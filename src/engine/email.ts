@@ -3,10 +3,11 @@ import { domain_patterns, contacts as contactsTable, companies as companiesTable
 import { eq, and, gte } from 'drizzle-orm';
 import { renderTopCandidates, renderPattern, orderedPatterns } from './patterns';
 import { verifyPrimary, verifySecondary } from './verify';
+import { verifyHunter } from './hunter';
 
 export type EmailTier = 'green' | 'amber' | 'blue';
 export type EmailStatus = 'verified' | 'likely' | 'linkedin_only' | 'none';
-export type EmailSource = 'cache' | 'generated' | 'secondary' | 'apollo' | 'none';
+export type EmailSource = 'cache' | 'generated' | 'secondary' | 'apollo' | 'hunter' | 'none';
 
 export interface EmailResolutionResult {
   email: string | null;
@@ -76,6 +77,19 @@ export async function resolveKnownEmail(
   email: string,
   providerStatus: string | undefined
 ): Promise<EmailResolutionResult> {
+  // Primary verifier: Hunter. It resolves catch-all domains well and is the cheapest of our
+  // providers, so it runs first and short-circuits on a definitive answer.
+  if (process.env.HUNTER_API_KEY) {
+    const h = await verifyHunter(email);
+    if (h.status === 'VALID') {
+      return { email, status: 'verified', tier: 'green', source: 'hunter', verifierRawJson: h.raw, patternUsed: null };
+    }
+    if (h.status === 'INVALID') {
+      return { email: null, status: 'none', tier: 'blue', source: 'hunter', verifierRawJson: h.raw, patternUsed: null };
+    }
+    // CATCH_ALL / UNKNOWN: fall through to Reoon/BounceBan below.
+  }
+
   if (process.env.REOON_API_KEY) {
     const v = await verifyPrimary(email);
     if (v.status === 'VALID') {

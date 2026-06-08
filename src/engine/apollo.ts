@@ -54,7 +54,7 @@ function searchTitlesFor(role: string, team: string | undefined): string[] {
   ];
 }
 
-function classifyPersona(title: string, seniority: string | undefined): string {
+export function classifyPersona(title: string, seniority: string | undefined): string {
   const t = title.toLowerCase();
   if (/recruit|talent acquisition|sourcer/.test(t)) return 'recruiter';
   if (/(manager|head of|director|vp|vice president|lead)\b/.test(t)) return 'hiring_manager';

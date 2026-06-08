@@ -6,6 +6,7 @@ import { eq } from 'drizzle-orm';
 import { requireAuth } from '../middleware/auth';
 import { resolveEmail, resolveKnownEmail } from '../engine/email';
 import { fetchApolloContacts, type SourcedContact } from '../engine/apollo';
+import { fetchHunterContacts } from '../engine/hunter';
 import { v4 as uuidv4 } from 'uuid';
 
 const resolveBodySchema = z.object({
@@ -170,13 +171,18 @@ export async function resolveRoutes(fastify: FastifyInstance) {
 
       const company = companyRecord[0];
 
-      // Step 2: Source contacts. Prefer real people from Apollo when a key is configured;
-      // fall back to synthetic contacts so the product still works without a data provider.
-      const apolloContacts = await fetchApolloContacts(domain, role, team, 6);
-      const sourcedContacts: SourcedContact[] = apolloContacts.length > 0
-        ? apolloContacts
-        : generateSyntheticContacts(companyName, domain, role, team, user_school);
-      const contactSource: 'apollo' | 'synthetic' = apolloContacts.length > 0 ? 'apollo' : 'synthetic';
+      // Step 2: Source contacts. Priority: Hunter (cheapest, emails included) -> Apollo ->
+      // synthetic, so the product always returns something even with no provider keys.
+      let sourcedContacts: SourcedContact[] = await fetchHunterContacts(domain, role, team, 6);
+      let contactSource: 'hunter' | 'apollo' | 'synthetic' = 'hunter';
+      if (sourcedContacts.length === 0) {
+        sourcedContacts = await fetchApolloContacts(domain, role, team, 6);
+        contactSource = 'apollo';
+      }
+      if (sourcedContacts.length === 0) {
+        sourcedContacts = generateSyntheticContacts(companyName, domain, role, team, user_school);
+        contactSource = 'synthetic';
+      }
 
       // Step 3: Insert contacts and resolve emails
       const results = [];
