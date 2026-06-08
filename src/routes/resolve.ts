@@ -17,6 +17,19 @@ const resolveBodySchema = z.object({
   user_school: z.string().optional(),
 });
 
+// Per-company+role cache. A resolve is the expensive step (provider search + per-contact
+// verification credits), and the same company/role gets looked up repeatedly across students
+// and sessions. Caching the finished result makes repeat resolves cost zero credits.
+// NOTE: in-memory, so it resets on process restart. A persistent (DB-backed) cache is the
+// next step; this already eliminates the common repeat-lookup spend within an uptime.
+interface CachedResolve {
+  results: unknown[];
+  source: string;
+  at: number;
+}
+const resolveCache = new Map<string, CachedResolve>();
+const RESOLVE_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
 function getSizeBucket(domain: string): { size_bucket: string; employee_count: number } {
   // Heuristic bucket assignment based on well-known companies
   // In production this would come from a data provider
@@ -149,6 +162,14 @@ export async function resolveRoutes(fastify: FastifyInstance) {
 
     const { company: companyName, domain, role, team, user_school } = body;
 
+    // Cache check: same company+role within the TTL -> return the cached result, spending no
+    // provider/verification credits.
+    const cacheKey = `${domain}|${role}`.toLowerCase();
+    const cached = resolveCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < RESOLVE_CACHE_TTL_MS) {
+      return reply.status(200).send({ contacts: cached.results, source: cached.source, cached: true });
+    }
+
     try {
       // Step 1: Look up or create company record
       let companyRecord = await db
@@ -254,7 +275,9 @@ export async function resolveRoutes(fastify: FastifyInstance) {
 
       // Sort: green first, then amber, then blue; alumni first within same tier
       const tierOrder = { green: 0, amber: 1, blue: 2 };
-      const personaOrder = { alumni: 0, hiring_manager: 1, recruiter: 2, near_peer: 3, senior_ic: 4 };
+      // Ordered by how likely each persona is to reply to a student (and their referral
+      // value), so the UI list and any "top" selection favor reachable people over execs.
+      const personaOrder = { alumni: 0, near_peer: 1, recruiter: 2, hiring_manager: 3, senior_ic: 4 };
 
       results.sort((a, b) => {
         const tierDiff =
@@ -267,7 +290,8 @@ export async function resolveRoutes(fastify: FastifyInstance) {
         );
       });
 
-      return reply.status(200).send({ contacts: results, source: contactSource });
+      resolveCache.set(cacheKey, { results, source: contactSource, at: Date.now() });
+      return reply.status(200).send({ contacts: results, source: contactSource, cached: false });
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to resolve contacts' });
