@@ -42,6 +42,7 @@ FORMAT RULES (non-negotiable):
 - If alumni or school_match: LEAD with the shared school connection
 - Single CTA only - use "could I ask 2 questions?" or "grab 15 min?" - never multiple asks
 - No buzzwords, no flattery walls, no "I hope this email finds you well"
+- Punctuation: NEVER use em dashes (—) or en dashes (–) anywhere in the subject or body. Use commas, colons, or periods instead.
 
 OUTPUT FORMAT: Return ONLY a JSON object with keys "subject" and "body". No markdown, no explanation.`;
 

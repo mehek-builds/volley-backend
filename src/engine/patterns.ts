@@ -70,6 +70,18 @@ export function orderedPatterns(sizeBucket: string | null | undefined): PatternT
   return SIZE_PATTERNS[bucket];
 }
 
+// Maps a job title to a coarse team/function label, used to build people-search title queries.
+export function extractTeam(role: string): string {
+  const lower = role.toLowerCase();
+  if (lower.includes('machine learning') || lower.includes('ml')) return 'ML Platform';
+  if (lower.includes('data')) return 'Data Engineering';
+  if (lower.includes('frontend') || lower.includes('front-end')) return 'Frontend';
+  if (lower.includes('backend') || lower.includes('back-end')) return 'Backend Infrastructure';
+  if (lower.includes('mobile') || lower.includes('ios') || lower.includes('android')) return 'Mobile';
+  if (lower.includes('product')) return 'Product';
+  return 'Engineering';
+}
+
 export function renderTopCandidates(
   name: ContactName,
   domain: string,

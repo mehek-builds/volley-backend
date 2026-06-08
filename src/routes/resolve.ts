@@ -5,6 +5,7 @@ import { companies, contacts, email_resolutions } from '../db/schema';
 import { eq } from 'drizzle-orm';
 import { requireAuth } from '../middleware/auth';
 import { resolveEmail } from '../engine/email';
+import { fetchApolloContacts } from '../engine/apollo';
 import { v4 as uuidv4 } from 'uuid';
 
 const resolveBodySchema = z.object({
@@ -169,19 +170,18 @@ export async function resolveRoutes(fastify: FastifyInstance) {
 
       const company = companyRecord[0];
 
-      // Step 2: Generate synthetic contacts
-      const syntheticContacts = generateSyntheticContacts(
-        companyName,
-        domain,
-        role,
-        team,
-        user_school
-      );
+      // Step 2: Source contacts. Prefer real people from Apollo when a key is configured;
+      // fall back to synthetic contacts so the product still works without a data provider.
+      const apolloContacts = await fetchApolloContacts(domain, role, team, 6);
+      const sourcedContacts = apolloContacts.length > 0
+        ? apolloContacts
+        : generateSyntheticContacts(companyName, domain, role, team, user_school);
+      const contactSource: 'apollo' | 'synthetic' = apolloContacts.length > 0 ? 'apollo' : 'synthetic';
 
       // Step 3: Insert contacts and resolve emails
       const results = [];
 
-      for (const sc of syntheticContacts) {
+      for (const sc of sourcedContacts) {
         // Insert contact
         const contactId = uuidv4();
         await db.insert(contacts).values({
@@ -258,7 +258,7 @@ export async function resolveRoutes(fastify: FastifyInstance) {
         );
       });
 
-      return reply.status(200).send({ contacts: results });
+      return reply.status(200).send({ contacts: results, source: contactSource });
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to resolve contacts' });
