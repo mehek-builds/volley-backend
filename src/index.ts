@@ -9,7 +9,7 @@ import { resolveRoutes } from './routes/resolve';
 import { draftRoutes } from './routes/draft';
 import { trackRoutes } from './routes/track';
 
-async function buildApp() {
+export async function buildApp() {
   const fastify = Fastify({
     logger: {
       level: process.env.LOG_LEVEL || 'info',
@@ -80,4 +80,7 @@ async function start() {
   }
 }
 
-start();
+// On Vercel (serverless) the app is invoked via api/index.ts, not a long-lived listener.
+if (!process.env.VERCEL) {
+  start();
+}

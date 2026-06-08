@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Backend API for student outreach Chrome extension",
   "main": "dist/index.js",
+  "engines": {
+    "node": "22.x"
+  },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
     "@fastify/cors": "^9.0.0",
