@@ -22,7 +22,7 @@ DATABASE_URL="<your-neon-pooled-url>" npm run db:push
 Re-run this whenever `src/db/schema.ts` changes.
 
 ### 3. Import the repo on Vercel
-vercel.com → Add New → Project → import **mehek-builds/warmpath-backend**.
+vercel.com → Add New → Project → import **mehek-builds/volley-backend**.
 Framework preset: **Other**. Leave build/output settings default (Vercel detects
 `api/` functions automatically — no build command needed).
 

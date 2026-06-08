@@ -1,7 +1,7 @@
 {
-  "name": "student-outreach-backend",
+  "name": "volley-backend",
   "version": "1.0.0",
-  "description": "Backend API for student outreach Chrome extension",
+  "description": "Backend API for the Volley student-outreach Chrome extension",
   "main": "dist/index.js",
   "engines": {
     "node": "22.x"
