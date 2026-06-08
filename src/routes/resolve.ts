@@ -1,7 +1,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { db } from '../db/index';
-import { companies, contacts, email_resolutions } from '../db/schema';
+import { companies, contacts, email_resolutions, resolve_cache } from '../db/schema';
 import { eq } from 'drizzle-orm';
 import { requireAuth } from '../middleware/auth';
 import { resolveEmail, resolveKnownEmail } from '../engine/email';
@@ -17,17 +17,10 @@ const resolveBodySchema = z.object({
   user_school: z.string().optional(),
 });
 
-// Per-company+role cache. A resolve is the expensive step (provider search + per-contact
-// verification credits), and the same company/role gets looked up repeatedly across students
-// and sessions. Caching the finished result makes repeat resolves cost zero credits.
-// NOTE: in-memory, so it resets on process restart. A persistent (DB-backed) cache is the
-// next step; this already eliminates the common repeat-lookup spend within an uptime.
-interface CachedResolve {
-  results: unknown[];
-  source: string;
-  at: number;
-}
-const resolveCache = new Map<string, CachedResolve>();
+// Per-company+role cache (persistent, DB-backed via the resolve_cache table). A resolve is
+// the expensive step (provider search + per-contact verification credits), and the same
+// company/role gets looked up repeatedly across students and sessions. Caching the finished
+// result makes repeat resolves cost zero credits, and it survives process restarts.
 const RESOLVE_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
 function getSizeBucket(domain: string): { size_bucket: string; employee_count: number } {
@@ -165,9 +158,14 @@ export async function resolveRoutes(fastify: FastifyInstance) {
     // Cache check: same company+role within the TTL -> return the cached result, spending no
     // provider/verification credits.
     const cacheKey = `${domain}|${role}`.toLowerCase();
-    const cached = resolveCache.get(cacheKey);
-    if (cached && Date.now() - cached.at < RESOLVE_CACHE_TTL_MS) {
-      return reply.status(200).send({ contacts: cached.results, source: cached.source, cached: true });
+    try {
+      const cachedRows = await db.select().from(resolve_cache).where(eq(resolve_cache.cache_key, cacheKey)).limit(1);
+      const cached = cachedRows[0];
+      if (cached && Date.now() - new Date(cached.cached_at).getTime() < RESOLVE_CACHE_TTL_MS) {
+        return reply.status(200).send({ contacts: cached.results, source: cached.source, cached: true });
+      }
+    } catch (err) {
+      fastify.log.error({ err }, 'resolve_cache read failed; continuing uncached');
     }
 
     try {
@@ -290,7 +288,17 @@ export async function resolveRoutes(fastify: FastifyInstance) {
         );
       });
 
-      resolveCache.set(cacheKey, { results, source: contactSource, at: Date.now() });
+      try {
+        await db
+          .insert(resolve_cache)
+          .values({ cache_key: cacheKey, results, source: contactSource, cached_at: new Date() })
+          .onConflictDoUpdate({
+            target: resolve_cache.cache_key,
+            set: { results, source: contactSource, cached_at: new Date() },
+          });
+      } catch (err) {
+        fastify.log.error({ err }, 'resolve_cache write failed; result still returned');
+      }
       return reply.status(200).send({ contacts: results, source: contactSource, cached: false });
     } catch (err) {
       fastify.log.error(err);

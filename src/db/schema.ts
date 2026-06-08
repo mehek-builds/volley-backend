@@ -86,6 +86,16 @@ export const outreach_events = pgTable('outreach_events', {
   follow_up_count: integer('follow_up_count').default(0),
 });
 
+// ---- resolve_cache ----
+// Persists a finished /resolve result per (domain|role) so repeat lookups spend no provider
+// or verification credits, surviving process restarts. cache_key = `${domain}|${role}`.
+export const resolve_cache = pgTable('resolve_cache', {
+  cache_key: text('cache_key').primaryKey(),
+  results: jsonb('results').notNull(),
+  source: text('source').notNull(),
+  cached_at: timestamp('cached_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
 // ---- learning_signals ----
 export const learning_signals = pgTable('learning_signals', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -114,3 +124,5 @@ export type OutreachEvent = typeof outreach_events.$inferSelect;
 export type NewOutreachEvent = typeof outreach_events.$inferInsert;
 export type LearningSignal = typeof learning_signals.$inferSelect;
 export type NewLearningSignal = typeof learning_signals.$inferInsert;
+export type ResolveCache = typeof resolve_cache.$inferSelect;
+export type NewResolveCache = typeof resolve_cache.$inferInsert;

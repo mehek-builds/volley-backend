@@ -71,6 +71,9 @@ async function apolloSearchIds(domain: string, titles: string[], apiKey: string,
 export function classifyPersona(title: string, seniority: string | undefined): string {
   const t = title.toLowerCase();
   if (/recruit|talent acquisition|sourcer/.test(t)) return 'recruiter';
+  // Leadership / founders / C-suite are decision-makers, not near-peers - group them with
+  // hiring managers (which the draft selection deprioritizes for cold student outreach).
+  if (/\b(ceo|cto|coo|cfo|cmo|cpo|chief|founder|co-?founder|president|owner|partner)\b/.test(t)) return 'hiring_manager';
   if (/(manager|head of|director|vp|vice president|lead)\b/.test(t)) return 'hiring_manager';
   if (seniority && /senior|staff|principal|lead/.test(seniority.toLowerCase())) return 'senior_ic';
   if (/senior|staff|principal|lead/.test(t)) return 'senior_ic';
