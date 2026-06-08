@@ -84,7 +84,19 @@ export async function resolveKnownEmail(
     if (v.status === 'INVALID') {
       return { email: null, status: 'none', tier: 'blue', source: 'apollo', verifierRawJson: v.raw, patternUsed: null };
     }
-    // CATCH_ALL / UNKNOWN: fall through to the provider's own status below.
+    // CATCH_ALL / UNKNOWN: Reoon can't decide on catch-all domains. If the provider already
+    // calls it verified, trust that (no extra spend). Otherwise use BounceBan, which resolves
+    // catch-all addresses, before falling back to the provider's status.
+    const providerVerified = providerStatus === 'verified';
+    if (!providerVerified && process.env.BOUNCEBAN_API_KEY) {
+      const s = await verifySecondary(email);
+      if (s.deliverable && s.confidence >= 0.85) {
+        return { email, status: 'verified', tier: 'green', source: 'secondary', verifierRawJson: s.raw, patternUsed: null };
+      }
+      if (s.raw && !s.deliverable && s.confidence === 0) {
+        return { email: null, status: 'none', tier: 'blue', source: 'secondary', verifierRawJson: s.raw, patternUsed: null };
+      }
+    }
   }
 
   const providerVerified = providerStatus === 'verified';

@@ -71,24 +71,29 @@ export async function verifySecondary(email: string): Promise<SecondaryVerifyRes
   }
 
   try {
-    const response = await axios.post(
-      'https://api.bounceban.com/v1/verify',
-      { email, api_key: apiKey },
-      { timeout: 10000 }
-    );
+    // BounceBan single real-time verify: GET with the key in the Authorization header.
+    // Returns result ('deliverable' | 'undeliverable' | 'risky' | 'unknown') and a 0-100 score.
+    const response = await axios.get('https://api.bounceban.com/v1/verify/single', {
+      params: { email },
+      headers: { Authorization: apiKey },
+      timeout: 20000,
+    });
 
     const data = response.data as {
-      result: 'deliverable' | 'undeliverable' | 'unknown';
-      confidence: number;
+      result: string;
+      score?: number;
     };
 
     return {
       deliverable: data.result === 'deliverable',
-      confidence: data.confidence ?? 0,
+      confidence: typeof data.score === 'number' ? data.score / 100 : 0,
       raw: data,
     };
   } catch (err) {
-    console.error('[verify] BounceBan API error:', err);
+    const msg = axios.isAxiosError(err)
+      ? `${err.response?.status} ${JSON.stringify(err.response?.data)?.slice(0, 200)}`
+      : String(err);
+    console.error('[verify] BounceBan API error:', msg);
     return { deliverable: false, confidence: 0, raw: null };
   }
 }
