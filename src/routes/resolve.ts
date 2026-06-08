@@ -4,8 +4,8 @@ import { db } from '../db/index';
 import { companies, contacts, email_resolutions } from '../db/schema';
 import { eq } from 'drizzle-orm';
 import { requireAuth } from '../middleware/auth';
-import { resolveEmail } from '../engine/email';
-import { fetchApolloContacts } from '../engine/apollo';
+import { resolveEmail, resolveKnownEmail } from '../engine/email';
+import { fetchApolloContacts, type SourcedContact } from '../engine/apollo';
 import { v4 as uuidv4 } from 'uuid';
 
 const resolveBodySchema = z.object({
@@ -173,7 +173,7 @@ export async function resolveRoutes(fastify: FastifyInstance) {
       // Step 2: Source contacts. Prefer real people from Apollo when a key is configured;
       // fall back to synthetic contacts so the product still works without a data provider.
       const apolloContacts = await fetchApolloContacts(domain, role, team, 6);
-      const sourcedContacts = apolloContacts.length > 0
+      const sourcedContacts: SourcedContact[] = apolloContacts.length > 0
         ? apolloContacts
         : generateSyntheticContacts(companyName, domain, role, team, user_school);
       const contactSource: 'apollo' | 'synthetic' = apolloContacts.length > 0 ? 'apollo' : 'synthetic';
@@ -196,16 +196,19 @@ export async function resolveRoutes(fastify: FastifyInstance) {
           school_match: sc.school_match,
         });
 
-        // Resolve email
-        const emailResult = await resolveEmail(
-          {
-            id: contactId,
-            first_name: sc.first_name,
-            last_name: sc.last_name,
-            company_domain: domain,
-          },
-          { size_bucket: company.size_bucket }
-        );
+        // Resolve email. If the source already gave us a real address (Apollo), verify that
+        // directly; otherwise generate + verify candidate patterns.
+        const emailResult = sc.email
+          ? await resolveKnownEmail(sc.email, sc.email_status)
+          : await resolveEmail(
+              {
+                id: contactId,
+                first_name: sc.first_name,
+                last_name: sc.last_name,
+                company_domain: domain,
+              },
+              { size_bucket: company.size_bucket }
+            );
 
         // Store email resolution
         const resolutionId = uuidv4();

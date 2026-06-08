@@ -6,7 +6,7 @@ import { verifyPrimary, verifySecondary } from './verify';
 
 export type EmailTier = 'green' | 'amber' | 'blue';
 export type EmailStatus = 'verified' | 'likely' | 'linkedin_only' | 'none';
-export type EmailSource = 'cache' | 'generated' | 'secondary' | 'none';
+export type EmailSource = 'cache' | 'generated' | 'secondary' | 'apollo' | 'none';
 
 export interface EmailResolutionResult {
   email: string | null;
@@ -64,6 +64,38 @@ async function learnPattern(
   } catch (err) {
     console.error('[email] Failed to learn pattern:', err);
   }
+}
+
+/**
+ * Resolve an email we already have (e.g. a real address from Apollo) rather than generating
+ * candidates. When REOON_API_KEY is set we independently verify it; otherwise we trust the
+ * provider's own status. This is the path that makes Apollo-sourced contacts come back as
+ * genuinely verified (green) instead of best-guess.
+ */
+export async function resolveKnownEmail(
+  email: string,
+  providerStatus: string | undefined
+): Promise<EmailResolutionResult> {
+  if (process.env.REOON_API_KEY) {
+    const v = await verifyPrimary(email);
+    if (v.status === 'VALID') {
+      return { email, status: 'verified', tier: 'green', source: 'apollo', verifierRawJson: v.raw, patternUsed: null };
+    }
+    if (v.status === 'INVALID') {
+      return { email: null, status: 'none', tier: 'blue', source: 'apollo', verifierRawJson: v.raw, patternUsed: null };
+    }
+    // CATCH_ALL / UNKNOWN: fall through to the provider's own status below.
+  }
+
+  const providerVerified = providerStatus === 'verified';
+  return {
+    email,
+    status: providerVerified ? 'verified' : 'likely',
+    tier: providerVerified ? 'green' : 'amber',
+    source: 'apollo',
+    verifierRawJson: { provider_email_status: providerStatus ?? null },
+    patternUsed: null,
+  };
 }
 
 export async function resolveEmail(
