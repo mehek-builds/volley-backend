@@ -16,70 +16,97 @@ interface HunterEmail {
   linkedin?: string;
 }
 
+// One persona bucket = one Hunter Domain Search with department/seniority filters that bias
+// the result toward that kind of person. Running these separately (instead of one blended
+// search) is what prevents the list from being dominated by recruiters.
+interface PersonaBucket {
+  persona: string;
+  params: Record<string, string>;
+}
+
+const PERSONA_BUCKETS: PersonaBucket[] = [
+  { persona: 'recruiter', params: { department: 'hr' } },
+  { persona: 'hiring_manager', params: { department: 'management,it', seniority: 'executive,senior' } },
+  { persona: 'near_peer', params: { department: 'it', seniority: 'junior' } },
+];
+
+function mapHunterEmail(e: HunterEmail, fallbackPersona: string): SourcedContact | null {
+  const first = (e.first_name ?? '').trim();
+  const last = (e.last_name ?? '').trim();
+  const email = (e.value ?? '').trim();
+  const title = (e.position ?? '').trim();
+  if (!first || !last || !email) return null;
+  // Use the title to classify when it's explicit; otherwise trust the bucket the search
+  // targeted (e.g. a junior IT person with a vague title stays a near_peer).
+  const classified = classifyPersona(title, e.seniority);
+  const persona = title ? classified : fallbackPersona;
+  return {
+    full_name: `${first} ${last}`,
+    first_name: first,
+    last_name: last,
+    title: title || 'Team member',
+    persona,
+    school_match: false,
+    linkedin_url: e.linkedin ?? '',
+    email,
+    // The verifier in resolveKnownEmail produces the authoritative tier; 'guessed' ensures
+    // we never shortcut a Domain Search result straight to green.
+    email_status: 'guessed',
+  };
+}
+
+async function hunterSearch(domain: string, bucket: PersonaBucket, apiKey: string): Promise<SourcedContact[]> {
+  try {
+    const res = await axios.get('https://api.hunter.io/v2/domain-search', {
+      params: { domain, limit: 5, ...bucket.params, api_key: apiKey },
+      timeout: 20000,
+    });
+    const emails: HunterEmail[] = res.data?.data?.emails ?? [];
+    return emails
+      .map((e) => mapHunterEmail(e, bucket.persona))
+      .filter((c): c is SourcedContact => c !== null);
+  } catch (err) {
+    const msg = axios.isAxiosError(err)
+      ? `${err.response?.status} ${JSON.stringify(err.response?.data)?.slice(0, 200)}`
+      : String(err);
+    console.error(`[hunter] domain-search error (${bucket.persona}):`, msg);
+    return [];
+  }
+}
+
 /**
- * Find real contacts at a company via Hunter Domain Search. Returns [] when no key is set
- * or on error, so callers can fall back to Apollo/synthetic.
- *
- * Departments are biased toward the people a student should contact (recruiting + the role's
- * function + leadership). One call costs a single Hunter "search" credit and yields many
- * contacts, each already carrying an email.
+ * Find a *balanced* set of real contacts via Hunter Domain Search. Runs one search per persona
+ * bucket (recruiter / hiring manager / near-peer IC) in parallel, then round-robins the
+ * buckets so the shortlist always spans personas instead of being all recruiters. Each contact
+ * already carries an email. Returns [] when no key is set, so callers fall back to Apollo.
  */
 export async function fetchHunterContacts(
   domain: string,
-  role: string,
-  team: string | undefined,
+  _role: string,
+  _team: string | undefined,
   limit = 6
 ): Promise<SourcedContact[]> {
   const apiKey = process.env.HUNTER_API_KEY;
   if (!apiKey) return [];
 
-  try {
-    const res = await axios.get('https://api.hunter.io/v2/domain-search', {
-      params: {
-        domain,
-        limit: Math.max(limit * 2, 10),
-        department: 'hr,executive,management,engineering,it',
-        api_key: apiKey,
-      },
-      timeout: 20000,
-    });
+  const buckets = await Promise.all(PERSONA_BUCKETS.map((b) => hunterSearch(domain, b, apiKey)));
 
-    const emails: HunterEmail[] = res.data?.data?.emails ?? [];
-
-    const sourced: SourcedContact[] = emails
-      .map((e): SourcedContact | null => {
-        const first = (e.first_name ?? '').trim();
-        const last = (e.last_name ?? '').trim();
-        const email = (e.value ?? '').trim();
-        const title = (e.position ?? '').trim();
-        if (!first || !last || !email) return null;
-        return {
-          full_name: `${first} ${last}`,
-          first_name: first,
-          last_name: last,
-          title: title || 'Team member',
-          persona: classifyPersona(title, e.seniority),
-          school_match: false,
-          linkedin_url: e.linkedin ?? '',
-          email,
-          // Hunter Domain Search confidence (0-100); the verifier in resolveKnownEmail
-          // produces the authoritative tier. We pass 'guessed' so it never shortcuts to green.
-          email_status: 'guessed',
-        };
-      })
-      .filter((c): c is SourcedContact => c !== null);
-
-    const order: Record<string, number> = { recruiter: 0, hiring_manager: 1, senior_ic: 2, near_peer: 3 };
-    sourced.sort((a, b) => (order[a.persona] ?? 9) - (order[b.persona] ?? 9));
-
-    return sourced.slice(0, limit);
-  } catch (err) {
-    const msg = axios.isAxiosError(err)
-      ? `${err.response?.status} ${JSON.stringify(err.response?.data)?.slice(0, 200)}`
-      : String(err);
-    console.error('[hunter] domain-search error:', msg);
-    return [];
+  // Round-robin across buckets, de-duping by email, so the final list interleaves personas.
+  const final: SourcedContact[] = [];
+  const seen = new Set<string>();
+  let added = true;
+  while (final.length < limit && added) {
+    added = false;
+    for (const list of buckets) {
+      const next = list.find((c) => !seen.has(c.email!));
+      if (next && final.length < limit) {
+        final.push(next);
+        seen.add(next.email!);
+        added = true;
+      }
+    }
   }
+  return final;
 }
 
 export interface HunterVerifyResult {

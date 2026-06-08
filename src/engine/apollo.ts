@@ -39,19 +39,33 @@ interface ApolloMatch {
   seniority?: string;
 }
 
-// Titles we search for: recruiters, the role itself, and the managers above it.
-function searchTitlesFor(role: string, team: string | undefined): string[] {
+// One persona bucket = one Apollo search with titles that target that kind of person.
+// Searching per persona (instead of one blended title list) keeps the shortlist from being
+// dominated by recruiters, who otherwise crowd out the results.
+function personaTitleBuckets(role: string, team: string | undefined): Array<{ persona: string; titles: string[] }> {
   const fn = team || extractTeam(role);
   return [
-    'University Recruiter',
-    'Technical Recruiter',
-    'Recruiter',
-    'Talent Acquisition',
-    role,
-    `${fn} Manager`,
-    `Head of ${fn}`,
-    `Director of ${fn}`,
+    { persona: 'recruiter', titles: ['University Recruiter', 'Technical Recruiter', 'Recruiter', 'Talent Acquisition'] },
+    { persona: 'hiring_manager', titles: [`${fn} Manager`, `Head of ${fn}`, `Director of ${fn}`, 'Engineering Manager'] },
+    { persona: 'near_peer', titles: [role, `${fn} Engineer`, 'Software Engineer'] },
   ];
+}
+
+// Search Apollo for matching person IDs by title (no enrichment credits spent).
+async function apolloSearchIds(domain: string, titles: string[], apiKey: string, perPage: number): Promise<string[]> {
+  try {
+    const res = await axios.post(
+      'https://api.apollo.io/api/v1/mixed_people/api_search',
+      { q_organization_domains_list: [domain], person_titles: titles, page: 1, per_page: perPage },
+      { headers: APOLLO_HEADERS(apiKey), timeout: 15000 }
+    );
+    const people: ApolloSearchPerson[] = res.data?.people ?? [];
+    return people.map((p) => p.id).filter((id): id is string => Boolean(id));
+  } catch (err) {
+    const msg = axios.isAxiosError(err) ? `${err.response?.status}` : String(err);
+    console.error('[apollo] search error:', msg);
+    return [];
+  }
 }
 
 export function classifyPersona(title: string, seniority: string | undefined): string {
@@ -89,20 +103,25 @@ export async function fetchApolloContacts(
   }
 
   try {
-    // Step 1: search for matching person IDs by title.
-    const searchRes = await axios.post(
-      'https://api.apollo.io/api/v1/mixed_people/api_search',
-      {
-        q_organization_domains_list: [domain],
-        person_titles: searchTitlesFor(role, team),
-        page: 1,
-        per_page: Math.max(limit * 2, 10),
-      },
-      { headers: APOLLO_HEADERS(apiKey), timeout: 15000 }
-    );
+    // Step 1: one search per persona bucket (in parallel), then round-robin the IDs so the
+    // enriched set spans recruiter / hiring manager / near-peer instead of all recruiters.
+    const buckets = personaTitleBuckets(role, team);
+    const idLists = await Promise.all(buckets.map((b) => apolloSearchIds(domain, b.titles, apiKey, 5)));
 
-    const found: ApolloSearchPerson[] = searchRes.data?.people ?? [];
-    const ids = found.map((p) => p.id).filter((id): id is string => Boolean(id)).slice(0, limit);
+    const ids: string[] = [];
+    const seenId = new Set<string>();
+    let added = true;
+    while (ids.length < limit && added) {
+      added = false;
+      for (const list of idLists) {
+        const next = list.find((id) => !seenId.has(id));
+        if (next && ids.length < limit) {
+          ids.push(next);
+          seenId.add(next);
+          added = true;
+        }
+      }
+    }
     if (ids.length === 0) {
       console.warn(`[apollo] no people found for ${domain} (${role})`);
       return [];
