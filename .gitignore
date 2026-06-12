@@ -5,3 +5,4 @@ dist/
 drizzle/meta/
 *.js.map
 .vercel
+.env*

@@ -13,6 +13,18 @@ import {
 export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
   email: text('email').unique().notNull(),
+  email_verified: boolean('email_verified').default(false),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
+});
+
+// ---- email_verification_codes ----
+// One active code per email; re-requesting overwrites. Codes are stored as
+// SHA-256 hashes so a DB leak never exposes a usable code.
+export const email_verification_codes = pgTable('email_verification_codes', {
+  email: text('email').primaryKey(),
+  code_hash: text('code_hash').notNull(),
+  expires_at: timestamp('expires_at', { withTimezone: true }).notNull(),
+  attempts: integer('attempts').default(0).notNull(),
   created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
 

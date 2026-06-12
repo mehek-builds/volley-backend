@@ -8,6 +8,7 @@ import { profileRoutes } from './routes/profile';
 import { resolveRoutes } from './routes/resolve';
 import { draftRoutes } from './routes/draft';
 import { trackRoutes } from './routes/track';
+import { privacyRoutes } from './routes/privacy';
 
 export async function buildApp() {
   const fastify = Fastify({
@@ -41,12 +42,19 @@ export async function buildApp() {
     return reply.status(200).send({ status: 'ok', ts: new Date().toISOString() });
   });
 
+  // Stable share link for the Chrome Web Store listing. The 32-char extension ID
+  // is assigned by Google and immutable; this redirect is the one URL to share.
+  fastify.get('/install', async (_request, reply) => {
+    return reply.redirect('https://chromewebstore.google.com/detail/bdbedbmkjpfioknfpmhookefabipjaad', 302);
+  });
+
   // Routes
   await fastify.register(authRoutes);
   await fastify.register(profileRoutes);
   await fastify.register(resolveRoutes);
   await fastify.register(draftRoutes);
   await fastify.register(trackRoutes);
+  await fastify.register(privacyRoutes);
 
   // Global error handler
   fastify.setErrorHandler((error, _request, reply) => {
