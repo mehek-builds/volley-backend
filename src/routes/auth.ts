@@ -137,7 +137,10 @@ export async function authRoutes(fastify: FastifyInstance) {
       return reply.status(200).send({ sent: true });
     } catch (err) {
       fastify.log.error(err);
-      return reply.status(500).send({ error: 'Failed to send verification code' });
+      // Send failure (e.g. Resend domain not verified yet, provider outage):
+      // report verification as unavailable so clients fall back to the legacy
+      // signup path instead of dead-ending the user.
+      return reply.status(503).send({ error: 'verification_unavailable' });
     }
   });
 
