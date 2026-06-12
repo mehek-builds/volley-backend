@@ -4,6 +4,7 @@ import { db } from '../db/index';
 import { companies, contacts, email_resolutions, resolve_cache } from '../db/schema';
 import { eq } from 'drizzle-orm';
 import { requireAuth } from '../middleware/auth';
+import { allowHourly, getEntitlements, getCount, bumpCounter, monthPeriod, quotaExceededPayload, rateLimitedReply, LIMITS } from '../middleware/quota';
 import { resolveEmail, resolveKnownEmail } from '../engine/email';
 import { fetchApolloContacts, type SourcedContact } from '../engine/apollo';
 import { fetchHunterContacts } from '../engine/hunter';
@@ -155,6 +156,18 @@ export async function resolveRoutes(fastify: FastifyInstance) {
 
     const { company: companyName, domain, role, team, user_school } = body;
 
+    // Volume gating per PRD Section 10: hourly abuse limit, then the monthly
+    // verified-contact quota (trial = pro limits for 7 days, then free tier).
+    const userId = request.jwtPayload!.userId;
+    if (!(await allowHourly(userId, 'resolve', LIMITS.perHour.resolve))) {
+      return rateLimitedReply(reply);
+    }
+    const ent = await getEntitlements(userId);
+    const usedContacts = await getCount(userId, monthPeriod(), 'verified_contacts');
+    if (usedContacts >= ent.monthlyContacts) {
+      return reply.status(402).send(quotaExceededPayload(ent, usedContacts, 'contacts'));
+    }
+
     // Cache check: same company+role within the TTL -> return the cached result, spending no
     // provider/verification credits.
     const cacheKey = `${domain}|${role}`.toLowerCase();
@@ -162,6 +175,11 @@ export async function resolveRoutes(fastify: FastifyInstance) {
       const cachedRows = await db.select().from(resolve_cache).where(eq(resolve_cache.cache_key, cacheKey)).limit(1);
       const cached = cachedRows[0];
       if (cached && Date.now() - new Date(cached.cached_at).getTime() < RESOLVE_CACHE_TTL_MS) {
+        // Cache hits cost us nothing but deliver the same user value: they spend quota too.
+        const cachedVerified = Array.isArray(cached.results)
+          ? (cached.results as Array<{ email_resolution?: { tier?: string } }>).filter(r => r.email_resolution?.tier === 'green').length
+          : 0;
+        if (cachedVerified > 0) await bumpCounter(userId, monthPeriod(), 'verified_contacts', cachedVerified);
         return reply.status(200).send({ contacts: cached.results, source: cached.source, cached: true });
       }
     } catch (err) {
@@ -299,6 +317,10 @@ export async function resolveRoutes(fastify: FastifyInstance) {
       } catch (err) {
         fastify.log.error({ err }, 'resolve_cache write failed; result still returned');
       }
+      // Spend quota only on verified (green) contacts: never on a guess (PRD).
+      const verifiedCount = results.filter(r => r.email_resolution.tier === 'green').length;
+      if (verifiedCount > 0) await bumpCounter(userId, monthPeriod(), 'verified_contacts', verifiedCount);
+
       return reply.status(200).send({ contacts: results, source: contactSource, cached: false });
     } catch (err) {
       fastify.log.error(err);

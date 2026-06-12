@@ -9,6 +9,7 @@ import { resolveRoutes } from './routes/resolve';
 import { draftRoutes } from './routes/draft';
 import { trackRoutes } from './routes/track';
 import { privacyRoutes } from './routes/privacy';
+import { billingRoutes } from './routes/billing';
 
 export async function buildApp() {
   const fastify = Fastify({
@@ -55,6 +56,7 @@ export async function buildApp() {
   await fastify.register(draftRoutes);
   await fastify.register(trackRoutes);
   await fastify.register(privacyRoutes);
+  await fastify.register(billingRoutes);
 
   // Global error handler
   fastify.setErrorHandler((error, _request, reply) => {

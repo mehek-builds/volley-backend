@@ -6,6 +6,7 @@ import { db } from '../db/index';
 import { users, email_verification_codes } from '../db/schema';
 import { eq } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
+import { allowHourly, rateLimitedReply, LIMITS, TRIAL_DAYS } from '../middleware/quota';
 
 const sessionBodySchema = z.object({
   email: z.string().email(),
@@ -17,6 +18,10 @@ const verifyBodySchema = z.object({
 });
 
 const CODE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+function trialEnd(): Date {
+  return new Date(Date.now() + TRIAL_DAYS * 24 * 60 * 60 * 1000);
+}
 const MAX_ATTEMPTS = 5;
 
 function hashCode(code: string): string {
@@ -75,13 +80,17 @@ export async function authRoutes(fastify: FastifyInstance) {
       return reply.status(500).send({ error: 'JWT_SIGNING_SECRET not configured' });
     }
 
+    if (!(await allowHourly(email.toLowerCase(), 'session', LIMITS.perHour.session))) {
+      return rateLimitedReply(reply);
+    }
+
     try {
       // Find or create user
       let user = await db.select().from(users).where(eq(users.email, email)).limit(1);
 
       if (user.length === 0) {
         const newUserId = uuidv4();
-        await db.insert(users).values({ id: newUserId, email, created_at: new Date() });
+        await db.insert(users).values({ id: newUserId, email, trial_ends_at: trialEnd(), created_at: new Date() });
         user = await db.select().from(users).where(eq(users.email, email)).limit(1);
       }
 
@@ -110,6 +119,9 @@ export async function authRoutes(fastify: FastifyInstance) {
     }
 
     const email = body.email.toLowerCase();
+    if (!(await allowHourly(email, 'request-code', LIMITS.perHour.requestCode))) {
+      return rateLimitedReply(reply);
+    }
     const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
 
     try {
@@ -143,6 +155,9 @@ export async function authRoutes(fastify: FastifyInstance) {
     }
 
     const email = body.email.toLowerCase();
+    if (!(await allowHourly(email, 'verify-code', 15))) {
+      return rateLimitedReply(reply);
+    }
 
     try {
       const rows = await db
@@ -172,7 +187,7 @@ export async function authRoutes(fastify: FastifyInstance) {
 
       let user = await db.select().from(users).where(eq(users.email, email)).limit(1);
       if (user.length === 0) {
-        await db.insert(users).values({ id: uuidv4(), email, email_verified: true, created_at: new Date() });
+        await db.insert(users).values({ id: uuidv4(), email, email_verified: true, trial_ends_at: trialEnd(), created_at: new Date() });
         user = await db.select().from(users).where(eq(users.email, email)).limit(1);
       } else if (!user[0].email_verified) {
         await db.update(users).set({ email_verified: true }).where(eq(users.email, email));

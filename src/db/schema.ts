@@ -1,5 +1,6 @@
 import {
   pgTable,
+  primaryKey,
   uuid,
   text,
   timestamp,
@@ -14,8 +15,24 @@ export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
   email: text('email').unique().notNull(),
   email_verified: boolean('email_verified').default(false),
+  // Billing: 'free' | 'pro'. Reverse trial runs until trial_ends_at (set at signup).
+  plan: text('plan').default('free').notNull(),
+  trial_ends_at: timestamp('trial_ends_at', { withTimezone: true }),
   created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
+
+// ---- usage_counters ----
+// Quota + rate-limit ledger. key = user id (or email for pre-auth endpoints),
+// period = 'YYYY-MM' for monthly quotas or 'YYYY-MM-DDTHH' for hourly rate limits,
+// kind = what is being counted ('verified_contacts', 'drafts', 'rate:resolve', ...).
+export const usage_counters = pgTable('usage_counters', {
+  key: text('key').notNull(),
+  period: text('period').notNull(),
+  kind: text('kind').notNull(),
+  count: integer('count').default(0).notNull(),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.key, t.period, t.kind] }),
+}));
 
 // ---- email_verification_codes ----
 // One active code per email; re-requesting overwrites. Codes are stored as

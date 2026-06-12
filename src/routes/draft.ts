@@ -1,6 +1,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth';
+import { allowHourly, getEntitlements, getCount, bumpCounter, monthPeriod, quotaExceededPayload, rateLimitedReply, LIMITS } from '../middleware/quota';
 import { generateDraft } from '../llm/draft';
 
 const draftBodySchema = z.object({
@@ -42,8 +43,19 @@ export async function draftRoutes(fastify: FastifyInstance) {
 
     const { contact, role, company, user_profile } = body;
 
+    const userId = request.jwtPayload!.userId;
+    if (!(await allowHourly(userId, 'draft', LIMITS.perHour.draft))) {
+      return rateLimitedReply(reply);
+    }
+    const ent = await getEntitlements(userId);
+    const usedDrafts = await getCount(userId, monthPeriod(), 'drafts');
+    if (usedDrafts >= ent.monthlyDrafts) {
+      return reply.status(402).send(quotaExceededPayload(ent, usedDrafts, 'drafts'));
+    }
+
     try {
       const draft = await generateDraft(contact, role, company, user_profile);
+      await bumpCounter(userId, monthPeriod(), 'drafts');
       return reply.status(200).send(draft);
     } catch (err) {
       fastify.log.error(err);
