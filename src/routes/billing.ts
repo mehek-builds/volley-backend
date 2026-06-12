@@ -25,8 +25,8 @@ export async function billingRoutes(fastify: FastifyInstance) {
         contacts: { used: usedContacts, limit: ent.monthlyContacts },
         drafts: { used: usedDrafts, limit: ent.monthlyDrafts },
       },
-      ...(process.env.STRIPE_PAYMENT_LINK && ent.tier !== 'pro'
-        ? { upgrade_url: process.env.STRIPE_PAYMENT_LINK }
+      ...((process.env.UPGRADE_URL || process.env.STRIPE_PAYMENT_LINK) && ent.tier !== 'pro'
+        ? { upgrade_url: process.env.UPGRADE_URL || process.env.STRIPE_PAYMENT_LINK }
         : {}),
     });
   });
@@ -73,6 +73,46 @@ export async function billingRoutes(fastify: FastifyInstance) {
         }
       }
       // Future: handle customer.subscription.deleted to downgrade on cancellation.
+      return reply.status(200).send({ received: true });
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(400).send({ error: 'unparseable event' });
+    }
+  });
+
+  // Lemon Squeezy webhook: signature is HMAC-SHA256 (hex) of the raw body in
+  // X-Signature. subscription_created/resumed/unpaused -> Pro; expired -> free.
+  // Customer matching is by email, same convention as the Stripe webhook.
+  fastify.post('/billing/lemonsqueezy-webhook', async (request: FastifyRequest, reply: FastifyReply) => {
+    const secret = process.env.LEMONSQUEEZY_WEBHOOK_SECRET;
+    if (!secret) {
+      return reply.status(503).send({ error: 'billing not configured' });
+    }
+
+    const sigHeader = request.headers['x-signature'];
+    const raw = request.body as Buffer;
+    if (typeof sigHeader !== 'string' || !Buffer.isBuffer(raw)) {
+      return reply.status(400).send({ error: 'bad request' });
+    }
+
+    const expected = createHmac('sha256', secret).update(raw).digest('hex');
+    const given = Buffer.from(sigHeader, 'hex');
+    const want = Buffer.from(expected, 'hex');
+    if (given.length !== want.length || !timingSafeEqual(given, want)) {
+      return reply.status(400).send({ error: 'bad signature' });
+    }
+
+    try {
+      const event = JSON.parse(raw.toString('utf8'));
+      const name: string = event.meta?.event_name || '';
+      const email: string | undefined = event.data?.attributes?.user_email;
+      if (email && ['subscription_created', 'subscription_resumed', 'subscription_unpaused'].includes(name)) {
+        await db.update(users).set({ plan: 'pro' }).where(eq(users.email, email.toLowerCase()));
+        fastify.log.info({ email, name }, 'upgraded to pro via lemon squeezy');
+      } else if (email && ['subscription_expired'].includes(name)) {
+        await db.update(users).set({ plan: 'free' }).where(eq(users.email, email.toLowerCase()));
+        fastify.log.info({ email, name }, 'downgraded to free via lemon squeezy');
+      }
       return reply.status(200).send({ received: true });
     } catch (err) {
       fastify.log.error(err);

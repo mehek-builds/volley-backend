@@ -90,7 +90,7 @@ export async function getEntitlements(userId: string): Promise<Entitlements> {
 }
 
 export function quotaExceededPayload(ent: Entitlements, used: number, what: 'contacts' | 'drafts') {
-  const link = process.env.STRIPE_PAYMENT_LINK;
+  const link = process.env.UPGRADE_URL || process.env.STRIPE_PAYMENT_LINK;
   const cap = what === 'contacts' ? ent.monthlyContacts : ent.monthlyDrafts;
   const base =
     ent.tier === 'pro'
