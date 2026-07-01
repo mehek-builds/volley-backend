@@ -3,12 +3,17 @@ import { z } from 'zod';
 import { eq, desc } from 'drizzle-orm';
 import { createHash } from 'node:crypto';
 import { put } from '@vercel/blob';
+import pdfParse from 'pdf-parse';
 import { db } from '../db/index';
 import { experience_bank, profiles, generated_resumes, autofill_events } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
-import { generateResumeSpec } from '../llm/resumeSpec';
-import { renderResumeDocx } from '../engine/resumeRender';
+import { generateResumeSpec, type ResumeSpec } from '../llm/resumeSpec';
+import { renderResumePdf } from '../engine/resumeRender';
+import { validateResumeSpec, validatePdfLayout } from '../engine/resumeValidate';
+
+const MAX_SPEC_ATTEMPTS = 2; // 1 initial pass + 1 feedback-driven retry, per PRD-v2 Section 6.4's
+// "automated quality gate" - bounded so a stubborn JD can't loop the endpoint indefinitely.
 
 const bodySchema = z.object({
   company: z.string().min(1),
@@ -48,33 +53,73 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     const profileRows = await db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1);
     const parsed = profileRows[0]?.parsed_json as { school?: string; grad_year?: number; full_name?: string } | undefined;
 
-    let spec;
-    try {
-      spec = await generateResumeSpec(body.jd_text, body.company, body.role, bank, {
-        school: parsed?.school ?? '',
-        grad_year: parsed?.grad_year,
-      });
-    } catch (err) {
-      fastify.log.error(err);
+    // Generate -> validate -> (if issues) regenerate once with the issues as feedback -> validate
+    // again and accept best-effort. Same two-layer pattern as the Dubai engine: the prompt states
+    // the rules (resumeSpec.ts's SYSTEM_PROMPT), the validator (resumeValidate.ts) checks them,
+    // and only genuine drift triggers a second Claude call instead of trusting the prompt alone.
+    let spec: ResumeSpec | undefined;
+    let specIssues: string[] = [];
+    let specWarnings: ReturnType<typeof validateResumeSpec>['warnings'] = [];
+    let atsCoverage = 0;
+
+    for (let attempt = 1; attempt <= MAX_SPEC_ATTEMPTS; attempt++) {
+      try {
+        spec = await generateResumeSpec(
+          body.jd_text,
+          body.company,
+          body.role,
+          bank,
+          { school: parsed?.school ?? '', grad_year: parsed?.grad_year },
+          attempt > 1 ? specIssues : undefined,
+        );
+      } catch (err) {
+        fastify.log.error(err);
+        return reply.status(500).send({ error: 'Failed to generate resume spec' });
+      }
+
+      const result = validateResumeSpec(spec, body.jd_text);
+      specIssues = result.issues;
+      specWarnings = result.warnings;
+      atsCoverage = result.ats_keyword_coverage_pct;
+
+      if (specIssues.length === 0 || attempt === MAX_SPEC_ATTEMPTS) break;
+      fastify.log.warn({ specIssues }, 'resume spec failed validation, retrying with feedback');
+    }
+    if (!spec) {
       return reply.status(500).send({ error: 'Failed to generate resume spec' });
     }
 
-    let docxBuffer: Buffer;
+    let pdfBuffer: Buffer;
+    let trimmedForFit: boolean;
+    let sparse: boolean;
     try {
-      docxBuffer = await renderResumeDocx(spec, body.contact);
+      const rendered = await renderResumePdf(spec, body.contact);
+      pdfBuffer = rendered.buffer;
+      trimmedForFit = rendered.trimmed;
+      sparse = rendered.sparse;
     } catch (err) {
       fastify.log.error(err);
-      return reply.status(500).send({ error: 'Failed to render resume document' });
+      return reply.status(500).send({ error: 'Failed to render resume PDF' });
+    }
+
+    // Authoritative post-render check (mirrors validate_resume.py's PDF section): confirms the
+    // pre-render height estimate actually held, and that the text is really extractable.
+    let layoutIssues: string[] = [];
+    try {
+      const parsedPdf = await pdfParse(pdfBuffer);
+      layoutIssues = validatePdfLayout(parsedPdf.text, parsedPdf.numpages).issues;
+    } catch (err) {
+      fastify.log.warn(err, 'could not post-render-validate the generated PDF');
     }
 
     const jdHash = createHash('sha256').update(body.jd_text).digest('hex').slice(0, 16);
-    const objectKey = `users/${userId}/resumes/${jdHash}-${Date.now()}.docx`;
+    const objectKey = `users/${userId}/resumes/${jdHash}-${Date.now()}.pdf`;
 
     let resumeUrl: string;
     try {
-      const blob = await put(objectKey, docxBuffer, {
+      const blob = await put(objectKey, pdfBuffer, {
         access: 'public',
-        contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        contentType: 'application/pdf',
       });
       resumeUrl = blob.url;
     } catch (err) {
@@ -88,7 +133,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       await db.insert(generated_resumes).values({
         user_id: userId,
         job_context: jobContext,
-        spec,
+        spec: { ...spec, _quality: { specIssues, layoutIssues, atsCoverage, trimmedForFit, sparse } },
         resume_object_key: objectKey,
       });
     } catch (err) {
@@ -99,8 +144,15 @@ export async function resumeRoutes(fastify: FastifyInstance) {
 
     return reply.status(200).send({
       resume_url: resumeUrl,
-      file_name: `${body.contact.full_name.replace(/\s+/g, '_')}_${body.company.replace(/\s+/g, '_')}_Resume.docx`,
+      file_name: `${body.contact.full_name.replace(/\s+/g, '_')}_${body.company.replace(/\s+/g, '_')}_Resume.pdf`,
       spec,
+      quality: {
+        issues: [...specIssues, ...layoutIssues],
+        warnings: specWarnings,
+        ats_keyword_coverage_pct: atsCoverage,
+        trimmed_for_one_page_fit: trimmedForFit,
+        sparse_add_more_experience: sparse,
+      },
     });
   });
 
