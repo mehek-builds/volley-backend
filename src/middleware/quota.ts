@@ -20,6 +20,7 @@ export const LIMITS = {
   perHour: {
     resolve: parseInt(process.env.RATE_RESOLVE_PER_HOUR || '15', 10),
     draft: parseInt(process.env.RATE_DRAFT_PER_HOUR || '40', 10),
+    resume: parseInt(process.env.RATE_RESUME_PER_HOUR || '15', 10),
     requestCode: parseInt(process.env.RATE_CODE_PER_HOUR || '5', 10),
     session: parseInt(process.env.RATE_SESSION_PER_HOUR || '10', 10),
   },

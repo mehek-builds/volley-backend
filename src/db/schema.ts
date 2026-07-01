@@ -137,6 +137,87 @@ export const learning_signals = pgTable('learning_signals', {
   created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
 
+// ---- experience_bank ----
+// Each row is one job/project. bullet_variants holds every phrasing the student
+// has ever used for that entry across resume versions, so /resume/generate can
+// pick the best-fit variant per posting instead of being locked to one fixed resume.
+export const experience_bank = pgTable('experience_bank', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  type: text('type').notNull(), // 'job' | 'project'
+  org: text('org').notNull(),
+  title: text('title'),
+  date_range: text('date_range'),
+  bullet_variants: jsonb('bullet_variants').notNull(), // string[]
+  tags: jsonb('tags'), // string[] of skills/keywords this entry supports
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
+});
+
+// ---- application_profile ----
+// Section 4B of PRD-v2: more sensitive than `profiles` (phone/address/work-auth), so it
+// is stored separately and must never be included in a drafting-LLM prompt.
+export const application_profile = pgTable('application_profile', {
+  user_id: uuid('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
+  phone: text('phone'),
+  address_city: text('address_city'),
+  address_state: text('address_state'),
+  address_zip: text('address_zip'),
+  linkedin_url: text('linkedin_url'),
+  github_url: text('github_url'),
+  portfolio_url: text('portfolio_url'),
+  citizenship: text('citizenship'),
+  work_authorized: boolean('work_authorized'),
+  needs_sponsorship: boolean('needs_sponsorship'),
+  availability_date: text('availability_date'),
+  desired_salary: text('desired_salary'),
+  eeo_prefs: jsonb('eeo_prefs'), // nullable, only set if the student explicitly opts in
+  referral_source_default: text('referral_source_default').default('Company website'),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+});
+
+// ---- resume_templates ----
+export const resume_templates = pgTable('resume_templates', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  name: text('name').notNull(),
+  base_docx_object_key: text('base_docx_object_key'),
+  slot_map: jsonb('slot_map'),
+});
+
+// ---- generated_resumes ----
+export const generated_resumes = pgTable('generated_resumes', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  job_context: jsonb('job_context').notNull(), // { company, role, jd_hash }
+  spec: jsonb('spec').notNull(), // the tailoring decision, kept for audit/debugging
+  resume_object_key: text('resume_object_key').notNull(),
+  template_id: uuid('template_id').references(() => resume_templates.id),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
+});
+
+// ---- ats_adapters ----
+// Health tracking for the per-ATS field-mapping adapters (Section 7 of PRD-v2). Populated
+// by a scheduled spot-check, not written to by the extension itself.
+export const ats_adapters = pgTable('ats_adapters', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  ats_name: text('ats_name').notNull(),
+  version: text('version').notNull(),
+  selectors: jsonb('selectors').notNull(),
+  last_verified_at: timestamp('last_verified_at', { withTimezone: true }),
+  status: text('status').default('healthy'), // 'healthy' | 'degraded' | 'broken'
+});
+
+// ---- autofill_events ----
+export const autofill_events = pgTable('autofill_events', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  ats_name: text('ats_name').notNull(),
+  job_context: jsonb('job_context').notNull(),
+  fields_filled: integer('fields_filled').default(0),
+  fields_skipped: integer('fields_skipped').default(0), // e.g. SSN, open-ended questions
+  submitted_by_user: boolean('submitted_by_user'), // self-reported; Volley never touches Submit
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
+});
+
 // ---- TypeScript inference types ----
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
@@ -155,3 +236,13 @@ export type LearningSignal = typeof learning_signals.$inferSelect;
 export type NewLearningSignal = typeof learning_signals.$inferInsert;
 export type ResolveCache = typeof resolve_cache.$inferSelect;
 export type NewResolveCache = typeof resolve_cache.$inferInsert;
+export type ExperienceBankEntry = typeof experience_bank.$inferSelect;
+export type NewExperienceBankEntry = typeof experience_bank.$inferInsert;
+export type ApplicationProfile = typeof application_profile.$inferSelect;
+export type NewApplicationProfile = typeof application_profile.$inferInsert;
+export type ResumeTemplate = typeof resume_templates.$inferSelect;
+export type GeneratedResume = typeof generated_resumes.$inferSelect;
+export type NewGeneratedResume = typeof generated_resumes.$inferInsert;
+export type AtsAdapter = typeof ats_adapters.$inferSelect;
+export type AutofillEvent = typeof autofill_events.$inferSelect;
+export type NewAutofillEvent = typeof autofill_events.$inferInsert;

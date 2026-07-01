@@ -33,6 +33,8 @@ Set these for Production (and Preview if you want):
 |-----|-------|
 | `DATABASE_URL` | your Neon/Vercel Postgres **pooled** URL |
 | `JWT_SIGNING_SECRET` | any 32+ char random string |
+| `ENCRYPTION_KEY` | any 32+ char random string, encrypts `application_profile` columns at rest |
+| `BLOB_READ_WRITE_TOKEN` | Vercel Storage tab -> Create -> Blob; stores generated resume files |
 | `ANTHROPIC_API_KEY` | your Anthropic key |
 | `HUNTER_API_KEY` | your Hunter key |
 | `REOON_API_KEY` | your Reoon key (optional) |

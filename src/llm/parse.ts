@@ -3,6 +3,7 @@ import Anthropic from '@anthropic-ai/sdk';
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 export interface ParsedProfile {
+  full_name: string;
   experience: Array<{
     company: string;
     title: string;
@@ -24,6 +25,7 @@ const SYSTEM_PROMPT = `You are a resume parser. Extract structured information f
 
 The JSON must match this exact shape:
 {
+  "full_name": string,
   "experience": [{"company": string, "title": string, "start": string, "end": string, "description": string}],
   "skills": [string],
   "projects": [{"name": string, "description": string}],
@@ -33,6 +35,7 @@ The JSON must match this exact shape:
 }
 
 Rules:
+- "full_name" is the applicant's name from the resume header, not a company or school name
 - "end" should be "Present" if the role is current
 - "grad_year" should be a 4-digit integer; infer from graduation date or expected graduation
 - "target_roles" should be inferred from the resume objective, job titles, or skills (e.g. ["Software Engineer", "ML Engineer"])
