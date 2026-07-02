@@ -4,7 +4,7 @@ import { db } from '../db/index';
 import { users } from '../db/schema';
 import { eq } from 'drizzle-orm';
 import { requireAuth } from '../middleware/auth';
-import { getEntitlements, getCount, monthPeriod, FREE_LIFETIME_RESUME_LIMIT, LIFETIME_PERIOD } from '../middleware/quota';
+import { getEntitlements, getCount, monthPeriod } from '../middleware/quota';
 
 export async function billingRoutes(fastify: FastifyInstance) {
   // Plan + usage for the signed-in user. The extension can show "12 of 30 used".
@@ -12,14 +12,10 @@ export async function billingRoutes(fastify: FastifyInstance) {
     const { userId, email } = request.jwtPayload!;
     const ent = await getEntitlements(userId);
     const period = monthPeriod();
-    // Resumes count against a lifetime bucket on free, a monthly one on pro/trial
-    // (see quota.ts / resume.ts - same split drives the /resume/generate gate).
-    const resumeQuotaPeriod = ent.tier === 'free' ? LIFETIME_PERIOD : period;
-    const resumeQuotaLimit = ent.tier === 'free' ? FREE_LIFETIME_RESUME_LIMIT : ent.monthlyResumes;
     const [usedContacts, usedDrafts, usedResumes] = await Promise.all([
       getCount(userId, period, 'verified_contacts'),
       getCount(userId, period, 'drafts'),
-      getCount(userId, resumeQuotaPeriod, 'resumes'),
+      getCount(userId, period, 'resumes'),
     ]);
     const rows = await db.select().from(users).where(eq(users.id, userId)).limit(1);
     const upgradeUrl = process.env.UPGRADE_URL || process.env.STRIPE_PAYMENT_LINK;
@@ -30,7 +26,7 @@ export async function billingRoutes(fastify: FastifyInstance) {
       usage: {
         contacts: { used: usedContacts, limit: ent.monthlyContacts },
         drafts: { used: usedDrafts, limit: ent.monthlyDrafts },
-        resumes: { used: usedResumes, limit: resumeQuotaLimit },
+        resumes: { used: usedResumes, limit: ent.monthlyResumes },
       },
       ...(upgradeUrl && ent.tier !== 'pro' ? { upgrade_url: upgradeUrl } : {}),
     });

@@ -16,9 +16,10 @@ export const users = pgTable('users', {
   email: text('email').unique().notNull(),
   email_verified: boolean('email_verified').default(false),
   // Billing: 'free' | 'pro' ('plus' is a legacy alias, treated as 'pro' - see quota.ts).
-  // Every feature (outreach + resume-gen/autofill) is available on 'free'; 'pro' is the
-  // single $49.99/mo tier that removes free's lifetime resume-generation cap (2026-07-02
-  // decision, see quota.ts's LIMITS/FREE_LIFETIME_RESUME_LIMIT comments for the full model).
+  // Every feature (outreach + resume-gen/autofill) is available on 'free', including 20
+  // resume generations per month (recurring, Apollo.io-style credits, not a one-time
+  // trial); 'pro' is the single $49.99/mo tier that removes the monthly resume cap
+  // (2026-07-02 decision, see quota.ts's LIMITS comments for the full model).
   // Reverse trial runs until trial_ends_at (set at signup) at pro-level limits.
   plan: text('plan').default('free').notNull(),
   trial_ends_at: timestamp('trial_ends_at', { withTimezone: true }),

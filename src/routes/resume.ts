@@ -7,18 +7,7 @@ import pdfParse from 'pdf-parse';
 import { db } from '../db/index';
 import { experience_bank, profiles, generated_resumes, autofill_events } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
-import {
-  allowHourly,
-  bumpCounter,
-  getCount,
-  getEntitlements,
-  FREE_LIFETIME_RESUME_LIMIT,
-  LIFETIME_PERIOD,
-  LIMITS,
-  monthPeriod,
-  quotaExceededPayload,
-  rateLimitedReply,
-} from '../middleware/quota';
+import { allowHourly, bumpCounter, getCount, getEntitlements, LIMITS, monthPeriod, quotaExceededPayload, rateLimitedReply } from '../middleware/quota';
 import { generateResumeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import { renderResumePdf } from '../engine/resumeRender';
 import { validateResumeSpec, validatePdfLayout } from '../engine/resumeValidate';
@@ -56,16 +45,15 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       return rateLimitedReply(reply);
     }
 
-    // Resume-gen + autofill is available on every tier (2026-07-02 decision), but free
-    // gets a LIFETIME cap rather than a monthly one - crossing it is what moves a student
-    // onto the $49.99/mo tier, so the counter period differs by tier rather than the quota
-    // existing at all. Pro/trial's monthlyResumes is deliberately huge (see quota.ts).
+    // Resume-gen + autofill is available on every tier (2026-07-02 decision): free gets
+    // 20/month that resets like contacts/drafts (Apollo.io-style recurring credits, not a
+    // one-time lifetime trial - keeps free students returning monthly). Pro/trial's
+    // monthlyResumes is deliberately huge (see quota.ts) so it's a no-op cap in practice.
     const ent = await getEntitlements(userId);
-    const resumeQuotaPeriod = ent.tier === 'free' ? LIFETIME_PERIOD : monthPeriod();
-    const resumeQuotaLimit = ent.tier === 'free' ? FREE_LIFETIME_RESUME_LIMIT : ent.monthlyResumes;
-    const usedResumes = await getCount(userId, resumeQuotaPeriod, 'resumes');
-    if (usedResumes >= resumeQuotaLimit) {
-      return reply.status(402).send(quotaExceededPayload(ent, usedResumes, 'resumes', resumeQuotaLimit));
+    const period = monthPeriod();
+    const usedResumes = await getCount(userId, period, 'resumes');
+    if (usedResumes >= ent.monthlyResumes) {
+      return reply.status(402).send(quotaExceededPayload(ent, usedResumes, 'resumes'));
     }
 
     const bank = await db.select().from(experience_bank).where(eq(experience_bank.user_id, userId));
@@ -165,7 +153,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       // shouldn't block the student from getting their resume.
     }
 
-    await bumpCounter(userId, resumeQuotaPeriod, 'resumes');
+    await bumpCounter(userId, period, 'resumes');
 
     return reply.status(200).send({
       resume_url: resumeUrl,

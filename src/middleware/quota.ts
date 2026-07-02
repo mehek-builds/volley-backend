@@ -3,18 +3,21 @@ import { sql, and, eq } from 'drizzle-orm';
 import { db } from '../db/index';
 import { usage_counters, users } from '../db/schema';
 
-// Pricing model per PRD Section 10 (v0) + product decision 2026-07-02 (supersedes the
-// 2026-07-01 Plus-tier resolution): every feature - outreach AND resume-gen/autofill - is
-// available on the free tier. Resume generation is free up to a LIFETIME cap (not
-// monthly); once a student crosses it, continued resume generation requires the $49.99/mo
-// paid tier. Contacts/drafts keep their existing separate monthly free/pro split
-// (unchanged by this decision). Gate volume, not discovery. All enforcement is
-// server-side so every client version is covered. Limits are env-tunable without a
-// redeploy of intent.
+// Pricing model per PRD Section 10 (v0) + product decision 2026-07-02, revised same day
+// to a recurring-credits model (Apollo.io-style, not a one-time lifetime trial): every
+// feature - outreach AND resume-gen/autofill - is available on the free tier, including
+// 20 resume generations per month that reset like everything else. This keeps free
+// students coming back every month (job searches run for months, not a single session),
+// rather than a one-time trial that either converts immediately or churns the student
+// out entirely. Crossing 20/month - or wanting it removed entirely - is what moves a
+// student onto the $49.99/mo paid tier, which sets an effectively-unlimited monthly
+// resume quota instead. Gate volume, not discovery. All enforcement is server-side so
+// every client version is covered. Limits are env-tunable without a redeploy of intent.
 export const LIMITS = {
   free: {
     monthlyContacts: parseInt(process.env.FREE_MONTHLY_CONTACTS || '30', 10),
     monthlyDrafts: parseInt(process.env.FREE_MONTHLY_DRAFTS || '60', 10),
+    monthlyResumes: parseInt(process.env.FREE_MONTHLY_RESUMES || '20', 10),
   },
   pro: {
     monthlyContacts: parseInt(process.env.PRO_MONTHLY_CONTACTS || '500', 10),
@@ -32,12 +35,6 @@ export const LIMITS = {
     session: parseInt(process.env.RATE_SESSION_PER_HOUR || '10', 10),
   },
 } as const;
-
-// Free tier's resume generation allowance is LIFETIME, not monthly - it never resets.
-// Crossing it is what moves a student onto the $49.99/mo tier, so a monthly reset would
-// undermine the whole gate.
-export const FREE_LIFETIME_RESUME_LIMIT = parseInt(process.env.FREE_LIFETIME_RESUMES || '20', 10);
-export const LIFETIME_PERIOD = 'lifetime';
 
 export const TRIAL_DAYS = parseInt(process.env.TRIAL_DAYS || '7', 10);
 
@@ -81,8 +78,6 @@ export interface Entitlements {
   tier: 'trial' | 'free' | 'pro';
   monthlyContacts: number;
   monthlyDrafts: number;
-  // Only meaningful for 'pro'/'trial' - 'free' uses FREE_LIFETIME_RESUME_LIMIT with the
-  // LIFETIME_PERIOD counter instead (see resume.ts), not this monthly figure.
   monthlyResumes: number;
 }
 
@@ -105,24 +100,17 @@ export async function getEntitlements(userId: string): Promise<Entitlements> {
   if (trialEnd > new Date()) {
     return { tier: 'trial', ...LIMITS.pro };
   }
-  return { tier: 'free', ...LIMITS.free, monthlyResumes: 0 };
+  return { tier: 'free', ...LIMITS.free };
 }
 
-export function quotaExceededPayload(
-  ent: Entitlements,
-  used: number,
-  what: 'contacts' | 'drafts' | 'resumes',
-  capOverride?: number,
-) {
+export function quotaExceededPayload(ent: Entitlements, used: number, what: 'contacts' | 'drafts' | 'resumes') {
   const upgradeLink = process.env.UPGRADE_URL || process.env.STRIPE_PAYMENT_LINK;
 
   if (what === 'resumes') {
-    // Free tier's cap is lifetime, not monthly (capOverride carries FREE_LIFETIME_RESUME_LIMIT
-    // from resume.ts, since Entitlements.monthlyResumes doesn't apply to 'free').
-    const cap = capOverride ?? ent.monthlyResumes;
+    const cap = ent.monthlyResumes;
     const base =
       ent.tier === 'free'
-        ? `You've used your ${cap} free resume generations. Volley Premium ($49.99/mo) unlocks unlimited resume generation + autofill.`
+        ? `You've used your ${cap} free resume generations this month. Volley Premium ($49.99/mo) unlocks unlimited resume generation + autofill. Resets on the 1st.`
         : `You've hit this month's resume limit (${cap}). It resets on the 1st.`;
     return {
       error: upgradeLink && ent.tier === 'free' ? `${base} Upgrade: ${upgradeLink}` : base,
