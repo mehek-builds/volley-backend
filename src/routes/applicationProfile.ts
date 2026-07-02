@@ -19,23 +19,27 @@ const ENCRYPTED_FIELDS = [
   'desired_salary',
 ] as const;
 
+// Every column is nullable in the DB (application_profile has no .notNull() fields), and
+// GET echoes back null for anything unset. The client round-trips the fetched profile
+// verbatim on save, so every field here must accept null, not just undefined - `.optional()`
+// alone rejects null and 400s on every save-after-load.
 const bodySchema = z.object({
-  phone: z.string().optional(),
-  address_city: z.string().optional(),
-  address_state: z.string().optional(),
-  address_zip: z.string().optional(),
-  linkedin_url: z.string().optional(),
-  github_url: z.string().optional(),
-  portfolio_url: z.string().optional(),
-  citizenship: z.string().optional(),
-  work_authorized: z.boolean().optional(),
-  needs_sponsorship: z.boolean().optional(),
-  availability_date: z.string().optional(),
-  desired_salary: z.string().optional(),
+  phone: z.string().nullable().optional(),
+  address_city: z.string().nullable().optional(),
+  address_state: z.string().nullable().optional(),
+  address_zip: z.string().nullable().optional(),
+  linkedin_url: z.string().nullable().optional(),
+  github_url: z.string().nullable().optional(),
+  portfolio_url: z.string().nullable().optional(),
+  citizenship: z.string().nullable().optional(),
+  work_authorized: z.boolean().nullable().optional(),
+  needs_sponsorship: z.boolean().nullable().optional(),
+  availability_date: z.string().nullable().optional(),
+  desired_salary: z.string().nullable().optional(),
   // Only ever set if the student explicitly opts in (PRD-v2 Section 4B); absent/null
   // means every autofill selects "Decline to Self-Identify" where that option exists.
   eeo_prefs: z.record(z.string()).nullable().optional(),
-  referral_source_default: z.string().optional(),
+  referral_source_default: z.string().nullable().optional(),
 });
 
 function encryptRow(body: z.infer<typeof bodySchema>) {
