@@ -58,7 +58,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
 
     // Resume-gen + autofill is available on every tier (2026-07-02 decision), but free
     // gets a LIFETIME cap rather than a monthly one - crossing it is what moves a student
-    // onto the $399/mo tier, so the counter period differs by tier rather than the quota
+    // onto the $49.99/mo tier, so the counter period differs by tier rather than the quota
     // existing at all. Pro/trial's monthlyResumes is deliberately huge (see quota.ts).
     const ent = await getEntitlements(userId);
     const resumeQuotaPeriod = ent.tier === 'free' ? LIFETIME_PERIOD : monthPeriod();

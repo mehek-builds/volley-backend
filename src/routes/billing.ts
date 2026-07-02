@@ -72,7 +72,7 @@ export async function billingRoutes(fastify: FastifyInstance) {
       const event = JSON.parse(raw.toString('utf8'));
       if (event.type === 'checkout.session.completed') {
         const email: string | undefined = event.data?.object?.customer_details?.email;
-        // Single paid tier now ($399/mo, unlocks everything - no separate Plus add-on).
+        // Single paid tier now ($49.99/mo, unlocks everything - no separate Plus add-on).
         if (email) {
           await db.update(users).set({ plan: 'pro' }).where(eq(users.email, email.toLowerCase()));
           fastify.log.info({ email }, 'upgraded to pro via stripe checkout');
