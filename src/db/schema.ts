@@ -221,7 +221,11 @@ export const autofill_events = pgTable('autofill_events', {
   job_context: jsonb('job_context').notNull(),
   fields_filled: integer('fields_filled').default(0),
   fields_skipped: integer('fields_skipped').default(0), // e.g. SSN, open-ended questions
-  submitted_by_user: boolean('submitted_by_user'), // self-reported; Volley never touches Submit
+  submitted_by_user: boolean('submitted_by_user'), // self-reported; unused since auto_submitted below covers it
+  // true = the extension clicked Submit itself, after the student's own cancelable countdown
+  // (2026-07-02 opt-in auto-submit toggle in AutofillSetupScreen, off by default). false = the
+  // student either has the toggle off or cancelled the countdown on this application.
+  auto_submitted: boolean('auto_submitted').default(false),
   created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
 

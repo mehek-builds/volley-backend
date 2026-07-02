@@ -169,8 +169,9 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     });
   });
 
-  // POST /autofill/event - client-reported fill outcome (fields_filled/skipped only; Volley
-  // never observes or reports whether Submit was clicked, since it never touches that button).
+  // POST /autofill/event - client-reported fill outcome. auto_submitted is true only when the
+  // student had opted in to auto-submit (AutofillSetupScreen toggle, off by default) and their
+  // own cancelable countdown ran out without them cancelling it.
   fastify.post('/autofill/event', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
 
@@ -179,6 +180,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       job_context: z.object({ company: z.string(), role: z.string() }),
       fields_filled: z.number().int().min(0),
       fields_skipped: z.number().int().min(0),
+      auto_submitted: z.boolean().optional(),
     });
 
     let body: z.infer<typeof eventSchema>;
