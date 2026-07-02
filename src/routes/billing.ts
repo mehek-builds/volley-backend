@@ -12,11 +12,14 @@ export async function billingRoutes(fastify: FastifyInstance) {
     const { userId, email } = request.jwtPayload!;
     const ent = await getEntitlements(userId);
     const period = monthPeriod();
-    const [usedContacts, usedDrafts] = await Promise.all([
+    const [usedContacts, usedDrafts, usedResumes] = await Promise.all([
       getCount(userId, period, 'verified_contacts'),
       getCount(userId, period, 'drafts'),
+      getCount(userId, period, 'resumes'),
     ]);
     const rows = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+    const upgradeUrl = process.env.UPGRADE_URL || process.env.STRIPE_PAYMENT_LINK;
+    const plusUpgradeUrl = process.env.PLUS_UPGRADE_URL || process.env.STRIPE_PLUS_PAYMENT_LINK;
     return reply.status(200).send({
       email,
       tier: ent.tier,
@@ -24,10 +27,12 @@ export async function billingRoutes(fastify: FastifyInstance) {
       usage: {
         contacts: { used: usedContacts, limit: ent.monthlyContacts },
         drafts: { used: usedDrafts, limit: ent.monthlyDrafts },
+        resumes: { used: usedResumes, limit: ent.monthlyResumes },
       },
-      ...((process.env.UPGRADE_URL || process.env.STRIPE_PAYMENT_LINK) && ent.tier !== 'pro'
-        ? { upgrade_url: process.env.UPGRADE_URL || process.env.STRIPE_PAYMENT_LINK }
-        : {}),
+      ...(upgradeUrl && ent.tier !== 'pro' && ent.tier !== 'plus' ? { upgrade_url: upgradeUrl } : {}),
+      // Plus unlocks resume-gen + autofill on top of Pro; surface it to anyone not
+      // already on Plus or mid-trial (trial already runs at plus-level limits).
+      ...(plusUpgradeUrl && ent.tier !== 'plus' && ent.tier !== 'trial' ? { plus_upgrade_url: plusUpgradeUrl } : {}),
     });
   });
 
@@ -67,9 +72,13 @@ export async function billingRoutes(fastify: FastifyInstance) {
       const event = JSON.parse(raw.toString('utf8'));
       if (event.type === 'checkout.session.completed') {
         const email: string | undefined = event.data?.object?.customer_details?.email;
+        // Distinguish which tier was purchased via Payment Link metadata (set in the
+        // Stripe dashboard on the Plus link's "Advanced options"). Absent metadata
+        // (the original outreach-only Payment Link) preserves prior behavior: Pro.
+        const plan = event.data?.object?.metadata?.plan === 'plus' ? 'plus' : 'pro';
         if (email) {
-          await db.update(users).set({ plan: 'pro' }).where(eq(users.email, email.toLowerCase()));
-          fastify.log.info({ email }, 'upgraded to pro via stripe checkout');
+          await db.update(users).set({ plan }).where(eq(users.email, email.toLowerCase()));
+          fastify.log.info({ email, plan }, 'upgraded via stripe checkout');
         }
       }
       // Future: handle customer.subscription.deleted to downgrade on cancellation.
@@ -106,9 +115,14 @@ export async function billingRoutes(fastify: FastifyInstance) {
       const event = JSON.parse(raw.toString('utf8'));
       const name: string = event.meta?.event_name || '';
       const email: string | undefined = event.data?.attributes?.user_email;
+      // Distinguish which tier by variant_id: a dedicated Plus variant in Lemon
+      // Squeezy maps to 'plus'; anything else (including the original outreach-only
+      // variant) preserves prior behavior: Pro.
+      const variantId: string | undefined = event.data?.attributes?.variant_id?.toString();
+      const plan = variantId && variantId === process.env.LEMONSQUEEZY_PLUS_VARIANT_ID ? 'plus' : 'pro';
       if (email && ['subscription_created', 'subscription_resumed', 'subscription_unpaused'].includes(name)) {
-        await db.update(users).set({ plan: 'pro' }).where(eq(users.email, email.toLowerCase()));
-        fastify.log.info({ email, name }, 'upgraded to pro via lemon squeezy');
+        await db.update(users).set({ plan }).where(eq(users.email, email.toLowerCase()));
+        fastify.log.info({ email, name, plan }, 'upgraded via lemon squeezy');
       } else if (email && ['subscription_expired'].includes(name)) {
         await db.update(users).set({ plan: 'free' }).where(eq(users.email, email.toLowerCase()));
         fastify.log.info({ email, name }, 'downgraded to free via lemon squeezy');

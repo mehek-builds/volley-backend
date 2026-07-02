@@ -7,7 +7,7 @@ import pdfParse from 'pdf-parse';
 import { db } from '../db/index';
 import { experience_bank, profiles, generated_resumes, autofill_events } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
-import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
+import { allowHourly, bumpCounter, getCount, getEntitlements, LIMITS, monthPeriod, quotaExceededPayload, rateLimitedReply } from '../middleware/quota';
 import { generateResumeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import { renderResumePdf } from '../engine/resumeRender';
 import { validateResumeSpec, validatePdfLayout } from '../engine/resumeValidate';
@@ -43,6 +43,15 @@ export async function resumeRoutes(fastify: FastifyInstance) {
 
     if (!(await allowHourly(userId, 'resume', LIMITS.perHour.resume))) {
       return rateLimitedReply(reply);
+    }
+
+    // Resume-gen + autofill is a Plus-tier feature (PRD-v2 Section 12.1): gate on
+    // the monthly resume quota, separate from the outreach-only contacts/drafts gate.
+    const ent = await getEntitlements(userId);
+    const period = monthPeriod();
+    const usedResumes = await getCount(userId, period, 'resumes');
+    if (usedResumes >= ent.monthlyResumes) {
+      return reply.status(402).send(quotaExceededPayload(ent, usedResumes, 'resumes'));
     }
 
     const bank = await db.select().from(experience_bank).where(eq(experience_bank.user_id, userId));
@@ -141,6 +150,8 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       // The file is already generated and returned below; failing to log it for audit
       // shouldn't block the student from getting their resume.
     }
+
+    await bumpCounter(userId, period, 'resumes');
 
     return reply.status(200).send({
       resume_url: resumeUrl,

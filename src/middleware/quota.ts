@@ -3,18 +3,29 @@ import { sql, and, eq } from 'drizzle-orm';
 import { db } from '../db/index';
 import { usage_counters, users } from '../db/schema';
 
-// Pricing model per PRD Section 10: 7-day reverse trial (full features), then a
-// recurring free tier of ~25-40 verified contacts + drafts per month, $19.99/mo Pro.
+// Pricing model per PRD Section 10 (v0) + PRD-v2 Section 12.1 (resolved 2026-07-01):
+// 7-day reverse trial (full features, plus-level), then a recurring free tier of
+// ~25-40 verified contacts + drafts per month, $19.99/mo Pro (outreach-only, v0),
+// $39.99/mo Plus (Pro's contacts/drafts limits + resume-gen/autofill on top).
 // Gate volume, not discovery. All enforcement is server-side so every client
 // version is covered. Limits are env-tunable without a redeploy of intent.
 export const LIMITS = {
   free: {
     monthlyContacts: parseInt(process.env.FREE_MONTHLY_CONTACTS || '30', 10),
     monthlyDrafts: parseInt(process.env.FREE_MONTHLY_DRAFTS || '60', 10),
+    monthlyResumes: 0,
   },
   pro: {
     monthlyContacts: parseInt(process.env.PRO_MONTHLY_CONTACTS || '500', 10),
     monthlyDrafts: parseInt(process.env.PRO_MONTHLY_DRAFTS || '1000', 10),
+    monthlyResumes: 0,
+  },
+  // Plus reuses Pro's contacts/drafts limits (PRD-v2: "includes everything v0 has")
+  // and adds resume-gen + autofill on top, per PRD-v2 Section 12.1's resolved pricing.
+  plus: {
+    monthlyContacts: parseInt(process.env.PRO_MONTHLY_CONTACTS || '500', 10),
+    monthlyDrafts: parseInt(process.env.PRO_MONTHLY_DRAFTS || '1000', 10),
+    monthlyResumes: parseInt(process.env.PLUS_MONTHLY_RESUMES || '30', 10),
   },
   // Abuse protection (rolling hour, per user or per email)
   perHour: {
@@ -65,18 +76,23 @@ export async function allowHourly(key: string, kind: string, limit: number): Pro
 }
 
 export interface Entitlements {
-  tier: 'trial' | 'free' | 'pro';
+  tier: 'trial' | 'free' | 'pro' | 'plus';
   monthlyContacts: number;
   monthlyDrafts: number;
+  monthlyResumes: number;
 }
 
 export async function getEntitlements(userId: string): Promise<Entitlements> {
   const rows = await db.select().from(users).where(eq(users.id, userId)).limit(1);
   const user = rows[0];
+  if (user?.plan === 'plus') {
+    return { tier: 'plus', ...LIMITS.plus };
+  }
   if (user?.plan === 'pro') {
     return { tier: 'pro', ...LIMITS.pro };
   }
-  // Reverse trial: full (pro-level) limits for the first TRIAL_DAYS after signup.
+  // Reverse trial: full (plus-level) limits for the first TRIAL_DAYS after signup,
+  // so a trialing student can try resume-gen + autofill, not just outreach.
   // trial_ends_at is set at signup; users created before this field existed fall
   // back to created_at + TRIAL_DAYS.
   const trialEnd = user?.trial_ends_at
@@ -85,25 +101,46 @@ export async function getEntitlements(userId: string): Promise<Entitlements> {
       ? new Date(new Date(user.created_at).getTime() + TRIAL_DAYS * 24 * 60 * 60 * 1000)
       : new Date(0);
   if (trialEnd > new Date()) {
-    return { tier: 'trial', ...LIMITS.pro };
+    return { tier: 'trial', ...LIMITS.plus };
   }
   return { tier: 'free', ...LIMITS.free };
 }
 
-export function quotaExceededPayload(ent: Entitlements, used: number, what: 'contacts' | 'drafts') {
-  const link = process.env.UPGRADE_URL || process.env.STRIPE_PAYMENT_LINK;
+export function quotaExceededPayload(ent: Entitlements, used: number, what: 'contacts' | 'drafts' | 'resumes') {
+  // Resumes have their own upgrade path (free/pro -> Plus specifically, not Pro),
+  // since Pro's tier doesn't include resume-gen at all (PRD-v2 Section 12.1).
+  const plusLink = process.env.PLUS_UPGRADE_URL || process.env.STRIPE_PLUS_PAYMENT_LINK;
+  const link = what === 'resumes' ? plusLink : process.env.UPGRADE_URL || process.env.STRIPE_PAYMENT_LINK;
+
+  if (what === 'resumes') {
+    const cap = ent.monthlyResumes;
+    const base =
+      cap === 0
+        ? `Resume generation and application autofill are a Volley Plus feature ($39.99/mo).`
+        : `You've hit this month's Plus limit (${cap} resumes). It resets on the 1st.`;
+    return {
+      error: link ? `${base} Upgrade: ${link}` : base,
+      code: 'quota_exceeded',
+      used,
+      limit: cap,
+      tier: ent.tier,
+      ...(link ? { upgrade_url: link } : {}),
+    };
+  }
+
   const cap = what === 'contacts' ? ent.monthlyContacts : ent.monthlyDrafts;
   const base =
-    ent.tier === 'pro'
-      ? `You've hit this month's Pro limit (${cap} ${what}). It resets on the 1st.`
+    ent.tier === 'pro' || ent.tier === 'plus'
+      ? `You've hit this month's ${ent.tier === 'plus' ? 'Plus' : 'Pro'} limit (${cap} ${what}). It resets on the 1st.`
       : `You've used your ${cap} free verified ${what} this month. Volley Pro ($19.99/mo) unlocks ${what === 'contacts' ? LIMITS.pro.monthlyContacts : LIMITS.pro.monthlyDrafts} per month.`;
+  const isPaid = ent.tier === 'pro' || ent.tier === 'plus';
   return {
-    error: link && ent.tier !== 'pro' ? `${base} Upgrade: ${link}` : base,
+    error: link && !isPaid ? `${base} Upgrade: ${link}` : base,
     code: 'quota_exceeded',
     used,
     limit: cap,
     tier: ent.tier,
-    ...(link && ent.tier !== 'pro' ? { upgrade_url: link } : {}),
+    ...(link && !isPaid ? { upgrade_url: link } : {}),
   };
 }
 

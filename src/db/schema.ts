@@ -15,7 +15,9 @@ export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
   email: text('email').unique().notNull(),
   email_verified: boolean('email_verified').default(false),
-  // Billing: 'free' | 'pro'. Reverse trial runs until trial_ends_at (set at signup).
+  // Billing: 'free' | 'pro' | 'plus'. 'pro' ($19.99/mo) is v0 outreach-only (contacts+drafts).
+  // 'plus' ($39.99/mo, PRD-v2 Section 12.1) is pro's limits plus resume-gen + autofill access.
+  // Reverse trial runs until trial_ends_at (set at signup) at plus-level limits.
   plan: text('plan').default('free').notNull(),
   trial_ends_at: timestamp('trial_ends_at', { withTimezone: true }),
   created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
