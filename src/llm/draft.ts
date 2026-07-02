@@ -95,7 +95,8 @@ Write the outreach email JSON now.`.trim();
     ],
   });
 
-  const text = response.content[0].type === 'text' ? response.content[0].text : '';
+  const textBlock = response.content.find((block) => block.type === 'text');
+  const text = textBlock?.type === 'text' ? textBlock.text : '';
 
   let subject: string;
   let body: string;

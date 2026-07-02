@@ -70,7 +70,8 @@ export async function generateResumeSpec(
     ],
   });
 
-  const text = response.content[0].type === 'text' ? response.content[0].text : '';
+  const textBlock = response.content.find((block) => block.type === 'text');
+  const text = textBlock?.type === 'text' ? textBlock.text : '';
 
   try {
     const cleaned = text.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
