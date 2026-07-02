@@ -37,8 +37,9 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     let body: z.infer<typeof bodySchema>;
     try {
       body = bodySchema.parse(request.body);
-    } catch {
-      return reply.status(400).send({ error: 'Invalid request body' });
+    } catch (err) {
+      const detail = err instanceof z.ZodError ? err.issues.map((i) => `${i.path.join('.')}: ${i.message}`) : undefined;
+      return reply.status(400).send({ error: 'Invalid request body', detail });
     }
 
     if (!(await allowHourly(userId, 'resume', LIMITS.perHour.resume))) {
@@ -186,8 +187,9 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     let body: z.infer<typeof eventSchema>;
     try {
       body = eventSchema.parse(request.body);
-    } catch {
-      return reply.status(400).send({ error: 'Invalid request body' });
+    } catch (err) {
+      const detail = err instanceof z.ZodError ? err.issues.map((i) => `${i.path.join('.')}: ${i.message}`) : undefined;
+      return reply.status(400).send({ error: 'Invalid request body', detail });
     }
 
     try {
