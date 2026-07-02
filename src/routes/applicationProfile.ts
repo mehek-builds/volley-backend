@@ -17,6 +17,7 @@ const ENCRYPTED_FIELDS = [
   'citizenship',
   'availability_date',
   'desired_salary',
+  'ats_signup_password',
 ] as const;
 
 // Every column is nullable in the DB (application_profile has no .notNull() fields), and
@@ -40,6 +41,7 @@ const bodySchema = z.object({
   // means every autofill selects "Decline to Self-Identify" where that option exists.
   eeo_prefs: z.record(z.string()).nullable().optional(),
   referral_source_default: z.string().nullable().optional(),
+  ats_signup_password: z.string().nullable().optional(),
 });
 
 function encryptRow(body: z.infer<typeof bodySchema>) {

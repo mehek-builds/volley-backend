@@ -177,6 +177,11 @@ export const application_profile = pgTable('application_profile', {
   desired_salary: text('desired_salary'),
   eeo_prefs: jsonb('eeo_prefs'), // nullable, only set if the student explicitly opts in
   referral_source_default: text('referral_source_default').default('Company website'),
+  // Student-chosen, reused across every ATS that requires the student to create their own
+  // account (e.g. Workday) before Volley can autofill the real application. Volley never
+  // creates the account itself (2026-07-03 decision) - this only pre-fills the signup form's
+  // password fields so the student can review and click "Create Account" themselves.
+  ats_signup_password: text('ats_signup_password'),
   updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
 
