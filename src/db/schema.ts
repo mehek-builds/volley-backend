@@ -15,9 +15,11 @@ export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
   email: text('email').unique().notNull(),
   email_verified: boolean('email_verified').default(false),
-  // Billing: 'free' | 'pro' | 'plus'. 'pro' ($19.99/mo) is v0 outreach-only (contacts+drafts).
-  // 'plus' ($39.99/mo, PRD-v2 Section 12.1) is pro's limits plus resume-gen + autofill access.
-  // Reverse trial runs until trial_ends_at (set at signup) at plus-level limits.
+  // Billing: 'free' | 'pro' ('plus' is a legacy alias, treated as 'pro' - see quota.ts).
+  // Every feature (outreach + resume-gen/autofill) is available on 'free'; 'pro' is the
+  // single $399/mo tier that removes free's lifetime resume-generation cap (2026-07-02
+  // decision, see quota.ts's LIMITS/FREE_LIFETIME_RESUME_LIMIT comments for the full model).
+  // Reverse trial runs until trial_ends_at (set at signup) at pro-level limits.
   plan: text('plan').default('free').notNull(),
   trial_ends_at: timestamp('trial_ends_at', { withTimezone: true }),
   created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
