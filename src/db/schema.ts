@@ -198,14 +198,16 @@ export const generated_resumes = pgTable('generated_resumes', {
 
 // ---- ats_adapters ----
 // Health tracking for the per-ATS field-mapping adapters (Section 7 of PRD-v2). Populated
-// by a scheduled spot-check, not written to by the extension itself.
+// by a scheduled spot-check (src/routes/adapterHealth.ts), not written to by the extension
+// itself. One row per ATS, upserted in place - ats_name is unique so each scheduled run
+// updates the same row rather than accumulating history.
 export const ats_adapters = pgTable('ats_adapters', {
   id: uuid('id').primaryKey().defaultRandom(),
-  ats_name: text('ats_name').notNull(),
+  ats_name: text('ats_name').notNull().unique(),
   version: text('version').notNull(),
   selectors: jsonb('selectors').notNull(),
   last_verified_at: timestamp('last_verified_at', { withTimezone: true }),
-  status: text('status').default('healthy'), // 'healthy' | 'degraded' | 'broken'
+  status: text('status').default('healthy'), // 'healthy' | 'degraded' | 'broken' | 'unknown'
 });
 
 // ---- autofill_events ----

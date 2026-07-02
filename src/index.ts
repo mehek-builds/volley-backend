@@ -13,6 +13,7 @@ import { billingRoutes } from './routes/billing';
 import { experienceBankRoutes } from './routes/experienceBank';
 import { applicationProfileRoutes } from './routes/applicationProfile';
 import { resumeRoutes } from './routes/resume';
+import { adapterHealthRoutes } from './routes/adapterHealth';
 
 export async function buildApp() {
   const fastify = Fastify({
@@ -63,6 +64,7 @@ export async function buildApp() {
   await fastify.register(experienceBankRoutes);
   await fastify.register(applicationProfileRoutes);
   await fastify.register(resumeRoutes);
+  await fastify.register(adapterHealthRoutes);
 
   // Global error handler
   fastify.setErrorHandler((error, _request, reply) => {
