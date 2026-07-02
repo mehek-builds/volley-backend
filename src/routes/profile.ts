@@ -98,7 +98,11 @@ export async function profileRoutes(fastify: FastifyInstance) {
         return reply.status(404).send({ error: 'Profile not found - upload a resume first' });
       }
 
-      return reply.status(200).send(profile[0].parsed_json);
+      // parsed_json is resume-extracted data and was never guaranteed to carry an email (most
+      // resumes don't put one in a parseable spot); the account's verified login email is a
+      // more reliable source and autofill (Lever/Greenhouse/etc.) needs one to fill the email
+      // field at all - confirmed missing on every live-tested application until this fix.
+      return reply.status(200).send({ ...(profile[0].parsed_json as object), email: request.jwtPayload!.email });
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to retrieve profile' });
