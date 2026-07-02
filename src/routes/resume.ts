@@ -19,13 +19,16 @@ const bodySchema = z.object({
   company: z.string().min(1),
   role: z.string().min(1),
   jd_text: z.string().min(20),
+  // GET /profile/application returns null (not undefined) for unset fields (same shape the PUT
+  // endpoint already accepts, per the 2026-07-02 fix) - the extension passes those straight
+  // through as this endpoint's contact fields, so this must accept null too.
   contact: z.object({
     full_name: z.string().min(1),
-    email: z.string().optional(),
-    phone: z.string().optional(),
-    linkedin_url: z.string().optional(),
-    github_url: z.string().optional(),
-    portfolio_url: z.string().optional(),
+    email: z.string().nullable().optional().transform((v) => v ?? undefined),
+    phone: z.string().nullable().optional().transform((v) => v ?? undefined),
+    linkedin_url: z.string().nullable().optional().transform((v) => v ?? undefined),
+    github_url: z.string().nullable().optional().transform((v) => v ?? undefined),
+    portfolio_url: z.string().nullable().optional().transform((v) => v ?? undefined),
   }),
 });
 
