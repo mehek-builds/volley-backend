@@ -89,7 +89,12 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         );
       } catch (err) {
         fastify.log.error(err);
-        return reply.status(500).send({ error: 'Failed to generate resume spec' });
+        // A malformed/truncated model response is as retryable as a validation failure.
+        if (spec) break; // a prior attempt already produced a usable spec - accept it best-effort
+        if (attempt === MAX_SPEC_ATTEMPTS) {
+          return reply.status(500).send({ error: 'Failed to generate resume spec' });
+        }
+        continue;
       }
 
       const result = validateResumeSpec(spec, body.jd_text);

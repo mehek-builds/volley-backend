@@ -60,7 +60,7 @@ export async function generateResumeSpec(
 
   const response = await client.messages.create({
     model: 'claude-sonnet-5',
-    max_tokens: 2048,
+    max_tokens: 4096,
     system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
     messages: [
       {
@@ -73,10 +73,27 @@ export async function generateResumeSpec(
   const textBlock = response.content.find((block) => block.type === 'text');
   const text = textBlock?.type === 'text' ? textBlock.text : '';
 
+  if (response.stop_reason === 'max_tokens') {
+    throw new Error(`Resume spec truncated at max_tokens (${text.length} chars) - raise the cap`);
+  }
+
   try {
     const cleaned = text.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
     return JSON.parse(cleaned) as ResumeSpec;
   } catch {
-    throw new Error(`Claude returned invalid JSON for resume spec: ${text.slice(0, 200)}`);
+    // Fence stripping can miss (explanation text around the fence, stray trailing output);
+    // the outermost brace pair is the spec whenever one parses.
+    const first = text.indexOf('{');
+    const last = text.lastIndexOf('}');
+    if (first !== -1 && last > first) {
+      try {
+        return JSON.parse(text.slice(first, last + 1)) as ResumeSpec;
+      } catch {
+        // fall through to the descriptive error
+      }
+    }
+    throw new Error(
+      `Claude returned invalid JSON for resume spec (stop_reason=${response.stop_reason}): ${text.slice(0, 200)}`,
+    );
   }
 }
