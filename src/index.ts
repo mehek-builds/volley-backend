@@ -12,6 +12,7 @@ import { privacyRoutes } from './routes/privacy';
 import { billingRoutes } from './routes/billing';
 import { experienceBankRoutes } from './routes/experienceBank';
 import { applicationProfileRoutes } from './routes/applicationProfile';
+import { applicationAnswerRoutes } from './routes/applicationAnswer';
 import { resumeRoutes } from './routes/resume';
 import { adapterHealthRoutes } from './routes/adapterHealth';
 
@@ -63,6 +64,7 @@ export async function buildApp() {
   await fastify.register(billingRoutes);
   await fastify.register(experienceBankRoutes);
   await fastify.register(applicationProfileRoutes);
+  await fastify.register(applicationAnswerRoutes);
   await fastify.register(resumeRoutes);
   await fastify.register(adapterHealthRoutes);
 

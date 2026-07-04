@@ -175,6 +175,7 @@ export const application_profile = pgTable('application_profile', {
   needs_sponsorship: boolean('needs_sponsorship'),
   availability_date: text('availability_date'),
   desired_salary: text('desired_salary'),
+  date_of_birth: text('date_of_birth'), // encrypted; filled only where a form explicitly asks (never SSN)
   eeo_prefs: jsonb('eeo_prefs'), // nullable, only set if the student explicitly opts in
   referral_source_default: text('referral_source_default').default('Company website'),
   updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow(),

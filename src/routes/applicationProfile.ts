@@ -17,6 +17,7 @@ const ENCRYPTED_FIELDS = [
   'citizenship',
   'availability_date',
   'desired_salary',
+  'date_of_birth',
 ] as const;
 
 // Every column is nullable in the DB (application_profile has no .notNull() fields), and
@@ -36,6 +37,7 @@ const bodySchema = z.object({
   needs_sponsorship: z.boolean().nullable().optional(),
   availability_date: z.string().nullable().optional(),
   desired_salary: z.string().nullable().optional(),
+  date_of_birth: z.string().nullable().optional(),
   // Only ever set if the student explicitly opts in (PRD-v2 Section 4B); absent/null
   // means every autofill selects "Decline to Self-Identify" where that option exists.
   eeo_prefs: z.record(z.string()).nullable().optional(),
