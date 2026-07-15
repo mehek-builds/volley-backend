@@ -33,12 +33,12 @@ export async function applicationAnswerRoutes(fastify: FastifyInstance) {
     const parsedProfile = profileRows[0]?.parsed_json as { school?: string; grad_year?: number } | undefined;
 
     try {
-      const answer = await draftApplicationAnswer(question, company, role, jd_text, bank, {
+      const { answer, warnings } = await draftApplicationAnswer(question, company, role, jd_text, bank, {
         school: parsedProfile?.school,
         grad_year: parsedProfile?.grad_year,
       });
       if (!answer) return reply.status(502).send({ error: 'Empty draft returned' });
-      return reply.status(200).send({ answer });
+      return reply.status(200).send({ answer, warnings });
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to draft answer' });

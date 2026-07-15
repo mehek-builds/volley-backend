@@ -27,9 +27,35 @@ export async function buildApp() {
     },
   });
 
-  // CORS - allow all origins in dev
+  // CORS: only known browser origins, instead of reflecting whatever origin calls. The
+  // danger being closed is arbitrary WEBSITES reading API responses cross-origin; every
+  // authed call carries an Authorization header, so it is preflighted and an unlisted
+  // origin never reaches the route. chrome-extension:// origins are allowed as a class:
+  // the extension's API calls come from its background service worker (no host_permissions,
+  // so they ARE CORS-enforced), the store build and unpacked dev builds have different IDs,
+  // and a foreign extension gains nothing - it cannot read our token from another
+  // extension's storage, and without a token every route 401s. localhost covers local dev;
+  // CORS_EXTRA_ORIGINS covers future domains without a redeploy.
+  const extraOrigins = (process.env.CORS_EXTRA_ORIGINS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const allowedOrigins = new Set([
+    'https://role-quick-website.vercel.app',
+    'https://rolequick.com',
+    'https://www.rolequick.com',
+    ...extraOrigins,
+  ]);
   await fastify.register(cors, {
-    origin: true,
+    origin: (origin, cb) => {
+      // No Origin header = non-browser caller (curl, server-to-server, health checks);
+      // CORS doesn't apply and auth still does.
+      if (!origin) return cb(null, true);
+      if (allowedOrigins.has(origin)) return cb(null, true);
+      if (origin.startsWith('chrome-extension://')) return cb(null, true);
+      if (/^https?:\/\/localhost(:\d+)?$/.test(origin)) return cb(null, true);
+      return cb(null, false);
+    },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true,

@@ -10,7 +10,7 @@ import { requireAuth } from '../middleware/auth';
 import { allowHourly, bumpCounter, getCount, getEntitlements, LIMITS, monthPeriod, quotaExceededPayload, rateLimitedReply } from '../middleware/quota';
 import { generateResumeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import { renderResumePdf } from '../engine/resumeRender';
-import { validateResumeSpec, validatePdfLayout } from '../engine/resumeValidate';
+import { validateResumeSpec, validatePdfLayout, pruneUngroundedContent } from '../engine/resumeValidate';
 
 const MAX_SPEC_ATTEMPTS = 2; // 1 initial pass + 1 feedback-driven retry, per PRD-v2 Section 6.4's
 // "automated quality gate" - bounded so a stubborn JD can't loop the endpoint indefinitely.
@@ -97,7 +97,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         continue;
       }
 
-      const result = validateResumeSpec(spec, body.jd_text);
+      const result = validateResumeSpec(spec, body.jd_text, bank);
       specIssues = result.issues;
       specWarnings = result.warnings;
       atsCoverage = result.ats_keyword_coverage_pct;
@@ -107,6 +107,30 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     }
     if (!spec) {
       return reply.status(500).send({ error: 'Failed to generate resume spec' });
+    }
+
+    // Grounding backstop: if the spec STILL cites anything not in the bank after the retry loop,
+    // strip the offending content rather than render a fabricated claim (Mehek's hard rule). We
+    // never let this empty the resume - if pruning would remove every entry (usually an org-name
+    // formatting mismatch, not real fabrication), keep the spec and surface a loud quality issue
+    // instead of shipping a blank page.
+    let groundingRemoved: string[] = [];
+    const pruned = pruneUngroundedContent(spec, bank);
+    if (pruned.removed.length > 0) {
+      if (pruned.spec.experience.length === 0 && spec.experience.length > 0) {
+        // Every entry failed to match the bank. Usually an org-name formatting mismatch rather than
+        // real fabrication, so we ship unpruned rather than a blank resume - but this is exactly the
+        // case where fabrication could slip through with only an advisory, so make it loud in logs
+        // (not just the user-facing quality note) for monitoring.
+        fastify.log.error(
+          { userId, company: body.company, removed: pruned.removed },
+          'resume grounding pruned ALL experience entries; shipping unpruned - review for fabrication',
+        );
+        specIssues = [...specIssues, 'grounding: could not verify any experience entry against the bank; shipped unpruned - review before sending'];
+      } else {
+        spec = pruned.spec;
+        groundingRemoved = pruned.removed;
+      }
     }
 
     let pdfBuffer: Buffer;
@@ -153,7 +177,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       await db.insert(generated_resumes).values({
         user_id: userId,
         job_context: jobContext,
-        spec: { ...spec, _quality: { specIssues, layoutIssues, atsCoverage, trimmedForFit, sparse } },
+        spec: { ...spec, _quality: { specIssues, layoutIssues, atsCoverage, trimmedForFit, sparse, groundingRemoved } },
         resume_object_key: objectKey,
       });
     } catch (err) {
@@ -174,6 +198,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         ats_keyword_coverage_pct: atsCoverage,
         trimmed_for_one_page_fit: trimmedForFit,
         sparse_add_more_experience: sparse,
+        grounding_removed: groundingRemoved,
       },
     });
   });

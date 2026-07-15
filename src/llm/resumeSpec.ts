@@ -58,14 +58,25 @@ export async function generateResumeSpec(
     ? `\n\nThe previous attempt had these issues - fix them in this revision:\n${feedback.map((f) => `- ${f}`).join('\n')}`
     : '';
 
+  // The rules are static and the job/JD/bank block is identical across the two attempts of a
+  // single generate (only `feedbackBlock`, in the user turn, differs on the retry), so both go
+  // in the cached system prefix: the retry then reads ~all of its input from cache instead of
+  // re-sending the full JD + experience bank at full price. The bank/JD block carries the
+  // cache_control marker because it is the large one - a marker on the short rules block alone
+  // was below the model's minimum cacheable prefix and silently cached nothing. Bank is
+  // serialized compactly (no 2-space pretty-print) to nearly halve its token weight.
+  const contextBlock = `Job: ${role} at ${company}\n\nJob description:\n${jdText}\n\nEducation: ${education.school}${education.grad_year ? `, class of ${education.grad_year}` : ''}\n\nExperience bank:\n${JSON.stringify(bank)}`;
   const response = await client.messages.create({
     model: 'claude-sonnet-5',
     max_tokens: 4096,
-    system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+    system: [
+      { type: 'text', text: SYSTEM_PROMPT },
+      { type: 'text', text: contextBlock, cache_control: { type: 'ephemeral' } },
+    ],
     messages: [
       {
         role: 'user',
-        content: `Job: ${role} at ${company}\n\nJob description:\n${jdText}\n\nEducation: ${education.school}${education.grad_year ? `, class of ${education.grad_year}` : ''}\n\nExperience bank:\n${JSON.stringify(bank, null, 2)}\n\nReturn the tailoring spec JSON.${feedbackBlock}`,
+        content: `Return the tailoring spec JSON.${feedbackBlock}`,
       },
     ],
   });

@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { extractTeam } from './patterns';
+import { isAlumniMatch } from './schoolMatch';
 
 // A real contact sourced from Apollo. Mirrors the synthetic generator's shape so resolve.ts
 // can treat both paths uniformly, plus the real Apollo email + status when available (the
@@ -14,6 +15,11 @@ export interface SourcedContact {
   linkedin_url: string;
   email?: string;
   email_status?: string; // Apollo's own verification status: 'verified' | 'guessed' | ...
+  // Raw school names the provider returned for this person (0-2 typically). Carried through so
+  // /resolve can (re)compute school_match against the requesting student's school - crucially,
+  // this is what lets a shared (per company+role) cache entry recompute the alum flag per user
+  // instead of leaking one student's alma mater onto another's results.
+  candidate_schools?: string[];
 }
 
 const APOLLO_HEADERS = (apiKey: string) => ({
@@ -28,6 +34,13 @@ interface ApolloSearchPerson {
   title?: string;
 }
 
+interface ApolloEducation {
+  school_name?: string;
+  school?: string;
+  institution?: string;
+  degree?: string;
+}
+
 interface ApolloMatch {
   first_name?: string;
   last_name?: string;
@@ -37,6 +50,37 @@ interface ApolloMatch {
   email?: string;
   email_status?: string;
   seniority?: string;
+  // Education is parsed defensively across the shapes Apollo has been observed to return it in
+  // (an `education`/`education_history` array of objects or strings, or a flat `schools` array).
+  // NOTE: the standard people/bulk_match response does NOT reliably include education; when it is
+  // absent, extractSchools returns [] and school_match stays false (we never guess an alum).
+  education?: Array<ApolloEducation | string> | null;
+  education_history?: Array<ApolloEducation | string> | null;
+  schools?: string[] | null;
+}
+
+// Pull every school name off an Apollo match, tolerating the several shapes education can arrive
+// in. Returns [] when Apollo gave us no education data.
+export function extractSchools(m: ApolloMatch): string[] {
+  const out: string[] = [];
+  const pushStr = (v: unknown) => {
+    if (typeof v === 'string' && v.trim()) out.push(v.trim());
+  };
+  const fromArray = (arr: Array<ApolloEducation | string> | null | undefined) => {
+    if (!Array.isArray(arr)) return;
+    for (const e of arr) {
+      if (typeof e === 'string') pushStr(e);
+      else if (e && typeof e === 'object') {
+        pushStr(e.school_name);
+        pushStr(e.school);
+        pushStr(e.institution);
+      }
+    }
+  };
+  fromArray(m.education);
+  fromArray(m.education_history);
+  if (Array.isArray(m.schools)) for (const s of m.schools) pushStr(s);
+  return out;
 }
 
 // One persona bucket = one Apollo search with titles that target that kind of person.
@@ -90,13 +134,15 @@ export function classifyPersona(title: string, seniority: string | undefined): s
  * Returns [] on any error or when no key is configured, so the caller can fall back to
  * synthetic contacts and the product keeps working.
  *
- * Note: school_match is left false (Apollo does not return education here). Alumni
- * detection is a deliberate follow-up.
+ * Alumni detection: when Apollo's enrichment returns education for a person, we compare it to the
+ * requesting student's school (userSchool) and set school_match. When Apollo returns no education,
+ * school_match stays false - we never fabricate an alum. See extractSchools's NOTE on coverage.
  */
 export async function fetchApolloContacts(
   domain: string,
   role: string,
   team: string | undefined,
+  userSchool: string | undefined,
   limit = 6
 ): Promise<SourcedContact[]> {
   const apiKey = process.env.APOLLO_API_KEY;
@@ -150,13 +196,15 @@ export async function fetchApolloContacts(
         const title = (m.title ?? '').trim();
         // Need at least a usable name and a title; email is optional (engine can still try).
         if (!first || !last || !title) return null;
+        const schools = extractSchools(m);
         return {
           full_name: full,
           first_name: first,
           last_name: last,
           title,
           persona: classifyPersona(title, m.seniority),
-          school_match: false,
+          school_match: isAlumniMatch(userSchool, schools),
+          candidate_schools: schools,
           linkedin_url: m.linkedin_url ?? '',
           email: m.email,
           email_status: m.email_status,

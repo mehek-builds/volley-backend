@@ -46,6 +46,9 @@ function mapHunterEmail(e: HunterEmail, fallbackPersona: string): SourcedContact
     last_name: last,
     title: title || 'Team member',
     persona,
+    // Alumni detection is Apollo-only: Hunter's Domain Search returns no education data, so we
+    // can't tell if a Hunter-sourced contact is an alum. Leave school_match false here; any
+    // Apollo-detected alum still ranks first in resolve.ts's final ordering.
     school_match: false,
     linkedin_url: e.linkedin ?? '',
     email,

@@ -43,6 +43,9 @@ async function signSessionToken(userId: string, email: string): Promise<string> 
 async function sendVerificationEmail(email: string, code: string): Promise<void> {
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
+    // Bound the wait so a hung Resend can't hold the request open indefinitely; the caller
+    // treats a throw here as "verification unavailable" and 503s the client to the fallback.
+    signal: AbortSignal.timeout(10000),
     headers: {
       Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
       'Content-Type': 'application/json',
@@ -73,20 +76,41 @@ export async function authRoutes(fastify: FastifyInstance) {
       return reply.status(400).send({ error: 'Invalid request body: email is required and must be valid' });
     }
 
-    const { email } = body;
+    // Normalize the email the same way the code flow does (request-code / verify-code both
+    // lowercase). users.email is a case-sensitive unique key, so without this an attacker could
+    // sidestep the gate below (and legacy accounts) just by changing letter case.
+    const email = body.email.toLowerCase();
 
     const secret = process.env.JWT_SIGNING_SECRET;
     if (!secret) {
       return reply.status(500).send({ error: 'JWT_SIGNING_SECRET not configured' });
     }
 
-    if (!(await allowHourly(email.toLowerCase(), 'session', LIMITS.perHour.session))) {
+    if (!(await allowHourly(email, 'session', LIMITS.perHour.session))) {
       return rateLimitedReply(reply);
     }
 
     try {
       // Find or create user
       let user = await db.select().from(users).where(eq(users.email, email)).limit(1);
+
+      // This legacy path does NO proof that the caller owns `email`, so it must not hand out a
+      // 30-day token for an account that ALREADY EXISTS - otherwise anyone who knows a user's
+      // email could mint a token and read their decrypted application profile. Existing accounts
+      // must re-enter through the emailed-code flow (/auth/request-code + /auth/verify-code).
+      // Gating on existence (not the email_verified flag) is what actually closes the hole: the
+      // whole v0.1.0 base predates verification and has email_verified=false, so a verified-only
+      // gate left every one of them impersonable.
+      //
+      // Break-glass: when email verification isn't configured (no RESEND_API_KEY) there is no code
+      // flow to fall back to, so we preserve signup/login rather than brick auth. Once RESEND_API_KEY
+      // is set in an environment, every existing account is gated here. (An email-provider OUTAGE
+      // with the key set is deliberately NOT a break-glass: better a rare, brief inability to log in
+      // on a new device - existing 30-day sessions keep working - than reopening login-as-anyone.)
+      const verificationConfigured = !!process.env.RESEND_API_KEY;
+      if (user.length > 0 && verificationConfigured) {
+        return reply.status(403).send({ error: 'verification_required' });
+      }
 
       if (user.length === 0) {
         const newUserId = uuidv4();

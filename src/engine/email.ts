@@ -1,6 +1,6 @@
 import { db } from '../db/index';
 import { domain_patterns, contacts as contactsTable, companies as companiesTable } from '../db/schema';
-import { eq, and, gte } from 'drizzle-orm';
+import { eq, and, gte, sql } from 'drizzle-orm';
 import { renderTopCandidates, renderPattern, orderedPatterns } from './patterns';
 import { verifyPrimary, verifySecondary } from './verify';
 import { verifyHunter } from './hunter';
@@ -35,33 +35,29 @@ async function learnPattern(
   currentConfirmations = 1
 ): Promise<void> {
   try {
-    const existing = await db
-      .select()
-      .from(domain_patterns)
-      .where(eq(domain_patterns.domain, domain))
-      .limit(1);
-
-    if (existing.length > 0) {
-      const newConfirmations = (existing[0].confirmations ?? 1) + 1;
-      const newConfidence = Math.min(0.99, (existing[0].confidence ?? 0.5) + 0.1);
-      await db
-        .update(domain_patterns)
-        .set({
-          pattern,
-          confidence: newConfidence,
-          confirmations: newConfirmations,
-          last_confirmed_at: new Date(),
-        })
-        .where(eq(domain_patterns.domain, domain));
-    } else {
-      await db.insert(domain_patterns).values({
+    // Atomic upsert. /resolve now resolves up to ~6 same-company contacts CONCURRENTLY, so their
+    // learnPattern calls race on this domain's row. A read-then-write (select, then insert-or-update)
+    // would drop increments and collide on the domain primary key; ON CONFLICT DO UPDATE does the
+    // read-modify-write in a single atomic statement instead, incrementing off the row's current
+    // value regardless of interleaving.
+    await db
+      .insert(domain_patterns)
+      .values({
         domain,
         pattern,
         confidence: 0.7,
         confirmations: currentConfirmations,
         last_confirmed_at: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: domain_patterns.domain,
+        set: {
+          pattern,
+          confidence: sql`least(0.99, ${domain_patterns.confidence} + 0.1)`,
+          confirmations: sql`${domain_patterns.confirmations} + 1`,
+          last_confirmed_at: new Date(),
+        },
       });
-    }
   } catch (err) {
     console.error('[email] Failed to learn pattern:', err);
   }

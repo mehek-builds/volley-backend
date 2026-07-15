@@ -1,4 +1,6 @@
 import type { ResumeSpec } from '../llm/resumeSpec';
+import type { ExperienceBankEntry } from '../db/schema';
+import { wordSet, numberSignatures, ungroundedNumbers } from './grounding';
 
 // Deterministic QA gate for a generated resume, ported from the Dubai off-cycle resume
 // engine's validate_resume.py + pressure_test.py (~/Documents/Internship Apps/_resume-engine/) -
@@ -62,11 +64,160 @@ export interface ValidationResult {
   ats_keyword_coverage_pct: number;
 }
 
+// ---- Grounding: every org/title/number in the output must trace back to the experience bank ----
+// This is the deterministic backstop for the product's #1 promise ("never invents a job, a skill,
+// or a number"). The generator prompt already forbids fabrication; this catches drift the prompt
+// misses, by checking generated facts against the student's actual source data, not just its form.
+
+export interface GroundingViolation {
+  entry: string; // the generated entry's org (for context)
+  kind: 'org' | 'title' | 'metric' | 'date';
+  detail: string; // the offending token (org name, title, number, or year)
+  bullet?: string; // present for metric violations
+}
+
+// The 4-digit years in a date string, e.g. "Jun 2023 - Aug 2024" -> ["2023","2024"].
+function yearsIn(dateRange: string | null | undefined): string[] {
+  return dateRange ? (dateRange.match(/\b(?:19|20)\d{2}\b/g) ?? []) : [];
+}
+
+// Years present in the generated date range that don't appear in the source entry's date range.
+// Only enforced when the source HAS a date range - if the bank entry has no dates we can't verify,
+// so we don't fabricate-flag (best-effort, consistent with the rest of grounding).
+function ungroundedYears(genRange: string, srcRange: string | null | undefined): string[] {
+  const srcYears = new Set(yearsIn(srcRange));
+  if (srcYears.size === 0) return [];
+  return yearsIn(genRange).filter((y) => !srcYears.has(y));
+}
+
+// The bank entry whose org best matches the generated org (>=50% token containment), or undefined
+// if the generated org appears in no bank entry (i.e. it was invented).
+function matchBankEntry(orgName: string, bank: ExperienceBankEntry[]): ExperienceBankEntry | undefined {
+  const gen = wordSet(orgName);
+  if (gen.size === 0) return undefined;
+  let best: { e: ExperienceBankEntry; score: number } | undefined;
+  for (const e of bank) {
+    const src = wordSet(e.org);
+    if (src.size === 0) continue;
+    let inter = 0;
+    for (const t of gen) if (src.has(t)) inter++;
+    if (inter === 0) continue;
+    const containment = inter / Math.min(gen.size, src.size);
+    if (containment >= 0.5 && (!best || containment > best.score)) best = { e, score: containment };
+  }
+  return best?.e;
+}
+
+function bankEntryCorpus(e: ExperienceBankEntry): string {
+  const variants = Array.isArray(e.bullet_variants) ? (e.bullet_variants as string[]) : [];
+  const tags = Array.isArray(e.tags) ? (e.tags as string[]) : [];
+  return [e.org, e.title ?? '', e.date_range ?? '', ...variants, ...tags].join(' ');
+}
+
+function titleIsSwapped(genTitle: string, srcTitle: string | null): boolean {
+  if (!genTitle || !srcTitle) return false;
+  const gt = wordSet(genTitle);
+  const st = wordSet(srcTitle);
+  if (gt.size === 0 || st.size === 0) return false;
+  for (const t of gt) if (st.has(t)) return false; // any shared word = a legit light rewrite
+  return true; // zero overlap = the title was swapped for a different one
+}
+
+// Every grounding violation in a spec against the student's bank. Org that isn't in the bank ->
+// 'org'; a title with zero word-overlap with its source title -> 'title'; a bullet number whose
+// value doesn't appear in that entry's source text -> 'metric'.
+export function findGroundingViolations(spec: ResumeSpec, bank: ExperienceBankEntry[]): GroundingViolation[] {
+  const violations: GroundingViolation[] = [];
+  for (const entry of spec.experience) {
+    const src = matchBankEntry(entry.org, bank);
+    if (!src) {
+      // No source entry -> the org is invented. Its bullets' metrics are unsupported too, but the
+      // org fix (drop the whole entry) subsumes them, so we don't double-report per bullet.
+      violations.push({ entry: entry.org, kind: 'org', detail: entry.org });
+      continue;
+    }
+    if (titleIsSwapped(entry.title, src.title)) {
+      violations.push({ entry: entry.org, kind: 'title', detail: entry.title });
+    }
+    for (const yr of ungroundedYears(entry.date_range, src.date_range)) {
+      violations.push({ entry: entry.org, kind: 'date', detail: yr });
+    }
+    const srcSigs = numberSignatures(bankEntryCorpus(src));
+    for (const bullet of entry.bullets) {
+      for (const n of ungroundedNumbers(bullet, srcSigs)) {
+        violations.push({ entry: entry.org, kind: 'metric', detail: n, bullet });
+      }
+    }
+  }
+  return violations;
+}
+
+// Last-resort sanitizer: after the generate/retry loop, strip anything still ungrounded rather
+// than ship a fabricated claim. Drops invented entries, replaces a swapped title with the real
+// one, and drops bullets that carry an ungrounded number. Returns the cleaned spec + a human list
+// of what was removed (for the quality report / audit).
+export function pruneUngroundedContent(
+  spec: ResumeSpec,
+  bank: ExperienceBankEntry[],
+): { spec: ResumeSpec; removed: string[] } {
+  const removed: string[] = [];
+  const experience: ResumeSpec['experience'] = [];
+  for (const entry of spec.experience) {
+    const src = matchBankEntry(entry.org, bank);
+    if (!src) {
+      removed.push(`dropped entry "${entry.org}" (not in experience bank)`);
+      continue;
+    }
+    let title = entry.title;
+    if (titleIsSwapped(title, src.title)) {
+      removed.push(`reset title "${title}" -> "${src.title}" for ${entry.org}`);
+      title = src.title ?? title;
+    }
+    let date_range = entry.date_range;
+    if (src.date_range && ungroundedYears(date_range, src.date_range).length > 0) {
+      removed.push(`reset date "${date_range}" -> "${src.date_range}" for ${entry.org}`);
+      date_range = src.date_range;
+    }
+    const srcSigs = numberSignatures(bankEntryCorpus(src));
+    const bullets = entry.bullets.filter((b) => {
+      const bad = ungroundedNumbers(b, srcSigs);
+      if (bad.length > 0) {
+        removed.push(`dropped bullet with ungrounded ${bad.join(', ')} in ${entry.org}`);
+        return false;
+      }
+      return true;
+    });
+    experience.push({ ...entry, title, date_range, bullets });
+  }
+  return { spec: { ...spec, experience }, removed };
+}
+
+// Skills the spec lists that don't trace back to ANY bank entry (org/title/dates/bullets/tags).
+// Surfaced as review WARNINGS, not hard issues: the bank is an incomplete view of a student's
+// real skills (they may genuinely know a tool they never wrote a bullet about), so hard-blocking
+// would strip legitimate skills. A warning flags likely JD-driven fabrication ("claims Kubernetes
+// because the JD wants it") for human review without over-correcting. A skill counts as grounded
+// if ANY of its content words appears in the bank corpus.
+export function findUngroundedSkills(skills: string[], bank: ExperienceBankEntry[]): string[] {
+  const corpus = wordSet(bank.map(bankEntryCorpus).join(' '));
+  if (corpus.size === 0) return [];
+  const out: string[] = [];
+  for (const skill of skills) {
+    const tokens = wordSet(skill);
+    if (tokens.size === 0) continue; // pure punctuation/symbol - nothing to ground
+    const grounded = [...tokens].some((t) => corpus.has(t));
+    if (!grounded) out.push(skill);
+  }
+  return out;
+}
+
 // Spec-level checks: content rules a JD-tailored spec must satisfy before it's worth rendering.
 // Mirrors validate_resume.py's content/structure checks + pressure_test.py's per-bullet scoring,
 // adapted from the Dubai engine's fixed EDUCATION/EXPERIENCE/LEADERSHIP/SKILLS template to
 // Volley's generalized per-student spec (no LEADERSHIP section, entries aren't hardcoded).
-export function validateResumeSpec(spec: ResumeSpec, jdText: string): ValidationResult {
+// When `bank` is provided, grounding violations are added as hard issues so the retry loop
+// regenerates; pass [] to skip grounding (form-only validation).
+export function validateResumeSpec(spec: ResumeSpec, jdText: string, bank: ExperienceBankEntry[] = []): ValidationResult {
   const issues: string[] = [];
   const warnings: BulletFlag[] = [];
 
@@ -136,6 +287,25 @@ export function validateResumeSpec(spec: ResumeSpec, jdText: string): Validation
   const coveragePct = kw.size > 0 ? Math.round((100 * present) / kw.size) : 100;
   if (coveragePct < MIN_KEYWORD_COVERAGE) {
     issues.push(`low ATS keyword coverage ${coveragePct}% (< ${MIN_KEYWORD_COVERAGE}%): not tailored enough to this JD`);
+  }
+
+  // Grounding: fail if the spec cites an org/title/number that isn't in the student's bank.
+  if (bank.length > 0) {
+    for (const v of findGroundingViolations(spec, bank)) {
+      if (v.kind === 'org') {
+        issues.push(`grounding: experience entry "${v.detail}" is not in the student's experience bank`);
+      } else if (v.kind === 'title') {
+        issues.push(`grounding: title "${v.detail}" for ${v.entry} is not supported by the experience bank`);
+      } else if (v.kind === 'date') {
+        issues.push(`grounding: date "${v.detail}" for ${v.entry} is not in the student's experience bank`);
+      } else {
+        issues.push(`grounding: metric "${v.detail}" in a ${v.entry} bullet is not in the experience bank ("${(v.bullet ?? '').slice(0, 40)}")`);
+      }
+    }
+    // Skills are grounded softly (warning, not a hard retry-driving issue) - see findUngroundedSkills.
+    for (const skill of findUngroundedSkills(spec.skills, bank)) {
+      warnings.push({ entry: 'skills', bullet: skill, flags: ['ungrounded-skill'] });
+    }
   }
 
   return { issues, warnings, ats_keyword_coverage_pct: coveragePct };
