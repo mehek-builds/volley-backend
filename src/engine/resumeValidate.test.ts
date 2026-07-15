@@ -162,6 +162,54 @@ test('pruneUngroundedContent resets a fabricated date to the source entry date',
   assert.equal(cleaned.experience[0].date_range, '2024');
 });
 
+test('H2: an acronym org matches its full-name bank entry and is NOT flagged/pruned as invented', () => {
+  const acronymBank: ExperienceBankEntry[] = [
+    bankEntry({
+      id: 'mit',
+      org: 'Massachusetts Institute of Technology',
+      title: 'Research Assistant',
+      date_range: '2024',
+      bullet_variants: ['Built a robotics controller for the lab'],
+      tags: ['robotics'],
+    }),
+  ];
+  const s = spec([
+    {
+      org: 'MIT', // acronym of the full bank org; shares zero tokens with it
+      title: 'Research Assistant',
+      date_range: '2024',
+      bullets: ['Built a robotics controller for the lab'],
+    },
+  ]);
+  // Must NOT be treated as an invented org.
+  assert.deepEqual(
+    findGroundingViolations(s, acronymBank).filter((v) => v.kind === 'org'),
+    [],
+  );
+  // ...and pruning must keep the real entry rather than silently dropping it.
+  const { spec: cleaned, removed } = pruneUngroundedContent(s, acronymBank);
+  assert.equal(cleaned.experience.length, 1);
+  assert.equal(cleaned.experience[0].org, 'MIT');
+  assert.deepEqual(removed, []);
+
+  // Reverse direction: bank stores the acronym, generated uses the full name.
+  const acronymStoredBank: ExperienceBankEntry[] = [
+    bankEntry({ id: 'usc', org: 'USC', title: 'TA', bullet_variants: ['Graded assignments'] }),
+  ];
+  const s2 = spec([
+    {
+      org: 'University of Southern California',
+      title: 'TA',
+      date_range: '2024',
+      bullets: ['Graded assignments'],
+    },
+  ]);
+  assert.deepEqual(
+    findGroundingViolations(s2, acronymStoredBank).filter((v) => v.kind === 'org'),
+    [],
+  );
+});
+
 test('findUngroundedSkills flags a skill absent from the bank but not one present in it', () => {
   const out = findUngroundedSkills(['Python', 'Kubernetes'], BANK);
   assert.ok(out.includes('Kubernetes')); // never appears in any bank entry

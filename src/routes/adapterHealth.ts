@@ -78,16 +78,24 @@ async function runCheck(check: (typeof CHECKS)[number]): Promise<{ ats_name: str
 // requests and adds this header automatically when the CRON_SECRET env var is set) -
 // both are checked against the same INTERNAL_CRON_SECRET value.
 function isAuthorized(request: FastifyRequest): boolean {
-  const secret = process.env.INTERNAL_CRON_SECRET;
-  if (!secret) return false;
-  if (request.headers['x-internal-secret'] === secret) return true;
-  const auth = request.headers['authorization'];
-  return typeof auth === 'string' && auth === `Bearer ${secret}`;
+  // Accept either our own INTERNAL_CRON_SECRET (curl/tooling via x-internal-secret or Bearer) or
+  // Vercel Cron's `Authorization: Bearer <CRON_SECRET>`. Vercel injects CRON_SECRET automatically
+  // and it is usually a DIFFERENT value from INTERNAL_CRON_SECRET, so checking only the latter meant
+  // the scheduled daily cron 401'd and adapter health silently never updated - defeating the whole
+  // point of catching a broken adapter before a student hits it.
+  const internal = process.env.INTERNAL_CRON_SECRET;
+  const cronSecret = process.env.CRON_SECRET;
+  const header = request.headers['authorization'];
+  const auth = typeof header === 'string' ? header : '';
+  if (internal && request.headers['x-internal-secret'] === internal) return true;
+  if (internal && auth === `Bearer ${internal}`) return true;
+  if (cronSecret && auth === `Bearer ${cronSecret}`) return true;
+  return false;
 }
 
 async function handleHealthCheck(request: FastifyRequest, reply: FastifyReply, fastify: FastifyInstance) {
-  if (!process.env.INTERNAL_CRON_SECRET) {
-    return reply.status(503).send({ error: 'adapter health check not configured (INTERNAL_CRON_SECRET unset)' });
+  if (!process.env.INTERNAL_CRON_SECRET && !process.env.CRON_SECRET) {
+    return reply.status(503).send({ error: 'adapter health check not configured (set INTERNAL_CRON_SECRET or CRON_SECRET)' });
   }
   if (!isAuthorized(request)) {
     return reply.status(401).send({ error: 'unauthorized' });

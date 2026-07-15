@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { numberSignatures, ungroundedNumbers, wordSet, ungroundedProperNouns } from './grounding';
+import { numberSignatures, ungroundedNumbers, wordSet, ungroundedProperNouns, stripEmDashes } from './grounding';
 
 test('a number present in the source is grounded', () => {
   const src = numberSignatures('Handled 40K requests per day across the pipeline');
@@ -33,6 +33,42 @@ test('a percentage/multiplier is NOT grounded by a bare count of the same digits
   // ...but a real percentage in the source still grounds the same percentage.
   const src2 = numberSignatures('cut costs by 25%');
   assert.deepEqual(ungroundedNumbers('cut costs 25%', src2), []);
+});
+
+test('L3: "24/7" ratio is not treated as the fabricated metric "24"', () => {
+  const src = numberSignatures('Provided on-call support for the platform'); // no numbers
+  assert.deepEqual(ungroundedNumbers('Kept the service available 24/7', src), []);
+  // a date-like N/N is likewise not clipped into a spurious metric
+  assert.deepEqual(ungroundedNumbers('Ran the program from 09/2024', numberSignatures('joined 2024')), []);
+});
+
+test('L3: percent and decimal proportion are treated as equivalent (0.40 <-> 40%)', () => {
+  const srcDecimal = numberSignatures('conversion rate of 0.40 on the funnel');
+  assert.deepEqual(ungroundedNumbers('lifted conversion to 40%', srcDecimal), []);
+  const srcPercent = numberSignatures('improved conversion by 40%');
+  assert.deepEqual(ungroundedNumbers('reached a 0.40 conversion rate', srcPercent), []);
+  // a genuinely different proportion is still flagged
+  assert.deepEqual(ungroundedNumbers('lifted conversion to 90%', srcDecimal), ['90%']);
+});
+
+test('L3: a decimal >= 1 (GPA/rating) does NOT ground a fabricated large percentage', () => {
+  // "3.8" GPA and "380%" both used to reduce to d:3.8 and cross-ground. They must stay distinct:
+  // only a value < 1 is a percentage-equivalent proportion.
+  const srcGpa = numberSignatures('maintained a 3.8 GPA while working');
+  assert.deepEqual(ungroundedNumbers('grew active users 380%', srcGpa), ['380%']);
+  // reverse: a source "380%" must not ground a fabricated "3.8"
+  const srcPct = numberSignatures('grew revenue 380% year over year');
+  assert.deepEqual(ungroundedNumbers('earned a 3.8 rating', srcPct), ['3.8']);
+  // the legitimate < 1 proportion equivalence still holds
+  assert.deepEqual(ungroundedNumbers('hit 40%', numberSignatures('a 0.40 rate')), []);
+});
+
+test('L6: stripEmDashes replaces em/en dashes and tidies punctuation', () => {
+  assert.equal(stripEmDashes('I built the API — it scaled well.'), 'I built the API, it scaled well.');
+  assert.equal(stripEmDashes('Fast, reliable—and simple.'), 'Fast, reliable, and simple.');
+  assert.equal(stripEmDashes('No dashes here.'), 'No dashes here.');
+  assert.ok(!stripEmDashes('a — b – c').includes('—'));
+  assert.ok(!stripEmDashes('a — b – c').includes('–'));
 });
 
 test('tech identifiers like S3 / EC2 / GPT-4 are not treated as fabricated metrics', () => {

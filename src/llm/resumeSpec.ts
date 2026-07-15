@@ -39,12 +39,45 @@ Rules:
   only lightly rewrite (never fabricate achievements) when no stored variant surfaces the JD's language.
 - Order skills so the ones matching JD keywords come first.
 - Never invent an employer, title, or metric that isn't grounded in the experience bank.
+- Use the student's real school and degree exactly as given in the Education line; never invent or
+  upgrade a degree, and leave "degree" an empty string if none is provided.
+- "coursework": include only courses grounded in the experience bank or the job description; if none
+  are grounded, return an empty string. Never invent course names to look more relevant.
 - Every bullet starts with a strong action verb, one of: ${[...STRONG_VERBS].join(', ')}.
 - Every bullet is 8-30 words, one sentence, no more than two "and"s (prefer ; : or - over a run-on).
 - Include a real number, percent, dollar amount, or multiplier in a bullet whenever the source material
   supports one; do not invent metrics that aren't grounded in the experience bank.
 - NEVER use an em dash (—) anywhere in the output. Use a comma, colon, hyphen, or period instead.
 - Bullets must fit in roughly two lines of a resume (under 235 characters) - be concise, not padded.`;
+
+// Coerce a parsed model response into a well-formed ResumeSpec: missing/mistyped fields become safe
+// empties and a non-array experience/skills/bullets becomes []. Without this, a syntactically valid
+// but partial JSON (e.g. no "experience" key) later crashed validateResumeSpec/renderResumePdf on
+// `spec.experience.flatMap` / `spec.skills.length` with an uncaught TypeError -> opaque 500 that
+// also bypassed the retry loop. An empty experience array is preserved (not faked), so the route's
+// validation still flags "no experience entries" and retries/handles it cleanly.
+export function normalizeSpec(raw: unknown): ResumeSpec {
+  const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+  const strArr = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+  const experience = (Array.isArray(o.experience) ? o.experience : [])
+    .filter((e): e is Record<string, unknown> => !!e && typeof e === 'object')
+    .map((e) => ({
+      org: str(e.org),
+      title: str(e.title),
+      date_range: str(e.date_range),
+      bullets: strArr(e.bullets),
+    }));
+  return {
+    school: str(o.school),
+    degree: str(o.degree),
+    grad_date: str(o.grad_date),
+    coursework: str(o.coursework),
+    experience,
+    skills: strArr(o.skills),
+  };
+}
 
 export async function generateResumeSpec(
   jdText: string,
@@ -65,7 +98,7 @@ export async function generateResumeSpec(
   // cache_control marker because it is the large one - a marker on the short rules block alone
   // was below the model's minimum cacheable prefix and silently cached nothing. Bank is
   // serialized compactly (no 2-space pretty-print) to nearly halve its token weight.
-  const contextBlock = `Job: ${role} at ${company}\n\nJob description:\n${jdText}\n\nEducation: ${education.school}${education.grad_year ? `, class of ${education.grad_year}` : ''}\n\nExperience bank:\n${JSON.stringify(bank)}`;
+  const contextBlock = `Job: ${role} at ${company}\n\nJob description:\n${jdText}\n\nEducation: ${education.school}${education.degree ? `, ${education.degree}` : ''}${education.grad_year ? `, class of ${education.grad_year}` : ''}\n\nExperience bank:\n${JSON.stringify(bank)}`;
   const response = await client.messages.create({
     model: 'claude-sonnet-5',
     max_tokens: 4096,
@@ -90,7 +123,7 @@ export async function generateResumeSpec(
 
   try {
     const cleaned = text.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
-    return JSON.parse(cleaned) as ResumeSpec;
+    return normalizeSpec(JSON.parse(cleaned));
   } catch {
     // Fence stripping can miss (explanation text around the fence, stray trailing output);
     // the outermost brace pair is the spec whenever one parses.
@@ -98,7 +131,7 @@ export async function generateResumeSpec(
     const last = text.lastIndexOf('}');
     if (first !== -1 && last > first) {
       try {
-        return JSON.parse(text.slice(first, last + 1)) as ResumeSpec;
+        return normalizeSpec(JSON.parse(text.slice(first, last + 1)));
       } catch {
         // fall through to the descriptive error
       }
