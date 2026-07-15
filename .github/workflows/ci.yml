@@ -5,6 +5,14 @@ on:
   push:
     branches: [main]
 
+# Least privilege: this job only needs to read the code (S1).
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -17,5 +25,9 @@ jobs:
       - run: npm ci
       - name: Typecheck
         run: npm run typecheck
+      # `node --test` exits 0 when the glob matches nothing, so a moved/renamed test
+      # would go green with zero tests run. Fail loudly if no test files exist (B2).
+      - name: Ensure test files exist
+        run: test -n "$(find src -name '*.test.ts' -print -quit)"
       - name: Test
         run: npm test
