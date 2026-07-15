@@ -1,0 +1,41 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { normalizeSpec } from './resumeSpec';
+
+// Regression coverage for the "partial model JSON crashes resume generation" bug (audit #4):
+// a syntactically valid but incomplete spec (e.g. no "experience" key) used to reach
+// validateResumeSpec/renderResumePdf and throw an uncaught TypeError on `.flatMap`/`.length`,
+// surfacing as an opaque 500 and bypassing the retry loop. normalizeSpec guarantees a well-formed
+// shape so downstream code is crash-proof, while preserving an empty experience array (not faking
+// content) so the route's own "no experience entries" validation still fires.
+
+test('normalizeSpec coerces a partial object into a well-formed spec (no undefined arrays)', () => {
+  const s = normalizeSpec({ school: 'USC' });
+  assert.equal(s.school, 'USC');
+  assert.equal(s.degree, '');
+  assert.equal(s.grad_date, '');
+  assert.equal(s.coursework, '');
+  assert.deepEqual(s.experience, []);
+  assert.deepEqual(s.skills, []);
+});
+
+test('normalizeSpec drops non-string bullets/skills and non-object experience entries', () => {
+  const s = normalizeSpec({
+    experience: [
+      { org: 'Acme', title: 'Intern', date_range: '2024', bullets: ['Built X', 42, null] },
+      null,
+      'garbage',
+    ],
+    skills: ['Python', 7, undefined],
+  });
+  assert.equal(s.experience.length, 1);
+  assert.equal(s.experience[0].org, 'Acme');
+  assert.deepEqual(s.experience[0].bullets, ['Built X']);
+  assert.deepEqual(s.skills, ['Python']);
+});
+
+test('normalizeSpec tolerates non-object / null input without throwing', () => {
+  assert.deepEqual(normalizeSpec(null).experience, []);
+  assert.deepEqual(normalizeSpec('nope').skills, []);
+  assert.deepEqual(normalizeSpec(undefined).experience, []);
+});

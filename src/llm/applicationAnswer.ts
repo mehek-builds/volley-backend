@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { ExperienceBankEntry } from '../db/schema';
-import { wordSet, numberSignatures, ungroundedNumbers, ungroundedProperNouns } from '../engine/grounding';
+import { wordSet, numberSignatures, ungroundedNumbers, ungroundedProperNouns, stripEmDashes } from '../engine/grounding';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -115,6 +115,11 @@ export async function draftApplicationAnswer(
     badNumbers = ungroundedNumbers(answer, sourceSignatures);
   }
 
+  // L6: enforce the zero-em-dash rule by STRIPPING dashes from the returned answer, not just
+  // warning. The extension fills essay fields directly and never surfaces these warnings, so an
+  // em dash would otherwise reach a submitted application.
+  answer = stripEmDashes(answer);
+
   // Remaining grounding + quality signals are surfaced as review warnings (the student edits
   // before submitting); they never block returning a draft.
   const warnings: string[] = [];
@@ -127,7 +132,6 @@ export async function draftApplicationAnswer(
   }
   const wordCount = answer.split(/\s+/).filter(Boolean).length;
   if (wordCount > 160) warnings.push(`Answer is ${wordCount} words - consider trimming.`);
-  if (answer.includes('—')) warnings.push('Contains an em dash - replace it before sending.');
 
   return { answer, warnings };
 }

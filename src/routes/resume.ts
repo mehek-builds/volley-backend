@@ -45,19 +45,22 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       return reply.status(400).send({ error: 'Invalid request body', detail });
     }
 
-    if (!(await allowHourly(userId, 'resume', LIMITS.perHour.resume))) {
-      return rateLimitedReply(reply);
-    }
-
     // Resume-gen + autofill is available on every tier (2026-07-02 decision): free gets
     // 20/month that resets like contacts/drafts (Apollo.io-style recurring credits, not a
     // one-time lifetime trial - keeps free students returning monthly). Pro/trial's
     // monthlyResumes is deliberately huge (see quota.ts) so it's a no-op cap in practice.
+    // The monthly quota check (read-only) runs BEFORE the hourly limiter, which increments a
+    // counter: a student already over their monthly cap gets a clean 402 without also spending
+    // one of their hourly rate-limit slots on the rejected call.
     const ent = await getEntitlements(userId);
     const period = monthPeriod();
     const usedResumes = await getCount(userId, period, 'resumes');
     if (usedResumes >= ent.monthlyResumes) {
       return reply.status(402).send(quotaExceededPayload(ent, usedResumes, 'resumes'));
+    }
+
+    if (!(await allowHourly(userId, 'resume', LIMITS.perHour.resume))) {
+      return rateLimitedReply(reply);
     }
 
     const bank = await db.select().from(experience_bank).where(eq(experience_bank.user_id, userId));
@@ -66,7 +69,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     }
 
     const profileRows = await db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1);
-    const parsed = profileRows[0]?.parsed_json as { school?: string; grad_year?: number; full_name?: string } | undefined;
+    const parsed = profileRows[0]?.parsed_json as { school?: string; grad_year?: number; full_name?: string; degree?: string } | undefined;
 
     // Generate -> validate -> (if issues) regenerate once with the issues as feedback -> validate
     // again and accept best-effort. Same two-layer pattern as the Dubai engine: the prompt states
@@ -84,7 +87,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
           body.company,
           body.role,
           bank,
-          { school: parsed?.school ?? '', grad_year: parsed?.grad_year },
+          { school: parsed?.school ?? '', degree: parsed?.degree, grad_year: parsed?.grad_year },
           attempt > 1 ? specIssues : undefined,
         );
       } catch (err) {

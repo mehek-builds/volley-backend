@@ -34,35 +34,62 @@ export function wordSet(text: string): Set<string> {
 const METRIC_NUMBER_RE =
   /(?<![a-z0-9])(?:\$\s?\d[\d,]*(?:\.\d+)?|\d[\d,]*(?:\.\d+)?(?:k|m|b|x|%)(?![a-z])|\d[\d,]*\d(?:\.\d+)?|\d+\.\d+)\+?/gi;
 
+function numStr(x: number): string {
+  return Number.isInteger(x) ? String(x) : String(parseFloat(x.toFixed(6)));
+}
+
+// The metric-number strings in `text`, with ratio/date-like "N/N" patterns (e.g. "24/7", "12/2024")
+// filtered out - those aren't standalone metrics, and "24/7" was previously mis-captured as the
+// metric "24". Uses match positions so a number touching a slash-digit on either side is skipped.
+function metricTokens(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(METRIC_NUMBER_RE)) {
+    const start = m.index ?? 0;
+    const end = start + m[0].length;
+    const prev = start > 0 ? text[start - 1] : '';
+    const prev2 = start > 1 ? text[start - 2] : '';
+    const next = end < text.length ? text[end] : '';
+    const next2 = end + 1 < text.length ? text[end + 1] : '';
+    if ((next === '/' && /\d/.test(next2)) || (prev === '/' && /\d/.test(prev2))) continue;
+    out.push(m[0]);
+  }
+  return out;
+}
+
 // Every comparable signature of a single number string. "40K", "40,000" and "40000" all reduce to
-// the same expanded signature, so a grounded number written one way still matches its source
-// written another way.
+// the same expanded integer; a percentage and its decimal proportion reduce to the same tagged
+// value so a source "0.40" grounds an output "40%" (and vice-versa). A bare count stays distinct
+// from a proportion: "25%"/"0.25" -> "d:0.25", but plain "25" -> "25", so "a team of 25" still does
+// NOT ground "25%". Multipliers ("3x") only ground their exact form.
 function signaturesOf(raw: string): string[] {
   const t = raw.toLowerCase().replace(/[$,\s]/g, '').replace(/\+$/, '');
   if (!/\d/.test(t)) return [];
-  const sigs = [t]; // raw normalized form, e.g. "40k", "25%", "3x"
-  // Only unit-less numbers and k/m/b magnitudes expand to a comparable integer ("40k" <-> "40000").
-  // A percentage or multiplier is a distinct quantity from a bare count: "25%" must NOT be treated
-  // as grounded by "a team of 25", and "3x" must not be grounded by "3 projects". So we skip the
-  // integer expansion when the token carries a % or x unit (the exact "25%"/"3x" form still has to
-  // appear in the source to ground).
-  if (!/[%x]$/.test(t)) {
-    const m = t.match(/^(\d+\.?\d*)(k|m|b)?$/);
+  const sigs = new Set<string>([t]); // raw normalized form, e.g. "40k", "25%", "3x", "0.40", "40"
+  const pct = t.match(/^(\d+(?:\.\d+)?)%$/);
+  if (pct) {
+    const p = parseFloat(pct[1]);
+    if (Number.isFinite(p)) sigs.add(`d:${numStr(p / 100)}`); // "40%" -> d:0.4
+  } else if (/^\d+\.\d+$/.test(t)) {
+    const d = parseFloat(t);
+    if (Number.isFinite(d)) sigs.add(`d:${numStr(d)}`); // "0.40" -> d:0.4
+  } else if (!/[%x]$/.test(t)) {
+    // Only unit-less numbers and k/m/b magnitudes expand to a comparable integer ("40k" <-> "40000").
+    const m = t.match(/^(\d+(?:\.\d+)?)(k|m|b)?$/);
     if (m) {
       let val = parseFloat(m[1]);
       if (m[2] === 'k') val *= 1e3;
       else if (m[2] === 'm') val *= 1e6;
       else if (m[2] === 'b') val *= 1e9;
-      if (Number.isFinite(val)) sigs.push(String(Math.round(val)));
+      if (Number.isFinite(val)) sigs.add(numStr(Math.round(val)));
     }
   }
-  return sigs;
+  return [...sigs];
 }
 
 // The set of numeric signatures present in a source corpus (experience bank text, JD, etc.).
 export function numberSignatures(text: string): Set<string> {
   const sigs = new Set<string>();
-  for (const raw of text.match(METRIC_NUMBER_RE) ?? []) {
+  for (const raw of metricTokens(text)) {
     for (const s of signaturesOf(raw)) sigs.add(s);
   }
   return sigs;
@@ -72,12 +99,26 @@ export function numberSignatures(text: string): Set<string> {
 // Empty result = every number is grounded in the source.
 export function ungroundedNumbers(generated: string, sourceSignatures: Set<string>): string[] {
   const out: string[] = [];
-  for (const raw of generated.match(METRIC_NUMBER_RE) ?? []) {
+  for (const raw of metricTokens(generated)) {
     const sigs = signaturesOf(raw);
     const grounded = sigs.some((s) => sourceSignatures.has(s));
     if (!grounded) out.push(raw.trim());
   }
   return out;
+}
+
+// Replace em/en dashes with a comma (or fold into adjacent sentence punctuation) so drafted text
+// never ships a dash. Global hard rule = zero em dashes, and essay warnings aren't surfaced by the
+// extension, so the answer path strips rather than only warns.
+export function stripEmDashes(s: string): string {
+  return s
+    .replace(/\s*[—–]\s*/g, ', ') // em/en dash -> comma + space
+    .replace(/,\s*,/g, ', ') // collapse any doubled commas
+    .replace(/,\s*([.!?;:])/g, '$1') // ", ." -> "."
+    .replace(/\s{2,}/g, ' ')
+    .replace(/^\s*,\s*/, '') // no leading comma (dash at start)
+    .replace(/\s*,\s*$/, '') // no trailing comma (dash at end)
+    .trim();
 }
 
 // Sentence/pronoun capitalization that isn't an organization or proper noun of interest.

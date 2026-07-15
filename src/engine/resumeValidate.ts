@@ -90,20 +90,69 @@ function ungroundedYears(genRange: string, srcRange: string | null | undefined):
   return yearsIn(genRange).filter((y) => !srcYears.has(y));
 }
 
-// The bank entry whose org best matches the generated org (>=50% token containment), or undefined
-// if the generated org appears in no bank entry (i.e. it was invented).
-function matchBankEntry(orgName: string, bank: ExperienceBankEntry[]): ExperienceBankEntry | undefined {
-  const gen = wordSet(orgName);
-  if (gen.size === 0) return undefined;
-  let best: { e: ExperienceBankEntry; score: number } | undefined;
-  for (const e of bank) {
-    const src = wordSet(e.org);
-    if (src.size === 0) continue;
+// Connector words dropped when forming an org's initialism ("Massachusetts Institute of
+// Technology" -> "mit", not "miot").
+const ORG_CONNECTORS = new Set(['of', 'the', 'and', 'for', 'at', 'a', 'an', 'de', 'to']);
+
+function normalizeOrg(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[.,/#!$%^&*;:{}=\-_`~()'"[\]–—]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// First letters of the significant words, e.g. "Massachusetts Institute of Technology" -> "mit",
+// "University of California Los Angeles" -> "ucla", "National Aeronautics and Space
+// Administration" -> "nasa".
+function orgInitialism(s: string): string {
+  return normalizeOrg(s)
+    .split(' ')
+    .filter((w) => w && !ORG_CONNECTORS.has(w))
+    .map((w) => w[0])
+    .join('');
+}
+
+// If `s` is a single-token acronym (2-6 letters like "MIT"/"USC"/"UCLA"/"IBM"), return it
+// lowercased; otherwise null.
+function acronymTokenOf(s: string): string | null {
+  const tokens = normalizeOrg(s).split(' ').filter(Boolean);
+  if (tokens.length === 1 && /^[a-z]{2,6}$/.test(tokens[0])) return tokens[0];
+  return null;
+}
+
+// Match score between a generated org and a bank org: >0 means they're the same organization.
+// H2 fix: an acronym vs its multi-word expansion shares ZERO tokens (bank "Massachusetts Institute
+// of Technology" vs generated "MIT"), so token containment alone wrongly treats a real entry as
+// invented and prunes it. We additionally match a single-token acronym on either side against the
+// other side's initialism (also covers USC, IBM, UCLA, NASA, ...).
+function orgMatchScore(genOrg: string, bankOrg: string): number {
+  const gen = wordSet(genOrg);
+  const src = wordSet(bankOrg);
+  if (gen.size > 0 && src.size > 0) {
     let inter = 0;
     for (const t of gen) if (src.has(t)) inter++;
-    if (inter === 0) continue;
-    const containment = inter / Math.min(gen.size, src.size);
-    if (containment >= 0.5 && (!best || containment > best.score)) best = { e, score: containment };
+    if (inter > 0) {
+      const containment = inter / Math.min(gen.size, src.size);
+      if (containment >= 0.5) return containment;
+    }
+  }
+  const genAcr = acronymTokenOf(genOrg);
+  if (genAcr && genAcr === orgInitialism(bankOrg)) return 1;
+  const srcAcr = acronymTokenOf(bankOrg);
+  if (srcAcr && srcAcr === orgInitialism(genOrg)) return 1;
+  return 0;
+}
+
+// The bank entry whose org best matches the generated org, or undefined if the generated org
+// appears in no bank entry (i.e. it was invented). Matching is token-containment OR acronym/
+// initialism-aware (see orgMatchScore).
+function matchBankEntry(orgName: string, bank: ExperienceBankEntry[]): ExperienceBankEntry | undefined {
+  if (wordSet(orgName).size === 0 && !acronymTokenOf(orgName)) return undefined;
+  let best: { e: ExperienceBankEntry; score: number } | undefined;
+  for (const e of bank) {
+    const score = orgMatchScore(orgName, e.org);
+    if (score > 0 && (!best || score > best.score)) best = { e, score };
   }
   return best?.e;
 }
