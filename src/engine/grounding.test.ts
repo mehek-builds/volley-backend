@@ -51,6 +51,18 @@ test('L3: percent and decimal proportion are treated as equivalent (0.40 <-> 40%
   assert.deepEqual(ungroundedNumbers('lifted conversion to 90%', srcDecimal), ['90%']);
 });
 
+test('L3: a decimal >= 1 (GPA/rating) does NOT ground a fabricated large percentage', () => {
+  // "3.8" GPA and "380%" both used to reduce to d:3.8 and cross-ground. They must stay distinct:
+  // only a value < 1 is a percentage-equivalent proportion.
+  const srcGpa = numberSignatures('maintained a 3.8 GPA while working');
+  assert.deepEqual(ungroundedNumbers('grew active users 380%', srcGpa), ['380%']);
+  // reverse: a source "380%" must not ground a fabricated "3.8"
+  const srcPct = numberSignatures('grew revenue 380% year over year');
+  assert.deepEqual(ungroundedNumbers('earned a 3.8 rating', srcPct), ['3.8']);
+  // the legitimate < 1 proportion equivalence still holds
+  assert.deepEqual(ungroundedNumbers('hit 40%', numberSignatures('a 0.40 rate')), []);
+});
+
 test('L6: stripEmDashes replaces em/en dashes and tidies punctuation', () => {
   assert.equal(stripEmDashes('I built the API — it scaled well.'), 'I built the API, it scaled well.');
   assert.equal(stripEmDashes('Fast, reliable—and simple.'), 'Fast, reliable, and simple.');

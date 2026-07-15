@@ -67,11 +67,16 @@ function signaturesOf(raw: string): string[] {
   const sigs = new Set<string>([t]); // raw normalized form, e.g. "40k", "25%", "3x", "0.40", "40"
   const pct = t.match(/^(\d+(?:\.\d+)?)%$/);
   if (pct) {
-    const p = parseFloat(pct[1]);
-    if (Number.isFinite(p)) sigs.add(`d:${numStr(p / 100)}`); // "40%" -> d:0.4
+    const p = parseFloat(pct[1]) / 100;
+    // Only a percentage that is itself a proportion in [0,1) maps to a decimal signature. A
+    // percentage >= 100% ("380%") must NOT collapse to "d:3.8", or it would ground a bank decimal
+    // >= 1 (e.g. a "3.8" GPA) and let a fabricated large percentage ship as verified.
+    if (Number.isFinite(p) && p < 1) sigs.add(`d:${numStr(p)}`); // "40%" -> d:0.4
   } else if (/^\d+\.\d+$/.test(t)) {
     const d = parseFloat(t);
-    if (Number.isFinite(d)) sigs.add(`d:${numStr(d)}`); // "0.40" -> d:0.4
+    // Symmetrically, only a decimal in (0,1) is percentage-equivalent; a decimal >= 1 (GPA, rating,
+    // "1.5x"-style figure) is a distinct quantity and must not ground a percentage.
+    if (Number.isFinite(d) && d < 1) sigs.add(`d:${numStr(d)}`); // "0.40" -> d:0.4
   } else if (!/[%x]$/.test(t)) {
     // Only unit-less numbers and k/m/b magnitudes expand to a comparable integer ("40k" <-> "40000").
     const m = t.match(/^(\d+(?:\.\d+)?)(k|m|b)?$/);
