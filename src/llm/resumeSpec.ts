@@ -97,6 +97,10 @@ export async function generateResumeSpec(
   // The student's declared skills (profiles.skills). Empty/undefined means they never gave us a
   // list, which the validator treats as soft-grounding rather than as "they have no skills".
   skills?: string[] | null,
+  // Hard per-call wall-clock bound. The route runs inside Vercel's 60s function ceiling and passes
+  // its real remaining budget here; a call that outlives it is aborted (APIUserAbortError), which
+  // the route's overload classifier deliberately treats as NOT retryable - it is our own deadline.
+  timeoutMs?: number,
 ): Promise<ResumeSpec> {
   const feedbackBlock = feedback?.length
     ? `\n\nThe previous attempt had these issues - fix them in this revision:\n${feedback.map((f) => `- ${f}`).join('\n')}`
@@ -115,20 +119,27 @@ export async function generateResumeSpec(
     ? `\n\nSkills list (the student's own skills - the ONLY skills that may appear in "skills"):\n${JSON.stringify(skills)}`
     : `\n\nSkills list: none provided. Use only skills clearly evidenced by a bullet you selected, and do not add skills from the job description.`;
   const contextBlock = `Job: ${role} at ${company}\n\nJob description:\n${jdText}\n\nEducation: ${education.school}${education.degree ? `, ${education.degree}` : ''}${education.grad_year ? `, class of ${education.grad_year}` : ''}${skillsBlock}\n\nExperience bank:\n${JSON.stringify(bank)}`;
-  const response = await client.messages.create({
-    model: 'claude-sonnet-5',
-    max_tokens: 4096,
-    system: [
-      { type: 'text', text: SYSTEM_PROMPT },
-      { type: 'text', text: contextBlock, cache_control: { type: 'ephemeral' } },
-    ],
-    messages: [
-      {
-        role: 'user',
-        content: `Return the tailoring spec JSON.${feedbackBlock}`,
-      },
-    ],
-  });
+  const response = await client.messages.create(
+    {
+      model: 'claude-sonnet-5',
+      max_tokens: 4096,
+      system: [
+        { type: 'text', text: SYSTEM_PROMPT },
+        { type: 'text', text: contextBlock, cache_control: { type: 'ephemeral' } },
+      ],
+      messages: [
+        {
+          role: 'user',
+          content: `Return the tailoring spec JSON.${feedbackBlock}`,
+        },
+      ],
+    },
+    // When the caller supplies a budget, the abort signal hard-bounds the call and maxRetries: 0
+    // hands ALL capacity retries to the route's own counter (resume.ts). The SDK's built-in retries
+    // would multiply the route's attempts and, worse, honor a long Retry-After with a sleep the
+    // route cannot see or budget-gate - which is exactly the hidden stall that 504s a 60s function.
+    timeoutMs !== undefined ? { signal: AbortSignal.timeout(timeoutMs), maxRetries: 0 } : undefined,
+  );
 
   const textBlock = response.content.find((block) => block.type === 'text');
   const text = textBlock?.type === 'text' ? textBlock.text : '';
