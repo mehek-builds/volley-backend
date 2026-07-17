@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { mintDownloadToken, readDownloadToken, resumePrefix, FILL_TOKEN_TTL_MS } from './resumeAccess';
+import { mintDownloadToken, readDownloadToken, resumePrefix, DOWNLOAD_TOKEN_TTL_MS } from './resumeAccess';
 
 // getKey() reads this when a token is minted or read, not at import time, so setting it here
 // is enough.
@@ -31,16 +31,28 @@ test('the token is opaque: the object key never appears in it', () => {
 test('a token past its expiry is refused', () => {
   const mintedAt = 1_700_000_000_000;
   const token = mintDownloadToken(USER, KEY, { now: mintedAt });
-  assert.ok(readDownloadToken(token, mintedAt + FILL_TOKEN_TTL_MS - 1000));
-  assert.equal(readDownloadToken(token, mintedAt + FILL_TOKEN_TTL_MS + 1000), null);
+  assert.ok(readDownloadToken(token, mintedAt + DOWNLOAD_TOKEN_TTL_MS - 1000));
+  assert.equal(readDownloadToken(token, mintedAt + DOWNLOAD_TOKEN_TTL_MS + 1000), null);
+});
+
+test('a token still works after a long hover-then-click pause', () => {
+  // The token is minted on card `mouseenter` (the pre-warm) and not read until the student
+  // clicks "Yes, fill it", and content.ts caches the generation promise per job, so this gap is
+  // however long they take to read the posting. A window that expires here fails silently: the
+  // fetch throws, the catch skips the file, and the application goes out with no resume. This
+  // is the regression a 5-minute TTL shipped, so it is pinned.
+  const hoveredAt = 1_700_000_000_000;
+  const token = mintDownloadToken(USER, KEY, { now: hoveredAt });
+  assert.ok(readDownloadToken(token, hoveredAt + 30 * 60 * 1000), '30 minutes after hover must still fill');
+  assert.ok(readDownloadToken(token, hoveredAt + 55 * 60 * 1000), '55 minutes after hover must still fill');
 });
 
 test('an explicit ttl overrides the default window', () => {
   const mintedAt = 1_700_000_000_000;
-  const token = mintDownloadToken(USER, KEY, { now: mintedAt, ttlMs: 60 * 60 * 1000 });
-  // Dead under the default 5-minute window, alive under its own hour-long one.
-  assert.ok(readDownloadToken(token, mintedAt + 30 * 60 * 1000));
-  assert.equal(readDownloadToken(token, mintedAt + 61 * 60 * 1000), null);
+  const token = mintDownloadToken(USER, KEY, { now: mintedAt, ttlMs: 10 * 60 * 1000 });
+  // Alive inside its own shorter window, dead after it, while the default would still be live.
+  assert.ok(readDownloadToken(token, mintedAt + 9 * 60 * 1000));
+  assert.equal(readDownloadToken(token, mintedAt + 11 * 60 * 1000), null);
 });
 
 test('a tampered token is refused rather than trusted', () => {

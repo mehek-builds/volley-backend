@@ -15,15 +15,20 @@ import { list, del } from '@vercel/blob';
 // AES-256-GCM encrypted rather than signed: GCM is authenticated, so this also serves as the
 // signature, and the ciphertext is opaque to the holder.
 //
-// The extension pre-warms /resume/generate on card hover and only fetches the URL when the
-// student clicks "Yes, fill it" (content.ts), so the token has to outlive a hover-then-read
-// pause. Five minutes covers that with room to spare; seconds would break real fills.
-export const FILL_TOKEN_TTL_MS = 5 * 60 * 1000;
-
-// A data export is a file the student saves and opens later, so its links need to outlive the
-// fill path's window. An hour is long enough to be usable and still short enough that a
-// forwarded export file does not become a permanent grant.
-export const EXPORT_TOKEN_TTL_MS = 60 * 60 * 1000;
+// TTL is one hour, and the binding constraint is NOT how long a fill takes. The extension
+// pre-warms /resume/generate on card `mouseenter` and caches the promise per job
+// (`resumeGenByJob`, content.ts), so the token is minted when the student HOVERS the card and
+// is not read until they click "Yes, fill it". That gap is unbounded in principle: hover, read
+// the posting, take a call, come back and click. An earlier 5-minute window looked generous
+// against a ~55s fill and was wrong for exactly this reason.
+//
+// Getting this too short fails SILENTLY and expensively: the content script's `fetch` throws,
+// the catch skips the file, and the application submits with no resume attached and no error
+// anyone sees. Getting it too long only widens the window on a link that was never written
+// down anywhere. Those costs are wildly asymmetric, so this errs long. An hour also suits an
+// export file the student saves and opens later, so both paths share it rather than keeping
+// two constants that would drift.
+export const DOWNLOAD_TOKEN_TTL_MS = 60 * 60 * 1000;
 
 // How long a generated resume file is kept before the retention sweep deletes it. This is the
 // only control that reaches blobs whose URL was already handed to a client before this change
@@ -61,7 +66,7 @@ export function mintDownloadToken(
   opts: { ttlMs?: number; now?: number } = {},
 ): string {
   const now = opts.now ?? Date.now();
-  const payload: DownloadToken = { k: objectKey, u: userId, exp: now + (opts.ttlMs ?? FILL_TOKEN_TTL_MS) };
+  const payload: DownloadToken = { k: objectKey, u: userId, exp: now + (opts.ttlMs ?? DOWNLOAD_TOKEN_TTL_MS) };
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', getKey(), iv);
   const ciphertext = Buffer.concat([cipher.update(JSON.stringify(payload), 'utf8'), cipher.final()]);

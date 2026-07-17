@@ -14,7 +14,7 @@ import {
   email_verification_codes,
 } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
-import { deleteResumeBlobsForUser, mintDownloadToken, EXPORT_TOKEN_TTL_MS } from '../lib/resumeAccess';
+import { deleteResumeBlobsForUser, mintDownloadToken, DOWNLOAD_TOKEN_TTL_MS } from '../lib/resumeAccess';
 import { apiBaseFor } from '../lib/apiBase';
 import { decryptRow } from './applicationProfile';
 
@@ -57,11 +57,11 @@ export async function accountRoutes(fastify: FastifyInstance) {
       experience_bank: bank,
       generated_resumes: resumes.map((row) => ({
         ...row,
-        // Links expire (EXPORT_TOKEN_TTL_MS), and files past the retention window are already
+        // Links expire (DOWNLOAD_TOKEN_TTL_MS), and files past the retention window are already
         // gone, so this 404s rather than resolving. Called out in `notes` so an empty download
         // does not read as data loss.
         download_url: `${base}/resume/download?t=${mintDownloadToken(userId, row.resume_object_key, {
-          ttlMs: EXPORT_TOKEN_TTL_MS,
+          ttlMs: DOWNLOAD_TOKEN_TTL_MS,
         })}`,
       })),
       outreach_events: outreach,
