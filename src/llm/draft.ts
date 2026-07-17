@@ -31,7 +31,17 @@ export interface DraftResult {
   warnings: string[];
 }
 
-const SYSTEM_PROMPT = `You are an expert at writing concise, warm, student outreach emails that get replies.
+// Exported so the skills-grounding rule can be pinned by a test (R-027): the outreach half of
+// R-015. The Skills line in the user content is the student's DECLARED list (the /draft route
+// overrides client-supplied skills with profiles.skills), and this prompt carries the same
+// never-claim-an-unheld-skill discipline resumeSpec.ts enforces for the resume.
+export const SYSTEM_PROMPT = `You are an expert at writing concise, warm, student outreach emails that get replies.
+
+SKILLS GROUNDING (non-negotiable): the "Skills" line is the student's own declared list and the
+ONLY source of skill claims. NEVER state or imply a skill, tool, or technology that is not on that
+list, and NEVER add one because the role or company would want it. If the role wants a tool the
+list lacks, the student does not have it: leave it out. Omitting a skill costs nothing; claiming
+one the student lacks costs their credibility the moment someone asks about it.
 
 FORMAT RULES (non-negotiable):
 - Email body: 100-140 words total
@@ -70,7 +80,7 @@ Role the student is interested in: ${role} at ${company}
 
 Student background:
 - School: ${userProfile.school} (Class of '${userProfile.grad_year})
-- Skills: ${topSkills}
+- Skills (the student's declared list, the only skills you may claim): ${topSkills}
 - Recent experience: ${recentExperience.map((e) => `${e.title} at ${e.company} (${e.start}-${e.end}): ${e.description}`).join('; ')}
 
 ${alumniNote}
