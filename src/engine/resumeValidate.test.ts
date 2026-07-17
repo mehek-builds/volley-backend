@@ -221,13 +221,69 @@ test('findUngroundedSkills flags a skill absent from the bank but not one presen
 // generated_resumes.spec for 21 real model runs. Each claimed skill returns zero rows when grepped
 // across the entire bank.
 
-test('R-015: a JD keyword the student never claimed is ungrounded, even though the JD wants it', () => {
-  // The submitted Monzo Analytics Engineer resume claims BigQuery and Looker. Mehek has never used
-  // either; they are simply the JD's headline tools, echoed back. That application went out on
-  // 2026-07-16 and a recruiter will ask about them in a screen.
+test('R-015: a JD keyword outside the declared list is ungrounded, even though the JD wants it', () => {
+  // The submitted Monzo Analytics Engineer resume claims BigQuery and Looker, neither of which the
+  // model had any grounding for: it echoed the JD's headline tools.
+  //
+  // ⚠️ This test's original comment claimed "Mehek has never used either". That was WRONG, and it is
+  // corrected here rather than deleted, because the mistake is instructive. It was inferred from the
+  // experience BANK (0 rows for both), but the bank is a seeded, incomplete artifact and is not a
+  // record of what she can do. Her own resumes claim Looker on 14 of them and BigQuery on 1, and she
+  // confirmed on 2026-07-17 that she has really used both. So the defect was never "it claimed a
+  // false skill" - it was "it claimed a skill it had NO WAY OF KNOWING she had", and happened to be
+  // right. An ungrounded guess is a defect even when it guesses correctly, which is the whole reason
+  // the declared list, not the bank, is the authority.
+  //
+  // The assertion is unchanged and still exactly right: whatever is not in the declared list is
+  // ungrounded, full stop. Here `declared` is a deliberately unrelated list, not Mehek's real one.
   const declared = ['Python', 'TypeScript', 'React'];
   const out = findUngroundedSkills(['Python', 'BigQuery', 'Looker'], BANK, declared);
   assert.deepEqual(out, ['BigQuery', 'Looker']);
+});
+
+// ─── Translation: rendering a DECLARED skill in the JD's vocabulary (2026-07-17) ─────────────
+// Mehek asked for the SKILLS line to be tailored per JD. Selecting and ordering her real skills is
+// plainly fine; ADDING the JD's keywords is R-015 itself and is refused. Renaming sits between them:
+// writing a skill she HAS in the words the JD uses is honest and beats the ATS filter. spec
+// .skill_source carries the rename so the validator can still enforce truth.
+
+test('translation: a declared skill written in the JD\'s words survives', () => {
+  const declared = ['SQL', 'A/B testing'];
+  const out = findUngroundedSkills(['ETL', 'experimentation'], BANK, declared, {
+    ETL: 'SQL',
+    experimentation: 'A/B testing',
+  });
+  assert.deepEqual(out, [], 'a rename of a declared skill must not be pruned');
+});
+
+test('translation CANNOT smuggle in a skill the student never declared', () => {
+  // The whole risk of allowing renames. The map is only believed when the thing it claims to rename
+  // is itself declared: "Kubernetes" mapped to a skill she does not have grounds nothing.
+  const declared = ['SQL', 'Python'];
+  const out = findUngroundedSkills(['Kubernetes'], BANK, declared, { Kubernetes: 'Production deployment' });
+  assert.deepEqual(out, ['Kubernetes'], 'the renamed-from skill must itself be declared');
+});
+
+test('translation cannot launder a skill by pointing at an unrelated declared one', () => {
+  // A well-formed map whose target IS declared is the residual risk: the model could mislabel. The
+  // prompt's negative examples target it, and the mapping stays visible in skill_source rather than
+  // disappearing. Pinning current behaviour honestly: this DOES pass the validator, so the guard is
+  // the prompt plus auditability, not this function. If mislabelling ever shows up live, this is the
+  // test to change, and a whitelist of accepted renames is the likely answer.
+  const declared = ['SQL'];
+  const out = findUngroundedSkills(['BigQuery'], BANK, declared, { BigQuery: 'SQL' });
+  assert.deepEqual(out, [], 'documents the known limit: a declared target is accepted on trust');
+});
+
+test('translation map is ignored when it is absent, malformed, or self-referential junk', () => {
+  const declared = ['SQL'];
+  assert.deepEqual(findUngroundedSkills(['ETL'], BANK, declared), ['ETL'], 'no map -> no rename');
+  assert.deepEqual(findUngroundedSkills(['ETL'], BANK, declared, {}), ['ETL'], 'empty map -> no rename');
+  assert.deepEqual(
+    findUngroundedSkills(['ETL'], BANK, declared, { Other: 'SQL' }),
+    ['ETL'],
+    'a map entry for a DIFFERENT term must not ground this one',
+  );
 });
 
 test('R-015: the declared list overrides the seeded bank tags, which are junk', () => {
@@ -265,6 +321,26 @@ test('R-015: an off-list skill is a HARD issue when a list exists, and a warning
   const softMode = validateResumeSpec(s, 'we use bigquery', BANK);
   assert.ok(!softMode.issues.some((i) => i.includes('BigQuery')), 'should not hard-fail with no list');
   assert.ok(softMode.warnings.some((w) => w.bullet === 'BigQuery'), 'should still warn');
+});
+
+test('a rename emitted DESPITE the prompt ban is pruned and hard-flagged, not honored', () => {
+  // Renaming is disabled in the prompt, and the reason it is disabled is that the model has already
+  // ignored that prompt's rules once. So the validator must not honor skill_source either: a ban the
+  // validator quietly waives on request is not a ban. "ETL" here renames a genuinely declared "SQL",
+  // i.e. the BEST case for a rename, and it must still be pruned until the curated whitelist exists.
+  const s = spec([{ org: 'Northwind Labs', title: 'Engineer', date_range: '2024', bullets: [] }]);
+  s.skills = ['SQL', 'ETL'];
+  s.skill_source = { ETL: 'SQL' };
+
+  const { spec: cleaned, removed } = pruneUngroundedContent(s, BANK, ['SQL']);
+  assert.deepEqual(cleaned.skills, ['SQL'], 'the rename must not survive the prune');
+  assert.ok(removed.some((r) => r.includes('ETL')));
+
+  const validated = validateResumeSpec(s, 'we use ETL pipelines', BANK, ['SQL']);
+  assert.ok(
+    validated.issues.some((i) => i.includes('ETL')),
+    'the rename must drive the retry as a hard issue',
+  );
 });
 
 test('R-015: prune strips an off-list skill as a last resort, and keeps the declared ones', () => {

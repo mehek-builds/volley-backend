@@ -4,7 +4,7 @@ import { profiles, experience_bank } from '../db/schema';
 import { eq, sql } from 'drizzle-orm';
 import { requireAuth } from '../middleware/auth';
 import { parseResumeWithClaude, ParsedProfile } from '../llm/parse';
-import pdfParse from 'pdf-parse';
+import { extractPdfText } from '../lib/pdfText';
 import { put } from '@vercel/blob';
 import { MultipartFile } from '@fastify/multipart';
 
@@ -18,6 +18,30 @@ export function toBullets(description: string): string[] {
     .map((l) => l.replace(/^\s*[-•·*•]\s*/, '').trim())
     .filter((l) => l.length > 0);
   return lines.length > 0 ? lines : [description.trim()].filter((l) => l.length > 0);
+}
+
+// The student's DECLARED skills (profiles.skills), filtered to non-empty strings. Same filtering
+// discipline as /resume/generate: the column is jsonb, so a hand-edited row can hold anything,
+// and junk here would flow into prompts and validators as unmatchable entries. Returns [] for
+// NULL/absent/malformed, which callers must treat as "never declared", not "has no skills".
+export function declaredSkillsList(value: unknown): string[] {
+  return (Array.isArray(value) ? value : []).filter(
+    (s): s is string => typeof s === 'string' && s.trim().length > 0,
+  );
+}
+
+// What GET /profile serves (R-027). parsed_json is resume-INFERRED data; profiles.skills is the
+// student's own DECLARED list and the one authoritative skills source (R-015). Before this, the
+// served profile spread bare parsed_json, so every consumer downstream of GET /profile (outreach
+// drafting via /draft's user_profile, the extension's profile cache) kept running on the inferred
+// array even after the student declared their real list - two skills sources, disagreeing, in one
+// profile, and the R-015 fix reached the resume only. A non-empty declared list now overrides
+// parsed_json.skills; parsed_json stays the fallback so un-onboarded users (skills = NULL) are
+// served exactly what they were before.
+export function serveProfileJson(parsedJson: unknown, declaredSkills: unknown, email: string): Record<string, unknown> {
+  const base = (parsedJson && typeof parsedJson === 'object' ? parsedJson : {}) as Record<string, unknown>;
+  const declared = declaredSkillsList(declaredSkills);
+  return { ...base, ...(declared.length > 0 ? { skills: declared } : {}), email };
 }
 
 // ParsedProfile -> experience_bank rows.
@@ -86,7 +110,11 @@ export async function profileRoutes(fastify: FastifyInstance) {
 
     let resumeText: string;
     try {
-      const parsed = await pdfParse(resumeBuffer);
+      // extractPdfText, not bare pdfParse: a small uploaded PDF concat-assembled from multipart
+      // chunks lands in Node's shared buffer pool, where pdf-parse's byteOffset bug (R-017, see
+      // lib/pdfText.ts) rejects a perfectly valid file as "bad XRef entry" - which here would
+      // 400 a student's real resume at signup.
+      const parsed = await extractPdfText(resumeBuffer);
       resumeText = parsed.text;
     } catch (err) {
       fastify.log.error(err);
@@ -192,7 +220,8 @@ export async function profileRoutes(fastify: FastifyInstance) {
       // resumes don't put one in a parseable spot); the account's verified login email is a
       // more reliable source and autofill (Lever/Greenhouse/etc.) needs one to fill the email
       // field at all - confirmed missing on every live-tested application until this fix.
-      return reply.status(200).send({ ...(profile[0].parsed_json as object), email: request.jwtPayload!.email });
+      // Skills come from serveProfileJson: declared list first, parsed_json as fallback (R-027).
+      return reply.status(200).send(serveProfileJson(profile[0].parsed_json, profile[0].skills, request.jwtPayload!.email));
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to retrieve profile' });

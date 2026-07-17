@@ -3,7 +3,6 @@ import { z } from 'zod';
 import { eq, desc } from 'drizzle-orm';
 import { createHash } from 'node:crypto';
 import { put } from '@vercel/blob';
-import pdfParse from 'pdf-parse';
 import { db } from '../db/index';
 import { profiles, generated_resumes, autofill_events } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
@@ -14,9 +13,126 @@ import { renderResumePdf } from '../engine/resumeRender';
 import { validateResumeSpec, validatePdfLayout, pruneUngroundedContent } from '../engine/resumeValidate';
 import { mintDownloadToken, readDownloadToken, resolveBlobUrl } from '../lib/resumeAccess';
 import { apiBaseFor } from '../lib/apiBase';
+import { extractPdfText } from '../lib/pdfText';
 
 const MAX_SPEC_ATTEMPTS = 2; // 1 initial pass + 1 feedback-driven retry, per PRD-v2 Section 6.4's
 // "automated quality gate" - bounded so a stubborn JD can't loop the endpoint indefinitely.
+
+// Hard wall-clock ceiling for the whole request, measured from function entry (reqStart) so it
+// accounts for the pre-loop work (auth, quota, bank/profile reads) too. Vercel kills the function at
+// 60s; every model call is bounded to (deadline - post-gen reserve - elapsed), so a slow Anthropic
+// response fails fast instead of 504ing AND there is guaranteed room after the last spec for the PDF
+// render + parse + blob upload + audit inserts.
+const REQUEST_DEADLINE_MS = 55000;
+const POST_GEN_RESERVE_MS = 9000;
+
+// ─── Transient model-capacity handling (live QA 2026-07-16) ──────────────────
+// A real Anthropic `overloaded_error` incident killed a whole fill: the card showed "Failed to
+// generate resume spec" and the only recovery was the student re-clicking "Yes, fill it". Two
+// separate defects produced that, and they need two separate fixes.
+//
+// 1. IN-REQUEST WASTE. A 529 fails FAST (~1s), not slow. So an overload burned both
+//    MAX_SPEC_ATTEMPTS in ~10s and gave up with ~45s of function budget still unspent. Worse, the
+//    single attempt counter conflated two unrelated reasons to retry - a transient CAPACITY failure
+//    and a QUALITY feedback pass - so one 529 silently consumed the feedback retry that exists to
+//    raise ATS coverage. Fixed here: capacity retries get their own counter and backoff, and only a
+//    real (non-transient) error or an exhausted budget ends the attempt.
+//
+// 2. THE CEILING. In-request retry CANNOT be the whole fix, and it is important not to pretend it
+//    is. Vercel kills this function at 60s (vercel.json maxDuration), REQUEST_DEADLINE_MS is 55s,
+//    and the observed incident needed ~6 attempts over ~2.5 MINUTES to get a 200. No in-request
+//    retry can outlive a 60s function, so surviving an incident of that length is necessarily the
+//    CLIENT's job: only a fresh request escapes the ceiling. That is why exhausting these retries
+//    returns a 503 + `code: 'llm_overloaded'` + `retry_after_ms` rather than a generic 500 - it is
+//    a machine-readable "come back", and the extension retries on it across requests while showing
+//    a "capacity busy" state. A 500 is indistinguishable from a bad JD, so the client could only
+//    give up. Large prompts are shed first during an overload and this route sends the JD plus the
+//    whole experience bank, so it is most fragile exactly when capacity is tight.
+const MAX_OVERLOAD_ATTEMPTS = 4;
+const MIN_CALL_BUDGET_MS = 6000; // never start a model call with less than this left
+const MAX_BACKOFF_MS = 6000;
+
+// Anthropic returns 529 overloaded_error during a capacity incident and 429 when rate limited; the
+// SDK surfaces both as APIError with a numeric `status`. Connection resets carry no status, so match
+// those on the message. Deliberately NOT retried: 4xx other than 429 (a bad request stays bad), and
+// APIUserAbortError (status undefined, message names an abort) - that is OUR deadline firing, and
+// retrying it would just burn the budget we already ran out of.
+export function isTransientOverload(err: unknown): boolean {
+  const status = (err as { status?: unknown })?.status;
+  if (typeof status === 'number') return status === 429 || status >= 500;
+  if (!(err instanceof Error)) return false;
+  if (/abort/i.test(err.name) || /abort/i.test(err.message)) return false;
+  // Our own parse/truncation errors (resumeSpec.ts) embed up to 200 chars of MODEL OUTPUT in the
+  // message. A JD or resume about networking puts the word "network" in that snippet, which would
+  // satisfy the connection regex below and misclassify a deterministic parse failure as a transient
+  // capacity blip - the client would then retry a request that fails identically every time. Name
+  // those errors explicitly before any substring matching.
+  if (/^(Claude returned invalid JSON|Resume spec truncated)/.test(err.message)) return false;
+  return /connection|econnreset|socket|network|fetch failed/i.test(err.message);
+}
+
+// The OTHER permanent failure class R-012 exposed, distinct from both a transient overload and a
+// genuinely bad request. Anthropic surfaces credit exhaustion as a 400 invalid_request_error
+// whose message says so ("Your credit balance is too low to access the Anthropic API. Please go
+// to Plans & Billing to upgrade or purchase credits."), and a revoked/wrong key as a 401 or 403.
+// None of these are the student's fault and none are transient: retrying cannot refill a balance,
+// and the generic "Failed to generate resume spec" card made a product-down incident look like a
+// flaky JD for hours (live, 2026-07-17) - the student's only move was clicking "Yes, fill it"
+// forever. Message-matching the 400 is deliberate and narrow: a 400 WITHOUT billing language is a
+// malformed request from OUR code and must stay a plain 500, never be blamed on billing.
+export function isBillingOrAuthFailure(err: unknown): boolean {
+  const status = (err as { status?: unknown })?.status;
+  if (status === 401 || status === 403) return true;
+  if (status !== 400) return false;
+  const message = err instanceof Error ? err.message : String((err as { message?: unknown })?.message ?? '');
+  return /credit balance|billing|purchase credits/i.test(message);
+}
+
+// One log line + one payload for every route that calls the model, so the operator action is
+// named identically wherever the failure surfaces. 503 + code llm_billing mirrors the
+// llm_overloaded plumbing shape, but deliberately carries NO retry_after_ms: the client must not
+// hammer a dead account, and the distinct code is how it knows this one is permanent until an
+// owner acts.
+export const LLM_BILLING_LOG =
+  'ANTHROPIC BILLING/AUTH FAILURE: every model-backed feature is DOWN for every user until the owner acts. Fix: top up credits in the Anthropic console, or rotate/restore ANTHROPIC_API_KEY (R-012)';
+export const LLM_BILLING_PAYLOAD = {
+  error: 'Drafting is temporarily unavailable. This is a problem on our side, not something you did, and retrying will not fix it. The RoleQuick team needs to restore service.',
+  code: 'llm_billing',
+} as const;
+
+// Honor Retry-After when the API sends one, else exponential backoff with jitter. Jitter matters:
+// every RoleQuick client retrying a shared incident on the same schedule would synchronize into a
+// thundering herd against an API that is already shedding load.
+export function overloadBackoffMs(err: unknown, attempt: number): number {
+  const headers = (err as { headers?: { get?: (k: string) => string | null } })?.headers;
+  const raw = typeof headers?.get === 'function' ? headers.get('retry-after') : null;
+  const seconds = raw === null || raw === undefined ? NaN : Number(raw);
+  if (Number.isFinite(seconds) && seconds > 0) return Math.min(seconds * 1000, MAX_BACKOFF_MS);
+  const expo = Math.min(1000 * 2 ** (attempt - 1), MAX_BACKOFF_MS);
+  return expo + Math.floor(Math.random() * 250);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// POST /autofill/event's body. Strip-mode on purpose (zod's default): unknown keys from newer
+// extension builds are dropped rather than rejected, so the two sides can version independently.
+// The flip side is that a field the extension sends but this schema does not name is dropped
+// SILENTLY, which is how the R-030 telemetry almost vanished: the extension branch
+// fix/r027-tags-r030-log ships r030_candidate_labels (the labels where linkQuestion matched with
+// asksForLink false on a text input - the population the register says to sample live before
+// designing any fix) and without the field here every sample would have been stripped on arrival.
+// Bounds are telemetry-sized: 50 labels of 200 chars covers any real form and caps what a
+// misbehaving client can store per event. Optional: older extensions and label-less fills omit it.
+export const autofillEventSchema = z.object({
+  ats_name: z.string().min(1),
+  job_context: z.object({ company: z.string(), role: z.string() }),
+  fields_filled: z.number().int().min(0),
+  fields_skipped: z.number().int().min(0),
+  auto_submitted: z.boolean().optional(),
+  r030_candidate_labels: z.array(z.string().max(200)).max(50).optional(),
+});
 
 const bodySchema = z.object({
   company: z.string().min(1),
@@ -38,6 +154,7 @@ const bodySchema = z.object({
 export async function resumeRoutes(fastify: FastifyInstance) {
   // POST /resume/generate - tailor a resume to a specific JD from the student's experience bank
   fastify.post('/resume/generate', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const reqStart = Date.now(); // wall-clock anchor for the whole-request time budget (see budgetLeftMs)
     const userId = request.jwtPayload!.userId;
 
     let body: z.infer<typeof bodySchema>;
@@ -89,21 +206,76 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     let specWarnings: ReturnType<typeof validateResumeSpec>['warnings'] = [];
     let atsCoverage = 0;
 
+    const budgetLeftMs = () => REQUEST_DEADLINE_MS - POST_GEN_RESERVE_MS - (Date.now() - reqStart);
+
     for (let attempt = 1; attempt <= MAX_SPEC_ATTEMPTS; attempt++) {
+      if (budgetLeftMs() < MIN_CALL_BUDGET_MS) {
+        // Not enough of the function budget left for another full model call plus the reserved
+        // render/upload time within Vercel's 60s.
+        if (spec) break; // ship the best-effort spec from a prior attempt
+        return reply.status(503).send({ error: 'Resume generation is taking too long. Please try again.' });
+      }
       try {
-        spec = await generateResumeSpec(
-          body.jd_text,
-          body.company,
-          body.role,
-          bank,
-          { school: parsed?.school ?? '', degree: parsed?.degree, grad_year: parsed?.grad_year },
-          attempt > 1 ? specIssues : undefined,
-          declaredSkills,
-        );
+        // Capacity retries run HERE, on their own counter, rather than consuming an outer
+        // MAX_SPEC_ATTEMPTS slot: an `overloaded_error` says nothing about spec quality, so
+        // spending the feedback pass on one meant a transient 529 could quietly cost the student
+        // ATS coverage on a resume that did eventually generate.
+        spec = await (async () => {
+          let lastErr: unknown;
+          for (let tries = 1; tries <= MAX_OVERLOAD_ATTEMPTS; tries++) {
+            const budget = budgetLeftMs();
+            if (budget < MIN_CALL_BUDGET_MS) break;
+            try {
+              return await generateResumeSpec(
+                body.jd_text,
+                body.company,
+                body.role,
+                bank,
+                { school: parsed?.school ?? '', degree: parsed?.degree, grad_year: parsed?.grad_year },
+                attempt > 1 ? specIssues : undefined,
+                declaredSkills,
+                budget,
+              );
+            } catch (err) {
+              lastErr = err;
+              if (!isTransientOverload(err)) throw err;
+              const waitMs = overloadBackoffMs(err, tries);
+              // Only sleep if a real attempt could still follow it; otherwise fall out now and let
+              // the 503 go back while the client still has time to act on it.
+              if (budgetLeftMs() - waitMs < MIN_CALL_BUDGET_MS) break;
+              fastify.log.warn(
+                { tries, waitMs, budgetLeftMs: budgetLeftMs(), status: (err as { status?: number })?.status },
+                'model capacity overloaded, backing off and retrying in-request',
+              );
+              await sleep(waitMs);
+            }
+          }
+          throw lastErr ?? new Error('resume spec generation exhausted its budget');
+        })();
       } catch (err) {
         fastify.log.error(err);
-        // A malformed/truncated model response is as retryable as a validation failure.
         if (spec) break; // a prior attempt already produced a usable spec - accept it best-effort
+        // Billing/auth first: it is PERMANENT, so neither the transient 503 (which invites a
+        // retry) nor the generic 500 (which reads as a bad JD) is honest about it. Distinct code,
+        // not-your-fault message, and a log that names the operator action (R-012).
+        if (isBillingOrAuthFailure(err)) {
+          fastify.log.error({ status: (err as { status?: number })?.status, userId }, LLM_BILLING_LOG);
+          return reply.status(503).send(LLM_BILLING_PAYLOAD);
+        }
+        // A transient capacity failure is a "come back", not a failure to report. Say so in a way
+        // the client can act on: a 500 here is indistinguishable from a bad JD, so the extension
+        // could only surface a hard "Failed to generate resume spec" and strand the fill. This is
+        // the half of the fix that survives an incident longer than the 60s function ceiling, since
+        // only a fresh request can outlive it.
+        if (isTransientOverload(err)) {
+          return reply.status(503).send({
+            error: 'The model is busy right now. RoleQuick will retry automatically.',
+            code: 'llm_overloaded',
+            retry_after_ms: 5000,
+          });
+        }
+        // A malformed/truncated model response is as retryable as a validation failure - but not if
+        // we're out of budget.
         if (attempt === MAX_SPEC_ATTEMPTS) {
           return reply.status(500).send({ error: 'Failed to generate resume spec' });
         }
@@ -166,12 +338,23 @@ export async function resumeRoutes(fastify: FastifyInstance) {
 
     // Authoritative post-render check (mirrors validate_resume.py's PDF section): confirms the
     // pre-render height estimate actually held, and that the text is really extractable.
+    // extractPdfText, not bare pdfParse: the raw call threw "bad XRef entry" on every ~2.5KB
+    // pooled render buffer (R-017; the byteOffset story lives in lib/pdfText.ts), so this check
+    // had NEVER run and its empty issues array read downstream as a clean pass.
     let layoutIssues: string[] = [];
     try {
-      const parsedPdf = await pdfParse(pdfBuffer);
+      const parsedPdf = await extractPdfText(pdfBuffer);
       layoutIssues = validatePdfLayout(parsedPdf.text, parsedPdf.numpages).issues;
     } catch (err) {
-      fastify.log.warn(err, 'could not post-render-validate the generated PDF');
+      // LOUD on purpose, and still non-fatal to the response. A validation step that fails
+      // silently is worse than none: layoutIssues stays [] below, which downstream reads as
+      // "validated, no issues". If this fires, the one-page/extractability guarantees are
+      // UNVERIFIED for the resume being returned - the student still gets their file, but this
+      // resume shipped unchecked and the parser needs fixing again (R-017's failure mode).
+      fastify.log.error(
+        { err, userId, company: body.company },
+        'POST-RENDER PDF VALIDATION DID NOT RUN: rendered resume could not be parsed, so its quality.issues are INCOMPLETE and the one-page/extractability guarantees are unverified (R-017)',
+      );
     }
 
     const jdHash = createHash('sha256').update(body.jd_text).digest('hex').slice(0, 16);
@@ -290,17 +473,9 @@ export async function resumeRoutes(fastify: FastifyInstance) {
   fastify.post('/autofill/event', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
 
-    const eventSchema = z.object({
-      ats_name: z.string().min(1),
-      job_context: z.object({ company: z.string(), role: z.string() }),
-      fields_filled: z.number().int().min(0),
-      fields_skipped: z.number().int().min(0),
-      auto_submitted: z.boolean().optional(),
-    });
-
-    let body: z.infer<typeof eventSchema>;
+    let body: z.infer<typeof autofillEventSchema>;
     try {
-      body = eventSchema.parse(request.body);
+      body = autofillEventSchema.parse(request.body);
     } catch (err) {
       const detail = err instanceof z.ZodError ? err.issues.map((i) => `${i.path.join('.')}: ${i.message}`) : undefined;
       return reply.status(400).send({ error: 'Invalid request body', detail });

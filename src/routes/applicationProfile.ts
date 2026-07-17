@@ -37,7 +37,11 @@ export const ENCRYPTED_FIELDS = [
 // GET echoes back null for anything unset. The client round-trips the fetched profile
 // verbatim on save, so every field here must accept null, not just undefined - `.optional()`
 // alone rejects null and 400s on every save-after-load.
-const bodySchema = z.object({
+//
+// Exported for the round-trip test. The failure mode it pins: a column declared in schema.ts with
+// no line here is stripped by zod SILENTLY, so PUT discards the value and still returns 200 - the
+// client believes a write that never happened. Every new column must land in both places at once.
+export const bodySchema = z.object({
   phone: z.string().nullable().optional(),
   address_city: z.string().nullable().optional(),
   address_state: z.string().nullable().optional(),
@@ -62,6 +66,11 @@ const bodySchema = z.object({
   gpa: z.string().nullable().optional(),
   gpa_scale: z.string().nullable().optional(),
   major: z.string().nullable().optional(),
+  // Fluent languages, a string[] the student enumerated themselves (see schema.ts for why the
+  // declared list is the authority). Plaintext, so deliberately NOT in ENCRYPTED_FIELDS above -
+  // and being an array, encryptRow's typeof-string guard would skip it even if someone added it
+  // there by mistake.
+  languages: z.array(z.string()).nullable().optional(),
   // Only ever set if the student explicitly opts in (PRD-v2 Section 4B); absent/null
   // means every autofill selects "Decline to Self-Identify" where that option exists.
   eeo_prefs: z.record(z.string()).nullable().optional(),

@@ -288,6 +288,12 @@ export function pruneUngroundedContent(
   // pruning empties it, the declared list is the thing to fix.
   let skills = spec.skills;
   if (declaredSkills?.length) {
+    // spec.skill_source is deliberately NOT passed while renaming is disabled. The disable lives in
+    // the prompt, and the whole reason it is off is that the model ignored the prompt's own rules on
+    // the first live run; a prompt-level ban that the validator still honors is not a ban, it is an
+    // invitation with a comment. Until the curated synonym whitelist exists, a rename the model emits
+    // anyway is treated as any other ungrounded skill and pruned, which fails in the honest
+    // direction: fewer skills listed, all of them verbatim hers. Re-enable both together.
     const ungrounded = new Set(findUngroundedSkills(spec.skills, bank, declaredSkills));
     if (ungrounded.size > 0) {
       skills = spec.skills.filter((s) => !ungrounded.has(s));
@@ -322,12 +328,28 @@ export function findUngroundedSkills(
   skills: string[],
   bank: ExperienceBankEntry[],
   declared?: string[] | null,
+  skillSource?: Record<string, string> | null,
 ): string[] {
   const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
   const allowed = new Set((declared ?? []).map(norm).filter(Boolean));
 
   if (allowed.size > 0) {
-    return skills.filter((s) => norm(s) && !allowed.has(norm(s)));
+    // A skill survives declared mode two ways, and only two:
+    //   1. it is verbatim one of the student's declared skills, or
+    //   2. spec.skill_source says it RENAMES one of them, for the JD's vocabulary.
+    // Case 2 is why this map is trusted at all: the model may relabel "SQL" as the JD's "ETL", but
+    // the label it claims to be renaming must itself be a real declared skill. So a rename can never
+    // introduce a skill the student never claimed - the worst it can do is mislabel one they did,
+    // which the prompt's negative examples target and which stays visible in skill_source rather than
+    // vanishing into the resume. Without this, every rename would be silently dropped here (R-015).
+    return skills.filter((s) => {
+      const n = norm(s);
+      if (!n) return false;
+      if (allowed.has(n)) return false;
+      const renames = skillSource?.[s];
+      if (renames && allowed.has(norm(renames))) return false;
+      return true;
+    });
   }
 
   const corpus = wordSet(bank.map(bankEntryCorpus).join(' '));
@@ -466,6 +488,9 @@ export function validateResumeSpec(
     // that drives the retry loop: the student said what they know, and the resume claiming more
     // than that is a false statement about them, not a quality nit. Without one there is nothing
     // authoritative to check against, so it stays a warning - see findUngroundedSkills.
+    // skill_source deliberately not passed while renaming is disabled: see pruneUngroundedContent.
+    // A rename the model emits against the prompt's ban must surface as a hard issue and drive the
+    // retry, whose feedback line below already tells it the fix (use the list verbatim).
     const ungroundedSkills = findUngroundedSkills(spec.skills, bank, declaredSkills);
     if (declaredSkills?.length) {
       for (const skill of ungroundedSkills) {
@@ -494,5 +519,10 @@ export function validatePdfLayout(extractedText: string, pageCount: number): Pdf
   const issues: string[] = [];
   if (pageCount !== 1) issues.push(`PDF is ${pageCount} pages (want 1)`);
   if (extractedText.trim().length < 400) issues.push('PDF text not extractable (ATS-unreadable)');
+  // The zero-em-dash rule (validate_resume.py enforces the same), checked on what actually
+  // RENDERED rather than trusting the spec-level prompt. This check existed in spirit but could
+  // never fire while the post-render parse threw on every resume (R-017); it is the seeded
+  // violation the R-017 regression test drives end to end.
+  if (extractedText.includes('\u2014')) issues.push('Rendered PDF contains an em dash (banned punctuation)');
   return { issues, page_count: pageCount, extractable_chars: extractedText.trim().length };
 }

@@ -12,7 +12,10 @@ const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 //
 // Anti-AI-tells discipline is deliberate (see the vault's letterstory-email-voice doc): these
 // answers must read hand-written, or they hurt the student more than a blank box would.
-const SYSTEM_PROMPT = `You draft a first-person answer to ONE job-application question for a student.
+//
+// Exported so the premise rule (R-029) can be pinned by a test: the live Replit incident showed
+// the failure is a missing rule, and a silent edit to this prompt would silently re-open it.
+export const SYSTEM_PROMPT = `You draft a first-person answer to ONE job-application question for a student.
 
 Every strong answer to a "why this role / tell us about yourself / why you" question does two
 things. Do BOTH, woven together in the student's own voice, never as labeled sections:
@@ -31,6 +34,17 @@ doesn't actually have, and never invent a fact about the company beyond what the
 experience bank or JD doesn't support a claim, stay general and honest rather than fabricating a
 specific.
 
+Premise (hard rule): a question can presuppose an artifact, event, or status that the student's
+material does not support - "tell us about your submitted project" when nothing was submitted,
+"the portfolio piece you attached", "as we discussed". NEVER adopt such a premise. An answer built
+from true facts under a false frame is still false: "For my submission I built X" lies even when X
+is real. When the substance exists, answer from what is actually true and refuse the frame - "The
+project I would point to is X, which I built..." - describing past work in the past tense, tied to
+its real employer or project name, never claiming to have submitted, attached, linked, or built
+anything for THIS application. When no honest answer exists without the missing artifact, output
+exactly CANNOT_DRAFT and nothing else, so the field is flagged for the student instead of filled
+with a false frame.
+
 Voice and format:
 - First person, the student's own plain voice. Direct and specific, not corporate.
 - 60-130 words unless the question implies shorter. One or two short paragraphs.
@@ -43,6 +57,19 @@ Voice and format:
 export interface AnswerResult {
   answer: string;
   warnings: string[];
+}
+
+// The drafter's refusal sentinel (R-029). When the prompt's premise rule concludes no honest
+// answer exists, the model outputs CANNOT_DRAFT; mapping it to '' routes the refusal through the
+// module's existing cannot-draft path - the route already 502s on an empty answer ("Empty draft
+// returned") and the extension already flags an undrafted field for the student - so a refusal
+// surfaces exactly like any other failed draft instead of inventing a new channel. Prefix-matched
+// rather than equality: a model that appends its reason ("CANNOT_DRAFT: the question presumes a
+// submission") is still refusing. A sentinel mentioned MID-answer is not a refusal and passes
+// through untouched.
+export function normalizeDraftedAnswer(raw: string): string {
+  const text = raw.trim();
+  return /^CANNOT_DRAFT\b/.test(text) ? '' : text;
 }
 
 function buildContextBlock(
@@ -103,14 +130,19 @@ export async function draftApplicationAnswer(
   const sourceSignatures = numberSignatures(corpusText);
   const corpusWords = wordSet(corpusText);
 
-  let answer = await callModel();
+  let answer = normalizeDraftedAnswer(await callModel());
+  // A premise refusal (R-029) is final: '' flows out through the empty-answer path below and the
+  // route's existing 502, so the field is flagged for the student rather than drafted.
+  if (answer === '') return { answer: '', warnings: [] };
 
   // If the draft used numbers not present in the student's material, regenerate once with that as
   // explicit feedback (same self-correcting pattern as the resume path).
   let badNumbers = ungroundedNumbers(answer, sourceSignatures);
   if (badNumbers.length > 0) {
-    answer = await callModel(
-      `Your previous draft included numbers that are NOT in the student's experience bank or the job description: ${badNumbers.join(', ')}. Rewrite it using only facts and figures that appear in the provided material. Do not invent metrics.`,
+    answer = normalizeDraftedAnswer(
+      await callModel(
+        `Your previous draft included numbers that are NOT in the student's experience bank or the job description: ${badNumbers.join(', ')}. Rewrite it using only facts and figures that appear in the provided material. Do not invent metrics.`,
+      ),
     );
     badNumbers = ungroundedNumbers(answer, sourceSignatures);
   }

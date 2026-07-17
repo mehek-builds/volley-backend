@@ -19,6 +19,34 @@ export interface ResumeSpec {
   // is what this said and what the prompt asked for - with no skills source in the system, that
   // instruction was an invitation to keyword-stuff, and the model took it (R-015).
   skills: string[];
+  // Rendered-term -> the DECLARED skill it renames. RENAMING IS CURRENTLY DISABLED IN THE PROMPT;
+  // this field and the validator support for it are retained deliberately, because the plumbing is
+  // right and only the model's judgement was not. See the DISABLED note below before re-enabling.
+  //
+  // The idea: writing a skill the student HAS in the JD's words ("ETL" for their "SQL") is honest ATS
+  // tailoring, and declared mode drops anything not verbatim in the list, so a rename needs a
+  // declared target to survive. That guard works: a rename can never introduce a skill they never
+  // claimed.
+  //
+  // 🔴 WHY IT IS OFF: the guard stops INVENTION but not GENERALISATION, and generalisation is what
+  // the model actually did, on the very first live run, against a prompt that forbade it in those
+  // words. Measured on a real Notion generation, 2026-07-17:
+  //     {"LLMs": "OpenAI API", "Machine Learning": "Hugging Face", "databases": "SQL"}
+  // Every target is genuinely declared, so all three passed. But "Hugging Face" is a library and
+  // "Machine Learning" is a discipline; "OpenAI API" is one vendor's API and "LLMs" is a field. Those
+  // are not the same skill wearing a different label, they are a specific claim laundered into a
+  // broad one. The outputs may even be defensible on other evidence, and that is precisely the trap:
+  // an ungrounded step is a defect even when it lands on a true answer (the whole lesson of R-015).
+  //
+  // Prompt hardening was tried first and failed: the rule already said, verbatim, that a term which is
+  // "DIFFERENT, BROADER, or more SPECIFIC" is not a rename, with worked negative examples. The model
+  // broadened anyway. A rule the model reads and ignores is not a control.
+  //
+  // TO RE-ENABLE SAFELY it needs a CURATED synonym whitelist that we own, not model judgement:
+  // an explicit table (SQL -> ETL, A/B testing -> experimentation) where every pair is a true alias
+  // rather than a hypernym. Until that exists, skills are copied verbatim. Selection and ordering,
+  // which carry most of the ATS benefit, are unaffected and stay on.
+  skill_source?: Record<string, string>;
 }
 
 // Content rules ported from the Dubai off-cycle resume engine's validate_resume.py /
@@ -33,16 +61,26 @@ Return ONLY valid JSON with no explanation or markdown wrapping, matching this e
 {
   "school": string, "degree": string, "grad_date": string, "coursework": string,
   "experience": [{"org": string, "title": string, "date_range": string, "bullets": [string, string, string]}],
-  "skills": [string]
+  "skills": [string],
+  "skill_source": {string: string}
 }
 
 Rules:
 - Pick up to 3 experience entries that best match the JD, most relevant first.
 - For each entry pick exactly 3 bullets: reuse a stored bullet_variant verbatim when one already fits well;
   only lightly rewrite (never fabricate achievements) when no stored variant surfaces the JD's language.
-- "skills": list ONLY skills from the student's Skills list, copied as they are written there. Of those,
-  put the ones matching the JD first. If the Skills list is empty, use only skills clearly evidenced by a
-  bullet you selected.
+- "skills": EVERY entry must be one of the student's Skills list, either copied as written there or
+  renamed under the "skill_source" rule below. If the Skills list is empty, use only skills clearly
+  evidenced by a bullet you selected.
+- SELECT, do not dump. Choose the 8-10 Skills-list entries most relevant to THIS JD, most relevant
+  first, and leave the rest out. A SKILLS line listing every skill the student has tells the reader
+  nothing about their fit for this role, and pushes the relevant ones below the fold. Omitting a
+  skill here does not deny it: it is a different job's resume.
+- Each skill appears exactly ONCE, and is written EXACTLY as it appears in the Skills list. Copy the
+  student's own wording character for character. Do not re-word, re-label, generalise, expand an
+  abbreviation, or substitute the job description's vocabulary. If the JD says "ETL" and the student
+  wrote "SQL", the resume says "SQL".
+- "skill_source": leave it out. Renaming is DISABLED (see below).
 - NEVER add a skill because the job description asks for it. If the JD wants a tool and the student's
   Skills list doesn't have it, they don't have it: leave it out. A resume that omits a skill costs an
   interview; a resume that claims one the student lacks costs their credibility in the screen.
@@ -77,6 +115,17 @@ export function normalizeSpec(raw: unknown): ResumeSpec {
       date_range: str(e.date_range),
       bullets: strArr(e.bullets),
     }));
+  // skill_source is jsonb-ish free-form from the model, so drop anything that isn't a string->string
+  // pair. A malformed entry must not throw here and must not silently read as "grounded" downstream:
+  // an omitted mapping simply means the term has to stand on its own against the declared list.
+  const strMap = (v: unknown): Record<string, string> | undefined => {
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
+    const out: Record<string, string> = {};
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      if (typeof k === 'string' && typeof val === 'string' && k.trim() && val.trim()) out[k] = val;
+    }
+    return Object.keys(out).length ? out : undefined;
+  };
   return {
     school: str(o.school),
     degree: str(o.degree),
@@ -84,6 +133,7 @@ export function normalizeSpec(raw: unknown): ResumeSpec {
     coursework: str(o.coursework),
     experience,
     skills: strArr(o.skills),
+    skill_source: strMap(o.skill_source),
   };
 }
 
@@ -97,6 +147,10 @@ export async function generateResumeSpec(
   // The student's declared skills (profiles.skills). Empty/undefined means they never gave us a
   // list, which the validator treats as soft-grounding rather than as "they have no skills".
   skills?: string[] | null,
+  // Hard per-call wall-clock bound. The route runs inside Vercel's 60s function ceiling and passes
+  // its real remaining budget here; a call that outlives it is aborted (APIUserAbortError), which
+  // the route's overload classifier deliberately treats as NOT retryable - it is our own deadline.
+  timeoutMs?: number,
 ): Promise<ResumeSpec> {
   const feedbackBlock = feedback?.length
     ? `\n\nThe previous attempt had these issues - fix them in this revision:\n${feedback.map((f) => `- ${f}`).join('\n')}`
@@ -115,20 +169,37 @@ export async function generateResumeSpec(
     ? `\n\nSkills list (the student's own skills - the ONLY skills that may appear in "skills"):\n${JSON.stringify(skills)}`
     : `\n\nSkills list: none provided. Use only skills clearly evidenced by a bullet you selected, and do not add skills from the job description.`;
   const contextBlock = `Job: ${role} at ${company}\n\nJob description:\n${jdText}\n\nEducation: ${education.school}${education.degree ? `, ${education.degree}` : ''}${education.grad_year ? `, class of ${education.grad_year}` : ''}${skillsBlock}\n\nExperience bank:\n${JSON.stringify(bank)}`;
-  const response = await client.messages.create({
-    model: 'claude-sonnet-5',
-    max_tokens: 4096,
-    system: [
-      { type: 'text', text: SYSTEM_PROMPT },
-      { type: 'text', text: contextBlock, cache_control: { type: 'ephemeral' } },
-    ],
-    messages: [
-      {
-        role: 'user',
-        content: `Return the tailoring spec JSON.${feedbackBlock}`,
-      },
-    ],
-  });
+  const response = await client.messages.create(
+    {
+      model: 'claude-sonnet-5',
+      // max_tokens is a SHARED budget for thinking AND the JSON, not just the JSON. Measured on a
+      // real call: thinking_tokens=1360 of output_tokens=2242, so reasoning ate ~60% of the response
+      // before a single character of spec was emitted. At 4096 that left little headroom, and the
+      // failure mode is nasty: the JSON truncates mid-object, `stop_reason: max_tokens` throws, and
+      // the retry is a second full-price call that tends to truncate the same way -> a hard 500 on a
+      // healthy model. It is also INTERMITTENT, since how long the model thinks varies per JD, so it
+      // surfaces as a flaky endpoint rather than an obvious bug. Caught when the skills
+      // select/translate rules made the prompt richer and pushed a working call over the line.
+      // 8192 leaves roughly 3x headroom over the largest spec observed (~2.2k output tokens). We
+      // only pay for what is generated, so a higher ceiling costs nothing on a normal call.
+      max_tokens: 8192,
+      system: [
+        { type: 'text', text: SYSTEM_PROMPT },
+        { type: 'text', text: contextBlock, cache_control: { type: 'ephemeral' } },
+      ],
+      messages: [
+        {
+          role: 'user',
+          content: `Return the tailoring spec JSON.${feedbackBlock}`,
+        },
+      ],
+    },
+    // When the caller supplies a budget, the abort signal hard-bounds the call and maxRetries: 0
+    // hands ALL capacity retries to the route's own counter (resume.ts). The SDK's built-in retries
+    // would multiply the route's attempts and, worse, honor a long Retry-After with a sleep the
+    // route cannot see or budget-gate - which is exactly the hidden stall that 504s a 60s function.
+    timeoutMs !== undefined ? { signal: AbortSignal.timeout(timeoutMs), maxRetries: 0 } : undefined,
+  );
 
   const textBlock = response.content.find((block) => block.type === 'text');
   const text = textBlock?.type === 'text' ? textBlock.text : '';
