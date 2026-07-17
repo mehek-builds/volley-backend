@@ -379,7 +379,11 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       // with no resume attached. The suffix is left ON deliberately: an unguessable pathname is
       // defence in depth on an object we cannot make private.
       objectKey = blob.pathname;
-      resumeUrl = `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(userId, objectKey)}`;
+      // R-040: carry put()'s own URL inside the sealed token. The download route's key -> URL
+      // lookup rides list(), which is eventually consistent with no bound - a fresh resume can
+      // 404 as "deleted" for the whole window a student is submitting in. put()'s URL is a
+      // strong read target and it is in hand right here.
+      resumeUrl = `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(userId, objectKey, { blobUrl: blob.url })}`;
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to store generated resume' });
@@ -436,12 +440,19 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     const payload = readDownloadToken(token);
     if (!payload) return reply.status(403).send({ error: 'Invalid or expired download link' });
 
+    // R-040: tokens minted since the fix carry the blob URL itself (payload.b) - a strong
+    // point-read with no list() consistency dependence. Tokens from before the fix (<= 5 min
+    // old at any moment) fall back to the list()-based key lookup they were minted against.
     let blobUrl: string | null;
-    try {
-      blobUrl = await resolveBlobUrl(payload.k);
-    } catch (err) {
-      fastify.log.error(err);
-      return reply.status(502).send({ error: 'Could not reach resume storage' });
+    if (payload.b) {
+      blobUrl = payload.b;
+    } else {
+      try {
+        blobUrl = await resolveBlobUrl(payload.k);
+      } catch (err) {
+        fastify.log.error(err);
+        return reply.status(502).send({ error: 'Could not reach resume storage' });
+      }
     }
     // Expected once the retention sweep has been through: the link is still cryptographically
     // valid but the file is intentionally gone. That is a 404, not an error.
@@ -450,6 +461,11 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     let pdf: Buffer;
     try {
       const upstream = await fetch(blobUrl);
+      // A sweep-deleted blob answers 404 at the store; keep the same contract the resolve path
+      // has always had rather than turning "intentionally gone" into a 502.
+      if (upstream.status === 404 || upstream.status === 410) {
+        return reply.status(404).send({ error: 'This resume has been deleted' });
+      }
       if (!upstream.ok) throw new Error(`blob fetch ${upstream.status}`);
       pdf = Buffer.from(await upstream.arrayBuffer());
     } catch (err) {

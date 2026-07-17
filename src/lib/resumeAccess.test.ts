@@ -96,3 +96,28 @@ test('resumePrefix is scoped per user and cannot collide across users', () => {
   assert.equal(resumePrefix(USER), `users/${USER}/resumes/`);
   assert.ok(!resumePrefix(USER).startsWith(resumePrefix(OTHER_USER)));
 });
+
+test('R-040: a token carries the blob URL through the seal and back', () => {
+  const blobUrl = 'https://abc123xyz.public.blob.vercel-storage.com/users/x/resumes/abc-1-r4nd0m.pdf';
+  const payload = readDownloadToken(mintDownloadToken(USER, KEY, { blobUrl }));
+  assert.ok(payload);
+  assert.equal(payload.b, blobUrl);
+  // Still opaque: the URL must not be readable off the wire form.
+  const token = mintDownloadToken(USER, KEY, { blobUrl });
+  assert.ok(!Buffer.from(token, 'base64url').toString('utf8').includes('vercel-storage'));
+});
+
+test('R-040: tokens minted without a blob URL (pre-fix) still read cleanly', () => {
+  const payload = readDownloadToken(mintDownloadToken(USER, KEY));
+  assert.ok(payload);
+  assert.equal(payload.b, undefined);
+});
+
+test('R-040: a b that is not a Vercel Blob store URL is refused outright', () => {
+  // The AEAD seal makes forgery a non-concern; this guards the mint path itself ever being
+  // handed a foreign URL - the download route proxies b, so b must never name another host.
+  const evil = mintDownloadToken(USER, KEY, { blobUrl: 'https://attacker.example.com/x.pdf' });
+  assert.equal(readDownloadToken(evil), null);
+  const notAUrl = mintDownloadToken(USER, KEY, { blobUrl: 'not a url' });
+  assert.equal(readDownloadToken(notAUrl), null);
+});
