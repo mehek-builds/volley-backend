@@ -208,6 +208,7 @@ export function findGroundingViolations(spec: ResumeSpec, bank: ExperienceBankEn
 export function pruneUngroundedContent(
   spec: ResumeSpec,
   bank: ExperienceBankEntry[],
+  declaredSkills?: string[] | null,
 ): { spec: ResumeSpec; removed: string[] } {
   const removed: string[] = [];
   const experience: ResumeSpec['experience'] = [];
@@ -238,16 +239,57 @@ export function pruneUngroundedContent(
     });
     experience.push({ ...entry, title, date_range, bullets });
   }
-  return { spec: { ...spec, experience }, removed };
+
+  // Skills are pruned only in declared mode. Dropping on soft bank-grounding would strip skills the
+  // student genuinely has but never wrote a bullet about, which is why that mode only warns.
+  //
+  // Unlike experience, an empty result needs no "never let this empty the resume" guard: a resume
+  // with no SKILLS line is honest and readable, whereas one with no experience is a blank page. If
+  // pruning empties it, the declared list is the thing to fix.
+  let skills = spec.skills;
+  if (declaredSkills?.length) {
+    const ungrounded = new Set(findUngroundedSkills(spec.skills, bank, declaredSkills));
+    if (ungrounded.size > 0) {
+      skills = spec.skills.filter((s) => !ungrounded.has(s));
+      removed.push(`dropped ungrounded skills: ${[...ungrounded].join(', ')}`);
+    }
+  }
+
+  return { spec: { ...spec, experience, skills }, removed };
 }
 
-// Skills the spec lists that don't trace back to ANY bank entry (org/title/dates/bullets/tags).
-// Surfaced as review WARNINGS, not hard issues: the bank is an incomplete view of a student's
-// real skills (they may genuinely know a tool they never wrote a bullet about), so hard-blocking
-// would strip legitimate skills. A warning flags likely JD-driven fabrication ("claims Kubernetes
-// because the JD wants it") for human review without over-correcting. A skill counts as grounded
-// if ANY of its content words appears in the bank corpus.
-export function findUngroundedSkills(skills: string[], bank: ExperienceBankEntry[]): string[] {
+// Skills the spec lists that the student cannot be said to have. Two modes, and which one applies
+// depends entirely on whether the student ever told us their skills (profiles.skills, R-015).
+//
+// DECLARED MODE (`declared` non-empty) - the list is AUTHORITATIVE and anything outside it is
+// ungrounded, full stop. Bank corpus is NOT consulted, deliberately: `experience_bank.tags` is
+// seeded junk (the same gRPC/SDK-design array copy-pasted onto 6 of 7 rows, including a Product
+// Management internship and a VP of Finance role), so grounding against it is how "gRPC" and "SDK
+// design" reached essentially every resume Mehek has sent. A source that is itself unreliable
+// cannot launder a claim. The student's own list can, which is the whole point of collecting it.
+//
+// FALLBACK MODE (no `declared`) - the pre-existing soft behaviour, unchanged: a skill is grounded
+// if any of its content words appears in the bank corpus, and misses are WARNINGS rather than
+// hard issues. The reasoning still holds when there is no declared list: the bank is an incomplete
+// view of a student's real skills (they may genuinely know a tool they never wrote a bullet
+// about), so hard-blocking on it alone would strip legitimate skills. The warning still flags
+// likely JD-driven fabrication for human review without over-correcting.
+//
+// So collecting the list is what upgrades this check from advisory to enforceable. Without it,
+// there is nothing a fabricated skill can be checked against - which is why the register's fix #1
+// (add a real skills source) had to come before its fix #4 (validate against it).
+export function findUngroundedSkills(
+  skills: string[],
+  bank: ExperienceBankEntry[],
+  declared?: string[] | null,
+): string[] {
+  const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
+  const allowed = new Set((declared ?? []).map(norm).filter(Boolean));
+
+  if (allowed.size > 0) {
+    return skills.filter((s) => norm(s) && !allowed.has(norm(s)));
+  }
+
   const corpus = wordSet(bank.map(bankEntryCorpus).join(' '));
   if (corpus.size === 0) return [];
   const out: string[] = [];
@@ -266,7 +308,12 @@ export function findUngroundedSkills(skills: string[], bank: ExperienceBankEntry
 // Volley's generalized per-student spec (no LEADERSHIP section, entries aren't hardcoded).
 // When `bank` is provided, grounding violations are added as hard issues so the retry loop
 // regenerates; pass [] to skip grounding (form-only validation).
-export function validateResumeSpec(spec: ResumeSpec, jdText: string, bank: ExperienceBankEntry[] = []): ValidationResult {
+export function validateResumeSpec(
+  spec: ResumeSpec,
+  jdText: string,
+  bank: ExperienceBankEntry[] = [],
+  declaredSkills?: string[] | null,
+): ValidationResult {
   const issues: string[] = [];
   const warnings: BulletFlag[] = [];
 
@@ -351,9 +398,19 @@ export function validateResumeSpec(spec: ResumeSpec, jdText: string, bank: Exper
         issues.push(`grounding: metric "${v.detail}" in a ${v.entry} bullet is not in the experience bank ("${(v.bullet ?? '').slice(0, 40)}")`);
       }
     }
-    // Skills are grounded softly (warning, not a hard retry-driving issue) - see findUngroundedSkills.
-    for (const skill of findUngroundedSkills(spec.skills, bank)) {
-      warnings.push({ entry: 'skills', bullet: skill, flags: ['ungrounded-skill'] });
+    // With a declared skills list the check is enforceable, so an off-list skill is a HARD issue
+    // that drives the retry loop: the student said what they know, and the resume claiming more
+    // than that is a false statement about them, not a quality nit. Without one there is nothing
+    // authoritative to check against, so it stays a warning - see findUngroundedSkills.
+    const ungroundedSkills = findUngroundedSkills(spec.skills, bank, declaredSkills);
+    if (declaredSkills?.length) {
+      for (const skill of ungroundedSkills) {
+        issues.push(`grounding: skill "${skill}" is not in the student's skills list; never add a skill because the JD asks for it`);
+      }
+    } else {
+      for (const skill of ungroundedSkills) {
+        warnings.push({ entry: 'skills', bullet: skill, flags: ['ungrounded-skill'] });
+      }
     }
   }
 

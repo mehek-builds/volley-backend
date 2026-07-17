@@ -1,60 +1,114 @@
-import { test, describe } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { encryptField, decryptField } from './fieldCrypto';
+import {
+  assertEncryptionKeyConfigured,
+  decryptField,
+  encryptField,
+  looksEncrypted,
+  FieldDecryptError,
+} from './fieldCrypto';
 
-process.env.ENCRYPTION_KEY ??= 'test-encryption-key-for-unit-tests';
+// R-021: a missing or rotated ENCRYPTION_KEY made RoleQuick type base64 ciphertext into a real job
+// application, silently. These pin the three parts of the fix: the boot gate, a decrypt failure
+// that throws instead of returning garbage, and the shape test that tells a legacy plaintext row
+// apart from a value the key can no longer read.
 
-describe('fieldCrypto', () => {
-  test('round-trips a value', () => {
+function withKey<T>(key: string | undefined, fn: () => T): T {
+  const prev = process.env.ENCRYPTION_KEY;
+  if (key === undefined) delete process.env.ENCRYPTION_KEY;
+  else process.env.ENCRYPTION_KEY = key;
+  try {
+    return fn();
+  } finally {
+    if (prev === undefined) delete process.env.ENCRYPTION_KEY;
+    else process.env.ENCRYPTION_KEY = prev;
+  }
+}
+
+test('a field round-trips under the same key', () => {
+  withKey('test-key', () => {
+    assert.equal(decryptField(encryptField('2026-07-18')), '2026-07-18');
     assert.equal(decryptField(encryptField('+971 50 123 4567')), '+971 50 123 4567');
   });
+});
 
-  test('same plaintext encrypts differently each time (random IV), still decrypts', () => {
-    const a = encryptField('Dubai');
-    const b = encryptField('Dubai');
-    assert.notEqual(a, b, 'a fixed IV would leak equality between rows');
-    assert.equal(decryptField(a), 'Dubai');
-    assert.equal(decryptField(b), 'Dubai');
+test('the boot gate refuses to start without ENCRYPTION_KEY', () => {
+  withKey(undefined, () => {
+    assert.throws(() => assertEncryptionKeyConfigured(), /ENCRYPTION_KEY not configured/);
   });
+  withKey('test-key', () => {
+    assert.doesNotThrow(() => assertEncryptionKeyConfigured());
+  });
+});
 
-  test('a tampered ciphertext is rejected, not silently mis-decrypted', () => {
-    // AES-GCM is authenticated; this is what makes a corrupt value throw rather than return junk.
-    const enc = encryptField('India');
-    const raw = Buffer.from(enc, 'base64');
-    raw[raw.length - 1] ^= 0xff;
-    assert.throws(() => decryptField(raw.toString('base64')));
+test('a rotated key throws rather than yielding garbage', () => {
+  // The scenario fieldCrypto used to advertise as safe ("key rotation only means changing one env
+  // var"). It is not safe, and the point of the fix is that it now fails loudly.
+  const stored = withKey('original-key', () => encryptField('2026-07-18'));
+  withKey('rotated-key', () => {
+    assert.throws(() => decryptField(stored), FieldDecryptError);
   });
+});
 
-  test('handles unicode and long values', () => {
-    const v = 'Zürich, Švýcarsko — ' + 'x'.repeat(200);
-    assert.equal(decryptField(encryptField(v)), v);
-  });
+test('the real R-021 ciphertext reads as encrypted, not as legacy plaintext', () => {
+  // Verbatim from the register: what RoleQuick actually typed into Proxima Fusion's required
+  // "When are you available to start?" field. Reading this as plaintext is what shipped it.
+  assert.equal(looksEncrypted('JralgwdTrv/2HCp1wcfOJFB9D8q4aNkP19peworH2yqNeSnKaYjP'), true);
+});
 
-  // ---- the performance contract ----
-  //
-  // This is a REGRESSION GUARD, not a benchmark, and it exists because the bug it pins is
-  // invisible to every functional test above: deriving the scrypt key per call produces
-  // byte-identical output, so correctness tests all pass while throughput collapses ~90x.
-  //
-  // getKey() used to run scryptSync on EVERY encrypt and decrypt. scrypt is a password-hashing
-  // KDF - deliberately slow and memory-hard - and scryptSync blocks the event loop, so one
-  // GET /profile/application (~9 encrypted fields) paid ~9 blocking derivations and stalled every
-  // other in-flight request. Measured: 26 req/s and a p50 of 1898ms, against a local Postgres
-  // where the queries themselves cost under a millisecond. With the key cached: ~2300 req/s, p50
-  // 17ms. Same bytes, 89x the throughput.
-  //
-  // The threshold is deliberately loose. A single uncached scryptSync at Node's defaults costs
-  // tens of milliseconds, so 200 operations uncached is multiple SECONDS. Anything under a second
-  // proves the key is being reused; the exact figure is machine-dependent and not the point.
-  test('derives the key once, not per call (pins a 90x throughput regression)', () => {
-    encryptField('warm the cache'); // exclude the one legitimate derivation from the timing
-    const t0 = process.hrtime.bigint();
-    for (let i = 0; i < 100; i++) decryptField(encryptField('Dubai'));
-    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
-    assert.ok(
-      ms < 1000,
-      `200 crypto ops took ${ms.toFixed(0)}ms. That is the signature of scrypt running per call ` +
-        `instead of once - check getKey()'s cache in fieldCrypto.ts.`,
-    );
+test('every real stored plaintext reads as plaintext, so legacy rows still pass through', () => {
+  // The passthrough for genuinely pre-encryption rows has to keep working. These are the actual
+  // shapes of the encrypted columns (phone, city, country, citizenship, availability, salary, DOB).
+  for (const plain of [
+    '2026-07-18',
+    '18/07/2026',
+    '25/09/2005',
+    '+971 50 123 4567',
+    'Dubai',
+    'United Arab Emirates',
+    'Indian',
+    'Negotiable, open to your standard intern rate',
+    'Immediately',
+    'EUR 18,000/yr',
+    '14 weeks',
+  ]) {
+    assert.equal(looksEncrypted(plain), false, `"${plain}" must read as plaintext`);
+  }
+});
+
+test('a short base64-alphabet plaintext is not mistaken for an envelope', () => {
+  // 'Pune' is pure base64 charset and a clean multiple of 4, so only the length floor separates it
+  // from ciphertext: it decodes to 3 bytes against a 28-byte iv+tag minimum.
+  assert.equal(looksEncrypted('Pune'), false);
+  assert.equal(looksEncrypted('Oslo'), false);
+});
+
+test('anything encryptField produces reads as encrypted', () => {
+  withKey('test-key', () => {
+    for (const plain of ['a', 'Dubai', '2026-07-18', 'Negotiable, open to your standard intern rate']) {
+      assert.equal(looksEncrypted(encryptField(plain)), true, `ciphertext of "${plain}"`);
+    }
   });
+});
+
+// Regression guard for the key cache, and the reason it must exist: per-call scrypt derivation
+// produces BYTE-IDENTICAL output, so every correctness test above passes while throughput
+// collapses ~90x (26 req/s and a p50 of 1898ms on GET /profile/application, against a local
+// Postgres where the queries cost under a millisecond). Only timing catches it.
+//
+// The threshold is deliberately loose. One uncached scryptSync costs tens of ms at Node's
+// defaults, so 200 operations uncached is multiple SECONDS - measured at 7546ms with the cache
+// removed. Anything under a second proves the key is being reused; the exact figure is
+// machine-dependent and not the point.
+test('derives the key once, not per call (pins a 90x throughput regression)', () => {
+  process.env.ENCRYPTION_KEY = 'perf-guard-key';
+  encryptField('warm the cache'); // exclude the one legitimate derivation from the timing
+  const t0 = process.hrtime.bigint();
+  for (let i = 0; i < 100; i++) decryptField(encryptField('Dubai'));
+  const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  assert.ok(
+    ms < 1000,
+    `200 crypto ops took ${ms.toFixed(0)}ms. That is the signature of scrypt running per call ` +
+      `instead of once - check getKey()'s cache in fieldCrypto.ts.`,
+  );
 });

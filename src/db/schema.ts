@@ -78,6 +78,7 @@ export const profiles = pgTable('profiles', {
   // URL has to be kept or the file is unreachable even once it is really uploaded.
   // NULL is normal: the upload is best-effort and a blob outage must not fail a signup.
   resume_url: text('resume_url'),
+  voice_pref: text('voice_pref'),
   // string[] of the skills the student ACTUALLY has, in their own words. The one authoritative
   // source for the resume's SKILLS line (R-015).
   //
@@ -92,12 +93,7 @@ export const profiles = pgTable('profiles', {
   // and the validator falls back to soft bank-grounding. A populated list is AUTHORITATIVE: skills
   // outside it are hard-rejected, which is only safe BECAUSE the list is the student's own
   // statement rather than something inferred from their bullets.
-  //
-  // Copied verbatim from R-015 (efc59e6, fix/qa-register-backend). The column is ALREADY LIVE in
-  // prod, so it must be declared here or `drizzle-kit push` from this branch would drop it and
-  // take the data with it. Keep this definition identical to R-015's until that branch merges.
   skills: jsonb('skills'),
-  voice_pref: text('voice_pref'),
   updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
 

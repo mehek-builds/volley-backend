@@ -15,7 +15,10 @@ export interface ResumeSpec {
     date_range: string;
     bullets: string[]; // exactly 3, chosen/lightly rewritten from bullet_variants
   }>;
-  skills: string[]; // ordered by relevance to the JD, JD keywords surfaced first
+  // The student's OWN skills, those matching the JD first. NOT "JD keywords surfaced first", which
+  // is what this said and what the prompt asked for - with no skills source in the system, that
+  // instruction was an invitation to keyword-stuff, and the model took it (R-015).
+  skills: string[];
 }
 
 // Content rules ported from the Dubai off-cycle resume engine's validate_resume.py /
@@ -37,8 +40,13 @@ Rules:
 - Pick up to 3 experience entries that best match the JD, most relevant first.
 - For each entry pick exactly 3 bullets: reuse a stored bullet_variant verbatim when one already fits well;
   only lightly rewrite (never fabricate achievements) when no stored variant surfaces the JD's language.
-- Order skills so the ones matching JD keywords come first.
-- Never invent an employer, title, or metric that isn't grounded in the experience bank.
+- "skills": list ONLY skills from the student's Skills list, copied as they are written there. Of those,
+  put the ones matching the JD first. If the Skills list is empty, use only skills clearly evidenced by a
+  bullet you selected.
+- NEVER add a skill because the job description asks for it. If the JD wants a tool and the student's
+  Skills list doesn't have it, they don't have it: leave it out. A resume that omits a skill costs an
+  interview; a resume that claims one the student lacks costs their credibility in the screen.
+- Never invent an employer, title, metric, or skill that isn't grounded in the experience bank.
 - Use the student's real school and degree exactly as given in the Education line; never invent or
   upgrade a degree, and leave "degree" an empty string if none is provided.
 - "coursework": include only courses grounded in the experience bank or the job description; if none
@@ -86,6 +94,9 @@ export async function generateResumeSpec(
   bank: ExperienceBankEntry[],
   education: { school: string; degree?: string; grad_year?: number },
   feedback?: string[],
+  // The student's declared skills (profiles.skills). Empty/undefined means they never gave us a
+  // list, which the validator treats as soft-grounding rather than as "they have no skills".
+  skills?: string[] | null,
 ): Promise<ResumeSpec> {
   const feedbackBlock = feedback?.length
     ? `\n\nThe previous attempt had these issues - fix them in this revision:\n${feedback.map((f) => `- ${f}`).join('\n')}`
@@ -98,7 +109,12 @@ export async function generateResumeSpec(
   // cache_control marker because it is the large one - a marker on the short rules block alone
   // was below the model's minimum cacheable prefix and silently cached nothing. Bank is
   // serialized compactly (no 2-space pretty-print) to nearly halve its token weight.
-  const contextBlock = `Job: ${role} at ${company}\n\nJob description:\n${jdText}\n\nEducation: ${education.school}${education.degree ? `, ${education.degree}` : ''}${education.grad_year ? `, class of ${education.grad_year}` : ''}\n\nExperience bank:\n${JSON.stringify(bank)}`;
+  // The skills list sits in the cached prefix alongside the bank: it is per-student, not per-JD, so
+  // it is identical across both attempts of a generate and across every application they file.
+  const skillsBlock = skills?.length
+    ? `\n\nSkills list (the student's own skills - the ONLY skills that may appear in "skills"):\n${JSON.stringify(skills)}`
+    : `\n\nSkills list: none provided. Use only skills clearly evidenced by a bullet you selected, and do not add skills from the job description.`;
+  const contextBlock = `Job: ${role} at ${company}\n\nJob description:\n${jdText}\n\nEducation: ${education.school}${education.degree ? `, ${education.degree}` : ''}${education.grad_year ? `, class of ${education.grad_year}` : ''}${skillsBlock}\n\nExperience bank:\n${JSON.stringify(bank)}`;
   const response = await client.messages.create({
     model: 'claude-sonnet-5',
     max_tokens: 4096,
