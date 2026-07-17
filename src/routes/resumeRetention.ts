@@ -15,15 +15,24 @@ import { sweepExpiredResumeBlobs, RESUME_RETENTION_DAYS } from '../lib/resumeAcc
 // alone; only the PDF goes. GET /resume/download 404s for a swept file, which is the intended
 // end state, not an error.
 async function handleSweep(request: FastifyRequest, reply: FastifyReply, fastify: FastifyInstance) {
+  // Every refusal logs. The success path already logs on every run because "a retention promise
+  // that quietly stops running looks identical to one that has nothing to do" - but that reasoning
+  // applies twice as hard here, where the sweep never runs at all. A 503 answered to Vercel Cron
+  // in silence is exactly how the adapter-health job died unnoticed (see lib/cronAuth.ts), and the
+  // privacy policy now states the 30-day window as fact, so a silently-dead sweep makes the page
+  // lie rather than merely degrading a feature.
   if (!isCronConfigured()) {
+    fastify.log.warn('resume retention sweep REFUSED: neither INTERNAL_CRON_SECRET nor CRON_SECRET is set, so resume files are NOT being deleted and the privacy policy overstates retention');
     return reply
       .status(503)
       .send({ error: 'resume retention sweep not configured (set INTERNAL_CRON_SECRET or CRON_SECRET)' });
   }
   if (!isCronAuthorized(request)) {
+    fastify.log.warn('resume retention sweep REFUSED: caller presented no valid secret; if this is Vercel Cron, CRON_SECRET does not match and the sweep is not running');
     return reply.status(401).send({ error: 'unauthorized' });
   }
   if (!process.env.BLOB_READ_WRITE_TOKEN) {
+    fastify.log.warn('resume retention sweep REFUSED: BLOB_READ_WRITE_TOKEN is not set, so resume files are NOT being deleted');
     return reply.status(503).send({ error: 'BLOB_READ_WRITE_TOKEN not configured' });
   }
 

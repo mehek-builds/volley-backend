@@ -102,9 +102,14 @@ export function readDownloadToken(token: string, now = Date.now()): DownloadToke
   }
 }
 
-// The DB stores only the object key (generated_resumes.resume_object_key), not the blob URL,
-// and @vercel/blob's head()/del() both want a URL. list({ prefix }) is the one way to get from
-// key to URL without a schema migration, which is why this lookup exists at all.
+// The DB stores only the object key (generated_resumes.resume_object_key), not the blob URL, and
+// @vercel/blob's head()/del() both want a URL. list({ prefix }) is the one way to get from key to
+// URL without a schema migration, which is why this lookup exists at all.
+//
+// This only works because resume.ts stores the pathname `put()` ACTUALLY assigned rather than the
+// one it asked for. `addRandomSuffix` defaults to true, so those differ, and storing the requested
+// key made this return null for every resume ever generated - a 404 on every download, swallowed
+// by the extension's catch, shipping applications with no resume and logging nothing.
 export async function resolveBlobUrl(objectKey: string): Promise<string | null> {
   const { blobs } = await list({ prefix: objectKey, limit: 5 });
   return blobs.find((b) => b.pathname === objectKey)?.url ?? null;
@@ -121,12 +126,18 @@ async function listAll(prefix: string): Promise<Array<{ url: string; pathname: s
   return out;
 }
 
-// Deletes every generated resume file belonging to one user. MUST run before the user row is
-// deleted: generated_resumes cascades on users.id, so dropping the user first destroys
-// resume_object_key - the only pointer to these blobs - and orphans public PII files with no
-// way left to find them.
-export async function deleteResumeBlobsForUser(userId: string): Promise<number> {
-  const blobs = await listAll(resumePrefix(userId));
+// Deletes every blob belonging to one user. MUST run before the user row is deleted:
+// generated_resumes cascades on users.id, so dropping the user first destroys resume_object_key -
+// the only pointer to these blobs - and orphans public PII files with no way left to find them.
+//
+// Scoped to the whole `users/<id>/` prefix rather than just `users/<id>/resumes/`, so that
+// anything else ever written under a user is deleted with them by default. profile.ts already
+// computes `users/<id>/resume.pdf` for the uploaded master resume (it never actually writes it
+// today, so nothing is stored there yet); the day someone wires that up, a resumes-only prefix
+// would silently leave a public PII PDF behind with its pointer already cascade-deleted. Deleting
+// by owner rather than by category means that whole class of mistake cannot happen.
+export async function deleteBlobsForUser(userId: string): Promise<number> {
+  const blobs = await listAll(`users/${userId}/`);
   if (blobs.length === 0) return 0;
   await del(blobs.map((b) => b.url));
   return blobs.length;

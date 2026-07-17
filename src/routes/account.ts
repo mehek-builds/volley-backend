@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { db } from '../db/index';
 import {
   users,
@@ -14,7 +14,7 @@ import {
   email_verification_codes,
 } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
-import { deleteResumeBlobsForUser, mintDownloadToken, DOWNLOAD_TOKEN_TTL_MS } from '../lib/resumeAccess';
+import { deleteBlobsForUser, mintDownloadToken } from '../lib/resumeAccess';
 import { apiBaseFor } from '../lib/apiBase';
 import { decryptRow } from './applicationProfile';
 
@@ -42,8 +42,13 @@ export async function accountRoutes(fastify: FastifyInstance) {
     const outreach = await db.select().from(outreach_events).where(eq(outreach_events.user_id, userId));
     const fills = await db.select().from(autofill_events).where(eq(autofill_events.user_id, userId));
     // usage_counters has no FK to users (it is keyed by a plain string so pre-auth endpoints can
-    // rate-limit by email), so it has to be queried - and later deleted - by key explicitly.
-    const counters = await db.select().from(usage_counters).where(eq(usage_counters.key, userId));
+    // rate-limit by email), so it has to be queried - and later deleted - by key explicitly. Both
+    // keys: auth.ts rate-limits the pre-auth endpoints by EMAIL, so an export keyed only on the
+    // user id would omit rows we hold about her.
+    const counters = await db
+      .select()
+      .from(usage_counters)
+      .where(inArray(usage_counters.key, [userId, request.jwtPayload!.email]));
 
     const base = apiBaseFor(request);
 
@@ -60,9 +65,7 @@ export async function accountRoutes(fastify: FastifyInstance) {
         // Links expire (DOWNLOAD_TOKEN_TTL_MS), and files past the retention window are already
         // gone, so this 404s rather than resolving. Called out in `notes` so an empty download
         // does not read as data loss.
-        download_url: `${base}/resume/download?t=${mintDownloadToken(userId, row.resume_object_key, {
-          ttlMs: DOWNLOAD_TOKEN_TTL_MS,
-        })}`,
+        download_url: `${base}/resume/download?t=${mintDownloadToken(userId, row.resume_object_key)}`,
       })),
       outreach_events: outreach,
       autofill_events: fills,
@@ -102,7 +105,7 @@ export async function accountRoutes(fastify: FastifyInstance) {
     // returning an error is the recoverable failure; the other order is not.
     let deletedFiles: number;
     try {
-      deletedFiles = await deleteResumeBlobsForUser(userId);
+      deletedFiles = await deleteBlobsForUser(userId);
     } catch (err) {
       fastify.log.error({ err, userId }, 'account deletion aborted: could not delete resume files');
       return reply.status(500).send({
@@ -112,7 +115,13 @@ export async function accountRoutes(fastify: FastifyInstance) {
 
     try {
       // Neither of these has an FK to users, so the cascade does not reach them.
-      await db.delete(usage_counters).where(eq(usage_counters.key, userId));
+      //
+      // BOTH keys, not just the user id. usage_counters.key is a plain string precisely so the
+      // pre-auth endpoints can rate-limit before a user id exists, and auth.ts does exactly that:
+      // `allowHourly(email, ...)` for session/request-code/verify-code. Deleting only the userId
+      // rows left every one of those keyed by her email address, tying her address to a deleted
+      // account forever, with nothing else in the codebase that would ever purge them.
+      await db.delete(usage_counters).where(inArray(usage_counters.key, [userId, email]));
       await db.delete(email_verification_codes).where(eq(email_verification_codes.email, email));
       // Cascades to profiles, application_profile, experience_bank, generated_resumes,
       // outreach_events and autofill_events; learning_signals is onDelete:'set null', which

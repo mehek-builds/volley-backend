@@ -173,18 +173,27 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     }
 
     const jdHash = createHash('sha256').update(body.jd_text).digest('hex').slice(0, 16);
-    const objectKey = `users/${userId}/resumes/${jdHash}-${Date.now()}.pdf`;
+    const requestedKey = `users/${userId}/resumes/${jdHash}-${Date.now()}.pdf`;
 
     let resumeUrl: string;
+    let objectKey: string;
     try {
       // `access: 'public'` is not a choice - it is the only value @vercel/blob@0.27.3 accepts.
       // What we control is who ever learns the resulting URL, and the answer is nobody: the
       // blob URL is permanent and unauthenticated, so it stays server-side and the client gets
-      // a 5-minute capability link to /resume/download instead. See lib/resumeAccess.ts.
-      await put(objectKey, pdfBuffer, {
+      // a capability link to /resume/download instead. See lib/resumeAccess.ts.
+      const blob = await put(requestedKey, pdfBuffer, {
         access: 'public',
         contentType: 'application/pdf',
       });
+      // Store the pathname the API actually assigned, NOT the one we asked for. `addRandomSuffix`
+      // defaults to TRUE in this SDK (create-folder-*.d.ts documents `@defaultvalue true`, and the
+      // header is only sent when the option is set explicitly), so the stored object is really at
+      // `<requestedKey minus .pdf>-<random>.pdf`. Writing requestedKey here instead made every
+      // later key -> URL lookup miss, which 404'd every download and silently shipped applications
+      // with no resume attached. The suffix is left ON deliberately: an unguessable pathname is
+      // defence in depth on an object we cannot make private.
+      objectKey = blob.pathname;
       resumeUrl = `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(userId, objectKey)}`;
     } catch (err) {
       fastify.log.error(err);
@@ -229,7 +238,8 @@ export async function resumeRoutes(fastify: FastifyInstance) {
   // script, which runs in the ATS page's origin and has no access to the auth token (that lives
   // in the background worker's chrome.storage) - it does a bare `fetch(resume_url)`. An
   // Authorization header is therefore impossible here, and the token in `t` is the credential
-  // instead. It is opaque, single-purpose, scoped to one object key, and expires in 5 minutes,
+  // instead. It is opaque, single-purpose, scoped to one object key, and expires (see
+  // DOWNLOAD_TOKEN_TTL_MS, which is the one place that number lives),
   // which is what makes handing it to a page origin acceptable when handing over a permanent
   // public blob URL was not.
   fastify.get('/resume/download', async (request: FastifyRequest, reply: FastifyReply) => {
