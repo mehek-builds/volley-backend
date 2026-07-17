@@ -188,7 +188,15 @@ export const application_profile = pgTable('application_profile', {
   citizenship: text('citizenship'),
   work_authorized: boolean('work_authorized'),
   needs_sponsorship: boolean('needs_sponsorship'),
+  // WHEN she can start. Stored ISO (YYYY-MM-DD) because onboarding uses <input type="date">:
+  // a locale-shaped string is silently dropped by a picker expecting the other order (R-014).
   availability_date: text('availability_date'),
+  // HOW LONG she is available ("14 weeks"), which is a different question from when she can start.
+  // Without this column the extension could recognise a duration question but never answer it, so
+  // "Length or term/length of availability (10-14 weeks)" got "Immediately" - a start time in
+  // answer to a duration (R-014 facet b). Free text, not a date: "14 weeks", "3 months", "a
+  // semester" are all legitimate and none of them parse.
+  availability_term: text('availability_term'),
   desired_salary: text('desired_salary'),
   date_of_birth: text('date_of_birth'), // encrypted; filled only where a form explicitly asks (never SSN)
   eeo_prefs: jsonb('eeo_prefs'), // nullable, only set if the student explicitly opts in
