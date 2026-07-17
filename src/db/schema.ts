@@ -233,8 +233,16 @@ export const application_profile = pgTable('application_profile', {
   // The currency `desired_salary` is denominated in, e.g. "EUR". Separate and plaintext: a bare
   // "80000" is not an answer, it is an ambiguity, and replaying a figure earned against one
   // currency onto a posting in another states something the student never said. A Munich
-  // application parked mid-fill for exactly this (needed "a salary figure + unit"). Fill leaves
-  // the field blank unless BOTH are present, the same way gpa needs gpa_scale to be readable.
+  // application parked mid-fill for exactly this (needed "a salary figure + unit").
+  //
+  // ⚠️ THE COLUMN EXISTS; THE GUARD DOES NOT YET. This comment used to claim fill leaves the field
+  // blank unless both are present. It does not: desiredAnswer's rule is still
+  // `SALARY_QUESTION.test(l) && ap.desired_salary`, with no currency check, so a figure harvested
+  // from a EUR form WILL be typed into a CAD field. Storing the currency is only half the fix -
+  // the adapters have to require the pair, and that lives in the extension
+  // (rolequick-autofill#7's classifyField/desiredAnswer), not here. Until it lands, treat a
+  // populated desired_salary with a null currency as a known mis-fill risk rather than a solved
+  // problem.
   desired_salary_currency: text('desired_salary_currency'),
   date_of_birth: text('date_of_birth'), // encrypted; filled only where a form explicitly asks (never SSN)
   // Academic record (R-005). PRD-v2 Section 4D promised "GPA (if listed)" as auto-extract-no-ask,

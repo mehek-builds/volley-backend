@@ -86,7 +86,11 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     // enough: /resume/generate and /application/answer both hard-400 without bank entries, so a
     // student with a parse but no bank has an account that looks set up and cannot generate
     // anything. Treating that as step 0 sends them back to the one screen that fixes it.
-    const has_resume = !!profile?.parsed_json && (bankCount?.n ?? 0) > 0;
+    // Checks a REQUIRED key, not object truthiness: `!!{}` is true, so a parse that returned
+    // nothing usable would advance the student past step 01 with no name, school or grad_year -
+    // and the targeting screen would then derive its period options from grad_year 0.
+    const parsed = profile?.parsed_json as { full_name?: string } | null | undefined;
+    const has_resume = !!parsed?.full_name && (bankCount?.n ?? 0) > 0;
     const has_applied = (applyCount?.n ?? 0) > 0;
 
     const learned = HARVEST_FIELDS.filter((f) => readable(appProfile, f) !== null);
@@ -103,7 +107,13 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     // and only ask for the resume fourth, which earns commitment before the expensive ask. The
     // difference is that their opener exists to manufacture a yes, while these are questions we
     // were always going to ask - just reordered to the point where they cost nothing.
-    const has_focus = Array.isArray(target?.categories) && (target.categories as string[]).length > 0;
+    // Answered, not non-empty. `length > 0` looks stricter but it strands: a PUT of
+    // {categories: []} is valid per targetingBodySchema, saves fine, and then derives 'focus'
+    // forever with no way forward through the API. The UI already requires at least one before
+    // Continue enables, so tolerating [] costs nothing real and removes a footgun whose only
+    // guard would otherwise live in the client - the wrong layer for an invariant the server's
+    // own state machine reads.
+    const has_focus = Array.isArray(target?.categories);
 
     // Targeting counts as answered on the main period: it is the only one of the remaining three
     // with no sensible default, so a student who set it went through the screen on purpose.

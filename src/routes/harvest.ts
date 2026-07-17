@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { db } from '../db/index';
 import { application_profile, users } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
@@ -158,12 +158,27 @@ export async function harvestRoutes(fastify: FastifyInstance) {
 
     if (kept.length > 0) {
       try {
+        // COALESCE, not a plain SET. The read above and this write are not atomic, so two flushes
+        // racing (a pagehide flush overlapping the idle flush, or two tabs on the same ATS) can
+        // both see a field empty and both pass the check - and a plain SET would let the later one
+        // win, overwriting a value the earlier one had just learned. COALESCE keeps whatever is
+        // already stored, which makes fill-if-empty a property of the DATABASE rather than of the
+        // extension happening to serialise its flushes.
+        //
+        // `kept` above stays best-effort: it only drives the ticker's copy, so a lost race shows a
+        // field as learned that a concurrent write already learned. Same outcome, right value.
+        const coalesced = Object.fromEntries(
+          Object.keys(row).map((k) => [
+            k,
+            sql`coalesce(${application_profile[k as keyof typeof application_profile]}, ${row[k]})`,
+          ]),
+        );
         await db
           .insert(application_profile)
           .values({ user_id: userId, ...row, updated_at: new Date() })
           .onConflictDoUpdate({
             target: application_profile.user_id,
-            set: { ...row, updated_at: new Date() },
+            set: { ...coalesced, updated_at: new Date() },
           });
       } catch (err) {
         fastify.log.error(err);
