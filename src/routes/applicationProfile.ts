@@ -4,7 +4,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '../db/index';
 import { application_profile } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
-import { encryptField, decryptField } from '../lib/fieldCrypto';
+import { encryptField, decryptField, looksEncrypted, FieldDecryptError } from '../lib/fieldCrypto';
 
 // Fields sensitive enough to encrypt at rest per PRD-v2 Section 4: phone/address/
 // work-authorization status. Links and referral_source are not identity-sensitive
@@ -55,19 +55,58 @@ function encryptRow(body: z.infer<typeof bodySchema>) {
   return row;
 }
 
+// R-021: a value that fails to decrypt is NOT automatically legacy plaintext.
+//
+// The catch that used to sit here assumed it was, and passed the raw value straight through. So a
+// missing or rotated ENCRYPTION_KEY did not fail: it quietly served base64 ciphertext, which the
+// extension then typed into real job applications. Caught live on Proxima Fusion filling the
+// required "When are you available to start?" field, with auto-submit already proven to fire.
+//
+// The two cases are now told apart by shape. A value that does not look like our envelope is
+// genuinely legacy plaintext and passes through exactly as before. A value that DOES look like our
+// envelope but will not decrypt means the key is wrong, rotated or gone, which is a config error
+// about the server, not data the student can fix.
+//
+// That case throws, and the route turns it into a 500. It deliberately does NOT degrade to "null
+// the bad field and serve the rest", even though a blank field would be safe to fill: the client
+// round-trips the fetched profile verbatim on save (see bodySchema above) and PUT writes it back
+// with `set`, so a served null would be saved straight over the still-encrypted column and destroy
+// the only copy of the data. Refusing to serve keeps a recoverable problem recoverable.
 function decryptRow(row: typeof application_profile.$inferSelect) {
   const out: Record<string, unknown> = { ...row };
   for (const field of ENCRYPTED_FIELDS) {
     const value = out[field];
-    if (typeof value === 'string' && value.length > 0) {
-      try {
-        out[field] = decryptField(value);
-      } catch {
-        // Legacy/plaintext row (e.g. pre-encryption data) — return as-is rather than 500ing.
-      }
+    if (typeof value === 'string' && value.length > 0 && looksEncrypted(value)) {
+      out[field] = decryptField(value); // throws FieldDecryptError on a wrong or missing key
     }
   }
   return out;
+}
+
+// Serve a profile row, or refuse loudly if it cannot be decrypted. Shared by GET and PUT so the
+// two cannot drift: PUT re-reads and returns the row too, and would otherwise emit ciphertext by
+// the same route the GET no longer does.
+function sendProfile(
+  fastify: FastifyInstance,
+  reply: FastifyReply,
+  row: typeof application_profile.$inferSelect,
+  userId: string,
+) {
+  try {
+    return reply.status(200).send(decryptRow(row));
+  } catch (err) {
+    if (err instanceof FieldDecryptError) {
+      fastify.log.error(
+        { err, userId },
+        'ENCRYPTION_KEY cannot decrypt stored application_profile values. Refusing to serve the profile rather than emit ciphertext into an application (R-021). Check that ENCRYPTION_KEY matches the one the rows were written with.',
+      );
+      return reply.status(500).send({
+        error:
+          'Your saved details could not be read on the server. This is a configuration problem on our side, not a problem with your data, and re-entering it will not help. Please contact support.',
+      });
+    }
+    throw err;
+  }
 }
 
 export async function applicationProfileRoutes(fastify: FastifyInstance) {
@@ -77,7 +116,7 @@ export async function applicationProfileRoutes(fastify: FastifyInstance) {
     if (rows.length === 0) {
       return reply.status(404).send({ error: 'Application profile not found' });
     }
-    return reply.status(200).send(decryptRow(rows[0]));
+    return sendProfile(fastify, reply, rows[0], userId);
   });
 
   fastify.put('/profile/application', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
@@ -106,6 +145,6 @@ export async function applicationProfileRoutes(fastify: FastifyInstance) {
     }
 
     const rows = await db.select().from(application_profile).where(eq(application_profile.user_id, userId)).limit(1);
-    return reply.status(200).send(decryptRow(rows[0]));
+    return sendProfile(fastify, reply, rows[0], userId);
   });
 }
