@@ -10,3 +10,5 @@ drizzle/meta/
 *.js.map
 .vercel
 .env*
+QA-SHIMS-README.md
+render-example-resumes.cjs
