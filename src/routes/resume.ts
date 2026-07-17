@@ -70,6 +70,11 @@ export async function resumeRoutes(fastify: FastifyInstance) {
 
     const profileRows = await db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1);
     const parsed = profileRows[0]?.parsed_json as { school?: string; grad_year?: number; full_name?: string; degree?: string } | undefined;
+    // The student's declared skills, the only authoritative source for the SKILLS line (R-015).
+    // Filtered rather than cast: this is jsonb, so a hand-edited row can hold anything, and a
+    // non-string in here would reach the model as junk and the validator as an unmatchable entry.
+    const declaredSkills = (Array.isArray(profileRows[0]?.skills) ? profileRows[0].skills : [])
+      .filter((s): s is string => typeof s === 'string' && s.trim().length > 0);
 
     // Generate -> validate -> (if issues) regenerate once with the issues as feedback -> validate
     // again and accept best-effort. Same two-layer pattern as the Dubai engine: the prompt states
@@ -89,6 +94,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
           bank,
           { school: parsed?.school ?? '', degree: parsed?.degree, grad_year: parsed?.grad_year },
           attempt > 1 ? specIssues : undefined,
+          declaredSkills,
         );
       } catch (err) {
         fastify.log.error(err);
@@ -100,7 +106,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         continue;
       }
 
-      const result = validateResumeSpec(spec, body.jd_text, bank);
+      const result = validateResumeSpec(spec, body.jd_text, bank, declaredSkills);
       specIssues = result.issues;
       specWarnings = result.warnings;
       atsCoverage = result.ats_keyword_coverage_pct;
@@ -118,7 +124,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     // formatting mismatch, not real fabrication), keep the spec and surface a loud quality issue
     // instead of shipping a blank page.
     let groundingRemoved: string[] = [];
-    const pruned = pruneUngroundedContent(spec, bank);
+    const pruned = pruneUngroundedContent(spec, bank, declaredSkills);
     if (pruned.removed.length > 0) {
       if (pruned.spec.experience.length === 0 && spec.experience.length > 0) {
         // Every entry failed to match the bank. Usually an org-name formatting mismatch rather than
@@ -130,6 +136,11 @@ export async function resumeRoutes(fastify: FastifyInstance) {
           'resume grounding pruned ALL experience entries; shipping unpruned - review for fabrication',
         );
         specIssues = [...specIssues, 'grounding: could not verify any experience entry against the bank; shipped unpruned - review before sending'];
+        // ...but still take the pruned SKILLS. The reason this branch ships unpruned is that an
+        // empty experience list is a blank page, which is worse than an unverified one. That
+        // reasoning does not extend to skills: dropping a fabricated skill costs nothing, and
+        // letting one ride through on an experience-matching quirk is exactly the R-015 harm.
+        spec = { ...spec, skills: pruned.spec.skills };
       } else {
         spec = pruned.spec;
         groundingRemoved = pruned.removed;
