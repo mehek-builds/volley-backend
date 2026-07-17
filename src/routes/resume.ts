@@ -5,8 +5,9 @@ import { createHash } from 'node:crypto';
 import { put } from '@vercel/blob';
 import pdfParse from 'pdf-parse';
 import { db } from '../db/index';
-import { experience_bank, profiles, generated_resumes, autofill_events } from '../db/schema';
+import { profiles, generated_resumes, autofill_events } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
+import { readExperienceBank } from '../db/experienceBank';
 import { allowHourly, bumpCounter, getCount, getEntitlements, LIMITS, monthPeriod, quotaExceededPayload, rateLimitedReply } from '../middleware/quota';
 import { generateResumeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import { renderResumePdf } from '../engine/resumeRender';
@@ -63,16 +64,8 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       return rateLimitedReply(reply);
     }
 
-    // ORDER BY is load-bearing, not cosmetic (R-022). Postgres promises no row order without one,
-    // and the bank is fed straight into grounding, where the entry chosen for an org used to depend
-    // on which row came back first. Two identical requests could therefore produce different
-    // resumes. matchBankEntry no longer breaks ties on array order, but a stable read keeps the
-    // whole pipeline reproducible: same bank, same JD, same spec to debug.
-    const bank = await db
-      .select()
-      .from(experience_bank)
-      .where(eq(experience_bank.user_id, userId))
-      .orderBy(experience_bank.created_at, experience_bank.id);
+    // Ordered read, always: see readExperienceBank for why the order is load-bearing (R-022).
+    const bank = await readExperienceBank(userId);
     if (bank.length === 0) {
       return reply.status(400).send({ error: 'No experience bank found - complete onboarding first' });
     }

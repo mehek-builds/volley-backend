@@ -140,6 +140,16 @@ function acronymTokenOf(s: string): string | null {
 //
 // Jaccard (inter / union) does not saturate: the one-word "Traeco" scores 1/5 = 0.2 while the full
 // entry scores 5/5 = 1.0, so the specific entry wins on merit rather than on row order.
+//
+// The two kinds of evidence are TIERS, not one scale. A shared literal token is stronger evidence
+// than an initialism inference, so every word match must outrank every acronym match: word matches
+// occupy (1, 2] as 1 + Jaccard, acronyms sit at exactly 1. Ranking them on one scale is a bug that
+// a first cut of this fix actually shipped - Jaccard put a literal match at 1/3 while the acronym
+// branch still returned a flat 1, so a bank holding "MIT Media Lab" AND "Massachusetts Institute of
+// Technology" resolved a spec's "MIT" to the university and then rewrote its title, which is the
+// exact R-022 damage this function exists to prevent.
+const ACRONYM_MATCH_SCORE = 1; // strictly below any word match, which is 1 + a positive Jaccard
+
 function orgMatchScore(genOrg: string, bankOrg: string): number {
   const gen = wordSet(genOrg);
   const src = wordSet(bankOrg);
@@ -148,13 +158,13 @@ function orgMatchScore(genOrg: string, bankOrg: string): number {
     for (const t of gen) if (src.has(t)) inter++;
     if (inter > 0) {
       const containment = inter / Math.min(gen.size, src.size);
-      if (containment >= 0.5) return inter / (gen.size + src.size - inter);
+      if (containment >= 0.5) return 1 + inter / (gen.size + src.size - inter);
     }
   }
   const genAcr = acronymTokenOf(genOrg);
-  if (genAcr && genAcr === orgInitialism(bankOrg)) return 1;
+  if (genAcr && genAcr === orgInitialism(bankOrg)) return ACRONYM_MATCH_SCORE;
   const srcAcr = acronymTokenOf(bankOrg);
-  if (srcAcr && srcAcr === orgInitialism(genOrg)) return 1;
+  if (srcAcr && srcAcr === orgInitialism(genOrg)) return ACRONYM_MATCH_SCORE;
   return 0;
 }
 

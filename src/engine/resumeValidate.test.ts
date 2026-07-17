@@ -422,3 +422,47 @@ test('R-023: the coverage number is still computed and reported', () => {
   const r = validateResumeSpec(s, 'python python python rest rest services services engineer', bank);
   assert.ok(typeof r.ats_keyword_coverage_pct === 'number' && r.ats_keyword_coverage_pct > 0);
 });
+
+// ─── R-022 follow-up: a literal token match must beat an initialism inference ────────────────
+//
+// Caught in code review of the R-022 fix itself. Ranking word matches by Jaccard while the acronym
+// branch still returned a flat 1 meant the weaker evidence won: a spec's "MIT" scored 1/3 against
+// "MIT Media Lab" but 1.0 against "Massachusetts Institute of Technology". The H2 test above misses
+// this because its bank holds a single entry, so nothing competes for the match.
+
+const acronymCompetitionBank: ExperienceBankEntry[] = [
+  bankEntry({ id: 'lab', org: 'MIT Media Lab', title: 'Researcher', bullet_variants: ['Built a tangible interface.'] }),
+  bankEntry({ id: 'uni', org: 'Massachusetts Institute of Technology', title: 'Student', bullet_variants: ['Studied things.'] }),
+];
+
+test('R-022: a literal shared token outranks an initialism when both are in the bank', () => {
+  const s = spec([{ org: 'MIT', title: 'Researcher', date_range: '2024', bullets: ['Built a tangible interface.'] }]);
+  assert.deepEqual(
+    findGroundingViolations(s, acronymCompetitionBank),
+    [],
+    '"MIT" must resolve to MIT Media Lab, not to the university it is also an initialism of',
+  );
+});
+
+test('R-022: that ranking does not depend on bank row order either', () => {
+  const s = spec([{ org: 'MIT', title: 'Researcher', date_range: '2024', bullets: ['Built a tangible interface.'] }]);
+  assert.deepEqual(findGroundingViolations(s, [...acronymCompetitionBank].reverse()), []);
+});
+
+test('R-022: the pruner does not rewrite the title via the losing acronym match', () => {
+  for (const b of [acronymCompetitionBank, [...acronymCompetitionBank].reverse()]) {
+    const { spec: cleaned, removed } = pruneUngroundedContent(
+      spec([{ org: 'MIT', title: 'Researcher', date_range: '2024', bullets: ['Built a tangible interface.'] }]),
+      b,
+    );
+    assert.equal(cleaned.experience[0].title, 'Researcher');
+    assert.equal(removed.length, 0, `nothing should be pruned, got: ${removed.join('; ')}`);
+  }
+});
+
+test('R-022: an acronym still matches when it is the ONLY evidence available', () => {
+  // The tier must not disable the acronym path, only rank it below a literal match (guards H2).
+  const uniOnly = [acronymCompetitionBank[1]];
+  const s = spec([{ org: 'MIT', title: 'Student', date_range: '2024', bullets: ['Studied things.'] }]);
+  assert.deepEqual(findGroundingViolations(s, uniOnly).filter((v) => v.kind === 'org'), []);
+});
