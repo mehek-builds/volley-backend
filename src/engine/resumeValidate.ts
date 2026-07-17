@@ -248,7 +248,7 @@ export function pruneUngroundedContent(
   // pruning empties it, the declared list is the thing to fix.
   let skills = spec.skills;
   if (declaredSkills?.length) {
-    const ungrounded = new Set(findUngroundedSkills(spec.skills, bank, declaredSkills));
+    const ungrounded = new Set(findUngroundedSkills(spec.skills, bank, declaredSkills, spec.skill_source));
     if (ungrounded.size > 0) {
       skills = spec.skills.filter((s) => !ungrounded.has(s));
       removed.push(`dropped ungrounded skills: ${[...ungrounded].join(', ')}`);
@@ -282,12 +282,28 @@ export function findUngroundedSkills(
   skills: string[],
   bank: ExperienceBankEntry[],
   declared?: string[] | null,
+  skillSource?: Record<string, string> | null,
 ): string[] {
   const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
   const allowed = new Set((declared ?? []).map(norm).filter(Boolean));
 
   if (allowed.size > 0) {
-    return skills.filter((s) => norm(s) && !allowed.has(norm(s)));
+    // A skill survives declared mode two ways, and only two:
+    //   1. it is verbatim one of the student's declared skills, or
+    //   2. spec.skill_source says it RENAMES one of them, for the JD's vocabulary.
+    // Case 2 is why this map is trusted at all: the model may relabel "SQL" as the JD's "ETL", but
+    // the label it claims to be renaming must itself be a real declared skill. So a rename can never
+    // introduce a skill the student never claimed - the worst it can do is mislabel one they did,
+    // which the prompt's negative examples target and which stays visible in skill_source rather than
+    // vanishing into the resume. Without this, every rename would be silently dropped here (R-015).
+    return skills.filter((s) => {
+      const n = norm(s);
+      if (!n) return false;
+      if (allowed.has(n)) return false;
+      const renames = skillSource?.[s];
+      if (renames && allowed.has(norm(renames))) return false;
+      return true;
+    });
   }
 
   const corpus = wordSet(bank.map(bankEntryCorpus).join(' '));
@@ -402,7 +418,7 @@ export function validateResumeSpec(
     // that drives the retry loop: the student said what they know, and the resume claiming more
     // than that is a false statement about them, not a quality nit. Without one there is nothing
     // authoritative to check against, so it stays a warning - see findUngroundedSkills.
-    const ungroundedSkills = findUngroundedSkills(spec.skills, bank, declaredSkills);
+    const ungroundedSkills = findUngroundedSkills(spec.skills, bank, declaredSkills, spec.skill_source);
     if (declaredSkills?.length) {
       for (const skill of ungroundedSkills) {
         issues.push(`grounding: skill "${skill}" is not in the student's skills list; never add a skill because the JD asks for it`);
