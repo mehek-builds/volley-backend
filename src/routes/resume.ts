@@ -63,7 +63,16 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       return rateLimitedReply(reply);
     }
 
-    const bank = await db.select().from(experience_bank).where(eq(experience_bank.user_id, userId));
+    // ORDER BY is load-bearing, not cosmetic (R-022). Postgres promises no row order without one,
+    // and the bank is fed straight into grounding, where the entry chosen for an org used to depend
+    // on which row came back first. Two identical requests could therefore produce different
+    // resumes. matchBankEntry no longer breaks ties on array order, but a stable read keeps the
+    // whole pipeline reproducible: same bank, same JD, same spec to debug.
+    const bank = await db
+      .select()
+      .from(experience_bank)
+      .where(eq(experience_bank.user_id, userId))
+      .orderBy(experience_bank.created_at, experience_bank.id);
     if (bank.length === 0) {
       return reply.status(400).send({ error: 'No experience bank found - complete onboarding first' });
     }

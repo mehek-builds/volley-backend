@@ -126,6 +126,20 @@ function acronymTokenOf(s: string): string | null {
 // of Technology" vs generated "MIT"), so token containment alone wrongly treats a real entry as
 // invented and prunes it. We additionally match a single-token acronym on either side against the
 // other side's initialism (also covers USC, IBM, UCLA, NASA, ...).
+// Containment GATES the match; Jaccard RANKS it. The two jobs need different measures, and using
+// containment for both is what caused R-022.
+//
+// Containment (inter / min(|gen|,|src|)) is the right gate: it tolerates a bank entry named more or
+// less specifically than the spec's ("Lava Lab" vs "USC Lava Lab"). But it SATURATES at 1.0 the
+// moment either side is a single shared token, so it cannot rank. With a bank holding both
+// "Traeco" and "Traeco - AI Agent Cost Infrastructure", the spec's
+// "Traeco - AI Agent Cost Infrastructure" scored 1/min(5,1) = 1.0 against the one-word "Traeco" and
+// 5/min(5,5) = 1.0 against its real entry: a dead tie, resolved by whichever row the DB happened to
+// return first. Wrong side of that coin and the pruner reset her real title "AI Engineer" to
+// "Founder" and deleted a true bullet.
+//
+// Jaccard (inter / union) does not saturate: the one-word "Traeco" scores 1/5 = 0.2 while the full
+// entry scores 5/5 = 1.0, so the specific entry wins on merit rather than on row order.
 function orgMatchScore(genOrg: string, bankOrg: string): number {
   const gen = wordSet(genOrg);
   const src = wordSet(bankOrg);
@@ -134,7 +148,7 @@ function orgMatchScore(genOrg: string, bankOrg: string): number {
     for (const t of gen) if (src.has(t)) inter++;
     if (inter > 0) {
       const containment = inter / Math.min(gen.size, src.size);
-      if (containment >= 0.5) return containment;
+      if (containment >= 0.5) return inter / (gen.size + src.size - inter);
     }
   }
   const genAcr = acronymTokenOf(genOrg);
@@ -145,16 +159,32 @@ function orgMatchScore(genOrg: string, bankOrg: string): number {
 }
 
 // The bank entry whose org best matches the generated org, or undefined if the generated org
-// appears in no bank entry (i.e. it was invented). Matching is token-containment OR acronym/
-// initialism-aware (see orgMatchScore).
+// appears in no bank entry (i.e. it was invented). Matching is token-containment-gated,
+// Jaccard-ranked, OR acronym/initialism-aware (see orgMatchScore).
+//
+// Ties are broken deterministically rather than by array order (R-022): the caller reads the bank
+// straight out of Postgres, which promises no ordering without an ORDER BY, so "first one wins"
+// meant the resume's contents could change between two identical requests. Prefer the more specific
+// org (more tokens), then fall back to the org name itself so the choice is total and stable.
 function matchBankEntry(orgName: string, bank: ExperienceBankEntry[]): ExperienceBankEntry | undefined {
   if (wordSet(orgName).size === 0 && !acronymTokenOf(orgName)) return undefined;
   let best: { e: ExperienceBankEntry; score: number } | undefined;
   for (const e of bank) {
     const score = orgMatchScore(orgName, e.org);
-    if (score > 0 && (!best || score > best.score)) best = { e, score };
+    if (score <= 0) continue;
+    if (!best || score > best.score || (score === best.score && breaksTie(e.org, best.e.org))) {
+      best = { e, score };
+    }
   }
   return best?.e;
+}
+
+// Deterministic, order-independent tie-break: more specific org first, then lexicographic.
+function breaksTie(candidateOrg: string, incumbentOrg: string): boolean {
+  const c = wordSet(candidateOrg).size;
+  const i = wordSet(incumbentOrg).size;
+  if (c !== i) return c > i;
+  return candidateOrg < incumbentOrg;
 }
 
 function bankEntryCorpus(e: ExperienceBankEntry): string {

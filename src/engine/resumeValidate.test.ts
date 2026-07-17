@@ -312,3 +312,77 @@ test('pruneUngroundedContent drops the invented entry and the fabricated-metric 
   // The cleaned spec must now be fully grounded.
   assert.deepEqual(findGroundingViolations(cleaned, BANK), []);
 });
+
+// ─── R-022: a short bank org must not hijack the match for a longer one ──────────────────────
+//
+// Found 2026-07-17 by generating real resumes against live Cohere JDs with Mehek's real bank. Her
+// bank holds BOTH "Traeco" (Founder) and "Traeco - AI Agent Cost Infrastructure" (AI Engineer).
+// Containment scored the one-word entry 1/min(5,1) = 1.0 and the real entry 5/min(5,5) = 1.0, a
+// dead tie that "first one wins" resolved by whichever row Postgres returned first. On the losing
+// side the pruner reset her real title to "Founder" and deleted a true bullet, on 4/4 generations.
+
+const traecoBank: ExperienceBankEntry[] = [
+  bankEntry({
+    id: 'founder',
+    org: 'Traeco',
+    title: 'Founder',
+    bullet_variants: ['Built an AI cost-visibility product and grew the waitlist 35% over two months'],
+  }),
+  bankEntry({
+    id: 'aieng',
+    org: 'Traeco - AI Agent Cost Infrastructure',
+    title: 'AI Engineer',
+    bullet_variants: ['Engineered a Python SDK and orchestration layer, scoped from 50+ discovery interviews'],
+  }),
+];
+
+const traecoSpec = () =>
+  spec([
+    {
+      org: 'Traeco - AI Agent Cost Infrastructure',
+      title: 'AI Engineer',
+      date_range: '2024',
+      bullets: ['Instrumented orchestration pipelines from 50+ discovery interviews to fix failure patterns.'],
+    },
+  ]);
+
+test('R-022: the specific bank entry wins over a shorter one sharing a token', () => {
+  assert.deepEqual(findGroundingViolations(traecoSpec(), traecoBank), []);
+});
+
+test('R-022: the match does not depend on bank row order', () => {
+  // The exact failure: no ORDER BY upstream, so the DB may hand these back either way round.
+  const reversed = [...traecoBank].reverse();
+  assert.deepEqual(findGroundingViolations(traecoSpec(), reversed), []);
+  assert.deepEqual(
+    pruneUngroundedContent(traecoSpec(), reversed).removed,
+    pruneUngroundedContent(traecoSpec(), traecoBank).removed,
+  );
+});
+
+test('R-022: the pruner no longer rewrites a real title into a different real one', () => {
+  for (const b of [traecoBank, [...traecoBank].reverse()]) {
+    const { spec: cleaned, removed } = pruneUngroundedContent(traecoSpec(), b);
+    assert.equal(cleaned.experience[0].title, 'AI Engineer', 'her real title must survive');
+    assert.equal(removed.length, 0, `nothing should be pruned, got: ${removed.join('; ')}`);
+  }
+});
+
+test('R-022: a grounded metric is not dropped just because a sibling entry lacks it', () => {
+  // "50+" lives in the AI Engineer entry, not the Founder one. Matching the wrong sibling made a
+  // true bullet look fabricated and deleted it.
+  const violations = findGroundingViolations(traecoSpec(), traecoBank).filter((v) => v.kind === 'metric');
+  assert.deepEqual(violations, []);
+});
+
+test('R-022: a genuinely invented org is still caught', () => {
+  // The gate must not have been loosened into uselessness by the ranking change.
+  const invented = spec([{ org: 'Globex Corporation', title: 'Engineer', date_range: '2024', bullets: ['Shipped a thing.'] }]);
+  assert.ok(findGroundingViolations(invented, traecoBank).some((v) => v.kind === 'org'));
+});
+
+test('R-022: a less specific spec org still matches its only plausible bank entry', () => {
+  // Containment still gates, so the tolerated "spec says less than the bank" case keeps working.
+  const short = spec([{ org: 'Traeco', title: 'Founder', date_range: '2024', bullets: ['Built an AI cost-visibility product.'] }]);
+  assert.deepEqual(findGroundingViolations(short, traecoBank).filter((v) => v.kind === 'org'), []);
+});
