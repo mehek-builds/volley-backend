@@ -2,6 +2,7 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { eq } from 'drizzle-orm';
 import { db } from '../db/index';
 import { ats_adapters } from '../db/schema';
+import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 
 // Scheduled spot-check for the ATS field-mapping adapters (PRD-v2 Section 7's "adapter
 // maintenance is an ongoing cost" note + Section 9's monitoring gap). Fetches each ATS's
@@ -73,31 +74,11 @@ async function runCheck(check: (typeof CHECKS)[number]): Promise<{ ats_name: str
   return { ats_name: check.ats_name, status: 'degraded', note: 'test posting reachable but one or more expected selectors missing - the adapter may need re-verification against a live posting' };
 }
 
-// Accepts either a manually-set `x-internal-secret` header (curl/tooling) or Vercel
-// Cron's own `Authorization: Bearer <CRON_SECRET>` header (Vercel Cron only issues GET
-// requests and adds this header automatically when the CRON_SECRET env var is set) -
-// both are checked against the same INTERNAL_CRON_SECRET value.
-function isAuthorized(request: FastifyRequest): boolean {
-  // Accept either our own INTERNAL_CRON_SECRET (curl/tooling via x-internal-secret or Bearer) or
-  // Vercel Cron's `Authorization: Bearer <CRON_SECRET>`. Vercel injects CRON_SECRET automatically
-  // and it is usually a DIFFERENT value from INTERNAL_CRON_SECRET, so checking only the latter meant
-  // the scheduled daily cron 401'd and adapter health silently never updated - defeating the whole
-  // point of catching a broken adapter before a student hits it.
-  const internal = process.env.INTERNAL_CRON_SECRET;
-  const cronSecret = process.env.CRON_SECRET;
-  const header = request.headers['authorization'];
-  const auth = typeof header === 'string' ? header : '';
-  if (internal && request.headers['x-internal-secret'] === internal) return true;
-  if (internal && auth === `Bearer ${internal}`) return true;
-  if (cronSecret && auth === `Bearer ${cronSecret}`) return true;
-  return false;
-}
-
 async function handleHealthCheck(request: FastifyRequest, reply: FastifyReply, fastify: FastifyInstance) {
-  if (!process.env.INTERNAL_CRON_SECRET && !process.env.CRON_SECRET) {
+  if (!isCronConfigured()) {
     return reply.status(503).send({ error: 'adapter health check not configured (set INTERNAL_CRON_SECRET or CRON_SECRET)' });
   }
-  if (!isAuthorized(request)) {
+  if (!isCronAuthorized(request)) {
     return reply.status(401).send({ error: 'unauthorized' });
   }
 
@@ -141,7 +122,7 @@ export async function adapterHealthRoutes(fastify: FastifyInstance) {
   // GET /internal/adapter-health - read the last-known status per ATS (for a dashboard
   // or a manual glance), same secret gate as the check endpoint.
   fastify.get('/internal/adapter-health', async (request: FastifyRequest, reply: FastifyReply) => {
-    if (!isAuthorized(request)) {
+    if (!isCronAuthorized(request)) {
       return reply.status(401).send({ error: 'unauthorized' });
     }
     const rows = await db.select().from(ats_adapters);

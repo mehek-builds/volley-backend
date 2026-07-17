@@ -1,0 +1,140 @@
+import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto';
+import { list, del } from '@vercel/blob';
+
+// Generated resumes carry the student's full name, phone, address and work history, and
+// @vercel/blob@0.27.3 can only write `access: 'public'` (the type is that one literal - there
+// is no private-read or signed-URL API to upgrade to without changing infra). So the object
+// itself is unavoidably readable by anyone holding its URL, forever. The mitigation is to
+// never hand that URL out: the API mints a short-lived capability token instead, and
+// /resume/download resolves it server-side. Combined with the retention sweep below, a blob
+// URL that does leak is only reachable for as long as the file is meant to exist at all.
+//
+// The token is what authenticates the download, so it must not leak the underlying object key
+// (key + the store's stable base URL = permanent unauthenticated access, which is exactly the
+// hole we are closing). A signed-but-readable JWT would do precisely that, so the payload is
+// AES-256-GCM encrypted rather than signed: GCM is authenticated, so this also serves as the
+// signature, and the ciphertext is opaque to the holder.
+//
+// The extension pre-warms /resume/generate on card hover and only fetches the URL when the
+// student clicks "Yes, fill it" (content.ts), so the token has to outlive a hover-then-read
+// pause. Five minutes covers that with room to spare; seconds would break real fills.
+export const FILL_TOKEN_TTL_MS = 5 * 60 * 1000;
+
+// A data export is a file the student saves and opens later, so its links need to outlive the
+// fill path's window. An hour is long enough to be usable and still short enough that a
+// forwarded export file does not become a permanent grant.
+export const EXPORT_TOKEN_TTL_MS = 60 * 60 * 1000;
+
+// How long a generated resume file is kept before the retention sweep deletes it. This is the
+// only control that reaches blobs whose URL was already handed to a client before this change
+// (and possibly into a browser history, a proxy log, or an ATS), since those URLs cannot be
+// revoked. The spec row in generated_resumes is kept for audit; only the file goes.
+export const RESUME_RETENTION_DAYS = 30;
+
+export function resumePrefix(userId: string): string {
+  return `users/${userId}/resumes/`;
+}
+
+// Domain-separated from fieldCrypto's application_profile key: same ENCRYPTION_KEY env var,
+// different scrypt salt, so a download token can never be confused with (or decrypt) an
+// encrypted profile column.
+function getKey(): Buffer {
+  const secret = process.env.ENCRYPTION_KEY;
+  if (!secret) throw new Error('ENCRYPTION_KEY not configured');
+  return scryptSync(secret, 'rolequick-resume-download-token', 32);
+}
+
+export interface DownloadToken {
+  /** Blob object key. */
+  k: string;
+  /** Owning user id. */
+  u: string;
+  /** Absolute expiry, ms since epoch. */
+  exp: number;
+}
+
+// Format mirrors fieldCrypto: iv(12) + authTag(16) + ciphertext. base64url because this
+// travels in a query string.
+export function mintDownloadToken(
+  userId: string,
+  objectKey: string,
+  opts: { ttlMs?: number; now?: number } = {},
+): string {
+  const now = opts.now ?? Date.now();
+  const payload: DownloadToken = { k: objectKey, u: userId, exp: now + (opts.ttlMs ?? FILL_TOKEN_TTL_MS) };
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', getKey(), iv);
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(payload), 'utf8'), cipher.final()]);
+  return Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString('base64url');
+}
+
+// Returns null for anything that isn't a live token we minted: tampered, truncated, expired,
+// or encrypted under a rotated key. Callers must treat null as 403 and never distinguish the
+// cases to the caller - "why" is a probing oracle.
+export function readDownloadToken(token: string, now = Date.now()): DownloadToken | null {
+  try {
+    const raw = Buffer.from(token, 'base64url');
+    // iv + tag with no ciphertext is not a token; subarray would silently return empties.
+    if (raw.length <= 28) return null;
+    const iv = raw.subarray(0, 12);
+    const authTag = raw.subarray(12, 28);
+    const ciphertext = raw.subarray(28);
+    const decipher = createDecipheriv('aes-256-gcm', getKey(), iv);
+    decipher.setAuthTag(authTag);
+    const json = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+    const payload = JSON.parse(json) as DownloadToken;
+    if (typeof payload.k !== 'string' || typeof payload.u !== 'string' || typeof payload.exp !== 'number') {
+      return null;
+    }
+    if (now > payload.exp) return null;
+    // Defence in depth: a token is only ever minted for a key inside its own user's prefix, so
+    // a payload claiming otherwise means the key derivation or the mint path is compromised.
+    // Refuse rather than serve one user's file under another's token.
+    if (!payload.k.startsWith(resumePrefix(payload.u))) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+// The DB stores only the object key (generated_resumes.resume_object_key), not the blob URL,
+// and @vercel/blob's head()/del() both want a URL. list({ prefix }) is the one way to get from
+// key to URL without a schema migration, which is why this lookup exists at all.
+export async function resolveBlobUrl(objectKey: string): Promise<string | null> {
+  const { blobs } = await list({ prefix: objectKey, limit: 5 });
+  return blobs.find((b) => b.pathname === objectKey)?.url ?? null;
+}
+
+async function listAll(prefix: string): Promise<Array<{ url: string; pathname: string; uploadedAt: Date }>> {
+  const out: Array<{ url: string; pathname: string; uploadedAt: Date }> = [];
+  let cursor: string | undefined;
+  do {
+    const res = await list({ prefix, cursor, limit: 1000 });
+    out.push(...res.blobs.map((b) => ({ url: b.url, pathname: b.pathname, uploadedAt: b.uploadedAt })));
+    cursor = res.hasMore ? res.cursor : undefined;
+  } while (cursor);
+  return out;
+}
+
+// Deletes every generated resume file belonging to one user. MUST run before the user row is
+// deleted: generated_resumes cascades on users.id, so dropping the user first destroys
+// resume_object_key - the only pointer to these blobs - and orphans public PII files with no
+// way left to find them.
+export async function deleteResumeBlobsForUser(userId: string): Promise<number> {
+  const blobs = await listAll(resumePrefix(userId));
+  if (blobs.length === 0) return 0;
+  await del(blobs.map((b) => b.url));
+  return blobs.length;
+}
+
+// Deletes resume files older than RESUME_RETENTION_DAYS across all users.
+export async function sweepExpiredResumeBlobs(
+  now = Date.now(),
+  retentionDays = RESUME_RETENTION_DAYS,
+): Promise<{ scanned: number; deleted: number }> {
+  const cutoff = now - retentionDays * 24 * 60 * 60 * 1000;
+  const blobs = await listAll('users/');
+  const expired = blobs.filter((b) => b.pathname.includes('/resumes/') && b.uploadedAt.getTime() < cutoff);
+  if (expired.length > 0) await del(expired.map((b) => b.url));
+  return { scanned: blobs.length, deleted: expired.length };
+}
