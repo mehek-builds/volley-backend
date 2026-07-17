@@ -58,6 +58,21 @@ export const profiles = pgTable('profiles', {
   parsed_json: jsonb('parsed_json'),
   resume_object_key: text('resume_object_key'),
   voice_pref: text('voice_pref'),
+  // string[] of the skills the student ACTUALLY has, in their own words. The one authoritative
+  // source for the resume's SKILLS line (R-015).
+  //
+  // Before this column there was no skills data in the system at all: ResumeSpec demanded
+  // `skills: string[]` and nothing was ever passed in, so the model had to invent the field. It
+  // did the only two things it could - reuse the seeded `experience_bank.tags` junk (the identical
+  // gRPC/SDK-design array on 6 of 7 rows, including a Product Management internship and a VP of
+  // Finance role), and lift keywords straight out of the JD. A submitted Monzo application claims
+  // BigQuery and Looker; both return zero rows across the entire bank.
+  //
+  // NULL is meaningful and is NOT the same as []. NULL means "the student never gave us a list",
+  // and the validator falls back to soft bank-grounding. A populated list is AUTHORITATIVE: skills
+  // outside it are hard-rejected, which is only safe BECAUSE the list is the student's own
+  // statement rather than something inferred from their bullets.
+  skills: jsonb('skills'),
   updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
 

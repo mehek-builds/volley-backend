@@ -216,6 +216,74 @@ test('findUngroundedSkills flags a skill absent from the bank but not one presen
   assert.ok(!out.includes('Python')); // 'python' is a tag on the Northwind entry
 });
 
+// ─── R-015: the declared skills list is authoritative ───────────────────────
+// The cases below are the real fabrications caught on 2026-07-17, verified against the stored
+// generated_resumes.spec for 21 real model runs. Each claimed skill returns zero rows when grepped
+// across the entire bank.
+
+test('R-015: a JD keyword the student never claimed is ungrounded, even though the JD wants it', () => {
+  // The submitted Monzo Analytics Engineer resume claims BigQuery and Looker. Mehek has never used
+  // either; they are simply the JD's headline tools, echoed back. That application went out on
+  // 2026-07-16 and a recruiter will ask about them in a screen.
+  const declared = ['Python', 'TypeScript', 'React'];
+  const out = findUngroundedSkills(['Python', 'BigQuery', 'Looker'], BANK, declared);
+  assert.deepEqual(out, ['BigQuery', 'Looker']);
+});
+
+test('R-015: the declared list overrides the seeded bank tags, which are junk', () => {
+  // 'python' is a tag on a bank entry, so soft mode grounds it. But the seeded tags are the
+  // identical copy-pasted array on 6 of 7 rows (including a Product Management internship and a VP
+  // of Finance role), which is exactly how gRPC and SDK design reached every resume she has sent.
+  // A source that is itself unreliable must not be able to launder a claim.
+  const out = findUngroundedSkills(['Python'], BANK, ['TypeScript']);
+  assert.deepEqual(out, ['Python'], 'declared mode must not consult the bank corpus');
+});
+
+test('R-015: declared matching is case- and whitespace-insensitive, not a literal compare', () => {
+  const declared = ['REST APIs', 'Python'];
+  assert.deepEqual(findUngroundedSkills(['rest apis', '  Python  '], BANK, declared), []);
+});
+
+test('R-015: an empty declared list falls back to soft bank-grounding, it does not reject everything', () => {
+  // NULL/[] means "the student never gave us a list", NOT "the student has no skills". Getting this
+  // wrong would strip the SKILLS line off every resume for every user who hasn't onboarded yet.
+  assert.deepEqual(findUngroundedSkills(['Python'], BANK, []), []);
+  assert.deepEqual(findUngroundedSkills(['Python'], BANK, null), []);
+  assert.deepEqual(findUngroundedSkills(['Python'], BANK, undefined), []);
+});
+
+test('R-015: an off-list skill is a HARD issue when a list exists, and a warning when it does not', () => {
+  // The hard issue is what drives the retry loop, so the model gets told to fix it rather than the
+  // student being handed a fabricated resume with an advisory attached.
+  const s = spec([{ org: 'Northwind Labs', title: 'Engineer', date_range: '2024', bullets: [] }]);
+  s.skills = ['BigQuery'];
+
+  const declaredMode = validateResumeSpec(s, 'we use bigquery', BANK, ['Python']);
+  assert.ok(declaredMode.issues.some((i) => i.includes('BigQuery')), 'should be a hard issue');
+  assert.ok(!declaredMode.warnings.some((w) => w.bullet === 'BigQuery'));
+
+  const softMode = validateResumeSpec(s, 'we use bigquery', BANK);
+  assert.ok(!softMode.issues.some((i) => i.includes('BigQuery')), 'should not hard-fail with no list');
+  assert.ok(softMode.warnings.some((w) => w.bullet === 'BigQuery'), 'should still warn');
+});
+
+test('R-015: prune strips an off-list skill as a last resort, and keeps the declared ones', () => {
+  const s = spec([{ org: 'Northwind Labs', title: 'Engineer', date_range: '2024', bullets: [] }]);
+  s.skills = ['Python', 'BigQuery', 'Looker'];
+  const { spec: cleaned, removed } = pruneUngroundedContent(s, BANK, ['Python']);
+  assert.deepEqual(cleaned.skills, ['Python']);
+  assert.ok(removed.some((r) => r.includes('BigQuery') && r.includes('Looker')));
+});
+
+test('R-015: prune leaves skills alone in soft mode', () => {
+  // Soft grounding must never DROP a skill: the bank is an incomplete view of what a student knows,
+  // so a miss there is a reason to warn, not to delete.
+  const s = spec([{ org: 'Northwind Labs', title: 'Engineer', date_range: '2024', bullets: [] }]);
+  s.skills = ['Python', 'Kubernetes'];
+  const { spec: cleaned } = pruneUngroundedContent(s, BANK);
+  assert.deepEqual(cleaned.skills, ['Python', 'Kubernetes']);
+});
+
 test('pruneUngroundedContent drops the invented entry and the fabricated-metric bullet', () => {
   const s = spec([
     {
