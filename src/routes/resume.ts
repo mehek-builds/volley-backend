@@ -3,7 +3,6 @@ import { z } from 'zod';
 import { eq, desc } from 'drizzle-orm';
 import { createHash } from 'node:crypto';
 import { put } from '@vercel/blob';
-import pdfParse from 'pdf-parse';
 import { db } from '../db/index';
 import { profiles, generated_resumes, autofill_events } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
@@ -14,6 +13,7 @@ import { renderResumePdf } from '../engine/resumeRender';
 import { validateResumeSpec, validatePdfLayout, pruneUngroundedContent } from '../engine/resumeValidate';
 import { mintDownloadToken, readDownloadToken, resolveBlobUrl } from '../lib/resumeAccess';
 import { apiBaseFor } from '../lib/apiBase';
+import { extractPdfText } from '../lib/pdfText';
 
 const MAX_SPEC_ATTEMPTS = 2; // 1 initial pass + 1 feedback-driven retry, per PRD-v2 Section 6.4's
 // "automated quality gate" - bounded so a stubborn JD can't loop the endpoint indefinitely.
@@ -284,12 +284,23 @@ export async function resumeRoutes(fastify: FastifyInstance) {
 
     // Authoritative post-render check (mirrors validate_resume.py's PDF section): confirms the
     // pre-render height estimate actually held, and that the text is really extractable.
+    // extractPdfText, not bare pdfParse: the raw call threw "bad XRef entry" on every ~2.5KB
+    // pooled render buffer (R-017; the byteOffset story lives in lib/pdfText.ts), so this check
+    // had NEVER run and its empty issues array read downstream as a clean pass.
     let layoutIssues: string[] = [];
     try {
-      const parsedPdf = await pdfParse(pdfBuffer);
+      const parsedPdf = await extractPdfText(pdfBuffer);
       layoutIssues = validatePdfLayout(parsedPdf.text, parsedPdf.numpages).issues;
     } catch (err) {
-      fastify.log.warn(err, 'could not post-render-validate the generated PDF');
+      // LOUD on purpose, and still non-fatal to the response. A validation step that fails
+      // silently is worse than none: layoutIssues stays [] below, which downstream reads as
+      // "validated, no issues". If this fires, the one-page/extractability guarantees are
+      // UNVERIFIED for the resume being returned - the student still gets their file, but this
+      // resume shipped unchecked and the parser needs fixing again (R-017's failure mode).
+      fastify.log.error(
+        { err, userId, company: body.company },
+        'POST-RENDER PDF VALIDATION DID NOT RUN: rendered resume could not be parsed, so its quality.issues are INCOMPLETE and the one-page/extractability guarantees are unverified (R-017)',
+      );
     }
 
     const jdHash = createHash('sha256').update(body.jd_text).digest('hex').slice(0, 16);

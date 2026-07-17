@@ -4,7 +4,7 @@ import { profiles, experience_bank } from '../db/schema';
 import { eq, sql } from 'drizzle-orm';
 import { requireAuth } from '../middleware/auth';
 import { parseResumeWithClaude, ParsedProfile } from '../llm/parse';
-import pdfParse from 'pdf-parse';
+import { extractPdfText } from '../lib/pdfText';
 import { put } from '@vercel/blob';
 import { MultipartFile } from '@fastify/multipart';
 
@@ -110,7 +110,11 @@ export async function profileRoutes(fastify: FastifyInstance) {
 
     let resumeText: string;
     try {
-      const parsed = await pdfParse(resumeBuffer);
+      // extractPdfText, not bare pdfParse: a small uploaded PDF concat-assembled from multipart
+      // chunks lands in Node's shared buffer pool, where pdf-parse's byteOffset bug (R-017, see
+      // lib/pdfText.ts) rejects a perfectly valid file as "bad XRef entry" - which here would
+      // 400 a student's real resume at signup.
+      const parsed = await extractPdfText(resumeBuffer);
       resumeText = parsed.text;
     } catch (err) {
       fastify.log.error(err);

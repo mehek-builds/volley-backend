@@ -519,5 +519,10 @@ export function validatePdfLayout(extractedText: string, pageCount: number): Pdf
   const issues: string[] = [];
   if (pageCount !== 1) issues.push(`PDF is ${pageCount} pages (want 1)`);
   if (extractedText.trim().length < 400) issues.push('PDF text not extractable (ATS-unreadable)');
+  // The zero-em-dash rule (validate_resume.py enforces the same), checked on what actually
+  // RENDERED rather than trusting the spec-level prompt. This check existed in spirit but could
+  // never fire while the post-render parse threw on every resume (R-017); it is the seeded
+  // violation the R-017 regression test drives end to end.
+  if (extractedText.includes('\u2014')) issues.push('Rendered PDF contains an em dash (banned punctuation)');
   return { issues, page_count: pageCount, extractable_chars: extractedText.trim().length };
 }
