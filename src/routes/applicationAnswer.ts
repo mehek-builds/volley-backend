@@ -6,6 +6,7 @@ import { profiles } from '../db/schema';
 import { readExperienceBank } from '../db/experienceBank';
 import { requireAuth } from '../middleware/auth';
 import { draftApplicationAnswer } from '../llm/applicationAnswer';
+import { isBillingOrAuthFailure, LLM_BILLING_LOG, LLM_BILLING_PAYLOAD } from './resume';
 
 const bodySchema = z.object({
   question: z.string().min(1),
@@ -44,6 +45,13 @@ export async function applicationAnswerRoutes(fastify: FastifyInstance) {
       return reply.status(200).send({ answer, warnings });
     } catch (err) {
       fastify.log.error(err);
+      // Same classification as /resume/generate (R-012): the essay drafter dies on the exact
+      // same exhausted account, and its generic 500 hid the cause just as thoroughly - three
+      // required essays came back empty on a live Perplexity fill with nothing naming billing.
+      if (isBillingOrAuthFailure(err)) {
+        fastify.log.error({ status: (err as { status?: number })?.status, userId }, LLM_BILLING_LOG);
+        return reply.status(503).send(LLM_BILLING_PAYLOAD);
+      }
       return reply.status(500).send({ error: 'Failed to draft answer' });
     }
   });

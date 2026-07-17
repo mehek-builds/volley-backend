@@ -71,6 +71,35 @@ export function isTransientOverload(err: unknown): boolean {
   return /connection|econnreset|socket|network|fetch failed/i.test(err.message);
 }
 
+// The OTHER permanent failure class R-012 exposed, distinct from both a transient overload and a
+// genuinely bad request. Anthropic surfaces credit exhaustion as a 400 invalid_request_error
+// whose message says so ("Your credit balance is too low to access the Anthropic API. Please go
+// to Plans & Billing to upgrade or purchase credits."), and a revoked/wrong key as a 401 or 403.
+// None of these are the student's fault and none are transient: retrying cannot refill a balance,
+// and the generic "Failed to generate resume spec" card made a product-down incident look like a
+// flaky JD for hours (live, 2026-07-17) - the student's only move was clicking "Yes, fill it"
+// forever. Message-matching the 400 is deliberate and narrow: a 400 WITHOUT billing language is a
+// malformed request from OUR code and must stay a plain 500, never be blamed on billing.
+export function isBillingOrAuthFailure(err: unknown): boolean {
+  const status = (err as { status?: unknown })?.status;
+  if (status === 401 || status === 403) return true;
+  if (status !== 400) return false;
+  const message = err instanceof Error ? err.message : String((err as { message?: unknown })?.message ?? '');
+  return /credit balance|billing|purchase credits/i.test(message);
+}
+
+// One log line + one payload for every route that calls the model, so the operator action is
+// named identically wherever the failure surfaces. 503 + code llm_billing mirrors the
+// llm_overloaded plumbing shape, but deliberately carries NO retry_after_ms: the client must not
+// hammer a dead account, and the distinct code is how it knows this one is permanent until an
+// owner acts.
+export const LLM_BILLING_LOG =
+  'ANTHROPIC BILLING/AUTH FAILURE: every model-backed feature is DOWN for every user until the owner acts. Fix: top up credits in the Anthropic console, or rotate/restore ANTHROPIC_API_KEY (R-012)';
+export const LLM_BILLING_PAYLOAD = {
+  error: 'Drafting is temporarily unavailable. This is a problem on our side, not something you did, and retrying will not fix it. The RoleQuick team needs to restore service.',
+  code: 'llm_billing',
+} as const;
+
 // Honor Retry-After when the API sends one, else exponential backoff with jitter. Jitter matters:
 // every RoleQuick client retrying a shared incident on the same schedule would synchronize into a
 // thundering herd against an API that is already shedding load.
@@ -208,6 +237,13 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       } catch (err) {
         fastify.log.error(err);
         if (spec) break; // a prior attempt already produced a usable spec - accept it best-effort
+        // Billing/auth first: it is PERMANENT, so neither the transient 503 (which invites a
+        // retry) nor the generic 500 (which reads as a bad JD) is honest about it. Distinct code,
+        // not-your-fault message, and a log that names the operator action (R-012).
+        if (isBillingOrAuthFailure(err)) {
+          fastify.log.error({ status: (err as { status?: number })?.status, userId }, LLM_BILLING_LOG);
+          return reply.status(503).send(LLM_BILLING_PAYLOAD);
+        }
         // A transient capacity failure is a "come back", not a failure to report. Say so in a way
         // the client can act on: a 500 here is indistinguishable from a bad JD, so the extension
         // could only surface a hard "Failed to generate resume spec" and strand the fill. This is
