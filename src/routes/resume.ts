@@ -18,6 +18,75 @@ import { apiBaseFor } from '../lib/apiBase';
 const MAX_SPEC_ATTEMPTS = 2; // 1 initial pass + 1 feedback-driven retry, per PRD-v2 Section 6.4's
 // "automated quality gate" - bounded so a stubborn JD can't loop the endpoint indefinitely.
 
+// Hard wall-clock ceiling for the whole request, measured from function entry (reqStart) so it
+// accounts for the pre-loop work (auth, quota, bank/profile reads) too. Vercel kills the function at
+// 60s; every model call is bounded to (deadline - post-gen reserve - elapsed), so a slow Anthropic
+// response fails fast instead of 504ing AND there is guaranteed room after the last spec for the PDF
+// render + parse + blob upload + audit inserts.
+const REQUEST_DEADLINE_MS = 55000;
+const POST_GEN_RESERVE_MS = 9000;
+
+// ─── Transient model-capacity handling (live QA 2026-07-16) ──────────────────
+// A real Anthropic `overloaded_error` incident killed a whole fill: the card showed "Failed to
+// generate resume spec" and the only recovery was the student re-clicking "Yes, fill it". Two
+// separate defects produced that, and they need two separate fixes.
+//
+// 1. IN-REQUEST WASTE. A 529 fails FAST (~1s), not slow. So an overload burned both
+//    MAX_SPEC_ATTEMPTS in ~10s and gave up with ~45s of function budget still unspent. Worse, the
+//    single attempt counter conflated two unrelated reasons to retry - a transient CAPACITY failure
+//    and a QUALITY feedback pass - so one 529 silently consumed the feedback retry that exists to
+//    raise ATS coverage. Fixed here: capacity retries get their own counter and backoff, and only a
+//    real (non-transient) error or an exhausted budget ends the attempt.
+//
+// 2. THE CEILING. In-request retry CANNOT be the whole fix, and it is important not to pretend it
+//    is. Vercel kills this function at 60s (vercel.json maxDuration), REQUEST_DEADLINE_MS is 55s,
+//    and the observed incident needed ~6 attempts over ~2.5 MINUTES to get a 200. No in-request
+//    retry can outlive a 60s function, so surviving an incident of that length is necessarily the
+//    CLIENT's job: only a fresh request escapes the ceiling. That is why exhausting these retries
+//    returns a 503 + `code: 'llm_overloaded'` + `retry_after_ms` rather than a generic 500 - it is
+//    a machine-readable "come back", and the extension retries on it across requests while showing
+//    a "capacity busy" state. A 500 is indistinguishable from a bad JD, so the client could only
+//    give up. Large prompts are shed first during an overload and this route sends the JD plus the
+//    whole experience bank, so it is most fragile exactly when capacity is tight.
+const MAX_OVERLOAD_ATTEMPTS = 4;
+const MIN_CALL_BUDGET_MS = 6000; // never start a model call with less than this left
+const MAX_BACKOFF_MS = 6000;
+
+// Anthropic returns 529 overloaded_error during a capacity incident and 429 when rate limited; the
+// SDK surfaces both as APIError with a numeric `status`. Connection resets carry no status, so match
+// those on the message. Deliberately NOT retried: 4xx other than 429 (a bad request stays bad), and
+// APIUserAbortError (status undefined, message names an abort) - that is OUR deadline firing, and
+// retrying it would just burn the budget we already ran out of.
+export function isTransientOverload(err: unknown): boolean {
+  const status = (err as { status?: unknown })?.status;
+  if (typeof status === 'number') return status === 429 || status >= 500;
+  if (!(err instanceof Error)) return false;
+  if (/abort/i.test(err.name) || /abort/i.test(err.message)) return false;
+  // Our own parse/truncation errors (resumeSpec.ts) embed up to 200 chars of MODEL OUTPUT in the
+  // message. A JD or resume about networking puts the word "network" in that snippet, which would
+  // satisfy the connection regex below and misclassify a deterministic parse failure as a transient
+  // capacity blip - the client would then retry a request that fails identically every time. Name
+  // those errors explicitly before any substring matching.
+  if (/^(Claude returned invalid JSON|Resume spec truncated)/.test(err.message)) return false;
+  return /connection|econnreset|socket|network|fetch failed/i.test(err.message);
+}
+
+// Honor Retry-After when the API sends one, else exponential backoff with jitter. Jitter matters:
+// every RoleQuick client retrying a shared incident on the same schedule would synchronize into a
+// thundering herd against an API that is already shedding load.
+export function overloadBackoffMs(err: unknown, attempt: number): number {
+  const headers = (err as { headers?: { get?: (k: string) => string | null } })?.headers;
+  const raw = typeof headers?.get === 'function' ? headers.get('retry-after') : null;
+  const seconds = raw === null || raw === undefined ? NaN : Number(raw);
+  if (Number.isFinite(seconds) && seconds > 0) return Math.min(seconds * 1000, MAX_BACKOFF_MS);
+  const expo = Math.min(1000 * 2 ** (attempt - 1), MAX_BACKOFF_MS);
+  return expo + Math.floor(Math.random() * 250);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 const bodySchema = z.object({
   company: z.string().min(1),
   role: z.string().min(1),
@@ -38,6 +107,7 @@ const bodySchema = z.object({
 export async function resumeRoutes(fastify: FastifyInstance) {
   // POST /resume/generate - tailor a resume to a specific JD from the student's experience bank
   fastify.post('/resume/generate', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const reqStart = Date.now(); // wall-clock anchor for the whole-request time budget (see budgetLeftMs)
     const userId = request.jwtPayload!.userId;
 
     let body: z.infer<typeof bodySchema>;
@@ -89,21 +159,69 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     let specWarnings: ReturnType<typeof validateResumeSpec>['warnings'] = [];
     let atsCoverage = 0;
 
+    const budgetLeftMs = () => REQUEST_DEADLINE_MS - POST_GEN_RESERVE_MS - (Date.now() - reqStart);
+
     for (let attempt = 1; attempt <= MAX_SPEC_ATTEMPTS; attempt++) {
+      if (budgetLeftMs() < MIN_CALL_BUDGET_MS) {
+        // Not enough of the function budget left for another full model call plus the reserved
+        // render/upload time within Vercel's 60s.
+        if (spec) break; // ship the best-effort spec from a prior attempt
+        return reply.status(503).send({ error: 'Resume generation is taking too long. Please try again.' });
+      }
       try {
-        spec = await generateResumeSpec(
-          body.jd_text,
-          body.company,
-          body.role,
-          bank,
-          { school: parsed?.school ?? '', degree: parsed?.degree, grad_year: parsed?.grad_year },
-          attempt > 1 ? specIssues : undefined,
-          declaredSkills,
-        );
+        // Capacity retries run HERE, on their own counter, rather than consuming an outer
+        // MAX_SPEC_ATTEMPTS slot: an `overloaded_error` says nothing about spec quality, so
+        // spending the feedback pass on one meant a transient 529 could quietly cost the student
+        // ATS coverage on a resume that did eventually generate.
+        spec = await (async () => {
+          let lastErr: unknown;
+          for (let tries = 1; tries <= MAX_OVERLOAD_ATTEMPTS; tries++) {
+            const budget = budgetLeftMs();
+            if (budget < MIN_CALL_BUDGET_MS) break;
+            try {
+              return await generateResumeSpec(
+                body.jd_text,
+                body.company,
+                body.role,
+                bank,
+                { school: parsed?.school ?? '', degree: parsed?.degree, grad_year: parsed?.grad_year },
+                attempt > 1 ? specIssues : undefined,
+                declaredSkills,
+                budget,
+              );
+            } catch (err) {
+              lastErr = err;
+              if (!isTransientOverload(err)) throw err;
+              const waitMs = overloadBackoffMs(err, tries);
+              // Only sleep if a real attempt could still follow it; otherwise fall out now and let
+              // the 503 go back while the client still has time to act on it.
+              if (budgetLeftMs() - waitMs < MIN_CALL_BUDGET_MS) break;
+              fastify.log.warn(
+                { tries, waitMs, budgetLeftMs: budgetLeftMs(), status: (err as { status?: number })?.status },
+                'model capacity overloaded, backing off and retrying in-request',
+              );
+              await sleep(waitMs);
+            }
+          }
+          throw lastErr ?? new Error('resume spec generation exhausted its budget');
+        })();
       } catch (err) {
         fastify.log.error(err);
-        // A malformed/truncated model response is as retryable as a validation failure.
         if (spec) break; // a prior attempt already produced a usable spec - accept it best-effort
+        // A transient capacity failure is a "come back", not a failure to report. Say so in a way
+        // the client can act on: a 500 here is indistinguishable from a bad JD, so the extension
+        // could only surface a hard "Failed to generate resume spec" and strand the fill. This is
+        // the half of the fix that survives an incident longer than the 60s function ceiling, since
+        // only a fresh request can outlive it.
+        if (isTransientOverload(err)) {
+          return reply.status(503).send({
+            error: 'The model is busy right now. RoleQuick will retry automatically.',
+            code: 'llm_overloaded',
+            retry_after_ms: 5000,
+          });
+        }
+        // A malformed/truncated model response is as retryable as a validation failure - but not if
+        // we're out of budget.
         if (attempt === MAX_SPEC_ATTEMPTS) {
           return reply.status(500).send({ error: 'Failed to generate resume spec' });
         }
