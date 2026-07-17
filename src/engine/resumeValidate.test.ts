@@ -312,3 +312,157 @@ test('pruneUngroundedContent drops the invented entry and the fabricated-metric 
   // The cleaned spec must now be fully grounded.
   assert.deepEqual(findGroundingViolations(cleaned, BANK), []);
 });
+
+// ─── R-022: a short bank org must not hijack the match for a longer one ──────────────────────
+//
+// Found 2026-07-17 by generating real resumes against live Cohere JDs with Mehek's real bank. Her
+// bank holds BOTH "Traeco" (Founder) and "Traeco - AI Agent Cost Infrastructure" (AI Engineer).
+// Containment scored the one-word entry 1/min(5,1) = 1.0 and the real entry 5/min(5,5) = 1.0, a
+// dead tie that "first one wins" resolved by whichever row Postgres returned first. On the losing
+// side the pruner reset her real title to "Founder" and deleted a true bullet, on 4/4 generations.
+
+const traecoBank: ExperienceBankEntry[] = [
+  bankEntry({
+    id: 'founder',
+    org: 'Traeco',
+    title: 'Founder',
+    bullet_variants: ['Built an AI cost-visibility product and grew the waitlist 35% over two months'],
+  }),
+  bankEntry({
+    id: 'aieng',
+    org: 'Traeco - AI Agent Cost Infrastructure',
+    title: 'AI Engineer',
+    bullet_variants: ['Engineered a Python SDK and orchestration layer, scoped from 50+ discovery interviews'],
+  }),
+];
+
+const traecoSpec = () =>
+  spec([
+    {
+      org: 'Traeco - AI Agent Cost Infrastructure',
+      title: 'AI Engineer',
+      date_range: '2024',
+      bullets: ['Instrumented orchestration pipelines from 50+ discovery interviews to fix failure patterns.'],
+    },
+  ]);
+
+test('R-022: the specific bank entry wins over a shorter one sharing a token', () => {
+  assert.deepEqual(findGroundingViolations(traecoSpec(), traecoBank), []);
+});
+
+test('R-022: the match does not depend on bank row order', () => {
+  // The exact failure: no ORDER BY upstream, so the DB may hand these back either way round.
+  const reversed = [...traecoBank].reverse();
+  assert.deepEqual(findGroundingViolations(traecoSpec(), reversed), []);
+  assert.deepEqual(
+    pruneUngroundedContent(traecoSpec(), reversed).removed,
+    pruneUngroundedContent(traecoSpec(), traecoBank).removed,
+  );
+});
+
+test('R-022: the pruner no longer rewrites a real title into a different real one', () => {
+  for (const b of [traecoBank, [...traecoBank].reverse()]) {
+    const { spec: cleaned, removed } = pruneUngroundedContent(traecoSpec(), b);
+    assert.equal(cleaned.experience[0].title, 'AI Engineer', 'her real title must survive');
+    assert.equal(removed.length, 0, `nothing should be pruned, got: ${removed.join('; ')}`);
+  }
+});
+
+test('R-022: a grounded metric is not dropped just because a sibling entry lacks it', () => {
+  // "50+" lives in the AI Engineer entry, not the Founder one. Matching the wrong sibling made a
+  // true bullet look fabricated and deleted it.
+  const violations = findGroundingViolations(traecoSpec(), traecoBank).filter((v) => v.kind === 'metric');
+  assert.deepEqual(violations, []);
+});
+
+test('R-022: a genuinely invented org is still caught', () => {
+  // The gate must not have been loosened into uselessness by the ranking change.
+  const invented = spec([{ org: 'Globex Corporation', title: 'Engineer', date_range: '2024', bullets: ['Shipped a thing.'] }]);
+  assert.ok(findGroundingViolations(invented, traecoBank).some((v) => v.kind === 'org'));
+});
+
+test('R-022: a less specific spec org still matches its only plausible bank entry', () => {
+  // Containment still gates, so the tolerated "spec says less than the bank" case keeps working.
+  const short = spec([{ org: 'Traeco', title: 'Founder', date_range: '2024', bullets: ['Built an AI cost-visibility product.'] }]);
+  assert.deepEqual(findGroundingViolations(short, traecoBank).filter((v) => v.kind === 'org'), []);
+});
+
+// ─── R-023: an unreachable gate must not drive the retry loop ────────────────────────────────
+//
+// jdKeywords() treats every non-stopword JD word over 3 chars as a required keyword: 304 of them
+// for a 4.8k Cohere posting, including "toronto", "vacation", "passionate", "obsess". Measured
+// 2026-07-17 against Mehek's real bank: her ENTIRE bank (7 entries, 409 words, ~3x what fits on a
+// page) covers only 12-17%. Nothing she could write reaches the 18% floor, so this fired on 100%
+// of generations, forced a second model call that could never clear it, and fed the model
+// "not tailored enough to this JD" as a fix-this instruction, which is how JD vocabulary got
+// imported into the skills line.
+
+test('R-023: low ATS coverage is reported but does NOT become a retry-driving issue', () => {
+  const bank = [bankEntry({ org: 'Northwind Labs', title: 'Engineer', bullet_variants: ['Shipped a Python service.'] })];
+  const s = spec([{ org: 'Northwind Labs', title: 'Engineer', date_range: '2024', bullets: ['Shipped a Python service.'] }]);
+  // A JD sharing almost no vocabulary with the resume: coverage is necessarily near zero.
+  const jd = 'Kubernetes Rust Terraform observability oncall distributed consensus Byzantine tolerance quorum replication sharding';
+  const r = validateResumeSpec(s, jd, bank);
+
+  assert.ok(r.ats_keyword_coverage_pct < 18, 'precondition: coverage is below the floor');
+  assert.equal(
+    r.issues.some((i) => /keyword coverage/i.test(i)),
+    false,
+    'coverage must not be a hard issue: it is unreachable, so it would retry forever and pressure the model to stuff JD keywords',
+  );
+  assert.ok(
+    r.warnings.some((w) => w.entry === 'ats' && w.flags.some((f) => /low-keyword-coverage/.test(f))),
+    'but it must still be surfaced as a warning so a genuinely untailored resume is visible',
+  );
+});
+
+test('R-023: the coverage number is still computed and reported', () => {
+  const bank = [bankEntry({ org: 'Northwind Labs', bullet_variants: ['Built Python REST services.'] })];
+  const s = spec([{ org: 'Northwind Labs', title: 'Engineer', date_range: '2024', bullets: ['Built Python REST services.'] }]);
+  const r = validateResumeSpec(s, 'python python python rest rest services services engineer', bank);
+  assert.ok(typeof r.ats_keyword_coverage_pct === 'number' && r.ats_keyword_coverage_pct > 0);
+});
+
+// ─── R-022 follow-up: a literal token match must beat an initialism inference ────────────────
+//
+// Caught in code review of the R-022 fix itself. Ranking word matches by Jaccard while the acronym
+// branch still returned a flat 1 meant the weaker evidence won: a spec's "MIT" scored 1/3 against
+// "MIT Media Lab" but 1.0 against "Massachusetts Institute of Technology". The H2 test above misses
+// this because its bank holds a single entry, so nothing competes for the match.
+
+const acronymCompetitionBank: ExperienceBankEntry[] = [
+  bankEntry({ id: 'lab', org: 'MIT Media Lab', title: 'Researcher', bullet_variants: ['Built a tangible interface.'] }),
+  bankEntry({ id: 'uni', org: 'Massachusetts Institute of Technology', title: 'Student', bullet_variants: ['Studied things.'] }),
+];
+
+test('R-022: a literal shared token outranks an initialism when both are in the bank', () => {
+  const s = spec([{ org: 'MIT', title: 'Researcher', date_range: '2024', bullets: ['Built a tangible interface.'] }]);
+  assert.deepEqual(
+    findGroundingViolations(s, acronymCompetitionBank),
+    [],
+    '"MIT" must resolve to MIT Media Lab, not to the university it is also an initialism of',
+  );
+});
+
+test('R-022: that ranking does not depend on bank row order either', () => {
+  const s = spec([{ org: 'MIT', title: 'Researcher', date_range: '2024', bullets: ['Built a tangible interface.'] }]);
+  assert.deepEqual(findGroundingViolations(s, [...acronymCompetitionBank].reverse()), []);
+});
+
+test('R-022: the pruner does not rewrite the title via the losing acronym match', () => {
+  for (const b of [acronymCompetitionBank, [...acronymCompetitionBank].reverse()]) {
+    const { spec: cleaned, removed } = pruneUngroundedContent(
+      spec([{ org: 'MIT', title: 'Researcher', date_range: '2024', bullets: ['Built a tangible interface.'] }]),
+      b,
+    );
+    assert.equal(cleaned.experience[0].title, 'Researcher');
+    assert.equal(removed.length, 0, `nothing should be pruned, got: ${removed.join('; ')}`);
+  }
+});
+
+test('R-022: an acronym still matches when it is the ONLY evidence available', () => {
+  // The tier must not disable the acronym path, only rank it below a literal match (guards H2).
+  const uniOnly = [acronymCompetitionBank[1]];
+  const s = spec([{ org: 'MIT', title: 'Student', date_range: '2024', bullets: ['Studied things.'] }]);
+  assert.deepEqual(findGroundingViolations(s, uniOnly).filter((v) => v.kind === 'org'), []);
+});

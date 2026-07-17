@@ -5,8 +5,9 @@ import { createHash } from 'node:crypto';
 import { put } from '@vercel/blob';
 import pdfParse from 'pdf-parse';
 import { db } from '../db/index';
-import { experience_bank, profiles, generated_resumes, autofill_events } from '../db/schema';
+import { profiles, generated_resumes, autofill_events } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
+import { readExperienceBank } from '../db/experienceBank';
 import { allowHourly, bumpCounter, getCount, getEntitlements, LIMITS, monthPeriod, quotaExceededPayload, rateLimitedReply } from '../middleware/quota';
 import { generateResumeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import { renderResumePdf } from '../engine/resumeRender';
@@ -63,7 +64,8 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       return rateLimitedReply(reply);
     }
 
-    const bank = await db.select().from(experience_bank).where(eq(experience_bank.user_id, userId));
+    // Ordered read, always: see readExperienceBank for why the order is load-bearing (R-022).
+    const bank = await readExperienceBank(userId);
     if (bank.length === 0) {
       return reply.status(400).send({ error: 'No experience bank found - complete onboarding first' });
     }

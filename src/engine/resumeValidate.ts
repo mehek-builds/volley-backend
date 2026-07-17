@@ -126,6 +126,30 @@ function acronymTokenOf(s: string): string | null {
 // of Technology" vs generated "MIT"), so token containment alone wrongly treats a real entry as
 // invented and prunes it. We additionally match a single-token acronym on either side against the
 // other side's initialism (also covers USC, IBM, UCLA, NASA, ...).
+// Containment GATES the match; Jaccard RANKS it. The two jobs need different measures, and using
+// containment for both is what caused R-022.
+//
+// Containment (inter / min(|gen|,|src|)) is the right gate: it tolerates a bank entry named more or
+// less specifically than the spec's ("Lava Lab" vs "USC Lava Lab"). But it SATURATES at 1.0 the
+// moment either side is a single shared token, so it cannot rank. With a bank holding both
+// "Traeco" and "Traeco - AI Agent Cost Infrastructure", the spec's
+// "Traeco - AI Agent Cost Infrastructure" scored 1/min(5,1) = 1.0 against the one-word "Traeco" and
+// 5/min(5,5) = 1.0 against its real entry: a dead tie, resolved by whichever row the DB happened to
+// return first. Wrong side of that coin and the pruner reset her real title "AI Engineer" to
+// "Founder" and deleted a true bullet.
+//
+// Jaccard (inter / union) does not saturate: the one-word "Traeco" scores 1/5 = 0.2 while the full
+// entry scores 5/5 = 1.0, so the specific entry wins on merit rather than on row order.
+//
+// The two kinds of evidence are TIERS, not one scale. A shared literal token is stronger evidence
+// than an initialism inference, so every word match must outrank every acronym match: word matches
+// occupy (1, 2] as 1 + Jaccard, acronyms sit at exactly 1. Ranking them on one scale is a bug that
+// a first cut of this fix actually shipped - Jaccard put a literal match at 1/3 while the acronym
+// branch still returned a flat 1, so a bank holding "MIT Media Lab" AND "Massachusetts Institute of
+// Technology" resolved a spec's "MIT" to the university and then rewrote its title, which is the
+// exact R-022 damage this function exists to prevent.
+const ACRONYM_MATCH_SCORE = 1; // strictly below any word match, which is 1 + a positive Jaccard
+
 function orgMatchScore(genOrg: string, bankOrg: string): number {
   const gen = wordSet(genOrg);
   const src = wordSet(bankOrg);
@@ -134,27 +158,43 @@ function orgMatchScore(genOrg: string, bankOrg: string): number {
     for (const t of gen) if (src.has(t)) inter++;
     if (inter > 0) {
       const containment = inter / Math.min(gen.size, src.size);
-      if (containment >= 0.5) return containment;
+      if (containment >= 0.5) return 1 + inter / (gen.size + src.size - inter);
     }
   }
   const genAcr = acronymTokenOf(genOrg);
-  if (genAcr && genAcr === orgInitialism(bankOrg)) return 1;
+  if (genAcr && genAcr === orgInitialism(bankOrg)) return ACRONYM_MATCH_SCORE;
   const srcAcr = acronymTokenOf(bankOrg);
-  if (srcAcr && srcAcr === orgInitialism(genOrg)) return 1;
+  if (srcAcr && srcAcr === orgInitialism(genOrg)) return ACRONYM_MATCH_SCORE;
   return 0;
 }
 
 // The bank entry whose org best matches the generated org, or undefined if the generated org
-// appears in no bank entry (i.e. it was invented). Matching is token-containment OR acronym/
-// initialism-aware (see orgMatchScore).
+// appears in no bank entry (i.e. it was invented). Matching is token-containment-gated,
+// Jaccard-ranked, OR acronym/initialism-aware (see orgMatchScore).
+//
+// Ties are broken deterministically rather than by array order (R-022): the caller reads the bank
+// straight out of Postgres, which promises no ordering without an ORDER BY, so "first one wins"
+// meant the resume's contents could change between two identical requests. Prefer the more specific
+// org (more tokens), then fall back to the org name itself so the choice is total and stable.
 function matchBankEntry(orgName: string, bank: ExperienceBankEntry[]): ExperienceBankEntry | undefined {
   if (wordSet(orgName).size === 0 && !acronymTokenOf(orgName)) return undefined;
   let best: { e: ExperienceBankEntry; score: number } | undefined;
   for (const e of bank) {
     const score = orgMatchScore(orgName, e.org);
-    if (score > 0 && (!best || score > best.score)) best = { e, score };
+    if (score <= 0) continue;
+    if (!best || score > best.score || (score === best.score && breaksTie(e.org, best.e.org))) {
+      best = { e, score };
+    }
   }
   return best?.e;
+}
+
+// Deterministic, order-independent tie-break: more specific org first, then lexicographic.
+function breaksTie(candidateOrg: string, incumbentOrg: string): boolean {
+  const c = wordSet(candidateOrg).size;
+  const i = wordSet(incumbentOrg).size;
+  if (c !== i) return c > i;
+  return candidateOrg < incumbentOrg;
 }
 
 function bankEntryCorpus(e: ExperienceBankEntry): string {
@@ -379,10 +419,34 @@ export function validateResumeSpec(
     }
   }
 
+  // Reported, but NOT a hard issue: the floor is currently unreachable, so making it drive the
+  // retry loop was pure harm (R-023).
+  //
+  // jdKeywords() returns every non-stopword word in the JD over 3 chars: 304 of them for a 4.8k
+  // Cohere posting, including "toronto", "vacation", "benefits", "passionate", "obsess". Measured
+  // 2026-07-17: Mehek's ENTIRE bank, all 7 entries and 409 words (nearly 3x what fits on one page),
+  // covers 12-17% of that vocabulary. No resume she could physically write reaches 18%, so this
+  // fired on 100% of generations and the retry could never clear it.
+  //
+  // That mattered for more than cost. The retry feeds these issues back to the model as "fix them
+  // in this revision", so every generation was explicitly told "not tailored enough to this JD" and
+  // responded the only way it could: by importing JD vocabulary into the skills line. This gate was
+  // manufacturing the R-015 fabrication it was supposed to be unrelated to.
+  //
+  // Left as a warning rather than recalibrated because the number is not just mis-scaled, it barely
+  // discriminates: measured against a matching JD vs a wholly mismatched one it separates them by
+  // ~2 points, and the obvious alternatives (repeated terms, top-N by frequency) score the
+  // MISMATCHED JD higher. A metric worth gating on needs a real keyword model, which is a design
+  // decision, not a threshold tweak. Until then, do not restore this as an issue by lowering
+  // MIN_KEYWORD_COVERAGE: that buys a green check without making the resume any more tailored.
   const present = [...kw].filter((w) => allText.toLowerCase().includes(w)).length;
   const coveragePct = kw.size > 0 ? Math.round((100 * present) / kw.size) : 100;
   if (coveragePct < MIN_KEYWORD_COVERAGE) {
-    issues.push(`low ATS keyword coverage ${coveragePct}% (< ${MIN_KEYWORD_COVERAGE}%): not tailored enough to this JD`);
+    warnings.push({
+      entry: 'ats',
+      bullet: '',
+      flags: [`low-keyword-coverage(${coveragePct}% < ${MIN_KEYWORD_COVERAGE}%)`],
+    });
   }
 
   // Grounding: fail if the spec cites an org/title/number that isn't in the student's bank.
