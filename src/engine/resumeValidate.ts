@@ -248,7 +248,13 @@ export function pruneUngroundedContent(
   // pruning empties it, the declared list is the thing to fix.
   let skills = spec.skills;
   if (declaredSkills?.length) {
-    const ungrounded = new Set(findUngroundedSkills(spec.skills, bank, declaredSkills, spec.skill_source));
+    // spec.skill_source is deliberately NOT passed while renaming is disabled. The disable lives in
+    // the prompt, and the whole reason it is off is that the model ignored the prompt's own rules on
+    // the first live run; a prompt-level ban that the validator still honors is not a ban, it is an
+    // invitation with a comment. Until the curated synonym whitelist exists, a rename the model emits
+    // anyway is treated as any other ungrounded skill and pruned, which fails in the honest
+    // direction: fewer skills listed, all of them verbatim hers. Re-enable both together.
+    const ungrounded = new Set(findUngroundedSkills(spec.skills, bank, declaredSkills));
     if (ungrounded.size > 0) {
       skills = spec.skills.filter((s) => !ungrounded.has(s));
       removed.push(`dropped ungrounded skills: ${[...ungrounded].join(', ')}`);
@@ -418,7 +424,10 @@ export function validateResumeSpec(
     // that drives the retry loop: the student said what they know, and the resume claiming more
     // than that is a false statement about them, not a quality nit. Without one there is nothing
     // authoritative to check against, so it stays a warning - see findUngroundedSkills.
-    const ungroundedSkills = findUngroundedSkills(spec.skills, bank, declaredSkills, spec.skill_source);
+    // skill_source deliberately not passed while renaming is disabled: see pruneUngroundedContent.
+    // A rename the model emits against the prompt's ban must surface as a hard issue and drive the
+    // retry, whose feedback line below already tells it the fix (use the list verbatim).
+    const ungroundedSkills = findUngroundedSkills(spec.skills, bank, declaredSkills);
     if (declaredSkills?.length) {
       for (const skill of ungroundedSkills) {
         issues.push(`grounding: skill "${skill}" is not in the student's skills list; never add a skill because the JD asks for it`);

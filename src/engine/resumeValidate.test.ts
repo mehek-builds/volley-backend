@@ -323,6 +323,26 @@ test('R-015: an off-list skill is a HARD issue when a list exists, and a warning
   assert.ok(softMode.warnings.some((w) => w.bullet === 'BigQuery'), 'should still warn');
 });
 
+test('a rename emitted DESPITE the prompt ban is pruned and hard-flagged, not honored', () => {
+  // Renaming is disabled in the prompt, and the reason it is disabled is that the model has already
+  // ignored that prompt's rules once. So the validator must not honor skill_source either: a ban the
+  // validator quietly waives on request is not a ban. "ETL" here renames a genuinely declared "SQL",
+  // i.e. the BEST case for a rename, and it must still be pruned until the curated whitelist exists.
+  const s = spec([{ org: 'Northwind Labs', title: 'Engineer', date_range: '2024', bullets: [] }]);
+  s.skills = ['SQL', 'ETL'];
+  s.skill_source = { ETL: 'SQL' };
+
+  const { spec: cleaned, removed } = pruneUngroundedContent(s, BANK, ['SQL']);
+  assert.deepEqual(cleaned.skills, ['SQL'], 'the rename must not survive the prune');
+  assert.ok(removed.some((r) => r.includes('ETL')));
+
+  const validated = validateResumeSpec(s, 'we use ETL pipelines', BANK, ['SQL']);
+  assert.ok(
+    validated.issues.some((i) => i.includes('ETL')),
+    'the rename must drive the retry as a hard issue',
+  );
+});
+
 test('R-015: prune strips an off-list skill as a last resort, and keeps the declared ones', () => {
   const s = spec([{ org: 'Northwind Labs', title: 'Engineer', date_range: '2024', bullets: [] }]);
   s.skills = ['Python', 'BigQuery', 'Looker'];
