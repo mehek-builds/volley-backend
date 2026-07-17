@@ -255,6 +255,21 @@ export const application_profile = pgTable('application_profile', {
   gpa: text('gpa'), // encrypted; the value as earned, e.g. "3.89"
   gpa_scale: text('gpa_scale'), // plaintext, e.g. "4.0" - meaningless alone, and needed to read gpa
   major: text('major'), // plaintext, e.g. "Computer Science"; no more sensitive than school
+  // string[] of language names the student declared FLUENCY in, e.g. ["English","Hindi"].
+  // Plaintext like major and profiles.skills, and for the same reason: a declared fluency list is
+  // career data the student volunteers on the face of every resume, not an identity fact, and the
+  // fill path reads it on every application - putting it behind ENCRYPTED_FIELDS would make the
+  // read side carry decrypt-or-fail handling (R-021's whole ceremony) to protect a list whose
+  // entire purpose is to be typed into forms.
+  //
+  // THE DECLARED LIST IS THE AUTHORITY (R-015's lesson, applied on purpose). This is the student's
+  // own enumeration, never an inference: not from citizenship, not from resume text, not from
+  // where a posting is based. A language question is exactly where a guessed answer becomes a
+  // false claim of fluency to an employer - ZURU asked about Spanish and Enpal about German on
+  // live applications (2026-07-17) and RoleQuick had nothing to say either time, which was the
+  // CORRECT failure. The fix is asking the student once in onboarding, not inferring. Absent or
+  // empty means "never answered", and the fill path must leave language questions alone.
+  languages: jsonb('languages'),
   eeo_prefs: jsonb('eeo_prefs'), // nullable, only set if the student explicitly opts in
   referral_source_default: text('referral_source_default').default('Company website'),
   updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow(),
