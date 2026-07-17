@@ -56,6 +56,15 @@ export interface DownloadToken {
   u: string;
   /** Absolute expiry, ms since epoch. */
   exp: number;
+  /**
+   * Blob URL as assigned by put(), carried so the download route can do a direct point-read.
+   * R-040: resolving the key via list({prefix}) is EVENTUALLY consistent with no bound - under
+   * list lag a fresh resume 404s as "deleted" and the application ships resume-less (live-hit on
+   * every Ashby fill of 2026-07-18, reproduced server-side at 54s after put). The URL exists at
+   * mint time for free; the AEAD-sealed token is a safe place for it (never client-readable).
+   * Optional so tokens minted by older code keep working through their 5-minute TTL.
+   */
+  b?: string;
 }
 
 // Format mirrors fieldCrypto: iv(12) + authTag(16) + ciphertext. base64url because this
@@ -63,10 +72,11 @@ export interface DownloadToken {
 export function mintDownloadToken(
   userId: string,
   objectKey: string,
-  opts: { ttlMs?: number; now?: number } = {},
+  opts: { ttlMs?: number; now?: number; blobUrl?: string } = {},
 ): string {
   const now = opts.now ?? Date.now();
   const payload: DownloadToken = { k: objectKey, u: userId, exp: now + (opts.ttlMs ?? DOWNLOAD_TOKEN_TTL_MS) };
+  if (opts.blobUrl) payload.b = opts.blobUrl;
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', getKey(), iv);
   const ciphertext = Buffer.concat([cipher.update(JSON.stringify(payload), 'utf8'), cipher.final()]);
@@ -90,6 +100,17 @@ export function readDownloadToken(token: string, now = Date.now()): DownloadToke
     const payload = JSON.parse(json) as DownloadToken;
     if (typeof payload.k !== 'string' || typeof payload.u !== 'string' || typeof payload.exp !== 'number') {
       return null;
+    }
+    // The AEAD seal already makes b unforgeable, but a proxy target is exactly where belt and
+    // suspenders is right: if b is present it must be a Vercel Blob store URL and nothing else.
+    if (payload.b !== undefined) {
+      if (typeof payload.b !== 'string') return null;
+      try {
+        const host = new URL(payload.b).hostname;
+        if (!host.endsWith('.public.blob.vercel-storage.com')) return null;
+      } catch {
+        return null;
+      }
     }
     if (now > payload.exp) return null;
     // Defence in depth: a token is only ever minted for a key inside its own user's prefix, so

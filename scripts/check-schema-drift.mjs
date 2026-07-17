@@ -49,11 +49,13 @@ const MIN_EXPECTED_TABLES = 10;
 
 // Parses `export const x = pgTable('name', { col: type('db_col') ... })`. The DB column name is the
 // string literal inside each column's builder, which is what information_schema will report.
+// Name classes include digits: r030_candidate_labels was invisible to a digit-less class and
+// reported as undeclared drift on every branch (2026-07-18) - the guard failing the guard.
 function parseDeclaredSchema(src) {
   const tables = {};
-  const tableRe = /export const \w+\s*=\s*pgTable\(\s*['"`]([a-z_]+)['"`]\s*,\s*\{([\s\S]*?)\n\}\s*[,)]/g;
+  const tableRe = /export const \w+\s*=\s*pgTable\(\s*['"`]([a-z0-9_]+)['"`]\s*,\s*\{([\s\S]*?)\n\}\s*[,)]/g;
   for (const m of src.matchAll(tableRe)) {
-    tables[m[1]] = [...m[2].matchAll(/^\s+\w+:\s*\w+\(\s*['"`]([a-zA-Z_]+)['"`]/gm)].map((c) => c[1]);
+    tables[m[1]] = [...m[2].matchAll(/^\s+\w+:\s*\w+\(\s*['"`]([a-zA-Z0-9_]+)['"`]/gm)].map((c) => c[1]);
   }
   return tables;
 }
