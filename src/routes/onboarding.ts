@@ -24,7 +24,7 @@ import { ENCRYPTED_FIELDS } from './applicationProfile';
 // The one thing that IS stored is completion (users.onboarding_completed_at), because it gates
 // harvest and therefore has to be an explicit act rather than an inference. See harvest.ts.
 
-type Step = 'resume' | 'install' | 'apply' | 'gaps' | 'targeting' | 'done';
+type Step = 'focus' | 'resume' | 'install' | 'apply' | 'gaps' | 'targeting' | 'done';
 
 // Asked on screen 03 only if the first application did not teach us. Order is the render order.
 //
@@ -92,29 +92,51 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     const learned = HARVEST_FIELDS.filter((f) => readable(appProfile, f) !== null);
     const gaps = GAP_FIELDS.filter((f) => readable(appProfile, f) === null);
 
-    // Targeting counts as answered on the main period: it is the only one of the five with no
-    // sensible default, so a student who set it went through the screen on purpose.
+    // The five targeting questions split on ONE fact: whether they need the resume.
+    //
+    // categories and role_types do not - a student knows what kind of work they want before they
+    // upload anything. titles are seeded from ParsedProfile.target_roles and the period options are
+    // computed from grad_year, so those three cannot be asked until the resume is parsed.
+    //
+    // So the two resume-independent ones move BEFORE the upload, as step 00. That is the honest
+    // version of what Simplify does: they open with two cheap questions ("how soon?", "where?")
+    // and only ask for the resume fourth, which earns commitment before the expensive ask. The
+    // difference is that their opener exists to manufacture a yes, while these are questions we
+    // were always going to ask - just reordered to the point where they cost nothing.
+    const has_focus = Array.isArray(target?.categories) && (target.categories as string[]).length > 0;
+
+    // Targeting counts as answered on the main period: it is the only one of the remaining three
+    // with no sensible default, so a student who set it went through the screen on purpose.
     const has_targeting = !!target?.primary_period;
 
     // The extension cannot be detected from here (no externally_connectable, and adding it would
     // widen the manifest mid-review). An autofill event IS proof of install - it can only be
     // POSTed by a running extension - so install and apply collapse into one derived signal
     // rather than a handshake the web app cannot perform.
+    // Gaps do NOT gate progress, and that is load-bearing rather than a preference. Every gap
+    // field is optional and skippable, so gating on `gaps.length` derives 'gaps' FOREVER for
+    // anyone who skipped them: targeting becomes unreachable, and worse, a student who reached
+    // targeting anyway and saved it still lands back on gaps on every reload. Gaps is a screen on
+    // the way to targeting, not a checkpoint. Targeting is the real gate, because it is the one
+    // thing nothing else can supply.
     const step: Step = user.onboarding_completed_at
       ? 'done'
-      : !has_resume
-        ? 'resume'
-        : !has_applied
-          ? 'install'
-          : gaps.length > 0
-            ? 'gaps'
+      : !has_focus
+        ? 'focus'
+        : !has_resume
+          ? 'resume'
+          : !has_applied
+            ? 'install'
             : !has_targeting
-              ? 'targeting'
+              ? gaps.length > 0
+                ? 'gaps'
+                : 'targeting'
               : 'done';
 
     return reply.status(200).send({
       step,
       completed_at: user.onboarding_completed_at,
+      has_focus,
       has_resume,
       has_applied,
       has_targeting,

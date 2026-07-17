@@ -18,12 +18,34 @@ const ROLE_TYPES = ['internship', 'co-op', 'new-grad', 'full-time'] as const;
 const PERIOD_RE = /^(spring|summer|fall|winter)-20\d{2}$/;
 const period = z.string().regex(PERIOD_RE, 'period must look like "summer-2027"');
 
-// Caps are here to bound a jsonb column that a client controls, not to express a product
-// opinion. A student with more than 12 target titles has not answered the question.
+// The caps on categories and role_types are a PRODUCT rule, not just a bound on a
+// client-controlled jsonb column.
+//
+// An uncapped multi-select lets a student tick every category and quietly destroy their own
+// matching: "I'm interested in everything" is indistinguishable from "I haven't chosen", and both
+// produce a feed that matches nothing in particular. Simplify forces exactly one category and at
+// most two experience levels (walked 2026-07-17) - aggressive, but it means every answer they
+// hold is a real preference. These caps are looser than theirs, because our categories are
+// broader, while still forcing a choice: 3 of 8 categories, and 2 of 4 role types (internship +
+// co-op, or new-grad + full-time, are the real pairs a student actually wants).
+//
+// The titles cap stays a plain bound. A student with more than 12 target titles has not answered
+// the question, but titles are seeded from their own resume, so there is no matching to protect.
+export const MAX_CATEGORIES = 3;
+export const MAX_ROLE_TYPES = 2;
+
 export const targetingBodySchema = z.object({
-  categories: z.array(z.string().min(1).max(40)).max(8).nullable().optional(),
+  categories: z
+    .array(z.string().min(1).max(40))
+    .max(MAX_CATEGORIES, `pick at most ${MAX_CATEGORIES} categories`)
+    .nullable()
+    .optional(),
   titles: z.array(z.string().min(1).max(80)).max(12).nullable().optional(),
-  role_types: z.array(z.enum(ROLE_TYPES)).max(ROLE_TYPES.length).nullable().optional(),
+  role_types: z
+    .array(z.enum(ROLE_TYPES))
+    .max(MAX_ROLE_TYPES, `pick at most ${MAX_ROLE_TYPES} role types`)
+    .nullable()
+    .optional(),
   primary_period: period.nullable().optional(),
   backup_period: period.nullable().optional(),
 });

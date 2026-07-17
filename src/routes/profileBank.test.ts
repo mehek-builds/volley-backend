@@ -149,8 +149,38 @@ describe('targeting schema', () => {
     assert.equal(targetingBodySchema.safeParse({}).success, true);
   });
 
-  test('caps bound a client-controlled jsonb column', () => {
+  test('titles cap is a plain bound', () => {
     assert.equal(targetingBodySchema.safeParse({ titles: Array(13).fill('Engineer') }).success, false);
     assert.equal(targetingBodySchema.safeParse({ titles: Array(12).fill('Engineer') }).success, true);
+  });
+
+  // These two caps are a PRODUCT rule, not a bound. An uncapped multi-select lets a student tick
+  // every category and quietly destroy their own matching - "interested in everything" and
+  // "hasn't chosen" become the same answer, and both match nothing in particular. Walking
+  // Simplify's flow (2026-07-17) showed them forcing exactly one category and at most two
+  // experience levels for this reason. Ours are looser because our categories are broader, but
+  // they still force a choice.
+  test('categories cap at 3, and say so', () => {
+    assert.equal(
+      targetingBodySchema.safeParse({ categories: ['software-engineering', 'data-ml', 'research'] }).success,
+      true,
+    );
+    const r = targetingBodySchema.safeParse({
+      categories: ['software-engineering', 'data-ml', 'research', 'product'],
+    });
+    assert.equal(r.success, false);
+    assert.match(r.error!.issues[0].message, /at most 3 categories/);
+  });
+
+  test('role types cap at 2 - internship+co-op is a real pair, all four is not a preference', () => {
+    assert.equal(targetingBodySchema.safeParse({ role_types: ['internship', 'co-op'] }).success, true);
+    const r = targetingBodySchema.safeParse({ role_types: ['internship', 'co-op', 'new-grad'] });
+    assert.equal(r.success, false);
+    assert.match(r.error!.issues[0].message, /at most 2 role types/);
+  });
+
+  test('the caps do not block clearing', () => {
+    assert.equal(targetingBodySchema.safeParse({ categories: null, role_types: null }).success, true);
+    assert.equal(targetingBodySchema.safeParse({ categories: [], role_types: [] }).success, true);
   });
 });
