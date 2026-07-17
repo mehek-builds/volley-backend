@@ -409,10 +409,34 @@ export function validateResumeSpec(
     }
   }
 
+  // Reported, but NOT a hard issue: the floor is currently unreachable, so making it drive the
+  // retry loop was pure harm (R-023).
+  //
+  // jdKeywords() returns every non-stopword word in the JD over 3 chars: 304 of them for a 4.8k
+  // Cohere posting, including "toronto", "vacation", "benefits", "passionate", "obsess". Measured
+  // 2026-07-17: Mehek's ENTIRE bank, all 7 entries and 409 words (nearly 3x what fits on one page),
+  // covers 12-17% of that vocabulary. No resume she could physically write reaches 18%, so this
+  // fired on 100% of generations and the retry could never clear it.
+  //
+  // That mattered for more than cost. The retry feeds these issues back to the model as "fix them
+  // in this revision", so every generation was explicitly told "not tailored enough to this JD" and
+  // responded the only way it could: by importing JD vocabulary into the skills line. This gate was
+  // manufacturing the R-015 fabrication it was supposed to be unrelated to.
+  //
+  // Left as a warning rather than recalibrated because the number is not just mis-scaled, it barely
+  // discriminates: measured against a matching JD vs a wholly mismatched one it separates them by
+  // ~2 points, and the obvious alternatives (repeated terms, top-N by frequency) score the
+  // MISMATCHED JD higher. A metric worth gating on needs a real keyword model, which is a design
+  // decision, not a threshold tweak. Until then, do not restore this as an issue by lowering
+  // MIN_KEYWORD_COVERAGE: that buys a green check without making the resume any more tailored.
   const present = [...kw].filter((w) => allText.toLowerCase().includes(w)).length;
   const coveragePct = kw.size > 0 ? Math.round((100 * present) / kw.size) : 100;
   if (coveragePct < MIN_KEYWORD_COVERAGE) {
-    issues.push(`low ATS keyword coverage ${coveragePct}% (< ${MIN_KEYWORD_COVERAGE}%): not tailored enough to this JD`);
+    warnings.push({
+      entry: 'ats',
+      bullet: '',
+      flags: [`low-keyword-coverage(${coveragePct}% < ${MIN_KEYWORD_COVERAGE}%)`],
+    });
   }
 
   // Grounding: fail if the spec cites an org/title/number that isn't in the student's bank.

@@ -386,3 +386,39 @@ test('R-022: a less specific spec org still matches its only plausible bank entr
   const short = spec([{ org: 'Traeco', title: 'Founder', date_range: '2024', bullets: ['Built an AI cost-visibility product.'] }]);
   assert.deepEqual(findGroundingViolations(short, traecoBank).filter((v) => v.kind === 'org'), []);
 });
+
+// ─── R-023: an unreachable gate must not drive the retry loop ────────────────────────────────
+//
+// jdKeywords() treats every non-stopword JD word over 3 chars as a required keyword: 304 of them
+// for a 4.8k Cohere posting, including "toronto", "vacation", "passionate", "obsess". Measured
+// 2026-07-17 against Mehek's real bank: her ENTIRE bank (7 entries, 409 words, ~3x what fits on a
+// page) covers only 12-17%. Nothing she could write reaches the 18% floor, so this fired on 100%
+// of generations, forced a second model call that could never clear it, and fed the model
+// "not tailored enough to this JD" as a fix-this instruction, which is how JD vocabulary got
+// imported into the skills line.
+
+test('R-023: low ATS coverage is reported but does NOT become a retry-driving issue', () => {
+  const bank = [bankEntry({ org: 'Northwind Labs', title: 'Engineer', bullet_variants: ['Shipped a Python service.'] })];
+  const s = spec([{ org: 'Northwind Labs', title: 'Engineer', date_range: '2024', bullets: ['Shipped a Python service.'] }]);
+  // A JD sharing almost no vocabulary with the resume: coverage is necessarily near zero.
+  const jd = 'Kubernetes Rust Terraform observability oncall distributed consensus Byzantine tolerance quorum replication sharding';
+  const r = validateResumeSpec(s, jd, bank);
+
+  assert.ok(r.ats_keyword_coverage_pct < 18, 'precondition: coverage is below the floor');
+  assert.equal(
+    r.issues.some((i) => /keyword coverage/i.test(i)),
+    false,
+    'coverage must not be a hard issue: it is unreachable, so it would retry forever and pressure the model to stuff JD keywords',
+  );
+  assert.ok(
+    r.warnings.some((w) => w.entry === 'ats' && w.flags.some((f) => /low-keyword-coverage/.test(f))),
+    'but it must still be surfaced as a warning so a genuinely untailored resume is visible',
+  );
+});
+
+test('R-023: the coverage number is still computed and reported', () => {
+  const bank = [bankEntry({ org: 'Northwind Labs', bullet_variants: ['Built Python REST services.'] })];
+  const s = spec([{ org: 'Northwind Labs', title: 'Engineer', date_range: '2024', bullets: ['Built Python REST services.'] }]);
+  const r = validateResumeSpec(s, 'python python python rest rest services services engineer', bank);
+  assert.ok(typeof r.ats_keyword_coverage_pct === 'number' && r.ats_keyword_coverage_pct > 0);
+});
