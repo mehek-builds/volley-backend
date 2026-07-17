@@ -361,6 +361,15 @@ export const autofill_events = pgTable('autofill_events', {
   // (2026-07-02 opt-in auto-submit toggle in AutofillSetupScreen, off by default). false = the
   // student either has the toggle off or cancelled the countdown on this application.
   auto_submitted: boolean('auto_submitted').default(false),
+  // R-030's measurement channel, not its fix. The register's verdict on the link classifier is
+  // "do not fix it from first principles; get a real label off a real board first", so the
+  // extension (fix/r027-tags-r030-log) logs the labels in exactly the R-030 population - where
+  // linkQuestion matched, asksForLink is false, and the control is a text input - and ships them
+  // here as a string[]. Nullable on purpose: events from older extension versions and fills with
+  // no candidate labels simply omit it, and nothing reads the column yet. Whether the real fix is
+  // "the platform must be the subject", a per-product veto, or nothing at all gets decided from
+  // this data, not invented ahead of it.
+  r030_candidate_labels: jsonb('r030_candidate_labels'),
   created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
 

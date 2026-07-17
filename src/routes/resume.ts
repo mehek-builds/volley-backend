@@ -116,6 +116,24 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// POST /autofill/event's body. Strip-mode on purpose (zod's default): unknown keys from newer
+// extension builds are dropped rather than rejected, so the two sides can version independently.
+// The flip side is that a field the extension sends but this schema does not name is dropped
+// SILENTLY, which is how the R-030 telemetry almost vanished: the extension branch
+// fix/r027-tags-r030-log ships r030_candidate_labels (the labels where linkQuestion matched with
+// asksForLink false on a text input - the population the register says to sample live before
+// designing any fix) and without the field here every sample would have been stripped on arrival.
+// Bounds are telemetry-sized: 50 labels of 200 chars covers any real form and caps what a
+// misbehaving client can store per event. Optional: older extensions and label-less fills omit it.
+export const autofillEventSchema = z.object({
+  ats_name: z.string().min(1),
+  job_context: z.object({ company: z.string(), role: z.string() }),
+  fields_filled: z.number().int().min(0),
+  fields_skipped: z.number().int().min(0),
+  auto_submitted: z.boolean().optional(),
+  r030_candidate_labels: z.array(z.string().max(200)).max(50).optional(),
+});
+
 const bodySchema = z.object({
   company: z.string().min(1),
   role: z.string().min(1),
@@ -455,17 +473,9 @@ export async function resumeRoutes(fastify: FastifyInstance) {
   fastify.post('/autofill/event', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
 
-    const eventSchema = z.object({
-      ats_name: z.string().min(1),
-      job_context: z.object({ company: z.string(), role: z.string() }),
-      fields_filled: z.number().int().min(0),
-      fields_skipped: z.number().int().min(0),
-      auto_submitted: z.boolean().optional(),
-    });
-
-    let body: z.infer<typeof eventSchema>;
+    let body: z.infer<typeof autofillEventSchema>;
     try {
-      body = eventSchema.parse(request.body);
+      body = autofillEventSchema.parse(request.body);
     } catch (err) {
       const detail = err instanceof z.ZodError ? err.issues.map((i) => `${i.path.join('.')}: ${i.message}`) : undefined;
       return reply.status(400).send({ error: 'Invalid request body', detail });
