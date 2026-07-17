@@ -90,3 +90,25 @@ test('anything encryptField produces reads as encrypted', () => {
     }
   });
 });
+
+// Regression guard for the key cache, and the reason it must exist: per-call scrypt derivation
+// produces BYTE-IDENTICAL output, so every correctness test above passes while throughput
+// collapses ~90x (26 req/s and a p50 of 1898ms on GET /profile/application, against a local
+// Postgres where the queries cost under a millisecond). Only timing catches it.
+//
+// The threshold is deliberately loose. One uncached scryptSync costs tens of ms at Node's
+// defaults, so 200 operations uncached is multiple SECONDS - measured at 7546ms with the cache
+// removed. Anything under a second proves the key is being reused; the exact figure is
+// machine-dependent and not the point.
+test('derives the key once, not per call (pins a 90x throughput regression)', () => {
+  process.env.ENCRYPTION_KEY = 'perf-guard-key';
+  encryptField('warm the cache'); // exclude the one legitimate derivation from the timing
+  const t0 = process.hrtime.bigint();
+  for (let i = 0; i < 100; i++) decryptField(encryptField('Dubai'));
+  const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  assert.ok(
+    ms < 1000,
+    `200 crypto ops took ${ms.toFixed(0)}ms. That is the signature of scrypt running per call ` +
+      `instead of once - check getKey()'s cache in fieldCrypto.ts.`,
+  );
+});

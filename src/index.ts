@@ -15,6 +15,9 @@ import { applicationProfileRoutes } from './routes/applicationProfile';
 import { applicationAnswerRoutes } from './routes/applicationAnswer';
 import { resumeRoutes } from './routes/resume';
 import { adapterHealthRoutes } from './routes/adapterHealth';
+import { targetingRoutes } from './routes/targeting';
+import { harvestRoutes } from './routes/harvest';
+import { onboardingRoutes } from './routes/onboarding';
 import { assertEncryptionKeyConfigured } from './lib/fieldCrypto';
 
 export async function buildApp() {
@@ -101,6 +104,9 @@ export async function buildApp() {
   await fastify.register(billingRoutes);
   await fastify.register(experienceBankRoutes);
   await fastify.register(applicationProfileRoutes);
+  await fastify.register(targetingRoutes);
+  await fastify.register(harvestRoutes);
+  await fastify.register(onboardingRoutes);
   await fastify.register(applicationAnswerRoutes);
   await fastify.register(resumeRoutes);
   await fastify.register(adapterHealthRoutes);
