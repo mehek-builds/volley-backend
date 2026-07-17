@@ -19,15 +19,33 @@ export interface ResumeSpec {
   // is what this said and what the prompt asked for - with no skills source in the system, that
   // instruction was an invitation to keyword-stuff, and the model took it (R-015).
   skills: string[];
-  // Rendered-term -> the DECLARED skill it renames, for entries written in the JD's vocabulary
-  // rather than the student's own ("ETL" -> "SQL", "model evals" -> "LLM evaluation").
+  // Rendered-term -> the DECLARED skill it renames. RENAMING IS CURRENTLY DISABLED IN THE PROMPT;
+  // this field and the validator support for it are retained deliberately, because the plumbing is
+  // right and only the model's judgement was not. See the DISABLED note below before re-enabling.
   //
-  // Why this exists: matching the JD's wording for a skill the student ACTUALLY HAS is legitimate
-  // ATS tailoring, but the declared-mode validator drops anything not verbatim in the declared list,
-  // so a rename would be silently deleted. This map is what makes a rename survivable AND auditable:
-  // the validator only accepts a translated term if it maps to a real declared skill, so a rename
-  // cannot smuggle in a skill the student never claimed. Renaming is the ONLY licence granted here;
-  // adding is still forbidden (R-015).
+  // The idea: writing a skill the student HAS in the JD's words ("ETL" for their "SQL") is honest ATS
+  // tailoring, and declared mode drops anything not verbatim in the list, so a rename needs a
+  // declared target to survive. That guard works: a rename can never introduce a skill they never
+  // claimed.
+  //
+  // 🔴 WHY IT IS OFF: the guard stops INVENTION but not GENERALISATION, and generalisation is what
+  // the model actually did, on the very first live run, against a prompt that forbade it in those
+  // words. Measured on a real Notion generation, 2026-07-17:
+  //     {"LLMs": "OpenAI API", "Machine Learning": "Hugging Face", "databases": "SQL"}
+  // Every target is genuinely declared, so all three passed. But "Hugging Face" is a library and
+  // "Machine Learning" is a discipline; "OpenAI API" is one vendor's API and "LLMs" is a field. Those
+  // are not the same skill wearing a different label, they are a specific claim laundered into a
+  // broad one. The outputs may even be defensible on other evidence, and that is precisely the trap:
+  // an ungrounded step is a defect even when it lands on a true answer (the whole lesson of R-015).
+  //
+  // Prompt hardening was tried first and failed: the rule already said, verbatim, that a term which is
+  // "DIFFERENT, BROADER, or more SPECIFIC" is not a rename, with worked negative examples. The model
+  // broadened anyway. A rule the model reads and ignores is not a control.
+  //
+  // TO RE-ENABLE SAFELY it needs a CURATED synonym whitelist that we own, not model judgement:
+  // an explicit table (SQL -> ETL, A/B testing -> experimentation) where every pair is a true alias
+  // rather than a hypernym. Until that exists, skills are copied verbatim. Selection and ordering,
+  // which carry most of the ATS benefit, are unaffected and stay on.
   skill_source?: Record<string, string>;
 }
 
@@ -58,18 +76,11 @@ Rules:
   first, and leave the rest out. A SKILLS line listing every skill the student has tells the reader
   nothing about their fit for this role, and pushes the relevant ones below the fold. Omitting a
   skill here does not deny it: it is a different job's resume.
-- Each skill appears exactly ONCE. If you rename one under "skill_source", list it ONLY under the new
-  label: writing both "SQL" and "ETL" spends two slots on one skill and reads like padding.
-- "skill_source": OPTIONAL renaming, for ATS matching. When the JD names the SAME skill in different
-  words, you may write the student's skill in the JD's words, and you MUST record it as
-  {"the term you wrote": "the exact Skills-list entry it renames"}. Examples of a legitimate rename:
-  JD says "ETL" and the student has "SQL" -> write "ETL", record {"ETL": "SQL"}. JD says
-  "experimentation" and they have "A/B testing" -> {"experimentation": "A/B testing"}.
-  A rename is one skill wearing the JD's label. It is NEVER a bridge to a skill they lack:
-  "Kubernetes" is NOT a rename of "Production deployment". "BigQuery" is NOT a rename of "SQL".
-  "React" is NOT a rename of "JavaScript". If the JD's term names a DIFFERENT, BROADER, or more
-  SPECIFIC thing than the student's skill - a distinct product, vendor, or technology - it is not a
-  rename, and you must leave it out entirely. When in doubt, use the student's own wording.
+- Each skill appears exactly ONCE, and is written EXACTLY as it appears in the Skills list. Copy the
+  student's own wording character for character. Do not re-word, re-label, generalise, expand an
+  abbreviation, or substitute the job description's vocabulary. If the JD says "ETL" and the student
+  wrote "SQL", the resume says "SQL".
+- "skill_source": leave it out. Renaming is DISABLED (see below).
 - NEVER add a skill because the job description asks for it. If the JD wants a tool and the student's
   Skills list doesn't have it, they don't have it: leave it out. A resume that omits a skill costs an
   interview; a resume that claims one the student lacks costs their credibility in the screen.
