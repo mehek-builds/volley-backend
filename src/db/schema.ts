@@ -220,6 +220,8 @@ export const application_profile = pgTable('application_profile', {
   // is not a Toronto answer, so replaying a captured one is the original bug wearing a new hat.
   work_authorized: boolean('work_authorized'),
   needs_sponsorship: boolean('needs_sponsorship'),
+  // WHEN she can start. Stored ISO (YYYY-MM-DD) because onboarding uses <input type="date">:
+  // a locale-shaped string is silently dropped by a picker expecting the other order (R-014).
   availability_date: text('availability_date'),
   // HOW LONG she is available ("14 weeks"), which is a different question from when she can start.
   // Without this column the extension could recognise a duration question but never answer it, so

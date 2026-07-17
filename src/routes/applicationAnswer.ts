@@ -2,7 +2,8 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { eq } from 'drizzle-orm';
 import { db } from '../db/index';
-import { experience_bank, profiles } from '../db/schema';
+import { profiles } from '../db/schema';
+import { readExperienceBank } from '../db/experienceBank';
 import { requireAuth } from '../middleware/auth';
 import { draftApplicationAnswer } from '../llm/applicationAnswer';
 
@@ -25,7 +26,9 @@ export async function applicationAnswerRoutes(fastify: FastifyInstance) {
     const userId = request.jwtPayload!.userId;
     const { question, company, role, jd_text } = parsed.data;
 
-    const bank = await db.select().from(experience_bank).where(eq(experience_bank.user_id, userId));
+    // Ordered read, always: see readExperienceBank (R-022). The bank goes into a cached prompt
+    // prefix, so an unstable order busts the cache as well as making drafts non-reproducible.
+    const bank = await readExperienceBank(userId);
     if (bank.length === 0) {
       return reply.status(400).send({ error: 'No experience bank found - complete onboarding first' });
     }

@@ -27,6 +27,11 @@ export const ENCRYPTED_FIELDS = [
   // which profiles.parsed_json already stores in the clear.
   'gpa',
 ] as const;
+// availability_term is deliberately absent, though availability_date is here. The bar is identity
+// sensitivity, not "everything on the profile": links, referral_source_default, gpa and major are
+// all plaintext too. "14 weeks" says nothing about who she is, where she lives or what she earns,
+// and leaving it queryable is worth more than encrypting a duration. A date is different: combined
+// with the rest it is a movement fact about a person.
 
 // Every column is nullable in the DB (application_profile has no .notNull() fields), and
 // GET echoes back null for anything unset. The client round-trips the fetched profile
@@ -45,6 +50,7 @@ const bodySchema = z.object({
   work_authorized: z.boolean().nullable().optional(),
   needs_sponsorship: z.boolean().nullable().optional(),
   availability_date: z.string().nullable().optional(),
+  availability_term: z.string().nullable().optional(),
   desired_salary: z.string().nullable().optional(),
   // The unit `desired_salary` is in. A figure without it cannot be filled honestly onto a
   // posting in another currency, so the adapters require both or neither.
