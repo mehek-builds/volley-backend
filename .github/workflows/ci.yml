@@ -31,3 +31,32 @@ jobs:
         run: test -n "$(find src -name '*.test.ts' -print -quit)"
       - name: Test
         run: npm test
+
+  # Catches the one failure mode schema-push has that nothing else sees: a branch runs db:push
+  # before it merges, prod ends up holding a column `main` does not declare, and the NEXT branch's
+  # push drops it. On 2026-07-17 prod carried 8 undeclared columns, one holding real data, while
+  # every test was green and typecheck was clean. See scripts/check-schema-drift.mjs.
+  #
+  # Separate job, not a step in `test`: this one needs a database and `test` deliberately does not,
+  # so a missing/rotated secret must never be able to take the test suite down with it.
+  schema-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      # Skips rather than fails when the secret is absent, so a fork or a checkout without database
+      # access is not blocked by a check it cannot possibly run. The skip is LOUD: a silent skip
+      # would leave a green tick meaning "not checked", which is how this class of bug survives.
+      - name: Check schema drift against the database
+        env:
+          DATABASE_URL: ${{ secrets.SCHEMA_CHECK_DATABASE_URL }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::warning title=Schema drift NOT checked::SCHEMA_CHECK_DATABASE_URL is not set, so this PR was not compared against the database. Set the secret to enable the guard."
+            exit 0
+          fi
+          npm run schema:check
