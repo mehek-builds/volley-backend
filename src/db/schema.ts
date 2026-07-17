@@ -24,6 +24,21 @@ export const users = pgTable('users', {
   plan: text('plan').default('free').notNull(),
   trial_ends_at: timestamp('trial_ends_at', { withTimezone: true }),
   created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  // Token epoch: JWTs issued before this instant are rejected by requireAuth.
+  // Set when verify-code adopts a pre-existing unverified account, so any token
+  // minted during a no-RESEND break-glass window dies on the owner's first
+  // verified login instead of surviving its full 30 days.
+  session_valid_from: timestamp('session_valid_from', { withTimezone: true }),
+  // Onboarding: set when the student finishes /start (resume -> install -> first
+  // application -> gaps -> targeting). NULL means onboarding is still open.
+  //
+  // This gates HARVEST, and that is its real job. While it is NULL the extension may read
+  // values back out of a form the student is filling by hand and write them to
+  // application_profile; once set, it stops. Harvesting forever would be a materially
+  // different consent bargain than "we watch the first one so you never type it again",
+  // and the student is told which one is happening. Deriving this from "has a profile"
+  // would make the bargain implicit and un-revocable, so it is stored.
+  onboarding_completed_at: timestamp('onboarding_completed_at', { withTimezone: true }),
 });
 
 // ---- usage_counters ----
@@ -57,6 +72,31 @@ export const profiles = pgTable('profiles', {
     .references(() => users.id, { onDelete: 'cascade' }),
   parsed_json: jsonb('parsed_json'),
   resume_object_key: text('resume_object_key'),
+  // The stored original. resume_object_key has always been written and never read, and it pointed
+  // at a blob that was never uploaded: POST /profile parsed the PDF and dropped the buffer on the
+  // floor. A Vercel Blob URL carries a random token, so the key alone cannot reconstruct it - the
+  // URL has to be kept or the file is unreachable even once it is really uploaded.
+  // NULL is normal: the upload is best-effort and a blob outage must not fail a signup.
+  resume_url: text('resume_url'),
+  // string[] of the skills the student ACTUALLY has, in their own words. The one authoritative
+  // source for the resume's SKILLS line (R-015).
+  //
+  // Before this column there was no skills data in the system at all: ResumeSpec demanded
+  // `skills: string[]` and nothing was ever passed in, so the model had to invent the field. It
+  // did the only two things it could - reuse the seeded `experience_bank.tags` junk (the identical
+  // gRPC/SDK-design array on 6 of 7 rows, including a Product Management internship and a VP of
+  // Finance role), and lift keywords straight out of the JD. A submitted Monzo application claims
+  // BigQuery and Looker; both return zero rows across the entire bank.
+  //
+  // NULL is meaningful and is NOT the same as []. NULL means "the student never gave us a list",
+  // and the validator falls back to soft bank-grounding. A populated list is AUTHORITATIVE: skills
+  // outside it are hard-rejected, which is only safe BECAUSE the list is the student's own
+  // statement rather than something inferred from their bullets.
+  //
+  // Copied verbatim from R-015 (efc59e6, fix/qa-register-backend). The column is ALREADY LIVE in
+  // prod, so it must be declared here or `drizzle-kit push` from this branch would drop it and
+  // take the data with it. Keep this definition identical to R-015's until that branch merges.
+  skills: jsonb('skills'),
   voice_pref: text('voice_pref'),
   updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
@@ -167,17 +207,84 @@ export const application_profile = pgTable('application_profile', {
   address_city: text('address_city'),
   address_state: text('address_state'),
   address_zip: text('address_zip'),
+  // Country the student is BASED IN (residence / where they work from). Distinct from
+  // `citizenship` below: "which country do you intend to work from" and "country of residence"
+  // ask about location, not nationality. Encrypted at rest like the other address fields.
+  address_country: text('address_country'),
   linkedin_url: text('linkedin_url'),
   github_url: text('github_url'),
   portfolio_url: text('portfolio_url'),
   citizenship: text('citizenship'),
+  // Kept for the student's own reference ONLY. NEVER written into a form and never harvested
+  // back out of one: these are single global flags, but every real form asks a LOCATION-SCOPED
+  // question ("authorized to work in the location where this role is based?"), and deriving one
+  // from the other shipped a false legal declaration on a live application (R-004, Lever/Xsolla
+  // 2026-07-16). The adapters skip both via WORK_ELIGIBILITY_QUESTION and auto-submit HOLDS while
+  // either sits unanswered. Harvest treats them as a denylist for the same reason: a Berlin answer
+  // is not a Toronto answer, so replaying a captured one is the original bug wearing a new hat.
   work_authorized: boolean('work_authorized'),
   needs_sponsorship: boolean('needs_sponsorship'),
   availability_date: text('availability_date'),
   desired_salary: text('desired_salary'),
+  // The currency `desired_salary` is denominated in, e.g. "EUR". Separate and plaintext: a bare
+  // "80000" is not an answer, it is an ambiguity, and replaying a figure earned against one
+  // currency onto a posting in another states something the student never said. A Munich
+  // application parked mid-fill for exactly this (needed "a salary figure + unit"). Fill leaves
+  // the field blank unless BOTH are present, the same way gpa needs gpa_scale to be readable.
+  desired_salary_currency: text('desired_salary_currency'),
   date_of_birth: text('date_of_birth'), // encrypted; filled only where a form explicitly asks (never SSN)
+  // Academic record (R-005). PRD-v2 Section 4D promised "GPA (if listed)" as auto-extract-no-ask,
+  // but no column, route, or adapter ever handled it, so every GPA-gated intern form was
+  // unfillable - and GPA is among the most common REQUIRED intern fields.
+  // gpa and gpa_scale are stored SEPARATELY and deliberately: a bare "3.89" is meaningless without
+  // the scale it was earned on, and a form asking for a UK percentage needs to know the source
+  // scale to say anything honest about it. Storing a pre-converted number instead would bake one
+  // form's convention into the profile and lose the original.
+  gpa: text('gpa'), // encrypted; the value as earned, e.g. "3.89"
+  gpa_scale: text('gpa_scale'), // plaintext, e.g. "4.0" - meaningless alone, and needed to read gpa
+  major: text('major'), // plaintext, e.g. "Computer Science"; no more sensitive than school
   eeo_prefs: jsonb('eeo_prefs'), // nullable, only set if the student explicitly opts in
   referral_source_default: text('referral_source_default').default('Company website'),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+});
+
+// ---- targeting ----
+// What the student is going after: the five questions /start asks last (category, titles,
+// role types, main period, backup period).
+//
+// Deliberately its OWN table, not columns on the two that already exist:
+//   - NOT application_profile, whose contract is "sensitive, encrypted, and never included in a
+//     drafting-LLM prompt". Targeting is the opposite on both counts: it is a stated preference,
+//     not an identity record, and resume tailoring WANTS it in the prompt. Filing it there would
+//     either leak it into a table that promises encryption or lock it out of the one consumer
+//     that needs it.
+//   - NOT profiles.parsed_json, which is overwritten wholesale by every resume upload
+//     (routes/profile.ts). Targeting would silently vanish the next time the student swapped
+//     their resume, which is a data-loss bug with a long fuse.
+//
+// Asked LAST in onboarding on purpose: everything else /start needs can be learned by watching
+// one real application. This cannot, because it is about the NEXT hundred postings rather than
+// the one in front of them.
+export const targeting = pgTable('targeting', {
+  user_id: uuid('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
+  // string[] of category slugs, e.g. ['software-engineering', 'data-ml'].
+  categories: jsonb('categories'),
+  // string[] of literal titles the student would accept, e.g. ['Software Engineer Intern'].
+  // Seeded from ParsedProfile.target_roles, which the resume parser has written since v0 and
+  // which nothing has ever read. This is the first consumer.
+  titles: jsonb('titles'),
+  // string[] from ['internship','co-op','new-grad','full-time']. Plural because a student
+  // hunting a summer internship will usually take a co-op, and the distinction is the
+  // employer's vocabulary rather than the student's intent.
+  role_types: jsonb('role_types'),
+  // Season slugs, e.g. 'summer-2027'. Free text rather than an enum: the set is derived from
+  // grad_year at render time and slides forward every term, so pinning it in the DB would need
+  // a migration each year to say nothing new.
+  primary_period: text('primary_period'),
+  // Where they'd go if the main one doesn't land. Stored separately rather than as an ordered
+  // array so "main" and "backup" keep their meaning - a ranked list would lose the distinction
+  // the student actually drew.
+  backup_period: text('backup_period'),
   updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
 

@@ -9,15 +9,23 @@ import { encryptField, decryptField } from '../lib/fieldCrypto';
 // Fields sensitive enough to encrypt at rest per PRD-v2 Section 4: phone/address/
 // work-authorization status. Links and referral_source are not identity-sensitive
 // in the same way and stay plaintext so they remain easily queryable later.
-const ENCRYPTED_FIELDS = [
+// Exported so /profile/harvest encrypts the same set: two copies of this list would drift, and
+// the failure mode of drift is a sensitive value written to the DB in plaintext.
+export const ENCRYPTED_FIELDS = [
   'phone',
   'address_city',
   'address_state',
   'address_zip',
+  'address_country',
   'citizenship',
   'availability_date',
   'desired_salary',
   'date_of_birth',
+  // Academic record (R-005). Encrypted with the identity-sensitive set rather than left plaintext
+  // with the links: a specific GPA is a real record about a real person. gpa_scale and major stay
+  // plaintext - a scale is meaningless on its own, and a major is no more sensitive than school,
+  // which profiles.parsed_json already stores in the clear.
+  'gpa',
 ] as const;
 
 // Every column is nullable in the DB (application_profile has no .notNull() fields), and
@@ -29,6 +37,7 @@ const bodySchema = z.object({
   address_city: z.string().nullable().optional(),
   address_state: z.string().nullable().optional(),
   address_zip: z.string().nullable().optional(),
+  address_country: z.string().nullable().optional(),
   linkedin_url: z.string().nullable().optional(),
   github_url: z.string().nullable().optional(),
   portfolio_url: z.string().nullable().optional(),
@@ -37,7 +46,16 @@ const bodySchema = z.object({
   needs_sponsorship: z.boolean().nullable().optional(),
   availability_date: z.string().nullable().optional(),
   desired_salary: z.string().nullable().optional(),
+  // The unit `desired_salary` is in. A figure without it cannot be filled honestly onto a
+  // posting in another currency, so the adapters require both or neither.
+  desired_salary_currency: z.string().nullable().optional(),
   date_of_birth: z.string().nullable().optional(),
+  // Academic record (R-005). gpa and gpa_scale are separate on purpose: "3.89" says nothing without
+  // "4.0", and a form asking for a UK percentage cannot be answered honestly without knowing the
+  // scale the number was earned on.
+  gpa: z.string().nullable().optional(),
+  gpa_scale: z.string().nullable().optional(),
+  major: z.string().nullable().optional(),
   // Only ever set if the student explicitly opts in (PRD-v2 Section 4B); absent/null
   // means every autofill selects "Decline to Self-Identify" where that option exists.
   eeo_prefs: z.record(z.string()).nullable().optional(),

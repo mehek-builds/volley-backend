@@ -1,0 +1,156 @@
+import { test, describe } from 'node:test';
+import assert from 'node:assert/strict';
+import { toBullets, bankEntriesFrom } from './profile';
+import type { ParsedProfile } from '../llm/parse';
+import { targetingBodySchema } from './targeting';
+
+const UID = '00000000-0000-4000-8000-000000000001';
+
+function profile(over: Partial<ParsedProfile> = {}): ParsedProfile {
+  return {
+    full_name: 'Mehek Mandal',
+    experience: [],
+    skills: [],
+    projects: [],
+    school: 'University of Southern California',
+    grad_year: 2028,
+    target_roles: [],
+    ...over,
+  };
+}
+
+describe('toBullets', () => {
+  test('splits a multi-line description into one variant per bullet', () => {
+    assert.deepEqual(toBullets('Built the thing\nShipped the thing'), ['Built the thing', 'Shipped the thing']);
+  });
+
+  test('strips leading bullet markers', () => {
+    assert.deepEqual(toBullets('- Built it\n• Shipped it\n* Measured it'), ['Built it', 'Shipped it', 'Measured it']);
+  });
+
+  test('falls back to the whole description when there is nothing to split on', () => {
+    assert.deepEqual(toBullets('One single sentence.'), ['One single sentence.']);
+  });
+
+  test('drops blank lines rather than seeding empty variants', () => {
+    assert.deepEqual(toBullets('Built it\n\n\nShipped it'), ['Built it', 'Shipped it']);
+  });
+
+  test('empty description yields no variants at all', () => {
+    assert.deepEqual(toBullets(''), []);
+    assert.deepEqual(toBullets('   \n  '), []);
+  });
+});
+
+// Before this mapping existed, POST /profile wrote parsed_json and nothing else, while
+// /resume/generate and /application/answer both hard-400 on an empty bank. Every account made
+// through the web app looked set up and could generate nothing.
+describe('bankEntriesFrom', () => {
+  test('maps experience to job entries with a joined date range', () => {
+    const entries = bankEntriesFrom(
+      profile({
+        experience: [
+          { company: 'Traeco', title: 'Founder', start: '2025', end: '2026', description: 'Built it\nShipped it' },
+        ],
+      }),
+      UID,
+    );
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].type, 'job');
+    assert.equal(entries[0].org, 'Traeco');
+    assert.equal(entries[0].title, 'Founder');
+    assert.equal(entries[0].date_range, '2025 - 2026');
+    assert.deepEqual(entries[0].bullet_variants, ['Built it', 'Shipped it']);
+    assert.equal(entries[0].user_id, UID);
+  });
+
+  test('maps projects to project entries', () => {
+    const entries = bankEntriesFrom(
+      profile({ projects: [{ name: 'RoleQuick', description: 'Autofills applications' }] }),
+      UID,
+    );
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].type, 'project');
+    assert.equal(entries[0].org, 'RoleQuick');
+    assert.equal(entries[0].title, null);
+    assert.equal(entries[0].date_range, null);
+  });
+
+  test('drops entries with no org - an unnamed row cannot ground anything', () => {
+    const entries = bankEntriesFrom(
+      profile({
+        experience: [{ company: '  ', title: 'Ghost', start: '', end: '', description: 'Did things' }],
+        projects: [{ name: '', description: 'Nameless' }],
+      }),
+      UID,
+    );
+    assert.equal(entries.length, 0);
+  });
+
+  test('drops entries with no bullets - bullet_variants is notNull and min(1)', () => {
+    const entries = bankEntriesFrom(
+      profile({ experience: [{ company: 'Traeco', title: 'Founder', start: '', end: '', description: '' }] }),
+      UID,
+    );
+    assert.equal(entries.length, 0);
+  });
+
+  test('a missing date range is null, not the string " - "', () => {
+    const entries = bankEntriesFrom(
+      profile({ experience: [{ company: 'Traeco', title: '', start: '', end: '', description: 'Did it' }] }),
+      UID,
+    );
+    assert.equal(entries[0].date_range, null);
+    assert.equal(entries[0].title, null);
+  });
+
+  test('jobs and projects both land, jobs first', () => {
+    const entries = bankEntriesFrom(
+      profile({
+        experience: [{ company: 'Traeco', title: 'Founder', start: '2025', end: '2026', description: 'Built it' }],
+        projects: [{ name: 'RoleQuick', description: 'Autofills' }],
+      }),
+      UID,
+    );
+    assert.deepEqual(entries.map((e) => e.type), ['job', 'project']);
+  });
+
+  test('handles a parse with no experience or projects at all', () => {
+    assert.deepEqual(bankEntriesFrom(profile(), UID), []);
+  });
+});
+
+describe('targeting schema', () => {
+  test('accepts the five answers /start collects', () => {
+    const r = targetingBodySchema.safeParse({
+      categories: ['software-engineering', 'data-ml'],
+      titles: ['Software Engineer Intern', 'ML Engineer Intern'],
+      role_types: ['internship', 'co-op'],
+      primary_period: 'summer-2027',
+      backup_period: 'spring-2027',
+    });
+    assert.equal(r.success, true);
+  });
+
+  test('a period must be a slug, not a display label', () => {
+    assert.equal(targetingBodySchema.safeParse({ primary_period: 'summer-2027' }).success, true);
+    assert.equal(targetingBodySchema.safeParse({ primary_period: 'Summer 2027' }).success, false);
+    assert.equal(targetingBodySchema.safeParse({ primary_period: 'summer-27' }).success, false);
+    assert.equal(targetingBodySchema.safeParse({ primary_period: 'whenever' }).success, false);
+  });
+
+  test('role_types is a closed set', () => {
+    assert.equal(targetingBodySchema.safeParse({ role_types: ['internship'] }).success, true);
+    assert.equal(targetingBodySchema.safeParse({ role_types: ['contract'] }).success, false);
+  });
+
+  test('null clears a field; omission leaves it alone', () => {
+    assert.equal(targetingBodySchema.safeParse({ primary_period: null }).success, true);
+    assert.equal(targetingBodySchema.safeParse({}).success, true);
+  });
+
+  test('caps bound a client-controlled jsonb column', () => {
+    assert.equal(targetingBodySchema.safeParse({ titles: Array(13).fill('Engineer') }).success, false);
+    assert.equal(targetingBodySchema.safeParse({ titles: Array(12).fill('Engineer') }).success, true);
+  });
+});

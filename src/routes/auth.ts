@@ -91,27 +91,30 @@ export async function authRoutes(fastify: FastifyInstance) {
     }
 
     try {
-      // Find or create user
-      let user = await db.select().from(users).where(eq(users.email, email)).limit(1);
-
-      // This legacy path does NO proof that the caller owns `email`, so it must not hand out a
-      // 30-day token for an account that ALREADY EXISTS - otherwise anyone who knows a user's
-      // email could mint a token and read their decrypted application profile. Existing accounts
-      // must re-enter through the emailed-code flow (/auth/request-code + /auth/verify-code).
-      // Gating on existence (not the email_verified flag) is what actually closes the hole: the
-      // whole v0.1.0 base predates verification and has email_verified=false, so a verified-only
-      // gate left every one of them impersonable.
+      // This legacy path does NO proof that the caller owns `email`, so when email verification is
+      // available it must not mint a 30-day token AT ALL - not for an account that already exists
+      // (anyone who knew the email could read its decrypted profile), and not for a new one either.
+      // Minting a token for a not-yet-registered email lets an attacker PRE-REGISTER a victim's
+      // address, hold a valid 30-day token, and read the victim's data once they later adopt that
+      // account through the code flow (verify-code merges by email onto the SAME user id, without
+      // rotating it). So gate EVERY request here and route all signup/login through the emailed-code
+      // flow (/auth/request-code + /auth/verify-code), which proves ownership before any token or
+      // adoptable account exists.
       //
       // Break-glass: when email verification isn't configured (no RESEND_API_KEY) there is no code
-      // flow to fall back to, so we preserve signup/login rather than brick auth. Once RESEND_API_KEY
-      // is set in an environment, every existing account is gated here. (An email-provider OUTAGE
-      // with the key set is deliberately NOT a break-glass: better a rare, brief inability to log in
-      // on a new device - existing 30-day sessions keep working - than reopening login-as-anyone.)
+      // flow to fall back to, so we preserve find-or-create rather than brick auth. Once
+      // RESEND_API_KEY is set, every account (new AND existing) is gated here. DEPLOY NOTE: the
+      // PUBLISHED client must handle this 403 by routing to /auth/request-code + /auth/verify-code,
+      // or enabling RESEND blocks ALL new signups on it (not just a new-device login for existing
+      // users). An email-provider OUTAGE with the key set is deliberately NOT a break-glass either:
+      // better a brief inability to sign in than reopening token-minting-for-anyone.
       const verificationConfigured = !!process.env.RESEND_API_KEY;
-      if (user.length > 0 && verificationConfigured) {
+      if (verificationConfigured) {
         return reply.status(403).send({ error: 'verification_required' });
       }
 
+      // Break-glass only (no email provider configured): find or create the account by email.
+      let user = await db.select().from(users).where(eq(users.email, email)).limit(1);
       if (user.length === 0) {
         const newUserId = uuidv4();
         await db.insert(users).values({ id: newUserId, email, trial_ends_at: trialEnd(), created_at: new Date() });
@@ -217,7 +220,15 @@ export async function authRoutes(fastify: FastifyInstance) {
         await db.insert(users).values({ id: uuidv4(), email, email_verified: true, trial_ends_at: trialEnd(), created_at: new Date() });
         user = await db.select().from(users).where(eq(users.email, email)).limit(1);
       } else if (!user[0].email_verified) {
-        await db.update(users).set({ email_verified: true }).where(eq(users.email, email));
+        // Adopting a pre-existing UNVERIFIED account onto the same users.id. Any
+        // token already out for this account was minted without proof of email
+        // ownership (a no-RESEND break-glass window), so bump the token epoch:
+        // requireAuth rejects every JWT with iat before session_valid_from. The
+        // token we sign below postdates this instant and stays valid.
+        await db
+          .update(users)
+          .set({ email_verified: true, session_valid_from: new Date() })
+          .where(eq(users.email, email));
       }
 
       const token = await signSessionToken(user[0].id, user[0].email);
