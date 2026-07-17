@@ -11,6 +11,8 @@ import { allowHourly, bumpCounter, getCount, getEntitlements, LIMITS, monthPerio
 import { generateResumeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import { renderResumePdf } from '../engine/resumeRender';
 import { validateResumeSpec, validatePdfLayout, pruneUngroundedContent } from '../engine/resumeValidate';
+import { mintDownloadToken, readDownloadToken, resolveBlobUrl } from '../lib/resumeAccess';
+import { apiBaseFor } from '../lib/apiBase';
 
 const MAX_SPEC_ATTEMPTS = 2; // 1 initial pass + 1 feedback-driven retry, per PRD-v2 Section 6.4's
 // "automated quality gate" - bounded so a stubborn JD can't loop the endpoint indefinitely.
@@ -171,15 +173,28 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     }
 
     const jdHash = createHash('sha256').update(body.jd_text).digest('hex').slice(0, 16);
-    const objectKey = `users/${userId}/resumes/${jdHash}-${Date.now()}.pdf`;
+    const requestedKey = `users/${userId}/resumes/${jdHash}-${Date.now()}.pdf`;
 
     let resumeUrl: string;
+    let objectKey: string;
     try {
-      const blob = await put(objectKey, pdfBuffer, {
+      // `access: 'public'` is not a choice - it is the only value @vercel/blob@0.27.3 accepts.
+      // What we control is who ever learns the resulting URL, and the answer is nobody: the
+      // blob URL is permanent and unauthenticated, so it stays server-side and the client gets
+      // a capability link to /resume/download instead. See lib/resumeAccess.ts.
+      const blob = await put(requestedKey, pdfBuffer, {
         access: 'public',
         contentType: 'application/pdf',
       });
-      resumeUrl = blob.url;
+      // Store the pathname the API actually assigned, NOT the one we asked for. `addRandomSuffix`
+      // defaults to TRUE in this SDK (create-folder-*.d.ts documents `@defaultvalue true`, and the
+      // header is only sent when the option is set explicitly), so the stored object is really at
+      // `<requestedKey minus .pdf>-<random>.pdf`. Writing requestedKey here instead made every
+      // later key -> URL lookup miss, which 404'd every download and silently shipped applications
+      // with no resume attached. The suffix is left ON deliberately: an unguessable pathname is
+      // defence in depth on an object we cannot make private.
+      objectKey = blob.pathname;
+      resumeUrl = `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(userId, objectKey)}`;
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to store generated resume' });
@@ -217,6 +232,56 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     });
   });
 
+  // GET /resume/download?t=... - streams a generated resume via its capability token.
+  //
+  // Deliberately NOT behind requireAuth. The extension fetches resume_url from the content
+  // script, which runs in the ATS page's origin and has no access to the auth token (that lives
+  // in the background worker's chrome.storage) - it does a bare `fetch(resume_url)`. An
+  // Authorization header is therefore impossible here, and the token in `t` is the credential
+  // instead. It is opaque, single-purpose, scoped to one object key, and expires (see
+  // DOWNLOAD_TOKEN_TTL_MS, which is the one place that number lives),
+  // which is what makes handing it to a page origin acceptable when handing over a permanent
+  // public blob URL was not.
+  fastify.get('/resume/download', async (request: FastifyRequest, reply: FastifyReply) => {
+    const token = (request.query as { t?: string }).t;
+    if (!token) return reply.status(400).send({ error: 'Missing download token' });
+
+    // One 403 for every failure mode (tampered, truncated, expired, wrong key). Distinguishing
+    // them would turn this into an oracle for probing keys.
+    const payload = readDownloadToken(token);
+    if (!payload) return reply.status(403).send({ error: 'Invalid or expired download link' });
+
+    let blobUrl: string | null;
+    try {
+      blobUrl = await resolveBlobUrl(payload.k);
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(502).send({ error: 'Could not reach resume storage' });
+    }
+    // Expected once the retention sweep has been through: the link is still cryptographically
+    // valid but the file is intentionally gone. That is a 404, not an error.
+    if (!blobUrl) return reply.status(404).send({ error: 'This resume has been deleted' });
+
+    let pdf: Buffer;
+    try {
+      const upstream = await fetch(blobUrl);
+      if (!upstream.ok) throw new Error(`blob fetch ${upstream.status}`);
+      pdf = Buffer.from(await upstream.arrayBuffer());
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(502).send({ error: 'Could not read resume from storage' });
+    }
+
+    return reply
+      .status(200)
+      .header('Content-Type', 'application/pdf')
+      // The whole point is that this URL is short-lived; a shared cache holding the PDF against
+      // the token would quietly recreate the unauthenticated-copy problem.
+      .header('Cache-Control', 'private, no-store')
+      .header('Content-Disposition', 'attachment; filename="resume.pdf"')
+      .send(pdf);
+  });
+
   // POST /autofill/event - client-reported fill outcome. auto_submitted is true only when the
   // student had opted in to auto-submit (AutofillSetupScreen toggle, off by default) and their
   // own cancelable countdown ran out without them cancelling it.
@@ -249,7 +314,12 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     return reply.status(204).send();
   });
 
-  // GET /resume/history - past generated resumes for this student
+  // GET /resume/history - past generated resumes for this student.
+  //
+  // Each row carries a fresh download link. Until now the history rows held only the object
+  // key, so nothing could actually retrieve a past resume; the token makes the list usable and
+  // is minted per-request so the links expire with the response rather than being stored.
+  // Files older than the retention window are gone, and their link 404s by design.
   fastify.get('/resume/history', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
     const rows = await db
@@ -258,6 +328,11 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       .where(eq(generated_resumes.user_id, userId))
       .orderBy(desc(generated_resumes.created_at))
       .limit(50);
-    return reply.status(200).send({ resumes: rows });
+    const base = apiBaseFor(request);
+    const resumes = rows.map((row) => ({
+      ...row,
+      download_url: `${base}/resume/download?t=${mintDownloadToken(userId, row.resume_object_key)}`,
+    }));
+    return reply.status(200).send({ resumes });
   });
 }

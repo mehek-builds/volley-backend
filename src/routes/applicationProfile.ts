@@ -55,7 +55,9 @@ function encryptRow(body: z.infer<typeof bodySchema>) {
   return row;
 }
 
-function decryptRow(row: typeof application_profile.$inferSelect) {
+// Exported for GET /account/export, which has to hand back the same decrypted view this
+// route serves - an export that returned ciphertext would not be an export.
+export function decryptRow(row: typeof application_profile.$inferSelect) {
   const out: Record<string, unknown> = { ...row };
   for (const field of ENCRYPTED_FIELDS) {
     const value = out[field];
