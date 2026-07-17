@@ -32,7 +32,13 @@ type Step = 'focus' | 'resume' | 'install' | 'apply' | 'gaps' | 'targeting' | 'd
 // anything that a form will reliably ask - phone, city, links, citizenship, DOB - belongs in the
 // harvest instead and must not appear here. If a gap shows up for everyone, that is a signal the
 // harvest is missing a classifier, not that the question belongs in onboarding.
-const GAP_FIELDS = ['gpa', 'gpa_scale', 'major', 'desired_salary', 'desired_salary_currency'] as const;
+//
+// languages belongs here and can never move to the harvest, for a structural reason: a form asks
+// "Do you speak German?" about ITS language, so watching an application teaches at most one
+// yes/no about one language, never the student's own list - and the declared list is the
+// authority (R-015, see schema.ts). ZURU asked about Spanish and Enpal about German with nothing
+// on file (2026-07-17); only the student can close that gap, so onboarding asks once.
+const GAP_FIELDS = ['gpa', 'gpa_scale', 'major', 'languages', 'desired_salary', 'desired_salary_currency'] as const;
 
 // Fields worth having before the student's SECOND application. Not a completeness bar: a student
 // with no portfolio has no gap. Used only to report `learned` for the receipt on screen 05.
@@ -59,6 +65,21 @@ function readable(row: Record<string, unknown> | undefined, key: string): string
   } catch {
     return null;
   }
+}
+
+// The gap list /onboarding/state serves, in GAP_FIELDS render order. Extracted and exported so a
+// test can pin the semantics without a live server or database.
+//
+// languages is the one gap field readable() cannot judge: it is a jsonb string[], not text, so
+// "answered" means a non-empty array. An empty array is still a gap, on purpose - [] is what a
+// student who skipped the screen saves, and skipped and never-asked are the same fact to the next
+// application: a language question it cannot answer.
+export function gapsFrom(row: Record<string, unknown> | undefined) {
+  return GAP_FIELDS.filter((f) => {
+    if (f !== 'languages') return readable(row, f) === null;
+    const langs = row?.['languages'];
+    return !Array.isArray(langs) || langs.length === 0;
+  });
 }
 
 export async function onboardingRoutes(fastify: FastifyInstance) {
@@ -94,7 +115,7 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     const has_applied = (applyCount?.n ?? 0) > 0;
 
     const learned = HARVEST_FIELDS.filter((f) => readable(appProfile, f) !== null);
-    const gaps = GAP_FIELDS.filter((f) => readable(appProfile, f) === null);
+    const gaps = gapsFrom(appProfile);
 
     // The five targeting questions split on ONE fact: whether they need the resume.
     //
