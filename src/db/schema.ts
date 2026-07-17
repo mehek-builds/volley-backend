@@ -221,6 +221,12 @@ export const application_profile = pgTable('application_profile', {
   work_authorized: boolean('work_authorized'),
   needs_sponsorship: boolean('needs_sponsorship'),
   availability_date: text('availability_date'),
+  // HOW LONG she is available ("14 weeks"), which is a different question from when she can start.
+  // Without this column the extension could recognise a duration question but never answer it, so
+  // "Length or term/length of availability (10-14 weeks)" got "Immediately" - a start time in
+  // answer to a duration (R-014 facet b). Free text, not a date: "14 weeks", "3 months", "a
+  // semester" are all legitimate and none of them parse.
+  availability_term: text('availability_term'),
   desired_salary: text('desired_salary'),
   // The currency `desired_salary` is denominated in, e.g. "EUR". Separate and plaintext: a bare
   // "80000" is not an answer, it is an ambiguity, and replaying a figure earned against one
