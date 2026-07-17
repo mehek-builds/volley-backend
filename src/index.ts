@@ -17,8 +17,22 @@ import { resumeRoutes } from './routes/resume';
 import { accountRoutes } from './routes/account';
 import { resumeRetentionRoutes } from './routes/resumeRetention';
 import { adapterHealthRoutes } from './routes/adapterHealth';
+import { targetingRoutes } from './routes/targeting';
+import { harvestRoutes } from './routes/harvest';
+import { onboardingRoutes } from './routes/onboarding';
+import { assertEncryptionKeyConfigured } from './lib/fieldCrypto';
 
 export async function buildApp() {
+  // Refuse to run at all without ENCRYPTION_KEY (R-021). Every encrypted application_profile
+  // column is unreadable without it, and the old failure mode was not an error but silence: the
+  // decrypt threw, a catch downstream read that as "legacy plaintext", and the raw ciphertext went
+  // out to the extension and into a real job application. A dead server is a far better outcome
+  // than a server that quietly types base64 at employers, so this fails before any route exists.
+  //
+  // This belongs in buildApp() rather than start(): prod is Vercel serverless via api/index.ts,
+  // where start() never runs, so a gate there would protect only local dev.
+  assertEncryptionKeyConfigured();
+
   const fastify = Fastify({
     logger: {
       level: process.env.LOG_LEVEL || 'info',
@@ -108,6 +122,9 @@ export async function buildApp() {
   await fastify.register(billingRoutes);
   await fastify.register(experienceBankRoutes);
   await fastify.register(applicationProfileRoutes);
+  await fastify.register(targetingRoutes);
+  await fastify.register(harvestRoutes);
+  await fastify.register(onboardingRoutes);
   await fastify.register(applicationAnswerRoutes);
   await fastify.register(resumeRoutes);
   await fastify.register(accountRoutes);

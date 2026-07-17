@@ -4,21 +4,34 @@ import { eq } from 'drizzle-orm';
 import { db } from '../db/index';
 import { application_profile } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
-import { encryptField, decryptField } from '../lib/fieldCrypto';
+import { encryptField, decryptField, looksEncrypted, FieldDecryptError } from '../lib/fieldCrypto';
 
 // Fields sensitive enough to encrypt at rest per PRD-v2 Section 4: phone/address/
 // work-authorization status. Links and referral_source are not identity-sensitive
 // in the same way and stay plaintext so they remain easily queryable later.
-const ENCRYPTED_FIELDS = [
+// Exported so /profile/harvest encrypts the same set: two copies of this list would drift, and
+// the failure mode of drift is a sensitive value written to the DB in plaintext.
+export const ENCRYPTED_FIELDS = [
   'phone',
   'address_city',
   'address_state',
   'address_zip',
+  'address_country',
   'citizenship',
   'availability_date',
   'desired_salary',
   'date_of_birth',
+  // Academic record (R-005). Encrypted with the identity-sensitive set rather than left plaintext
+  // with the links: a specific GPA is a real record about a real person. gpa_scale and major stay
+  // plaintext - a scale is meaningless on its own, and a major is no more sensitive than school,
+  // which profiles.parsed_json already stores in the clear.
+  'gpa',
 ] as const;
+// availability_term is deliberately absent, though availability_date is here. The bar is identity
+// sensitivity, not "everything on the profile": links, referral_source_default, gpa and major are
+// all plaintext too. "14 weeks" says nothing about who she is, where she lives or what she earns,
+// and leaving it queryable is worth more than encrypting a duration. A date is different: combined
+// with the rest it is a movement fact about a person.
 
 // Every column is nullable in the DB (application_profile has no .notNull() fields), and
 // GET echoes back null for anything unset. The client round-trips the fetched profile
@@ -29,6 +42,7 @@ const bodySchema = z.object({
   address_city: z.string().nullable().optional(),
   address_state: z.string().nullable().optional(),
   address_zip: z.string().nullable().optional(),
+  address_country: z.string().nullable().optional(),
   linkedin_url: z.string().nullable().optional(),
   github_url: z.string().nullable().optional(),
   portfolio_url: z.string().nullable().optional(),
@@ -36,8 +50,18 @@ const bodySchema = z.object({
   work_authorized: z.boolean().nullable().optional(),
   needs_sponsorship: z.boolean().nullable().optional(),
   availability_date: z.string().nullable().optional(),
+  availability_term: z.string().nullable().optional(),
   desired_salary: z.string().nullable().optional(),
+  // The unit `desired_salary` is in. A figure without it cannot be filled honestly onto a
+  // posting in another currency, so the adapters require both or neither.
+  desired_salary_currency: z.string().nullable().optional(),
   date_of_birth: z.string().nullable().optional(),
+  // Academic record (R-005). gpa and gpa_scale are separate on purpose: "3.89" says nothing without
+  // "4.0", and a form asking for a UK percentage cannot be answered honestly without knowing the
+  // scale the number was earned on.
+  gpa: z.string().nullable().optional(),
+  gpa_scale: z.string().nullable().optional(),
+  major: z.string().nullable().optional(),
   // Only ever set if the student explicitly opts in (PRD-v2 Section 4B); absent/null
   // means every autofill selects "Decline to Self-Identify" where that option exists.
   eeo_prefs: z.record(z.string()).nullable().optional(),
@@ -55,21 +79,63 @@ function encryptRow(body: z.infer<typeof bodySchema>) {
   return row;
 }
 
-// Exported for GET /account/export, which has to hand back the same decrypted view this
-// route serves - an export that returned ciphertext would not be an export.
+// R-021: a value that fails to decrypt is NOT automatically legacy plaintext.
+//
+// The catch that used to sit here assumed it was, and passed the raw value straight through. So a
+// missing or rotated ENCRYPTION_KEY did not fail: it quietly served base64 ciphertext, which the
+// extension then typed into real job applications. Caught live on Proxima Fusion filling the
+// required "When are you available to start?" field, with auto-submit already proven to fire.
+//
+// The two cases are now told apart by shape. A value that does not look like our envelope is
+// genuinely legacy plaintext and passes through exactly as before. A value that DOES look like our
+// envelope but will not decrypt means the key is wrong, rotated or gone, which is a config error
+// about the server, not data the student can fix.
+//
+// That case throws, and the route turns it into a 500. It deliberately does NOT degrade to "null
+// the bad field and serve the rest", even though a blank field would be safe to fill: the client
+// round-trips the fetched profile verbatim on save (see bodySchema above) and PUT writes it back
+// with `set`, so a served null would be saved straight over the still-encrypted column and destroy
+// the only copy of the data. Refusing to serve keeps a recoverable problem recoverable.
+//
+// Exported for GET /account/export, which has to hand back the same decrypted view this route
+// serves - an export that returned ciphertext would not be an export. It inherits the throw above
+// deliberately: an export that silently handed back base64 would be worse here than anywhere,
+// since the student is being told this file IS their data.
 export function decryptRow(row: typeof application_profile.$inferSelect) {
   const out: Record<string, unknown> = { ...row };
   for (const field of ENCRYPTED_FIELDS) {
     const value = out[field];
-    if (typeof value === 'string' && value.length > 0) {
-      try {
-        out[field] = decryptField(value);
-      } catch {
-        // Legacy/plaintext row (e.g. pre-encryption data) — return as-is rather than 500ing.
-      }
+    if (typeof value === 'string' && value.length > 0 && looksEncrypted(value)) {
+      out[field] = decryptField(value); // throws FieldDecryptError on a wrong or missing key
     }
   }
   return out;
+}
+
+// Serve a profile row, or refuse loudly if it cannot be decrypted. Shared by GET and PUT so the
+// two cannot drift: PUT re-reads and returns the row too, and would otherwise emit ciphertext by
+// the same route the GET no longer does.
+function sendProfile(
+  fastify: FastifyInstance,
+  reply: FastifyReply,
+  row: typeof application_profile.$inferSelect,
+  userId: string,
+) {
+  try {
+    return reply.status(200).send(decryptRow(row));
+  } catch (err) {
+    if (err instanceof FieldDecryptError) {
+      fastify.log.error(
+        { err, userId },
+        'ENCRYPTION_KEY cannot decrypt stored application_profile values. Refusing to serve the profile rather than emit ciphertext into an application (R-021). Check that ENCRYPTION_KEY matches the one the rows were written with.',
+      );
+      return reply.status(500).send({
+        error:
+          'Your saved details could not be read on the server. This is a configuration problem on our side, not a problem with your data, and re-entering it will not help. Please contact support.',
+      });
+    }
+    throw err;
+  }
 }
 
 export async function applicationProfileRoutes(fastify: FastifyInstance) {
@@ -79,7 +145,7 @@ export async function applicationProfileRoutes(fastify: FastifyInstance) {
     if (rows.length === 0) {
       return reply.status(404).send({ error: 'Application profile not found' });
     }
-    return reply.status(200).send(decryptRow(rows[0]));
+    return sendProfile(fastify, reply, rows[0], userId);
   });
 
   fastify.put('/profile/application', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
@@ -108,6 +174,6 @@ export async function applicationProfileRoutes(fastify: FastifyInstance) {
     }
 
     const rows = await db.select().from(application_profile).where(eq(application_profile.user_id, userId)).limit(1);
-    return reply.status(200).send(decryptRow(rows[0]));
+    return sendProfile(fastify, reply, rows[0], userId);
   });
 }
