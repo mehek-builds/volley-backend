@@ -260,6 +260,9 @@ export async function draftApplicationAnswer(
       ),
     );
     unheldClaims = claimedUnheldItems(answer, ranking.unheld);
+    // The regenerated answer is new text: re-derive the numbers verdict from it, or the
+    // "Unverified numbers" warning below would be stale (or silently absent) for rankings.
+    badNumbers = ungroundedNumbers(answer, sourceSignatures);
   }
   // Still claiming an unheld skill after explicit feedback: never ship it. Unlike a suspect
   // number (a review warning the student edits), an unheld-skill claim is the exact R-015 harm,
