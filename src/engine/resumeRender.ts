@@ -121,7 +121,7 @@ function drawTabbedLine(doc: PDFKit.PDFDocument, left: string, right: string, ga
 
 // validate_resume.py flags a page as "not filled" when bottom white space exceeds 54pt, since
 // the Dubai template always has a guaranteed pool of leadership/coursework filler to top it up
-// with. Volley's spec has no such guaranteed filler (padding it would mean fabricating content,
+// with. RoleQuick's spec has no such guaranteed filler (padding it would mean fabricating content,
 // which the no-fabrication rule forbids), so sparseness is surfaced as a warning, not something
 // the renderer tries to fix by inventing bullets.
 const SPARSE_FILL_RATIO = 0.5;

@@ -5,7 +5,7 @@ import { wordSet, numberSignatures, ungroundedNumbers } from './grounding';
 // Deterministic QA gate for a generated resume, ported from the Dubai off-cycle resume
 // engine's validate_resume.py + pressure_test.py (~/Documents/Internship Apps/_resume-engine/) -
 // the same quality bar Mehek applies to her own resume builds, now applied to every student's
-// Volley-generated resume too. Content checks operate on the spec (pre-render); layout checks
+// RoleQuick-generated resume too. Content checks operate on the spec (pre-render); layout checks
 // (page count, extractable text) operate on the rendered PDF text.
 
 // Same whitelist as the Dubai engine's STRONG_VERBS, exported so resumeSpec.ts's system prompt
@@ -367,7 +367,7 @@ export function findUngroundedSkills(
 // Spec-level checks: content rules a JD-tailored spec must satisfy before it's worth rendering.
 // Mirrors validate_resume.py's content/structure checks + pressure_test.py's per-bullet scoring,
 // adapted from the Dubai engine's fixed EDUCATION/EXPERIENCE/LEADERSHIP/SKILLS template to
-// Volley's generalized per-student spec (no LEADERSHIP section, entries aren't hardcoded).
+// RoleQuick's generalized per-student spec (no LEADERSHIP section, entries aren't hardcoded).
 // When `bank` is provided, grounding violations are added as hard issues so the retry loop
 // regenerates; pass [] to skip grounding (form-only validation).
 export function validateResumeSpec(
