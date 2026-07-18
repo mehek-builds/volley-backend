@@ -147,6 +147,29 @@ export async function draftApplicationAnswer(
     badNumbers = ungroundedNumbers(answer, sourceSignatures);
   }
 
+  // R-042 deterministic check: an unheld question item in the answer is an unheld-skill claim
+  // ("Python first, JAVA second" against a declared list with no Java - the live miss). One
+  // feedback regeneration, same self-correcting pattern as the numbers check above.
+  let unheldClaims = ranking ? claimedUnheldItems(answer, ranking.unheld) : [];
+  if (unheldClaims.length > 0 && ranking) {
+    answer = normalizeDraftedAnswer(
+      await callModel(
+        `Your previous draft named ${unheldClaims.join(', ')}, which the student has NOT declared as skills. Rewrite it ranking only ${ranking.held.join(', ')}, and do not mention the undeclared items at all.`,
+      ),
+    );
+    unheldClaims = claimedUnheldItems(answer, ranking.unheld);
+    // The regenerated answer is new text: re-derive the numbers verdict from it, or the
+    // "Unverified numbers" warning below would be stale (or silently absent) for rankings.
+    badNumbers = ungroundedNumbers(answer, sourceSignatures);
+  }
+  // Still claiming an unheld skill after explicit feedback: never ship it. Unlike a suspect
+  // number (a review warning the student edits), an unheld-skill claim is the exact R-015 harm,
+  // so this fails closed through the cannot-draft path: empty answer -> route 502 -> the
+  // extension flags the field for the student instead of filling it with a false claim.
+  if (unheldClaims.length > 0) {
+    return { answer: '', warnings: [] };
+  }
+
   // L6: enforce the zero-em-dash rule by STRIPPING dashes from the returned answer, not just
   // warning. The extension fills essay fields directly and never surfaces these warnings, so an
   // em dash would otherwise reach a submitted application.
