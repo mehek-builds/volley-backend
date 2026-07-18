@@ -4,7 +4,7 @@ import { db } from '../db/index';
 import { users } from '../db/schema';
 import { eq } from 'drizzle-orm';
 import { requireAuth } from '../middleware/auth';
-import { getEntitlements, getCount, monthPeriod } from '../middleware/quota';
+import { getEntitlements, getCount, monthPeriod, upgradeUrl } from '../middleware/quota';
 
 export async function billingRoutes(fastify: FastifyInstance) {
   // Plan + usage for the signed-in user. The extension can show "12 of 30 used".
@@ -18,7 +18,9 @@ export async function billingRoutes(fastify: FastifyInstance) {
       getCount(userId, period, 'resumes'),
     ]);
     const rows = await db.select().from(users).where(eq(users.id, userId)).limit(1);
-    const upgradeUrl = process.env.UPGRADE_URL || process.env.STRIPE_PAYMENT_LINK;
+    // upgradeUrl() rather than a raw env read: it drops Stripe test-mode links (R-043), and
+    // /me surfaces upgrade_url to the same students the 402 upsell does.
+    const upgradeLink = upgradeUrl();
     return reply.status(200).send({
       email,
       tier: ent.tier,
@@ -28,7 +30,7 @@ export async function billingRoutes(fastify: FastifyInstance) {
         drafts: { used: usedDrafts, limit: ent.monthlyDrafts },
         resumes: { used: usedResumes, limit: ent.monthlyResumes },
       },
-      ...(upgradeUrl && ent.tier !== 'pro' ? { upgrade_url: upgradeUrl } : {}),
+      ...(upgradeLink && ent.tier !== 'pro' ? { upgrade_url: upgradeLink } : {}),
     });
   });
 
