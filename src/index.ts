@@ -21,6 +21,8 @@ import { targetingRoutes } from './routes/targeting';
 import { harvestRoutes } from './routes/harvest';
 import { onboardingRoutes } from './routes/onboarding';
 import { assertEncryptionKeyConfigured } from './lib/fieldCrypto';
+import { metaRoutes } from './routes/meta';
+import { API_VERSION, PRODUCT_NAME, PRODUCT_LINKS } from './lib/product';
 
 export async function buildApp() {
   // Refuse to run at all without ENCRYPTION_KEY (R-021). Every encrypted application_profile
@@ -87,7 +89,7 @@ export async function buildApp() {
       cb(null, {
         origin: (origin, originCb) => originCb(null, isAllowedOrigin(origin)),
         methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-        allowedHeaders: ['Content-Type', 'Authorization'],
+        allowedHeaders: ['Content-Type', 'Authorization', 'X-Litos-Client', 'X-Litos-Version'],
         credentials: true,
       });
     },
@@ -103,17 +105,25 @@ export async function buildApp() {
 
   // Health check
   fastify.get('/health', async (_request, reply) => {
-    return reply.status(200).send({ status: 'ok', ts: new Date().toISOString() });
+    return reply.status(200).send({
+      status: 'ok',
+      service: 'litos-api',
+      product: PRODUCT_NAME,
+      api_version: API_VERSION,
+      revision: process.env.VERCEL_GIT_COMMIT_SHA || process.env.GIT_SHA || null,
+      ts: new Date().toISOString(),
+    });
   });
 
   // Stable share link for the Chrome Web Store listing. The 32-char extension ID
   // is assigned by Google and immutable; this redirect is the one URL to share.
   fastify.get('/install', async (_request, reply) => {
-    return reply.redirect('https://chromewebstore.google.com/detail/bdbedbmkjpfioknfpmhookefabipjaad', 302);
+    return reply.redirect(PRODUCT_LINKS.install, 302);
   });
 
   // Routes
   await fastify.register(authRoutes);
+  await fastify.register(metaRoutes);
   await fastify.register(profileRoutes);
   await fastify.register(resolveRoutes);
   await fastify.register(draftRoutes);

@@ -8,6 +8,7 @@ import {
   integer,
   real,
   boolean,
+  index,
 } from 'drizzle-orm/pg-core';
 
 // ---- users ----
@@ -127,7 +128,9 @@ export const contacts = pgTable('contacts', {
   title: text('title'),
   persona: text('persona'),
   school_match: boolean('school_match').default(false),
-});
+}, (t) => ({
+  companyDomainIdx: index('contacts_company_domain_idx').on(t.company_domain),
+}));
 
 // ---- email_resolutions ----
 export const email_resolutions = pgTable('email_resolutions', {
@@ -139,7 +142,9 @@ export const email_resolutions = pgTable('email_resolutions', {
   source: text('source'),
   verifier_raw_json: jsonb('verifier_raw_json'),
   resolved_at: timestamp('resolved_at', { withTimezone: true }).defaultNow(),
-});
+}, (t) => ({
+  contactIdx: index('email_resolutions_contact_id_idx').on(t.contact_id),
+}));
 
 // ---- outreach_events ----
 export const outreach_events = pgTable('outreach_events', {
@@ -154,7 +159,14 @@ export const outreach_events = pgTable('outreach_events', {
   replied_at: timestamp('replied_at', { withTimezone: true }),
   bounced: boolean('bounced').default(false),
   follow_up_count: integer('follow_up_count').default(0),
-});
+}, (t) => ({
+  userContactChannelIdx: index('outreach_events_user_contact_channel_idx').on(
+    t.user_id,
+    t.contact_id,
+    t.channel,
+  ),
+  userCreatedIdx: index('outreach_events_user_created_idx').on(t.user_id, t.sent_at),
+}));
 
 // ---- resolve_cache ----
 // Persists a finished /resolve result per (domain|role) so repeat lookups spend no provider
@@ -176,7 +188,9 @@ export const learning_signals = pgTable('learning_signals', {
   outcome: text('outcome'),
   user_id: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
   created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
-});
+}, (t) => ({
+  userCreatedIdx: index('learning_signals_user_created_idx').on(t.user_id, t.created_at),
+}));
 
 // ---- experience_bank ----
 // Each row is one job/project. bullet_variants holds every phrasing the student
@@ -192,7 +206,9 @@ export const experience_bank = pgTable('experience_bank', {
   bullet_variants: jsonb('bullet_variants').notNull(), // string[]
   tags: jsonb('tags'), // string[] of skills/keywords this entry supports
   created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
-});
+}, (t) => ({
+  userIdx: index('experience_bank_user_id_idx').on(t.user_id),
+}));
 
 // ---- application_profile ----
 // Section 4B of PRD-v2: more sensitive than `profiles` (phone/address/work-auth), so it
@@ -332,7 +348,9 @@ export const generated_resumes = pgTable('generated_resumes', {
   resume_object_key: text('resume_object_key').notNull(),
   template_id: uuid('template_id').references(() => resume_templates.id),
   created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
-});
+}, (t) => ({
+  userCreatedIdx: index('generated_resumes_user_created_idx').on(t.user_id, t.created_at),
+}));
 
 // ---- ats_adapters ----
 // Health tracking for the per-ATS field-mapping adapters (Section 7 of PRD-v2). Populated
@@ -371,7 +389,10 @@ export const autofill_events = pgTable('autofill_events', {
   // this data, not invented ahead of it.
   r030_candidate_labels: jsonb('r030_candidate_labels'),
   created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
-});
+}, (t) => ({
+  userCreatedIdx: index('autofill_events_user_created_idx').on(t.user_id, t.created_at),
+  atsCreatedIdx: index('autofill_events_ats_created_idx').on(t.ats_name, t.created_at),
+}));
 
 // ---- TypeScript inference types ----
 export type User = typeof users.$inferSelect;

@@ -11,7 +11,9 @@ import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:
 // a real job application. Real rotation needs a key-version tag stored per value plus a
 // re-encryption pass. Until that exists, this secret is permanent and losing it is data loss.
 
-const KEY_SALT = 'volley-application-profile';
+// Frozen storage identifier. It predates the Litos brand and participates in
+// key derivation for every encrypted profile value. Renaming it is data loss.
+export const FIELD_CRYPTO_SALT_ID = 'volley-application-profile';
 const IV_BYTES = 12;
 const TAG_BYTES = 16;
 
@@ -56,7 +58,7 @@ function getKey(): Buffer {
   const secret = process.env.ENCRYPTION_KEY;
   if (!secret) throw new Error('ENCRYPTION_KEY not configured');
   if (cachedKey && cachedSecret === secret) return cachedKey;
-  cachedKey = scryptSync(secret, KEY_SALT, 32);
+  cachedKey = scryptSync(secret, FIELD_CRYPTO_SALT_ID, 32);
   cachedSecret = secret;
   return cachedKey;
 }

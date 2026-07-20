@@ -34,6 +34,28 @@ const EVIL_ORIGIN = 'https://evil.example.com';
 const SITE_ORIGIN = 'https://role-quick-website.vercel.app';
 const EXT_ORIGIN = 'chrome-extension://bdbedbmkjpfioknfpmhookefabipjaad';
 
+test('/v1/meta publishes the cacheable Litos client contract', async () => {
+  const app = await getApp();
+  const res = await app.inject({ method: 'GET', url: '/v1/meta' });
+  assert.equal(res.statusCode, 200);
+  assert.match(String(res.headers['cache-control']), /max-age=300/);
+  const body = res.json();
+  assert.equal(body.product.name, 'Litos');
+  assert.equal(body.api.version, '1');
+  assert.equal(body.api.compatibility.extension.minimum, '0.4.1');
+});
+
+test('/health identifies the deployable service and revision contract', async () => {
+  const app = await getApp();
+  const res = await app.inject({ method: 'GET', url: '/health' });
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.equal(body.service, 'litos-api');
+  assert.equal(body.product, 'Litos');
+  assert.equal(body.api_version, '1');
+  assert.ok(Object.hasOwn(body, 'revision'));
+});
+
 // These four cover the CORS carve-out that /resume/download depends on. Getting any of them
 // wrong fails silently in exactly the way that hurts: the fill still "works", the resume file
 // just never attaches, and nothing logs an error.

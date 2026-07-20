@@ -1,7 +1,7 @@
 {
   "name": "volley-backend",
   "version": "1.0.1",
-  "description": "Backend API for the Volley student-outreach Chrome extension",
+  "description": "Backend API for the Litos job application assistant",
   "main": "dist/index.js",
   "engines": {
     "node": "22.x"
@@ -40,7 +40,7 @@
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test 'src/**/*.test.ts'",
-    "db:generate": "drizzle-kit generate",
+    "db:generate": "drizzle-kit generate:pg",
     "db:migrate": "tsx src/db/migrate.ts",
     "db:push": "drizzle-kit push:pg",
     "schema:check": "node scripts/check-schema-drift.mjs"

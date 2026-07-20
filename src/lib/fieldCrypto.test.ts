@@ -6,7 +6,12 @@ import {
   encryptField,
   looksEncrypted,
   FieldDecryptError,
+  FIELD_CRYPTO_SALT_ID,
 } from './fieldCrypto';
+
+test('the legacy key-derivation salt is immutable across product renames', () => {
+  assert.equal(FIELD_CRYPTO_SALT_ID, 'volley-application-profile');
+});
 
 // R-021: a missing or rotated ENCRYPTION_KEY made RoleQuick type base64 ciphertext into a real job
 // application, silently. These pin the three parts of the fix: the boot gate, a decrypt failure

@@ -2,6 +2,7 @@ import { FastifyReply } from 'fastify';
 import { sql, and, eq } from 'drizzle-orm';
 import { db } from '../db/index';
 import { usage_counters, users } from '../db/schema';
+import { PRODUCT_NAME } from '../lib/product';
 
 // Pricing model per PRD Section 10 (v0) + product decision 2026-07-02, revised same day
 // to a recurring-credits model (Apollo.io-style, not a one-time lifetime trial): every
@@ -110,7 +111,7 @@ export function quotaExceededPayload(ent: Entitlements, used: number, what: 'con
     const cap = ent.monthlyResumes;
     const base =
       ent.tier === 'free'
-        ? `You've used your ${cap} free resume generations this month. Volley Premium ($49.99/mo) unlocks unlimited resume generation + autofill. Resets on the 1st.`
+        ? `You've used your ${cap} free resume generations this month. ${PRODUCT_NAME} Pro ($49.99/mo) unlocks unlimited resume generation + autofill. Resets on the 1st.`
         : `You've hit this month's resume limit (${cap}). It resets on the 1st.`;
     return {
       error: upgradeLink && ent.tier === 'free' ? `${base} Upgrade: ${upgradeLink}` : base,
@@ -126,7 +127,7 @@ export function quotaExceededPayload(ent: Entitlements, used: number, what: 'con
   const base =
     ent.tier === 'pro'
       ? `You've hit this month's Pro limit (${cap} ${what}). It resets on the 1st.`
-      : `You've used your ${cap} free verified ${what} this month. Volley Pro unlocks ${what === 'contacts' ? LIMITS.pro.monthlyContacts : LIMITS.pro.monthlyDrafts} per month.`;
+      : `You've used your ${cap} free verified ${what} this month. ${PRODUCT_NAME} Pro unlocks ${what === 'contacts' ? LIMITS.pro.monthlyContacts : LIMITS.pro.monthlyDrafts} per month.`;
   return {
     error: upgradeLink && ent.tier !== 'pro' ? `${base} Upgrade: ${upgradeLink}` : base,
     code: 'quota_exceeded',

@@ -14,6 +14,7 @@ import { validateResumeSpec, validatePdfLayout, pruneUngroundedContent } from '.
 import { mintDownloadToken, readDownloadToken, resolveBlobUrl } from '../lib/resumeAccess';
 import { apiBaseFor } from '../lib/apiBase';
 import { extractPdfText } from '../lib/pdfText';
+import { PRODUCT_NAME } from '../lib/product';
 
 const MAX_SPEC_ATTEMPTS = 2; // 1 initial pass + 1 feedback-driven retry, per PRD-v2 Section 6.4's
 // "automated quality gate" - bounded so a stubborn JD can't loop the endpoint indefinitely.
@@ -96,7 +97,7 @@ export function isBillingOrAuthFailure(err: unknown): boolean {
 export const LLM_BILLING_LOG =
   'ANTHROPIC BILLING/AUTH FAILURE: every model-backed feature is DOWN for every user until the owner acts. Fix: top up credits in the Anthropic console, or rotate/restore ANTHROPIC_API_KEY (R-012)';
 export const LLM_BILLING_PAYLOAD = {
-  error: 'Drafting is temporarily unavailable. This is a problem on our side, not something you did, and retrying will not fix it. The RoleQuick team needs to restore service.',
+  error: `Drafting is temporarily unavailable. This is a problem on our side, not something you did, and retrying will not fix it. The ${PRODUCT_NAME} team needs to restore service.`,
   code: 'llm_billing',
 } as const;
 
@@ -269,7 +270,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         // only a fresh request can outlive it.
         if (isTransientOverload(err)) {
           return reply.status(503).send({
-            error: 'The model is busy right now. RoleQuick will retry automatically.',
+            error: `The model is busy right now. ${PRODUCT_NAME} will retry automatically.`,
             code: 'llm_overloaded',
             retry_after_ms: 5000,
           });

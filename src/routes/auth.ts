@@ -7,6 +7,7 @@ import { users, email_verification_codes } from '../db/schema';
 import { eq } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import { allowHourly, rateLimitedReply, LIMITS, TRIAL_DAYS } from '../middleware/quota';
+import { PRODUCT_NAME } from '../lib/product';
 
 const sessionBodySchema = z.object({
   email: z.string().email(),
@@ -38,8 +39,18 @@ async function signSessionToken(userId: string, email: string): Promise<string> 
     .sign(secretBytes);
 }
 
+export function buildVerificationEmail(email: string, code: string) {
+  if (!/^\d{6}$/.test(code)) throw new Error('Verification code must be six digits');
+  return {
+    from: process.env.RESEND_FROM || `${PRODUCT_NAME} <onboarding@resend.dev>`,
+    to: [email],
+    subject: `${code} is your ${PRODUCT_NAME} verification code`,
+    html: `<p>Welcome to ${PRODUCT_NAME}. Your verification code is:</p><p><strong>${code}</strong></p><p>It expires in 10 minutes. If you did not request this, you can ignore this email.</p>`,
+  };
+}
+
 // Sends the 6-digit code via Resend's HTTPS API. Requires RESEND_API_KEY and
-// RESEND_FROM (a sender on a domain verified in Resend, e.g. "Volley <hi@yourdomain>").
+// RESEND_FROM, which must be a sender on a domain verified in Resend.
 async function sendVerificationEmail(email: string, code: string): Promise<void> {
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
@@ -50,12 +61,7 @@ async function sendVerificationEmail(email: string, code: string): Promise<void>
       Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      from: process.env.RESEND_FROM || 'Volley <onboarding@resend.dev>',
-      to: [email],
-      subject: `${code} is your Volley verification code`,
-      html: `<p>Welcome to Volley. Your verification code is:</p><p style="font-size:28px;font-weight:bold;letter-spacing:4px">${code}</p><p>It expires in 10 minutes. If you didn't request this, you can ignore this email.</p>`,
-    }),
+    body: JSON.stringify(buildVerificationEmail(email, code)),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
