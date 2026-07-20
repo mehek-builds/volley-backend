@@ -1,11 +1,11 @@
-# Deploying the Volley backend to Vercel
+# Deploying the Litos backend to Vercel
 
 The app is a Fastify server wrapped as a single Vercel serverless function
 (`api/index.ts`); `vercel.json` rewrites every path to it and raises the function
-timeout to 60s (Hunter + draft calls can take 10–40s). Postgres must be a hosted
-serverless database — your laptop's local Postgres is not reachable from Vercel.
+timeout to 60s (Hunter + draft calls can take 10-40s). Postgres must be a hosted
+serverless database. Your laptop's local Postgres is not reachable from Vercel.
 
-## One-time setup (steps only you can do — account + billing)
+## One-time setup (steps only you can do: account + billing)
 
 ### 1. Create a serverless Postgres
 Use **Vercel Postgres** (Storage tab → Create → Postgres) or **Neon** (neon.tech).
@@ -19,12 +19,25 @@ The DB starts empty. From this folder, point drizzle at the new DB and push the 
 DATABASE_URL="<your-neon-pooled-url>" npm run db:push
 ```
 
-Re-run this whenever `src/db/schema.ts` changes.
+Before any later schema change, run the two-direction drift guard. Do not push when
+it reports drift:
+
+```bash
+npm run schema:check
+```
+
+For column or table changes, review the generated SQL before running `db:push`.
+For the performance indexes declared in `src/db/schema.ts`, use the idempotent
+concurrent installer so production reads and writes can continue:
+
+```bash
+npm run db:indexes
+```
 
 ### 3. Import the repo on Vercel
 vercel.com → Add New → Project → import **mehek-builds/volley-backend**.
 Framework preset: **Other**. Leave build/output settings default (Vercel detects
-`api/` functions automatically — no build command needed).
+`api/` functions automatically, so no build command is needed).
 
 ### 4. Add Environment Variables (Project → Settings → Environment Variables)
 Set these for Production (and Preview if you want):
@@ -42,7 +55,7 @@ Set these for Production (and Preview if you want):
 | `APOLLO_API_KEY` | your Apollo key (optional fallback) |
 | `NODE_ENV` | `production` |
 
-`VERCEL` is set automatically by Vercel — that's what disables the local listener.
+`VERCEL` is set automatically by Vercel. That disables the local listener.
 Do **not** set `PORT`/`HOST` (serverless ignores them).
 
 ### 5. Deploy
@@ -60,10 +73,10 @@ VITE_API_BASE=https://<your-app>.vercel.app
 ```
 
 Then rebuild: `npm run build`, and reload the unpacked extension in Chrome
-(`chrome://extensions` → Volley → reload). The popup + Apply flow now hit Vercel.
+(`chrome://extensions` → Litos → reload). The popup + Apply flow now hit Vercel.
 
 ## Notes
-- **Cold starts:** the free tier sleeps; first request after idle is slow (~1–3s).
-- **CORS** already allows the `chrome-extension://` origin (origin: true).
+- **Cold starts:** the free tier sleeps; first request after idle is slow (~1-3s).
+- **CORS** allows configured web origins and Chrome extension origins.
 - **Function timeout** is 60s (Hobby max). If a resolve ever exceeds it, lower the
   per-resolve contact count or upgrade the plan (Pro allows 300s).

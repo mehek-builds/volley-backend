@@ -1,11 +1,13 @@
 import type { ResumeSpec } from '../llm/resumeSpec';
+import { RESUME_CONTENT_LIMITS } from './resumeContentPolicy';
 import type { ExperienceBankEntry } from '../db/schema';
 import { wordSet, numberSignatures, ungroundedNumbers } from './grounding';
+import { deriveCandidateContext, type CandidateEducation } from './resumePolicy';
 
 // Deterministic QA gate for a generated resume, ported from the Dubai off-cycle resume
 // engine's validate_resume.py + pressure_test.py (~/Documents/Internship Apps/_resume-engine/) -
 // the same quality bar Mehek applies to her own resume builds, now applied to every student's
-// Volley-generated resume too. Content checks operate on the spec (pre-render); layout checks
+// Litos-generated resume too. Content checks operate on the spec (pre-render); layout checks
 // (page count, extractable text) operate on the rendered PDF text.
 
 // Same whitelist as the Dubai engine's STRONG_VERBS, exported so resumeSpec.ts's system prompt
@@ -71,7 +73,7 @@ export interface ValidationResult {
 
 export interface GroundingViolation {
   entry: string; // the generated entry's org (for context)
-  kind: 'org' | 'title' | 'metric' | 'date';
+  kind: 'org' | 'title' | 'metric' | 'date' | 'claim';
   detail: string; // the offending token (org name, title, number, or year)
   bullet?: string; // present for metric violations
 }
@@ -203,6 +205,21 @@ function bankEntryCorpus(e: ExperienceBankEntry): string {
   return [e.org, e.title ?? '', e.date_range ?? '', ...variants, ...tags].join(' ');
 }
 
+function bulletClaimIsGrounded(bullet: string, entry: ExperienceBankEntry): boolean {
+  const generated = contentWords(bullet);
+  if (generated.size === 0) return false;
+  const variants = Array.isArray(entry.bullet_variants)
+    ? (entry.bullet_variants as unknown[]).filter((value): value is string => typeof value === 'string')
+    : [];
+  return variants.some((variant) => {
+    const source = contentWords(variant);
+    if (source.size === 0) return false;
+    let shared = 0;
+    for (const word of generated) if (source.has(word)) shared += 1;
+    return shared / Math.min(generated.size, source.size) >= 0.3;
+  });
+}
+
 function titleIsSwapped(genTitle: string, srcTitle: string | null): boolean {
   if (!genTitle || !srcTitle) return false;
   const gt = wordSet(genTitle);
@@ -235,6 +252,9 @@ export function findGroundingViolations(spec: ResumeSpec, bank: ExperienceBankEn
     for (const bullet of entry.bullets) {
       for (const n of ungroundedNumbers(bullet, srcSigs)) {
         violations.push({ entry: entry.org, kind: 'metric', detail: n, bullet });
+      }
+      if (!bulletClaimIsGrounded(bullet, src)) {
+        violations.push({ entry: entry.org, kind: 'claim', detail: bullet, bullet });
       }
     }
   }
@@ -273,6 +293,10 @@ export function pruneUngroundedContent(
       const bad = ungroundedNumbers(b, srcSigs);
       if (bad.length > 0) {
         removed.push(`dropped bullet with ungrounded ${bad.join(', ')} in ${entry.org}`);
+        return false;
+      }
+      if (!bulletClaimIsGrounded(b, src)) {
+        removed.push(`dropped unsupported bullet in ${entry.org}`);
         return false;
       }
       return true;
@@ -367,7 +391,7 @@ export function findUngroundedSkills(
 // Spec-level checks: content rules a JD-tailored spec must satisfy before it's worth rendering.
 // Mirrors validate_resume.py's content/structure checks + pressure_test.py's per-bullet scoring,
 // adapted from the Dubai engine's fixed EDUCATION/EXPERIENCE/LEADERSHIP/SKILLS template to
-// Volley's generalized per-student spec (no LEADERSHIP section, entries aren't hardcoded).
+// Litos's generalized per-student spec (no LEADERSHIP section, entries aren't hardcoded).
 // When `bank` is provided, grounding violations are added as hard issues so the retry loop
 // regenerates; pass [] to skip grounding (form-only validation).
 export function validateResumeSpec(
@@ -375,6 +399,7 @@ export function validateResumeSpec(
   jdText: string,
   bank: ExperienceBankEntry[] = [],
   declaredSkills?: string[] | null,
+  education?: CandidateEducation,
 ): ValidationResult {
   const issues: string[] = [];
   const warnings: BulletFlag[] = [];
@@ -382,6 +407,7 @@ export function validateResumeSpec(
   const allText = [
     spec.school,
     spec.degree,
+    spec.grad_date,
     spec.coursework,
     ...spec.experience.flatMap((e) => [e.org, e.title, ...e.bullets]),
     ...spec.skills,
@@ -389,11 +415,37 @@ export function validateResumeSpec(
 
   if (allText.includes('—')) issues.push('spec contains an em dash');
   if (spec.experience.length === 0) issues.push('no experience entries selected');
+  if (spec.experience.length > RESUME_CONTENT_LIMITS.maxEntries) {
+    issues.push(
+      `${spec.experience.length} entries selected (max ${RESUME_CONTENT_LIMITS.maxEntries})`,
+    );
+  }
+
+  if (education) {
+    const exact = (value: string | undefined) => value?.trim() ?? '';
+    if (spec.school !== exact(education.school)) issues.push('education school differs from uploaded resume');
+    if (spec.degree !== exact(education.degree)) issues.push('education degree differs from uploaded resume');
+    if (spec.grad_date !== exact(education.grad_date)) issues.push('education graduation date differs from uploaded resume');
+    const allowedCoursework = new Set((education.coursework ?? []).map((course) => course.trim()).filter(Boolean));
+    const renderedCoursework = spec.coursework.split(',').map((course) => course.trim()).filter(Boolean);
+    if (renderedCoursework.some((course) => !allowedCoursework.has(course))) {
+      issues.push('coursework contains a course not listed on the uploaded resume');
+    }
+    const expectedPosition = deriveCandidateContext(education).education_position;
+    if (spec.education_position !== expectedPosition) {
+      issues.push(`education must render ${expectedPosition === 'top' ? 'at the top for a currently enrolled student' : 'after experience for this candidate'}`);
+    }
+  }
 
   const kw = jdKeywords(jdText);
 
   for (const entry of spec.experience) {
-    if (entry.bullets.length > 3) issues.push(`${entry.org}: ${entry.bullets.length} bullets (max 3)`);
+    if (entry.bullets.length > RESUME_CONTENT_LIMITS.maxBulletsPerEntry) {
+      issues.push(
+        `${entry.org}: ${entry.bullets.length} bullets (max ${RESUME_CONTENT_LIMITS.maxBulletsPerEntry})`,
+      );
+    }
+    if (entry.bullets.length === 0) issues.push(`${entry.org}: no bullets selected`);
 
     for (const bullet of entry.bullets) {
       const flags: string[] = [];
@@ -480,6 +532,8 @@ export function validateResumeSpec(
         issues.push(`grounding: title "${v.detail}" for ${v.entry} is not supported by the experience bank`);
       } else if (v.kind === 'date') {
         issues.push(`grounding: date "${v.detail}" for ${v.entry} is not in the student's experience bank`);
+      } else if (v.kind === 'claim') {
+        issues.push(`grounding: a ${v.entry} bullet is not supported by any stored source bullet`);
       } else {
         issues.push(`grounding: metric "${v.detail}" in a ${v.entry} bullet is not in the experience bank ("${(v.bullet ?? '').slice(0, 40)}")`);
       }

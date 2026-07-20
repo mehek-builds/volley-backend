@@ -154,3 +154,81 @@ export function ungroundedProperNouns(text: string, corpus: Set<string>): string
   }
   return [...found];
 }
+
+// R-042: ranking/ordering asks. A "rank these languages" question invites naming items from the
+// QUESTION's own list, and every item positively ranked is a skill claim in the student's name -
+// which is how a live draft said "Python first, JAVA second" against a declared list with no Java
+// (R-015's disease through a new door: the resume's SKILLS pruning and the prose grounding rule
+// both key on the student's own material, and neither sees a ranking's item list). These helpers
+// are the deterministic half of the fix; the prompt rule in llm/applicationAnswer.ts is the other
+// half, and llm/applicationAnswer.ts wires both to the declared skills list (R-015's authority).
+
+// Does the question ask the student to rank/order items? Deliberately keyword-narrow: "in order
+// to" is everywhere in application questions and must never trigger, so bare "order" only counts
+// with a ranking object ("order these", "in order of preference") or a list-then-order shape.
+const RANKING_ASK_RES = [
+  /\brank(?:ing|ed)?\b/i,
+  /\bin (?:the )?order of\b/i, // "in order of preference/proficiency"
+  /\b(?:list|sort|arrange|order)\b[^.?!]*\bin order\b/i, // "list your languages in order"
+  /\border (?:them|these|those|the following|your)\b/i,
+  /\bfrom (?:most|strongest|best)\b[^.?!]*\bto (?:least|weakest|worst)\b/i,
+];
+
+export function isRankingAsk(question: string): boolean {
+  return RANKING_ASK_RES.some((re) => re.test(question));
+}
+
+// One candidate-list segment -> its items. Splits on commas/semicolons/newlines plus "and"/"or"
+// joiners, then keeps only item-shaped pieces (short, at most 3 words): a colon followed by prose
+// ("Rank your priorities: tell us what matters most to you") produces sentence-length fragments
+// that all fail the shape filter, so it extracts nothing instead of inventing a list.
+function splitListSegment(segment: string): string[] {
+  return segment
+    .replace(/^\s*(?:e\.g\.|for example|such as|including)[,:]?\s*/i, '')
+    .split(/[,;\n]/)
+    .flatMap((part) => part.split(/\s+(?:and|or)\s+/i))
+    .map((s) => s.trim().replace(/^\(|[).?!]+$/g, '').trim())
+    .filter((s) => s.length > 0 && s.length <= 40 && s.split(/\s+/).length <= 3)
+    .filter((s) => !/^(?:etc|and so on)\.?$/i.test(s));
+}
+
+// The question's own candidate list, when it names one. Sources, most explicit first: a
+// parenthesized list "(Python, Java, C++)", then a colon tail "rank these: Python, Java, Go".
+// A single survivor is not a list, so each source needs 2+ item-shaped pieces to count. Missing
+// an item here only narrows enforcement (the prompt rule still applies); it can never add a
+// false claim, so the extraction stays conservative on purpose.
+export function extractRankedItems(question: string): string[] {
+  const paren = question.match(/\(([^)]*,[^)]*)\)/);
+  if (paren) {
+    const items = splitListSegment(paren[1]);
+    if (items.length >= 2) return items;
+  }
+  const colon = question.lastIndexOf(':');
+  if (colon !== -1) {
+    const items = splitListSegment(question.slice(colon + 1));
+    if (items.length >= 2) return items;
+  }
+  return [];
+}
+
+// Whole-item mention test, safe for symbol-bearing names ("C++", "C#") where \b sits on the wrong
+// side of the "+"/"#": the lookarounds stand in for word boundaries so "C" is not claimed by an
+// answer that says "C++", nor "Java" by "JavaScript". Case-insensitive on purpose: the live miss
+// ranked "JAVA" where the question wrote "Java".
+function itemMentionRe(item: string): RegExp {
+  const escaped = item
+    .trim()
+    .split(/\s+/)
+    .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('\\s+');
+  return new RegExp(`(?<![a-z0-9+#])${escaped}(?![a-z0-9+#])`, 'i');
+}
+
+// The unheld question items the drafted answer still names. ANY mention is treated as a claim:
+// "positively ranked" versus "honestly disclaimed" is a judgement call a deterministic check
+// cannot make, so the prompt tells the model to omit unheld items entirely and this enforces
+// exactly that. Stricter than an honest "I have not used Java" needs, and that is the right
+// failure direction (same reasoning as pruneUngroundedContent: fewer claims, all of them real).
+export function claimedUnheldItems(answer: string, unheldItems: string[]): string[] {
+  return unheldItems.filter((item) => item.trim().length > 0 && itemMentionRe(item).test(answer));
+}

@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { ExperienceBankEntry } from '../db/schema';
+import { RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
 import { STRONG_VERBS } from '../engine/resumeValidate';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -9,11 +10,13 @@ export interface ResumeSpec {
   degree: string;
   grad_date: string;
   coursework: string;
+  education_position?: 'top' | 'after_experience';
   experience: Array<{
+    type?: 'job' | 'project' | 'leadership';
     org: string;
     title: string;
     date_range: string;
-    bullets: string[]; // exactly 3, chosen/lightly rewritten from bullet_variants
+    bullets: string[];
   }>;
   // The student's OWN skills, those matching the JD first. NOT "JD keywords surfaced first", which
   // is what this said and what the prompt asked for - with no skills source in the system, that
@@ -60,15 +63,17 @@ each achievement), select and lightly rewrite the best-fit subset for THIS speci
 Return ONLY valid JSON with no explanation or markdown wrapping, matching this exact shape:
 {
   "school": string, "degree": string, "grad_date": string, "coursework": string,
-  "experience": [{"org": string, "title": string, "date_range": string, "bullets": [string, string, string]}],
+  "education_position": "top" | "after_experience",
+  "experience": [{"type": "job" | "project" | "leadership", "org": string, "title": string, "date_range": string, "bullets": [string]}],
   "skills": [string],
   "skill_source": {string: string}
 }
 
 Rules:
-- Pick up to 3 experience entries that best match the JD, most relevant first.
-- For each entry pick exactly 3 bullets: reuse a stored bullet_variant verbatim when one already fits well;
+- Pick up to ${RESUME_CONTENT_LIMITS.maxEntries} entries across jobs, projects, and leadership that best match the JD, most relevant first.
+- Select ${RESUME_CONTENT_LIMITS.minBulletsPerEntry} or ${RESUME_CONTENT_LIMITS.maxBulletsPerEntry} bullets per entry based on evidence strength and available one-page space. Reuse a stored bullet_variant verbatim when one already fits well;
   only lightly rewrite (never fabricate achievements) when no stored variant surfaces the JD's language.
+- Copy each entry's type from the experience bank. Do not turn a project into a job or a job into leadership.
 - "skills": EVERY entry must be one of the student's Skills list, either copied as written there or
   renamed under the "skill_source" rule below. If the Skills list is empty, use only skills clearly
   evidenced by a bullet you selected.
@@ -85,10 +90,10 @@ Rules:
   Skills list doesn't have it, they don't have it: leave it out. A resume that omits a skill costs an
   interview; a resume that claims one the student lacks costs their credibility in the screen.
 - Never invent an employer, title, metric, or skill that isn't grounded in the experience bank.
-- Use the student's real school and degree exactly as given in the Education line; never invent or
+- Use the student's real school, degree, and graduation date exactly as given in the Education line; never invent or
   upgrade a degree, and leave "degree" an empty string if none is provided.
-- "coursework": include only courses grounded in the experience bank or the job description; if none
-  are grounded, return an empty string. Never invent course names to look more relevant.
+- "coursework": include only courses explicitly listed in the Education source. Never use the job description as evidence for a course.
+- Set education_position to "top" only when the Education source says the candidate is currently enrolled. Otherwise use "after_experience".
 - Every bullet starts with a strong action verb, one of: ${[...STRONG_VERBS].join(', ')}.
 - Every bullet is 8-30 words, one sentence, no more than two "and"s (prefer ; : or - over a run-on).
 - Include a real number, percent, dollar amount, or multiplier in a bullet whenever the source material
@@ -110,6 +115,7 @@ export function normalizeSpec(raw: unknown): ResumeSpec {
   const experience = (Array.isArray(o.experience) ? o.experience : [])
     .filter((e): e is Record<string, unknown> => !!e && typeof e === 'object')
     .map((e) => ({
+      type: (e.type === 'project' || e.type === 'leadership' ? e.type : 'job') as 'job' | 'project' | 'leadership',
       org: str(e.org),
       title: str(e.title),
       date_range: str(e.date_range),
@@ -131,6 +137,7 @@ export function normalizeSpec(raw: unknown): ResumeSpec {
     degree: str(o.degree),
     grad_date: str(o.grad_date),
     coursework: str(o.coursework),
+    education_position: o.education_position === 'after_experience' ? 'after_experience' : 'top',
     experience,
     skills: strArr(o.skills),
     skill_source: strMap(o.skill_source),
@@ -142,7 +149,14 @@ export async function generateResumeSpec(
   company: string,
   role: string,
   bank: ExperienceBankEntry[],
-  education: { school: string; degree?: string; grad_year?: number },
+  education: {
+    school: string;
+    degree?: string;
+    grad_date?: string;
+    grad_year?: number;
+    currently_enrolled?: boolean;
+    coursework?: string[];
+  },
   feedback?: string[],
   // The student's declared skills (profiles.skills). Empty/undefined means they never gave us a
   // list, which the validator treats as soft-grounding rather than as "they have no skills".
@@ -168,7 +182,7 @@ export async function generateResumeSpec(
   const skillsBlock = skills?.length
     ? `\n\nSkills list (the student's own skills - the ONLY skills that may appear in "skills"):\n${JSON.stringify(skills)}`
     : `\n\nSkills list: none provided. Use only skills clearly evidenced by a bullet you selected, and do not add skills from the job description.`;
-  const contextBlock = `Job: ${role} at ${company}\n\nJob description:\n${jdText}\n\nEducation: ${education.school}${education.degree ? `, ${education.degree}` : ''}${education.grad_year ? `, class of ${education.grad_year}` : ''}${skillsBlock}\n\nExperience bank:\n${JSON.stringify(bank)}`;
+  const contextBlock = `Job: ${role} at ${company}\n\nJob description:\n${jdText}\n\nEducation source (copy facts exactly; this is the only authority for school, degree, graduation date, enrollment, and coursework):\n${JSON.stringify(education)}${skillsBlock}\n\nExperience bank:\n${JSON.stringify(bank)}`;
   const response = await client.messages.create(
     {
       model: 'claude-sonnet-5',

@@ -12,3 +12,5 @@ drizzle/meta/
 .env*
 QA-SHIMS-README.md
 render-example-resumes.cjs
+
+graphify-out/

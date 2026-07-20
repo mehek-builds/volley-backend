@@ -6,6 +6,7 @@ import { profiles } from '../db/schema';
 import { readExperienceBank } from '../db/experienceBank';
 import { requireAuth } from '../middleware/auth';
 import { draftApplicationAnswer } from '../llm/applicationAnswer';
+import { declaredSkillsList } from './profile';
 import { isBillingOrAuthFailure, LLM_BILLING_LOG, LLM_BILLING_PAYLOAD } from './resume';
 
 const bodySchema = z.object({
@@ -35,12 +36,16 @@ export async function applicationAnswerRoutes(fastify: FastifyInstance) {
     }
     const profileRows = await db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1);
     const parsedProfile = profileRows[0]?.parsed_json as { school?: string; grad_year?: number } | undefined;
+    // The declared skills list (profiles.skills, R-015's authority) rides along for the R-042
+    // ranking grounding: a "rank these languages" ask may rank only the intersection of the
+    // question's own items and this list. [] means "never declared" and disables the check.
+    const declaredSkills = declaredSkillsList(profileRows[0]?.skills);
 
     try {
       const { answer, warnings } = await draftApplicationAnswer(question, company, role, jd_text, bank, {
         school: parsedProfile?.school,
         grad_year: parsedProfile?.grad_year,
-      });
+      }, declaredSkills);
       if (!answer) return reply.status(502).send({ error: 'Empty draft returned' });
       return reply.status(200).send({ answer, warnings });
     } catch (err) {

@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { toBullets, bankEntriesFrom } from './profile';
+import { toBullets, bankEntriesFrom, planBankReconciliation } from './profile';
 import type { ParsedProfile } from '../llm/parse';
 import { targetingBodySchema } from './targeting';
 
@@ -66,12 +66,12 @@ describe('bankEntriesFrom', () => {
 
   test('maps projects to project entries', () => {
     const entries = bankEntriesFrom(
-      profile({ projects: [{ name: 'RoleQuick', description: 'Autofills applications' }] }),
+      profile({ projects: [{ name: 'Litos', description: 'Autofills applications' }] }),
       UID,
     );
     assert.equal(entries.length, 1);
     assert.equal(entries[0].type, 'project');
-    assert.equal(entries[0].org, 'RoleQuick');
+    assert.equal(entries[0].org, 'Litos');
     assert.equal(entries[0].title, null);
     assert.equal(entries[0].date_range, null);
   });
@@ -108,7 +108,7 @@ describe('bankEntriesFrom', () => {
     const entries = bankEntriesFrom(
       profile({
         experience: [{ company: 'Traeco', title: 'Founder', start: '2025', end: '2026', description: 'Built it' }],
-        projects: [{ name: 'RoleQuick', description: 'Autofills' }],
+        projects: [{ name: 'Litos', description: 'Autofills' }],
       }),
       UID,
     );
@@ -117,6 +117,58 @@ describe('bankEntriesFrom', () => {
 
   test('handles a parse with no experience or projects at all', () => {
     assert.deepEqual(bankEntriesFrom(profile(), UID), []);
+  });
+});
+
+describe('planBankReconciliation', () => {
+  test('adds newly parsed leadership without replacing existing jobs', () => {
+    const parsed = profile({
+      experience: [{ company: 'Traeco', title: 'Founder', start: '2025', end: '2026', description: 'Built it' }],
+      leadership: [{ organization: 'Women in Computing', title: 'President', start: '2026', end: 'Present', description: 'Led the team' }],
+    });
+    const result = planBankReconciliation(parsed, UID, [{
+      id: 'job-1',
+      type: 'job',
+      org: 'Traeco',
+      title: 'Founder',
+      date_range: '2025 - 2026',
+    }]);
+    assert.deepEqual(result.inserts.map((entry) => entry.type), ['leadership']);
+    assert.deepEqual(result.enrichments, []);
+  });
+
+  test('fills blank project metadata without touching stored bullet variants', () => {
+    const parsed = profile({
+      projects: [{ name: 'Litos', role: 'Product Lead', date_range: '2026 - Present', description: 'Built the product' }],
+    });
+    const result = planBankReconciliation(parsed, UID, [{
+      id: 'project-1',
+      type: 'project',
+      org: 'litos',
+      title: null,
+      date_range: null,
+    }]);
+    assert.deepEqual(result.inserts, []);
+    assert.deepEqual(result.enrichments, [{
+      id: 'project-1',
+      title: 'Product Lead',
+      date_range: '2026 - Present',
+    }]);
+  });
+
+  test('keeps two roles at the same company when both titles are distinct', () => {
+    const parsed = profile({
+      experience: [{ company: 'Acme', title: 'Product Intern', start: '2026', end: '2026', description: 'Shipped research' }],
+    });
+    const result = planBankReconciliation(parsed, UID, [{
+      id: 'job-1',
+      type: 'job',
+      org: 'Acme',
+      title: 'Engineering Intern',
+      date_range: '2025',
+    }]);
+    assert.equal(result.inserts.length, 1);
+    assert.equal(result.inserts[0].title, 'Product Intern');
   });
 });
 

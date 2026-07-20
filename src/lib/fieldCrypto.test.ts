@@ -13,7 +13,7 @@ test('the legacy key-derivation salt is immutable across product renames', () =>
   assert.equal(FIELD_CRYPTO_SALT_ID, 'volley-application-profile');
 });
 
-// R-021: a missing or rotated ENCRYPTION_KEY made RoleQuick type base64 ciphertext into a real job
+// R-021: a missing or rotated ENCRYPTION_KEY made Litos type base64 ciphertext into a real job
 // application, silently. These pin the three parts of the fix: the boot gate, a decrypt failure
 // that throws instead of returning garbage, and the shape test that tells a legacy plaintext row
 // apart from a value the key can no longer read.
@@ -56,7 +56,7 @@ test('a rotated key throws rather than yielding garbage', () => {
 });
 
 test('the real R-021 ciphertext reads as encrypted, not as legacy plaintext', () => {
-  // Verbatim from the register: what RoleQuick actually typed into Proxima Fusion's required
+  // Verbatim from the register: what Litos actually typed into Proxima Fusion's required
   // "When are you available to start?" field. Reading this as plaintext is what shipped it.
   assert.equal(looksEncrypted('JralgwdTrv/2HCp1wcfOJFB9D8q4aNkP19peworH2yqNeSnKaYjP'), true);
 });

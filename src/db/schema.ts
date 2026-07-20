@@ -199,7 +199,7 @@ export const learning_signals = pgTable('learning_signals', {
 export const experience_bank = pgTable('experience_bank', {
   id: uuid('id').primaryKey().defaultRandom(),
   user_id: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
-  type: text('type').notNull(), // 'job' | 'project'
+  type: text('type').notNull(), // 'job' | 'project' | 'leadership'
   org: text('org').notNull(),
   title: text('title'),
   date_range: text('date_range'),
@@ -282,7 +282,7 @@ export const application_profile = pgTable('application_profile', {
   // own enumeration, never an inference: not from citizenship, not from resume text, not from
   // where a posting is based. A language question is exactly where a guessed answer becomes a
   // false claim of fluency to an employer - ZURU asked about Spanish and Enpal about German on
-  // live applications (2026-07-17) and RoleQuick had nothing to say either time, which was the
+  // live applications (2026-07-17) and Litos had nothing to say either time, which was the
   // CORRECT failure. The fix is asking the student once in onboarding, not inferring. Absent or
   // empty means "never answered", and the fill path must leave language questions alone.
   languages: jsonb('languages'),

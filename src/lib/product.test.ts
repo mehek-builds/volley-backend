@@ -8,5 +8,5 @@ test('publishes the canonical Litos product contract', () => {
   assert.equal(API_VERSION, '1');
   assert.equal(config.product.name, 'Litos');
   assert.match(config.product.links.install, /chromewebstore\.google\.com/);
-  assert.equal(config.api.compatibility.extension.minimum, '0.4.1');
+  assert.equal(config.api.compatibility.extension.minimum, '0.4.4');
 });

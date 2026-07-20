@@ -5,18 +5,18 @@ export const API_VERSION = '1';
 // systems have moved: the current website, Chrome listing, and support inbox all
 // continue to work while Litos becomes the display brand.
 export const PRODUCT_LINKS = {
-  website: process.env.PRODUCT_WEBSITE_URL || 'https://role-quick-website.vercel.app',
+  website: process.env.PRODUCT_WEBSITE_URL || 'https://trylitos.com',
   install:
     process.env.PRODUCT_INSTALL_URL ||
     'https://chromewebstore.google.com/detail/bdbedbmkjpfioknfpmhookefabipjaad',
   privacy:
     process.env.PRODUCT_PRIVACY_URL ||
-    'https://role-quick-website.vercel.app/privacy',
+    'https://trylitos.com/privacy',
   supportEmail: process.env.PRODUCT_SUPPORT_EMAIL || 'hello@rolequick.com',
 } as const;
 
 export const CLIENT_COMPATIBILITY = {
-  extension: { minimum: '0.4.1' },
+  extension: { minimum: '0.4.4' },
   web: { minimum: '0.1.0' },
 } as const;
 

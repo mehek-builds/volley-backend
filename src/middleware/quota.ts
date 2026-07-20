@@ -107,14 +107,27 @@ export async function getEntitlements(userId: string): Promise<Entitlements> {
   return { tier: 'free', ...LIMITS.free };
 }
 
+// R-043: prod served the quota upsell with a Stripe TEST-mode checkout (buy.stripe.com/test_...),
+// so a real quota'd student landed on a fake checkout that takes no money and grants nothing.
+// A test-mode link is strictly worse than no link, so it is refused here rather than trusting
+// every future env edit to get it right: the upsell then reads exactly as if no link were
+// configured (quota info + reset date, no Upgrade sentence). Unset means the same thing, which
+// is the intended state until a real payment rail exists. Live links pass through untouched.
+export function upgradeUrl(): string | undefined {
+  const link = process.env.UPGRADE_URL || process.env.STRIPE_PAYMENT_LINK;
+  if (!link) return undefined;
+  if (/stripe\.com\/(c\/pay\/)?test_|cs_test_/.test(link)) return undefined;
+  return link;
+}
+
 export function quotaExceededPayload(ent: Entitlements, used: number, what: 'contacts' | 'drafts' | 'resumes') {
-  const upgradeLink = process.env.UPGRADE_URL || process.env.STRIPE_PAYMENT_LINK;
+  const upgradeLink = upgradeUrl();
 
   if (what === 'resumes') {
     const cap = ent.monthlyResumes;
     const base =
       ent.tier === 'free'
-        ? `You've used your ${cap} free resume generations this month. ${PRODUCT_NAME} Pro ($49.99/mo) unlocks unlimited resume generation + autofill. Resets on the 1st.`
+        ? `You've used your ${cap} free resume generations this month. ${PRODUCT_NAME} Premium ($49.99/mo) unlocks unlimited resume generation + autofill. Resets on the 1st.`
         : `You've hit this month's resume limit (${cap}). It resets on the 1st.`;
     return {
       error: upgradeLink && ent.tier === 'free' ? `${base} Upgrade: ${upgradeLink}` : base,

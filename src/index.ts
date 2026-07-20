@@ -36,6 +36,28 @@ function trustProxySetting(): false | number {
   return process.env.VERCEL ? 1 : false;
 }
 
+type PublicError = { statusCode: number; message: string };
+
+export function toPublicError(error: unknown): PublicError {
+  if (typeof error !== 'object' || error === null) {
+    return { statusCode: 500, message: 'Internal server error' };
+  }
+
+  const candidate = error as { statusCode?: unknown; message?: unknown };
+  const statusCode =
+    typeof candidate.statusCode === 'number' && candidate.statusCode >= 400 && candidate.statusCode < 500
+      ? candidate.statusCode
+      : 500;
+
+  return {
+    statusCode,
+    message:
+      statusCode < 500 && typeof candidate.message === 'string' && candidate.message.trim()
+        ? candidate.message
+        : 'Internal server error',
+  };
+}
+
 export async function buildApp(options: BuildAppOptions = {}) {
   // Refuse to run at all without ENCRYPTION_KEY (R-021). Every encrypted application_profile
   // column is unreadable without it, and the old failure mode was not an error but silence: the
@@ -74,6 +96,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
     .map((s) => s.trim())
     .filter(Boolean);
   const allowedOrigins = new Set([
+    'https://trylitos.com',
+    'https://www.trylitos.com',
     'https://role-quick-website.vercel.app',
     'https://rolequick.com',
     'https://www.rolequick.com',
@@ -163,10 +187,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
   // Global error handler
   fastify.setErrorHandler((error, _request, reply) => {
     fastify.log.error(error);
-    const statusCode = error.statusCode ?? 500;
-    return reply.status(statusCode).send({
-      error: error.message || 'Internal server error',
-    });
+    const publicError = toPublicError(error);
+    return reply.status(publicError.statusCode).send({ error: publicError.message });
   });
 
   // 404 handler

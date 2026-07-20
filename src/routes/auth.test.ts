@@ -1,31 +1,45 @@
-import { test } from 'node:test';
+import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildVerificationEmail } from './auth';
 
-test('verification email uses the Litos brand and semantic HTML', () => {
-  const previous = process.env.RESEND_FROM;
-  delete process.env.RESEND_FROM;
-  try {
-    const email = buildVerificationEmail('student@example.com', '123456');
-    assert.equal(email.from, 'Litos <onboarding@resend.dev>');
-    assert.equal(email.subject, '123456 is your Litos verification code');
-    assert.equal(email.to[0], 'student@example.com');
-    assert.match(email.html, /<p>Welcome to Litos\./);
-    assert.doesNotMatch(email.html, /RoleQuick|Volley/i);
-  } finally {
-    if (previous === undefined) delete process.env.RESEND_FROM;
-    else process.env.RESEND_FROM = previous;
-  }
-});
+const EMAIL = 'student@usc.edu';
+const CODE = '123456';
 
-test('verification email preserves a verified sender and rejects malformed codes', () => {
-  const previous = process.env.RESEND_FROM;
-  process.env.RESEND_FROM = 'Litos <hello@example.com>';
-  try {
-    assert.equal(buildVerificationEmail('student@example.com', '123456').from, process.env.RESEND_FROM);
-    assert.throws(() => buildVerificationEmail('student@example.com', '<script>'), /six digits/);
-  } finally {
-    if (previous === undefined) delete process.env.RESEND_FROM;
-    else process.env.RESEND_FROM = previous;
+function withEnv(vars: Record<string, string | undefined>, fn: () => void) {
+  const saved: Record<string, string | undefined> = {};
+  for (const key of Object.keys(vars)) {
+    saved[key] = process.env[key];
+    if (vars[key] === undefined) delete process.env[key];
+    else process.env[key] = vars[key];
   }
+  try {
+    fn();
+  } finally {
+    for (const key of Object.keys(saved)) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  }
+}
+
+describe('verification email copy', () => {
+  test('uses the Litos brand and semantic HTML', () => {
+    withEnv({ RESEND_FROM: undefined }, () => {
+      const email = buildVerificationEmail(EMAIL, CODE);
+      assert.equal(email.from, 'Litos <onboarding@resend.dev>');
+      assert.equal(email.subject, '123456 is your Litos verification code');
+      assert.deepEqual(email.to, [EMAIL]);
+      assert.match(email.html, /<p>Welcome to Litos\./);
+      assert.match(email.html, /expires in 10 minutes/);
+      assert.doesNotMatch(email.html, /RoleQuick|Volley/i);
+      assert.doesNotMatch(email.html, /style=/i);
+    });
+  });
+
+  test('preserves a verified sender and rejects malformed codes', () => {
+    withEnv({ RESEND_FROM: 'Litos <hello@example.com>' }, () => {
+      assert.equal(buildVerificationEmail(EMAIL, CODE).from, 'Litos <hello@example.com>');
+      assert.throws(() => buildVerificationEmail(EMAIL, '<script>'), /six digits/);
+    });
+  });
 });
