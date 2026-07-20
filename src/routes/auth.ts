@@ -43,15 +43,15 @@ async function signSessionToken(userId: string, email: string): Promise<string> 
 // a store rejection (R-037), so the product name is now asserted instead of trusted.
 export function buildVerificationEmail(email: string, code: string) {
   return {
-    from: process.env.RESEND_FROM || 'RoleQuick <onboarding@resend.dev>',
+    from: process.env.RESEND_FROM || 'Litos <onboarding@resend.dev>',
     to: [email],
-    subject: `${code} is your RoleQuick verification code`,
-    html: `<p>Welcome to RoleQuick. Your verification code is:</p><p style="font-size:28px;font-weight:bold;letter-spacing:4px">${code}</p><p>It expires in 10 minutes. If you didn't request this, you can ignore this email.</p>`,
+    subject: `${code} is your Litos verification code`,
+    html: `<p>Welcome to Litos. Your verification code is:</p><p style="font-size:28px;font-weight:bold;letter-spacing:4px">${code}</p><p>It expires in 10 minutes. If you didn't request this, you can ignore this email.</p>`,
   };
 }
 
 // Sends the 6-digit code via Resend's HTTPS API. Requires RESEND_API_KEY and
-// RESEND_FROM (a sender on a domain verified in Resend, e.g. "RoleQuick <hi@yourdomain>").
+// RESEND_FROM (a sender on a domain verified in Resend, e.g. "Litos <hi@yourdomain>").
 async function sendVerificationEmail(email: string, code: string): Promise<void> {
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',

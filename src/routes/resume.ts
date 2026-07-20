@@ -97,12 +97,12 @@ export function isBillingOrAuthFailure(err: unknown): boolean {
 export const LLM_BILLING_LOG =
   'ANTHROPIC BILLING/AUTH FAILURE: every model-backed feature is DOWN for every user until the owner acts. Fix: top up credits in the Anthropic console, or rotate/restore ANTHROPIC_API_KEY (R-012)';
 export const LLM_BILLING_PAYLOAD = {
-  error: 'Drafting is temporarily unavailable. This is a problem on our side, not something you did, and retrying will not fix it. The RoleQuick team needs to restore service.',
+  error: 'Drafting is temporarily unavailable. This is a problem on our side, not something you did, and retrying will not fix it. The Litos team needs to restore service.',
   code: 'llm_billing',
 } as const;
 
 // Honor Retry-After when the API sends one, else exponential backoff with jitter. Jitter matters:
-// every RoleQuick client retrying a shared incident on the same schedule would synchronize into a
+// every Litos client retrying a shared incident on the same schedule would synchronize into a
 // thundering herd against an API that is already shedding load.
 export function overloadBackoffMs(err: unknown, attempt: number): number {
   const headers = (err as { headers?: { get?: (k: string) => string | null } })?.headers;
@@ -293,7 +293,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         // only a fresh request can outlive it.
         if (isTransientOverload(err)) {
           return reply.status(503).send({
-            error: 'The model is busy right now. RoleQuick will retry automatically.',
+            error: 'The model is busy right now. Litos will retry automatically.',
             code: 'llm_overloaded',
             retry_after_ms: 5000,
           });
@@ -332,7 +332,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
           'resume grounding could not verify any experience entry; holding attachment',
         );
         return reply.status(422).send({
-          error: 'RoleQuick could not verify this resume against the uploaded experience, so it was not attached.',
+          error: 'Litos could not verify this resume against the uploaded experience, so it was not attached.',
           code: 'resume_quality_hold',
           quality: {
             ready_to_attach: false,
@@ -377,7 +377,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         'resume blocked after final content validation',
       );
       return reply.status(422).send({
-        error: 'This resume needs review before RoleQuick can attach it.',
+        error: 'This resume needs review before Litos can attach it.',
         code: 'resume_quality_hold',
         quality: {
           ready_to_attach: false,
@@ -403,7 +403,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         'POST-RENDER PDF VALIDATION DID NOT RUN: rendered resume could not be parsed, so its quality.issues are INCOMPLETE and the one-page/extractability guarantees are unverified (R-017)',
       );
       return reply.status(500).send({
-        error: 'RoleQuick could not verify the generated PDF, so it was not attached.',
+        error: 'Litos could not verify the generated PDF, so it was not attached.',
         code: 'resume_quality_hold',
       });
     }

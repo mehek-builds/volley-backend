@@ -66,12 +66,12 @@ describe('bankEntriesFrom', () => {
 
   test('maps projects to project entries', () => {
     const entries = bankEntriesFrom(
-      profile({ projects: [{ name: 'RoleQuick', description: 'Autofills applications' }] }),
+      profile({ projects: [{ name: 'Litos', description: 'Autofills applications' }] }),
       UID,
     );
     assert.equal(entries.length, 1);
     assert.equal(entries[0].type, 'project');
-    assert.equal(entries[0].org, 'RoleQuick');
+    assert.equal(entries[0].org, 'Litos');
     assert.equal(entries[0].title, null);
     assert.equal(entries[0].date_range, null);
   });
@@ -108,7 +108,7 @@ describe('bankEntriesFrom', () => {
     const entries = bankEntriesFrom(
       profile({
         experience: [{ company: 'Traeco', title: 'Founder', start: '2025', end: '2026', description: 'Built it' }],
-        projects: [{ name: 'RoleQuick', description: 'Autofills' }],
+        projects: [{ name: 'Litos', description: 'Autofills' }],
       }),
       UID,
     );
@@ -139,12 +139,12 @@ describe('planBankReconciliation', () => {
 
   test('fills blank project metadata without touching stored bullet variants', () => {
     const parsed = profile({
-      projects: [{ name: 'RoleQuick', role: 'Product Lead', date_range: '2026 - Present', description: 'Built the product' }],
+      projects: [{ name: 'Litos', role: 'Product Lead', date_range: '2026 - Present', description: 'Built the product' }],
     });
     const result = planBankReconciliation(parsed, UID, [{
       id: 'project-1',
       type: 'project',
-      org: 'rolequick',
+      org: 'litos',
       title: null,
       date_range: null,
     }]);

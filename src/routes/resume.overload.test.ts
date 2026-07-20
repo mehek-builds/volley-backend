@@ -111,7 +111,7 @@ test('falls back to exponential backoff with jitter when there is no Retry-After
 });
 
 test('jitter actually varies, so a fleet of clients cannot synchronize into a thundering herd', () => {
-  // Every RoleQuick client retrying a SHARED incident is the failure mode here: identical schedules
+  // Every Litos client retrying a SHARED incident is the failure mode here: identical schedules
   // would hammer an API that is already shedding load.
   const err = { status: 529 };
   const samples = new Set(Array.from({ length: 40 }, () => overloadBackoffMs(err, 1)));

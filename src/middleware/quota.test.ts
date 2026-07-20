@@ -6,10 +6,10 @@ import type { Entitlements } from './quota';
 // Regression coverage for R-043 (prod, 2026-07-18): the /resume/generate 402 upsell linked a
 // Stripe TEST-mode checkout (buy.stripe.com/test_...), so a real quota'd student landed on a
 // fake checkout that takes no money and grants nothing - and the copy still said "Volley
-// Premium" months after the RoleQuick rename (R-037's lesson: stale product names in
+// Premium" months after the Litos rename (R-037's lesson: stale product names in
 // user-facing surfaces have already cost a store rejection). These pin the three parts of the
 // fix: test-mode links are refused at runtime, an unconfigured link omits the Upgrade sentence
-// while keeping the quota info readable, and the product name is RoleQuick everywhere. The
+// while keeping the quota info readable, and the product name is Litos everywhere. The
 // JSON shape (error/code/used/limit/tier, optional upgrade_url) is the extension's contract:
 // throwApiError surfaces `error` verbatim, so it must stay a plain human sentence.
 
@@ -47,8 +47,8 @@ describe('upgradeUrl (R-043)', () => {
     withUpgradeEnv({ STRIPE_PAYMENT_LINK: LIVE_LINK }, () => {
       assert.equal(upgradeUrl(), LIVE_LINK);
     });
-    withUpgradeEnv({ UPGRADE_URL: 'https://rolequick.app/upgrade', STRIPE_PAYMENT_LINK: LIVE_LINK }, () => {
-      assert.equal(upgradeUrl(), 'https://rolequick.app/upgrade');
+    withUpgradeEnv({ UPGRADE_URL: 'https://trylitos.com/upgrade', STRIPE_PAYMENT_LINK: LIVE_LINK }, () => {
+      assert.equal(upgradeUrl(), 'https://trylitos.com/upgrade');
     });
   });
 
@@ -69,12 +69,12 @@ describe('upgradeUrl (R-043)', () => {
 });
 
 describe('402 quota payload (R-043)', () => {
-  test('resumes, free tier, live link configured: RoleQuick Premium copy plus the Upgrade sentence', () => {
+  test('resumes, free tier, live link configured: Litos Premium copy plus the Upgrade sentence', () => {
     withUpgradeEnv({ UPGRADE_URL: LIVE_LINK }, () => {
       const payload = quotaExceededPayload(ent('free'), 20, 'resumes');
       assert.equal(
         payload.error,
-        `You've used your ${LIMITS.free.monthlyResumes} free resume generations this month. RoleQuick Premium ($49.99/mo) unlocks unlimited resume generation + autofill. Resets on the 1st. Upgrade: ${LIVE_LINK}`
+        `You've used your ${LIMITS.free.monthlyResumes} free resume generations this month. Litos Premium ($49.99/mo) unlocks unlimited resume generation + autofill. Resets on the 1st. Upgrade: ${LIVE_LINK}`
       );
       assert.equal(payload.code, 'quota_exceeded');
       assert.equal(payload.used, 20);
@@ -89,7 +89,7 @@ describe('402 quota payload (R-043)', () => {
       const payload = quotaExceededPayload(ent('free'), 20, 'resumes');
       assert.equal(
         payload.error,
-        `You've used your ${LIMITS.free.monthlyResumes} free resume generations this month. RoleQuick Premium ($49.99/mo) unlocks unlimited resume generation + autofill. Resets on the 1st.`
+        `You've used your ${LIMITS.free.monthlyResumes} free resume generations this month. Litos Premium ($49.99/mo) unlocks unlimited resume generation + autofill. Resets on the 1st.`
       );
       assert.equal('upgrade_url' in payload, false);
       // The contract fields the extension parses stay put regardless of link configuration.
@@ -125,10 +125,10 @@ describe('402 quota payload (R-043)', () => {
     }
   });
 
-  test('contacts and drafts say RoleQuick Pro', () => {
+  test('contacts and drafts say Litos Pro', () => {
     withUpgradeEnv({}, () => {
-      assert.match(quotaExceededPayload(ent('free'), 30, 'contacts').error, /RoleQuick Pro/);
-      assert.match(quotaExceededPayload(ent('free'), 60, 'drafts').error, /RoleQuick Pro/);
+      assert.match(quotaExceededPayload(ent('free'), 30, 'contacts').error, /Litos Pro/);
+      assert.match(quotaExceededPayload(ent('free'), 60, 'drafts').error, /Litos Pro/);
     });
   });
 

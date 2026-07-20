@@ -2,7 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { deniedKeys, harvestable, DENIED } from './harvest';
 
-// The R-004 regression surface. RoleQuick once auto-filled "Yes, I am authorized to work without
+// The R-004 regression surface. Litos once auto-filled "Yes, I am authorized to work without
 // sponsorship" onto a live Berlin application for a Dubai-based student who needed sponsorship
 // (Lever/Xsolla, 2026-07-16). The fix made the extension refuse to ANSWER those questions.
 // Harvest is the same bug pointed the other way: capture a location-scoped answer once, replay it

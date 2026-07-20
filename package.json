@@ -1,7 +1,7 @@
 {
-  "name": "volley-backend",
+  "name": "litos-backend",
   "version": "1.0.1",
-  "description": "Backend API for the Volley student-outreach Chrome extension",
+  "description": "Backend API for the Litos job-application Chrome extension",
   "main": "dist/index.js",
   "engines": {
     "node": "22.x"
