@@ -1,6 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { numberSignatures, ungroundedNumbers, wordSet, ungroundedProperNouns, stripEmDashes } from './grounding';
+import {
+  numberSignatures,
+  ungroundedNumbers,
+  wordSet,
+  ungroundedProperNouns,
+  stripEmDashes,
+  isRankingAsk,
+  extractRankedItems,
+  claimedUnheldItems,
+} from './grounding';
 
 test('a number present in the source is grounded', () => {
   const src = numberSignatures('Handled 40K requests per day across the pipeline');
@@ -100,4 +109,62 @@ test('ungroundedProperNouns does not flag names that appear in the corpus', () =
   const corpus = wordSet('Interned at Stripe on the payments team');
   const out = ungroundedProperNouns('At Stripe I owned the payments flow.', corpus);
   assert.deepEqual(out, []);
+});
+
+// R-042: ranking/ordering asks treat every rankable item as a skill claim. The live miss (DRW,
+// 2026-07-18): "rank your languages" drafted "Python first, JAVA second" with no Java anywhere
+// in the declared list. These helpers are the deterministic half of that fix.
+
+test('R-042: ranking asks are detected, prose questions are not', () => {
+  assert.equal(isRankingAsk('Rank the following languages by proficiency: Python, Java, C++'), true);
+  assert.equal(isRankingAsk('Please rank these tools in order of preference'), true);
+  assert.equal(isRankingAsk('List your languages in order of comfort'), true);
+  assert.equal(isRankingAsk('Order these frameworks from most to least familiar'), true);
+  assert.equal(isRankingAsk('Why do you want to work here?'), false);
+  assert.equal(isRankingAsk('Tell us about a project you are proud of'), false);
+});
+
+test('R-042: "in order to" never reads as a ranking ask', () => {
+  assert.equal(isRankingAsk('What would you do in order to meet a tight deadline?'), false);
+  assert.equal(isRankingAsk('Describe the steps you took in order to ship your project'), false);
+});
+
+test('R-042: the question\'s own item list is extracted from a colon tail', () => {
+  assert.deepEqual(
+    extractRankedItems('Rank the following languages by proficiency: Python, Java, C++, Go'),
+    ['Python', 'Java', 'C++', 'Go'],
+  );
+});
+
+test('R-042: parenthesized and semicolon-separated lists extract too', () => {
+  assert.deepEqual(extractRankedItems('Rank the languages below (Python, Java, C++) by comfort'), ['Python', 'Java', 'C++']);
+  assert.deepEqual(extractRankedItems('Rank these: React; Vue; Angular'), ['React', 'Vue', 'Angular']);
+});
+
+test('R-042: "and"/"or" joiners and trailing punctuation are handled', () => {
+  assert.deepEqual(extractRankedItems('Rank your comfort with the following: Python, Java, and SQL.'), ['Python', 'Java', 'SQL']);
+});
+
+test('R-042: a colon followed by prose is not mistaken for an item list', () => {
+  assert.deepEqual(extractRankedItems('Rank your priorities: tell us what matters most to you in a first job.'), []);
+});
+
+test('R-042: a ranking ask naming no candidates extracts nothing', () => {
+  assert.deepEqual(extractRankedItems('Rank your programming languages by proficiency'), []);
+});
+
+test('R-042: an unheld item in the drafted answer is caught in any casing', () => {
+  // the live shape: the question wrote "Java", the draft claimed "JAVA"
+  assert.deepEqual(claimedUnheldItems('I would rank Python first and JAVA second.', ['Java']), ['Java']);
+});
+
+test('R-042: an answer ranking only held items passes clean', () => {
+  assert.deepEqual(claimedUnheldItems('Python first: I used it daily at Traeco. C++ second.', ['Java', 'Go']), []);
+});
+
+test('R-042: symbol-bearing items match whole, never by prefix', () => {
+  // "C" must not be claimed by an answer that says C++, nor "Java" by JavaScript
+  assert.deepEqual(claimedUnheldItems('C++ is my strongest language.', ['C']), []);
+  assert.deepEqual(claimedUnheldItems('I write JavaScript daily.', ['Java']), []);
+  assert.deepEqual(claimedUnheldItems('I have shipped C# services in production.', ['C#']), ['C#']);
 });
