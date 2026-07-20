@@ -1,5 +1,6 @@
 import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
+import { RESUME_CONTENT_LIMITS } from './resumeContentPolicy';
 
 export interface CandidateEducation {
   school: string;
@@ -137,7 +138,7 @@ export function applyResumePolicy(
           return true;
         })
         .sort((a, b) => relevanceScore(b, jdText) - relevanceScore(a, jdText))
-        .slice(0, 3);
+        .slice(0, RESUME_CONTENT_LIMITS.maxBulletsPerEntry);
       const type = (source?.type === 'project' || source?.type === 'leadership' ? source.type : 'job') as
         | 'job'
         | 'project'
@@ -150,7 +151,7 @@ export function applyResumePolicy(
       };
     })
     .sort((a, b) => b.score - a.score)
-    .slice(0, 4)
+    .slice(0, RESUME_CONTENT_LIMITS.maxEntries)
     .map(({ score: _score, ...entry }) => entry);
 
   return {

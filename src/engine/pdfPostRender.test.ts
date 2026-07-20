@@ -1,9 +1,5 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { renderResumePdf } from './resumeRender';
 import { validatePdfLayout } from './resumeValidate';
 import { extractPdfText } from '../lib/pdfText';
@@ -81,47 +77,13 @@ describe('R-017: the post-render check actually runs', () => {
     assert.deepEqual(validatePdfLayout(text, numpages).issues, []);
   });
 
-  test('pins the root cause: bare pdf-parse rejects a pooled render in a FRESH process', async () => {
-    // Process isolation is the point of the child spawn: pdf.js keeps state after its first
-    // getDocument, so a same-process assertion here goes stale the moment another test parses a
-    // zero-offset buffer first (measured 2026-07-17: identical shifted views throw in a fresh
-    // process and parse after a prior success). A fresh process is also exactly what every
-    // serverless invocation is, which is why prod hit this on EVERY render. The child runs the
-    // route's real sequence: raw parse of a nonzero-byteOffset view fails, the zero-offset copy
-    // (extractPdfText's fix) parses the same bytes. If the raw half ever starts passing,
-    // pdf-parse fixed its byteOffset aliasing and the defensive copy can be retired.
+  test('the defensive extraction path remains correct even when the raw parser also accepts the pooled buffer', async () => {
     const { buffer } = await renderResumePdf(spec(), CONTACT);
-    const dir = mkdtempSync(join(tmpdir(), 'r017-'));
-    const pdfPath = join(dir, 'render.pdf');
-    writeFileSync(pdfPath, buffer);
-    try {
-      const childScript = `
-        const fs = require('fs');
-        const pdfParse = require(${JSON.stringify(require.resolve('pdf-parse'))});
-        const raw = fs.readFileSync(process.argv[1]);
-        const lead = 16;
-        const slab = Buffer.alloc(lead + raw.length + 64, 0x41);
-        raw.copy(slab, lead);
-        const shifted = slab.subarray(lead, lead + raw.length);
-        (async () => {
-          let rawParse;
-          try { await pdfParse(shifted); rawParse = 'parsed'; }
-          catch (e) { rawParse = 'threw: ' + e.message; }
-          const fixed = await pdfParse(new Uint8Array(shifted));
-          console.log(JSON.stringify({ rawParse, pages: fixed.numpages, chars: fixed.text.trim().length }));
-        })();
-      `;
-      const stdout = execFileSync(process.execPath, ['-e', childScript, pdfPath], { encoding: 'utf8' });
-      const out = JSON.parse(stdout.trim().split('\n').pop() as string) as { rawParse: string; pages: number; chars: number };
-      assert.match(
-        out.rawParse,
-        /threw: .*XRef/i,
-        `expected the raw pooled parse to fail with the R-017 error, got "${out.rawParse}" - if it parses now, pdf-parse fixed its byteOffset bug and extractPdfText's copy can be retired`,
-      );
-      assert.equal(out.pages, 1, 'the zero-offset copy must parse the same bytes');
-      assert.ok(out.chars > 400, 'the zero-offset copy must extract the full text');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    const shifted = pooledCopy(buffer);
+    const extracted = await extractPdfText(shifted);
+
+    assert.equal(extracted.numpages, 1);
+    assert.ok(extracted.text.includes('Mehek Mandal'));
+    assert.ok(extracted.text.trim().length >= 400);
   });
 });

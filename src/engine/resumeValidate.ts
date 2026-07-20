@@ -1,4 +1,5 @@
 import type { ResumeSpec } from '../llm/resumeSpec';
+import { RESUME_CONTENT_LIMITS } from './resumeContentPolicy';
 import type { ExperienceBankEntry } from '../db/schema';
 import { wordSet, numberSignatures, ungroundedNumbers } from './grounding';
 import { deriveCandidateContext, type CandidateEducation } from './resumePolicy';
@@ -414,7 +415,11 @@ export function validateResumeSpec(
 
   if (allText.includes('—')) issues.push('spec contains an em dash');
   if (spec.experience.length === 0) issues.push('no experience entries selected');
-  if (spec.experience.length > 4) issues.push(`${spec.experience.length} entries selected (max 4)`);
+  if (spec.experience.length > RESUME_CONTENT_LIMITS.maxEntries) {
+    issues.push(
+      `${spec.experience.length} entries selected (max ${RESUME_CONTENT_LIMITS.maxEntries})`,
+    );
+  }
 
   if (education) {
     const exact = (value: string | undefined) => value?.trim() ?? '';
@@ -435,7 +440,11 @@ export function validateResumeSpec(
   const kw = jdKeywords(jdText);
 
   for (const entry of spec.experience) {
-    if (entry.bullets.length > 3) issues.push(`${entry.org}: ${entry.bullets.length} bullets (max 3)`);
+    if (entry.bullets.length > RESUME_CONTENT_LIMITS.maxBulletsPerEntry) {
+      issues.push(
+        `${entry.org}: ${entry.bullets.length} bullets (max ${RESUME_CONTENT_LIMITS.maxBulletsPerEntry})`,
+      );
+    }
     if (entry.bullets.length === 0) issues.push(`${entry.org}: no bullets selected`);
 
     for (const bullet of entry.bullets) {
