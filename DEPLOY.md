@@ -1,4 +1,4 @@
-# Deploying the Volley backend to Vercel
+# Deploying the Litos backend to Vercel
 
 The app is a Fastify server wrapped as a single Vercel serverless function
 (`api/index.ts`); `vercel.json` rewrites every path to it and raises the function
@@ -60,7 +60,7 @@ VITE_API_BASE=https://<your-app>.vercel.app
 ```
 
 Then rebuild: `npm run build`, and reload the unpacked extension in Chrome
-(`chrome://extensions` → Volley → reload). The popup + Apply flow now hit Vercel.
+(`chrome://extensions` → Litos → reload). The popup + Apply flow now hit Vercel.
 
 ## Notes
 - **Cold starts:** the free tier sleeps; first request after idle is slow (~1–3s).
