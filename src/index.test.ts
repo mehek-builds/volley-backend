@@ -29,6 +29,23 @@ after(async () => {
   if (appPromise) await (await appPromise).close();
 });
 
+test('the global error boundary preserves client errors and hides server internals', async () => {
+  const { toPublicError } = await import('./index');
+
+  assert.deepEqual(toPublicError({ statusCode: 400, message: 'Invalid request' }), {
+    statusCode: 400,
+    message: 'Invalid request',
+  });
+  assert.deepEqual(toPublicError(new Error('DATABASE_URL=postgres://secret-host')), {
+    statusCode: 500,
+    message: 'Internal server error',
+  });
+  assert.deepEqual(toPublicError({ statusCode: 700, message: 'Unexpected internal state' }), {
+    statusCode: 500,
+    message: 'Internal server error',
+  });
+});
+
 const ATS_ORIGIN = 'https://job-boards.greenhouse.io';
 const EVIL_ORIGIN = 'https://evil.example.com';
 const SITE_ORIGIN = 'https://role-quick-website.vercel.app';
