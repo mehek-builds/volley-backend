@@ -9,10 +9,21 @@ import { requireAuth } from '../middleware/auth';
 import { readExperienceBank } from '../db/experienceBank';
 import { allowHourly, bumpCounter, getCount, getEntitlements, LIMITS, monthPeriod, quotaExceededPayload, rateLimitedReply } from '../middleware/quota';
 import { generateResumeSpec, type ResumeSpec } from '../llm/resumeSpec';
-import { renderResumePdf } from '../engine/resumeRender';
+import {
+  findPdfTextFidelityIssues,
+  findResumeTypographyIssues,
+  renderResumePdf,
+  validateResumeVisualLayout,
+  type ResumeVisualLayout,
+} from '../engine/resumeRender';
 import { validateResumeSpec, validatePdfLayout, pruneUngroundedContent } from '../engine/resumeValidate';
 import { mintDownloadToken, readDownloadToken, resolveBlobUrl } from '../lib/resumeAccess';
 import { apiBaseFor } from '../lib/apiBase';
+import { resumeGenerateBodySchema, type ResumeGenerateBody } from './resumeRequestSchema';
+import {
+  resumeGenerateSuccessResponseSchema,
+  resumeQualityHoldResponseSchema,
+} from './resumeResponseSchema';
 import { extractPdfText } from '../lib/pdfText';
 import { applyResumePolicy, type CandidateEducation } from '../engine/resumePolicy';
 
@@ -139,32 +150,15 @@ export const autofillEventSchema = z.object({
   r030_candidate_labels: z.array(z.string().max(200)).max(50).optional(),
 });
 
-const bodySchema = z.object({
-  company: z.string().min(1),
-  role: z.string().min(1),
-  jd_text: z.string().min(20),
-  // GET /profile/application returns null (not undefined) for unset fields (same shape the PUT
-  // endpoint already accepts, per the 2026-07-02 fix) - the extension passes those straight
-  // through as this endpoint's contact fields, so this must accept null too.
-  contact: z.object({
-    full_name: z.string().min(1),
-    email: z.string().nullable().optional().transform((v) => v ?? undefined),
-    phone: z.string().nullable().optional().transform((v) => v ?? undefined),
-    linkedin_url: z.string().nullable().optional().transform((v) => v ?? undefined),
-    github_url: z.string().nullable().optional().transform((v) => v ?? undefined),
-    portfolio_url: z.string().nullable().optional().transform((v) => v ?? undefined),
-  }),
-});
-
 export async function resumeRoutes(fastify: FastifyInstance) {
   // POST /resume/generate - tailor a resume to a specific JD from the student's experience bank
   fastify.post('/resume/generate', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const reqStart = Date.now(); // wall-clock anchor for the whole-request time budget (see budgetLeftMs)
     const userId = request.jwtPayload!.userId;
 
-    let body: z.infer<typeof bodySchema>;
+    let body: ResumeGenerateBody;
     try {
-      body = bodySchema.parse(request.body);
+      body = resumeGenerateBodySchema.parse(request.body);
     } catch (err) {
       const detail = err instanceof z.ZodError ? err.issues.map((i) => `${i.path.join('.')}: ${i.message}`) : undefined;
       return reply.status(400).send({ error: 'Invalid request body', detail });
@@ -307,7 +301,8 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       }
 
       const result = validateResumeSpec(spec, body.jd_text, bank, declaredSkills, education);
-      specIssues = result.issues;
+      const typographyIssues = findResumeTypographyIssues(spec, body.contact);
+      specIssues = [...result.issues, ...typographyIssues];
       specWarnings = result.warnings;
       atsCoverage = result.ats_keyword_coverage_pct;
 
@@ -331,7 +326,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
           { userId, company: body.company, removed: pruned.removed },
           'resume grounding could not verify any experience entry; holding attachment',
         );
-        return reply.status(422).send({
+        return reply.status(422).send(resumeQualityHoldResponseSchema.parse({
           error: 'Litos could not verify this resume against the uploaded experience, so it was not attached.',
           code: 'resume_quality_hold',
           quality: {
@@ -340,7 +335,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
             warnings: specWarnings,
             omissions: pruned.removed,
           },
-        });
+        }));
       } else {
         spec = pruned.spec;
         groundingRemoved = pruned.removed;
@@ -351,6 +346,9 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     let trimmedForFit: boolean;
     let sparse: boolean;
     let layoutOmissions: string[];
+    let visualLayout: ResumeVisualLayout;
+    let visualWarnings: string[];
+    let visualIssues: string[];
     try {
       const rendered = await renderResumePdf(spec, body.contact, body.jd_text);
       pdfBuffer = rendered.buffer;
@@ -358,6 +356,10 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       trimmedForFit = rendered.trimmed;
       sparse = rendered.sparse;
       layoutOmissions = rendered.omissions;
+      visualLayout = rendered.layout;
+      const visualValidation = validateResumeVisualLayout(visualLayout);
+      visualWarnings = visualValidation.warnings;
+      visualIssues = visualValidation.issues;
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to render resume PDF' });
@@ -376,7 +378,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         { userId, company: body.company, issues: finalSpecValidation.issues },
         'resume blocked after final content validation',
       );
-      return reply.status(422).send({
+      return reply.status(422).send(resumeQualityHoldResponseSchema.parse({
         error: 'This resume needs review before Litos can attach it.',
         code: 'resume_quality_hold',
         quality: {
@@ -384,38 +386,67 @@ export async function resumeRoutes(fastify: FastifyInstance) {
           issues: finalSpecValidation.issues,
           warnings: specWarnings,
           omissions: layoutOmissions,
+          visual_warnings: visualWarnings,
         },
-      });
+      }));
     }
 
-    let layoutIssues: string[] = [];
+    let layoutIssues: string[] = [...visualIssues];
     try {
       const parsedPdf = await extractPdfText(pdfBuffer);
-      layoutIssues = validatePdfLayout(parsedPdf.text, parsedPdf.numpages).issues;
+      layoutIssues.push(...validatePdfLayout(parsedPdf.text, parsedPdf.numpages).issues);
+      layoutIssues.push(...findPdfTextFidelityIssues(parsedPdf.text, spec, body.contact));
     } catch (err) {
-      // LOUD on purpose, and still non-fatal to the response. A validation step that fails
-      // silently is worse than none: layoutIssues stays [] below, which downstream reads as
-      // "validated, no issues". If this fires, the one-page/extractability guarantees are
-      // UNVERIFIED for the resume being returned - the student still gets their file, but this
-      // resume shipped unchecked and the parser needs fixing again (R-017's failure mode).
+      // Fail closed when validation cannot run. Returning or storing an unverified PDF would
+      // turn a parser failure into a false quality pass and repeat R-017's failure mode.
       fastify.log.error(
         { err, userId, company: body.company },
         'POST-RENDER PDF VALIDATION DID NOT RUN: rendered resume could not be parsed, so its quality.issues are INCOMPLETE and the one-page/extractability guarantees are unverified (R-017)',
       );
-      return reply.status(500).send({
+      return reply.status(500).send(resumeQualityHoldResponseSchema.parse({
         error: 'Litos could not verify the generated PDF, so it was not attached.',
         code: 'resume_quality_hold',
-      });
+      }));
     }
 
     if (layoutIssues.length > 0) {
       fastify.log.error({ userId, company: body.company, layoutIssues }, 'resume blocked after PDF validation');
-      return reply.status(422).send({
-        error: 'This resume did not pass the one-page PDF check, so it was not attached.',
+      return reply.status(422).send(resumeQualityHoldResponseSchema.parse({
+        error: 'This resume did not pass the visual PDF checks, so it was not attached.',
         code: 'resume_quality_hold',
-        quality: { ready_to_attach: false, issues: layoutIssues, warnings: specWarnings, omissions: layoutOmissions },
-      });
+        quality: {
+          ready_to_attach: false,
+          issues: layoutIssues,
+          warnings: specWarnings,
+          omissions: layoutOmissions,
+          visual_warnings: visualWarnings,
+        },
+      }));
     }
+
+    const responseTemplate = resumeGenerateSuccessResponseSchema.parse({
+      resume_url: 'validated-before-storage',
+      file_name: `${body.contact.full_name.replace(/\s+/g, '_')}_${body.company.replace(/\s+/g, '_')}_Resume.pdf`,
+      spec,
+      quality: {
+        ready_to_attach: true,
+        issues: [],
+        warnings: specWarnings,
+        ats_keyword_coverage_pct: atsCoverage,
+        trimmed_for_one_page_fit: trimmedForFit,
+        sparse_add_more_experience: sparse,
+        grounding_removed: groundingRemoved,
+        omissions: layoutOmissions,
+        visual_warnings: visualWarnings,
+        layout: {
+          fill_ratio_pct: Math.round(visualLayout.fill_ratio * 100),
+          bottom_whitespace_pt: Math.round(visualLayout.bottom_whitespace),
+          density_expansion_pct: Math.round(visualLayout.density_expansion * 100),
+          body_font_size_pt: Number(visualLayout.body_font_size.toFixed(2)),
+          section_order: visualLayout.section_order,
+        },
+      },
+    });
 
     const jdHash = createHash('sha256').update(body.jd_text).digest('hex').slice(0, 16);
     const requestedKey = `users/${userId}/resumes/${jdHash}-${Date.now()}.pdf`;
@@ -455,7 +486,27 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       await db.insert(generated_resumes).values({
         user_id: userId,
         job_context: jobContext,
-        spec: { ...spec, _quality: { specIssues: [], layoutIssues, atsCoverage, trimmedForFit, sparse, groundingRemoved, layoutOmissions } },
+        spec: {
+          ...spec,
+          _quality: {
+            specIssues: [],
+            layoutIssues,
+            visualWarnings,
+            atsCoverage,
+            trimmedForFit,
+            sparse,
+            groundingRemoved,
+            layoutOmissions,
+            visualLayout: {
+              fillRatio: visualLayout.fill_ratio,
+              bottomWhitespace: visualLayout.bottom_whitespace,
+              densityExpansion: visualLayout.density_expansion,
+              bodyFontSize: visualLayout.body_font_size,
+              sectionOrder: visualLayout.section_order,
+              maximumBulletLines: Math.max(0, ...visualLayout.bullets.map((bullet) => bullet.lines)),
+            },
+          },
+        },
         resume_object_key: objectKey,
       });
     } catch (err) {
@@ -466,21 +517,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
 
     await bumpCounter(userId, period, 'resumes');
 
-    return reply.status(200).send({
-      resume_url: resumeUrl,
-      file_name: `${body.contact.full_name.replace(/\s+/g, '_')}_${body.company.replace(/\s+/g, '_')}_Resume.pdf`,
-      spec,
-      quality: {
-        ready_to_attach: true,
-        issues: [],
-        warnings: specWarnings,
-        ats_keyword_coverage_pct: atsCoverage,
-        trimmed_for_one_page_fit: trimmedForFit,
-        sparse_add_more_experience: sparse,
-        grounding_removed: groundingRemoved,
-        omissions: layoutOmissions,
-      },
-    });
+    return reply.status(200).send({ ...responseTemplate, resume_url: resumeUrl });
   });
 
   // GET /resume/download?t=... - streams a generated resume via its capability token.

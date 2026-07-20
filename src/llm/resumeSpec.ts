@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { ExperienceBankEntry } from '../db/schema';
+import { RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
 import { STRONG_VERBS } from '../engine/resumeValidate';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -69,8 +70,8 @@ Return ONLY valid JSON with no explanation or markdown wrapping, matching this e
 }
 
 Rules:
-- Pick up to 4 entries across jobs, projects, and leadership that best match the JD, most relevant first.
-- Select 2 or 3 bullets per entry based on evidence strength and available one-page space. Reuse a stored bullet_variant verbatim when one already fits well;
+- Pick up to ${RESUME_CONTENT_LIMITS.maxEntries} entries across jobs, projects, and leadership that best match the JD, most relevant first.
+- Select ${RESUME_CONTENT_LIMITS.minBulletsPerEntry} or ${RESUME_CONTENT_LIMITS.maxBulletsPerEntry} bullets per entry based on evidence strength and available one-page space. Reuse a stored bullet_variant verbatim when one already fits well;
   only lightly rewrite (never fabricate achievements) when no stored variant surfaces the JD's language.
 - Copy each entry's type from the experience bank. Do not turn a project into a job or a job into leadership.
 - "skills": EVERY entry must be one of the student's Skills list, either copied as written there or
