@@ -1,6 +1,7 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 
 const MINUTE_MS = 60_000;
+const MAX_POLICY_WINDOWS = 4;
 
 export interface RateLimitPolicy {
   name: string;
@@ -19,7 +20,7 @@ export interface RateLimitConfig {
 interface Bucket {
   count: number;
   resetAt: number;
-  lastSeenAt: number;
+  windowMs: number;
 }
 
 export interface RateLimitResult {
@@ -63,6 +64,8 @@ export function defaultRateLimitConfig(): RateLimitConfig {
 
 export class InMemoryRateLimitStore {
   private readonly buckets = new Map<string, Bucket>();
+  private readonly expiryQueues = new Map<number, Map<string, Bucket>>();
+  private lastNow = Number.NEGATIVE_INFINITY;
 
   constructor(
     private readonly maxKeys: number,
@@ -74,17 +77,37 @@ export class InMemoryRateLimitStore {
   }
 
   consume(key: string, policy: RateLimitPolicy): RateLimitResult {
-    const now = this.now();
+    // Wall clocks can step backward after NTP or VM corrections. Clamp them so
+    // insertion order remains expiration order within each policy window.
+    const now = Math.max(this.lastNow, this.now());
+    this.lastNow = now;
     let bucket = this.buckets.get(key);
+    let created = false;
 
     if (!bucket || bucket.resetAt <= now) {
-      if (!bucket) this.makeRoom(now);
-      bucket = { count: 0, resetAt: now + policy.windowMs, lastSeenAt: now };
-      this.buckets.set(key, bucket);
+      if (bucket) this.removeBucket(key, bucket);
+      this.purgeExpired(now);
+      if (!this.expiryQueues.has(policy.windowMs) && this.expiryQueues.size >= MAX_POLICY_WINDOWS) {
+        throw new RangeError(`Rate-limit store supports at most ${MAX_POLICY_WINDOWS} distinct windows`);
+      }
+      this.makeRoom();
+      bucket = { count: 0, resetAt: now + policy.windowMs, windowMs: policy.windowMs };
+      created = true;
     }
 
     bucket.count += 1;
-    bucket.lastSeenAt = now;
+    // Map insertion order is the LRU queue. Moving a hot bucket to the tail
+    // keeps capacity eviction constant-time during high-cardinality churn.
+    this.buckets.delete(key);
+    this.buckets.set(key, bucket);
+    if (created) {
+      let queue = this.expiryQueues.get(bucket.windowMs);
+      if (!queue) {
+        queue = new Map();
+        this.expiryQueues.set(bucket.windowMs, queue);
+      }
+      queue.set(key, bucket);
+    }
 
     return {
       allowed: bucket.count <= policy.limit,
@@ -95,23 +118,35 @@ export class InMemoryRateLimitStore {
     };
   }
 
-  private makeRoom(now: number): void {
-    if (this.buckets.size < this.maxKeys) return;
+  private removeBucket(key: string, bucket: Bucket): void {
+    this.buckets.delete(key);
+    const queue = this.expiryQueues.get(bucket.windowMs);
+    queue?.delete(key);
+    if (queue?.size === 0) this.expiryQueues.delete(bucket.windowMs);
+  }
 
-    for (const [key, bucket] of this.buckets) {
-      if (bucket.resetAt <= now) this.buckets.delete(key);
-    }
-    if (this.buckets.size < this.maxKeys) return;
-
-    let oldestKey: string | undefined;
-    let oldestSeenAt = Number.POSITIVE_INFINITY;
-    for (const [key, bucket] of this.buckets) {
-      if (bucket.lastSeenAt < oldestSeenAt) {
-        oldestKey = key;
-        oldestSeenAt = bucket.lastSeenAt;
+  private purgeExpired(now: number): void {
+    // Each policy window has an insertion-ordered expiry queue. Within a
+    // window, reset times are monotonic, so expired cleanup touches only the
+    // queue heads instead of scanning every live client bucket.
+    for (const [windowMs, queue] of this.expiryQueues) {
+      while (queue.size > 0) {
+        const oldestKey = queue.keys().next().value as string | undefined;
+        if (oldestKey === undefined) break;
+        const oldest = queue.get(oldestKey);
+        if (!oldest || oldest.resetAt > now) break;
+        this.removeBucket(oldestKey, oldest);
       }
+      if (queue.size === 0) this.expiryQueues.delete(windowMs);
     }
-    if (oldestKey) this.buckets.delete(oldestKey);
+  }
+
+  private makeRoom(): void {
+    if (this.buckets.size < this.maxKeys) return;
+    const oldestKey = this.buckets.keys().next().value as string | undefined;
+    if (oldestKey === undefined) return;
+    const oldest = this.buckets.get(oldestKey);
+    if (oldest) this.removeBucket(oldestKey, oldest);
   }
 }
 
