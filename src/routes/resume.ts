@@ -124,6 +124,10 @@ function sleep(ms: number): Promise<void> {
 // fix/r027-tags-r030-log ships r030_candidate_labels (the labels where linkQuestion matched with
 // asksForLink false on a text input - the population the register says to sample live before
 // designing any fix) and without the field here every sample would have been stripped on arrival.
+// Not R-030-only anymore: the extension branch fix/r039-location-commitment-veto reuses the same
+// channel for its telemetry, riding tag-prefixed entries "r039-veto:<label>" and
+// "r039-third-party:<label>" alongside the plain R-030 label strings, so a consumer of this
+// column must filter by prefix rather than assume every row is an R-030 sample.
 // Bounds are telemetry-sized: 50 labels of 200 chars covers any real form and caps what a
 // misbehaving client can store per event. Optional: older extensions and label-less fills omit it.
 export const autofillEventSchema = z.object({

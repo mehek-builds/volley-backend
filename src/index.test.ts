@@ -29,9 +29,28 @@ after(async () => {
   if (appPromise) await (await appPromise).close();
 });
 
+test('the global error boundary preserves client errors and hides server internals', async () => {
+  const { toPublicError } = await import('./index');
+
+  assert.deepEqual(toPublicError({ statusCode: 400, message: 'Invalid request' }), {
+    statusCode: 400,
+    message: 'Invalid request',
+  });
+  assert.deepEqual(toPublicError(new Error('DATABASE_URL=postgres://secret-host')), {
+    statusCode: 500,
+    message: 'Internal server error',
+  });
+  assert.deepEqual(toPublicError({ statusCode: 700, message: 'Unexpected internal state' }), {
+    statusCode: 500,
+    message: 'Internal server error',
+  });
+});
+
 const ATS_ORIGIN = 'https://job-boards.greenhouse.io';
 const EVIL_ORIGIN = 'https://evil.example.com';
-const SITE_ORIGIN = 'https://role-quick-website.vercel.app';
+const SITE_ORIGIN = 'https://trylitos.com';
+const WWW_SITE_ORIGIN = 'https://www.trylitos.com';
+const VERCEL_SITE_ORIGIN = 'https://role-quick-website.vercel.app';
 const EXT_ORIGIN = 'chrome-extension://bdbedbmkjpfioknfpmhookefabipjaad';
 
 // These four cover the CORS carve-out that /resume/download depends on. Getting any of them
@@ -85,6 +104,12 @@ test('the website and the extension keep their allowlisted access', async () => 
   assert.equal(site.headers['access-control-allow-origin'], SITE_ORIGIN);
   assert.equal(site.headers['access-control-allow-credentials'], 'true');
 
+  const wwwSite = await app.inject({ method: 'GET', url: '/profile', headers: { origin: WWW_SITE_ORIGIN } });
+  assert.equal(wwwSite.headers['access-control-allow-origin'], WWW_SITE_ORIGIN);
+
+  const vercelSite = await app.inject({ method: 'GET', url: '/profile', headers: { origin: VERCEL_SITE_ORIGIN } });
+  assert.equal(vercelSite.headers['access-control-allow-origin'], VERCEL_SITE_ORIGIN);
+
   const ext = await app.inject({
     method: 'OPTIONS',
     url: '/profile',
@@ -92,6 +117,14 @@ test('the website and the extension keep their allowlisted access', async () => 
   });
   assert.equal(ext.statusCode, 204);
   assert.equal(ext.headers['access-control-allow-origin'], EXT_ORIGIN);
+});
+
+test('/privacy redirects to the canonical trylitos.com policy', async () => {
+  const app = await getApp();
+  const res = await app.inject({ method: 'GET', url: '/privacy' });
+
+  assert.equal(res.statusCode, 301);
+  assert.equal(res.headers.location, 'https://trylitos.com/privacy');
 });
 
 test('account export and deletion require auth', async () => {

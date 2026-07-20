@@ -1,6 +1,13 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { SYSTEM_PROMPT, normalizeDraftedAnswer } from './applicationAnswer';
+import {
+  SYSTEM_PROMPT,
+  normalizeDraftedAnswer,
+  rankingGroundingFor,
+  rankingRuleText,
+  thinRankingWarning,
+  draftApplicationAnswer,
+} from './applicationAnswer';
 
 // R-029 regression coverage. Live on Replit (2026-07-17): asked "Please tell us about your
 // submitted project" on a form whose Project URL was empty and unfillable, the drafter wrote
@@ -67,5 +74,125 @@ describe('R-029: the refusal sentinel rides the cannot-draft path', () => {
   test('an empty model response stays empty', () => {
     assert.equal(normalizeDraftedAnswer(''), '');
     assert.equal(normalizeDraftedAnswer('   '), '');
+  });
+});
+
+// R-042 regression coverage. Live on DRW (2026-07-18): a "rank your languages" answer said
+// "Python first, JAVA second" - Java is nowhere in the 19 declared skills. The prose grounding
+// rule (R-015/R-027) keys on the student's material and never sees a ranking's item list, so a
+// ranking question invited claiming an item from the QUESTION's own text. The fix treats every
+// rankable item as a skill claim: a prompt rule, a per-question held/unheld split in the user
+// turn, and a deterministic post-check that fails closed through the cannot-draft path. The
+// model itself stays out of these tests (same discipline as the R-029 suite above): the drafted
+// answers below are hand-written stand-ins for model output.
+
+describe('R-042: the ranking rule is pinned in the system prompt', () => {
+  const flat = SYSTEM_PROMPT.replace(/\s+/g, ' ');
+
+  test('names ranking as a skill claim', () => {
+    assert.match(flat, /Ranking \(hard rule\)/);
+    assert.match(flat, /every item you place in that ranking is a skill claim in the student's name/);
+  });
+
+  test('confines the ranking to the declared list and bans padding', () => {
+    assert.match(flat, /Rank ONLY items that appear in the student's declared skills list/);
+    assert.match(flat, /leave it out of the answer entirely/);
+    assert.match(flat, /rather than padding the list/);
+  });
+});
+
+describe('R-042: rankingGroundingFor grades the question against the declared list', () => {
+  const DECLARED = ['Python', 'C++', 'SQL'];
+
+  test('splits the question\'s items into held and unheld', () => {
+    const g = rankingGroundingFor('Rank the following languages by proficiency: Python, Java, C++', DECLARED);
+    assert.ok(g);
+    assert.deepEqual(g.items, ['Python', 'Java', 'C++']);
+    assert.deepEqual(g.held, ['Python', 'C++']);
+    assert.deepEqual(g.unheld, ['Java']);
+  });
+
+  test('matching is case- and whitespace-insensitive (same normalization as findUngroundedSkills)', () => {
+    const g = rankingGroundingFor('Rank these: PYTHON, sql', DECLARED);
+    assert.deepEqual(g?.held, ['PYTHON', 'sql']);
+    assert.deepEqual(g?.unheld, []);
+  });
+
+  test('a non-ranking prose question is completely unaffected', () => {
+    assert.equal(rankingGroundingFor('Why do you want to work at DRW?', DECLARED), null);
+    assert.equal(rankingGroundingFor('Tell us about a project you are proud of.', DECLARED), null);
+  });
+
+  test('a never-declared list disables the check instead of reading as "holds nothing"', () => {
+    assert.equal(rankingGroundingFor('Rank these: Python, Java', []), null);
+    assert.equal(rankingGroundingFor('Rank these: Python, Java', null), null);
+    assert.equal(rankingGroundingFor('Rank these: Python, Java', undefined), null);
+    // junk-only entries are "never declared" too, same filtering as declaredSkillsList
+    assert.equal(rankingGroundingFor('Rank these: Python, Java', ['', '   ']), null);
+  });
+
+  test('a ranking ask naming no candidates still grounds prompt-side (items empty)', () => {
+    const g = rankingGroundingFor('Rank your programming languages by proficiency', DECLARED);
+    assert.ok(g);
+    assert.deepEqual(g.items, []);
+    assert.deepEqual(g.held, []);
+    assert.deepEqual(g.unheld, []);
+  });
+});
+
+describe('R-042: the per-question rule the user turn carries', () => {
+  test('names the held intersection and bans the unheld remainder', () => {
+    const text = rankingRuleText({ items: ['Python', 'Java', 'C++'], held: ['Python', 'C++'], unheld: ['Java'] });
+    assert.match(text, /declared skills cover only: Python, C\+\+/);
+    assert.match(text, /names Java, which the student has NOT declared/);
+    assert.match(text, /do not rank, claim, or mention them at all/);
+  });
+
+  test('a fully-held list carries no unheld clause', () => {
+    const text = rankingRuleText({ items: ['Python', 'SQL'], held: ['Python', 'SQL'], unheld: [] });
+    assert.match(text, /cover only: Python, SQL/);
+    assert.doesNotMatch(text, /NOT declared/);
+  });
+
+  test('a listless ranking ask still gets the declared-list-only rule', () => {
+    const text = rankingRuleText({ items: [], held: [], unheld: [] });
+    assert.match(text, /Rank only skills on the declared skills list/);
+  });
+});
+
+describe('R-042: the thin-intersection flag', () => {
+  test('names what the ask wanted and what the draft omits', () => {
+    const w = thinRankingWarning({ items: ['Python', 'Java', 'C++'], held: ['Python', 'C++'], unheld: ['Java'] });
+    assert.ok(w);
+    assert.match(w, /names 3 items/);
+    assert.match(w, /cover 2 \(Python, C\+\+\)/);
+    assert.match(w, /omits: Java/);
+  });
+
+  test('a fully-held ranking carries no flag', () => {
+    assert.equal(thinRankingWarning({ items: ['Python'], held: ['Python'], unheld: [] }), null);
+  });
+
+  test('a listless ranking ask carries no flag (nothing measurable to be thinner than)', () => {
+    assert.equal(thinRankingWarning({ items: [], held: [], unheld: [] }), null);
+  });
+});
+
+describe('R-042: an all-unheld ranking rides the cannot-draft path', () => {
+  test('zero declared overlap returns the empty answer deterministically, before any model call', async () => {
+    // No API key, no mock, no network: the short-circuit must fire before the client is touched,
+    // and the route's existing empty-answer 502 flags the field for the student (same signal as
+    // an R-029 premise refusal).
+    const { answer, warnings } = await draftApplicationAnswer(
+      'Rank the following languages by proficiency: Java, Kotlin, Scala',
+      'DRW',
+      'Software Engineering Intern',
+      'JVM-heavy trading systems role',
+      [],
+      { school: 'USC' },
+      ['Python', 'SQL'],
+    );
+    assert.equal(answer, '');
+    assert.deepEqual(warnings, []);
   });
 });
