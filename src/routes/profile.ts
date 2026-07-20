@@ -1,7 +1,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { db } from '../db/index';
 import { profiles, experience_bank } from '../db/schema';
-import { eq, sql } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { requireAuth } from '../middleware/auth';
 import { parseResumeWithClaude, ParsedProfile } from '../llm/parse';
 import { extractPdfText } from '../lib/pdfText';
@@ -87,6 +87,44 @@ export function bankEntriesFrom(parsed: ParsedProfile, userId: string) {
   // bullet_variants is .notNull() and the PUT route requires min(1); an entry with no text is
   // not groundable anyway, so it is dropped rather than seeded as an empty shell.
   return [...jobs, ...projects, ...leadership].filter((e) => e.bullet_variants.length > 0);
+}
+
+interface ExistingBankEntry {
+  id: string;
+  type: string;
+  org: string;
+  title: string | null;
+  date_range: string | null;
+}
+
+export function planBankReconciliation(
+  parsed: ParsedProfile,
+  userId: string,
+  existing: ExistingBankEntry[],
+) {
+  const normalize = (value: string | null | undefined) =>
+    (value ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const inserts: ReturnType<typeof bankEntriesFrom> = [];
+  const enrichments: Array<{ id: string; title?: string; date_range?: string }> = [];
+
+  for (const candidate of bankEntriesFrom(parsed, userId)) {
+    const candidateTitle = normalize(candidate.title);
+    const match = existing.find((entry) => {
+      if (entry.type !== candidate.type || normalize(entry.org) !== normalize(candidate.org)) return false;
+      const existingTitle = normalize(entry.title);
+      return !candidateTitle || !existingTitle || candidateTitle === existingTitle;
+    });
+    if (!match) {
+      inserts.push(candidate);
+      continue;
+    }
+    const enrichment: { id: string; title?: string; date_range?: string } = { id: match.id };
+    if (!match.title && candidate.title) enrichment.title = candidate.title;
+    if (!match.date_range && candidate.date_range) enrichment.date_range = candidate.date_range;
+    if (enrichment.title || enrichment.date_range) enrichments.push(enrichment);
+  }
+
+  return { inserts, enrichments };
 }
 
 export async function profileRoutes(fastify: FastifyInstance) {
@@ -187,25 +225,34 @@ export async function profileRoutes(fastify: FastifyInstance) {
       return reply.status(500).send({ error: 'Failed to save profile to database' });
     }
 
-    // Seed the experience bank from the parse - but ONLY when it is empty.
-    //
-    // Seed-if-empty rather than replace: PUT /profile/experience-bank is a full delete-and-insert,
-    // so re-seeding on every upload would silently destroy any bullet variants the student added
-    // by hand the moment they swapped in a new resume version. The bank is meant to ACCUMULATE
-    // phrasings across resume versions (that is why bullet_variants is a pool), and blowing it
-    // away on re-upload would defeat the one thing it exists to do.
+    // Reconcile the parse into the experience bank without replacing anything the student edited.
+    // New roles are inserted, and blank title/date metadata may be filled. Existing bullets,
+    // titles, and dates are never overwritten.
     let bank_seeded = 0;
+    let bank_enriched = 0;
     try {
-      const [{ n }] = await db
-        .select({ n: sql<number>`count(*)::int` })
+      const existing = await db
+        .select({
+          id: experience_bank.id,
+          type: experience_bank.type,
+          org: experience_bank.org,
+          title: experience_bank.title,
+          date_range: experience_bank.date_range,
+        })
         .from(experience_bank)
         .where(eq(experience_bank.user_id, userId));
-      if (n === 0) {
-        const entries = bankEntriesFrom(parsedProfile, userId);
-        if (entries.length > 0) {
-          await db.insert(experience_bank).values(entries);
-          bank_seeded = entries.length;
-        }
+      const reconciliation = planBankReconciliation(parsedProfile, userId, existing);
+      if (reconciliation.inserts.length > 0) {
+        await db.insert(experience_bank).values(reconciliation.inserts);
+        bank_seeded = reconciliation.inserts.length;
+      }
+      for (const enrichment of reconciliation.enrichments) {
+        const values = {
+          ...(enrichment.title ? { title: enrichment.title } : {}),
+          ...(enrichment.date_range ? { date_range: enrichment.date_range } : {}),
+        };
+        await db.update(experience_bank).set(values).where(eq(experience_bank.id, enrichment.id));
+        bank_enriched += 1;
       }
     } catch (err) {
       // Loud: an account whose bank stayed empty cannot generate a resume or draft an answer,
@@ -213,7 +260,7 @@ export async function profileRoutes(fastify: FastifyInstance) {
       fastify.log.error({ err, userId }, 'failed to seed experience bank from resume parse');
     }
 
-    return reply.status(200).send({ ...parsedProfile, bank_seeded });
+    return reply.status(200).send({ ...parsedProfile, bank_seeded, bank_enriched });
   });
 
   // GET /profile - retrieve user profile
