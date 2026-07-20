@@ -8,7 +8,7 @@ import { readExperienceBank } from '../db/experienceBank';
 
 const entrySchema = z.object({
   id: z.string().uuid().optional(), // present on update, absent on create
-  type: z.enum(['job', 'project']),
+  type: z.enum(['job', 'project', 'leadership']),
   org: z.string().min(1),
   title: z.string().optional(),
   date_range: z.string().optional(),

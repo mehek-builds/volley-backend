@@ -82,6 +82,19 @@ test('a fabricated metric not present in the source entry is a grounding violati
   assert.ok(violations.some((v) => v.kind === 'metric' && v.detail === '40K'));
 });
 
+test('a fabricated nonnumeric achievement is a grounding violation', () => {
+  const s = spec([
+    {
+      org: 'Northwind Labs',
+      title: 'Software Engineer Intern',
+      date_range: '2024',
+      bullets: ['Negotiated enterprise partnerships and closed strategic customer contracts'],
+    },
+  ]);
+  const violations = findGroundingViolations(s, BANK);
+  assert.ok(violations.some((v) => v.kind === 'claim'));
+});
+
 test('a faithfully-grounded bullet passes grounding', () => {
   const s = spec([
     {

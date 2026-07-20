@@ -185,7 +185,7 @@ export const learning_signals = pgTable('learning_signals', {
 export const experience_bank = pgTable('experience_bank', {
   id: uuid('id').primaryKey().defaultRandom(),
   user_id: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
-  type: text('type').notNull(), // 'job' | 'project'
+  type: text('type').notNull(), // 'job' | 'project' | 'leadership'
   org: text('org').notNull(),
   title: text('title'),
   date_range: text('date_range'),
