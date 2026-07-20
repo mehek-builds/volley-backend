@@ -56,6 +56,43 @@ test('/health identifies the deployable service and revision contract', async ()
   assert.ok(Object.hasOwn(body, 'revision'));
 });
 
+test('front-door limiter isolates clients and emits standard retry metadata', async () => {
+  const { buildApp } = await import('./index');
+  const policy = { name: 'general', limit: 2, windowMs: 60_000 };
+  const limitedApp = await buildApp({
+    rateLimit: {
+      general: policy,
+      authStart: { name: 'auth_start', limit: 1, windowMs: 60_000 },
+      authVerify: { name: 'auth_verify', limit: 1, windowMs: 60_000 },
+      download: { name: 'resume_download', limit: 1, windowMs: 60_000 },
+      maxKeys: 100,
+    },
+    now: () => 1_000,
+  });
+  await limitedApp.ready();
+
+  try {
+    const request = (ip: string) =>
+      limitedApp.inject({ method: 'GET', url: '/missing', headers: { 'x-forwarded-for': ip } });
+
+    assert.equal((await request('203.0.113.10')).statusCode, 404);
+    const second = await request('203.0.113.10');
+    assert.equal(second.statusCode, 404);
+    assert.equal(second.headers['ratelimit-remaining'], '0');
+
+    const blocked = await request('203.0.113.10');
+    assert.equal(blocked.statusCode, 429);
+    assert.equal(blocked.headers['retry-after'], '60');
+    assert.equal(blocked.headers['ratelimit-limit'], '2');
+    assert.equal(blocked.json().code, 'rate_limited');
+
+    assert.equal((await request('203.0.113.11')).statusCode, 404);
+    assert.equal((await limitedApp.inject({ method: 'GET', url: '/health' })).statusCode, 200);
+  } finally {
+    await limitedApp.close();
+  }
+});
+
 // These four cover the CORS carve-out that /resume/download depends on. Getting any of them
 // wrong fails silently in exactly the way that hurts: the fill still "works", the resume file
 // just never attaches, and nothing logs an error.

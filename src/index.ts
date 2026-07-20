@@ -23,8 +23,20 @@ import { onboardingRoutes } from './routes/onboarding';
 import { assertEncryptionKeyConfigured } from './lib/fieldCrypto';
 import { metaRoutes } from './routes/meta';
 import { API_VERSION, PRODUCT_NAME, PRODUCT_LINKS } from './lib/product';
+import { createRateLimitHook, defaultRateLimitConfig, type RateLimitConfig } from './middleware/rateLimit';
 
-export async function buildApp() {
+export interface BuildAppOptions {
+  rateLimit?: RateLimitConfig;
+  now?: () => number;
+}
+
+function trustProxySetting(): false | number {
+  const configuredHops = Number.parseInt(process.env.TRUST_PROXY_HOPS ?? '', 10);
+  if (Number.isFinite(configuredHops) && configuredHops > 0) return configuredHops;
+  return process.env.VERCEL ? 1 : false;
+}
+
+export async function buildApp(options: BuildAppOptions = {}) {
   // Refuse to run at all without ENCRYPTION_KEY (R-021). Every encrypted application_profile
   // column is unreadable without it, and the old failure mode was not an error but silence: the
   // decrypt threw, a catch downstream read that as "legacy plaintext", and the raw ciphertext went
@@ -36,6 +48,9 @@ export async function buildApp() {
   assertEncryptionKeyConfigured();
 
   const fastify = Fastify({
+    // Vercel is the only public ingress, so one proxy hop is trusted there. Local and
+    // self-hosted processes do not trust spoofable forwarding headers unless configured.
+    trustProxy: trustProxySetting(),
     logger: {
       level: process.env.LOG_LEVEL || 'info',
       transport:
@@ -102,6 +117,10 @@ export async function buildApp() {
       files: 1,
     },
   });
+
+  // Front-door protection runs before route handlers and database work. Expensive product
+  // operations keep their separate database-backed per-user limits in quota.ts.
+  fastify.addHook('onRequest', createRateLimitHook(options.rateLimit ?? defaultRateLimitConfig(), options.now));
 
   // Health check
   fastify.get('/health', async (_request, reply) => {

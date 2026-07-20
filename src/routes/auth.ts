@@ -92,7 +92,11 @@ export async function authRoutes(fastify: FastifyInstance) {
       return reply.status(500).send({ error: 'JWT_SIGNING_SECRET not configured' });
     }
 
-    if (!(await allowHourly(email, 'session', LIMITS.perHour.session))) {
+    const [emailAllowed, ipAllowed] = await Promise.all([
+      allowHourly(email, 'session', LIMITS.perHour.session),
+      allowHourly(`ip:${request.ip}`, 'session-ip', LIMITS.perHour.sessionPerIp),
+    ]);
+    if (!emailAllowed || !ipAllowed) {
       return rateLimitedReply(reply);
     }
 
@@ -152,7 +156,11 @@ export async function authRoutes(fastify: FastifyInstance) {
     }
 
     const email = body.email.toLowerCase();
-    if (!(await allowHourly(email, 'request-code', LIMITS.perHour.requestCode))) {
+    const [emailAllowed, ipAllowed] = await Promise.all([
+      allowHourly(email, 'request-code', LIMITS.perHour.requestCode),
+      allowHourly(`ip:${request.ip}`, 'request-code-ip', LIMITS.perHour.requestCodePerIp),
+    ]);
+    if (!emailAllowed || !ipAllowed) {
       return rateLimitedReply(reply);
     }
     const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
@@ -191,7 +199,11 @@ export async function authRoutes(fastify: FastifyInstance) {
     }
 
     const email = body.email.toLowerCase();
-    if (!(await allowHourly(email, 'verify-code', 15))) {
+    const [emailAllowed, ipAllowed] = await Promise.all([
+      allowHourly(email, 'verify-code', 15),
+      allowHourly(`ip:${request.ip}`, 'verify-code-ip', LIMITS.perHour.verifyCodePerIp),
+    ]);
+    if (!emailAllowed || !ipAllowed) {
       return rateLimitedReply(reply);
     }
 

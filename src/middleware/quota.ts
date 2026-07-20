@@ -34,6 +34,9 @@ export const LIMITS = {
     resume: parseInt(process.env.RATE_RESUME_PER_HOUR || '15', 10),
     requestCode: parseInt(process.env.RATE_CODE_PER_HOUR || '5', 10),
     session: parseInt(process.env.RATE_SESSION_PER_HOUR || '10', 10),
+    requestCodePerIp: parseInt(process.env.RATE_CODE_IP_PER_HOUR || '50', 10),
+    verifyCodePerIp: parseInt(process.env.RATE_VERIFY_IP_PER_HOUR || '200', 10),
+    sessionPerIp: parseInt(process.env.RATE_SESSION_IP_PER_HOUR || '100', 10),
   },
 } as const;
 
@@ -139,5 +142,15 @@ export function quotaExceededPayload(ent: Entitlements, used: number, what: 'con
 }
 
 export function rateLimitedReply(reply: FastifyReply) {
-  return reply.status(429).send({ error: 'Slow down a little: too many requests. Try again in a few minutes.', code: 'rate_limited' });
+  const now = new Date();
+  const retryAfterSeconds = 60 * 60 - (now.getUTCMinutes() * 60 + now.getUTCSeconds());
+  return reply
+    .header('Retry-After', String(retryAfterSeconds))
+    .header('Cache-Control', 'private, no-store')
+    .status(429)
+    .send({
+      error: 'Slow down a little: too many requests. Try again in a few minutes.',
+      code: 'rate_limited',
+      retry_after_seconds: retryAfterSeconds,
+    });
 }
