@@ -68,14 +68,25 @@ export function bankEntriesFrom(parsed: ParsedProfile, userId: string) {
       user_id: userId,
       type: 'project',
       org: p.name.trim(),
-      title: null,
-      date_range: null,
+      title: p.role?.trim() || null,
+      date_range: p.date_range?.trim() || null,
       bullet_variants: toBullets(p.description ?? ''),
+      tags: [] as string[],
+    }));
+  const leadership = (parsed.leadership ?? [])
+    .filter((entry) => entry.organization?.trim())
+    .map((entry) => ({
+      user_id: userId,
+      type: 'leadership',
+      org: entry.organization.trim(),
+      title: entry.title?.trim() || null,
+      date_range: [entry.start, entry.end].filter(Boolean).join(' - ') || null,
+      bullet_variants: toBullets(entry.description ?? ''),
       tags: [] as string[],
     }));
   // bullet_variants is .notNull() and the PUT route requires min(1); an entry with no text is
   // not groundable anyway, so it is dropped rather than seeded as an empty shell.
-  return [...jobs, ...projects].filter((e) => e.bullet_variants.length > 0);
+  return [...jobs, ...projects, ...leadership].filter((e) => e.bullet_variants.length > 0);
 }
 
 export async function profileRoutes(fastify: FastifyInstance) {

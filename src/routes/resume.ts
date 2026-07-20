@@ -14,6 +14,7 @@ import { validateResumeSpec, validatePdfLayout, pruneUngroundedContent } from '.
 import { mintDownloadToken, readDownloadToken, resolveBlobUrl } from '../lib/resumeAccess';
 import { apiBaseFor } from '../lib/apiBase';
 import { extractPdfText } from '../lib/pdfText';
+import { applyResumePolicy, type CandidateEducation } from '../engine/resumePolicy';
 
 const MAX_SPEC_ATTEMPTS = 2; // 1 initial pass + 1 feedback-driven retry, per PRD-v2 Section 6.4's
 // "automated quality gate" - bounded so a stubborn JD can't loop the endpoint indefinitely.
@@ -190,7 +191,25 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     }
 
     const profileRows = await db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1);
-    const parsed = profileRows[0]?.parsed_json as { school?: string; grad_year?: number; full_name?: string; degree?: string } | undefined;
+    const parsed = profileRows[0]?.parsed_json as {
+      school?: string;
+      degree?: string;
+      grad_date?: string;
+      grad_year?: number;
+      currently_enrolled?: boolean;
+      coursework?: string[];
+      full_name?: string;
+    } | undefined;
+    const education: CandidateEducation = {
+      school: parsed?.school ?? '',
+      degree: parsed?.degree,
+      grad_date: parsed?.grad_date || (parsed?.grad_year ? String(parsed.grad_year) : undefined),
+      grad_year: parsed?.grad_year,
+      currently_enrolled: parsed?.currently_enrolled,
+      coursework: Array.isArray(parsed?.coursework)
+        ? parsed.coursework.filter((course): course is string => typeof course === 'string')
+        : [],
+    };
     // The student's declared skills, the only authoritative source for the SKILLS line (R-015).
     // Filtered rather than cast: this is jsonb, so a hand-edited row can hold anything, and a
     // non-string in here would reach the model as junk and the validator as an unmatchable entry.
@@ -212,7 +231,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       if (budgetLeftMs() < MIN_CALL_BUDGET_MS) {
         // Not enough of the function budget left for another full model call plus the reserved
         // render/upload time within Vercel's 60s.
-        if (spec) break; // ship the best-effort spec from a prior attempt
+        if (spec) break; // keep the prior spec and run it through the final deterministic gate
         return reply.status(503).send({ error: 'Resume generation is taking too long. Please try again.' });
       }
       try {
@@ -226,16 +245,17 @@ export async function resumeRoutes(fastify: FastifyInstance) {
             const budget = budgetLeftMs();
             if (budget < MIN_CALL_BUDGET_MS) break;
             try {
-              return await generateResumeSpec(
+              const generated = await generateResumeSpec(
                 body.jd_text,
                 body.company,
                 body.role,
                 bank,
-                { school: parsed?.school ?? '', degree: parsed?.degree, grad_year: parsed?.grad_year },
+                education,
                 attempt > 1 ? specIssues : undefined,
                 declaredSkills,
                 budget,
               );
+              return applyResumePolicy(generated, education, bank, body.jd_text).spec;
             } catch (err) {
               lastErr = err;
               if (!isTransientOverload(err)) throw err;
@@ -254,7 +274,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         })();
       } catch (err) {
         fastify.log.error(err);
-        if (spec) break; // a prior attempt already produced a usable spec - accept it best-effort
+        if (spec) break; // a prior spec still has to pass pruning and final validation below
         // Billing/auth first: it is PERMANENT, so neither the transient 503 (which invites a
         // retry) nor the generic 500 (which reads as a bad JD) is honest about it. Distinct code,
         // not-your-fault message, and a log that names the operator action (R-012).
@@ -282,7 +302,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         continue;
       }
 
-      const result = validateResumeSpec(spec, body.jd_text, bank, declaredSkills);
+      const result = validateResumeSpec(spec, body.jd_text, bank, declaredSkills, education);
       specIssues = result.issues;
       specWarnings = result.warnings;
       atsCoverage = result.ats_keyword_coverage_pct;
@@ -294,29 +314,29 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       return reply.status(500).send({ error: 'Failed to generate resume spec' });
     }
 
-    // Grounding backstop: if the spec STILL cites anything not in the bank after the retry loop,
-    // strip the offending content rather than render a fabricated claim (Mehek's hard rule). We
-    // never let this empty the resume - if pruning would remove every entry (usually an org-name
-    // formatting mismatch, not real fabrication), keep the spec and surface a loud quality issue
-    // instead of shipping a blank page.
+    // Grounding backstop: if the spec still cites anything not in the bank after the retry loop,
+    // strip the offending content rather than render a fabricated claim. If that would remove
+    // every entry, hold the resume for review instead of attaching either a blank or unverified file.
     let groundingRemoved: string[] = [];
     const pruned = pruneUngroundedContent(spec, bank, declaredSkills);
     if (pruned.removed.length > 0) {
       if (pruned.spec.experience.length === 0 && spec.experience.length > 0) {
-        // Every entry failed to match the bank. Usually an org-name formatting mismatch rather than
-        // real fabrication, so we ship unpruned rather than a blank resume - but this is exactly the
-        // case where fabrication could slip through with only an advisory, so make it loud in logs
-        // (not just the user-facing quality note) for monitoring.
+        // Every entry failed to match the bank. This may be an organization-name mismatch, but the
+        // system cannot safely distinguish that from fabrication at this point.
         fastify.log.error(
           { userId, company: body.company, removed: pruned.removed },
-          'resume grounding pruned ALL experience entries; shipping unpruned - review for fabrication',
+          'resume grounding could not verify any experience entry; holding attachment',
         );
-        specIssues = [...specIssues, 'grounding: could not verify any experience entry against the bank; shipped unpruned - review before sending'];
-        // ...but still take the pruned SKILLS. The reason this branch ships unpruned is that an
-        // empty experience list is a blank page, which is worse than an unverified one. That
-        // reasoning does not extend to skills: dropping a fabricated skill costs nothing, and
-        // letting one ride through on an experience-matching quirk is exactly the R-015 harm.
-        spec = { ...spec, skills: pruned.spec.skills };
+        return reply.status(422).send({
+          error: 'RoleQuick could not verify this resume against the uploaded experience, so it was not attached.',
+          code: 'resume_quality_hold',
+          quality: {
+            ready_to_attach: false,
+            issues: ['grounding: could not verify any experience entry against the bank'],
+            warnings: specWarnings,
+            omissions: pruned.removed,
+          },
+        });
       } else {
         spec = pruned.spec;
         groundingRemoved = pruned.removed;
@@ -326,11 +346,14 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     let pdfBuffer: Buffer;
     let trimmedForFit: boolean;
     let sparse: boolean;
+    let layoutOmissions: string[];
     try {
-      const rendered = await renderResumePdf(spec, body.contact);
+      const rendered = await renderResumePdf(spec, body.contact, body.jd_text);
       pdfBuffer = rendered.buffer;
+      spec = rendered.spec;
       trimmedForFit = rendered.trimmed;
       sparse = rendered.sparse;
+      layoutOmissions = rendered.omissions;
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to render resume PDF' });
@@ -341,6 +364,26 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     // extractPdfText, not bare pdfParse: the raw call threw "bad XRef entry" on every ~2.5KB
     // pooled render buffer (R-017; the byteOffset story lives in lib/pdfText.ts), so this check
     // had NEVER run and its empty issues array read downstream as a clean pass.
+    const finalSpecValidation = validateResumeSpec(spec, body.jd_text, bank, declaredSkills, education);
+    specWarnings = finalSpecValidation.warnings;
+    atsCoverage = finalSpecValidation.ats_keyword_coverage_pct;
+    if (finalSpecValidation.issues.length > 0) {
+      fastify.log.error(
+        { userId, company: body.company, issues: finalSpecValidation.issues },
+        'resume blocked after final content validation',
+      );
+      return reply.status(422).send({
+        error: 'This resume needs review before RoleQuick can attach it.',
+        code: 'resume_quality_hold',
+        quality: {
+          ready_to_attach: false,
+          issues: finalSpecValidation.issues,
+          warnings: specWarnings,
+          omissions: layoutOmissions,
+        },
+      });
+    }
+
     let layoutIssues: string[] = [];
     try {
       const parsedPdf = await extractPdfText(pdfBuffer);
@@ -355,6 +398,19 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         { err, userId, company: body.company },
         'POST-RENDER PDF VALIDATION DID NOT RUN: rendered resume could not be parsed, so its quality.issues are INCOMPLETE and the one-page/extractability guarantees are unverified (R-017)',
       );
+      return reply.status(500).send({
+        error: 'RoleQuick could not verify the generated PDF, so it was not attached.',
+        code: 'resume_quality_hold',
+      });
+    }
+
+    if (layoutIssues.length > 0) {
+      fastify.log.error({ userId, company: body.company, layoutIssues }, 'resume blocked after PDF validation');
+      return reply.status(422).send({
+        error: 'This resume did not pass the one-page PDF check, so it was not attached.',
+        code: 'resume_quality_hold',
+        quality: { ready_to_attach: false, issues: layoutIssues, warnings: specWarnings, omissions: layoutOmissions },
+      });
     }
 
     const jdHash = createHash('sha256').update(body.jd_text).digest('hex').slice(0, 16);
@@ -395,7 +451,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       await db.insert(generated_resumes).values({
         user_id: userId,
         job_context: jobContext,
-        spec: { ...spec, _quality: { specIssues, layoutIssues, atsCoverage, trimmedForFit, sparse, groundingRemoved } },
+        spec: { ...spec, _quality: { specIssues: [], layoutIssues, atsCoverage, trimmedForFit, sparse, groundingRemoved, layoutOmissions } },
         resume_object_key: objectKey,
       });
     } catch (err) {
@@ -411,12 +467,14 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       file_name: `${body.contact.full_name.replace(/\s+/g, '_')}_${body.company.replace(/\s+/g, '_')}_Resume.pdf`,
       spec,
       quality: {
-        issues: [...specIssues, ...layoutIssues],
+        ready_to_attach: true,
+        issues: [],
         warnings: specWarnings,
         ats_keyword_coverage_pct: atsCoverage,
         trimmed_for_one_page_fit: trimmedForFit,
         sparse_add_more_experience: sparse,
         grounding_removed: groundingRemoved,
+        omissions: layoutOmissions,
       },
     });
   });
