@@ -1,11 +1,11 @@
-# Graph Report - .  (2026-07-20)
+# Graph Report - .  (2026-07-21)
 
 ## Corpus Check
-- 79 files · ~66,954 words
+- 79 files · ~67,351 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 308 nodes · 549 edges · 15 communities detected
+- 309 nodes · 551 edges · 16 communities detected
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS
 - Token cost: 0 input · 0 output
 
@@ -28,7 +28,7 @@
 
 ### Community 0 - "Community 0"
 Cohesion: 0.07
-Nodes (11): decryptRow(), sendProfile(), buildVerificationEmail(), issuedBeforeEpoch(), requireAuth(), sendVerificationEmail(), assertEncryptionKeyConfigured(), decryptField() (+3 more)
+Nodes (12): decryptRow(), sendProfile(), buildVerificationEmail(), issuedBeforeEpoch(), requireAuth(), sendVerificationEmail(), verificationSender(), assertEncryptionKeyConfigured() (+4 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.08
@@ -40,27 +40,27 @@ Nodes (33): contactLine(), createResumeDocument(), drawEducation(), drawEntrySec
 
 ### Community 3 - "Community 3"
 Cohesion: 0.09
-Nodes (10): buildApp(), getApp(), handler(), start(), trustProxySetting(), allowHourly(), bumpCounter(), hourPeriod() (+2 more)
-
-### Community 4 - "Community 4"
-Cohesion: 0.09
 Nodes (7): clampExpansion(), interpolate(), resumeDesignAtExpansion(), generateResumeSpec(), normalizeSpec(), spec(), traecoSpec()
 
-### Community 5 - "Community 5"
-Cohesion: 0.13
-Nodes (7): deleteBlobsForUser(), getKey(), listAll(), mintDownloadToken(), readDownloadToken(), resumePrefix(), sweepExpiredResumeBlobs()
+### Community 4 - "Community 4"
+Cohesion: 0.1
+Nodes (5): buildApp(), getApp(), handler(), start(), trustProxySetting()
 
-### Community 6 - "Community 6"
+### Community 5 - "Community 5"
 Cohesion: 0.24
 Nodes (17): acronymTokenOf(), bankEntryCorpus(), breaksTie(), bulletClaimIsGrounded(), contentWords(), findGroundingViolations(), findUngroundedSkills(), jdKeywords() (+9 more)
 
-### Community 7 - "Community 7"
+### Community 6 - "Community 6"
 Cohesion: 0.13
 Nodes (4): bankEntriesFrom(), declaredSkillsList(), planBankReconciliation(), serveProfileJson()
 
-### Community 8 - "Community 8"
+### Community 7 - "Community 7"
 Cohesion: 0.11
 Nodes (0): 
+
+### Community 8 - "Community 8"
+Cohesion: 0.16
+Nodes (5): allowHourly(), bumpCounter(), hourPeriod(), quotaExceededPayload(), upgradeUrl()
 
 ### Community 9 - "Community 9"
 Cohesion: 0.19
@@ -79,15 +79,19 @@ Cohesion: 0.31
 Nodes (8): applyResumePolicy(), deriveCandidateContext(), metricCount(), orgScore(), overlapScore(), parseGraduationDate(), relevanceScore(), tokens()
 
 ### Community 13 - "Community 13"
+Cohesion: 0.31
+Nodes (7): deleteBlobsForUser(), getKey(), listAll(), mintDownloadToken(), readDownloadToken(), resumePrefix(), sweepExpiredResumeBlobs()
+
+### Community 14 - "Community 14"
 Cohesion: 0.67
 Nodes (0): 
 
-### Community 14 - "Community 14"
+### Community 15 - "Community 15"
 Cohesion: 1.0
 Nodes (0): 
 
 ## Knowledge Gaps
-- **Thin community `Community 14`** (1 nodes): `drizzle.config.ts`
+- **Thin community `Community 15`** (1 nodes): `drizzle.config.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 
 ## Suggested Questions
@@ -100,10 +104,8 @@ _Questions this graph is uniquely positioned to answer:_
 - **Should `Community 3` be split into smaller, more focused modules?**
   _Cohesion score 0.09 - nodes in this community are weakly interconnected._
 - **Should `Community 4` be split into smaller, more focused modules?**
-  _Cohesion score 0.09 - nodes in this community are weakly interconnected._
-- **Should `Community 5` be split into smaller, more focused modules?**
+  _Cohesion score 0.1 - nodes in this community are weakly interconnected._
+- **Should `Community 6` be split into smaller, more focused modules?**
   _Cohesion score 0.13 - nodes in this community are weakly interconnected._
 - **Should `Community 7` be split into smaller, more focused modules?**
-  _Cohesion score 0.13 - nodes in this community are weakly interconnected._
-- **Should `Community 8` be split into smaller, more focused modules?**
   _Cohesion score 0.11 - nodes in this community are weakly interconnected._

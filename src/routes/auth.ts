@@ -7,7 +7,7 @@ import { users, email_verification_codes } from '../db/schema';
 import { eq } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import { allowHourly, rateLimitedReply, LIMITS, TRIAL_DAYS } from '../middleware/quota';
-import { PRODUCT_NAME } from '../lib/product';
+import { PRODUCT_LINKS, PRODUCT_NAME } from '../lib/product';
 
 const sessionBodySchema = z.object({
   email: z.string().email(),
@@ -29,6 +29,21 @@ function hashCode(code: string): string {
   return createHash('sha256').update(code).digest('hex');
 }
 
+function verificationSender(): string {
+  const configured = process.env.RESEND_FROM?.trim() || 'onboarding@resend.dev';
+  const openBracket = configured.lastIndexOf('<');
+  const mailbox =
+    openBracket >= 0 && configured.endsWith('>')
+      ? configured.slice(openBracket + 1, -1).trim()
+      : configured;
+
+  if (!z.string().email().safeParse(mailbox).success) {
+    throw new Error('RESEND_FROM must contain a valid email address');
+  }
+
+  return `${PRODUCT_NAME} <${mailbox}>`;
+}
+
 async function signSessionToken(userId: string, email: string): Promise<string> {
   const secret = process.env.JWT_SIGNING_SECRET!;
   const secretBytes = new TextEncoder().encode(secret);
@@ -41,11 +56,64 @@ async function signSessionToken(userId: string, email: string): Promise<string> 
 
 export function buildVerificationEmail(email: string, code: string) {
   if (!/^\d{6}$/.test(code)) throw new Error('Verification code must be six digits');
+  const signInUrl = new URL('/login', PRODUCT_LINKS.website).toString();
+  const iconUrl = new URL('/icon.png', PRODUCT_LINKS.website).toString();
+
   return {
-    from: process.env.RESEND_FROM || `${PRODUCT_NAME} <onboarding@resend.dev>`,
+    from: verificationSender(),
     to: [email],
     subject: `${code} is your ${PRODUCT_NAME} verification code`,
-    html: `<p>Welcome to ${PRODUCT_NAME}. Your verification code is:</p><p><strong>${code}</strong></p><p>It expires in 10 minutes. If you did not request this, you can ignore this email.</p>`,
+    html: `<!doctype html>
+<html lang="en">
+  <body style="margin:0;padding:0;background-color:#f7f7f5;color:#12120f;">
+    <p style="display:none;max-height:0;overflow:hidden;opacity:0;">Your ${PRODUCT_NAME} verification code is ${code}. It expires in 10 minutes.</p>
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+      <tr>
+        <td align="center" style="padding:32px 16px;">
+          <table role="presentation" width="600" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:600px;background-color:#ffffff;border:1px solid #e8e6e1;border-radius:20px;overflow:hidden;">
+            <tr>
+              <td style="padding:24px 32px;background-color:#eef1fe;border-bottom:1px solid #e8e6e1;">
+                <p style="margin:0;">
+                  <img src="${iconUrl}" width="40" height="40" alt="${PRODUCT_NAME}" style="display:inline-block;vertical-align:middle;border:0;" />
+                  <strong style="vertical-align:middle;color:#12120f;">${PRODUCT_NAME}</strong>
+                </p>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:36px 32px;">
+                <h1 style="margin:0 0 16px;color:#12120f;">You're one quick step away</h1>
+                <p style="margin:0 0 24px;color:#6b6a64;">We're so excited to have you here. Enter this code to finish signing in and keep your job search moving with ${PRODUCT_NAME}.</p>
+                <p style="margin:0 0 8px;color:#6b6a64;">Your verification code</p>
+                <h2 aria-label="Verification code ${code.split('').join(' ')}" style="margin:0 0 24px;padding:18px 20px;background-color:#eef1fe;border:1px solid #dce2fa;border-radius:12px;color:#12120f;">${code}</h2>
+                <p style="margin:0 0 28px;">
+                  <a href="${signInUrl}" style="display:inline-block;padding:13px 20px;background-color:#6b84e8;color:#ffffff;text-decoration:none;border-radius:999px;">Finish signing in</a>
+                </p>
+                <p style="margin:0 0 28px;color:#6b6a64;">If the button does not work, open <a href="${signInUrl}" style="color:#4f68c9;">${signInUrl}</a>.</p>
+                <h2 style="margin:0 0 12px;color:#12120f;">Once you're in</h2>
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:0 0 20px;background-color:#f7f7f5;border:1px solid #e8e6e1;border-radius:12px;">
+                  <tr>
+                    <td align="center" style="padding:14px 8px;color:#12120f;">Find roles</td>
+                    <td align="center" style="padding:14px 4px;color:#6b84e8;">&#8594;</td>
+                    <td align="center" style="padding:14px 8px;color:#12120f;">Tailor</td>
+                    <td align="center" style="padding:14px 4px;color:#6b84e8;">&#8594;</td>
+                    <td align="center" style="padding:14px 8px;color:#12120f;">Apply</td>
+                  </tr>
+                </table>
+                <ul style="margin:0 0 28px;padding-left:20px;color:#6b6a64;">
+                  <li style="margin-bottom:8px;">Tailor and fill applications with less repetitive work.</li>
+                  <li style="margin-bottom:8px;">Keep every opportunity organized in one dashboard.</li>
+                  <li>Draft thoughtful recruiter outreach when you want it.</li>
+                </ul>
+                <p style="margin:0;color:#6b6a64;">This code expires in 10 minutes. If you did not request it, you can safely ignore this email.</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`,
+    text: `You're one quick step away\n\nWe're so excited to have you here. Enter this code to finish signing in to ${PRODUCT_NAME}:\n\n${code}\n\nFinish signing in: ${signInUrl}\n\nOnce you're in, ${PRODUCT_NAME} can help you tailor and fill applications, keep opportunities organized, and draft recruiter outreach.\n\nThis code expires in 10 minutes. If you did not request it, you can safely ignore this email.`,
   };
 }
 

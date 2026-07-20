@@ -9,7 +9,7 @@
       "source_file": "drizzle.config.ts",
       "source_location": "L1",
       "id": "drizzle_config",
-      "community": 14
+      "community": 15
     },
     {
       "label": "index.ts",
@@ -17,7 +17,7 @@
       "source_file": "src/db/index.ts",
       "source_location": "L1",
       "id": "index",
-      "community": 3
+      "community": 4
     },
     {
       "label": "getApp()",
@@ -25,7 +25,7 @@
       "source_file": "api/index.ts",
       "source_location": "L12",
       "id": "index_getapp",
-      "community": 3
+      "community": 4
     },
     {
       "label": "handler()",
@@ -33,7 +33,7 @@
       "source_file": "api/index.ts",
       "source_location": "L17",
       "id": "index_handler",
-      "community": 3
+      "community": 4
     },
     {
       "label": "index.test.ts",
@@ -41,7 +41,7 @@
       "source_file": "src/index.test.ts",
       "source_location": "L1",
       "id": "index_test",
-      "community": 13
+      "community": 14
     },
     {
       "label": "getApp()",
@@ -49,7 +49,7 @@
       "source_file": "src/index.test.ts",
       "source_location": "L16",
       "id": "index_test_getapp",
-      "community": 13
+      "community": 14
     },
     {
       "label": "request()",
@@ -57,7 +57,7 @@
       "source_file": "src/index.test.ts",
       "source_location": "L94",
       "id": "index_test_request",
-      "community": 13
+      "community": 14
     },
     {
       "label": "trustProxySetting()",
@@ -65,7 +65,7 @@
       "source_file": "src/index.ts",
       "source_location": "L33",
       "id": "index_trustproxysetting",
-      "community": 3
+      "community": 4
     },
     {
       "label": "toPublicError()",
@@ -73,7 +73,7 @@
       "source_file": "src/index.ts",
       "source_location": "L41",
       "id": "index_topublicerror",
-      "community": 3
+      "community": 4
     },
     {
       "label": "buildApp()",
@@ -81,7 +81,7 @@
       "source_file": "src/index.ts",
       "source_location": "L61",
       "id": "index_buildapp",
-      "community": 3
+      "community": 4
     },
     {
       "label": "start()",
@@ -89,7 +89,7 @@
       "source_file": "src/index.ts",
       "source_location": "L202",
       "id": "index_start",
-      "community": 3
+      "community": 4
     },
     {
       "label": "rateLimit.test.ts",
@@ -193,7 +193,7 @@
       "source_file": "src/middleware/quota.ts",
       "source_location": "L1",
       "id": "quota",
-      "community": 3
+      "community": 8
     },
     {
       "label": "monthPeriod()",
@@ -201,7 +201,7 @@
       "source_file": "src/middleware/quota.ts",
       "source_location": "L45",
       "id": "quota_monthperiod",
-      "community": 3
+      "community": 8
     },
     {
       "label": "hourPeriod()",
@@ -209,7 +209,7 @@
       "source_file": "src/middleware/quota.ts",
       "source_location": "L49",
       "id": "quota_hourperiod",
-      "community": 3
+      "community": 8
     },
     {
       "label": "bumpCounter()",
@@ -217,7 +217,7 @@
       "source_file": "src/middleware/quota.ts",
       "source_location": "L54",
       "id": "quota_bumpcounter",
-      "community": 3
+      "community": 8
     },
     {
       "label": "getCount()",
@@ -225,7 +225,7 @@
       "source_file": "src/middleware/quota.ts",
       "source_location": "L66",
       "id": "quota_getcount",
-      "community": 3
+      "community": 8
     },
     {
       "label": "allowHourly()",
@@ -233,7 +233,7 @@
       "source_file": "src/middleware/quota.ts",
       "source_location": "L76",
       "id": "quota_allowhourly",
-      "community": 3
+      "community": 8
     },
     {
       "label": "getEntitlements()",
@@ -241,7 +241,7 @@
       "source_file": "src/middleware/quota.ts",
       "source_location": "L88",
       "id": "quota_getentitlements",
-      "community": 3
+      "community": 8
     },
     {
       "label": "upgradeUrl()",
@@ -249,7 +249,7 @@
       "source_file": "src/middleware/quota.ts",
       "source_location": "L116",
       "id": "quota_upgradeurl",
-      "community": 3
+      "community": 8
     },
     {
       "label": "quotaExceededPayload()",
@@ -257,7 +257,7 @@
       "source_file": "src/middleware/quota.ts",
       "source_location": "L123",
       "id": "quota_quotaexceededpayload",
-      "community": 3
+      "community": 8
     },
     {
       "label": "rateLimitedReply()",
@@ -265,7 +265,7 @@
       "source_file": "src/middleware/quota.ts",
       "source_location": "L157",
       "id": "quota_ratelimitedreply",
-      "community": 3
+      "community": 8
     },
     {
       "label": "quota.test.ts",
@@ -273,7 +273,7 @@
       "source_file": "src/middleware/quota.test.ts",
       "source_location": "L1",
       "id": "quota_test",
-      "community": 3
+      "community": 8
     },
     {
       "label": "withUpgradeEnv()",
@@ -281,7 +281,7 @@
       "source_file": "src/middleware/quota.test.ts",
       "source_location": "L19",
       "id": "quota_test_withupgradeenv",
-      "community": 3
+      "community": 8
     },
     {
       "label": "ent()",
@@ -289,7 +289,7 @@
       "source_file": "src/middleware/quota.test.ts",
       "source_location": "L35",
       "id": "quota_test_ent",
-      "community": 3
+      "community": 8
     },
     {
       "label": "auth.ts",
@@ -321,7 +321,7 @@
       "source_file": "src/routes/draft.ts",
       "source_location": "L1",
       "id": "draft",
-      "community": 7
+      "community": 6
     },
     {
       "label": "generateDraft()",
@@ -329,7 +329,7 @@
       "source_file": "src/llm/draft.ts",
       "source_location": "L59",
       "id": "draft_generatedraft",
-      "community": 7
+      "community": 6
     },
     {
       "label": "applicationAnswer.test.ts",
@@ -345,7 +345,7 @@
       "source_file": "src/llm/parse.ts",
       "source_location": "L1",
       "id": "parse",
-      "community": 7
+      "community": 6
     },
     {
       "label": "parseResumeWithClaude()",
@@ -353,7 +353,7 @@
       "source_file": "src/llm/parse.ts",
       "source_location": "L67",
       "id": "parse_parseresumewithclaude",
-      "community": 7
+      "community": 6
     },
     {
       "label": "resumeSpec.test.ts",
@@ -361,7 +361,7 @@
       "source_file": "src/llm/resumeSpec.test.ts",
       "source_location": "L1",
       "id": "resumespec_test",
-      "community": 4
+      "community": 3
     },
     {
       "label": "resumeSpec.ts",
@@ -369,7 +369,7 @@
       "source_file": "src/llm/resumeSpec.ts",
       "source_location": "L1",
       "id": "resumespec",
-      "community": 4
+      "community": 3
     },
     {
       "label": "normalizeSpec()",
@@ -377,7 +377,7 @@
       "source_file": "src/llm/resumeSpec.ts",
       "source_location": "L110",
       "id": "resumespec_normalizespec",
-      "community": 4
+      "community": 3
     },
     {
       "label": "generateResumeSpec()",
@@ -385,7 +385,7 @@
       "source_file": "src/llm/resumeSpec.ts",
       "source_location": "L147",
       "id": "resumespec_generateresumespec",
-      "community": 4
+      "community": 3
     },
     {
       "label": "applicationAnswer.ts",
@@ -449,7 +449,7 @@
       "source_file": "src/lib/apiBase.ts",
       "source_location": "L1",
       "id": "apibase",
-      "community": 8
+      "community": 7
     },
     {
       "label": "apiBaseFor()",
@@ -457,7 +457,7 @@
       "source_file": "src/lib/apiBase.ts",
       "source_location": "L7",
       "id": "apibase_apibasefor",
-      "community": 8
+      "community": 7
     },
     {
       "label": "resumeAccess.ts",
@@ -465,7 +465,7 @@
       "source_file": "src/lib/resumeAccess.ts",
       "source_location": "L1",
       "id": "resumeaccess",
-      "community": 5
+      "community": 13
     },
     {
       "label": "resumePrefix()",
@@ -473,7 +473,7 @@
       "source_file": "src/lib/resumeAccess.ts",
       "source_location": "L39",
       "id": "resumeaccess_resumeprefix",
-      "community": 5
+      "community": 13
     },
     {
       "label": "getKey()",
@@ -481,7 +481,7 @@
       "source_file": "src/lib/resumeAccess.ts",
       "source_location": "L46",
       "id": "resumeaccess_getkey",
-      "community": 5
+      "community": 13
     },
     {
       "label": "mintDownloadToken()",
@@ -489,7 +489,7 @@
       "source_file": "src/lib/resumeAccess.ts",
       "source_location": "L72",
       "id": "resumeaccess_mintdownloadtoken",
-      "community": 5
+      "community": 13
     },
     {
       "label": "readDownloadToken()",
@@ -497,7 +497,7 @@
       "source_file": "src/lib/resumeAccess.ts",
       "source_location": "L89",
       "id": "resumeaccess_readdownloadtoken",
-      "community": 5
+      "community": 13
     },
     {
       "label": "resolveBlobUrl()",
@@ -505,7 +505,7 @@
       "source_file": "src/lib/resumeAccess.ts",
       "source_location": "L134",
       "id": "resumeaccess_resolvebloburl",
-      "community": 5
+      "community": 13
     },
     {
       "label": "listAll()",
@@ -513,7 +513,7 @@
       "source_file": "src/lib/resumeAccess.ts",
       "source_location": "L139",
       "id": "resumeaccess_listall",
-      "community": 5
+      "community": 13
     },
     {
       "label": "deleteBlobsForUser()",
@@ -521,7 +521,7 @@
       "source_file": "src/lib/resumeAccess.ts",
       "source_location": "L160",
       "id": "resumeaccess_deleteblobsforuser",
-      "community": 5
+      "community": 13
     },
     {
       "label": "sweepExpiredResumeBlobs()",
@@ -529,7 +529,7 @@
       "source_file": "src/lib/resumeAccess.ts",
       "source_location": "L168",
       "id": "resumeaccess_sweepexpiredresumeblobs",
-      "community": 5
+      "community": 13
     },
     {
       "label": "fieldCrypto.test.ts",
@@ -553,7 +553,7 @@
       "source_file": "src/lib/pdfText.ts",
       "source_location": "L1",
       "id": "pdftext",
-      "community": 4
+      "community": 3
     },
     {
       "label": "extractPdfText()",
@@ -561,7 +561,7 @@
       "source_file": "src/lib/pdfText.ts",
       "source_location": "L19",
       "id": "pdftext_extractpdftext",
-      "community": 4
+      "community": 3
     },
     {
       "label": "fieldCrypto.ts",
@@ -633,7 +633,7 @@
       "source_file": "src/lib/resumeAccess.test.ts",
       "source_location": "L1",
       "id": "resumeaccess_test",
-      "community": 5
+      "community": 13
     },
     {
       "label": "product.ts",
@@ -641,7 +641,7 @@
       "source_file": "src/lib/product.ts",
       "source_location": "L1",
       "id": "product",
-      "community": 3
+      "community": 4
     },
     {
       "label": "publicProductConfig()",
@@ -649,7 +649,7 @@
       "source_file": "src/lib/product.ts",
       "source_location": "L23",
       "id": "product_publicproductconfig",
-      "community": 3
+      "community": 4
     },
     {
       "label": "cronAuth.ts",
@@ -657,7 +657,7 @@
       "source_file": "src/lib/cronAuth.ts",
       "source_location": "L1",
       "id": "cronauth",
-      "community": 5
+      "community": 4
     },
     {
       "label": "isCronAuthorized()",
@@ -665,7 +665,7 @@
       "source_file": "src/lib/cronAuth.ts",
       "source_location": "L11",
       "id": "cronauth_iscronauthorized",
-      "community": 5
+      "community": 4
     },
     {
       "label": "isCronConfigured()",
@@ -673,7 +673,7 @@
       "source_file": "src/lib/cronAuth.ts",
       "source_location": "L24",
       "id": "cronauth_iscronconfigured",
-      "community": 5
+      "community": 4
     },
     {
       "label": "product.test.ts",
@@ -681,7 +681,7 @@
       "source_file": "src/lib/product.test.ts",
       "source_location": "L1",
       "id": "product_test",
-      "community": 3
+      "community": 4
     },
     {
       "label": "schema.ts",
@@ -697,7 +697,7 @@
       "source_file": "src/db/migrate.ts",
       "source_location": "L1",
       "id": "migrate",
-      "community": 3
+      "community": 4
     },
     {
       "label": "runMigrations()",
@@ -705,7 +705,7 @@
       "source_file": "src/db/migrate.ts",
       "source_location": "L6",
       "id": "migrate_runmigrations",
-      "community": 3
+      "community": 4
     },
     {
       "label": "experienceBank.ts",
@@ -729,7 +729,7 @@
       "source_file": "src/engine/resumePolicy.test.ts",
       "source_location": "L1",
       "id": "resumepolicy_test",
-      "community": 4
+      "community": 3
     },
     {
       "label": "bankEntry()",
@@ -737,7 +737,7 @@
       "source_file": "src/engine/resumePolicy.test.ts",
       "source_location": "L10",
       "id": "resumepolicy_test_bankentry",
-      "community": 4
+      "community": 3
     },
     {
       "label": "rawSpec()",
@@ -745,7 +745,7 @@
       "source_file": "src/engine/resumePolicy.test.ts",
       "source_location": "L48",
       "id": "resumepolicy_test_rawspec",
-      "community": 4
+      "community": 3
     },
     {
       "label": "resumeContentPolicy.ts",
@@ -753,7 +753,7 @@
       "source_file": "src/engine/resumeContentPolicy.ts",
       "source_location": "L1",
       "id": "resumecontentpolicy",
-      "community": 4
+      "community": 3
     },
     {
       "label": "resumePolicy.ts",
@@ -961,7 +961,7 @@
       "source_file": "src/engine/resumeDesign.ts",
       "source_location": "L1",
       "id": "resumedesign",
-      "community": 4
+      "community": 3
     },
     {
       "label": "clampExpansion()",
@@ -969,7 +969,7 @@
       "source_file": "src/engine/resumeDesign.ts",
       "source_location": "L116",
       "id": "resumedesign_clampexpansion",
-      "community": 4
+      "community": 3
     },
     {
       "label": "interpolate()",
@@ -977,7 +977,7 @@
       "source_file": "src/engine/resumeDesign.ts",
       "source_location": "L120",
       "id": "resumedesign_interpolate",
-      "community": 4
+      "community": 3
     },
     {
       "label": "resumeDesignAtExpansion()",
@@ -985,7 +985,7 @@
       "source_file": "src/engine/resumeDesign.ts",
       "source_location": "L124",
       "id": "resumedesign_resumedesignatexpansion",
-      "community": 4
+      "community": 3
     },
     {
       "label": "resumeVisualBenchmark.ts",
@@ -993,7 +993,7 @@
       "source_file": "src/engine/resumeVisualBenchmark.ts",
       "source_location": "L1",
       "id": "resumevisualbenchmark",
-      "community": 4
+      "community": 3
     },
     {
       "label": "expandedBullet()",
@@ -1001,7 +1001,7 @@
       "source_file": "src/engine/resumeVisualBenchmark.ts",
       "source_location": "L104",
       "id": "resumevisualbenchmark_expandedbullet",
-      "community": 4
+      "community": 3
     },
     {
       "label": "makeEntry()",
@@ -1009,7 +1009,7 @@
       "source_file": "src/engine/resumeVisualBenchmark.ts",
       "source_location": "L112",
       "id": "resumevisualbenchmark_makeentry",
-      "community": 4
+      "community": 3
     },
     {
       "label": "contactFor()",
@@ -1017,7 +1017,7 @@
       "source_file": "src/engine/resumeVisualBenchmark.ts",
       "source_location": "L143",
       "id": "resumevisualbenchmark_contactfor",
-      "community": 4
+      "community": 3
     },
     {
       "label": "specFor()",
@@ -1025,7 +1025,7 @@
       "source_file": "src/engine/resumeVisualBenchmark.ts",
       "source_location": "L164",
       "id": "resumevisualbenchmark_specfor",
-      "community": 4
+      "community": 3
     },
     {
       "label": "verify.ts",
@@ -1385,7 +1385,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L1",
       "id": "resumevalidate",
-      "community": 6
+      "community": 5
     },
     {
       "label": "jdKeywords()",
@@ -1393,7 +1393,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L47",
       "id": "resumevalidate_jdkeywords",
-      "community": 6
+      "community": 5
     },
     {
       "label": "contentWords()",
@@ -1401,7 +1401,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L52",
       "id": "resumevalidate_contentwords",
-      "community": 6
+      "community": 5
     },
     {
       "label": "yearsIn()",
@@ -1409,7 +1409,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L82",
       "id": "resumevalidate_yearsin",
-      "community": 6
+      "community": 5
     },
     {
       "label": "ungroundedYears()",
@@ -1417,7 +1417,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L89",
       "id": "resumevalidate_ungroundedyears",
-      "community": 6
+      "community": 5
     },
     {
       "label": "normalizeOrg()",
@@ -1425,7 +1425,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L99",
       "id": "resumevalidate_normalizeorg",
-      "community": 6
+      "community": 5
     },
     {
       "label": "orgInitialism()",
@@ -1433,7 +1433,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L110",
       "id": "resumevalidate_orginitialism",
-      "community": 6
+      "community": 5
     },
     {
       "label": "acronymTokenOf()",
@@ -1441,7 +1441,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L120",
       "id": "resumevalidate_acronymtokenof",
-      "community": 6
+      "community": 5
     },
     {
       "label": "orgMatchScore()",
@@ -1449,7 +1449,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L155",
       "id": "resumevalidate_orgmatchscore",
-      "community": 6
+      "community": 5
     },
     {
       "label": "matchBankEntry()",
@@ -1457,7 +1457,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L181",
       "id": "resumevalidate_matchbankentry",
-      "community": 6
+      "community": 5
     },
     {
       "label": "breaksTie()",
@@ -1465,7 +1465,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L195",
       "id": "resumevalidate_breakstie",
-      "community": 6
+      "community": 5
     },
     {
       "label": "bankEntryCorpus()",
@@ -1473,7 +1473,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L202",
       "id": "resumevalidate_bankentrycorpus",
-      "community": 6
+      "community": 5
     },
     {
       "label": "bulletClaimIsGrounded()",
@@ -1481,7 +1481,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L208",
       "id": "resumevalidate_bulletclaimisgrounded",
-      "community": 6
+      "community": 5
     },
     {
       "label": "titleIsSwapped()",
@@ -1489,7 +1489,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L223",
       "id": "resumevalidate_titleisswapped",
-      "community": 6
+      "community": 5
     },
     {
       "label": "findGroundingViolations()",
@@ -1497,7 +1497,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L235",
       "id": "resumevalidate_findgroundingviolations",
-      "community": 6
+      "community": 5
     },
     {
       "label": "pruneUngroundedContent()",
@@ -1505,7 +1505,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L268",
       "id": "resumevalidate_pruneungroundedcontent",
-      "community": 6
+      "community": 5
     },
     {
       "label": "findUngroundedSkills()",
@@ -1513,7 +1513,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L351",
       "id": "resumevalidate_findungroundedskills",
-      "community": 6
+      "community": 5
     },
     {
       "label": "validateResumeSpec()",
@@ -1521,7 +1521,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L397",
       "id": "resumevalidate_validateresumespec",
-      "community": 6
+      "community": 5
     },
     {
       "label": "validatePdfLayout()",
@@ -1529,7 +1529,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L572",
       "id": "resumevalidate_validatepdflayout",
-      "community": 6
+      "community": 5
     },
     {
       "label": "grounding.test.ts",
@@ -1545,7 +1545,7 @@
       "source_file": "src/engine/resumeValidate.test.ts",
       "source_location": "L1",
       "id": "resumevalidate_test",
-      "community": 4
+      "community": 3
     },
     {
       "label": "bankEntry()",
@@ -1553,7 +1553,7 @@
       "source_file": "src/engine/resumeValidate.test.ts",
       "source_location": "L12",
       "id": "resumevalidate_test_bankentry",
-      "community": 4
+      "community": 3
     },
     {
       "label": "spec()",
@@ -1561,7 +1561,7 @@
       "source_file": "src/engine/resumeValidate.test.ts",
       "source_location": "L27",
       "id": "resumevalidate_test_spec",
-      "community": 4
+      "community": 3
     },
     {
       "label": "traecoSpec()",
@@ -1569,7 +1569,7 @@
       "source_file": "src/engine/resumeValidate.test.ts",
       "source_location": "L428",
       "id": "resumevalidate_test_traecospec",
-      "community": 4
+      "community": 3
     },
     {
       "label": "schoolMatch.ts",
@@ -1681,7 +1681,7 @@
       "source_file": "src/engine/resumeVisualLayout.test.ts",
       "source_location": "L1",
       "id": "resumevisuallayout_test",
-      "community": 4
+      "community": 3
     },
     {
       "label": "renderedTextItems()",
@@ -1689,7 +1689,7 @@
       "source_file": "src/engine/resumeVisualLayout.test.ts",
       "source_location": "L27",
       "id": "resumevisuallayout_test_renderedtextitems",
-      "community": 4
+      "community": 3
     },
     {
       "label": "round()",
@@ -1697,7 +1697,7 @@
       "source_file": "src/engine/resumeVisualLayout.test.ts",
       "source_location": "L196",
       "id": "resumevisuallayout_test_round",
-      "community": 4
+      "community": 3
     },
     {
       "label": "apollo.ts",
@@ -1801,7 +1801,7 @@
       "source_file": "src/engine/pdfPostRender.test.ts",
       "source_location": "L1",
       "id": "pdfpostrender_test",
-      "community": 4
+      "community": 3
     },
     {
       "label": "spec()",
@@ -1809,7 +1809,7 @@
       "source_file": "src/engine/pdfPostRender.test.ts",
       "source_location": "L15",
       "id": "pdfpostrender_test_spec",
-      "community": 4
+      "community": 3
     },
     {
       "label": "pooledCopy()",
@@ -1817,7 +1817,7 @@
       "source_file": "src/engine/pdfPostRender.test.ts",
       "source_location": "L45",
       "id": "pdfpostrender_test_pooledcopy",
-      "community": 4
+      "community": 3
     },
     {
       "label": "account.ts",
@@ -1841,7 +1841,7 @@
       "source_file": "src/routes/meta.ts",
       "source_location": "L1",
       "id": "meta",
-      "community": 3
+      "community": 4
     },
     {
       "label": "metaRoutes()",
@@ -1849,7 +1849,7 @@
       "source_file": "src/routes/meta.ts",
       "source_location": "L4",
       "id": "meta_metaroutes",
-      "community": 3
+      "community": 4
     },
     {
       "label": "privacy.ts",
@@ -1857,7 +1857,7 @@
       "source_file": "src/routes/privacy.ts",
       "source_location": "L1",
       "id": "privacy",
-      "community": 3
+      "community": 4
     },
     {
       "label": "privacyRoutes()",
@@ -1865,7 +1865,7 @@
       "source_file": "src/routes/privacy.ts",
       "source_location": "L9",
       "id": "privacy_privacyroutes",
-      "community": 3
+      "community": 4
     },
     {
       "label": "resumeResponseSchema.test.ts",
@@ -1873,7 +1873,7 @@
       "source_file": "src/routes/resumeResponseSchema.test.ts",
       "source_location": "L1",
       "id": "resumeresponseschema_test",
-      "community": 8
+      "community": 7
     },
     {
       "label": "applyDeclaredSkills()",
@@ -1881,7 +1881,7 @@
       "source_file": "src/routes/draft.ts",
       "source_location": "L46",
       "id": "draft_applydeclaredskills",
-      "community": 7
+      "community": 6
     },
     {
       "label": "draftRoutes()",
@@ -1889,7 +1889,7 @@
       "source_file": "src/routes/draft.ts",
       "source_location": "L50",
       "id": "draft_draftroutes",
-      "community": 7
+      "community": 6
     },
     {
       "label": "withEnv()",
@@ -1905,7 +1905,7 @@
       "source_file": "src/routes/adapterHealth.ts",
       "source_location": "L1",
       "id": "adapterhealth",
-      "community": 5
+      "community": 4
     },
     {
       "label": "runCheck()",
@@ -1913,7 +1913,7 @@
       "source_file": "src/routes/adapterHealth.ts",
       "source_location": "L55",
       "id": "adapterhealth_runcheck",
-      "community": 5
+      "community": 4
     },
     {
       "label": "handleHealthCheck()",
@@ -1921,7 +1921,7 @@
       "source_file": "src/routes/adapterHealth.ts",
       "source_location": "L77",
       "id": "adapterhealth_handlehealthcheck",
-      "community": 5
+      "community": 4
     },
     {
       "label": "adapterHealthRoutes()",
@@ -1929,7 +1929,7 @@
       "source_file": "src/routes/adapterHealth.ts",
       "source_location": "L116",
       "id": "adapterhealth_adapterhealthroutes",
-      "community": 5
+      "community": 4
     },
     {
       "label": "resumeRequestSchema.ts",
@@ -1937,7 +1937,7 @@
       "source_file": "src/routes/resumeRequestSchema.ts",
       "source_location": "L1",
       "id": "resumerequestschema",
-      "community": 8
+      "community": 7
     },
     {
       "label": "optionalContactField()",
@@ -1945,7 +1945,7 @@
       "source_file": "src/routes/resumeRequestSchema.ts",
       "source_location": "L13",
       "id": "resumerequestschema_optionalcontactfield",
-      "community": 8
+      "community": 7
     },
     {
       "label": "profileSkills.test.ts",
@@ -1953,7 +1953,7 @@
       "source_file": "src/routes/profileSkills.test.ts",
       "source_location": "L1",
       "id": "profileskills_test",
-      "community": 7
+      "community": 6
     },
     {
       "label": "targeting.ts",
@@ -1961,7 +1961,7 @@
       "source_file": "src/routes/targeting.ts",
       "source_location": "L1",
       "id": "targeting",
-      "community": 7
+      "community": 6
     },
     {
       "label": "shape()",
@@ -1969,7 +1969,7 @@
       "source_file": "src/routes/targeting.ts",
       "source_location": "L61",
       "id": "targeting_shape",
-      "community": 7
+      "community": 6
     },
     {
       "label": "targetingRoutes()",
@@ -1977,7 +1977,7 @@
       "source_file": "src/routes/targeting.ts",
       "source_location": "L72",
       "id": "targeting_targetingroutes",
-      "community": 7
+      "community": 6
     },
     {
       "label": "resume.overload.test.ts",
@@ -1985,7 +1985,7 @@
       "source_file": "src/routes/resume.overload.test.ts",
       "source_location": "L1",
       "id": "resume_overload_test",
-      "community": 8
+      "community": 7
     },
     {
       "label": "harvest.ts",
@@ -2025,7 +2025,7 @@
       "source_file": "src/routes/resumeResponseSchema.ts",
       "source_location": "L1",
       "id": "resumeresponseschema",
-      "community": 8
+      "community": 7
     },
     {
       "label": "onboarding.test.ts",
@@ -2049,7 +2049,7 @@
       "source_file": "src/routes/resumeRequestSchema.test.ts",
       "source_location": "L1",
       "id": "resumerequestschema_test",
-      "community": 8
+      "community": 7
     },
     {
       "label": "profileBank.test.ts",
@@ -2057,7 +2057,7 @@
       "source_file": "src/routes/profileBank.test.ts",
       "source_location": "L1",
       "id": "profilebank_test",
-      "community": 7
+      "community": 6
     },
     {
       "label": "profile()",
@@ -2065,7 +2065,7 @@
       "source_file": "src/routes/profileBank.test.ts",
       "source_location": "L9",
       "id": "profilebank_test_profile",
-      "community": 7
+      "community": 6
     },
     {
       "label": "profile.ts",
@@ -2073,7 +2073,7 @@
       "source_file": "src/routes/profile.ts",
       "source_location": "L1",
       "id": "profile",
-      "community": 7
+      "community": 6
     },
     {
       "label": "toBullets()",
@@ -2081,7 +2081,7 @@
       "source_file": "src/routes/profile.ts",
       "source_location": "L15",
       "id": "profile_tobullets",
-      "community": 7
+      "community": 6
     },
     {
       "label": "declaredSkillsList()",
@@ -2089,7 +2089,7 @@
       "source_file": "src/routes/profile.ts",
       "source_location": "L27",
       "id": "profile_declaredskillslist",
-      "community": 7
+      "community": 6
     },
     {
       "label": "serveProfileJson()",
@@ -2097,7 +2097,7 @@
       "source_file": "src/routes/profile.ts",
       "source_location": "L41",
       "id": "profile_serveprofilejson",
-      "community": 7
+      "community": 6
     },
     {
       "label": "bankEntriesFrom()",
@@ -2105,7 +2105,7 @@
       "source_file": "src/routes/profile.ts",
       "source_location": "L53",
       "id": "profile_bankentriesfrom",
-      "community": 7
+      "community": 6
     },
     {
       "label": "planBankReconciliation()",
@@ -2113,7 +2113,7 @@
       "source_file": "src/routes/profile.ts",
       "source_location": "L100",
       "id": "profile_planbankreconciliation",
-      "community": 7
+      "community": 6
     },
     {
       "label": "profileRoutes()",
@@ -2121,7 +2121,7 @@
       "source_file": "src/routes/profile.ts",
       "source_location": "L130",
       "id": "profile_profileroutes",
-      "community": 7
+      "community": 6
     },
     {
       "label": "experienceBankRoutes()",
@@ -2137,7 +2137,7 @@
       "source_file": "src/routes/resume.billing.test.ts",
       "source_location": "L1",
       "id": "resume_billing_test",
-      "community": 8
+      "community": 7
     },
     {
       "label": "apiError()",
@@ -2145,7 +2145,7 @@
       "source_file": "src/routes/resume.billing.test.ts",
       "source_location": "L15",
       "id": "resume_billing_test_apierror",
-      "community": 8
+      "community": 7
     },
     {
       "label": "onboarding.ts",
@@ -2201,7 +2201,7 @@
       "source_file": "src/routes/autofillEvent.test.ts",
       "source_location": "L1",
       "id": "autofillevent_test",
-      "community": 8
+      "community": 7
     },
     {
       "label": "event()",
@@ -2209,7 +2209,7 @@
       "source_file": "src/routes/autofillEvent.test.ts",
       "source_location": "L18",
       "id": "autofillevent_test_event",
-      "community": 8
+      "community": 7
     },
     {
       "label": "applicationProfile.test.ts",
@@ -2233,7 +2233,7 @@
       "source_file": "src/routes/resumeRetention.ts",
       "source_location": "L1",
       "id": "resumeretention",
-      "community": 5
+      "community": 4
     },
     {
       "label": "handleSweep()",
@@ -2241,7 +2241,7 @@
       "source_file": "src/routes/resumeRetention.ts",
       "source_location": "L17",
       "id": "resumeretention_handlesweep",
-      "community": 5
+      "community": 4
     },
     {
       "label": "resumeRetentionRoutes()",
@@ -2249,7 +2249,7 @@
       "source_file": "src/routes/resumeRetention.ts",
       "source_location": "L52",
       "id": "resumeretention_resumeretentionroutes",
-      "community": 5
+      "community": 4
     },
     {
       "label": "resolve.ts",
@@ -2313,7 +2313,7 @@
       "source_file": "src/routes/billing.ts",
       "source_location": "L1",
       "id": "billing",
-      "community": 3
+      "community": 8
     },
     {
       "label": "billingRoutes()",
@@ -2321,7 +2321,7 @@
       "source_file": "src/routes/billing.ts",
       "source_location": "L9",
       "id": "billing_billingroutes",
-      "community": 3
+      "community": 8
     },
     {
       "label": "resume.ts",
@@ -2329,7 +2329,7 @@
       "source_file": "src/routes/resume.ts",
       "source_location": "L1",
       "id": "resume",
-      "community": 8
+      "community": 7
     },
     {
       "label": "isTransientOverload()",
@@ -2337,7 +2337,7 @@
       "source_file": "src/routes/resume.ts",
       "source_location": "L73",
       "id": "resume_istransientoverload",
-      "community": 8
+      "community": 7
     },
     {
       "label": "isBillingOrAuthFailure()",
@@ -2345,7 +2345,7 @@
       "source_file": "src/routes/resume.ts",
       "source_location": "L96",
       "id": "resume_isbillingorauthfailure",
-      "community": 8
+      "community": 7
     },
     {
       "label": "overloadBackoffMs()",
@@ -2353,7 +2353,7 @@
       "source_file": "src/routes/resume.ts",
       "source_location": "L119",
       "id": "resume_overloadbackoffms",
-      "community": 8
+      "community": 7
     },
     {
       "label": "sleep()",
@@ -2361,7 +2361,7 @@
       "source_file": "src/routes/resume.ts",
       "source_location": "L128",
       "id": "resume_sleep",
-      "community": 8
+      "community": 7
     },
     {
       "label": "resumeRoutes()",
@@ -2369,7 +2369,7 @@
       "source_file": "src/routes/resume.ts",
       "source_location": "L154",
       "id": "resume_resumeroutes",
-      "community": 8
+      "community": 7
     },
     {
       "label": "applicationProfile.ts",
@@ -2436,10 +2436,18 @@
       "community": 0
     },
     {
-      "label": "signSessionToken()",
+      "label": "verificationSender()",
       "file_type": "code",
       "source_file": "src/routes/auth.ts",
       "source_location": "L32",
+      "id": "auth_verificationsender",
+      "community": 0
+    },
+    {
+      "label": "signSessionToken()",
+      "file_type": "code",
+      "source_file": "src/routes/auth.ts",
+      "source_location": "L47",
       "id": "auth_signsessiontoken",
       "community": 0
     },
@@ -2447,7 +2455,7 @@
       "label": "buildVerificationEmail()",
       "file_type": "code",
       "source_file": "src/routes/auth.ts",
-      "source_location": "L42",
+      "source_location": "L57",
       "id": "auth_buildverificationemail",
       "community": 0
     },
@@ -2455,7 +2463,7 @@
       "label": "sendVerificationEmail()",
       "file_type": "code",
       "source_file": "src/routes/auth.ts",
-      "source_location": "L54",
+      "source_location": "L122",
       "id": "auth_sendverificationemail",
       "community": 0
     },
@@ -2463,7 +2471,7 @@
       "label": "authRoutes()",
       "file_type": "code",
       "source_file": "src/routes/auth.ts",
-      "source_location": "L72",
+      "source_location": "L140",
       "id": "auth_authroutes",
       "community": 0
     }
@@ -3616,6 +3624,18 @@
       "source_location": "L32",
       "weight": 1.0,
       "_src": "auth",
+      "_tgt": "auth_verificationsender",
+      "source": "auth",
+      "target": "auth_verificationsender",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src/routes/auth.ts",
+      "source_location": "L47",
+      "weight": 1.0,
+      "_src": "auth",
       "_tgt": "auth_signsessiontoken",
       "source": "auth",
       "target": "auth_signsessiontoken",
@@ -3625,7 +3645,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/routes/auth.ts",
-      "source_location": "L42",
+      "source_location": "L57",
       "weight": 1.0,
       "_src": "auth",
       "_tgt": "auth_buildverificationemail",
@@ -3637,7 +3657,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/routes/auth.ts",
-      "source_location": "L54",
+      "source_location": "L122",
       "weight": 1.0,
       "_src": "auth",
       "_tgt": "auth_sendverificationemail",
@@ -3649,7 +3669,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/routes/auth.ts",
-      "source_location": "L72",
+      "source_location": "L140",
       "weight": 1.0,
       "_src": "auth",
       "_tgt": "auth_authroutes",
@@ -9049,7 +9069,19 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/routes/auth.ts",
-      "source_location": "L64",
+      "source_location": "L63",
+      "weight": 1.0,
+      "_src": "auth_buildverificationemail",
+      "_tgt": "auth_verificationsender",
+      "source": "auth_verificationsender",
+      "target": "auth_buildverificationemail",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src/routes/auth.ts",
+      "source_location": "L132",
       "weight": 1.0,
       "_src": "auth_sendverificationemail",
       "_tgt": "auth_buildverificationemail",
