@@ -5,7 +5,7 @@ import type { FastifyInstance } from 'fastify';
 // hand-maintained HTML, which silently kept describing the retired "Volley" product
 // after the extension became RoleQuick, so the store listing pointed at a policy for
 // the wrong product. Redirect instead of duplicating: one policy, one place to edit.
-const CANONICAL_PRIVACY_URL = 'https://role-quick-website.vercel.app/privacy';
+const CANONICAL_PRIVACY_URL = 'https://trylitos.com/privacy';
 
 export async function privacyRoutes(fastify: FastifyInstance) {
   fastify.get('/privacy', async (_request, reply) => {

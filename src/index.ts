@@ -79,6 +79,8 @@ export async function buildApp() {
     .map((s) => s.trim())
     .filter(Boolean);
   const allowedOrigins = new Set([
+    'https://trylitos.com',
+    'https://www.trylitos.com',
     'https://role-quick-website.vercel.app',
     'https://rolequick.com',
     'https://www.rolequick.com',
