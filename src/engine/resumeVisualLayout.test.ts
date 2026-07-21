@@ -312,6 +312,62 @@ describe('resume visual layout controls', () => {
 
     assert.ok(issues.includes('rendered PDF text does not faithfully preserve header name'));
   });
+
+  test('PDF text fidelity accepts whitespace differences introduced at wrapped line boundaries', () => {
+    const spec = {
+      school: '',
+      degree: '',
+      grad_date: '',
+      coursework: '',
+      experience: [{
+        org: 'Traeco',
+        title: 'Software Engineer',
+        date_range: '2025 - 2026',
+        bullets: ['Built reliable infrastructure for production traffic replay'],
+      }],
+      skills: [],
+    };
+    const contact = { full_name: 'Mehek Mandal' };
+    const extracted = [
+      'Mehek Mandal',
+      'Traeco',
+      'Software Engineer',
+      '2025 - 2026',
+      // pdf.js can join the wrapped line without the source space after "reliable".
+      'Built reliableinfrastructure for production traffic replay',
+    ].join('\n');
+
+    assert.deepEqual(findPdfTextFidelityIssues(extracted, spec, contact), []);
+  });
+
+  test('PDF text fidelity still rejects a missing non-whitespace character', () => {
+    const spec = {
+      school: '',
+      degree: '',
+      grad_date: '',
+      coursework: '',
+      experience: [{
+        org: 'Traeco',
+        title: 'Software Engineer',
+        date_range: '2025 - 2026',
+        bullets: ['Built reliable infrastructure for production traffic replay'],
+      }],
+      skills: [],
+    };
+    const contact = { full_name: 'Mehek Mandal' };
+    const extracted = [
+      'Mehek Mandal',
+      'Traeco',
+      'Software Engineer',
+      '2025 - 2026',
+      'Built reliable infrastructure for production trafic replay',
+    ].join('\n');
+
+    assert.ok(
+      findPdfTextFidelityIssues(extracted, spec, contact)
+        .includes('rendered PDF text does not faithfully preserve entry 1 bullet 1'),
+    );
+  });
 });
 
 describe('25-case rendered resume benchmark', () => {
