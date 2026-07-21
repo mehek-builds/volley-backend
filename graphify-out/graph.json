@@ -9,7 +9,7 @@
       "source_file": "drizzle.config.ts",
       "source_location": "L1",
       "id": "drizzle_config",
-      "community": 15
+      "community": 14
     },
     {
       "label": "index.ts",
@@ -41,7 +41,7 @@
       "source_file": "src/index.test.ts",
       "source_location": "L1",
       "id": "index_test",
-      "community": 14
+      "community": 13
     },
     {
       "label": "getApp()",
@@ -49,7 +49,7 @@
       "source_file": "src/index.test.ts",
       "source_location": "L16",
       "id": "index_test_getapp",
-      "community": 14
+      "community": 13
     },
     {
       "label": "request()",
@@ -57,7 +57,7 @@
       "source_file": "src/index.test.ts",
       "source_location": "L94",
       "id": "index_test_request",
-      "community": 14
+      "community": 13
     },
     {
       "label": "trustProxySetting()",
@@ -97,7 +97,7 @@
       "source_file": "src/middleware/rateLimit.test.ts",
       "source_location": "L1",
       "id": "ratelimit_test",
-      "community": 11
+      "community": 10
     },
     {
       "label": "auth.test.ts",
@@ -113,7 +113,7 @@
       "source_file": "src/middleware/rateLimit.ts",
       "source_location": "L1",
       "id": "ratelimit",
-      "community": 11
+      "community": 10
     },
     {
       "label": "positiveInteger()",
@@ -121,7 +121,7 @@
       "source_file": "src/middleware/rateLimit.ts",
       "source_location": "L33",
       "id": "ratelimit_positiveinteger",
-      "community": 11
+      "community": 10
     },
     {
       "label": "defaultRateLimitConfig()",
@@ -129,7 +129,7 @@
       "source_file": "src/middleware/rateLimit.ts",
       "source_location": "L38",
       "id": "ratelimit_defaultratelimitconfig",
-      "community": 11
+      "community": 10
     },
     {
       "label": "InMemoryRateLimitStore",
@@ -137,7 +137,7 @@
       "source_file": "src/middleware/rateLimit.ts",
       "source_location": "L64",
       "id": "ratelimit_inmemoryratelimitstore",
-      "community": 11
+      "community": 10
     },
     {
       "label": ".constructor()",
@@ -145,7 +145,7 @@
       "source_file": "src/middleware/rateLimit.ts",
       "source_location": "L67",
       "id": "ratelimit_inmemoryratelimitstore_constructor",
-      "community": 11
+      "community": 10
     },
     {
       "label": ".size()",
@@ -153,7 +153,7 @@
       "source_file": "src/middleware/rateLimit.ts",
       "source_location": "L72",
       "id": "ratelimit_inmemoryratelimitstore_size",
-      "community": 11
+      "community": 10
     },
     {
       "label": ".consume()",
@@ -161,7 +161,7 @@
       "source_file": "src/middleware/rateLimit.ts",
       "source_location": "L76",
       "id": "ratelimit_inmemoryratelimitstore_consume",
-      "community": 11
+      "community": 10
     },
     {
       "label": ".makeRoom()",
@@ -169,7 +169,7 @@
       "source_file": "src/middleware/rateLimit.ts",
       "source_location": "L98",
       "id": "ratelimit_inmemoryratelimitstore_makeroom",
-      "community": 11
+      "community": 10
     },
     {
       "label": "policyForRequest()",
@@ -177,7 +177,7 @@
       "source_file": "src/middleware/rateLimit.ts",
       "source_location": "L120",
       "id": "ratelimit_policyforrequest",
-      "community": 11
+      "community": 10
     },
     {
       "label": "createRateLimitHook()",
@@ -185,7 +185,7 @@
       "source_file": "src/middleware/rateLimit.ts",
       "source_location": "L128",
       "id": "ratelimit_createratelimithook",
-      "community": 11
+      "community": 10
     },
     {
       "label": "quota.ts",
@@ -321,7 +321,7 @@
       "source_file": "src/routes/draft.ts",
       "source_location": "L1",
       "id": "draft",
-      "community": 6
+      "community": 7
     },
     {
       "label": "generateDraft()",
@@ -329,7 +329,7 @@
       "source_file": "src/llm/draft.ts",
       "source_location": "L59",
       "id": "draft_generatedraft",
-      "community": 6
+      "community": 7
     },
     {
       "label": "applicationAnswer.test.ts",
@@ -337,7 +337,7 @@
       "source_file": "src/llm/applicationAnswer.test.ts",
       "source_location": "L1",
       "id": "applicationanswer_test",
-      "community": 10
+      "community": 5
     },
     {
       "label": "parse.ts",
@@ -345,7 +345,7 @@
       "source_file": "src/llm/parse.ts",
       "source_location": "L1",
       "id": "parse",
-      "community": 6
+      "community": 7
     },
     {
       "label": "parseResumeWithClaude()",
@@ -353,7 +353,7 @@
       "source_file": "src/llm/parse.ts",
       "source_location": "L67",
       "id": "parse_parseresumewithclaude",
-      "community": 6
+      "community": 7
     },
     {
       "label": "resumeSpec.test.ts",
@@ -393,7 +393,7 @@
       "source_file": "src/routes/applicationAnswer.ts",
       "source_location": "L1",
       "id": "applicationanswer",
-      "community": 10
+      "community": 5
     },
     {
       "label": "normalizeDraftedAnswer()",
@@ -401,7 +401,7 @@
       "source_file": "src/llm/applicationAnswer.ts",
       "source_location": "L88",
       "id": "applicationanswer_normalizedraftedanswer",
-      "community": 10
+      "community": 5
     },
     {
       "label": "rankingGroundingFor()",
@@ -409,7 +409,7 @@
       "source_file": "src/llm/applicationAnswer.ts",
       "source_location": "L105",
       "id": "applicationanswer_rankinggroundingfor",
-      "community": 10
+      "community": 5
     },
     {
       "label": "rankingRuleText()",
@@ -417,7 +417,7 @@
       "source_file": "src/llm/applicationAnswer.ts",
       "source_location": "L127",
       "id": "applicationanswer_rankingruletext",
-      "community": 10
+      "community": 5
     },
     {
       "label": "thinRankingWarning()",
@@ -425,7 +425,7 @@
       "source_file": "src/llm/applicationAnswer.ts",
       "source_location": "L141",
       "id": "applicationanswer_thinrankingwarning",
-      "community": 10
+      "community": 5
     },
     {
       "label": "buildContextBlock()",
@@ -433,7 +433,7 @@
       "source_file": "src/llm/applicationAnswer.ts",
       "source_location": "L146",
       "id": "applicationanswer_buildcontextblock",
-      "community": 10
+      "community": 5
     },
     {
       "label": "draftApplicationAnswer()",
@@ -441,7 +441,7 @@
       "source_file": "src/llm/applicationAnswer.ts",
       "source_location": "L164",
       "id": "applicationanswer_draftapplicationanswer",
-      "community": 10
+      "community": 5
     },
     {
       "label": "apiBase.ts",
@@ -449,7 +449,7 @@
       "source_file": "src/lib/apiBase.ts",
       "source_location": "L1",
       "id": "apibase",
-      "community": 7
+      "community": 0
     },
     {
       "label": "apiBaseFor()",
@@ -457,7 +457,7 @@
       "source_file": "src/lib/apiBase.ts",
       "source_location": "L7",
       "id": "apibase_apibasefor",
-      "community": 7
+      "community": 0
     },
     {
       "label": "resumeAccess.ts",
@@ -465,7 +465,7 @@
       "source_file": "src/lib/resumeAccess.ts",
       "source_location": "L1",
       "id": "resumeaccess",
-      "community": 13
+      "community": 12
     },
     {
       "label": "resumePrefix()",
@@ -473,7 +473,7 @@
       "source_file": "src/lib/resumeAccess.ts",
       "source_location": "L39",
       "id": "resumeaccess_resumeprefix",
-      "community": 13
+      "community": 12
     },
     {
       "label": "getKey()",
@@ -481,7 +481,7 @@
       "source_file": "src/lib/resumeAccess.ts",
       "source_location": "L46",
       "id": "resumeaccess_getkey",
-      "community": 13
+      "community": 12
     },
     {
       "label": "mintDownloadToken()",
@@ -489,7 +489,7 @@
       "source_file": "src/lib/resumeAccess.ts",
       "source_location": "L72",
       "id": "resumeaccess_mintdownloadtoken",
-      "community": 13
+      "community": 12
     },
     {
       "label": "readDownloadToken()",
@@ -497,7 +497,7 @@
       "source_file": "src/lib/resumeAccess.ts",
       "source_location": "L89",
       "id": "resumeaccess_readdownloadtoken",
-      "community": 13
+      "community": 12
     },
     {
       "label": "resolveBlobUrl()",
@@ -505,7 +505,7 @@
       "source_file": "src/lib/resumeAccess.ts",
       "source_location": "L134",
       "id": "resumeaccess_resolvebloburl",
-      "community": 13
+      "community": 12
     },
     {
       "label": "listAll()",
@@ -513,7 +513,7 @@
       "source_file": "src/lib/resumeAccess.ts",
       "source_location": "L139",
       "id": "resumeaccess_listall",
-      "community": 13
+      "community": 12
     },
     {
       "label": "deleteBlobsForUser()",
@@ -521,7 +521,7 @@
       "source_file": "src/lib/resumeAccess.ts",
       "source_location": "L160",
       "id": "resumeaccess_deleteblobsforuser",
-      "community": 13
+      "community": 12
     },
     {
       "label": "sweepExpiredResumeBlobs()",
@@ -529,7 +529,7 @@
       "source_file": "src/lib/resumeAccess.ts",
       "source_location": "L168",
       "id": "resumeaccess_sweepexpiredresumeblobs",
-      "community": 13
+      "community": 12
     },
     {
       "label": "fieldCrypto.test.ts",
@@ -633,7 +633,7 @@
       "source_file": "src/lib/resumeAccess.test.ts",
       "source_location": "L1",
       "id": "resumeaccess_test",
-      "community": 13
+      "community": 12
     },
     {
       "label": "product.ts",
@@ -713,7 +713,7 @@
       "source_file": "src/routes/experienceBank.ts",
       "source_location": "L1",
       "id": "experiencebank",
-      "community": 10
+      "community": 5
     },
     {
       "label": "readExperienceBank()",
@@ -721,7 +721,7 @@
       "source_file": "src/db/experienceBank.ts",
       "source_location": "L23",
       "id": "experiencebank_readexperiencebank",
-      "community": 10
+      "community": 5
     },
     {
       "label": "resumePolicy.test.ts",
@@ -761,7 +761,7 @@
       "source_file": "src/engine/resumePolicy.ts",
       "source_location": "L1",
       "id": "resumepolicy",
-      "community": 12
+      "community": 11
     },
     {
       "label": "tokens()",
@@ -769,7 +769,7 @@
       "source_file": "src/engine/resumePolicy.ts",
       "source_location": "L23",
       "id": "resumepolicy_tokens",
-      "community": 12
+      "community": 11
     },
     {
       "label": "overlapScore()",
@@ -777,7 +777,7 @@
       "source_file": "src/engine/resumePolicy.ts",
       "source_location": "L29",
       "id": "resumepolicy_overlapscore",
-      "community": 12
+      "community": 11
     },
     {
       "label": "parseGraduationDate()",
@@ -785,7 +785,7 @@
       "source_file": "src/engine/resumePolicy.ts",
       "source_location": "L37",
       "id": "resumepolicy_parsegraduationdate",
-      "community": 12
+      "community": 11
     },
     {
       "label": "deriveCandidateContext()",
@@ -793,7 +793,7 @@
       "source_file": "src/engine/resumePolicy.ts",
       "source_location": "L59",
       "id": "resumepolicy_derivecandidatecontext",
-      "community": 12
+      "community": 11
     },
     {
       "label": "orgScore()",
@@ -801,7 +801,7 @@
       "source_file": "src/engine/resumePolicy.ts",
       "source_location": "L78",
       "id": "resumepolicy_orgscore",
-      "community": 12
+      "community": 11
     },
     {
       "label": "matchingBankEntry()",
@@ -809,7 +809,7 @@
       "source_file": "src/engine/resumePolicy.ts",
       "source_location": "L98",
       "id": "resumepolicy_matchingbankentry",
-      "community": 12
+      "community": 11
     },
     {
       "label": "entryText()",
@@ -817,7 +817,7 @@
       "source_file": "src/engine/resumePolicy.ts",
       "source_location": "L105",
       "id": "resumepolicy_entrytext",
-      "community": 12
+      "community": 11
     },
     {
       "label": "metricCount()",
@@ -825,7 +825,7 @@
       "source_file": "src/engine/resumePolicy.ts",
       "source_location": "L109",
       "id": "resumepolicy_metriccount",
-      "community": 12
+      "community": 11
     },
     {
       "label": "relevanceScore()",
@@ -833,7 +833,7 @@
       "source_file": "src/engine/resumePolicy.ts",
       "source_location": "L113",
       "id": "resumepolicy_relevancescore",
-      "community": 12
+      "community": 11
     },
     {
       "label": "applyResumePolicy()",
@@ -841,7 +841,7 @@
       "source_file": "src/engine/resumePolicy.ts",
       "source_location": "L117",
       "id": "resumepolicy_applyresumepolicy",
-      "community": 12
+      "community": 11
     },
     {
       "label": "grounding.ts",
@@ -1385,7 +1385,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L1",
       "id": "resumevalidate",
-      "community": 5
+      "community": 6
     },
     {
       "label": "jdKeywords()",
@@ -1393,7 +1393,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L47",
       "id": "resumevalidate_jdkeywords",
-      "community": 5
+      "community": 6
     },
     {
       "label": "contentWords()",
@@ -1401,7 +1401,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L52",
       "id": "resumevalidate_contentwords",
-      "community": 5
+      "community": 6
     },
     {
       "label": "yearsIn()",
@@ -1409,7 +1409,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L82",
       "id": "resumevalidate_yearsin",
-      "community": 5
+      "community": 6
     },
     {
       "label": "ungroundedYears()",
@@ -1417,7 +1417,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L89",
       "id": "resumevalidate_ungroundedyears",
-      "community": 5
+      "community": 6
     },
     {
       "label": "normalizeOrg()",
@@ -1425,7 +1425,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L99",
       "id": "resumevalidate_normalizeorg",
-      "community": 5
+      "community": 6
     },
     {
       "label": "orgInitialism()",
@@ -1433,7 +1433,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L110",
       "id": "resumevalidate_orginitialism",
-      "community": 5
+      "community": 6
     },
     {
       "label": "acronymTokenOf()",
@@ -1441,7 +1441,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L120",
       "id": "resumevalidate_acronymtokenof",
-      "community": 5
+      "community": 6
     },
     {
       "label": "orgMatchScore()",
@@ -1449,7 +1449,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L155",
       "id": "resumevalidate_orgmatchscore",
-      "community": 5
+      "community": 6
     },
     {
       "label": "matchBankEntry()",
@@ -1457,7 +1457,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L181",
       "id": "resumevalidate_matchbankentry",
-      "community": 5
+      "community": 6
     },
     {
       "label": "breaksTie()",
@@ -1465,7 +1465,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L195",
       "id": "resumevalidate_breakstie",
-      "community": 5
+      "community": 6
     },
     {
       "label": "bankEntryCorpus()",
@@ -1473,7 +1473,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L202",
       "id": "resumevalidate_bankentrycorpus",
-      "community": 5
+      "community": 6
     },
     {
       "label": "bulletClaimIsGrounded()",
@@ -1481,7 +1481,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L208",
       "id": "resumevalidate_bulletclaimisgrounded",
-      "community": 5
+      "community": 6
     },
     {
       "label": "titleIsSwapped()",
@@ -1489,7 +1489,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L223",
       "id": "resumevalidate_titleisswapped",
-      "community": 5
+      "community": 6
     },
     {
       "label": "findGroundingViolations()",
@@ -1497,7 +1497,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L235",
       "id": "resumevalidate_findgroundingviolations",
-      "community": 5
+      "community": 6
     },
     {
       "label": "pruneUngroundedContent()",
@@ -1505,7 +1505,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L268",
       "id": "resumevalidate_pruneungroundedcontent",
-      "community": 5
+      "community": 6
     },
     {
       "label": "findUngroundedSkills()",
@@ -1513,7 +1513,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L351",
       "id": "resumevalidate_findungroundedskills",
-      "community": 5
+      "community": 6
     },
     {
       "label": "validateResumeSpec()",
@@ -1521,7 +1521,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L397",
       "id": "resumevalidate_validateresumespec",
-      "community": 5
+      "community": 6
     },
     {
       "label": "validatePdfLayout()",
@@ -1529,7 +1529,7 @@
       "source_file": "src/engine/resumeValidate.ts",
       "source_location": "L572",
       "id": "resumevalidate_validatepdflayout",
-      "community": 5
+      "community": 6
     },
     {
       "label": "grounding.test.ts",
@@ -1873,7 +1873,7 @@
       "source_file": "src/routes/resumeResponseSchema.test.ts",
       "source_location": "L1",
       "id": "resumeresponseschema_test",
-      "community": 7
+      "community": 5
     },
     {
       "label": "applyDeclaredSkills()",
@@ -1881,7 +1881,7 @@
       "source_file": "src/routes/draft.ts",
       "source_location": "L46",
       "id": "draft_applydeclaredskills",
-      "community": 6
+      "community": 7
     },
     {
       "label": "draftRoutes()",
@@ -1889,7 +1889,7 @@
       "source_file": "src/routes/draft.ts",
       "source_location": "L50",
       "id": "draft_draftroutes",
-      "community": 6
+      "community": 7
     },
     {
       "label": "withEnv()",
@@ -1897,6 +1897,22 @@
       "source_file": "src/routes/auth.test.ts",
       "source_location": "L8",
       "id": "auth_test_withenv",
+      "community": 0
+    },
+    {
+      "label": "fakeFetch()",
+      "file_type": "code",
+      "source_file": "src/routes/auth.test.ts",
+      "source_location": "L67",
+      "id": "auth_test_fakefetch",
+      "community": 0
+    },
+    {
+      "label": "withEnvAsync()",
+      "file_type": "code",
+      "source_file": "src/routes/auth.test.ts",
+      "source_location": "L106",
+      "id": "auth_test_withenvasync",
       "community": 0
     },
     {
@@ -1937,7 +1953,7 @@
       "source_file": "src/routes/resumeRequestSchema.ts",
       "source_location": "L1",
       "id": "resumerequestschema",
-      "community": 7
+      "community": 5
     },
     {
       "label": "optionalContactField()",
@@ -1945,7 +1961,7 @@
       "source_file": "src/routes/resumeRequestSchema.ts",
       "source_location": "L13",
       "id": "resumerequestschema_optionalcontactfield",
-      "community": 7
+      "community": 5
     },
     {
       "label": "profileSkills.test.ts",
@@ -1953,7 +1969,7 @@
       "source_file": "src/routes/profileSkills.test.ts",
       "source_location": "L1",
       "id": "profileskills_test",
-      "community": 6
+      "community": 7
     },
     {
       "label": "targeting.ts",
@@ -1961,7 +1977,7 @@
       "source_file": "src/routes/targeting.ts",
       "source_location": "L1",
       "id": "targeting",
-      "community": 6
+      "community": 7
     },
     {
       "label": "shape()",
@@ -1969,7 +1985,7 @@
       "source_file": "src/routes/targeting.ts",
       "source_location": "L61",
       "id": "targeting_shape",
-      "community": 6
+      "community": 7
     },
     {
       "label": "targetingRoutes()",
@@ -1977,7 +1993,7 @@
       "source_file": "src/routes/targeting.ts",
       "source_location": "L72",
       "id": "targeting_targetingroutes",
-      "community": 6
+      "community": 7
     },
     {
       "label": "resume.overload.test.ts",
@@ -1985,7 +2001,7 @@
       "source_file": "src/routes/resume.overload.test.ts",
       "source_location": "L1",
       "id": "resume_overload_test",
-      "community": 7
+      "community": 5
     },
     {
       "label": "harvest.ts",
@@ -2025,7 +2041,7 @@
       "source_file": "src/routes/resumeResponseSchema.ts",
       "source_location": "L1",
       "id": "resumeresponseschema",
-      "community": 7
+      "community": 5
     },
     {
       "label": "onboarding.test.ts",
@@ -2049,7 +2065,7 @@
       "source_file": "src/routes/resumeRequestSchema.test.ts",
       "source_location": "L1",
       "id": "resumerequestschema_test",
-      "community": 7
+      "community": 5
     },
     {
       "label": "profileBank.test.ts",
@@ -2057,7 +2073,7 @@
       "source_file": "src/routes/profileBank.test.ts",
       "source_location": "L1",
       "id": "profilebank_test",
-      "community": 6
+      "community": 7
     },
     {
       "label": "profile()",
@@ -2065,7 +2081,7 @@
       "source_file": "src/routes/profileBank.test.ts",
       "source_location": "L9",
       "id": "profilebank_test_profile",
-      "community": 6
+      "community": 7
     },
     {
       "label": "profile.ts",
@@ -2073,7 +2089,7 @@
       "source_file": "src/routes/profile.ts",
       "source_location": "L1",
       "id": "profile",
-      "community": 6
+      "community": 7
     },
     {
       "label": "toBullets()",
@@ -2081,7 +2097,7 @@
       "source_file": "src/routes/profile.ts",
       "source_location": "L15",
       "id": "profile_tobullets",
-      "community": 6
+      "community": 7
     },
     {
       "label": "declaredSkillsList()",
@@ -2089,7 +2105,7 @@
       "source_file": "src/routes/profile.ts",
       "source_location": "L27",
       "id": "profile_declaredskillslist",
-      "community": 6
+      "community": 7
     },
     {
       "label": "serveProfileJson()",
@@ -2097,7 +2113,7 @@
       "source_file": "src/routes/profile.ts",
       "source_location": "L41",
       "id": "profile_serveprofilejson",
-      "community": 6
+      "community": 7
     },
     {
       "label": "bankEntriesFrom()",
@@ -2105,7 +2121,7 @@
       "source_file": "src/routes/profile.ts",
       "source_location": "L53",
       "id": "profile_bankentriesfrom",
-      "community": 6
+      "community": 7
     },
     {
       "label": "planBankReconciliation()",
@@ -2113,7 +2129,7 @@
       "source_file": "src/routes/profile.ts",
       "source_location": "L100",
       "id": "profile_planbankreconciliation",
-      "community": 6
+      "community": 7
     },
     {
       "label": "profileRoutes()",
@@ -2121,7 +2137,7 @@
       "source_file": "src/routes/profile.ts",
       "source_location": "L130",
       "id": "profile_profileroutes",
-      "community": 6
+      "community": 7
     },
     {
       "label": "experienceBankRoutes()",
@@ -2129,7 +2145,7 @@
       "source_file": "src/routes/experienceBank.ts",
       "source_location": "L25",
       "id": "experiencebank_experiencebankroutes",
-      "community": 10
+      "community": 5
     },
     {
       "label": "resume.billing.test.ts",
@@ -2137,7 +2153,7 @@
       "source_file": "src/routes/resume.billing.test.ts",
       "source_location": "L1",
       "id": "resume_billing_test",
-      "community": 7
+      "community": 5
     },
     {
       "label": "apiError()",
@@ -2145,7 +2161,7 @@
       "source_file": "src/routes/resume.billing.test.ts",
       "source_location": "L15",
       "id": "resume_billing_test_apierror",
-      "community": 7
+      "community": 5
     },
     {
       "label": "onboarding.ts",
@@ -2201,7 +2217,7 @@
       "source_file": "src/routes/autofillEvent.test.ts",
       "source_location": "L1",
       "id": "autofillevent_test",
-      "community": 7
+      "community": 4
     },
     {
       "label": "event()",
@@ -2209,7 +2225,7 @@
       "source_file": "src/routes/autofillEvent.test.ts",
       "source_location": "L18",
       "id": "autofillevent_test_event",
-      "community": 7
+      "community": 4
     },
     {
       "label": "applicationProfile.test.ts",
@@ -2329,7 +2345,7 @@
       "source_file": "src/routes/resume.ts",
       "source_location": "L1",
       "id": "resume",
-      "community": 7
+      "community": 5
     },
     {
       "label": "isTransientOverload()",
@@ -2337,7 +2353,7 @@
       "source_file": "src/routes/resume.ts",
       "source_location": "L73",
       "id": "resume_istransientoverload",
-      "community": 7
+      "community": 5
     },
     {
       "label": "isBillingOrAuthFailure()",
@@ -2345,7 +2361,7 @@
       "source_file": "src/routes/resume.ts",
       "source_location": "L96",
       "id": "resume_isbillingorauthfailure",
-      "community": 7
+      "community": 5
     },
     {
       "label": "overloadBackoffMs()",
@@ -2353,7 +2369,7 @@
       "source_file": "src/routes/resume.ts",
       "source_location": "L119",
       "id": "resume_overloadbackoffms",
-      "community": 7
+      "community": 5
     },
     {
       "label": "sleep()",
@@ -2361,7 +2377,7 @@
       "source_file": "src/routes/resume.ts",
       "source_location": "L128",
       "id": "resume_sleep",
-      "community": 7
+      "community": 5
     },
     {
       "label": "resumeRoutes()",
@@ -2369,7 +2385,7 @@
       "source_file": "src/routes/resume.ts",
       "source_location": "L154",
       "id": "resume_resumeroutes",
-      "community": 7
+      "community": 5
     },
     {
       "label": "applicationProfile.ts",
@@ -2417,7 +2433,7 @@
       "source_file": "src/routes/applicationAnswer.ts",
       "source_location": "L22",
       "id": "applicationanswer_applicationanswerroutes",
-      "community": 10
+      "community": 5
     },
     {
       "label": "trialEnd()",
@@ -2471,7 +2487,7 @@
       "label": "authRoutes()",
       "file_type": "code",
       "source_file": "src/routes/auth.ts",
-      "source_location": "L140",
+      "source_location": "L150",
       "id": "auth_authroutes",
       "community": 0
     }
@@ -2967,6 +2983,30 @@
       "_tgt": "auth_test_withenv",
       "source": "auth_test",
       "target": "auth_test_withenv",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src/routes/auth.test.ts",
+      "source_location": "L93",
+      "weight": 1.0,
+      "_src": "auth_test",
+      "_tgt": "auth_test_fakefetch",
+      "source": "auth_test",
+      "target": "auth_test_fakefetch",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src/routes/auth.test.ts",
+      "source_location": "L106",
+      "weight": 1.0,
+      "_src": "auth_test",
+      "_tgt": "auth_test_withenvasync",
+      "source": "auth_test",
+      "target": "auth_test_withenvasync",
       "confidence_score": 1.0
     },
     {
@@ -3669,7 +3709,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/routes/auth.ts",
-      "source_location": "L140",
+      "source_location": "L150",
       "weight": 1.0,
       "_src": "auth",
       "_tgt": "auth_authroutes",
@@ -9081,7 +9121,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/routes/auth.ts",
-      "source_location": "L132",
+      "source_location": "L136",
       "weight": 1.0,
       "_src": "auth_sendverificationemail",
       "_tgt": "auth_buildverificationemail",

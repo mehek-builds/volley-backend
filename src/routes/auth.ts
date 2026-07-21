@@ -119,8 +119,12 @@ export function buildVerificationEmail(email: string, code: string) {
 
 // Sends the 6-digit code via Resend's HTTPS API. Requires RESEND_API_KEY and
 // RESEND_FROM, which must be a sender on a domain verified in Resend.
-async function sendVerificationEmail(email: string, code: string): Promise<void> {
-  const res = await fetch('https://api.resend.com/emails', {
+export async function sendVerificationEmail(
+  email: string,
+  code: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<string> {
+  const res = await fetchImpl('https://api.resend.com/emails', {
     method: 'POST',
     // Bound the wait so a hung Resend can't hold the request open indefinitely; the caller
     // treats a throw here as "verification unavailable" and 503s the client to the fallback.
@@ -135,6 +139,12 @@ async function sendVerificationEmail(email: string, code: string): Promise<void>
     const text = await res.text().catch(() => res.statusText);
     throw new Error(`Resend API ${res.status}: ${text}`);
   }
+
+  const result = (await res.json().catch(() => null)) as { id?: unknown } | null;
+  if (typeof result?.id !== 'string' || result.id.length === 0) {
+    throw new Error('Resend API accepted the request without returning an email id');
+  }
+  return result.id;
 }
 
 export async function authRoutes(fastify: FastifyInstance) {
@@ -242,8 +252,9 @@ export async function authRoutes(fastify: FastifyInstance) {
           set: { code_hash: hashCode(code), expires_at: new Date(Date.now() + CODE_TTL_MS), attempts: 0, created_at: new Date() },
         });
 
-      await sendVerificationEmail(email, code);
-      return reply.status(200).send({ sent: true });
+      const emailId = await sendVerificationEmail(email, code);
+      fastify.log.info({ emailId, email, event: 'verification_email_accepted' });
+      return reply.status(200).send({ sent: true, resend_available_in_seconds: 30 });
     } catch (err) {
       fastify.log.error(err);
       // Send failure (e.g. Resend domain not verified yet, provider outage):
