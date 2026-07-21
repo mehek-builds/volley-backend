@@ -22,6 +22,7 @@ import { harvestRoutes } from './routes/harvest';
 import { onboardingRoutes } from './routes/onboarding';
 import { assertEncryptionKeyConfigured } from './lib/fieldCrypto';
 import { metaRoutes } from './routes/meta';
+import { applicationRoutes } from './routes/applications';
 import { API_VERSION, PRODUCT_NAME, PRODUCT_LINKS } from './lib/product';
 import { createRateLimitHook, defaultRateLimitConfig, type RateLimitConfig } from './middleware/rateLimit';
 
@@ -179,6 +180,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await fastify.register(harvestRoutes);
   await fastify.register(onboardingRoutes);
   await fastify.register(applicationAnswerRoutes);
+  await fastify.register(applicationRoutes);
   await fastify.register(resumeRoutes);
   await fastify.register(accountRoutes);
   await fastify.register(resumeRetentionRoutes);

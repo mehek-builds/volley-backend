@@ -34,6 +34,7 @@ export const resumeQualityHoldResponseSchema = z.object({
 });
 
 export const resumeGenerateSuccessResponseSchema = z.object({
+  resume_id: z.string().uuid(),
   resume_url: z.string(),
   file_name: z.string(),
   spec: z.unknown(),

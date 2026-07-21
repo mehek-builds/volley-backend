@@ -1,7 +1,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { eq, desc } from 'drizzle-orm';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { put } from '@vercel/blob';
 import { db } from '../db/index';
 import { profiles, generated_resumes, autofill_events } from '../db/schema';
@@ -27,6 +27,7 @@ import {
 import { extractPdfText } from '../lib/pdfText';
 import { PRODUCT_NAME } from '../lib/product';
 import { applyResumePolicy, type CandidateEducation } from '../engine/resumePolicy';
+import { deriveEditedTerms } from '../lib/applicationReview';
 
 const MAX_SPEC_ATTEMPTS = 2; // 1 initial pass + 1 feedback-driven retry, per PRD-v2 Section 6.4's
 // "automated quality gate" - bounded so a stubborn JD can't loop the endpoint indefinitely.
@@ -425,7 +426,9 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       }));
     }
 
+    const resumeId = randomUUID();
     const responseTemplate = resumeGenerateSuccessResponseSchema.parse({
+      resume_id: resumeId,
       resume_url: 'validated-before-storage',
       file_name: `${body.contact.full_name.replace(/\s+/g, '_')}_${body.company.replace(/\s+/g, '_')}_Resume.pdf`,
       spec,
@@ -482,13 +485,24 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     }
 
     const jobContext = { company: body.company, role: body.role, jd_hash: jdHash };
+    const now = new Date().toISOString();
 
     try {
       await db.insert(generated_resumes).values({
+        id: resumeId,
         user_id: userId,
         job_context: jobContext,
         spec: {
           ...spec,
+          _contact: body.contact,
+          _review: {
+            jd_text: body.jd_text,
+            status: 'resume_ready',
+            edited_terms: deriveEditedTerms(spec, bank),
+            questions: [],
+            skipped_reasons: [],
+            updated_at: now,
+          },
           _quality: {
             specIssues: [],
             layoutIssues,
