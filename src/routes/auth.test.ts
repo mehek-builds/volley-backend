@@ -1,6 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildVerificationEmail, sendVerificationEmail } from './auth';
+import { buildVerificationEmail, sendVerificationEmail, verificationFailure } from './auth';
+import { createHash } from 'node:crypto';
 
 const EMAIL = 'person@example.com';
 const CODE = '123456';
@@ -99,6 +100,68 @@ describe('verification email delivery requests', () => {
     await assert.rejects(
       () => sendVerificationEmail(EMAIL, CODE, fakeFetch as typeof fetch),
       /without returning an email id/,
+    );
+  });
+});
+
+describe('verification code edge cases', () => {
+  const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+  const now = new Date('2026-07-21T08:00:00.000Z');
+
+  test('accepts the matching unexpired code with attempts remaining', () => {
+    assert.equal(
+      verificationFailure(
+        { code_hash: hash(CODE), expires_at: new Date('2026-07-21T08:10:00.000Z'), attempts: 4 },
+        CODE,
+        now,
+      ),
+      null,
+    );
+  });
+
+  test('rejects missing and expired codes without consuming an attempt', () => {
+    assert.deepEqual(verificationFailure(undefined, CODE, now), {
+      status: 400,
+      error: 'Code expired or not found. Request a new one.',
+      incrementAttempts: false,
+    });
+    assert.deepEqual(
+      verificationFailure(
+        { code_hash: hash(CODE), expires_at: new Date('2026-07-21T07:59:59.000Z'), attempts: 0 },
+        CODE,
+        now,
+      ),
+      {
+        status: 400,
+        error: 'Code expired or not found. Request a new one.',
+        incrementAttempts: false,
+      },
+    );
+  });
+
+  test('locks a code after five incorrect attempts', () => {
+    assert.deepEqual(
+      verificationFailure(
+        { code_hash: hash(CODE), expires_at: new Date('2026-07-21T08:10:00.000Z'), attempts: 5 },
+        CODE,
+        now,
+      ),
+      {
+        status: 429,
+        error: 'Too many attempts. Request a new code.',
+        incrementAttempts: false,
+      },
+    );
+  });
+
+  test('counts an incorrect code only while the active code can still be used', () => {
+    assert.deepEqual(
+      verificationFailure(
+        { code_hash: hash(CODE), expires_at: new Date('2026-07-21T08:10:00.000Z'), attempts: 2 },
+        '654321',
+        now,
+      ),
+      { status: 400, error: 'Incorrect code.', incrementAttempts: true },
     );
   });
 });

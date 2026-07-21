@@ -4,7 +4,7 @@ import { SignJWT } from 'jose';
 import { createHash, randomInt } from 'node:crypto';
 import { db } from '../db/index';
 import { users, email_verification_codes } from '../db/schema';
-import { eq } from 'drizzle-orm';
+import { and, eq, gte, lt, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import { allowHourly, rateLimitedReply, LIMITS, TRIAL_DAYS } from '../middleware/quota';
 import { PRODUCT_LINKS, PRODUCT_NAME } from '../lib/product';
@@ -25,8 +25,45 @@ function trialEnd(): Date {
 }
 const MAX_ATTEMPTS = 5;
 
+type VerificationRecord = {
+  code_hash: string;
+  expires_at: Date;
+  attempts: number;
+};
+
+type VerificationFailure = {
+  status: 400 | 429;
+  error: string;
+  incrementAttempts: boolean;
+};
+
 function hashCode(code: string): string {
   return createHash('sha256').update(code).digest('hex');
+}
+
+export function verificationFailure(
+  record: VerificationRecord | undefined,
+  submittedCode: string,
+  now = new Date(),
+): VerificationFailure | null {
+  if (!record || record.expires_at < now) {
+    return {
+      status: 400,
+      error: 'Code expired or not found. Request a new one.',
+      incrementAttempts: false,
+    };
+  }
+  if (record.attempts >= MAX_ATTEMPTS) {
+    return {
+      status: 429,
+      error: 'Too many attempts. Request a new code.',
+      incrementAttempts: false,
+    };
+  }
+  if (record.code_hash !== hashCode(submittedCode)) {
+    return { status: 400, error: 'Incorrect code.', incrementAttempts: true };
+  }
+  return null;
 }
 
 function verificationSender(): string {
@@ -258,8 +295,8 @@ export async function authRoutes(fastify: FastifyInstance) {
     } catch (err) {
       fastify.log.error(err);
       // Send failure (e.g. Resend domain not verified yet, provider outage):
-      // report verification as unavailable so clients fall back to the legacy
-      // signup path instead of dead-ending the user.
+      // report verification as unavailable. Clients must keep ownership verification
+      // mandatory and provide a retry path rather than minting an unverified session.
       return reply.status(503).send({ error: 'verification_unavailable' });
     }
   });
@@ -293,42 +330,71 @@ export async function authRoutes(fastify: FastifyInstance) {
         .where(eq(email_verification_codes.email, email))
         .limit(1);
       const record = rows[0];
-
-      if (!record || record.expires_at < new Date()) {
-        return reply.status(400).send({ error: 'Code expired or not found. Request a new one.' });
-      }
-      if (record.attempts >= MAX_ATTEMPTS) {
-        return reply.status(429).send({ error: 'Too many attempts. Request a new code.' });
-      }
-
-      if (record.code_hash !== hashCode(body.code)) {
+      const failure = verificationFailure(record, body.code);
+      if (failure) {
+        if (failure.incrementAttempts && record) {
         await db
           .update(email_verification_codes)
-          .set({ attempts: record.attempts + 1 })
-          .where(eq(email_verification_codes.email, email));
-        return reply.status(400).send({ error: 'Incorrect code.' });
+            .set({ attempts: sql`${email_verification_codes.attempts} + 1` })
+            .where(
+              and(
+                eq(email_verification_codes.email, email),
+                eq(email_verification_codes.code_hash, record.code_hash),
+                lt(email_verification_codes.attempts, MAX_ATTEMPTS),
+              ),
+            );
+        }
+        return reply.status(failure.status).send({ error: failure.error });
       }
 
-      // Code is good: burn it, mark the user verified, issue a session.
-      await db.delete(email_verification_codes).where(eq(email_verification_codes.email, email));
+      // Consume the exact code and create or update the user in one transaction. A
+      // concurrent verify cannot reuse the code, and a database failure rolls the
+      // deletion back so the user can retry instead of being stranded.
+      const verifiedUser = await db.transaction(async (tx) => {
+        const consumed = await tx
+          .delete(email_verification_codes)
+          .where(
+            and(
+              eq(email_verification_codes.email, email),
+              eq(email_verification_codes.code_hash, hashCode(body.code)),
+              gte(email_verification_codes.expires_at, new Date()),
+              lt(email_verification_codes.attempts, MAX_ATTEMPTS),
+            ),
+          )
+          .returning({ email: email_verification_codes.email });
+        if (consumed.length === 0) return null;
 
-      let user = await db.select().from(users).where(eq(users.email, email)).limit(1);
-      if (user.length === 0) {
-        await db.insert(users).values({ id: uuidv4(), email, email_verified: true, trial_ends_at: trialEnd(), created_at: new Date() });
-        user = await db.select().from(users).where(eq(users.email, email)).limit(1);
-      } else if (!user[0].email_verified) {
-        // Adopting a pre-existing UNVERIFIED account onto the same users.id. Any
-        // token already out for this account was minted without proof of email
-        // ownership (a no-RESEND break-glass window), so bump the token epoch:
-        // requireAuth rejects every JWT with iat before session_valid_from. The
-        // token we sign below postdates this instant and stays valid.
-        await db
-          .update(users)
-          .set({ email_verified: true, session_valid_from: new Date() })
-          .where(eq(users.email, email));
+        const existing = await tx.select().from(users).where(eq(users.email, email)).limit(1);
+        if (existing.length === 0) {
+          const created = await tx
+            .insert(users)
+            .values({
+              id: uuidv4(),
+              email,
+              email_verified: true,
+              trial_ends_at: trialEnd(),
+              created_at: new Date(),
+            })
+            .returning({ id: users.id, email: users.email });
+          return created[0] ?? null;
+        }
+
+        if (!existing[0].email_verified) {
+          // Adopting a pre-existing UNVERIFIED account onto the same users.id. Any
+          // old unverified token is invalidated before this verified token is signed.
+          await tx
+            .update(users)
+            .set({ email_verified: true, session_valid_from: new Date() })
+            .where(eq(users.email, email));
+        }
+        return { id: existing[0].id, email: existing[0].email };
+      });
+
+      if (!verifiedUser) {
+        return reply.status(400).send({ error: 'Code expired or not found. Request a new one.' });
       }
 
-      const token = await signSessionToken(user[0].id, user[0].email);
+      const token = await signSessionToken(verifiedUser.id, verifiedUser.email);
       return reply.status(200).send({ token });
     } catch (err) {
       fastify.log.error(err);
