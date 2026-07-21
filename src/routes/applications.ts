@@ -17,12 +17,14 @@ import {
   readApplicationReview,
   type ApplicationReviewQuestion,
 } from '../lib/applicationReview';
+import { getLiveViewUrl, isBrowserbaseConfigured } from '../lib/browserbase';
 import { apiBaseFor } from '../lib/apiBase';
 import { extractPdfText } from '../lib/pdfText';
 import { mintDownloadToken } from '../lib/resumeAccess';
 import { normalizeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import { requireAuth } from '../middleware/auth';
 import { declaredSkillsList } from './profile';
+import { processSubmissionApplication } from './submissionRunner';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
 const questionSchema = z.object({
@@ -42,7 +44,7 @@ const submitBodySchema = z.object({
   questions: z.array(questionSchema).max(100),
 });
 const statusBodySchema = z.object({
-  status: z.enum(['submitting', 'submitted', 'failed']),
+  status: z.literal('failed'),
   error: z.string().max(2000).optional(),
 });
 
@@ -221,6 +223,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const stored = row.spec as StoredSpec;
       const current = readApplicationReview(stored);
       if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
+      if (!isBrowserbaseConfigured()) {
+        return reply.status(503).send({
+          error: 'The secure portal runner is not configured yet. Add the Browserbase API key.',
+          code: 'PORTAL_RUNNER_NOT_CONFIGURED',
+        });
+      }
       const next = {
         ...current,
         questions: parsed.data.questions as ApplicationReviewQuestion[],
@@ -228,7 +236,70 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         updated_at: new Date().toISOString(),
       };
       await db.update(generated_resumes).set({ spec: { ...stored, _review: next } }).where(eq(generated_resumes.id, row.id));
-      return reply.status(202).send({ application_id: row.id, review: next });
+      const processed = await processSubmissionApplication(row.id, fastify);
+      return reply.status(202).send({ application_id: row.id, review: processed ?? next });
+    },
+  );
+
+  fastify.get(
+    '/applications/:id/submission',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      const review = readApplicationReview(row.spec);
+      if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
+      let handoff_url: string | undefined;
+      if (review.status === 'needs_attention' && review.browser_session_id) {
+        try {
+          handoff_url = await getLiveViewUrl(review.browser_session_id);
+        } catch {
+          handoff_url = undefined;
+        }
+      }
+      return reply.send({ application_id: row.id, review, handoff_url, configured: isBrowserbaseConfigured() });
+    },
+  );
+
+  fastify.post(
+    '/applications/:id/submission/handoff-complete',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      const stored = row.spec as StoredSpec;
+      const current = readApplicationReview(stored);
+      if (!current || current.status !== 'needs_attention') {
+        return reply.status(409).send({ error: 'This application is not waiting for portal attention' });
+      }
+      if (current.handoff_expires_at && Date.parse(current.handoff_expires_at) < Date.now()) {
+        return reply.status(409).send({ error: 'The secure portal session expired. Start the submission again.' });
+      }
+      const next = { ...current, status: 'ready_for_final_approval' as const, attention_reason: undefined, updated_at: new Date().toISOString() };
+      await db.update(generated_resumes).set({ spec: { ...stored, _review: next } }).where(eq(generated_resumes.id, row.id));
+      return reply.send({ application_id: row.id, review: next });
+    },
+  );
+
+  fastify.post(
+    '/applications/:id/submission/approve',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      const stored = row.spec as StoredSpec;
+      const current = readApplicationReview(stored);
+      if (!current || current.status !== 'ready_for_final_approval') {
+        return reply.status(409).send({ error: 'Review the prepared portal before final approval' });
+      }
+      if (current.handoff_expires_at && Date.parse(current.handoff_expires_at) < Date.now()) {
+        return reply.status(409).send({ error: 'The secure portal session expired. Start the submission again.' });
+      }
+      const now = new Date().toISOString();
+      const next = { ...current, status: 'submitting' as const, final_approved_at: now, updated_at: now };
+      await db.update(generated_resumes).set({ spec: { ...stored, _review: next } }).where(eq(generated_resumes.id, row.id));
+      const processed = await processSubmissionApplication(row.id, fastify);
+      return reply.status(202).send({ application_id: row.id, review: processed ?? next });
     },
   );
 
@@ -248,8 +319,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         ...current,
         status: parsed.data.status,
         updated_at: now,
-        ...(parsed.data.status === 'submitted' ? { submitted_at: now, submission_error: undefined } : {}),
-        ...(parsed.data.status === 'failed' ? { submission_error: parsed.data.error ?? 'The company portal rejected the submission.' } : {}),
+        submission_error: parsed.data.error ?? 'The company portal rejected the submission.',
       };
       await db.update(generated_resumes).set({ spec: { ...stored, _review: next } }).where(eq(generated_resumes.id, row.id));
       return reply.send({ application_id: row.id, review: next });

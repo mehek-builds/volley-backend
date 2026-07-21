@@ -10,6 +10,7 @@
   ],
   "crons": [
     { "path": "/internal/adapter-health-check", "schedule": "0 13 * * *" },
-    { "path": "/internal/resume-retention-sweep", "schedule": "30 3 * * *" }
+    { "path": "/internal/resume-retention-sweep", "schedule": "30 3 * * *" },
+    { "path": "/internal/application-submission-runner", "schedule": "15 4 * * *" }
   ]
 }
