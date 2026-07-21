@@ -115,6 +115,11 @@ export function findPdfTextFidelityIssues(
   contact: ContactHeader,
 ): string[] {
   const rendered = normalizedPdfText(extractedText);
+  // pdf.js may omit or insert whitespace where PDFKit wraps a text run across lines. That is a
+  // text-extraction artifact, not lost resume content. Production resumes were being rejected
+  // whenever one otherwise intact bullet wrapped at exactly such a boundary. Compare every
+  // expected field without whitespace while still requiring the same characters, order, and
+  // occurrence count. Unsupported or missing glyphs still fail closed.
   const renderedWithoutWhitespace = rendered.replace(/\s+/g, '');
   const expected: Array<{ label: string; value: string | undefined }> = [
     { label: 'header name', value: contact.full_name },
@@ -148,18 +153,12 @@ export function findPdfTextFidelityIssues(
 
   return presentExpected
     .filter(({ label, normalized }) => {
-      if (label === 'header name' && !rendered.startsWith(normalized)) return true;
+      const target = normalized.replace(/\s+/g, '');
+      if (label === 'header name' && !renderedWithoutWhitespace.startsWith(target)) return true;
 
-      const ignoresWhitespace = !/\s/.test(normalized);
-      const target = ignoresWhitespace ? normalized.replace(/\s+/g, '') : normalized;
-      const actualOccurrences = occurrenceCount(
-        ignoresWhitespace ? renderedWithoutWhitespace : rendered,
-        target,
-      );
+      const actualOccurrences = occurrenceCount(renderedWithoutWhitespace, target);
       const expectedOccurrences = presentExpected.reduce((total, item) => {
-        const expectedText = ignoresWhitespace
-          ? item.normalized.replace(/\s+/g, '')
-          : item.normalized;
+        const expectedText = item.normalized.replace(/\s+/g, '');
         return total + occurrenceCount(expectedText, target);
       }, 0);
 
