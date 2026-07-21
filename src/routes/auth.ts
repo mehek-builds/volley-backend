@@ -4,10 +4,10 @@ import { SignJWT } from 'jose';
 import { createHash, randomInt } from 'node:crypto';
 import { db } from '../db/index';
 import { users, email_verification_codes } from '../db/schema';
-import { eq } from 'drizzle-orm';
+import { and, eq, gte, lt, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import { allowHourly, rateLimitedReply, LIMITS, TRIAL_DAYS } from '../middleware/quota';
-import { PRODUCT_NAME } from '../lib/product';
+import { PRODUCT_LINKS, PRODUCT_NAME } from '../lib/product';
 
 const sessionBodySchema = z.object({
   email: z.string().email(),
@@ -25,8 +25,60 @@ function trialEnd(): Date {
 }
 const MAX_ATTEMPTS = 5;
 
+type VerificationRecord = {
+  code_hash: string;
+  expires_at: Date;
+  attempts: number;
+};
+
+type VerificationFailure = {
+  status: 400 | 429;
+  error: string;
+  incrementAttempts: boolean;
+};
+
 function hashCode(code: string): string {
   return createHash('sha256').update(code).digest('hex');
+}
+
+export function verificationFailure(
+  record: VerificationRecord | undefined,
+  submittedCode: string,
+  now = new Date(),
+): VerificationFailure | null {
+  if (!record || record.expires_at < now) {
+    return {
+      status: 400,
+      error: 'Code expired or not found. Request a new one.',
+      incrementAttempts: false,
+    };
+  }
+  if (record.attempts >= MAX_ATTEMPTS) {
+    return {
+      status: 429,
+      error: 'Too many attempts. Request a new code.',
+      incrementAttempts: false,
+    };
+  }
+  if (record.code_hash !== hashCode(submittedCode)) {
+    return { status: 400, error: 'Incorrect code.', incrementAttempts: true };
+  }
+  return null;
+}
+
+function verificationSender(): string {
+  const configured = process.env.RESEND_FROM?.trim() || 'onboarding@resend.dev';
+  const openBracket = configured.lastIndexOf('<');
+  const mailbox =
+    openBracket >= 0 && configured.endsWith('>')
+      ? configured.slice(openBracket + 1, -1).trim()
+      : configured;
+
+  if (!z.string().email().safeParse(mailbox).success) {
+    throw new Error('RESEND_FROM must contain a valid email address');
+  }
+
+  return `${PRODUCT_NAME} <${mailbox}>`;
 }
 
 async function signSessionToken(userId: string, email: string): Promise<string> {
@@ -41,18 +93,75 @@ async function signSessionToken(userId: string, email: string): Promise<string> 
 
 export function buildVerificationEmail(email: string, code: string) {
   if (!/^\d{6}$/.test(code)) throw new Error('Verification code must be six digits');
+  const signInUrl = new URL('/login', PRODUCT_LINKS.website).toString();
+  const iconUrl = new URL('/icon.png', PRODUCT_LINKS.website).toString();
+
   return {
-    from: process.env.RESEND_FROM || `${PRODUCT_NAME} <onboarding@resend.dev>`,
+    from: verificationSender(),
     to: [email],
     subject: `${code} is your ${PRODUCT_NAME} verification code`,
-    html: `<p>Welcome to ${PRODUCT_NAME}. Your verification code is:</p><p><strong>${code}</strong></p><p>It expires in 10 minutes. If you did not request this, you can ignore this email.</p>`,
+    html: `<!doctype html>
+<html lang="en">
+  <body style="margin:0;padding:0;background-color:#f7f7f5;color:#12120f;">
+    <p style="display:none;max-height:0;overflow:hidden;opacity:0;">Your ${PRODUCT_NAME} verification code is ${code}. It expires in 10 minutes.</p>
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+      <tr>
+        <td align="center" style="padding:32px 16px;">
+          <table role="presentation" width="600" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:600px;background-color:#ffffff;border:1px solid #e8e6e1;border-radius:20px;overflow:hidden;">
+            <tr>
+              <td style="padding:24px 32px;background-color:#eef1fe;border-bottom:1px solid #e8e6e1;">
+                <p style="margin:0;">
+                  <img src="${iconUrl}" width="40" height="40" alt="${PRODUCT_NAME}" style="display:inline-block;vertical-align:middle;border:0;" />
+                  <strong style="vertical-align:middle;color:#12120f;">${PRODUCT_NAME}</strong>
+                </p>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:36px 32px;">
+                <h1 style="margin:0 0 16px;color:#12120f;">You're one quick step away</h1>
+                <p style="margin:0 0 24px;color:#6b6a64;">We're so excited to have you here. Enter this code to finish signing in and keep your job search moving with ${PRODUCT_NAME}.</p>
+                <p style="margin:0 0 8px;color:#6b6a64;">Your verification code</p>
+                <h2 aria-label="Verification code ${code.split('').join(' ')}" style="margin:0 0 24px;padding:18px 20px;background-color:#eef1fe;border:1px solid #dce2fa;border-radius:12px;color:#12120f;">${code}</h2>
+                <p style="margin:0 0 28px;">
+                  <a href="${signInUrl}" style="display:inline-block;padding:13px 20px;background-color:#6b84e8;color:#ffffff;text-decoration:none;border-radius:999px;">Finish signing in</a>
+                </p>
+                <p style="margin:0 0 28px;color:#6b6a64;">If the button does not work, open <a href="${signInUrl}" style="color:#4f68c9;">${signInUrl}</a>.</p>
+                <h2 style="margin:0 0 12px;color:#12120f;">Once you're in</h2>
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:0 0 20px;background-color:#f7f7f5;border:1px solid #e8e6e1;border-radius:12px;">
+                  <tr>
+                    <td align="center" style="padding:14px 8px;color:#12120f;">Find roles</td>
+                    <td align="center" style="padding:14px 4px;color:#6b84e8;">&#8594;</td>
+                    <td align="center" style="padding:14px 8px;color:#12120f;">Tailor</td>
+                    <td align="center" style="padding:14px 4px;color:#6b84e8;">&#8594;</td>
+                    <td align="center" style="padding:14px 8px;color:#12120f;">Apply</td>
+                  </tr>
+                </table>
+                <ul style="margin:0 0 28px;padding-left:20px;color:#6b6a64;">
+                  <li style="margin-bottom:8px;">Tailor and fill applications with less repetitive work.</li>
+                  <li style="margin-bottom:8px;">Keep every opportunity organized in one dashboard.</li>
+                  <li>Draft thoughtful recruiter outreach when you want it.</li>
+                </ul>
+                <p style="margin:0;color:#6b6a64;">This code expires in 10 minutes. If you did not request it, you can safely ignore this email.</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`,
+    text: `You're one quick step away\n\nWe're so excited to have you here. Enter this code to finish signing in to ${PRODUCT_NAME}:\n\n${code}\n\nFinish signing in: ${signInUrl}\n\nOnce you're in, ${PRODUCT_NAME} can help you tailor and fill applications, keep opportunities organized, and draft recruiter outreach.\n\nThis code expires in 10 minutes. If you did not request it, you can safely ignore this email.`,
   };
 }
 
 // Sends the 6-digit code via Resend's HTTPS API. Requires RESEND_API_KEY and
 // RESEND_FROM, which must be a sender on a domain verified in Resend.
-async function sendVerificationEmail(email: string, code: string): Promise<void> {
-  const res = await fetch('https://api.resend.com/emails', {
+export async function sendVerificationEmail(
+  email: string,
+  code: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<string> {
+  const res = await fetchImpl('https://api.resend.com/emails', {
     method: 'POST',
     // Bound the wait so a hung Resend can't hold the request open indefinitely; the caller
     // treats a throw here as "verification unavailable" and 503s the client to the fallback.
@@ -67,6 +176,12 @@ async function sendVerificationEmail(email: string, code: string): Promise<void>
     const text = await res.text().catch(() => res.statusText);
     throw new Error(`Resend API ${res.status}: ${text}`);
   }
+
+  const result = (await res.json().catch(() => null)) as { id?: unknown } | null;
+  if (typeof result?.id !== 'string' || result.id.length === 0) {
+    throw new Error('Resend API accepted the request without returning an email id');
+  }
+  return result.id;
 }
 
 export async function authRoutes(fastify: FastifyInstance) {
@@ -174,13 +289,14 @@ export async function authRoutes(fastify: FastifyInstance) {
           set: { code_hash: hashCode(code), expires_at: new Date(Date.now() + CODE_TTL_MS), attempts: 0, created_at: new Date() },
         });
 
-      await sendVerificationEmail(email, code);
-      return reply.status(200).send({ sent: true });
+      const emailId = await sendVerificationEmail(email, code);
+      fastify.log.info({ emailId, email, event: 'verification_email_accepted' });
+      return reply.status(200).send({ sent: true, resend_available_in_seconds: 30 });
     } catch (err) {
       fastify.log.error(err);
       // Send failure (e.g. Resend domain not verified yet, provider outage):
-      // report verification as unavailable so clients fall back to the legacy
-      // signup path instead of dead-ending the user.
+      // report verification as unavailable. Clients must keep ownership verification
+      // mandatory and provide a retry path rather than minting an unverified session.
       return reply.status(503).send({ error: 'verification_unavailable' });
     }
   });
@@ -214,42 +330,71 @@ export async function authRoutes(fastify: FastifyInstance) {
         .where(eq(email_verification_codes.email, email))
         .limit(1);
       const record = rows[0];
-
-      if (!record || record.expires_at < new Date()) {
-        return reply.status(400).send({ error: 'Code expired or not found. Request a new one.' });
-      }
-      if (record.attempts >= MAX_ATTEMPTS) {
-        return reply.status(429).send({ error: 'Too many attempts. Request a new code.' });
-      }
-
-      if (record.code_hash !== hashCode(body.code)) {
+      const failure = verificationFailure(record, body.code);
+      if (failure) {
+        if (failure.incrementAttempts && record) {
         await db
           .update(email_verification_codes)
-          .set({ attempts: record.attempts + 1 })
-          .where(eq(email_verification_codes.email, email));
-        return reply.status(400).send({ error: 'Incorrect code.' });
+            .set({ attempts: sql`${email_verification_codes.attempts} + 1` })
+            .where(
+              and(
+                eq(email_verification_codes.email, email),
+                eq(email_verification_codes.code_hash, record.code_hash),
+                lt(email_verification_codes.attempts, MAX_ATTEMPTS),
+              ),
+            );
+        }
+        return reply.status(failure.status).send({ error: failure.error });
       }
 
-      // Code is good: burn it, mark the user verified, issue a session.
-      await db.delete(email_verification_codes).where(eq(email_verification_codes.email, email));
+      // Consume the exact code and create or update the user in one transaction. A
+      // concurrent verify cannot reuse the code, and a database failure rolls the
+      // deletion back so the user can retry instead of being stranded.
+      const verifiedUser = await db.transaction(async (tx) => {
+        const consumed = await tx
+          .delete(email_verification_codes)
+          .where(
+            and(
+              eq(email_verification_codes.email, email),
+              eq(email_verification_codes.code_hash, hashCode(body.code)),
+              gte(email_verification_codes.expires_at, new Date()),
+              lt(email_verification_codes.attempts, MAX_ATTEMPTS),
+            ),
+          )
+          .returning({ email: email_verification_codes.email });
+        if (consumed.length === 0) return null;
 
-      let user = await db.select().from(users).where(eq(users.email, email)).limit(1);
-      if (user.length === 0) {
-        await db.insert(users).values({ id: uuidv4(), email, email_verified: true, trial_ends_at: trialEnd(), created_at: new Date() });
-        user = await db.select().from(users).where(eq(users.email, email)).limit(1);
-      } else if (!user[0].email_verified) {
-        // Adopting a pre-existing UNVERIFIED account onto the same users.id. Any
-        // token already out for this account was minted without proof of email
-        // ownership (a no-RESEND break-glass window), so bump the token epoch:
-        // requireAuth rejects every JWT with iat before session_valid_from. The
-        // token we sign below postdates this instant and stays valid.
-        await db
-          .update(users)
-          .set({ email_verified: true, session_valid_from: new Date() })
-          .where(eq(users.email, email));
+        const existing = await tx.select().from(users).where(eq(users.email, email)).limit(1);
+        if (existing.length === 0) {
+          const created = await tx
+            .insert(users)
+            .values({
+              id: uuidv4(),
+              email,
+              email_verified: true,
+              trial_ends_at: trialEnd(),
+              created_at: new Date(),
+            })
+            .returning({ id: users.id, email: users.email });
+          return created[0] ?? null;
+        }
+
+        if (!existing[0].email_verified) {
+          // Adopting a pre-existing UNVERIFIED account onto the same users.id. Any
+          // old unverified token is invalidated before this verified token is signed.
+          await tx
+            .update(users)
+            .set({ email_verified: true, session_valid_from: new Date() })
+            .where(eq(users.email, email));
+        }
+        return { id: existing[0].id, email: existing[0].email };
+      });
+
+      if (!verifiedUser) {
+        return reply.status(400).send({ error: 'Code expired or not found. Request a new one.' });
       }
 
-      const token = await signSessionToken(user[0].id, user[0].email);
+      const token = await signSessionToken(verifiedUser.id, verifiedUser.email);
       return reply.status(200).send({ token });
     } catch (err) {
       fastify.log.error(err);
