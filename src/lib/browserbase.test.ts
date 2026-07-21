@@ -29,10 +29,15 @@ test('session body disables CAPTCHA solving and restricts navigation to the port
 });
 
 test('legacy project ID remains optional and compatible', () => {
-  assert.equal(
-    browserSessionBody('context-1', 'https://jobs.lever.co/acme/123', 'project-1').projectId,
-    'project-1',
-  );
+  assert.deepEqual(browserSessionBody('context-1', 'https://jobs.lever.co/acme/123', 'project-1'), {
+    projectId: 'project-1',
+    keepAlive: true,
+    browserSettings: {
+      context: { id: 'context-1', persist: true },
+      allowedDomains: ['jobs.lever.co'],
+      solveCaptchas: false,
+    },
+  });
 });
 
 test('Stratus session body preserves the browser identity and pauses on protection challenges', () => {
