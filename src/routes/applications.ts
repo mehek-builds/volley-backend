@@ -225,7 +225,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
       if (!isBrowserbaseConfigured()) {
         return reply.status(503).send({
-          error: 'The secure portal runner is not configured yet. Add the Browserbase API key and project ID.',
+          error: 'The secure portal runner is not configured yet. Add the Browserbase API key.',
           code: 'PORTAL_RUNNER_NOT_CONFIGURED',
         });
       }

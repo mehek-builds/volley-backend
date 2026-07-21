@@ -69,7 +69,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
   const portal = detectPortal(current.portal_url);
   const runId = current.submission_run_id ?? randomUUID();
   const contextId = current.browser_context_id ?? (await createBrowserContext());
-  const session = await createBrowserSession(contextId);
+  const session = await createBrowserSession(contextId, current.portal_url);
   {
     const connected = await connectToSession(session);
     const page = connected.page;
