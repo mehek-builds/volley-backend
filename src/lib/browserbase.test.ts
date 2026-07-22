@@ -79,10 +79,14 @@ test('managed Stratus requires its production URL and private API key', () => {
   const previousProvider = process.env.BROWSER_PROVIDER;
   const previousStratusKey = process.env.STRATUS_API_KEY;
   const previousStratusUrl = process.env.STRATUS_BASE_URL;
+  const previousVercelEnv = process.env.VERCEL_ENV;
   process.env.BROWSER_PROVIDER = 'stratus-managed';
   delete process.env.STRATUS_API_KEY;
   process.env.STRATUS_BASE_URL = 'https://stratus-browser-cloud.vercel.app';
   assert.equal(isBrowserbaseConfigured(), false);
+  process.env.VERCEL_ENV = 'production';
+  assert.equal(isBrowserbaseConfigured(), true);
+  delete process.env.VERCEL_ENV;
   process.env.STRATUS_API_KEY = 'private-key';
   assert.equal(isBrowserbaseConfigured(), true);
   if (previousProvider === undefined) delete process.env.BROWSER_PROVIDER;
@@ -91,6 +95,8 @@ test('managed Stratus requires its production URL and private API key', () => {
   else process.env.STRATUS_API_KEY = previousStratusKey;
   if (previousStratusUrl === undefined) delete process.env.STRATUS_BASE_URL;
   else process.env.STRATUS_BASE_URL = previousStratusUrl;
+  if (previousVercelEnv === undefined) delete process.env.VERCEL_ENV;
+  else process.env.VERCEL_ENV = previousVercelEnv;
 });
 
 test('managed Stratus posts bounded actions to the private production run endpoint', async () => {
