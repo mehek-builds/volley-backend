@@ -1,4 +1,5 @@
 import type { Page } from 'playwright-core';
+import type { ManagedBrowserAction, ManagedBrowserResult } from './browserbase';
 
 export type SupportedPortal = 'greenhouse' | 'lever' | 'ashby' | 'controlled_test';
 
@@ -19,6 +20,85 @@ export type FillResult = {
   filledFields: string[];
   blockers: string[];
 };
+
+function receiptReference(body: string): string | undefined {
+  return body.match(/(?:confirmation|reference)(?:\s*(?:id|number))?\s*[:#]\s*([A-Z0-9-]{5,})/i)?.[1]
+    ?? body.match(/application\s*(?:id|number|#)\s*[:#]?\s*([A-Z0-9-]{5,})/i)?.[1];
+}
+
+function managedFill(
+  actions: ManagedBrowserAction[],
+  selector: string,
+  value: string | undefined,
+  label: string,
+  optional = true,
+) {
+  if (!value) return;
+  actions.push({ type: 'fill', selector, value, label, optional });
+}
+
+export function buildManagedPortalActions(
+  portal: SupportedPortal,
+  packet: SubmissionPacket,
+  submit = false,
+): ManagedBrowserAction[] {
+  const actions: ManagedBrowserAction[] = [];
+  if (portal === 'greenhouse' || portal === 'controlled_test') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    managedFill(actions, '#first_name, input[name="job_application[first_name]"]', parts[0], 'first_name', false);
+    managedFill(actions, '#last_name, input[name="job_application[last_name]"]', parts.slice(1).join(' '), 'last_name', false);
+    managedFill(actions, '#email, input[name="job_application[email]"]', packet.email, 'email', false);
+    managedFill(actions, '#phone, input[name="job_application[phone]"]', packet.phone, 'phone');
+    managedFill(actions, '#candidate-location, input[autocomplete="address-level2"]', packet.city, 'location');
+    actions.push({
+      type: 'upload',
+      selector: '#resume, input[type="file"][name="job_application[resume]"]',
+      label: 'resume',
+      file: { name: packet.resumeName, mimeType: 'application/pdf', base64: packet.resume.toString('base64') },
+    });
+  } else if (portal === 'lever') {
+    managedFill(actions, 'input[name="name"]', packet.fullName, 'name', false);
+    managedFill(actions, 'input[name="email"]', packet.email, 'email', false);
+    managedFill(actions, 'input[name="phone"]', packet.phone, 'phone');
+    managedFill(actions, 'input[name="urls[LinkedIn]"]', packet.linkedinUrl, 'linkedin');
+    managedFill(actions, 'input[name="urls[GitHub]"]', packet.githubUrl, 'github');
+    managedFill(actions, 'input[name="urls[Portfolio]"]', packet.portfolioUrl, 'portfolio');
+    actions.push({
+      type: 'upload', selector: 'input[name="resume"][type="file"]', label: 'resume',
+      file: { name: packet.resumeName, mimeType: 'application/pdf', base64: packet.resume.toString('base64') },
+    });
+  } else {
+    managedFill(actions, 'input[name="_systemfield_name"]', packet.fullName, 'name', false);
+    managedFill(actions, 'input[name="_systemfield_email"]', packet.email, 'email', false);
+    managedFill(actions, 'input[name="_systemfield_phone"]', packet.phone, 'phone');
+    managedFill(actions, 'input[name="_systemfield_location"]', packet.city, 'location');
+    actions.push({
+      type: 'upload', selector: 'input[type="file"]', label: 'resume',
+      file: { name: packet.resumeName, mimeType: 'application/pdf', base64: packet.resume.toString('base64') },
+    });
+  }
+  for (const item of packet.questions) {
+    if (!item.answer.trim()) continue;
+    actions.push({
+      type: 'fillByLabelText', text: item.question, value: item.answer,
+      label: `question:${item.question.slice(0, 80)}`,
+    });
+  }
+  if (submit) actions.push({ type: 'click', selector: 'button[type="submit"], input[type="submit"]' });
+  return actions;
+}
+
+export function readManagedReceipt(result: ManagedBrowserResult): {
+  confirmationText: string;
+  finalUrl: string;
+  referenceId?: string;
+} {
+  const body = result.text.replace(/\s+/g, ' ').trim();
+  if (!/thank you|application (?:has been )?(?:submitted|received)|we received your application|success/i.test(body)) {
+    throw new Error('The portal did not show a verifiable submission confirmation');
+  }
+  return { confirmationText: body.slice(0, 1000), finalUrl: result.url, referenceId: receiptReference(body) };
+}
 
 const HOSTS: Record<Exclude<SupportedPortal, 'controlled_test'>, RegExp> = {
   greenhouse: /(^|\.)greenhouse\.io$/i,
@@ -139,9 +219,8 @@ export async function clickFinalSubmit(page: Page): Promise<void> {
 
 export async function readReceipt(page: Page): Promise<{ confirmationText: string; finalUrl: string; referenceId?: string }> {
   const body = (await page.locator('body').innerText()).replace(/\s+/g, ' ').trim();
-  const match = body.match(/(?:application|confirmation|reference)\s*(?:id|number|#)?\s*[:#]?\s*([A-Z0-9-]{5,})/i);
   if (!/thank you|application (?:has been )?(?:submitted|received)|we received your application|success/i.test(body)) {
     throw new Error('The portal did not show a verifiable submission confirmation');
   }
-  return { confirmationText: body.slice(0, 1000), finalUrl: page.url(), referenceId: match?.[1] };
+  return { confirmationText: body.slice(0, 1000), finalUrl: page.url(), referenceId: receiptReference(body) };
 }

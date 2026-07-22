@@ -1,11 +1,11 @@
 # Graph Report - .  (2026-07-22)
 
 ## Corpus Check
-- 87 files · ~72,883 words
+- 87 files · ~73,975 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 354 nodes · 643 edges · 18 communities detected
+- 361 nodes · 659 edges · 18 communities detected
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS
 - Token cost: 0 input · 0 output
 
@@ -43,12 +43,12 @@ Cohesion: 0.08
 Nodes (10): buildApp(), getApp(), handler(), start(), trustProxySetting(), allowHourly(), bumpCounter(), hourPeriod() (+2 more)
 
 ### Community 4 - "Community 4"
-Cohesion: 0.09
-Nodes (11): APOLLO_HEADERS(), apolloSearchIds(), fetchApolloContacts(), personaTitleBuckets(), learnPattern(), resolveEmail(), orderedPatterns(), renderTopCandidates() (+3 more)
+Cohesion: 0.12
+Nodes (20): clampExpansion(), interpolate(), resumeDesignAtExpansion(), acronymTokenOf(), bankEntryCorpus(), breaksTie(), bulletClaimIsGrounded(), contentWords() (+12 more)
 
 ### Community 5 - "Community 5"
-Cohesion: 0.13
-Nodes (17): acronymTokenOf(), bankEntryCorpus(), breaksTie(), bulletClaimIsGrounded(), contentWords(), findGroundingViolations(), findUngroundedSkills(), jdKeywords() (+9 more)
+Cohesion: 0.09
+Nodes (11): APOLLO_HEADERS(), apolloSearchIds(), fetchApolloContacts(), personaTitleBuckets(), learnPattern(), resolveEmail(), orderedPatterns(), renderTopCandidates() (+3 more)
 
 ### Community 6 - "Community 6"
 Cohesion: 0.09
@@ -59,36 +59,36 @@ Cohesion: 0.13
 Nodes (7): deleteBlobsForUser(), getKey(), listAll(), mintDownloadToken(), readDownloadToken(), resumePrefix(), sweepExpiredResumeBlobs()
 
 ### Community 8 - "Community 8"
-Cohesion: 0.2
-Nodes (11): fillFirst(), fillPortal(), fillReviewedQuestions(), uploadFirst(), buildPacket(), fail(), nextReview(), prepare() (+3 more)
-
-### Community 9 - "Community 9"
 Cohesion: 0.19
 Nodes (7): extractRankedItems(), metricTokens(), numberSignatures(), numStr(), signaturesOf(), splitListSegment(), ungroundedNumbers()
 
-### Community 10 - "Community 10"
+### Community 9 - "Community 9"
 Cohesion: 0.26
 Nodes (5): createRateLimitHook(), defaultRateLimitConfig(), InMemoryRateLimitStore, policyForRequest(), positiveInteger()
 
-### Community 11 - "Community 11"
-Cohesion: 0.27
+### Community 10 - "Community 10"
+Cohesion: 0.22
 Nodes (5): browserSessionBody(), config(), createBrowserSession(), getBrowserSession(), request()
+
+### Community 11 - "Community 11"
+Cohesion: 0.23
+Nodes (9): buildManagedPortalActions(), fillFirst(), fillPortal(), fillReviewedQuestions(), managedFill(), readManagedReceipt(), readReceipt(), receiptReference() (+1 more)
 
 ### Community 12 - "Community 12"
 Cohesion: 0.31
 Nodes (8): applyResumePolicy(), deriveCandidateContext(), metricCount(), orgScore(), overlapScore(), parseGraduationDate(), relevanceScore(), tokens()
 
 ### Community 13 - "Community 13"
+Cohesion: 0.53
+Nodes (8): buildPacket(), fail(), nextReview(), prepare(), prepareManaged(), processSubmissionApplication(), submit(), writeReview()
+
+### Community 14 - "Community 14"
 Cohesion: 0.39
 Nodes (6): buildContextBlock(), draftApplicationAnswer(), normalizeDraftedAnswer(), rankingGroundingFor(), rankingRuleText(), thinRankingWarning()
 
-### Community 14 - "Community 14"
+### Community 15 - "Community 15"
 Cohesion: 0.47
 Nodes (7): aliasGroupOf(), collapseInitialisms(), isAlumniMatch(), normalizeString(), parseSchool(), sameInstitutionByTokens(), tokenize()
-
-### Community 15 - "Community 15"
-Cohesion: 1.0
-Nodes (3): clampExpansion(), interpolate(), resumeDesignAtExpansion()
 
 ### Community 16 - "Community 16"
 Cohesion: 0.67
@@ -112,9 +112,9 @@ _Questions this graph is uniquely positioned to answer:_
 - **Should `Community 3` be split into smaller, more focused modules?**
   _Cohesion score 0.08 - nodes in this community are weakly interconnected._
 - **Should `Community 4` be split into smaller, more focused modules?**
-  _Cohesion score 0.09 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.12 - nodes in this community are weakly interconnected._
 - **Should `Community 5` be split into smaller, more focused modules?**
-  _Cohesion score 0.13 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.09 - nodes in this community are weakly interconnected._
 - **Should `Community 6` be split into smaller, more focused modules?**
   _Cohesion score 0.09 - nodes in this community are weakly interconnected._
 - **Should `Community 7` be split into smaller, more focused modules?**

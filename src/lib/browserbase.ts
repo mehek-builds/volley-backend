@@ -1,6 +1,27 @@
 import { chromium, type Browser, type Page } from 'playwright-core';
 
-export type BrowserProvider = 'browserbase' | 'stratus';
+export type BrowserProvider = 'browserbase' | 'stratus' | 'stratus-managed';
+
+export type ManagedBrowserAction = {
+  type: 'click' | 'fill' | 'fillByLabelText' | 'upload' | 'waitForSelector' | 'press' | 'select' | 'extract';
+  selector?: string;
+  value?: string;
+  text?: string;
+  label?: string;
+  optional?: boolean;
+  timeout?: number;
+  attribute?: string;
+  file?: { name: string; mimeType: string; base64: string };
+};
+
+export type ManagedBrowserResult = {
+  title: string;
+  url: string;
+  text: string;
+  screenshot?: string | null;
+  filledFields?: string[];
+  blockers?: string[];
+};
 
 type SessionResponse = {
   id: string;
@@ -9,11 +30,13 @@ type SessionResponse = {
 };
 
 function config() {
-  const provider: BrowserProvider = process.env.BROWSER_PROVIDER === 'stratus' || Boolean(process.env.STRATUS_BASE_URL)
-    ? 'stratus'
-    : 'browserbase';
+  const provider: BrowserProvider = process.env.BROWSER_PROVIDER === 'stratus-managed'
+    ? 'stratus-managed'
+    : process.env.BROWSER_PROVIDER === 'stratus' || Boolean(process.env.STRATUS_BASE_URL)
+      ? 'stratus'
+      : 'browserbase';
   const apiKey = process.env.BROWSER_API_KEY
-    ?? (provider === 'stratus' ? process.env.STRATUS_API_KEY : process.env.BROWSERBASE_API_KEY);
+    ?? (provider !== 'browserbase' ? process.env.STRATUS_API_KEY : process.env.BROWSERBASE_API_KEY);
   const projectId = process.env.BROWSERBASE_PROJECT_ID;
   const stratusBaseUrl = process.env.STRATUS_BASE_URL?.replace(/\/$/, '');
   const apiRoot = (process.env.BROWSER_API_ROOT
@@ -40,11 +63,39 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export function isBrowserbaseConfigured(): boolean {
-  const provider: BrowserProvider = process.env.BROWSER_PROVIDER === 'stratus' || Boolean(process.env.STRATUS_BASE_URL)
-    ? 'stratus'
-    : 'browserbase';
+  const provider: BrowserProvider = process.env.BROWSER_PROVIDER === 'stratus-managed'
+    ? 'stratus-managed'
+    : process.env.BROWSER_PROVIDER === 'stratus' || Boolean(process.env.STRATUS_BASE_URL)
+      ? 'stratus'
+      : 'browserbase';
+  if (provider === 'stratus-managed') {
+    return Boolean(process.env.STRATUS_BASE_URL?.trim() && process.env.STRATUS_API_KEY?.trim());
+  }
   return Boolean(process.env.BROWSER_API_KEY
     ?? (provider === 'stratus' ? process.env.STRATUS_API_KEY : process.env.BROWSERBASE_API_KEY));
+}
+
+export function isManagedStratusProvider(): boolean {
+  return process.env.BROWSER_PROVIDER === 'stratus-managed';
+}
+
+export async function runManagedBrowser(
+  portalUrl: string,
+  actions: ManagedBrowserAction[],
+): Promise<ManagedBrowserResult> {
+  const baseUrl = process.env.STRATUS_BASE_URL?.replace(/\/$/, '');
+  const apiKey = process.env.STRATUS_API_KEY?.trim();
+  if (!baseUrl || !apiKey) throw new Error('Stratus managed browser is not configured');
+  const response = await fetch(`${baseUrl}/api/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Stratus-API-Key': apiKey },
+    body: JSON.stringify({ url: portalUrl, actions, screenshot: true, fullPage: true, waitUntil: 'networkidle2' }),
+  });
+  const payload = await response.json().catch(() => ({})) as { run?: ManagedBrowserResult; error?: string };
+  if (!response.ok || !payload.run) {
+    throw new Error(payload.error || `Stratus managed browser request failed with status ${response.status}`);
+  }
+  return payload.run;
 }
 
 export async function createBrowserContext(): Promise<string> {
@@ -87,6 +138,7 @@ export function browserSessionBody(
 
 export async function createBrowserSession(contextId: string, portalUrl: string): Promise<SessionResponse> {
   const { projectId, provider } = config();
+  if (provider === 'stratus-managed') throw new Error('Managed Stratus uses bounded runs instead of persistent sessions');
   return request<SessionResponse>('/sessions', {
     method: 'POST',
     body: JSON.stringify(browserSessionBody(contextId, portalUrl, projectId, provider)),
