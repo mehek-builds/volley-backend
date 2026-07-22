@@ -209,6 +209,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
     },
   );
 
+  // Preparation endpoint only: save the packet answers and fill the employer portal.
+  // It must never click the employer's final submit control. That action is reserved
+  // for /submission/approve after the user has reviewed the captured portal preview.
   fastify.post(
     '/applications/:id/submit-request',
     { preHandler: requireAuth },
@@ -218,7 +221,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const parsed = submitBodySchema.safeParse(request.body);
       if (!parsed.success) return reply.status(400).send({ error: 'Invalid answers', detail: parsed.error.issues });
       if (parsed.data.questions.some((question) => question.required && !question.answer.trim())) {
-        return reply.status(422).send({ error: 'Answer every required question before submitting.' });
+        return reply.status(422).send({ error: 'Complete required profile answers before Litos prepares the portal.' });
       }
       const stored = row.spec as StoredSpec;
       const current = readApplicationReview(stored);
@@ -281,6 +284,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
     },
   );
 
+  // This is the single user approval gate for the employer's final submit action.
   fastify.post(
     '/applications/:id/submission/approve',
     { preHandler: requireAuth },
@@ -290,7 +294,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const stored = row.spec as StoredSpec;
       const current = readApplicationReview(stored);
       if (!current || current.status !== 'ready_for_final_approval') {
-        return reply.status(409).send({ error: 'Review the prepared portal before final approval' });
+        return reply.status(409).send({ error: 'Review the prepared portal before final submission' });
       }
       if (current.handoff_expires_at && Date.parse(current.handoff_expires_at) < Date.now()) {
         return reply.status(409).send({ error: 'The secure portal session expired. Start the submission again.' });
