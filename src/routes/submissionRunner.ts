@@ -11,8 +11,19 @@ import {
   createBrowserSession,
   getBrowserSession,
   isBrowserbaseConfigured,
+  isManagedStratusProvider,
+  runManagedBrowser,
 } from '../lib/browserbase';
-import { clickFinalSubmit, detectPortal, fillPortal, readReceipt, type SubmissionPacket } from '../lib/portalSubmission';
+import {
+  buildManagedPortalActions,
+  clickFinalSubmit,
+  detectPortal,
+  fillPortal,
+  readManagedReceipt,
+  readReceipt,
+  type SubmissionPacket,
+  type SupportedPortal,
+} from '../lib/portalSubmission';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { resolveBlobUrl } from '../lib/resumeAccess';
 import { decryptRow } from './applicationProfile';
@@ -62,12 +73,50 @@ async function buildPacket(row: ResumeRow): Promise<SubmissionPacket> {
   };
 }
 
+async function prepareManaged(
+  row: ResumeRow,
+  current: ApplicationReviewState,
+  portal: SupportedPortal,
+  runId: string,
+  fastify: FastifyInstance,
+) {
+  await writeReview(row, nextReview(current, {
+    status: 'filling',
+    submission_run_id: runId,
+    submission_error: undefined,
+  }));
+  const packet = await buildPacket(row);
+  const result = await runManagedBrowser(current.portal_url!, buildManagedPortalActions(portal, packet));
+  if (!result.screenshot) throw new Error('Stratus managed browser did not return a preview screenshot');
+  const preview = await put(
+    `users/${row.user_id}/submission-runs/${runId}/filled.png`,
+    Buffer.from(result.screenshot, 'base64'),
+    { access: 'public', contentType: 'image/png' },
+  );
+  const blockers = result.blockers ?? [];
+  const review = nextReview(current, {
+    status: blockers.length > 0 ? 'needs_attention' : 'ready_for_final_approval',
+    submission_run_id: runId,
+    filled_fields: result.filledFields ?? [],
+    preview_screenshot_url: preview.url,
+    attention_reason: blockers.join('\n') || undefined,
+    handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
+    submission_error: undefined,
+  });
+  await writeReview(row, review);
+  fastify.log.info({ applicationId: row.id, portal, status: review.status }, 'Application portal prepared with Stratus Sandbox');
+}
+
 async function prepare(row: ResumeRow, fastify: FastifyInstance) {
   const stored = row.spec as StoredSpec;
   const current = readApplicationReview(stored);
   if (!current?.portal_url) throw new Error('Application portal URL is missing');
   const portal = detectPortal(current.portal_url);
   const runId = current.submission_run_id ?? randomUUID();
+  if (isManagedStratusProvider()) {
+    await prepareManaged(row, current, portal, runId, fastify);
+    return;
+  }
   const contextId = current.browser_context_id ?? (await createBrowserContext());
   const session = await createBrowserSession(contextId, current.portal_url);
   {
@@ -106,7 +155,35 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
 
 async function submit(row: ResumeRow, fastify: FastifyInstance) {
   const current = readApplicationReview(row.spec);
-  if (!current?.browser_session_id || !current.submission_run_id) throw new Error('Prepared browser session is missing');
+  if (!current?.submission_run_id || !current.portal_url) throw new Error('Prepared browser run is missing');
+  if (isManagedStratusProvider()) {
+    const portal = detectPortal(current.portal_url);
+    const packet = await buildPacket(row);
+    const result = await runManagedBrowser(current.portal_url, buildManagedPortalActions(portal, packet, true));
+    const receipt = readManagedReceipt(result);
+    if (!result.screenshot) throw new Error('Stratus managed browser did not return a receipt screenshot');
+    const capturedAt = new Date().toISOString();
+    const blob = await put(
+      `users/${row.user_id}/submission-runs/${current.submission_run_id}/receipt.png`,
+      Buffer.from(result.screenshot, 'base64'),
+      { access: 'public', contentType: 'image/png' },
+    );
+    await writeReview(row, nextReview(current, {
+      status: 'submitted',
+      submitted_at: capturedAt,
+      submission_error: undefined,
+      receipt: {
+        confirmation_text: receipt.confirmationText,
+        final_url: receipt.finalUrl,
+        screenshot_url: blob.url,
+        captured_at: capturedAt,
+        reference_id: receipt.referenceId,
+      },
+    }));
+    fastify.log.info({ applicationId: row.id }, 'Application submission receipt verified with Stratus Sandbox');
+    return;
+  }
+  if (!current.browser_session_id) throw new Error('Prepared browser session is missing');
   const session = await getBrowserSession(current.browser_session_id);
   let browser;
   try {
@@ -144,7 +221,7 @@ async function fail(row: ResumeRow, error: unknown) {
   const current = readApplicationReview(row.spec);
   if (!current) return;
   const message = error instanceof Error ? error.message : 'Submission runner failed';
-  const externalGate = message.includes('Browserbase is not configured');
+  const externalGate = /browserbase|stratus managed browser is not configured|secure browser provider is not configured/i.test(message);
   await writeReview(row, nextReview(current, {
     status: externalGate ? 'submit_requested' : 'failed',
     submission_error: message,
@@ -170,7 +247,7 @@ export async function processSubmissionApplication(applicationId: string, fastif
 export async function submissionRunnerRoutes(fastify: FastifyInstance) {
   fastify.get('/internal/application-submission-runner', async (request: FastifyRequest, reply: FastifyReply) => {
     if (!isCronConfigured() || !isCronAuthorized(request)) return reply.status(401).send({ error: 'Unauthorized' });
-    if (!isBrowserbaseConfigured()) return reply.status(503).send({ error: 'Browserbase is not configured', processed: 0 });
+    if (!isBrowserbaseConfigured()) return reply.status(503).send({ error: 'Secure portal runner is not configured', processed: 0 });
     const rows = await db
       .select()
       .from(generated_resumes)

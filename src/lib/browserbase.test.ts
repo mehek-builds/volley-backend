@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { browserSessionBody, isBrowserbaseConfigured } from './browserbase';
+import { browserSessionBody, isBrowserbaseConfigured, runManagedBrowser } from './browserbase';
 
 test('Browserbase configuration requires only the current API key', () => {
   const previousKey = process.env.BROWSERBASE_API_KEY;
@@ -73,4 +73,58 @@ test('Stratus configuration accepts its provider-specific API key', () => {
   else process.env.STRATUS_API_KEY = previousStratusKey;
   if (previousBrowserKey === undefined) delete process.env.BROWSER_API_KEY;
   else process.env.BROWSER_API_KEY = previousBrowserKey;
+});
+
+test('managed Stratus requires its production URL and private API key', () => {
+  const previousProvider = process.env.BROWSER_PROVIDER;
+  const previousStratusKey = process.env.STRATUS_API_KEY;
+  const previousStratusUrl = process.env.STRATUS_BASE_URL;
+  process.env.BROWSER_PROVIDER = 'stratus-managed';
+  delete process.env.STRATUS_API_KEY;
+  process.env.STRATUS_BASE_URL = 'https://stratus-browser-cloud.vercel.app';
+  assert.equal(isBrowserbaseConfigured(), false);
+  process.env.STRATUS_API_KEY = 'private-key';
+  assert.equal(isBrowserbaseConfigured(), true);
+  if (previousProvider === undefined) delete process.env.BROWSER_PROVIDER;
+  else process.env.BROWSER_PROVIDER = previousProvider;
+  if (previousStratusKey === undefined) delete process.env.STRATUS_API_KEY;
+  else process.env.STRATUS_API_KEY = previousStratusKey;
+  if (previousStratusUrl === undefined) delete process.env.STRATUS_BASE_URL;
+  else process.env.STRATUS_BASE_URL = previousStratusUrl;
+});
+
+test('managed Stratus posts bounded actions to the private production run endpoint', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  let captured: { url?: string; key?: string | null; body?: unknown } = {};
+  globalThis.fetch = (async (input, init) => {
+    captured = {
+      url: String(input),
+      key: new Headers(init?.headers).get('X-Stratus-API-Key'),
+      body: JSON.parse(String(init?.body)),
+    };
+    return new Response(JSON.stringify({ run: { title: 'Complete', url: 'https://portal.example/complete', text: 'Thank you' } }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }) as typeof fetch;
+  const result = await runManagedBrowser('https://portal.example/apply', [{ type: 'fill', selector: '#email', value: 'person@example.com' }]);
+  assert.equal(result.title, 'Complete');
+  assert.equal(captured.url, 'https://stratus.example/api/run');
+  assert.equal(captured.key, 'private-key');
+  assert.deepEqual(captured.body, {
+    url: 'https://portal.example/apply',
+    actions: [{ type: 'fill', selector: '#email', value: 'person@example.com' }],
+    screenshot: true,
+    fullPage: true,
+    waitUntil: 'networkidle2',
+  });
+  globalThis.fetch = previousFetch;
+  if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+  else process.env.STRATUS_API_KEY = previousKey;
+  if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+  else process.env.STRATUS_BASE_URL = previousUrl;
 });
