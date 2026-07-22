@@ -126,7 +126,7 @@ test('managed Stratus posts bounded actions to the private production run endpoi
     actions: [{ type: 'fill', selector: '#email', value: 'person@example.com' }],
     screenshot: true,
     fullPage: true,
-    waitUntil: 'networkidle2',
+    waitUntil: 'domcontentloaded',
   });
   globalThis.fetch = previousFetch;
   if (previousKey === undefined) delete process.env.STRATUS_API_KEY;

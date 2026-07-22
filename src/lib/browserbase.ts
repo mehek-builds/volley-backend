@@ -109,7 +109,7 @@ export async function runManagedBrowser(
       ...(apiKey ? { 'X-Stratus-API-Key': apiKey } : {}),
       ...(authorization ? { Authorization: authorization } : {}),
     },
-    body: JSON.stringify({ url: portalUrl, actions, screenshot: true, fullPage: true, waitUntil: 'networkidle2' }),
+    body: JSON.stringify({ url: portalUrl, actions, screenshot: true, fullPage: true, waitUntil: 'domcontentloaded' }),
   });
   const payload = await response.json().catch(() => ({})) as { run?: ManagedBrowserResult; error?: ManagedBrowserError };
   if (!response.ok || !payload.run) {
