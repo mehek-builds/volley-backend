@@ -19,6 +19,7 @@ import {
   clickFinalSubmit,
   detectPortal,
   fillPortal,
+  portalApplicationUrl,
   readManagedReceipt,
   readReceipt,
   type SubmissionPacket,
@@ -86,7 +87,7 @@ async function prepareManaged(
     submission_error: undefined,
   }));
   const packet = await buildPacket(row);
-  const result = await runManagedBrowser(current.portal_url!, buildManagedPortalActions(portal, packet));
+  const result = await runManagedBrowser(portalApplicationUrl(portal, current.portal_url!), buildManagedPortalActions(portal, packet));
   if (!result.screenshot) throw new Error('Stratus managed browser did not return a preview screenshot');
   const preview = await put(
     `users/${row.user_id}/submission-runs/${runId}/filled.png`,
@@ -159,7 +160,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
   if (isManagedStratusProvider()) {
     const portal = detectPortal(current.portal_url);
     const packet = await buildPacket(row);
-    const result = await runManagedBrowser(current.portal_url, buildManagedPortalActions(portal, packet, true));
+    const result = await runManagedBrowser(portalApplicationUrl(portal, current.portal_url), buildManagedPortalActions(portal, packet, true));
     const receipt = readManagedReceipt(result);
     if (!result.screenshot) throw new Error('Stratus managed browser did not return a receipt screenshot');
     const capturedAt = new Date().toISOString();

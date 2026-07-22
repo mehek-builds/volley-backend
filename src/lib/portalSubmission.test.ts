@@ -1,11 +1,26 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildManagedPortalActions, detectPortal, readManagedReceipt } from './portalSubmission';
+import { buildManagedPortalActions, detectPortal, portalApplicationUrl, readManagedReceipt } from './portalSubmission';
 
 test('detects the three supported applicant portal families', () => {
   assert.equal(detectPortal('https://boards.greenhouse.io/acme/jobs/123'), 'greenhouse');
   assert.equal(detectPortal('https://jobs.lever.co/acme/123/apply'), 'lever');
   assert.equal(detectPortal('https://jobs.ashbyhq.com/acme/123/application'), 'ashby');
+});
+
+test('opens Ashby directly on its application tab for managed filling', () => {
+  assert.equal(
+    portalApplicationUrl('ashby', 'https://jobs.ashbyhq.com/acme/123'),
+    'https://jobs.ashbyhq.com/acme/123/application',
+  );
+  assert.equal(
+    portalApplicationUrl('ashby', 'https://jobs.ashbyhq.com/acme/123/application'),
+    'https://jobs.ashbyhq.com/acme/123/application',
+  );
+  assert.equal(
+    portalApplicationUrl('lever', 'https://jobs.lever.co/acme/123/apply'),
+    'https://jobs.lever.co/acme/123/apply',
+  );
 });
 
 test('rejects insecure and lookalike portal URLs', () => {

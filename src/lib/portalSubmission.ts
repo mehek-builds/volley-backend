@@ -122,6 +122,13 @@ export function detectPortal(rawUrl: string): SupportedPortal {
   throw new Error('This portal is not supported yet. Supported portals are Greenhouse, Lever, and Ashby.');
 }
 
+export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): string {
+  if (portal !== 'ashby') return rawUrl;
+  const url = new URL(rawUrl);
+  if (!url.pathname.endsWith('/application')) url.pathname = `${url.pathname.replace(/\/$/, '')}/application`;
+  return url.toString();
+}
+
 async function fillFirst(page: Page, selectors: string[], value: string | undefined, label: string, out: string[]) {
   if (!value) return;
   for (const selector of selectors) {
