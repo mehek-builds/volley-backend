@@ -15,7 +15,7 @@ const optionalContactField = (maximum: number) =>
 
 export const resumeGenerateBodySchema = z.object({
   company: z.string().min(1).max(RESUME_REQUEST_LIMITS.company),
-  role: z.string().min(1).max(RESUME_REQUEST_LIMITS.role),
+  role: z.string().trim().min(1).max(RESUME_REQUEST_LIMITS.role),
   jd_text: z.string().min(20).max(RESUME_REQUEST_LIMITS.jobDescription),
   contact: z.object({
     full_name: z.string().min(1).max(RESUME_REQUEST_LIMITS.fullName),

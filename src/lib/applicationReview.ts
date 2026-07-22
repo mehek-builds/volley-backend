@@ -11,6 +11,7 @@ export type ApplicationReviewQuestion = {
 
 export type ApplicationReviewState = {
   jd_text: string;
+  role?: string;
   portal_url?: string;
   ats_name?: string;
   status:

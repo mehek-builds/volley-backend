@@ -2,7 +2,7 @@ import type { ResumeSpec } from '../llm/resumeSpec';
 import { RESUME_CONTENT_LIMITS } from './resumeContentPolicy';
 import type { ExperienceBankEntry } from '../db/schema';
 import { wordSet, numberSignatures, ungroundedNumbers } from './grounding';
-import { deriveCandidateContext, type CandidateEducation } from './resumePolicy';
+import { deriveCandidateContext, resumeSafeTargetRole, type CandidateEducation } from './resumePolicy';
 
 // Deterministic QA gate for a generated resume, ported from the Dubai off-cycle resume
 // engine's validate_resume.py + pressure_test.py (~/Documents/Internship Apps/_resume-engine/) -
@@ -400,11 +400,13 @@ export function validateResumeSpec(
   bank: ExperienceBankEntry[] = [],
   declaredSkills?: string[] | null,
   education?: CandidateEducation,
+  targetRole?: string,
 ): ValidationResult {
   const issues: string[] = [];
   const warnings: BulletFlag[] = [];
 
   const allText = [
+    spec.target_role ?? '',
     spec.school,
     spec.degree,
     spec.grad_date,
@@ -414,6 +416,13 @@ export function validateResumeSpec(
   ].join(' ');
 
   if (allText.includes('—')) issues.push('spec contains an em dash');
+  if (targetRole !== undefined) {
+    const expectedTargetRole = resumeSafeTargetRole(targetRole);
+    if (!expectedTargetRole) issues.push('target role headline requires a non-empty job title');
+    else if (spec.target_role !== expectedTargetRole) {
+      issues.push('target role headline does not exactly match the resume-safe job title');
+    }
+  }
   if (spec.experience.length === 0) issues.push('no experience entries selected');
   if (spec.experience.length > RESUME_CONTENT_LIMITS.maxEntries) {
     issues.push(

@@ -117,14 +117,41 @@ test('policy restores exact education facts and uses only uploaded coursework', 
     currently_enrolled: true,
     coursework: ['Data Structures', 'Statistics'],
   };
-  const { spec } = applyResumePolicy(rawSpec(), education, BANK, 'TypeScript PostgreSQL search service engineering', new Date('2026-07-20'));
+  const { spec } = applyResumePolicy(rawSpec(), education, BANK, 'TypeScript PostgreSQL search service engineering', { now: new Date('2026-07-20') });
   assert.equal(spec.school, education.school);
   assert.equal(spec.degree, education.degree);
   assert.equal(spec.grad_date, education.grad_date);
   assert.equal(spec.coursework, 'Data Structures, Statistics');
   assert.equal(spec.education_position, 'top');
-  assert.equal(spec.experience[0].org, 'Campus Search');
-  assert.equal(spec.experience[0].type, 'project');
+  assert.equal(spec.experience[0].org, 'Acme Labs');
+  assert.equal(spec.experience[0].type, 'job');
+});
+
+test('policy preserves the model order that follows the JD priority order', () => {
+  const spec = rawSpec();
+  spec.experience = [
+    {
+      ...spec.experience[0],
+      bullets: [
+        'Presented research findings to leaders and secured approval for two experiments',
+        'Built weekly dashboards that tracked activation across three onboarding paths',
+      ],
+    },
+    spec.experience[1],
+  ];
+
+  const result = applyResumePolicy(
+    spec,
+    { school: 'USC', grad_date: 'May 2028' },
+    BANK,
+    'First prioritize research. Later, TypeScript PostgreSQL search service engineering dashboards activation.',
+  );
+
+  assert.equal(result.spec.experience[0].org, 'Acme Labs');
+  assert.equal(
+    result.spec.experience[0].bullets[0],
+    'Presented research findings to leaders and secured approval for two experiments',
+  );
 });
 
 test('validator blocks fabricated education and coursework', () => {
@@ -169,4 +196,25 @@ test('layout planner removes the lowest-fit evidence, records omissions, and ren
   assert.equal(pdf.numpages, 1);
   assert.equal(validation.issues.length, 0);
   assert.deepEqual(rendered.spec, plan.spec);
+});
+
+test('policy deterministically sets a resume-safe exact target role headline', () => {
+  const result = applyResumePolicy(
+    rawSpec(),
+    { school: 'USC', grad_date: 'May 2028' },
+    BANK,
+    'analytics engineering',
+    {
+      now: new Date('2026-07-20'),
+      targetRole: `  Senior Analytics Engineer ${String.fromCharCode(0x2014)} Growth  `,
+    },
+  );
+  assert.equal(result.spec.target_role, 'Senior Analytics Engineer - Growth');
+});
+
+test('policy preserves a generated target role when the route has no role context', () => {
+  const input = rawSpec();
+  input.target_role = 'Analytics Engineer';
+  const result = applyResumePolicy(input, { school: 'USC' }, BANK, 'analytics engineering');
+  assert.equal(result.spec.target_role, 'Analytics Engineer');
 });

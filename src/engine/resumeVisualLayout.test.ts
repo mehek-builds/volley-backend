@@ -279,6 +279,29 @@ describe('resume visual layout controls', () => {
     assert.deepEqual(findPdfTextFidelityIssues(parsed.text, rendered.spec, contact), []);
   });
 
+  test('target role headline renders, wraps safely, and remains ATS-readable', async () => {
+    const benchmark = RESUME_VISUAL_BENCHMARK.find((entry) => entry.id === '06-normal-two-jobs');
+    assert.ok(benchmark);
+    const spec = structuredClone(benchmark.spec);
+    spec.target_role = 'Senior Analytics Engineering and Data Governance Lead for Global Operations';
+    const rendered = await renderResumePdf(spec, benchmark.contact, benchmark.jdText);
+    const parsed = await extractPdfText(rendered.buffer);
+
+    assert.equal(parsed.numpages, 1);
+    assert.match(parsed.text.replace(/\s+/g, ' '), /Senior Analytics Engineering and Data Governance Lead for Global Operations/);
+    assert.deepEqual(validateResumeVisualLayout(rendered.layout).issues, []);
+    assert.deepEqual(validatePdfLayout(parsed.text, parsed.numpages).issues, []);
+    assert.deepEqual(findPdfTextFidelityIssues(parsed.text, rendered.spec, benchmark.contact), []);
+  });
+
+  test('PDF fidelity rejects a missing target role headline', () => {
+    const benchmark = RESUME_VISUAL_BENCHMARK.find((entry) => entry.id === '06-normal-two-jobs');
+    assert.ok(benchmark);
+    const spec = { ...benchmark.spec, target_role: 'Analytics Engineer' };
+    const issues = findPdfTextFidelityIssues('Candidate Name EDUCATION EXPERIENCE', spec, benchmark.contact);
+    assert.ok(issues.includes('rendered PDF text does not faithfully preserve target role headline'));
+  });
+
   test('PDF text fidelity fails closed for unsupported name glyphs', async () => {
     const benchmark = RESUME_VISUAL_BENCHMARK.find((entry) => entry.id === '06-normal-two-jobs');
     assert.ok(benchmark);

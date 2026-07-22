@@ -12,6 +12,7 @@ import {
   validateResumeVisualLayout,
 } from '../engine/resumeRender';
 import { validatePdfLayout, validateResumeSpec } from '../engine/resumeValidate';
+import { resumeSafeTargetRole } from '../engine/resumePolicy';
 import {
   deriveEditedTerms,
   readApplicationReview,
@@ -109,6 +110,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (!review?.jd_text || !contact?.full_name) {
         return reply.status(409).send({ error: 'This older resume cannot be edited in the dashboard. Generate it again first.' });
       }
+      if (review.role) {
+        edited.target_role = resumeSafeTargetRole(review.role);
+      }
 
       const userId = request.jwtPayload!.userId;
       const bank = await readExperienceBank(userId);
@@ -135,6 +139,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         bank,
         declaredSkillsList(profileRows[0]?.skills),
         education,
+        review.role,
       );
       if (validation.issues.length > 0) {
         return reply.status(422).send({

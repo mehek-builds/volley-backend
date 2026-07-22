@@ -6,6 +6,10 @@ import { STRONG_VERBS } from '../engine/resumeValidate';
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 export interface ResumeSpec {
+  // The role this resume targets. This is a targeting headline, not a claim that the candidate
+  // previously held the role. applyResumePolicy owns the final value so model drift cannot turn
+  // it into a fabricated credential.
+  target_role?: string;
   school: string;
   degree: string;
   grad_date: string;
@@ -56,12 +60,13 @@ export interface ResumeSpec {
 // pressure_test.py (~/Documents/Internship Apps/_resume-engine/), the same quality bar
 // applied to Mehek's own resume builds. Encoded here as generation instructions; enforced
 // again post-generation by engine/resumeValidate.ts so drift gets caught, not just discouraged.
-const SYSTEM_PROMPT = `You are a resume-tailoring engine. Given a job description and a student's full
+export const RESUME_SYSTEM_PROMPT = `You are a resume-tailoring engine. Given a job description and a student's full
 experience bank (every job/project they've ever had, with every bullet-point phrasing they've used for
 each achievement), select and lightly rewrite the best-fit subset for THIS specific posting.
 
 Return ONLY valid JSON with no explanation or markdown wrapping, matching this exact shape:
 {
+  "target_role": string,
   "school": string, "degree": string, "grad_date": string, "coursework": string,
   "education_position": "top" | "after_experience",
   "experience": [{"type": "job" | "project" | "leadership", "org": string, "title": string, "date_range": string, "bullets": [string]}],
@@ -70,9 +75,20 @@ Return ONLY valid JSON with no explanation or markdown wrapping, matching this e
 }
 
 Rules:
+- Treat this resume as a proof document for THIS application, not a generic career summary.
+- Set "target_role" to the exact role named in the Job line. It is a targeting headline only.
 - Pick up to ${RESUME_CONTENT_LIMITS.maxEntries} entries across jobs, projects, and leadership that best match the JD, most relevant first.
 - Select ${RESUME_CONTENT_LIMITS.minBulletsPerEntry} or ${RESUME_CONTENT_LIMITS.maxBulletsPerEntry} bullets per entry based on evidence strength and available one-page space. Reuse a stored bullet_variant verbatim when one already fits well;
   only lightly rewrite (never fabricate achievements) when no stored variant surfaces the JD's language.
+- Follow the JD's priority order: the earliest clearly stated responsibilities and requirements get
+  the strongest supported evidence first. Order entries and bullets so a recruiter can compare the
+  resume with the posting from top to bottom.
+- When the candidate's source evidence genuinely supports the same idea, copy the JD's exact
+  multi-word terminology into the bullet. Do not use a creative synonym merely to sound different.
+  Exact language never overrides truth: if the source does not support the phrase, omit it.
+- If the JD states company values or operating principles, demonstrate the relevant value through a
+  grounded achievement or collaboration bullet when the bank supports it. Do not create a separate
+  values section, make generic personality claims, or displace stronger role evidence.
 - Copy each entry's type from the experience bank. Do not turn a project into a job or a job into leadership.
 - "skills": EVERY entry must be one of the student's Skills list, either copied as written there or
   renamed under the "skill_source" rule below. If the Skills list is empty, use only skills clearly
@@ -133,6 +149,7 @@ export function normalizeSpec(raw: unknown): ResumeSpec {
     return Object.keys(out).length ? out : undefined;
   };
   return {
+    target_role: str(o.target_role),
     school: str(o.school),
     degree: str(o.degree),
     grad_date: str(o.grad_date),
@@ -198,7 +215,7 @@ export async function generateResumeSpec(
       // only pay for what is generated, so a higher ceiling costs nothing on a normal call.
       max_tokens: 8192,
       system: [
-        { type: 'text', text: SYSTEM_PROMPT },
+        { type: 'text', text: RESUME_SYSTEM_PROMPT },
         { type: 'text', text: contextBlock, cache_control: { type: 'ephemeral' } },
       ],
       messages: [

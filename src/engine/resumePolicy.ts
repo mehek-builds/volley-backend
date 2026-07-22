@@ -16,6 +16,10 @@ export interface CandidateContext {
   education_position: 'top' | 'after_experience';
 }
 
+export function resumeSafeTargetRole(role: string): string {
+  return role.trim().replace(/[\u2013\u2014]/g, '-').replace(/\s+/g, ' ');
+}
+
 const STOP = new Set(
   'the and for with from that this into using used role team work your our their are was were have has'.split(' '),
 );
@@ -102,10 +106,6 @@ function matchingBankEntry(entry: ResumeSpec['experience'][number], bank: Experi
     .sort((a, b) => b.score - a.score || b.source.org.length - a.source.org.length)[0]?.source;
 }
 
-function entryText(entry: ResumeSpec['experience'][number]): string {
-  return [entry.org, entry.title, ...entry.bullets].join(' ');
-}
-
 function metricCount(text: string): number {
   return text.match(/(?:\$|%|\b\d+(?:\.\d+)?x?\b)/g)?.length ?? 0;
 }
@@ -118,14 +118,17 @@ export function applyResumePolicy(
   rawSpec: ResumeSpec,
   education: CandidateEducation,
   bank: ExperienceBankEntry[],
-  jdText: string,
-  now = new Date(),
+  _jdText: string,
+  options: { now?: Date; targetRole?: string } = {},
 ): { spec: ResumeSpec; context: CandidateContext } {
-  const context = deriveCandidateContext(education, now);
+  const context = deriveCandidateContext(education, options.now ?? new Date());
   const sourceCoursework = (education.coursework ?? []).map((course) => course.trim()).filter(Boolean);
 
+  // The model receives the JD in its original order and selects evidence in that same priority
+  // order. Preserve that ordering here. Re-sorting against the whole JD can let a later,
+  // keyword-dense requirement displace evidence for the first stated responsibility.
   const experience = rawSpec.experience
-    .map((entry, originalIndex) => {
+    .map((entry) => {
       const source = matchingBankEntry(entry, bank);
       const seen = new Set<string>();
       const bullets = entry.bullets
@@ -137,7 +140,6 @@ export function applyResumePolicy(
           seen.add(key);
           return true;
         })
-        .sort((a, b) => relevanceScore(b, jdText) - relevanceScore(a, jdText))
         .slice(0, RESUME_CONTENT_LIMITS.maxBulletsPerEntry);
       const type = (source?.type === 'project' || source?.type === 'leadership' ? source.type : 'job') as
         | 'job'
@@ -147,17 +149,15 @@ export function applyResumePolicy(
         ...entry,
         type,
         bullets,
-        score: relevanceScore(entryText({ ...entry, bullets }), jdText) + Math.max(0, 4 - originalIndex) * 0.25,
       };
     })
-    .sort((a, b) => b.score - a.score)
-    .slice(0, RESUME_CONTENT_LIMITS.maxEntries)
-    .map(({ score: _score, ...entry }) => entry);
+    .slice(0, RESUME_CONTENT_LIMITS.maxEntries);
 
   return {
     context,
     spec: {
       ...rawSpec,
+      target_role: options.targetRole ? resumeSafeTargetRole(options.targetRole) : rawSpec.target_role,
       school: education.school?.trim() ?? '',
       degree: education.degree?.trim() ?? '',
       grad_date: education.grad_date?.trim() ?? '',

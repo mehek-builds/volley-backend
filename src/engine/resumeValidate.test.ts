@@ -110,6 +110,38 @@ test('a faithfully-grounded bullet passes grounding', () => {
   assert.deepEqual(findGroundingViolations(s, BANK), []);
 });
 
+test('target role headline must match the role for this application', () => {
+  const s = spec([
+    {
+      org: 'Northwind Labs',
+      title: 'Software Engineer Intern',
+      date_range: '2024',
+      bullets: ['Built an internal analytics dashboard used by the growth team'],
+    },
+  ]);
+  s.target_role = 'Product Manager';
+  const result = validateResumeSpec(s, 'analytics engineering role', BANK, undefined, undefined, 'Analytics Engineer');
+  assert.ok(result.issues.includes('target role headline does not exactly match the resume-safe job title'));
+
+  s.target_role = 'Analytics Engineer';
+  const aligned = validateResumeSpec(s, 'analytics engineering role', BANK, undefined, undefined, 'Analytics Engineer');
+  assert.ok(!aligned.issues.includes('target role headline does not exactly match the resume-safe job title'));
+});
+
+test('target role validation rejects an empty normalized job title', () => {
+  const s = spec([]);
+  s.target_role = '';
+  const result = validateResumeSpec(s, 'product research analytics', [], undefined, undefined, '   ');
+  assert.ok(result.issues.includes('target role headline requires a non-empty job title'));
+});
+
+test('target role headline participates in banned punctuation validation', () => {
+  const s = spec([]);
+  s.target_role = `Analytics Engineer ${String.fromCharCode(0x2014)} Growth`;
+  const result = validateResumeSpec(s, 'analytics engineering role');
+  assert.ok(result.issues.includes('spec contains an em dash'));
+});
+
 test('a title swapped for a completely different one is flagged, a light rewrite is not', () => {
   const swapped = spec([
     {

@@ -38,4 +38,12 @@ describe('resume generation request limits', () => {
     });
     assert.equal(result.success, false);
   });
+
+  test('rejects a whitespace-only role before headline generation', () => {
+    const result = resumeGenerateBodySchema.safeParse({
+      ...validRequest,
+      role: '   ',
+    });
+    assert.equal(result.success, false);
+  });
 });

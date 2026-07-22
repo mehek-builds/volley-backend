@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeSpec } from './resumeSpec';
+import { normalizeSpec, RESUME_SYSTEM_PROMPT } from './resumeSpec';
 
 // Regression coverage for the "partial model JSON crashes resume generation" bug (audit #4):
 // a syntactically valid but incomplete spec (e.g. no "experience" key) used to reach
@@ -38,4 +38,18 @@ test('normalizeSpec tolerates non-object / null input without throwing', () => {
   assert.deepEqual(normalizeSpec(null).experience, []);
   assert.deepEqual(normalizeSpec('nope').skills, []);
   assert.deepEqual(normalizeSpec(undefined).experience, []);
+});
+
+test('normalizeSpec preserves the per-application target role headline', () => {
+  const s = normalizeSpec({ target_role: 'Analytics Engineer' });
+  assert.equal(s.target_role, 'Analytics Engineer');
+});
+
+test('resume prompt pins every application-specific tailoring rule', () => {
+  assert.match(RESUME_SYSTEM_PROMPT, /proof document for THIS application/);
+  assert.match(RESUME_SYSTEM_PROMPT, /exact role named in the Job line/);
+  assert.match(RESUME_SYSTEM_PROMPT, /Follow the JD's priority order/);
+  assert.match(RESUME_SYSTEM_PROMPT, /copy the JD's exact\s+multi-word terminology/);
+  assert.match(RESUME_SYSTEM_PROMPT, /company values or operating principles/);
+  assert.match(RESUME_SYSTEM_PROMPT, /Exact language never overrides truth/);
 });

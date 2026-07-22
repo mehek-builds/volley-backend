@@ -123,6 +123,7 @@ export function findPdfTextFidelityIssues(
   const renderedWithoutWhitespace = rendered.replace(/\s+/g, '');
   const expected: Array<{ label: string; value: string | undefined }> = [
     { label: 'header name', value: contact.full_name },
+    { label: 'target role headline', value: spec.target_role },
     { label: 'contact email', value: contact.email },
     { label: 'contact phone', value: contact.phone },
     { label: 'LinkedIn URL', value: contact.linkedin_url },
@@ -475,6 +476,18 @@ export function measureResumeLayout(
       width,
       design.typography.lineGapRatio.bold,
     );
+    if (spec.target_role) {
+      headerHeight +=
+        design.spacing.contactTop +
+        textHeight(
+          doc,
+          spec.target_role,
+          RESUME_FONTS.bold,
+          design.typography.contact,
+          width,
+          design.typography.lineGapRatio.bold,
+        );
+    }
     const line = contactLine(contact);
     if (line) {
       headerHeight +=
@@ -956,6 +969,16 @@ export async function renderResumePdf(
       align: 'center',
       lineGap: design.typography.name * design.typography.lineGapRatio.bold,
     });
+  if (spec.target_role) {
+    doc
+      .font(RESUME_FONTS.bold)
+      .fontSize(design.typography.contact)
+      .text(spec.target_role, design.page.margin, doc.y + design.spacing.contactTop, {
+        width,
+        align: 'center',
+        lineGap: design.typography.contact * design.typography.lineGapRatio.bold,
+      });
+  }
   const line = contactLine(contact);
   if (line) {
     doc

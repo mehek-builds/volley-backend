@@ -255,7 +255,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
                 declaredSkills,
                 budget,
               );
-              return applyResumePolicy(generated, education, bank, body.jd_text).spec;
+              return applyResumePolicy(generated, education, bank, body.jd_text, { targetRole: body.role }).spec;
             } catch (err) {
               lastErr = err;
               if (!isTransientOverload(err)) throw err;
@@ -302,7 +302,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         continue;
       }
 
-      const result = validateResumeSpec(spec, body.jd_text, bank, declaredSkills, education);
+      const result = validateResumeSpec(spec, body.jd_text, bank, declaredSkills, education, body.role);
       const typographyIssues = findResumeTypographyIssues(spec, body.contact);
       specIssues = [...result.issues, ...typographyIssues];
       specWarnings = result.warnings;
@@ -372,7 +372,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     // extractPdfText, not bare pdfParse: the raw call threw "bad XRef entry" on every ~2.5KB
     // pooled render buffer (R-017; the byteOffset story lives in lib/pdfText.ts), so this check
     // had NEVER run and its empty issues array read downstream as a clean pass.
-    const finalSpecValidation = validateResumeSpec(spec, body.jd_text, bank, declaredSkills, education);
+    const finalSpecValidation = validateResumeSpec(spec, body.jd_text, bank, declaredSkills, education, body.role);
     specWarnings = finalSpecValidation.warnings;
     atsCoverage = finalSpecValidation.ats_keyword_coverage_pct;
     if (finalSpecValidation.issues.length > 0) {
@@ -497,6 +497,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
           _contact: body.contact,
           _review: {
             jd_text: body.jd_text,
+            role: body.role,
             status: 'resume_ready',
             edited_terms: deriveEditedTerms(spec, bank),
             questions: [],
