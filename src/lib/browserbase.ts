@@ -1,4 +1,5 @@
 import { chromium, type Browser, type Page } from 'playwright-core';
+import { getVercelOidcToken } from '@vercel/oidc';
 
 export type BrowserProvider = 'browserbase' | 'stratus' | 'stratus-managed';
 
@@ -69,7 +70,10 @@ export function isBrowserbaseConfigured(): boolean {
       ? 'stratus'
       : 'browserbase';
   if (provider === 'stratus-managed') {
-    return Boolean(process.env.STRATUS_BASE_URL?.trim() && process.env.STRATUS_API_KEY?.trim());
+    return Boolean(
+      process.env.STRATUS_BASE_URL?.trim()
+      && (process.env.STRATUS_API_KEY?.trim() || process.env.VERCEL_ENV === 'production'),
+    );
   }
   return Boolean(process.env.BROWSER_API_KEY
     ?? (provider === 'stratus' ? process.env.STRATUS_API_KEY : process.env.BROWSERBASE_API_KEY));
@@ -85,10 +89,18 @@ export async function runManagedBrowser(
 ): Promise<ManagedBrowserResult> {
   const baseUrl = process.env.STRATUS_BASE_URL?.replace(/\/$/, '');
   const apiKey = process.env.STRATUS_API_KEY?.trim();
-  if (!baseUrl || !apiKey) throw new Error('Stratus managed browser is not configured');
+  if (!baseUrl) throw new Error('Stratus managed browser is not configured');
+  const authorization = !apiKey && process.env.VERCEL_ENV === 'production'
+    ? `Bearer ${await getVercelOidcToken()}`
+    : undefined;
+  if (!apiKey && !authorization) throw new Error('Stratus managed browser is not configured');
   const response = await fetch(`${baseUrl}/api/run`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Stratus-API-Key': apiKey },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(apiKey ? { 'X-Stratus-API-Key': apiKey } : {}),
+      ...(authorization ? { Authorization: authorization } : {}),
+    },
     body: JSON.stringify({ url: portalUrl, actions, screenshot: true, fullPage: true, waitUntil: 'networkidle2' }),
   });
   const payload = await response.json().catch(() => ({})) as { run?: ManagedBrowserResult; error?: string };
