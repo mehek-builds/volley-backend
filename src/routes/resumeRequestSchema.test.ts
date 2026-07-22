@@ -20,6 +20,17 @@ describe('resume generation request limits', () => {
     assert.equal(parsed.contact.linkedin_url, undefined);
   });
 
+  test('accepts optional portal metadata so the dashboard can create a review packet in one request', () => {
+    const parsed = resumeGenerateBodySchema.parse({
+      ...validRequest,
+      application: {
+        portal_url: 'https://jobs.ashbyhq.com/litos/role',
+        ats_name: 'Ashby',
+      },
+    });
+    assert.equal(parsed.application?.ats_name, 'Ashby');
+  });
+
   test('rejects oversized contact values before PDF measurement', () => {
     const result = resumeGenerateBodySchema.safeParse({
       ...validRequest,

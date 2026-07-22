@@ -1,7 +1,7 @@
 # Graph Report - .  (2026-07-23)
 
 ## Corpus Check
-- 87 files · ~75,141 words
+- 87 files · ~75,295 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
@@ -88,11 +88,11 @@ Nodes (3): clampExpansion(), interpolate(), resumeDesignAtExpansion()
 
 ### Community 15 - "Community 15"
 Cohesion: 0.67
-Nodes (0): 
+Nodes (0):
 
 ### Community 16 - "Community 16"
 Cohesion: 1.0
-Nodes (0): 
+Nodes (0):
 
 ## Knowledge Gaps
 - **Thin community `Community 16`** (1 nodes): `drizzle.config.ts`
