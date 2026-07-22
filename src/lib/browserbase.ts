@@ -28,7 +28,7 @@ type ManagedBrowserError = string | { message?: string; code?: string };
 
 function managedBrowserErrorMessage(error: ManagedBrowserError | undefined, status: number): string {
   if (typeof error === 'string' && error.trim()) return error;
-  if (error && typeof error.message === 'string' && error.message.trim()) return error.message;
+  if (error && typeof error === 'object' && typeof error.message === 'string' && error.message.trim()) return error.message;
   return `Stratus managed browser request failed with status ${status}`;
 }
 
