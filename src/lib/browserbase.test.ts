@@ -134,3 +134,28 @@ test('managed Stratus posts bounded actions to the private production run endpoi
   if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
   else process.env.STRATUS_BASE_URL = previousUrl;
 });
+
+test('managed Stratus surfaces structured provider errors as readable messages', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example';
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    error: { code: 'SANDBOX_RUN_FAILED', message: 'Portal field selector timed out' },
+  }), {
+    status: 502,
+    headers: { 'Content-Type': 'application/json' },
+  })) as typeof fetch;
+
+  await assert.rejects(
+    runManagedBrowser('https://portal.example/apply', []),
+    /Portal field selector timed out/,
+  );
+
+  globalThis.fetch = previousFetch;
+  if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+  else process.env.STRATUS_API_KEY = previousKey;
+  if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+  else process.env.STRATUS_BASE_URL = previousUrl;
+});

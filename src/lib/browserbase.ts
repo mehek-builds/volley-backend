@@ -24,6 +24,14 @@ export type ManagedBrowserResult = {
   blockers?: string[];
 };
 
+type ManagedBrowserError = string | { message?: string; code?: string };
+
+function managedBrowserErrorMessage(error: ManagedBrowserError | undefined, status: number): string {
+  if (typeof error === 'string' && error.trim()) return error;
+  if (error && typeof error.message === 'string' && error.message.trim()) return error.message;
+  return `Stratus managed browser request failed with status ${status}`;
+}
+
 type SessionResponse = {
   id: string;
   connectUrl?: string;
@@ -103,9 +111,9 @@ export async function runManagedBrowser(
     },
     body: JSON.stringify({ url: portalUrl, actions, screenshot: true, fullPage: true, waitUntil: 'networkidle2' }),
   });
-  const payload = await response.json().catch(() => ({})) as { run?: ManagedBrowserResult; error?: string };
+  const payload = await response.json().catch(() => ({})) as { run?: ManagedBrowserResult; error?: ManagedBrowserError };
   if (!response.ok || !payload.run) {
-    throw new Error(payload.error || `Stratus managed browser request failed with status ${response.status}`);
+    throw new Error(managedBrowserErrorMessage(payload.error, response.status));
   }
   return payload.run;
 }
