@@ -1,6 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { describeRequiredBlocker, humanFieldLabel, isOpaqueIdentifier, tidyLabel } from './fieldLabel';
+import {
+  describeRequiredBlocker,
+  describeUnlabelledBlockers,
+  humanFieldLabel,
+  isOpaqueIdentifier,
+  tidyLabel,
+} from './fieldLabel';
 
 // R-048, from live QA 2026-07-23 against real Greenhouse and Ashby forms.
 
@@ -44,6 +50,15 @@ test('genuine labels are kept', () => {
     'What is your top location preference?',
   ]) {
     assert.equal(isOpaqueIdentifier(real), false, `${real} should be treated as a label`);
+  }
+});
+
+test('vowelless acronyms are labels, not machine ids', () => {
+  // A "single token with no vowel is machine-generated" rule was tried and removed: it swallowed
+  // these, and suppressing one costs the user the name of the field blocking their application.
+  for (const acronym of ['CV', 'SSN', 'PhD', 'MD', 'NDA', 'DBS']) {
+    assert.equal(isOpaqueIdentifier(acronym), false, `${acronym} should be treated as a label`);
+    assert.equal(humanFieldLabel([acronym]), acronym);
   }
 });
 
@@ -93,4 +108,55 @@ test('the sentence never says "is required" twice', () => {
     const sentence = describeRequiredBlocker(humanFieldLabel([candidate]));
     assert.ok((sentence.match(/is required/g) ?? []).length <= 1, sentence);
   }
+});
+
+// The following were all found by adversarial review of the first cut of this file, 2026-07-23.
+// Each is a case where the heuristics told the user "no label Litos can read" while a perfectly
+// readable label sat on the form, or let a machine handle through.
+
+test('non-Latin labels are labels, not machine ids', () => {
+  // An ASCII-only letter test classified every localised label as opaque, so a Greenhouse or Ashby
+  // posting in any non-English locale reported all of its blocked fields as unreadable.
+  for (const label of ['姓名', '氏名', 'Фамилия', 'الاسم', '이름', 'Ονοματεπώνυμο']) {
+    assert.equal(isOpaqueIdentifier(label), false, `${label} should be treated as a label`);
+    assert.equal(humanFieldLabel([label]), label);
+  }
+});
+
+test('accented and non-English Latin labels survive', () => {
+  for (const label of ['Prénom', 'Año de graduación', 'Führerschein', 'Endereço']) {
+    assert.equal(isOpaqueIdentifier(label), false, `${label} should be treated as a label`);
+  }
+});
+
+test('framework handles flattened into an id are still rejected', () => {
+  // portalSubmission offers the element id as a last-resort candidate, and Rails renders
+  // job_application[answers_attributes][0][text_value] as an underscore-flattened id.
+  for (const handle of [
+    'job_application_answers_attributes_0_text_value',
+    'answers_attributes_2_boolean_value',
+    'urn:li:answer:9911',
+    'customQuestion12345',
+    'some.nested.path[0]',
+  ]) {
+    assert.equal(isOpaqueIdentifier(handle), true, `${handle} should be opaque`);
+  }
+});
+
+test('a label containing a colon or digits is still a label', () => {
+  // The structural-token rules must only apply to unspaced tokens with INTERNAL punctuation, or
+  // real prose gets suppressed. Asserted through humanFieldLabel, which is how callers reach this:
+  // tidyLabel strips the trailing decoration first.
+  for (const label of ['Degree: ', 'Graduation year (e.g. 2028)', 'Address line 2', 'GPA out of 4.0']) {
+    assert.ok(humanFieldLabel([label]), `${label} should survive as a label`);
+  }
+  assert.equal(isOpaqueIdentifier('Degree'), false);
+});
+
+test('unlabelled fields are counted, not collapsed into one line', () => {
+  // Every unlabelled field yields an identical sentence, so deduping them as strings turned five
+  // blocked fields into one and the student would fix one thing and fail again learning nothing.
+  assert.equal(describeUnlabelledBlockers(1), describeRequiredBlocker(null));
+  assert.match(describeUnlabelledBlockers(4), /^4 required fields/);
+  assert.match(describeUnlabelledBlockers(4), /have no label Litos can read/);
 });

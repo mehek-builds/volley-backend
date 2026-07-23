@@ -12,6 +12,22 @@ import { z } from 'zod';
 // R-052. Bounded on purpose: these are the only parsed fields a student may correct by hand, and
 // the ceilings stop a paste of an entire resume landing in the school field. Every value is trimmed
 // by the handler, so " " is rejected here as empty rather than stored as whitespace.
+/**
+ * The graduation year implied by a typed grad_date.
+ *
+ * Takes the LAST year in the string, not the first. Students correcting this field paste what their
+ * resume prints, and resumes print ranges: "Aug 2024 - May 2028". Taking the first match stored
+ * grad_year 2024, which every eligibility filter reads as "already graduated", quietly disqualifying
+ * the student from the internships this product exists to win. The last year in a range is the one
+ * they finish in. Returns undefined when no year is present, so the stored value is left alone
+ * rather than being zeroed by a partial edit.
+ */
+export function graduationYearFrom(gradDate: string): number | undefined {
+  const years = gradDate.match(/\b(?:19|20)\d{2}\b/g);
+  if (!years || years.length === 0) return undefined;
+  return Number(years[years.length - 1]);
+}
+
 export const educationPatchSchema = z
   .object({
     full_name: z.string().trim().min(1).max(120).optional(),
@@ -329,12 +345,11 @@ export async function profileRoutes(fastify: FastifyInstance) {
       for (const key of ['full_name', 'school', 'degree', 'grad_date'] as const) {
         if (patch[key] !== undefined) next[key] = patch[key].trim();
       }
-      // grad_year is what eligibility filters read, and it is derived rather than typed: keeping it
-      // in step with grad_date here stops the two disagreeing about whether the student has already
-      // graduated. A grad_date with no 4-digit year leaves the existing value alone.
+      // grad_year is what eligibility filters read, and it is derived rather than typed, so it must
+      // track grad_date or the two disagree about whether the student has already graduated.
       if (patch.grad_date !== undefined) {
-        const year = patch.grad_date.match(/\b(19|20)\d{2}\b/)?.[0];
-        if (year) next.grad_year = Number(year);
+        const year = graduationYearFrom(patch.grad_date);
+        if (year !== undefined) next.grad_year = year;
       }
 
       await db.update(profiles).set({ parsed_json: next }).where(eq(profiles.user_id, userId));

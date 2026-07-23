@@ -34,10 +34,21 @@ export interface ParsedProfile {
   target_roles: string[];
 }
 
-// Exported so a test can pin the joint-degree rule in place. The generator-side guard in
-// resumeValidate.ts ("education degree differs from uploaded resume") faithfully enforces whatever
-// this parser stored, so a degree corrupted HERE is corrupted everywhere downstream with no
-// remaining check to catch it. Do not delete the rule in a prompt cleanup.
+// R-047, the failure the degree rule below exists to prevent. An uploaded resume reading
+// "Bachelor of Science in Computer Science & Business Administration, Finance Emphasis" was stored
+// as "Bachelor of Science in Business Administration, Emphasis in Finance": the Computer Science
+// half dropped and the emphasis reworded, turning a computer science candidate into a finance
+// candidate on every software application.
+//
+// The concrete strings stay HERE, in a comment, and deliberately NOT in the prompt. A plausible
+// verbatim degree inside the model-visible text is few-shot contamination: for a resume whose
+// education section is unclear, it hands the model a ready-made degree to emit, which is exactly
+// the fabrication the rule forbids two lines later.
+//
+// The prompt is the only defence. resumeValidate.ts's guard ("education degree differs from
+// uploaded resume") compares the generated spec against whatever THIS parser stored, so a degree
+// corrupted here is corrupted everywhere downstream with nothing left to catch it. Exported so a
+// test can pin the rule against a later prompt cleanup.
 export const SYSTEM_PROMPT = `You are a resume parser. Extract structured information from resume text and return ONLY valid JSON with no explanation or markdown wrapping.
 
 The JSON must match this exact shape:
@@ -60,15 +71,12 @@ Rules:
 - "full_name" is the applicant's name from the resume header, not a company or school name
 - "end" should be "Present" if the role is current
 - Preserve the education wording from the uploaded resume. Do not upgrade or infer a degree.
-- "degree" is the degree line copied VERBATIM. This rule exists because "preserve the wording" was
-  not enough on its own: a real joint degree, "Bachelor of Science in Computer Science & Business
-  Administration, Finance Emphasis", came back as "Bachelor of Science in Business Administration,
-  Emphasis in Finance", silently dropping the Computer Science half and rewording the emphasis. That
-  turns a computer science candidate into a finance candidate on every software application. So:
-  carry BOTH halves of a joint or dual degree, keep the emphasis or concentration exactly as printed
-  and in the same order, and never let the school or college name influence the degree. A business
-  school hosts non-business degrees; an engineering school hosts non-engineering ones. If the resume
-  states no degree, return an empty string rather than inferring one.
+- "degree" is the degree line copied VERBATIM from the Education section. Carry BOTH halves of a
+  joint or dual degree; keep every field, emphasis or concentration exactly as printed and in the
+  same order; do not shorten, reorder or summarise. Never let the school or college name influence
+  the degree: a business school hosts non-business degrees, an engineering school hosts
+  non-engineering ones. If the resume states no degree, return an empty string rather than
+  inferring one.
 - "grad_date" must preserve the most precise date printed on the resume, such as "May 2028". Use an empty string when absent.
 - "grad_year" should be the 4-digit year from grad_date. Use 0 when it is absent.
 - "currently_enrolled" is true only when the resume explicitly says expected graduation, candidate, current student, or otherwise clearly shows an unfinished degree with a future graduation date.

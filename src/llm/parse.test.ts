@@ -15,8 +15,17 @@ test('the parse prompt demands a verbatim degree', () => {
 });
 
 test('the parse prompt names the joint-degree failure it exists to prevent', () => {
-  assert.match(SYSTEM_PROMPT, /joint or dual degree/);
-  assert.match(SYSTEM_PROMPT, /carry BOTH halves/i);
+  const flat = SYSTEM_PROMPT.replace(/\s+/g, ' ');
+  assert.match(flat, /joint or dual degree/);
+  assert.match(flat, /carry BOTH halves/i);
+});
+
+test('the prompt does not hand the model a ready-made degree to copy', () => {
+  // Few-shot contamination: a plausible verbatim degree inside model-visible text is something the
+  // model can emit when a resume's education section is unclear, which is the exact fabrication the
+  // rule forbids. The concrete R-047 strings belong in a code comment, not the prompt.
+  assert.doesNotMatch(SYSTEM_PROMPT, /Bachelor of Science in/i);
+  assert.doesNotMatch(SYSTEM_PROMPT, /Emphasis in Finance/i);
 });
 
 test('the parse prompt forbids inferring a degree from the school or college name', () => {
@@ -28,7 +37,8 @@ test('the parse prompt forbids inferring a degree from the school or college nam
 });
 
 test('the parse prompt still requires an empty string over an invented degree', () => {
-  assert.match(SYSTEM_PROMPT, /return an empty string rather than inferring one/i);
+  const flat = SYSTEM_PROMPT.replace(/\s+/g, ' ');
+  assert.match(flat, /return an empty string rather than inferring one/i);
 });
 
 test('the parse prompt keeps the precise graduation date', () => {

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { educationPatchSchema } from './profile';
+import { educationPatchSchema, graduationYearFrom } from './profile';
 
 // R-052. The parsed education block was write-once at upload time, so R-047's dropped
 // "Computer Science &" could only be fixed by producing a whole new PDF. These pin the shape of the
@@ -54,20 +54,31 @@ test('unknown keys cannot ride along into parsed_json', () => {
   assert.deepEqual(Object.keys(parsed.success ? parsed.data : {}), ['degree']);
 });
 
-// The handler derives grad_year from grad_date so eligibility filters and the printed date cannot
-// disagree. Mirrored here as a unit so the rule is pinned independently of the route wiring.
-function derivedGradYear(gradDate: string): number | undefined {
-  const year = gradDate.match(/\b(19|20)\d{2}\b/)?.[0];
-  return year ? Number(year) : undefined;
-}
+// grad_year is derived from grad_date so eligibility filters and the printed date cannot disagree.
 
-test('grad_year follows grad_date, since eligibility is read from the year', () => {
-  assert.equal(derivedGradYear('May 2028'), 2028);
-  assert.equal(derivedGradYear('Expected May 2027'), 2027);
-  assert.equal(derivedGradYear('2028-05'), 2028);
+test('grad_year follows grad_date', () => {
+  assert.equal(graduationYearFrom('May 2028'), 2028);
+  assert.equal(graduationYearFrom('Expected May 2027'), 2027);
+  assert.equal(graduationYearFrom('2028-05'), 2028);
+});
+
+test('a date RANGE resolves to the year the student finishes, not the year they started', () => {
+  // Found in adversarial review. Students correcting this field paste what their resume prints, and
+  // resumes print ranges. Taking the first match stored 2024, which every eligibility filter reads
+  // as "already graduated", silently disqualifying her from the internships this product exists to
+  // win. The last year in a range is the one she finishes in.
+  assert.equal(graduationYearFrom('Aug 2024 - May 2028'), 2028);
+  assert.equal(graduationYearFrom('2024-2028'), 2028);
+  assert.equal(graduationYearFrom('Sept 2025 to June 2029'), 2029);
 });
 
 test('a grad_date with no year leaves the stored year alone rather than zeroing it', () => {
-  assert.equal(derivedGradYear('Spring'), undefined);
-  assert.equal(derivedGradYear(''), undefined);
+  assert.equal(graduationYearFrom('Spring'), undefined);
+  assert.equal(graduationYearFrom(''), undefined);
+  assert.equal(graduationYearFrom('TBD'), undefined);
+});
+
+test('a year-like number that is not a year is not mistaken for one', () => {
+  assert.equal(graduationYearFrom('GPA 3.89'), undefined);
+  assert.equal(graduationYearFrom('Class of 2028, 120 credits'), 2028);
 });
