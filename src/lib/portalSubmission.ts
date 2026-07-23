@@ -1,5 +1,15 @@
 import type { Page } from 'playwright-core';
 import type { ManagedBrowserAction, ManagedBrowserResult } from './browserbase';
+import { describeRequiredBlocker, humanFieldLabel } from './fieldLabel';
+
+// Portal field ids legitimately contain CSS-syntax characters (Greenhouse uses UUIDs, others use
+// dots and colons), so they are matched with the [id="..."] attribute form rather than #id. Inside
+// a quoted attribute value only the quote and the backslash need escaping, which keeps this to one
+// rule instead of a full CSS identifier escaper, and means a field id can never terminate the
+// selector and match something unintended.
+function quoteAttr(value: string): string {
+  return value.replace(/["\\]/g, '\\$&');
+}
 
 export type SupportedPortal = 'greenhouse' | 'lever' | 'ashby' | 'controlled_test';
 
@@ -211,8 +221,45 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     if (type === 'hidden') continue;
     const value = await field.inputValue().catch(() => '');
     if (value) continue;
-    const name = (await field.getAttribute('aria-label')) ?? (await field.getAttribute('name')) ?? 'required field';
-    blockers.push(`${name.slice(0, 120)} is required`);
+
+    // Ordered best-to-worst source of a HUMAN label (R-048). The visible <label> comes first
+    // because Greenhouse and Ashby name their custom question inputs with UUIDs, so the `name`
+    // attribute is an opaque token; humanFieldLabel rejects those rather than printing them.
+    const id = await field.getAttribute('id');
+    const labelledBy = await field.getAttribute('aria-labelledby');
+    const candidates: (string | null)[] = [];
+
+    if (id) {
+      candidates.push(
+        await page
+          .locator(`label[for="${quoteAttr(id)}"]`)
+          .first()
+          .innerText()
+          .catch(() => null),
+      );
+    }
+    if (labelledBy) {
+      candidates.push(
+        await page
+          .locator(`[id="${quoteAttr(labelledBy.split(/\s+/)[0])}"]`)
+          .first()
+          .innerText()
+          .catch(() => null),
+      );
+    }
+    candidates.push(
+      await field
+        .locator('xpath=ancestor::label[1]')
+        .first()
+        .innerText()
+        .catch(() => null),
+    );
+    candidates.push(await field.getAttribute('aria-label'));
+    candidates.push(await field.getAttribute('placeholder'));
+    candidates.push(await field.getAttribute('name'));
+    candidates.push(id);
+
+    blockers.push(describeRequiredBlocker(humanFieldLabel(candidates), { type }));
   }
   return { filledFields, blockers: [...new Set(blockers)] };
 }

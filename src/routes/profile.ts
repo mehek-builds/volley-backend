@@ -7,6 +7,21 @@ import { parseResumeWithClaude, ParsedProfile } from '../llm/parse';
 import { extractPdfText } from '../lib/pdfText';
 import { put } from '@vercel/blob';
 import { MultipartFile } from '@fastify/multipart';
+import { z } from 'zod';
+
+// R-052. Bounded on purpose: these are the only parsed fields a student may correct by hand, and
+// the ceilings stop a paste of an entire resume landing in the school field. Every value is trimmed
+// by the handler, so " " is rejected here as empty rather than stored as whitespace.
+export const educationPatchSchema = z
+  .object({
+    full_name: z.string().trim().min(1).max(120).optional(),
+    school: z.string().trim().min(1).max(200).optional(),
+    // Joint degrees are long: "Bachelor of Science in Computer Science & Business Administration,
+    // Finance Emphasis" is 88 characters, and truncating one is the exact failure R-047 was.
+    degree: z.string().trim().max(200).optional(),
+    grad_date: z.string().trim().max(40).optional(),
+  })
+  .refine((value) => Object.keys(value).length > 0, { message: 'Send at least one field to update' });
 
 // A resume's description blob rendered as bullet variants. Resumes are written as bullets, and
 // the bank's whole point is one record per role holding every phrasing of it, so a single
@@ -283,6 +298,50 @@ export async function profileRoutes(fastify: FastifyInstance) {
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to retrieve profile' });
+    }
+  });
+
+  // PATCH /profile/education - correct a mis-parsed education block (R-052).
+  //
+  // These four fields were previously write-once at resume-upload time and read-only everywhere
+  // else, so a single wrong word could only be fixed by producing an entirely new PDF. That is what
+  // made R-047 unfixable from inside the product: the parser dropped "Computer Science &" from a
+  // joint degree, and there was no way to put it back. Deliberately narrow: it touches only the
+  // education keys and cannot reach experience, skills or any encrypted application field.
+  fastify.patch('/profile/education', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const userId = request.jwtPayload!.userId;
+    const parsed = educationPatchSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: 'Invalid education patch', details: parsed.error.flatten().fieldErrors });
+    }
+
+    try {
+      const rows = await db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1);
+      if (rows.length === 0) {
+        return reply.status(404).send({ error: 'Profile not found - upload a resume first' });
+      }
+
+      const current = (rows[0].parsed_json ?? {}) as Record<string, unknown>;
+      const patch = parsed.data;
+      const next: Record<string, unknown> = { ...current };
+      // Only overwrite keys the caller actually sent, so a form that submits one field cannot blank
+      // the other three.
+      for (const key of ['full_name', 'school', 'degree', 'grad_date'] as const) {
+        if (patch[key] !== undefined) next[key] = patch[key].trim();
+      }
+      // grad_year is what eligibility filters read, and it is derived rather than typed: keeping it
+      // in step with grad_date here stops the two disagreeing about whether the student has already
+      // graduated. A grad_date with no 4-digit year leaves the existing value alone.
+      if (patch.grad_date !== undefined) {
+        const year = patch.grad_date.match(/\b(19|20)\d{2}\b/)?.[0];
+        if (year) next.grad_year = Number(year);
+      }
+
+      await db.update(profiles).set({ parsed_json: next }).where(eq(profiles.user_id, userId));
+      return reply.status(200).send(serveProfileJson(next, rows[0].skills, request.jwtPayload!.email));
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ error: 'Failed to update education' });
     }
   });
 }
