@@ -65,20 +65,22 @@ export function isChoiceQuestion(question: string): boolean {
 
 // Whether reviewed questions may be sent to a given provider's runner.
 //
-// The managed provider runs its own script in a separate service. It throws on any non-text
-// control and does NOT honour the `optional` flag this repo sets, verified across three deploys:
-// each fix moved the failure to the next checkbox rather than surviving it, and every failure took
-// the whole run down with it, discarding the name, email, phone and resume already entered.
+// Both providers now can. This was briefly false for 'managed' as a containment measure: that
+// runner used to call fill() on every control, which throws on a checkbox or radio, and it did not
+// honour the `optional` flag, so one unfillable question aborted the entire run and discarded the
+// name, email, phone and resume already entered.
 //
-// Guessing control types from question wording was tried and does not hold. Until that runner
-// either honours `optional` or reports control types back, the managed path sends NO reviewed
-// questions: a run that completes and hands over five filled fields plus an honest blocker list is
-// strictly better for the student than a run that fails with a Playwright stack trace and nothing.
-// The answers are still stored on the packet and shown in the dashboard for her to copy.
+// Fixed at the source in stratus-browser-cloud (PR #6, merged and deployed 2026-07-23): every
+// action is wrapped so an optional failure is stepped over, and fillByLabelText dispatches on the
+// control it actually found (select -> selectOption, checkbox/radio -> check, otherwise fill), with
+// option matching scoped to the question's own container. Guessing control types from question
+// wording was tried here first and does not work: "How did you hear about this job?" reads like
+// free text and is a checkbox group.
 //
-// The direct Playwright path is unaffected: `optional` genuinely works there.
-export function canFillReviewedQuestions(provider: 'managed' | 'direct'): boolean {
-  return provider === 'direct';
+// Kept as a function rather than deleted because it is the switch to reach for if a provider
+// regresses, and the history above is the reason it exists.
+export function canFillReviewedQuestions(_provider: 'managed' | 'direct'): boolean {
+  return true;
 }
 
 export function buildManagedPortalActions(

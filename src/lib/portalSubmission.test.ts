@@ -54,10 +54,8 @@ test('managed controlled-portal actions include reviewed fields, resume upload, 
     resumeName: 'resume.pdf',
     questions: [{ question: 'Why this role?', answer: 'I enjoy systems work.' }],
   }, true);
-  // No 'fillByLabelText': reviewed questions are no longer sent to the managed runner, which
-  // throws on any non-text control and ignores `optional`. See canFillReviewedQuestions.
   assert.deepEqual(actions.map((action) => action.type), [
-    'fill', 'fill', 'fill', 'upload', 'click',
+    'fill', 'fill', 'fill', 'upload', 'fillByLabelText', 'click',
   ]);
   assert.equal(actions.find((action) => action.type === 'upload')?.file?.base64, 'cGRm');
 });
@@ -116,18 +114,24 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
       { question: 'What are your annualized total compensation expectations?', answer: 'USD 175,000 per year' },
     ],
   });
-  // NO reviewed questions reach the managed runner. It throws on any non-text control and ignores
-  // `optional`, verified across three deploys: each narrowing moved the failure to the next
-  // checkbox, and every failure discarded the five fields already filled. A run that completes
-  // with name/email/phone/resume plus an honest blocker list beats one that dies with a stack
-  // trace and nothing.
-  assert.deepEqual(actions.filter((action) => action.type === 'fillByLabelText'), []);
-  // first_name, last_name, email (phone and location are omitted from this fixture), then resume.
-  assert.deepEqual(actions.map((a) => a.type), ['fill', 'fill', 'fill', 'upload']);
+  // Both questions are sent now that the runner dispatches on control type (stratus PR #6), and
+  // both stay optional so a control it still cannot handle degrades to a blocker rather than
+  // taking the whole run down and discarding the fields already filled.
+  const questionActions = actions.filter((action) => action.type === 'fillByLabelText');
+  assert.equal(questionActions.length, 2);
+  for (const action of questionActions) {
+    assert.equal(action.optional, true, `"${action.text}" must not be able to abort the run`);
+  }
+  // first_name, last_name, email (phone and location are omitted from this fixture), resume, then
+  // the two questions.
+  assert.deepEqual(actions.map((a) => a.type), [
+    'fill', 'fill', 'fill', 'upload', 'fillByLabelText', 'fillByLabelText',
+  ]);
 });
 
-test('the managed runner is not sent reviewed questions; the direct path still is', () => {
-  assert.equal(canFillReviewedQuestions('managed'), false);
+test('both providers may be sent reviewed questions', () => {
+  // False for 'managed' only while its runner threw on checkboxes and ignored `optional`.
+  assert.equal(canFillReviewedQuestions('managed'), true);
   assert.equal(canFillReviewedQuestions('direct'), true);
 });
 
