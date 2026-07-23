@@ -93,7 +93,13 @@ async function prepareManaged(
   const preview = await put(
     `users/${row.user_id}/submission-runs/${runId}/filled.png`,
     Buffer.from(result.screenshot, 'base64'),
-    { access: 'public', contentType: 'image/png' },
+    // addRandomSuffix because a RETRY reuses the run id (runId falls back to
+    // current.submission_run_id), so a second attempt writes the same key and Vercel Blob rejects
+    // it: "This blob already exists". That turned an otherwise SUCCESSFUL run, five fields filled
+    // and a preview captured, into status `failed`. Suffixing also keeps each attempt's evidence
+    // instead of overwriting the previous one, which matters when comparing a retry to what it
+    // replaced.
+    { access: 'public', contentType: 'image/png', addRandomSuffix: true },
   );
   // Sanitized at the boundary, not upstream: the managed provider scans the form in its own
   // service and returns finished sentences, so it never passes through this repo's label
@@ -141,6 +147,8 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
     const preview = await put(`users/${row.user_id}/submission-runs/${runId}/filled.png`, screenshot, {
       access: 'public',
       contentType: 'image/png',
+      // See the managed path above: a retry reuses the run id and would collide.
+      addRandomSuffix: true,
     });
     const review = nextReview(current, {
       status: result.blockers.length > 0 ? 'needs_attention' : 'ready_for_final_approval',
@@ -173,7 +181,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
     const blob = await put(
       `users/${row.user_id}/submission-runs/${current.submission_run_id}/receipt.png`,
       Buffer.from(result.screenshot, 'base64'),
-      { access: 'public', contentType: 'image/png' },
+      // A receipt is the proof an application was actually submitted, so a collision here would
+      // fail the run at the worst possible moment: after the employer already has it.
+      { access: 'public', contentType: 'image/png', addRandomSuffix: true },
     );
     await writeReview(row, nextReview(current, {
       status: 'submitted',
@@ -204,7 +214,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
     const blob = await put(
       `users/${row.user_id}/submission-runs/${current.submission_run_id}/receipt.png`,
       screenshot,
-      { access: 'public', contentType: 'image/png' },
+      { access: 'public', contentType: 'image/png', addRandomSuffix: true },
     );
     await writeReview(row, nextReview(current, {
       status: 'submitted',
