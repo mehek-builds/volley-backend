@@ -5,6 +5,7 @@ import {
   describeUnlabelledBlockers,
   humanFieldLabel,
   isOpaqueIdentifier,
+  sanitizeProviderBlockers,
   tidyLabel,
 } from './fieldLabel';
 
@@ -159,4 +160,58 @@ test('unlabelled fields are counted, not collapsed into one line', () => {
   assert.equal(describeUnlabelledBlockers(1), describeRequiredBlocker(null));
   assert.match(describeUnlabelledBlockers(4), /^4 required fields/);
   assert.match(describeUnlabelledBlockers(4), /have no label Litos can read/);
+});
+
+// The managed browser provider scans the form in a SEPARATE service and returns finished
+// sentences, so it never passes through humanFieldLabel above. Live QA on a real Ashby posting
+// showed three raw UUIDs on the dashboard after every other part of this fix had shipped. These pin
+// the boundary sanitizer that closes that gap for every provider, present and future.
+
+test('UUID blockers from a provider never reach the user', () => {
+  const fromProvider = [
+    'CAPTCHA requires your attention',
+    '638d2df3-7fb9-4fd6-a3ff-97be54cb1e31 is required',
+    '0f4a9ba8-f641-47f1-b58e-7966b0f3beb2 is required',
+    '81496894-ad86-426e-a473-0c8fea1a2121 is required',
+  ];
+  const clean = sanitizeProviderBlockers(fromProvider);
+  assert.equal(clean.join(' ').includes('638d2df3'), false);
+  assert.equal(clean.join(' ').includes('0f4a9ba8'), false);
+  assert.equal(clean.join(' ').includes('81496894'), false);
+  // The CAPTCHA line is human and survives untouched.
+  assert.ok(clean.includes('CAPTCHA requires your attention'));
+  // The three unnamed fields are COUNTED, so the user knows there are three things to fix.
+  assert.ok(clean.some((line) => /^3 required fields/.test(line)), clean.join(' | '));
+});
+
+test('a provider blocker naming a real field is preserved and made readable', () => {
+  const clean = sanitizeProviderBlockers(['Please indicate your overall GPA. * is required']);
+  assert.deepEqual(clean, ['"Please indicate your overall GPA." is required and is still empty']);
+});
+
+test('the old double-appended template is repaired, not echoed', () => {
+  const clean = sanitizeProviderBlockers(['required field is required']);
+  assert.equal(clean.length, 1);
+  assert.match(clean[0], /no label Litos can read/);
+  assert.doesNotMatch(clean[0], /required field is required/);
+});
+
+test('a single unnamed field reads naturally rather than as a count of one', () => {
+  const clean = sanitizeProviderBlockers(['cf-4820193 is required']);
+  assert.deepEqual(clean, [describeRequiredBlocker(null)]);
+});
+
+test('duplicate provider lines collapse, and empty ones are dropped', () => {
+  const clean = sanitizeProviderBlockers(['CAPTCHA requires your attention', 'CAPTCHA requires your attention', '', '   ']);
+  assert.deepEqual(clean, ['CAPTCHA requires your attention']);
+});
+
+test('a bare identifier with no sentence around it is not printed as prose', () => {
+  const clean = sanitizeProviderBlockers(['9f8d4312-8d32-4bc2-baf2-e2ff2b684844']);
+  assert.equal(clean.join(' ').includes('9f8d4312'), false);
+  assert.match(clean[0], /no label Litos can read/);
+});
+
+test('an empty provider result produces no blockers', () => {
+  assert.deepEqual(sanitizeProviderBlockers([]), []);
 });

@@ -31,10 +31,27 @@ const STRUCTURAL_TOKEN_RE = /^\S*[[\]:]\S/;
 // customQuestion12345, applicantAnswer42: a long lowerCamel run ending in digits.
 const LONG_CAMEL_WITH_DIGITS_RE = /^[a-z]{4,}[A-Z][A-Za-z]*\d+$/;
 
-/** True when a string is a machine identifier rather than something a person wrote. */
+// Generic placeholders providers substitute when THEY could not read a label either. They are
+// grammatical English, so no shape rule catches them, but they name nothing: quoting one back
+// produces '"required field" is required and is still empty', which is the original R-048 sentence
+// wearing quotation marks.
+const PLACEHOLDER_LABELS: ReadonlySet<string> = new Set([
+  'required field',
+  'required',
+  'field',
+  'this field',
+  'input',
+  'value',
+  'unknown',
+  'unnamed field',
+  'untitled',
+]);
+
+/** True when a string is a machine identifier or a generic placeholder, not a real label. */
 export function isOpaqueIdentifier(value: string): boolean {
   const trimmed = value.trim();
   if (!trimmed) return true;
+  if (PLACEHOLDER_LABELS.has(trimmed.toLowerCase())) return true;
   if (UUID_RE.test(trimmed)) return true;
   if (LONG_HEX_RE.test(trimmed)) return true;
   if (NUMERIC_ID_RE.test(trimmed)) return true;
@@ -103,4 +120,46 @@ export function describeRequiredBlocker(label: string | null, hint?: { type?: st
 export function describeUnlabelledBlockers(count: number): string {
   if (count === 1) return describeRequiredBlocker(null);
   return `${count} required fields on the form have no label Litos can read, and are still empty`;
+}
+
+/**
+ * Last line of defence on blocker text, applied to whatever a browser provider hands back.
+ *
+ * The managed provider does its own field scanning in a separate service and returns finished
+ * sentences, so it never touches the label resolution above. Live QA against a real Ashby posting
+ * proved that: the dashboard showed three raw UUIDs after every other part of this fix had shipped.
+ * The user must never see a machine identifier no matter which provider produced the run, and this
+ * repo cannot assume it controls every one of them, so the sanitizing happens where the strings
+ * enter: any "<opaque token> is required" line becomes the unlabelled description, those are
+ * counted rather than repeated, and human-readable lines (a CAPTCHA notice, a real field name) pass
+ * through untouched.
+ */
+export function sanitizeProviderBlockers(blockers: readonly string[]): string[] {
+  const readable: string[] = [];
+  let unlabelled = 0;
+
+  for (const raw of blockers) {
+    const line = typeof raw === 'string' ? raw.trim() : '';
+    if (!line) continue;
+
+    // The shape every provider uses for a missing required field: "<something> is required".
+    const match = line.match(/^(.*?)\s+is required\.?$/i);
+    if (match) {
+      const label = humanFieldLabel([match[1]]);
+      if (label) readable.push(describeRequiredBlocker(label));
+      else unlabelled += 1;
+      continue;
+    }
+
+    // Not a required-field line. Keep it, but never let a bare identifier through as prose.
+    if (isOpaqueIdentifier(line)) {
+      unlabelled += 1;
+      continue;
+    }
+    readable.push(line);
+  }
+
+  const deduped = [...new Set(readable)];
+  if (unlabelled > 0) deduped.push(describeUnlabelledBlockers(unlabelled));
+  return deduped;
 }

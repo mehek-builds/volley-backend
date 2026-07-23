@@ -25,6 +25,7 @@ import {
   type SubmissionPacket,
   type SupportedPortal,
 } from '../lib/portalSubmission';
+import { sanitizeProviderBlockers } from '../lib/fieldLabel';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { resolveBlobUrl } from '../lib/resumeAccess';
 import { decryptRow } from './applicationProfile';
@@ -94,7 +95,10 @@ async function prepareManaged(
     Buffer.from(result.screenshot, 'base64'),
     { access: 'public', contentType: 'image/png' },
   );
-  const blockers = result.blockers ?? [];
+  // Sanitized at the boundary, not upstream: the managed provider scans the form in its own
+  // service and returns finished sentences, so it never passes through this repo's label
+  // resolution. Live QA proved that gap by showing three raw UUIDs on a real Ashby posting.
+  const blockers = sanitizeProviderBlockers(result.blockers ?? []);
   const review = nextReview(current, {
     status: blockers.length > 0 ? 'needs_attention' : 'ready_for_final_approval',
     submission_run_id: runId,
@@ -145,7 +149,9 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
       browser_session_id: session.id,
       filled_fields: result.filledFields,
       preview_screenshot_url: preview.url,
-      attention_reason: result.blockers.join('\n') || undefined,
+      // Already human on this path, but sanitized anyway so both providers are held to one
+      // guarantee and a future change to either cannot quietly reintroduce identifiers.
+      attention_reason: sanitizeProviderBlockers(result.blockers).join('\n') || undefined,
       handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
       submission_error: undefined,
     });
