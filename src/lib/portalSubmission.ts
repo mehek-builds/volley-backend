@@ -48,6 +48,19 @@ function managedFill(
   actions.push({ type: 'fill', selector, value, label, optional });
 }
 
+// Questions that are almost always rendered as a checkbox, radio group or select on an ATS form,
+// and therefore cannot be typed into. Matching on the QUESTION wording rather than the answer is
+// deliberate: the answer "Yes" tells you nothing about the control, while "Have you..." tells you
+// a great deal. Over-matching is the safe direction, because a skipped question becomes a visible
+// blocker the student clears in seconds, whereas a question that reaches the managed runner as an
+// untypable control ends the entire run and loses every field already filled.
+const CHOICE_QUESTION_RE =
+  /^\s*(?:do|does|did|have|has|are|is|was|were|will|would|can|could|should|may|must)\s+you\b|select\s+(?:all|one|any|your)\b|please\s+select\b|which\s+of\s+the\s+following\b|\bwhat\s+year\b|\byes\s*\/\s*no\b/i;
+
+export function isChoiceQuestion(question: string): boolean {
+  return CHOICE_QUESTION_RE.test(question);
+}
+
 export function buildManagedPortalActions(
   portal: SupportedPortal,
   packet: SubmissionPacket,
@@ -90,17 +103,18 @@ export function buildManagedPortalActions(
   }
   for (const item of packet.questions) {
     if (!item.answer.trim()) continue;
+    // Choice questions are not sent at all. `optional: true` SHOULD have been enough, and it is
+    // honoured on the direct Playwright path, but the managed provider runs its own runner in a
+    // separate service and throws through the flag: a verified redeploy still ended the Aquatic run
+    // `failed` on "Input of type checkbox cannot be filled", discarding the name, email, phone and
+    // resume it had already entered. Since that runner cannot be fixed from this repo, the only
+    // reliable lever is not handing it an action it will choke on.
+    if (isChoiceQuestion(item.question)) continue;
     actions.push({
       type: 'fillByLabelText',
       text: item.question,
       value: item.answer,
       label: `question:${item.question.slice(0, 80)}`,
-      // Optional, like every other fill here. Without this one unfillable control ABORTS THE WHOLE
-      // RUN and discards the name, email, phone and resume that were already entered. Observed on
-      // Aquatic's Greenhouse form: "Please select all fields of study" is a checkbox group, and
-      // Playwright's fill() cannot fill a checkbox, so the run ended `failed` with a raw Playwright
-      // stack trace and nothing to show for it. An answer that cannot be typed should degrade to a
-      // blocker the student resolves, which is the product's whole handoff model.
       optional: true,
     });
   }

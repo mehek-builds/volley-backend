@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildManagedPortalActions, detectPortal, portalApplicationUrl, readManagedReceipt } from './portalSubmission';
+import { buildManagedPortalActions, detectPortal, isChoiceQuestion, portalApplicationUrl, readManagedReceipt } from './portalSubmission';
 
 test('detects the three supported applicant portal families', () => {
   assert.equal(detectPortal('https://boards.greenhouse.io/acme/jobs/123'), 'greenhouse');
@@ -66,6 +66,32 @@ test('managed receipt requires confirmation language and captures the reference'
   assert.throws(() => readManagedReceipt({ title: 'Form', url: 'https://example.com', text: 'Apply now' }), /verifiable/);
 });
 
+test('choice-shaped questions are recognised by their wording', () => {
+  for (const q of [
+    'Please select all fields of study that closely align with your education background',
+    'Have you completed any internships?',
+    'Do you have any outstanding offers or deadlines?',
+    'Will you require sponsorship?',
+    'Are you legally eligible to work in the United States?',
+    'What year are you expected to graduate?',
+    'Which of the following best describes you?',
+  ]) {
+    assert.equal(isChoiceQuestion(q), true, `"${q}" should be treated as a choice control`);
+  }
+});
+
+test('genuinely free-text questions are still typed', () => {
+  for (const q of [
+    'What are your annualized total compensation expectations?',
+    'What is your Github username?',
+    'Why do you want to work here?',
+    'Tell us about a project you are proud of',
+    'Current Location',
+  ]) {
+    assert.equal(isChoiceQuestion(q), false, `"${q}" should still be filled`);
+  }
+});
+
 test('a question that cannot be typed degrades to a blocker instead of killing the run', () => {
   // Live failure on Aquatic's Greenhouse form, 2026-07-23: "Please select all fields of study" is
   // a checkbox group, Playwright's fill() cannot fill a checkbox, and because the question action
@@ -82,10 +108,11 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
     ],
   });
   const questionActions = actions.filter((action) => action.type === 'fillByLabelText');
-  assert.equal(questionActions.length, 2);
-  for (const action of questionActions) {
-    assert.equal(action.optional, true, `"${action.text}" must not be able to abort the run`);
-  }
+  // The checkbox group is not sent at all: the managed runner throws through `optional`, so the
+  // only reliable lever is never handing it an action it will choke on. The typable one survives.
+  assert.equal(questionActions.length, 1);
+  assert.match(String(questionActions[0].text), /compensation expectations/);
+  assert.equal(questionActions[0].optional, true);
 });
 
 test('choice controls are not auto-clicked by matching answer text', () => {
