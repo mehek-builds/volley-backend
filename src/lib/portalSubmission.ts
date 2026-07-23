@@ -91,10 +91,25 @@ export function buildManagedPortalActions(
   for (const item of packet.questions) {
     if (!item.answer.trim()) continue;
     actions.push({
-      type: 'fillByLabelText', text: item.question, value: item.answer,
+      type: 'fillByLabelText',
+      text: item.question,
+      value: item.answer,
       label: `question:${item.question.slice(0, 80)}`,
+      // Optional, like every other fill here. Without this one unfillable control ABORTS THE WHOLE
+      // RUN and discards the name, email, phone and resume that were already entered. Observed on
+      // Aquatic's Greenhouse form: "Please select all fields of study" is a checkbox group, and
+      // Playwright's fill() cannot fill a checkbox, so the run ended `failed` with a raw Playwright
+      // stack trace and nothing to show for it. An answer that cannot be typed should degrade to a
+      // blocker the student resolves, which is the product's whole handoff model.
+      optional: true,
     });
   }
+  // Deliberately NOT attempted: clicking checkboxes and radios by matching their label to the
+  // answer text. It would fill more of the form, and it is the obvious next step, but a short
+  // generic answer ("Yes", "No") can match a label anywhere on the page, including a legal
+  // acknowledgement or a consent box. Ticking the wrong consent on a real application is a harm
+  // the student cannot undo, while an unanswered choice question is a blocker she resolves in
+  // seconds. Choice controls stay with the human until they can be scoped to their own question.
   if (submit) actions.push({ type: 'click', selector: 'button[type="submit"], input[type="submit"]' });
   return actions;
 }
