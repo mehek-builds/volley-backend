@@ -17,6 +17,10 @@ export const resumeGenerateBodySchema = z.object({
   company: z.string().min(1).max(RESUME_REQUEST_LIMITS.company),
   role: z.string().trim().min(1).max(RESUME_REQUEST_LIMITS.role),
   jd_text: z.string().min(20).max(RESUME_REQUEST_LIMITS.jobDescription),
+  application: z.object({
+    portal_url: z.string().url().max(4000),
+    ats_name: z.string().min(1).max(100),
+  }).optional(),
   contact: z.object({
     full_name: z.string().min(1).max(RESUME_REQUEST_LIMITS.fullName),
     email: optionalContactField(RESUME_REQUEST_LIMITS.email),

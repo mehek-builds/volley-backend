@@ -38,6 +38,17 @@ export const resumeGenerateSuccessResponseSchema = z.object({
   resume_url: z.string(),
   file_name: z.string(),
   spec: z.unknown(),
+  application: z.object({
+    id: z.string().uuid(),
+    job_context: z.object({
+      company: z.string(),
+      role: z.string(),
+      jd_hash: z.string(),
+    }),
+    spec: z.unknown(),
+    download_url: z.string(),
+    created_at: z.string(),
+  }).optional(),
   quality: resumeQualityResponseSchema.extend({
     ready_to_attach: z.literal(true),
     ats_keyword_coverage_pct: z.number(),

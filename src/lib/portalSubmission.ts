@@ -1,5 +1,16 @@
 import type { Page } from 'playwright-core';
 import type { ManagedBrowserAction, ManagedBrowserResult } from './browserbase';
+import { describeRequiredBlocker, describeUnlabelledBlockers, humanFieldLabel } from './fieldLabel';
+import type { Locator } from 'playwright-core';
+
+// Portal field ids legitimately contain CSS-syntax characters (Greenhouse uses UUIDs, others use
+// dots and colons), so they are matched with the [id="..."] attribute form rather than #id. Inside
+// a quoted attribute value only the quote and the backslash need escaping, which keeps this to one
+// rule instead of a full CSS identifier escaper, and means a field id can never terminate the
+// selector and match something unintended.
+function quoteAttr(value: string): string {
+  return value.replace(/["\\]/g, '\\$&');
+}
 
 export type SupportedPortal = 'greenhouse' | 'lever' | 'ashby' | 'controlled_test';
 
@@ -204,6 +215,8 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     blockers.push('CAPTCHA requires your attention');
   }
   const required = page.locator('input[required], textarea[required], select[required]');
+  const labelledBlockers: string[] = [];
+  let unlabelledCount = 0;
   for (let index = 0; index < (await required.count()); index += 1) {
     const field = required.nth(index);
     if (!(await field.isVisible().catch(() => false))) continue;
@@ -211,10 +224,80 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     if (type === 'hidden') continue;
     const value = await field.inputValue().catch(() => '');
     if (value) continue;
-    const name = (await field.getAttribute('aria-label')) ?? (await field.getAttribute('name')) ?? 'required field';
-    blockers.push(`${name.slice(0, 120)} is required`);
+
+    const label = await resolveFieldLabel(page, field);
+    if (label) labelledBlockers.push(describeRequiredBlocker(label, { type }));
+    else unlabelledCount += 1;
   }
-  return { filledFields, blockers: [...new Set(blockers)] };
+
+  // Deliberately NOT deduped together with the labelled lines. Every unlabelled field produces the
+  // identical sentence, so a plain Set collapsed five distinct blocked fields into one: the student
+  // would fix the one thing named, resubmit, and fail again with no new information. Labelled lines
+  // still dedupe, because two fields sharing a label really are one thing to fix.
+  blockers.push(...new Set(labelledBlockers));
+  if (unlabelledCount > 0) blockers.push(describeUnlabelledBlockers(unlabelledCount));
+  return { filledFields, blockers };
+}
+
+// Playwright's locator actions AUTO-WAIT, defaulting to 30s. Probing four label sources per field
+// with the default would spend up to two minutes on a single unlabelled field and blow the
+// function's runtime budget, killing the whole submission run: strictly worse than the ugly UUID
+// text this replaced. Every probe is therefore explicitly bounded, and the probes run LAZILY,
+// stopping at the first source that yields something a human wrote.
+const LABEL_PROBE_TIMEOUT_MS = 750;
+
+async function resolveFieldLabel(page: Page, field: Locator): Promise<string | null> {
+  const id = await field.getAttribute('id').catch(() => null);
+  const labelledBy = await field.getAttribute('aria-labelledby').catch(() => null);
+  // aria-labelledby is a space-separated ID list; leading whitespace would make split()[0] the
+  // empty string and produce [id=""], which matches nothing and costs a probe for no reason.
+  const labelledByFirst = labelledBy?.trim().split(/\s+/)[0] || null;
+
+  // Ordered best to worst. The visible <label> comes first because Greenhouse and Ashby name their
+  // custom question inputs with UUIDs, so `name` and `id` are opaque tokens; humanFieldLabel
+  // rejects those rather than printing them, and the loop simply moves on to the next source.
+  const probes: Array<() => Promise<string | null>> = [];
+
+  if (id) {
+    probes.push(() =>
+      page.locator(`label[for="${quoteAttr(id)}"]`).first().innerText({ timeout: LABEL_PROBE_TIMEOUT_MS }),
+    );
+  }
+  if (labelledByFirst) {
+    // textContent, not innerText: a legitimate sr-only label is display:none-adjacent and innerText
+    // renders it as the empty string, discarding a perfectly good name.
+    probes.push(() =>
+      page.locator(`[id="${quoteAttr(labelledByFirst)}"]`).first().textContent({ timeout: LABEL_PROBE_TIMEOUT_MS }),
+    );
+  }
+  probes.push(async () => {
+    // Gated on count() so a field with no ancestor label costs one cheap query instead of a full
+    // timeout. Skipped when the label wraps more than one control: innerText of a label wrapping a
+    // radio group returns the whole group's text, which is not this field's name.
+    const ancestor = field.locator('xpath=ancestor::label[1]');
+    if ((await ancestor.count().catch(() => 0)) === 0) return null;
+    if ((await ancestor.locator('input, select, textarea').count().catch(() => 0)) > 1) return null;
+    return ancestor.first().innerText({ timeout: LABEL_PROBE_TIMEOUT_MS });
+  });
+  probes.push(() => field.getAttribute('aria-label'));
+  probes.push(() => field.getAttribute('placeholder'));
+  probes.push(() => field.getAttribute('name'));
+  probes.push(async () => id);
+
+  for (const probe of probes) {
+    let raw: string | null = null;
+    // The try wraps locator CONSTRUCTION as well as the await: a page-controlled id containing a
+    // character that is not legal in a CSS string can throw synchronously, and an unhandled throw
+    // here would abort the entire fill run rather than degrading to "no label".
+    try {
+      raw = await probe();
+    } catch {
+      raw = null;
+    }
+    const label = humanFieldLabel([raw]);
+    if (label) return label;
+  }
+  return null;
 }
 
 export async function clickFinalSubmit(page: Page): Promise<void> {

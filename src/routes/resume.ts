@@ -184,13 +184,16 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       return rateLimitedReply(reply);
     }
 
-    // Ordered read, always: see readExperienceBank for why the order is load-bearing (R-022).
-    const bank = await readExperienceBank(userId);
+    // These reads are independent. Starting them together removes one database round trip from
+    // every generation while preserving readExperienceBank's load-bearing row ordering (R-022).
+    const [bank, profileRows] = await Promise.all([
+      readExperienceBank(userId),
+      db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1),
+    ]);
     if (bank.length === 0) {
       return reply.status(400).send({ error: 'No experience bank found - complete onboarding first' });
     }
 
-    const profileRows = await db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1);
     const parsed = profileRows[0]?.parsed_json as {
       school?: string;
       degree?: string;
@@ -487,44 +490,53 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     const jobContext = { company: body.company, role: body.role, jd_hash: jdHash };
     const now = new Date().toISOString();
 
+    const applicationReview = {
+      jd_text: body.jd_text,
+      role: body.role,
+      ...(body.application ? {
+        portal_url: body.application.portal_url,
+        ats_name: body.application.ats_name,
+      } : {}),
+      status: body.application ? 'ready_to_submit' as const : 'resume_ready' as const,
+      edited_terms: deriveEditedTerms(spec, bank),
+      questions: [],
+      skipped_reasons: [],
+      updated_at: now,
+    };
+    const storedSpec = {
+      ...spec,
+      _contact: body.contact,
+      _review: applicationReview,
+      _quality: {
+        specIssues: [],
+        layoutIssues,
+        visualWarnings,
+        atsCoverage,
+        trimmedForFit,
+        sparse,
+        groundingRemoved,
+        layoutOmissions,
+        visualLayout: {
+          fillRatio: visualLayout.fill_ratio,
+          bottomWhitespace: visualLayout.bottom_whitespace,
+          densityExpansion: visualLayout.density_expansion,
+          bodyFontSize: visualLayout.body_font_size,
+          sectionOrder: visualLayout.section_order,
+          maximumBulletLines: Math.max(0, ...visualLayout.bullets.map((bullet) => bullet.lines)),
+        },
+      },
+    };
+
+    let persisted = false;
     try {
       await db.insert(generated_resumes).values({
         id: resumeId,
         user_id: userId,
         job_context: jobContext,
-        spec: {
-          ...spec,
-          _contact: body.contact,
-          _review: {
-            jd_text: body.jd_text,
-            role: body.role,
-            status: 'resume_ready',
-            edited_terms: deriveEditedTerms(spec, bank),
-            questions: [],
-            skipped_reasons: [],
-            updated_at: now,
-          },
-          _quality: {
-            specIssues: [],
-            layoutIssues,
-            visualWarnings,
-            atsCoverage,
-            trimmedForFit,
-            sparse,
-            groundingRemoved,
-            layoutOmissions,
-            visualLayout: {
-              fillRatio: visualLayout.fill_ratio,
-              bottomWhitespace: visualLayout.bottom_whitespace,
-              densityExpansion: visualLayout.density_expansion,
-              bodyFontSize: visualLayout.body_font_size,
-              sectionOrder: visualLayout.section_order,
-              maximumBulletLines: Math.max(0, ...visualLayout.bullets.map((bullet) => bullet.lines)),
-            },
-          },
-        },
+        spec: storedSpec,
         resume_object_key: objectKey,
       });
+      persisted = true;
     } catch (err) {
       fastify.log.error(err);
       // The file is already generated and returned below; failing to log it for audit
@@ -533,7 +545,17 @@ export async function resumeRoutes(fastify: FastifyInstance) {
 
     await bumpCounter(userId, period, 'resumes');
 
-    return reply.status(200).send({ ...responseTemplate, resume_url: resumeUrl });
+    return reply.status(200).send({
+      ...responseTemplate,
+      resume_url: resumeUrl,
+      application: persisted ? {
+        id: resumeId,
+        job_context: jobContext,
+        spec: storedSpec,
+        download_url: resumeUrl,
+        created_at: now,
+      } : undefined,
+    });
   });
 
   // GET /resume/download?t=... - streams a generated resume via its capability token.
