@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildManagedPortalActions, detectPortal, isChoiceQuestion, portalApplicationUrl, readManagedReceipt } from './portalSubmission';
+import {
+  buildManagedPortalActions,
+  canFillReviewedQuestions,
+  detectPortal,
+  isChoiceQuestion,
+  portalApplicationUrl,
+  readManagedReceipt,
+} from './portalSubmission';
 
 test('detects the three supported applicant portal families', () => {
   assert.equal(detectPortal('https://boards.greenhouse.io/acme/jobs/123'), 'greenhouse');
@@ -47,8 +54,10 @@ test('managed controlled-portal actions include reviewed fields, resume upload, 
     resumeName: 'resume.pdf',
     questions: [{ question: 'Why this role?', answer: 'I enjoy systems work.' }],
   }, true);
+  // No 'fillByLabelText': reviewed questions are no longer sent to the managed runner, which
+  // throws on any non-text control and ignores `optional`. See canFillReviewedQuestions.
   assert.deepEqual(actions.map((action) => action.type), [
-    'fill', 'fill', 'fill', 'upload', 'fillByLabelText', 'click',
+    'fill', 'fill', 'fill', 'upload', 'click',
   ]);
   assert.equal(actions.find((action) => action.type === 'upload')?.file?.base64, 'cGRm');
 });
@@ -107,12 +116,19 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
       { question: 'What are your annualized total compensation expectations?', answer: 'USD 175,000 per year' },
     ],
   });
-  const questionActions = actions.filter((action) => action.type === 'fillByLabelText');
-  // The checkbox group is not sent at all: the managed runner throws through `optional`, so the
-  // only reliable lever is never handing it an action it will choke on. The typable one survives.
-  assert.equal(questionActions.length, 1);
-  assert.match(String(questionActions[0].text), /compensation expectations/);
-  assert.equal(questionActions[0].optional, true);
+  // NO reviewed questions reach the managed runner. It throws on any non-text control and ignores
+  // `optional`, verified across three deploys: each narrowing moved the failure to the next
+  // checkbox, and every failure discarded the five fields already filled. A run that completes
+  // with name/email/phone/resume plus an honest blocker list beats one that dies with a stack
+  // trace and nothing.
+  assert.deepEqual(actions.filter((action) => action.type === 'fillByLabelText'), []);
+  // first_name, last_name, email (phone and location are omitted from this fixture), then resume.
+  assert.deepEqual(actions.map((a) => a.type), ['fill', 'fill', 'fill', 'upload']);
+});
+
+test('the managed runner is not sent reviewed questions; the direct path still is', () => {
+  assert.equal(canFillReviewedQuestions('managed'), false);
+  assert.equal(canFillReviewedQuestions('direct'), true);
 });
 
 test('choice controls are not auto-clicked by matching answer text', () => {
@@ -128,4 +144,10 @@ test('choice controls are not auto-clicked by matching answer text', () => {
   });
   const clicks = actions.filter((action) => action.type === 'click');
   assert.equal(clicks.length, 0, 'no click action may be synthesized from an answer string');
+});
+
+test('question wording alone cannot predict a control type', () => {
+  // Recorded because it is the lesson that cost three deploys: this reads like free text and is a
+  // checkbox group on Aquatic's Greenhouse form. The heuristic is a helper, never the guard.
+  assert.equal(isChoiceQuestion('How did you hear about this job?'), true);
 });

@@ -48,17 +48,37 @@ function managedFill(
   actions.push({ type: 'fill', selector, value, label, optional });
 }
 
-// Questions that are almost always rendered as a checkbox, radio group or select on an ATS form,
-// and therefore cannot be typed into. Matching on the QUESTION wording rather than the answer is
-// deliberate: the answer "Yes" tells you nothing about the control, while "Have you..." tells you
-// a great deal. Over-matching is the safe direction, because a skipped question becomes a visible
-// blocker the student clears in seconds, whereas a question that reaches the managed runner as an
-// untypable control ends the entire run and loses every field already filled.
+// Questions that are usually a checkbox, radio group or select on an ATS form, and so cannot be
+// typed into. Matching on the QUESTION wording rather than the answer is the informative signal:
+// "Yes" tells you nothing about the control, "Have you..." tells you a lot.
+//
+// Kept and exported because the direct Playwright path can still use it, but note it is NOT a
+// sufficient guard on its own: it was written against "Please select all fields of study", and the
+// very next run failed on "How did you hear about this job?", which reads like free text and is a
+// checkbox group. Question wording cannot reliably predict a control type.
 const CHOICE_QUESTION_RE =
-  /^\s*(?:do|does|did|have|has|are|is|was|were|will|would|can|could|should|may|must)\s+you\b|select\s+(?:all|one|any|your)\b|please\s+select\b|which\s+of\s+the\s+following\b|\bwhat\s+year\b|\byes\s*\/\s*no\b/i;
+  /^\s*(?:do|does|did|have|has|are|is|was|were|will|would|can|could|should|may|must)\s+you\b|select\s+(?:all|one|any|your)\b|please\s+select\b|which\s+of\s+the\s+following\b|\bwhat\s+year\b|\bhow\s+did\s+you\s+hear\b|\byes\s*\/\s*no\b/i;
 
 export function isChoiceQuestion(question: string): boolean {
   return CHOICE_QUESTION_RE.test(question);
+}
+
+// Whether reviewed questions may be sent to a given provider's runner.
+//
+// The managed provider runs its own script in a separate service. It throws on any non-text
+// control and does NOT honour the `optional` flag this repo sets, verified across three deploys:
+// each fix moved the failure to the next checkbox rather than surviving it, and every failure took
+// the whole run down with it, discarding the name, email, phone and resume already entered.
+//
+// Guessing control types from question wording was tried and does not hold. Until that runner
+// either honours `optional` or reports control types back, the managed path sends NO reviewed
+// questions: a run that completes and hands over five filled fields plus an honest blocker list is
+// strictly better for the student than a run that fails with a Playwright stack trace and nothing.
+// The answers are still stored on the packet and shown in the dashboard for her to copy.
+//
+// The direct Playwright path is unaffected: `optional` genuinely works there.
+export function canFillReviewedQuestions(provider: 'managed' | 'direct'): boolean {
+  return provider === 'direct';
 }
 
 export function buildManagedPortalActions(
@@ -101,15 +121,11 @@ export function buildManagedPortalActions(
       file: { name: packet.resumeName, mimeType: 'application/pdf', base64: packet.resume.toString('base64') },
     });
   }
-  for (const item of packet.questions) {
+  // See canFillReviewedQuestions: the managed runner throws on any non-text control and ignores
+  // `optional`, so a single checkbox takes down a run that had otherwise filled five fields
+  // correctly. Sending none of them is what makes the run survive to a usable handoff.
+  for (const item of canFillReviewedQuestions('managed') ? packet.questions : []) {
     if (!item.answer.trim()) continue;
-    // Choice questions are not sent at all. `optional: true` SHOULD have been enough, and it is
-    // honoured on the direct Playwright path, but the managed provider runs its own runner in a
-    // separate service and throws through the flag: a verified redeploy still ended the Aquatic run
-    // `failed` on "Input of type checkbox cannot be filled", discarding the name, email, phone and
-    // resume it had already entered. Since that runner cannot be fixed from this repo, the only
-    // reliable lever is not handing it an action it will choke on.
-    if (isChoiceQuestion(item.question)) continue;
     actions.push({
       type: 'fillByLabelText',
       text: item.question,
