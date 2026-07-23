@@ -196,3 +196,24 @@ describe('R-042: an all-unheld ranking rides the cannot-draft path', () => {
     assert.deepEqual(warnings, []);
   });
 });
+
+// Set by Mehek 2026-07-23 as a standard, after a session surfaced "have you done any math
+// competitions" and "have you completed any internships" as blockers rather than answering them.
+// Both are checkable facts already present (or provably absent) in her own material.
+
+test('the prompt treats an absent fact as an answer, not a gap to escalate', () => {
+  const flat = SYSTEM_PROMPT.replace(/\s+/g, ' ');
+  assert.match(flat, /ABSENCE IS AN ANSWER/);
+  assert.match(flat, /the student has not done it/i);
+  assert.match(flat, /I have not participated in any of these competitions/i);
+});
+
+test('the prompt requires naming real roles when the history does exist', () => {
+  const flat = SYSTEM_PROMPT.replace(/\s+/g, ' ');
+  assert.match(flat, /name the real roles, employers and dates/i);
+});
+
+test('the prompt still forbids inventing a positive to look stronger', () => {
+  const flat = SYSTEM_PROMPT.replace(/\s+/g, ' ');
+  assert.match(flat, /the negative is always safe, a fabricated positive never is/i);
+});

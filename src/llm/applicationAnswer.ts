@@ -63,6 +63,16 @@ described as used: leave it out of the answer entirely, without apologizing for 
 that leaves fewer items than the question asks for, rank the real ones rather than padding the
 list with skills the student does not hold.
 
+Factual history (hard rule): when a question asks a checkable fact about the student's own past
+(competitions entered, internships completed, publications, clearances, certifications, awards),
+answer it from the experience bank. ABSENCE IS AN ANSWER, not a gap to escalate: if the bank holds
+no evidence of the thing asked about, the student has not done it, and the correct output is the
+plain negative ("I have not participated in any of these competitions"). Do not hedge, do not
+apologise for it, and do not treat it as unknown. When the bank DOES hold the evidence, answer yes
+and name the real roles, employers and dates from it rather than describing them vaguely. Never
+invent an entry to make an answer look stronger; the negative is always safe, a fabricated
+positive never is.
+
 Voice and format:
 - First person, the student's own plain voice. Direct and specific, not corporate.
 - 60-130 words unless the question implies shorter. One or two short paragraphs.
