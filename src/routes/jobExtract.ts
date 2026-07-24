@@ -23,8 +23,12 @@ export async function jobExtractRoutes(fastify: FastifyInstance) {
   // job description field. This exists so "New application" can go from a pasted URL to a
   // reviewable packet without the operator hand-copying text out of a separate tab: the dashboard
   // is the one surface, per the 2026-07-24 product decision to stop treating JD-sourcing as a
-  // side-channel step. Best-effort only - a paywalled, bot-gated, or JS-hostile posting can still
-  // come back empty or wrong, so the caller must let the student review/edit before generating.
+  // side-channel step. Genuinely best-effort, confirmed live: server-rendered boards (Greenhouse,
+  // SmartRecruiters, plain company career pages) come back clean. At least one heavily
+  // client-rendered board (Ashby) returned a correct page title but empty text even after forcing
+  // several seconds of render delay before extracting - some SPA renders this run cannot reach
+  // (shadow DOM, virtualization, or something else opaque to the managed browser). Callers MUST
+  // treat a 502 here as "fall back to the manual paste field," not as a bug to keep chasing.
   fastify.post('/jobs/extract', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
 
