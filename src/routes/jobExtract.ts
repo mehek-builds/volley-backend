@@ -53,7 +53,10 @@ export async function jobExtractRoutes(fastify: FastifyInstance) {
 
     let result: Awaited<ReturnType<typeof runManagedBrowser>>;
     try {
-      result = await runManagedBrowser(body.job_url, [{ type: 'extract' }]);
+      // The Stratus run validates every action and requires a non-empty selector, even for
+      // 'extract' - 'body' pulls the whole rendered page's visible text, matching what
+      // ManagedBrowserResult.text already carries for the fill actions elsewhere in this codebase.
+      result = await runManagedBrowser(body.job_url, [{ type: 'extract', selector: 'body' }]);
     } catch (err) {
       fastify.log.error({ err, userId, job_url: body.job_url }, 'job description extraction failed');
       return reply.status(502).send({
