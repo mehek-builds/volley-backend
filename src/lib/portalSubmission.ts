@@ -37,25 +37,43 @@ function receiptReference(body: string): string | undefined {
     ?? body.match(/application\s*(?:id|number|#)\s*[:#]?\s*([A-Z0-9-]{5,})/i)?.[1];
 }
 
+// Bounded auto-wait for every managed action. Playwright defaults to 30s, so a single selector
+// that never matches (e.g. a Greenhouse posting proxied through a branded domain whose form does
+// not use the classic `job_application[...]` field names) used to burn the full 30s per action and
+// take the run's whole time budget with it. Capping the wait degrades a missed selector to a fast
+// blocker card instead of a hard timeout. Present fields still fill immediately; this only bites
+// when the selector is genuinely wrong. Applied by default to every managedFill/managedUpload and
+// to the reviewed-question fills, so no one action can ever spend 30s.
+const MANAGED_FILL_TIMEOUT_MS = 10_000;
+
 function managedFill(
   actions: ManagedBrowserAction[],
   selector: string,
   value: string | undefined,
   label: string,
   optional = true,
-  timeout?: number,
+  timeout = MANAGED_FILL_TIMEOUT_MS,
 ) {
   if (!value) return;
-  actions.push({ type: 'fill', selector, value, label, optional, ...(timeout ? { timeout } : {}) });
+  actions.push({ type: 'fill', selector, value, label, optional, timeout });
 }
 
-// Bounded auto-wait for the core identity fields (name/email). Playwright defaults to 30s, so a
-// single selector that never matches (e.g. a Greenhouse posting proxied through a branded domain
-// whose form does not use the classic `job_application[...]` field names) used to burn the full
-// 30s and take the run's whole time budget with it. Capping the wait degrades a missed selector to
-// a fast blocker card instead of a hard timeout. Present fields still fill immediately; this only
-// bites when the selector is genuinely wrong.
-const CORE_FIELD_TIMEOUT_MS = 10_000;
+// The resume upload is always optional + bounded. On a real ATS form the file input is present and
+// setInputFiles returns immediately; on a branded-redirect form that lacks the selector (Jump
+// Trading) an unbounded, non-optional upload waited the full 30s on setInputFiles and failed the
+// whole run one step after the name/email fills were already made optional. Optional means a missing
+// file input degrades to a blocker card; the run never auto-submits, so "resume not attached" is a
+// safe thing to hand back to the human rather than a hard error.
+function managedUpload(actions: ManagedBrowserAction[], selector: string, packet: SubmissionPacket) {
+  actions.push({
+    type: 'upload',
+    selector,
+    label: 'resume',
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+    file: { name: packet.resumeName, mimeType: 'application/pdf', base64: packet.resume.toString('base64') },
+  });
+}
 
 // Questions that are usually a checkbox, radio group or select on an ATS form, and so cannot be
 // typed into. Matching on the QUESTION wording rather than the answer is the informative signal:
@@ -112,22 +130,18 @@ export function buildManagedPortalActions(
   const actions: ManagedBrowserAction[] = [];
   if (portal === 'greenhouse' || portal === 'controlled_test') {
     const parts = packet.fullName.trim().split(/\s+/);
-    // optional + a bounded timeout, not required: a branded-redirect Greenhouse customer (Jump
-    // Trading serves its posting through www.jumptrading.com with a different form DOM) has none of
-    // these classic selectors, and a required fill there waited the full 30s and then aborted the
-    // whole run. Optional means a missed core field degrades to a required-field blocker card, the
-    // same way phone and location already do.
-    managedFill(actions, '#first_name, input[name="job_application[first_name]"]', parts[0], 'first_name', true, CORE_FIELD_TIMEOUT_MS);
-    managedFill(actions, '#last_name, input[name="job_application[last_name]"]', parts.slice(1).join(' '), 'last_name', true, CORE_FIELD_TIMEOUT_MS);
-    managedFill(actions, '#email, input[name="job_application[email]"]', packet.email, 'email', true, CORE_FIELD_TIMEOUT_MS);
+    // optional (managedFill default) + bounded, not required: a branded-redirect Greenhouse customer
+    // (Jump Trading serves its posting through www.jumptrading.com with a different form DOM) has
+    // none of these classic selectors, and a required fill there waited the full 30s and then
+    // aborted the whole run. Optional means a missed core field degrades to a required-field blocker
+    // card. The resume upload is optional + bounded for the same reason (managedUpload): the live
+    // Jump Trading retry proved the run now clears name/email and stops at the resume file input.
+    managedFill(actions, '#first_name, input[name="job_application[first_name]"]', parts[0], 'first_name');
+    managedFill(actions, '#last_name, input[name="job_application[last_name]"]', parts.slice(1).join(' '), 'last_name');
+    managedFill(actions, '#email, input[name="job_application[email]"]', packet.email, 'email');
     managedFill(actions, '#phone, input[name="job_application[phone]"]', packet.phone, 'phone');
     managedFill(actions, '#candidate-location, input[autocomplete="address-level2"]', packet.city, 'location');
-    actions.push({
-      type: 'upload',
-      selector: '#resume, input[type="file"][name="job_application[resume]"]',
-      label: 'resume',
-      file: { name: packet.resumeName, mimeType: 'application/pdf', base64: packet.resume.toString('base64') },
-    });
+    managedUpload(actions, '#resume, input[type="file"][name="job_application[resume]"]', packet);
   } else if (portal === 'lever') {
     managedFill(actions, 'input[name="name"]', packet.fullName, 'name', false);
     managedFill(actions, 'input[name="email"]', packet.email, 'email', false);
@@ -135,10 +149,7 @@ export function buildManagedPortalActions(
     managedFill(actions, 'input[name="urls[LinkedIn]"]', packet.linkedinUrl, 'linkedin');
     managedFill(actions, 'input[name="urls[GitHub]"]', packet.githubUrl, 'github');
     managedFill(actions, 'input[name="urls[Portfolio]"]', packet.portfolioUrl, 'portfolio');
-    actions.push({
-      type: 'upload', selector: 'input[name="resume"][type="file"]', label: 'resume',
-      file: { name: packet.resumeName, mimeType: 'application/pdf', base64: packet.resume.toString('base64') },
-    });
+    managedUpload(actions, 'input[name="resume"][type="file"]', packet);
   } else {
     managedFill(actions, 'input[name="_systemfield_name"]', packet.fullName, 'name', false);
     managedFill(actions, 'input[name="_systemfield_email"]', packet.email, 'email', false);
@@ -155,10 +166,7 @@ export function buildManagedPortalActions(
     managedFill(actions, ASHBY_LINKEDIN_SELECTOR, packet.linkedinUrl, 'linkedin');
     managedFill(actions, ASHBY_GITHUB_SELECTOR, packet.githubUrl, 'github');
     managedFill(actions, ASHBY_PORTFOLIO_SELECTOR, packet.portfolioUrl, 'portfolio');
-    actions.push({
-      type: 'upload', selector: 'input[type="file"]', label: 'resume',
-      file: { name: packet.resumeName, mimeType: 'application/pdf', base64: packet.resume.toString('base64') },
-    });
+    managedUpload(actions, 'input[type="file"]', packet);
   }
   // See canFillReviewedQuestions: the managed runner throws on any non-text control and ignores
   // `optional`, so a single checkbox takes down a run that had otherwise filled five fields
@@ -171,6 +179,7 @@ export function buildManagedPortalActions(
       value: item.answer,
       label: `question:${item.question.slice(0, 80)}`,
       optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
     });
   }
   // Deliberately NOT attempted: clicking checkboxes and radios by matching their label to the
