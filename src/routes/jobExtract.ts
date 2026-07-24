@@ -56,7 +56,16 @@ export async function jobExtractRoutes(fastify: FastifyInstance) {
       // The Stratus run validates every action and requires a non-empty selector, even for
       // 'extract' - 'body' pulls the whole rendered page's visible text, matching what
       // ManagedBrowserResult.text already carries for the fill actions elsewhere in this codebase.
-      result = await runManagedBrowser(body.job_url, [{ type: 'extract', selector: 'body' }]);
+      // runManagedBrowser's fixed run config waits only for 'domcontentloaded', which fires before
+      // client-rendered ATS boards (Ashby, Workday, Google Careers) have painted the JD - a bare
+      // extract right after came back empty on those live in this session. A leading, optional
+      // waitForSelector on 'h1' gives client-side rendering a real chance to finish first: job
+      // postings render a heading early, and 'optional' means a page without one (or one that
+      // times out) still falls through to the extract instead of aborting the whole run.
+      result = await runManagedBrowser(body.job_url, [
+        { type: 'waitForSelector', selector: 'h1', timeout: 8000, optional: true },
+        { type: 'extract', selector: 'body' },
+      ]);
     } catch (err) {
       fastify.log.error({ err, userId, job_url: body.job_url }, 'job description extraction failed');
       return reply.status(502).send({
