@@ -32,6 +32,7 @@ export const LIMITS = {
     resolve: parseInt(process.env.RATE_RESOLVE_PER_HOUR || '15', 10),
     draft: parseInt(process.env.RATE_DRAFT_PER_HOUR || '40', 10),
     resume: parseInt(process.env.RATE_RESUME_PER_HOUR || '15', 10),
+    jobExtract: parseInt(process.env.RATE_JOB_EXTRACT_PER_HOUR || '15', 10),
     requestCode: parseInt(process.env.RATE_CODE_PER_HOUR || '5', 10),
     session: parseInt(process.env.RATE_SESSION_PER_HOUR || '10', 10),
     requestCodePerIp: parseInt(process.env.RATE_CODE_IP_PER_HOUR || '50', 10),
