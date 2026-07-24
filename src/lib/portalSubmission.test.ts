@@ -9,10 +9,30 @@ import {
   readManagedReceipt,
 } from './portalSubmission';
 
-test('detects the three supported applicant portal families', () => {
+test('detects the four supported applicant portal families', () => {
   assert.equal(detectPortal('https://boards.greenhouse.io/acme/jobs/123'), 'greenhouse');
   assert.equal(detectPortal('https://jobs.lever.co/acme/123/apply'), 'lever');
   assert.equal(detectPortal('https://jobs.ashbyhq.com/acme/123/application'), 'ashby');
+  assert.equal(detectPortal('https://jobs.smartrecruiters.com/Acme/744000-role'), 'smartrecruiters');
+});
+
+test('SmartRecruiters managed actions open the application form before filling', () => {
+  const actions = buildManagedPortalActions('smartrecruiters', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  // The JD page and the actual form are different URLs on SmartRecruiters (confirmed live,
+  // 2026-07-24) - the first action must be the optional, bounded click that opens the form, so a
+  // run started on the JD page still reaches the fields below it.
+  assert.equal(actions[0].type, 'click');
+  assert.equal(actions[0].optional, true);
+  const fillSelectors = actions.filter((a) => a.type === 'fill').map((a) => a.selector);
+  assert.ok(fillSelectors.includes('#first-name-input'));
+  assert.ok(fillSelectors.includes('#email-input'));
+  assert.ok(fillSelectors.includes('#confirm-email-input'));
 });
 
 test('opens Ashby directly on its application tab for managed filling', () => {

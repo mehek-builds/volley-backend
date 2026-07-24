@@ -12,7 +12,7 @@ function quoteAttr(value: string): string {
   return value.replace(/["\\]/g, '\\$&');
 }
 
-export type SupportedPortal = 'greenhouse' | 'lever' | 'ashby' | 'controlled_test';
+export type SupportedPortal = 'greenhouse' | 'lever' | 'ashby' | 'smartrecruiters' | 'controlled_test';
 
 export type SubmissionPacket = {
   fullName: string;
@@ -122,6 +122,23 @@ const ASHBY_GITHUB_SELECTOR =
 const ASHBY_PORTFOLIO_SELECTOR =
   'input[name*="portfolio" i], input[aria-label*="portfolio" i], input[placeholder*="portfolio" i]';
 
+// SmartRecruiters renders its "Easy Apply" form as web components (spl-input, spl-phone-field,
+// spl-dropzone, ...) behind OPEN shadow roots (confirmed live, 2026-07-24, on a real Western
+// Digital posting: jobs.smartrecruiters.com/oneclick-ui/company/...). Playwright's locator engine
+// auto-pierces open shadow roots for plain CSS selectors, so a compound selector spanning the
+// shadow boundary (e.g. the dropzone selector below) resolves without any special syntax - these
+// are real ids/data-test attributes read off that live DOM, not guessed from a naming pattern.
+//
+// SCOPE LIMIT, on purpose: this only fills the first ("Personal information") step and stops.
+// A real posting's "Next" button leads to further steps (custom questions, EEO, ...) that this
+// pass does not discover or advance through - the same multi-step complexity this milestone
+// explicitly carved Workday out for. clickFinalSubmit() will not find a submit control until a
+// human clicks through the remaining steps, so a SmartRecruiters run always lands on
+// needs_attention/blocked rather than a false "submitted" - the same safe-degradation behavior
+// as every other blocker on this path, never a silent partial success.
+const SMARTRECRUITERS_RESUME_SELECTOR = 'spl-dropzone[data-test="resume-upload"] input[type="file"]';
+const SMARTRECRUITERS_PHONE_SELECTOR = '[aria-label="Phone number"]';
+
 export function buildManagedPortalActions(
   portal: SupportedPortal,
   packet: SubmissionPacket,
@@ -150,6 +167,27 @@ export function buildManagedPortalActions(
     managedFill(actions, 'input[name="urls[GitHub]"]', packet.githubUrl, 'github');
     managedFill(actions, 'input[name="urls[Portfolio]"]', packet.portfolioUrl, 'portfolio');
     managedUpload(actions, 'input[name="resume"][type="file"]', packet);
+  } else if (portal === 'smartrecruiters') {
+    // See navigateToApplicationForm/SMARTRECRUITERS_APPLY_LINK_SELECTOR: the JD page and the
+    // actual form are different URLs. The managed runner has no separate "navigate, then act"
+    // step, so this click has to be the first action in the same sequence; optional and bounded
+    // so it is a no-op when the runner already landed on the form URL directly.
+    actions.push({
+      type: 'click',
+      selector: SMARTRECRUITERS_APPLY_LINK_SELECTOR,
+      label: 'open application form',
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
+    const parts = packet.fullName.trim().split(/\s+/);
+    managedFill(actions, '#first-name-input', parts[0], 'first_name');
+    managedFill(actions, '#last-name-input', parts.slice(1).join(' '), 'last_name');
+    managedFill(actions, '#email-input', packet.email, 'email');
+    managedFill(actions, '#confirm-email-input', packet.email, 'confirm_email');
+    managedFill(actions, SMARTRECRUITERS_PHONE_SELECTOR, packet.phone, 'phone');
+    managedFill(actions, '#linkedin-input', packet.linkedinUrl, 'linkedin');
+    managedFill(actions, '#website-input', packet.portfolioUrl ?? packet.githubUrl, 'portfolio');
+    managedUpload(actions, SMARTRECRUITERS_RESUME_SELECTOR, packet);
   } else {
     managedFill(actions, 'input[name="_systemfield_name"]', packet.fullName, 'name', false);
     managedFill(actions, 'input[name="_systemfield_email"]', packet.email, 'email', false);
@@ -208,6 +246,7 @@ const HOSTS: Record<Exclude<SupportedPortal, 'controlled_test'>, RegExp> = {
   greenhouse: /(^|\.)greenhouse\.io$/i,
   lever: /(^|\.)lever\.co$/i,
   ashby: /(^|\.)ashbyhq\.com$/i,
+  smartrecruiters: /(^|\.)smartrecruiters\.com$/i,
 };
 
 export function detectPortal(rawUrl: string): SupportedPortal {
@@ -223,7 +262,7 @@ export function detectPortal(rawUrl: string): SupportedPortal {
   ) {
     return 'controlled_test';
   }
-  throw new Error('This portal is not supported yet. Supported portals are Greenhouse, Lever, and Ashby.');
+  throw new Error('This portal is not supported yet. Supported portals are Greenhouse, Lever, Ashby, and SmartRecruiters.');
 }
 
 export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): string {
@@ -231,6 +270,24 @@ export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): s
   const url = new URL(rawUrl);
   if (!url.pathname.endsWith('/application')) url.pathname = `${url.pathname.replace(/\/$/, '')}/application`;
   return url.toString();
+}
+
+// SmartRecruiters' job-posting URL (jobs.smartrecruiters.com/{Company}/{jobId}-{slug}) is a JD
+// page only - the actual form lives at a SEPARATE URL
+// (oneclick-ui/company/{Company}/publication/{uuid}) behind an "I'm interested" link, and that
+// uuid is unrelated to the jobId, so it cannot be derived the way portalApplicationUrl() derives
+// Ashby's /application suffix. It has to be found on the live page. Confirmed live, 2026-07-24, on
+// a real Western Digital posting. A no-op on every other portal, and a no-op on SmartRecruiters
+// once already on the form (the selector simply won't match).
+const SMARTRECRUITERS_APPLY_LINK_SELECTOR = 'a[href*="oneclick-ui"], a[href*="/apply"]';
+
+export async function navigateToApplicationForm(page: Page, portal: SupportedPortal): Promise<void> {
+  if (portal !== 'smartrecruiters') return;
+  const link = page.locator(SMARTRECRUITERS_APPLY_LINK_SELECTOR).first();
+  if ((await link.count()) === 0) return; // already on the form, or the link isn't there this time
+  const href = await link.getAttribute('href');
+  if (!href) return;
+  await page.goto(new URL(href, page.url()).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 });
 }
 
 async function fillFirst(page: Page, selectors: string[], value: string | undefined, label: string, out: string[]) {
@@ -294,6 +351,16 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="urls[GitHub]"]'], packet.githubUrl, 'github', filledFields);
     await fillFirst(page, ['input[name="urls[Portfolio]"]'], packet.portfolioUrl, 'portfolio', filledFields);
     await uploadFirst(page, ['input[name="resume"][type="file"]'], packet, filledFields);
+  } else if (portal === 'smartrecruiters') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    await fillFirst(page, ['#first-name-input'], parts[0], 'first_name', filledFields);
+    await fillFirst(page, ['#last-name-input'], parts.slice(1).join(' '), 'last_name', filledFields);
+    await fillFirst(page, ['#email-input'], packet.email, 'email', filledFields);
+    await fillFirst(page, ['#confirm-email-input'], packet.email, 'confirm_email', filledFields);
+    await fillFirst(page, [SMARTRECRUITERS_PHONE_SELECTOR], packet.phone, 'phone', filledFields);
+    await fillFirst(page, ['#linkedin-input'], packet.linkedinUrl, 'linkedin', filledFields);
+    await fillFirst(page, ['#website-input'], packet.portfolioUrl ?? packet.githubUrl, 'portfolio', filledFields);
+    await uploadFirst(page, [SMARTRECRUITERS_RESUME_SELECTOR], packet, filledFields);
   } else {
     await fillFirst(page, ['input[name="_systemfield_name"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="_systemfield_email"]'], packet.email, 'email', filledFields);
