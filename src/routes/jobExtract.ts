@@ -57,13 +57,15 @@ export async function jobExtractRoutes(fastify: FastifyInstance) {
       // 'extract' - 'body' pulls the whole rendered page's visible text, matching what
       // ManagedBrowserResult.text already carries for the fill actions elsewhere in this codebase.
       // runManagedBrowser's fixed run config waits only for 'domcontentloaded', which fires before
-      // client-rendered ATS boards (Ashby, Workday, Google Careers) have painted the JD - a bare
-      // extract right after came back empty on those live in this session. A leading, optional
-      // waitForSelector on 'h1' gives client-side rendering a real chance to finish first: job
-      // postings render a heading early, and 'optional' means a page without one (or one that
-      // times out) still falls through to the extract instead of aborting the whole run.
+      // client-rendered ATS boards (Ashby, Workday, Google Careers) have painted the JD. Live
+      // testing this session showed waiting on a real heading selector is not reliable timing: a
+      // client-rendered Ashby posting came back with the correct <title> (set early by the SPA)
+      // but zero extracted text, so document.title updating is not proof the body has painted.
+      // A selector that can never match forces waitForSelector to burn its FULL timeout before
+      // 'optional' lets the run continue - a deterministic render-delay that does not depend on
+      // guessing any site's heading markup.
       result = await runManagedBrowser(body.job_url, [
-        { type: 'waitForSelector', selector: 'h1', timeout: 8000, optional: true },
+        { type: 'waitForSelector', selector: '.litos-jd-extract-render-delay-noop', timeout: 5000, optional: true },
         { type: 'extract', selector: 'body' },
       ]);
     } catch (err) {
