@@ -187,6 +187,35 @@ test('Greenhouse core identity fields degrade gracefully instead of a 30s hard t
   }
 });
 
+test('no managed action can burn the 30s default — every fill, upload, and question is bounded', () => {
+  // Live Jump Trading retry, 2026-07-24: after the core-field fix the run cleared name/email and
+  // then died on `locator.setInputFiles: Timeout 30000ms exceeded` at the resume input, because the
+  // upload action was neither optional nor bounded. Same latent 30s trap sat on phone/location and
+  // the question fills. Every managed action must now be time-bounded so one wrong selector can't
+  // eat the run's budget, and the resume upload must be optional so a missing file input degrades
+  // to a blocker card instead of failing the run.
+  for (const portal of ['greenhouse', 'lever', 'ashby'] as const) {
+    const actions = buildManagedPortalActions(portal, {
+      fullName: 'Taylor Example',
+      email: 'taylor@example.com',
+      phone: '+1 555 0100',
+      city: 'Los Angeles',
+      resume: Buffer.from('pdf'),
+      resumeName: 'resume.pdf',
+      questions: [{ question: 'Why this role?', answer: 'I enjoy systems work.' }],
+    });
+    for (const action of actions) {
+      assert.ok(
+        (action.timeout ?? Infinity) < 30_000,
+        `${portal} ${action.type} (${action.label ?? action.text}) must be bounded under the 30s default`,
+      );
+    }
+    const upload = actions.find((a) => a.type === 'upload');
+    assert.equal(upload?.optional, true, `${portal} resume upload must degrade to a blocker, not fail the run`);
+    assert.ok((upload?.timeout ?? Infinity) < 30_000, `${portal} resume upload must be bounded`);
+  }
+});
+
 test('both providers may be sent reviewed questions', () => {
   // False for 'managed' only while its runner threw on checkboxes and ignored `optional`.
   assert.equal(canFillReviewedQuestions('managed'), true);
