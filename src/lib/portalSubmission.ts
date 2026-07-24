@@ -43,10 +43,19 @@ function managedFill(
   value: string | undefined,
   label: string,
   optional = true,
+  timeout?: number,
 ) {
   if (!value) return;
-  actions.push({ type: 'fill', selector, value, label, optional });
+  actions.push({ type: 'fill', selector, value, label, optional, ...(timeout ? { timeout } : {}) });
 }
+
+// Bounded auto-wait for the core identity fields (name/email). Playwright defaults to 30s, so a
+// single selector that never matches (e.g. a Greenhouse posting proxied through a branded domain
+// whose form does not use the classic `job_application[...]` field names) used to burn the full
+// 30s and take the run's whole time budget with it. Capping the wait degrades a missed selector to
+// a fast blocker card instead of a hard timeout. Present fields still fill immediately; this only
+// bites when the selector is genuinely wrong.
+const CORE_FIELD_TIMEOUT_MS = 10_000;
 
 // Questions that are usually a checkbox, radio group or select on an ATS form, and so cannot be
 // typed into. Matching on the QUESTION wording rather than the answer is the informative signal:
@@ -83,6 +92,18 @@ export function canFillReviewedQuestions(_provider: 'managed' | 'direct'): boole
   return true;
 }
 
+// Ashby's core identity inputs use stable `_systemfield_*` names, but LinkedIn/GitHub/portfolio are
+// not among them and, when present, are custom fields whose `name` is an opaque UUID. Matching on a
+// case-insensitive substring of name/aria-label/placeholder is what reliably finds them without a
+// per-employer selector. Verify against a live Ashby form's rendered HTML if a real run still shows
+// the URL fields empty; these were written from the naming pattern, not yet confirmed on the wire.
+const ASHBY_LINKEDIN_SELECTOR =
+  'input[name="_systemfield_linkedin" i], input[name*="linkedin" i], input[aria-label*="linkedin" i], input[placeholder*="linkedin" i]';
+const ASHBY_GITHUB_SELECTOR =
+  'input[name="_systemfield_github" i], input[name*="github" i], input[aria-label*="github" i], input[placeholder*="github" i]';
+const ASHBY_PORTFOLIO_SELECTOR =
+  'input[name*="portfolio" i], input[aria-label*="portfolio" i], input[placeholder*="portfolio" i]';
+
 export function buildManagedPortalActions(
   portal: SupportedPortal,
   packet: SubmissionPacket,
@@ -91,9 +112,14 @@ export function buildManagedPortalActions(
   const actions: ManagedBrowserAction[] = [];
   if (portal === 'greenhouse' || portal === 'controlled_test') {
     const parts = packet.fullName.trim().split(/\s+/);
-    managedFill(actions, '#first_name, input[name="job_application[first_name]"]', parts[0], 'first_name', false);
-    managedFill(actions, '#last_name, input[name="job_application[last_name]"]', parts.slice(1).join(' '), 'last_name', false);
-    managedFill(actions, '#email, input[name="job_application[email]"]', packet.email, 'email', false);
+    // optional + a bounded timeout, not required: a branded-redirect Greenhouse customer (Jump
+    // Trading serves its posting through www.jumptrading.com with a different form DOM) has none of
+    // these classic selectors, and a required fill there waited the full 30s and then aborted the
+    // whole run. Optional means a missed core field degrades to a required-field blocker card, the
+    // same way phone and location already do.
+    managedFill(actions, '#first_name, input[name="job_application[first_name]"]', parts[0], 'first_name', true, CORE_FIELD_TIMEOUT_MS);
+    managedFill(actions, '#last_name, input[name="job_application[last_name]"]', parts.slice(1).join(' '), 'last_name', true, CORE_FIELD_TIMEOUT_MS);
+    managedFill(actions, '#email, input[name="job_application[email]"]', packet.email, 'email', true, CORE_FIELD_TIMEOUT_MS);
     managedFill(actions, '#phone, input[name="job_application[phone]"]', packet.phone, 'phone');
     managedFill(actions, '#candidate-location, input[autocomplete="address-level2"]', packet.city, 'location');
     actions.push({
@@ -118,6 +144,17 @@ export function buildManagedPortalActions(
     managedFill(actions, 'input[name="_systemfield_email"]', packet.email, 'email', false);
     managedFill(actions, 'input[name="_systemfield_phone"]', packet.phone, 'phone');
     managedFill(actions, 'input[name="_systemfield_location"]', packet.city, 'location');
+    // LinkedIn/GitHub/portfolio, previously missing entirely from this branch: the packet carries
+    // them (confirmed live on a real account via GET /profile/application) and the Lever branch
+    // fills its equivalents, but Ashby was silently dropping them, surfacing as a "'LinkedIn
+    // Profile' is required and is still empty" blocker on a real run. Ashby does not expose these
+    // as `_systemfield_*` names the way name/email/phone/location are, and custom fields carry
+    // opaque UUID `name`s, so match by a case-insensitive substring across name/aria-label/
+    // placeholder rather than one guessed exact name. Optional (default) and only pushed when the
+    // value exists, so a form without the field is a no-op rather than a blocker.
+    managedFill(actions, ASHBY_LINKEDIN_SELECTOR, packet.linkedinUrl, 'linkedin');
+    managedFill(actions, ASHBY_GITHUB_SELECTOR, packet.githubUrl, 'github');
+    managedFill(actions, ASHBY_PORTFOLIO_SELECTOR, packet.portfolioUrl, 'portfolio');
     actions.push({
       type: 'upload', selector: 'input[type="file"]', label: 'resume',
       file: { name: packet.resumeName, mimeType: 'application/pdf', base64: packet.resume.toString('base64') },
@@ -253,6 +290,11 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="_systemfield_email"]'], packet.email, 'email', filledFields);
     await fillFirst(page, ['input[name="_systemfield_phone"]'], packet.phone, 'phone', filledFields);
     await fillFirst(page, ['input[name="_systemfield_location"]'], packet.city, 'location', filledFields);
+    // See ASHBY_*_SELECTOR: these were missing from the direct path too, so a real Ashby run
+    // reported LinkedIn as an empty required field even though the packet had it.
+    await fillFirst(page, ASHBY_LINKEDIN_SELECTOR.split(', '), packet.linkedinUrl, 'linkedin', filledFields);
+    await fillFirst(page, ASHBY_GITHUB_SELECTOR.split(', '), packet.githubUrl, 'github', filledFields);
+    await fillFirst(page, ASHBY_PORTFOLIO_SELECTOR.split(', '), packet.portfolioUrl, 'portfolio', filledFields);
     await uploadFirst(page, ['input[type="file"]'], packet, filledFields);
   }
   await fillReviewedQuestions(page, packet, filledFields);

@@ -129,6 +129,64 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
   ]);
 });
 
+test('the Ashby branch fills LinkedIn, GitHub, and portfolio from the packet', () => {
+  // Live regression, 2026-07-24: a real Ashby run reported "'LinkedIn Profile' is required and is
+  // still empty" even though the account's profile had linkedin_url set, because this branch had no
+  // URL fills at all (the Lever branch did). It must now emit them when the packet carries them.
+  const actions = buildManagedPortalActions('ashby', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    phone: '+1 555 0100',
+    city: 'Los Angeles',
+    linkedinUrl: 'https://www.linkedin.com/in/taylor',
+    githubUrl: 'https://github.com/taylor',
+    portfolioUrl: 'https://taylor.dev',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  const filledLabels = actions.filter((a) => a.type === 'fill').map((a) => a.label);
+  assert.ok(filledLabels.includes('linkedin'), 'Ashby must fill LinkedIn when the packet has it');
+  assert.ok(filledLabels.includes('github'), 'Ashby must fill GitHub when the packet has it');
+  assert.ok(filledLabels.includes('portfolio'), 'Ashby must fill portfolio when the packet has it');
+  // The URL selectors are substring/attribute matches so they find Ashby's custom UUID-named fields.
+  const linkedin = actions.find((a) => a.label === 'linkedin');
+  assert.match(linkedin?.selector ?? '', /linkedin/i);
+});
+
+test('the Ashby branch omits URL fills the packet does not carry', () => {
+  const actions = buildManagedPortalActions('ashby', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  const filledLabels = actions.filter((a) => a.type === 'fill').map((a) => a.label);
+  assert.ok(!filledLabels.includes('linkedin'));
+  assert.ok(!filledLabels.includes('github'));
+  assert.ok(!filledLabels.includes('portfolio'));
+});
+
+test('Greenhouse core identity fields degrade gracefully instead of a 30s hard timeout', () => {
+  // Live regression, 2026-07-24: Jump Trading serves its Greenhouse posting through a branded
+  // redirect whose form lacks the classic `job_application[...]` selectors, so a required fill on
+  // first_name waited the full 30s Playwright default and then aborted the whole run. These fills
+  // must now be optional (a miss becomes a required-field blocker) and time-bounded (well under 30s).
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  for (const label of ['first_name', 'last_name', 'email']) {
+    const action = actions.find((a) => a.label === label);
+    assert.equal(action?.optional, true, `${label} must not be able to abort the run on a selector miss`);
+    assert.ok((action?.timeout ?? Infinity) < 30_000, `${label} must be bounded under the 30s default`);
+  }
+});
+
 test('both providers may be sent reviewed questions', () => {
   // False for 'managed' only while its runner threw on checkboxes and ignored `optional`.
   assert.equal(canFillReviewedQuestions('managed'), true);
