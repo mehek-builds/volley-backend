@@ -74,6 +74,10 @@ export async function jobExtractRoutes(fastify: FastifyInstance) {
       });
     }
 
+    fastify.log.info(
+      { userId, job_url: body.job_url, title: result.title, url: result.url, textLen: result.text?.length ?? 0, blockers: result.blockers },
+      'job description extraction result',
+    );
     const jdText = clipJdText(result.text);
     if (!jdText) {
       return reply.status(502).send({
