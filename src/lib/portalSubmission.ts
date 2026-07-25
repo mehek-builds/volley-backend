@@ -131,6 +131,17 @@ const ASHBY_GITHUB_SELECTOR =
   'input[name="_systemfield_github" i], input[name*="github" i], input[aria-label*="github" i], input[placeholder*="github" i]';
 const ASHBY_PORTFOLIO_SELECTOR =
   'input[name*="portfolio" i], input[aria-label*="portfolio" i], input[placeholder*="portfolio" i]';
+// Phone controls vary more than the other identity fields. Ashby and branded Greenhouse forms
+// often omit the legacy id/name while still exposing the semantic HTML type or autocomplete value.
+// Keep the aria-label and placeholder alternatives exact. A broad `*=phone` match can target a
+// prose screening question such as "mobile app experience", which previously caused a phone
+// number to be entered into an unrelated text answer.
+const SEMANTIC_PHONE_SELECTOR =
+  'input[type="tel" i], input[autocomplete*="tel" i], input[aria-label="Phone" i], input[aria-label="Phone number" i], input[placeholder="Phone" i], input[placeholder="Phone number" i]';
+const GREENHOUSE_PHONE_SELECTOR =
+  `#phone, input[name="job_application[phone]"], ${SEMANTIC_PHONE_SELECTOR}`;
+const ASHBY_PHONE_SELECTOR =
+  `#phone, input[name="phone"], input[name="_systemfield_phone"], ${SEMANTIC_PHONE_SELECTOR}`;
 
 // SmartRecruiters renders its "Easy Apply" form as web components (spl-input, spl-phone-field,
 // spl-dropzone, ...) behind OPEN shadow roots (confirmed live, 2026-07-24, on a real Western
@@ -173,7 +184,7 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedFill(actions, '#first_name, input[name="job_application[first_name]"]', parts[0], 'first_name');
     managedFill(actions, '#last_name, input[name="job_application[last_name]"]', parts.slice(1).join(' '), 'last_name');
     managedFill(actions, '#email, input[name="job_application[email]"]', packet.email, 'email');
-    managedFill(actions, '#phone, input[name="job_application[phone]"]', packet.phone, 'phone');
+    managedFill(actions, GREENHOUSE_PHONE_SELECTOR, packet.phone, 'phone');
     managedFill(actions, '#candidate-location, input[autocomplete="address-level2"]', packet.city, 'location');
     managedUpload(actions, '#resume, input[type="file"][name="job_application[resume]"]', packet);
   } else if (family === 'lever') {
@@ -210,7 +221,7 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
   } else {
     managedFill(actions, 'input[name="_systemfield_name"]', packet.fullName, 'name', false);
     managedFill(actions, 'input[name="_systemfield_email"]', packet.email, 'email', false);
-    managedFill(actions, 'input[name="_systemfield_phone"]', packet.phone, 'phone');
+    managedFill(actions, ASHBY_PHONE_SELECTOR, packet.phone, 'phone');
     managedFill(actions, 'input[name="_systemfield_location"]', packet.city, 'location');
     // LinkedIn/GitHub/portfolio, previously missing entirely from this branch: the packet carries
     // them (confirmed live on a real account via GET /profile/application) and the Lever branch
@@ -388,7 +399,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['#first_name', 'input[name="job_application[first_name]"]'], parts[0], 'first_name', filledFields);
     await fillFirst(page, ['#last_name', 'input[name="job_application[last_name]"]'], parts.slice(1).join(' '), 'last_name', filledFields);
     await fillFirst(page, ['#email', 'input[name="job_application[email]"]'], packet.email, 'email', filledFields);
-    await fillFirst(page, ['#phone', 'input[name="job_application[phone]"]'], packet.phone, 'phone', filledFields);
+    await fillFirst(page, GREENHOUSE_PHONE_SELECTOR.split(', '), packet.phone, 'phone', filledFields);
     await fillFirst(page, ['#candidate-location', 'input[autocomplete="address-level2"]'], packet.city, 'location', filledFields);
     await uploadFirst(page, ['#resume', 'input[type="file"][name="job_application[resume]"]'], packet, filledFields);
   } else if (family === 'lever') {
@@ -412,7 +423,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
   } else {
     await fillFirst(page, ['input[name="_systemfield_name"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="_systemfield_email"]'], packet.email, 'email', filledFields);
-    await fillFirst(page, ['input[name="_systemfield_phone"]'], packet.phone, 'phone', filledFields);
+    await fillFirst(page, ASHBY_PHONE_SELECTOR.split(', '), packet.phone, 'phone', filledFields);
     await fillFirst(page, ['input[name="_systemfield_location"]'], packet.city, 'location', filledFields);
     // See ASHBY_*_SELECTOR: these were missing from the direct path too, so a real Ashby run
     // reported LinkedIn as an empty required field even though the packet had it.
