@@ -4,7 +4,7 @@ import { getVercelOidcToken } from '@vercel/oidc';
 export type BrowserProvider = 'browserbase' | 'stratus' | 'stratus-managed';
 
 export type ManagedBrowserAction = {
-  type: 'click' | 'fill' | 'fillByLabelText' | 'upload' | 'waitForSelector' | 'press' | 'select' | 'extract';
+  type: 'click' | 'fill' | 'fillByLabelText' | 'upload' | 'waitForSelector' | 'press' | 'select' | 'extract' | 'discover';
   selector?: string;
   value?: string;
   text?: string;
@@ -15,6 +15,16 @@ export type ManagedBrowserAction = {
   file?: { name: string; mimeType: string; base64: string };
 };
 
+// One entry per text-shaped custom question the 'discover' action found on the live page.
+// Mirrors questionDiscovery.ts's DiscoveredQuestion so the managed and direct-Playwright paths
+// hand the same shape to the same resolution code (see discoverAndResolveQuestions).
+export type ManagedDiscoveredQuestion = {
+  label: string;
+  selector: string;
+  inputType: string;
+  maxLength: number | null;
+};
+
 export type ManagedBrowserResult = {
   title: string;
   url: string;
@@ -22,6 +32,7 @@ export type ManagedBrowserResult = {
   screenshot?: string | null;
   filledFields?: string[];
   blockers?: string[];
+  discovered?: ManagedDiscoveredQuestion[];
 };
 
 type ManagedBrowserError = string | { message?: string; code?: string };
