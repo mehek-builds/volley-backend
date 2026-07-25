@@ -82,8 +82,40 @@ test('controlled portal is gated by an explicit server flag', () => {
   assert.throws(() => detectPortal('https://trylitos.com/qa/portal-submission'), /not supported/);
   process.env.LITOS_ENABLE_TEST_PORTAL = 'true';
   assert.equal(detectPortal('https://trylitos.com/qa/portal-submission'), 'controlled_test');
+  assert.equal(detectPortal('https://trylitos.com/qa/portal-submission?board=lever'), 'controlled_lever');
+  assert.equal(detectPortal('https://trylitos.com/qa/portal-submission?board=ashby'), 'controlled_ashby');
+  assert.equal(
+    detectPortal('https://trylitos.com/qa/portal-submission?board=smartrecruiters'),
+    'controlled_smartrecruiters',
+  );
   if (previous === undefined) delete process.env.LITOS_ENABLE_TEST_PORTAL;
   else process.env.LITOS_ENABLE_TEST_PORTAL = previous;
+});
+
+test('controlled portal variants exercise every real adapter selector family', () => {
+  const packet = {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    phone: '+1 213 555 0100',
+    city: 'Los Angeles',
+    linkedinUrl: 'https://linkedin.com/in/taylor',
+    githubUrl: 'https://github.com/taylor',
+    portfolioUrl: 'https://taylor.example',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  };
+  const selectors = new Map([
+    ['controlled_test', '#first_name'],
+    ['controlled_lever', 'input[name="name"]'],
+    ['controlled_ashby', 'input[name="_systemfield_name"]'],
+    ['controlled_smartrecruiters', '#first-name-input'],
+  ] as const);
+  for (const [portal, expected] of selectors) {
+    const actions = buildManagedPortalActions(portal, packet, true);
+    assert.ok(actions.some((action) => action.type === 'fill' && action.selector?.includes(expected)));
+    assert.equal(actions.at(-1)?.type, 'click');
+  }
 });
 
 test('managed controlled-portal actions include reviewed fields, resume upload, and final submit', () => {

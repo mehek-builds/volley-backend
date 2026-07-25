@@ -12,7 +12,17 @@ function quoteAttr(value: string): string {
   return value.replace(/["\\]/g, '\\$&');
 }
 
-export type SupportedPortal = 'greenhouse' | 'lever' | 'ashby' | 'smartrecruiters' | 'controlled_test';
+type PortalFamily = 'greenhouse' | 'lever' | 'ashby' | 'smartrecruiters';
+type ControlledPortal = 'controlled_test' | 'controlled_lever' | 'controlled_ashby' | 'controlled_smartrecruiters';
+export type SupportedPortal = PortalFamily | ControlledPortal;
+
+function portalFamily(portal: SupportedPortal): PortalFamily {
+  if (portal === 'controlled_test') return 'greenhouse';
+  if (portal === 'controlled_lever') return 'lever';
+  if (portal === 'controlled_ashby') return 'ashby';
+  if (portal === 'controlled_smartrecruiters') return 'smartrecruiters';
+  return portal;
+}
 
 export type SubmissionPacket = {
   fullName: string;
@@ -145,7 +155,8 @@ const SMARTRECRUITERS_PHONE_SELECTOR = '[aria-label="Phone number"]';
 // this out is what let R-055's discovery step reuse every portal's already-verified selectors
 // instead of a third copy of them.
 function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: SupportedPortal, packet: SubmissionPacket) {
-  if (portal === 'greenhouse' || portal === 'controlled_test') {
+  const family = portalFamily(portal);
+  if (family === 'greenhouse') {
     const parts = packet.fullName.trim().split(/\s+/);
     // optional (managedFill default) + bounded, not required: a branded-redirect Greenhouse customer
     // (Jump Trading serves its posting through www.jumptrading.com with a different form DOM) has
@@ -159,7 +170,7 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedFill(actions, '#phone, input[name="job_application[phone]"]', packet.phone, 'phone');
     managedFill(actions, '#candidate-location, input[autocomplete="address-level2"]', packet.city, 'location');
     managedUpload(actions, '#resume, input[type="file"][name="job_application[resume]"]', packet);
-  } else if (portal === 'lever') {
+  } else if (family === 'lever') {
     managedFill(actions, 'input[name="name"]', packet.fullName, 'name', false);
     managedFill(actions, 'input[name="email"]', packet.email, 'email', false);
     managedFill(actions, 'input[name="phone"]', packet.phone, 'phone');
@@ -167,18 +178,20 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedFill(actions, 'input[name="urls[GitHub]"]', packet.githubUrl, 'github');
     managedFill(actions, 'input[name="urls[Portfolio]"]', packet.portfolioUrl, 'portfolio');
     managedUpload(actions, 'input[name="resume"][type="file"]', packet);
-  } else if (portal === 'smartrecruiters') {
+  } else if (family === 'smartrecruiters') {
     // See navigateToApplicationForm/SMARTRECRUITERS_APPLY_LINK_SELECTOR: the JD page and the
     // actual form are different URLs. The managed runner has no separate "navigate, then act"
     // step, so this click has to be the first action in the same sequence; optional and bounded
     // so it is a no-op when the runner already landed on the form URL directly.
-    actions.push({
-      type: 'click',
-      selector: SMARTRECRUITERS_APPLY_LINK_SELECTOR,
-      label: 'open application form',
-      optional: true,
-      timeout: MANAGED_FILL_TIMEOUT_MS,
-    });
+    if (portal === 'smartrecruiters') {
+      actions.push({
+        type: 'click',
+        selector: SMARTRECRUITERS_APPLY_LINK_SELECTOR,
+        label: 'open application form',
+        optional: true,
+        timeout: MANAGED_FILL_TIMEOUT_MS,
+      });
+    }
     const parts = packet.fullName.trim().split(/\s+/);
     managedFill(actions, '#first-name-input', parts[0], 'first_name');
     managedFill(actions, '#last-name-input', parts.slice(1).join(' '), 'last_name');
@@ -265,7 +278,7 @@ export function readManagedReceipt(result: ManagedBrowserResult): {
   return { confirmationText: body.slice(0, 1000), finalUrl: result.url, referenceId: receiptReference(body) };
 }
 
-const HOSTS: Record<Exclude<SupportedPortal, 'controlled_test'>, RegExp> = {
+const HOSTS: Record<PortalFamily, RegExp> = {
   greenhouse: /(^|\.)greenhouse\.io$/i,
   lever: /(^|\.)lever\.co$/i,
   ashby: /(^|\.)ashbyhq\.com$/i,
@@ -283,6 +296,10 @@ export function detectPortal(rawUrl: string): SupportedPortal {
     (url.hostname === 'trylitos.com' || url.hostname === 'www.trylitos.com' || url.hostname === 'localhost') &&
     url.pathname.startsWith('/qa/portal-submission')
   ) {
+    const board = url.searchParams.get('board')?.toLowerCase();
+    if (board === 'lever') return 'controlled_lever';
+    if (board === 'ashby') return 'controlled_ashby';
+    if (board === 'smartrecruiters') return 'controlled_smartrecruiters';
     return 'controlled_test';
   }
   throw new Error('This portal is not supported yet. Supported portals are Greenhouse, Lever, Ashby, and SmartRecruiters.');
@@ -358,7 +375,8 @@ async function fillReviewedQuestions(page: Page, packet: SubmissionPacket, out: 
 
 export async function fillPortal(page: Page, portal: SupportedPortal, packet: SubmissionPacket): Promise<FillResult> {
   const filledFields: string[] = [];
-  if (portal === 'greenhouse' || portal === 'controlled_test') {
+  const family = portalFamily(portal);
+  if (family === 'greenhouse') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, ['#first_name', 'input[name="job_application[first_name]"]'], parts[0], 'first_name', filledFields);
     await fillFirst(page, ['#last_name', 'input[name="job_application[last_name]"]'], parts.slice(1).join(' '), 'last_name', filledFields);
@@ -366,7 +384,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['#phone', 'input[name="job_application[phone]"]'], packet.phone, 'phone', filledFields);
     await fillFirst(page, ['#candidate-location', 'input[autocomplete="address-level2"]'], packet.city, 'location', filledFields);
     await uploadFirst(page, ['#resume', 'input[type="file"][name="job_application[resume]"]'], packet, filledFields);
-  } else if (portal === 'lever') {
+  } else if (family === 'lever') {
     await fillFirst(page, ['input[name="name"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="email"]'], packet.email, 'email', filledFields);
     await fillFirst(page, ['input[name="phone"]'], packet.phone, 'phone', filledFields);
@@ -374,7 +392,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="urls[GitHub]"]'], packet.githubUrl, 'github', filledFields);
     await fillFirst(page, ['input[name="urls[Portfolio]"]'], packet.portfolioUrl, 'portfolio', filledFields);
     await uploadFirst(page, ['input[name="resume"][type="file"]'], packet, filledFields);
-  } else if (portal === 'smartrecruiters') {
+  } else if (family === 'smartrecruiters') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, ['#first-name-input'], parts[0], 'first_name', filledFields);
     await fillFirst(page, ['#last-name-input'], parts.slice(1).join(' '), 'last_name', filledFields);
