@@ -38,8 +38,21 @@ export type ApplicationReviewState = {
   attention_reason?: string;
   handoff_expires_at?: string;
   final_approved_at?: string;
+  submission_claimed_at?: string;
+  submission_claim_id?: string;
   filled_fields?: string[];
   preview_screenshot_url?: string;
+  submission_authorization?: {
+    source: 'standing_consent' | 'per_application_approval';
+    authorized_at: string;
+    consented_at?: string;
+    consent_version?: string;
+  };
+  verification?: {
+    status: 'not_needed' | 'searching' | 'completed' | 'handoff';
+    provider?: 'gmail' | 'outlook';
+    completed_at?: string;
+  };
   receipt?: {
     confirmation_text: string;
     final_url: string;
