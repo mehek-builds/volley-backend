@@ -1567,7 +1567,7 @@
       "label": "directPreparationIsSafe()",
       "file_type": "code",
       "source_file": "src/lib/submissionSafety.ts",
-      "source_location": "L10",
+      "source_location": "L18",
       "id": "submissionsafety_directpreparationissafe",
       "community": 1
     },
@@ -8697,7 +8697,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/lib/submissionSafety.ts",
-      "source_location": "L10",
+      "source_location": "L18",
       "weight": 1.0,
       "_src": "submissionsafety",
       "_tgt": "submissionsafety_directpreparationissafe",

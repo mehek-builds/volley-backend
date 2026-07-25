@@ -256,7 +256,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const stored = row.spec as StoredSpec;
       const current = readApplicationReview(stored);
       if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
-      const disposition = submitRequestDisposition(current.status);
+      const disposition = submitRequestDisposition(current.status, Boolean(current.submission_claimed_at));
       if (disposition === 'submitted') {
         return reply.status(200).send({ application_id: row.id, review: current });
       }
@@ -281,6 +281,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         questions: parsed.data.questions as ApplicationReviewQuestion[],
         status: 'submit_requested' as const,
         updated_at: new Date().toISOString(),
+        attention_reason: undefined,
+        handoff_expires_at: undefined,
+        browser_session_id: undefined,
       };
       const claimed = await db.update(generated_resumes)
         .set({ spec: { ...stored, _review: next } })
