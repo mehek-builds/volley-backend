@@ -26,7 +26,6 @@ async function visibleOtpField(page: Page): Promise<Locator | null> {
   }
   return null;
 }
-
 async function safeContinueButton(field: Locator): Promise<Locator | null> {
   const form = field.locator('xpath=ancestor::form[1]');
   if (await form.count() === 0) return null;
@@ -96,4 +95,3 @@ export async function completeEmailVerificationIfPresent(options: {
   }
   return { status: 'completed', provider: match.provider };
 }
-

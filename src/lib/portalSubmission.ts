@@ -24,6 +24,8 @@ export type SubmissionPacket = {
   portfolioUrl?: string;
   resume: Buffer;
   resumeName: string;
+  coverLetter?: Buffer;
+  coverLetterName?: string;
   questions: Array<{ question: string; answer: string }>;
 };
 
@@ -64,14 +66,21 @@ function managedFill(
 // whole run one step after the name/email fills were already made optional. Optional means a missing
 // file input degrades to a blocker card; the run never auto-submits, so "resume not attached" is a
 // safe thing to hand back to the human rather than a hard error.
-function managedUpload(actions: ManagedBrowserAction[], selector: string, packet: SubmissionPacket) {
+function managedUpload(
+  actions: ManagedBrowserAction[],
+  selector: string,
+  label: 'resume' | 'cover_letter',
+  file: Buffer | undefined,
+  fileName: string | undefined,
+) {
+  if (!file || !fileName) return;
   actions.push({
     type: 'upload',
     selector,
-    label: 'resume',
+    label,
     optional: true,
     timeout: MANAGED_FILL_TIMEOUT_MS,
-    file: { name: packet.resumeName, mimeType: 'application/pdf', base64: packet.resume.toString('base64') },
+    file: { name: fileName, mimeType: 'application/pdf', base64: file.toString('base64') },
   });
 }
 
@@ -116,11 +125,12 @@ export function canFillReviewedQuestions(_provider: 'managed' | 'direct'): boole
 // per-employer selector. Verify against a live Ashby form's rendered HTML if a real run still shows
 // the URL fields empty; these were written from the naming pattern, not yet confirmed on the wire.
 const ASHBY_LINKEDIN_SELECTOR =
-  'input[name="_systemfield_linkedin" i], input[name*="linkedin" i], input[aria-label*="linkedin" i], input[placeholder*="linkedin" i]';
+  'input[name="_systemfield_linkedin" i], input[name*="linkedin" i], input[aria-label*="linkedin" i], input[placeholder*="linkedin" i], label:has-text("LinkedIn Profile") + div input';
 const ASHBY_GITHUB_SELECTOR =
-  'input[name="_systemfield_github" i], input[name*="github" i], input[aria-label*="github" i], input[placeholder*="github" i]';
+  'input[name="_systemfield_github" i], input[name*="github" i], input[aria-label*="github" i], input[placeholder*="github" i], label:has-text("GitHub") + div input';
 const ASHBY_PORTFOLIO_SELECTOR =
-  'input[name*="portfolio" i], input[aria-label*="portfolio" i], input[placeholder*="portfolio" i]';
+  'input[name*="portfolio" i], input[aria-label*="portfolio" i], input[placeholder*="portfolio" i], label:has-text("Portfolio") + div input, label:has-text("Website") + div input';
+const ASHBY_PHONE_SELECTOR = '#phone, input[name="phone"], input[name="_systemfield_phone"]';
 
 // SmartRecruiters renders its "Easy Apply" form as web components (spl-input, spl-phone-field,
 // spl-dropzone, ...) behind OPEN shadow roots (confirmed live, 2026-07-24, on a real Western
@@ -138,6 +148,42 @@ const ASHBY_PORTFOLIO_SELECTOR =
 // as every other blocker on this path, never a silent partial success.
 const SMARTRECRUITERS_RESUME_SELECTOR = 'spl-dropzone[data-test="resume-upload"] input[type="file"]';
 const SMARTRECRUITERS_PHONE_SELECTOR = '[aria-label="Phone number"]';
+const SMARTRECRUITERS_FIRST_NAME_SELECTOR = 'spl-input#first-name-input input';
+const SMARTRECRUITERS_LAST_NAME_SELECTOR = 'spl-input#last-name-input input';
+const SMARTRECRUITERS_EMAIL_SELECTOR = 'spl-input#email-input input';
+const SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR = 'spl-input#confirm-email-input input';
+const SMARTRECRUITERS_LINKEDIN_SELECTOR = 'spl-input#linkedin-input input';
+const SMARTRECRUITERS_WEBSITE_SELECTOR = 'spl-input#website-input input';
+const ASHBY_RESUME_SELECTOR = 'input#_systemfield_resume[type="file"], input[type="file"][name="_systemfield_resume"], input[type="file"][name*="resume" i]';
+const ASHBY_COVER_LETTER_SELECTOR = 'input#cover_letter[type="file"], input[type="file"][id*="cover" i], input[type="file"][name*="cover" i], input[type="file"][aria-label*="cover" i]';
+
+const COVER_LETTER_UPLOAD_SELECTORS: Record<SupportedPortal, string> = {
+  greenhouse: 'input#cover_letter[type="file"], input[type="file"][name*="cover_letter" i], input[type="file"][id*="cover_letter" i], label:has-text("Cover Letter") input[type="file"]',
+  lever: 'input[type="file"][name*="cover" i], input[type="file"][id*="cover" i], label:has-text("Cover Letter") input[type="file"]',
+  ashby: ASHBY_COVER_LETTER_SELECTOR,
+  smartrecruiters: 'spl-dropzone[data-test*="cover" i] input[type="file"], input[type="file"][name*="cover" i], label:has-text("Cover Letter") input[type="file"]',
+  controlled_test: 'input[type="file"][name*="cover" i], input[type="file"][id*="cover" i], label:has-text("Cover Letter") input[type="file"]',
+};
+
+export function coverLetterUploadSelector(portal: SupportedPortal): string {
+  return COVER_LETTER_UPLOAD_SELECTORS[portal];
+}
+
+export function managedResultHasCoverLetterUpload(result: ManagedBrowserResult | null, portal: SupportedPortal): boolean {
+  const selector = coverLetterUploadSelector(portal);
+  return result?.extracted?.some((item) => (
+    item.selector === selector && item.value?.trim().toLowerCase() === 'file'
+  )) === true;
+}
+
+export async function hasCoverLetterUpload(page: Page, portal: SupportedPortal): Promise<boolean> {
+  if ((await page.locator(coverLetterUploadSelector(portal)).count()) > 0) return true;
+  const labelled = page.getByLabel(/cover\s*letter/i);
+  for (let index = 0; index < await labelled.count(); index += 1) {
+    if ((await labelled.nth(index).getAttribute('type'))?.toLowerCase() === 'file') return true;
+  }
+  return false;
+}
 
 // Fixed-field fills only (name/email/phone/location/links/resume) - shared by
 // buildManagedPortalActions (the real fill+submit run) and buildManagedDiscoveryActions (a
@@ -158,7 +204,8 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedFill(actions, '#email, input[name="job_application[email]"]', packet.email, 'email');
     managedFill(actions, '#phone, input[name="job_application[phone]"]', packet.phone, 'phone');
     managedFill(actions, '#candidate-location, input[autocomplete="address-level2"]', packet.city, 'location');
-    managedUpload(actions, '#resume, input[type="file"][name="job_application[resume]"]', packet);
+    managedUpload(actions, '#resume, input[type="file"][name="job_application[resume]"]', 'resume', packet.resume, packet.resumeName);
+    managedUpload(actions, 'input#cover_letter[type="file"], input[type="file"][name*="cover_letter" i]', 'cover_letter', packet.coverLetter, packet.coverLetterName);
   } else if (portal === 'lever') {
     managedFill(actions, 'input[name="name"]', packet.fullName, 'name', false);
     managedFill(actions, 'input[name="email"]', packet.email, 'email', false);
@@ -166,7 +213,8 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedFill(actions, 'input[name="urls[LinkedIn]"]', packet.linkedinUrl, 'linkedin');
     managedFill(actions, 'input[name="urls[GitHub]"]', packet.githubUrl, 'github');
     managedFill(actions, 'input[name="urls[Portfolio]"]', packet.portfolioUrl, 'portfolio');
-    managedUpload(actions, 'input[name="resume"][type="file"]', packet);
+    managedUpload(actions, 'input[name="resume"][type="file"]', 'resume', packet.resume, packet.resumeName);
+    managedUpload(actions, 'input[type="file"][name*="cover" i]', 'cover_letter', packet.coverLetter, packet.coverLetterName);
   } else if (portal === 'smartrecruiters') {
     // See navigateToApplicationForm/SMARTRECRUITERS_APPLY_LINK_SELECTOR: the JD page and the
     // actual form are different URLs. The managed runner has no separate "navigate, then act"
@@ -180,18 +228,18 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
       timeout: MANAGED_FILL_TIMEOUT_MS,
     });
     const parts = packet.fullName.trim().split(/\s+/);
-    managedFill(actions, '#first-name-input', parts[0], 'first_name');
-    managedFill(actions, '#last-name-input', parts.slice(1).join(' '), 'last_name');
-    managedFill(actions, '#email-input', packet.email, 'email');
-    managedFill(actions, '#confirm-email-input', packet.email, 'confirm_email');
+    managedFill(actions, SMARTRECRUITERS_FIRST_NAME_SELECTOR, parts[0], 'first_name');
+    managedFill(actions, SMARTRECRUITERS_LAST_NAME_SELECTOR, parts.slice(1).join(' '), 'last_name');
+    managedFill(actions, SMARTRECRUITERS_EMAIL_SELECTOR, packet.email, 'email');
+    managedFill(actions, SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR, packet.email, 'confirm_email');
     managedFill(actions, SMARTRECRUITERS_PHONE_SELECTOR, packet.phone, 'phone');
-    managedFill(actions, '#linkedin-input', packet.linkedinUrl, 'linkedin');
-    managedFill(actions, '#website-input', packet.portfolioUrl ?? packet.githubUrl, 'portfolio');
-    managedUpload(actions, SMARTRECRUITERS_RESUME_SELECTOR, packet);
+    managedFill(actions, SMARTRECRUITERS_LINKEDIN_SELECTOR, packet.linkedinUrl, 'linkedin');
+    managedFill(actions, SMARTRECRUITERS_WEBSITE_SELECTOR, packet.portfolioUrl ?? packet.githubUrl, 'portfolio');
+    managedUpload(actions, SMARTRECRUITERS_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
   } else {
     managedFill(actions, 'input[name="_systemfield_name"]', packet.fullName, 'name', false);
     managedFill(actions, 'input[name="_systemfield_email"]', packet.email, 'email', false);
-    managedFill(actions, 'input[name="_systemfield_phone"]', packet.phone, 'phone');
+    managedFill(actions, ASHBY_PHONE_SELECTOR, packet.phone, 'phone');
     managedFill(actions, 'input[name="_systemfield_location"]', packet.city, 'location');
     // LinkedIn/GitHub/portfolio, previously missing entirely from this branch: the packet carries
     // them (confirmed live on a real account via GET /profile/application) and the Lever branch
@@ -204,7 +252,8 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedFill(actions, ASHBY_LINKEDIN_SELECTOR, packet.linkedinUrl, 'linkedin');
     managedFill(actions, ASHBY_GITHUB_SELECTOR, packet.githubUrl, 'github');
     managedFill(actions, ASHBY_PORTFOLIO_SELECTOR, packet.portfolioUrl, 'portfolio');
-    managedUpload(actions, 'input[type="file"]', packet);
+    managedUpload(actions, ASHBY_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    managedUpload(actions, ASHBY_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
   }
 }
 
@@ -219,6 +268,14 @@ export function buildManagedDiscoveryActions(portal: SupportedPortal, packet: Su
   const actions: ManagedBrowserAction[] = [];
   pushFixedFieldActions(actions, portal, packet);
   actions.push({ type: 'discover', optional: true, timeout: MANAGED_FILL_TIMEOUT_MS });
+  actions.push({
+    type: 'extract',
+    selector: coverLetterUploadSelector(portal),
+    attribute: 'type',
+    label: 'cover_letter_capability',
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
   return actions;
 }
 
@@ -325,13 +382,27 @@ async function fillFirst(page: Page, selectors: string[], value: string | undefi
   }
 }
 
-async function uploadFirst(page: Page, selectors: string[], packet: SubmissionPacket, out: string[]) {
+async function uploadFirst(
+  page: Page,
+  selectors: string[],
+  file: Buffer | undefined,
+  fileName: string | undefined,
+  label: 'resume' | 'cover_letter',
+  out: string[],
+) {
+  if (!file || !fileName) return;
   for (const selector of selectors) {
     const field = page.locator(selector).first();
     if ((await field.count()) > 0) {
-      await field.setInputFiles({ name: packet.resumeName, mimeType: 'application/pdf', buffer: packet.resume });
-      out.push('resume');
-      return;
+      const type = await field.getAttribute('type').catch(() => null);
+      if (type?.toLowerCase() !== 'file') continue;
+      try {
+        await field.setInputFiles({ name: fileName, mimeType: 'application/pdf', buffer: file });
+        out.push(label);
+        return;
+      } catch {
+        continue;
+      }
     }
   }
 }
@@ -365,7 +436,8 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['#email', 'input[name="job_application[email]"]'], packet.email, 'email', filledFields);
     await fillFirst(page, ['#phone', 'input[name="job_application[phone]"]'], packet.phone, 'phone', filledFields);
     await fillFirst(page, ['#candidate-location', 'input[autocomplete="address-level2"]'], packet.city, 'location', filledFields);
-    await uploadFirst(page, ['#resume', 'input[type="file"][name="job_application[resume]"]'], packet, filledFields);
+    await uploadFirst(page, ['#resume', 'input[type="file"][name="job_application[resume]"]'], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, ['input#cover_letter[type="file"]', 'input[type="file"][name*="cover_letter" i]'], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
   } else if (portal === 'lever') {
     await fillFirst(page, ['input[name="name"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="email"]'], packet.email, 'email', filledFields);
@@ -373,28 +445,30 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="urls[LinkedIn]"]'], packet.linkedinUrl, 'linkedin', filledFields);
     await fillFirst(page, ['input[name="urls[GitHub]"]'], packet.githubUrl, 'github', filledFields);
     await fillFirst(page, ['input[name="urls[Portfolio]"]'], packet.portfolioUrl, 'portfolio', filledFields);
-    await uploadFirst(page, ['input[name="resume"][type="file"]'], packet, filledFields);
+    await uploadFirst(page, ['input[name="resume"][type="file"]'], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, ['input[type="file"][name*="cover" i]'], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
   } else if (portal === 'smartrecruiters') {
     const parts = packet.fullName.trim().split(/\s+/);
-    await fillFirst(page, ['#first-name-input'], parts[0], 'first_name', filledFields);
-    await fillFirst(page, ['#last-name-input'], parts.slice(1).join(' '), 'last_name', filledFields);
-    await fillFirst(page, ['#email-input'], packet.email, 'email', filledFields);
-    await fillFirst(page, ['#confirm-email-input'], packet.email, 'confirm_email', filledFields);
+    await fillFirst(page, [SMARTRECRUITERS_FIRST_NAME_SELECTOR], parts[0], 'first_name', filledFields);
+    await fillFirst(page, [SMARTRECRUITERS_LAST_NAME_SELECTOR], parts.slice(1).join(' '), 'last_name', filledFields);
+    await fillFirst(page, [SMARTRECRUITERS_EMAIL_SELECTOR], packet.email, 'email', filledFields);
+    await fillFirst(page, [SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR], packet.email, 'confirm_email', filledFields);
     await fillFirst(page, [SMARTRECRUITERS_PHONE_SELECTOR], packet.phone, 'phone', filledFields);
-    await fillFirst(page, ['#linkedin-input'], packet.linkedinUrl, 'linkedin', filledFields);
-    await fillFirst(page, ['#website-input'], packet.portfolioUrl ?? packet.githubUrl, 'portfolio', filledFields);
-    await uploadFirst(page, [SMARTRECRUITERS_RESUME_SELECTOR], packet, filledFields);
+    await fillFirst(page, [SMARTRECRUITERS_LINKEDIN_SELECTOR], packet.linkedinUrl, 'linkedin', filledFields);
+    await fillFirst(page, [SMARTRECRUITERS_WEBSITE_SELECTOR], packet.portfolioUrl ?? packet.githubUrl, 'portfolio', filledFields);
+    await uploadFirst(page, [SMARTRECRUITERS_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
   } else {
     await fillFirst(page, ['input[name="_systemfield_name"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="_systemfield_email"]'], packet.email, 'email', filledFields);
-    await fillFirst(page, ['input[name="_systemfield_phone"]'], packet.phone, 'phone', filledFields);
+    await fillFirst(page, ASHBY_PHONE_SELECTOR.split(', '), packet.phone, 'phone', filledFields);
     await fillFirst(page, ['input[name="_systemfield_location"]'], packet.city, 'location', filledFields);
     // See ASHBY_*_SELECTOR: these were missing from the direct path too, so a real Ashby run
     // reported LinkedIn as an empty required field even though the packet had it.
     await fillFirst(page, ASHBY_LINKEDIN_SELECTOR.split(', '), packet.linkedinUrl, 'linkedin', filledFields);
     await fillFirst(page, ASHBY_GITHUB_SELECTOR.split(', '), packet.githubUrl, 'github', filledFields);
     await fillFirst(page, ASHBY_PORTFOLIO_SELECTOR.split(', '), packet.portfolioUrl, 'portfolio', filledFields);
-    await uploadFirst(page, ['input[type="file"]'], packet, filledFields);
+    await uploadFirst(page, ASHBY_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, ASHBY_COVER_LETTER_SELECTOR.split(', '), packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
   }
   await fillReviewedQuestions(page, packet, filledFields);
 

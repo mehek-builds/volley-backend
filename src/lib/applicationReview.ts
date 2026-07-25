@@ -24,6 +24,7 @@ export type ApplicationReviewState = {
     | 'needs_attention'
     | 'ready_for_final_approval'
     | 'submitting'
+    | 'submission_claimed'
     | 'submitted'
     | 'failed';
   edited_terms: string[];
@@ -38,6 +39,7 @@ export type ApplicationReviewState = {
   attention_reason?: string;
   handoff_expires_at?: string;
   final_approved_at?: string;
+  cover_letter_supported?: boolean;
   submission_claimed_at?: string;
   submission_claim_id?: string;
   filled_fields?: string[];

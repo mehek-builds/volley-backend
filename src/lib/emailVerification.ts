@@ -40,7 +40,6 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     ? value as Record<string, unknown>
     : null;
 }
-
 function firstString(record: Record<string, unknown>, keys: string[]): string {
   for (const key of keys) {
     const value = record[key];
@@ -262,4 +261,3 @@ export async function findComposioVerificationCode(options: {
   }
   return extractVerificationCode(payloads, options.portalUrl, options.requestedAt);
 }
-

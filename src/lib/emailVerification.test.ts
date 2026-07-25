@@ -14,7 +14,6 @@ test('extracts one context-bound numeric code without returning unrelated number
   );
   assert.equal(extractCodeFromVerificationText('Application 482913 was received on 2026-07-25.'), null);
 });
-
 test('rejects text with multiple different verification codes', () => {
   assert.equal(
     extractCodeFromVerificationText('Your old verification code is 111111. Your new verification code is 222222.'),
@@ -108,4 +107,3 @@ test('queries only read tools and tolerates an unconnected provider', async () =
     enable_top_results: false,
   });
 });
-
