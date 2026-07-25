@@ -21,6 +21,8 @@ import {
   clickFinalSubmit,
   detectPortal,
   fillPortal,
+  hasCoverLetterUpload,
+  managedResultHasCoverLetterUpload,
   navigateToApplicationForm,
   portalApplicationUrl,
   readManagedReceipt,
@@ -48,6 +50,7 @@ import {
   type DiscoveredQuestion,
 } from '../lib/questionDiscovery';
 import type { ApplicationReviewQuestion } from '../lib/applicationReview';
+import { generateStoredCoverLetter, storedCoverLetter } from '../lib/coverLetterService';
 
 type ResumeRow = typeof generated_resumes.$inferSelect;
 type StoredSpec = Record<string, unknown>;
@@ -57,7 +60,9 @@ function nextReview(current: ApplicationReviewState, patch: Partial<ApplicationR
 }
 
 async function writeReview(row: ResumeRow, review: ApplicationReviewState) {
-  await db.update(generated_resumes).set({ spec: { ...(row.spec as StoredSpec), _review: review } }).where(eq(generated_resumes.id, row.id));
+  await db.update(generated_resumes).set({
+    spec: sql`jsonb_set(${generated_resumes.spec}, '{_review}', ${JSON.stringify(review)}::jsonb, true)`,
+  }).where(eq(generated_resumes.id, row.id));
 }
 
 async function buildPacket(row: ResumeRow): Promise<SubmissionPacket> {
@@ -105,6 +110,18 @@ async function buildPacket(row: ResumeRow): Promise<SubmissionPacket> {
       : undefined,
     questions: review.questions.map((item) => ({ question: item.question, answer: item.answer })),
   };
+}
+
+function omitCoverLetter(packet: SubmissionPacket): SubmissionPacket {
+  return { ...packet, coverLetter: undefined, coverLetterName: undefined };
+}
+
+async function packetForCoverLetterCapability(row: ResumeRow, supported: boolean): Promise<SubmissionPacket> {
+  if (!supported) return omitCoverLetter(await buildPacket(row));
+  if (!storedCoverLetter(row)) await generateStoredCoverLetter(row, false, true);
+  const rows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, row.id)).limit(1);
+  if (!rows[0]) throw new Error('Application packet disappeared while generating its cover letter');
+  return buildPacket(rows[0]);
 }
 
 // R-055 fix: the dashboard flow used to send only whatever `review.questions` the client already
@@ -237,7 +254,7 @@ async function prepareManaged(
     submission_run_id: runId,
     submission_error: undefined,
   }));
-  const packet = await buildPacket(row);
+  let packet = omitCoverLetter(await buildPacket(row));
 
   // R-055 on the managed path: a cheap first call fills only the fixed fields and asks
   // stratus-browser-cloud's 'discover' action (PR #7) to scan the resulting page for custom
@@ -246,6 +263,8 @@ async function prepareManaged(
   // uses, so the two providers can never answer a question differently.
   const applicationUrl = portalApplicationUrl(portal, current.portal_url!);
   const discoveryResult = await runManagedBrowser(applicationUrl, buildManagedDiscoveryActions(portal, packet)).catch(() => null);
+  const coverLetterSupported = managedResultHasCoverLetterUpload(discoveryResult, portal);
+  packet = await packetForCoverLetterCapability(row, coverLetterSupported);
   const { questions: discoveredQuestions, attentionReasons: discoveryAttention } = await discoverAndResolveQuestions(
     discoveryResult?.discovered ?? [],
     row,
@@ -280,6 +299,7 @@ async function prepareManaged(
     filled_fields: result.filledFields ?? [],
     preview_screenshot_url: preview.url,
     questions: mergedQuestions,
+    cover_letter_supported: coverLetterSupported,
     attention_reason: [...blockers, ...discoveryAttention].join('\n') || undefined,
     handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
     submission_error: undefined,
@@ -312,7 +332,8 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
     }));
     await page.goto(current.portal_url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     await navigateToApplicationForm(page, portal); // no-op except SmartRecruiters's JD-page/form-page split
-    const packet = await buildPacket(row);
+    const coverLetterSupported = await hasCoverLetterUpload(page, portal);
+    const packet = await packetForCoverLetterCapability(row, coverLetterSupported);
 
     // R-055: discover and resolve the posting's own custom questions before filling, so a
     // dashboard-only submission does not depend on the extension having run first.
@@ -340,6 +361,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
       filled_fields: result.filledFields,
       preview_screenshot_url: preview.url,
       questions: mergedQuestions,
+      cover_letter_supported: coverLetterSupported,
       // Already human on this path, but sanitized anyway so both providers are held to one
       // guarantee and a future change to either cannot quietly reintroduce identifiers.
       attention_reason:
@@ -357,7 +379,8 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
   if (!current?.submission_run_id || !current.portal_url) throw new Error('Prepared browser run is missing');
   if (isManagedStratusProvider()) {
     const portal = detectPortal(current.portal_url);
-    const packet = await buildPacket(row);
+    const builtPacket = await buildPacket(row);
+    const packet = current.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
     const result = await runManagedBrowser(portalApplicationUrl(portal, current.portal_url), buildManagedPortalActions(portal, packet, true));
     const receipt = readManagedReceipt(result);
     if (!result.screenshot) throw new Error('Stratus managed browser did not return a receipt screenshot');

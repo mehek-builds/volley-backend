@@ -148,6 +148,34 @@ const ASHBY_PORTFOLIO_SELECTOR =
 const SMARTRECRUITERS_RESUME_SELECTOR = 'spl-dropzone[data-test="resume-upload"] input[type="file"]';
 const SMARTRECRUITERS_PHONE_SELECTOR = '[aria-label="Phone number"]';
 
+const COVER_LETTER_UPLOAD_SELECTORS: Record<SupportedPortal, string> = {
+  greenhouse: '#cover_letter, input[type="file"][name*="cover_letter" i], input[type="file"][id*="cover_letter" i], label:has-text("Cover Letter") input[type="file"]',
+  lever: 'input[type="file"][name*="cover" i], input[type="file"][id*="cover" i], label:has-text("Cover Letter") input[type="file"]',
+  ashby: 'input[type="file"][name*="cover" i], input[type="file"][aria-label*="cover" i], label:has-text("Cover Letter") input[type="file"]',
+  smartrecruiters: 'spl-dropzone[data-test*="cover" i] input[type="file"], input[type="file"][name*="cover" i], label:has-text("Cover Letter") input[type="file"]',
+  controlled_test: 'input[type="file"][name*="cover" i], input[type="file"][id*="cover" i], label:has-text("Cover Letter") input[type="file"]',
+};
+
+export function coverLetterUploadSelector(portal: SupportedPortal): string {
+  return COVER_LETTER_UPLOAD_SELECTORS[portal];
+}
+
+export function managedResultHasCoverLetterUpload(result: ManagedBrowserResult | null, portal: SupportedPortal): boolean {
+  const selector = coverLetterUploadSelector(portal);
+  return result?.extracted?.some((item) => (
+    item.selector === selector && item.value?.trim().toLowerCase() === 'file'
+  )) === true;
+}
+
+export async function hasCoverLetterUpload(page: Page, portal: SupportedPortal): Promise<boolean> {
+  if ((await page.locator(coverLetterUploadSelector(portal)).count()) > 0) return true;
+  const labelled = page.getByLabel(/cover\s*letter/i);
+  for (let index = 0; index < await labelled.count(); index += 1) {
+    if ((await labelled.nth(index).getAttribute('type'))?.toLowerCase() === 'file') return true;
+  }
+  return false;
+}
+
 // Fixed-field fills only (name/email/phone/location/links/resume) - shared by
 // buildManagedPortalActions (the real fill+submit run) and buildManagedDiscoveryActions (a
 // cheaper first pass that also asks the runner to scan the page for custom questions). Splitting
@@ -231,6 +259,14 @@ export function buildManagedDiscoveryActions(portal: SupportedPortal, packet: Su
   const actions: ManagedBrowserAction[] = [];
   pushFixedFieldActions(actions, portal, packet);
   actions.push({ type: 'discover', optional: true, timeout: MANAGED_FILL_TIMEOUT_MS });
+  actions.push({
+    type: 'extract',
+    selector: coverLetterUploadSelector(portal),
+    attribute: 'type',
+    label: 'cover_letter_capability',
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
   return actions;
 }
 

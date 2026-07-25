@@ -4,8 +4,10 @@ import {
   buildManagedDiscoveryActions,
   buildManagedPortalActions,
   canFillReviewedQuestions,
+  coverLetterUploadSelector,
   detectPortal,
   isChoiceQuestion,
+  managedResultHasCoverLetterUpload,
   portalApplicationUrl,
   readManagedReceipt,
 } from './portalSubmission';
@@ -17,7 +19,7 @@ test('detects the four supported applicant portal families', () => {
   assert.equal(detectPortal('https://jobs.smartrecruiters.com/Acme/744000-role'), 'smartrecruiters');
 });
 
-test('a managed discovery run fills the fixed fields, then ends with discover - never sends reviewed questions or submits', () => {
+test('a managed discovery run detects custom questions and cover-letter attachment capability without submitting', () => {
   // R-055 on the managed path: this cheap first call exists only to get the page's custom
   // questions back (stratus-browser-cloud PR #7). It reuses the same fixed-field fills (including
   // the resume upload - harmless and idempotent, the real run below fills them again) but must
@@ -29,11 +31,35 @@ test('a managed discovery run fills the fixed fields, then ends with discover - 
     resumeName: 'resume.pdf',
     questions: [{ question: 'Why this role?', answer: 'I enjoy systems work.' }],
   });
-  assert.equal(actions.at(-1)?.type, 'discover');
+  assert.equal(actions.at(-2)?.type, 'discover');
+  assert.deepEqual(actions.at(-1), {
+    type: 'extract',
+    selector: coverLetterUploadSelector('greenhouse'),
+    attribute: 'type',
+    label: 'cover_letter_capability',
+    optional: true,
+    timeout: 10_000,
+  });
   assert.equal(actions.some((a) => a.type === 'fillByLabelText'), false);
   assert.equal(actions.some((a) => a.type === 'click'), false);
   const fillSelectors = actions.filter((a) => a.type === 'fill').map((a) => a.selector);
   assert.ok(fillSelectors.some((s) => s?.includes('first_name')));
+});
+
+test('managed cover-letter detection requires an actual file input extraction', () => {
+  const selector = coverLetterUploadSelector('greenhouse');
+  assert.equal(managedResultHasCoverLetterUpload({ title: 'Apply', url: 'https://example.com', text: 'Cover letter is optional', extracted: [{ selector, value: 'file' }] }, 'greenhouse'), true);
+  assert.equal(managedResultHasCoverLetterUpload({ title: 'Apply', url: 'https://example.com', text: 'Cover letter is optional', extracted: [{ selector: '#resume', value: 'file' }] }, 'greenhouse'), false);
+  assert.equal(managedResultHasCoverLetterUpload({ title: 'Apply', url: 'https://example.com', text: 'Cover letter is optional', extracted: [] }, 'greenhouse'), false);
+  assert.equal(managedResultHasCoverLetterUpload(null, 'greenhouse'), false);
+});
+
+test('every portal detects a cover-letter file control, not optional wording alone', () => {
+  for (const portal of ['greenhouse', 'lever', 'ashby', 'smartrecruiters', 'controlled_test'] as const) {
+    const selector = coverLetterUploadSelector(portal);
+    assert.match(selector, /type="file"/);
+    assert.match(selector, /cover/i);
+  }
 });
 
 test('SmartRecruiters managed actions open the application form before filling', () => {
