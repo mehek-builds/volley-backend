@@ -147,6 +147,12 @@ const ASHBY_PORTFOLIO_SELECTOR =
 // as every other blocker on this path, never a silent partial success.
 const SMARTRECRUITERS_RESUME_SELECTOR = 'spl-dropzone[data-test="resume-upload"] input[type="file"]';
 const SMARTRECRUITERS_PHONE_SELECTOR = '[aria-label="Phone number"]';
+const SMARTRECRUITERS_FIRST_NAME_SELECTOR = 'spl-input#first-name-input input';
+const SMARTRECRUITERS_LAST_NAME_SELECTOR = 'spl-input#last-name-input input';
+const SMARTRECRUITERS_EMAIL_SELECTOR = 'spl-input#email-input input';
+const SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR = 'spl-input#confirm-email-input input';
+const SMARTRECRUITERS_LINKEDIN_SELECTOR = 'spl-input#linkedin-input input';
+const SMARTRECRUITERS_WEBSITE_SELECTOR = 'spl-input#website-input input';
 const ASHBY_RESUME_SELECTOR = '#_systemfield_resume, input[type="file"][name="_systemfield_resume"], input[type="file"][name*="resume" i]';
 const ASHBY_COVER_LETTER_SELECTOR = '#cover_letter, input[type="file"][id*="cover" i], input[type="file"][name*="cover" i], input[type="file"][aria-label*="cover" i]';
 
@@ -221,13 +227,13 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
       timeout: MANAGED_FILL_TIMEOUT_MS,
     });
     const parts = packet.fullName.trim().split(/\s+/);
-    managedFill(actions, '#first-name-input', parts[0], 'first_name');
-    managedFill(actions, '#last-name-input', parts.slice(1).join(' '), 'last_name');
-    managedFill(actions, '#email-input', packet.email, 'email');
-    managedFill(actions, '#confirm-email-input', packet.email, 'confirm_email');
+    managedFill(actions, SMARTRECRUITERS_FIRST_NAME_SELECTOR, parts[0], 'first_name');
+    managedFill(actions, SMARTRECRUITERS_LAST_NAME_SELECTOR, parts.slice(1).join(' '), 'last_name');
+    managedFill(actions, SMARTRECRUITERS_EMAIL_SELECTOR, packet.email, 'email');
+    managedFill(actions, SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR, packet.email, 'confirm_email');
     managedFill(actions, SMARTRECRUITERS_PHONE_SELECTOR, packet.phone, 'phone');
-    managedFill(actions, '#linkedin-input', packet.linkedinUrl, 'linkedin');
-    managedFill(actions, '#website-input', packet.portfolioUrl ?? packet.githubUrl, 'portfolio');
+    managedFill(actions, SMARTRECRUITERS_LINKEDIN_SELECTOR, packet.linkedinUrl, 'linkedin');
+    managedFill(actions, SMARTRECRUITERS_WEBSITE_SELECTOR, packet.portfolioUrl ?? packet.githubUrl, 'portfolio');
     managedUpload(actions, SMARTRECRUITERS_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
   } else {
     managedFill(actions, 'input[name="_systemfield_name"]', packet.fullName, 'name', false);
@@ -436,13 +442,13 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await uploadFirst(page, ['input[type="file"][name*="cover" i]'], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
   } else if (portal === 'smartrecruiters') {
     const parts = packet.fullName.trim().split(/\s+/);
-    await fillFirst(page, ['#first-name-input'], parts[0], 'first_name', filledFields);
-    await fillFirst(page, ['#last-name-input'], parts.slice(1).join(' '), 'last_name', filledFields);
-    await fillFirst(page, ['#email-input'], packet.email, 'email', filledFields);
-    await fillFirst(page, ['#confirm-email-input'], packet.email, 'confirm_email', filledFields);
+    await fillFirst(page, [SMARTRECRUITERS_FIRST_NAME_SELECTOR], parts[0], 'first_name', filledFields);
+    await fillFirst(page, [SMARTRECRUITERS_LAST_NAME_SELECTOR], parts.slice(1).join(' '), 'last_name', filledFields);
+    await fillFirst(page, [SMARTRECRUITERS_EMAIL_SELECTOR], packet.email, 'email', filledFields);
+    await fillFirst(page, [SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR], packet.email, 'confirm_email', filledFields);
     await fillFirst(page, [SMARTRECRUITERS_PHONE_SELECTOR], packet.phone, 'phone', filledFields);
-    await fillFirst(page, ['#linkedin-input'], packet.linkedinUrl, 'linkedin', filledFields);
-    await fillFirst(page, ['#website-input'], packet.portfolioUrl ?? packet.githubUrl, 'portfolio', filledFields);
+    await fillFirst(page, [SMARTRECRUITERS_LINKEDIN_SELECTOR], packet.linkedinUrl, 'linkedin', filledFields);
+    await fillFirst(page, [SMARTRECRUITERS_WEBSITE_SELECTOR], packet.portfolioUrl ?? packet.githubUrl, 'portfolio', filledFields);
     await uploadFirst(page, [SMARTRECRUITERS_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
   } else {
     await fillFirst(page, ['input[name="_systemfield_name"]'], packet.fullName, 'name', filledFields);
