@@ -182,6 +182,29 @@ test('Ashby targets live phone and label-bound profile fields', () => {
   assert.match(fills.find((action) => action.label === 'portfolio')?.selector ?? '', /Website/);
 });
 
+test('phone fills recognize safe semantic phone controls without matching prose text inputs', () => {
+  // Regression: ISSUE-001, live Deepgram and CTC forms left Phone empty even though the saved
+  // profile contained a value. Those forms expose the control through type, autocomplete, or its
+  // visible phone label instead of the small set of exact ids and names previously recognized.
+  // Found by /qa on 2026-07-25.
+  // Report: outputs/litos-10-application-trials-2026-07-25.md
+  for (const portal of ['greenhouse', 'ashby'] as const) {
+    const actions = buildManagedPortalActions(portal, {
+      fullName: 'Taylor Example',
+      email: 'taylor@example.com',
+      phone: '+971 50 123 4567',
+      resume: Buffer.from('resume-pdf'),
+      resumeName: 'resume.pdf',
+      questions: [],
+    });
+    const selector = actions.find((action) => action.type === 'fill' && action.label === 'phone')?.selector ?? '';
+    assert.match(selector, /input\[type="tel"/);
+    assert.match(selector, /autocomplete\*="tel"/);
+    assert.match(selector, /Phone/);
+    assert.doesNotMatch(selector, /input\[type="text"\](?:,|$)/);
+  }
+});
+
 test('managed receipt requires confirmation language and captures the reference', () => {
   assert.deepEqual(readManagedReceipt({
     title: 'Complete',
