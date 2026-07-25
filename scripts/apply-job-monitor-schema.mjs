@@ -7,7 +7,12 @@ if (!connectionString) {
   process.exit(2);
 }
 
-const client = new pg.Client({ connectionString, ssl: { rejectUnauthorized: false } });
+// Local PostgreSQL commonly has TLS disabled. Hosted providers used by Litos require it.
+const isLocal = /localhost|127\.0\.0\.1/.test(connectionString);
+const client = new pg.Client({
+  connectionString,
+  ssl: isLocal ? undefined : { rejectUnauthorized: false },
+});
 await client.connect();
 try {
   await client.query('begin');
