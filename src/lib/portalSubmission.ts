@@ -147,11 +147,13 @@ const ASHBY_PORTFOLIO_SELECTOR =
 // as every other blocker on this path, never a silent partial success.
 const SMARTRECRUITERS_RESUME_SELECTOR = 'spl-dropzone[data-test="resume-upload"] input[type="file"]';
 const SMARTRECRUITERS_PHONE_SELECTOR = '[aria-label="Phone number"]';
+const ASHBY_RESUME_SELECTOR = '#_systemfield_resume, input[type="file"][name="_systemfield_resume"], input[type="file"][name*="resume" i]';
+const ASHBY_COVER_LETTER_SELECTOR = '#cover_letter, input[type="file"][id*="cover" i], input[type="file"][name*="cover" i], input[type="file"][aria-label*="cover" i]';
 
 const COVER_LETTER_UPLOAD_SELECTORS: Record<SupportedPortal, string> = {
   greenhouse: '#cover_letter, input[type="file"][name*="cover_letter" i], input[type="file"][id*="cover_letter" i], label:has-text("Cover Letter") input[type="file"]',
   lever: 'input[type="file"][name*="cover" i], input[type="file"][id*="cover" i], label:has-text("Cover Letter") input[type="file"]',
-  ashby: 'input[type="file"][name*="cover" i], input[type="file"][aria-label*="cover" i], label:has-text("Cover Letter") input[type="file"]',
+  ashby: ASHBY_COVER_LETTER_SELECTOR,
   smartrecruiters: 'spl-dropzone[data-test*="cover" i] input[type="file"], input[type="file"][name*="cover" i], label:has-text("Cover Letter") input[type="file"]',
   controlled_test: 'input[type="file"][name*="cover" i], input[type="file"][id*="cover" i], label:has-text("Cover Letter") input[type="file"]',
 };
@@ -243,8 +245,8 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedFill(actions, ASHBY_LINKEDIN_SELECTOR, packet.linkedinUrl, 'linkedin');
     managedFill(actions, ASHBY_GITHUB_SELECTOR, packet.githubUrl, 'github');
     managedFill(actions, ASHBY_PORTFOLIO_SELECTOR, packet.portfolioUrl, 'portfolio');
-    managedUpload(actions, 'input[type="file"][name="_systemfield_resume"], input[type="file"][name*="resume" i], input[type="file"]:not([name*="cover" i])', 'resume', packet.resume, packet.resumeName);
-    managedUpload(actions, 'input[type="file"][name*="cover" i], input[type="file"][aria-label*="cover" i]', 'cover_letter', packet.coverLetter, packet.coverLetterName);
+    managedUpload(actions, ASHBY_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    managedUpload(actions, ASHBY_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
   }
 }
 
@@ -452,8 +454,8 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ASHBY_LINKEDIN_SELECTOR.split(', '), packet.linkedinUrl, 'linkedin', filledFields);
     await fillFirst(page, ASHBY_GITHUB_SELECTOR.split(', '), packet.githubUrl, 'github', filledFields);
     await fillFirst(page, ASHBY_PORTFOLIO_SELECTOR.split(', '), packet.portfolioUrl, 'portfolio', filledFields);
-    await uploadFirst(page, ['input[type="file"][name="_systemfield_resume"]', 'input[type="file"][name*="resume" i]', 'input[type="file"]'], packet.resume, packet.resumeName, 'resume', filledFields);
-    await uploadFirst(page, ['input[type="file"][name*="cover" i]', 'input[type="file"][aria-label*="cover" i]'], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await uploadFirst(page, ASHBY_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, ASHBY_COVER_LETTER_SELECTOR.split(', '), packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
   }
   await fillReviewedQuestions(page, packet, filledFields);
 

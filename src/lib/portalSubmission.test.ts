@@ -145,6 +145,23 @@ test('managed portals upload a tailored cover letter without replacing the resum
   }
 });
 
+test('Ashby targets its real resume and optional cover-letter input ids', () => {
+  const actions = buildManagedPortalActions('ashby', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    coverLetter: Buffer.from('cover-pdf'),
+    coverLetterName: 'cover-letter.pdf',
+    questions: [],
+  });
+  const uploads = actions.filter((action) => action.type === 'upload');
+  assert.match(uploads[0]?.selector ?? '', /#_systemfield_resume/);
+  assert.doesNotMatch(uploads[0]?.selector ?? '', /input\[type="file"\]$/);
+  assert.match(uploads[1]?.selector ?? '', /#cover_letter/);
+  assert.match(coverLetterUploadSelector('ashby'), /#cover_letter/);
+});
+
 test('managed receipt requires confirmation language and captures the reference', () => {
   assert.deepEqual(readManagedReceipt({
     title: 'Complete',
