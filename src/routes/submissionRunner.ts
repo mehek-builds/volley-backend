@@ -43,6 +43,8 @@ import {
   discoverPageQuestions,
   isOpenEndedQuestion,
   isRefusedQuestion,
+  normalizeDiscoveredLabel,
+  normalizeStoredPortalQuestions,
   resolveKnownAnswer,
   fitToBudget,
   WORK_ELIGIBILITY_QUESTION,
@@ -235,8 +237,9 @@ async function discoverAndResolveQuestions(
   current: ApplicationReviewState,
   ap: ApplicationProfileLike,
   automaticSubmissionEnabled: boolean,
+  portal: SupportedPortal,
 ): Promise<{ questions: ApplicationReviewQuestion[]; attentionReasons: string[] }> {
-  const existingLabels = new Set(current.questions.map((q) => q.question.trim().toLowerCase()));
+  const existingLabels = new Set(current.questions.map((q) => normalizeDiscoveredLabel(q.question).toLowerCase()));
   const questions: ApplicationReviewQuestion[] = [];
   const attentionReasons: string[] = [];
 
@@ -252,8 +255,9 @@ async function discoverAndResolveQuestions(
   }
 
   for (const field of discovered) {
-    const label = field.label;
-    if (existingLabels.has(label)) continue; // already answered by the client or a prior run
+    const label = normalizeDiscoveredLabel(field.label);
+    if (!label || normalizeStoredPortalQuestions([{ question: label, answer: '' }], portal).length === 0) continue;
+    if (existingLabels.has(label.toLowerCase())) continue; // already answered by the client or a prior run
     if (isRefusedQuestion(label)) {
       attentionReasons.push(WORK_ELIGIBILITY_QUESTION.test(label)
         ? workEligibilitySkipReason(label)
@@ -366,15 +370,18 @@ async function prepareManaged(
   const discoveryResult = await runManagedBrowser(applicationUrl, buildManagedDiscoveryActions(portal, packet)).catch(() => null);
   const coverLetterSupported = managedResultHasCoverLetterUpload(discoveryResult, portal);
   packet = await packetForCoverLetterCapability(row, coverLetterSupported);
+  const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
+  const resolutionCurrent = { ...current, questions: storedQuestions };
   const { questions: discoveredQuestions, attentionReasons: discoveryAttention } = await discoverAndResolveQuestions(
     discoveryResult?.discovered ?? [],
     row,
-    current,
+    resolutionCurrent,
     await loadApplicationProfileLike(row.user_id),
     authorization.enabled,
+    portal,
   );
-  const mergedQuestions = [...current.questions, ...discoveredQuestions];
-  packet.questions = [...packet.questions, ...discoveredQuestions.map((q) => ({ question: q.question, answer: q.answer }))];
+  const mergedQuestions = [...storedQuestions, ...discoveredQuestions];
+  packet.questions = mergedQuestions.map((q) => ({ question: q.question, answer: q.answer }));
 
   const result = await runManagedBrowser(applicationUrl, buildManagedPortalActions(portal, packet));
   if (!result.screenshot) throw new Error('Stratus managed browser did not return a preview screenshot');
@@ -454,10 +461,12 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
     // R-055: discover and resolve the posting's own custom questions before filling, so a
     // dashboard-only submission does not depend on the extension having run first.
     const discovered = await discoverPageQuestions(page).catch(() => []);
+    const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
+    const resolutionCurrent = { ...current, questions: storedQuestions };
     const { questions: discoveredQuestions, attentionReasons: discoveryAttention } =
-      await discoverAndResolveQuestions(discovered, row, current, await loadApplicationProfileLike(row.user_id), authorization.enabled);
-    const mergedQuestions = [...current.questions, ...discoveredQuestions];
-    packet.questions = [...packet.questions, ...discoveredQuestions.map((q) => ({ question: q.question, answer: q.answer }))];
+      await discoverAndResolveQuestions(discovered, row, resolutionCurrent, await loadApplicationProfileLike(row.user_id), authorization.enabled, portal);
+    const mergedQuestions = [...storedQuestions, ...discoveredQuestions];
+    packet.questions = mergedQuestions.map((q) => ({ question: q.question, answer: q.answer }));
 
     let result = await fillPortal(page, portal, packet);
     const postFillVerification = await completeEmailVerificationIfPresent({

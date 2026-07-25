@@ -6,6 +6,8 @@ import {
   fitToBudget,
   isOpenEndedQuestion,
   isRefusedQuestion,
+  normalizeDiscoveredLabel,
+  normalizeStoredPortalQuestions,
   resolveKnownAnswer,
   WORK_ELIGIBILITY_QUESTION,
 } from './questionDiscovery';
@@ -122,4 +124,23 @@ test('WORK_ELIGIBILITY_QUESTION does not fire on unrelated "sponsor" mentions', 
   // A bare `sponsor` match previously classified "How did you hear about us? [..., Sponsored ad]"
   // as a work-eligibility question - see the extension's own comment on this regex.
   assert.equal(WORK_ELIGIBILITY_QUESTION.test('how did you hear about us? (LinkedIn, Sponsored ad, ...)'), false);
+});
+
+test('Ashby discovery labels drop placeholder text and provider UUIDs before answer mapping', () => {
+  assert.equal(
+    normalizeDiscoveredLabel('what excites you about deepgram? type here... e60b1271-ae04-4eec-a264-5684f39b2229 e60b1271-ae04-4eec-a264-5684f39b2229'),
+    'what excites you about deepgram?',
+  );
+});
+
+test('Ashby fixed profile fields never reappear as editable custom questions', () => {
+  const normalized = normalizeStoredPortalQuestions([
+    { id: 'phone', question: 'phone 1-415-555-1234... 9c344ee4-aecc-4162-a897-8e1e99b3025a', answer: '+971 50 123 4567' },
+    { id: 'linkedin', question: 'linkedin type here... c4edc16d-6480-47b0-9f7a-1571301d1d16', answer: 'https://linkedin.com/in/example' },
+    { id: 'essay', question: 'what excites you about deepgram? type here... e60b1271-ae04-4eec-a264-5684f39b2229', answer: 'Reviewed answer' },
+  ], 'ashby');
+
+  assert.deepEqual(normalized, [
+    { id: 'essay', question: 'what excites you about deepgram?', answer: 'Reviewed answer' },
+  ]);
 });

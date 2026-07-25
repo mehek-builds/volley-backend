@@ -1,4 +1,6 @@
 import type { Page } from 'playwright-core';
+import { isOpaqueIdentifier, tidyLabel } from './fieldLabel';
+import type { SupportedPortal } from './portalSubmission';
 import {
   resolveSalary,
   storedSalaryOf,
@@ -169,6 +171,62 @@ export type DiscoveredQuestion = {
   inputType: string;
   maxLength: number | null;
 };
+
+const INLINE_UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
+const TRAILING_ANSWER_PLACEHOLDER_RE = /\s+(?:type|enter|write)\s+(?:your\s+)?(?:answer\s+)?here(?:\.{3}|…)?\s*$/i;
+
+/**
+ * Managed Ashby discovery may concatenate visible label text, placeholder text, name, and id into
+ * one string. Strip only positively identified provider handles and generic answer placeholders,
+ * leaving the employer's full question intact for both display and label-based filling.
+ */
+export function normalizeDiscoveredLabel(raw: string): string {
+  const withoutHandles = raw.replace(INLINE_UUID_RE, ' ').replace(/\s+/g, ' ').trim();
+  const withoutPlaceholder = withoutHandles.replace(TRAILING_ANSWER_PLACEHOLDER_RE, '').trim();
+  const label = tidyLabel(withoutPlaceholder);
+  return label && !isOpaqueIdentifier(label) ? label : '';
+}
+
+function isFixedPortalProfileField(portal: SupportedPortal, label: string): boolean {
+  const key = classifyField(label);
+  if (portal === 'ashby') {
+    return key === 'phone' || key === 'address_city' || key === 'linkedin_url'
+      || key === 'github_url' || key === 'portfolio_url';
+  }
+  if (portal === 'lever') {
+    return key === 'phone' || key === 'linkedin_url' || key === 'github_url' || key === 'portfolio_url';
+  }
+  if (portal === 'greenhouse' || portal === 'controlled_test') {
+    return key === 'phone' || key === 'address_city';
+  }
+  if (portal === 'smartrecruiters') {
+    return key === 'phone' || key === 'linkedin_url' || key === 'portfolio_url';
+  }
+  return false;
+}
+
+/** Normalize legacy provider labels and remove controls already owned by fixed portal selectors. */
+export function normalizeStoredPortalQuestions<T extends { question: string; answer: string }>(
+  questions: readonly T[],
+  portal: SupportedPortal,
+): T[] {
+  const normalized: T[] = [];
+  const indexByLabel = new Map<string, number>();
+  for (const question of questions) {
+    const label = normalizeDiscoveredLabel(question.question);
+    if (!label || isFixedPortalProfileField(portal, label)) continue;
+    const key = label.toLowerCase();
+    const next = { ...question, question: label };
+    const existingIndex = indexByLabel.get(key);
+    if (existingIndex === undefined) {
+      indexByLabel.set(key, normalized.length);
+      normalized.push(next);
+    } else if (!normalized[existingIndex].answer.trim() && next.answer.trim()) {
+      normalized[existingIndex] = next;
+    }
+  }
+  return normalized;
+}
 
 // Passed to page.evaluate() as a source STRING rather than a typed function: this backend's
 // tsconfig has no "dom" lib (it is a Node project), so a typed function here would need
