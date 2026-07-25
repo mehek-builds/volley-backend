@@ -76,12 +76,10 @@ test('SmartRecruiters managed actions open the application form before filling',
   assert.equal(actions[0].type, 'click');
   assert.equal(actions[0].optional, true);
   const fillSelectors = actions.filter((a) => a.type === 'fill').map((a) => a.selector);
-  assert.ok(fillSelectors.some((selector) => selector?.includes('[id="first-name-input"]')));
-  assert.ok(fillSelectors.some((selector) => selector?.includes('spl-input#first-name-input input')));
-  assert.ok(fillSelectors.some((selector) => selector?.includes('[id="email-input"]')));
-  assert.ok(fillSelectors.some((selector) => selector?.includes('spl-input#email-input input')));
-  assert.ok(fillSelectors.some((selector) => selector?.includes('[id="confirm-email-input"]')));
-  assert.ok(fillSelectors.some((selector) => selector?.includes('spl-input#confirm-email-input input')));
+  assert.ok(fillSelectors.includes('spl-input#first-name-input input'));
+  assert.ok(fillSelectors.includes('spl-input#email-input input'));
+  assert.ok(fillSelectors.includes('spl-input#confirm-email-input input'));
+  assert.equal(fillSelectors.some((selector) => selector?.includes('[id="first-name-input"]')), false);
 });
 
 test('opens Ashby directly on its application tab for managed filling', () => {
