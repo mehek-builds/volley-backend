@@ -50,9 +50,9 @@ test('SmartRecruiters managed actions open the application form before filling',
   assert.equal(actions[0].type, 'click');
   assert.equal(actions[0].optional, true);
   const fillSelectors = actions.filter((a) => a.type === 'fill').map((a) => a.selector);
-  assert.ok(fillSelectors.includes('#first-name-input'));
-  assert.ok(fillSelectors.includes('#email-input'));
-  assert.ok(fillSelectors.includes('#confirm-email-input'));
+  assert.ok(fillSelectors.includes('[id="first-name-input"]'));
+  assert.ok(fillSelectors.includes('[id="email-input"]'));
+  assert.ok(fillSelectors.includes('[id="confirm-email-input"]'));
 });
 
 test('opens Ashby directly on its application tab for managed filling', () => {
@@ -115,7 +115,7 @@ test('controlled portal variants exercise every real adapter selector family', (
     ['controlled_test', '#first_name'],
     ['controlled_lever', 'input[name="name"]'],
     ['controlled_ashby', 'input[name="_systemfield_name"]'],
-    ['controlled_smartrecruiters', '#first-name-input'],
+    ['controlled_smartrecruiters', '[id="first-name-input"]'],
   ] as const);
   for (const [portal, expected] of selectors) {
     const actions = buildManagedPortalActions(portal, packet, true);
