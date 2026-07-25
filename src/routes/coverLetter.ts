@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { db } from '../db/index';
 import { generated_resumes } from '../db/schema';
 import { apiBaseFor } from '../lib/apiBase';
-import { generateStoredCoverLetter, saveStoredCoverLetter } from '../lib/coverLetterService';
+import { deleteStoredCoverLetter, generateStoredCoverLetter, saveStoredCoverLetter } from '../lib/coverLetterService';
 import { mintDownloadToken } from '../lib/resumeAccess';
 import { requireAuth } from '../middleware/auth';
 
@@ -69,5 +69,12 @@ export async function coverLetterRoutes(fastify: FastifyInstance) {
     } catch (error) {
       return generationError(reply, error);
     }
+  });
+
+  fastify.delete('/applications/:id/cover-letter', { preHandler: requireAuth }, async (request, reply) => {
+    const row = await ownedApplication(request, reply);
+    if (!row) return;
+    await deleteStoredCoverLetter(row);
+    return reply.status(204).send();
   });
 }

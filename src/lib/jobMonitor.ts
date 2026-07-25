@@ -52,7 +52,7 @@ function date(value: unknown): Date | undefined {
 
 export function normalizeGreenhouseJobs(payload: unknown): NormalizedJob[] {
   const jobs = (payload as { jobs?: unknown[] } | null)?.jobs;
-  if (!Array.isArray(jobs)) return [];
+  if (!Array.isArray(jobs)) throw new Error('Greenhouse board returned an invalid jobs payload');
   return jobs.flatMap((raw) => {
     const job = raw as Record<string, unknown>;
     const id = String(job.id ?? '').trim();
@@ -81,7 +81,7 @@ export function normalizeGreenhouseJobs(payload: unknown): NormalizedJob[] {
 }
 
 export function normalizeLeverJobs(payload: unknown): NormalizedJob[] {
-  if (!Array.isArray(payload)) return [];
+  if (!Array.isArray(payload)) throw new Error('Lever board returned an invalid jobs payload');
   return payload.flatMap((raw) => {
     const job = raw as Record<string, unknown>;
     const id = text(job.id);
@@ -112,7 +112,7 @@ export function normalizeLeverJobs(payload: unknown): NormalizedJob[] {
 
 export function normalizeAshbyJobs(payload: unknown): NormalizedJob[] {
   const jobs = (payload as { jobs?: unknown[] } | null)?.jobs;
-  if (!Array.isArray(jobs)) return [];
+  if (!Array.isArray(jobs)) throw new Error('Ashby board returned an invalid jobs payload');
   return jobs.flatMap((raw) => {
     const job = raw as Record<string, unknown>;
     const postingUrl = text(job.jobUrl);

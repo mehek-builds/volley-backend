@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { put } from '@vercel/blob';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/index';
 import { readExperienceBank } from '../db/experienceBank';
@@ -21,6 +21,7 @@ import {
 import { getLiveViewUrl, isBrowserbaseConfigured } from '../lib/browserbase';
 import { apiBaseFor } from '../lib/apiBase';
 import { extractPdfText } from '../lib/pdfText';
+import { storedCoverLetter } from '../lib/coverLetterService';
 import { mintDownloadToken } from '../lib/resumeAccess';
 import { normalizeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import { requireAuth } from '../middleware/auth';
@@ -50,6 +51,14 @@ const statusBodySchema = z.object({
 });
 
 type StoredSpec = Record<string, unknown>;
+
+function reviewSpec(review: unknown) {
+  return sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(review)}::jsonb, true)`;
+}
+
+function approvedReviewSpec(review: unknown, approvedAt: string) {
+  return sql`jsonb_set(${reviewSpec(review)}, '{_cover_letter,approved_at}', ${JSON.stringify(approvedAt)}::jsonb, true)`;
+}
 
 async function ownedResume(request: FastifyRequest, reply: FastifyReply) {
   const parsed = paramsSchema.safeParse(request.params);
@@ -172,6 +181,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         ...rendered.spec,
         _contact: contact,
         _review: updatedReview,
+        ...(stored._cover_letter ? { _cover_letter: stored._cover_letter } : {}),
         _quality: {
           ...(stored._quality as Record<string, unknown> | undefined),
           atsCoverage: validation.ats_keyword_coverage_pct,
@@ -209,7 +219,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         status: parsed.data.questions.length > 0 ? 'questions_ready' : 'ready_to_submit',
         updated_at: new Date().toISOString(),
       };
-      await db.update(generated_resumes).set({ spec: { ...stored, _review: next } }).where(eq(generated_resumes.id, row.id));
+      await db.update(generated_resumes).set({ spec: reviewSpec(next) }).where(eq(generated_resumes.id, row.id));
       return reply.send({ application_id: row.id, review: next });
     },
   );
@@ -238,10 +248,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         ...current,
         questions: parsed.data.questions as ApplicationReviewQuestion[],
         status: 'submit_requested' as const,
-        submission_authorized_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
-      await db.update(generated_resumes).set({ spec: { ...stored, _review: next } }).where(eq(generated_resumes.id, row.id));
+      const claimed = await db.update(generated_resumes).set({ spec: reviewSpec(next) }).where(and(
+        eq(generated_resumes.id, row.id),
+        sql`${generated_resumes.spec}->'_review'->>'status' in ('resume_ready', 'questions_ready', 'ready_to_submit', 'failed')`,
+      )).returning();
+      if (!claimed[0]) return reply.status(409).send({ error: 'This application is already being prepared or submitted' });
       const processed = await processSubmissionApplication(row.id, fastify);
       return reply.status(202).send({ application_id: row.id, review: processed ?? next });
     },
@@ -263,7 +276,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           handoff_url = undefined;
         }
       }
-      return reply.send({ application_id: row.id, review, handoff_url, configured: isBrowserbaseConfigured() });
+      return reply.send({
+        application_id: row.id,
+        review,
+        cover_letter: storedCoverLetter(row),
+        handoff_url,
+        configured: isBrowserbaseConfigured(),
+      });
     },
   );
 
@@ -283,13 +302,16 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       }
       const next = {
         ...current,
-        status: current.submission_authorized_at ? 'submitting' as const : 'ready_for_final_approval' as const,
+        status: 'ready_for_final_approval' as const,
         attention_reason: undefined,
         updated_at: new Date().toISOString(),
       };
-      await db.update(generated_resumes).set({ spec: { ...stored, _review: next } }).where(eq(generated_resumes.id, row.id));
-      const processed = next.status === 'submitting' ? await processSubmissionApplication(row.id, fastify) : null;
-      return reply.send({ application_id: row.id, review: processed ?? next });
+      const updated = await db.update(generated_resumes).set({ spec: reviewSpec(next) }).where(and(
+        eq(generated_resumes.id, row.id),
+        sql`${generated_resumes.spec}->'_review'->>'status' = 'needs_attention'`,
+      )).returning();
+      if (!updated[0]) return reply.status(409).send({ error: 'This application is no longer waiting for portal attention' });
+      return reply.send({ application_id: row.id, review: next });
     },
   );
 
@@ -308,8 +330,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         return reply.status(409).send({ error: 'The secure portal session expired. Start the submission again.' });
       }
       const now = new Date().toISOString();
-      const next = { ...current, status: 'submitting' as const, final_approved_at: now, submission_authorized_at: current.submission_authorized_at ?? now, updated_at: now };
-      await db.update(generated_resumes).set({ spec: { ...stored, _review: next } }).where(eq(generated_resumes.id, row.id));
+      const next = { ...current, status: 'submitting' as const, final_approved_at: now, submission_authorized_at: now, updated_at: now };
+      const updated = await db.update(generated_resumes).set({ spec: approvedReviewSpec(next, now) }).where(and(
+        eq(generated_resumes.id, row.id),
+        sql`${generated_resumes.spec}->'_review'->>'status' = 'ready_for_final_approval'`,
+      )).returning();
+      if (!updated[0]) return reply.status(409).send({ error: 'This application was already approved or changed' });
       const processed = await processSubmissionApplication(row.id, fastify);
       return reply.status(202).send({ application_id: row.id, review: processed ?? next });
     },
@@ -333,7 +359,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         updated_at: now,
         submission_error: parsed.data.error ?? 'The company portal rejected the submission.',
       };
-      await db.update(generated_resumes).set({ spec: { ...stored, _review: next } }).where(eq(generated_resumes.id, row.id));
+      await db.update(generated_resumes).set({ spec: reviewSpec(next) }).where(eq(generated_resumes.id, row.id));
       return reply.send({ application_id: row.id, review: next });
     },
   );

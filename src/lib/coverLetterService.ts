@@ -1,4 +1,4 @@
-import { put } from '@vercel/blob';
+import { del, put } from '@vercel/blob';
 import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db/index';
 import { generated_resumes, profiles } from '../db/schema';
@@ -6,6 +6,7 @@ import { readExperienceBank } from '../db/experienceBank';
 import { readApplicationReview } from './applicationReview';
 import { renderCoverLetterPdf } from './coverLetterPdf';
 import { generateCoverLetter, validateCoverLetter } from '../llm/coverLetter';
+import { resolveBlobUrl } from './resumeAccess';
 
 export type ApplicationRow = typeof generated_resumes.$inferSelect;
 type StoredSpec = Record<string, unknown>;
@@ -15,6 +16,7 @@ export type CoverLetterArtifact = {
   word_count: number;
   warnings: string[];
   generated_at: string;
+  approved_at?: string;
   object_key: string;
   file_name: string;
 };
@@ -53,6 +55,7 @@ async function persistCoverLetter(
   body: string,
   warnings: string[],
   wordCount: number,
+  approved: boolean,
 ) {
   const stored = row.spec as StoredSpec;
   const review = readApplicationReview(stored);
@@ -64,17 +67,35 @@ async function persistCoverLetter(
     access: 'public',
     contentType: 'application/pdf',
   });
+  const generatedAt = new Date().toISOString();
   const artifact: CoverLetterArtifact = {
     body,
     word_count: wordCount,
     warnings,
-    generated_at: new Date().toISOString(),
+    generated_at: generatedAt,
+    approved_at: approved ? generatedAt : undefined,
     object_key: blob.pathname,
     file_name: `${contact.full_name.replace(/\s+/g, '_')}_${job.company.replace(/\s+/g, '_')}_Cover_Letter.pdf`,
   };
-  await db.update(generated_resumes).set({
-    spec: sql`jsonb_set(${generated_resumes.spec}, '{_cover_letter}', ${JSON.stringify(artifact)}::jsonb, true)`,
-  }).where(and(eq(generated_resumes.id, row.id), eq(generated_resumes.user_id, row.user_id)));
+  const previous = storedCoverLetter(row);
+  let updated: Array<{ id: string }>;
+  try {
+    updated = await db.update(generated_resumes).set({
+      spec: sql`jsonb_set(${generated_resumes.spec}, '{_cover_letter}', ${JSON.stringify(artifact)}::jsonb, true)`,
+    }).where(and(eq(generated_resumes.id, row.id), eq(generated_resumes.user_id, row.user_id)))
+      .returning({ id: generated_resumes.id });
+  } catch (error) {
+    await del(blob.url).catch(() => undefined);
+    throw error;
+  }
+  if (!updated[0]) {
+    await del(blob.url).catch(() => undefined);
+    throw new Error('Application changed before the cover letter could be saved');
+  }
+  if (previous?.object_key && previous.object_key !== artifact.object_key) {
+    const previousUrl = await resolveBlobUrl(previous.object_key).catch(() => null);
+    if (previousUrl) await del(previousUrl).catch(() => undefined);
+  }
   return { cover_letter: artifact, blob_url: blob.url };
 }
 
@@ -101,7 +122,7 @@ export async function generateStoredCoverLetter(row: ApplicationRow, force = fal
     error.issues = validation.issues;
     throw error;
   }
-  return persistCoverLetter(row, validation.body, validation.warnings, validation.word_count);
+  return persistCoverLetter(row, validation.body, validation.warnings, validation.word_count, false);
 }
 
 export async function saveStoredCoverLetter(row: ApplicationRow, body: string) {
@@ -117,5 +138,16 @@ export async function saveStoredCoverLetter(row: ApplicationRow, body: string) {
     error.issues = validation.issues;
     throw error;
   }
-  return persistCoverLetter(row, validation.body, validation.warnings, validation.word_count);
+  return persistCoverLetter(row, validation.body, validation.warnings, validation.word_count, true);
+}
+
+export async function deleteStoredCoverLetter(row: ApplicationRow) {
+  const existing = storedCoverLetter(row);
+  await db.update(generated_resumes).set({
+    spec: sql`${generated_resumes.spec} - '_cover_letter'`,
+  }).where(and(eq(generated_resumes.id, row.id), eq(generated_resumes.user_id, row.user_id)));
+  if (existing?.object_key) {
+    const url = await resolveBlobUrl(existing.object_key).catch(() => null);
+    if (url) await del(url).catch(() => undefined);
+  }
 }

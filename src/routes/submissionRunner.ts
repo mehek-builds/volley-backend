@@ -61,7 +61,7 @@ function nextReview(current: ApplicationReviewState, patch: Partial<ApplicationR
 
 async function writeReview(row: ResumeRow, review: ApplicationReviewState) {
   await db.update(generated_resumes).set({
-    spec: sql`jsonb_set(${generated_resumes.spec}, '{_review}', ${JSON.stringify(review)}::jsonb, true)`,
+    spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(review)}::jsonb, true)`,
   }).where(eq(generated_resumes.id, row.id));
 }
 
@@ -84,7 +84,7 @@ async function buildPacket(row: ResumeRow): Promise<SubmissionPacket> {
   if (!response.ok) throw new Error('Generated resume file could not be downloaded');
   const resume = Buffer.from(await response.arrayBuffer());
   let coverLetter: Buffer | undefined;
-  if (typeof coverLetterMeta.object_key === 'string') {
+  if (typeof coverLetterMeta.object_key === 'string' && typeof coverLetterMeta.approved_at === 'string') {
     const coverLetterUrl = await resolveBlobUrl(coverLetterMeta.object_key);
     if (!coverLetterUrl) throw new Error('Generated cover letter file is unavailable');
     const coverLetterResponse = await fetch(coverLetterUrl);
@@ -294,7 +294,7 @@ async function prepareManaged(
   const review = nextReview(current, {
     status: blockers.length > 0 || discoveryAttention.length > 0
       ? 'needs_attention'
-      : current.submission_authorized_at ? 'submitting' : 'ready_for_final_approval',
+      : 'ready_for_final_approval',
     submission_run_id: runId,
     filled_fields: result.filledFields ?? [],
     preview_screenshot_url: preview.url,
@@ -354,7 +354,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
     const review = nextReview(current, {
       status: result.blockers.length > 0 || discoveryAttention.length > 0
         ? 'needs_attention'
-        : current.submission_authorized_at ? 'submitting' : 'ready_for_final_approval',
+        : 'ready_for_final_approval',
       submission_run_id: runId,
       browser_context_id: contextId,
       browser_session_id: session.id,
@@ -414,6 +414,10 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
     const connected = await connectToSession(session);
     browser = connected.browser;
     const page = connected.page;
+    const portal = detectPortal(current.portal_url);
+    const builtPacket = await buildPacket(row);
+    const packet = current.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
+    await fillPortal(page, portal, packet);
     await clickFinalSubmit(page);
     const receipt = await readReceipt(page);
     const capturedAt = new Date().toISOString();
@@ -442,12 +446,13 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
 }
 
 async function fail(row: ResumeRow, error: unknown) {
-  const current = readApplicationReview(row.spec);
+  const latestRows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, row.id)).limit(1);
+  const current = latestRows[0] ? readApplicationReview(latestRows[0].spec) : null;
   if (!current) return;
   const message = error instanceof Error ? error.message : 'Submission runner failed';
   const externalGate = /browserbase|stratus managed browser is not configured|secure browser provider is not configured/i.test(message);
-  await writeReview(row, nextReview(current, {
-    status: externalGate ? 'submit_requested' : 'failed',
+  await writeReview(latestRows[0], nextReview(current, {
+    status: externalGate && current.status !== 'submission_claimed' ? 'submit_requested' : 'failed',
     submission_error: message,
   }));
 }
@@ -460,13 +465,32 @@ export async function processSubmissionApplication(applicationId: string, fastif
     let workingRow = row;
     let review = readApplicationReview(workingRow.spec);
     if (review?.status === 'submit_requested') {
-      await prepare(workingRow, fastify);
+      const claimedReview = nextReview(review, { status: 'preparing' });
+      const claimed = await db.update(generated_resumes).set({
+        spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(claimedReview)}::jsonb, true)`,
+      }).where(and(
+        eq(generated_resumes.id, applicationId),
+        sql`${generated_resumes.spec}->'_review'->>'status' = 'submit_requested'`,
+      )).returning();
+      if (claimed[0]) await prepare(claimed[0], fastify);
       const preparedRows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, applicationId)).limit(1);
       if (!preparedRows[0]) return null;
       workingRow = preparedRows[0];
       review = readApplicationReview(workingRow.spec);
     }
-    if (review?.status === 'submitting') await submit(workingRow, fastify);
+    if (review?.status === 'submitting') {
+      const claimedReview = nextReview(review, {
+        status: 'submission_claimed',
+        submission_claimed_at: new Date().toISOString(),
+      });
+      const claimed = await db.update(generated_resumes).set({
+        spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(claimedReview)}::jsonb, true)`,
+      }).where(and(
+        eq(generated_resumes.id, applicationId),
+        sql`${generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
+      )).returning();
+      if (claimed[0]) await submit(claimed[0], fastify);
+    }
   } catch (error) {
     fastify.log.error({ error, applicationId: row.id }, 'Application runner step failed');
     await fail(row, error);

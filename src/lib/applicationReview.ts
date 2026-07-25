@@ -24,6 +24,7 @@ export type ApplicationReviewState = {
     | 'needs_attention'
     | 'ready_for_final_approval'
     | 'submitting'
+    | 'submission_claimed'
     | 'submitted'
     | 'failed';
   edited_terms: string[];
@@ -40,6 +41,7 @@ export type ApplicationReviewState = {
   final_approved_at?: string;
   submission_authorized_at?: string;
   cover_letter_supported?: boolean;
+  submission_claimed_at?: string;
   filled_fields?: string[];
   preview_screenshot_url?: string;
   receipt?: {

@@ -143,6 +143,8 @@ test('managed portals upload a tailored cover letter without replacing the resum
     assert.equal(uploads[0]?.file?.name, 'resume.pdf');
     assert.equal(uploads[1]?.file?.name, 'cover-letter.pdf');
     assert.notEqual(uploads[0]?.selector, uploads[1]?.selector);
+    if (portal === 'greenhouse') assert.doesNotMatch(uploads[1]?.selector ?? '', /(^|,\s*)#cover_letter/);
+    if (portal === 'ashby') assert.doesNotMatch(uploads[0]?.selector ?? '', /cover/i);
   }
 });
 

@@ -41,3 +41,15 @@ test('builds first-party ATS endpoints from board tokens', () => {
   assert.match(sourceEndpoint({ ats_name: 'lever', board_token: 'acme' }), /api\.lever\.co/);
   assert.match(sourceEndpoint({ ats_name: 'ashby', board_token: 'acme' }), /api\.ashbyhq\.com/);
 });
+
+test('rejects malformed successful payloads instead of interpreting them as an empty board', () => {
+  assert.throws(() => normalizeGreenhouseJobs({ error: 'rate limited' }), /invalid jobs payload/);
+  assert.throws(() => normalizeLeverJobs({ postings: [] }), /invalid jobs payload/);
+  assert.throws(() => normalizeAshbyJobs({ results: [] }), /invalid jobs payload/);
+});
+
+test('accepts explicit empty job collections', () => {
+  assert.deepEqual(normalizeGreenhouseJobs({ jobs: [] }), []);
+  assert.deepEqual(normalizeLeverJobs([]), []);
+  assert.deepEqual(normalizeAshbyJobs({ jobs: [] }), []);
+});

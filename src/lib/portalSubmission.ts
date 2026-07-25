@@ -154,11 +154,11 @@ const SMARTRECRUITERS_EMAIL_SELECTOR = 'spl-input#email-input input';
 const SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR = 'spl-input#confirm-email-input input';
 const SMARTRECRUITERS_LINKEDIN_SELECTOR = 'spl-input#linkedin-input input';
 const SMARTRECRUITERS_WEBSITE_SELECTOR = 'spl-input#website-input input';
-const ASHBY_RESUME_SELECTOR = '#_systemfield_resume, input[type="file"][name="_systemfield_resume"], input[type="file"][name*="resume" i]';
-const ASHBY_COVER_LETTER_SELECTOR = '#cover_letter, input[type="file"][id*="cover" i], input[type="file"][name*="cover" i], input[type="file"][aria-label*="cover" i]';
+const ASHBY_RESUME_SELECTOR = 'input#_systemfield_resume[type="file"], input[type="file"][name="_systemfield_resume"], input[type="file"][name*="resume" i]';
+const ASHBY_COVER_LETTER_SELECTOR = 'input#cover_letter[type="file"], input[type="file"][id*="cover" i], input[type="file"][name*="cover" i], input[type="file"][aria-label*="cover" i]';
 
 const COVER_LETTER_UPLOAD_SELECTORS: Record<SupportedPortal, string> = {
-  greenhouse: '#cover_letter, input[type="file"][name*="cover_letter" i], input[type="file"][id*="cover_letter" i], label:has-text("Cover Letter") input[type="file"]',
+  greenhouse: 'input#cover_letter[type="file"], input[type="file"][name*="cover_letter" i], input[type="file"][id*="cover_letter" i], label:has-text("Cover Letter") input[type="file"]',
   lever: 'input[type="file"][name*="cover" i], input[type="file"][id*="cover" i], label:has-text("Cover Letter") input[type="file"]',
   ashby: ASHBY_COVER_LETTER_SELECTOR,
   smartrecruiters: 'spl-dropzone[data-test*="cover" i] input[type="file"], input[type="file"][name*="cover" i], label:has-text("Cover Letter") input[type="file"]',
@@ -205,7 +205,7 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedFill(actions, '#phone, input[name="job_application[phone]"]', packet.phone, 'phone');
     managedFill(actions, '#candidate-location, input[autocomplete="address-level2"]', packet.city, 'location');
     managedUpload(actions, '#resume, input[type="file"][name="job_application[resume]"]', 'resume', packet.resume, packet.resumeName);
-    managedUpload(actions, '#cover_letter, input[type="file"][name*="cover_letter" i]', 'cover_letter', packet.coverLetter, packet.coverLetterName);
+    managedUpload(actions, 'input#cover_letter[type="file"], input[type="file"][name*="cover_letter" i]', 'cover_letter', packet.coverLetter, packet.coverLetterName);
   } else if (portal === 'lever') {
     managedFill(actions, 'input[name="name"]', packet.fullName, 'name', false);
     managedFill(actions, 'input[name="email"]', packet.email, 'email', false);
@@ -394,9 +394,15 @@ async function uploadFirst(
   for (const selector of selectors) {
     const field = page.locator(selector).first();
     if ((await field.count()) > 0) {
-      await field.setInputFiles({ name: fileName, mimeType: 'application/pdf', buffer: file });
-      out.push(label);
-      return;
+      const type = await field.getAttribute('type').catch(() => null);
+      if (type?.toLowerCase() !== 'file') continue;
+      try {
+        await field.setInputFiles({ name: fileName, mimeType: 'application/pdf', buffer: file });
+        out.push(label);
+        return;
+      } catch {
+        continue;
+      }
     }
   }
 }
@@ -431,7 +437,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['#phone', 'input[name="job_application[phone]"]'], packet.phone, 'phone', filledFields);
     await fillFirst(page, ['#candidate-location', 'input[autocomplete="address-level2"]'], packet.city, 'location', filledFields);
     await uploadFirst(page, ['#resume', 'input[type="file"][name="job_application[resume]"]'], packet.resume, packet.resumeName, 'resume', filledFields);
-    await uploadFirst(page, ['#cover_letter', 'input[type="file"][name*="cover_letter" i]'], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await uploadFirst(page, ['input#cover_letter[type="file"]', 'input[type="file"][name*="cover_letter" i]'], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
   } else if (portal === 'lever') {
     await fillFirst(page, ['input[name="name"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="email"]'], packet.email, 'email', filledFields);

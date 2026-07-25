@@ -14,13 +14,14 @@ const sourceSchema = z.object({
   enabled: z.boolean().optional().default(true),
 });
 
-const sourcesBodySchema = z.object({ sources: z.array(sourceSchema).min(1).max(500) });
+const sourcesBodySchema = z.object({ sources: z.array(sourceSchema).min(1).max(100) });
 const listQuerySchema = z.object({
   q: z.string().trim().max(200).optional(),
   location: z.string().trim().max(200).optional(),
   company: z.string().trim().max(200).optional(),
   remote: z.enum(['true', 'false']).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
+  offset: z.coerce.number().int().min(0).max(100_000).default(0),
 });
 const jobParamsSchema = z.object({ id: z.string().uuid() });
 
@@ -41,21 +42,24 @@ function configuredSources(): JobSourceInput[] {
   } catch {
     throw new Error('JOB_MONITOR_SOURCES_JSON must be valid JSON');
   }
-  const result = z.array(sourceSchema).max(500).safeParse(parsed);
+  const result = z.array(sourceSchema).max(100).safeParse(parsed);
   if (!result.success) throw new Error('JOB_MONITOR_SOURCES_JSON contains an invalid source');
   return result.data;
 }
 
 async function upsertSources(sources: JobSourceInput[]) {
   for (const source of sources) {
-    await db.insert(career_page_sources).values(source).onConflictDoUpdate({
+    const rows = await db.insert(career_page_sources).values(source).onConflictDoUpdate({
       target: [career_page_sources.ats_name, career_page_sources.board_token],
       set: {
         company_name: source.company_name,
         career_url: source.career_url,
         enabled: source.enabled ?? true,
       },
-    });
+    }).returning({ id: career_page_sources.id });
+    if (source.enabled === false && rows[0]) {
+      await db.update(monitored_jobs).set({ is_active: false }).where(eq(monitored_jobs.source_id, rows[0].id));
+    }
   }
 }
 
@@ -108,8 +112,8 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
   fastify.get('/jobs', async (request: FastifyRequest, reply: FastifyReply) => {
     const parsed = listQuerySchema.safeParse(request.query);
     if (!parsed.success) return reply.status(400).send({ error: 'Invalid job filters' });
-    const { q, location, company, remote, limit } = parsed.data;
-    const conditions = [eq(monitored_jobs.is_active, true)];
+    const { q, location, company, remote, limit, offset } = parsed.data;
+    const conditions = [eq(monitored_jobs.is_active, true), eq(career_page_sources.enabled, true)];
     if (q) conditions.push(or(ilike(monitored_jobs.title, `%${q}%`), ilike(monitored_jobs.description, `%${q}%`))!);
     if (location) conditions.push(ilike(monitored_jobs.location, `%${location}%`));
     if (company) conditions.push(ilike(monitored_jobs.company_name, `%${company}%`));
@@ -133,9 +137,10 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       .from(monitored_jobs)
       .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
       .where(and(...conditions))
-      .orderBy(desc(monitored_jobs.posted_at), desc(monitored_jobs.first_seen_at))
-      .limit(limit);
-    return reply.send({ jobs: rows });
+      .orderBy(desc(monitored_jobs.posted_at), desc(monitored_jobs.first_seen_at), desc(monitored_jobs.id))
+      .limit(limit + 1)
+      .offset(offset);
+    return reply.send({ jobs: rows.slice(0, limit), limit, offset, has_more: rows.length > limit });
   });
 
   fastify.get('/jobs/:id', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -160,7 +165,11 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       })
       .from(monitored_jobs)
       .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
-      .where(eq(monitored_jobs.id, parsed.data.id))
+      .where(and(
+        eq(monitored_jobs.id, parsed.data.id),
+        eq(monitored_jobs.is_active, true),
+        eq(career_page_sources.enabled, true),
+      ))
       .limit(1);
     if (!rows[0]) return reply.status(404).send({ error: 'Job not found' });
     return reply.send({ job: rows[0] });
@@ -178,7 +187,10 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     if (!requireOperator(request, reply)) return;
     const envSources = configuredSources();
     if (envSources.length > 0) await upsertSources(envSources);
-    const sources = await db.select().from(career_page_sources).where(eq(career_page_sources.enabled, true));
+    const sources = await db.select().from(career_page_sources)
+      .where(eq(career_page_sources.enabled, true))
+      .orderBy(sql`${career_page_sources.last_polled_at} asc nulls first`)
+      .limit(20);
     const results = [];
     for (let index = 0; index < sources.length; index += 4) {
       results.push(...await Promise.all(sources.slice(index, index + 4).map(pollSource)));
