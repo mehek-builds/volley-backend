@@ -468,6 +468,8 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
       permissionGranted: verificationSettings?.enabled === true,
     });
     if (postFillVerification.status !== 'not_needed') verification = postFillVerification;
+    // Re-scan only after a successful verification so an empty OTP field reported during the
+    // first pass cannot remain as a stale blocker. This does not click the final submit control.
     if (postFillVerification.status === 'completed') result = await fillPortal(page, portal, packet);
     const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
     const preview = await put(`users/${row.user_id}/submission-runs/${runId}/filled.png`, screenshot, {

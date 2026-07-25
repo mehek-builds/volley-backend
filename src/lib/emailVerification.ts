@@ -1,4 +1,4 @@
-import { Composio } from '@composio/core';
+import { composioRequest } from './composioApi';
 
 const CODE_CONTEXT = /\b(?:verification|security|authentication|confirmation|one[ -]?time|passcode|otp)\b/i;
 const CODE_PATTERN = /(?<!\d)(\d{4,8})(?!\d)/g;
@@ -215,15 +215,16 @@ export function isAutomaticEmailVerificationConfigured(): boolean {
 }
 
 function defaultExecutor(): EmailToolExecutor {
-  const apiKey = process.env.COMPOSIO_API_KEY?.trim();
-  if (!apiKey) throw new Error('Composio is not configured');
-  const composio = new Composio({ apiKey });
-  return async (tool, input) => composio.tools.execute(tool, {
-    userId: input.userId,
-    version: input.version,
-    arguments: input.arguments,
-    allowTracing: false,
-  }, { signal: AbortSignal.timeout(10_000) });
+  return async (tool, input) => composioRequest(`/api/v3.1/tools/execute/${encodeURIComponent(tool)}`, {
+    method: 'POST',
+    body: {
+      user_id: input.userId,
+      version: input.version,
+      arguments: input.arguments,
+      allow_tracing: false,
+    },
+    signal: AbortSignal.timeout(10_000),
+  });
 }
 
 export async function findComposioVerificationCode(options: {
