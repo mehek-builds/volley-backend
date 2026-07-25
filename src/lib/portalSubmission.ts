@@ -125,11 +125,12 @@ export function canFillReviewedQuestions(_provider: 'managed' | 'direct'): boole
 // per-employer selector. Verify against a live Ashby form's rendered HTML if a real run still shows
 // the URL fields empty; these were written from the naming pattern, not yet confirmed on the wire.
 const ASHBY_LINKEDIN_SELECTOR =
-  'input[name="_systemfield_linkedin" i], input[name*="linkedin" i], input[aria-label*="linkedin" i], input[placeholder*="linkedin" i]';
+  'input[name="_systemfield_linkedin" i], input[name*="linkedin" i], input[aria-label*="linkedin" i], input[placeholder*="linkedin" i], label:has-text("LinkedIn Profile") + div input';
 const ASHBY_GITHUB_SELECTOR =
-  'input[name="_systemfield_github" i], input[name*="github" i], input[aria-label*="github" i], input[placeholder*="github" i]';
+  'input[name="_systemfield_github" i], input[name*="github" i], input[aria-label*="github" i], input[placeholder*="github" i], label:has-text("GitHub") + div input';
 const ASHBY_PORTFOLIO_SELECTOR =
-  'input[name*="portfolio" i], input[aria-label*="portfolio" i], input[placeholder*="portfolio" i]';
+  'input[name*="portfolio" i], input[aria-label*="portfolio" i], input[placeholder*="portfolio" i], label:has-text("Portfolio") + div input, label:has-text("Website") + div input';
+const ASHBY_PHONE_SELECTOR = '#phone, input[name="phone"], input[name="_systemfield_phone"]';
 
 // SmartRecruiters renders its "Easy Apply" form as web components (spl-input, spl-phone-field,
 // spl-dropzone, ...) behind OPEN shadow roots (confirmed live, 2026-07-24, on a real Western
@@ -238,7 +239,7 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
   } else {
     managedFill(actions, 'input[name="_systemfield_name"]', packet.fullName, 'name', false);
     managedFill(actions, 'input[name="_systemfield_email"]', packet.email, 'email', false);
-    managedFill(actions, 'input[name="_systemfield_phone"]', packet.phone, 'phone');
+    managedFill(actions, ASHBY_PHONE_SELECTOR, packet.phone, 'phone');
     managedFill(actions, 'input[name="_systemfield_location"]', packet.city, 'location');
     // LinkedIn/GitHub/portfolio, previously missing entirely from this branch: the packet carries
     // them (confirmed live on a real account via GET /profile/application) and the Lever branch
@@ -453,7 +454,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
   } else {
     await fillFirst(page, ['input[name="_systemfield_name"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="_systemfield_email"]'], packet.email, 'email', filledFields);
-    await fillFirst(page, ['input[name="_systemfield_phone"]'], packet.phone, 'phone', filledFields);
+    await fillFirst(page, ASHBY_PHONE_SELECTOR.split(', '), packet.phone, 'phone', filledFields);
     await fillFirst(page, ['input[name="_systemfield_location"]'], packet.city, 'location', filledFields);
     // See ASHBY_*_SELECTOR: these were missing from the direct path too, so a real Ashby run
     // reported LinkedIn as an empty required field even though the packet had it.

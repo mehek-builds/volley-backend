@@ -163,6 +163,23 @@ test('Ashby targets its real resume and optional cover-letter input ids', () => 
   assert.match(coverLetterUploadSelector('ashby'), /#cover_letter/);
 });
 
+test('Ashby targets live phone and label-bound profile fields', () => {
+  const actions = buildManagedPortalActions('ashby', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    phone: '5550100000',
+    linkedinUrl: 'https://linkedin.com/in/taylor-example',
+    portfolioUrl: 'https://example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  const fills = actions.filter((action) => action.type === 'fill');
+  assert.match(fills.find((action) => action.label === 'phone')?.selector ?? '', /#phone/);
+  assert.match(fills.find((action) => action.label === 'linkedin')?.selector ?? '', /LinkedIn Profile/);
+  assert.match(fills.find((action) => action.label === 'portfolio')?.selector ?? '', /Website/);
+});
+
 test('managed receipt requires confirmation language and captures the reference', () => {
   assert.deepEqual(readManagedReceipt({
     title: 'Complete',
