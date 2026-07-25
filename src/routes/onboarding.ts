@@ -1,5 +1,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { eq, sql } from 'drizzle-orm';
+import { z } from 'zod';
 import { db } from '../db/index';
 import {
   users,
@@ -12,6 +13,7 @@ import {
 import { requireAuth } from '../middleware/auth';
 import { decryptField } from '../lib/fieldCrypto';
 import { ENCRYPTED_FIELDS } from './applicationProfile';
+import { AUTOMATIC_SUBMISSION_CONSENT_VERSION, automationConsentValues } from '../lib/automationConsent';
 
 // GET /onboarding/state - the one call /start needs to decide what to render.
 //
@@ -39,6 +41,16 @@ type Step = 'focus' | 'resume' | 'install' | 'apply' | 'gaps' | 'targeting' | 'd
 // authority (R-015, see schema.ts). ZURU asked about Spanish and Enpal about German with nothing
 // on file (2026-07-17); only the student can close that gap, so onboarding asks once.
 const GAP_FIELDS = ['gpa', 'gpa_scale', 'major', 'languages', 'desired_salary', 'desired_salary_currency'] as const;
+const completeBodySchema = z.object({
+  automatic_submission_enabled: z.boolean().default(false),
+  automatic_verification_enabled: z.boolean().default(false),
+});
+const automationBodySchema = z.object({
+  automatic_submission_enabled: z.boolean().optional(),
+  automatic_verification_enabled: z.boolean().optional(),
+}).refine((value) => value.automatic_submission_enabled !== undefined || value.automatic_verification_enabled !== undefined, {
+  message: 'At least one automation permission is required',
+});
 
 // Fields worth having before the student's SECOND application. Not a completeness bar: a student
 // with no portfolio has no gap. Used only to report `learned` for the receipt on screen 05.
@@ -176,21 +188,57 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       // True while the extension is allowed to read values back out of a form. Surfaced so the
       // student can always see whether it is on, rather than having to trust that it stopped.
       harvest_active: !user.onboarding_completed_at,
+      automatic_submission_enabled: user.automatic_submission_enabled,
+      automatic_submission_consented_at: user.automatic_submission_consented_at,
+      automatic_submission_consent_version: user.automatic_submission_consent_version,
+      automatic_verification_enabled: user.automatic_verification_enabled,
     });
   });
 
   // Explicit act, not an inference: this is what turns harvest off, so the student takes it.
   fastify.post('/onboarding/complete', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
+    const parsed = completeBodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) return reply.status(400).send({ error: 'Invalid automation permissions' });
     try {
+      const now = new Date();
       await db
         .update(users)
-        .set({ onboarding_completed_at: new Date() })
+        .set({
+          onboarding_completed_at: now,
+          ...automationConsentValues(parsed.data, now),
+        })
         .where(eq(users.id, userId));
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to complete onboarding' });
     }
-    return reply.status(200).send({ ok: true, harvest_active: false });
+    return reply.status(200).send({ ok: true, harvest_active: false, ...parsed.data });
+  });
+
+  fastify.put('/onboarding/automation', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const parsed = automationBodySchema.safeParse(request.body);
+    if (!parsed.success) return reply.status(400).send({ error: 'Invalid automation permissions' });
+    const userId = request.jwtPayload!.userId;
+    const now = new Date();
+    const patch: Partial<typeof users.$inferInsert> = {};
+    if (parsed.data.automatic_submission_enabled !== undefined) {
+      patch.automatic_submission_enabled = parsed.data.automatic_submission_enabled;
+      patch.automatic_submission_consented_at = parsed.data.automatic_submission_enabled ? now : null;
+      patch.automatic_submission_consent_version = parsed.data.automatic_submission_enabled
+        ? AUTOMATIC_SUBMISSION_CONSENT_VERSION
+        : null;
+    }
+    if (parsed.data.automatic_verification_enabled !== undefined) {
+      patch.automatic_verification_enabled = parsed.data.automatic_verification_enabled;
+      patch.automatic_verification_consented_at = parsed.data.automatic_verification_enabled ? now : null;
+    }
+    const [updated] = await db.update(users).set(patch).where(eq(users.id, userId)).returning({
+      automatic_submission_enabled: users.automatic_submission_enabled,
+      automatic_submission_consent_version: users.automatic_submission_consent_version,
+      automatic_verification_enabled: users.automatic_verification_enabled,
+    });
+    if (!updated) return reply.status(404).send({ error: 'No such user' });
+    return reply.send(updated);
   });
 }

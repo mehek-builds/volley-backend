@@ -47,7 +47,7 @@ export async function applicationAnswerRoutes(fastify: FastifyInstance) {
         grad_year: parsedProfile?.grad_year,
       }, declaredSkills);
       if (!answer) return reply.status(502).send({ error: 'Empty draft returned' });
-      return reply.status(200).send({ answer, warnings });
+      return reply.status(200).send({ answer, warnings, grounded: warnings.length === 0 });
     } catch (err) {
       fastify.log.error(err);
       // Same classification as /resume/generate (R-012): the essay drafter dies on the exact
