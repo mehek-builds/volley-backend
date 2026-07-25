@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
+    "@composio/core": "^0.14.0",
     "@expo-google-fonts/tinos": "0.4.2",
     "@fastify/cors": "^11.3.0",
     "@fastify/multipart": "^10.1.0",
@@ -50,6 +51,7 @@
     "db:migrate": "tsx src/db/migrate.ts",
     "db:push": "drizzle-kit push:pg",
     "db:indexes": "node scripts/apply-performance-indexes.mjs",
+    "schema:apply-automation-consent": "node scripts/apply-automation-consent-schema.mjs",
     "schema:check": "node scripts/check-schema-drift.mjs"
   }
 }
