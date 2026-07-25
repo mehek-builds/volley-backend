@@ -1,11 +1,11 @@
 # Graph Report - .  (2026-07-26)
 
 ## Corpus Check
-- 110 files · ~95,624 words
+- 110 files · ~96,439 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 474 nodes · 868 edges · 21 communities detected
+- 477 nodes · 876 edges · 20 communities detected
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS
 - Token cost: 0 input · 0 output
 
@@ -43,16 +43,16 @@ Cohesion: 0.15
 Nodes (33): contactLine(), createResumeDocument(), drawEducation(), drawEntrySection(), drawSectionHeader(), drawSplitLine(), educationHeight(), educationPosition() (+25 more)
 
 ### Community 4 - "Community 4"
+Cohesion: 0.12
+Nodes (20): clampExpansion(), interpolate(), resumeDesignAtExpansion(), acronymTokenOf(), bankEntryCorpus(), breaksTie(), bulletClaimIsGrounded(), contentWords() (+12 more)
+
+### Community 5 - "Community 5"
 Cohesion: 0.08
 Nodes (7): decryptRow(), sendProfile(), assertEncryptionKeyConfigured(), decryptField(), encryptField(), FieldDecryptError, getKey()
 
-### Community 5 - "Community 5"
+### Community 6 - "Community 6"
 Cohesion: 0.12
 Nodes (18): completeEmailVerificationIfPresent(), safeContinueButton(), visibleOtpField(), waitForCode(), asRecord(), bodyText(), decodeBase64Url(), defaultExecutor() (+10 more)
-
-### Community 6 - "Community 6"
-Cohesion: 0.15
-Nodes (20): clampExpansion(), interpolate(), resumeDesignAtExpansion(), acronymTokenOf(), bankEntryCorpus(), breaksTie(), bulletClaimIsGrounded(), contentWords() (+12 more)
 
 ### Community 7 - "Community 7"
 Cohesion: 0.13
@@ -63,57 +63,53 @@ Cohesion: 0.14
 Nodes (15): buildManagedDiscoveryActions(), buildManagedPortalActions(), canFillReviewedQuestions(), fillFirst(), fillPortal(), fillReviewedQuestions(), managedFill(), managedUpload() (+7 more)
 
 ### Community 9 - "Community 9"
+Cohesion: 0.16
+Nodes (14): describeRequiredBlocker(), describeUnlabelledBlockers(), humanFieldLabel(), isOpaqueIdentifier(), sanitizeProviderBlockers(), tidyLabel(), classifyField(), isFixedPortalProfileField() (+6 more)
+
+### Community 10 - "Community 10"
 Cohesion: 0.23
 Nodes (16): authorizationValidAtClick(), buildPacket(), claimPreparation(), claimSubmission(), discoverAndResolveQuestions(), fail(), holdRevokedSubmission(), loadApplicationProfileLike() (+8 more)
 
-### Community 10 - "Community 10"
+### Community 11 - "Community 11"
 Cohesion: 0.13
 Nodes (7): deleteBlobsForUser(), getKey(), listAll(), mintDownloadToken(), readDownloadToken(), resumePrefix(), sweepExpiredResumeBlobs()
 
-### Community 11 - "Community 11"
+### Community 12 - "Community 12"
 Cohesion: 0.23
 Nodes (17): collectCurrencies(), currencyPrefixAt(), dedupeRanges(), detectCurrency(), findStatedRanges(), groupDigits(), isProseSalary(), mapCurrencyToken() (+9 more)
 
-### Community 12 - "Community 12"
+### Community 13 - "Community 13"
 Cohesion: 0.15
 Nodes (7): browserSessionBody(), config(), createBrowserSession(), getBrowserSession(), managedBrowserErrorMessage(), request(), runManagedBrowser()
 
-### Community 13 - "Community 13"
+### Community 14 - "Community 14"
 Cohesion: 0.26
 Nodes (5): createRateLimitHook(), defaultRateLimitConfig(), InMemoryRateLimitStore, policyForRequest(), positiveInteger()
 
-### Community 14 - "Community 14"
+### Community 15 - "Community 15"
 Cohesion: 0.33
 Nodes (9): applyResumePolicy(), deriveCandidateContext(), metricCount(), orgScore(), overlapScore(), parseGraduationDate(), relevanceScore(), resumeSafeTargetRole() (+1 more)
-
-### Community 15 - "Community 15"
-Cohesion: 0.27
-Nodes (5): classifyField(), isLocationCommitmentQuestion(), isRefusedQuestion(), resolveKnownAnswer(), workEligibilitySkipReason()
 
 ### Community 16 - "Community 16"
 Cohesion: 0.39
 Nodes (7): annualize(), answerCompensation(), detectCurrency(), detectUnit(), formatCompensation(), parseStatedCompensation(), toNumber()
 
 ### Community 17 - "Community 17"
-Cohesion: 0.54
-Nodes (6): describeRequiredBlocker(), describeUnlabelledBlockers(), humanFieldLabel(), isOpaqueIdentifier(), sanitizeProviderBlockers(), tidyLabel()
+Cohesion: 0.67
+Nodes (0):
 
 ### Community 18 - "Community 18"
-Cohesion: 0.67
+Cohesion: 1.0
 Nodes (0):
 
 ### Community 19 - "Community 19"
 Cohesion: 1.0
 Nodes (0):
 
-### Community 20 - "Community 20"
-Cohesion: 1.0
-Nodes (0):
-
 ## Knowledge Gaps
-- **Thin community `Community 19`** (1 nodes): `drizzle.config.ts`
+- **Thin community `Community 18`** (1 nodes): `drizzle.config.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 20`** (1 nodes): `submissionStateMachine.test.ts`
+- **Thin community `Community 19`** (1 nodes): `submissionStateMachine.test.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 
 ## Suggested Questions
@@ -126,10 +122,10 @@ _Questions this graph is uniquely positioned to answer:_
 - **Should `Community 2` be split into smaller, more focused modules?**
   _Cohesion score 0.08 - nodes in this community are weakly interconnected._
 - **Should `Community 4` be split into smaller, more focused modules?**
-  _Cohesion score 0.08 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.12 - nodes in this community are weakly interconnected._
 - **Should `Community 5` be split into smaller, more focused modules?**
+  _Cohesion score 0.08 - nodes in this community are weakly interconnected._
+- **Should `Community 6` be split into smaller, more focused modules?**
   _Cohesion score 0.12 - nodes in this community are weakly interconnected._
 - **Should `Community 7` be split into smaller, more focused modules?**
   _Cohesion score 0.13 - nodes in this community are weakly interconnected._
-- **Should `Community 8` be split into smaller, more focused modules?**
-  _Cohesion score 0.14 - nodes in this community are weakly interconnected._
