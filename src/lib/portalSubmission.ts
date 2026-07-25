@@ -139,12 +139,12 @@ const ASHBY_PORTFOLIO_SELECTOR =
 const SMARTRECRUITERS_RESUME_SELECTOR = 'spl-dropzone[data-test="resume-upload"] input[type="file"]';
 const SMARTRECRUITERS_PHONE_SELECTOR = '[aria-label="Phone number"]';
 
-export function buildManagedPortalActions(
-  portal: SupportedPortal,
-  packet: SubmissionPacket,
-  submit = false,
-): ManagedBrowserAction[] {
-  const actions: ManagedBrowserAction[] = [];
+// Fixed-field fills only (name/email/phone/location/links/resume) - shared by
+// buildManagedPortalActions (the real fill+submit run) and buildManagedDiscoveryActions (a
+// cheaper first pass that also asks the runner to scan the page for custom questions). Splitting
+// this out is what let R-055's discovery step reuse every portal's already-verified selectors
+// instead of a third copy of them.
+function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: SupportedPortal, packet: SubmissionPacket) {
   if (portal === 'greenhouse' || portal === 'controlled_test') {
     const parts = packet.fullName.trim().split(/\s+/);
     // optional (managedFill default) + bounded, not required: a branded-redirect Greenhouse customer
@@ -206,6 +206,29 @@ export function buildManagedPortalActions(
     managedFill(actions, ASHBY_PORTFOLIO_SELECTOR, packet.portfolioUrl, 'portfolio');
     managedUpload(actions, 'input[type="file"]', packet);
   }
+}
+
+// A cheap first pass: fill the fixed fields (idempotent - the real run below fills them again,
+// including the resume upload) and ask the runner to scan the resulting page for custom questions
+// via the 'discover' action (stratus-browser-cloud PR #7). No reviewed questions, no submit - this
+// call exists only to get `result.discovered` back so the caller can resolve answers in Node
+// (questionDiscovery.ts) before the real fill run. Direct-Playwright provider skips this call
+// entirely (discoverPageQuestions runs against its own live Page instead); this is the managed
+// path's only way to see the live DOM mid-run, since /api/run is otherwise stateless.
+export function buildManagedDiscoveryActions(portal: SupportedPortal, packet: SubmissionPacket): ManagedBrowserAction[] {
+  const actions: ManagedBrowserAction[] = [];
+  pushFixedFieldActions(actions, portal, packet);
+  actions.push({ type: 'discover', optional: true, timeout: MANAGED_FILL_TIMEOUT_MS });
+  return actions;
+}
+
+export function buildManagedPortalActions(
+  portal: SupportedPortal,
+  packet: SubmissionPacket,
+  submit = false,
+): ManagedBrowserAction[] {
+  const actions: ManagedBrowserAction[] = [];
+  pushFixedFieldActions(actions, portal, packet);
   // See canFillReviewedQuestions: the managed runner throws on any non-text control and ignores
   // `optional`, so a single checkbox takes down a run that had otherwise filled five fields
   // correctly. Sending none of them is what makes the run survive to a usable handoff.

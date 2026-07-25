@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  buildManagedDiscoveryActions,
   buildManagedPortalActions,
   canFillReviewedQuestions,
   detectPortal,
@@ -14,6 +15,25 @@ test('detects the four supported applicant portal families', () => {
   assert.equal(detectPortal('https://jobs.lever.co/acme/123/apply'), 'lever');
   assert.equal(detectPortal('https://jobs.ashbyhq.com/acme/123/application'), 'ashby');
   assert.equal(detectPortal('https://jobs.smartrecruiters.com/Acme/744000-role'), 'smartrecruiters');
+});
+
+test('a managed discovery run fills the fixed fields, then ends with discover - never sends reviewed questions or submits', () => {
+  // R-055 on the managed path: this cheap first call exists only to get the page's custom
+  // questions back (stratus-browser-cloud PR #7). It reuses the same fixed-field fills (including
+  // the resume upload - harmless and idempotent, the real run below fills them again) but must
+  // never send reviewed-question answers or click submit, since nothing has been resolved yet.
+  const actions = buildManagedDiscoveryActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [{ question: 'Why this role?', answer: 'I enjoy systems work.' }],
+  });
+  assert.equal(actions.at(-1)?.type, 'discover');
+  assert.equal(actions.some((a) => a.type === 'fillByLabelText'), false);
+  assert.equal(actions.some((a) => a.type === 'click'), false);
+  const fillSelectors = actions.filter((a) => a.type === 'fill').map((a) => a.selector);
+  assert.ok(fillSelectors.some((s) => s?.includes('first_name')));
 });
 
 test('SmartRecruiters managed actions open the application form before filling', () => {

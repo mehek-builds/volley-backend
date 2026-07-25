@@ -16,6 +16,7 @@ import {
   runManagedBrowser,
 } from '../lib/browserbase';
 import {
+  buildManagedDiscoveryActions,
   buildManagedPortalActions,
   clickFinalSubmit,
   detectPortal,
@@ -44,6 +45,7 @@ import {
   WORK_ELIGIBILITY_QUESTION,
   workEligibilitySkipReason,
   type ApplicationProfileLike,
+  type DiscoveredQuestion,
 } from '../lib/questionDiscovery';
 import type { ApplicationReviewQuestion } from '../lib/applicationReview';
 
@@ -94,21 +96,22 @@ async function buildPacket(row: ResumeRow): Promise<SubmissionPacket> {
 
 // R-055 fix: the dashboard flow used to send only whatever `review.questions` the client already
 // supplied (empty on a fresh dashboard-only run), so a real posting's custom questions - GPA,
-// sponsorship, GitHub, essays - were never attempted. This discovers them straight off the live
-// page the direct-Playwright path already has open, resolves the ones the stored profile can
-// answer confidently, drafts the genuinely open-ended ones through the SAME essay endpoint the
-// extension calls, and otherwise leaves a question alone rather than guess.
+// sponsorship, GitHub, essays - were never attempted. This resolves a raw discovered-question list
+// (however the caller obtained it) against the stored profile, drafts the genuinely open-ended
+// ones through the SAME essay endpoint the extension calls, and otherwise leaves a question alone
+// rather than guess.
 //
-// Direct-Playwright provider only. The managed-Stratus path (buildManagedPortalActions) has no
-// live Page object - only declarative HTTP actions - so it has no analogue to this discovery step
-// and keeps relying on whatever `review.questions` the client already supplied, same as before.
+// Provider-agnostic on purpose: the direct-Playwright path gets `discovered` from its own live
+// Page (discoverPageQuestions), and the managed-Stratus path gets it from the 'discover' action's
+// result (buildManagedDiscoveryActions / stratus-browser-cloud PR #7) - this function has no
+// browser dependency of its own, so both callers share one resolution path and can never drift on
+// what counts as an answerable question.
 async function discoverAndResolveQuestions(
-  page: Page,
+  discovered: DiscoveredQuestion[],
   row: ResumeRow,
   current: ApplicationReviewState,
   ap: ApplicationProfileLike,
 ): Promise<{ questions: ApplicationReviewQuestion[]; attentionReasons: string[] }> {
-  const discovered = await discoverPageQuestions(page).catch(() => []);
   const existingLabels = new Set(current.questions.map((q) => q.question.trim().toLowerCase()));
   const questions: ApplicationReviewQuestion[] = [];
   const attentionReasons: string[] = [];
@@ -222,7 +225,24 @@ async function prepareManaged(
     submission_error: undefined,
   }));
   const packet = await buildPacket(row);
-  const result = await runManagedBrowser(portalApplicationUrl(portal, current.portal_url!), buildManagedPortalActions(portal, packet));
+
+  // R-055 on the managed path: a cheap first call fills only the fixed fields and asks
+  // stratus-browser-cloud's 'discover' action (PR #7) to scan the resulting page for custom
+  // questions - the only way this path ever sees the live DOM, since /api/run is otherwise
+  // stateless. Resolved through the SAME questionDiscovery.ts logic the direct-Playwright path
+  // uses, so the two providers can never answer a question differently.
+  const applicationUrl = portalApplicationUrl(portal, current.portal_url!);
+  const discoveryResult = await runManagedBrowser(applicationUrl, buildManagedDiscoveryActions(portal, packet)).catch(() => null);
+  const { questions: discoveredQuestions, attentionReasons: discoveryAttention } = await discoverAndResolveQuestions(
+    discoveryResult?.discovered ?? [],
+    row,
+    current,
+    await loadApplicationProfileLike(row.user_id),
+  );
+  const mergedQuestions = [...current.questions, ...discoveredQuestions];
+  packet.questions = [...packet.questions, ...discoveredQuestions.map((q) => ({ question: q.question, answer: q.answer }))];
+
+  const result = await runManagedBrowser(applicationUrl, buildManagedPortalActions(portal, packet));
   if (!result.screenshot) throw new Error('Stratus managed browser did not return a preview screenshot');
   const preview = await put(
     `users/${row.user_id}/submission-runs/${runId}/filled.png`,
@@ -240,11 +260,12 @@ async function prepareManaged(
   // resolution. Live QA proved that gap by showing three raw UUIDs on a real Ashby posting.
   const blockers = sanitizeProviderBlockers(result.blockers ?? []);
   const review = nextReview(current, {
-    status: blockers.length > 0 ? 'needs_attention' : 'ready_for_final_approval',
+    status: blockers.length > 0 || discoveryAttention.length > 0 ? 'needs_attention' : 'ready_for_final_approval',
     submission_run_id: runId,
     filled_fields: result.filledFields ?? [],
     preview_screenshot_url: preview.url,
-    attention_reason: blockers.join('\n') || undefined,
+    questions: mergedQuestions,
+    attention_reason: [...blockers, ...discoveryAttention].join('\n') || undefined,
     handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
     submission_error: undefined,
   });
@@ -280,8 +301,9 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
 
     // R-055: discover and resolve the posting's own custom questions before filling, so a
     // dashboard-only submission does not depend on the extension having run first.
+    const discovered = await discoverPageQuestions(page).catch(() => []);
     const { questions: discoveredQuestions, attentionReasons: discoveryAttention } =
-      await discoverAndResolveQuestions(page, row, current, await loadApplicationProfileLike(row.user_id));
+      await discoverAndResolveQuestions(discovered, row, current, await loadApplicationProfileLike(row.user_id));
     const mergedQuestions = [...current.questions, ...discoveredQuestions];
     packet.questions = [...packet.questions, ...discoveredQuestions.map((q) => ({ question: q.question, answer: q.answer }))];
 
