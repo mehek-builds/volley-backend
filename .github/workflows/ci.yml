@@ -25,6 +25,8 @@ jobs:
       - run: npm ci
       - name: Typecheck
         run: npm run typecheck
+      - name: Build and load production modules
+        run: npm run build:smoke
       # `node --test` exits 0 when the glob matches nothing, so a moved/renamed test
       # would go green with zero tests run. Fail loudly if no test files exist (B2).
       - name: Ensure test files exist
