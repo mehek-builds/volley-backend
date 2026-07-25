@@ -21,6 +21,7 @@ import {
 import { getLiveViewUrl, isBrowserbaseConfigured } from '../lib/browserbase';
 import { apiBaseFor } from '../lib/apiBase';
 import { extractPdfText } from '../lib/pdfText';
+import { storedCoverLetter } from '../lib/coverLetterService';
 import { mintDownloadToken } from '../lib/resumeAccess';
 import { normalizeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import { requireAuth } from '../middleware/auth';
@@ -52,6 +53,14 @@ const statusBodySchema = z.object({
 });
 
 type StoredSpec = Record<string, unknown>;
+
+function reviewSpec(review: unknown) {
+  return sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(review)}::jsonb, true)`;
+}
+
+function approvedReviewSpec(review: unknown, approvedAt: string) {
+  return sql`jsonb_set(${reviewSpec(review)}, '{_cover_letter,approved_at}', ${JSON.stringify(approvedAt)}::jsonb, true)`;
+}
 
 async function ownedResume(request: FastifyRequest, reply: FastifyReply) {
   const parsed = paramsSchema.safeParse(request.params);
@@ -177,6 +186,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         ...rendered.spec,
         _contact: contact,
         _review: updatedReview,
+        ...(stored._cover_letter ? { _cover_letter: stored._cover_letter } : {}),
         _quality: {
           ...(stored._quality as Record<string, unknown> | undefined),
           atsCoverage: validation.ats_keyword_coverage_pct,
@@ -226,7 +236,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         updated_at: new Date().toISOString(),
       };
       const claimed = await db.update(generated_resumes)
-        .set({ spec: { ...stored, _review: next } })
+        .set({ spec: reviewSpec(next) })
         .where(and(
           eq(generated_resumes.id, row.id),
           sql`${generated_resumes.spec}->'_review'->>'status' = ${current.status}`,
@@ -256,7 +266,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const stored = row.spec as StoredSpec;
       const current = readApplicationReview(stored);
       if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
-      const disposition = submitRequestDisposition(current.status);
+      const disposition = submitRequestDisposition(current.status, Boolean(current.submission_claimed_at));
       if (disposition === 'submitted') {
         return reply.status(200).send({ application_id: row.id, review: current });
       }
@@ -281,9 +291,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         questions: parsed.data.questions as ApplicationReviewQuestion[],
         status: 'submit_requested' as const,
         updated_at: new Date().toISOString(),
+        attention_reason: undefined,
+        handoff_expires_at: undefined,
+        browser_session_id: undefined,
       };
       const claimed = await db.update(generated_resumes)
-        .set({ spec: { ...stored, _review: next } })
+        .set({ spec: reviewSpec(next) })
         .where(and(
           eq(generated_resumes.id, row.id),
           sql`${generated_resumes.spec}->'_review'->>'status' = ${current.status}`,
@@ -316,7 +329,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           handoff_url = undefined;
         }
       }
-      return reply.send({ application_id: row.id, review, handoff_url, configured: isBrowserbaseConfigured() });
+      return reply.send({
+        application_id: row.id,
+        review,
+        cover_letter: storedCoverLetter(row),
+        handoff_url,
+        configured: isBrowserbaseConfigured(),
+      });
     },
   );
 
@@ -336,7 +355,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       }
       const next = { ...current, status: 'ready_for_final_approval' as const, attention_reason: undefined, updated_at: new Date().toISOString() };
       const completed = await db.update(generated_resumes)
-        .set({ spec: { ...stored, _review: next } })
+        .set({ spec: reviewSpec(next) })
         .where(and(
           eq(generated_resumes.id, row.id),
           sql`${generated_resumes.spec}->'_review'->>'status' = 'needs_attention'`,
@@ -380,7 +399,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         updated_at: now,
       };
       const approved = await db.update(generated_resumes)
-        .set({ spec: { ...stored, _review: next } })
+        .set({ spec: approvedReviewSpec(next, now) })
         .where(and(
           eq(generated_resumes.id, row.id),
           sql`${generated_resumes.spec}->'_review'->>'status' = 'ready_for_final_approval'`,
@@ -419,7 +438,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         submission_error: parsed.data.error ?? 'The company portal rejected the submission.',
       };
       const updated = await db.update(generated_resumes)
-        .set({ spec: { ...stored, _review: next } })
+        .set({ spec: reviewSpec(next) })
         .where(and(
           eq(generated_resumes.id, row.id),
           sql`${generated_resumes.spec}->'_review'->>'status' = ${current.status}`,

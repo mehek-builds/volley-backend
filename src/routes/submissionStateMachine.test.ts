@@ -18,7 +18,7 @@ test('post-click failures retain the claimed row and become uncertain attention'
 
 test('submit-request state transition is conditional so a replay cannot reset submitted state', async () => {
   const route = await readFile('src/routes/applications.ts', 'utf8');
-  assert.match(route, /submitRequestDisposition\(current\.status\)/);
+  assert.match(route, /submitRequestDisposition\(current\.status, Boolean\(current\.submission_claimed_at\)\)/);
   assert.match(route, /spec}->'_review'->>'status' = \$\{current\.status\}/);
   assert.match(route, /spec}->'_review'->>'status' = 'ready_for_final_approval'/);
   assert.match(route, /spec}->'_review'->>'status' = 'needs_attention'/);

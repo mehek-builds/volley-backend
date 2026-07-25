@@ -33,6 +33,7 @@ export type ManagedBrowserResult = {
   filledFields?: string[];
   blockers?: string[];
   discovered?: ManagedDiscoveredQuestion[];
+  extracted?: Array<{ selector: string; value: string | null }>;
 };
 
 type ManagedBrowserError = string | { message?: string; code?: string };

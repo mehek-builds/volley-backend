@@ -9,6 +9,7 @@ import {
   real,
   boolean,
   index,
+  uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
 // ---- users ----
@@ -362,6 +363,51 @@ export const generated_resumes = pgTable('generated_resumes', {
   userCreatedIdx: index('generated_resumes_user_created_idx').on(t.user_id, t.created_at),
 }));
 
+// ---- career_page_sources ----
+// Operator-managed company career boards. The polling worker reads the public ATS APIs rather
+// than scraping job aggregators, so Litos can show first-party postings with a stable apply URL.
+export const career_page_sources = pgTable('career_page_sources', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  company_name: text('company_name').notNull(),
+  ats_name: text('ats_name').notNull(), // 'greenhouse' | 'lever' | 'ashby'
+  board_token: text('board_token').notNull(),
+  career_url: text('career_url').notNull(),
+  enabled: boolean('enabled').default(true).notNull(),
+  last_polled_at: timestamp('last_polled_at', { withTimezone: true }),
+  last_error: text('last_error'),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  boardUnique: uniqueIndex('career_page_sources_ats_board_unique').on(t.ats_name, t.board_token),
+  enabledIdx: index('career_page_sources_enabled_idx').on(t.enabled),
+}));
+
+// ---- monitored_jobs ----
+// Normalized first-party postings from career_page_sources. first_seen_at is the Litos discovery
+// time; posted_at is the employer-provided timestamp when the ATS exposes one.
+export const monitored_jobs = pgTable('monitored_jobs', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  source_id: uuid('source_id').references(() => career_page_sources.id, { onDelete: 'cascade' }).notNull(),
+  external_id: text('external_id').notNull(),
+  company_name: text('company_name').notNull(),
+  title: text('title').notNull(),
+  location: text('location'),
+  department: text('department'),
+  employment_type: text('employment_type'),
+  description: text('description').notNull(),
+  apply_url: text('apply_url').notNull(),
+  posting_url: text('posting_url').notNull(),
+  remote: boolean('remote').default(false).notNull(),
+  posted_at: timestamp('posted_at', { withTimezone: true }),
+  first_seen_at: timestamp('first_seen_at', { withTimezone: true }).defaultNow().notNull(),
+  last_seen_at: timestamp('last_seen_at', { withTimezone: true }).defaultNow().notNull(),
+  is_active: boolean('is_active').default(true).notNull(),
+  raw_json: jsonb('raw_json'),
+}, (t) => ({
+  sourceExternalUnique: uniqueIndex('monitored_jobs_source_external_unique').on(t.source_id, t.external_id),
+  activePostedIdx: index('monitored_jobs_active_posted_idx').on(t.is_active, t.posted_at),
+  companyIdx: index('monitored_jobs_company_idx').on(t.company_name),
+}));
+
 // ---- ats_adapters ----
 // Health tracking for the per-ATS field-mapping adapters (Section 7 of PRD-v2). Populated
 // by a scheduled spot-check (src/routes/adapterHealth.ts), not written to by the extension
@@ -429,6 +475,10 @@ export type NewApplicationProfile = typeof application_profile.$inferInsert;
 export type ResumeTemplate = typeof resume_templates.$inferSelect;
 export type GeneratedResume = typeof generated_resumes.$inferSelect;
 export type NewGeneratedResume = typeof generated_resumes.$inferInsert;
+export type CareerPageSource = typeof career_page_sources.$inferSelect;
+export type NewCareerPageSource = typeof career_page_sources.$inferInsert;
+export type MonitoredJob = typeof monitored_jobs.$inferSelect;
+export type NewMonitoredJob = typeof monitored_jobs.$inferInsert;
 export type AtsAdapter = typeof ats_adapters.$inferSelect;
 export type AutofillEvent = typeof autofill_events.$inferSelect;
 export type NewAutofillEvent = typeof autofill_events.$inferInsert;

@@ -50,6 +50,15 @@ const CHECKS: Array<{
     // Client-rendered SPA: can only confirm the board is still live and still Ashby.
     verify: (html) => (html.includes('cdn.ashbyprd.com') && html.includes('id="root"') ? null : false),
   },
+  {
+    ats_name: 'smartrecruiters',
+    version: '2026-07-25',
+    test_url: 'https://jobs.smartrecruiters.com/WesternDigital',
+    selectors: ['#first-name-input', '#last-name-input', '#email-input', '#resume-input'],
+    // The company page and application form are client-rendered. Confirm the deployment identity
+    // without claiming that a server-side fetch has verified live form selectors.
+    verify: (html) => (/smartrecruiters/i.test(html) ? null : false),
+  },
 ];
 
 async function runCheck(check: (typeof CHECKS)[number]): Promise<{ ats_name: string; status: string; note: string }> {

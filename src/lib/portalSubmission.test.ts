@@ -4,8 +4,10 @@ import {
   buildManagedDiscoveryActions,
   buildManagedPortalActions,
   canFillReviewedQuestions,
+  coverLetterUploadSelector,
   detectPortal,
   isChoiceQuestion,
+  managedResultHasCoverLetterUpload,
   portalApplicationUrl,
   readManagedReceipt,
 } from './portalSubmission';
@@ -17,7 +19,7 @@ test('detects the four supported applicant portal families', () => {
   assert.equal(detectPortal('https://jobs.smartrecruiters.com/Acme/744000-role'), 'smartrecruiters');
 });
 
-test('a managed discovery run fills the fixed fields, then ends with discover - never sends reviewed questions or submits', () => {
+test('a managed discovery run detects custom questions and cover-letter attachment capability without submitting', () => {
   // R-055 on the managed path: this cheap first call exists only to get the page's custom
   // questions back (stratus-browser-cloud PR #7). It reuses the same fixed-field fills (including
   // the resume upload - harmless and idempotent, the real run below fills them again) but must
@@ -29,11 +31,35 @@ test('a managed discovery run fills the fixed fields, then ends with discover - 
     resumeName: 'resume.pdf',
     questions: [{ question: 'Why this role?', answer: 'I enjoy systems work.' }],
   });
-  assert.equal(actions.at(-1)?.type, 'discover');
+  assert.equal(actions.at(-2)?.type, 'discover');
+  assert.deepEqual(actions.at(-1), {
+    type: 'extract',
+    selector: coverLetterUploadSelector('greenhouse'),
+    attribute: 'type',
+    label: 'cover_letter_capability',
+    optional: true,
+    timeout: 10_000,
+  });
   assert.equal(actions.some((a) => a.type === 'fillByLabelText'), false);
   assert.equal(actions.some((a) => a.type === 'click'), false);
   const fillSelectors = actions.filter((a) => a.type === 'fill').map((a) => a.selector);
   assert.ok(fillSelectors.some((s) => s?.includes('first_name')));
+});
+
+test('managed cover-letter detection requires an actual file input extraction', () => {
+  const selector = coverLetterUploadSelector('greenhouse');
+  assert.equal(managedResultHasCoverLetterUpload({ title: 'Apply', url: 'https://example.com', text: 'Cover letter is optional', extracted: [{ selector, value: 'file' }] }, 'greenhouse'), true);
+  assert.equal(managedResultHasCoverLetterUpload({ title: 'Apply', url: 'https://example.com', text: 'Cover letter is optional', extracted: [{ selector: '#resume', value: 'file' }] }, 'greenhouse'), false);
+  assert.equal(managedResultHasCoverLetterUpload({ title: 'Apply', url: 'https://example.com', text: 'Cover letter is optional', extracted: [] }, 'greenhouse'), false);
+  assert.equal(managedResultHasCoverLetterUpload(null, 'greenhouse'), false);
+});
+
+test('every portal detects a cover-letter file control, not optional wording alone', () => {
+  for (const portal of ['greenhouse', 'lever', 'ashby', 'smartrecruiters', 'controlled_test'] as const) {
+    const selector = coverLetterUploadSelector(portal);
+    assert.match(selector, /type="file"/);
+    assert.match(selector, /cover/i);
+  }
 });
 
 test('SmartRecruiters managed actions open the application form before filling', () => {
@@ -50,9 +76,12 @@ test('SmartRecruiters managed actions open the application form before filling',
   assert.equal(actions[0].type, 'click');
   assert.equal(actions[0].optional, true);
   const fillSelectors = actions.filter((a) => a.type === 'fill').map((a) => a.selector);
-  assert.ok(fillSelectors.includes('[id="first-name-input"]'));
-  assert.ok(fillSelectors.includes('[id="email-input"]'));
-  assert.ok(fillSelectors.includes('[id="confirm-email-input"]'));
+  assert.ok(fillSelectors.some((selector) => selector?.includes('[id="first-name-input"]')));
+  assert.ok(fillSelectors.some((selector) => selector?.includes('spl-input#first-name-input input')));
+  assert.ok(fillSelectors.some((selector) => selector?.includes('[id="email-input"]')));
+  assert.ok(fillSelectors.some((selector) => selector?.includes('spl-input#email-input input')));
+  assert.ok(fillSelectors.some((selector) => selector?.includes('[id="confirm-email-input"]')));
+  assert.ok(fillSelectors.some((selector) => selector?.includes('spl-input#confirm-email-input input')));
 });
 
 test('opens Ashby directly on its application tab for managed filling', () => {
@@ -136,6 +165,84 @@ test('managed controlled-portal actions include reviewed fields, resume upload, 
     'fill', 'fill', 'fill', 'upload', 'fillByLabelText', 'click',
   ]);
   assert.equal(actions.find((action) => action.type === 'upload')?.file?.base64, 'cGRm');
+});
+
+test('managed portals upload a tailored cover letter without replacing the resume', () => {
+  for (const portal of ['greenhouse', 'lever', 'ashby'] as const) {
+    const actions = buildManagedPortalActions(portal, {
+      fullName: 'Taylor Example',
+      email: 'taylor@example.com',
+      resume: Buffer.from('resume-pdf'),
+      resumeName: 'resume.pdf',
+      coverLetter: Buffer.from('cover-pdf'),
+      coverLetterName: 'cover-letter.pdf',
+      questions: [],
+    });
+    const uploads = actions.filter((action) => action.type === 'upload');
+    assert.deepEqual(uploads.map((action) => action.label), ['resume', 'cover_letter']);
+    assert.equal(uploads[0]?.file?.name, 'resume.pdf');
+    assert.equal(uploads[1]?.file?.name, 'cover-letter.pdf');
+    assert.notEqual(uploads[0]?.selector, uploads[1]?.selector);
+    if (portal === 'greenhouse') assert.doesNotMatch(uploads[1]?.selector ?? '', /(^|,\s*)#cover_letter/);
+    if (portal === 'ashby') assert.doesNotMatch(uploads[0]?.selector ?? '', /cover/i);
+  }
+});
+
+test('Ashby targets its real resume and optional cover-letter input ids', () => {
+  const actions = buildManagedPortalActions('ashby', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    coverLetter: Buffer.from('cover-pdf'),
+    coverLetterName: 'cover-letter.pdf',
+    questions: [],
+  });
+  const uploads = actions.filter((action) => action.type === 'upload');
+  assert.match(uploads[0]?.selector ?? '', /#_systemfield_resume/);
+  assert.doesNotMatch(uploads[0]?.selector ?? '', /input\[type="file"\]$/);
+  assert.match(uploads[1]?.selector ?? '', /#cover_letter/);
+  assert.match(coverLetterUploadSelector('ashby'), /#cover_letter/);
+});
+
+test('Ashby targets live phone and label-bound profile fields', () => {
+  const actions = buildManagedPortalActions('ashby', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    phone: '5550100000',
+    linkedinUrl: 'https://linkedin.com/in/taylor-example',
+    portfolioUrl: 'https://example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  const fills = actions.filter((action) => action.type === 'fill');
+  assert.match(fills.find((action) => action.label === 'phone')?.selector ?? '', /#phone/);
+  assert.match(fills.find((action) => action.label === 'linkedin')?.selector ?? '', /LinkedIn Profile/);
+  assert.match(fills.find((action) => action.label === 'portfolio')?.selector ?? '', /Website/);
+});
+
+test('phone fills recognize safe semantic phone controls without matching prose text inputs', () => {
+  // Regression: ISSUE-001, live Deepgram and CTC forms left Phone empty even though the saved
+  // profile contained a value. Those forms expose the control through type, autocomplete, or its
+  // visible phone label instead of the small set of exact ids and names previously recognized.
+  // Found by /qa on 2026-07-25.
+  // Report: outputs/litos-10-application-trials-2026-07-25.md
+  for (const portal of ['greenhouse', 'ashby'] as const) {
+    const actions = buildManagedPortalActions(portal, {
+      fullName: 'Taylor Example',
+      email: 'taylor@example.com',
+      phone: '+971 50 123 4567',
+      resume: Buffer.from('resume-pdf'),
+      resumeName: 'resume.pdf',
+      questions: [],
+    });
+    const selector = actions.find((action) => action.type === 'fill' && action.label === 'phone')?.selector ?? '';
+    assert.match(selector, /input\[type="tel"/);
+    assert.match(selector, /autocomplete\*="tel"/);
+    assert.match(selector, /Phone/);
+    assert.doesNotMatch(selector, /input\[type="text"\](?:,|$)/);
+  }
 });
 
 test('managed receipt requires confirmation language and captures the reference', () => {

@@ -21,6 +21,8 @@ import {
   clickFinalSubmit,
   detectPortal,
   fillPortal,
+  hasCoverLetterUpload,
+  managedResultHasCoverLetterUpload,
   navigateToApplicationForm,
   portalApplicationUrl,
   readManagedReceipt,
@@ -41,6 +43,8 @@ import {
   discoverPageQuestions,
   isOpenEndedQuestion,
   isRefusedQuestion,
+  normalizeDiscoveredLabel,
+  normalizeStoredPortalQuestions,
   resolveKnownAnswer,
   fitToBudget,
   WORK_ELIGIBILITY_QUESTION,
@@ -49,6 +53,7 @@ import {
   type DiscoveredQuestion,
 } from '../lib/questionDiscovery';
 import type { ApplicationReviewQuestion } from '../lib/applicationReview';
+import { generateStoredCoverLetter, storedCoverLetter } from '../lib/coverLetterService';
 import { mayClickFinalSubmit, preparedSubmissionStatus } from '../lib/submissionAuthorization';
 import { directPreparationIsSafe } from '../lib/submissionSafety';
 
@@ -66,7 +71,9 @@ function nextReview(current: ApplicationReviewState, patch: Partial<ApplicationR
 }
 
 async function writeReview(row: ResumeRow, review: ApplicationReviewState) {
-  await db.update(generated_resumes).set({ spec: { ...(row.spec as StoredSpec), _review: review } }).where(eq(generated_resumes.id, row.id));
+  await db.update(generated_resumes).set({
+    spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(review)}::jsonb, true)`,
+  }).where(eq(generated_resumes.id, row.id));
 }
 
 async function standingAuthorization(userId: string): Promise<StandingAuthorization> {
@@ -105,7 +112,9 @@ async function claimSubmission(row: ResumeRow): Promise<ResumeRow | null> {
     submission_claim_id: randomUUID(),
   });
   const rows = await db.update(generated_resumes)
-    .set({ spec: { ...(row.spec as StoredSpec), _review: claimed } })
+    .set({
+      spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(claimed)}::jsonb, true)`,
+    })
     .where(and(
       eq(generated_resumes.id, row.id),
       sql`${generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
@@ -125,7 +134,9 @@ async function claimPreparation(row: ResumeRow): Promise<ResumeRow | null> {
     submission_claim_id: undefined,
   });
   const rows = await db.update(generated_resumes)
-    .set({ spec: { ...(row.spec as StoredSpec), _review: preparing } })
+    .set({
+      spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(preparing)}::jsonb, true)`,
+    })
     .where(and(
       eq(generated_resumes.id, row.id),
       sql`${generated_resumes.spec}->'_review'->>'status' = 'submit_requested'`,
@@ -152,6 +163,7 @@ async function holdRevokedSubmission(row: ResumeRow, review: ApplicationReviewSt
 async function buildPacket(row: ResumeRow): Promise<SubmissionPacket> {
   const stored = row.spec as StoredSpec;
   const contact = (stored._contact ?? {}) as Record<string, unknown>;
+  const coverLetterMeta = (stored._cover_letter ?? {}) as Record<string, unknown>;
   const [userRow, appRow, profileRow] = await Promise.all([
     db.select().from(users).where(eq(users.id, row.user_id)).limit(1),
     db.select().from(application_profile).where(eq(application_profile.user_id, row.user_id)).limit(1),
@@ -166,6 +178,14 @@ async function buildPacket(row: ResumeRow): Promise<SubmissionPacket> {
   const response = await fetch(blobUrl);
   if (!response.ok) throw new Error('Generated resume file could not be downloaded');
   const resume = Buffer.from(await response.arrayBuffer());
+  let coverLetter: Buffer | undefined;
+  if (typeof coverLetterMeta.object_key === 'string' && typeof coverLetterMeta.approved_at === 'string') {
+    const coverLetterUrl = await resolveBlobUrl(coverLetterMeta.object_key);
+    if (!coverLetterUrl) throw new Error('Generated cover letter file is unavailable');
+    const coverLetterResponse = await fetch(coverLetterUrl);
+    if (!coverLetterResponse.ok) throw new Error('Generated cover letter file could not be downloaded');
+    coverLetter = Buffer.from(await coverLetterResponse.arrayBuffer());
+  }
   const fullName = String(contact.full_name ?? parsed.full_name ?? '').trim();
   const email = String(contact.email ?? userRow[0]?.email ?? '').trim();
   if (!fullName || !email) throw new Error('Full name and email are required before submission');
@@ -179,8 +199,24 @@ async function buildPacket(row: ResumeRow): Promise<SubmissionPacket> {
     portfolioUrl: typeof app.portfolio_url === 'string' ? app.portfolio_url : undefined,
     resume,
     resumeName: `litos-${row.id}.pdf`,
+    coverLetter,
+    coverLetterName: coverLetter
+      ? String(coverLetterMeta.file_name ?? `litos-${row.id}-cover-letter.pdf`)
+      : undefined,
     questions: review.questions.map((item) => ({ question: item.question, answer: item.answer })),
   };
+}
+
+function omitCoverLetter(packet: SubmissionPacket): SubmissionPacket {
+  return { ...packet, coverLetter: undefined, coverLetterName: undefined };
+}
+
+async function packetForCoverLetterCapability(row: ResumeRow, supported: boolean): Promise<SubmissionPacket> {
+  if (!supported) return omitCoverLetter(await buildPacket(row));
+  if (!storedCoverLetter(row)) await generateStoredCoverLetter(row, false, true);
+  const rows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, row.id)).limit(1);
+  if (!rows[0]) throw new Error('Application packet disappeared while generating its cover letter');
+  return buildPacket(rows[0]);
 }
 
 // R-055 fix: the dashboard flow used to send only whatever `review.questions` the client already
@@ -201,8 +237,9 @@ async function discoverAndResolveQuestions(
   current: ApplicationReviewState,
   ap: ApplicationProfileLike,
   automaticSubmissionEnabled: boolean,
+  portal: SupportedPortal,
 ): Promise<{ questions: ApplicationReviewQuestion[]; attentionReasons: string[] }> {
-  const existingLabels = new Set(current.questions.map((q) => q.question.trim().toLowerCase()));
+  const existingLabels = new Set(current.questions.map((q) => normalizeDiscoveredLabel(q.question).toLowerCase()));
   const questions: ApplicationReviewQuestion[] = [];
   const attentionReasons: string[] = [];
 
@@ -218,8 +255,9 @@ async function discoverAndResolveQuestions(
   }
 
   for (const field of discovered) {
-    const label = field.label;
-    if (existingLabels.has(label)) continue; // already answered by the client or a prior run
+    const label = normalizeDiscoveredLabel(field.label);
+    if (!label || normalizeStoredPortalQuestions([{ question: label, answer: '' }], portal).length === 0) continue;
+    if (existingLabels.has(label.toLowerCase())) continue; // already answered by the client or a prior run
     if (isRefusedQuestion(label)) {
       attentionReasons.push(WORK_ELIGIBILITY_QUESTION.test(label)
         ? workEligibilitySkipReason(label)
@@ -321,7 +359,7 @@ async function prepareManaged(
     submission_run_id: runId,
     submission_error: undefined,
   }));
-  const packet = await buildPacket(row);
+  let packet = omitCoverLetter(await buildPacket(row));
 
   // R-055 on the managed path: a cheap first call fills only the fixed fields and asks
   // stratus-browser-cloud's 'discover' action (PR #7) to scan the resulting page for custom
@@ -330,15 +368,20 @@ async function prepareManaged(
   // uses, so the two providers can never answer a question differently.
   const applicationUrl = portalApplicationUrl(portal, current.portal_url!);
   const discoveryResult = await runManagedBrowser(applicationUrl, buildManagedDiscoveryActions(portal, packet)).catch(() => null);
+  const coverLetterSupported = managedResultHasCoverLetterUpload(discoveryResult, portal);
+  packet = await packetForCoverLetterCapability(row, coverLetterSupported);
+  const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
+  const resolutionCurrent = { ...current, questions: storedQuestions };
   const { questions: discoveredQuestions, attentionReasons: discoveryAttention } = await discoverAndResolveQuestions(
     discoveryResult?.discovered ?? [],
     row,
-    current,
+    resolutionCurrent,
     await loadApplicationProfileLike(row.user_id),
     authorization.enabled,
+    portal,
   );
-  const mergedQuestions = [...current.questions, ...discoveredQuestions];
-  packet.questions = [...packet.questions, ...discoveredQuestions.map((q) => ({ question: q.question, answer: q.answer }))];
+  const mergedQuestions = [...storedQuestions, ...discoveredQuestions];
+  packet.questions = mergedQuestions.map((q) => ({ question: q.question, answer: q.answer }));
 
   const result = await runManagedBrowser(applicationUrl, buildManagedPortalActions(portal, packet));
   if (!result.screenshot) throw new Error('Stratus managed browser did not return a preview screenshot');
@@ -368,6 +411,7 @@ async function prepareManaged(
     preview_screenshot_url: preview.url,
     verification: { status: verificationHandoff ? 'handoff' : 'not_needed' },
     questions: mergedQuestions,
+    cover_letter_supported: coverLetterSupported,
     attention_reason: [...blockers, ...discoveryAttention].join('\n') || undefined,
     handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
     submission_error: undefined,
@@ -411,15 +455,18 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
       requestedAt: verificationRequestedAt,
       permissionGranted: verificationSettings?.enabled === true,
     });
-    const packet = await buildPacket(row);
+    const coverLetterSupported = await hasCoverLetterUpload(page, portal);
+    const packet = await packetForCoverLetterCapability(row, coverLetterSupported);
 
     // R-055: discover and resolve the posting's own custom questions before filling, so a
     // dashboard-only submission does not depend on the extension having run first.
     const discovered = await discoverPageQuestions(page).catch(() => []);
+    const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
+    const resolutionCurrent = { ...current, questions: storedQuestions };
     const { questions: discoveredQuestions, attentionReasons: discoveryAttention } =
-      await discoverAndResolveQuestions(discovered, row, current, await loadApplicationProfileLike(row.user_id), authorization.enabled);
-    const mergedQuestions = [...current.questions, ...discoveredQuestions];
-    packet.questions = [...packet.questions, ...discoveredQuestions.map((q) => ({ question: q.question, answer: q.answer }))];
+      await discoverAndResolveQuestions(discovered, row, resolutionCurrent, await loadApplicationProfileLike(row.user_id), authorization.enabled, portal);
+    const mergedQuestions = [...storedQuestions, ...discoveredQuestions];
+    packet.questions = mergedQuestions.map((q) => ({ question: q.question, answer: q.answer }));
 
     let result = await fillPortal(page, portal, packet);
     const postFillVerification = await completeEmailVerificationIfPresent({
@@ -430,6 +477,8 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
       permissionGranted: verificationSettings?.enabled === true,
     });
     if (postFillVerification.status !== 'not_needed') verification = postFillVerification;
+    // Re-scan only after a successful verification so an empty OTP field reported during the
+    // first pass cannot remain as a stale blocker. This does not click the final submit control.
     if (postFillVerification.status === 'completed') result = await fillPortal(page, portal, packet);
     const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
     const preview = await put(`users/${row.user_id}/submission-runs/${runId}/filled.png`, screenshot, {
@@ -457,6 +506,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
         completed_at: verification.status === 'completed' ? new Date().toISOString() : undefined,
       },
       questions: mergedQuestions,
+      cover_letter_supported: coverLetterSupported,
       // Already human on this path, but sanitized anyway so both providers are held to one
       // guarantee and a future change to either cannot quietly reintroduce identifiers.
       attention_reason:
@@ -495,11 +545,12 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
   if (!claimedReview) return;
   if (isManagedStratusProvider()) {
     const portal = detectPortal(claimedReview.portal_url!);
-    const packet = await buildPacket(row);
     if (!await authorizationValidAtClick(row, claimedReview)) {
       await holdRevokedSubmission(row, claimedReview);
       return;
     }
+    const builtPacket = await buildPacket(row);
+    const packet = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
     const result = await runManagedBrowser(portalApplicationUrl(portal, claimedReview.portal_url!), buildManagedPortalActions(portal, packet, true));
     const receipt = readManagedReceipt(result);
     if (!result.screenshot) throw new Error('Stratus managed browser did not return a receipt screenshot');
@@ -537,6 +588,10 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
       await holdRevokedSubmission(row, claimedReview);
       return;
     }
+    const portal = detectPortal(claimedReview.portal_url!);
+    const builtPacket = await buildPacket(row);
+    const packet = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
+    await fillPortal(page, portal, packet);
     await clickFinalSubmit(page);
     const receipt = await readReceipt(page);
     const capturedAt = new Date().toISOString();
@@ -565,12 +620,13 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
 }
 
 async function fail(row: ResumeRow, error: unknown) {
-  const current = readApplicationReview(row.spec);
+  const latestRows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, row.id)).limit(1);
+  const current = latestRows[0] ? readApplicationReview(latestRows[0].spec) : null;
   if (!current) return;
   const message = error instanceof Error ? error.message : 'Submission runner failed';
   const externalGate = /browserbase|stratus managed browser is not configured|secure browser provider is not configured/i.test(message);
   const uncertainAfterClaim = Boolean(current.submission_claimed_at);
-  await writeReview(row, nextReview(current, {
+  await writeReview(latestRows[0], nextReview(current, {
     status: uncertainAfterClaim ? 'needs_attention' : externalGate ? 'submit_requested' : 'failed',
     submission_error: message,
     attention_reason: uncertainAfterClaim

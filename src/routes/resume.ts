@@ -659,10 +659,16 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       .orderBy(desc(generated_resumes.created_at))
       .limit(50);
     const base = apiBaseFor(request);
-    const resumes = rows.map((row) => ({
-      ...row,
-      download_url: `${base}/resume/download?t=${mintDownloadToken(userId, row.resume_object_key)}`,
-    }));
+    const resumes = rows.map((row) => {
+      const coverLetter = ((row.spec as Record<string, unknown>)._cover_letter ?? {}) as Record<string, unknown>;
+      return {
+        ...row,
+        download_url: `${base}/resume/download?t=${mintDownloadToken(userId, row.resume_object_key)}`,
+        cover_letter_download_url: typeof coverLetter.object_key === 'string'
+          ? `${base}/resume/download?t=${mintDownloadToken(userId, coverLetter.object_key)}`
+          : undefined,
+      };
+    });
     return reply.status(200).send({ resumes });
   });
 }

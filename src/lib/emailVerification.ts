@@ -1,7 +1,4 @@
-type ComposioConstructor = typeof import('@composio/core').Composio;
-const { loadComposio } = require('./composioLoader.cjs') as {
-  loadComposio: () => Promise<{ Composio: ComposioConstructor }>;
-};
+import { composioRequest } from './composioApi';
 
 const CODE_CONTEXT = /\b(?:verification|security|authentication|confirmation|one[ -]?time|passcode|otp)\b/i;
 const CODE_PATTERN = /(?<!\d)(\d{4,8})(?!\d)/g;
@@ -43,7 +40,6 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     ? value as Record<string, unknown>
     : null;
 }
-
 function firstString(record: Record<string, unknown>, keys: string[]): string {
   for (const key of keys) {
     const value = record[key];
@@ -219,19 +215,16 @@ export function isAutomaticEmailVerificationConfigured(): boolean {
 }
 
 function defaultExecutor(): EmailToolExecutor {
-  const apiKey = process.env.COMPOSIO_API_KEY?.trim();
-  if (!apiKey) throw new Error('Composio is not configured');
-  const composio = loadComposio()
-    .then(({ Composio }) => new Composio({ apiKey }));
-  return async (tool, input) => {
-    const client = await composio;
-    return client.tools.execute(tool, {
-      userId: input.userId,
+  return async (tool, input) => composioRequest(`/api/v3.1/tools/execute/${encodeURIComponent(tool)}`, {
+    method: 'POST',
+    body: {
+      user_id: input.userId,
       version: input.version,
       arguments: input.arguments,
-      allowTracing: false,
-    }, { signal: AbortSignal.timeout(10_000) });
-  };
+      allow_tracing: false,
+    },
+    signal: AbortSignal.timeout(10_000),
+  });
 }
 
 export async function findComposioVerificationCode(options: {

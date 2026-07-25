@@ -9,10 +9,11 @@ test('a submitted or active application cannot begin another submission run', ()
   assert.equal(submitRequestDisposition('submitting'), 'in_flight');
 });
 
-test('only pre-submission and explicit failure states can start a run', () => {
+test('pre-submit attention can retry, but a post-click uncertainty cannot risk a duplicate application', () => {
   assert.equal(submitRequestDisposition('ready_to_submit'), 'start');
   assert.equal(submitRequestDisposition('failed'), 'start');
-  assert.equal(submitRequestDisposition('needs_attention'), 'reject');
+  assert.equal(submitRequestDisposition('needs_attention', false), 'start');
+  assert.equal(submitRequestDisposition('needs_attention', true), 'reject');
   assert.equal(submitRequestDisposition('ready_for_final_approval'), 'reject');
 });
 
