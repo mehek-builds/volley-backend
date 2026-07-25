@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { put } from '@vercel/blob';
+import type { Page } from 'playwright-core';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db/index';
@@ -15,10 +16,12 @@ import {
   runManagedBrowser,
 } from '../lib/browserbase';
 import {
+  buildManagedDiscoveryActions,
   buildManagedPortalActions,
   clickFinalSubmit,
   detectPortal,
   fillPortal,
+  navigateToApplicationForm,
   portalApplicationUrl,
   readManagedReceipt,
   readReceipt,
@@ -29,6 +32,22 @@ import { sanitizeProviderBlockers } from '../lib/fieldLabel';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { resolveBlobUrl } from '../lib/resumeAccess';
 import { decryptRow } from './applicationProfile';
+import { readExperienceBank } from '../db/experienceBank';
+import { declaredSkillsList } from './profile';
+import { draftApplicationAnswer } from '../llm/applicationAnswer';
+import { isBillingOrAuthFailure } from './resume';
+import {
+  discoverPageQuestions,
+  isOpenEndedQuestion,
+  isRefusedQuestion,
+  resolveKnownAnswer,
+  fitToBudget,
+  WORK_ELIGIBILITY_QUESTION,
+  workEligibilitySkipReason,
+  type ApplicationProfileLike,
+  type DiscoveredQuestion,
+} from '../lib/questionDiscovery';
+import type { ApplicationReviewQuestion } from '../lib/applicationReview';
 
 type ResumeRow = typeof generated_resumes.$inferSelect;
 type StoredSpec = Record<string, unknown>;
@@ -88,6 +107,124 @@ async function buildPacket(row: ResumeRow): Promise<SubmissionPacket> {
   };
 }
 
+// R-055 fix: the dashboard flow used to send only whatever `review.questions` the client already
+// supplied (empty on a fresh dashboard-only run), so a real posting's custom questions - GPA,
+// sponsorship, GitHub, essays - were never attempted. This resolves a raw discovered-question list
+// (however the caller obtained it) against the stored profile, drafts the genuinely open-ended
+// ones through the SAME essay endpoint the extension calls, and otherwise leaves a question alone
+// rather than guess.
+//
+// Provider-agnostic on purpose: the direct-Playwright path gets `discovered` from its own live
+// Page (discoverPageQuestions), and the managed-Stratus path gets it from the 'discover' action's
+// result (buildManagedDiscoveryActions / stratus-browser-cloud PR #7) - this function has no
+// browser dependency of its own, so both callers share one resolution path and can never drift on
+// what counts as an answerable question.
+async function discoverAndResolveQuestions(
+  discovered: DiscoveredQuestion[],
+  row: ResumeRow,
+  current: ApplicationReviewState,
+  ap: ApplicationProfileLike,
+): Promise<{ questions: ApplicationReviewQuestion[]; attentionReasons: string[] }> {
+  const existingLabels = new Set(current.questions.map((q) => q.question.trim().toLowerCase()));
+  const questions: ApplicationReviewQuestion[] = [];
+  const attentionReasons: string[] = [];
+
+  let bank: Awaited<ReturnType<typeof readExperienceBank>> | null = null;
+  let declaredSkills: string[] = [];
+  let school: string | undefined;
+  let gradYear: number | undefined;
+  let company = 'this company';
+  try {
+    company = new URL(current.portal_url!).hostname.replace(/^www\./, '').split('.')[0];
+  } catch {
+    // keep the fallback
+  }
+
+  for (const field of discovered) {
+    const label = field.label;
+    if (existingLabels.has(label)) continue; // already answered by the client or a prior run
+    if (isRefusedQuestion(label)) {
+      if (WORK_ELIGIBILITY_QUESTION.test(label)) attentionReasons.push(workEligibilitySkipReason(label));
+      continue; // EEO/SSN/etc: never answered, never surfaced as a field to fill
+    }
+
+    const known = resolveKnownAnswer(label, field.inputType, ap, current.jd_text);
+    if (known && 'value' in known) {
+      questions.push({ id: randomUUID(), question: label, answer: known.value, kind: 'required', required: false });
+      continue;
+    }
+    if (known && 'skipReason' in known) {
+      attentionReasons.push(known.skipReason);
+      continue;
+    }
+    if (!isOpenEndedQuestion(label)) continue; // not a known field, not an essay: leave it alone
+
+    // Open-ended: draft it through the same in-house endpoint the extension calls, then always
+    // hold it for review (an unreviewed AI draft answering a real employer's question is exactly
+    // what the extension's "AI draft - review before submitting" flag exists to catch).
+    try {
+      if (bank === null) {
+        bank = await readExperienceBank(row.user_id);
+        const [profileRow] = await db.select().from(profiles).where(eq(profiles.user_id, row.user_id)).limit(1);
+        const parsedProfile = profileRow?.parsed_json as { school?: string; grad_year?: number } | undefined;
+        school = parsedProfile?.school;
+        gradYear = parsedProfile?.grad_year;
+        declaredSkills = declaredSkillsList(profileRow?.skills);
+      }
+      if (bank.length === 0) {
+        attentionReasons.push(`open-ended question left for you (no experience bank on file): "${label.slice(0, 60)}"`);
+        continue;
+      }
+      const { answer } = await draftApplicationAnswer(
+        label,
+        company,
+        current.role ?? 'this role',
+        current.jd_text,
+        bank,
+        { school, grad_year: gradYear },
+        declaredSkills,
+      );
+      const fitted = answer ? fitToBudget(answer, field.maxLength ?? 100_000) : null;
+      if (!fitted) {
+        attentionReasons.push(`open-ended question left for you (could not draft a confident answer): "${label.slice(0, 60)}"`);
+        continue;
+      }
+      questions.push({ id: randomUUID(), question: label, answer: fitted, kind: 'essay', required: false });
+      attentionReasons.push(`AI-drafted answer needs your review before this goes out: "${label.slice(0, 60)}"`);
+    } catch (error) {
+      if (isBillingOrAuthFailure(error)) throw error; // this is a real outage, not a per-field skip
+      attentionReasons.push(`open-ended question left for you (draft generation failed): "${label.slice(0, 60)}"`);
+    }
+  }
+
+  return { questions, attentionReasons };
+}
+
+async function loadApplicationProfileLike(userId: string): Promise<ApplicationProfileLike> {
+  const [appRow] = await db.select().from(application_profile).where(eq(application_profile.user_id, userId)).limit(1);
+  const app = appRow ? (decryptRow(appRow) as Record<string, unknown>) : {};
+  const str = (key: string): string | undefined => (typeof app[key] === 'string' ? (app[key] as string) : undefined);
+  return {
+    phone: str('phone'),
+    address_city: str('address_city'),
+    address_state: str('address_state'),
+    address_country: str('address_country'),
+    linkedin_url: str('linkedin_url'),
+    github_url: str('github_url'),
+    portfolio_url: str('portfolio_url'),
+    citizenship: str('citizenship'),
+    date_of_birth: str('date_of_birth'),
+    availability_date: str('availability_date'),
+    availability_term: str('availability_term'),
+    desired_salary: str('desired_salary'),
+    desired_salary_currency: str('desired_salary_currency'),
+    gpa: str('gpa'),
+    gpa_scale: str('gpa_scale'),
+    major: str('major'),
+    referral_source_default: str('referral_source_default'),
+  };
+}
+
 async function prepareManaged(
   row: ResumeRow,
   current: ApplicationReviewState,
@@ -101,7 +238,24 @@ async function prepareManaged(
     submission_error: undefined,
   }));
   const packet = await buildPacket(row);
-  const result = await runManagedBrowser(portalApplicationUrl(portal, current.portal_url!), buildManagedPortalActions(portal, packet));
+
+  // R-055 on the managed path: a cheap first call fills only the fixed fields and asks
+  // stratus-browser-cloud's 'discover' action (PR #7) to scan the resulting page for custom
+  // questions - the only way this path ever sees the live DOM, since /api/run is otherwise
+  // stateless. Resolved through the SAME questionDiscovery.ts logic the direct-Playwright path
+  // uses, so the two providers can never answer a question differently.
+  const applicationUrl = portalApplicationUrl(portal, current.portal_url!);
+  const discoveryResult = await runManagedBrowser(applicationUrl, buildManagedDiscoveryActions(portal, packet)).catch(() => null);
+  const { questions: discoveredQuestions, attentionReasons: discoveryAttention } = await discoverAndResolveQuestions(
+    discoveryResult?.discovered ?? [],
+    row,
+    current,
+    await loadApplicationProfileLike(row.user_id),
+  );
+  const mergedQuestions = [...current.questions, ...discoveredQuestions];
+  packet.questions = [...packet.questions, ...discoveredQuestions.map((q) => ({ question: q.question, answer: q.answer }))];
+
+  const result = await runManagedBrowser(applicationUrl, buildManagedPortalActions(portal, packet));
   if (!result.screenshot) throw new Error('Stratus managed browser did not return a preview screenshot');
   const preview = await put(
     `users/${row.user_id}/submission-runs/${runId}/filled.png`,
@@ -119,11 +273,14 @@ async function prepareManaged(
   // resolution. Live QA proved that gap by showing three raw UUIDs on a real Ashby posting.
   const blockers = sanitizeProviderBlockers(result.blockers ?? []);
   const review = nextReview(current, {
-    status: blockers.length > 0 ? 'needs_attention' : current.submission_authorized_at ? 'submitting' : 'ready_for_final_approval',
+    status: blockers.length > 0 || discoveryAttention.length > 0
+      ? 'needs_attention'
+      : current.submission_authorized_at ? 'submitting' : 'ready_for_final_approval',
     submission_run_id: runId,
     filled_fields: result.filledFields ?? [],
     preview_screenshot_url: preview.url,
-    attention_reason: blockers.join('\n') || undefined,
+    questions: mergedQuestions,
+    attention_reason: [...blockers, ...discoveryAttention].join('\n') || undefined,
     handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
     submission_error: undefined,
   });
@@ -154,7 +311,17 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
       submission_error: undefined,
     }));
     await page.goto(current.portal_url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await navigateToApplicationForm(page, portal); // no-op except SmartRecruiters's JD-page/form-page split
     const packet = await buildPacket(row);
+
+    // R-055: discover and resolve the posting's own custom questions before filling, so a
+    // dashboard-only submission does not depend on the extension having run first.
+    const discovered = await discoverPageQuestions(page).catch(() => []);
+    const { questions: discoveredQuestions, attentionReasons: discoveryAttention } =
+      await discoverAndResolveQuestions(discovered, row, current, await loadApplicationProfileLike(row.user_id));
+    const mergedQuestions = [...current.questions, ...discoveredQuestions];
+    packet.questions = [...packet.questions, ...discoveredQuestions.map((q) => ({ question: q.question, answer: q.answer }))];
+
     const result = await fillPortal(page, portal, packet);
     const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
     const preview = await put(`users/${row.user_id}/submission-runs/${runId}/filled.png`, screenshot, {
@@ -164,15 +331,19 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
       addRandomSuffix: true,
     });
     const review = nextReview(current, {
-      status: result.blockers.length > 0 ? 'needs_attention' : current.submission_authorized_at ? 'submitting' : 'ready_for_final_approval',
+      status: result.blockers.length > 0 || discoveryAttention.length > 0
+        ? 'needs_attention'
+        : current.submission_authorized_at ? 'submitting' : 'ready_for_final_approval',
       submission_run_id: runId,
       browser_context_id: contextId,
       browser_session_id: session.id,
       filled_fields: result.filledFields,
       preview_screenshot_url: preview.url,
+      questions: mergedQuestions,
       // Already human on this path, but sanitized anyway so both providers are held to one
       // guarantee and a future change to either cannot quietly reintroduce identifiers.
-      attention_reason: sanitizeProviderBlockers(result.blockers).join('\n') || undefined,
+      attention_reason:
+        [...sanitizeProviderBlockers(result.blockers), ...discoveryAttention].join('\n') || undefined,
       handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
       submission_error: undefined,
     });
