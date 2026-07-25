@@ -296,7 +296,8 @@ export function detectPortal(rawUrl: string): SupportedPortal {
     (url.hostname === 'trylitos.com' || url.hostname === 'www.trylitos.com' || url.hostname === 'localhost') &&
     url.pathname.startsWith('/qa/portal-submission')
   ) {
-    const board = url.searchParams.get('board')?.toLowerCase();
+    const pathBoard = url.pathname.split('/').filter(Boolean)[2];
+    const board = (url.searchParams.get('board') ?? pathBoard)?.toLowerCase();
     if (board === 'lever') return 'controlled_lever';
     if (board === 'ashby') return 'controlled_ashby';
     if (board === 'smartrecruiters') return 'controlled_smartrecruiters';

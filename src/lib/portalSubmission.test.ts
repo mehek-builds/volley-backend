@@ -88,6 +88,12 @@ test('controlled portal is gated by an explicit server flag', () => {
     detectPortal('https://trylitos.com/qa/portal-submission?board=smartrecruiters'),
     'controlled_smartrecruiters',
   );
+  assert.equal(detectPortal('https://trylitos.com/qa/portal-submission/lever/lever-02'), 'controlled_lever');
+  assert.equal(detectPortal('https://trylitos.com/qa/portal-submission/ashby/ashby-03'), 'controlled_ashby');
+  assert.equal(
+    detectPortal('https://trylitos.com/qa/portal-submission/smartrecruiters/smartrecruiters-04'),
+    'controlled_smartrecruiters',
+  );
   if (previous === undefined) delete process.env.LITOS_ENABLE_TEST_PORTAL;
   else process.env.LITOS_ENABLE_TEST_PORTAL = previous;
 });
