@@ -60,6 +60,25 @@ test('managed controlled-portal actions include reviewed fields, resume upload, 
   assert.equal(actions.find((action) => action.type === 'upload')?.file?.base64, 'cGRm');
 });
 
+test('managed portals upload a tailored cover letter without replacing the resume', () => {
+  for (const portal of ['greenhouse', 'lever', 'ashby'] as const) {
+    const actions = buildManagedPortalActions(portal, {
+      fullName: 'Taylor Example',
+      email: 'taylor@example.com',
+      resume: Buffer.from('resume-pdf'),
+      resumeName: 'resume.pdf',
+      coverLetter: Buffer.from('cover-pdf'),
+      coverLetterName: 'cover-letter.pdf',
+      questions: [],
+    });
+    const uploads = actions.filter((action) => action.type === 'upload');
+    assert.deepEqual(uploads.map((action) => action.label), ['resume', 'cover_letter']);
+    assert.equal(uploads[0]?.file?.name, 'resume.pdf');
+    assert.equal(uploads[1]?.file?.name, 'cover-letter.pdf');
+    assert.notEqual(uploads[0]?.selector, uploads[1]?.selector);
+  }
+});
+
 test('managed receipt requires confirmation language and captures the reference', () => {
   assert.deepEqual(readManagedReceipt({
     title: 'Complete',

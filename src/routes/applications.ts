@@ -238,6 +238,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         ...current,
         questions: parsed.data.questions as ApplicationReviewQuestion[],
         status: 'submit_requested' as const,
+        submission_authorized_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
       await db.update(generated_resumes).set({ spec: { ...stored, _review: next } }).where(eq(generated_resumes.id, row.id));
@@ -280,9 +281,15 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (current.handoff_expires_at && Date.parse(current.handoff_expires_at) < Date.now()) {
         return reply.status(409).send({ error: 'The secure portal session expired. Start the submission again.' });
       }
-      const next = { ...current, status: 'ready_for_final_approval' as const, attention_reason: undefined, updated_at: new Date().toISOString() };
+      const next = {
+        ...current,
+        status: current.submission_authorized_at ? 'submitting' as const : 'ready_for_final_approval' as const,
+        attention_reason: undefined,
+        updated_at: new Date().toISOString(),
+      };
       await db.update(generated_resumes).set({ spec: { ...stored, _review: next } }).where(eq(generated_resumes.id, row.id));
-      return reply.send({ application_id: row.id, review: next });
+      const processed = next.status === 'submitting' ? await processSubmissionApplication(row.id, fastify) : null;
+      return reply.send({ application_id: row.id, review: processed ?? next });
     },
   );
 
@@ -301,7 +308,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         return reply.status(409).send({ error: 'The secure portal session expired. Start the submission again.' });
       }
       const now = new Date().toISOString();
-      const next = { ...current, status: 'submitting' as const, final_approved_at: now, updated_at: now };
+      const next = { ...current, status: 'submitting' as const, final_approved_at: now, submission_authorized_at: current.submission_authorized_at ?? now, updated_at: now };
       await db.update(generated_resumes).set({ spec: { ...stored, _review: next } }).where(eq(generated_resumes.id, row.id));
       const processed = await processSubmissionApplication(row.id, fastify);
       return reply.status(202).send({ application_id: row.id, review: processed ?? next });

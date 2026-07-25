@@ -24,6 +24,8 @@ export type SubmissionPacket = {
   portfolioUrl?: string;
   resume: Buffer;
   resumeName: string;
+  coverLetter?: Buffer;
+  coverLetterName?: string;
   questions: Array<{ question: string; answer: string }>;
 };
 
@@ -64,14 +66,21 @@ function managedFill(
 // whole run one step after the name/email fills were already made optional. Optional means a missing
 // file input degrades to a blocker card; the run never auto-submits, so "resume not attached" is a
 // safe thing to hand back to the human rather than a hard error.
-function managedUpload(actions: ManagedBrowserAction[], selector: string, packet: SubmissionPacket) {
+function managedUpload(
+  actions: ManagedBrowserAction[],
+  selector: string,
+  label: 'resume' | 'cover_letter',
+  file: Buffer | undefined,
+  fileName: string | undefined,
+) {
+  if (!file || !fileName) return;
   actions.push({
     type: 'upload',
     selector,
-    label: 'resume',
+    label,
     optional: true,
     timeout: MANAGED_FILL_TIMEOUT_MS,
-    file: { name: packet.resumeName, mimeType: 'application/pdf', base64: packet.resume.toString('base64') },
+    file: { name: fileName, mimeType: 'application/pdf', base64: file.toString('base64') },
   });
 }
 
@@ -141,7 +150,8 @@ export function buildManagedPortalActions(
     managedFill(actions, '#email, input[name="job_application[email]"]', packet.email, 'email');
     managedFill(actions, '#phone, input[name="job_application[phone]"]', packet.phone, 'phone');
     managedFill(actions, '#candidate-location, input[autocomplete="address-level2"]', packet.city, 'location');
-    managedUpload(actions, '#resume, input[type="file"][name="job_application[resume]"]', packet);
+    managedUpload(actions, '#resume, input[type="file"][name="job_application[resume]"]', 'resume', packet.resume, packet.resumeName);
+    managedUpload(actions, '#cover_letter, input[type="file"][name*="cover_letter" i]', 'cover_letter', packet.coverLetter, packet.coverLetterName);
   } else if (portal === 'lever') {
     managedFill(actions, 'input[name="name"]', packet.fullName, 'name', false);
     managedFill(actions, 'input[name="email"]', packet.email, 'email', false);
@@ -149,7 +159,8 @@ export function buildManagedPortalActions(
     managedFill(actions, 'input[name="urls[LinkedIn]"]', packet.linkedinUrl, 'linkedin');
     managedFill(actions, 'input[name="urls[GitHub]"]', packet.githubUrl, 'github');
     managedFill(actions, 'input[name="urls[Portfolio]"]', packet.portfolioUrl, 'portfolio');
-    managedUpload(actions, 'input[name="resume"][type="file"]', packet);
+    managedUpload(actions, 'input[name="resume"][type="file"]', 'resume', packet.resume, packet.resumeName);
+    managedUpload(actions, 'input[type="file"][name*="cover" i]', 'cover_letter', packet.coverLetter, packet.coverLetterName);
   } else {
     managedFill(actions, 'input[name="_systemfield_name"]', packet.fullName, 'name', false);
     managedFill(actions, 'input[name="_systemfield_email"]', packet.email, 'email', false);
@@ -166,7 +177,8 @@ export function buildManagedPortalActions(
     managedFill(actions, ASHBY_LINKEDIN_SELECTOR, packet.linkedinUrl, 'linkedin');
     managedFill(actions, ASHBY_GITHUB_SELECTOR, packet.githubUrl, 'github');
     managedFill(actions, ASHBY_PORTFOLIO_SELECTOR, packet.portfolioUrl, 'portfolio');
-    managedUpload(actions, 'input[type="file"]', packet);
+    managedUpload(actions, 'input[type="file"][name="_systemfield_resume"], input[type="file"][name*="resume" i], input[type="file"]:not([name*="cover" i])', 'resume', packet.resume, packet.resumeName);
+    managedUpload(actions, 'input[type="file"][name*="cover" i], input[type="file"][aria-label*="cover" i]', 'cover_letter', packet.coverLetter, packet.coverLetterName);
   }
   // See canFillReviewedQuestions: the managed runner throws on any non-text control and ignores
   // `optional`, so a single checkbox takes down a run that had otherwise filled five fields
@@ -245,12 +257,20 @@ async function fillFirst(page: Page, selectors: string[], value: string | undefi
   }
 }
 
-async function uploadFirst(page: Page, selectors: string[], packet: SubmissionPacket, out: string[]) {
+async function uploadFirst(
+  page: Page,
+  selectors: string[],
+  file: Buffer | undefined,
+  fileName: string | undefined,
+  label: 'resume' | 'cover_letter',
+  out: string[],
+) {
+  if (!file || !fileName) return;
   for (const selector of selectors) {
     const field = page.locator(selector).first();
     if ((await field.count()) > 0) {
-      await field.setInputFiles({ name: packet.resumeName, mimeType: 'application/pdf', buffer: packet.resume });
-      out.push('resume');
+      await field.setInputFiles({ name: fileName, mimeType: 'application/pdf', buffer: file });
+      out.push(label);
       return;
     }
   }
@@ -285,7 +305,8 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['#email', 'input[name="job_application[email]"]'], packet.email, 'email', filledFields);
     await fillFirst(page, ['#phone', 'input[name="job_application[phone]"]'], packet.phone, 'phone', filledFields);
     await fillFirst(page, ['#candidate-location', 'input[autocomplete="address-level2"]'], packet.city, 'location', filledFields);
-    await uploadFirst(page, ['#resume', 'input[type="file"][name="job_application[resume]"]'], packet, filledFields);
+    await uploadFirst(page, ['#resume', 'input[type="file"][name="job_application[resume]"]'], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, ['#cover_letter', 'input[type="file"][name*="cover_letter" i]'], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
   } else if (portal === 'lever') {
     await fillFirst(page, ['input[name="name"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="email"]'], packet.email, 'email', filledFields);
@@ -293,7 +314,8 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="urls[LinkedIn]"]'], packet.linkedinUrl, 'linkedin', filledFields);
     await fillFirst(page, ['input[name="urls[GitHub]"]'], packet.githubUrl, 'github', filledFields);
     await fillFirst(page, ['input[name="urls[Portfolio]"]'], packet.portfolioUrl, 'portfolio', filledFields);
-    await uploadFirst(page, ['input[name="resume"][type="file"]'], packet, filledFields);
+    await uploadFirst(page, ['input[name="resume"][type="file"]'], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, ['input[type="file"][name*="cover" i]'], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
   } else {
     await fillFirst(page, ['input[name="_systemfield_name"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="_systemfield_email"]'], packet.email, 'email', filledFields);
@@ -304,7 +326,8 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ASHBY_LINKEDIN_SELECTOR.split(', '), packet.linkedinUrl, 'linkedin', filledFields);
     await fillFirst(page, ASHBY_GITHUB_SELECTOR.split(', '), packet.githubUrl, 'github', filledFields);
     await fillFirst(page, ASHBY_PORTFOLIO_SELECTOR.split(', '), packet.portfolioUrl, 'portfolio', filledFields);
-    await uploadFirst(page, ['input[type="file"]'], packet, filledFields);
+    await uploadFirst(page, ['input[type="file"][name="_systemfield_resume"]', 'input[type="file"][name*="resume" i]', 'input[type="file"]'], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, ['input[type="file"][name*="cover" i]', 'input[type="file"][aria-label*="cover" i]'], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
   }
   await fillReviewedQuestions(page, packet, filledFields);
 

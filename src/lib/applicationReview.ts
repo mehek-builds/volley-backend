@@ -38,6 +38,7 @@ export type ApplicationReviewState = {
   attention_reason?: string;
   handoff_expires_at?: string;
   final_approved_at?: string;
+  submission_authorized_at?: string;
   filled_fields?: string[];
   preview_screenshot_url?: string;
   receipt?: {

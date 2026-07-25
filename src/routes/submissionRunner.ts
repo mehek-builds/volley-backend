@@ -44,6 +44,7 @@ async function writeReview(row: ResumeRow, review: ApplicationReviewState) {
 async function buildPacket(row: ResumeRow): Promise<SubmissionPacket> {
   const stored = row.spec as StoredSpec;
   const contact = (stored._contact ?? {}) as Record<string, unknown>;
+  const coverLetterMeta = (stored._cover_letter ?? {}) as Record<string, unknown>;
   const [userRow, appRow, profileRow] = await Promise.all([
     db.select().from(users).where(eq(users.id, row.user_id)).limit(1),
     db.select().from(application_profile).where(eq(application_profile.user_id, row.user_id)).limit(1),
@@ -58,6 +59,14 @@ async function buildPacket(row: ResumeRow): Promise<SubmissionPacket> {
   const response = await fetch(blobUrl);
   if (!response.ok) throw new Error('Generated resume file could not be downloaded');
   const resume = Buffer.from(await response.arrayBuffer());
+  let coverLetter: Buffer | undefined;
+  if (typeof coverLetterMeta.object_key === 'string') {
+    const coverLetterUrl = await resolveBlobUrl(coverLetterMeta.object_key);
+    if (!coverLetterUrl) throw new Error('Generated cover letter file is unavailable');
+    const coverLetterResponse = await fetch(coverLetterUrl);
+    if (!coverLetterResponse.ok) throw new Error('Generated cover letter file could not be downloaded');
+    coverLetter = Buffer.from(await coverLetterResponse.arrayBuffer());
+  }
   const fullName = String(contact.full_name ?? parsed.full_name ?? '').trim();
   const email = String(contact.email ?? userRow[0]?.email ?? '').trim();
   if (!fullName || !email) throw new Error('Full name and email are required before submission');
@@ -71,6 +80,10 @@ async function buildPacket(row: ResumeRow): Promise<SubmissionPacket> {
     portfolioUrl: typeof app.portfolio_url === 'string' ? app.portfolio_url : undefined,
     resume,
     resumeName: `litos-${row.id}.pdf`,
+    coverLetter,
+    coverLetterName: coverLetter
+      ? String(coverLetterMeta.file_name ?? `litos-${row.id}-cover-letter.pdf`)
+      : undefined,
     questions: review.questions.map((item) => ({ question: item.question, answer: item.answer })),
   };
 }
@@ -106,7 +119,7 @@ async function prepareManaged(
   // resolution. Live QA proved that gap by showing three raw UUIDs on a real Ashby posting.
   const blockers = sanitizeProviderBlockers(result.blockers ?? []);
   const review = nextReview(current, {
-    status: blockers.length > 0 ? 'needs_attention' : 'ready_for_final_approval',
+    status: blockers.length > 0 ? 'needs_attention' : current.submission_authorized_at ? 'submitting' : 'ready_for_final_approval',
     submission_run_id: runId,
     filled_fields: result.filledFields ?? [],
     preview_screenshot_url: preview.url,
@@ -151,7 +164,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
       addRandomSuffix: true,
     });
     const review = nextReview(current, {
-      status: result.blockers.length > 0 ? 'needs_attention' : 'ready_for_final_approval',
+      status: result.blockers.length > 0 ? 'needs_attention' : current.submission_authorized_at ? 'submitting' : 'ready_for_final_approval',
       submission_run_id: runId,
       browser_context_id: contextId,
       browser_session_id: session.id,
@@ -250,9 +263,16 @@ export async function processSubmissionApplication(applicationId: string, fastif
   const row = rows[0];
   if (!row) return null;
   try {
-    const review = readApplicationReview(row.spec);
-    if (review?.status === 'submit_requested') await prepare(row, fastify);
-    if (review?.status === 'submitting') await submit(row, fastify);
+    let workingRow = row;
+    let review = readApplicationReview(workingRow.spec);
+    if (review?.status === 'submit_requested') {
+      await prepare(workingRow, fastify);
+      const preparedRows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, applicationId)).limit(1);
+      if (!preparedRows[0]) return null;
+      workingRow = preparedRows[0];
+      review = readApplicationReview(workingRow.spec);
+    }
+    if (review?.status === 'submitting') await submit(workingRow, fastify);
   } catch (error) {
     fastify.log.error({ error, applicationId: row.id }, 'Application runner step failed');
     await fail(row, error);

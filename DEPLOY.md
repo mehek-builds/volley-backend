@@ -34,6 +34,12 @@ concurrent installer so production reads and writes can continue:
 npm run db:indexes
 ```
 
+Install the career-page monitoring tables before enabling the job feed:
+
+```bash
+DATABASE_URL="<your-neon-pooled-url>" npm run db:job-monitor
+```
+
 ### 3. Import the repo on Vercel
 vercel.com → Add New → Project → import **mehek-builds/volley-backend**.
 Framework preset: **Other**. Leave build/output settings default (Vercel detects
@@ -53,6 +59,7 @@ Set these for Production (and Preview if you want):
 | `REOON_API_KEY` | your Reoon key (optional) |
 | `BOUNCEBAN_API_KEY` | your BounceBan key (optional) |
 | `APOLLO_API_KEY` | your Apollo key (optional fallback) |
+| `JOB_MONITOR_SOURCES_JSON` | JSON array of Greenhouse, Lever, and Ashby company boards to check every 15 minutes |
 | `NODE_ENV` | `production` |
 
 `VERCEL` is set automatically by Vercel. That disables the local listener.
