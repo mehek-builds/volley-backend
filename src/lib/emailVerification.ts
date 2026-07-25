@@ -1,5 +1,3 @@
-import { Composio } from '@composio/core';
-
 const CODE_CONTEXT = /\b(?:verification|security|authentication|confirmation|one[ -]?time|passcode|otp)\b/i;
 const CODE_PATTERN = /(?<!\d)(\d{4,8})(?!\d)/g;
 const MAX_CODE_AGE_MS = 10 * 60_000;
@@ -34,6 +32,14 @@ export type EmailToolExecutor = (
   tool: string,
   input: { userId: string; version: string; arguments: Record<string, unknown> },
 ) => Promise<{ successful: boolean; data: Record<string, unknown>; error?: string | null }>;
+
+type ComposioModule = typeof import('@composio/core');
+
+// TypeScript rewrites import() to require() when compiling CommonJS. Composio is ESM-only, so
+// preserve a native dynamic import and keep the optional integration out of server cold starts.
+const importComposio = new Function('specifier', 'return import(specifier)') as (
+  specifier: string,
+) => Promise<ComposioModule>;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -214,9 +220,10 @@ export function isAutomaticEmailVerificationConfigured(): boolean {
   return Boolean(process.env.COMPOSIO_API_KEY?.trim());
 }
 
-function defaultExecutor(): EmailToolExecutor {
+async function defaultExecutor(): Promise<EmailToolExecutor> {
   const apiKey = process.env.COMPOSIO_API_KEY?.trim();
   if (!apiKey) throw new Error('Composio is not configured');
+  const { Composio } = await importComposio('@composio/core');
   const composio = new Composio({ apiKey });
   return async (tool, input) => composio.tools.execute(tool, {
     userId: input.userId,
@@ -233,7 +240,7 @@ export async function findComposioVerificationCode(options: {
   executor?: EmailToolExecutor;
 }): Promise<VerificationCodeMatch | null> {
   if (!options.executor && !isAutomaticEmailVerificationConfigured()) return null;
-  const execute = options.executor ?? defaultExecutor();
+  const execute = options.executor ?? await defaultExecutor();
   const after = new Date(options.requestedAt.getTime() - CLOCK_SKEW_MS);
   const gmailQuery = `after:${after.toISOString().slice(0, 10).replace(/-/g, '/')} {subject:"verification code" subject:"security code" subject:passcode subject:OTP}`;
 
