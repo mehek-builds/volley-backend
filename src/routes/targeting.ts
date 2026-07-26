@@ -34,9 +34,30 @@ const period = z.string().regex(PERIOD_RE, 'period must look like "summer-2027"'
 export const MAX_CATEGORIES = 3;
 export const MAX_ROLE_TYPES = 2;
 
+/* The eight categories, mirrored from the web app's lib/periods.ts CATEGORIES.
+ *
+ * Closed here as well as there, because the closed list IS the product rule: this steers which
+ * postings a student is shown, and free text produces forty spellings of "SWE" that match nothing.
+ * The column accepted any string up to 40 characters, so the rule lived entirely in the client -
+ * the wrong layer for an invariant the matcher reads. Caught 2026-07-27 when a test harness saved
+ * "engineering", which is not a category, and got a 200.
+ *
+ * Adding a category means adding it in both places. That is the cost of the list being closed, and
+ * it is cheaper than a silently unmatchable preference. */
+export const CATEGORIES = [
+  'software-engineering',
+  'data-ml',
+  'product',
+  'design',
+  'quant-trading',
+  'hardware',
+  'research',
+  'other',
+] as const;
+
 export const targetingBodySchema = z.object({
   categories: z
-    .array(z.string().min(1).max(40))
+    .array(z.enum(CATEGORIES))
     .max(MAX_CATEGORIES, `pick at most ${MAX_CATEGORIES} categories`)
     .nullable()
     .optional(),

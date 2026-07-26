@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { academicSeedFrom } from './profile';
 import { decryptField } from '../lib/fieldCrypto';
 import { gapsFrom } from './onboarding';
+import { CATEGORIES, targetingBodySchema } from './targeting';
 
 /* The gaps screen used to ask every student for a GPA and a major their own upload had just
  * printed. These pin the seeding that stops that, and the two ways it is allowed to say no. */
@@ -56,5 +57,23 @@ describe('the gaps a seeded profile still has', () => {
 
   test('a resume that printed nothing leaves the full six', () => {
     assert.equal(gapsFrom({}).length, 6);
+  });
+});
+
+describe('targeting categories are a closed list on the server too', () => {
+  test('the eight the web app offers are accepted', () => {
+    for (const slug of CATEGORIES) {
+      assert.equal(targetingBodySchema.safeParse({ categories: [slug] }).success, true, slug);
+    }
+  });
+
+  test('a category the matcher has never heard of is rejected, not stored', () => {
+    assert.equal(targetingBodySchema.safeParse({ categories: ['engineering'] }).success, false);
+    assert.equal(targetingBodySchema.safeParse({ categories: ['SWE'] }).success, false);
+  });
+
+  test('an empty list is still valid, because it is what "not chosen yet" saves', () => {
+    assert.equal(targetingBodySchema.safeParse({ categories: [] }).success, true);
+    assert.equal(targetingBodySchema.safeParse({ categories: null }).success, true);
   });
 });
