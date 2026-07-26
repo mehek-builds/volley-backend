@@ -14,14 +14,11 @@ async function main() {
   try {
     await client.query("set lock_timeout = '5s'");
     await client.query("set statement_timeout = '2min'");
-    await client.query('begin');
     await client.query('alter table "users" add column if not exists "google_subject" text');
     await client.query(
-      'create unique index if not exists "users_google_subject_unique" on "users" ("google_subject") where "google_subject" is not null',
+      'create unique index concurrently if not exists "users_google_subject_unique" on "users" ("google_subject") where "google_subject" is not null',
     );
-    await client.query('commit');
   } catch (error) {
-    await client.query('rollback').catch(() => undefined);
     throw error;
   } finally {
     await client.end();

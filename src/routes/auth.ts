@@ -55,6 +55,24 @@ export function googleIsAuthoritativeForEmail(identity: GoogleIdentity): boolean
     identity.email.endsWith(`@${identity.hostedDomain.toLowerCase()}`);
 }
 
+export function googleVerificationFailure(error: unknown): 'invalid' | 'unavailable' {
+  const code = typeof error === 'object' && error !== null && 'code' in error
+    ? String(error.code)
+    : '';
+  if (
+    error instanceof TypeError ||
+    code === 'ERR_JWKS_TIMEOUT' ||
+    code === 'ECONNRESET' ||
+    code === 'ENOTFOUND' ||
+    code === 'ETIMEDOUT'
+  ) {
+    return 'unavailable';
+  }
+  return 'invalid';
+}
+
+export class GoogleVerificationUnavailable extends Error {}
+
 export async function verifyGoogleCredential(
   credential: string,
   clientId: string,
@@ -65,7 +83,10 @@ export async function verifyGoogleCredential(
       issuer: [...GOOGLE_ISSUERS],
     });
     return googleIdentityFromClaims(payload);
-  } catch {
+  } catch (error) {
+    if (googleVerificationFailure(error) === 'unavailable') {
+      throw new GoogleVerificationUnavailable('Google identity verification is unavailable');
+    }
     return null;
   }
 }
@@ -272,7 +293,13 @@ export async function authRoutes(fastify: FastifyInstance) {
       return reply.status(500).send({ error: 'JWT_SIGNING_SECRET not configured' });
     }
 
-    const identity = await verifyGoogleCredential(body.credential, clientId);
+    let identity: GoogleIdentity | null;
+    try {
+      identity = await verifyGoogleCredential(body.credential, clientId);
+    } catch (error) {
+      request.log.warn({ err: error }, 'Google identity verification unavailable');
+      return reply.status(503).send({ error: 'google_auth_unavailable' });
+    }
     if (!identity) {
       return reply.status(401).send({ error: 'invalid_google_credential' });
     }
@@ -296,18 +323,20 @@ export async function authRoutes(fastify: FastifyInstance) {
         // by email, because a stale third-party address could take over data.
         if (!googleIsAuthoritativeForEmail(identity)) return null;
 
-        const byEmail = await tx
-          .select({
-            id: users.id,
-            email: users.email,
-            google_subject: users.google_subject,
-            email_verified: users.email_verified,
-          })
-          .from(users)
-          .where(eq(users.email, identity.email))
-          .limit(1);
-        if (byEmail[0]) {
-          if (byEmail[0].google_subject && byEmail[0].google_subject !== identity.subject) {
+        const linkExistingByEmail = async () => {
+          const byEmail = await tx
+            .select({
+              id: users.id,
+              email: users.email,
+              google_subject: users.google_subject,
+              email_verified: users.email_verified,
+            })
+            .from(users)
+            .where(eq(users.email, identity.email))
+            .limit(1);
+          const existing = byEmail[0];
+          if (!existing) return null;
+          if (existing.google_subject && existing.google_subject !== identity.subject) {
             return null;
           }
           await tx
@@ -315,14 +344,17 @@ export async function authRoutes(fastify: FastifyInstance) {
             .set({
               google_subject: identity.subject,
               email_verified: true,
-              ...(!byEmail[0].email_verified ? { session_valid_from: new Date() } : {}),
+              ...(!existing.email_verified ? { session_valid_from: new Date() } : {}),
             })
-            .where(eq(users.id, byEmail[0].id));
+            .where(eq(users.id, existing.id));
           return {
-            user: { id: byEmail[0].id, email: byEmail[0].email },
+            user: { id: existing.id, email: existing.email },
             isNewUser: false,
           };
-        }
+        };
+
+        const linkedByEmail = await linkExistingByEmail();
+        if (linkedByEmail) return linkedByEmail;
 
         const registration = googleRegistrationValues(identity);
         // Keep first-time Google registration compatible with deployed databases
@@ -349,11 +381,23 @@ export async function authRoutes(fastify: FastifyInstance) {
             ${registration.created_at},
             ${registration.onboarding_completed_at}
           )
+          ON CONFLICT DO NOTHING
           RETURNING id, email
         `);
-        return created.rows[0]
-          ? { user: created.rows[0], isNewUser: true }
-          : null;
+        if (created.rows[0]) return { user: created.rows[0], isNewUser: true };
+
+        // A second valid request can race the first between the lookups and
+        // INSERT. Re-read the winning identity instead of turning a harmless
+        // retry or parallel-tab sign-in into a 500 response.
+        const concurrentBySubject = await tx
+          .select({ id: users.id, email: users.email })
+          .from(users)
+          .where(eq(users.google_subject, identity.subject))
+          .limit(1);
+        if (concurrentBySubject[0]) {
+          return { user: concurrentBySubject[0], isNewUser: false };
+        }
+        return linkExistingByEmail();
       });
 
       if (!googleUser) {

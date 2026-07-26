@@ -5,6 +5,7 @@ import {
   googleRegistrationValues,
   googleIdentityFromClaims,
   googleIsAuthoritativeForEmail,
+  googleVerificationFailure,
   sendVerificationEmail,
   verificationFailure,
 } from './auth';
@@ -64,6 +65,13 @@ describe('Google identity claims', () => {
       created_at: now,
       onboarding_completed_at: null,
     });
+  });
+
+  test('distinguishes invalid credentials from temporary Google verifier failures', () => {
+    assert.equal(googleVerificationFailure(new Error('bad signature')), 'invalid');
+    assert.equal(googleVerificationFailure(new TypeError('fetch failed')), 'unavailable');
+    assert.equal(googleVerificationFailure({ code: 'ERR_JWKS_TIMEOUT' }), 'unavailable');
+    assert.equal(googleVerificationFailure({ code: 'ENOTFOUND' }), 'unavailable');
   });
 });
 
