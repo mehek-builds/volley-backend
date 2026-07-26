@@ -56,6 +56,7 @@
     "db:automatic-verification": "node scripts/apply-automatic-verification-migration.mjs",
     "db:google-auth": "node scripts/apply-google-auth-migration.mjs",
     "db:guest-mode": "node scripts/apply-guest-mode-schema.mjs",
+    "db:lemon-squeezy": "node scripts/apply-lemon-squeezy-schema.mjs",
     "schema:check": "node scripts/check-schema-drift.mjs"
   }
 }
