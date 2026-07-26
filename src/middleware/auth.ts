@@ -6,7 +6,8 @@ import { eq } from 'drizzle-orm';
 
 export interface JWTPayload {
   userId: string;
-  email: string;
+  email?: string;
+  isGuest: boolean;
 }
 
 declare module 'fastify' {
@@ -43,7 +44,7 @@ export async function requireAuth(request: FastifyRequest, reply: FastifyReply) 
     const secretBytes = new TextEncoder().encode(secret);
     const { payload } = await jwtVerify(token, secretBytes);
 
-    if (!payload['userId'] || !payload['email']) {
+    if (!payload['userId']) {
       return reply.status(401).send({ error: 'Invalid token payload' });
     }
 
@@ -55,7 +56,12 @@ export async function requireAuth(request: FastifyRequest, reply: FastifyReply) 
     // a 30-day token minted for that email during a break-glass window dies here.
     // Cost: one indexed PK read per authed request (accepted tradeoff, 2026-07-16).
     const row = await db
-      .select({ session_valid_from: users.session_valid_from })
+      .select({
+        session_valid_from: users.session_valid_from,
+        email: users.email,
+        is_guest: users.is_guest,
+        guest_expires_at: users.guest_expires_at,
+      })
       .from(users)
       .where(eq(users.id, userId))
       .limit(1);
@@ -66,10 +72,17 @@ export async function requireAuth(request: FastifyRequest, reply: FastifyReply) 
     if (issuedBeforeEpoch(payload.iat, row[0].session_valid_from)) {
       return reply.status(401).send({ error: 'Invalid or expired token' });
     }
+    if (row[0].is_guest && row[0].guest_expires_at && row[0].guest_expires_at <= new Date()) {
+      return reply.status(401).send({ error: 'Invalid or expired token' });
+    }
+    if (Boolean(payload['isGuest']) !== row[0].is_guest) {
+      return reply.status(401).send({ error: 'Invalid or expired token' });
+    }
 
     request.jwtPayload = {
       userId,
-      email: payload['email'] as string,
+      ...(row[0].email ? { email: row[0].email } : {}),
+      isGuest: row[0].is_guest,
     };
   } catch (err) {
     return reply.status(401).send({ error: 'Invalid or expired token' });

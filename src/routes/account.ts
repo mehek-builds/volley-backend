@@ -45,10 +45,11 @@ export async function accountRoutes(fastify: FastifyInstance) {
     // rate-limit by email), so it has to be queried - and later deleted - by key explicitly. Both
     // keys: auth.ts rate-limits the pre-auth endpoints by EMAIL, so an export keyed only on the
     // user id would omit rows we hold about her.
+    const counterKeys = request.jwtPayload!.email ? [userId, request.jwtPayload!.email] : [userId];
     const counters = await db
       .select()
       .from(usage_counters)
-      .where(inArray(usage_counters.key, [userId, request.jwtPayload!.email]));
+      .where(inArray(usage_counters.key, counterKeys));
 
     const base = apiBaseFor(request);
 
@@ -84,7 +85,7 @@ export async function accountRoutes(fastify: FastifyInstance) {
   // DELETE /account - irreversible. Requires the caller to echo their own email in the body:
   // a bare authed DELETE is one mis-wired client away from destroying an account by accident,
   // and there is no undo behind this.
-  const deleteSchema = z.object({ confirm_email: z.string().min(1) });
+  const deleteSchema = z.object({ confirm_email: z.string().min(1).optional(), confirm_guest: z.literal('DELETE').optional() });
 
   fastify.delete('/account', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
@@ -92,9 +93,12 @@ export async function accountRoutes(fastify: FastifyInstance) {
 
     const parsed = deleteSchema.safeParse(request.body);
     if (!parsed.success) {
-      return reply.status(400).send({ error: 'Send { confirm_email } matching your account email to confirm' });
+      return reply.status(400).send({ error: 'Send account confirmation to continue' });
     }
-    if (parsed.data.confirm_email.trim().toLowerCase() !== email.toLowerCase()) {
+    if (request.jwtPayload!.isGuest && parsed.data.confirm_guest !== 'DELETE') {
+      return reply.status(400).send({ error: 'Send { confirm_guest: "DELETE" } to confirm' });
+    }
+    if (!request.jwtPayload!.isGuest && (!email || parsed.data.confirm_email?.trim().toLowerCase() !== email.toLowerCase())) {
       return reply.status(400).send({ error: 'confirm_email does not match your account email' });
     }
 
@@ -121,8 +125,9 @@ export async function accountRoutes(fastify: FastifyInstance) {
       // `allowHourly(email, ...)` for session/request-code/verify-code. Deleting only the userId
       // rows left every one of those keyed by her email address, tying her address to a deleted
       // account forever, with nothing else in the codebase that would ever purge them.
-      await db.delete(usage_counters).where(inArray(usage_counters.key, [userId, email]));
-      await db.delete(email_verification_codes).where(eq(email_verification_codes.email, email));
+      const counterKeys = email ? [userId, email] : [userId];
+      await db.delete(usage_counters).where(inArray(usage_counters.key, counterKeys));
+      if (email) await db.delete(email_verification_codes).where(eq(email_verification_codes.email, email));
       // Cascades to profiles, application_profile, experience_bank, generated_resumes,
       // outreach_events and autofill_events; learning_signals is onDelete:'set null', which
       // anonymizes those aggregate rows rather than keeping them tied to a deleted account.

@@ -69,10 +69,10 @@ export function declaredSkillsList(value: unknown): string[] {
 // profile, and the R-015 fix reached the resume only. A non-empty declared list now overrides
 // parsed_json.skills; parsed_json stays the fallback so un-onboarded users (skills = NULL) are
 // served exactly what they were before.
-export function serveProfileJson(parsedJson: unknown, declaredSkills: unknown, email: string): Record<string, unknown> {
+export function serveProfileJson(parsedJson: unknown, declaredSkills: unknown, email?: string): Record<string, unknown> {
   const base = (parsedJson && typeof parsedJson === 'object' ? parsedJson : {}) as Record<string, unknown>;
   const declared = declaredSkillsList(declaredSkills);
-  return { ...base, ...(declared.length > 0 ? { skills: declared } : {}), email };
+  return { ...base, ...(declared.length > 0 ? { skills: declared } : {}), ...(email ? { email } : {}) };
 }
 
 // ParsedProfile -> experience_bank rows.
