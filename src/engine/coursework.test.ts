@@ -72,6 +72,12 @@ describe('the strong-verb gate', () => {
     'Fabricated the mounting bracket from sheet aluminium.',
     'Programmed the flight controller in C.',
     'Debugged the race condition in the scheduler.',
+    'Recorded field data using tablets with Fulcrum.',
+    'Compiled the quarterly species count into one report.',
+    'Wrote the onboarding guide for incoming volunteers.',
+    'Reviewed 200 grant applications against the funding rubric.',
+    'Estimated the load case for the revised bracket.',
+    'Soldered the sensor harness for the test rig.',
   ];
   for (const bullet of admitted) {
     test(`accepts ${bullet.split(' ')[0]}`, () => {
@@ -86,6 +92,10 @@ describe('the strong-verb gate', () => {
     'Worked on the onboarding flow.',
     'Participated in the weekly standup.',
     'Responsible for the lab inventory.',
+    // Considered under the synonym rule and deliberately left out: nothing admitted means what
+    // these mean, and both describe custody rather than an act.
+    'Maintained the lab inventory spreadsheet.',
+    'Selected samples for the second round.',
   ];
   for (const bullet of rejected) {
     test(`still rejects ${bullet.split(' ')[0]}`, () => {

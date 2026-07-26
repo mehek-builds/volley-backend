@@ -38,6 +38,23 @@ import { deriveCandidateContext, resumeSafeTargetRole, type CandidateEducation }
  *    So the additions below are strictly SYNONYMS OF ADMITTED VERBS, each one named against the
  *    verb it matches. Nothing is admitted because it appeared in a resume; only because rejecting
  *    it while accepting its twin was incoherent.
+ *
+ *    First batch, against the verb each one twins: performed/conducted, operated/ran,
+ *    assessed/evaluated, simulated/modeled, prototyped/built, fabricated and machined against
+ *    constructed and assembled, programmed and coded against developed, debugged/diagnosed,
+ *    refactored/rebuilt, migrated/transformed, tested/validated.
+ *
+ *    Second batch, added after "Recorded field data using tablets" was flagged in the same run
+ *    while documented, tracked and catalogued were all admitted. Rather than wait for each
+ *    remaining resume to surface one more, the whole recording-and-reporting family was closed:
+ *    recorded and logged against documented and tracked, compiled against catalogued, wrote
+ *    against authored and drafted, installed against deployed, reviewed against audited, tuned
+ *    against calibrated, estimated against forecasted, computed against quantified, soldered and
+ *    welded against assembled, iterated against refined.
+ *
+ *    The line that decides an addition is whether an already-admitted verb means the same thing.
+ *    "maintained" and "selected" were considered under this rule and left out: nothing on the list
+ *    means what they mean, and both describe custody rather than an act.
  */
 export const STRONG_VERBS = new Set(
   `built shipped designed engineered developed led drove owned launched analyzed
@@ -56,7 +73,8 @@ staffed scheduled onboarded fundraised campaigned organized administered process
 treated triaged screened rehabilitated cultivated consulted elected guided collected
 constructed assembled purified sequenced cultured calibrated administered dissected determined reported
 performed operated assessed simulated tested prototyped fabricated machined programmed coded
-debugged refactored migrated`
+debugged refactored migrated
+recorded logged compiled wrote installed reviewed tuned estimated computed soldered welded iterated`
     .split(/\s+/)
     .filter(Boolean),
 );
