@@ -40,6 +40,55 @@ export const educationPatchSchema = z
   })
   .refine((value) => Object.keys(value).length > 0, { message: 'Send at least one field to update' });
 
+/* Tokens that end in a period without ending a sentence. Without these, splitting on ". " turns
+ * "ZymoGenetics, Inc. Executed a DNA fingerprinting project" into two bullets and cuts the employer
+ * name in half. Degrees are here for the same reason resumes are full of them. */
+const NON_TERMINAL_ABBREVIATIONS = new Set([
+  'inc', 'ltd', 'llc', 'llp', 'corp', 'co', 'plc', 'gmbh',
+  'dr', 'mr', 'mrs', 'ms', 'prof', 'st', 'jr', 'sr',
+  'vs', 'etc', 'approx', 'dept', 'univ', 'no', 'fig', 'est',
+  'ph.d', 'm.s', 'b.s', 'b.a', 'm.a', 'm.b.a', 'u.s', 'u.k', 'e.g', 'i.e', 'a.m', 'p.m',
+]);
+
+/* One prose paragraph split back into the bullets a resume actually printed.
+ *
+ * WHY THIS EXISTS. The parser returns each role's `description` as prose - the resume's separate
+ * bullet points run together into one string with no newlines - so splitting on newlines alone
+ * produced exactly ONE variant per role, every time. Measured 2026-07-27 on a real 2-page CV: all
+ * ten bank entries came back with a single bullet_variant, each one a run-on of three or four
+ * distinct achievements.
+ *
+ * That quietly defeats the bank. Its whole point is one record per role holding every phrasing of
+ * it, so /resume/generate has something to choose between; with one giant variant there is nothing
+ * to choose. Worse, the grounding pass checks each generated bullet against these variants, and a
+ * model that (correctly) wrote three bullets out of the blob had one of them pruned as unsupported
+ * - a real achievement, off the student's own resume, dropped from their resume.
+ *
+ * Sentence splitting is CONSERVATIVE by design. A split that fires where it should not corrupts a
+ * bullet, while one that fails to fire only leaves the old behaviour, so every ambiguous case is
+ * resolved by not splitting: a period is a boundary only when the next character is a capital and
+ * the word before it is neither an initial nor a known abbreviation.
+ */
+export function splitSentences(line: string): string[] {
+  const pieces = line.split(/(?<=[.!?])\s+(?=[A-Z(])/);
+  const out: string[] = [];
+  for (const piece of pieces) {
+    const previous = out[out.length - 1];
+    if (previous !== undefined) {
+      const tail = previous.replace(/[)\]"']+$/, '');
+      const lastWord = tail.slice(0, -1).split(/[\s]/).pop()?.toLowerCase() ?? '';
+      // "A." is an initial, not the end of a sentence. Abbreviations are the same case by list.
+      const isInitial = /^\p{L}$/u.test(lastWord);
+      if (tail.endsWith('.') && (isInitial || NON_TERMINAL_ABBREVIATIONS.has(lastWord))) {
+        out[out.length - 1] = `${previous} ${piece}`;
+        continue;
+      }
+    }
+    out.push(piece);
+  }
+  return out.map((s) => s.trim()).filter(Boolean);
+}
+
 // A resume's description blob rendered as bullet variants. Resumes are written as bullets, and
 // the bank's whole point is one record per role holding every phrasing of it, so a single
 // newline-joined string collapses the structure /resume/generate exists to choose between.
@@ -49,7 +98,12 @@ export function toBullets(description: string): string[] {
     .split(/\r?\n/)
     .map((l) => l.replace(/^\s*[-•·*•]\s*/, '').trim())
     .filter((l) => l.length > 0);
-  return lines.length > 0 ? lines : [description.trim()].filter((l) => l.length > 0);
+  // Newlines are the reliable signal and are used whenever they are there. Sentences are the
+  // fallback for the common case where the parse returned prose, and are applied per line so a
+  // resume that gives us both structures keeps its own.
+  const bullets = lines.flatMap((line) => splitSentences(line));
+  if (bullets.length > 0) return bullets;
+  return [description.trim()].filter((l) => l.length > 0);
 }
 
 // The student's DECLARED skills (profiles.skills), filtered to non-empty strings. Same filtering

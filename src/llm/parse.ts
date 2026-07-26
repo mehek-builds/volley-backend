@@ -89,6 +89,10 @@ The JSON must match this exact shape:
 Rules:
 - "full_name" is the applicant's name from the resume header, not a company or school name
 - "end" should be "Present" if the role is current
+- "description" must keep the resume's own bullet structure: one printed bullet per line, separated
+  by a newline character, with the bullet marker itself removed. Do not merge separate bullets into
+  a paragraph. Each bullet is a distinct achievement, and running them together destroys the only
+  structure the resume gave us.
 - Preserve the education wording from the uploaded resume. Do not upgrade or infer a degree.
 - "degree" is the degree line copied VERBATIM from the Education section. Carry BOTH halves of a
   joint or dual degree; keep every field, emphasis or concentration exactly as printed and in the
