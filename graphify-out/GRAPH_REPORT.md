@@ -1,11 +1,11 @@
 # Graph Report - .  (2026-07-26)
 
 ## Corpus Check
-- 123 files · ~102,096 words
+- 123 files · ~102,836 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 538 nodes · 984 edges · 21 communities detected
+- 542 nodes · 990 edges · 21 communities detected
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS
 - Token cost: 0 input · 0 output
 
@@ -28,7 +28,7 @@
 
 ### Community 0 - "Community 0"
 Cohesion: 0.04
-Nodes (21): buildVerificationEmail(), hashCode(), issuedBeforeEpoch(), requireAuth(), sendVerificationEmail(), verificationFailure(), verificationSender(), buildApp() (+13 more)
+Nodes (25): buildVerificationEmail(), googleIdentityFromClaims(), googleRegistrationValues(), hashCode(), issuedBeforeEpoch(), requireAuth(), sendVerificationEmail(), trialEnd() (+17 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.05
@@ -67,24 +67,24 @@ Cohesion: 0.1
 Nodes (5): fetchSourceJobs(), normalizeAshbyJobs(), normalizeGreenhouseJobs(), normalizeLeverJobs(), sourceEndpoint()
 
 ### Community 10 - "Community 10"
-Cohesion: 0.13
-Nodes (13): buildContextBlock(), draftApplicationAnswer(), normalizeDraftedAnswer(), rankingGroundingFor(), rankingRuleText(), thinRankingWarning(), extractRankedItems(), metricTokens() (+5 more)
-
-### Community 11 - "Community 11"
 Cohesion: 0.22
 Nodes (18): authorizationValidAtClick(), buildPacket(), claimPreparation(), claimSubmission(), discoverAndResolveQuestions(), fail(), holdRevokedSubmission(), loadApplicationProfileLike() (+10 more)
+
+### Community 11 - "Community 11"
+Cohesion: 0.13
+Nodes (13): buildContextBlock(), draftApplicationAnswer(), normalizeDraftedAnswer(), rankingGroundingFor(), rankingRuleText(), thinRankingWarning(), extractRankedItems(), metricTokens() (+5 more)
 
 ### Community 12 - "Community 12"
 Cohesion: 0.16
 Nodes (14): describeRequiredBlocker(), describeUnlabelledBlockers(), humanFieldLabel(), isOpaqueIdentifier(), sanitizeProviderBlockers(), tidyLabel(), classifyField(), isFixedPortalProfileField() (+6 more)
 
 ### Community 13 - "Community 13"
-Cohesion: 0.14
-Nodes (10): apiBase(), apiKey(), composioRequest(), authConfigId(), composioClient(), createEmailConnectionLink(), disconnectEmailProvider(), emailConnectionCallbackUrl() (+2 more)
-
-### Community 14 - "Community 14"
 Cohesion: 0.23
 Nodes (17): collectCurrencies(), currencyPrefixAt(), dedupeRanges(), detectCurrency(), findStatedRanges(), groupDigits(), isProseSalary(), mapCurrencyToken() (+9 more)
+
+### Community 14 - "Community 14"
+Cohesion: 0.14
+Nodes (10): apiBase(), apiKey(), composioRequest(), authConfigId(), composioClient(), createEmailConnectionLink(), disconnectEmailProvider(), emailConnectionCallbackUrl() (+2 more)
 
 ### Community 15 - "Community 15"
 Cohesion: 0.15

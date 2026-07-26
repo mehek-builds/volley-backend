@@ -17,6 +17,9 @@ export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
   email: text('email').unique().notNull(),
   email_verified: boolean('email_verified').default(false),
+  // Stable Google identity. Google explicitly requires account linkage by the
+  // immutable `sub` claim, never by an email address that can change.
+  google_subject: text('google_subject').unique(),
   // Billing: 'free' | 'pro' ('plus' is a legacy alias, treated as 'pro' - see quota.ts).
   // Every feature (outreach + resume-gen/autofill) is available on 'free', including 20
   // resume generations per month (recurring, Apollo.io-style credits, not a one-time

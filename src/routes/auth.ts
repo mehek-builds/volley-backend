@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { SignJWT } from 'jose';
+import { createRemoteJWKSet, jwtVerify, SignJWT, type JWTPayload as JoseJWTPayload } from 'jose';
 import { createHash, randomInt } from 'node:crypto';
 import { db } from '../db/index';
 import { users, email_verification_codes } from '../db/schema';
@@ -18,12 +18,81 @@ const verifyBodySchema = z.object({
   code: z.string().regex(/^\d{6}$/),
 });
 
+const googleBodySchema = z.object({
+  credential: z.string().min(1).max(10_000),
+});
+
+const GOOGLE_ISSUERS = ['accounts.google.com', 'https://accounts.google.com'] as const;
+const googleKeys = createRemoteJWKSet(new URL('https://www.googleapis.com/oauth2/v3/certs'));
+
+export type GoogleIdentity = {
+  subject: string;
+  email: string;
+  hostedDomain: string | null;
+};
+
+export function googleIdentityFromClaims(payload: JoseJWTPayload): GoogleIdentity | null {
+  if (
+    typeof payload.sub !== 'string' ||
+    payload.sub.length === 0 ||
+    typeof payload.email !== 'string' ||
+    !z.string().email().safeParse(payload.email).success ||
+    payload.email_verified !== true
+  ) {
+    return null;
+  }
+
+  return {
+    subject: payload.sub,
+    email: payload.email.toLowerCase(),
+    hostedDomain: typeof payload.hd === 'string' && payload.hd.length > 0 ? payload.hd : null,
+  };
+}
+
+export function googleIsAuthoritativeForEmail(identity: GoogleIdentity): boolean {
+  if (identity.email.endsWith('@gmail.com')) return true;
+  return identity.hostedDomain !== null &&
+    identity.email.endsWith(`@${identity.hostedDomain.toLowerCase()}`);
+}
+
+export async function verifyGoogleCredential(
+  credential: string,
+  clientId: string,
+): Promise<GoogleIdentity | null> {
+  try {
+    const { payload } = await jwtVerify(credential, googleKeys, {
+      audience: clientId,
+      issuer: [...GOOGLE_ISSUERS],
+    });
+    return googleIdentityFromClaims(payload);
+  } catch {
+    return null;
+  }
+}
+
 const CODE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
-function trialEnd(): Date {
-  return new Date(Date.now() + TRIAL_DAYS * 24 * 60 * 60 * 1000);
+function trialEnd(now = new Date()): Date {
+  return new Date(now.getTime() + TRIAL_DAYS * 24 * 60 * 60 * 1000);
 }
 const MAX_ATTEMPTS = 5;
+
+export function googleRegistrationValues(
+  identity: GoogleIdentity,
+  now = new Date(),
+  id = uuidv4(),
+) {
+  return {
+    id,
+    email: identity.email,
+    email_verified: true,
+    google_subject: identity.subject,
+    plan: 'free',
+    trial_ends_at: trialEnd(now),
+    created_at: now,
+    onboarding_completed_at: null,
+  };
+}
 
 type VerificationRecord = {
   code_hash: string;
@@ -185,6 +254,92 @@ export async function sendVerificationEmail(
 }
 
 export async function authRoutes(fastify: FastifyInstance) {
+  // Exchange a Google Identity Services ID token for the same Litos session
+  // used by email-code sign-in and the Chrome extension.
+  fastify.post('/auth/google', async (request: FastifyRequest, reply: FastifyReply) => {
+    let body: z.infer<typeof googleBodySchema>;
+    try {
+      body = googleBodySchema.parse(request.body);
+    } catch {
+      return reply.status(400).send({ error: 'A Google credential is required' });
+    }
+
+    const clientId = process.env.GOOGLE_CLIENT_ID?.trim();
+    if (!clientId) {
+      return reply.status(503).send({ error: 'google_auth_unavailable' });
+    }
+    if (!process.env.JWT_SIGNING_SECRET) {
+      return reply.status(500).send({ error: 'JWT_SIGNING_SECRET not configured' });
+    }
+
+    const identity = await verifyGoogleCredential(body.credential, clientId);
+    if (!identity) {
+      return reply.status(401).send({ error: 'invalid_google_credential' });
+    }
+
+    try {
+      const googleUser = await db.transaction(async (tx) => {
+        const bySubject = await tx
+          .select()
+          .from(users)
+          .where(eq(users.google_subject, identity.subject))
+          .limit(1);
+        if (bySubject[0]) {
+          return {
+            user: { id: bySubject[0].id, email: bySubject[0].email },
+            isNewUser: false,
+          };
+        }
+
+        // Google warns that it is not authoritative for a non-Gmail address
+        // outside Google Workspace. Do not merge that identity into an account
+        // by email, because a stale third-party address could take over data.
+        if (!googleIsAuthoritativeForEmail(identity)) return null;
+
+        const byEmail = await tx.select().from(users).where(eq(users.email, identity.email)).limit(1);
+        if (byEmail[0]) {
+          if (byEmail[0].google_subject && byEmail[0].google_subject !== identity.subject) {
+            return null;
+          }
+          await tx
+            .update(users)
+            .set({
+              google_subject: identity.subject,
+              email_verified: true,
+              ...(!byEmail[0].email_verified ? { session_valid_from: new Date() } : {}),
+            })
+            .where(eq(users.id, byEmail[0].id));
+          return {
+            user: { id: byEmail[0].id, email: byEmail[0].email },
+            isNewUser: false,
+          };
+        }
+
+        const created = await tx
+          .insert(users)
+          .values(googleRegistrationValues(identity))
+          .returning({ id: users.id, email: users.email });
+        return created[0]
+          ? { user: created[0], isNewUser: true }
+          : null;
+      });
+
+      if (!googleUser) {
+        return reply.status(409).send({ error: 'google_email_requires_verification' });
+      }
+
+      const token = await signSessionToken(googleUser.user.id, googleUser.user.email);
+      return reply.status(200).send({
+        token,
+        email: googleUser.user.email,
+        is_new_user: googleUser.isNewUser,
+      });
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ error: 'Failed to sign in with Google' });
+    }
+  });
+
   // Legacy passwordless session, used by extension v0.1.0 (the build under store
   // review). Kept so installed clients keep working; remove once v0.2.0 (code
   // verification) is the published version.
