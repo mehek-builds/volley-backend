@@ -154,8 +154,12 @@ const UNMETERED_PATHS = new Set(['/health', '/v1/meta', '/install', '/privacy'])
 
 export function policyForRequest(method: string, path: string, config: RateLimitConfig): RateLimitPolicy | null {
   if (method === 'OPTIONS' || UNMETERED_PATHS.has(path)) return null;
-  if (path === '/auth/request-code' || path === '/auth/session') return config.authStart;
-  if (path === '/auth/verify-code') return config.authVerify;
+  if (path === '/auth/request-code' || path === '/auth/session' || path === '/auth/password/login') {
+    return config.authStart;
+  }
+  if (path === '/auth/verify-code' || path === '/auth/google' || path === '/auth/password') {
+    return config.authVerify;
+  }
   if (path === '/resume/download') return config.download;
   return config.general;
 }

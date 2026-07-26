@@ -1,10 +1,90 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildVerificationEmail, sendVerificationEmail, verificationFailure } from './auth';
+import {
+  buildVerificationEmail,
+  googleRegistrationValues,
+  googleIdentityFromClaims,
+  googleIsAuthoritativeForEmail,
+  googleVerificationFailure,
+  isRecentVerification,
+  sendVerificationEmail,
+  verificationFailure,
+} from './auth';
 import { createHash } from 'node:crypto';
 
 const EMAIL = 'person@example.com';
 const CODE = '123456';
+
+test('password recovery requires a fresh Google or email-code verification', () => {
+  const now = 2_000_000;
+  assert.equal(isRecentVerification('email_code', now - 899, now), true);
+  assert.equal(isRecentVerification('google', now - 900, now), true);
+  assert.equal(isRecentVerification('email_code', now - 901, now), false);
+  assert.equal(isRecentVerification('password', now, now), false);
+  assert.equal(isRecentVerification('legacy', now, now), false);
+  assert.equal(isRecentVerification('google', now + 1, now), false);
+});
+
+describe('Google identity claims', () => {
+  test('accepts a verified Google identity and normalizes its email', () => {
+    assert.deepEqual(
+      googleIdentityFromClaims({ sub: 'google-123', email: 'Person@Gmail.com', email_verified: true }),
+      { subject: 'google-123', email: 'person@gmail.com', hostedDomain: null },
+    );
+  });
+
+  test('rejects identities without a stable subject or verified email', () => {
+    assert.equal(googleIdentityFromClaims({ email: EMAIL, email_verified: true }), null);
+    assert.equal(googleIdentityFromClaims({ sub: 'google-123', email: EMAIL, email_verified: false }), null);
+    assert.equal(googleIdentityFromClaims({ sub: 'google-123', email: 'not-an-email', email_verified: true }), null);
+  });
+
+  test('only treats Gmail and Google Workspace addresses as authoritative', () => {
+    assert.equal(
+      googleIsAuthoritativeForEmail({ subject: '1', email: 'person@gmail.com', hostedDomain: null }),
+      true,
+    );
+    assert.equal(
+      googleIsAuthoritativeForEmail({ subject: '2', email: 'person@company.com', hostedDomain: 'company.com' }),
+      true,
+    );
+    assert.equal(
+      googleIsAuthoritativeForEmail({ subject: '3', email: 'person@yahoo.com', hostedDomain: null }),
+      false,
+    );
+    assert.equal(
+      googleIsAuthoritativeForEmail({ subject: '4', email: 'person@other.com', hostedDomain: 'company.com' }),
+      false,
+    );
+  });
+
+  test('builds a complete first-time registration with trial and onboarding defaults', () => {
+    const now = new Date('2026-07-26T08:00:00.000Z');
+    const registration = googleRegistrationValues(
+      { subject: 'google-new-user', email: 'new.user@gmail.com', hostedDomain: null },
+      now,
+      '00000000-0000-4000-8000-000000000001',
+    );
+
+    assert.deepEqual(registration, {
+      id: '00000000-0000-4000-8000-000000000001',
+      email: 'new.user@gmail.com',
+      email_verified: true,
+      google_subject: 'google-new-user',
+      plan: 'free',
+      trial_ends_at: new Date('2026-08-02T08:00:00.000Z'),
+      created_at: now,
+      onboarding_completed_at: null,
+    });
+  });
+
+  test('distinguishes invalid credentials from temporary Google verifier failures', () => {
+    assert.equal(googleVerificationFailure(new Error('bad signature')), 'invalid');
+    assert.equal(googleVerificationFailure(new TypeError('fetch failed')), 'unavailable');
+    assert.equal(googleVerificationFailure({ code: 'ERR_JWKS_TIMEOUT' }), 'unavailable');
+    assert.equal(googleVerificationFailure({ code: 'ENOTFOUND' }), 'unavailable');
+  });
+});
 
 function withEnv(vars: Record<string, string | undefined>, fn: () => void) {
   const saved: Record<string, string | undefined> = {};

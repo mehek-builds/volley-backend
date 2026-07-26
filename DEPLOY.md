@@ -52,6 +52,7 @@ Set these for Production (and Preview if you want):
 |-----|-------|
 | `DATABASE_URL` | your Neon/Vercel Postgres **pooled** URL |
 | `JWT_SIGNING_SECRET` | any 32+ char random string |
+| `GOOGLE_CLIENT_ID` | Google OAuth web client ID, must match the website's `NEXT_PUBLIC_GOOGLE_CLIENT_ID` |
 | `ENCRYPTION_KEY` | any 32+ char random string, encrypts `application_profile` columns at rest |
 | `BLOB_READ_WRITE_TOKEN` | Vercel Storage tab -> Create -> Blob; stores generated resume files |
 | `ANTHROPIC_API_KEY` | your Anthropic key |
@@ -60,7 +61,54 @@ Set these for Production (and Preview if you want):
 | `BOUNCEBAN_API_KEY` | your BounceBan key (optional) |
 | `APOLLO_API_KEY` | your Apollo key (optional fallback) |
 | `JOB_MONITOR_SOURCES_JSON` | JSON array of Greenhouse, Lever, and Ashby company boards to check every 15 minutes |
+| `LEMONSQUEEZY_CHECKOUT_URL` | reusable live product URL containing `/checkout/buy/` |
+| `LEMONSQUEEZY_VARIANT_ID` | numeric ID of the $49.99 monthly Pro variant |
+| `LEMONSQUEEZY_WEBHOOK_SECRET` | signing secret configured on the Lemon Squeezy webhook |
 | `NODE_ENV` | `production` |
+
+Before enabling Google sign-in, add the identity column without touching existing users:
+
+```bash
+npm run db:google-auth
+```
+
+Before deploying password-auth code, apply its additive migration first:
+
+```bash
+vercel env run -e production -- node scripts/apply-password-auth-migration.mjs
+```
+
+The migration adds nullable `password_hash` and non-null `session_version`
+columns. It is safe to run more than once and old application versions ignore
+both columns, so the required order is migration first, API deploy second, web
+deploy last. Roll back application code without rolling back these columns.
+
+Password authentication uses these contracts:
+
+- `POST /auth/password/login` accepts `{ "email": "...", "password": "..." }`.
+  It returns `{ "token": "...", "email": "..." }` or the same
+  `invalid_credentials` response for an unknown email and a wrong password.
+- `PUT /auth/password` requires a Bearer session and accepts
+  `{ "password": "...", "current_password": "..." }`. A Google or email-code
+  session issued within the last 15 minutes may omit `current_password` for
+  first-time setup or recovery.
+- A successful password update rotates `session_version`. The response token
+  replaces the caller's old token, and every older token becomes invalid.
+- Passwords are normalized with Unicode NFC, must be 15 to 128 characters, and
+  are stored only as salted Argon2id hashes. Configure the rate-limit variables
+  documented in `.env.example` when production needs limits other than defaults.
+
+Before enabling Lemon Squeezy checkout, add the subscription state columns:
+
+```bash
+npm run db:lemon-squeezy
+```
+
+In Lemon Squeezy, configure a webhook at
+`https://student-outreach-backend.vercel.app/billing/lemonsqueezy-webhook` and
+subscribe to `subscription_created` and `subscription_updated`. Use the same
+secret for the webhook and `LEMONSQUEEZY_WEBHOOK_SECRET`. Keep
+`LEMONSQUEEZY_ACCEPT_TEST_MODE` unset in production.
 
 `VERCEL` is set automatically by Vercel. That disables the local listener.
 Do **not** set `PORT`/`HOST` (serverless ignores them).

@@ -11,20 +11,45 @@ import {
   index,
   uniqueIndex,
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 
 // ---- users ----
 export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
-  email: text('email').unique().notNull(),
+  // Guests are real authenticated principals with no email. A verified email is
+  // attached in-place when a first-time guest claims the workspace.
+  email: text('email').unique(),
   email_verified: boolean('email_verified').default(false),
+  is_guest: boolean('is_guest').default(false).notNull(),
+  guest_key_hash: text('guest_key_hash').unique(),
+  guest_expires_at: timestamp('guest_expires_at', { withTimezone: true }),
+  claimed_at: timestamp('claimed_at', { withTimezone: true }),
+  // Stable Google identity. Google explicitly requires account linkage by the
+  // immutable `sub` claim, never by an email address that can change.
+  google_subject: text('google_subject'),
+  // Passwords are never stored or encrypted. This contains only a salted,
+  // memory-hard Argon2id PHC string and stays nullable for Google/code users.
+  password_hash: text('password_hash'),
+  // Incrementing this revokes every previously issued JWT immediately. It
+  // avoids timestamp precision races during password changes and recovery.
+  session_version: integer('session_version').default(0).notNull(),
   // Billing: 'free' | 'pro' ('plus' is a legacy alias, treated as 'pro' - see quota.ts).
   // Every feature (outreach + resume-gen/autofill) is available on 'free', including 20
   // resume generations per month (recurring, Apollo.io-style credits, not a one-time
-  // trial); 'pro' is the single $49.99/mo tier that removes the monthly resume cap
+  // trial); 'pro' is the single $49.99/mo tier with a 1,000-resume monthly cap
   // (2026-07-02 decision, see quota.ts's LIMITS comments for the full model).
   // Reverse trial runs until trial_ends_at (set at signup) at pro-level limits.
   plan: text('plan').default('free').notNull(),
   trial_ends_at: timestamp('trial_ends_at', { withTimezone: true }),
+  billing_provider: text('billing_provider'),
+  billing_customer_id: text('billing_customer_id'),
+  billing_subscription_id: text('billing_subscription_id'),
+  billing_variant_id: text('billing_variant_id'),
+  billing_status: text('billing_status'),
+  billing_renews_at: timestamp('billing_renews_at', { withTimezone: true }),
+  billing_ends_at: timestamp('billing_ends_at', { withTimezone: true }),
+  billing_portal_url: text('billing_portal_url'),
+  billing_event_updated_at: timestamp('billing_event_updated_at', { withTimezone: true }),
   created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
   // Token epoch: JWTs issued before this instant are rejected by requireAuth.
   // Set when verify-code adopts a pre-existing unverified account, so any token
@@ -51,13 +76,19 @@ export const users = pgTable('users', {
   // Gmail or Outlook account. Submission permission never implies inbox permission.
   automatic_verification_enabled: boolean('automatic_verification_enabled').default(false).notNull(),
   automatic_verification_consented_at: timestamp('automatic_verification_consented_at', { withTimezone: true }),
-  // Separate permission for asking the configured browser provider to solve a CAPTCHA on a job
-  // application portal. Submission permission never implies CAPTCHA permission, and the provider
-  // request is always explicit so provider defaults cannot silently widen the user's consent.
+  // Separate permission to resume after the applicant completes a CAPTCHA in the current portal
+  // tab. Submission permission never implies this permission, and Litos never solves the challenge.
   automatic_captcha_enabled: boolean('automatic_captcha_enabled').default(false).notNull(),
   automatic_captcha_consented_at: timestamp('automatic_captcha_consented_at', { withTimezone: true }),
   automatic_captcha_consent_version: text('automatic_captcha_consent_version'),
-});
+}, (t) => ({
+  googleSubjectUnique: uniqueIndex('users_google_subject_unique')
+    .on(t.google_subject)
+    .where(sql`${t.google_subject} is not null`),
+  billingSubscriptionUnique: uniqueIndex('users_billing_subscription_unique')
+    .on(t.billing_subscription_id)
+    .where(sql`${t.billing_subscription_id} is not null`),
+}));
 
 // ---- usage_counters ----
 // Quota + rate-limit ledger. key = user id (or email for pre-auth endpoints),

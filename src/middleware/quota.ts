@@ -3,6 +3,7 @@ import { sql, and, eq } from 'drizzle-orm';
 import { db } from '../db/index';
 import { usage_counters, users } from '../db/schema';
 import { PRODUCT_NAME } from '../lib/product';
+import { lemonSqueezyCheckoutReadyUrl } from '../lib/lemonSqueezy';
 
 // Pricing model per PRD Section 10 (v0) + product decision 2026-07-02, revised same day
 // to a recurring-credits model (Apollo.io-style, not a one-time lifetime trial): every
@@ -10,9 +11,8 @@ import { PRODUCT_NAME } from '../lib/product';
 // 20 resume generations per month that reset like everything else. This keeps free
 // students coming back every month (job searches run for months, not a single session),
 // rather than a one-time trial that either converts immediately or churns the student
-// out entirely. Crossing 20/month - or wanting it removed entirely - is what moves a
-// student onto the $49.99/mo paid tier, which sets an effectively-unlimited monthly
-// resume quota instead. Gate volume, not discovery. All enforcement is server-side so
+// out entirely. Crossing 20/month is what moves a student onto the $49.99/mo paid tier,
+// which includes 1,000 resume generations per month. Gate volume, not discovery. All enforcement is server-side so
 // every client version is covered. Limits are env-tunable without a redeploy of intent.
 export const LIMITS = {
   free: {
@@ -23,21 +23,25 @@ export const LIMITS = {
   pro: {
     monthlyContacts: parseInt(process.env.PRO_MONTHLY_CONTACTS || '500', 10),
     monthlyDrafts: parseInt(process.env.PRO_MONTHLY_DRAFTS || '1000', 10),
-    // Effectively unlimited (bounded, not Infinity, so it round-trips cleanly through
-    // JSON/DB) - the $49.99/mo tier's whole point is no meaningful resume cap.
-    monthlyResumes: parseInt(process.env.PRO_MONTHLY_RESUMES || '100000', 10),
+    monthlyResumes: parseInt(process.env.PRO_MONTHLY_RESUMES || '1000', 10),
   },
   // Abuse protection (rolling hour, per user or per email)
   perHour: {
     resolve: parseInt(process.env.RATE_RESOLVE_PER_HOUR || '15', 10),
     draft: parseInt(process.env.RATE_DRAFT_PER_HOUR || '40', 10),
-    resume: parseInt(process.env.RATE_RESUME_PER_HOUR || '15', 10),
+    // The dashboard prepares the user's top 30 daily matches as soon as the session opens.
+    // Keep a small retry margin above that batch while preserving the per-user abuse ceiling.
+    resume: parseInt(process.env.RATE_RESUME_PER_HOUR || '40', 10),
     jobExtract: parseInt(process.env.RATE_JOB_EXTRACT_PER_HOUR || '15', 10),
     requestCode: parseInt(process.env.RATE_CODE_PER_HOUR || '5', 10),
     session: parseInt(process.env.RATE_SESSION_PER_HOUR || '10', 10),
     requestCodePerIp: parseInt(process.env.RATE_CODE_IP_PER_HOUR || '50', 10),
     verifyCodePerIp: parseInt(process.env.RATE_VERIFY_IP_PER_HOUR || '200', 10),
     sessionPerIp: parseInt(process.env.RATE_SESSION_IP_PER_HOUR || '100', 10),
+    passwordLogin: parseInt(process.env.RATE_PASSWORD_LOGIN_PER_HOUR || '10', 10),
+    passwordLoginPerIp: parseInt(process.env.RATE_PASSWORD_LOGIN_IP_PER_HOUR || '100', 10),
+    passwordChange: parseInt(process.env.RATE_PASSWORD_CHANGE_PER_HOUR || '5', 10),
+    passwordChangePerIp: parseInt(process.env.RATE_PASSWORD_CHANGE_IP_PER_HOUR || '30', 10),
   },
 } as const;
 
@@ -62,6 +66,28 @@ export async function bumpCounter(key: string, period: string, kind: string, by 
     })
     .returning({ count: usage_counters.count });
   return rows[0]?.count ?? by;
+}
+
+// Atomically reserves one or more units without ever crossing the supplied cap.
+// A null result means another request consumed the final slot first.
+export async function claimCounterSlot(key: string, period: string, kind: string, limit: number, by = 1): Promise<number | null> {
+  const rows = await db
+    .insert(usage_counters)
+    .values({ key, period, kind, count: by })
+    .onConflictDoUpdate({
+      target: [usage_counters.key, usage_counters.period, usage_counters.kind],
+      set: { count: sql`${usage_counters.count} + ${by}` },
+      setWhere: sql`${usage_counters.count} + ${by} <= ${limit}`,
+    })
+    .returning({ count: usage_counters.count });
+  return rows[0]?.count ?? null;
+}
+
+export async function releaseCounterSlot(key: string, period: string, kind: string, by = 1): Promise<void> {
+  await db
+    .update(usage_counters)
+    .set({ count: sql`greatest(${usage_counters.count} - ${by}, 0)` })
+    .where(and(eq(usage_counters.key, key), eq(usage_counters.period, period), eq(usage_counters.kind, kind)));
 }
 
 export async function getCount(key: string, period: string, kind: string): Promise<number> {
@@ -115,7 +141,9 @@ export async function getEntitlements(userId: string): Promise<Entitlements> {
 // configured (quota info + reset date, no Upgrade sentence). Unset means the same thing, which
 // is the intended state until a real payment rail exists. Live links pass through untouched.
 export function upgradeUrl(): string | undefined {
-  const link = process.env.UPGRADE_URL || process.env.STRIPE_PAYMENT_LINK;
+  const lemonLink = lemonSqueezyCheckoutReadyUrl();
+  if (lemonLink) return lemonLink;
+  const link = process.env.UPGRADE_URL;
   if (!link) return undefined;
   if (/stripe\.com\/(c\/pay\/)?test_|cs_test_/.test(link)) return undefined;
   return link;
@@ -128,7 +156,7 @@ export function quotaExceededPayload(ent: Entitlements, used: number, what: 'con
     const cap = ent.monthlyResumes;
     const base =
       ent.tier === 'free'
-        ? `You've used your ${cap} free resume generations this month. ${PRODUCT_NAME} Premium ($49.99/mo) unlocks unlimited resume generation + autofill. Resets on the 1st.`
+        ? `You've used your ${cap} free resume generations this month. ${PRODUCT_NAME} Pro ($49.99/mo) includes ${LIMITS.pro.monthlyResumes.toLocaleString()} resume generations + autofill. Resets on the 1st.`
         : `You've hit this month's resume limit (${cap}). It resets on the 1st.`;
     return {
       error: upgradeLink && ent.tier === 'free' ? `${base} Upgrade: ${upgradeLink}` : base,

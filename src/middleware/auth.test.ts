@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { issuedBeforeEpoch } from './auth';
+import { issuedBeforeEpoch, sessionVersionIsStale } from './auth';
 
 test('no epoch set: every token passes', () => {
   assert.equal(issuedBeforeEpoch(1_700_000_000, null), false);
@@ -27,4 +27,15 @@ test('token minted after the epoch survives', () => {
 
 test('token with no iat is treated as stale when an epoch exists', () => {
   assert.equal(issuedBeforeEpoch(undefined, new Date(1_700_000_010_000)), true);
+});
+
+test('legacy tokens without a version remain valid until an account rotation', () => {
+  assert.equal(sessionVersionIsStale(undefined, 0), false);
+  assert.equal(sessionVersionIsStale(undefined, 1), true);
+});
+
+test('session versions provide exact immediate revocation', () => {
+  assert.equal(sessionVersionIsStale(4, 4), false);
+  assert.equal(sessionVersionIsStale(3, 4), true);
+  assert.equal(sessionVersionIsStale(5, 4), true);
 });

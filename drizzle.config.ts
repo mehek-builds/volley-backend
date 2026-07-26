@@ -6,8 +6,8 @@ dotenv.config();
 export default {
   schema: './src/db/schema.ts',
   out: './drizzle',
-  driver: 'pg',
+  dialect: 'postgresql',
   dbCredentials: {
-    connectionString: process.env.DATABASE_URL || 'postgresql://postgres:password@localhost:5432/student_outreach',
+    url: process.env.DATABASE_URL || 'postgresql://postgres:password@localhost:5432/student_outreach',
   },
 } satisfies Config;

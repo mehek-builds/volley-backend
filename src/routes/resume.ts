@@ -7,7 +7,7 @@ import { db } from '../db/index';
 import { profiles, generated_resumes, autofill_events } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { readExperienceBank } from '../db/experienceBank';
-import { allowHourly, bumpCounter, getCount, getEntitlements, LIMITS, monthPeriod, quotaExceededPayload, rateLimitedReply } from '../middleware/quota';
+import { allowHourly, claimCounterSlot, getCount, getEntitlements, LIMITS, monthPeriod, quotaExceededPayload, rateLimitedReply, releaseCounterSlot } from '../middleware/quota';
 import { generateResumeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import {
   findPdfTextFidelityIssues,
@@ -168,8 +168,8 @@ export async function resumeRoutes(fastify: FastifyInstance) {
 
     // Resume-gen + autofill is available on every tier (2026-07-02 decision): free gets
     // 20/month that resets like contacts/drafts (Apollo.io-style recurring credits, not a
-    // one-time lifetime trial - keeps free students returning monthly). Pro/trial's
-    // monthlyResumes is deliberately huge (see quota.ts) so it's a no-op cap in practice.
+    // one-time lifetime trial - keeps free students returning monthly). Pro/trial gets
+    // the larger monthly cap defined in quota.ts.
     // The monthly quota check (read-only) runs BEFORE the hourly limiter, which increments a
     // counter: a student already over their monthly cap gets a clean 402 without also spending
     // one of their hourly rate-limit slots on the rejected call.
@@ -458,6 +458,12 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     const jdHash = createHash('sha256').update(body.jd_text).digest('hex').slice(0, 16);
     const requestedKey = `users/${userId}/resumes/${jdHash}-${Date.now()}.pdf`;
 
+    const reservedCount = await claimCounterSlot(userId, period, 'resumes', ent.monthlyResumes);
+    if (reservedCount === null) {
+      const currentCount = await getCount(userId, period, 'resumes');
+      return reply.status(402).send(quotaExceededPayload(ent, currentCount, 'resumes'));
+    }
+
     let resumeUrl: string;
     let objectKey: string;
     try {
@@ -484,6 +490,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       resumeUrl = `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(userId, objectKey, { blobUrl: blob.url })}`;
     } catch (err) {
       fastify.log.error(err);
+      await releaseCounterSlot(userId, period, 'resumes');
       return reply.status(500).send({ error: 'Failed to store generated resume' });
     }
 
@@ -542,8 +549,6 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       // The file is already generated and returned below; failing to log it for audit
       // shouldn't block the student from getting their resume.
     }
-
-    await bumpCounter(userId, period, 'resumes');
 
     return reply.status(200).send({
       ...responseTemplate,
