@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { SignJWT, jwtVerify } from 'jose';
+import { createRemoteJWKSet, jwtVerify, SignJWT, type JWTPayload as JoseJWTPayload } from 'jose';
 import { createHash, randomInt } from 'node:crypto';
 import { db } from '../db/index';
 import { users, email_verification_codes } from '../db/schema';
@@ -22,15 +22,105 @@ const guestBodySchema = z.object({
   idempotency_key: z.string().uuid(),
 });
 
+const googleBodySchema = z.object({
+  credential: z.string().min(1).max(10_000),
+});
+
+const GOOGLE_ISSUERS = ['accounts.google.com', 'https://accounts.google.com'] as const;
+const googleKeys = createRemoteJWKSet(new URL('https://www.googleapis.com/oauth2/v3/certs'));
+
+export type GoogleIdentity = {
+  subject: string;
+  email: string;
+  hostedDomain: string | null;
+};
+
+export function googleIdentityFromClaims(payload: JoseJWTPayload): GoogleIdentity | null {
+  if (
+    typeof payload.sub !== 'string' ||
+    payload.sub.length === 0 ||
+    typeof payload.email !== 'string' ||
+    !z.string().email().safeParse(payload.email).success ||
+    payload.email_verified !== true
+  ) {
+    return null;
+  }
+
+  return {
+    subject: payload.sub,
+    email: payload.email.toLowerCase(),
+    hostedDomain: typeof payload.hd === 'string' && payload.hd.length > 0 ? payload.hd : null,
+  };
+}
+
+export function googleIsAuthoritativeForEmail(identity: GoogleIdentity): boolean {
+  if (identity.email.endsWith('@gmail.com')) return true;
+  return identity.hostedDomain !== null &&
+    identity.email.endsWith(`@${identity.hostedDomain.toLowerCase()}`);
+}
+
+export function googleVerificationFailure(error: unknown): 'invalid' | 'unavailable' {
+  const code = typeof error === 'object' && error !== null && 'code' in error
+    ? String(error.code)
+    : '';
+  if (
+    error instanceof TypeError ||
+    code === 'ERR_JWKS_TIMEOUT' ||
+    code === 'ECONNRESET' ||
+    code === 'ENOTFOUND' ||
+    code === 'ETIMEDOUT'
+  ) {
+    return 'unavailable';
+  }
+  return 'invalid';
+}
+
+export class GoogleVerificationUnavailable extends Error {}
+
+export async function verifyGoogleCredential(
+  credential: string,
+  clientId: string,
+): Promise<GoogleIdentity | null> {
+  try {
+    const { payload } = await jwtVerify(credential, googleKeys, {
+      audience: clientId,
+      issuer: [...GOOGLE_ISSUERS],
+    });
+    return googleIdentityFromClaims(payload);
+  } catch (error) {
+    if (googleVerificationFailure(error) === 'unavailable') {
+      throw new GoogleVerificationUnavailable('Google identity verification is unavailable');
+    }
+    return null;
+  }
+}
+
 const CODE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
-function trialEnd(): Date {
-  return new Date(Date.now() + TRIAL_DAYS * 24 * 60 * 60 * 1000);
+function trialEnd(now = new Date()): Date {
+  return new Date(now.getTime() + TRIAL_DAYS * 24 * 60 * 60 * 1000);
 }
-function guestExpiry(): Date {
-  return new Date(Date.now() + (TRIAL_DAYS + 30) * 24 * 60 * 60 * 1000);
+function guestExpiry(now = new Date()): Date {
+  return new Date(now.getTime() + (TRIAL_DAYS + 30) * 24 * 60 * 60 * 1000);
 }
 const MAX_ATTEMPTS = 5;
+
+export function googleRegistrationValues(
+  identity: GoogleIdentity,
+  now = new Date(),
+  id = uuidv4(),
+) {
+  return {
+    id,
+    email: identity.email,
+    email_verified: true,
+    google_subject: identity.subject,
+    plan: 'free',
+    trial_ends_at: trialEnd(now),
+    created_at: now,
+    onboarding_completed_at: null,
+  };
+}
 
 type VerificationRecord = {
   code_hash: string;
@@ -88,7 +178,12 @@ function verificationSender(): string {
   return `${PRODUCT_NAME} <${mailbox}>`;
 }
 
-async function signSessionToken(userId: string, email?: string, isGuest = false, expiresAt: string | number = '30d'): Promise<string> {
+async function signSessionToken(
+  userId: string,
+  email?: string | null,
+  isGuest = false,
+  expiresAt: string | number = '30d',
+): Promise<string> {
   const secret = process.env.JWT_SIGNING_SECRET!;
   const secretBytes = new TextEncoder().encode(secret);
   return new SignJWT({ userId, ...(email ? { email } : {}), isGuest })
@@ -227,12 +322,16 @@ export async function authRoutes(fastify: FastifyInstance) {
     }
 
     const keyHash = hashCode(parsed.data.idempotency_key);
-
     try {
       const existing = await db.select().from(users).where(eq(users.guest_key_hash, keyHash)).limit(1);
       const active = existing[0];
       if (active?.is_guest && active.guest_expires_at && active.guest_expires_at > new Date()) {
-        const token = await signSessionToken(active.id, undefined, true, Math.floor(active.guest_expires_at.getTime() / 1000));
+        const token = await signSessionToken(
+          active.id,
+          undefined,
+          true,
+          Math.floor(active.guest_expires_at.getTime() / 1000),
+        );
         return reply.status(200).send({
           token,
           is_guest: true,
@@ -245,8 +344,8 @@ export async function authRoutes(fastify: FastifyInstance) {
       if (!ipAllowed) return rateLimitedReply(reply);
 
       const now = new Date();
-      const trial_ends_at = trialEnd();
-      const guest_expires_at = guestExpiry();
+      const trial_ends_at = trialEnd(now);
+      const guest_expires_at = guestExpiry(now);
       const created = await db
         .insert(users)
         .values({
@@ -261,7 +360,8 @@ export async function authRoutes(fastify: FastifyInstance) {
         })
         .onConflictDoNothing({ target: users.guest_key_hash })
         .returning();
-      const guest = created[0] ?? (await db.select().from(users).where(eq(users.guest_key_hash, keyHash)).limit(1))[0];
+      const guest = created[0]
+        ?? (await db.select().from(users).where(eq(users.guest_key_hash, keyHash)).limit(1))[0];
       if (!guest) throw new Error('Guest creation did not return a user');
 
       const token = await signSessionToken(
@@ -279,6 +379,145 @@ export async function authRoutes(fastify: FastifyInstance) {
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to create guest session' });
+    }
+  });
+
+  // Exchange a Google Identity Services ID token for the same Litos session
+  // used by email-code sign-in and the Chrome extension.
+  fastify.post('/auth/google', async (request: FastifyRequest, reply: FastifyReply) => {
+    let body: z.infer<typeof googleBodySchema>;
+    try {
+      body = googleBodySchema.parse(request.body);
+    } catch {
+      return reply.status(400).send({ error: 'A Google credential is required' });
+    }
+
+    const clientId = process.env.GOOGLE_CLIENT_ID?.trim()
+      || '719679889441-oto6bdqapcrdmcso8lsfs46qc4nvpb3s.apps.googleusercontent.com';
+    if (!process.env.JWT_SIGNING_SECRET) {
+      return reply.status(500).send({ error: 'JWT_SIGNING_SECRET not configured' });
+    }
+
+    let identity: GoogleIdentity | null;
+    try {
+      identity = await verifyGoogleCredential(body.credential, clientId);
+    } catch (error) {
+      request.log.warn({ err: error }, 'Google identity verification unavailable');
+      return reply.status(503).send({ error: 'google_auth_unavailable' });
+    }
+    if (!identity) {
+      return reply.status(401).send({ error: 'invalid_google_credential' });
+    }
+
+    try {
+      const googleUser = await db.transaction(async (tx) => {
+        const bySubject = await tx
+          .select({ id: users.id, email: users.email })
+          .from(users)
+          .where(eq(users.google_subject, identity.subject))
+          .limit(1);
+        if (bySubject[0]) {
+          return {
+            user: { id: bySubject[0].id, email: bySubject[0].email },
+            isNewUser: false,
+          };
+        }
+
+        // Google warns that it is not authoritative for a non-Gmail address
+        // outside Google Workspace. Do not merge that identity into an account
+        // by email, because a stale third-party address could take over data.
+        if (!googleIsAuthoritativeForEmail(identity)) return null;
+
+        const linkExistingByEmail = async () => {
+          const byEmail = await tx
+            .select({
+              id: users.id,
+              email: users.email,
+              google_subject: users.google_subject,
+              email_verified: users.email_verified,
+            })
+            .from(users)
+            .where(eq(users.email, identity.email))
+            .limit(1);
+          const existing = byEmail[0];
+          if (!existing) return null;
+          if (existing.google_subject && existing.google_subject !== identity.subject) {
+            return null;
+          }
+          await tx
+            .update(users)
+            .set({
+              google_subject: identity.subject,
+              email_verified: true,
+              ...(!existing.email_verified ? { session_valid_from: new Date() } : {}),
+            })
+            .where(eq(users.id, existing.id));
+          return {
+            user: { id: existing.id, email: existing.email },
+            isNewUser: false,
+          };
+        };
+
+        const linkedByEmail = await linkExistingByEmail();
+        if (linkedByEmail) return linkedByEmail;
+
+        const registration = googleRegistrationValues(identity);
+        // Keep first-time Google registration compatible with deployed databases
+        // that have not yet received unrelated user-preference columns. Drizzle's
+        // generated INSERT includes every modeled column, even when omitted from
+        // values, so name the authentication columns explicitly here.
+        const created = await tx.execute<{ id: string; email: string }>(sql`
+          INSERT INTO ${users} (
+            id,
+            email,
+            email_verified,
+            google_subject,
+            plan,
+            trial_ends_at,
+            created_at,
+            onboarding_completed_at
+          ) VALUES (
+            ${registration.id},
+            ${registration.email},
+            ${registration.email_verified},
+            ${registration.google_subject},
+            ${registration.plan},
+            ${registration.trial_ends_at},
+            ${registration.created_at},
+            ${registration.onboarding_completed_at}
+          )
+          ON CONFLICT DO NOTHING
+          RETURNING id, email
+        `);
+        if (created.rows[0]) return { user: created.rows[0], isNewUser: true };
+
+        // A second valid request can race the first between the lookups and
+        // INSERT. Re-read the winning identity instead of turning a harmless
+        // retry or parallel-tab sign-in into a 500 response.
+        const concurrentBySubject = await tx
+          .select({ id: users.id, email: users.email })
+          .from(users)
+          .where(eq(users.google_subject, identity.subject))
+          .limit(1);
+        if (concurrentBySubject[0]) {
+          return { user: concurrentBySubject[0], isNewUser: false };
+        }
+        return linkExistingByEmail();
+      });
+
+      if (!googleUser) {
+        return reply.status(409).send({ error: 'google_email_requires_verification' });
+      }
+
+      const token = await signSessionToken(googleUser.user.id, googleUser.user.email);
+      return reply.status(200).send({
+        token,
+        email: googleUser.user.email,
+        is_new_user: googleUser.isNewUser,
+      });
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ error: 'Failed to sign in with Google' });
     }
   });
 
@@ -344,7 +583,9 @@ export async function authRoutes(fastify: FastifyInstance) {
       }
 
       const foundUser = user[0];
-      if (!foundUser.email) return reply.status(409).send({ error: 'Guest accounts must be claimed with email verification' });
+      if (!foundUser.email) {
+        return reply.status(409).send({ error: 'Guest accounts must be claimed with email verification' });
+      }
       const token = await signSessionToken(foundUser.id, foundUser.email, false);
 
       return reply.status(200).send({ token });
@@ -471,8 +712,10 @@ export async function authRoutes(fastify: FastifyInstance) {
         const existing = await tx.select().from(users).where(eq(users.email, email)).limit(1);
         if (guestUserId) {
           if (existing.length > 0) {
+            const existingEmail = existing[0].email;
+            if (!existingEmail) return null;
             return {
-              user: { id: existing[0].id, email: existing[0].email! },
+              user: { id: existing[0].id, email: existingEmail },
               existingAccount: true,
             };
           }
@@ -509,7 +752,9 @@ export async function authRoutes(fastify: FastifyInstance) {
             })
             .returning({ id: users.id, email: users.email });
           const user = created[0] ?? null;
-          return user ? { user, existingAccount: false } : null;
+          return user?.email
+            ? { user: { id: user.id, email: user.email }, existingAccount: false }
+            : null;
         }
 
         if (!existing[0].email_verified) {
@@ -531,7 +776,11 @@ export async function authRoutes(fastify: FastifyInstance) {
         return reply.status(400).send({ error: 'Code expired or not found. Request a new one.' });
       }
 
-      const token = await signSessionToken(verificationResult.user.id, verificationResult.user.email ?? undefined, false);
+      const token = await signSessionToken(
+        verificationResult.user.id,
+        verificationResult.user.email,
+        false,
+      );
       return reply.status(200).send({
         token,
         existing_account: verificationResult.existingAccount,

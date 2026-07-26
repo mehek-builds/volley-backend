@@ -11,6 +11,7 @@ import {
   index,
   uniqueIndex,
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 
 // ---- users ----
 export const users = pgTable('users', {
@@ -23,6 +24,9 @@ export const users = pgTable('users', {
   guest_key_hash: text('guest_key_hash').unique(),
   guest_expires_at: timestamp('guest_expires_at', { withTimezone: true }),
   claimed_at: timestamp('claimed_at', { withTimezone: true }),
+  // Stable Google identity. Google explicitly requires account linkage by the
+  // immutable `sub` claim, never by an email address that can change.
+  google_subject: text('google_subject'),
   // Billing: 'free' | 'pro' ('plus' is a legacy alias, treated as 'pro' - see quota.ts).
   // Every feature (outreach + resume-gen/autofill) is available on 'free', including 20
   // resume generations per month (recurring, Apollo.io-style credits, not a one-time
@@ -57,7 +61,11 @@ export const users = pgTable('users', {
   // Gmail or Outlook account. Submission permission never implies inbox permission.
   automatic_verification_enabled: boolean('automatic_verification_enabled').default(false).notNull(),
   automatic_verification_consented_at: timestamp('automatic_verification_consented_at', { withTimezone: true }),
-});
+}, (t) => ({
+  googleSubjectUnique: uniqueIndex('users_google_subject_unique')
+    .on(t.google_subject)
+    .where(sql`${t.google_subject} is not null`),
+}));
 
 // ---- usage_counters ----
 // Quota + rate-limit ledger. key = user id (or email for pre-auth endpoints),

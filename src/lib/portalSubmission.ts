@@ -12,7 +12,17 @@ function quoteAttr(value: string): string {
   return value.replace(/["\\]/g, '\\$&');
 }
 
-export type SupportedPortal = 'greenhouse' | 'lever' | 'ashby' | 'smartrecruiters' | 'controlled_test';
+type PortalFamily = 'greenhouse' | 'lever' | 'ashby' | 'smartrecruiters';
+type ControlledPortal = 'controlled_test' | 'controlled_lever' | 'controlled_ashby' | 'controlled_smartrecruiters';
+export type SupportedPortal = PortalFamily | ControlledPortal;
+
+function portalFamily(portal: SupportedPortal): PortalFamily {
+  if (portal === 'controlled_test') return 'greenhouse';
+  if (portal === 'controlled_lever') return 'lever';
+  if (portal === 'controlled_ashby') return 'ashby';
+  if (portal === 'controlled_smartrecruiters') return 'smartrecruiters';
+  return portal;
+}
 
 export type SubmissionPacket = {
   fullName: string;
@@ -164,6 +174,12 @@ const SMARTRECRUITERS_EMAIL_SELECTOR = 'spl-input#email-input input';
 const SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR = 'spl-input#confirm-email-input input';
 const SMARTRECRUITERS_LINKEDIN_SELECTOR = 'spl-input#linkedin-input input';
 const SMARTRECRUITERS_WEBSITE_SELECTOR = 'spl-input#website-input input';
+const CONTROLLED_SMARTRECRUITERS_FIRST_NAME_SELECTOR = '[id="first-name-input"]';
+const CONTROLLED_SMARTRECRUITERS_LAST_NAME_SELECTOR = '[id="last-name-input"]';
+const CONTROLLED_SMARTRECRUITERS_EMAIL_SELECTOR = '[id="email-input"]';
+const CONTROLLED_SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR = '[id="confirm-email-input"]';
+const CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR = '[id="linkedin-input"]';
+const CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR = '[id="website-input"]';
 const ASHBY_RESUME_SELECTOR = 'input#_systemfield_resume[type="file"], input[type="file"][name="_systemfield_resume"], input[type="file"][name*="resume" i]';
 const ASHBY_COVER_LETTER_SELECTOR = 'input#cover_letter[type="file"], input[type="file"][id*="cover" i], input[type="file"][name*="cover" i], input[type="file"][aria-label*="cover" i]';
 
@@ -173,6 +189,9 @@ const COVER_LETTER_UPLOAD_SELECTORS: Record<SupportedPortal, string> = {
   ashby: ASHBY_COVER_LETTER_SELECTOR,
   smartrecruiters: 'spl-dropzone[data-test*="cover" i] input[type="file"], input[type="file"][name*="cover" i], label:has-text("Cover Letter") input[type="file"]',
   controlled_test: 'input[type="file"][name*="cover" i], input[type="file"][id*="cover" i], label:has-text("Cover Letter") input[type="file"]',
+  controlled_lever: 'input[type="file"][name*="cover" i], input[type="file"][id*="cover" i], label:has-text("Cover Letter") input[type="file"]',
+  controlled_ashby: ASHBY_COVER_LETTER_SELECTOR,
+  controlled_smartrecruiters: 'input[type="file"][name*="cover" i], input[type="file"][id*="cover" i], label:has-text("Cover Letter") input[type="file"]',
 };
 
 export function coverLetterUploadSelector(portal: SupportedPortal): string {
@@ -201,7 +220,8 @@ export async function hasCoverLetterUpload(page: Page, portal: SupportedPortal):
 // this out is what let R-055's discovery step reuse every portal's already-verified selectors
 // instead of a third copy of them.
 function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: SupportedPortal, packet: SubmissionPacket) {
-  if (portal === 'greenhouse' || portal === 'controlled_test') {
+  const family = portalFamily(portal);
+  if (family === 'greenhouse') {
     const parts = packet.fullName.trim().split(/\s+/);
     // optional (managedFill default) + bounded, not required: a branded-redirect Greenhouse customer
     // (Jump Trading serves its posting through www.jumptrading.com with a different form DOM) has
@@ -216,7 +236,7 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedFill(actions, '#candidate-location, input[autocomplete="address-level2"]', packet.city, 'location');
     managedUpload(actions, '#resume, input[type="file"][name="job_application[resume]"]', 'resume', packet.resume, packet.resumeName);
     managedUpload(actions, 'input#cover_letter[type="file"], input[type="file"][name*="cover_letter" i]', 'cover_letter', packet.coverLetter, packet.coverLetterName);
-  } else if (portal === 'lever') {
+  } else if (family === 'lever') {
     managedFill(actions, 'input[name="name"]', packet.fullName, 'name', false);
     managedFill(actions, 'input[name="email"]', packet.email, 'email', false);
     managedFill(actions, 'input[name="phone"]', packet.phone, 'phone');
@@ -225,26 +245,29 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedFill(actions, 'input[name="urls[Portfolio]"]', packet.portfolioUrl, 'portfolio');
     managedUpload(actions, 'input[name="resume"][type="file"]', 'resume', packet.resume, packet.resumeName);
     managedUpload(actions, 'input[type="file"][name*="cover" i]', 'cover_letter', packet.coverLetter, packet.coverLetterName);
-  } else if (portal === 'smartrecruiters') {
+  } else if (family === 'smartrecruiters') {
     // See navigateToApplicationForm/SMARTRECRUITERS_APPLY_LINK_SELECTOR: the JD page and the
     // actual form are different URLs. The managed runner has no separate "navigate, then act"
     // step, so this click has to be the first action in the same sequence; optional and bounded
     // so it is a no-op when the runner already landed on the form URL directly.
-    actions.push({
-      type: 'click',
-      selector: SMARTRECRUITERS_APPLY_LINK_SELECTOR,
-      label: 'open application form',
-      optional: true,
-      timeout: MANAGED_FILL_TIMEOUT_MS,
-    });
+    if (portal === 'smartrecruiters') {
+      actions.push({
+        type: 'click',
+        selector: SMARTRECRUITERS_APPLY_LINK_SELECTOR,
+        label: 'open application form',
+        optional: true,
+        timeout: MANAGED_FILL_TIMEOUT_MS,
+      });
+    }
     const parts = packet.fullName.trim().split(/\s+/);
-    managedFill(actions, SMARTRECRUITERS_FIRST_NAME_SELECTOR, parts[0], 'first_name');
-    managedFill(actions, SMARTRECRUITERS_LAST_NAME_SELECTOR, parts.slice(1).join(' '), 'last_name');
-    managedFill(actions, SMARTRECRUITERS_EMAIL_SELECTOR, packet.email, 'email');
-    managedFill(actions, SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR, packet.email, 'confirm_email');
+    const controlled = portal === 'controlled_smartrecruiters';
+    managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_FIRST_NAME_SELECTOR : SMARTRECRUITERS_FIRST_NAME_SELECTOR, parts[0], 'first_name');
+    managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_LAST_NAME_SELECTOR : SMARTRECRUITERS_LAST_NAME_SELECTOR, parts.slice(1).join(' '), 'last_name');
+    managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_EMAIL_SELECTOR : SMARTRECRUITERS_EMAIL_SELECTOR, packet.email, 'email');
+    managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR : SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR, packet.email, 'confirm_email');
     managedFill(actions, SMARTRECRUITERS_PHONE_SELECTOR, packet.phone, 'phone');
-    managedFill(actions, SMARTRECRUITERS_LINKEDIN_SELECTOR, packet.linkedinUrl, 'linkedin');
-    managedFill(actions, SMARTRECRUITERS_WEBSITE_SELECTOR, packet.portfolioUrl ?? packet.githubUrl, 'portfolio');
+    managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR : SMARTRECRUITERS_LINKEDIN_SELECTOR, packet.linkedinUrl, 'linkedin');
+    managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR : SMARTRECRUITERS_WEBSITE_SELECTOR, packet.portfolioUrl ?? packet.githubUrl, 'portfolio');
     managedUpload(actions, SMARTRECRUITERS_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
   } else {
     managedFill(actions, 'input[name="_systemfield_name"]', packet.fullName, 'name', false);
@@ -332,7 +355,7 @@ export function readManagedReceipt(result: ManagedBrowserResult): {
   return { confirmationText: body.slice(0, 1000), finalUrl: result.url, referenceId: receiptReference(body) };
 }
 
-const HOSTS: Record<Exclude<SupportedPortal, 'controlled_test'>, RegExp> = {
+const HOSTS: Record<PortalFamily, RegExp> = {
   greenhouse: /(^|\.)greenhouse\.io$/i,
   lever: /(^|\.)lever\.co$/i,
   ashby: /(^|\.)ashbyhq\.com$/i,
@@ -347,6 +370,11 @@ export function detectPortal(rawUrl: string): SupportedPortal {
     url.pathname.startsWith('/qa/portal-submission') &&
     (url.protocol === 'https:' || (url.protocol === 'http:' && url.hostname === 'localhost'))
   ) {
+    const pathBoard = url.pathname.split('/').filter(Boolean)[2];
+    const board = (url.searchParams.get('board') ?? pathBoard)?.toLowerCase();
+    if (board === 'lever') return 'controlled_lever';
+    if (board === 'ashby') return 'controlled_ashby';
+    if (board === 'smartrecruiters') return 'controlled_smartrecruiters';
     return 'controlled_test';
   }
   if (url.protocol !== 'https:') throw new Error('Application portal must use HTTPS');
@@ -440,7 +468,8 @@ async function fillReviewedQuestions(page: Page, packet: SubmissionPacket, out: 
 
 export async function fillPortal(page: Page, portal: SupportedPortal, packet: SubmissionPacket): Promise<FillResult> {
   const filledFields: string[] = [];
-  if (portal === 'greenhouse' || portal === 'controlled_test') {
+  const family = portalFamily(portal);
+  if (family === 'greenhouse') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, ['#first_name', 'input[name="job_application[first_name]"]'], parts[0], 'first_name', filledFields);
     await fillFirst(page, ['#last_name', 'input[name="job_application[last_name]"]'], parts.slice(1).join(' '), 'last_name', filledFields);
@@ -449,7 +478,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['#candidate-location', 'input[autocomplete="address-level2"]'], packet.city, 'location', filledFields);
     await uploadFirst(page, ['#resume', 'input[type="file"][name="job_application[resume]"]'], packet.resume, packet.resumeName, 'resume', filledFields);
     await uploadFirst(page, ['input#cover_letter[type="file"]', 'input[type="file"][name*="cover_letter" i]'], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
-  } else if (portal === 'lever') {
+  } else if (family === 'lever') {
     await fillFirst(page, ['input[name="name"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="email"]'], packet.email, 'email', filledFields);
     await fillFirst(page, ['input[name="phone"]'], packet.phone, 'phone', filledFields);
@@ -458,15 +487,16 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="urls[Portfolio]"]'], packet.portfolioUrl, 'portfolio', filledFields);
     await uploadFirst(page, ['input[name="resume"][type="file"]'], packet.resume, packet.resumeName, 'resume', filledFields);
     await uploadFirst(page, ['input[type="file"][name*="cover" i]'], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
-  } else if (portal === 'smartrecruiters') {
+  } else if (family === 'smartrecruiters') {
     const parts = packet.fullName.trim().split(/\s+/);
-    await fillFirst(page, [SMARTRECRUITERS_FIRST_NAME_SELECTOR], parts[0], 'first_name', filledFields);
-    await fillFirst(page, [SMARTRECRUITERS_LAST_NAME_SELECTOR], parts.slice(1).join(' '), 'last_name', filledFields);
-    await fillFirst(page, [SMARTRECRUITERS_EMAIL_SELECTOR], packet.email, 'email', filledFields);
-    await fillFirst(page, [SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR], packet.email, 'confirm_email', filledFields);
+    const controlled = portal === 'controlled_smartrecruiters';
+    await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_FIRST_NAME_SELECTOR : SMARTRECRUITERS_FIRST_NAME_SELECTOR], parts[0], 'first_name', filledFields);
+    await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_LAST_NAME_SELECTOR : SMARTRECRUITERS_LAST_NAME_SELECTOR], parts.slice(1).join(' '), 'last_name', filledFields);
+    await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_EMAIL_SELECTOR : SMARTRECRUITERS_EMAIL_SELECTOR], packet.email, 'email', filledFields);
+    await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR : SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR], packet.email, 'confirm_email', filledFields);
     await fillFirst(page, [SMARTRECRUITERS_PHONE_SELECTOR], packet.phone, 'phone', filledFields);
-    await fillFirst(page, [SMARTRECRUITERS_LINKEDIN_SELECTOR], packet.linkedinUrl, 'linkedin', filledFields);
-    await fillFirst(page, [SMARTRECRUITERS_WEBSITE_SELECTOR], packet.portfolioUrl ?? packet.githubUrl, 'portfolio', filledFields);
+    await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR : SMARTRECRUITERS_LINKEDIN_SELECTOR], packet.linkedinUrl, 'linkedin', filledFields);
+    await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR : SMARTRECRUITERS_WEBSITE_SELECTOR], packet.portfolioUrl ?? packet.githubUrl, 'portfolio', filledFields);
     await uploadFirst(page, [SMARTRECRUITERS_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
   } else {
     await fillFirst(page, ['input[name="_systemfield_name"]'], packet.fullName, 'name', filledFields);

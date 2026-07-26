@@ -52,6 +52,7 @@ Set these for Production (and Preview if you want):
 |-----|-------|
 | `DATABASE_URL` | your Neon/Vercel Postgres **pooled** URL |
 | `JWT_SIGNING_SECRET` | any 32+ char random string |
+| `GOOGLE_CLIENT_ID` | Google OAuth web client ID, must match the website's `NEXT_PUBLIC_GOOGLE_CLIENT_ID` |
 | `ENCRYPTION_KEY` | any 32+ char random string, encrypts `application_profile` columns at rest |
 | `BLOB_READ_WRITE_TOKEN` | Vercel Storage tab -> Create -> Blob; stores generated resume files |
 | `ANTHROPIC_API_KEY` | your Anthropic key |
@@ -61,6 +62,12 @@ Set these for Production (and Preview if you want):
 | `APOLLO_API_KEY` | your Apollo key (optional fallback) |
 | `JOB_MONITOR_SOURCES_JSON` | JSON array of Greenhouse, Lever, and Ashby company boards to check every 15 minutes |
 | `NODE_ENV` | `production` |
+
+Before enabling Google sign-in, add the identity column without touching existing users:
+
+```bash
+npm run db:google-auth
+```
 
 `VERCEL` is set automatically by Vercel. That disables the local listener.
 Do **not** set `PORT`/`HOST` (serverless ignores them).
