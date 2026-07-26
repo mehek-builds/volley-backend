@@ -110,8 +110,10 @@ test('route policy protects auth and download routes without charging probes or 
   assert.equal(policyForRequest('GET', '/health', CONFIG), null);
   assert.equal(policyForRequest('OPTIONS', '/auth/request-code', CONFIG), null);
   assert.equal(policyForRequest('POST', '/auth/request-code', CONFIG)?.name, 'auth_start');
+  assert.equal(policyForRequest('POST', '/auth/password/login', CONFIG)?.name, 'auth_start');
   assert.equal(policyForRequest('POST', '/auth/verify-code', CONFIG)?.name, 'auth_verify');
   assert.equal(policyForRequest('POST', '/auth/google', CONFIG)?.name, 'auth_verify');
+  assert.equal(policyForRequest('PUT', '/auth/password', CONFIG)?.name, 'auth_verify');
   assert.equal(policyForRequest('GET', '/resume/download', CONFIG)?.name, 'resume_download');
   assert.equal(policyForRequest('GET', '/profile', CONFIG)?.name, 'general');
 });

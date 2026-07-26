@@ -6,10 +6,13 @@
 
 - Pro and trial plans now allow up to 1,000 resume generations per month.
 - Quota responses and account usage report the same 1,000-resume limit.
+- Verified users can create, change, recover, and use a password while keeping Google and email-code sign-in available.
+- Password updates rotate all existing sessions and require either the current password or a fresh verified identity session.
 
 ### Fixed
 
 - Concurrent resume requests atomically reserve quota so the monthly cap cannot be exceeded.
+- Password credentials are protected with Argon2id, generic login failures, and layered per-IP and per-account rate limits.
 
 ## [1.0.2] - 2026-07-25
 

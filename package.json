@@ -13,6 +13,7 @@
     "@fastify/multipart": "^10.1.0",
     "@vercel/blob": "^2.6.1",
     "@vercel/oidc": "^3.8.0",
+    "argon2": "^0.45.1",
     "axios": "^1.18.1",
     "dotenv": "^16.4.0",
     "drizzle-orm": "^0.45.2",
@@ -55,6 +56,7 @@
     "schema:apply-automation-consent": "node scripts/apply-automation-consent-schema.mjs",
     "db:automatic-verification": "node scripts/apply-automatic-verification-migration.mjs",
     "db:google-auth": "node scripts/apply-google-auth-migration.mjs",
+    "db:password-auth": "node scripts/apply-password-auth-migration.mjs",
     "db:guest-mode": "node scripts/apply-guest-mode-schema.mjs",
     "schema:check": "node scripts/check-schema-drift.mjs"
   }

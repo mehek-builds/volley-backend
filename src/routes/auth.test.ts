@@ -6,6 +6,7 @@ import {
   googleIdentityFromClaims,
   googleIsAuthoritativeForEmail,
   googleVerificationFailure,
+  isRecentVerification,
   sendVerificationEmail,
   verificationFailure,
 } from './auth';
@@ -13,6 +14,16 @@ import { createHash } from 'node:crypto';
 
 const EMAIL = 'person@example.com';
 const CODE = '123456';
+
+test('password recovery requires a fresh Google or email-code verification', () => {
+  const now = 2_000_000;
+  assert.equal(isRecentVerification('email_code', now - 899, now), true);
+  assert.equal(isRecentVerification('google', now - 900, now), true);
+  assert.equal(isRecentVerification('email_code', now - 901, now), false);
+  assert.equal(isRecentVerification('password', now, now), false);
+  assert.equal(isRecentVerification('legacy', now, now), false);
+  assert.equal(isRecentVerification('google', now + 1, now), false);
+});
 
 describe('Google identity claims', () => {
   test('accepts a verified Google identity and normalizes its email', () => {
