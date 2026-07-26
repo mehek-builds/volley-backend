@@ -19,11 +19,6 @@ export const users = pgTable('users', {
   // Guests are real authenticated principals with no email. A verified email is
   // attached in-place when a first-time guest claims the workspace.
   email: text('email').unique(),
-  // Retained for compatibility with accounts created by the original extension auth flow.
-  // Passwordless web auth does not write these fields, but omitting them from the declared
-  // schema would make a later schema push drop live account data.
-  password_hash: text('password_hash'),
-  session_version: integer('session_version').default(0).notNull(),
   email_verified: boolean('email_verified').default(false),
   is_guest: boolean('is_guest').default(false).notNull(),
   guest_key_hash: text('guest_key_hash').unique(),
