@@ -285,10 +285,8 @@ export async function authRoutes(fastify: FastifyInstance) {
       return reply.status(400).send({ error: 'A Google credential is required' });
     }
 
-    const clientId = process.env.GOOGLE_CLIENT_ID?.trim();
-    if (!clientId) {
-      return reply.status(503).send({ error: 'google_auth_unavailable' });
-    }
+    const clientId = process.env.GOOGLE_CLIENT_ID?.trim()
+      || '719679889441-oto6bdqapcrdmcso8lsfs46qc4nvpb3s.apps.googleusercontent.com';
     if (!process.env.JWT_SIGNING_SECRET) {
       return reply.status(500).send({ error: 'JWT_SIGNING_SECRET not configured' });
     }
