@@ -1,8 +1,9 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { db } from '../db/index';
-import { profiles, experience_bank } from '../db/schema';
+import { profiles, experience_bank, application_profile } from '../db/schema';
 import { eq } from 'drizzle-orm';
 import { requireAuth } from '../middleware/auth';
+import { encryptField } from '../lib/fieldCrypto';
 import { parseResumeWithClaude, parseResumeFromPdf, ParsedProfile } from '../llm/parse';
 import { extractPdfText } from '../lib/pdfText';
 import { put } from '@vercel/blob';
@@ -39,6 +40,55 @@ export const educationPatchSchema = z
   })
   .refine((value) => Object.keys(value).length > 0, { message: 'Send at least one field to update' });
 
+/* Tokens that end in a period without ending a sentence. Without these, splitting on ". " turns
+ * "ZymoGenetics, Inc. Executed a DNA fingerprinting project" into two bullets and cuts the employer
+ * name in half. Degrees are here for the same reason resumes are full of them. */
+const NON_TERMINAL_ABBREVIATIONS = new Set([
+  'inc', 'ltd', 'llc', 'llp', 'corp', 'co', 'plc', 'gmbh',
+  'dr', 'mr', 'mrs', 'ms', 'prof', 'st', 'jr', 'sr',
+  'vs', 'etc', 'approx', 'dept', 'univ', 'no', 'fig', 'est',
+  'ph.d', 'm.s', 'b.s', 'b.a', 'm.a', 'm.b.a', 'u.s', 'u.k', 'e.g', 'i.e', 'a.m', 'p.m',
+]);
+
+/* One prose paragraph split back into the bullets a resume actually printed.
+ *
+ * WHY THIS EXISTS. The parser returns each role's `description` as prose - the resume's separate
+ * bullet points run together into one string with no newlines - so splitting on newlines alone
+ * produced exactly ONE variant per role, every time. Measured 2026-07-27 on a real 2-page CV: all
+ * ten bank entries came back with a single bullet_variant, each one a run-on of three or four
+ * distinct achievements.
+ *
+ * That quietly defeats the bank. Its whole point is one record per role holding every phrasing of
+ * it, so /resume/generate has something to choose between; with one giant variant there is nothing
+ * to choose. Worse, the grounding pass checks each generated bullet against these variants, and a
+ * model that (correctly) wrote three bullets out of the blob had one of them pruned as unsupported
+ * - a real achievement, off the student's own resume, dropped from their resume.
+ *
+ * Sentence splitting is CONSERVATIVE by design. A split that fires where it should not corrupts a
+ * bullet, while one that fails to fire only leaves the old behaviour, so every ambiguous case is
+ * resolved by not splitting: a period is a boundary only when the next character is a capital and
+ * the word before it is neither an initial nor a known abbreviation.
+ */
+export function splitSentences(line: string): string[] {
+  const pieces = line.split(/(?<=[.!?])\s+(?=[A-Z(])/);
+  const out: string[] = [];
+  for (const piece of pieces) {
+    const previous = out[out.length - 1];
+    if (previous !== undefined) {
+      const tail = previous.replace(/[)\]"']+$/, '');
+      const lastWord = tail.slice(0, -1).split(/[\s]/).pop()?.toLowerCase() ?? '';
+      // "A." is an initial, not the end of a sentence. Abbreviations are the same case by list.
+      const isInitial = /^\p{L}$/u.test(lastWord);
+      if (tail.endsWith('.') && (isInitial || NON_TERMINAL_ABBREVIATIONS.has(lastWord))) {
+        out[out.length - 1] = `${previous} ${piece}`;
+        continue;
+      }
+    }
+    out.push(piece);
+  }
+  return out.map((s) => s.trim()).filter(Boolean);
+}
+
 // A resume's description blob rendered as bullet variants. Resumes are written as bullets, and
 // the bank's whole point is one record per role holding every phrasing of it, so a single
 // newline-joined string collapses the structure /resume/generate exists to choose between.
@@ -48,7 +98,12 @@ export function toBullets(description: string): string[] {
     .split(/\r?\n/)
     .map((l) => l.replace(/^\s*[-•·*•]\s*/, '').trim())
     .filter((l) => l.length > 0);
-  return lines.length > 0 ? lines : [description.trim()].filter((l) => l.length > 0);
+  // Newlines are the reliable signal and are used whenever they are there. Sentences are the
+  // fallback for the common case where the parse returned prose, and are applied per line so a
+  // resume that gives us both structures keeps its own.
+  const bullets = lines.flatMap((line) => splitSentences(line));
+  if (bullets.length > 0) return bullets;
+  return [description.trim()].filter((l) => l.length > 0);
 }
 
 // The student's DECLARED skills (profiles.skills), filtered to non-empty strings. Same filtering
@@ -118,6 +173,97 @@ export function bankEntriesFrom(parsed: ParsedProfile, userId: string) {
   // bullet_variants is .notNull() and the PUT route requires min(1); an entry with no text is
   // not groundable anyway, so it is dropped rather than seeded as an empty shell.
   return [...jobs, ...projects, ...leadership].filter((e) => e.bullet_variants.length > 0);
+}
+
+/* A resume header printed in capitals is a typographic choice, not a name.
+ *
+ * Measured on a real University of Washington sample resume, 2026-07-27: the header reads
+ * "MIRANDA W. HUDSON", so that is what was stored, and it is what the extension then types into an
+ * employer's First name and Last name boxes. Nobody writes their own name in block capitals on an
+ * application, and a form filled that way reads as machine-filled at a glance - which is the one
+ * impression this product cannot afford to make.
+ *
+ * Recased ONLY when the whole string is uppercase. A name with any lowercase in it has already told
+ * us how it wants to be written - "McDonald", "van der Berg", "DeShawn" - and touching those would
+ * break names this rule exists to protect. Within an all-caps string the same care applies going the
+ * other way: Mc/Mac prefixes, O', hyphens and the lowercase particles of a compound surname are all
+ * handled, because "MCDONALD-O'BRIEN" must not come back as "Mcdonald-o'brien".
+ */
+const NAME_PARTICLES = new Set([
+  'de', 'del', 'della', 'der', 'di', 'da', 'dos', 'du', 'la', 'le', 'van', 'von', 'bin', 'binte',
+  'ibn', 'al', 'el', 'ter', 'ten',
+]);
+
+export function normalizeDisplayName(name: string): string {
+  const trimmed = (name ?? '').trim().replace(/\s+/g, ' ');
+  if (trimmed.length === 0) return trimmed;
+  // Any lowercase letter at all means the name is already cased deliberately. Leave it alone.
+  if (/\p{Ll}/u.test(trimmed)) return trimmed;
+
+  const capitalize = (word: string): string => {
+    if (word.length === 0) return word;
+    const lower = word.toLowerCase();
+    // A particle keeps its lowercase form, but only in the middle of a name: "Van Der Berg" is
+    // wrong, "van der Berg" is right, and a surname that STARTS a string stays capitalised.
+    const cap = lower.charAt(0).toUpperCase() + lower.slice(1);
+    // Mc/Mac and O' carry an internal capital that title-casing alone loses.
+    if (/^mc[a-z]{2,}$/.test(lower)) return `Mc${lower.charAt(2).toUpperCase()}${lower.slice(3)}`;
+    if (/^mac[a-z]{3,}$/.test(lower)) return `Mac${lower.charAt(3).toUpperCase()}${lower.slice(4)}`;
+    if (/^o'[a-z]{2,}$/.test(lower)) return `O'${lower.charAt(2).toUpperCase()}${lower.slice(3)}`;
+    return cap;
+  };
+
+  return trimmed
+    .split(' ')
+    .map((word, index) => {
+      // A middle initial stays an initial: "W." must not become "W". (it already is) and must not
+      // be lowercased.
+      if (/^\p{Lu}\.?$/u.test(word)) return word;
+      const lower = word.toLowerCase();
+      if (index > 0 && NAME_PARTICLES.has(lower.replace(/\.$/, ''))) return lower;
+      // Hyphenated and apostrophised names are two names wearing one token.
+      return word
+        .split('-')
+        .map((part) => capitalize(part))
+        .join('-');
+    })
+    .join(' ');
+}
+
+/* The academic record a resume STATES, ready for application_profile.
+ *
+ * /start's gaps screen (onboarding.ts GAP_FIELDS) asks for gpa, gpa_scale, major, languages and a
+ * desired salary. Four of those genuinely cannot be read off a resume. Three of them can, and
+ * before this nothing tried: the parser had no field for them, so the screen asked all six of
+ * every student, including the ones whose upload printed "GPA: 3.75" and "Bachelor of Arts,
+ * Psychology" two seconds earlier. Measured across 15 real resumes on 2026-07-27, 8 printed a GPA.
+ *
+ * Two rules, both load-bearing:
+ *
+ * 1. NEVER OVERWRITE. A value already on application_profile came from the student or from the
+ *    harvest watching a real form, and both beat a parse of a PDF. This only fills blanks, so a
+ *    re-upload can correct nothing and can also destroy nothing.
+ * 2. gpa_scale is not defaulted. A bare "3.75" with no printed denominator stays a gap, because
+ *    guessing 4.0 quietly restates an Indian 10.0 or German 5.0 record as a near-perfect one.
+ */
+export function academicSeedFrom(
+  parsed: Pick<ParsedProfile, 'gpa' | 'gpa_scale' | 'major'>,
+  existing: Record<string, unknown> | undefined,
+): { gpa?: string; gpa_scale?: string; major?: string } {
+  const seed: { gpa?: string; gpa_scale?: string; major?: string } = {};
+  const held = (key: string) => {
+    const v = existing?.[key];
+    return typeof v === 'string' && v.trim().length > 0;
+  };
+  for (const key of ['gpa', 'gpa_scale', 'major'] as const) {
+    const value = parsed[key];
+    if (typeof value !== 'string' || value.trim().length === 0) continue;
+    if (held(key)) continue;
+    // gpa is in ENCRYPTED_FIELDS; the other two are stored in the clear on purpose (see
+    // applicationProfile.ts for why a scale and a major are not identity-sensitive).
+    seed[key] = key === 'gpa' ? encryptField(value.trim()) : value.trim();
+  }
+  return seed;
 }
 
 interface ExistingBankEntry {
@@ -223,7 +369,10 @@ export async function profileRoutes(fastify: FastifyInstance) {
     const minimumChars = Math.max(50, 700 * Math.max(1, sourcePages));
     const looksScanned = !resumeText || resumeText.trim().length < minimumChars;
 
-    let parsedProfile;
+    // Annotated rather than inferred: an evolving `let` takes its type from every later use, so the
+    // narrow Pick that academicSeedFrom accepts would otherwise become this variable's type and
+    // reject the source_pages stamp two lines down.
+    let parsedProfile: ParsedProfile;
     try {
       parsedProfile = looksScanned
         ? await parseResumeFromPdf(resumeBuffer)
@@ -231,7 +380,11 @@ export async function profileRoutes(fastify: FastifyInstance) {
       // Carried on the parse rather than in its own column: it is a fact ABOUT this parse of this
       // file, so it should be replaced wholesale when a student re-uploads, which is exactly what
       // parsed_json already does.
-      parsedProfile = { ...parsedProfile, source_pages: sourcePages };
+      parsedProfile = {
+        ...parsedProfile,
+        full_name: normalizeDisplayName(parsedProfile.full_name ?? ''),
+        source_pages: sourcePages,
+      };
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to parse resume with AI' });
@@ -327,7 +480,28 @@ export async function profileRoutes(fastify: FastifyInstance) {
       fastify.log.error({ err, userId }, 'failed to seed experience bank from resume parse');
     }
 
-    return reply.status(200).send({ ...parsedProfile, bank_seeded, bank_enriched });
+    // Fill the academic gaps the upload already answered. Best-effort and non-fatal for the same
+    // reason the blob write is: the parse is what the student came for, and a failure here costs
+    // them one extra question rather than their signup.
+    let gaps_prefilled: string[] = [];
+    try {
+      const [existing] = await db
+        .select()
+        .from(application_profile)
+        .where(eq(application_profile.user_id, userId));
+      const seed = academicSeedFrom(parsedProfile, existing as Record<string, unknown> | undefined);
+      if (Object.keys(seed).length > 0) {
+        await db
+          .insert(application_profile)
+          .values({ user_id: userId, ...seed })
+          .onConflictDoUpdate({ target: application_profile.user_id, set: seed });
+        gaps_prefilled = Object.keys(seed);
+      }
+    } catch (err) {
+      fastify.log.warn({ err, userId }, 'could not prefill academic fields from resume parse');
+    }
+
+    return reply.status(200).send({ ...parsedProfile, bank_seeded, bank_enriched, gaps_prefilled });
   });
 
   // GET /profile - retrieve user profile

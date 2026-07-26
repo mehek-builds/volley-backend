@@ -50,6 +50,40 @@ function readSourcePages(parsed: unknown): number {
   return typeof pages === 'number' && Number.isFinite(pages) && pages > 0 ? pages : 0;
 }
 
+/* The skills list to build from: the student's DECLARED list, falling back to the one their resume
+ * printed.
+ *
+ * THE FALLBACK IS THE WHOLE POINT. profiles.skills is the declared column, and at onboarding it is
+ * NULL for literally every student - the screen that collects it comes later. This build read only
+ * that column, so the base resume was always generated in NON-declared mode, where the skills line
+ * is grounded loosely against bullet text instead of against a list. The model filled the gap the
+ * way models do.
+ *
+ * Measured 2026-07-27 on a real Cal Poly computer science resume: the parse read eighteen skills off
+ * the page - C, C++, CSS, Git, HTML, Java, Python, Swift, SQL, Xcode, Vim, RStudio and more - and
+ * the base resume printed NINE, of which zero appeared anywhere on the student's resume. "Swift" and
+ * "Xcode" had become "iOS Development", "C" had become "Systems Programming", and "JSON" had become
+ * "JSON Parsing". Every one of those is arguably true, and that is exactly the trap R-015 named: a
+ * specific claim laundered into a broad one is ungrounded even when it lands on a true answer.
+ *
+ * Passing the parsed list puts the build back in declared mode, where the list is authoritative and
+ * pruneUngroundedContent drops anything not verbatim on it. This mirrors the precedence GET /profile
+ * has always served (serveProfileJson: declared first, parsed as the fallback), so the base resume
+ * stops being the one place in the product that ignores what the resume said.
+ */
+export function skillsSourceFor(declared: unknown, parsed: unknown): string[] | null {
+  const strings = (value: unknown): string[] =>
+    (Array.isArray(value) ? value : []).filter(
+      (s): s is string => typeof s === 'string' && s.trim().length > 0,
+    );
+  const own = strings(declared);
+  if (own.length > 0) return own;
+  const fromResume = strings((parsed as { skills?: unknown } | null)?.skills);
+  // null, not [], when there is nothing either way: an empty array would put pruning into declared
+  // mode against an empty authority and strip the skills line to nothing.
+  return fromResume.length > 0 ? fromResume : null;
+}
+
 function educationFrom(parsed: unknown): CandidateEducation {
   const p = (parsed ?? {}) as Record<string, unknown>;
   const str = (v: unknown) => (typeof v === 'string' ? v : undefined);
@@ -116,9 +150,7 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
     };
 
     const education = educationFrom(profile.parsed_json);
-    const declaredSkills = Array.isArray(profile.skills)
-      ? (profile.skills as unknown[]).filter((s): s is string => typeof s === 'string')
-      : null;
+    const declaredSkills = skillsSourceFor(profile.skills, profile.parsed_json);
 
     try {
       send({ event: 'stage', stage: 'reading' });

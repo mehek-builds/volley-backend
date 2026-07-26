@@ -27,6 +27,34 @@ import { deriveCandidateContext, resumeSafeTargetRole, type CandidateEducation }
  *    and should be rewritten. The fix was to add the strong verbs that were missing, not to
  *    silence the gate by admitting every verb it rejected. assisted, answered, helped, supported,
  *    participated and worked are deliberately absent.
+ *
+ * 3. IT REJECTED SYNONYMS OF VERBS IT ALREADY ADMITTED. A 15-resume run on 2026-07-27 flagged
+ *    "Performed column chromatography, PCR, DNA extraction" while conducted, executed, ran and
+ *    administered - the same verb wearing different clothes - were all on the list. That is not a
+ *    quality gate, it is a coin toss, and it is an expensive one: a single flagged bullet triggers
+ *    a complete regeneration of the resume, so the student waits through a second model call and
+ *    the retry then fails again on the same word.
+ *
+ *    So the additions below are strictly SYNONYMS OF ADMITTED VERBS, each one named against the
+ *    verb it matches. Nothing is admitted because it appeared in a resume; only because rejecting
+ *    it while accepting its twin was incoherent.
+ *
+ *    First batch, against the verb each one twins: performed/conducted, operated/ran,
+ *    assessed/evaluated, simulated/modeled, prototyped/built, fabricated and machined against
+ *    constructed and assembled, programmed and coded against developed, debugged/diagnosed,
+ *    refactored/rebuilt, migrated/transformed, tested/validated.
+ *
+ *    Second batch, added after "Recorded field data using tablets" was flagged in the same run
+ *    while documented, tracked and catalogued were all admitted. Rather than wait for each
+ *    remaining resume to surface one more, the whole recording-and-reporting family was closed:
+ *    recorded and logged against documented and tracked, compiled against catalogued, wrote
+ *    against authored and drafted, installed against deployed, reviewed against audited, tuned
+ *    against calibrated, estimated against forecasted, computed against quantified, soldered and
+ *    welded against assembled, iterated against refined.
+ *
+ *    The line that decides an addition is whether an already-admitted verb means the same thing.
+ *    "maintained" and "selected" were considered under this rule and left out: nothing on the list
+ *    means what they mean, and both describe custody rather than an act.
  */
 export const STRONG_VERBS = new Set(
   `built shipped designed engineered developed led drove owned launched analyzed
@@ -43,7 +71,10 @@ surveyed sampled measured catalogued classified validated verified audited inspe
 authored published edited curated illustrated exhibited
 staffed scheduled onboarded fundraised campaigned organized administered processed
 treated triaged screened rehabilitated cultivated consulted elected guided collected
-constructed assembled purified sequenced cultured calibrated administered dissected determined reported`
+constructed assembled purified sequenced cultured calibrated administered dissected determined reported
+performed operated assessed simulated tested prototyped fabricated machined programmed coded
+debugged refactored migrated
+recorded logged compiled wrote installed reviewed tuned estimated computed soldered welded iterated`
     .split(/\s+/)
     .filter(Boolean),
 );
@@ -513,6 +544,52 @@ export function findUngroundedSkills(
 // Litos's generalized per-student spec (no LEADERSHIP section, entries aren't hardcoded).
 // When `bank` is provided, grounding violations are added as hard issues so the retry loop
 // regenerates; pass [] to skip grounding (form-only validation).
+/* Is the rendered coursework line claiming a course the uploaded resume never printed?
+ *
+ * The line is a comma-JOIN of course titles, and a course title can itself contain a comma. Real
+ * example, measured on a University of Washington sample CV, 2026-07-27: "Race, Gender, and
+ * Sexuality in the Media". Splitting the line on "," shattered that into "Race", "Gender" and "and
+ * Sexuality in the Media", none of which are in the allowed set, so a resume whose coursework was
+ * copied VERBATIM off the upload was reported as containing a fabricated course.
+ *
+ * That is worse than a cosmetic bug. This validator's whole job is to tell a student when we have
+ * put something on their resume that is not theirs, and a check that cries wolf on correct output
+ * teaches them to scroll past the one warning that matters.
+ *
+ * So the line is walked rather than split: at each position, take the LONGEST allowed course that
+ * matches there. Longest-first is what makes it unambiguous when one title is a prefix of another
+ * ("Data Structures" vs "Data Structures and Algorithms"). Anything left that no allowed course
+ * matches is a genuinely ungrounded claim, which is exactly what we want to report.
+ */
+export function courseworkIsUngrounded(rendered: string, allowed: string[] | undefined): boolean {
+  const line = (rendered ?? '').trim();
+  if (line.length === 0) return false;
+  const courses = (allowed ?? [])
+    .map((course) => course.trim())
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+  if (courses.length === 0) return true; // a coursework line with nothing to ground it against
+
+  let at = 0;
+  while (at < line.length) {
+    // Separators between entries, and any stray whitespace the join left behind.
+    if (line[at] === ',' || line[at] === ' ') {
+      at += 1;
+      continue;
+    }
+    const match = courses.find((course) => line.startsWith(course, at));
+    if (!match) return true;
+    at += match.length;
+  }
+  return false;
+}
+
+// Spec-level checks: content rules a JD-tailored spec must satisfy before it's worth rendering.
+// Mirrors validate_resume.py's content/structure checks + pressure_test.py's per-bullet scoring,
+// adapted from the Dubai engine's fixed EDUCATION/EXPERIENCE/LEADERSHIP/SKILLS template to
+// Litos's generalized per-student spec (no LEADERSHIP section, entries aren't hardcoded).
+// When `bank` is provided, grounding violations are added as hard issues so the retry loop
+// regenerates; pass [] to skip grounding (form-only validation).
 export function validateResumeSpec(
   spec: ResumeSpec,
   jdText: string,
@@ -554,9 +631,7 @@ export function validateResumeSpec(
     if (spec.school !== exact(education.school)) issues.push('education school differs from uploaded resume');
     if (spec.degree !== exact(education.degree)) issues.push('education degree differs from uploaded resume');
     if (spec.grad_date !== exact(education.grad_date)) issues.push('education graduation date differs from uploaded resume');
-    const allowedCoursework = new Set((education.coursework ?? []).map((course) => course.trim()).filter(Boolean));
-    const renderedCoursework = spec.coursework.split(',').map((course) => course.trim()).filter(Boolean);
-    if (renderedCoursework.some((course) => !allowedCoursework.has(course))) {
+    if (courseworkIsUngrounded(spec.coursework, education.coursework)) {
       issues.push('coursework contains a course not listed on the uploaded resume');
     }
     const expectedPosition = deriveCandidateContext(education).education_position;
