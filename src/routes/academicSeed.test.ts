@@ -1,0 +1,60 @@
+import { test, describe } from 'node:test';
+import assert from 'node:assert/strict';
+import { academicSeedFrom } from './profile';
+import { decryptField } from '../lib/fieldCrypto';
+import { gapsFrom } from './onboarding';
+
+/* The gaps screen used to ask every student for a GPA and a major their own upload had just
+ * printed. These pin the seeding that stops that, and the two ways it is allowed to say no. */
+
+process.env.ENCRYPTION_KEY ??= Buffer.alloc(32, 7).toString('base64');
+
+describe('academicSeedFrom', () => {
+  test('seeds what the resume printed, and encrypts only the gpa', () => {
+    const seed = academicSeedFrom({ gpa: '3.75', gpa_scale: '4.0', major: 'Psychology' }, undefined);
+    assert.equal(seed.gpa_scale, '4.0');
+    assert.equal(seed.major, 'Psychology');
+    assert.notEqual(seed.gpa, '3.75', 'a stored gpa must be encrypted at rest');
+    assert.equal(decryptField(seed.gpa!), '3.75');
+  });
+
+  test('never overwrites a value the student or the harvest already supplied', () => {
+    const seed = academicSeedFrom(
+      { gpa: '3.75', gpa_scale: '4.0', major: 'Psychology' },
+      { gpa: 'already-encrypted', gpa_scale: '10.0', major: 'Computer Science' },
+    );
+    assert.deepEqual(seed, {}, 'a re-upload must not be able to restate a corrected record');
+  });
+
+  test('an absent field stays absent rather than becoming a guess', () => {
+    assert.deepEqual(academicSeedFrom({ gpa: '', gpa_scale: '', major: '' }, undefined), {});
+    assert.deepEqual(academicSeedFrom({}, undefined), {});
+  });
+
+  test('a gpa with no printed scale does not invent 4.0', () => {
+    const seed = academicSeedFrom({ gpa: '8.9', gpa_scale: '', major: '' }, undefined);
+    assert.ok(seed.gpa, 'the gpa itself is still worth keeping');
+    assert.equal(seed.gpa_scale, undefined, 'guessing the denominator misstates a 10.0-scale record');
+  });
+
+  test('whitespace is not a value', () => {
+    assert.deepEqual(academicSeedFrom({ gpa: '   ', major: ' ' }, undefined), {});
+    const seed = academicSeedFrom({ major: 'Physics' }, { major: '   ' });
+    assert.equal(seed.major, 'Physics', 'a blank column is still a blank, so it may be filled');
+  });
+});
+
+describe('the gaps a seeded profile still has', () => {
+  test('a resume that printed a GPA and a major removes those questions', () => {
+    const seeded = academicSeedFrom({ gpa: '3.75', gpa_scale: '4.0', major: 'Psychology' }, undefined);
+    assert.deepEqual(gapsFrom(seeded as Record<string, unknown>), [
+      'languages',
+      'desired_salary',
+      'desired_salary_currency',
+    ]);
+  });
+
+  test('a resume that printed nothing leaves the full six', () => {
+    assert.equal(gapsFrom({}).length, 6);
+  });
+});

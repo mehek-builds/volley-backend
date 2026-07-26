@@ -1,8 +1,9 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { db } from '../db/index';
-import { profiles, experience_bank } from '../db/schema';
+import { profiles, experience_bank, application_profile } from '../db/schema';
 import { eq } from 'drizzle-orm';
 import { requireAuth } from '../middleware/auth';
+import { encryptField } from '../lib/fieldCrypto';
 import { parseResumeWithClaude, parseResumeFromPdf, ParsedProfile } from '../llm/parse';
 import { extractPdfText } from '../lib/pdfText';
 import { put } from '@vercel/blob';
@@ -120,6 +121,42 @@ export function bankEntriesFrom(parsed: ParsedProfile, userId: string) {
   return [...jobs, ...projects, ...leadership].filter((e) => e.bullet_variants.length > 0);
 }
 
+/* The academic record a resume STATES, ready for application_profile.
+ *
+ * /start's gaps screen (onboarding.ts GAP_FIELDS) asks for gpa, gpa_scale, major, languages and a
+ * desired salary. Four of those genuinely cannot be read off a resume. Three of them can, and
+ * before this nothing tried: the parser had no field for them, so the screen asked all six of
+ * every student, including the ones whose upload printed "GPA: 3.75" and "Bachelor of Arts,
+ * Psychology" two seconds earlier. Measured across 15 real resumes on 2026-07-27, 8 printed a GPA.
+ *
+ * Two rules, both load-bearing:
+ *
+ * 1. NEVER OVERWRITE. A value already on application_profile came from the student or from the
+ *    harvest watching a real form, and both beat a parse of a PDF. This only fills blanks, so a
+ *    re-upload can correct nothing and can also destroy nothing.
+ * 2. gpa_scale is not defaulted. A bare "3.75" with no printed denominator stays a gap, because
+ *    guessing 4.0 quietly restates an Indian 10.0 or German 5.0 record as a near-perfect one.
+ */
+export function academicSeedFrom(
+  parsed: Pick<ParsedProfile, 'gpa' | 'gpa_scale' | 'major'>,
+  existing: Record<string, unknown> | undefined,
+): { gpa?: string; gpa_scale?: string; major?: string } {
+  const seed: { gpa?: string; gpa_scale?: string; major?: string } = {};
+  const held = (key: string) => {
+    const v = existing?.[key];
+    return typeof v === 'string' && v.trim().length > 0;
+  };
+  for (const key of ['gpa', 'gpa_scale', 'major'] as const) {
+    const value = parsed[key];
+    if (typeof value !== 'string' || value.trim().length === 0) continue;
+    if (held(key)) continue;
+    // gpa is in ENCRYPTED_FIELDS; the other two are stored in the clear on purpose (see
+    // applicationProfile.ts for why a scale and a major are not identity-sensitive).
+    seed[key] = key === 'gpa' ? encryptField(value.trim()) : value.trim();
+  }
+  return seed;
+}
+
 interface ExistingBankEntry {
   id: string;
   type: string;
@@ -223,7 +260,10 @@ export async function profileRoutes(fastify: FastifyInstance) {
     const minimumChars = Math.max(50, 700 * Math.max(1, sourcePages));
     const looksScanned = !resumeText || resumeText.trim().length < minimumChars;
 
-    let parsedProfile;
+    // Annotated rather than inferred: an evolving `let` takes its type from every later use, so the
+    // narrow Pick that academicSeedFrom accepts would otherwise become this variable's type and
+    // reject the source_pages stamp two lines down.
+    let parsedProfile: ParsedProfile;
     try {
       parsedProfile = looksScanned
         ? await parseResumeFromPdf(resumeBuffer)
@@ -327,7 +367,28 @@ export async function profileRoutes(fastify: FastifyInstance) {
       fastify.log.error({ err, userId }, 'failed to seed experience bank from resume parse');
     }
 
-    return reply.status(200).send({ ...parsedProfile, bank_seeded, bank_enriched });
+    // Fill the academic gaps the upload already answered. Best-effort and non-fatal for the same
+    // reason the blob write is: the parse is what the student came for, and a failure here costs
+    // them one extra question rather than their signup.
+    let gaps_prefilled: string[] = [];
+    try {
+      const [existing] = await db
+        .select()
+        .from(application_profile)
+        .where(eq(application_profile.user_id, userId));
+      const seed = academicSeedFrom(parsedProfile, existing as Record<string, unknown> | undefined);
+      if (Object.keys(seed).length > 0) {
+        await db
+          .insert(application_profile)
+          .values({ user_id: userId, ...seed })
+          .onConflictDoUpdate({ target: application_profile.user_id, set: seed });
+        gaps_prefilled = Object.keys(seed);
+      }
+    } catch (err) {
+      fastify.log.warn({ err, userId }, 'could not prefill academic fields from resume parse');
+    }
+
+    return reply.status(200).send({ ...parsedProfile, bank_seeded, bank_enriched, gaps_prefilled });
   });
 
   // GET /profile - retrieve user profile

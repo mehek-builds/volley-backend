@@ -32,6 +32,18 @@ export interface ParsedProfile {
   currently_enrolled?: boolean;
   coursework?: string[];
   target_roles: string[];
+  /* Academic record, PRINTED not inferred. These three exist because /start's gaps screen asks for
+   * exactly them, and before this the parser had no field for any of them - so the screen asked
+   * every student for a GPA and a major their own upload had just stated. Measured 2026-07-27
+   * across 15 real resumes: 8 printed a GPA verbatim ("GPA: 3.75") and every one printed a degree
+   * line the major is inside. See routes/profile.ts for the seeding, and onboarding.ts GAP_FIELDS
+   * for the questions this removes.
+   *
+   * Empty string, never a guess. A GPA is a claim on an employment application: a fabricated one is
+   * worse than an absent one, and an absent one is only one question. */
+  gpa?: string;
+  gpa_scale?: string;
+  major?: string;
   // Page count of the file this parse came from, measured by extractPdfText and stamped on by
   // routes/profile.ts - NOT produced by the model, which never sees the page structure. /start
   // states it back to the student when it shows the one-page base resume. 0 means unmeasured.
@@ -68,7 +80,10 @@ The JSON must match this exact shape:
   "grad_year": number,
   "currently_enrolled": boolean,
   "coursework": [string],
-  "target_roles": [string]
+  "target_roles": [string],
+  "gpa": string,
+  "gpa_scale": string,
+  "major": string
 }
 
 Rules:
@@ -85,6 +100,17 @@ Rules:
 - "grad_year" should be the 4-digit year from grad_date. Use 0 when it is absent.
 - "currently_enrolled" is true only when the resume explicitly says expected graduation, candidate, current student, or otherwise clearly shows an unfinished degree with a future graduation date.
 - "coursework" may contain only courses explicitly printed on the resume.
+- "gpa" is the grade average printed on the resume, digits only, e.g. "3.75" from "GPA: 3.75/4.0".
+  Empty string when the resume does not print one. NEVER estimate, round or infer a GPA from
+  honours, Latin honours, or anything else - an invented GPA is a false claim on a job application.
+- "gpa_scale" is the denominator when the resume prints one, e.g. "4.0" from "3.75/4.0". When the
+  resume prints a bare number with no scale, return an empty string rather than assuming 4.0:
+  scales differ by country (10.0 in India, 5.0 in Germany) and a wrong denominator silently
+  misstates the student's record.
+- "major" is the field of study alone, taken from the degree line, e.g. "Psychology" from
+  "Bachelor of Arts, Psychology" or "Computer Science" from "BS in Computer Science". Drop the
+  award words (Bachelor, BS, Master). For a joint or dual degree carry both, comma-separated, in
+  the printed order. Empty string when no degree is stated.
 - "target_roles" should be inferred from the resume objective, job titles, or skills (e.g. ["Software Engineer", "ML Engineer"])
 - Return empty arrays for missing sections, never null
 - If grad_year is truly unknown, use 0`;
