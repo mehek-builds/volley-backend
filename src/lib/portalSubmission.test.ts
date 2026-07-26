@@ -79,7 +79,7 @@ test('SmartRecruiters managed actions open the application form before filling',
   assert.ok(fillSelectors.includes('spl-input#first-name-input input'));
   assert.ok(fillSelectors.includes('spl-input#email-input input'));
   assert.ok(fillSelectors.includes('spl-input#confirm-email-input input'));
-  assert.equal(fillSelectors.some((selector) => selector === '#first-name-input'), false);
+  assert.equal(fillSelectors.some((selector) => selector?.includes('[id="first-name-input"]')), false);
 });
 
 test('opens Ashby directly on its application tab for managed filling', () => {
@@ -109,8 +109,46 @@ test('controlled portal is gated by an explicit server flag', () => {
   assert.throws(() => detectPortal('https://trylitos.com/qa/portal-submission'), /not supported/);
   process.env.LITOS_ENABLE_TEST_PORTAL = 'true';
   assert.equal(detectPortal('https://trylitos.com/qa/portal-submission'), 'controlled_test');
+  assert.equal(detectPortal('https://trylitos.com/qa/portal-submission?board=lever'), 'controlled_lever');
+  assert.equal(detectPortal('https://trylitos.com/qa/portal-submission?board=ashby'), 'controlled_ashby');
+  assert.equal(
+    detectPortal('https://trylitos.com/qa/portal-submission?board=smartrecruiters'),
+    'controlled_smartrecruiters',
+  );
+  assert.equal(detectPortal('https://trylitos.com/qa/portal-submission/lever/lever-02'), 'controlled_lever');
+  assert.equal(detectPortal('https://trylitos.com/qa/portal-submission/ashby/ashby-03'), 'controlled_ashby');
+  assert.equal(
+    detectPortal('https://trylitos.com/qa/portal-submission/smartrecruiters/smartrecruiters-04'),
+    'controlled_smartrecruiters',
+  );
   if (previous === undefined) delete process.env.LITOS_ENABLE_TEST_PORTAL;
   else process.env.LITOS_ENABLE_TEST_PORTAL = previous;
+});
+
+test('controlled portal variants exercise every real adapter selector family', () => {
+  const packet = {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    phone: '+1 213 555 0100',
+    city: 'Los Angeles',
+    linkedinUrl: 'https://linkedin.com/in/taylor',
+    githubUrl: 'https://github.com/taylor',
+    portfolioUrl: 'https://taylor.example',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  };
+  const selectors = new Map([
+    ['controlled_test', '#first_name'],
+    ['controlled_lever', 'input[name="name"]'],
+    ['controlled_ashby', 'input[name="_systemfield_name"]'],
+    ['controlled_smartrecruiters', '[id="first-name-input"]'],
+  ] as const);
+  for (const [portal, expected] of selectors) {
+    const actions = buildManagedPortalActions(portal, packet, true);
+    assert.ok(actions.some((action) => action.type === 'fill' && action.selector?.includes(expected)));
+    assert.equal(actions.at(-1)?.type, 'click');
+  }
 });
 
 test('managed controlled-portal actions include reviewed fields, resume upload, and final submit', () => {

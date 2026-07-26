@@ -1,11 +1,11 @@
 # Graph Report - .  (2026-07-26)
 
 ## Corpus Check
-- 124 files · ~101,901 words
+- 124 files · ~102,165 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 538 nodes · 982 edges · 21 communities detected
+- 539 nodes · 985 edges · 21 communities detected
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS
 - Token cost: 0 input · 0 output
 
@@ -59,12 +59,12 @@ Cohesion: 0.12
 Nodes (18): completeEmailVerificationIfPresent(), safeContinueButton(), visibleOtpField(), waitForCode(), asRecord(), bodyText(), decodeBase64Url(), defaultExecutor() (+10 more)
 
 ### Community 8 - "Community 8"
-Cohesion: 0.1
-Nodes (5): fetchSourceJobs(), normalizeAshbyJobs(), normalizeGreenhouseJobs(), normalizeLeverJobs(), sourceEndpoint()
+Cohesion: 0.13
+Nodes (18): buildManagedDiscoveryActions(), buildManagedPortalActions(), canFillReviewedQuestions(), coverLetterUploadSelector(), fillFirst(), fillPortal(), fillReviewedQuestions(), hasCoverLetterUpload() (+10 more)
 
 ### Community 9 - "Community 9"
-Cohesion: 0.13
-Nodes (17): buildManagedDiscoveryActions(), buildManagedPortalActions(), canFillReviewedQuestions(), coverLetterUploadSelector(), fillFirst(), fillPortal(), fillReviewedQuestions(), hasCoverLetterUpload() (+9 more)
+Cohesion: 0.1
+Nodes (5): fetchSourceJobs(), normalizeAshbyJobs(), normalizeGreenhouseJobs(), normalizeLeverJobs(), sourceEndpoint()
 
 ### Community 10 - "Community 10"
 Cohesion: 0.13
