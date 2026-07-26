@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.3] - 2026-07-26
+
+### Changed
+
+- Pro and trial plans now allow up to 1,000 resume generations per month.
+- Quota responses and account usage report the same 1,000-resume limit.
+
+### Fixed
+
+- Concurrent resume requests atomically reserve quota so the monthly cap cannot be exceeded.
+
 ## [1.0.2] - 2026-07-25
 
 ### Added

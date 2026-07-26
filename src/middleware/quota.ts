@@ -10,9 +10,8 @@ import { PRODUCT_NAME } from '../lib/product';
 // 20 resume generations per month that reset like everything else. This keeps free
 // students coming back every month (job searches run for months, not a single session),
 // rather than a one-time trial that either converts immediately or churns the student
-// out entirely. Crossing 20/month - or wanting it removed entirely - is what moves a
-// student onto the $49.99/mo paid tier, which sets an effectively-unlimited monthly
-// resume quota instead. Gate volume, not discovery. All enforcement is server-side so
+// out entirely. Crossing 20/month is what moves a student onto the $49.99/mo paid tier,
+// which includes 1,000 resume generations per month. Gate volume, not discovery. All enforcement is server-side so
 // every client version is covered. Limits are env-tunable without a redeploy of intent.
 export const LIMITS = {
   free: {
@@ -23,9 +22,7 @@ export const LIMITS = {
   pro: {
     monthlyContacts: parseInt(process.env.PRO_MONTHLY_CONTACTS || '500', 10),
     monthlyDrafts: parseInt(process.env.PRO_MONTHLY_DRAFTS || '1000', 10),
-    // Effectively unlimited (bounded, not Infinity, so it round-trips cleanly through
-    // JSON/DB) - the $49.99/mo tier's whole point is no meaningful resume cap.
-    monthlyResumes: parseInt(process.env.PRO_MONTHLY_RESUMES || '100000', 10),
+    monthlyResumes: parseInt(process.env.PRO_MONTHLY_RESUMES || '1000', 10),
   },
   // Abuse protection (rolling hour, per user or per email)
   perHour: {
@@ -64,6 +61,28 @@ export async function bumpCounter(key: string, period: string, kind: string, by 
     })
     .returning({ count: usage_counters.count });
   return rows[0]?.count ?? by;
+}
+
+// Atomically reserves one or more units without ever crossing the supplied cap.
+// A null result means another request consumed the final slot first.
+export async function claimCounterSlot(key: string, period: string, kind: string, limit: number, by = 1): Promise<number | null> {
+  const rows = await db
+    .insert(usage_counters)
+    .values({ key, period, kind, count: by })
+    .onConflictDoUpdate({
+      target: [usage_counters.key, usage_counters.period, usage_counters.kind],
+      set: { count: sql`${usage_counters.count} + ${by}` },
+      setWhere: sql`${usage_counters.count} + ${by} <= ${limit}`,
+    })
+    .returning({ count: usage_counters.count });
+  return rows[0]?.count ?? null;
+}
+
+export async function releaseCounterSlot(key: string, period: string, kind: string, by = 1): Promise<void> {
+  await db
+    .update(usage_counters)
+    .set({ count: sql`greatest(${usage_counters.count} - ${by}, 0)` })
+    .where(and(eq(usage_counters.key, key), eq(usage_counters.period, period), eq(usage_counters.kind, kind)));
 }
 
 export async function getCount(key: string, period: string, kind: string): Promise<number> {
@@ -130,7 +149,7 @@ export function quotaExceededPayload(ent: Entitlements, used: number, what: 'con
     const cap = ent.monthlyResumes;
     const base =
       ent.tier === 'free'
-        ? `You've used your ${cap} free resume generations this month. ${PRODUCT_NAME} Premium ($49.99/mo) unlocks unlimited resume generation + autofill. Resets on the 1st.`
+        ? `You've used your ${cap} free resume generations this month. ${PRODUCT_NAME} Pro ($49.99/mo) includes ${LIMITS.pro.monthlyResumes.toLocaleString()} resume generations + autofill. Resets on the 1st.`
         : `You've hit this month's resume limit (${cap}). It resets on the 1st.`;
     return {
       error: upgradeLink && ent.tier === 'free' ? `${base} Upgrade: ${upgradeLink}` : base,
