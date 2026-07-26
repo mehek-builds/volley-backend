@@ -145,8 +145,14 @@ async function run(file: string) {
    * three false defects on the first run after the fix.) */
   const gradYear = parsed.grad_year && parsed.grad_year >= 2000 ? parsed.grad_year : undefined;
   const sinceGrad = gradYear !== undefined ? new Date().getFullYear() - gradYear : undefined;
+  /* A PAST graduation date overrides currently_enrolled, matching deriveCandidateContext. The
+   * parser can return both at once - one sample resume came back enrolled=true with grad_year
+   * 2019 - and the date is the harder evidence. Without this the harness reported a false defect
+   * against correct behaviour. */
+  const stillEnrolled =
+    parsed.currently_enrolled && (gradYear === undefined || gradYear >= new Date().getFullYear());
   const expectedPos =
-    parsed.currently_enrolled ||
+    stillEnrolled ||
     gradYear === undefined ||
     (sinceGrad !== undefined && sinceGrad >= 0 && sinceGrad <= 2)
       ? 'top'

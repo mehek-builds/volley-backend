@@ -248,7 +248,19 @@ export async function generateBaseResumeSpec(
   const stream = client.messages.stream(
     {
       model: 'claude-sonnet-5',
-      max_tokens: 8192,
+      /* max_tokens is a SHARED budget for thinking AND the emitted JSON, not just the JSON, so
+       * the ceiling has to clear the model's reasoning as well as the spec.
+       *
+       * 8192 was copied from resumeSpec.ts, where it was sized against a TAILORED generate: a job
+       * description narrows the choice, so the model reasons briefly and emits one obvious subset.
+       * The base build has no JD, which is exactly what makes it reason longer - it has to compare
+       * every bank entry against every other for recency and breadth. Measured 2026-07-27 on a
+       * real two-page resume with 7 bank entries: the response hit the cap and truncated
+       * mid-object, failing the build outright. That is the headline case for this feature (a
+       * long resume compressed to one page), so the cap has to be sized for the WORST bank, not a
+       * typical one. Output is billed on what is generated, so a higher ceiling costs nothing on a
+       * small resume. */
+      max_tokens: 16384,
       system: [
         { type: 'text', text: BASE_RESUME_SYSTEM_PROMPT },
         { type: 'text', text: contextBlock, cache_control: { type: 'ephemeral' } },
