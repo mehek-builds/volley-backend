@@ -341,16 +341,17 @@ const HOSTS: Record<Exclude<SupportedPortal, 'controlled_test'>, RegExp> = {
 
 export function detectPortal(rawUrl: string): SupportedPortal {
   const url = new URL(rawUrl);
-  if (url.protocol !== 'https:') throw new Error('Application portal must use HTTPS');
-  for (const [portal, host] of Object.entries(HOSTS)) {
-    if (host.test(url.hostname)) return portal as SupportedPortal;
-  }
   if (
     process.env.LITOS_ENABLE_TEST_PORTAL === 'true' &&
     (url.hostname === 'trylitos.com' || url.hostname === 'www.trylitos.com' || url.hostname === 'localhost') &&
-    url.pathname.startsWith('/qa/portal-submission')
+    url.pathname.startsWith('/qa/portal-submission') &&
+    (url.protocol === 'https:' || (url.protocol === 'http:' && url.hostname === 'localhost'))
   ) {
     return 'controlled_test';
+  }
+  if (url.protocol !== 'https:') throw new Error('Application portal must use HTTPS');
+  for (const [portal, host] of Object.entries(HOSTS)) {
+    if (host.test(url.hostname)) return portal as SupportedPortal;
   }
   throw new Error('This portal is not supported yet. Supported portals are Greenhouse, Lever, Ashby, and SmartRecruiters.');
 }

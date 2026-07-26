@@ -9,7 +9,7 @@ import { getEntitlements, getCount, monthPeriod, upgradeUrl } from '../middlewar
 export async function billingRoutes(fastify: FastifyInstance) {
   // Plan + usage for the signed-in user. The extension can show "12 of 30 used".
   fastify.get('/me', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
-    const { userId, email } = request.jwtPayload!;
+    const { userId, email, isGuest } = request.jwtPayload!;
     const ent = await getEntitlements(userId);
     const period = monthPeriod();
     const [usedContacts, usedDrafts, usedResumes] = await Promise.all([
@@ -22,9 +22,11 @@ export async function billingRoutes(fastify: FastifyInstance) {
     // /me surfaces upgrade_url to the same students the 402 upsell does.
     const upgradeLink = upgradeUrl();
     return reply.status(200).send({
-      email,
+      email: email ?? null,
+      is_guest: isGuest,
       tier: ent.tier,
       trial_ends_at: rows[0]?.trial_ends_at ?? null,
+      guest_expires_at: rows[0]?.guest_expires_at ?? null,
       usage: {
         contacts: { used: usedContacts, limit: ent.monthlyContacts },
         drafts: { used: usedDrafts, limit: ent.monthlyDrafts },
