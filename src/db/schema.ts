@@ -19,11 +19,6 @@ export const users = pgTable('users', {
   // Guests are real authenticated principals with no email. A verified email is
   // attached in-place when a first-time guest claims the workspace.
   email: text('email').unique(),
-  // Retained for compatibility with accounts created by the original extension auth flow.
-  // Passwordless web auth does not write these fields, but omitting them from the declared
-  // schema would make a later schema push drop live account data.
-  password_hash: text('password_hash'),
-  session_version: integer('session_version').default(0).notNull(),
   email_verified: boolean('email_verified').default(false),
   is_guest: boolean('is_guest').default(false).notNull(),
   guest_key_hash: text('guest_key_hash').unique(),
@@ -32,6 +27,12 @@ export const users = pgTable('users', {
   // Stable Google identity. Google explicitly requires account linkage by the
   // immutable `sub` claim, never by an email address that can change.
   google_subject: text('google_subject'),
+  // Passwords are never stored or encrypted. This contains only a salted,
+  // memory-hard Argon2id PHC string and stays nullable for Google/code users.
+  password_hash: text('password_hash'),
+  // Incrementing this revokes every previously issued JWT immediately. It
+  // avoids timestamp precision races during password changes and recovery.
+  session_version: integer('session_version').default(0).notNull(),
   // Billing: 'free' | 'pro' ('plus' is a legacy alias, treated as 'pro' - see quota.ts).
   // Every feature (outreach + resume-gen/autofill) is available on 'free', including 20
   // resume generations per month (recurring, Apollo.io-style credits, not a one-time

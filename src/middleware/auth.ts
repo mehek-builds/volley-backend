@@ -8,6 +8,9 @@ export interface JWTPayload {
   userId: string;
   email?: string;
   isGuest: boolean;
+  authMethod: 'guest' | 'legacy' | 'google' | 'email_code' | 'password';
+  sessionVersion: number;
+  authenticatedAt: number;
 }
 
 declare module 'fastify' {
@@ -25,6 +28,11 @@ export function issuedBeforeEpoch(iatSeconds: number | undefined, sessionValidFr
   // A token with no iat cannot prove it postdates the epoch; treat it as stale.
   if (iatSeconds === undefined) return true;
   return iatSeconds < Math.floor(sessionValidFrom.getTime() / 1000);
+}
+
+export function sessionVersionIsStale(tokenVersion: unknown, storedVersion: number): boolean {
+  const normalizedTokenVersion = typeof tokenVersion === 'number' ? tokenVersion : 0;
+  return normalizedTokenVersion !== storedVersion;
 }
 
 export async function requireAuth(request: FastifyRequest, reply: FastifyReply) {
@@ -58,6 +66,7 @@ export async function requireAuth(request: FastifyRequest, reply: FastifyReply) 
     const row = await db
       .select({
         session_valid_from: users.session_valid_from,
+        session_version: users.session_version,
         email: users.email,
         is_guest: users.is_guest,
         guest_expires_at: users.guest_expires_at,
@@ -72,6 +81,9 @@ export async function requireAuth(request: FastifyRequest, reply: FastifyReply) 
     if (issuedBeforeEpoch(payload.iat, row[0].session_valid_from)) {
       return reply.status(401).send({ error: 'Invalid or expired token' });
     }
+    if (sessionVersionIsStale(payload['sessionVersion'], row[0].session_version)) {
+      return reply.status(401).send({ error: 'Invalid or expired token' });
+    }
     if (row[0].is_guest && row[0].guest_expires_at && row[0].guest_expires_at <= new Date()) {
       return reply.status(401).send({ error: 'Invalid or expired token' });
     }
@@ -83,6 +95,11 @@ export async function requireAuth(request: FastifyRequest, reply: FastifyReply) 
       userId,
       ...(row[0].email ? { email: row[0].email } : {}),
       isGuest: row[0].is_guest,
+      authMethod: typeof payload['authMethod'] === 'string'
+        ? payload['authMethod'] as JWTPayload['authMethod']
+        : 'legacy',
+      sessionVersion: row[0].session_version,
+      authenticatedAt: payload.iat ?? 0,
     };
   } catch (err) {
     return reply.status(401).send({ error: 'Invalid or expired token' });

@@ -72,6 +72,32 @@ Before enabling Google sign-in, add the identity column without touching existin
 npm run db:google-auth
 ```
 
+Before deploying password-auth code, apply its additive migration first:
+
+```bash
+vercel env run -e production -- node scripts/apply-password-auth-migration.mjs
+```
+
+The migration adds nullable `password_hash` and non-null `session_version`
+columns. It is safe to run more than once and old application versions ignore
+both columns, so the required order is migration first, API deploy second, web
+deploy last. Roll back application code without rolling back these columns.
+
+Password authentication uses these contracts:
+
+- `POST /auth/password/login` accepts `{ "email": "...", "password": "..." }`.
+  It returns `{ "token": "...", "email": "..." }` or the same
+  `invalid_credentials` response for an unknown email and a wrong password.
+- `PUT /auth/password` requires a Bearer session and accepts
+  `{ "password": "...", "current_password": "..." }`. A Google or email-code
+  session issued within the last 15 minutes may omit `current_password` for
+  first-time setup or recovery.
+- A successful password update rotates `session_version`. The response token
+  replaces the caller's old token, and every older token becomes invalid.
+- Passwords are normalized with Unicode NFC, must be 15 to 128 characters, and
+  are stored only as salted Argon2id hashes. Configure the rate-limit variables
+  documented in `.env.example` when production needs limits other than defaults.
+
 Before enabling Lemon Squeezy checkout, add the subscription state columns:
 
 ```bash

@@ -8,6 +8,15 @@ import { and, eq, gte, lt, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import { allowHourly, rateLimitedReply, LIMITS, TRIAL_DAYS } from '../middleware/quota';
 import { PRODUCT_LINKS, PRODUCT_NAME } from '../lib/product';
+import { requireAuth, type JWTPayload } from '../middleware/auth';
+import {
+  hashPassword,
+  normalizePassword,
+  passwordHashNeedsUpgrade,
+  passwordPolicyError,
+  passwordUpdateError,
+  verifyPassword,
+} from '../lib/passwordAuth';
 
 const sessionBodySchema = z.object({
   email: z.string().email(),
@@ -25,6 +34,18 @@ const guestBodySchema = z.object({
 const googleBodySchema = z.object({
   credential: z.string().min(1).max(10_000),
 });
+
+const passwordLoginBodySchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(1).max(512),
+});
+
+const setPasswordBodySchema = z.object({
+  password: z.string().min(1).max(512),
+  current_password: z.string().max(512).optional(),
+});
+
+type AuthMethod = JWTPayload['authMethod'];
 
 const GOOGLE_ISSUERS = ['accounts.google.com', 'https://accounts.google.com'] as const;
 const googleKeys = createRemoteJWKSet(new URL('https://www.googleapis.com/oauth2/v3/certs'));
@@ -104,6 +125,18 @@ function guestExpiry(now = new Date()): Date {
   return new Date(now.getTime() + (TRIAL_DAYS + 30) * 24 * 60 * 60 * 1000);
 }
 const MAX_ATTEMPTS = 5;
+const RECENT_VERIFICATION_SECONDS = 15 * 60;
+
+export function isRecentVerification(
+  authMethod: AuthMethod,
+  authenticatedAt: number,
+  nowSeconds = Math.floor(Date.now() / 1000),
+): boolean {
+  return (authMethod === 'email_code' || authMethod === 'google')
+    && authenticatedAt > 0
+    && nowSeconds - authenticatedAt >= 0
+    && nowSeconds - authenticatedAt <= RECENT_VERIFICATION_SECONDS;
+}
 
 export function googleRegistrationValues(
   identity: GoogleIdentity,
@@ -178,15 +211,19 @@ function verificationSender(): string {
   return `${PRODUCT_NAME} <${mailbox}>`;
 }
 
-async function signSessionToken(
-  userId: string,
-  email?: string | null,
-  isGuest = false,
-  expiresAt: string | number = '30d',
-): Promise<string> {
+type SessionTokenOptions = {
+  email?: string | null;
+  isGuest?: boolean;
+  expiresAt?: string | number;
+  authMethod: AuthMethod;
+  sessionVersion: number;
+};
+
+async function signSessionToken(userId: string, options: SessionTokenOptions): Promise<string> {
   const secret = process.env.JWT_SIGNING_SECRET!;
   const secretBytes = new TextEncoder().encode(secret);
-  return new SignJWT({ userId, ...(email ? { email } : {}), isGuest })
+  const { email, isGuest = false, expiresAt = '30d', authMethod, sessionVersion } = options;
+  return new SignJWT({ userId, ...(email ? { email } : {}), isGuest, authMethod, sessionVersion })
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
     .setExpirationTime(expiresAt)
@@ -326,12 +363,12 @@ export async function authRoutes(fastify: FastifyInstance) {
       const existing = await db.select().from(users).where(eq(users.guest_key_hash, keyHash)).limit(1);
       const active = existing[0];
       if (active?.is_guest && active.guest_expires_at && active.guest_expires_at > new Date()) {
-        const token = await signSessionToken(
-          active.id,
-          undefined,
-          true,
-          Math.floor(active.guest_expires_at.getTime() / 1000),
-        );
+        const token = await signSessionToken(active.id, {
+          isGuest: true,
+          expiresAt: Math.floor(active.guest_expires_at.getTime() / 1000),
+          authMethod: 'guest',
+          sessionVersion: active.session_version,
+        });
         return reply.status(200).send({
           token,
           is_guest: true,
@@ -364,12 +401,12 @@ export async function authRoutes(fastify: FastifyInstance) {
         ?? (await db.select().from(users).where(eq(users.guest_key_hash, keyHash)).limit(1))[0];
       if (!guest) throw new Error('Guest creation did not return a user');
 
-      const token = await signSessionToken(
-        guest.id,
-        undefined,
-        true,
-        Math.floor((guest.guest_expires_at ?? guest_expires_at).getTime() / 1000),
-      );
+      const token = await signSessionToken(guest.id, {
+        isGuest: true,
+        expiresAt: Math.floor((guest.guest_expires_at ?? guest_expires_at).getTime() / 1000),
+        authMethod: 'guest',
+        sessionVersion: guest.session_version,
+      });
       return reply.status(201).send({
         token,
         is_guest: true,
@@ -412,13 +449,13 @@ export async function authRoutes(fastify: FastifyInstance) {
     try {
       const googleUser = await db.transaction(async (tx) => {
         const bySubject = await tx
-          .select({ id: users.id, email: users.email })
+          .select({ id: users.id, email: users.email, session_version: users.session_version })
           .from(users)
           .where(eq(users.google_subject, identity.subject))
           .limit(1);
         if (bySubject[0]) {
           return {
-            user: { id: bySubject[0].id, email: bySubject[0].email },
+            user: bySubject[0],
             isNewUser: false,
           };
         }
@@ -428,32 +465,71 @@ export async function authRoutes(fastify: FastifyInstance) {
         // by email, because a stale third-party address could take over data.
         if (!googleIsAuthoritativeForEmail(identity)) return null;
 
-        const linkExistingByEmail = async () => {
+        const linkExistingByEmail = async (attempt = 0): Promise<{
+          user: { id: string; email: string; session_version: number };
+          isNewUser: false;
+        } | null> => {
           const byEmail = await tx
             .select({
               id: users.id,
               email: users.email,
               google_subject: users.google_subject,
               email_verified: users.email_verified,
+              session_version: users.session_version,
             })
             .from(users)
             .where(eq(users.email, identity.email))
             .limit(1);
           const existing = byEmail[0];
-          if (!existing) return null;
+          if (!existing?.email) return null;
           if (existing.google_subject && existing.google_subject !== identity.subject) {
             return null;
           }
-          await tx
+          if (existing.google_subject === identity.subject && existing.email_verified) {
+            return {
+              user: {
+                id: existing.id,
+                email: existing.email,
+                session_version: existing.session_version,
+              },
+              isNewUser: false,
+            };
+          }
+
+          const updated = await tx
             .update(users)
             .set({
               google_subject: identity.subject,
               email_verified: true,
               ...(!existing.email_verified ? { session_valid_from: new Date() } : {}),
+              ...(!existing.email_verified
+                ? { session_version: sql`${users.session_version} + 1` }
+                : {}),
             })
-            .where(eq(users.id, existing.id));
+            .where(and(
+              eq(users.id, existing.id),
+              eq(users.session_version, existing.session_version),
+              existing.google_subject
+                ? eq(users.google_subject, identity.subject)
+                : sql`${users.google_subject} IS NULL`,
+            ))
+            .returning({
+              id: users.id,
+              email: users.email,
+              session_version: users.session_version,
+            });
+          if (!updated[0]) {
+            // A parallel login or security-sensitive account update won the
+            // compare-and-swap. Re-read once so every issued token carries the
+            // session version that actually committed.
+            return attempt === 0 ? linkExistingByEmail(1) : null;
+          }
           return {
-            user: { id: existing.id, email: existing.email },
+            user: {
+              id: updated[0].id,
+              email: existing.email,
+              session_version: updated[0].session_version,
+            },
             isNewUser: false,
           };
         };
@@ -466,7 +542,7 @@ export async function authRoutes(fastify: FastifyInstance) {
         // that have not yet received unrelated user-preference columns. Drizzle's
         // generated INSERT includes every modeled column, even when omitted from
         // values, so name the authentication columns explicitly here.
-        const created = await tx.execute<{ id: string; email: string }>(sql`
+        const created = await tx.execute<{ id: string; email: string; session_version: number }>(sql`
           INSERT INTO ${users} (
             id,
             email,
@@ -487,7 +563,7 @@ export async function authRoutes(fastify: FastifyInstance) {
             ${registration.onboarding_completed_at}
           )
           ON CONFLICT DO NOTHING
-          RETURNING id, email
+          RETURNING id, email, session_version
         `);
         if (created.rows[0]) return { user: created.rows[0], isNewUser: true };
 
@@ -495,7 +571,7 @@ export async function authRoutes(fastify: FastifyInstance) {
         // INSERT. Re-read the winning identity instead of turning a harmless
         // retry or parallel-tab sign-in into a 500 response.
         const concurrentBySubject = await tx
-          .select({ id: users.id, email: users.email })
+          .select({ id: users.id, email: users.email, session_version: users.session_version })
           .from(users)
           .where(eq(users.google_subject, identity.subject))
           .limit(1);
@@ -509,7 +585,11 @@ export async function authRoutes(fastify: FastifyInstance) {
         return reply.status(409).send({ error: 'google_email_requires_verification' });
       }
 
-      const token = await signSessionToken(googleUser.user.id, googleUser.user.email);
+      const token = await signSessionToken(googleUser.user.id, {
+        email: googleUser.user.email,
+        authMethod: 'google',
+        sessionVersion: googleUser.user.session_version,
+      });
       return reply.status(200).send({
         token,
         email: googleUser.user.email,
@@ -520,6 +600,188 @@ export async function authRoutes(fastify: FastifyInstance) {
       return reply.status(500).send({ error: 'Failed to sign in with Google' });
     }
   });
+
+  fastify.post('/auth/password/login', async (request: FastifyRequest, reply: FastifyReply) => {
+    const parsed = passwordLoginBodySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: 'A valid email and password are required' });
+    }
+    if (!process.env.JWT_SIGNING_SECRET) {
+      return reply.status(500).send({ error: 'JWT_SIGNING_SECRET not configured' });
+    }
+
+    const email = parsed.data.email.toLowerCase();
+    const password = normalizePassword(parsed.data.password);
+    const [emailAllowed, ipAllowed] = await Promise.all([
+      allowHourly(email, 'password-login', LIMITS.perHour.passwordLogin),
+      allowHourly(`ip:${request.ip}`, 'password-login-ip', LIMITS.perHour.passwordLoginPerIp),
+    ]);
+    if (!emailAllowed || !ipAllowed) return rateLimitedReply(reply);
+
+    try {
+      const account = (await db
+        .select({
+          id: users.id,
+          email: users.email,
+          email_verified: users.email_verified,
+          is_guest: users.is_guest,
+          password_hash: users.password_hash,
+          session_version: users.session_version,
+        })
+        .from(users)
+        .where(eq(users.email, email))
+        .limit(1))[0];
+
+      // A dummy Argon2 verification keeps unknown emails and accounts without a
+      // password on the same computational path as a real account.
+      const passwordMatches = await verifyPassword(account?.password_hash ?? null, password);
+      if (
+        !account ||
+        account.is_guest ||
+        !account.email_verified ||
+        !account.email ||
+        !account.password_hash ||
+        !passwordMatches
+      ) {
+        return reply
+          .header('Cache-Control', 'private, no-store')
+          .status(401)
+          .send({ error: 'Invalid email or password', code: 'invalid_credentials' });
+      }
+
+      if (passwordHashNeedsUpgrade(account.password_hash)) {
+        const upgradedHash = await hashPassword(password);
+        await db
+          .update(users)
+          .set({ password_hash: upgradedHash })
+          .where(and(eq(users.id, account.id), eq(users.password_hash, account.password_hash)));
+      }
+
+      const token = await signSessionToken(account.id, {
+        email: account.email,
+        authMethod: 'password',
+        sessionVersion: account.session_version,
+      });
+      return reply
+        .header('Cache-Control', 'private, no-store')
+        .status(200)
+        .send({ token, email: account.email });
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ error: 'Failed to sign in' });
+    }
+  });
+
+  fastify.put(
+    '/auth/password',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const parsed = setPasswordBodySchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: 'A password is required', code: 'invalid_password' });
+      }
+      const identity = request.jwtPayload;
+      if (!identity || identity.isGuest || !identity.email) {
+        return reply.status(403).send({ error: 'Verify your email before setting a password' });
+      }
+
+      const password = normalizePassword(parsed.data.password);
+      const policyError = passwordPolicyError(password, identity.email);
+      if (policyError) {
+        const messages = {
+          password_too_short: 'Use at least 15 characters',
+          password_too_long: 'Use no more than 128 characters',
+          password_too_common: 'Choose a less common password',
+        } as const;
+        return reply.status(400).send({ error: messages[policyError], code: policyError });
+      }
+
+      try {
+        const account = (await db
+          .select({
+            id: users.id,
+            email: users.email,
+            email_verified: users.email_verified,
+            password_hash: users.password_hash,
+            session_version: users.session_version,
+          })
+          .from(users)
+          .where(eq(users.id, identity.userId))
+          .limit(1))[0];
+        if (!account?.email || !account.email_verified) {
+          return reply.status(403).send({ error: 'Verify your email before setting a password' });
+        }
+
+        const recoverySession = isRecentVerification(identity.authMethod, identity.authenticatedAt);
+        const [userAllowed, ipAllowed] = await Promise.all([
+          allowHourly(account.id, 'password-change', LIMITS.perHour.passwordChange),
+          allowHourly(`ip:${request.ip}`, 'password-change-ip', LIMITS.perHour.passwordChangePerIp),
+        ]);
+        if (!userAllowed || !ipAllowed) return rateLimitedReply(reply);
+
+        const updateError = await passwordUpdateError({
+          existingHash: account.password_hash,
+          newPassword: password,
+          currentPassword: parsed.data.current_password,
+          recoverySession,
+        });
+        if (updateError) {
+          const failures = {
+            recent_verification_required: {
+              status: 403,
+              error: 'Verify your email again before creating a password',
+            },
+            current_password_incorrect: {
+              status: 401,
+              error: 'Current password is incorrect',
+            },
+            password_unchanged: {
+              status: 400,
+              error: 'Choose a password you have not used for this account',
+            },
+          } as const;
+          const failure = failures[updateError];
+          return reply.status(failure.status).send({ error: failure.error, code: updateError });
+        }
+
+        const passwordHash = await hashPassword(password);
+        const updated = await db
+          .update(users)
+          .set({
+            password_hash: passwordHash,
+            session_version: sql`${users.session_version} + 1`,
+            session_valid_from: new Date(),
+          })
+          .where(and(
+            eq(users.id, account.id),
+            eq(users.session_version, identity.sessionVersion),
+            account.password_hash
+              ? eq(users.password_hash, account.password_hash)
+              : sql`${users.password_hash} IS NULL`,
+          ))
+          .returning({ session_version: users.session_version });
+        if (!updated[0]) {
+          return reply.status(409).send({
+            error: 'Your account changed in another session. Verify your email and try again.',
+            code: 'session_changed',
+          });
+        }
+
+        const token = await signSessionToken(account.id, {
+          email: account.email,
+          authMethod: 'password',
+          sessionVersion: updated[0].session_version,
+        });
+        return reply
+          .header('Cache-Control', 'private, no-store')
+          .status(200)
+          .send({ token, email: account.email });
+      } catch (err) {
+        fastify.log.error(err);
+        return reply.status(500).send({ error: 'Failed to update password' });
+      }
+    },
+  );
 
   // Legacy passwordless session, used by extension v0.1.0 (the build under store
   // review). Kept so installed clients keep working; remove once v0.2.0 (code
@@ -586,7 +848,11 @@ export async function authRoutes(fastify: FastifyInstance) {
       if (!foundUser.email) {
         return reply.status(409).send({ error: 'Guest accounts must be claimed with email verification' });
       }
-      const token = await signSessionToken(foundUser.id, foundUser.email, false);
+      const token = await signSessionToken(foundUser.id, {
+        email: foundUser.email,
+        authMethod: 'legacy',
+        sessionVersion: foundUser.session_version,
+      });
 
       return reply.status(200).send({ token });
     } catch (err) {
@@ -715,7 +981,11 @@ export async function authRoutes(fastify: FastifyInstance) {
             const existingEmail = existing[0].email;
             if (!existingEmail) return null;
             return {
-              user: { id: existing[0].id, email: existingEmail },
+              user: {
+                id: existing[0].id,
+                email: existingEmail,
+                session_version: existing[0].session_version,
+              },
               existingAccount: true,
             };
           }
@@ -730,12 +1000,13 @@ export async function authRoutes(fastify: FastifyInstance) {
               guest_expires_at: null,
               claimed_at: new Date(),
               session_valid_from: new Date(),
+              session_version: sql`${users.session_version} + 1`,
             })
             .where(and(eq(users.id, guestUserId), eq(users.is_guest, true)))
-            .returning({ id: users.id, email: users.email });
+            .returning({ id: users.id, email: users.email, session_version: users.session_version });
           if (!claimed[0]?.email) return null;
           return {
-            user: { id: claimed[0].id, email: claimed[0].email },
+            user: claimed[0],
             existingAccount: false,
           };
         }
@@ -750,24 +1021,34 @@ export async function authRoutes(fastify: FastifyInstance) {
               trial_ends_at: trialEnd(),
               created_at: new Date(),
             })
-            .returning({ id: users.id, email: users.email });
+            .returning({ id: users.id, email: users.email, session_version: users.session_version });
           const user = created[0] ?? null;
           return user?.email
-            ? { user: { id: user.id, email: user.email }, existingAccount: false }
+            ? { user, existingAccount: false }
             : null;
         }
 
         if (!existing[0].email_verified) {
           // Adopting a pre-existing UNVERIFIED account onto the same users.id. Any
           // old unverified token is invalidated before this verified token is signed.
-          await tx
+          const updated = await tx
             .update(users)
-            .set({ email_verified: true, session_valid_from: new Date() })
-            .where(eq(users.email, email));
+            .set({
+              email_verified: true,
+              session_valid_from: new Date(),
+              session_version: sql`${users.session_version} + 1`,
+            })
+            .where(eq(users.email, email))
+            .returning({ session_version: users.session_version });
+          existing[0].session_version = updated[0]?.session_version ?? existing[0].session_version + 1;
         }
         if (!existing[0].email) return null;
         return {
-          user: { id: existing[0].id, email: existing[0].email },
+          user: {
+            id: existing[0].id,
+            email: existing[0].email,
+            session_version: existing[0].session_version,
+          },
           existingAccount: false,
         };
       });
@@ -776,11 +1057,11 @@ export async function authRoutes(fastify: FastifyInstance) {
         return reply.status(400).send({ error: 'Code expired or not found. Request a new one.' });
       }
 
-      const token = await signSessionToken(
-        verificationResult.user.id,
-        verificationResult.user.email,
-        false,
-      );
+      const token = await signSessionToken(verificationResult.user.id, {
+        email: verificationResult.user.email,
+        authMethod: 'email_code',
+        sessionVersion: verificationResult.user.session_version,
+      });
       return reply.status(200).send({
         token,
         existing_account: verificationResult.existingAccount,
