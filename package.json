@@ -54,6 +54,7 @@
     "db:job-monitor": "node scripts/apply-job-monitor-schema.mjs",
     "schema:apply-automation-consent": "node scripts/apply-automation-consent-schema.mjs",
     "db:automatic-verification": "node scripts/apply-automatic-verification-migration.mjs",
+    "db:google-auth": "node scripts/apply-google-auth-migration.mjs",
     "schema:check": "node scripts/check-schema-drift.mjs"
   }
 }
