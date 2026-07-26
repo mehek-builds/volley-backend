@@ -19,6 +19,11 @@ export const users = pgTable('users', {
   // Guests are real authenticated principals with no email. A verified email is
   // attached in-place when a first-time guest claims the workspace.
   email: text('email').unique(),
+  // Retained for compatibility with accounts created by the original extension auth flow.
+  // Passwordless web auth does not write these fields, but omitting them from the declared
+  // schema would make a later schema push drop live account data.
+  password_hash: text('password_hash'),
+  session_version: integer('session_version').default(0).notNull(),
   email_verified: boolean('email_verified').default(false),
   is_guest: boolean('is_guest').default(false).notNull(),
   guest_key_hash: text('guest_key_hash').unique(),
@@ -41,6 +46,15 @@ export const users = pgTable('users', {
   // Reverse trial runs until trial_ends_at (set at signup) at pro-level limits.
   plan: text('plan').default('free').notNull(),
   trial_ends_at: timestamp('trial_ends_at', { withTimezone: true }),
+  billing_provider: text('billing_provider'),
+  billing_customer_id: text('billing_customer_id'),
+  billing_subscription_id: text('billing_subscription_id'),
+  billing_variant_id: text('billing_variant_id'),
+  billing_status: text('billing_status'),
+  billing_renews_at: timestamp('billing_renews_at', { withTimezone: true }),
+  billing_ends_at: timestamp('billing_ends_at', { withTimezone: true }),
+  billing_portal_url: text('billing_portal_url'),
+  billing_event_updated_at: timestamp('billing_event_updated_at', { withTimezone: true }),
   created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
   // Token epoch: JWTs issued before this instant are rejected by requireAuth.
   // Set when verify-code adopts a pre-existing unverified account, so any token
@@ -71,6 +85,9 @@ export const users = pgTable('users', {
   googleSubjectUnique: uniqueIndex('users_google_subject_unique')
     .on(t.google_subject)
     .where(sql`${t.google_subject} is not null`),
+  billingSubscriptionUnique: uniqueIndex('users_billing_subscription_unique')
+    .on(t.billing_subscription_id)
+    .where(sql`${t.billing_subscription_id} is not null`),
 }));
 
 // ---- usage_counters ----

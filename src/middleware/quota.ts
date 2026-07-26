@@ -3,6 +3,7 @@ import { sql, and, eq } from 'drizzle-orm';
 import { db } from '../db/index';
 import { usage_counters, users } from '../db/schema';
 import { PRODUCT_NAME } from '../lib/product';
+import { lemonSqueezyCheckoutReadyUrl } from '../lib/lemonSqueezy';
 
 // Pricing model per PRD Section 10 (v0) + product decision 2026-07-02, revised same day
 // to a recurring-credits model (Apollo.io-style, not a one-time lifetime trial): every
@@ -140,7 +141,9 @@ export async function getEntitlements(userId: string): Promise<Entitlements> {
 // configured (quota info + reset date, no Upgrade sentence). Unset means the same thing, which
 // is the intended state until a real payment rail exists. Live links pass through untouched.
 export function upgradeUrl(): string | undefined {
-  const link = process.env.UPGRADE_URL || process.env.STRIPE_PAYMENT_LINK;
+  const lemonLink = lemonSqueezyCheckoutReadyUrl();
+  if (lemonLink) return lemonLink;
+  const link = process.env.UPGRADE_URL;
   if (!link) return undefined;
   if (/stripe\.com\/(c\/pay\/)?test_|cs_test_/.test(link)) return undefined;
   return link;
