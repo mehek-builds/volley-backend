@@ -31,7 +31,9 @@ export const LIMITS = {
   perHour: {
     resolve: parseInt(process.env.RATE_RESOLVE_PER_HOUR || '15', 10),
     draft: parseInt(process.env.RATE_DRAFT_PER_HOUR || '40', 10),
-    resume: parseInt(process.env.RATE_RESUME_PER_HOUR || '15', 10),
+    // The dashboard prepares the user's top 30 daily matches as soon as the session opens.
+    // Keep a small retry margin above that batch while preserving the per-user abuse ceiling.
+    resume: parseInt(process.env.RATE_RESUME_PER_HOUR || '40', 10),
     jobExtract: parseInt(process.env.RATE_JOB_EXTRACT_PER_HOUR || '15', 10),
     requestCode: parseInt(process.env.RATE_CODE_PER_HOUR || '5', 10),
     session: parseInt(process.env.RATE_SESSION_PER_HOUR || '10', 10),

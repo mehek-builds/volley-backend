@@ -1,11 +1,11 @@
 # Graph Report - .  (2026-07-26)
 
 ## Corpus Check
-- 123 files · ~102,905 words
+- 124 files · ~103,008 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 542 nodes · 990 edges · 21 communities detected
+- 543 nodes · 991 edges · 22 communities detected
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS
 - Token cost: 0 input · 0 output
 
@@ -27,28 +27,28 @@
 ## Communities
 
 ### Community 0 - "Community 0"
-Cohesion: 0.04
-Nodes (25): buildVerificationEmail(), googleIdentityFromClaims(), googleRegistrationValues(), hashCode(), issuedBeforeEpoch(), requireAuth(), sendVerificationEmail(), trialEnd() (+17 more)
+Cohesion: 0.07
+Nodes (30): applyResumePolicy(), deriveCandidateContext(), metricCount(), orgScore(), overlapScore(), parseGraduationDate(), relevanceScore(), resumeSafeTargetRole() (+22 more)
 
 ### Community 1 - "Community 1"
-Cohesion: 0.05
-Nodes (18): deriveEditedTerms(), overlapScore(), terms(), approvedReviewSpec(), reviewSpec(), applyResumePolicy(), deriveCandidateContext(), metricCount() (+10 more)
+Cohesion: 0.06
+Nodes (19): deriveEditedTerms(), overlapScore(), terms(), approvedReviewSpec(), reviewSpec(), candidateContext(), canGenerateCoverLetter(), deleteStoredCoverLetter() (+11 more)
 
 ### Community 2 - "Community 2"
+Cohesion: 0.05
+Nodes (10): buildApp(), getApp(), handler(), start(), trustProxySetting(), allowHourly(), bumpCounter(), hourPeriod() (+2 more)
+
+### Community 3 - "Community 3"
+Cohesion: 0.06
+Nodes (15): buildVerificationEmail(), googleIdentityFromClaims(), googleRegistrationValues(), hashCode(), issuedBeforeEpoch(), requireAuth(), sendVerificationEmail(), trialEnd() (+7 more)
+
+### Community 4 - "Community 4"
 Cohesion: 0.08
 Nodes (18): APOLLO_HEADERS(), apolloSearchIds(), fetchApolloContacts(), personaTitleBuckets(), learnPattern(), resolveEmail(), orderedPatterns(), renderTopCandidates() (+10 more)
 
-### Community 3 - "Community 3"
+### Community 5 - "Community 5"
 Cohesion: 0.15
 Nodes (33): contactLine(), createResumeDocument(), drawEducation(), drawEntrySection(), drawSectionHeader(), drawSplitLine(), educationHeight(), educationPosition() (+25 more)
-
-### Community 4 - "Community 4"
-Cohesion: 0.09
-Nodes (14): candidateContext(), canGenerateCoverLetter(), deleteStoredCoverLetter(), generateStoredCoverLetter(), persistCoverLetter(), saveStoredCoverLetter(), storedCoverLetter(), deleteBlobsForUser() (+6 more)
-
-### Community 5 - "Community 5"
-Cohesion: 0.12
-Nodes (20): clampExpansion(), interpolate(), resumeDesignAtExpansion(), acronymTokenOf(), bankEntryCorpus(), breaksTie(), bulletClaimIsGrounded(), contentWords() (+12 more)
 
 ### Community 6 - "Community 6"
 Cohesion: 0.08
@@ -99,36 +99,40 @@ Cohesion: 0.39
 Nodes (7): annualize(), answerCompensation(), detectCurrency(), detectUnit(), formatCompensation(), parseStatedCompensation(), toNumber()
 
 ### Community 18 - "Community 18"
-Cohesion: 0.67
-Nodes (0):
+Cohesion: 1.0
+Nodes (3): clampExpansion(), interpolate(), resumeDesignAtExpansion()
 
 ### Community 19 - "Community 19"
-Cohesion: 1.0
+Cohesion: 0.67
 Nodes (0):
 
 ### Community 20 - "Community 20"
 Cohesion: 1.0
 Nodes (0):
 
+### Community 21 - "Community 21"
+Cohesion: 1.0
+Nodes (0):
+
 ## Knowledge Gaps
-- **Thin community `Community 19`** (1 nodes): `drizzle.config.ts`
+- **Thin community `Community 20`** (1 nodes): `drizzle.config.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 20`** (1 nodes): `submissionStateMachine.test.ts`
+- **Thin community `Community 21`** (1 nodes): `submissionStateMachine.test.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
 - **Should `Community 0` be split into smaller, more focused modules?**
-  _Cohesion score 0.04 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.07 - nodes in this community are weakly interconnected._
 - **Should `Community 1` be split into smaller, more focused modules?**
-  _Cohesion score 0.05 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.06 - nodes in this community are weakly interconnected._
 - **Should `Community 2` be split into smaller, more focused modules?**
-  _Cohesion score 0.08 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.05 - nodes in this community are weakly interconnected._
+- **Should `Community 3` be split into smaller, more focused modules?**
+  _Cohesion score 0.06 - nodes in this community are weakly interconnected._
 - **Should `Community 4` be split into smaller, more focused modules?**
-  _Cohesion score 0.09 - nodes in this community are weakly interconnected._
-- **Should `Community 5` be split into smaller, more focused modules?**
-  _Cohesion score 0.12 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.08 - nodes in this community are weakly interconnected._
 - **Should `Community 6` be split into smaller, more focused modules?**
   _Cohesion score 0.08 - nodes in this community are weakly interconnected._
 - **Should `Community 7` be split into smaller, more focused modules?**
