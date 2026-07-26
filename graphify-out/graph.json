@@ -92,6 +92,14 @@
       "community": 0
     },
     {
+      "label": "top30ResumeQueue.test.ts",
+      "file_type": "code",
+      "source_file": "src/middleware/top30ResumeQueue.test.ts",
+      "source_location": "L1",
+      "id": "top30resumequeue_test",
+      "community": 0
+    },
+    {
       "label": "rateLimit.test.ts",
       "file_type": "code",
       "source_file": "src/middleware/rateLimit.test.ts",
@@ -215,7 +223,7 @@
       "label": "monthPeriod()",
       "file_type": "code",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L46",
+      "source_location": "L48",
       "id": "quota_monthperiod",
       "community": 0
     },
@@ -223,7 +231,7 @@
       "label": "hourPeriod()",
       "file_type": "code",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L50",
+      "source_location": "L52",
       "id": "quota_hourperiod",
       "community": 0
     },
@@ -231,7 +239,7 @@
       "label": "bumpCounter()",
       "file_type": "code",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L55",
+      "source_location": "L57",
       "id": "quota_bumpcounter",
       "community": 0
     },
@@ -239,7 +247,7 @@
       "label": "getCount()",
       "file_type": "code",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L67",
+      "source_location": "L69",
       "id": "quota_getcount",
       "community": 0
     },
@@ -247,7 +255,7 @@
       "label": "allowHourly()",
       "file_type": "code",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L77",
+      "source_location": "L79",
       "id": "quota_allowhourly",
       "community": 0
     },
@@ -255,7 +263,7 @@
       "label": "getEntitlements()",
       "file_type": "code",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L89",
+      "source_location": "L91",
       "id": "quota_getentitlements",
       "community": 0
     },
@@ -263,7 +271,7 @@
       "label": "upgradeUrl()",
       "file_type": "code",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L117",
+      "source_location": "L119",
       "id": "quota_upgradeurl",
       "community": 0
     },
@@ -271,7 +279,7 @@
       "label": "quotaExceededPayload()",
       "file_type": "code",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L124",
+      "source_location": "L126",
       "id": "quota_quotaexceededpayload",
       "community": 0
     },
@@ -279,7 +287,7 @@
       "label": "rateLimitedReply()",
       "file_type": "code",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L158",
+      "source_location": "L160",
       "id": "quota_ratelimitedreply",
       "community": 0
     },
@@ -1041,7 +1049,7 @@
       "source_file": "src/lib/pdfText.ts",
       "source_location": "L1",
       "id": "pdftext",
-      "community": 1
+      "community": 5
     },
     {
       "label": "extractPdfText()",
@@ -1049,7 +1057,7 @@
       "source_file": "src/lib/pdfText.ts",
       "source_location": "L19",
       "id": "pdftext_extractpdftext",
-      "community": 1
+      "community": 5
     },
     {
       "label": "fieldCrypto.ts",
@@ -2361,7 +2369,7 @@
       "source_file": "src/engine/resumeVisualBenchmark.ts",
       "source_location": "L1",
       "id": "resumevisualbenchmark",
-      "community": 5
+      "community": 1
     },
     {
       "label": "expandedBullet()",
@@ -2369,7 +2377,7 @@
       "source_file": "src/engine/resumeVisualBenchmark.ts",
       "source_location": "L104",
       "id": "resumevisualbenchmark_expandedbullet",
-      "community": 5
+      "community": 1
     },
     {
       "label": "makeEntry()",
@@ -2377,7 +2385,7 @@
       "source_file": "src/engine/resumeVisualBenchmark.ts",
       "source_location": "L112",
       "id": "resumevisualbenchmark_makeentry",
-      "community": 5
+      "community": 1
     },
     {
       "label": "contactFor()",
@@ -2385,7 +2393,7 @@
       "source_file": "src/engine/resumeVisualBenchmark.ts",
       "source_location": "L143",
       "id": "resumevisualbenchmark_contactfor",
-      "community": 5
+      "community": 1
     },
     {
       "label": "specFor()",
@@ -2393,7 +2401,7 @@
       "source_file": "src/engine/resumeVisualBenchmark.ts",
       "source_location": "L164",
       "id": "resumevisualbenchmark_specfor",
-      "community": 5
+      "community": 1
     },
     {
       "label": "compensation.test.ts",
@@ -3241,7 +3249,7 @@
       "source_file": "src/engine/pdfPostRender.test.ts",
       "source_location": "L1",
       "id": "pdfpostrender_test",
-      "community": 1
+      "community": 5
     },
     {
       "label": "spec()",
@@ -3249,7 +3257,7 @@
       "source_file": "src/engine/pdfPostRender.test.ts",
       "source_location": "L15",
       "id": "pdfpostrender_test_spec",
-      "community": 1
+      "community": 5
     },
     {
       "label": "pooledCopy()",
@@ -3257,7 +3265,7 @@
       "source_file": "src/engine/pdfPostRender.test.ts",
       "source_location": "L45",
       "id": "pdfpostrender_test_pooledcopy",
-      "community": 1
+      "community": 5
     },
     {
       "label": "account.ts",
@@ -4852,6 +4860,18 @@
     {
       "relation": "imports_from",
       "confidence": "EXTRACTED",
+      "source_file": "src/middleware/top30ResumeQueue.test.ts",
+      "source_location": "L3",
+      "weight": 1.0,
+      "_src": "top30resumequeue_test",
+      "_tgt": "quota",
+      "source": "top30resumequeue_test",
+      "target": "quota",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports_from",
+      "confidence": "EXTRACTED",
       "source_file": "src/middleware/rateLimit.test.ts",
       "source_location": "L3",
       "weight": 1.0,
@@ -5177,7 +5197,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L46",
+      "source_location": "L48",
       "weight": 1.0,
       "_src": "quota",
       "_tgt": "quota_monthperiod",
@@ -5189,7 +5209,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L50",
+      "source_location": "L52",
       "weight": 1.0,
       "_src": "quota",
       "_tgt": "quota_hourperiod",
@@ -5201,7 +5221,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L55",
+      "source_location": "L57",
       "weight": 1.0,
       "_src": "quota",
       "_tgt": "quota_bumpcounter",
@@ -5213,7 +5233,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L67",
+      "source_location": "L69",
       "weight": 1.0,
       "_src": "quota",
       "_tgt": "quota_getcount",
@@ -5225,7 +5245,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L77",
+      "source_location": "L79",
       "weight": 1.0,
       "_src": "quota",
       "_tgt": "quota_allowhourly",
@@ -5237,7 +5257,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L89",
+      "source_location": "L91",
       "weight": 1.0,
       "_src": "quota",
       "_tgt": "quota_getentitlements",
@@ -5249,7 +5269,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L117",
+      "source_location": "L119",
       "weight": 1.0,
       "_src": "quota",
       "_tgt": "quota_upgradeurl",
@@ -5261,7 +5281,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L124",
+      "source_location": "L126",
       "weight": 1.0,
       "_src": "quota",
       "_tgt": "quota_quotaexceededpayload",
@@ -5273,7 +5293,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L158",
+      "source_location": "L160",
       "weight": 1.0,
       "_src": "quota",
       "_tgt": "quota_ratelimitedreply",
@@ -5369,7 +5389,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L78",
+      "source_location": "L80",
       "weight": 1.0,
       "_src": "quota_allowhourly",
       "_tgt": "quota_hourperiod",
@@ -5381,7 +5401,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L78",
+      "source_location": "L80",
       "weight": 1.0,
       "_src": "quota_allowhourly",
       "_tgt": "quota_bumpcounter",
@@ -5393,7 +5413,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L125",
+      "source_location": "L127",
       "weight": 1.0,
       "_src": "quota_quotaexceededpayload",
       "_tgt": "quota_upgradeurl",
