@@ -38,6 +38,10 @@ export const LIMITS = {
     requestCodePerIp: parseInt(process.env.RATE_CODE_IP_PER_HOUR || '50', 10),
     verifyCodePerIp: parseInt(process.env.RATE_VERIFY_IP_PER_HOUR || '200', 10),
     sessionPerIp: parseInt(process.env.RATE_SESSION_IP_PER_HOUR || '100', 10),
+    passwordLogin: parseInt(process.env.RATE_PASSWORD_LOGIN_PER_HOUR || '10', 10),
+    passwordLoginPerIp: parseInt(process.env.RATE_PASSWORD_LOGIN_IP_PER_HOUR || '100', 10),
+    passwordChange: parseInt(process.env.RATE_PASSWORD_CHANGE_PER_HOUR || '5', 10),
+    passwordChangePerIp: parseInt(process.env.RATE_PASSWORD_CHANGE_IP_PER_HOUR || '30', 10),
   },
 } as const;
 

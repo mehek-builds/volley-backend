@@ -1,11 +1,11 @@
 # Graph Report - .  (2026-07-26)
 
 ## Corpus Check
-- 126 files · ~105,501 words
+- 126 files · ~106,773 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 562 nodes · 1027 edges · 23 communities detected
+- 564 nodes · 1031 edges · 23 communities detected
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS
 - Token cost: 0 input · 0 output
 
@@ -32,7 +32,7 @@ Nodes (18): deriveEditedTerms(), overlapScore(), terms(), approvedReviewSpec(), 
 
 ### Community 1 - "Community 1"
 Cohesion: 0.06
-Nodes (17): buildVerificationEmail(), googleIdentityFromClaims(), googleRegistrationValues(), googleVerificationFailure(), GoogleVerificationUnavailable, hashCode(), issuedBeforeEpoch(), requireAuth() (+9 more)
+Nodes (18): buildVerificationEmail(), googleIdentityFromClaims(), googleRegistrationValues(), googleVerificationFailure(), GoogleVerificationUnavailable, hashCode(), issuedBeforeEpoch(), requireAuth() (+10 more)
 
 ### Community 2 - "Community 2"
 Cohesion: 0.08
@@ -47,48 +47,48 @@ Cohesion: 0.09
 Nodes (14): candidateContext(), canGenerateCoverLetter(), deleteStoredCoverLetter(), generateStoredCoverLetter(), persistCoverLetter(), saveStoredCoverLetter(), storedCoverLetter(), deleteBlobsForUser() (+6 more)
 
 ### Community 5 - "Community 5"
-Cohesion: 0.12
-Nodes (20): clampExpansion(), interpolate(), resumeDesignAtExpansion(), acronymTokenOf(), bankEntryCorpus(), breaksTie(), bulletClaimIsGrounded(), contentWords() (+12 more)
-
-### Community 6 - "Community 6"
 Cohesion: 0.08
 Nodes (7): decryptRow(), sendProfile(), assertEncryptionKeyConfigured(), decryptField(), encryptField(), FieldDecryptError, getKey()
 
-### Community 7 - "Community 7"
+### Community 6 - "Community 6"
 Cohesion: 0.09
 Nodes (5): buildApp(), getApp(), handler(), start(), trustProxySetting()
 
-### Community 8 - "Community 8"
+### Community 7 - "Community 7"
 Cohesion: 0.09
 Nodes (10): buildLemonSqueezyCheckoutUrl(), lemonSqueezyCheckoutBaseUrl(), lemonSqueezyCheckoutReadyUrl(), parseLemonSqueezySubscription(), validDate(), allowHourly(), bumpCounter(), hourPeriod() (+2 more)
 
-### Community 9 - "Community 9"
-Cohesion: 0.21
-Nodes (21): authorizationValidAtClick(), buildPacket(), claimPreparation(), claimSubmission(), controlledChromeExecutable(), discoverAndResolveQuestions(), fail(), holdRevokedSubmission() (+13 more)
-
-### Community 10 - "Community 10"
+### Community 8 - "Community 8"
 Cohesion: 0.12
 Nodes (18): completeEmailVerificationIfPresent(), safeContinueButton(), visibleOtpField(), waitForCode(), asRecord(), bodyText(), decodeBase64Url(), defaultExecutor() (+10 more)
 
+### Community 9 - "Community 9"
+Cohesion: 0.15
+Nodes (20): clampExpansion(), interpolate(), resumeDesignAtExpansion(), acronymTokenOf(), bankEntryCorpus(), breaksTie(), bulletClaimIsGrounded(), contentWords() (+12 more)
+
+### Community 10 - "Community 10"
+Cohesion: 0.21
+Nodes (21): authorizationValidAtClick(), buildPacket(), claimPreparation(), claimSubmission(), controlledChromeExecutable(), discoverAndResolveQuestions(), fail(), holdRevokedSubmission() (+13 more)
+
 ### Community 11 - "Community 11"
-Cohesion: 0.13
-Nodes (18): buildManagedDiscoveryActions(), buildManagedPortalActions(), canFillReviewedQuestions(), coverLetterUploadSelector(), fillFirst(), fillPortal(), fillReviewedQuestions(), hasCoverLetterUpload() (+10 more)
+Cohesion: 0.11
+Nodes (13): buildContextBlock(), draftApplicationAnswer(), normalizeDraftedAnswer(), rankingGroundingFor(), rankingRuleText(), thinRankingWarning(), extractRankedItems(), metricTokens() (+5 more)
 
 ### Community 12 - "Community 12"
 Cohesion: 0.13
-Nodes (13): buildContextBlock(), draftApplicationAnswer(), normalizeDraftedAnswer(), rankingGroundingFor(), rankingRuleText(), thinRankingWarning(), extractRankedItems(), metricTokens() (+5 more)
+Nodes (18): buildManagedDiscoveryActions(), buildManagedPortalActions(), canFillReviewedQuestions(), coverLetterUploadSelector(), fillFirst(), fillPortal(), fillReviewedQuestions(), hasCoverLetterUpload() (+10 more)
 
 ### Community 13 - "Community 13"
 Cohesion: 0.16
 Nodes (14): describeRequiredBlocker(), describeUnlabelledBlockers(), humanFieldLabel(), isOpaqueIdentifier(), sanitizeProviderBlockers(), tidyLabel(), classifyField(), isFixedPortalProfileField() (+6 more)
 
 ### Community 14 - "Community 14"
-Cohesion: 0.23
-Nodes (17): collectCurrencies(), currencyPrefixAt(), dedupeRanges(), detectCurrency(), findStatedRanges(), groupDigits(), isProseSalary(), mapCurrencyToken() (+9 more)
-
-### Community 15 - "Community 15"
 Cohesion: 0.14
 Nodes (10): apiBase(), apiKey(), composioRequest(), authConfigId(), composioClient(), createEmailConnectionLink(), disconnectEmailProvider(), emailConnectionCallbackUrl() (+2 more)
+
+### Community 15 - "Community 15"
+Cohesion: 0.23
+Nodes (17): collectCurrencies(), currencyPrefixAt(), dedupeRanges(), detectCurrency(), findStatedRanges(), groupDigits(), isProseSalary(), mapCurrencyToken() (+9 more)
 
 ### Community 16 - "Community 16"
 Cohesion: 0.15
@@ -140,6 +140,6 @@ _Questions this graph is uniquely positioned to answer:_
 - **Should `Community 4` be split into smaller, more focused modules?**
   _Cohesion score 0.09 - nodes in this community are weakly interconnected._
 - **Should `Community 5` be split into smaller, more focused modules?**
-  _Cohesion score 0.12 - nodes in this community are weakly interconnected._
-- **Should `Community 6` be split into smaller, more focused modules?**
   _Cohesion score 0.08 - nodes in this community are weakly interconnected._
+- **Should `Community 6` be split into smaller, more focused modules?**
+  _Cohesion score 0.09 - nodes in this community are weakly interconnected._
