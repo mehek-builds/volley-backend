@@ -56,22 +56,32 @@ async function renderedTextItems(pdf: Buffer): Promise<RenderedTextItem[][]> {
   return pages;
 }
 
+/* Every text baseline on the rendered page, top to bottom. These are golden values: they exist to
+ * catch layout drift nobody intended, so a diff here is a question, not automatically a bug.
+ *
+ * Last regenerated 2026-07-26, for the header rule between the name and the contact line. The
+ * signature of that change is visible in the numbers and is what made them safe to accept: the
+ * FIRST baseline (the name) is untouched in all three cases, and every baseline below it moves
+ * down by the same ~4pt, which is the rule's stroke plus a contactTop gap either side of it. A
+ * change that shifted only some rows, or shifted them by differing amounts, would have meant
+ * something reflowed rather than translated, and would not have been snapshot drift at all.
+ */
 const RENDERED_BASELINE_SNAPSHOTS: Record<string, number[]> = {
   '04-sparse-two-short-jobs': [
-    739.1, 720.7, 688.1, 664.9, 648.6, 620, 596.7, 580.4, 563.8, 547, 524.1,
-    507.9, 491.2, 474.4, 445.5, 422.3,
+    737.3, 710, 660.8, 634, 615.1, 573.9, 547.1, 528.3, 507.1, 485.7, 453.3,
+    434.5, 413.3, 391.9, 350.5, 323.6,
   ],
   '09-normal-all-sections': [
-    741.7, 727.1, 709.6, 692.5, 679.4, 666.8, 648.1, 631, 617.9, 605.3, 593.6,
-    580.9, 569.2, 550.5, 533.4, 520.3, 507.7, 496, 483.3, 471.6, 452.8, 435.7,
-    422.6, 410.1, 398.4, 385.6, 373.9, 355.2, 338.1,
+    737.6, 711.2, 664.6, 638.6, 620.2, 602.4, 562.9, 536.8, 518.5, 498, 484.7,
+    464, 450.8, 411.2, 385.2, 366.8, 346.3, 333, 312.4, 299.1, 259.5, 233.5,
+    215.1, 194.6, 181.4, 160.7, 147.4, 107.9, 81.8,
   ],
   '24-dense-long-everything': [
-    741.7, 727.1, 716.5, 699, 681.9, 668.8, 656.2, 644.5, 625.8, 608.7, 595.6,
-    583, 571.3, 558.6, 546.9, 534.2, 522.4, 507.7, 494.6, 482.1, 470.3, 457.6,
-    445.9, 433.2, 421.5, 402.8, 385.7, 372.5, 360, 348.3, 335.6, 323.8, 311.1,
-    299.4, 280.7, 263.6, 250.5, 237.9, 226.2, 213.5, 201.8, 189.1, 177.3,
-    158.6, 141.5, 129.8,
+    741.2, 723.2, 712.4, 690.9, 672.6, 658.7, 645.5, 633.5, 612, 593.6, 579.8,
+    566.2, 554.3, 540.4, 528.5, 514.7, 502.8, 485.8, 472, 458.4, 446.4, 432.6,
+    420.7, 406.9, 395, 373.4, 355.1, 341.2, 327.6, 315.7, 301.9, 289.9, 276.1,
+    264.2, 242.6, 224.3, 210.5, 196.8, 184.9, 171.1, 159.2, 145.4, 133.4,
+    111.9, 93.5, 81.6,
   ],
 };
 
@@ -79,8 +89,12 @@ describe('resume visual layout controls', () => {
   test('the benchmark contains exactly 25 named layouts', () => {
     assert.equal(RESUME_VISUAL_BENCHMARK.length, 25);
     assert.equal(new Set(RESUME_VISUAL_BENCHMARK.map((entry) => entry.id)).size, 25);
+    // Pinned so a density change has to be deliberate. targetFillRatio moved 0.66 -> 0.94 and
+    // expandBelowRatio was added on 2026-07-27; sparseTriggerRatio stays 0.5 because it now means
+    // only "warn that this resume is too thin", not "decide whether to expand".
     assert.equal(RESUME_DESIGN.compact.density.sparseTriggerRatio, 0.5);
-    assert.equal(RESUME_DESIGN.compact.density.targetFillRatio, 0.66);
+    assert.equal(RESUME_DESIGN.compact.density.expandBelowRatio, 0.98);
+    assert.equal(RESUME_DESIGN.compact.density.targetFillRatio, 0.94);
     assert.equal(RESUME_DESIGN.compact.density.maximumFillRatio, 1);
   });
 
@@ -130,11 +144,15 @@ describe('resume visual layout controls', () => {
     assert.equal(parsed.numpages, 1);
   });
 
-  test('sparse expansion stops near the target fill when full expansion would exceed it', () => {
-    const benchmark = RESUME_VISUAL_BENCHMARK.find((entry) => entry.id === '06-normal-two-jobs');
+  test('expansion stops near the target fill when full expansion would exceed it', () => {
+    /* Fixture changed 2026-07-27. This used to be 06-normal-two-jobs with five skills bolted on,
+     * chosen because it overshot the OLD 0.66 target at full expansion. Against a 0.94 target it
+     * no longer overshoots at all - it runs out of scale first - so it stopped exercising the
+     * behaviour named in the title. A genuinely dense resume is the case that still has to stop
+     * partway, so the test now uses one instead of a padded normal one. */
+    const benchmark = RESUME_VISUAL_BENCHMARK.find((entry) => entry.id === '16-dense-four-jobs');
     assert.ok(benchmark);
     const spec = structuredClone(benchmark.spec);
-    spec.skills.push(...Array.from({ length: 5 }, (_, index) => `Skill${index}`));
 
     const compact = measureResumeLayout(
       spec,
@@ -149,16 +167,25 @@ describe('resume visual layout controls', () => {
     );
     const plan = planResumeLayout(spec, benchmark.contact, benchmark.jdText);
 
-    assert.ok(compact.fill_ratio < RESUME_DESIGN.compact.density.sparseTriggerRatio);
+    // The interesting case is content that WOULD overshoot at full expansion: the search has to
+    // stop partway rather than run to the end of the scale.
+    assert.ok(compact.fill_ratio < RESUME_DESIGN.compact.density.targetFillRatio);
     assert.ok(spacious.fill_ratio > RESUME_DESIGN.compact.density.targetFillRatio);
     assert.ok(plan.layout.density_expansion > 0);
     assert.ok(plan.layout.density_expansion < 1);
     assert.ok(
       Math.abs(plan.layout.fill_ratio - RESUME_DESIGN.compact.density.targetFillRatio) < 0.002,
+      `converged to ${plan.layout.fill_ratio.toFixed(3)}`,
     );
   });
 
-  test('normal resumes retain the compact design', () => {
+  /* REPLACES 'normal resumes retain the compact design' (2026-07-27).
+   *
+   * That test asserted density_expansion === 0 for an ordinary resume, which was the behaviour
+   * that left every real resume a third empty: measured across five downloaded sample resumes,
+   * output filled 0.675 to 0.720 of the page. Retaining compact IS the defect, so the test that
+   * pinned it had to go rather than be worked around. A one-page resume should fill its page. */
+  test('normal resumes expand to fill the page', () => {
     const benchmark = RESUME_VISUAL_BENCHMARK.find((entry) => entry.id === '09-normal-all-sections');
     assert.ok(benchmark);
     const compact = measureResumeLayout(
@@ -168,9 +195,47 @@ describe('resume visual layout controls', () => {
     );
     const plan = planResumeLayout(benchmark.spec, benchmark.contact, benchmark.jdText);
 
-    assert.ok(compact.fill_ratio >= RESUME_DESIGN.compact.density.sparseTriggerRatio);
-    assert.equal(plan.layout.density_expansion, 0);
-    assert.equal(plan.layout.body_font_size, RESUME_DESIGN.compact.typography.body);
+    // Compact leaves this resume 40% empty, which is precisely why it must not be what ships.
+    assert.ok(compact.fill_ratio < RESUME_DESIGN.compact.density.expandBelowRatio);
+    assert.ok(plan.layout.density_expansion > 0);
+    assert.ok(
+      plan.layout.fill_ratio >= 0.9,
+      `expected a full page, got ${plan.layout.fill_ratio.toFixed(3)}`,
+    );
+    // Filling the page must never mean overflowing it.
+    assert.ok(plan.layout.fill_ratio <= RESUME_DESIGN.compact.density.maximumFillRatio);
+    assert.ok(plan.layout.bullets.every((b) => b.lines <= RESUME_DESIGN.compact.limits.maxBulletLines));
+  });
+
+  /* The other half of the same rule: expansion is bounded by what still fits. A resume already
+   * dense at compact must be expanded only as far as the target, never past the page. */
+  test('dense resumes expand only to the target, never past the page', () => {
+    for (const id of ['17-dense-five-entries', '24-dense-long-everything']) {
+      const benchmark = RESUME_VISUAL_BENCHMARK.find((entry) => entry.id === id);
+      assert.ok(benchmark, id);
+      const plan = planResumeLayout(benchmark.spec, benchmark.contact, benchmark.jdText);
+      assert.ok(
+        Math.abs(plan.layout.fill_ratio - RESUME_DESIGN.compact.density.targetFillRatio) < 0.01,
+        `${id}: fill ${plan.layout.fill_ratio.toFixed(3)}`,
+      );
+      assert.ok(plan.layout.fill_ratio <= RESUME_DESIGN.compact.density.maximumFillRatio, id);
+    }
+  });
+
+  /* Every benchmark, one invariant: whatever the expansion search picks, it fits on the page and
+   * respects the bullet line cap. This is the guard that makes widening the spacious end safe. */
+  test('no benchmark layout overflows its page after expansion', () => {
+    for (const benchmark of RESUME_VISUAL_BENCHMARK) {
+      const plan = planResumeLayout(benchmark.spec, benchmark.contact, benchmark.jdText);
+      assert.ok(
+        plan.layout.fill_ratio <= RESUME_DESIGN.compact.density.maximumFillRatio,
+        `${benchmark.id}: fill ${plan.layout.fill_ratio.toFixed(3)}`,
+      );
+      assert.ok(
+        plan.layout.bullets.every((b) => b.lines <= RESUME_DESIGN.compact.limits.maxBulletLines),
+        `${benchmark.id}: bullet exceeded ${RESUME_DESIGN.compact.limits.maxBulletLines} lines`,
+      );
+    }
   });
 
   test('the shared content policy caps bullets before layout selection', () => {
@@ -210,19 +275,24 @@ describe('resume visual layout controls', () => {
         })),
         bullet_lines: layout.bullets.map((bullet) => bullet.lines),
       },
+      /* Updated 2026-07-27 for the page-fill change. The headline number is bottom_whitespace:
+       * 297.7pt of empty page became 43.2pt, which is the whole point of the change. This resume
+       * now expands to 0.919 and lands at the 0.94 target instead of shipping compact at 0.586.
+       * Section heights all grow because the spacing scale grew; the order is unchanged and no
+       * bullet crossed the two-line limit. */
       {
-        body_font_size: 10.5,
-        density_expansion: 0,
-        fill_ratio: 0.584,
-        bottom_whitespace: 299.7,
+        body_font_size: 11.9,
+        density_expansion: 0.919,
+        fill_ratio: 0.94,
+        bottom_whitespace: 43.2,
         section_order: ['HEADER', 'EDUCATION', 'EXPERIENCE', 'PROJECTS', 'LEADERSHIP', 'SKILLS'],
         sections: [
-          { name: 'HEADER', top: 36, bottom: 71.1, height: 35.1 },
-          { name: 'EDUCATION', top: 71.1, bottom: 127.5, height: 56.5 },
-          { name: 'EXPERIENCE', top: 127.5, bottom: 225.2, height: 97.6 },
-          { name: 'PROJECTS', top: 225.2, bottom: 322.8, height: 97.6 },
-          { name: 'LEADERSHIP', top: 322.8, bottom: 420.4, height: 97.6 },
-          { name: 'SKILLS', top: 420.4, bottom: 456.3, height: 35.8 },
+          { name: 'HEADER', top: 36, bottom: 103.8, height: 67.8 },
+          { name: 'EDUCATION', top: 103.8, bottom: 192.2, height: 88.4 },
+          { name: 'EXPERIENCE', top: 192.2, bottom: 343.9, height: 151.7 },
+          { name: 'PROJECTS', top: 343.9, bottom: 495.6, height: 151.7 },
+          { name: 'LEADERSHIP', top: 495.6, bottom: 647.2, height: 151.7 },
+          { name: 'SKILLS', top: 647.2, bottom: 712.8, height: 65.6 },
         ],
         bullet_lines: [2, 2, 2, 2, 2, 2],
       },

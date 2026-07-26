@@ -33,8 +33,13 @@ export interface ResumeDesignTokens {
     sectionRuleWidth: number;
   };
   density: {
+    /** Below this after expansion, the resume is reported as genuinely thin. WARNING ONLY. */
     sparseTriggerRatio: number;
+    /** Compact layouts below this fill get expanded. Above it, compact is already full enough. */
+    expandBelowRatio: number;
+    /** What the expansion search aims for. */
     targetFillRatio: number;
+    /** Hard ceiling: past this the content would overflow the page. */
     maximumFillRatio: number;
   };
   limits: {
@@ -76,9 +81,22 @@ const COMPACT_DESIGN: ResumeDesignTokens = {
     splitRightRatio: 0.27,
     sectionRuleWidth: 0.65,
   },
+  /* Revised 2026-07-27, after a five-resume end-to-end run measured real output at 0.675 to 0.720
+   * fill: every generated resume was leaving roughly a third of the page blank, and a resume that
+   * stops two thirds down reads as a thin candidate however good the content is.
+   *
+   * The old numbers only ever expanded a layout that came in under 50% fill, and even then aimed
+   * at 66%. So a typical student resume short-circuited to compact and was never expanded at all.
+   * expandBelowRatio now separates "should we expand" from sparseTriggerRatio's "is this
+   * genuinely too thin to report", which were previously the same number doing two jobs.
+   *
+   * Nothing here can overflow the page: layoutAcceptsExpansion() bounds every candidate by
+   * maximumFillRatio and the per-bullet line limit, so the search can only pick a layout that
+   * still fits on one page. */
   density: {
     sparseTriggerRatio: 0.5,
-    targetFillRatio: 0.66,
+    expandBelowRatio: 0.98,
+    targetFillRatio: 0.94,
     maximumFillRatio: 1,
   },
   limits: {
@@ -86,25 +104,34 @@ const COMPACT_DESIGN: ResumeDesignTokens = {
   },
 };
 
+/* The open end of the scale. Widened 2026-07-27: the previous values topped out around 0.78 fill
+ * for an ordinary student resume, so the expansion search would run to expansion=1 and still leave
+ * a fifth of the page blank - it had nowhere further to go. These give the search enough range to
+ * actually reach targetFillRatio on a normal resume.
+ *
+ * Widening the ceiling does NOT make normal resumes airy: the search is a binary search for the
+ * target, so a resume that reaches 0.94 at expansion 0.4 stops at 0.4. Only content that cannot
+ * fill the page any other way ever sees these values, and for that content the alternative is
+ * white space, not tighter typography. */
 const SPACIOUS_DESIGN: ResumeDesignTokens = {
   ...COMPACT_DESIGN,
   typography: {
-    name: 19,
-    contact: 10.5,
-    section: 11.5,
-    body: 11.5,
+    name: 21,
+    contact: 11,
+    section: 12,
+    body: 12,
     lineGapRatio: { ...COMPACT_DESIGN.typography.lineGapRatio },
   },
   spacing: {
     ...COMPACT_DESIGN.spacing,
-    contactTop: 4,
-    headerBottom: 12,
-    educationTop: 8,
-    sectionTop: 16,
-    sectionRuleAfter: 9,
-    entryTop: 10,
-    detailTop: 3,
-    bulletTop: 4,
+    contactTop: 6,
+    headerBottom: 22,
+    educationTop: 14,
+    sectionTop: 28,
+    sectionRuleAfter: 12,
+    entryTop: 19,
+    detailTop: 5,
+    bulletTop: 8,
   },
 };
 

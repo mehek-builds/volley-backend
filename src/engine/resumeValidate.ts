@@ -12,6 +12,22 @@ import { deriveCandidateContext, resumeSafeTargetRole, type CandidateEducation }
 
 // Same whitelist as the Dubai engine's STRONG_VERBS, exported so resumeSpec.ts's system prompt
 // stays in sync with what the validator actually enforces (single source of truth).
+/* The whitelist is a QUALITY gate, not a dictionary: a bullet opening with a verb that is not here
+ * is reported so it can be rewritten. Two things follow from that, and both were wrong until a
+ * five-resume run on 2026-07-27 exposed them.
+ *
+ * 1. IT WAS BIASED TOWARD ENGINEERING. The original list came from a software resume engine, so a
+ *    marine-biology student writing "Taught two class sections" or a camp counsellor writing
+ *    "Mediated disputes among campers" was told their bullet was not action-verb-first. Five of
+ *    six such flags in that run came from the two non-engineering resumes. Litos serves every
+ *    student, so the list has to cover teaching, research, care, service and operations work.
+ *
+ * 2. WEAK VERBS MUST STAY OUT. The same run flagged "Assisted with collection of fish samples" and
+ *    "Answered visitor questions", and those flags are CORRECT - both bullets are genuinely weak
+ *    and should be rewritten. The fix was to add the strong verbs that were missing, not to
+ *    silence the gate by admitting every verb it rejected. assisted, answered, helped, supported,
+ *    participated and worked are deliberately absent.
+ */
 export const STRONG_VERBS = new Set(
   `built shipped designed engineered developed led drove owned launched analyzed
 delivered diagnosed ran secured founded co-founded managed presented translated instrumented deployed
@@ -20,7 +36,13 @@ coordinated spearheaded established pioneered cut reduced improved increased gre
 implemented conducted partnered collaborated evaluated modeled sized identified uncovered cracked
 recruited mentored trained structured forecasted tracked documented demoed integrated resolved isolated
 refined applied profiled solved interviewed communicated prepared produced drafted executed
-devised formulated advised championed briefed`
+devised formulated advised championed briefed
+taught tutored instructed facilitated supervised directed mediated counseled advocated
+formalized standardized transformed streamlined overhauled redesigned rebuilt consolidated
+surveyed sampled measured catalogued classified validated verified audited inspected
+authored published edited curated illustrated exhibited
+staffed scheduled onboarded fundraised campaigned organized administered processed
+treated triaged screened rehabilitated cultivated consulted elected guided collected`
     .split(/\s+/)
     .filter(Boolean),
 );
@@ -464,8 +486,12 @@ export function validateResumeSpec(
       const words = bullet.trim().split(/\s+/);
       const nWords = words.length;
       const first = (words[0] ?? '').replace(/[^a-zA-Z-]/g, '').toLowerCase();
-      const isAction = STRONG_VERBS.has(first);
-      const isInitiative = INITIATIVE_VERBS.has(first);
+      // A "co-" prefix inherits the base verb's strength: co-authoring a paper is as real as
+      // authoring one, and enumerating every co- form would double the list for no benefit.
+      // Checked as a fallback so an explicitly listed form (co-founded) still wins on its own.
+      const isAction = STRONG_VERBS.has(first) || (first.startsWith('co-') && STRONG_VERBS.has(first.slice(3)));
+      const isInitiative =
+        INITIATIVE_VERBS.has(first) || (first.startsWith('co-') && INITIATIVE_VERBS.has(first.slice(3)));
       const hasMetric = METRIC_RE.test(bullet);
       const andCount = (bullet.toLowerCase().match(/\band\b/g) ?? []).length;
       const hits = [...contentWords(bullet)].filter((w) => kw.has(w)).length;

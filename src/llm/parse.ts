@@ -32,6 +32,10 @@ export interface ParsedProfile {
   currently_enrolled?: boolean;
   coursework?: string[];
   target_roles: string[];
+  // Page count of the file this parse came from, measured by extractPdfText and stamped on by
+  // routes/profile.ts - NOT produced by the model, which never sees the page structure. /start
+  // states it back to the student when it shows the one-page base resume. 0 means unmeasured.
+  source_pages?: number;
 }
 
 // R-047, the failure the degree rule below exists to prevent. An uploaded resume reading

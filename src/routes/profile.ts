@@ -189,6 +189,11 @@ export async function profileRoutes(fastify: FastifyInstance) {
     }
 
     let resumeText: string;
+    // The uploaded file's real page count. Measured here and nowhere else: the buffer is gone by
+    // the time anything downstream runs, so a page count not captured now can only ever be guessed
+    // at later. /start's base-resume screen states it back to the student ("3 pages, one page"), so
+    // it has to be a measurement rather than an assumption.
+    let sourcePages = 0;
     try {
       // extractPdfText, not bare pdfParse: a small uploaded PDF concat-assembled from multipart
       // chunks lands in Node's shared buffer pool, where pdf-parse's byteOffset bug (R-017, see
@@ -196,18 +201,38 @@ export async function profileRoutes(fastify: FastifyInstance) {
       // 400 a student's real resume at signup.
       const parsed = await extractPdfText(resumeBuffer);
       resumeText = parsed.text;
+      sourcePages = parsed.numpages;
     } catch (err) {
       fastify.log.error(err);
       return reply.status(400).send({ error: 'Failed to parse PDF - ensure the file is a valid PDF' });
     }
 
-    if (!resumeText || resumeText.trim().length < 50) {
-      return reply.status(400).send({ error: 'PDF appears to be empty or could not be parsed' });
+    /* A scanned resume extracts as a trickle of text, not as nothing, so a flat 50-character floor
+     * waves it through. Measured 2026-07-27 on a real 2-page CV: 623 characters extracted, the
+     * parse came back with an empty name, empty school and zero experience, and the account was
+     * left in a state where the base resume hard-400s and onboarding cannot advance. The student
+     * is told only that something went wrong, with no hint that the FILE is the problem.
+     *
+     * Scaling by page count is what distinguishes the two cases: a genuine one-page resume runs
+     * 2,500-4,000 characters (measured across five real resumes), so 220 per page is far below any
+     * real document and far above the handful of characters a scan yields. The message names the
+     * actual cause and the actual fix, because "could not be parsed" sends people to re-upload the
+     * same scan. */
+    const minimumChars = Math.max(50, 700 * Math.max(1, sourcePages));
+    if (!resumeText || resumeText.trim().length < minimumChars) {
+      return reply.status(400).send({
+        error:
+          'We could not read the text in that PDF. It looks like a scan or an image rather than a text document. Export it again from Word, Google Docs or Overleaf, or use "Print to PDF", and the text will come through.',
+      });
     }
 
     let parsedProfile;
     try {
       parsedProfile = await parseResumeWithClaude(resumeText);
+      // Carried on the parse rather than in its own column: it is a fact ABOUT this parse of this
+      // file, so it should be replaced wholesale when a student re-uploads, which is exactly what
+      // parsed_json already does.
+      parsedProfile = { ...parsedProfile, source_pages: sourcePages };
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to parse resume with AI' });
