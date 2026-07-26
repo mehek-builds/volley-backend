@@ -280,7 +280,7 @@ export async function authRoutes(fastify: FastifyInstance) {
     try {
       const googleUser = await db.transaction(async (tx) => {
         const bySubject = await tx
-          .select()
+          .select({ id: users.id, email: users.email })
           .from(users)
           .where(eq(users.google_subject, identity.subject))
           .limit(1);
@@ -296,7 +296,16 @@ export async function authRoutes(fastify: FastifyInstance) {
         // by email, because a stale third-party address could take over data.
         if (!googleIsAuthoritativeForEmail(identity)) return null;
 
-        const byEmail = await tx.select().from(users).where(eq(users.email, identity.email)).limit(1);
+        const byEmail = await tx
+          .select({
+            id: users.id,
+            email: users.email,
+            google_subject: users.google_subject,
+            email_verified: users.email_verified,
+          })
+          .from(users)
+          .where(eq(users.email, identity.email))
+          .limit(1);
         if (byEmail[0]) {
           if (byEmail[0].google_subject && byEmail[0].google_subject !== identity.subject) {
             return null;
@@ -315,12 +324,35 @@ export async function authRoutes(fastify: FastifyInstance) {
           };
         }
 
-        const created = await tx
-          .insert(users)
-          .values(googleRegistrationValues(identity))
-          .returning({ id: users.id, email: users.email });
-        return created[0]
-          ? { user: created[0], isNewUser: true }
+        const registration = googleRegistrationValues(identity);
+        // Keep first-time Google registration compatible with deployed databases
+        // that have not yet received unrelated user-preference columns. Drizzle's
+        // generated INSERT includes every modeled column, even when omitted from
+        // values, so name the authentication columns explicitly here.
+        const created = await tx.execute<{ id: string; email: string }>(sql`
+          INSERT INTO ${users} (
+            id,
+            email,
+            email_verified,
+            google_subject,
+            plan,
+            trial_ends_at,
+            created_at,
+            onboarding_completed_at
+          ) VALUES (
+            ${registration.id},
+            ${registration.email},
+            ${registration.email_verified},
+            ${registration.google_subject},
+            ${registration.plan},
+            ${registration.trial_ends_at},
+            ${registration.created_at},
+            ${registration.onboarding_completed_at}
+          )
+          RETURNING id, email
+        `);
+        return created.rows[0]
+          ? { user: created.rows[0], isNewUser: true }
           : null;
       });
 
