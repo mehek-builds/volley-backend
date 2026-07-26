@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { browserSessionBody, isBrowserbaseConfigured, runManagedBrowser } from './browserbase';
+import {
+  browserSessionBody,
+  isBrowserbaseConfigured,
+  runManagedBrowser,
+} from './browserbase';
 
 test('Browserbase configuration requires only the current API key', () => {
   const previousKey = process.env.BROWSERBASE_API_KEY;
@@ -38,6 +42,11 @@ test('legacy project ID remains optional and compatible', () => {
       solveCaptchas: false,
     },
   });
+});
+
+test('browser sessions never ask the provider to solve a CAPTCHA', () => {
+  const body = browserSessionBody('context-1', 'https://boards.greenhouse.io/acme/jobs/123');
+  assert.equal(body.browserSettings.solveCaptchas, false);
 });
 
 test('Stratus session body preserves the browser identity and pauses on protection challenges', () => {

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { put } from '@vercel/blob';
+import { waitUntil } from '@vercel/functions';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -29,6 +30,7 @@ import { declaredSkillsList } from './profile';
 import { processSubmissionApplication } from './submissionRunner';
 import { isRefusedQuestion } from '../lib/questionDiscovery';
 import { submitRequestDisposition } from '../lib/submissionSafety';
+import { authorizedGreenhouseRoute } from '../lib/authorizedAts';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
 const questionSchema = z.object({
@@ -280,7 +282,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (sensitive) {
         return reply.status(422).send({ error: `Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}` });
       }
-      if (!isBrowserbaseConfigured()) {
+      if (!isBrowserbaseConfigured() && !authorizedGreenhouseRoute(current.portal_url ?? '')) {
         return reply.status(503).send({
           error: 'The secure portal runner is not configured yet.',
           code: 'PORTAL_RUNNER_NOT_CONFIGURED',
@@ -293,7 +295,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         updated_at: new Date().toISOString(),
         attention_reason: undefined,
         handoff_expires_at: undefined,
+        browser_context_id: undefined,
         browser_session_id: undefined,
+        preparation_claimed_at: undefined,
+        preparation_claim_id: undefined,
       };
       const claimed = await db.update(generated_resumes)
         .set({ spec: reviewSpec(next) })
@@ -308,8 +313,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         const review = readApplicationReview(refreshed.spec);
         return reply.status(202).send({ application_id: row.id, review: review ?? current });
       }
-      const processed = await processSubmissionApplication(row.id, fastify);
-      return reply.status(202).send({ application_id: row.id, review: processed ?? next });
+      const task = processSubmissionApplication(row.id, fastify).catch((error) => {
+        fastify.log.error({ error, applicationId: row.id }, 'Background application runner failed');
+      });
+      if (process.env.VERCEL) waitUntil(task);
+      else void task;
+      return reply.status(202).send({ application_id: row.id, review: next });
     },
   );
 
@@ -324,7 +333,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       let handoff_url: string | undefined;
       if (review.status === 'needs_attention' && review.browser_session_id) {
         try {
-          handoff_url = await getLiveViewUrl(review.browser_session_id);
+          handoff_url = await getLiveViewUrl(
+            review.browser_session_id,
+            review.captcha?.provider_requested ? 'browserbase' : undefined,
+          );
         } catch {
           handoff_url = undefined;
         }

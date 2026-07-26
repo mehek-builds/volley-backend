@@ -50,17 +50,23 @@ type SessionResponse = {
   connect_url?: string;
 };
 
-function config() {
-  const provider: BrowserProvider = process.env.BROWSER_PROVIDER === 'stratus-managed'
+function configuredProvider(): BrowserProvider {
+  return process.env.BROWSER_PROVIDER === 'stratus-managed'
     ? 'stratus-managed'
     : process.env.BROWSER_PROVIDER === 'stratus' || Boolean(process.env.STRATUS_BASE_URL)
       ? 'stratus'
       : 'browserbase';
-  const apiKey = process.env.BROWSER_API_KEY
-    ?? (provider !== 'browserbase' ? process.env.STRATUS_API_KEY : process.env.BROWSERBASE_API_KEY);
+}
+
+function config(providerOverride?: BrowserProvider) {
+  const provider = providerOverride ?? configuredProvider();
+  const apiKey = provider === 'browserbase'
+    ? process.env.BROWSERBASE_API_KEY
+      ?? (configuredProvider() === 'browserbase' ? process.env.BROWSER_API_KEY : undefined)
+    : process.env.BROWSER_API_KEY ?? process.env.STRATUS_API_KEY;
   const projectId = process.env.BROWSERBASE_PROJECT_ID;
   const stratusBaseUrl = process.env.STRATUS_BASE_URL?.replace(/\/$/, '');
-  const apiRoot = (process.env.BROWSER_API_ROOT
+  const apiRoot = ((providerOverride === 'browserbase' ? process.env.BROWSERBASE_API_ROOT : process.env.BROWSER_API_ROOT)
     ?? (provider === 'stratus' && stratusBaseUrl ? `${stratusBaseUrl}/v1` : 'https://api.browserbase.com/v1'))
     .replace(/\/$/, '');
   if (!apiKey) {
@@ -69,8 +75,8 @@ function config() {
   return { apiKey, projectId, provider, apiRoot };
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const { apiKey, apiRoot, provider } = config();
+async function request<T>(path: string, init: RequestInit = {}, providerOverride?: BrowserProvider): Promise<T> {
+  const { apiKey, apiRoot, provider } = config(providerOverride);
   const response = await fetch(`${apiRoot}${path}`, {
     ...init,
     headers: {
@@ -130,8 +136,8 @@ export async function runManagedBrowser(
   return payload.run;
 }
 
-export async function createBrowserContext(): Promise<string> {
-  const result = await request<{ id: string }>('/contexts', { method: 'POST', body: '{}' });
+export async function createBrowserContext(providerOverride?: BrowserProvider): Promise<string> {
+  const result = await request<{ id: string }>('/contexts', { method: 'POST', body: '{}' }, providerOverride);
   return result.id;
 }
 
@@ -168,22 +174,28 @@ export function browserSessionBody(
   };
 }
 
-export async function createBrowserSession(contextId: string, portalUrl: string): Promise<SessionResponse> {
-  const { projectId, provider } = config();
+export async function createBrowserSession(
+  contextId: string,
+  portalUrl: string,
+  providerOverride?: BrowserProvider,
+): Promise<SessionResponse> {
+  const { projectId, provider } = config(providerOverride);
   if (provider === 'stratus-managed') throw new Error('Managed Stratus uses bounded runs instead of persistent sessions');
   return request<SessionResponse>('/sessions', {
     method: 'POST',
     body: JSON.stringify(browserSessionBody(contextId, portalUrl, projectId, provider)),
-  });
+  }, providerOverride);
 }
 
-export async function getBrowserSession(sessionId: string): Promise<SessionResponse> {
-  return request<SessionResponse>(`/sessions/${encodeURIComponent(sessionId)}`);
+export async function getBrowserSession(sessionId: string, providerOverride?: BrowserProvider): Promise<SessionResponse> {
+  return request<SessionResponse>(`/sessions/${encodeURIComponent(sessionId)}`, {}, providerOverride);
 }
 
-export async function getLiveViewUrl(sessionId: string): Promise<string> {
+export async function getLiveViewUrl(sessionId: string, providerOverride?: BrowserProvider): Promise<string> {
   const result = await request<{ debuggerFullscreenUrl?: string; debuggerUrl?: string }>(
     `/sessions/${encodeURIComponent(sessionId)}/debug`,
+    {},
+    providerOverride,
   );
   const url = result.debuggerFullscreenUrl ?? result.debuggerUrl;
   if (!url) throw new Error('Secure browser provider did not return a live view URL');

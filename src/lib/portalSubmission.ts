@@ -513,7 +513,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
   await fillReviewedQuestions(page, packet, filledFields);
 
   const blockers: string[] = [];
-  if ((await page.locator('iframe[src*="captcha" i], [class*="captcha" i], [id*="captcha" i]').count()) > 0) {
+  if (await hasUnresolvedCaptcha(page)) {
     blockers.push('CAPTCHA requires your attention');
   }
   const required = page.locator('input[required], textarea[required], select[required]');
@@ -539,6 +539,54 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
   blockers.push(...new Set(labelledBlockers));
   if (unlabelledCount > 0) blockers.push(describeUnlabelledBlockers(unlabelledCount));
   return { filledFields, blockers };
+}
+
+export function captchaSnapshotRequiresAttention(responseTokens: string[], visibleChallengeCount: number): boolean {
+  if (visibleChallengeCount === 0) return false;
+  if (responseTokens.length === 0) return true;
+  return responseTokens.some((token) => token.trim().length === 0);
+}
+
+export async function hasUnresolvedCaptcha(page: Page): Promise<boolean> {
+  const responseFields = page.locator([
+    'textarea[name*="captcha-response" i]',
+    'input[name*="captcha-response" i]',
+    'textarea[id*="captcha-response" i]',
+    'input[id*="captcha-response" i]',
+    'textarea[name="cf-turnstile-response"]',
+    'input[name="cf-turnstile-response"]',
+  ].join(', '));
+  const responseTokens: string[] = [];
+  for (let index = 0; index < await responseFields.count(); index += 1) {
+    responseTokens.push(await responseFields.nth(index).inputValue().catch(() => ''));
+  }
+
+  const challenges = page.locator([
+    'iframe[src*="captcha" i]',
+    'iframe[src*="challenges.cloudflare.com" i]',
+    '[class*="captcha" i]',
+    '[id*="captcha" i]',
+    '[data-sitekey]',
+  ].join(', '));
+  let visibleChallengeCount = 0;
+  for (let index = 0; index < await challenges.count(); index += 1) {
+    if (await challenges.nth(index).isVisible().catch(() => false)) visibleChallengeCount += 1;
+  }
+  return captchaSnapshotRequiresAttention(responseTokens, visibleChallengeCount);
+}
+
+export async function waitForCaptchaResolution(
+  page: Page,
+  timeoutMs = 35_000,
+  pollMs = 1_000,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (await hasUnresolvedCaptcha(page)) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await page.waitForTimeout(Math.min(pollMs, remaining));
+  }
+  return true;
 }
 
 // Playwright's locator actions AUTO-WAIT, defaulting to 30s. Probing four label sources per field
@@ -605,6 +653,9 @@ async function resolveFieldLabel(page: Page, field: Locator): Promise<string | n
 export async function clickFinalSubmit(page: Page): Promise<void> {
   const button = page.getByRole('button', { name: /submit application|submit|apply/i }).last();
   if ((await button.count()) === 0) throw new Error('Final submit control was not found');
+  if (await hasUnresolvedCaptcha(page)) {
+    throw new Error('CAPTCHA_UNRESOLVED: final submit was not clicked');
+  }
   await button.click();
   await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => undefined);
 }

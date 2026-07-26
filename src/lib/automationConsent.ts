@@ -1,8 +1,14 @@
 export const AUTOMATIC_SUBMISSION_CONSENT_VERSION = '2026-07-25';
+export const AUTOMATIC_CAPTCHA_CONSENT_VERSION = '2026-07-26-human-resume-v1';
+
+export function automaticCaptchaConsentEnabled(enabled: boolean, version: string | null | undefined): boolean {
+  return enabled && version === AUTOMATIC_CAPTCHA_CONSENT_VERSION;
+}
 
 export type AutomationPermissions = {
   automatic_submission_enabled: boolean;
   automatic_verification_enabled: boolean;
+  automatic_captcha_enabled: boolean;
 };
 
 export function automationConsentValues(settings: AutomationPermissions, now: Date) {
@@ -14,5 +20,10 @@ export function automationConsentValues(settings: AutomationPermissions, now: Da
       : null,
     automatic_verification_enabled: settings.automatic_verification_enabled,
     automatic_verification_consented_at: settings.automatic_verification_enabled ? now : null,
+    automatic_captcha_enabled: settings.automatic_captcha_enabled,
+    automatic_captcha_consented_at: settings.automatic_captcha_enabled ? now : null,
+    automatic_captcha_consent_version: settings.automatic_captcha_enabled
+      ? AUTOMATIC_CAPTCHA_CONSENT_VERSION
+      : null,
   };
 }

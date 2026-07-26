@@ -34,6 +34,7 @@ export type ApplicationReviewState = {
   submitted_at?: string;
   submission_error?: string;
   submission_run_id?: string;
+  submission_channel?: 'browser' | 'greenhouse_job_board_api';
   browser_context_id?: string;
   browser_session_id?: string;
   attention_reason?: string;
@@ -42,6 +43,8 @@ export type ApplicationReviewState = {
   cover_letter_supported?: boolean;
   submission_claimed_at?: string;
   submission_claim_id?: string;
+  preparation_claimed_at?: string;
+  preparation_claim_id?: string;
   filled_fields?: string[];
   preview_screenshot_url?: string;
   submission_authorization?: {
@@ -54,6 +57,13 @@ export type ApplicationReviewState = {
     status: 'not_needed' | 'searching' | 'completed' | 'handoff';
     provider?: 'gmail' | 'outlook';
     completed_at?: string;
+  };
+  captcha?: {
+    authorized: boolean;
+    provider_requested: boolean;
+    unresolved: boolean;
+    consented_at?: string;
+    consent_version?: string;
   };
   receipt?: {
     confirmation_text: string;

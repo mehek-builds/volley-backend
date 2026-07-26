@@ -55,12 +55,26 @@ import {
 import type { ApplicationReviewQuestion } from '../lib/applicationReview';
 import { generateStoredCoverLetter, storedCoverLetter } from '../lib/coverLetterService';
 import { mayClickFinalSubmit, preparedSubmissionStatus } from '../lib/submissionAuthorization';
-import { directPreparationIsSafe } from '../lib/submissionSafety';
+import { directPreparationIsSafe, stalePreSubmitLease } from '../lib/submissionSafety';
+import { automaticCaptchaConsentEnabled } from '../lib/automationConsent';
+import {
+  AuthorizedAtsValidationError,
+  authorizedGreenhouseRoute,
+  hasAnyAuthorizedAtsCredential,
+  inspectAuthorizedGreenhouseApplication,
+  submitAuthorizedGreenhouseApplication,
+} from '../lib/authorizedAts';
 
 type ResumeRow = typeof generated_resumes.$inferSelect;
 type StoredSpec = Record<string, unknown>;
 
 type StandingAuthorization = {
+  enabled: boolean;
+  consentedAt?: string;
+  consentVersion?: string;
+};
+
+type CaptchaAuthorization = {
   enabled: boolean;
   consentedAt?: string;
   consentVersion?: string;
@@ -76,6 +90,21 @@ async function writeReview(row: ResumeRow, review: ApplicationReviewState) {
   }).where(eq(generated_resumes.id, row.id));
 }
 
+async function writePreparationReview(
+  row: ResumeRow,
+  review: ApplicationReviewState,
+  preparationClaimId: string,
+): Promise<boolean> {
+  const updated = await db.update(generated_resumes).set({
+    spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(review)}::jsonb, true)`,
+  }).where(and(
+    eq(generated_resumes.id, row.id),
+    sql`${generated_resumes.spec}->'_review'->>'preparation_claim_id' = ${preparationClaimId}`,
+    sql`${generated_resumes.spec}->'_review'->>'status' in ('preparing', 'filling')`,
+  )).returning({ id: generated_resumes.id });
+  return updated.length === 1;
+}
+
 async function standingAuthorization(userId: string): Promise<StandingAuthorization> {
   const [user] = await db.select({
     enabled: users.automatic_submission_enabled,
@@ -87,6 +116,29 @@ async function standingAuthorization(userId: string): Promise<StandingAuthorizat
     consentedAt: user?.consentedAt?.toISOString(),
     consentVersion: user?.consentVersion ?? undefined,
   };
+}
+
+async function captchaAuthorization(userId: string): Promise<CaptchaAuthorization> {
+  const [user] = await db.select({
+    enabled: users.automatic_captcha_enabled,
+    consentedAt: users.automatic_captcha_consented_at,
+    consentVersion: users.automatic_captcha_consent_version,
+  }).from(users).where(eq(users.id, userId)).limit(1);
+  const consentVersion = user?.consentVersion ?? undefined;
+  return {
+    enabled: automaticCaptchaConsentEnabled(user?.enabled === true, consentVersion),
+    consentedAt: user?.consentedAt?.toISOString(),
+    consentVersion,
+  };
+}
+
+const CAPTCHA_STOP_MESSAGE = 'A CAPTCHA needs to be completed by the applicant in the original portal tab. The application was not submitted.';
+
+function officialReceiptSvg(confirmationText: string, referenceId?: string): Buffer {
+  const escape = (value: string) => value.replace(/[&<>"']/g, (character) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;',
+  }[character]!));
+  return Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630"><rect width="1200" height="630" fill="#f7f7f3"/><rect x="80" y="80" width="1040" height="470" rx="28" fill="white" stroke="#d8d8d0"/><text x="130" y="175" font-family="system-ui,sans-serif" font-size="28" fill="#4267d5">EMPLOYER-AUTHORIZED ATS RECEIPT</text><text x="130" y="270" font-family="system-ui,sans-serif" font-size="42" font-weight="700" fill="#151512">Application accepted</text><text x="130" y="340" font-family="system-ui,sans-serif" font-size="22" fill="#31312d">${escape(confirmationText)}</text>${referenceId ? `<text x="130" y="410" font-family="monospace" font-size="22" fill="#63635d">Reference: ${escape(referenceId)}</text>` : ''}</svg>`);
 }
 
 function preparedReviewPatch(authorization: StandingAuthorization, safe: boolean): Partial<ApplicationReviewState> {
@@ -130,6 +182,8 @@ async function claimPreparation(row: ResumeRow): Promise<ResumeRow | null> {
   const preparing = nextReview(current, {
     status: 'preparing',
     submission_run_id: current.submission_run_id ?? randomUUID(),
+    preparation_claimed_at: new Date().toISOString(),
+    preparation_claim_id: randomUUID(),
     submission_claimed_at: undefined,
     submission_claim_id: undefined,
   });
@@ -140,6 +194,33 @@ async function claimPreparation(row: ResumeRow): Promise<ResumeRow | null> {
     .where(and(
       eq(generated_resumes.id, row.id),
       sql`${generated_resumes.spec}->'_review'->>'status' = 'submit_requested'`,
+    ))
+    .returning();
+  return rows[0] ?? null;
+}
+
+async function recoverStalePreparation(row: ResumeRow): Promise<ResumeRow | null> {
+  const current = readApplicationReview(row.spec);
+  if (!current || !stalePreSubmitLease(current.status, current.updated_at)) return row;
+  const recovered = nextReview(current, {
+    status: 'submit_requested',
+    browser_context_id: undefined,
+    browser_session_id: undefined,
+    preparation_claimed_at: undefined,
+    preparation_claim_id: undefined,
+    submission_claimed_at: undefined,
+    submission_claim_id: undefined,
+    attention_reason: undefined,
+    handoff_expires_at: undefined,
+  });
+  const rows = await db.update(generated_resumes)
+    .set({
+      spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(recovered)}::jsonb, true)`,
+    })
+    .where(and(
+      eq(generated_resumes.id, row.id),
+      sql`${generated_resumes.spec}->'_review'->>'status' = ${current.status}`,
+      sql`${generated_resumes.spec}->'_review'->>'updated_at' = ${current.updated_at}`,
     ))
     .returning();
   return rows[0] ?? null;
@@ -353,12 +434,15 @@ async function prepareManaged(
   runId: string,
   fastify: FastifyInstance,
   authorization: StandingAuthorization,
+  captchaAuthorizationState: CaptchaAuthorization,
 ) {
-  await writeReview(row, nextReview(current, {
+  const preparationClaimId = current.preparation_claim_id;
+  if (!preparationClaimId) throw new Error('Preparation claim is missing');
+  if (!await writePreparationReview(row, nextReview(current, {
     status: 'filling',
     submission_run_id: runId,
     submission_error: undefined,
-  }));
+  }), preparationClaimId)) return;
   let packet = omitCoverLetter(await buildPacket(row));
 
   // R-055 on the managed path: a cheap first call fills only the fixed fields and asks
@@ -400,23 +484,34 @@ async function prepareManaged(
   // service and returns finished sentences, so it never passes through this repo's label
   // resolution. Live QA proved that gap by showing three raw UUIDs on a real Ashby posting.
   const blockers = sanitizeProviderBlockers(result.blockers ?? []);
+  const captchaUnresolved = blockers.some((blocker) => /captcha/i.test(blocker));
   const verificationHandoff = blockers.some((blocker) =>
     /verification code|security code|one[ -]?time code|passcode|\botp\b/i.test(blocker),
   );
   const safe = blockers.length === 0 && discoveryAttention.length === 0;
   const review = nextReview(current, {
     ...preparedReviewPatch(authorization, safe),
+    ...(captchaUnresolved ? { status: 'failed' as const, submission_error: CAPTCHA_STOP_MESSAGE } : {}),
     submission_run_id: runId,
     filled_fields: result.filledFields ?? [],
     preview_screenshot_url: preview.url,
     verification: { status: verificationHandoff ? 'handoff' : 'not_needed' },
+    captcha: {
+      authorized: captchaAuthorizationState.enabled,
+      provider_requested: false,
+      unresolved: captchaUnresolved,
+      consented_at: captchaAuthorizationState.consentedAt,
+      consent_version: captchaAuthorizationState.consentVersion,
+    },
     questions: mergedQuestions,
     cover_letter_supported: coverLetterSupported,
     attention_reason: [...blockers, ...discoveryAttention].join('\n') || undefined,
     handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
     submission_error: undefined,
+    preparation_claimed_at: undefined,
+    preparation_claim_id: undefined,
   });
-  await writeReview(row, review);
+  if (!await writePreparationReview(row, review, preparationClaimId)) return;
   fastify.log.info({ applicationId: row.id, portal, status: review.status }, 'Application portal prepared with Stratus Sandbox');
 }
 
@@ -424,26 +519,68 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
   const stored = row.spec as StoredSpec;
   const current = readApplicationReview(stored);
   if (!current?.portal_url) throw new Error('Application portal URL is missing');
+  const preparationClaimId = current.preparation_claim_id;
+  if (!preparationClaimId) throw new Error('Preparation claim is missing');
   const portal = detectPortal(current.portal_url);
   const runId = current.submission_run_id ?? randomUUID();
   const authorization = await standingAuthorization(row.user_id);
+  const captchaAuthorizationState = await captchaAuthorization(row.user_id);
+  const authorizedRoute = authorizedGreenhouseRoute(current.portal_url);
+  if (authorizedRoute) {
+    const packet = await buildPacket(row);
+    try {
+      await inspectAuthorizedGreenhouseApplication(authorizedRoute, packet);
+    } catch (error) {
+      if (!(error instanceof AuthorizedAtsValidationError)) throw error;
+      const review = nextReview(current, {
+        status: 'needs_attention',
+        submission_channel: 'greenhouse_job_board_api',
+        submission_run_id: runId,
+        attention_reason: error.blockers.join('\n'),
+        preparation_claimed_at: undefined,
+        preparation_claim_id: undefined,
+      });
+      await writePreparationReview(row, review, preparationClaimId);
+      return;
+    }
+    const review = nextReview(current, {
+      ...preparedReviewPatch(authorization, true),
+      submission_channel: 'greenhouse_job_board_api',
+      submission_run_id: runId,
+      filled_fields: ['first_name', 'last_name', 'email', 'resume'],
+      cover_letter_supported: true,
+      attention_reason: undefined,
+      preparation_claimed_at: undefined,
+      preparation_claim_id: undefined,
+      captcha: { authorized: captchaAuthorizationState.enabled, provider_requested: false, unresolved: false, consented_at: captchaAuthorizationState.consentedAt, consent_version: captchaAuthorizationState.consentVersion },
+    });
+    await writePreparationReview(row, review, preparationClaimId);
+    fastify.log.info({ applicationId: row.id, boardToken: authorizedRoute.boardToken, status: review.status }, 'Application prepared for employer-authorized Greenhouse API');
+    return;
+  }
   if (isManagedStratusProvider()) {
-    await prepareManaged(row, current, portal, runId, fastify, authorization);
+    await prepareManaged(row, current, portal, runId, fastify, authorization, captchaAuthorizationState);
     return;
   }
   const contextId = current.browser_context_id ?? (await createBrowserContext());
-  const session = await createBrowserSession(contextId, current.portal_url);
+  const session = await createBrowserSession(
+    contextId,
+    current.portal_url,
+  );
   {
     const verificationRequestedAt = new Date();
     const connected = await connectToSession(session);
     const page = connected.page;
-    await writeReview(row, nextReview(current, {
+    if (!await writePreparationReview(row, nextReview(current, {
       status: 'filling',
       submission_run_id: runId,
       browser_context_id: contextId,
       browser_session_id: session.id,
       submission_error: undefined,
-    }));
+    }), preparationClaimId)) {
+      await connected.browser.close().catch(() => undefined);
+      return;
+    }
     await page.goto(current.portal_url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     await navigateToApplicationForm(page, portal); // no-op except SmartRecruiters's JD-page/form-page split
     const [verificationSettings] = await db.select({ enabled: users.automatic_verification_enabled })
@@ -488,6 +625,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
       addRandomSuffix: true,
     });
     const sanitizedBlockers = sanitizeProviderBlockers(result.blockers);
+    const captchaUnresolved = sanitizedBlockers.some((blocker) => /captcha/i.test(blocker));
     const safe = directPreparationIsSafe({
       blockerCount: sanitizedBlockers.length,
       attentionCount: discoveryAttention.length,
@@ -495,6 +633,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
     });
     const review = nextReview(current, {
       ...preparedReviewPatch(authorization, safe),
+      ...(captchaUnresolved ? { status: 'failed' as const, submission_error: CAPTCHA_STOP_MESSAGE } : {}),
       submission_run_id: runId,
       browser_context_id: contextId,
       browser_session_id: session.id,
@@ -505,6 +644,13 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
         provider: verification.provider,
         completed_at: verification.status === 'completed' ? new Date().toISOString() : undefined,
       },
+      captcha: {
+        authorized: captchaAuthorizationState.enabled,
+        provider_requested: false,
+        unresolved: captchaUnresolved,
+        consented_at: captchaAuthorizationState.consentedAt,
+        consent_version: captchaAuthorizationState.consentVersion,
+      },
       questions: mergedQuestions,
       cover_letter_supported: coverLetterSupported,
       // Already human on this path, but sanitized anyway so both providers are held to one
@@ -513,8 +659,13 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
         [...sanitizedBlockers, ...discoveryAttention].join('\n') || undefined,
       handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
       submission_error: undefined,
+      preparation_claimed_at: undefined,
+      preparation_claim_id: undefined,
     });
-    await writeReview(row, review);
+    if (!await writePreparationReview(row, review, preparationClaimId)) {
+      await connected.browser.close().catch(() => undefined);
+      return;
+    }
     fastify.log.info({ applicationId: row.id, portal, status: review.status }, 'Application portal prepared');
   }
 }
@@ -543,7 +694,28 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
   row = claimedRow;
   const claimedReview = readApplicationReview(row.spec);
   if (!claimedReview) return;
-  if (isManagedStratusProvider()) {
+  if (claimedReview.submission_channel === 'greenhouse_job_board_api') {
+    if (!await authorizationValidAtClick(row, claimedReview)) {
+      await holdRevokedSubmission(row, claimedReview);
+      return;
+    }
+    const route = authorizedGreenhouseRoute(claimedReview.portal_url!);
+    if (!route) throw new Error('The employer-authorized Greenhouse credential is no longer configured');
+    const receipt = await submitAuthorizedGreenhouseApplication(route, await buildPacket(row));
+    const capturedAt = new Date().toISOString();
+    const blob = await put(
+      `users/${row.user_id}/submission-runs/${claimedReview.submission_run_id}/authorized-ats-receipt.svg`,
+      officialReceiptSvg(receipt.confirmationText, receipt.referenceId),
+      { access: 'public', contentType: 'image/svg+xml', addRandomSuffix: true },
+    );
+    await writeReview(row, nextReview(claimedReview, {
+      status: 'submitted', submitted_at: capturedAt, submission_error: undefined,
+      receipt: { confirmation_text: receipt.confirmationText, final_url: receipt.finalUrl, screenshot_url: blob.url, captured_at: capturedAt, reference_id: receipt.referenceId },
+    }));
+    fastify.log.info({ applicationId: row.id, boardToken: route.boardToken }, 'Application accepted by employer-authorized Greenhouse API');
+    return;
+  }
+  if (isManagedStratusProvider() && !claimedReview.browser_session_id) {
     const portal = detectPortal(claimedReview.portal_url!);
     if (!await authorizationValidAtClick(row, claimedReview)) {
       await holdRevokedSubmission(row, claimedReview);
@@ -591,7 +763,20 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
     const portal = detectPortal(claimedReview.portal_url!);
     const builtPacket = await buildPacket(row);
     const packet = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
-    await fillPortal(page, portal, packet);
+    const finalScan = await fillPortal(page, portal, packet);
+    const finalBlockers = sanitizeProviderBlockers(finalScan.blockers);
+    if (finalBlockers.length > 0) {
+      const captchaUnresolved = finalBlockers.some((blocker) => /captcha/i.test(blocker));
+      await writeReview(row, nextReview(claimedReview, {
+        status: 'failed',
+        submission_error: captchaUnresolved ? CAPTCHA_STOP_MESSAGE : 'The form changed before submission. The application was not submitted.',
+        attention_reason: finalBlockers.join('\n'),
+        captcha: claimedReview.captcha
+          ? { ...claimedReview.captcha, unresolved: captchaUnresolved }
+          : undefined,
+      }));
+      return;
+    }
     await clickFinalSubmit(page);
     const receipt = await readReceipt(page);
     const capturedAt = new Date().toISOString();
@@ -625,37 +810,58 @@ async function fail(row: ResumeRow, error: unknown) {
   if (!current) return;
   const message = error instanceof Error ? error.message : 'Submission runner failed';
   const externalGate = /browserbase|stratus managed browser is not configured|secure browser provider is not configured/i.test(message);
+  const captchaStopped = /CAPTCHA_UNRESOLVED|CAPTCHA could not be completed/i.test(message);
   const uncertainAfterClaim = Boolean(current.submission_claimed_at);
   await writeReview(latestRows[0], nextReview(current, {
-    status: uncertainAfterClaim ? 'needs_attention' : externalGate ? 'submit_requested' : 'failed',
-    submission_error: message,
-    attention_reason: uncertainAfterClaim
+    status: captchaStopped ? 'failed' : uncertainAfterClaim ? 'needs_attention' : externalGate ? 'submit_requested' : 'failed',
+    submission_error: captchaStopped ? CAPTCHA_STOP_MESSAGE : message,
+    attention_reason: uncertainAfterClaim && !captchaStopped
       ? 'The final submission was attempted, but Litos could not verify the employer confirmation. Check the portal or your email before trying again.'
       : current.attention_reason,
   }));
+}
+
+async function failPreparation(row: ResumeRow, error: unknown, preparationClaimId: string) {
+  const latestRows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, row.id)).limit(1);
+  const latest = latestRows[0];
+  const current = latest ? readApplicationReview(latest.spec) : null;
+  if (!latest || !current) return;
+  const message = error instanceof Error ? error.message : 'Submission runner failed';
+  const externalGate = /browserbase|stratus managed browser is not configured|secure browser provider is not configured/i.test(message);
+  const captchaStopped = /CAPTCHA_UNRESOLVED|CAPTCHA could not be completed/i.test(message);
+  await writePreparationReview(latest, nextReview(current, {
+    status: captchaStopped ? 'failed' : externalGate ? 'submit_requested' : 'failed',
+    submission_error: captchaStopped ? CAPTCHA_STOP_MESSAGE : message,
+    preparation_claimed_at: undefined,
+    preparation_claim_id: undefined,
+  }), preparationClaimId);
 }
 
 export async function processSubmissionApplication(applicationId: string, fastify: FastifyInstance): Promise<ApplicationReviewState | null> {
   const rows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, applicationId)).limit(1);
   const row = rows[0];
   if (!row) return null;
-  let activeRow = row;
+  let activeRow = await recoverStalePreparation(row);
+  if (!activeRow) return null;
+  let preparationClaimId: string | undefined;
   try {
     let review = readApplicationReview(activeRow.spec);
     if (review?.status === 'submit_requested') {
       const claimed = await claimPreparation(activeRow);
       if (!claimed) return review;
       activeRow = claimed;
+      preparationClaimId = readApplicationReview(claimed.spec)?.preparation_claim_id;
       await prepare(activeRow, fastify);
       const prepared = await db.select().from(generated_resumes).where(eq(generated_resumes.id, applicationId)).limit(1);
       if (prepared[0]) activeRow = prepared[0];
       review = readApplicationReview(activeRow.spec);
+      if (review?.status !== 'preparing' && review?.status !== 'filling') preparationClaimId = undefined;
     }
     if (review?.status === 'submitting') await submit(activeRow, fastify);
   } catch (error) {
     fastify.log.error({ error, applicationId: row.id }, 'Application runner step failed');
-    const latest = await db.select().from(generated_resumes).where(eq(generated_resumes.id, applicationId)).limit(1);
-    await fail(latest[0] ?? activeRow, error);
+    if (preparationClaimId) await failPreparation(activeRow, error, preparationClaimId);
+    else await fail(activeRow, error);
   }
   const refreshed = await db.select().from(generated_resumes).where(eq(generated_resumes.id, applicationId)).limit(1);
   return refreshed[0] ? readApplicationReview(refreshed[0].spec) : null;
@@ -664,11 +870,11 @@ export async function processSubmissionApplication(applicationId: string, fastif
 export async function submissionRunnerRoutes(fastify: FastifyInstance) {
   fastify.get('/internal/application-submission-runner', async (request: FastifyRequest, reply: FastifyReply) => {
     if (!isCronConfigured() || !isCronAuthorized(request)) return reply.status(401).send({ error: 'Unauthorized' });
-    if (!isBrowserbaseConfigured()) return reply.status(503).send({ error: 'Secure portal runner is not configured', processed: 0 });
+    if (!isBrowserbaseConfigured() && !hasAnyAuthorizedAtsCredential()) return reply.status(503).send({ error: 'No secure submission channel is configured', processed: 0 });
     const rows = await db
       .select()
       .from(generated_resumes)
-      .where(sql`${generated_resumes.spec}->'_review'->>'status' in ('submit_requested', 'submitting')`)
+      .where(sql`${generated_resumes.spec}->'_review'->>'status' in ('submit_requested', 'preparing', 'filling', 'submitting')`)
       .limit(2);
     let processed = 0;
     for (const row of rows) {

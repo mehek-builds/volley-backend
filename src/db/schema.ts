@@ -42,8 +42,8 @@ export const users = pgTable('users', {
   // would make the bargain implicit and un-revocable, so it is stored.
   onboarding_completed_at: timestamp('onboarding_completed_at', { withTimezone: true }),
   // Revocable standing authorization for policy-eligible application submissions. The runner
-  // still stops for missing or contradictory facts, sensitive attestations, CAPTCHA, unsupported
-  // portal behavior, and any submission whose receipt cannot be verified.
+  // still stops for missing or contradictory facts, sensitive attestations, unresolved CAPTCHA,
+  // unsupported portal behavior, and any submission whose receipt cannot be verified.
   automatic_submission_enabled: boolean('automatic_submission_enabled').default(false).notNull(),
   automatic_submission_consented_at: timestamp('automatic_submission_consented_at', { withTimezone: true }),
   automatic_submission_consent_version: text('automatic_submission_consent_version'),
@@ -51,6 +51,12 @@ export const users = pgTable('users', {
   // Gmail or Outlook account. Submission permission never implies inbox permission.
   automatic_verification_enabled: boolean('automatic_verification_enabled').default(false).notNull(),
   automatic_verification_consented_at: timestamp('automatic_verification_consented_at', { withTimezone: true }),
+  // Separate permission for asking the configured browser provider to solve a CAPTCHA on a job
+  // application portal. Submission permission never implies CAPTCHA permission, and the provider
+  // request is always explicit so provider defaults cannot silently widen the user's consent.
+  automatic_captcha_enabled: boolean('automatic_captcha_enabled').default(false).notNull(),
+  automatic_captcha_consented_at: timestamp('automatic_captcha_consented_at', { withTimezone: true }),
+  automatic_captcha_consent_version: text('automatic_captcha_consent_version'),
 });
 
 // ---- usage_counters ----

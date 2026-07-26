@@ -24,3 +24,18 @@ export function directPreparationIsSafe(options: {
     && options.attentionCount === 0
     && options.verificationStatus !== 'handoff';
 }
+
+export function stalePreSubmitLease(
+  status: string,
+  updatedAt: string,
+  nowMs = Date.now(),
+  leaseMs = 5 * 60_000,
+): boolean {
+  if (status !== 'preparing' && status !== 'filling') return false;
+  const updatedAtMs = Date.parse(updatedAt);
+  return !Number.isFinite(updatedAtMs) || nowMs - updatedAtMs >= leaseMs;
+}
+
+export function preparationClaimOwnsReview(currentClaimId: string | undefined, writerClaimId: string): boolean {
+  return Boolean(currentClaimId) && currentClaimId === writerClaimId;
+}
