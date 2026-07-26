@@ -26,7 +26,7 @@ import { AUTOMATIC_SUBMISSION_CONSENT_VERSION, automationConsentValues } from '.
 // The one thing that IS stored is completion (users.onboarding_completed_at), because it gates
 // harvest and therefore has to be an explicit act rather than an inference. See harvest.ts.
 
-type Step = 'focus' | 'resume' | 'install' | 'apply' | 'gaps' | 'targeting' | 'done';
+type Step = 'focus' | 'resume' | 'base' | 'install' | 'apply' | 'gaps' | 'targeting' | 'done';
 
 // Asked on screen 03 only if the first application did not teach us. Order is the render order.
 //
@@ -122,9 +122,13 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     // Checks a REQUIRED key, not object truthiness: `!!{}` is true, so a parse that returned
     // nothing usable would advance the student past step 01 with no name, school or grad_year -
     // and the targeting screen would then derive its period options from grad_year 0.
-    const parsed = profile?.parsed_json as { full_name?: string } | null | undefined;
+    const parsed = profile?.parsed_json as { full_name?: string; source_pages?: number } | null | undefined;
     const has_resume = !!parsed?.full_name && (bankCount?.n ?? 0) > 0;
     const has_applied = (applyCount?.n ?? 0) > 0;
+
+    // The base resume: built once from the bank, with no job description. Stored rather than
+    // derived (see schema.ts), so this is a real column read and not an inference.
+    const has_base_resume = !!profile?.base_resume_json;
 
     const learned = HARVEST_FIELDS.filter((f) => readable(appProfile, f) !== null);
     const gaps = gapsFrom(appProfile);
@@ -162,29 +166,53 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     // targeting anyway and saved it still lands back on gaps on every reload. Gaps is a screen on
     // the way to targeting, not a checkpoint. Targeting is the real gate, because it is the one
     // thing nothing else can supply.
+    // The base resume sits directly after the upload and before the install, because it is the
+    // payoff for the upload: the student has just handed over a two- or three-page document and
+    // has no evidence we understood any of it. Showing them the one-page result closes that loop
+    // while the upload is still the thing they are thinking about.
+    //
+    // It gates like `has_resume` and unlike `gaps`: it is a real artifact the rest of the product
+    // depends on, not an optional detail screen. But the gate is the STORED SPEC, so a student who
+    // rebuilds or hand-edits later never gets sent back here, and an account created before this
+    // shipped derives 'base' exactly once and then moves on for good.
     const step: Step = user.onboarding_completed_at
       ? 'done'
       : !has_focus
         ? 'focus'
         : !has_resume
           ? 'resume'
-          : !has_applied
-            ? 'install'
-            : !has_targeting
-              ? gaps.length > 0
-                ? 'gaps'
-                : 'targeting'
-              : 'done';
+          : !has_base_resume
+            ? 'base'
+            : !has_applied
+              ? 'install'
+              : !has_targeting
+                ? gaps.length > 0
+                  ? 'gaps'
+                  : 'targeting'
+                : 'done';
 
     return reply.status(200).send({
       step,
       completed_at: user.onboarding_completed_at,
       has_focus,
       has_resume,
+      has_base_resume,
       has_applied,
       has_targeting,
       learned,
       gaps,
+      // Measured from the uploaded file at parse time (routes/profile.ts). 0 means we never got a
+      // page count - an older upload, or a parse that predates the measurement - and the base
+      // screen simply omits the "from N pages" line rather than guessing one.
+      source_pages: typeof parsed?.source_pages === 'number' ? parsed.source_pages : 0,
+      // The student's ORIGINAL upload, so /start can show it beside the rebuilt one. NULL is a
+      // normal state, not an error: storing the file is best-effort (a blob outage must not fail a
+      // signup), and every account created before resume_url was written has none. The comparison
+      // view degrades to describing the original rather than displaying it.
+      //
+      // Safe to serve here: it is this user's own file, behind requireAuth, and the URL already
+      // carries its own unguessable blob token.
+      source_resume_url: profile?.resume_url ?? null,
       // True while the extension is allowed to read values back out of a form. Surfaced so the
       // student can always see whether it is on, rather than having to trust that it stopped.
       harvest_active: !user.onboarding_completed_at,

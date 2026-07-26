@@ -491,6 +491,15 @@ export function measureResumeLayout(
     const line = contactLine(contact);
     if (line) {
       headerHeight +=
+        // The gap above the name/contact rule, then the gap below it. Mirrors the draw path term
+        // for term, which is the only way this stays correct: the layout planner decides how much
+        // room the body gets from this number, so a header that measures short pushes the last
+        // section off the page at render time.
+        //
+        // The rule's own stroke width is deliberately NOT counted. A stroke is painted centred on
+        // its baseline and never advances doc.y, so charging the header for it would make the
+        // planner and the renderer disagree by 0.65pt on every resume.
+        design.spacing.contactTop +
         design.spacing.contactTop +
         textHeight(
           doc,
@@ -620,7 +629,12 @@ function selectSparseDesign(
 ): { design: ResumeDesignTokens; layout: ResumeVisualLayout } {
   const compact = resumeDesignAtExpansion(0);
   const compactLayout = measureResumeLayout(spec, contact, compact, 0, measurementDocument);
-  if (compactLayout.fill_ratio >= compact.density.sparseTriggerRatio) {
+  // expandBelowRatio, NOT sparseTriggerRatio. These were the same 0.5 constant, which meant any
+  // resume filling half the page returned compact here and was never expanded - measured across
+  // five real resumes, that was all of them, at 0.675 to 0.720 fill. sparseTriggerRatio's job is
+  // to decide when to WARN that a resume is too thin; deciding when to expand is a different
+  // question with a different answer.
+  if (compactLayout.fill_ratio >= compact.density.expandBelowRatio) {
     return { design: compact, layout: compactLayout };
   }
 
@@ -981,10 +995,21 @@ export async function renderResumePdf(
   }
   const line = contactLine(contact);
   if (line) {
+    // A rule between the name and the contact details, full usable width. The identity sits above
+    // it and the ways to reach that person sit below: two different kinds of fact, so the eye gets
+    // a divider rather than a paragraph. Same stroke weight as the section rules, so the page has
+    // one rule language rather than two.
+    const ruleY = doc.y + design.spacing.contactTop;
+    doc
+      .moveTo(design.page.margin, ruleY)
+      .lineTo(design.page.margin + width, ruleY)
+      .lineWidth(design.geometry.sectionRuleWidth)
+      .stroke();
+    doc.y = ruleY + design.spacing.contactTop;
     doc
       .font(RESUME_FONTS.regular)
       .fontSize(design.typography.contact)
-      .text(line, design.page.margin, doc.y + design.spacing.contactTop, {
+      .text(line, design.page.margin, doc.y, {
         width,
         align: 'center',
         lineGap: design.typography.contact * design.typography.lineGapRatio.regular,

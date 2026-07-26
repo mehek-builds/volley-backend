@@ -14,6 +14,7 @@ import { experienceBankRoutes } from './routes/experienceBank';
 import { applicationProfileRoutes } from './routes/applicationProfile';
 import { applicationAnswerRoutes } from './routes/applicationAnswer';
 import { resumeRoutes } from './routes/resume';
+import { baseResumeRoutes } from './routes/baseResume';
 import { accountRoutes } from './routes/account';
 import { resumeRetentionRoutes } from './routes/resumeRetention';
 import { adapterHealthRoutes } from './routes/adapterHealth';
@@ -192,6 +193,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await fastify.register(coverLetterRoutes);
   await fastify.register(emailConnectionRoutes);
   await fastify.register(resumeRoutes);
+  await fastify.register(baseResumeRoutes);
   await fastify.register(accountRoutes);
   await fastify.register(resumeRetentionRoutes);
   await fastify.register(adapterHealthRoutes);

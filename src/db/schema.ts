@@ -137,6 +137,20 @@ export const profiles = pgTable('profiles', {
   // outside it are hard-rejected, which is only safe BECAUSE the list is the student's own
   // statement rather than something inferred from their bullets.
   skills: jsonb('skills'),
+  // The BASE resume: one ResumeSpec, built once at onboarding from the bank with no job
+  // description. It is what the student reviews and approves on /start, and the fallback every
+  // later generation falls back TO when a JD is thin, unreadable, or absent.
+  //
+  // Stored, not derived, and that is the point. Deriving it would rebuild it on every read, so the
+  // resume a student approved on Tuesday would quietly become a different resume on Friday because
+  // the model picked differently. Approval has to attach to an artifact that cannot move underneath
+  // it. Rebuilding is an explicit act (POST /resume/base), which is also what makes the built_at
+  // timestamp meaningful.
+  //
+  // NULL means never built - normal for every account created before this shipped, and the reason
+  // /onboarding/state treats the base step as skippable rather than a wall.
+  base_resume_json: jsonb('base_resume_json'),
+  base_resume_built_at: timestamp('base_resume_built_at', { withTimezone: true }),
   updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
 

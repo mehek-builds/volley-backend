@@ -60,6 +60,11 @@ function parseGraduationDate(value: string | undefined): Date | null {
   return new Date(Number(year), monthName ? monthNames[monthName] : 11, 31, 23, 59, 59);
 }
 
+/* How long after graduating education still leads the page. Two years covers the window in which
+ * the degree is still the strongest single line on a resume and employers are still hiring against
+ * it, which is exactly the "recently graduated" case. */
+const RECENT_GRADUATE_YEARS = 2;
+
 export function deriveCandidateContext(
   education: CandidateEducation,
   now = new Date(),
@@ -73,9 +78,37 @@ export function deriveCandidateContext(
     education.currently_enrolled !== false &&
     hasEducation &&
     (hasGraduationEvidence ? futureDate : education.currently_enrolled === true);
+
+  /* Education leads the page when the candidate is enrolled, RECENTLY graduated, or when we
+   * genuinely cannot tell. Only a clearly-finished, not-recent degree drops below experience.
+   *
+   * The unknown case is the one that matters and it used to fall the wrong way. parse.ts sets
+   * currently_enrolled true "only when the resume explicitly says expected graduation, candidate,
+   * current student", so false means "no explicit evidence", NOT "this person has graduated" -
+   * and the old rule read that silence as graduated. Measured on five real sample resumes
+   * (2026-07-27), four were current students and three of them had education pushed below
+   * experience, because their resumes print a placeholder or bare graduation date with no
+   * "Expected". For a product whose users are students and new grads, silence should resolve
+   * toward student: being wrong that way costs a slightly unusual ordering, being wrong the other
+   * way buries the single most relevant fact about the candidate.
+   */
+  const graduationYear = graduation ? graduation.getFullYear() : year;
+  const yearsSinceGraduation =
+    graduationYear !== undefined ? now.getFullYear() - graduationYear : undefined;
+  // `>= 0` matters: a FUTURE graduation year is not a recent graduation. Without it, someone who
+  // graduates in 2028 scores -2 years and reads as "recent", which would let a future date
+  // override an explicit currently_enrolled: false - the exact conflation this function exists to
+  // prevent.
+  const recentGraduate =
+    yearsSinceGraduation !== undefined &&
+    yearsSinceGraduation >= 0 &&
+    yearsSinceGraduation <= RECENT_GRADUATE_YEARS;
+  const educationLeads =
+    hasEducation && (currentlyEnrolled || recentGraduate || !hasGraduationEvidence);
+
   return {
     currently_enrolled: currentlyEnrolled,
-    education_position: currentlyEnrolled ? 'top' : 'after_experience',
+    education_position: educationLeads ? 'top' : 'after_experience',
   };
 }
 

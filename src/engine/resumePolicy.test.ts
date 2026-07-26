@@ -77,12 +77,31 @@ test('student status comes from uploaded education evidence, not a universal gra
     deriveCandidateContext({ school: 'USC', grad_year: 2028 }, now).education_position,
     'top',
   );
+  // CHANGED 2026-07-27, on an explicit product instruction: education leads the page for current
+  // students AND recent graduates. May 2025 against a July 2026 clock is 14 months ago, which is
+  // squarely "recently graduated", so this now expects 'top' where it previously expected
+  // 'after_experience'. currently_enrolled is still false here (the date is in the past) - it is
+  // the recency of the degree, not enrolment, that earns it the top slot.
   assert.equal(
     deriveCandidateContext({ school: 'USC', grad_date: 'May 2025', currently_enrolled: true }, now).education_position,
-    'after_experience',
+    'top',
   );
   assert.equal(
     deriveCandidateContext({ school: 'USC', currently_enrolled: true }, now).education_position,
+    'top',
+  );
+  // A degree finished long enough ago that the work history leads instead. This is the case that
+  // keeps the rule meaningful: without it, education would lead unconditionally.
+  assert.equal(
+    deriveCandidateContext({ school: 'USC', grad_date: 'May 2018', currently_enrolled: false }, now).education_position,
+    'after_experience',
+  );
+  // No date evidence at all. parse.ts returns currently_enrolled false when a resume simply does
+  // not say, so this must NOT be read as "graduated": for a student product, silence resolves
+  // toward student. Measured 2026-07-27: three of five real sample resumes land here, because
+  // they print a graduation date with no "Expected" and no parseable year.
+  assert.equal(
+    deriveCandidateContext({ school: 'USC', currently_enrolled: false }, now).education_position,
     'top',
   );
 });

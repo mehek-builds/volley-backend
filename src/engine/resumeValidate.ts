@@ -12,6 +12,22 @@ import { deriveCandidateContext, resumeSafeTargetRole, type CandidateEducation }
 
 // Same whitelist as the Dubai engine's STRONG_VERBS, exported so resumeSpec.ts's system prompt
 // stays in sync with what the validator actually enforces (single source of truth).
+/* The whitelist is a QUALITY gate, not a dictionary: a bullet opening with a verb that is not here
+ * is reported so it can be rewritten. Two things follow from that, and both were wrong until a
+ * five-resume run on 2026-07-27 exposed them.
+ *
+ * 1. IT WAS BIASED TOWARD ENGINEERING. The original list came from a software resume engine, so a
+ *    marine-biology student writing "Taught two class sections" or a camp counsellor writing
+ *    "Mediated disputes among campers" was told their bullet was not action-verb-first. Five of
+ *    six such flags in that run came from the two non-engineering resumes. Litos serves every
+ *    student, so the list has to cover teaching, research, care, service and operations work.
+ *
+ * 2. WEAK VERBS MUST STAY OUT. The same run flagged "Assisted with collection of fish samples" and
+ *    "Answered visitor questions", and those flags are CORRECT - both bullets are genuinely weak
+ *    and should be rewritten. The fix was to add the strong verbs that were missing, not to
+ *    silence the gate by admitting every verb it rejected. assisted, answered, helped, supported,
+ *    participated and worked are deliberately absent.
+ */
 export const STRONG_VERBS = new Set(
   `built shipped designed engineered developed led drove owned launched analyzed
 delivered diagnosed ran secured founded co-founded managed presented translated instrumented deployed
@@ -20,7 +36,14 @@ coordinated spearheaded established pioneered cut reduced improved increased gre
 implemented conducted partnered collaborated evaluated modeled sized identified uncovered cracked
 recruited mentored trained structured forecasted tracked documented demoed integrated resolved isolated
 refined applied profiled solved interviewed communicated prepared produced drafted executed
-devised formulated advised championed briefed`
+devised formulated advised championed briefed
+taught tutored instructed facilitated supervised directed mediated counseled advocated
+formalized standardized transformed streamlined overhauled redesigned rebuilt consolidated
+surveyed sampled measured catalogued classified validated verified audited inspected
+authored published edited curated illustrated exhibited
+staffed scheduled onboarded fundraised campaigned organized administered processed
+treated triaged screened rehabilitated cultivated consulted elected guided collected
+constructed assembled purified sequenced cultured calibrated administered dissected`
     .split(/\s+/)
     .filter(Boolean),
 );
@@ -178,14 +201,62 @@ function orgMatchScore(genOrg: string, bankOrg: string): number {
 // straight out of Postgres, which promises no ordering without an ORDER BY, so "first one wins"
 // meant the resume's contents could change between two identical requests. Prefer the more specific
 // org (more tokens), then fall back to the org name itself so the choice is total and stable.
-function matchBankEntry(orgName: string, bank: ExperienceBankEntry[]): ExperienceBankEntry | undefined {
+/* Match a GENERATED entry to the bank row it came from.
+ *
+ * Org name alone is not enough, and that gap produced a real defect. Two roles at one organisation
+ * is an ordinary resume shape - a promotion, or two lab positions at the same university - and
+ * both generated entries used to resolve to whichever single bank row won the org tie-break. The
+ * second entry's bullets then failed grounding against the FIRST role's source, so they were all
+ * dropped as "unsupported" and the entry rendered as a heading with nothing under it, carrying the
+ * other role's dates. Measured 2026-07-27 on a real two-page resume with two Department of Biology
+ * roles: three bullets stripped, one entry left with zero.
+ *
+ * So org score decides candidacy, then title and dates decide WHICH role, and `taken` stops two
+ * generated entries binding to the same row while an unused alternative exists.
+ */
+function matchBankEntry(
+  orgName: string,
+  bank: ExperienceBankEntry[],
+  opts: { title?: string | null; dateRange?: string | null; taken?: Set<string> } = {},
+): ExperienceBankEntry | undefined {
   if (wordSet(orgName).size === 0 && !acronymTokenOf(orgName)) return undefined;
-  let best: { e: ExperienceBankEntry; score: number } | undefined;
-  for (const e of bank) {
-    const score = orgMatchScore(orgName, e.org);
-    if (score <= 0) continue;
-    if (!best || score > best.score || (score === best.score && breaksTie(e.org, best.e.org))) {
-      best = { e, score };
+
+  const candidates = bank
+    .map((e) => ({ e, score: orgMatchScore(orgName, e.org) }))
+    .filter(({ score }) => score > 0);
+  if (candidates.length === 0) return undefined;
+
+  const norm = (v: string | null | undefined) => (v ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const wantTitle = norm(opts.title);
+  const wantYears = new Set(yearsIn(opts.dateRange));
+
+  const rank = ({ e, score }: { e: ExperienceBankEntry; score: number }) => {
+    let r = score;
+    // Title is the strongest disambiguator between two roles at one organisation.
+    const srcTitle = norm(e.title);
+    if (wantTitle && srcTitle) {
+      if (wantTitle === srcTitle) r += 3;
+      else {
+        const a = new Set(wantTitle.split(' ').filter(Boolean));
+        const overlap = srcTitle.split(' ').filter((w) => w && a.has(w)).length;
+        if (overlap > 0) r += Math.min(2, overlap * 0.5);
+      }
+    }
+    // Then dates: a shared year is strong evidence it is the same stint.
+    if (wantYears.size > 0) {
+      const shared = yearsIn(e.date_range).filter((y) => wantYears.has(y)).length;
+      if (shared > 0) r += Math.min(2, shared);
+    }
+    // Finally, prefer a row nothing else has claimed, so two entries cannot collapse onto one.
+    if (opts.taken && !opts.taken.has(e.id)) r += 0.25;
+    return r;
+  };
+
+  let best: { e: ExperienceBankEntry; score: number; rank: number } | undefined;
+  for (const c of candidates) {
+    const r = rank(c);
+    if (!best || r > best.rank || (r === best.rank && breaksTie(c.e.org, best.e.org))) {
+      best = { ...c, rank: r };
     }
   }
   return best?.e;
@@ -234,8 +305,15 @@ function titleIsSwapped(genTitle: string, srcTitle: string | null): boolean {
 // value doesn't appear in that entry's source text -> 'metric'.
 export function findGroundingViolations(spec: ResumeSpec, bank: ExperienceBankEntry[]): GroundingViolation[] {
   const violations: GroundingViolation[] = [];
+  // Shared across the loop so two entries at one organisation resolve to different bank rows.
+  const taken = new Set<string>();
   for (const entry of spec.experience) {
-    const src = matchBankEntry(entry.org, bank);
+    const src = matchBankEntry(entry.org, bank, {
+      title: entry.title,
+      dateRange: entry.date_range,
+      taken,
+    });
+    if (src) taken.add(src.id);
     if (!src) {
       // No source entry -> the org is invented. Its bullets' metrics are unsupported too, but the
       // org fix (drop the whole entry) subsumes them, so we don't double-report per bullet.
@@ -272,12 +350,19 @@ export function pruneUngroundedContent(
 ): { spec: ResumeSpec; removed: string[] } {
   const removed: string[] = [];
   const experience: ResumeSpec['experience'] = [];
+  // Shared across the loop so two entries at one organisation resolve to different bank rows.
+  const taken = new Set<string>();
   for (const entry of spec.experience) {
-    const src = matchBankEntry(entry.org, bank);
+    const src = matchBankEntry(entry.org, bank, {
+      title: entry.title,
+      dateRange: entry.date_range,
+      taken,
+    });
     if (!src) {
       removed.push(`dropped entry "${entry.org}" (not in experience bank)`);
       continue;
     }
+    taken.add(src.id);
     let title = entry.title;
     if (titleIsSwapped(title, src.title)) {
       removed.push(`reset title "${title}" -> "${src.title}" for ${entry.org}`);
@@ -464,8 +549,12 @@ export function validateResumeSpec(
       const words = bullet.trim().split(/\s+/);
       const nWords = words.length;
       const first = (words[0] ?? '').replace(/[^a-zA-Z-]/g, '').toLowerCase();
-      const isAction = STRONG_VERBS.has(first);
-      const isInitiative = INITIATIVE_VERBS.has(first);
+      // A "co-" prefix inherits the base verb's strength: co-authoring a paper is as real as
+      // authoring one, and enumerating every co- form would double the list for no benefit.
+      // Checked as a fallback so an explicitly listed form (co-founded) still wins on its own.
+      const isAction = STRONG_VERBS.has(first) || (first.startsWith('co-') && STRONG_VERBS.has(first.slice(3)));
+      const isInitiative =
+        INITIATIVE_VERBS.has(first) || (first.startsWith('co-') && INITIATIVE_VERBS.has(first.slice(3)));
       const hasMetric = METRIC_RE.test(bullet);
       const andCount = (bullet.toLowerCase().match(/\band\b/g) ?? []).length;
       const hits = [...contentWords(bullet)].filter((w) => kw.has(w)).length;
