@@ -17,7 +17,7 @@
       "source_file": "src/db/index.ts",
       "source_location": "L1",
       "id": "index",
-      "community": 4
+      "community": 3
     },
     {
       "label": "getApp()",
@@ -25,7 +25,7 @@
       "source_file": "api/index.ts",
       "source_location": "L12",
       "id": "index_getapp",
-      "community": 4
+      "community": 3
     },
     {
       "label": "handler()",
@@ -33,7 +33,7 @@
       "source_file": "api/index.ts",
       "source_location": "L17",
       "id": "index_handler",
-      "community": 4
+      "community": 3
     },
     {
       "label": "index.test.ts",
@@ -65,7 +65,7 @@
       "source_file": "src/index.ts",
       "source_location": "L39",
       "id": "index_trustproxysetting",
-      "community": 4
+      "community": 3
     },
     {
       "label": "toPublicError()",
@@ -73,7 +73,7 @@
       "source_file": "src/index.ts",
       "source_location": "L47",
       "id": "index_topublicerror",
-      "community": 4
+      "community": 3
     },
     {
       "label": "buildApp()",
@@ -81,7 +81,7 @@
       "source_file": "src/index.ts",
       "source_location": "L67",
       "id": "index_buildapp",
-      "community": 4
+      "community": 3
     },
     {
       "label": "start()",
@@ -89,7 +89,7 @@
       "source_file": "src/index.ts",
       "source_location": "L214",
       "id": "index_start",
-      "community": 4
+      "community": 3
     },
     {
       "label": "top30ResumeQueue.test.ts",
@@ -97,7 +97,7 @@
       "source_file": "src/middleware/top30ResumeQueue.test.ts",
       "source_location": "L1",
       "id": "top30resumequeue_test",
-      "community": 4
+      "community": 3
     },
     {
       "label": "rateLimit.test.ts",
@@ -217,79 +217,95 @@
       "source_file": "src/middleware/quota.ts",
       "source_location": "L1",
       "id": "quota",
-      "community": 4
+      "community": 3
     },
     {
       "label": "monthPeriod()",
       "file_type": "code",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L48",
+      "source_location": "L45",
       "id": "quota_monthperiod",
-      "community": 4
+      "community": 3
     },
     {
       "label": "hourPeriod()",
       "file_type": "code",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L52",
+      "source_location": "L49",
       "id": "quota_hourperiod",
-      "community": 4
+      "community": 3
     },
     {
       "label": "bumpCounter()",
       "file_type": "code",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L57",
+      "source_location": "L54",
       "id": "quota_bumpcounter",
-      "community": 4
+      "community": 3
+    },
+    {
+      "label": "claimCounterSlot()",
+      "file_type": "code",
+      "source_file": "src/middleware/quota.ts",
+      "source_location": "L68",
+      "id": "quota_claimcounterslot",
+      "community": 3
+    },
+    {
+      "label": "releaseCounterSlot()",
+      "file_type": "code",
+      "source_file": "src/middleware/quota.ts",
+      "source_location": "L81",
+      "id": "quota_releasecounterslot",
+      "community": 3
     },
     {
       "label": "getCount()",
       "file_type": "code",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L69",
+      "source_location": "L88",
       "id": "quota_getcount",
-      "community": 4
+      "community": 3
     },
     {
       "label": "allowHourly()",
       "file_type": "code",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L79",
+      "source_location": "L98",
       "id": "quota_allowhourly",
-      "community": 4
+      "community": 3
     },
     {
       "label": "getEntitlements()",
       "file_type": "code",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L91",
+      "source_location": "L110",
       "id": "quota_getentitlements",
-      "community": 4
+      "community": 3
     },
     {
       "label": "upgradeUrl()",
       "file_type": "code",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L119",
+      "source_location": "L138",
       "id": "quota_upgradeurl",
-      "community": 4
+      "community": 3
     },
     {
       "label": "quotaExceededPayload()",
       "file_type": "code",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L126",
+      "source_location": "L145",
       "id": "quota_quotaexceededpayload",
-      "community": 4
+      "community": 3
     },
     {
       "label": "rateLimitedReply()",
       "file_type": "code",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L160",
+      "source_location": "L179",
       "id": "quota_ratelimitedreply",
-      "community": 4
+      "community": 3
     },
     {
       "label": "quota.test.ts",
@@ -297,23 +313,23 @@
       "source_file": "src/middleware/quota.test.ts",
       "source_location": "L1",
       "id": "quota_test",
-      "community": 4
+      "community": 3
     },
     {
       "label": "withUpgradeEnv()",
       "file_type": "code",
       "source_file": "src/middleware/quota.test.ts",
-      "source_location": "L19",
+      "source_location": "L20",
       "id": "quota_test_withupgradeenv",
-      "community": 4
+      "community": 3
     },
     {
       "label": "ent()",
       "file_type": "code",
       "source_file": "src/middleware/quota.test.ts",
-      "source_location": "L35",
+      "source_location": "L36",
       "id": "quota_test_ent",
-      "community": 4
+      "community": 3
     },
     {
       "label": "auth.ts",
@@ -897,7 +913,7 @@
       "source_file": "src/lib/submissionAuthorization.ts",
       "source_location": "L1",
       "id": "submissionauthorization",
-      "community": 8
+      "community": 9
     },
     {
       "label": "preparedSubmissionStatus()",
@@ -905,7 +921,7 @@
       "source_file": "src/lib/submissionAuthorization.ts",
       "source_location": "L3",
       "id": "submissionauthorization_preparedsubmissionstatus",
-      "community": 8
+      "community": 9
     },
     {
       "label": "mayClickFinalSubmit()",
@@ -913,7 +929,7 @@
       "source_file": "src/lib/submissionAuthorization.ts",
       "source_location": "L11",
       "id": "submissionauthorization_mayclickfinalsubmit",
-      "community": 8
+      "community": 9
     },
     {
       "label": "composioConnections.test.ts",
@@ -937,7 +953,7 @@
       "source_file": "src/lib/emailVerification.test.ts",
       "source_location": "L1",
       "id": "emailverification_test",
-      "community": 9
+      "community": 8
     },
     {
       "label": "executor()",
@@ -945,7 +961,7 @@
       "source_file": "src/lib/emailVerification.test.ts",
       "source_location": "L81",
       "id": "emailverification_test_executor",
-      "community": 9
+      "community": 8
     },
     {
       "label": "fieldLabel.test.ts",
@@ -1137,7 +1153,7 @@
       "source_file": "src/lib/product.ts",
       "source_location": "L1",
       "id": "product",
-      "community": 4
+      "community": 3
     },
     {
       "label": "publicProductConfig()",
@@ -1145,7 +1161,7 @@
       "source_file": "src/lib/product.ts",
       "source_location": "L23",
       "id": "product_publicproductconfig",
-      "community": 4
+      "community": 3
     },
     {
       "label": "automationConsent.ts",
@@ -1361,7 +1377,7 @@
       "source_file": "src/lib/submissionAuthorization.test.ts",
       "source_location": "L1",
       "id": "submissionauthorization_test",
-      "community": 8
+      "community": 9
     },
     {
       "label": "questionDiscovery.test.ts",
@@ -1489,7 +1505,7 @@
       "source_file": "src/lib/browserVerification.ts",
       "source_location": "L1",
       "id": "browserverification",
-      "community": 9
+      "community": 8
     },
     {
       "label": "visibleOtpField()",
@@ -1497,7 +1513,7 @@
       "source_file": "src/lib/browserVerification.ts",
       "source_location": "L21",
       "id": "browserverification_visibleotpfield",
-      "community": 9
+      "community": 8
     },
     {
       "label": "safeContinueButton()",
@@ -1505,7 +1521,7 @@
       "source_file": "src/lib/browserVerification.ts",
       "source_location": "L29",
       "id": "browserverification_safecontinuebutton",
-      "community": 9
+      "community": 8
     },
     {
       "label": "waitForCode()",
@@ -1513,7 +1529,7 @@
       "source_file": "src/lib/browserVerification.ts",
       "source_location": "L41",
       "id": "browserverification_waitforcode",
-      "community": 9
+      "community": 8
     },
     {
       "label": "completeEmailVerificationIfPresent()",
@@ -1521,7 +1537,7 @@
       "source_file": "src/lib/browserVerification.ts",
       "source_location": "L59",
       "id": "browserverification_completeemailverificationifpresent",
-      "community": 9
+      "community": 8
     },
     {
       "label": "composioApi.ts",
@@ -1569,7 +1585,7 @@
       "source_file": "src/lib/emailVerification.ts",
       "source_location": "L1",
       "id": "emailverification",
-      "community": 9
+      "community": 8
     },
     {
       "label": "asRecord()",
@@ -1577,7 +1593,7 @@
       "source_file": "src/lib/emailVerification.ts",
       "source_location": "L38",
       "id": "emailverification_asrecord",
-      "community": 9
+      "community": 8
     },
     {
       "label": "firstString()",
@@ -1585,7 +1601,7 @@
       "source_file": "src/lib/emailVerification.ts",
       "source_location": "L43",
       "id": "emailverification_firststring",
-      "community": 9
+      "community": 8
     },
     {
       "label": "headerValue()",
@@ -1593,7 +1609,7 @@
       "source_file": "src/lib/emailVerification.ts",
       "source_location": "L51",
       "id": "emailverification_headervalue",
-      "community": 9
+      "community": 8
     },
     {
       "label": "decodeBase64Url()",
@@ -1601,7 +1617,7 @@
       "source_file": "src/lib/emailVerification.ts",
       "source_location": "L61",
       "id": "emailverification_decodebase64url",
-      "community": 9
+      "community": 8
     },
     {
       "label": "bodyText()",
@@ -1609,7 +1625,7 @@
       "source_file": "src/lib/emailVerification.ts",
       "source_location": "L69",
       "id": "emailverification_bodytext",
-      "community": 9
+      "community": 8
     },
     {
       "label": "receivedDate()",
@@ -1617,7 +1633,7 @@
       "source_file": "src/lib/emailVerification.ts",
       "source_location": "L84",
       "id": "emailverification_receiveddate",
-      "community": 9
+      "community": 8
     },
     {
       "label": "looksLikeMessage()",
@@ -1625,7 +1641,7 @@
       "source_file": "src/lib/emailVerification.ts",
       "source_location": "L99",
       "id": "emailverification_lookslikemessage",
-      "community": 9
+      "community": 8
     },
     {
       "label": "messagesFromPayload()",
@@ -1633,7 +1649,7 @@
       "source_file": "src/lib/emailVerification.ts",
       "source_location": "L108",
       "id": "emailverification_messagesfrompayload",
-      "community": 9
+      "community": 8
     },
     {
       "label": "senderDomain()",
@@ -1641,7 +1657,7 @@
       "source_file": "src/lib/emailVerification.ts",
       "source_location": "L138",
       "id": "emailverification_senderdomain",
-      "community": 9
+      "community": 8
     },
     {
       "label": "expectedSenderDomains()",
@@ -1649,7 +1665,7 @@
       "source_file": "src/lib/emailVerification.ts",
       "source_location": "L143",
       "id": "emailverification_expectedsenderdomains",
-      "community": 9
+      "community": 8
     },
     {
       "label": "allowedSender()",
@@ -1657,7 +1673,7 @@
       "source_file": "src/lib/emailVerification.ts",
       "source_location": "L154",
       "id": "emailverification_allowedsender",
-      "community": 9
+      "community": 8
     },
     {
       "label": "stripMarkup()",
@@ -1665,7 +1681,7 @@
       "source_file": "src/lib/emailVerification.ts",
       "source_location": "L158",
       "id": "emailverification_stripmarkup",
-      "community": 9
+      "community": 8
     },
     {
       "label": "extractCodeFromVerificationText()",
@@ -1673,7 +1689,7 @@
       "source_file": "src/lib/emailVerification.ts",
       "source_location": "L169",
       "id": "emailverification_extractcodefromverificationtext",
-      "community": 9
+      "community": 8
     },
     {
       "label": "extractVerificationCode()",
@@ -1681,7 +1697,7 @@
       "source_file": "src/lib/emailVerification.ts",
       "source_location": "L180",
       "id": "emailverification_extractverificationcode",
-      "community": 9
+      "community": 8
     },
     {
       "label": "isAutomaticEmailVerificationConfigured()",
@@ -1689,7 +1705,7 @@
       "source_file": "src/lib/emailVerification.ts",
       "source_location": "L213",
       "id": "emailverification_isautomaticemailverificationconfigured",
-      "community": 9
+      "community": 8
     },
     {
       "label": "defaultExecutor()",
@@ -1697,7 +1713,7 @@
       "source_file": "src/lib/emailVerification.ts",
       "source_location": "L217",
       "id": "emailverification_defaultexecutor",
-      "community": 9
+      "community": 8
     },
     {
       "label": "findComposioVerificationCode()",
@@ -1705,7 +1721,7 @@
       "source_file": "src/lib/emailVerification.ts",
       "source_location": "L230",
       "id": "emailverification_findcomposioverificationcode",
-      "community": 9
+      "community": 8
     },
     {
       "label": "browserVerification.test.ts",
@@ -1713,7 +1729,7 @@
       "source_file": "src/lib/browserVerification.test.ts",
       "source_location": "L1",
       "id": "browserverification_test",
-      "community": 9
+      "community": 8
     },
     {
       "label": "pageWithOtp()",
@@ -1721,7 +1737,7 @@
       "source_file": "src/lib/browserVerification.test.ts",
       "source_location": "L6",
       "id": "browserverification_test_pagewithotp",
-      "community": 9
+      "community": 8
     },
     {
       "label": "applicationReview.ts",
@@ -2057,7 +2073,7 @@
       "source_file": "src/lib/product.test.ts",
       "source_location": "L1",
       "id": "product_test",
-      "community": 4
+      "community": 3
     },
     {
       "label": "schema.ts",
@@ -2073,7 +2089,7 @@
       "source_file": "src/db/migrate.ts",
       "source_location": "L1",
       "id": "migrate",
-      "community": 4
+      "community": 3
     },
     {
       "label": "runMigrations()",
@@ -2081,7 +2097,7 @@
       "source_file": "src/db/migrate.ts",
       "source_location": "L6",
       "id": "migrate_runmigrations",
-      "community": 4
+      "community": 3
     },
     {
       "label": "experienceBank.ts",
@@ -2481,7 +2497,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L1",
       "id": "resumerender",
-      "community": 3
+      "community": 4
     },
     {
       "label": "contactLine()",
@@ -2489,7 +2505,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L91",
       "id": "resumerender_contactline",
-      "community": 3
+      "community": 4
     },
     {
       "label": "normalizedPdfText()",
@@ -2497,7 +2513,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L97",
       "id": "resumerender_normalizedpdftext",
-      "community": 3
+      "community": 4
     },
     {
       "label": "occurrenceCount()",
@@ -2505,7 +2521,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L101",
       "id": "resumerender_occurrencecount",
-      "community": 3
+      "community": 4
     },
     {
       "label": "findPdfTextFidelityIssues()",
@@ -2513,7 +2529,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L112",
       "id": "resumerender_findpdftextfidelityissues",
-      "community": 3
+      "community": 4
     },
     {
       "label": "educationPosition()",
@@ -2521,7 +2537,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L171",
       "id": "resumerender_educationposition",
-      "community": 3
+      "community": 4
     },
     {
       "label": "entriesFor()",
@@ -2529,7 +2545,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L175",
       "id": "resumerender_entriesfor",
-      "community": 3
+      "community": 4
     },
     {
       "label": "usableWidth()",
@@ -2537,7 +2553,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L179",
       "id": "resumerender_usablewidth",
-      "community": 3
+      "community": 4
     },
     {
       "label": "usableHeight()",
@@ -2545,7 +2561,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L183",
       "id": "resumerender_usableheight",
-      "community": 3
+      "community": 4
     },
     {
       "label": "createResumeDocument()",
@@ -2553,7 +2569,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L187",
       "id": "resumerender_createresumedocument",
-      "community": 3
+      "community": 4
     },
     {
       "label": "textHeight()",
@@ -2561,7 +2577,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L199",
       "id": "resumerender_textheight",
-      "community": 3
+      "community": 4
     },
     {
       "label": "textLines()",
@@ -2569,7 +2585,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L213",
       "id": "resumerender_textlines",
-      "community": 3
+      "community": 4
     },
     {
       "label": "hasEducation()",
@@ -2577,7 +2593,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L227",
       "id": "resumerender_haseducation",
-      "community": 3
+      "community": 4
     },
     {
       "label": "resumeContentBlocks()",
@@ -2585,7 +2601,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L241",
       "id": "resumerender_resumecontentblocks",
-      "community": 3
+      "community": 4
     },
     {
       "label": "expectedSectionOrder()",
@@ -2593,7 +2609,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L275",
       "id": "resumerender_expectedsectionorder",
-      "community": 3
+      "community": 4
     },
     {
       "label": "sectionHeaderHeight()",
@@ -2601,7 +2617,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L282",
       "id": "resumerender_sectionheaderheight",
-      "community": 3
+      "community": 4
     },
     {
       "label": "splitLineHeight()",
@@ -2609,7 +2625,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L303",
       "id": "resumerender_splitlineheight",
-      "community": 3
+      "community": 4
     },
     {
       "label": "educationHeight()",
@@ -2617,7 +2633,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L330",
       "id": "resumerender_educationheight",
-      "community": 3
+      "community": 4
     },
     {
       "label": "entryHeight()",
@@ -2625,7 +2641,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L367",
       "id": "resumerender_entryheight",
-      "community": 3
+      "community": 4
     },
     {
       "label": "entrySectionHeight()",
@@ -2633,7 +2649,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L421",
       "id": "resumerender_entrysectionheight",
-      "community": 3
+      "community": 4
     },
     {
       "label": "measureResumeLayout()",
@@ -2641,7 +2657,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L449",
       "id": "resumerender_measureresumelayout",
-      "community": 3
+      "community": 4
     },
     {
       "label": "estimateResumeHeight()",
@@ -2649,7 +2665,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L555",
       "id": "resumerender_estimateresumeheight",
-      "community": 3
+      "community": 4
     },
     {
       "label": "lowestValueBullet()",
@@ -2657,7 +2673,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L564",
       "id": "resumerender_lowestvaluebullet",
-      "community": 3
+      "community": 4
     },
     {
       "label": "entryValue()",
@@ -2665,7 +2681,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L580",
       "id": "resumerender_entryvalue",
-      "community": 3
+      "community": 4
     },
     {
       "label": "removeBullet()",
@@ -2673,7 +2689,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L584",
       "id": "resumerender_removebullet",
-      "community": 3
+      "community": 4
     },
     {
       "label": "removeLowestEntry()",
@@ -2681,7 +2697,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L598",
       "id": "resumerender_removelowestentry",
-      "community": 3
+      "community": 4
     },
     {
       "label": "layoutAcceptsExpansion()",
@@ -2689,7 +2705,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L609",
       "id": "resumerender_layoutacceptsexpansion",
-      "community": 3
+      "community": 4
     },
     {
       "label": "selectSparseDesign()",
@@ -2697,7 +2713,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L616",
       "id": "resumerender_selectsparsedesign",
-      "community": 3
+      "community": 4
     },
     {
       "label": "findResumeTypographyIssues()",
@@ -2705,7 +2721,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L672",
       "id": "resumerender_findresumetypographyissues",
-      "community": 3
+      "community": 4
     },
     {
       "label": "validateResumeVisualLayout()",
@@ -2713,7 +2729,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L682",
       "id": "resumerender_validateresumevisuallayout",
-      "community": 3
+      "community": 4
     },
     {
       "label": "planResumeLayout()",
@@ -2721,7 +2737,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L725",
       "id": "resumerender_planresumelayout",
-      "community": 3
+      "community": 4
     },
     {
       "label": "drawSectionHeader()",
@@ -2729,7 +2745,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L824",
       "id": "resumerender_drawsectionheader",
-      "community": 3
+      "community": 4
     },
     {
       "label": "drawSplitLine()",
@@ -2737,7 +2753,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L848",
       "id": "resumerender_drawsplitline",
-      "community": 3
+      "community": 4
     },
     {
       "label": "drawEducation()",
@@ -2745,7 +2761,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L877",
       "id": "resumerender_draweducation",
-      "community": 3
+      "community": 4
     },
     {
       "label": "drawEntrySection()",
@@ -2753,7 +2769,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L909",
       "id": "resumerender_drawentrysection",
-      "community": 3
+      "community": 4
     },
     {
       "label": "renderResumePdf()",
@@ -2761,7 +2777,7 @@
       "source_file": "src/engine/resumeRender.ts",
       "source_location": "L944",
       "id": "resumerender_renderresumepdf",
-      "community": 3
+      "community": 4
     },
     {
       "label": "resumeValidate.ts",
@@ -3289,7 +3305,7 @@
       "source_file": "src/routes/meta.ts",
       "source_location": "L1",
       "id": "meta",
-      "community": 4
+      "community": 3
     },
     {
       "label": "metaRoutes()",
@@ -3297,7 +3313,7 @@
       "source_file": "src/routes/meta.ts",
       "source_location": "L4",
       "id": "meta_metaroutes",
-      "community": 4
+      "community": 3
     },
     {
       "label": "privacy.ts",
@@ -3305,7 +3321,7 @@
       "source_file": "src/routes/privacy.ts",
       "source_location": "L1",
       "id": "privacy",
-      "community": 4
+      "community": 3
     },
     {
       "label": "privacyRoutes()",
@@ -3313,7 +3329,7 @@
       "source_file": "src/routes/privacy.ts",
       "source_location": "L9",
       "id": "privacy_privacyroutes",
-      "community": 4
+      "community": 3
     },
     {
       "label": "resumeResponseSchema.test.ts",
@@ -3553,7 +3569,7 @@
       "source_file": "src/routes/submissionRunner.ts",
       "source_location": "L1",
       "id": "submissionrunner",
-      "community": 8
+      "community": 9
     },
     {
       "label": "nextReview()",
@@ -3561,7 +3577,7 @@
       "source_file": "src/routes/submissionRunner.ts",
       "source_location": "L69",
       "id": "submissionrunner_nextreview",
-      "community": 8
+      "community": 9
     },
     {
       "label": "writeReview()",
@@ -3569,7 +3585,7 @@
       "source_file": "src/routes/submissionRunner.ts",
       "source_location": "L73",
       "id": "submissionrunner_writereview",
-      "community": 8
+      "community": 9
     },
     {
       "label": "standingAuthorization()",
@@ -3577,7 +3593,7 @@
       "source_file": "src/routes/submissionRunner.ts",
       "source_location": "L79",
       "id": "submissionrunner_standingauthorization",
-      "community": 8
+      "community": 9
     },
     {
       "label": "preparedReviewPatch()",
@@ -3585,7 +3601,7 @@
       "source_file": "src/routes/submissionRunner.ts",
       "source_location": "L92",
       "id": "submissionrunner_preparedreviewpatch",
-      "community": 8
+      "community": 9
     },
     {
       "label": "claimSubmission()",
@@ -3593,7 +3609,7 @@
       "source_file": "src/routes/submissionRunner.ts",
       "source_location": "L107",
       "id": "submissionrunner_claimsubmission",
-      "community": 8
+      "community": 9
     },
     {
       "label": "claimPreparation()",
@@ -3601,7 +3617,7 @@
       "source_file": "src/routes/submissionRunner.ts",
       "source_location": "L127",
       "id": "submissionrunner_claimpreparation",
-      "community": 8
+      "community": 9
     },
     {
       "label": "authorizationValidAtClick()",
@@ -3609,7 +3625,7 @@
       "source_file": "src/routes/submissionRunner.ts",
       "source_location": "L148",
       "id": "submissionrunner_authorizationvalidatclick",
-      "community": 8
+      "community": 9
     },
     {
       "label": "holdRevokedSubmission()",
@@ -3617,7 +3633,7 @@
       "source_file": "src/routes/submissionRunner.ts",
       "source_location": "L154",
       "id": "submissionrunner_holdrevokedsubmission",
-      "community": 8
+      "community": 9
     },
     {
       "label": "buildPacket()",
@@ -3625,7 +3641,7 @@
       "source_file": "src/routes/submissionRunner.ts",
       "source_location": "L163",
       "id": "submissionrunner_buildpacket",
-      "community": 8
+      "community": 9
     },
     {
       "label": "omitCoverLetter()",
@@ -3633,7 +3649,7 @@
       "source_file": "src/routes/submissionRunner.ts",
       "source_location": "L215",
       "id": "submissionrunner_omitcoverletter",
-      "community": 8
+      "community": 9
     },
     {
       "label": "packetForCoverLetterCapability()",
@@ -3641,7 +3657,7 @@
       "source_file": "src/routes/submissionRunner.ts",
       "source_location": "L219",
       "id": "submissionrunner_packetforcoverlettercapability",
-      "community": 8
+      "community": 9
     },
     {
       "label": "discoverAndResolveQuestions()",
@@ -3649,7 +3665,7 @@
       "source_file": "src/routes/submissionRunner.ts",
       "source_location": "L239",
       "id": "submissionrunner_discoverandresolvequestions",
-      "community": 8
+      "community": 9
     },
     {
       "label": "loadApplicationProfileLike()",
@@ -3657,7 +3673,7 @@
       "source_file": "src/routes/submissionRunner.ts",
       "source_location": "L329",
       "id": "submissionrunner_loadapplicationprofilelike",
-      "community": 8
+      "community": 9
     },
     {
       "label": "prepareManaged()",
@@ -3665,7 +3681,7 @@
       "source_file": "src/routes/submissionRunner.ts",
       "source_location": "L354",
       "id": "submissionrunner_preparemanaged",
-      "community": 8
+      "community": 9
     },
     {
       "label": "prepare()",
@@ -3673,7 +3689,7 @@
       "source_file": "src/routes/submissionRunner.ts",
       "source_location": "L428",
       "id": "submissionrunner_prepare",
-      "community": 8
+      "community": 9
     },
     {
       "label": "controlledChromeExecutable()",
@@ -3681,7 +3697,7 @@
       "source_file": "src/routes/submissionRunner.ts",
       "source_location": "L531",
       "id": "submissionrunner_controlledchromeexecutable",
-      "community": 8
+      "community": 9
     },
     {
       "label": "prepareControlled()",
@@ -3689,7 +3705,7 @@
       "source_file": "src/routes/submissionRunner.ts",
       "source_location": "L536",
       "id": "submissionrunner_preparecontrolled",
-      "community": 8
+      "community": 9
     },
     {
       "label": "submitControlled()",
@@ -3697,7 +3713,7 @@
       "source_file": "src/routes/submissionRunner.ts",
       "source_location": "L569",
       "id": "submissionrunner_submitcontrolled",
-      "community": 8
+      "community": 9
     },
     {
       "label": "submit()",
@@ -3705,7 +3721,7 @@
       "source_file": "src/routes/submissionRunner.ts",
       "source_location": "L598",
       "id": "submissionrunner_submit",
-      "community": 8
+      "community": 9
     },
     {
       "label": "fail()",
@@ -3713,7 +3729,7 @@
       "source_file": "src/routes/submissionRunner.ts",
       "source_location": "L702",
       "id": "submissionrunner_fail",
-      "community": 8
+      "community": 9
     },
     {
       "label": "processSubmissionApplication()",
@@ -3721,7 +3737,7 @@
       "source_file": "src/routes/submissionRunner.ts",
       "source_location": "L718",
       "id": "submissionrunner_processsubmissionapplication",
-      "community": 8
+      "community": 9
     },
     {
       "label": "submissionRunnerRoutes()",
@@ -3729,7 +3745,7 @@
       "source_file": "src/routes/submissionRunner.ts",
       "source_location": "L744",
       "id": "submissionrunner_submissionrunnerroutes",
-      "community": 8
+      "community": 9
     },
     {
       "label": "resumeResponseSchema.ts",
@@ -4001,7 +4017,7 @@
       "source_file": "src/routes/track.ts",
       "source_location": "L1",
       "id": "track",
-      "community": 4
+      "community": 3
     },
     {
       "label": "trackRoutes()",
@@ -4009,7 +4025,7 @@
       "source_file": "src/routes/track.ts",
       "source_location": "L17",
       "id": "track_trackroutes",
-      "community": 4
+      "community": 3
     },
     {
       "label": "autofillEvent.test.ts",
@@ -4129,7 +4145,7 @@
       "source_file": "src/routes/billing.ts",
       "source_location": "L1",
       "id": "billing",
-      "community": 4
+      "community": 3
     },
     {
       "label": "billingRoutes()",
@@ -4137,7 +4153,7 @@
       "source_file": "src/routes/billing.ts",
       "source_location": "L9",
       "id": "billing_billingroutes",
-      "community": 4
+      "community": 3
     },
     {
       "label": "resume.ts",
@@ -5285,7 +5301,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L48",
+      "source_location": "L45",
       "weight": 1.0,
       "_src": "quota",
       "_tgt": "quota_monthperiod",
@@ -5297,7 +5313,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L52",
+      "source_location": "L49",
       "weight": 1.0,
       "_src": "quota",
       "_tgt": "quota_hourperiod",
@@ -5309,7 +5325,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L57",
+      "source_location": "L54",
       "weight": 1.0,
       "_src": "quota",
       "_tgt": "quota_bumpcounter",
@@ -5321,7 +5337,31 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L69",
+      "source_location": "L68",
+      "weight": 1.0,
+      "_src": "quota",
+      "_tgt": "quota_claimcounterslot",
+      "source": "quota",
+      "target": "quota_claimcounterslot",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src/middleware/quota.ts",
+      "source_location": "L81",
+      "weight": 1.0,
+      "_src": "quota",
+      "_tgt": "quota_releasecounterslot",
+      "source": "quota",
+      "target": "quota_releasecounterslot",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src/middleware/quota.ts",
+      "source_location": "L88",
       "weight": 1.0,
       "_src": "quota",
       "_tgt": "quota_getcount",
@@ -5333,7 +5373,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L79",
+      "source_location": "L98",
       "weight": 1.0,
       "_src": "quota",
       "_tgt": "quota_allowhourly",
@@ -5345,7 +5385,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L91",
+      "source_location": "L110",
       "weight": 1.0,
       "_src": "quota",
       "_tgt": "quota_getentitlements",
@@ -5357,7 +5397,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L119",
+      "source_location": "L138",
       "weight": 1.0,
       "_src": "quota",
       "_tgt": "quota_upgradeurl",
@@ -5369,7 +5409,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L126",
+      "source_location": "L145",
       "weight": 1.0,
       "_src": "quota",
       "_tgt": "quota_quotaexceededpayload",
@@ -5381,7 +5421,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L160",
+      "source_location": "L179",
       "weight": 1.0,
       "_src": "quota",
       "_tgt": "quota_ratelimitedreply",
@@ -5393,7 +5433,7 @@
       "relation": "imports_from",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.test.ts",
-      "source_location": "L4",
+      "source_location": "L5",
       "weight": 1.0,
       "_src": "quota_test",
       "_tgt": "quota",
@@ -5477,7 +5517,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L80",
+      "source_location": "L99",
       "weight": 1.0,
       "_src": "quota_allowhourly",
       "_tgt": "quota_hourperiod",
@@ -5489,7 +5529,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L80",
+      "source_location": "L99",
       "weight": 1.0,
       "_src": "quota_allowhourly",
       "_tgt": "quota_bumpcounter",
@@ -5501,7 +5541,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.ts",
-      "source_location": "L127",
+      "source_location": "L146",
       "weight": 1.0,
       "_src": "quota_quotaexceededpayload",
       "_tgt": "quota_upgradeurl",
@@ -5513,7 +5553,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.test.ts",
-      "source_location": "L19",
+      "source_location": "L20",
       "weight": 1.0,
       "_src": "quota_test",
       "_tgt": "quota_test_withupgradeenv",
@@ -5525,7 +5565,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/middleware/quota.test.ts",
-      "source_location": "L35",
+      "source_location": "L36",
       "weight": 1.0,
       "_src": "quota_test",
       "_tgt": "quota_test_ent",

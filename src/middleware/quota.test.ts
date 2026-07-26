@@ -1,5 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { quotaExceededPayload, upgradeUrl, LIMITS } from './quota';
 import type { Entitlements } from './quota';
 
@@ -74,7 +75,7 @@ describe('402 quota payload (R-043)', () => {
       const payload = quotaExceededPayload(ent('free'), 20, 'resumes');
       assert.equal(
         payload.error,
-        `You've used your ${LIMITS.free.monthlyResumes} free resume generations this month. Litos Premium ($49.99/mo) unlocks unlimited resume generation + autofill. Resets on the 1st. Upgrade: ${LIVE_LINK}`
+        `You've used your ${LIMITS.free.monthlyResumes} free resume generations this month. Litos Pro ($49.99/mo) includes 1,000 resume generations + autofill. Resets on the 1st. Upgrade: ${LIVE_LINK}`
       );
       assert.equal(payload.code, 'quota_exceeded');
       assert.equal(payload.used, 20);
@@ -89,7 +90,7 @@ describe('402 quota payload (R-043)', () => {
       const payload = quotaExceededPayload(ent('free'), 20, 'resumes');
       assert.equal(
         payload.error,
-        `You've used your ${LIMITS.free.monthlyResumes} free resume generations this month. Litos Premium ($49.99/mo) unlocks unlimited resume generation + autofill. Resets on the 1st.`
+        `You've used your ${LIMITS.free.monthlyResumes} free resume generations this month. Litos Pro ($49.99/mo) includes 1,000 resume generations + autofill. Resets on the 1st.`
       );
       assert.equal('upgrade_url' in payload, false);
       // The contract fields the extension parses stay put regardless of link configuration.
@@ -141,4 +142,30 @@ describe('402 quota payload (R-043)', () => {
       }
     });
   });
+
+  test('pro includes 1,000 resume generations per month', () => {
+    assert.equal(LIMITS.pro.monthlyResumes, 1000);
+  });
+
+  test('the Pro boundary payload reports the exact monthly cap without an upsell', () => {
+    withUpgradeEnv({ UPGRADE_URL: LIVE_LINK }, () => {
+      const payload = quotaExceededPayload(ent('pro'), 1000, 'resumes');
+      assert.equal(payload.used, 1000);
+      assert.equal(payload.limit, 1000);
+      assert.equal(payload.tier, 'pro');
+      assert.equal(payload.error, "You've hit this month's resume limit (1000). It resets on the 1st.");
+      assert.equal('upgrade_url' in payload, false);
+    });
+  });
+});
+
+test('resume generation atomically reserves the final monthly slot and refunds storage failures', async () => {
+  const quotaSource = await readFile('src/middleware/quota.ts', 'utf8');
+  const routeSource = await readFile('src/routes/resume.ts', 'utf8');
+
+  assert.match(quotaSource, /setWhere: sql`\$\{usage_counters\.count\} \+ \$\{by\} <= \$\{limit\}`/);
+  assert.match(routeSource, /claimCounterSlot\(userId, period, 'resumes', ent\.monthlyResumes\)/);
+  assert.match(routeSource, /reservedCount === null[\s\S]*status\(402\)/);
+  assert.match(routeSource, /catch \(err\) \{[\s\S]*releaseCounterSlot\(userId, period, 'resumes'\)[\s\S]*Failed to store generated resume/);
+  assert.doesNotMatch(routeSource, /await bumpCounter\(userId, period, 'resumes'\)/);
 });
