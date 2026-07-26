@@ -109,6 +109,7 @@ test('controlled portal is gated by an explicit server flag', () => {
   assert.throws(() => detectPortal('https://trylitos.com/qa/portal-submission'), /not supported/);
   process.env.LITOS_ENABLE_TEST_PORTAL = 'true';
   assert.equal(detectPortal('https://trylitos.com/qa/portal-submission'), 'controlled_test');
+  assert.equal(detectPortal('http://localhost:3000/qa/portal-submission'), 'controlled_test');
   assert.equal(detectPortal('https://trylitos.com/qa/portal-submission?board=lever'), 'controlled_lever');
   assert.equal(detectPortal('https://trylitos.com/qa/portal-submission?board=ashby'), 'controlled_ashby');
   assert.equal(

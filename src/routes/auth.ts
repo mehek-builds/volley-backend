@@ -18,6 +18,10 @@ const verifyBodySchema = z.object({
   code: z.string().regex(/^\d{6}$/),
 });
 
+const guestBodySchema = z.object({
+  idempotency_key: z.string().uuid(),
+});
+
 const googleBodySchema = z.object({
   credential: z.string().min(1).max(10_000),
 });
@@ -96,6 +100,9 @@ const CODE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 function trialEnd(now = new Date()): Date {
   return new Date(now.getTime() + TRIAL_DAYS * 24 * 60 * 60 * 1000);
 }
+function guestExpiry(now = new Date()): Date {
+  return new Date(now.getTime() + (TRIAL_DAYS + 30) * 24 * 60 * 60 * 1000);
+}
 const MAX_ATTEMPTS = 5;
 
 export function googleRegistrationValues(
@@ -171,14 +178,42 @@ function verificationSender(): string {
   return `${PRODUCT_NAME} <${mailbox}>`;
 }
 
-async function signSessionToken(userId: string, email: string): Promise<string> {
+async function signSessionToken(
+  userId: string,
+  email?: string | null,
+  isGuest = false,
+  expiresAt: string | number = '30d',
+): Promise<string> {
   const secret = process.env.JWT_SIGNING_SECRET!;
   const secretBytes = new TextEncoder().encode(secret);
-  return new SignJWT({ userId, email })
+  return new SignJWT({ userId, ...(email ? { email } : {}), isGuest })
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
-    .setExpirationTime('30d')
+    .setExpirationTime(expiresAt)
     .sign(secretBytes);
+}
+
+async function optionalGuestUserId(request: FastifyRequest): Promise<string | null> {
+  const authHeader = request.headers.authorization;
+  if (!authHeader) return null;
+  if (!authHeader.startsWith('Bearer ') || !process.env.JWT_SIGNING_SECRET) {
+    throw new Error('invalid_guest_session');
+  }
+  const secretBytes = new TextEncoder().encode(process.env.JWT_SIGNING_SECRET);
+  const { payload } = await jwtVerify(authHeader.slice(7), secretBytes);
+  if (typeof payload.userId !== 'string' || payload.isGuest !== true) {
+    throw new Error('invalid_guest_session');
+  }
+  const row = await db
+    .select({ id: users.id, is_guest: users.is_guest, guest_expires_at: users.guest_expires_at })
+    .from(users)
+    .where(eq(users.id, payload.userId))
+    .limit(1);
+  const guest = row[0];
+  if (!guest?.is_guest || !guest.guest_expires_at || guest.guest_expires_at <= new Date()) {
+    throw new Error('invalid_guest_session');
+  }
+  return guest.id;
 }
 
 export function buildVerificationEmail(email: string, code: string) {
@@ -275,6 +310,78 @@ export async function sendVerificationEmail(
 }
 
 export async function authRoutes(fastify: FastifyInstance) {
+  // First-run guest mode. The client controls whether the entry point is shown;
+  // the backend owns identity, trial timing, quotas, and idempotency.
+  fastify.post('/auth/guest', async (request: FastifyRequest, reply: FastifyReply) => {
+    const parsed = guestBodySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: 'A valid guest idempotency key is required' });
+    }
+    if (!process.env.JWT_SIGNING_SECRET) {
+      return reply.status(500).send({ error: 'JWT_SIGNING_SECRET not configured' });
+    }
+
+    const keyHash = hashCode(parsed.data.idempotency_key);
+    try {
+      const existing = await db.select().from(users).where(eq(users.guest_key_hash, keyHash)).limit(1);
+      const active = existing[0];
+      if (active?.is_guest && active.guest_expires_at && active.guest_expires_at > new Date()) {
+        const token = await signSessionToken(
+          active.id,
+          undefined,
+          true,
+          Math.floor(active.guest_expires_at.getTime() / 1000),
+        );
+        return reply.status(200).send({
+          token,
+          is_guest: true,
+          trial_ends_at: active.trial_ends_at,
+          guest_expires_at: active.guest_expires_at,
+        });
+      }
+
+      const ipAllowed = await allowHourly(`ip:${request.ip}`, 'guest-create-ip', 3);
+      if (!ipAllowed) return rateLimitedReply(reply);
+
+      const now = new Date();
+      const trial_ends_at = trialEnd(now);
+      const guest_expires_at = guestExpiry(now);
+      const created = await db
+        .insert(users)
+        .values({
+          id: uuidv4(),
+          email: null,
+          email_verified: false,
+          is_guest: true,
+          guest_key_hash: keyHash,
+          trial_ends_at,
+          guest_expires_at,
+          created_at: now,
+        })
+        .onConflictDoNothing({ target: users.guest_key_hash })
+        .returning();
+      const guest = created[0]
+        ?? (await db.select().from(users).where(eq(users.guest_key_hash, keyHash)).limit(1))[0];
+      if (!guest) throw new Error('Guest creation did not return a user');
+
+      const token = await signSessionToken(
+        guest.id,
+        undefined,
+        true,
+        Math.floor((guest.guest_expires_at ?? guest_expires_at).getTime() / 1000),
+      );
+      return reply.status(201).send({
+        token,
+        is_guest: true,
+        trial_ends_at: guest.trial_ends_at,
+        guest_expires_at: guest.guest_expires_at,
+      });
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ error: 'Failed to create guest session' });
+    }
+  });
+
   // Exchange a Google Identity Services ID token for the same Litos session
   // used by email-code sign-in and the Chrome extension.
   fastify.post('/auth/google', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -476,7 +583,10 @@ export async function authRoutes(fastify: FastifyInstance) {
       }
 
       const foundUser = user[0];
-      const token = await signSessionToken(foundUser.id, foundUser.email);
+      if (!foundUser.email) {
+        return reply.status(409).send({ error: 'Guest accounts must be claimed with email verification' });
+      }
+      const token = await signSessionToken(foundUser.id, foundUser.email, false);
 
       return reply.status(200).send({ token });
     } catch (err) {
@@ -544,6 +654,12 @@ export async function authRoutes(fastify: FastifyInstance) {
     }
 
     const email = body.email.toLowerCase();
+    let guestUserId: string | null;
+    try {
+      guestUserId = await optionalGuestUserId(request);
+    } catch {
+      return reply.status(401).send({ error: 'Invalid or expired guest session' });
+    }
     const [emailAllowed, ipAllowed] = await Promise.all([
       allowHourly(email, 'verify-code', 15),
       allowHourly(`ip:${request.ip}`, 'verify-code-ip', LIMITS.perHour.verifyCodePerIp),
@@ -579,7 +695,7 @@ export async function authRoutes(fastify: FastifyInstance) {
       // Consume the exact code and create or update the user in one transaction. A
       // concurrent verify cannot reuse the code, and a database failure rolls the
       // deletion back so the user can retry instead of being stranded.
-      const verifiedUser = await db.transaction(async (tx) => {
+      const verificationResult = await db.transaction(async (tx) => {
         const consumed = await tx
           .delete(email_verification_codes)
           .where(
@@ -594,6 +710,36 @@ export async function authRoutes(fastify: FastifyInstance) {
         if (consumed.length === 0) return null;
 
         const existing = await tx.select().from(users).where(eq(users.email, email)).limit(1);
+        if (guestUserId) {
+          if (existing.length > 0) {
+            const existingEmail = existing[0].email;
+            if (!existingEmail) return null;
+            return {
+              user: { id: existing[0].id, email: existingEmail },
+              existingAccount: true,
+            };
+          }
+
+          const claimed = await tx
+            .update(users)
+            .set({
+              email,
+              email_verified: true,
+              is_guest: false,
+              guest_key_hash: null,
+              guest_expires_at: null,
+              claimed_at: new Date(),
+              session_valid_from: new Date(),
+            })
+            .where(and(eq(users.id, guestUserId), eq(users.is_guest, true)))
+            .returning({ id: users.id, email: users.email });
+          if (!claimed[0]?.email) return null;
+          return {
+            user: { id: claimed[0].id, email: claimed[0].email },
+            existingAccount: false,
+          };
+        }
+
         if (existing.length === 0) {
           const created = await tx
             .insert(users)
@@ -605,7 +751,10 @@ export async function authRoutes(fastify: FastifyInstance) {
               created_at: new Date(),
             })
             .returning({ id: users.id, email: users.email });
-          return created[0] ?? null;
+          const user = created[0] ?? null;
+          return user?.email
+            ? { user: { id: user.id, email: user.email }, existingAccount: false }
+            : null;
         }
 
         if (!existing[0].email_verified) {
@@ -616,15 +765,27 @@ export async function authRoutes(fastify: FastifyInstance) {
             .set({ email_verified: true, session_valid_from: new Date() })
             .where(eq(users.email, email));
         }
-        return { id: existing[0].id, email: existing[0].email };
+        if (!existing[0].email) return null;
+        return {
+          user: { id: existing[0].id, email: existing[0].email },
+          existingAccount: false,
+        };
       });
 
-      if (!verifiedUser) {
+      if (!verificationResult) {
         return reply.status(400).send({ error: 'Code expired or not found. Request a new one.' });
       }
 
-      const token = await signSessionToken(verifiedUser.id, verifiedUser.email);
-      return reply.status(200).send({ token });
+      const token = await signSessionToken(
+        verificationResult.user.id,
+        verificationResult.user.email,
+        false,
+      );
+      return reply.status(200).send({
+        token,
+        existing_account: verificationResult.existingAccount,
+        guest_workspace_preserved: verificationResult.existingAccount,
+      });
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to verify code' });

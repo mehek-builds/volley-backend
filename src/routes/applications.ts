@@ -29,6 +29,7 @@ import { declaredSkillsList } from './profile';
 import { processSubmissionApplication } from './submissionRunner';
 import { isRefusedQuestion } from '../lib/questionDiscovery';
 import { submitRequestDisposition } from '../lib/submissionSafety';
+import { detectPortal } from '../lib/portalSubmission';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
 const questionSchema = z.object({
@@ -280,7 +281,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (sensitive) {
         return reply.status(422).send({ error: `Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}` });
       }
-      if (!isBrowserbaseConfigured()) {
+      const controlledTest = process.env.LITOS_ENABLE_TEST_PORTAL === 'true'
+        && current.portal_url
+        && detectPortal(current.portal_url) === 'controlled_test';
+      if (!controlledTest && !isBrowserbaseConfigured()) {
         return reply.status(503).send({
           error: 'The secure portal runner is not configured yet.',
           code: 'PORTAL_RUNNER_NOT_CONFIGURED',

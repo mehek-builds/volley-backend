@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { put } from '@vercel/blob';
-import type { Page } from 'playwright-core';
+import { chromium, type Page } from 'playwright-core';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db/index';
@@ -160,7 +160,7 @@ async function holdRevokedSubmission(row: ResumeRow, review: ApplicationReviewSt
   }));
 }
 
-async function buildPacket(row: ResumeRow): Promise<SubmissionPacket> {
+async function buildPacket(row: ResumeRow, controlledTest = false): Promise<SubmissionPacket> {
   const stored = row.spec as StoredSpec;
   const contact = (stored._contact ?? {}) as Record<string, unknown>;
   const coverLetterMeta = (stored._cover_letter ?? {}) as Record<string, unknown>;
@@ -173,11 +173,16 @@ async function buildPacket(row: ResumeRow): Promise<SubmissionPacket> {
   const parsed = (profileRow[0]?.parsed_json ?? {}) as Record<string, unknown>;
   const review = readApplicationReview(stored);
   if (!review) throw new Error('Application review packet is missing');
-  const blobUrl = await resolveBlobUrl(row.resume_object_key);
-  if (!blobUrl) throw new Error('Generated resume file is unavailable');
-  const response = await fetch(blobUrl);
-  if (!response.ok) throw new Error('Generated resume file could not be downloaded');
-  const resume = Buffer.from(await response.arrayBuffer());
+  let resume: Buffer;
+  if (controlledTest && process.env.LITOS_ENABLE_TEST_PORTAL === 'true') {
+    resume = Buffer.from('%PDF-1.4\n% Litos controlled submission fixture\n%%EOF\n');
+  } else {
+    const blobUrl = await resolveBlobUrl(row.resume_object_key);
+    if (!blobUrl) throw new Error('Generated resume file is unavailable');
+    const response = await fetch(blobUrl);
+    if (!response.ok) throw new Error('Generated resume file could not be downloaded');
+    resume = Buffer.from(await response.arrayBuffer());
+  }
   let coverLetter: Buffer | undefined;
   if (typeof coverLetterMeta.object_key === 'string' && typeof coverLetterMeta.approved_at === 'string') {
     const coverLetterUrl = await resolveBlobUrl(coverLetterMeta.object_key);
@@ -427,6 +432,10 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
   const portal = detectPortal(current.portal_url);
   const runId = current.submission_run_id ?? randomUUID();
   const authorization = await standingAuthorization(row.user_id);
+  if (portal === 'controlled_test') {
+    await prepareControlled(row, current, runId, authorization, fastify);
+    return;
+  }
   if (isManagedStratusProvider()) {
     await prepareManaged(row, current, portal, runId, fastify, authorization);
     return;
@@ -519,6 +528,73 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
   }
 }
 
+function controlledChromeExecutable(): string {
+  return process.env.LITOS_TEST_BROWSER_EXECUTABLE
+    ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+}
+
+async function prepareControlled(
+  row: ResumeRow,
+  current: ApplicationReviewState,
+  runId: string,
+  authorization: StandingAuthorization,
+  fastify: FastifyInstance,
+) {
+  if (process.env.LITOS_ENABLE_TEST_PORTAL !== 'true') throw new Error('Controlled portal is disabled');
+  const browser = await chromium.launch({ executablePath: controlledChromeExecutable(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.goto(current.portal_url!, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    const packet = await buildPacket(row, true);
+    const result = await fillPortal(page, 'controlled_test', packet);
+    const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
+    const safe = result.blockers.length === 0;
+    const review = nextReview(current, {
+      ...preparedReviewPatch(authorization, safe),
+      submission_run_id: runId,
+      filled_fields: result.filledFields,
+      preview_screenshot_url: `data:image/png;base64,${screenshot.toString('base64')}`,
+      verification: { status: 'not_needed' },
+      attention_reason: result.blockers.join('\n') || undefined,
+      handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
+      submission_error: undefined,
+    });
+    await writeReview(row, review);
+    fastify.log.info({ applicationId: row.id, status: review.status }, 'Controlled application portal prepared');
+  } finally {
+    await browser.close();
+  }
+}
+
+async function submitControlled(row: ResumeRow, review: ApplicationReviewState, fastify: FastifyInstance) {
+  if (process.env.LITOS_ENABLE_TEST_PORTAL !== 'true') throw new Error('Controlled portal is disabled');
+  const browser = await chromium.launch({ executablePath: controlledChromeExecutable(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.goto(review.portal_url!, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await fillPortal(page, 'controlled_test', await buildPacket(row, true));
+    await clickFinalSubmit(page);
+    const receipt = await readReceipt(page);
+    const capturedAt = new Date().toISOString();
+    const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
+    await writeReview(row, nextReview(review, {
+      status: 'submitted',
+      submitted_at: capturedAt,
+      submission_error: undefined,
+      receipt: {
+        confirmation_text: receipt.confirmationText,
+        final_url: receipt.finalUrl,
+        screenshot_url: `data:image/png;base64,${screenshot.toString('base64')}`,
+        captured_at: capturedAt,
+        reference_id: receipt.referenceId,
+      },
+    }));
+    fastify.log.info({ applicationId: row.id }, 'Controlled application submission receipt verified');
+  } finally {
+    await browser.close();
+  }
+}
+
 async function submit(row: ResumeRow, fastify: FastifyInstance) {
   const current = readApplicationReview(row.spec);
   if (!current?.submission_run_id || !current.portal_url) throw new Error('Prepared browser run is missing');
@@ -543,6 +619,10 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
   row = claimedRow;
   const claimedReview = readApplicationReview(row.spec);
   if (!claimedReview) return;
+  if (detectPortal(claimedReview.portal_url!) === 'controlled_test') {
+    await submitControlled(row, claimedReview, fastify);
+    return;
+  }
   if (isManagedStratusProvider()) {
     const portal = detectPortal(claimedReview.portal_url!);
     if (!await authorizationValidAtClick(row, claimedReview)) {

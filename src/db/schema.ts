@@ -16,8 +16,14 @@ import { sql } from 'drizzle-orm';
 // ---- users ----
 export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
-  email: text('email').unique().notNull(),
+  // Guests are real authenticated principals with no email. A verified email is
+  // attached in-place when a first-time guest claims the workspace.
+  email: text('email').unique(),
   email_verified: boolean('email_verified').default(false),
+  is_guest: boolean('is_guest').default(false).notNull(),
+  guest_key_hash: text('guest_key_hash').unique(),
+  guest_expires_at: timestamp('guest_expires_at', { withTimezone: true }),
+  claimed_at: timestamp('claimed_at', { withTimezone: true }),
   // Stable Google identity. Google explicitly requires account linkage by the
   // immutable `sub` claim, never by an email address that can change.
   google_subject: text('google_subject'),
