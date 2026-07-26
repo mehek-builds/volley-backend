@@ -12,6 +12,8 @@ import {
   autofill_events,
   usage_counters,
   email_verification_codes,
+  pricing_experiment_assignments,
+  pricing_offers,
 } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { deleteBlobsForUser, mintDownloadToken } from '../lib/resumeAccess';
@@ -41,6 +43,10 @@ export async function accountRoutes(fastify: FastifyInstance) {
     const resumes = await db.select().from(generated_resumes).where(eq(generated_resumes.user_id, userId));
     const outreach = await db.select().from(outreach_events).where(eq(outreach_events.user_id, userId));
     const fills = await db.select().from(autofill_events).where(eq(autofill_events.user_id, userId));
+    const pricingAssignments = await db.select().from(pricing_experiment_assignments)
+      .where(eq(pricing_experiment_assignments.user_id, userId));
+    const pricingOffers = await db.select().from(pricing_offers)
+      .where(eq(pricing_offers.user_id, userId));
     // usage_counters has no FK to users (it is keyed by a plain string so pre-auth endpoints can
     // rate-limit by email), so it has to be queried - and later deleted - by key explicitly. Both
     // keys: auth.ts rate-limits the pre-auth endpoints by EMAIL, so an export keyed only on the
@@ -70,6 +76,8 @@ export async function accountRoutes(fastify: FastifyInstance) {
       })),
       outreach_events: outreach,
       autofill_events: fills,
+      pricing_experiment_assignments: pricingAssignments,
+      pricing_offers: pricingOffers,
       usage_counters: counters,
       notes: {
         generated_resume_files:

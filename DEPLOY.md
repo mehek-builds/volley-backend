@@ -61,9 +61,13 @@ Set these for Production (and Preview if you want):
 | `BOUNCEBAN_API_KEY` | your BounceBan key (optional) |
 | `APOLLO_API_KEY` | your Apollo key (optional fallback) |
 | `JOB_MONITOR_SOURCES_JSON` | JSON array of Greenhouse, Lever, and Ashby company boards to check every 15 minutes |
-| `LEMONSQUEEZY_CHECKOUT_URL` | reusable live product URL containing `/checkout/buy/` |
-| `LEMONSQUEEZY_VARIANT_ID` | numeric ID of the $49.99 monthly Pro variant |
+| `LEMONSQUEEZY_API_KEY` | restricted live API key used to create short-lived custom-price checkouts and verify customer country |
+| `LEMONSQUEEZY_STORE_ID` | numeric ID of the Litos store |
+| `LEMONSQUEEZY_VARIANT_ID_MONTHLY` | numeric ID of the recurring monthly Pro variant |
+| `LEMONSQUEEZY_VARIANT_ID_YEARLY` | numeric ID of the recurring yearly Pro variant |
 | `LEMONSQUEEZY_WEBHOOK_SECRET` | signing secret configured on the Lemon Squeezy webhook |
+| `PRICING_SIGNING_SECRET` | separate 32+ char secret for signed quotes and stable experiment assignment |
+| `PRICING_EXPERIMENT_JSON` | optional validated experiment definition, leave unset for control pricing |
 | `NODE_ENV` | `production` |
 
 Before enabling Google sign-in, add the identity column without touching existing users:
@@ -76,6 +80,7 @@ Before enabling Lemon Squeezy checkout, add the subscription state columns:
 
 ```bash
 npm run db:lemon-squeezy
+npm run db:regional-pricing
 ```
 
 In Lemon Squeezy, configure a webhook at
@@ -83,6 +88,20 @@ In Lemon Squeezy, configure a webhook at
 subscribe to `subscription_created` and `subscription_updated`. Use the same
 secret for the webhook and `LEMONSQUEEZY_WEBHOOK_SECRET`. Keep
 `LEMONSQUEEZY_ACCEPT_TEST_MODE` unset in production.
+
+Create monthly and yearly recurring variants in Lemon Squeezy. Their catalog
+prices are fallback metadata only. Every production checkout is created through
+the API with the server-resolved `custom_price`; the immutable offer row records
+the exact policy, country evidence, experiment group, interval, and amount.
+
+Start with `PRICING_EXPERIMENT_JSON` unset. A safe first willingness-to-pay test is:
+
+```json
+{"id":"wtp-2026-01","enabled":true,"allocation_bps":2000,"variants":[{"key":"control","weight_bps":5000,"multiplier_bps":10000},{"key":"plus10","weight_bps":5000,"multiplier_bps":11000}]}
+```
+
+This enrolls 20% of pricing subjects, splits them evenly, and leaves 80% on the
+policy control. Do not reuse an experiment ID after changing variants or weights.
 
 `VERCEL` is set automatically by Vercel. That disables the local listener.
 Do **not** set `PORT`/`HOST` (serverless ignores them).

@@ -49,6 +49,15 @@ export const users = pgTable('users', {
   billing_ends_at: timestamp('billing_ends_at', { withTimezone: true }),
   billing_portal_url: text('billing_portal_url'),
   billing_event_updated_at: timestamp('billing_event_updated_at', { withTimezone: true }),
+  pricing_country: text('pricing_country'),
+  pricing_band: text('pricing_band'),
+  pricing_policy_version: text('pricing_policy_version'),
+  pricing_experiment_id: text('pricing_experiment_id'),
+  pricing_experiment_variant: text('pricing_experiment_variant'),
+  pricing_interval: text('pricing_interval'),
+  pricing_currency: text('pricing_currency'),
+  pricing_amount_cents: integer('pricing_amount_cents'),
+  pricing_verification_status: text('pricing_verification_status'),
   created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
   // Token epoch: JWTs issued before this instant are rejected by requireAuth.
   // Set when verify-code adopts a pre-existing unverified account, so any token
@@ -83,6 +92,78 @@ export const users = pgTable('users', {
     .on(t.billing_subscription_id)
     .where(sql`${t.billing_subscription_id} is not null`),
 }));
+
+// ---- pricing_experiment_assignments ----
+// A user keeps the same variant for the lifetime of an experiment, even when they
+// change browsers or an operator changes allocation percentages after launch.
+export const pricing_experiment_assignments = pgTable('pricing_experiment_assignments', {
+  user_id: uuid('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  experiment_id: text('experiment_id').notNull(),
+  variant: text('variant').notNull(),
+  assigned_at: timestamp('assigned_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.user_id, t.experiment_id] }),
+}));
+
+// ---- pricing_offers ----
+// One immutable commercial snapshot per checkout attempt. Provider webhooks bind
+// back to this row so the amount, country evidence, and experiment assignment are
+// auditable without trusting client analytics.
+export const pricing_offers = pgTable('pricing_offers', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  subject_id: text('subject_id').notNull(),
+  idempotency_key: text('idempotency_key').notNull(),
+  quote_token_hash: text('quote_token_hash'),
+  policy_version: text('policy_version').notNull(),
+  country_code: text('country_code').notNull(),
+  detected_country_code: text('detected_country_code'),
+  requested_country_code: text('requested_country_code'),
+  billing_country_code: text('billing_country_code'),
+  country_mismatch: boolean('country_mismatch').default(false).notNull(),
+  band: text('band').notNull(),
+  experiment_id: text('experiment_id'),
+  experiment_variant: text('experiment_variant').notNull(),
+  billing_interval: text('billing_interval').notNull(),
+  currency: text('currency').notNull(),
+  base_amount_cents: integer('base_amount_cents').notNull(),
+  amount_cents: integer('amount_cents').notNull(),
+  status: text('status').default('creating').notNull(),
+  provider_checkout_id: text('provider_checkout_id'),
+  provider_checkout_url: text('provider_checkout_url'),
+  provider_customer_id: text('provider_customer_id'),
+  provider_subscription_id: text('provider_subscription_id'),
+  expires_at: timestamp('expires_at', { withTimezone: true }).notNull(),
+  checkout_created_at: timestamp('checkout_created_at', { withTimezone: true }),
+  paid_at: timestamp('paid_at', { withTimezone: true }),
+  verified_at: timestamp('verified_at', { withTimezone: true }),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  idempotencyUnique: uniqueIndex('pricing_offers_idempotency_unique').on(t.idempotency_key),
+  checkoutUnique: uniqueIndex('pricing_offers_checkout_unique')
+    .on(t.provider_checkout_id)
+    .where(sql`${t.provider_checkout_id} is not null`),
+  subscriptionIdx: index('pricing_offers_subscription_idx').on(t.provider_subscription_id),
+  userCreatedIdx: index('pricing_offers_user_created_idx').on(t.user_id, t.created_at),
+  experimentCreatedIdx: index('pricing_offers_experiment_created_idx').on(t.experiment_id, t.created_at),
+}));
+
+// ---- billing_webhook_events ----
+// Lemon Squeezy retries events. The raw body hash is the idempotency key because
+// the payload does not expose a dedicated event id.
+export const billing_webhook_events = pgTable('billing_webhook_events', {
+  event_key: text('event_key').primaryKey(),
+  provider: text('provider').notNull(),
+  event_name: text('event_name'),
+  result: text('result').default('processing').notNull(),
+  received_at: timestamp('received_at', { withTimezone: true }).defaultNow().notNull(),
+  processed_at: timestamp('processed_at', { withTimezone: true }),
+});
 
 // ---- usage_counters ----
 // Quota + rate-limit ledger. key = user id (or email for pre-auth endpoints),

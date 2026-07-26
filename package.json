@@ -57,6 +57,8 @@
     "db:google-auth": "node scripts/apply-google-auth-migration.mjs",
     "db:guest-mode": "node scripts/apply-guest-mode-schema.mjs",
     "db:lemon-squeezy": "node scripts/apply-lemon-squeezy-schema.mjs",
+    "db:regional-pricing": "node scripts/apply-regional-pricing-schema.mjs",
+    "test:regional-pricing-load": "node --import tsx scripts/load-test-regional-pricing.mjs",
     "schema:check": "node scripts/check-schema-drift.mjs"
   }
 }
