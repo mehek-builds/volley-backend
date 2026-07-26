@@ -194,6 +194,10 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       return reply.status(400).send({ error: 'No experience bank found - complete onboarding first' });
     }
 
+    // NULL is normal and must stay non-fatal: accounts created before the base-resume step exists,
+    // and anyone who skipped it, generate exactly as they did before.
+    const baseSpec = (profileRows[0]?.base_resume_json as ResumeSpec | null) ?? null;
+
     const parsed = profileRows[0]?.parsed_json as {
       school?: string;
       degree?: string;
@@ -257,6 +261,11 @@ export async function resumeRoutes(fastify: FastifyInstance) {
                 attempt > 1 ? specIssues : undefined,
                 declaredSkills,
                 budget,
+                // The approved base resume, when one exists. Tailoring starts from the page the
+                // student accepted and swaps against this JD, rather than reselecting from the raw
+                // bank on every application - which is also what makes their /start edits reach a
+                // real submission instead of dying in base_resume_json.
+                baseSpec,
               );
               return applyResumePolicy(generated, education, bank, body.jd_text, { targetRole: body.role }).spec;
             } catch (err) {

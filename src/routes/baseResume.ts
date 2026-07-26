@@ -6,7 +6,7 @@ import { requireAuth } from '../middleware/auth';
 import { readExperienceBank } from '../db/experienceBank';
 import { generateBaseResumeSpec, type BaseResumeEvent } from '../llm/baseResume';
 import { applyResumePolicy, type CandidateEducation } from '../engine/resumePolicy';
-import { validateResumeSpec, pruneUngroundedContent } from '../engine/resumeValidate';
+import { validateResumeSpec, pruneUngroundedContent, weakVerbBullets } from '../engine/resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
 
 /* GET /resume/base        - the stored base resume, or 404 if never built.
@@ -30,6 +30,7 @@ type Stage =
   | 'reading'
   | 'selecting'
   | 'writing'
+  | 'polishing'
   | 'fitting'
   | 'done'
   | 'failed';
@@ -38,6 +39,8 @@ type Stage =
 type StreamFrame =
   | { event: 'stage'; stage: Stage; detail?: string }
   | { event: 'source'; bank_entries: number; source_pages: number; declared_skills: number }
+  // Clears what the client has painted, so a retry's shorter pass cannot leave stale entries.
+  | { event: 'restart' }
   | ({ event: 'piece' } & BaseResumeEvent)
   | { event: 'done'; spec: ResumeSpec; warnings: string[]; built_at: string }
   | { event: 'error'; message: string };
@@ -128,22 +131,50 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
 
       send({ event: 'stage', stage: 'selecting' });
 
-      let sawFirstEntry = false;
-      const rawSpec = await generateBaseResumeSpec(
-        bank,
-        education,
-        declaredSkills,
-        (piece: BaseResumeEvent) => {
-          // The transition from choosing entries to writing them is observable rather than timed:
-          // the first completed entry IS the moment selection finished.
-          if (piece.type === 'entry' && !sawFirstEntry) {
-            sawFirstEntry = true;
-            send({ event: 'stage', stage: 'writing' });
-          }
-          send({ event: 'piece', ...piece });
-        },
-        { timeoutMs: REQUEST_DEADLINE_MS },
-      );
+      const generate = async (feedback?: string[]) => {
+        let sawFirstEntry = false;
+        return generateBaseResumeSpec(
+          bank,
+          education,
+          declaredSkills,
+          (piece: BaseResumeEvent) => {
+            // The transition from choosing entries to writing them is observable rather than
+            // timed: the first completed entry IS the moment selection finished.
+            if (piece.type === 'entry' && !sawFirstEntry) {
+              sawFirstEntry = true;
+              send({ event: 'stage', stage: 'writing' });
+            }
+            send({ event: 'piece', ...piece });
+          },
+          { timeoutMs: REQUEST_DEADLINE_MS, feedback },
+        );
+      };
+
+      let rawSpec = await generate();
+
+      /* THE HARD RULE, enforced rather than merely reported.
+       *
+       * Every bullet opens with a strong action verb. The tailored path has always had a feedback
+       * retry for this; the base path had none, so a weak opener was written into the student's
+       * stored base resume and surfaced only as a note they could ignore. That is the one resume
+       * most likely to be sent unread, so it is the worst place to let the rule slide.
+       *
+       * One retry, naming the exact offenders. Bounded because a second failure means the bank's
+       * own wording is the problem, and at that point the honest move is to show the student what
+       * we produced and let them rewrite it in the editor rather than loop burning model calls.
+       */
+      const weak = weakVerbBullets(rawSpec);
+      if (weak.length > 0) {
+        send({ event: 'stage', stage: 'polishing' });
+        // The client paints entries positionally, so it has to clear before the re-stream or a
+        // shorter second pass would leave stale entries from the first behind.
+        send({ event: 'restart' });
+        rawSpec = await generate([
+          `These bullets do not start with a strong action verb from the allowed list. Rewrite each one to open with an approved verb, keeping the same facts: ${weak
+            .map((w) => `"${w.verb}" in ${w.org}`)
+            .join('; ')}`,
+        ]);
+      }
 
       send({ event: 'stage', stage: 'fitting' });
 

@@ -44,10 +44,17 @@ Return ONLY valid JSON with no explanation or markdown wrapping, matching this e
 
 Selection rules (these differ from tailored generation - read them carefully):
 - There is NO job description. Do not invent a target role, and do not optimise for an imagined one.
-- Pick ${RESUME_CONTENT_LIMITS.maxEntries} entries whenever the bank holds ${RESUME_CONTENT_LIMITS.maxEntries} worth including, chosen for RECENCY-WEIGHTED BREADTH: the most
-  recent work first, and across the set, cover the distinct KINDS of work the student has done rather
-  than repeating one kind. Given two entries of similar strength, prefer the more recent one and the
-  one that adds a kind the set does not have yet.
+- Pick ${RESUME_CONTENT_LIMITS.maxEntries} entries whenever the bank holds ${RESUME_CONTENT_LIMITS.maxEntries} worth including. Selection has two tiers and the order matters.
+
+  TIER 1, the primary axis: RECENCY-WEIGHTED BREADTH. Take the most recent work first, and across
+  the set cover the distinct KINDS of work the student has done rather than repeating one kind.
+
+  TIER 2, a TIEBREAK ONLY: among entries that tier 1 leaves genuinely close, prefer the one with the
+  strongest evidence - a concrete outcome, a number, real scope or responsibility. Judge the
+  EVIDENCE, not the logo. "Impressive" is a biased instinct: it over-rewards famous employers and
+  under-rewards a student's own project or a small organisation where they actually ran something,
+  and those students are exactly who this product is for. So this tier never displaces a more recent
+  entry and never collapses the breadth rule by stacking four of the same kind of work.
 - THE RESUME MUST FILL ONE PAGE. Not "fit within one page" - fill it. A resume that stops two thirds
   down the page reads as a thin candidate no matter how strong the content is, and it is the most
   common way a good student's resume looks weak. If the selection above leaves the page short, add the
@@ -72,6 +79,11 @@ Selection rules (these differ from tailored generation - read them carefully):
   Otherwise use "after_experience".
 
 Writing rules (identical to the tailored path):
+- THE VERB RULE OUTRANKS VERBATIM REUSE. Reusing a stored bullet word for word is preferred, but not
+  when it opens with a verb that is not on the approved list. In that case rewrite the OPENING only,
+  keeping every fact, number and noun exactly as the source has them. A bullet that starts with
+  Assisted, Supported, Helped, Performed, Participated, Attended, Worked or Engaged must be recast
+  around what the student actually did.
 - Every bullet starts with a strong action verb, one of: ${[...STRONG_VERBS].join(', ')}.
 - Every bullet is 8-30 words, one sentence, no more than two "and"s (prefer ; : or - over a run-on).
 - Include a real number, percent, dollar amount or multiplier whenever the source supports one. Never

@@ -43,10 +43,44 @@ surveyed sampled measured catalogued classified validated verified audited inspe
 authored published edited curated illustrated exhibited
 staffed scheduled onboarded fundraised campaigned organized administered processed
 treated triaged screened rehabilitated cultivated consulted elected guided collected
-constructed assembled purified sequenced cultured calibrated administered dissected`
+constructed assembled purified sequenced cultured calibrated administered dissected determined reported`
     .split(/\s+/)
     .filter(Boolean),
 );
+
+/* THE HARD RULE: every bullet in this product opens with a strong action verb.
+ *
+ * One implementation, used by every path that writes, checks or edits a bullet - the two
+ * generation prompts, the validator, the base build's retry, and the /start editor. It used to be
+ * re-derived inline in the validator, which is how the base build ended up shipping bullets the
+ * validator itself would reject: the check existed, but nothing acted on it there.
+ *
+ * Exported as a function rather than a bare Set so the "co-" rule and the punctuation stripping
+ * cannot drift between callers.
+ */
+export function firstWordOf(bullet: string): string {
+  return (bullet.trim().split(/\s+/)[0] ?? '').replace(/[^a-zA-Z-]/g, '').toLowerCase();
+}
+
+export function startsWithStrongVerb(bullet: string): boolean {
+  const first = firstWordOf(bullet);
+  if (!first) return false;
+  // "co-" inherits the base verb's strength: co-authoring a paper is as real as authoring one.
+  return STRONG_VERBS.has(first) || (first.startsWith('co-') && STRONG_VERBS.has(first.slice(3)));
+}
+
+/** Bullets in a spec that break the rule, as "Org: verb" strings for prompt feedback. */
+export function weakVerbBullets(spec: ResumeSpec): Array<{ org: string; bullet: string; verb: string }> {
+  const out: Array<{ org: string; bullet: string; verb: string }> = [];
+  for (const entry of spec.experience ?? []) {
+    for (const bullet of entry.bullets ?? []) {
+      if (!startsWithStrongVerb(bullet)) {
+        out.push({ org: entry.org, bullet, verb: bullet.trim().split(/\s+/)[0] ?? '' });
+      }
+    }
+  }
+  return out;
+}
 
 const INITIATIVE_VERBS = new Set(
   `founded co-founded owned drove spearheaded launched built pioneered led initiated established
@@ -548,11 +582,11 @@ export function validateResumeSpec(
 
       const words = bullet.trim().split(/\s+/);
       const nWords = words.length;
-      const first = (words[0] ?? '').replace(/[^a-zA-Z-]/g, '').toLowerCase();
-      // A "co-" prefix inherits the base verb's strength: co-authoring a paper is as real as
-      // authoring one, and enumerating every co- form would double the list for no benefit.
-      // Checked as a fallback so an explicitly listed form (co-founded) still wins on its own.
-      const isAction = STRONG_VERBS.has(first) || (first.startsWith('co-') && STRONG_VERBS.has(first.slice(3)));
+      const first = firstWordOf(bullet);
+      // The one shared implementation of the hard rule (see startsWithStrongVerb above), so the
+      // validator, both generation prompts, the base build's retry and the /start editor can never
+      // disagree about what counts as a strong opener.
+      const isAction = startsWithStrongVerb(bullet);
       const isInitiative =
         INITIATIVE_VERBS.has(first) || (first.startsWith('co-') && INITIATIVE_VERBS.has(first.slice(3)));
       const hasMetric = METRIC_RE.test(bullet);

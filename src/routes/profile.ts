@@ -3,7 +3,7 @@ import { db } from '../db/index';
 import { profiles, experience_bank } from '../db/schema';
 import { eq } from 'drizzle-orm';
 import { requireAuth } from '../middleware/auth';
-import { parseResumeWithClaude, ParsedProfile } from '../llm/parse';
+import { parseResumeWithClaude, parseResumeFromPdf, ParsedProfile } from '../llm/parse';
 import { extractPdfText } from '../lib/pdfText';
 import { put } from '@vercel/blob';
 import { MultipartFile } from '@fastify/multipart';
@@ -210,25 +210,24 @@ export async function profileRoutes(fastify: FastifyInstance) {
     /* A scanned resume extracts as a trickle of text, not as nothing, so a flat 50-character floor
      * waves it through. Measured 2026-07-27 on a real 2-page CV: 623 characters extracted, the
      * parse came back with an empty name, empty school and zero experience, and the account was
-     * left in a state where the base resume hard-400s and onboarding cannot advance. The student
-     * is told only that something went wrong, with no hint that the FILE is the problem.
+     * left in a state where the base resume hard-400s and onboarding cannot advance.
      *
      * Scaling by page count is what distinguishes the two cases: a genuine one-page resume runs
-     * 2,500-4,000 characters (measured across five real resumes), so 220 per page is far below any
-     * real document and far above the handful of characters a scan yields. The message names the
-     * actual cause and the actual fix, because "could not be parsed" sends people to re-upload the
-     * same scan. */
+     * 2,500-4,000 characters (measured across five real resumes), so 700 per page is far below any
+     * real document and far above the handful of characters a scan yields.
+     *
+     * Below the floor we do NOT reject. Rejecting was the first fix and it was the wrong one: it
+     * told the student to go and re-export a file they may not have the source for, and locked out
+     * anyone whose only copy of their resume is a scan or a phone photo. Two of eight real resumes
+     * tested were image-only. We read those pages visually instead. */
     const minimumChars = Math.max(50, 700 * Math.max(1, sourcePages));
-    if (!resumeText || resumeText.trim().length < minimumChars) {
-      return reply.status(400).send({
-        error:
-          'We could not read the text in that PDF. It looks like a scan or an image rather than a text document. Export it again from Word, Google Docs or Overleaf, or use "Print to PDF", and the text will come through.',
-      });
-    }
+    const looksScanned = !resumeText || resumeText.trim().length < minimumChars;
 
     let parsedProfile;
     try {
-      parsedProfile = await parseResumeWithClaude(resumeText);
+      parsedProfile = looksScanned
+        ? await parseResumeFromPdf(resumeBuffer)
+        : await parseResumeWithClaude(resumeText);
       // Carried on the parse rather than in its own column: it is a fact ABOUT this parse of this
       // file, so it should be replaced wholesale when a student re-uploads, which is exactly what
       // parsed_json already does.
@@ -236,6 +235,18 @@ export async function profileRoutes(fastify: FastifyInstance) {
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to parse resume with AI' });
+    }
+
+    /* Vision can fail on a genuinely unreadable page - a photo too blurry to transcribe, a blank
+     * scan. Say so specifically instead of letting the student through to an account with no name
+     * and no experience, which is the dead end this whole branch exists to prevent. Checked only
+     * on the scanned path: a text resume that parses to nothing is a different problem, already
+     * surfaced by the bank_seeded warning on /start. */
+    if (looksScanned && !parsedProfile.full_name?.trim() && (parsedProfile.experience ?? []).length === 0) {
+      return reply.status(400).send({
+        error:
+          'That looks like a scan, and we could not make out the text on the page. A clearer scan or photo usually works. If you have the original in Word, Google Docs or Overleaf, exporting a PDF from there will always read cleanly.',
+      });
     }
 
     const resumeObjectKey = `users/${userId}/resume.pdf`;

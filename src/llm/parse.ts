@@ -119,3 +119,52 @@ export async function parseResumeWithClaude(resumeText: string): Promise<ParsedP
     throw new Error(`Claude returned invalid JSON for resume parsing: ${text.slice(0, 200)}`);
   }
 }
+
+/* Parse a resume the text layer cannot read: a scan, a photo, an export that embedded the page as
+ * an image.
+ *
+ * These are not rare and they are not the student's fault - phone scans of a printed CV, PDFs
+ * produced by a scanner, older files. Two of the eight real resumes tested on 2026-07-27 were
+ * image-only (623 characters across two pages, and 0 characters across one). Before this they were
+ * rejected at upload, which meant those students could not use Litos at all.
+ *
+ * Sends the PDF itself instead of extracted text: Claude reads the pages visually, so no OCR
+ * dependency, no separate service, and the SAME system prompt and JSON shape as the text path.
+ * That last part matters - a second parser would be a second set of rules to keep in step with
+ * R-047's degree handling and the enrollment rule.
+ *
+ * Sonnet rather than Haiku here on purpose: reading a page image is materially harder than reading
+ * text, this runs once per student at signup, and a misread degree is the R-047 failure this parser
+ * exists to prevent.
+ */
+export async function parseResumeFromPdf(pdf: Buffer): Promise<ParsedProfile> {
+  const response = await client.messages.create({
+    model: 'claude-sonnet-5',
+    max_tokens: 4096,
+    system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'document',
+            source: { type: 'base64', media_type: 'application/pdf', data: pdf.toString('base64') },
+          },
+          {
+            type: 'text',
+            text: 'This resume is a scan or an image, so there is no text layer to read. Read the pages visually and return the JSON. Transcribe exactly what is printed; never guess at a word you cannot make out, and leave a field empty rather than inventing a plausible value.',
+          },
+        ],
+      },
+    ],
+  });
+
+  const textBlock = response.content.find((block) => block.type === 'text');
+  const text = textBlock?.type === 'text' ? textBlock.text : '';
+  try {
+    const cleaned = text.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
+    return JSON.parse(cleaned) as ParsedProfile;
+  } catch {
+    throw new Error(`Claude returned invalid JSON for scanned resume parsing: ${text.slice(0, 200)}`);
+  }
+}

@@ -75,6 +75,12 @@ Return ONLY valid JSON with no explanation or markdown wrapping, matching this e
 }
 
 Rules:
+- If an APPROVED BASE RESUME is supplied, it is your starting point. The student has read and
+  accepted it, so carrying an entry over is the default and swapping one out is the exception you
+  justify against this specific posting. Its wording is the student's own corrected phrasing and is
+  authoritative over the raw bank text for the same work. The experience bank still holds everything
+  they have ever done, and it is where a swap comes FROM when this job is better served by work the
+  base resume left off.
 - Treat this resume as a proof document for THIS application, not a generic career summary.
 - Set "target_role" to the exact role named in the Job line. It is a targeting headline only.
 - Pick up to ${RESUME_CONTENT_LIMITS.maxEntries} entries across jobs, projects, and leadership that best match the JD, most relevant first.
@@ -110,6 +116,11 @@ Rules:
   upgrade a degree, and leave "degree" an empty string if none is provided.
 - "coursework": include only courses explicitly listed in the Education source. Never use the job description as evidence for a course.
 - Set education_position to "top" only when the Education source says the candidate is currently enrolled. Otherwise use "after_experience".
+- THE VERB RULE OUTRANKS VERBATIM REUSE. Reusing a stored bullet word for word is preferred, but not
+  when it opens with a verb that is not on the approved list. In that case rewrite the OPENING only,
+  keeping every fact, number and noun exactly as the source has them. A bullet that starts with
+  Assisted, Supported, Helped, Performed, Participated, Attended, Worked or Engaged must be recast
+  around what the student actually did.
 - Every bullet starts with a strong action verb, one of: ${[...STRONG_VERBS].join(', ')}.
 - Every bullet is 8-30 words, one sentence, no more than two "and"s (prefer ; : or - over a run-on).
 - Include a real number, percent, dollar amount, or multiplier in a bullet whenever the source material
@@ -182,7 +193,41 @@ export async function generateResumeSpec(
   // its real remaining budget here; a call that outlives it is aborted (APIUserAbortError), which
   // the route's overload classifier deliberately treats as NOT retryable - it is our own deadline.
   timeoutMs?: number,
+  /* The student's APPROVED base resume, when they have one.
+   *
+   * Appended rather than inserted mid-signature so existing positional callers keep working. */
+  baseSpec?: ResumeSpec | null,
 ): Promise<ResumeSpec> {
+  /* THE BASE RESUME IS THE STARTING POINT, NOT MORE CONTEXT.
+   *
+   * Without this the tailored path re-selected from the raw bank on every application, which had
+   * two consequences. The student's approved page was ignored, so a resume they had read and
+   * accepted bore no necessary relationship to what actually got submitted. Worse, any bullet they
+   * EDITED on /start was stranded: edits are stored on the base resume, while generation read
+   * `experience_bank.bullet_variants`, so a correction they made by hand never reached a single
+   * application.
+   *
+   * Framing it as a starting point also matches what tailoring is actually for. Most entries carry
+   * over unchanged; the JD's job is to justify SWAPS - pulling in a bank entry that fits this
+   * posting better than one already on the page - and to re-order what remains. That is a smaller,
+   * better-defined task than reselecting from scratch, and it makes the base resume the stable
+   * spine every application is a variation on. */
+  const baseBlock = baseSpec?.experience?.length
+    ? `\n\nThe student's APPROVED BASE RESUME. This is your starting point, and its wording is
+authoritative: where a bullet here covers the same work as a bank entry, the bullet BELOW is the
+student's own corrected phrasing and must be preferred verbatim.
+${JSON.stringify({ experience: baseSpec.experience, skills: baseSpec.skills })}
+
+How to use it:
+- Keep an entry from the base resume unless the bank holds one that fits THIS posting clearly
+  better. Carrying an entry over is the default; swapping is the exception you justify.
+- When you do swap, take the replacement from the experience bank below - the bank holds everything
+  the student has done, including work the base resume left off.
+- Re-order entries and bullets so the strongest evidence for THIS job reads first, even when the
+  set of entries does not change.
+- Never invent. Everything must still trace to the bank or to the base resume above.`
+    : '';
+
   const feedbackBlock = feedback?.length
     ? `\n\nThe previous attempt had these issues - fix them in this revision:\n${feedback.map((f) => `- ${f}`).join('\n')}`
     : '';
@@ -199,7 +244,7 @@ export async function generateResumeSpec(
   const skillsBlock = skills?.length
     ? `\n\nSkills list (the student's own skills - the ONLY skills that may appear in "skills"):\n${JSON.stringify(skills)}`
     : `\n\nSkills list: none provided. Use only skills clearly evidenced by a bullet you selected, and do not add skills from the job description.`;
-  const contextBlock = `Job: ${role} at ${company}\n\nJob description:\n${jdText}\n\nEducation source (copy facts exactly; this is the only authority for school, degree, graduation date, enrollment, and coursework):\n${JSON.stringify(education)}${skillsBlock}\n\nExperience bank:\n${JSON.stringify(bank)}`;
+  const contextBlock = `Job: ${role} at ${company}\n\nJob description:\n${jdText}\n\nEducation source (copy facts exactly; this is the only authority for school, degree, graduation date, enrollment, and coursework):\n${JSON.stringify(education)}${skillsBlock}${baseBlock}\n\nExperience bank:\n${JSON.stringify(bank)}`;
   const response = await client.messages.create(
     {
       model: 'claude-sonnet-5',

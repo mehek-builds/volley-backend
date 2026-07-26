@@ -11,7 +11,7 @@ import 'dotenv/config';
 import { readdir, readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { extractPdfText } from './src/lib/pdfText';
-import { parseResumeWithClaude } from './src/llm/parse';
+import { parseResumeWithClaude, parseResumeFromPdf } from './src/llm/parse';
 import { bankEntriesFrom } from './src/routes/profile';
 import { generateBaseResumeSpec } from './src/llm/baseResume';
 import { applyResumePolicy, type CandidateEducation } from './src/engine/resumePolicy';
@@ -59,19 +59,14 @@ async function run(file: string) {
   // Same page-scaled floor POST /profile applies, so this harness rejects a scan exactly where the
   // real upload does instead of running a doomed parse the route would never have reached.
   const minimumChars = Math.max(50, 700 * Math.max(1, sourcePages));
-  if (text.trim().length < minimumChars) {
-    add(
-      label,
-      'NOTE',
-      'rejected-at-upload',
-      `${text.trim().length} chars over ${sourcePages} page(s) is below the ${minimumChars} floor: upload is rejected with the scanned-PDF message. Correct behaviour.`,
-    );
-    return;
+  const looksScanned = text.trim().length < minimumChars;
+  if (looksScanned) {
+    add(label, 'NOTE', 'scanned-vision-path', `${text.trim().length} chars over ${sourcePages} page(s): reading the pages visually instead of the text layer.`);
   }
 
   let parsed;
   try {
-    parsed = await parseResumeWithClaude(text);
+    parsed = looksScanned ? await parseResumeFromPdf(buf) : await parseResumeWithClaude(text);
   } catch (e) {
     add(label, 'ERROR', 'parse', String((e as Error).message).slice(0, 200));
     return;
