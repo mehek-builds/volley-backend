@@ -465,7 +465,10 @@ export async function authRoutes(fastify: FastifyInstance) {
         // by email, because a stale third-party address could take over data.
         if (!googleIsAuthoritativeForEmail(identity)) return null;
 
-        const linkExistingByEmail = async () => {
+        const linkExistingByEmail = async (attempt = 0): Promise<{
+          user: { id: string; email: string; session_version: number };
+          isNewUser: false;
+        } | null> => {
           const byEmail = await tx
             .select({
               id: users.id,
@@ -478,11 +481,22 @@ export async function authRoutes(fastify: FastifyInstance) {
             .where(eq(users.email, identity.email))
             .limit(1);
           const existing = byEmail[0];
-          if (!existing) return null;
+          if (!existing?.email) return null;
           if (existing.google_subject && existing.google_subject !== identity.subject) {
             return null;
           }
-          await tx
+          if (existing.google_subject === identity.subject && existing.email_verified) {
+            return {
+              user: {
+                id: existing.id,
+                email: existing.email,
+                session_version: existing.session_version,
+              },
+              isNewUser: false,
+            };
+          }
+
+          const updated = await tx
             .update(users)
             .set({
               google_subject: identity.subject,
@@ -492,12 +506,29 @@ export async function authRoutes(fastify: FastifyInstance) {
                 ? { session_version: sql`${users.session_version} + 1` }
                 : {}),
             })
-            .where(eq(users.id, existing.id));
+            .where(and(
+              eq(users.id, existing.id),
+              eq(users.session_version, existing.session_version),
+              existing.google_subject
+                ? eq(users.google_subject, identity.subject)
+                : sql`${users.google_subject} IS NULL`,
+            ))
+            .returning({
+              id: users.id,
+              email: users.email,
+              session_version: users.session_version,
+            });
+          if (!updated[0]) {
+            // A parallel login or security-sensitive account update won the
+            // compare-and-swap. Re-read once so every issued token carries the
+            // session version that actually committed.
+            return attempt === 0 ? linkExistingByEmail(1) : null;
+          }
           return {
             user: {
-              id: existing.id,
+              id: updated[0].id,
               email: existing.email,
-              session_version: existing.session_version + (existing.email_verified ? 0 : 1),
+              session_version: updated[0].session_version,
             },
             isNewUser: false,
           };

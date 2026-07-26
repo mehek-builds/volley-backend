@@ -1,7 +1,7 @@
 # Graph Report - .  (2026-07-26)
 
 ## Corpus Check
-- 126 files · ~106,679 words
+- 126 files · ~106,773 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
@@ -108,15 +108,15 @@ Nodes (7): annualize(), answerCompensation(), detectCurrency(), detectUnit(), fo
 
 ### Community 20 - "Community 20"
 Cohesion: 0.67
-Nodes (0): 
+Nodes (0):
 
 ### Community 21 - "Community 21"
 Cohesion: 1.0
-Nodes (0): 
+Nodes (0):
 
 ### Community 22 - "Community 22"
 Cohesion: 1.0
-Nodes (0): 
+Nodes (0):
 
 ## Knowledge Gaps
 - **1 isolated node(s):** `GoogleVerificationUnavailable`
