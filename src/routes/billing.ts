@@ -1,13 +1,19 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { createHmac, timingSafeEqual } from 'node:crypto';
 import { db } from '../db/index';
 import { users } from '../db/schema';
 import { eq } from 'drizzle-orm';
 import { requireAuth } from '../middleware/auth';
 import { getEntitlements, getCount, monthPeriod, upgradeUrl } from '../middleware/quota';
+import {
+  buildLemonSqueezyCheckoutUrl,
+  lemonSqueezyCheckoutReadyUrl,
+  parseLemonSqueezySubscription,
+  planForLemonSqueezyStatus,
+  verifyLemonSqueezySignature,
+  verifyLemonSqueezyAccountToken,
+} from '../lib/lemonSqueezy';
 
 export async function billingRoutes(fastify: FastifyInstance) {
-  // Plan + usage for the signed-in user. The extension can show "12 of 30 used".
   fastify.get('/me', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const { userId, email, isGuest } = request.jwtPayload!;
     const ent = await getEntitlements(userId);
@@ -18,15 +24,20 @@ export async function billingRoutes(fastify: FastifyInstance) {
       getCount(userId, period, 'resumes'),
     ]);
     const rows = await db.select().from(users).where(eq(users.id, userId)).limit(1);
-    // upgradeUrl() rather than a raw env read: it drops Stripe test-mode links (R-043), and
-    // /me surfaces upgrade_url to the same students the 402 upsell does.
+    const user = rows[0];
     const upgradeLink = upgradeUrl();
     return reply.status(200).send({
       email: email ?? null,
       is_guest: isGuest,
       tier: ent.tier,
-      trial_ends_at: rows[0]?.trial_ends_at ?? null,
-      guest_expires_at: rows[0]?.guest_expires_at ?? null,
+      trial_ends_at: user?.trial_ends_at ?? null,
+      guest_expires_at: user?.guest_expires_at ?? null,
+      billing_provider: 'lemonsqueezy',
+      checkout_available: Boolean(lemonSqueezyCheckoutReadyUrl()),
+      billing_status: user?.billing_status ?? null,
+      billing_renews_at: user?.billing_renews_at ?? null,
+      billing_ends_at: user?.billing_ends_at ?? null,
+      billing_portal_url: user?.billing_portal_url ?? null,
       usage: {
         contacts: { used: usedContacts, limit: ent.monthlyContacts },
         drafts: { used: usedDrafts, limit: ent.monthlyDrafts },
@@ -36,93 +47,99 @@ export async function billingRoutes(fastify: FastifyInstance) {
     });
   });
 
-  // Stripe webhook: a completed Payment Link checkout upgrades the matching email
-  // to Pro. Signature verification needs the raw body, so this plugin re-parses
-  // application/json as a buffer (Fastify encapsulation keeps this scoped here).
+  fastify.post('/billing/checkout', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const { userId, email, isGuest } = request.jwtPayload!;
+    if (isGuest || !email) {
+      return reply.status(409).send({ error: 'Verify an email before starting checkout.', code: 'claim_required' });
+    }
+    const ent = await getEntitlements(userId);
+    if (ent.tier === 'pro') {
+      return reply.status(409).send({ error: 'This account already has Pro.', code: 'already_pro' });
+    }
+    const url = buildLemonSqueezyCheckoutUrl(userId, email);
+    if (!url) {
+      return reply.status(503).send({ error: 'Checkout is temporarily unavailable.', code: 'billing_not_configured' });
+    }
+    return reply.header('Cache-Control', 'private, no-store').status(200).send({ provider: 'lemonsqueezy', url });
+  });
+
   fastify.addContentTypeParser('application/json', { parseAs: 'buffer' }, (_req, body, done) => {
     done(null, body);
   });
 
-  fastify.post('/billing/stripe-webhook', async (request: FastifyRequest, reply: FastifyReply) => {
-    const secret = process.env.STRIPE_WEBHOOK_SECRET;
-    if (!secret) {
-      return reply.status(503).send({ error: 'billing not configured' });
-    }
-
-    const sigHeader = request.headers['stripe-signature'];
-    const raw = request.body as Buffer;
-    if (typeof sigHeader !== 'string' || !Buffer.isBuffer(raw)) {
-      return reply.status(400).send({ error: 'bad request' });
-    }
-
-    // Stripe-Signature: t=<ts>,v1=<hmac>, HMAC-SHA256 over `${t}.${rawBody}`.
-    const parts = Object.fromEntries(sigHeader.split(',').map((kv) => kv.split('=') as [string, string]));
-    const expected = createHmac('sha256', secret).update(`${parts.t}.${raw.toString('utf8')}`).digest('hex');
-    const given = Buffer.from(parts.v1 || '', 'hex');
-    const want = Buffer.from(expected, 'hex');
-    if (given.length !== want.length || !timingSafeEqual(given, want)) {
-      return reply.status(400).send({ error: 'bad signature' });
-    }
-    const ageSec = Math.abs(Date.now() / 1000 - Number(parts.t));
-    if (!Number.isFinite(ageSec) || ageSec > 300) {
-      return reply.status(400).send({ error: 'stale signature' });
-    }
-
-    try {
-      const event = JSON.parse(raw.toString('utf8'));
-      if (event.type === 'checkout.session.completed') {
-        const email: string | undefined = event.data?.object?.customer_details?.email;
-        // Single paid tier now ($49.99/mo, unlocks everything - no separate Plus add-on).
-        if (email) {
-          await db.update(users).set({ plan: 'pro' }).where(eq(users.email, email.toLowerCase()));
-          fastify.log.info({ email }, 'upgraded to pro via stripe checkout');
-        }
-      }
-      // Future: handle customer.subscription.deleted to downgrade on cancellation.
-      return reply.status(200).send({ received: true });
-    } catch (err) {
-      fastify.log.error(err);
-      return reply.status(400).send({ error: 'unparseable event' });
-    }
-  });
-
-  // Lemon Squeezy webhook: signature is HMAC-SHA256 (hex) of the raw body in
-  // X-Signature. subscription_created/resumed/unpaused -> Pro; expired -> free.
-  // Customer matching is by email, same convention as the Stripe webhook.
   fastify.post('/billing/lemonsqueezy-webhook', async (request: FastifyRequest, reply: FastifyReply) => {
     const secret = process.env.LEMONSQUEEZY_WEBHOOK_SECRET;
-    if (!secret) {
+    const expectedVariantId = process.env.LEMONSQUEEZY_VARIANT_ID?.trim();
+    if (!secret || !expectedVariantId) {
       return reply.status(503).send({ error: 'billing not configured' });
     }
 
-    const sigHeader = request.headers['x-signature'];
+    const signature = request.headers['x-signature'];
     const raw = request.body as Buffer;
-    if (typeof sigHeader !== 'string' || !Buffer.isBuffer(raw)) {
+    if (typeof signature !== 'string' || !Buffer.isBuffer(raw)) {
       return reply.status(400).send({ error: 'bad request' });
     }
-
-    const expected = createHmac('sha256', secret).update(raw).digest('hex');
-    const given = Buffer.from(sigHeader, 'hex');
-    const want = Buffer.from(expected, 'hex');
-    if (given.length !== want.length || !timingSafeEqual(given, want)) {
+    if (!verifyLemonSqueezySignature(raw, signature, secret)) {
       return reply.status(400).send({ error: 'bad signature' });
     }
 
+    let parsed: ReturnType<typeof parseLemonSqueezySubscription>;
     try {
-      const event = JSON.parse(raw.toString('utf8'));
-      const name: string = event.meta?.event_name || '';
-      const email: string | undefined = event.data?.attributes?.user_email;
-      if (email && ['subscription_created', 'subscription_resumed', 'subscription_unpaused'].includes(name)) {
-        await db.update(users).set({ plan: 'pro' }).where(eq(users.email, email.toLowerCase()));
-        fastify.log.info({ email, name }, 'upgraded to pro via lemon squeezy');
-      } else if (email && ['subscription_expired'].includes(name)) {
-        await db.update(users).set({ plan: 'free' }).where(eq(users.email, email.toLowerCase()));
-        fastify.log.info({ email, name }, 'downgraded to free via lemon squeezy');
-      }
-      return reply.status(200).send({ received: true });
-    } catch (err) {
-      fastify.log.error(err);
+      parsed = parseLemonSqueezySubscription(JSON.parse(raw.toString('utf8')));
+    } catch {
       return reply.status(400).send({ error: 'unparseable event' });
     }
+    if (!parsed) return reply.status(200).send({ received: true, ignored: true });
+    if (parsed.testMode && process.env.LEMONSQUEEZY_ACCEPT_TEST_MODE !== 'true') {
+      fastify.log.warn({ subscriptionId: parsed.subscriptionId }, 'ignored Lemon Squeezy test-mode event');
+      return reply.status(200).send({ received: true, ignored: true });
+    }
+    if (parsed.variantId !== expectedVariantId) {
+      fastify.log.warn({ variantId: parsed.variantId }, 'ignored Lemon Squeezy event for another variant');
+      return reply.status(200).send({ received: true, ignored: true });
+    }
+
+    const plan = planForLemonSqueezyStatus(parsed.status);
+    if (!plan) {
+      fastify.log.warn({ status: parsed.status }, 'ignored Lemon Squeezy event with unknown subscription status');
+      return reply.status(200).send({ received: true, ignored: true });
+    }
+
+    const trustedUserId = parsed.userId && verifyLemonSqueezyAccountToken(parsed.userId, parsed.accountToken, secret)
+      ? parsed.userId
+      : undefined;
+    let matched = trustedUserId
+      ? await db.select().from(users).where(eq(users.id, trustedUserId)).limit(1)
+      : [];
+    if (matched.length === 0) {
+      matched = await db.select().from(users).where(eq(users.billing_subscription_id, parsed.subscriptionId)).limit(1);
+    }
+    if (matched.length === 0 && parsed.email) {
+      matched = await db.select().from(users).where(eq(users.email, parsed.email)).limit(1);
+    }
+    const user = matched[0];
+    if (!user) {
+      fastify.log.error({ subscriptionId: parsed.subscriptionId }, 'Lemon Squeezy subscription did not match a Litos account');
+      return reply.status(422).send({ error: 'account not found' });
+    }
+    if (user.billing_event_updated_at && parsed.updatedAt < user.billing_event_updated_at) {
+      return reply.status(200).send({ received: true, ignored: true, reason: 'stale_event' });
+    }
+
+    await db.update(users).set({
+      plan,
+      billing_provider: 'lemonsqueezy',
+      billing_customer_id: parsed.customerId,
+      billing_subscription_id: parsed.subscriptionId,
+      billing_variant_id: parsed.variantId,
+      billing_status: parsed.status,
+      billing_renews_at: parsed.renewsAt,
+      billing_ends_at: parsed.endsAt,
+      billing_portal_url: parsed.portalUrl,
+      billing_event_updated_at: parsed.updatedAt,
+    }).where(eq(users.id, user.id));
+
+    fastify.log.info({ userId: user.id, status: parsed.status, plan }, 'synced Lemon Squeezy subscription');
+    return reply.status(200).send({ received: true });
   });
 }

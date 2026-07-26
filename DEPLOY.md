@@ -61,6 +61,9 @@ Set these for Production (and Preview if you want):
 | `BOUNCEBAN_API_KEY` | your BounceBan key (optional) |
 | `APOLLO_API_KEY` | your Apollo key (optional fallback) |
 | `JOB_MONITOR_SOURCES_JSON` | JSON array of Greenhouse, Lever, and Ashby company boards to check every 15 minutes |
+| `LEMONSQUEEZY_CHECKOUT_URL` | reusable live product URL containing `/checkout/buy/` |
+| `LEMONSQUEEZY_VARIANT_ID` | numeric ID of the $49.99 monthly Pro variant |
+| `LEMONSQUEEZY_WEBHOOK_SECRET` | signing secret configured on the Lemon Squeezy webhook |
 | `NODE_ENV` | `production` |
 
 Before enabling Google sign-in, add the identity column without touching existing users:
@@ -68,6 +71,18 @@ Before enabling Google sign-in, add the identity column without touching existin
 ```bash
 npm run db:google-auth
 ```
+
+Before enabling Lemon Squeezy checkout, add the subscription state columns:
+
+```bash
+npm run db:lemon-squeezy
+```
+
+In Lemon Squeezy, configure a webhook at
+`https://student-outreach-backend.vercel.app/billing/lemonsqueezy-webhook` and
+subscribe to `subscription_created` and `subscription_updated`. Use the same
+secret for the webhook and `LEMONSQUEEZY_WEBHOOK_SECRET`. Keep
+`LEMONSQUEEZY_ACCEPT_TEST_MODE` unset in production.
 
 `VERCEL` is set automatically by Vercel. That disables the local listener.
 Do **not** set `PORT`/`HOST` (serverless ignores them).
