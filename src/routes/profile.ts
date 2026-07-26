@@ -121,6 +121,61 @@ export function bankEntriesFrom(parsed: ParsedProfile, userId: string) {
   return [...jobs, ...projects, ...leadership].filter((e) => e.bullet_variants.length > 0);
 }
 
+/* A resume header printed in capitals is a typographic choice, not a name.
+ *
+ * Measured on a real University of Washington sample resume, 2026-07-27: the header reads
+ * "MIRANDA W. HUDSON", so that is what was stored, and it is what the extension then types into an
+ * employer's First name and Last name boxes. Nobody writes their own name in block capitals on an
+ * application, and a form filled that way reads as machine-filled at a glance - which is the one
+ * impression this product cannot afford to make.
+ *
+ * Recased ONLY when the whole string is uppercase. A name with any lowercase in it has already told
+ * us how it wants to be written - "McDonald", "van der Berg", "DeShawn" - and touching those would
+ * break names this rule exists to protect. Within an all-caps string the same care applies going the
+ * other way: Mc/Mac prefixes, O', hyphens and the lowercase particles of a compound surname are all
+ * handled, because "MCDONALD-O'BRIEN" must not come back as "Mcdonald-o'brien".
+ */
+const NAME_PARTICLES = new Set([
+  'de', 'del', 'della', 'der', 'di', 'da', 'dos', 'du', 'la', 'le', 'van', 'von', 'bin', 'binte',
+  'ibn', 'al', 'el', 'ter', 'ten',
+]);
+
+export function normalizeDisplayName(name: string): string {
+  const trimmed = (name ?? '').trim().replace(/\s+/g, ' ');
+  if (trimmed.length === 0) return trimmed;
+  // Any lowercase letter at all means the name is already cased deliberately. Leave it alone.
+  if (/\p{Ll}/u.test(trimmed)) return trimmed;
+
+  const capitalize = (word: string): string => {
+    if (word.length === 0) return word;
+    const lower = word.toLowerCase();
+    // A particle keeps its lowercase form, but only in the middle of a name: "Van Der Berg" is
+    // wrong, "van der Berg" is right, and a surname that STARTS a string stays capitalised.
+    const cap = lower.charAt(0).toUpperCase() + lower.slice(1);
+    // Mc/Mac and O' carry an internal capital that title-casing alone loses.
+    if (/^mc[a-z]{2,}$/.test(lower)) return `Mc${lower.charAt(2).toUpperCase()}${lower.slice(3)}`;
+    if (/^mac[a-z]{3,}$/.test(lower)) return `Mac${lower.charAt(3).toUpperCase()}${lower.slice(4)}`;
+    if (/^o'[a-z]{2,}$/.test(lower)) return `O'${lower.charAt(2).toUpperCase()}${lower.slice(3)}`;
+    return cap;
+  };
+
+  return trimmed
+    .split(' ')
+    .map((word, index) => {
+      // A middle initial stays an initial: "W." must not become "W". (it already is) and must not
+      // be lowercased.
+      if (/^\p{Lu}\.?$/u.test(word)) return word;
+      const lower = word.toLowerCase();
+      if (index > 0 && NAME_PARTICLES.has(lower.replace(/\.$/, ''))) return lower;
+      // Hyphenated and apostrophised names are two names wearing one token.
+      return word
+        .split('-')
+        .map((part) => capitalize(part))
+        .join('-');
+    })
+    .join(' ');
+}
+
 /* The academic record a resume STATES, ready for application_profile.
  *
  * /start's gaps screen (onboarding.ts GAP_FIELDS) asks for gpa, gpa_scale, major, languages and a
@@ -271,7 +326,11 @@ export async function profileRoutes(fastify: FastifyInstance) {
       // Carried on the parse rather than in its own column: it is a fact ABOUT this parse of this
       // file, so it should be replaced wholesale when a student re-uploads, which is exactly what
       // parsed_json already does.
-      parsedProfile = { ...parsedProfile, source_pages: sourcePages };
+      parsedProfile = {
+        ...parsedProfile,
+        full_name: normalizeDisplayName(parsedProfile.full_name ?? ''),
+        source_pages: sourcePages,
+      };
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to parse resume with AI' });
