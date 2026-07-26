@@ -23,6 +23,12 @@ async function main() {
     await client.query(
       'create unique index if not exists "users_guest_key_hash_unique" on "users" ("guest_key_hash") where "guest_key_hash" is not null',
     );
+    // Drizzle emits ON CONFLICT (guest_key_hash) without a predicate. PostgreSQL
+    // cannot infer the partial index above for that conflict target. A regular
+    // unique index is safe because PostgreSQL permits multiple NULL values.
+    await client.query(
+      'create unique index if not exists "users_guest_key_hash_conflict_unique" on "users" ("guest_key_hash")',
+    );
     await client.query('commit');
   } catch (error) {
     await client.query('rollback').catch(() => undefined);
