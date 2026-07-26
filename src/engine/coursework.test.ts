@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { courseworkIsUngrounded } from './resumeValidate';
+import { courseworkIsUngrounded, startsWithStrongVerb } from './resumeValidate';
 
 /* The case that started this: a UW sample CV listed "Race, Gender, and Sexuality in the Media".
  * The old check split the rendered line on "," and reported a verbatim-copied coursework line as
@@ -57,4 +57,39 @@ describe('courseworkIsUngrounded', () => {
     assert.equal(courseworkIsUngrounded('Women and Violence,Self-Concept', uw), false);
     assert.equal(courseworkIsUngrounded('  Women and Violence ,  Self-Concept  ', uw), false);
   });
+});
+
+/* The verb gate must stay a gate. These pin both halves: the synonyms it wrongly rejected on a
+ * 15-resume run, and the weak verbs it must keep rejecting. */
+describe('the strong-verb gate', () => {
+  const admitted = [
+    // Each is a synonym of a verb the list already had, named in resumeValidate.ts.
+    'Performed column chromatography, PCR, and DNA extraction.',
+    'Operated the mass spectrometer across three studies.',
+    'Assessed 40 applications against the rubric.',
+    'Simulated airflow over the revised wing profile.',
+    'Prototyped the fixture in three iterations.',
+    'Fabricated the mounting bracket from sheet aluminium.',
+    'Programmed the flight controller in C.',
+    'Debugged the race condition in the scheduler.',
+  ];
+  for (const bullet of admitted) {
+    test(`accepts ${bullet.split(' ')[0]}`, () => {
+      assert.equal(startsWithStrongVerb(bullet), true);
+    });
+  }
+
+  const rejected = [
+    'Assisted with collection of fish samples.',
+    'Answered visitor questions at the front desk.',
+    'Helped the team with weekly reporting.',
+    'Worked on the onboarding flow.',
+    'Participated in the weekly standup.',
+    'Responsible for the lab inventory.',
+  ];
+  for (const bullet of rejected) {
+    test(`still rejects ${bullet.split(' ')[0]}`, () => {
+      assert.equal(startsWithStrongVerb(bullet), false);
+    });
+  }
 });

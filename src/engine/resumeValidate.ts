@@ -27,6 +27,17 @@ import { deriveCandidateContext, resumeSafeTargetRole, type CandidateEducation }
  *    and should be rewritten. The fix was to add the strong verbs that were missing, not to
  *    silence the gate by admitting every verb it rejected. assisted, answered, helped, supported,
  *    participated and worked are deliberately absent.
+ *
+ * 3. IT REJECTED SYNONYMS OF VERBS IT ALREADY ADMITTED. A 15-resume run on 2026-07-27 flagged
+ *    "Performed column chromatography, PCR, DNA extraction" while conducted, executed, ran and
+ *    administered - the same verb wearing different clothes - were all on the list. That is not a
+ *    quality gate, it is a coin toss, and it is an expensive one: a single flagged bullet triggers
+ *    a complete regeneration of the resume, so the student waits through a second model call and
+ *    the retry then fails again on the same word.
+ *
+ *    So the additions below are strictly SYNONYMS OF ADMITTED VERBS, each one named against the
+ *    verb it matches. Nothing is admitted because it appeared in a resume; only because rejecting
+ *    it while accepting its twin was incoherent.
  */
 export const STRONG_VERBS = new Set(
   `built shipped designed engineered developed led drove owned launched analyzed
@@ -43,7 +54,9 @@ surveyed sampled measured catalogued classified validated verified audited inspe
 authored published edited curated illustrated exhibited
 staffed scheduled onboarded fundraised campaigned organized administered processed
 treated triaged screened rehabilitated cultivated consulted elected guided collected
-constructed assembled purified sequenced cultured calibrated administered dissected determined reported`
+constructed assembled purified sequenced cultured calibrated administered dissected determined reported
+performed operated assessed simulated tested prototyped fabricated machined programmed coded
+debugged refactored migrated`
     .split(/\s+/)
     .filter(Boolean),
 );
