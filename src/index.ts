@@ -19,7 +19,6 @@ import { accountRoutes } from './routes/account';
 import { resumeRetentionRoutes } from './routes/resumeRetention';
 import { adapterHealthRoutes } from './routes/adapterHealth';
 import { targetingRoutes } from './routes/targeting';
-import { jdMatchRoutes } from './routes/jdMatch';
 import { harvestRoutes } from './routes/harvest';
 import { onboardingRoutes } from './routes/onboarding';
 import { assertEncryptionKeyConfigured } from './lib/fieldCrypto';
@@ -184,7 +183,6 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await fastify.register(experienceBankRoutes);
   await fastify.register(applicationProfileRoutes);
   await fastify.register(targetingRoutes);
-  await fastify.register(jdMatchRoutes);
   await fastify.register(harvestRoutes);
   await fastify.register(onboardingRoutes);
   await fastify.register(applicationAnswerRoutes);
