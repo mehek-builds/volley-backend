@@ -973,7 +973,19 @@ export async function renderResumePdf(
   const doc = createResumeDocument(design);
   const chunks: Buffer[] = [];
   doc.on('data', (chunk) => chunks.push(chunk));
-  const done = new Promise<Buffer>((resolve) => doc.on('end', () => resolve(Buffer.concat(chunks))));
+  /* Rejects on a stream error, and not only on 'end'.
+   *
+   * Without the error handler this promise had exactly one way to settle, so a PDFKit stream error
+   * left the await hanging forever rather than throwing. That was survivable while rendering only
+   * happened on the tailored path; it is not now. The base-resume build renders on EVERY run as part
+   * of the ATS gate, and its whole design is to fail closed - a hang defeats that, because the
+   * function is killed at Vercel's 300s limit with the SSE half-written and neither a done nor an
+   * error frame sent. Rejecting hands control to the gate's catch, which reports the failure and
+   * refuses to store the resume, which is the behaviour that was intended all along. */
+  const done = new Promise<Buffer>((resolve, reject) => {
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+  });
 
   doc
     .font(RESUME_FONTS.bold)
