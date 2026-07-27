@@ -1,6 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import {
   MIN_SCORABLE_TERMS as _MIN,
   segmentJd,
@@ -413,7 +414,8 @@ Responsibilities
  */
 describe('route registration', () => {
   test('POST /jd-match is actually mounted in index.ts', () => {
-    const root = readFileSync(new URL('../index.ts', import.meta.url), 'utf8');
+    // __dirname, not import.meta.url: tsconfig targets CommonJS for the Vercel build.
+    const root = readFileSync(path.join(__dirname, '..', 'index.ts'), 'utf8');
     assert.match(root, /import \{ jdMatchRoutes \} from '\.\/routes\/jdMatch'/, 'index.ts must import the route');
     assert.match(root, /register\(jdMatchRoutes\)/, 'index.ts must register the route');
   });
