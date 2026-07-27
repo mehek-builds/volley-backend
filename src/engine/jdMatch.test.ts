@@ -1,5 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   MIN_SCORABLE_TERMS as _MIN,
   segmentJd,
@@ -395,5 +396,25 @@ Responsibilities
     scoreJdMatch('Python Docker AWS', jd.slice(0, 60_000));
     const ms = Number(process.hrtime.bigint() - started) / 1e6;
     assert.ok(ms < 250, `extraction took ${Math.round(ms)}ms; positional() was O(n^2) at ~594ms`);
+  });
+});
+
+/**
+ * Registration, not behaviour.
+ *
+ * This exists because the route shipped to production UNREGISTERED. The unbundle PR removed the two
+ * lines in index.ts that mount it, and the follow-up that restored the route file did not restore
+ * them. Every unit test passed, typecheck passed, the module was perfect, and POST /jd-match
+ * answered "Route not found" in prod. The same shape as the squash that once dropped schema.ts and
+ * kept the auth epoch out of prod: the code exists, nothing wires it up.
+ *
+ * A behavioural test of jdMatch.ts can never catch this. Only a test that reads the composition
+ * root can.
+ */
+describe('route registration', () => {
+  test('POST /jd-match is actually mounted in index.ts', () => {
+    const root = readFileSync(new URL('../index.ts', import.meta.url), 'utf8');
+    assert.match(root, /import \{ jdMatchRoutes \} from '\.\/routes\/jdMatch'/, 'index.ts must import the route');
+    assert.match(root, /register\(jdMatchRoutes\)/, 'index.ts must register the route');
   });
 });
