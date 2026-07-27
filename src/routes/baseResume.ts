@@ -93,7 +93,7 @@ type StreamFrame =
       warnings: string[];
       ats: AtsVerdict;
       // Bullets with no number in them, so /start can ask the student for the few that matter.
-      metrics: Array<{ org: string; bullet: string }>;
+      metrics: Array<{ org: string; title: string; date_range: string; bullet: string }>;
       built_at: string;
     }
   | { event: 'error'; message: string };
@@ -187,12 +187,20 @@ export function targetRoleText(
  * Capped at five and sorted longest-first: a long bullet with no number is describing something
  * substantial and is where a metric buys the most. Asking for every one of them turns onboarding
  * into a form - a federal-style resume has fifteen - and drop-off is the real risk. */
-export function metricGapsIn(spec: ResumeSpec, limit = 5): Array<{ org: string; bullet: string }> {
+export function metricGapsIn(
+  spec: ResumeSpec,
+  limit = 5,
+): Array<{ org: string; title: string; date_range: string; bullet: string }> {
   const hasNumber = /\d/;
-  const gaps: Array<{ org: string; bullet: string }> = [];
+  /* title and date_range travel with the gap so the ask can SAY which role it means. Two stints at
+   * one employer can carry the same duty line, and an unlabelled pair of identical prompts gives the
+   * student no way to tell which is which - so a number meant for one lands on the other. */
+  const gaps: Array<{ org: string; title: string; date_range: string; bullet: string }> = [];
   for (const entry of spec.experience ?? []) {
     for (const bullet of entry.bullets ?? []) {
-      if (!hasNumber.test(bullet)) gaps.push({ org: entry.org, bullet });
+      if (!hasNumber.test(bullet)) {
+        gaps.push({ org: entry.org, title: entry.title ?? '', date_range: entry.date_range ?? '', bullet });
+      }
     }
   }
   return gaps.sort((a, b) => b.bullet.length - a.bullet.length).slice(0, limit);
