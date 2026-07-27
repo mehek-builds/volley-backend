@@ -91,11 +91,11 @@ describe('R-042: the ranking rule is pinned in the system prompt', () => {
 
   test('names ranking as a skill claim', () => {
     assert.match(flat, /Ranking \(hard rule\)/);
-    assert.match(flat, /every item you place in that ranking is a skill claim in the student's name/);
+    assert.match(flat, /every item you place in that ranking is a skill claim in the applicant's name/);
   });
 
   test('confines the ranking to the declared list and bans padding', () => {
-    assert.match(flat, /Rank ONLY items that appear in the student's declared skills list/);
+    assert.match(flat, /Rank ONLY items that appear in the applicant's declared skills list/);
     assert.match(flat, /leave it out of the answer entirely/);
     assert.match(flat, /rather than padding the list/);
   });
@@ -144,7 +144,7 @@ describe('R-042: the per-question rule the user turn carries', () => {
   test('names the held intersection and bans the unheld remainder', () => {
     const text = rankingRuleText({ items: ['Python', 'Java', 'C++'], held: ['Python', 'C++'], unheld: ['Java'] });
     assert.match(text, /declared skills cover only: Python, C\+\+/);
-    assert.match(text, /names Java, which the student has NOT declared/);
+    assert.match(text, /names Java, which the applicant has NOT declared/);
     assert.match(text, /do not rank, claim, or mention them at all/);
   });
 
@@ -204,7 +204,7 @@ describe('R-042: an all-unheld ranking rides the cannot-draft path', () => {
 test('the prompt treats an absent fact as an answer, not a gap to escalate', () => {
   const flat = SYSTEM_PROMPT.replace(/\s+/g, ' ');
   assert.match(flat, /ABSENCE IS AN ANSWER/);
-  assert.match(flat, /the student has not done it/i);
+  assert.match(flat, /the applicant has not done it/i);
   assert.match(flat, /I have not participated in any of these competitions/i);
 });
 

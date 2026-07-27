@@ -98,6 +98,6 @@ describe('outreach drafting prompt (R-015 discipline, outreach half)', () => {
   test('pins the never-claim-an-unheld-skill rule in the draft system prompt', () => {
     assert.match(DRAFT_SYSTEM_PROMPT, /SKILLS GROUNDING/);
     assert.match(DRAFT_SYSTEM_PROMPT, /NEVER state or imply a skill/);
-    assert.match(DRAFT_SYSTEM_PROMPT, /the student does not have it: leave it out/);
+    assert.match(DRAFT_SYSTEM_PROMPT, /the applicant does not have it: leave it out/);
   });
 });

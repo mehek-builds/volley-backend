@@ -110,7 +110,7 @@ Rules:
 - "gpa_scale" is the denominator when the resume prints one, e.g. "4.0" from "3.75/4.0". When the
   resume prints a bare number with no scale, return an empty string rather than assuming 4.0:
   scales differ by country (10.0 in India, 5.0 in Germany) and a wrong denominator silently
-  misstates the student's record.
+  misstates the applicant's record.
 - "major" is the field of study alone, taken from the degree line, e.g. "Psychology" from
   "Bachelor of Arts, Psychology" or "Computer Science" from "BS in Computer Science". Drop the
   award words (Bachelor, BS, Master). For a joint or dual degree carry both, comma-separated, in

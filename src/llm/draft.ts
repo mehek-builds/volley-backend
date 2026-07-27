@@ -35,20 +35,20 @@ export interface DraftResult {
 // R-015. The Skills line in the user content is the student's DECLARED list (the /draft route
 // overrides client-supplied skills with profiles.skills), and this prompt carries the same
 // never-claim-an-unheld-skill discipline resumeSpec.ts enforces for the resume.
-export const SYSTEM_PROMPT = `You are an expert at writing concise, warm, student outreach emails that get replies.
+export const SYSTEM_PROMPT = `You are an expert at writing concise, warm outreach emails that get replies.
 
-SKILLS GROUNDING (non-negotiable): the "Skills" line is the student's own declared list and the
+SKILLS GROUNDING (non-negotiable): the "Skills" line is the applicant's own declared list and the
 ONLY source of skill claims. NEVER state or imply a skill, tool, or technology that is not on that
 list, and NEVER add one because the role or company would want it. If the role wants a tool the
-list lacks, the student does not have it: leave it out. Omitting a skill costs nothing; claiming
-one the student lacks costs their credibility the moment someone asks about it.
+list lacks, the applicant does not have it: leave it out. Omitting a skill costs nothing; claiming
+one they lack costs their credibility the moment someone asks about it.
 
 FORMAT RULES (non-negotiable):
 - Email body: 100-140 words total
 - Subject line: under 40 characters, value front-loaded
-- Subject examples: "[Name], 15-min chat? (Class of '27)" or "Quick question, [Name]"
-- Structure: 1 sentence specific personalized context (alumni/shared tie/why-them specifically) -> 1-2 sentences relevant hook grounded in the student's actual experience -> 1 sentence credible why-me that shows genuine fit -> ONE low-friction CTA only
-- Voice: student, warm, direct, not formal or corporate
+- Subject examples: "[Name], 15-min chat?" or "Quick question, [Name]"
+- Structure: 1 sentence specific personalized context (alumni/shared tie/why-them specifically) -> 1-2 sentences relevant hook grounded in the applicant's actual experience -> 1 sentence credible why-me that shows genuine fit -> ONE low-friction CTA only
+- Voice: warm, direct, human, not formal or corporate
 - If alumni or school_match: LEAD with the shared school connection
 - Single CTA only - use "could I ask 2 questions?" or "grab 15 min?" - never multiple asks
 - No buzzwords, no flattery walls, no "I hope this email finds you well"
@@ -64,8 +64,12 @@ export async function generateDraft(
 ): Promise<DraftResult> {
   const recentExperience = userProfile.experience.slice(0, 2);
   const topSkills = userProfile.skills.slice(0, 6).join(', ');
+  /* The shared-school tie stays: it is the strongest hook Litos has, and it is true of
+     anyone with an alma mater, not just people still enrolled. Only the noun changed,
+     from "student" to "applicant", so a mid-career user does not get an email written
+     in a student's voice. */
   const alumniNote = contact.school_match
-    ? `IMPORTANT: Both the student and ${contact.full_name} attended ${userProfile.school}. Lead with this connection.`
+    ? `IMPORTANT: Both the applicant and ${contact.full_name} attended ${userProfile.school}. Lead with this connection.`
     : '';
 
   const userContent = `
@@ -74,13 +78,13 @@ Contact to reach out to:
 - Title: ${contact.title}
 - Company: ${company}
 - Persona: ${contact.persona}
-- School match (same school as student): ${contact.school_match}
+- School match (same school as the applicant): ${contact.school_match}
 
-Role the student is interested in: ${role} at ${company}
+Role the applicant is interested in: ${role} at ${company}
 
-Student background:
+Applicant background:
 - School: ${userProfile.school} (Class of '${userProfile.grad_year})
-- Skills (the student's declared list, the only skills you may claim): ${topSkills}
+- Skills (the applicant's declared list, the only skills you may claim): ${topSkills}
 - Recent experience: ${recentExperience.map((e) => `${e.title} at ${e.company} (${e.start}-${e.end}): ${e.description}`).join('; ')}
 
 ${alumniNote}

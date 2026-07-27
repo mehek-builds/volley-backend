@@ -31,7 +31,7 @@ const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
  * gets selected, never what counts as good.
  */
 
-export const BASE_RESUME_SYSTEM_PROMPT = `You are a resume engine building a student's BASE resume: the single
+export const BASE_RESUME_SYSTEM_PROMPT = `You are a resume engine building an applicant's BASE resume: the single
 general-purpose resume they would send if they could only send one, with no job description to tailor against.
 
 Return ONLY valid JSON with no explanation or markdown wrapping, matching this exact shape:
@@ -47,17 +47,17 @@ Selection rules (these differ from tailored generation - read them carefully):
 - Pick ${RESUME_CONTENT_LIMITS.maxEntries} entries whenever the bank holds ${RESUME_CONTENT_LIMITS.maxEntries} worth including. Selection has two tiers and the order matters.
 
   TIER 1, the primary axis: RECENCY-WEIGHTED BREADTH. Take the most recent work first, and across
-  the set cover the distinct KINDS of work the student has done rather than repeating one kind.
+  the set cover the distinct KINDS of work the applicant has done rather than repeating one kind.
 
   TIER 2, a TIEBREAK ONLY: among entries that tier 1 leaves genuinely close, prefer the one with the
   strongest evidence - a concrete outcome, a number, real scope or responsibility. Judge the
   EVIDENCE, not the logo. "Impressive" is a biased instinct: it over-rewards famous employers and
-  under-rewards a student's own project or a small organisation where they actually ran something,
-  and those students are exactly who this product is for. So this tier never displaces a more recent
+  under-rewards an applicant's own project or a small organisation where they actually ran something,
+  and that is exactly the evidence this product exists to surface. So this tier never displaces a more recent
   entry and never collapses the breadth rule by stacking four of the same kind of work.
 - THE RESUME MUST FILL ONE PAGE. Not "fit within one page" - fill it. A resume that stops two thirds
   down the page reads as a thin candidate no matter how strong the content is, and it is the most
-  common way a good student's resume looks weak. If the selection above leaves the page short, add the
+  common way a good resume looks weak. If the selection above leaves the page short, add the
   next best entry from the bank and give every entry its full ${RESUME_CONTENT_LIMITS.maxBulletsPerEntry} bullets. Only drop back toward the
   minimum when the page would otherwise overflow.
 - Prefer each entry's strongest and most transferable stored bullet_variant, reused VERBATIM whenever one
@@ -69,10 +69,10 @@ Selection rules (these differ from tailored generation - read them carefully):
   whole page. If an entry cannot support ${RESUME_CONTENT_LIMITS.minBulletsPerEntry}, it does not belong on the resume: choose a different entry
   from the bank instead.
 - Copy each entry's type from the experience bank. Do not turn a project into a job or a job into leadership.
-- "skills": 8-10 entries, EVERY one copied EXACTLY as written in the student's Skills list, character for
+- "skills": 8-10 entries, EVERY one copied EXACTLY as written in the applicant's Skills list, character for
   character. Order them most broadly useful first. Never add a skill that is not on that list; if the list
   is empty, use only skills clearly evidenced by a bullet you selected.
-- Use the student's real school, degree and graduation date exactly as given in the Education line. Never
+- Use the applicant's real school, degree and graduation date exactly as given in the Education line. Never
   invent or upgrade a degree; leave "degree" an empty string if none is provided.
 - "coursework": only courses explicitly listed in the Education source.
 - Set education_position to "top" only when the Education source says the candidate is currently enrolled.
@@ -83,7 +83,7 @@ Writing rules (identical to the tailored path):
   when it opens with a verb that is not on the approved list. In that case rewrite the OPENING only,
   keeping every fact, number and noun exactly as the source has them. A bullet that starts with
   Assisted, Supported, Helped, Performed, Participated, Attended, Worked or Engaged must be recast
-  around what the student actually did.
+  around what the applicant actually did.
 - Every bullet starts with a strong action verb, one of: ${[...STRONG_VERBS].join(', ')}.
 - Every bullet is 8-30 words, one sentence, no more than two "and"s (prefer ; : or - over a run-on).
 - Include a real number, percent, dollar amount or multiplier whenever the source supports one. Never
@@ -251,7 +251,7 @@ export async function generateBaseResumeSpec(
   // Same cache shape as resumeSpec.ts: the bank and education are per-student and identical across
   // both attempts of a build, so they sit in the cached prefix and a retry re-reads them free.
   const skillsBlock = skills?.length
-    ? `\n\nSkills list (the student's own skills - the ONLY skills that may appear in "skills"):\n${JSON.stringify(skills)}`
+    ? `\n\nSkills list (the applicant's own skills - the ONLY skills that may appear in "skills"):\n${JSON.stringify(skills)}`
     : `\n\nSkills list: none provided. Use only skills clearly evidenced by a bullet you selected.`;
   const contextBlock = `Education source (copy facts exactly; this is the only authority for school, degree, graduation date, enrollment, and coursework):\n${JSON.stringify(education)}${skillsBlock}\n\nExperience bank:\n${JSON.stringify(bank)}`;
 
