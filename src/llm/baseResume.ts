@@ -75,7 +75,7 @@ Selection rules (these differ from tailored generation - read them carefully):
 - Use the applicant's real school, degree and graduation date exactly as given in the Education line. Never
   invent or upgrade a degree; leave "degree" an empty string if none is provided.
 - "coursework": only courses explicitly listed in the Education source.
-- Set education_position to "top" only when the Education source says the candidate is currently enrolled.
+- Set education_position to "top" when the Education source says the candidate is currently enrolled or graduated within the last two years, otherwise "after_experience". Note this field is RE-DERIVED server-side from the parsed education dates and your answer is not what ships; set it anyway so the object validates.
   Otherwise use "after_experience".
 
 Writing rules (identical to the tailored path):

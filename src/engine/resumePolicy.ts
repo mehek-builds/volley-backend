@@ -79,18 +79,22 @@ export function deriveCandidateContext(
     hasEducation &&
     (hasGraduationEvidence ? futureDate : education.currently_enrolled === true);
 
-  /* Education leads the page when the candidate is enrolled, RECENTLY graduated, or when we
-   * genuinely cannot tell. Only a clearly-finished, not-recent degree drops below experience.
+  /* Education leads the page when the candidate is enrolled or RECENTLY graduated. Anything else,
+   * including a resume that gives no graduation evidence at all, puts experience first.
    *
-   * The unknown case is the one that matters and it used to fall the wrong way. parse.ts sets
-   * currently_enrolled true "only when the resume explicitly says expected graduation, candidate,
-   * current student", so false means "no explicit evidence", NOT "this person has graduated" -
-   * and the old rule read that silence as graduated. Measured on five real sample resumes
-   * (2026-07-27), four were current students and three of them had education pushed below
-   * experience, because their resumes print a placeholder or bare graduation date with no
-   * "Expected". For a product whose users are students and new grads, silence should resolve
-   * toward student: being wrong that way costs a slightly unusual ordering, being wrong the other
-   * way buries the single most relevant fact about the candidate.
+   * CHANGED 2026-07-27 on Mehek's ruling, and this reverses a decision made earlier the same day.
+   * The unknown case used to resolve toward "student", on the reasoning that parse.ts sets
+   * currently_enrolled true only for an explicit signal, so false means "the resume did not say"
+   * rather than "this person graduated". That was measured and correct FOR A STUDENT PRODUCT:
+   * three of five real sample resumes landed in the unknown bucket and had education wrongly
+   * pushed down.
+   *
+   * The audience is now job seekers, not students. Under that framing the same silence points the
+   * other way: most people who are not students have simply finished, and leading with a degree
+   * they got years ago buries the work history an employer is reading for. A current student is
+   * still protected, because a future graduation date already makes currentlyEnrolled true above,
+   * and a genuine recent graduate is still protected by RECENT_GRADUATE_YEARS. What changes is
+   * only the case where we have no evidence in either direction.
    */
   const graduationYear = graduation ? graduation.getFullYear() : year;
   const yearsSinceGraduation =
@@ -103,8 +107,7 @@ export function deriveCandidateContext(
     yearsSinceGraduation !== undefined &&
     yearsSinceGraduation >= 0 &&
     yearsSinceGraduation <= RECENT_GRADUATE_YEARS;
-  const educationLeads =
-    hasEducation && (currentlyEnrolled || recentGraduate || !hasGraduationEvidence);
+  const educationLeads = hasEducation && (currentlyEnrolled || recentGraduate);
 
   return {
     currently_enrolled: currentlyEnrolled,
