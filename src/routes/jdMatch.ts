@@ -7,6 +7,7 @@ import { requireAuth } from '../middleware/auth';
 import { resumeSpecText } from '../engine/resumeValidate';
 import { scoreJdMatch, scoreBand, MIN_SCORABLE_TERMS } from '../engine/jdMatch';
 import { findGapEvidence } from '../engine/gapEvidence';
+import { checkResumeHealth } from '../engine/resumeHealth';
 import { readExperienceBank } from '../db/experienceBank';
 import type { ResumeSpec } from '../llm/resumeSpec';
 
@@ -32,6 +33,38 @@ const evidenceBodySchema = z.object({
     .array(z.object({ term: z.string().min(1).max(120), display: z.string().min(1).max(120) }))
     .max(60, 'too many terms to look up at once'),
   resume_text: z.string().min(1).max(30_000).optional(),
+});
+
+/**
+ * The spec as currently edited in the dashboard. Sent rather than read from storage because the
+ * check has to describe the resume ON SCREEN, not the last one saved.
+ *
+ * A REAL schema, not z.unknown() + sanitizeEditedSpec. Two reasons, both found in review:
+ *
+ *  - sanitizeEditedSpec only CASTS; it does not type-check. A bullet that was not a string reached
+ *    weakOpening and threw, so a malformed body produced a 500 where a 400 belongs.
+ *  - sanitizeEditedSpec is the SAVE gate, and it REJECTS any bullet over BULLET_MAX_CHARS. Running
+ *    the health check through it made the too-long finding unreachable: the one moment the student
+ *    needed to be told a bullet was too long, the route 400d and the panel said it could not check
+ *    the resume. A validator for a read-only quality report must not enforce the save rules.
+ *
+ * Bounds mirror what a one-page resume can physically hold, so a pasted blob cannot pin the loop.
+ */
+const healthBodySchema = z.object({
+  spec: z.object({
+    experience: z
+      .array(
+        z.object({
+          org: z.string().max(200).default(''),
+          title: z.string().max(200).optional(),
+          date_range: z.string().max(100).optional(),
+          bullets: z.array(z.string().max(2_000)).max(30).default([]),
+        }),
+      )
+      .max(20)
+      .default([]),
+    skills: z.array(z.string().max(120)).max(100).default([]),
+  }),
 });
 
 const bodySchema = z.object({
@@ -130,5 +163,25 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
     );
 
     return reply.status(200).send({ answers });
+  });
+
+  /**
+   * POST /resume/health
+   *
+   * The quality rules the generator already enforces, reported to the student instead of only to
+   * the model. Named findings with the bullet each fired on, ordered so the top one is worth fixing
+   * first. Deliberately NOT a score: Litos already has one number that means something specific,
+   * and a second one competing with it teaches students to average two different questions.
+   */
+  // 64KB is generous for a one-page resume and well under Fastify's 1MB default.
+  fastify.post('/resume/health', { preHandler: requireAuth, bodyLimit: 64 * 1024 }, async (request: FastifyRequest, reply: FastifyReply) => {
+    let body: z.infer<typeof healthBodySchema>;
+    try {
+      body = healthBodySchema.parse(request.body);
+    } catch {
+      return reply.status(400).send({ error: 'Invalid request body' });
+    }
+
+    return reply.status(200).send(checkResumeHealth(body.spec as unknown as ResumeSpec));
   });
 }
