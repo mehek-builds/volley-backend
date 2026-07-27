@@ -10,6 +10,8 @@ import { findGapEvidence } from '../engine/gapEvidence';
 import { checkResumeHealth } from '../engine/resumeHealth';
 import { buildFunnel } from '../engine/funnel';
 import { deriveStage, isStage, STAGES, BOARD_LIMIT } from '../engine/pipeline';
+import { buildInterviewPrep } from '../engine/interviewPrep';
+import { extractJdTerms } from '../engine/jdMatch';
 import { generated_resumes, autofill_events } from '../db/schema';
 import { readExperienceBank } from '../db/experienceBank';
 import type { ResumeSpec } from '../llm/resumeSpec';
@@ -318,5 +320,56 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
 
     if (updated.length === 0) return reply.status(404).send({ error: 'Application not found' });
     return reply.status(200).send({ id, stage });
+  });
+
+  /**
+   * POST /interview-prep
+   *
+   * The questions this posting implies, each answered by the student's own resume bullet or marked
+   * as having no answer. Derived, never generated: see engine/interviewPrep.ts.
+   */
+  fastify.post('/interview-prep', { preHandler: requireAuth, bodyLimit: 128 * 1024 }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const userId = request.jwtPayload!.userId;
+
+    const parsed = z
+      .object({
+        jd_text: z.string().min(1).max(60_000),
+        spec: z
+          .object({
+            experience: z
+              .array(
+                z.object({
+                  org: z.string().max(200).default(''),
+                  bullets: z.array(z.string().max(2_000)).max(30).default([]),
+                }),
+              )
+              .max(20)
+              .default([]),
+          })
+          .optional(),
+      })
+      .safeParse(request.body);
+    if (!parsed.success) return reply.status(400).send({ error: 'Invalid request body' });
+
+    let spec = parsed.data.spec as unknown as ResumeSpec | undefined;
+    if (!spec) {
+      const [profile] = await db.select().from(profiles).where(eq(profiles.user_id, userId));
+      const stored = profile?.base_resume_json as ResumeSpec | null | undefined;
+      if (!stored) return reply.status(404).send({ error: 'No base resume yet' });
+      spec = stored;
+    }
+
+    // extractJdTerms directly, not scoreJdMatch('', jd) with an empty resume. That call read as if
+    // it merged two meaningful sets when `matched` is structurally always empty against an empty
+    // resume, and it dragged the scorer's user-facing copy along with it into a panel that is not
+    // about scoring.
+    const prep = buildInterviewPrep(extractJdTerms(parsed.data.jd_text), spec);
+    if (prep.items.length === 0) {
+      return reply.status(200).send({
+        ...prep,
+        reason: 'This posting does not name enough specific skills to prepare questions from.',
+      });
+    }
+    return reply.status(200).send(prep);
   });
 }
