@@ -8,6 +8,7 @@ import { and, eq, gte, lt, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import { allowHourly, rateLimitedReply, LIMITS, TRIAL_DAYS } from '../middleware/quota';
 import { PRODUCT_LINKS, PRODUCT_NAME } from '../lib/product';
+import { emailSender, sendEmail } from '../lib/email';
 import { requireAuth, type JWTPayload } from '../middleware/auth';
 import {
   hashPassword,
@@ -196,21 +197,6 @@ export function verificationFailure(
   return null;
 }
 
-function verificationSender(): string {
-  const configured = process.env.RESEND_FROM?.trim() || 'onboarding@resend.dev';
-  const openBracket = configured.lastIndexOf('<');
-  const mailbox =
-    openBracket >= 0 && configured.endsWith('>')
-      ? configured.slice(openBracket + 1, -1).trim()
-      : configured;
-
-  if (!z.string().email().safeParse(mailbox).success) {
-    throw new Error('RESEND_FROM must contain a valid email address');
-  }
-
-  return `${PRODUCT_NAME} <${mailbox}>`;
-}
-
 type SessionTokenOptions = {
   email?: string | null;
   isGuest?: boolean;
@@ -259,7 +245,7 @@ export function buildVerificationEmail(email: string, code: string) {
   const iconUrl = new URL('/icon.png', PRODUCT_LINKS.website).toString();
 
   return {
-    from: verificationSender(),
+    from: emailSender(),
     to: [email],
     subject: `${code} is your ${PRODUCT_NAME} verification code`,
     html: `<!doctype html>
@@ -316,34 +302,15 @@ export function buildVerificationEmail(email: string, code: string) {
   };
 }
 
-// Sends the 6-digit code via Resend's HTTPS API. Requires RESEND_API_KEY and
-// RESEND_FROM, which must be a sender on a domain verified in Resend.
+// Sends the 6-digit code. The Resend call itself lives in lib/email.ts, which is
+// the backend's single outbound-mail path; this keeps its signature so callers and
+// tests are unaffected by that move.
 export async function sendVerificationEmail(
   email: string,
   code: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<string> {
-  const res = await fetchImpl('https://api.resend.com/emails', {
-    method: 'POST',
-    // Bound the wait so a hung Resend can't hold the request open indefinitely; the caller
-    // treats a throw here as "verification unavailable" and 503s the client to the fallback.
-    signal: AbortSignal.timeout(10000),
-    headers: {
-      Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(buildVerificationEmail(email, code)),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => res.statusText);
-    throw new Error(`Resend API ${res.status}: ${text}`);
-  }
-
-  const result = (await res.json().catch(() => null)) as { id?: unknown } | null;
-  if (typeof result?.id !== 'string' || result.id.length === 0) {
-    throw new Error('Resend API accepted the request without returning an email id');
-  }
-  return result.id;
+  return sendEmail(buildVerificationEmail(email, code), fetchImpl);
 }
 
 export async function authRoutes(fastify: FastifyInstance) {
