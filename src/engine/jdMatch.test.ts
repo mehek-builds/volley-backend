@@ -413,6 +413,42 @@ Responsibilities
  * A behavioural test of jdMatch.ts can never catch this. Only a test that reads the composition
  * root can.
  */
+describe('a posting does not ask for itself', () => {
+  const JD =
+    'Litos QA is validating a Software Engineering Intern workflow for Summer 2027. The role uses ' +
+    'TypeScript, React, Node.js and PostgreSQL. Candidates should be enrolled at a university in the United States.';
+  const CONTEXT = { company: 'Litos QA Receipt', role: 'Software Engineering Intern - Summer 2027' };
+
+  test('the company name, the job title, the season and the country are not requirements', () => {
+    // Found on a real posting in production, not in a fixture. The gap list told a student their
+    // resume "does not mention" the name of the company they were applying to.
+    const keys = extractJdTerms(JD, CONTEXT).map((t) => t.term);
+    for (const junk of ['litos qa', 'litos', 'qa', 'engineering intern', 'software engineering', 'summer', 'united states']) {
+      assert.ok(!keys.includes(junk), `"${junk}" is the posting describing itself`);
+    }
+  });
+
+  test('every real requirement still survives the exclusion', () => {
+    const keys = extractJdTerms(JD, CONTEXT).map((t) => t.term);
+    for (const real of ['typescript', 'react', 'nodejs', 'postgresql']) {
+      assert.ok(keys.includes(real), `"${real}" is a real requirement`);
+    }
+  });
+
+  test('without a context nothing is excluded beyond the standing list', () => {
+    const keys = extractJdTerms(JD).map((t) => t.term);
+    assert.ok(keys.includes('litos qa'), 'the exclusion is driven by job_context, not guessed');
+  });
+
+  test('a company whose name IS a skill does not erase the skill for everyone else', () => {
+    // Only this posting's own context is excluded, and only for this call.
+    const jd = 'Requirements\n- Strong Python and Docker experience\n';
+    const keys = extractJdTerms(jd, { company: 'Docker Inc', role: 'Engineer' }).map((t) => t.term);
+    assert.ok(!keys.includes('docker'), 'applying to Docker, Docker is not a requirement to list');
+    assert.ok(extractJdTerms(jd, { company: 'Acme', role: 'Engineer' }).map((t) => t.term).includes('docker'));
+  });
+});
+
 describe('scorability needs signal, not just a term count', () => {
   test('a posting of company, city and people names is not scorable', () => {
     // Cleared a floor of 6 and produced a confident 0% "Weak match" with Bob Smith, Jane Doe and
