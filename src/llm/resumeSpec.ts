@@ -22,7 +22,7 @@ export interface ResumeSpec {
     date_range: string;
     bullets: string[];
   }>;
-  // The student's OWN skills, those matching the JD first. NOT "JD keywords surfaced first", which
+  // The applicant's OWN skills, those matching the JD first. NOT "JD keywords surfaced first", which
   // is what this said and what the prompt asked for - with no skills source in the system, that
   // instruction was an invitation to keyword-stuff, and the model took it (R-015).
   skills: string[];
@@ -30,7 +30,7 @@ export interface ResumeSpec {
   // this field and the validator support for it are retained deliberately, because the plumbing is
   // right and only the model's judgement was not. See the DISABLED note below before re-enabling.
   //
-  // The idea: writing a skill the student HAS in the JD's words ("ETL" for their "SQL") is honest ATS
+  // The idea: writing a skill the applicant HAS in the JD's words ("ETL" for their "SQL") is honest ATS
   // tailoring, and declared mode drops anything not verbatim in the list, so a rename needs a
   // declared target to survive. That guard works: a rename can never introduce a skill they never
   // claimed.
@@ -60,7 +60,7 @@ export interface ResumeSpec {
 // pressure_test.py (~/Documents/Internship Apps/_resume-engine/), the same quality bar
 // applied to Mehek's own resume builds. Encoded here as generation instructions; enforced
 // again post-generation by engine/resumeValidate.ts so drift gets caught, not just discouraged.
-export const RESUME_SYSTEM_PROMPT = `You are a resume-tailoring engine. Given a job description and a student's full
+export const RESUME_SYSTEM_PROMPT = `You are a resume-tailoring engine. Given a job description and an applicant's full
 experience bank (every job/project they've ever had, with every bullet-point phrasing they've used for
 each achievement), select and lightly rewrite the best-fit subset for THIS specific posting.
 
@@ -75,9 +75,9 @@ Return ONLY valid JSON with no explanation or markdown wrapping, matching this e
 }
 
 Rules:
-- If an APPROVED BASE RESUME is supplied, it is your starting point. The student has read and
+- If an APPROVED BASE RESUME is supplied, it is your starting point. The applicant has read and
   accepted it, so carrying an entry over is the default and swapping one out is the exception you
-  justify against this specific posting. Its wording is the student's own corrected phrasing and is
+  justify against this specific posting. Its wording is the applicant's own corrected phrasing and is
   authoritative over the raw bank text for the same work. The experience bank still holds everything
   they have ever done, and it is where a swap comes FROM when this job is better served by work the
   base resume left off.
@@ -96,23 +96,23 @@ Rules:
   grounded achievement or collaboration bullet when the bank supports it. Do not create a separate
   values section, make generic personality claims, or displace stronger role evidence.
 - Copy each entry's type from the experience bank. Do not turn a project into a job or a job into leadership.
-- "skills": EVERY entry must be one of the student's Skills list, either copied as written there or
+- "skills": EVERY entry must be one of the applicant's Skills list, either copied as written there or
   renamed under the "skill_source" rule below. If the Skills list is empty, use only skills clearly
   evidenced by a bullet you selected.
 - SELECT, do not dump. Choose the 8-10 Skills-list entries most relevant to THIS JD, most relevant
-  first, and leave the rest out. A SKILLS line listing every skill the student has tells the reader
+  first, and leave the rest out. A SKILLS line listing every skill the applicant has tells the reader
   nothing about their fit for this role, and pushes the relevant ones below the fold. Omitting a
   skill here does not deny it: it is a different job's resume.
 - Each skill appears exactly ONCE, and is written EXACTLY as it appears in the Skills list. Copy the
-  student's own wording character for character. Do not re-word, re-label, generalise, expand an
-  abbreviation, or substitute the job description's vocabulary. If the JD says "ETL" and the student
+  applicant's own wording character for character. Do not re-word, re-label, generalise, expand an
+  abbreviation, or substitute the job description's vocabulary. If the JD says "ETL" and the applicant
   wrote "SQL", the resume says "SQL".
 - "skill_source": leave it out. Renaming is DISABLED (see below).
-- NEVER add a skill because the job description asks for it. If the JD wants a tool and the student's
+- NEVER add a skill because the job description asks for it. If the JD wants a tool and the applicant's
   Skills list doesn't have it, they don't have it: leave it out. A resume that omits a skill costs an
-  interview; a resume that claims one the student lacks costs their credibility in the screen.
+  interview; a resume that claims one the applicant lacks costs their credibility in the screen.
 - Never invent an employer, title, metric, or skill that isn't grounded in the experience bank.
-- Use the student's real school, degree, and graduation date exactly as given in the Education line; never invent or
+- Use the applicant's real school, degree, and graduation date exactly as given in the Education line; never invent or
   upgrade a degree, and leave "degree" an empty string if none is provided.
 - "coursework": include only courses explicitly listed in the Education source. Never use the job description as evidence for a course.
 - Set education_position to "top" only when the Education source says the candidate is currently enrolled. Otherwise use "after_experience".
@@ -120,7 +120,7 @@ Rules:
   when it opens with a verb that is not on the approved list. In that case rewrite the OPENING only,
   keeping every fact, number and noun exactly as the source has them. A bullet that starts with
   Assisted, Supported, Helped, Performed, Participated, Attended, Worked or Engaged must be recast
-  around what the student actually did.
+  around what the applicant actually did.
 - Every bullet starts with a strong action verb, one of: ${[...STRONG_VERBS].join(', ')}.
 - Every bullet is 8-30 words, one sentence, no more than two "and"s (prefer ; : or - over a run-on).
 - Include a real number, percent, dollar amount, or multiplier in a bullet whenever the source material
@@ -186,14 +186,14 @@ export async function generateResumeSpec(
     coursework?: string[];
   },
   feedback?: string[],
-  // The student's declared skills (profiles.skills). Empty/undefined means they never gave us a
+  // The applicant's declared skills (profiles.skills). Empty/undefined means they never gave us a
   // list, which the validator treats as soft-grounding rather than as "they have no skills".
   skills?: string[] | null,
   // Hard per-call wall-clock bound. The route runs inside Vercel's 60s function ceiling and passes
   // its real remaining budget here; a call that outlives it is aborted (APIUserAbortError), which
   // the route's overload classifier deliberately treats as NOT retryable - it is our own deadline.
   timeoutMs?: number,
-  /* The student's APPROVED base resume, when they have one.
+  /* The applicant's APPROVED base resume, when they have one.
    *
    * Appended rather than inserted mid-signature so existing positional callers keep working. */
   baseSpec?: ResumeSpec | null,
@@ -201,7 +201,7 @@ export async function generateResumeSpec(
   /* THE BASE RESUME IS THE STARTING POINT, NOT MORE CONTEXT.
    *
    * Without this the tailored path re-selected from the raw bank on every application, which had
-   * two consequences. The student's approved page was ignored, so a resume they had read and
+   * two consequences. The applicant's approved page was ignored, so a resume they had read and
    * accepted bore no necessary relationship to what actually got submitted. Worse, any bullet they
    * EDITED on /start was stranded: edits are stored on the base resume, while generation read
    * `experience_bank.bullet_variants`, so a correction they made by hand never reached a single
@@ -213,16 +213,16 @@ export async function generateResumeSpec(
    * better-defined task than reselecting from scratch, and it makes the base resume the stable
    * spine every application is a variation on. */
   const baseBlock = baseSpec?.experience?.length
-    ? `\n\nThe student's APPROVED BASE RESUME. This is your starting point, and its wording is
+    ? `\n\nThe applicant's APPROVED BASE RESUME. This is your starting point, and its wording is
 authoritative: where a bullet here covers the same work as a bank entry, the bullet BELOW is the
-student's own corrected phrasing and must be preferred verbatim.
+applicant's own corrected phrasing and must be preferred verbatim.
 ${JSON.stringify({ experience: baseSpec.experience, skills: baseSpec.skills })}
 
 How to use it:
 - Keep an entry from the base resume unless the bank holds one that fits THIS posting clearly
   better. Carrying an entry over is the default; swapping is the exception you justify.
 - When you do swap, take the replacement from the experience bank below - the bank holds everything
-  the student has done, including work the base resume left off.
+  the applicant has done, including work the base resume left off.
 - Re-order entries and bullets so the strongest evidence for THIS job reads first, even when the
   set of entries does not change.
 - Never invent. Everything must still trace to the bank or to the base resume above.`
@@ -239,10 +239,10 @@ How to use it:
   // cache_control marker because it is the large one - a marker on the short rules block alone
   // was below the model's minimum cacheable prefix and silently cached nothing. Bank is
   // serialized compactly (no 2-space pretty-print) to nearly halve its token weight.
-  // The skills list sits in the cached prefix alongside the bank: it is per-student, not per-JD, so
+  // The skills list sits in the cached prefix alongside the bank: it is per-applicant, not per-JD, so
   // it is identical across both attempts of a generate and across every application they file.
   const skillsBlock = skills?.length
-    ? `\n\nSkills list (the student's own skills - the ONLY skills that may appear in "skills"):\n${JSON.stringify(skills)}`
+    ? `\n\nSkills list (the applicant's own skills - the ONLY skills that may appear in "skills"):\n${JSON.stringify(skills)}`
     : `\n\nSkills list: none provided. Use only skills clearly evidenced by a bullet you selected, and do not add skills from the job description.`;
   const contextBlock = `Job: ${role} at ${company}\n\nJob description:\n${jdText}\n\nEducation source (copy facts exactly; this is the only authority for school, degree, graduation date, enrollment, and coursework):\n${JSON.stringify(education)}${skillsBlock}${baseBlock}\n\nExperience bank:\n${JSON.stringify(bank)}`;
   const response = await client.messages.create(
