@@ -191,7 +191,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1),
     ]);
     if (bank.length === 0) {
-      return reply.status(400).send({ error: 'No experience bank found - complete onboarding first' });
+      return reply.status(400).send({ error: 'Nothing saved about your work yet. Finish setting up first.' });
     }
 
     // NULL is normal and must stay non-fatal: accounts created before the base-resume step exists,

@@ -107,7 +107,7 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
       if (!spec) {
         // Mirrors GET /resume/base. The dashboard uses this to route the student to /start rather
         // than showing them a 0% that is about the missing resume, not about their fit.
-        return reply.status(404).send({ error: 'No base resume yet' });
+        return reply.status(404).send({ error: 'No main resume yet' });
       }
       storedResumeText = resumeSpecText(spec);
     }
@@ -359,7 +359,7 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
     if (!spec) {
       const [profile] = await db.select().from(profiles).where(eq(profiles.user_id, userId));
       const stored = profile?.base_resume_json as ResumeSpec | null | undefined;
-      if (!stored) return reply.status(404).send({ error: 'No base resume yet' });
+      if (!stored) return reply.status(404).send({ error: 'No main resume yet' });
       spec = stored;
     }
 

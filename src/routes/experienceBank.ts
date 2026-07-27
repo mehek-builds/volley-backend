@@ -58,7 +58,7 @@ export async function experienceBankRoutes(fastify: FastifyInstance) {
       });
     } catch (err) {
       fastify.log.error(err);
-      return reply.status(500).send({ error: 'Failed to save experience bank' });
+      return reply.status(500).send({ error: 'Could not save your work history' });
     }
 
     const rows = await readExperienceBank(userId);

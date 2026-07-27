@@ -477,7 +477,7 @@ export async function profileRoutes(fastify: FastifyInstance) {
     } catch (err) {
       // Loud: an account whose bank stayed empty cannot generate a resume or draft an answer,
       // which is exactly the silent-broken-account failure this seeding exists to end.
-      fastify.log.error({ err, userId }, 'failed to seed experience bank from resume parse');
+      fastify.log.error({ err, userId }, 'failed to seed experience bank from resume parse'); // vocab-allow: server log
     }
 
     // Fill the academic gaps the upload already answered. Best-effort and non-fatal for the same
