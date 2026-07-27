@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { courseworkIsUngrounded, excerpt, startsWithStrongVerb } from './resumeValidate';
-import { stripEmDashes } from './resumePolicy';
+import { courseworkIsUngrounded, excerpt, pruneUngroundedContent, startsWithStrongVerb } from './resumeValidate';
+import { normalizeDashesForPrint } from './resumePolicy';
 
 /* The case that started this: a UW sample CV listed "Race, Gender, and Sexuality in the Media".
  * The old check split the rendered line on "," and reported a verbatim-copied coursework line as
@@ -135,16 +135,16 @@ describe('excerpt', () => {
 
 /* The em dash reached a rendered PDF through the one spec field the content check did not read.
  * Found 2026-07-27 when the new ATS gate refused to save a WVU criminal-justice resume. */
-describe('stripEmDashes', () => {
+describe('normalizeDashesForPrint', () => {
   test('a date range is the field this was missed in', () => {
     assert.deepEqual(
-      stripEmDashes({ date_range: 'Sept. 2019 — Present' }),
+      normalizeDashesForPrint({ date_range: 'Sept. 2019 — Present' }),
       { date_range: 'Sept. 2019 - Present' },
     );
   });
 
   test('en dashes go too, they arrive from the same place', () => {
-    assert.equal(stripEmDashes('May 2024 – Aug 2024'), 'May 2024 - Aug 2024');
+    assert.equal(normalizeDashesForPrint('May 2024 – Aug 2024'), 'May 2024 - Aug 2024');
   });
 
   test('reaches every field, including nested bullets and skills', () => {
@@ -153,19 +153,48 @@ describe('stripEmDashes', () => {
       skills: ['C — D'],
       experience: [{ org: 'E', bullets: ['Built it — fast.'] }],
     };
-    const said = stripEmDashes(spec);
+    const said = normalizeDashesForPrint(spec);
     assert.equal(said.school, 'A - B');
     assert.deepEqual(said.skills, ['C - D']);
     assert.equal(said.experience[0].bullets[0], 'Built it - fast.');
   });
 
   test('a string with no em dash is returned untouched, and non-strings survive', () => {
-    assert.equal(stripEmDashes('Built the thing.'), 'Built the thing.');
-    assert.deepEqual(stripEmDashes({ n: 3, b: true, z: null }), { n: 3, b: true, z: null });
+    assert.equal(normalizeDashesForPrint('Built the thing.'), 'Built the thing.');
+    assert.deepEqual(normalizeDashesForPrint({ n: 3, b: true, z: null }), { n: 3, b: true, z: null });
   });
 
   test('spacing around the dash is normalised, not doubled', () => {
-    assert.equal(stripEmDashes('A—B'), 'A - B');
-    assert.equal(stripEmDashes('A — B'), 'A - B');
+    assert.equal(normalizeDashesForPrint('A—B'), 'A - B');
+    assert.equal(normalizeDashesForPrint('A — B'), 'A - B');
+  });
+});
+
+/* A WVU federal-resume TEMPLATE, put through the flow 2026-07-27: its placeholder bullets were
+ * correctly dropped as ungrounded, and the build then saved a resume with two empty entries. */
+describe('an entry left with no bullets', () => {
+  const bank = [{
+    id: 'a', user_id: 'u', type: 'job', org: 'Real Co', title: 'Analyst',
+    date_range: '2024', bullet_variants: ['Analyzed 40 filings a week.'], tags: [],
+  }] as unknown as Parameters<typeof pruneUngroundedContent>[1];
+
+  test('is dropped rather than rendered as a heading over white space', () => {
+    const { spec } = pruneUngroundedContent({
+      school: 'X', degree: 'Y', grad_date: 'Z', coursework: '', skills: [],
+      experience: [
+        { org: 'Real Co', title: 'Analyst', date_range: '2024', bullets: ['Analyzed 40 filings a week.'] },
+        { org: 'Real Co', title: 'Analyst', date_range: '2024', bullets: ['Cured cancer single-handedly.'] },
+      ],
+    } as never, bank, null);
+    assert.equal(spec.experience.length, 1);
+    assert.equal(spec.experience[0].bullets.length, 1);
+  });
+
+  test('says which entry went, so the note is actionable', () => {
+    const { removed } = pruneUngroundedContent({
+      school: 'X', degree: 'Y', grad_date: 'Z', coursework: '', skills: [],
+      experience: [{ org: 'Real Co', title: 'Analyst', date_range: '2024', bullets: ['Cured cancer.'] }],
+    } as never, bank, null);
+    assert.ok(removed.some((r) => r.includes('Real Co') && r.includes('entirely')), removed.join(' | '));
   });
 });

@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { contactHeaderFrom, targetRoleText, metricGapsIn, VERB_SUGGESTIONS } from './baseResume';
+import { contactHeaderFrom, targetRoleText, metricGapsIn, sanitizeEditedSpec, VERB_SUGGESTIONS } from './baseResume';
 import { startsWithStrongVerb } from '../engine/resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
 
@@ -130,5 +130,59 @@ describe('the verbs we suggest when a rewrite pass fails', () => {
     for (const verb of ['Organized', 'Processed', 'Trained', 'Prepared']) {
       assert.ok(VERB_SUGGESTIONS.includes(verb), verb);
     }
+  });
+});
+
+/* Findings from the code review of this branch, pinned so they cannot come back. */
+describe('verb derivation cannot admit what the vocabulary rules reject', () => {
+  test('"Found" does not ride in on "founded"', () => {
+    // found -> founded is on the list because founding a company is a real act.
+    // "Found and fixed 12 defects" is not that.
+    assert.equal(startsWithStrongVerb('Found and fixed 12 defects in the intake pipeline.'), false);
+    assert.equal(startsWithStrongVerb('Founded a student consultancy.'), true, 'the real verb still passes');
+  });
+
+  test('a doubled final consonant is derived, so a present-tense CV is not punished', () => {
+    // The bound used to sit on the whole word and demanded five letters, which excluded every word
+    // the rule is for. "shipped" and "planned" were on the list the whole time.
+    assert.equal(startsWithStrongVerb('Ship weekly releases to production.'), true);
+    assert.equal(startsWithStrongVerb('Shipped weekly releases to production.'), true);
+  });
+
+  test('the doubling rule still does not invent strength', () => {
+    for (const bullet of ['Chat with the team daily.', 'Nap between shifts.', 'Beg for an extension.']) {
+      assert.equal(startsWithStrongVerb(bullet), false, bullet);
+    }
+  });
+});
+
+/* PUT /resume/base takes user text into the document every tailored resume is built from. Before
+ * this it stored exactly what was sent, routing around the rules the build had just enforced. */
+describe('sanitizeEditedSpec', () => {
+  const withBullet = (bullet: string) => ({
+    school: 'USC', degree: 'BS', grad_date: 'May 2028', coursework: '', skills: [],
+    experience: [{ org: 'Acme', title: 'X', date_range: 'Y', bullets: [bullet] }],
+  });
+
+  test('an em dash typed into the metrics box cannot reach storage', () => {
+    const { spec } = sanitizeEditedSpec(withBullet('Managed intake — 12 clients a week.'));
+    assert.equal(spec!.experience[0].bullets[0], 'Managed intake - 12 clients a week.');
+  });
+
+  test('a bullet too long for the page is refused, not silently cut', () => {
+    const { spec, error } = sanitizeEditedSpec(withBullet(`Managed ${'x'.repeat(300)}`));
+    assert.equal(spec, undefined);
+    assert.ok(error?.includes('Acme'), error);
+    assert.ok(error?.includes('Shorten it'), error);
+  });
+
+  test('an ordinary edit passes through untouched', () => {
+    const { spec, error } = sanitizeEditedSpec(withBullet('Managed a caseload of 12 clients a week.'));
+    assert.equal(error, undefined);
+    assert.equal(spec!.experience[0].bullets[0], 'Managed a caseload of 12 clients a week.');
+  });
+
+  test('a spec with no experience is not a crash', () => {
+    assert.equal(sanitizeEditedSpec({}).error, undefined);
   });
 });

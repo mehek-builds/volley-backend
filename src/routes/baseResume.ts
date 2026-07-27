@@ -5,7 +5,11 @@ import { profiles, application_profile, targeting } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { readExperienceBank } from '../db/experienceBank';
 import { generateBaseResumeSpec, type BaseResumeEvent } from '../llm/baseResume';
-import { applyResumePolicy, type CandidateEducation } from '../engine/resumePolicy';
+import {
+  applyResumePolicy,
+  normalizeDashesForPrint,
+  type CandidateEducation,
+} from '../engine/resumePolicy';
 import {
   findPdfTextFidelityIssues,
   renderResumePdf,
@@ -13,6 +17,7 @@ import {
 } from '../engine/resumeRender';
 import { extractPdfText } from '../lib/pdfText';
 import {
+  BULLET_MAX_CHARS,
   validateResumeSpec,
   validatePdfLayout,
   pruneUngroundedContent,
@@ -36,6 +41,10 @@ import type { ResumeSpec } from '../llm/resumeSpec';
  */
 
 const REQUEST_DEADLINE_MS = 120_000; // vercel.json allows 300s; this is the model-call bound.
+/* The point past which another verb pass cannot finish inside the function's 300s. One more model
+ * call can take REQUEST_DEADLINE_MS, and the render plus PDF parse plus checks after it need room
+ * of their own, so the loop stops well before the ceiling rather than at it. */
+const VERB_PASS_BUDGET_MS = 140_000;
 
 /* A short menu of approved verbs, handed to the model when a rewrite pass fails.
  *
@@ -202,6 +211,32 @@ function educationFrom(parsed: unknown): CandidateEducation {
   };
 }
 
+/* A hand-edited spec, made safe to store.
+ *
+ * Whatever arrives at PUT /resume/base is USER TEXT, and it goes into the one document every
+ * tailored resume is built from (resume.ts reads base_resume_json as its starting point). It used to
+ * be stored exactly as sent, which routed around every rule the build had enforced seconds earlier:
+ * the em-dash ban, the bullet length cap, the one-page fit. An em dash typed into the metrics box on
+ * /start would therefore fail validatePdfLayout on every FUTURE resume, with nothing to connect the
+ * two for the student.
+ *
+ * The dash substitution is the same deterministic pass the build runs, so an edit and a build cannot
+ * disagree about punctuation. An over-long bullet is REJECTED rather than truncated: this is the
+ * student's own wording, and silently cutting it mid-sentence is worse than saying no.
+ */
+export function sanitizeEditedSpec(raw: unknown): { spec?: ResumeSpec; error?: string } {
+  const spec = normalizeDashesForPrint(raw) as ResumeSpec;
+  const tooLong = (spec.experience ?? [])
+    .flatMap((entry) => (entry.bullets ?? []).map((bullet) => ({ org: entry.org, bullet })))
+    .find(({ bullet }) => typeof bullet === 'string' && bullet.length > BULLET_MAX_CHARS);
+  if (tooLong) {
+    return {
+      error: `One bullet in ${tooLong.org} is longer than ${BULLET_MAX_CHARS} characters and will not fit the page. Shorten it and save again.`,
+    };
+  }
+  return { spec };
+}
+
 export async function baseResumeRoutes(fastify: FastifyInstance) {
   fastify.get('/resume/base', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
@@ -292,6 +327,7 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
         );
       };
 
+      const buildStartedAt = Date.now();
       let rawSpec = await generate();
 
       /* THE HARD RULE, enforced until it holds.
@@ -315,6 +351,15 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       for (let pass = 1; pass <= MAX_VERB_PASSES; pass += 1) {
         const weak = weakVerbBullets(rawSpec);
         if (weak.length === 0) break;
+        /* REQUEST_DEADLINE_MS bounds one model call, not the request. Three retries plus the first
+         * pass is 480s of model time against vercel.json's maxDuration of 300, and blowing that
+         * kills the function mid-stream: the client gets a truncated SSE with neither a done nor an
+         * error frame, and the finally never runs. So the loop stops when there is no longer room
+         * for another call plus the render and check that have to follow it. */
+        if (Date.now() - buildStartedAt > VERB_PASS_BUDGET_MS) {
+          fastify.log.warn({ userId, pass }, 'out of time for another verb pass; shipping with warnings');
+          break;
+        }
         send({ event: 'stage', stage: 'polishing' });
         // The client paints entries positionally, so it has to clear before the re-stream or a
         // shorter later pass would leave stale entries from the first behind.
@@ -367,19 +412,30 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       send({ event: 'stage', stage: 'checking' });
       const contact = contactHeaderFrom(profile.parsed_json, appProfile, email);
       let ats: AtsVerdict;
+      /* What the renderer actually PRINTED, which is not always what it was handed: planResumeLayout
+       * trims to make one page (a third bullet, then whole entries, then coursework, then skills).
+       * Checking the untrimmed spec against the printed text asks the PDF to contain lines the
+       * trimmer just removed, so any student whose content overflowed a page failed the gate and was
+       * stranded at this step - deterministically, so a rebuild would not clear it. resume.ts has
+       * always reassigned `spec = rendered.spec` here; this route was the one that did not. */
+      let printed = spec;
       try {
         const rendered = await renderResumePdf(spec, contact, targetText);
+        printed = rendered.spec;
         const parsedPdf = await extractPdfText(rendered.buffer);
         const layout = validatePdfLayout(parsedPdf.text, parsedPdf.numpages);
+        const issues = [
+          ...layout.issues,
+          ...findPdfTextFidelityIssues(parsedPdf.text, printed, contact),
+        ];
         ats = {
-          passed: layout.issues.length === 0,
-          issues: [...layout.issues, ...findPdfTextFidelityIssues(parsedPdf.text, spec, contact)],
+          passed: issues.length === 0,
+          issues,
           pages: layout.page_count,
           extractable_chars: layout.extractable_chars,
           keyword_coverage_pct: validation.ats_keyword_coverage_pct,
           scored_against: targetText ? 'target roles' : 'nothing on file',
         };
-        ats.passed = ats.issues.length === 0;
       } catch (err) {
         fastify.log.error({ err, userId }, 'ATS CHECK DID NOT RUN on a base resume; refusing to store it');
         ats = {
@@ -406,11 +462,18 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       const builtAt = new Date();
       await db
         .update(profiles)
-        .set({ base_resume_json: spec, base_resume_built_at: builtAt, updated_at: builtAt })
+        .set({ base_resume_json: printed, base_resume_built_at: builtAt, updated_at: builtAt })
         .where(eq(profiles.user_id, userId));
 
       send({ event: 'stage', stage: 'done' });
-      send({ event: 'done', spec, warnings, ats, metrics: metricGapsIn(spec), built_at: builtAt.toISOString() });
+      send({
+        event: 'done',
+        spec: printed,
+        warnings,
+        ats,
+        metrics: metricGapsIn(printed),
+        built_at: builtAt.toISOString(),
+      });
     } catch (err) {
       fastify.log.error(err);
       send({ event: 'stage', stage: 'failed' });
@@ -431,10 +494,23 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
     if (!body?.spec || typeof body.spec !== 'object') {
       return reply.status(400).send({ error: 'A spec is required' });
     }
+    /* Whatever arrives here is USER TEXT, and it goes into the one document every tailored resume is
+     * built from (resume.ts reads base_resume_json as its starting point). It used to be stored
+     * exactly as sent, which routed around every rule the build had just enforced two seconds
+     * earlier: the em-dash ban, the bullet length cap, the one-page fit. An em dash typed into the
+     * metrics box on /start would therefore fail validatePdfLayout on every FUTURE resume, and the
+     * student would have no way to connect the two.
+     *
+     * The dash substitution is the same deterministic pass the build runs, so an edit and a build
+     * cannot disagree about punctuation. Over-long bullets are rejected rather than truncated: this
+     * is the student's own wording and silently cutting it mid-sentence is worse than saying no. */
+    const { spec, error } = sanitizeEditedSpec(body.spec);
+    if (error) return reply.status(400).send({ error });
+
     const builtAt = new Date();
     const [updated] = await db
       .update(profiles)
-      .set({ base_resume_json: body.spec, base_resume_built_at: builtAt, updated_at: builtAt })
+      .set({ base_resume_json: spec, base_resume_built_at: builtAt, updated_at: builtAt })
       .where(eq(profiles.user_id, userId))
       .returning({ built_at: profiles.base_resume_built_at });
     if (!updated) return reply.status(404).send({ error: 'No such profile' });

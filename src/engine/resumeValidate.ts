@@ -128,15 +128,32 @@ const IRREGULAR_PAST: Record<string, string> = {
   grow: 'grew', cut: 'cut', teach: 'taught', write: 'wrote', overhaul: 'overhauled',
 };
 
+/* Present-tense forms whose DERIVED past tense collides with an admitted verb, but which are weak
+ * openers in their own right. Exactly one turned up when every common weak verb was run through the
+ * derivation: "found" (the past tense of *find*) derives to "founded", which is on the list because
+ * founding a company is a real act. "Found and fixed 12 defects" is not that, and without this it
+ * would have sailed through the hard rule.
+ *
+ * Checked BEFORE derivation, so the collision can never be reached. Deliberately tiny: it exists to
+ * stop derivation admitting what the vocabulary rules already reject, not to become a second
+ * denylist with its own opinions. */
+const DERIVATION_BLOCKED = new Set(['found']);
+
 function pastTenseCandidates(word: string): string[] {
+  if (DERIVATION_BLOCKED.has(word)) return [word];
   const irregular = IRREGULAR_PAST[word];
   const out = irregular ? [word, irregular] : [word];
   if (word.endsWith('e')) out.push(`${word}d`); // measure -> measured, synthesize -> synthesized
   else if (/[^aeiou]y$/.test(word)) out.push(`${word.slice(0, -1)}ied`); // identify -> identified
   else out.push(`${word}ed`); // present -> presented
-  // A doubled final consonant: "plan" -> "planned". Only for a short consonant-vowel-consonant stem,
-  // which is where the rule actually applies.
-  if (/^[a-z]{2,5}[^aeiou][aeiou][^aeiouwxy]$/.test(word)) out.push(`${word}${word.slice(-1)}ed`);
+  /* A doubled final consonant: "ship" -> "shipped", "plan" -> "planned". The stem must END in
+   * consonant-vowel-consonant, which is where the English rule actually applies.
+   *
+   * The bound is on the PREFIX, not the whole word. An earlier `{2,5}` sat in front of those three
+   * characters and so demanded five letters minimum, which excluded every word the rule is for -
+   * ship, plan, stop and map are four - leaving the branch dead while its own comment named "plan"
+   * as the example. Verified: "Ship weekly releases" was rejected while `shipped` sat on the list. */
+  if (/^[a-z]{0,4}[^aeiou][aeiou][^aeiouwxy]$/.test(word)) out.push(`${word}${word.slice(-1)}ed`);
   return out;
 }
 
@@ -170,7 +187,7 @@ refined structured`
     .filter(Boolean),
 );
 
-const BULLET_MAX_CHARS = 235; // beyond this, a ~2-line bullet wraps to a 3rd line
+export const BULLET_MAX_CHARS = 235; // beyond this, a ~2-line bullet wraps to a 3rd line
 const MIN_KEYWORD_COVERAGE = 18; // % of JD terms that must appear (ATS safety floor)
 const METRIC_RE = /(\$|%|\d|\b0\.\d+\b|\b\d+x\b)/i;
 
@@ -500,6 +517,20 @@ export function pruneUngroundedContent(
       }
       return true;
     });
+    /* An entry whose every bullet was pruned is a job heading with nothing under it. It renders as a
+     * company name, a title and a date range floating above white space, which reads to a human like
+     * a broken resume and to a parser like an employment record with no duties.
+     *
+     * Caught 2026-07-27 by putting a WVU federal-resume TEMPLATE through the flow: its placeholder
+     * bullets ("Provide your description of duties...") were correctly dropped as ungrounded, and
+     * the build then produced, saved and passed a resume containing two empty entries.
+     *
+     * Dropping the entry rather than failing the build is the right direction: the student still
+     * gets a resume out of the entries that do have content, and the note says what went. */
+    if (bullets.length === 0) {
+      removed.push(`dropped "${entry.org}" entirely, nothing on it could be supported by your resume`);
+      continue;
+    }
     experience.push({ ...entry, title, date_range, bullets });
   }
 

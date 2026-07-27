@@ -188,7 +188,7 @@ export function applyResumePolicy(
 
   return {
     context,
-    spec: stripEmDashes({
+    spec: normalizeDashesForPrint({
       ...rawSpec,
       target_role: options.targetRole ? resumeSafeTargetRole(options.targetRole) : rawSpec.target_role,
       school: education.school?.trim() ?? '',
@@ -216,13 +216,16 @@ export function applyResumePolicy(
  *
  * En dashes go too. They are the same typographic family, they arrive from the same place (a model
  * writing a date range), and PDF extraction treats them the same way.
- */
-export function stripEmDashes<T>(value: T): T {
+ *
+ * NAMED apart from grounding.ts's stripEmDashes on purpose. That one substitutes ", " and feeds the
+ * cover-letter and application-answer paths; this one substitutes " - " because it is fixing date
+ * ranges on a printed page. Two exports with one name and different output is a trap. */
+export function normalizeDashesForPrint<T>(value: T): T {
   if (typeof value === 'string') return value.replace(/\s*[—–]\s*/g, ' - ') as unknown as T;
-  if (Array.isArray(value)) return value.map((v) => stripEmDashes(v)) as unknown as T;
+  if (Array.isArray(value)) return value.map((v) => normalizeDashesForPrint(v)) as unknown as T;
   if (value && typeof value === 'object') {
     return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, stripEmDashes(v)]),
+      Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, normalizeDashesForPrint(v)]),
     ) as T;
   }
   return value;
