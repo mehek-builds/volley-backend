@@ -14,6 +14,48 @@ import { requireAuth } from '../middleware/auth';
 import { decryptField } from '../lib/fieldCrypto';
 import { ENCRYPTED_FIELDS } from './applicationProfile';
 import { AUTOMATIC_SUBMISSION_CONSENT_VERSION, automationConsentValues } from '../lib/automationConsent';
+import { standingConsentEligibility, mayChangeStandingConsent } from '../engine/standingConsent';
+import { generated_resumes } from '../db/schema';
+
+/**
+ * How many submissions has this student personally approved AND seen reach the employer?
+ *
+ * Both halves matter. `per_application_approval` means the student clicked the final submit
+ * themselves, and `submitted` means it actually landed: an approval that then failed taught them
+ * nothing about what Litos fills in on a real form. This is the counter that unlocks unattended
+ * submission, so it counts experience, not intent.
+ */
+/**
+ * The ONE way either route may turn automatic submission on.
+ *
+ * Pre-merge review found the gate had a second, unguarded writer: POST /onboarding/complete wrote
+ * the column straight from the request body, with no completed-onboarding guard, so a curl (or the
+ * /start finish screen's own checkbox) turned standing consent on at reviewed_submits = 0 and
+ * defeated the feature entirely. Two call sites checking the same rule is a rule that will be
+ * skipped a third time; this makes skipping it impossible without deleting the helper.
+ */
+async function gatedAutomationConsent(
+  userId: string,
+  settings: { automatic_submission_enabled?: boolean; automatic_verification_enabled?: boolean },
+): Promise<{ ok: true } | { ok: false; status: 403; body: { error: string; eligibility: unknown } }> {
+  if (settings.automatic_submission_enabled !== true) return { ok: true };
+  const eligibility = standingConsentEligibility(await reviewedSubmitCount(userId));
+  const verdict = mayChangeStandingConsent({ enabling: true, eligibility });
+  if (verdict.allowed) return { ok: true };
+  return { ok: false, status: 403, body: { error: verdict.reason, eligibility } };
+}
+
+async function reviewedSubmitCount(userId: string): Promise<number> {
+  const [row] = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(generated_resumes)
+    .where(
+      sql`${generated_resumes.user_id} = ${userId}
+        and ${generated_resumes.spec}->'_review'->>'status' = 'submitted'
+        and ${generated_resumes.spec}->'_review'->'submission_authorization'->>'source' = 'per_application_approval'`,
+    );
+  return row?.n ?? 0;
+}
 
 // GET /onboarding/state - the one call /start needs to decide what to render.
 //
@@ -216,6 +258,7 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       // True while the extension is allowed to read values back out of a form. Surfaced so the
       // student can always see whether it is on, rather than having to trust that it stopped.
       harvest_active: !user.onboarding_completed_at,
+      standing_consent_eligibility: standingConsentEligibility(await reviewedSubmitCount(userId)),
       automatic_submission_enabled: user.automatic_submission_enabled,
       automatic_submission_consented_at: user.automatic_submission_consented_at,
       automatic_submission_consent_version: user.automatic_submission_consent_version,
@@ -228,6 +271,12 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     const userId = request.jwtPayload!.userId;
     const parsed = completeBodySchema.safeParse(request.body ?? {});
     if (!parsed.success) return reply.status(400).send({ error: 'Invalid automation permissions' });
+
+    // The second writer. Ungated, this route re-enabled standing consent from any state at any
+    // time, which is the whole feature defeated by one curl.
+    const gate = await gatedAutomationConsent(userId, parsed.data);
+    if (!gate.ok) return reply.status(gate.status).send(gate.body);
+
     try {
       const now = new Date();
       await db
@@ -248,6 +297,13 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     const parsed = automationBodySchema.safeParse(request.body);
     if (!parsed.success) return reply.status(400).send({ error: 'Invalid automation permissions' });
     const userId = request.jwtPayload!.userId;
+
+    // Enforced HERE, not only in the UI. Hiding the toggle is presentation; this is the one control
+    // where a client that lies must not be believed. Turning it OFF is always allowed, from any
+    // state: a safety gate the student cannot re-arm is not a safety gate.
+    const gate = await gatedAutomationConsent(userId, parsed.data);
+    if (!gate.ok) return reply.status(gate.status).send(gate.body);
+
     const now = new Date();
     const patch: Partial<typeof users.$inferInsert> = {};
     if (parsed.data.automatic_submission_enabled !== undefined) {
