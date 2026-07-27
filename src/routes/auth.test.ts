@@ -111,7 +111,7 @@ describe('verification email copy', () => {
       assert.equal(email.subject, '123456 is your Litos verification code');
       assert.deepEqual(email.to, [EMAIL]);
       assert.match(email.html, /<html lang="en">/);
-      assert.match(email.html, /You're one quick step away/);
+      assert.match(email.html, /One more step/);
       assert.match(email.html, /We're so excited to have you here/);
       assert.match(email.html, /https:\/\/trylitos\.com\/icon\.png/);
       assert.match(email.html, /href="https:\/\/trylitos\.com\/login"/);

@@ -280,7 +280,7 @@ export function buildVerificationEmail(email: string, code: string) {
             </tr>
             <tr>
               <td style="padding:36px 32px;">
-                <h1 style="margin:0 0 16px;color:#12120f;">You're one quick step away</h1>
+                <h1 style="margin:0 0 16px;color:#12120f;">One more step</h1>
                 <p style="margin:0 0 24px;color:#6b6a64;">We're so excited to have you here. Enter this code to finish signing in and keep your job search moving with ${PRODUCT_NAME}.</p>
                 <p style="margin:0 0 8px;color:#6b6a64;">Your verification code</p>
                 <h2 aria-label="Verification code ${code.split('').join(' ')}" style="margin:0 0 24px;padding:18px 20px;background-color:#eef1fe;border:1px solid #dce2fa;border-radius:12px;color:#12120f;">${code}</h2>
@@ -299,9 +299,9 @@ export function buildVerificationEmail(email: string, code: string) {
                   </tr>
                 </table>
                 <ul style="margin:0 0 28px;padding-left:20px;color:#6b6a64;">
-                  <li style="margin-bottom:8px;">Tailor and fill applications with less repetitive work.</li>
-                  <li style="margin-bottom:8px;">Keep every opportunity organized in one dashboard.</li>
-                  <li>Draft thoughtful recruiter outreach when you want it.</li>
+                  <li style="margin-bottom:8px;">Rewrite your resume for each job, and fill in the form.</li>
+                  <li style="margin-bottom:8px;">Keep every job you applied to in one place.</li>
+                  <li>Write a short email to a real person at the company.</li>
                 </ul>
                 <p style="margin:0;color:#6b6a64;">This code expires in 10 minutes. If you did not request it, you can safely ignore this email.</p>
               </td>
@@ -312,7 +312,7 @@ export function buildVerificationEmail(email: string, code: string) {
     </table>
   </body>
 </html>`,
-    text: `You're one quick step away\n\nWe're so excited to have you here. Enter this code to finish signing in to ${PRODUCT_NAME}:\n\n${code}\n\nFinish signing in: ${signInUrl}\n\nOnce you're in, ${PRODUCT_NAME} can help you tailor and fill applications, keep opportunities organized, and draft recruiter outreach.\n\nThis code expires in 10 minutes. If you did not request it, you can safely ignore this email.`,
+    text: `One more step\n\nWe're so excited to have you here. Enter this code to finish signing in to ${PRODUCT_NAME}:\n\n${code}\n\nFinish signing in: ${signInUrl}\n\nOnce you're in, ${PRODUCT_NAME} can rewrite your resume for each job, fill in the form, keep every job you applied to in one place, and write a short email to a real person at the company.\n\nThis code expires in 10 minutes. If you did not request it, you can safely ignore this email.`,
   };
 }
 
