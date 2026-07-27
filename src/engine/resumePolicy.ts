@@ -188,7 +188,7 @@ export function applyResumePolicy(
 
   return {
     context,
-    spec: {
+    spec: normalizeDashesForPrint({
       ...rawSpec,
       target_role: options.targetRole ? resumeSafeTargetRole(options.targetRole) : rawSpec.target_role,
       school: education.school?.trim() ?? '',
@@ -197,6 +197,36 @@ export function applyResumePolicy(
       coursework: sourceCoursework.join(', '),
       education_position: context.education_position,
       experience,
-    },
+    }),
   };
+}
+
+/* The zero-em-dash rule, made true rather than merely checked.
+ *
+ * The spec-level check tests a `allText` join that never included `date_range`, so an em dash in
+ * "Sept. 2019 — Present" passed every content check and reached the rendered PDF, where the
+ * post-render ATS gate caught it and refused to save the resume. Found 2026-07-27 by running the
+ * gate over a WVU criminal-justice resume: the build failed on a punctuation character in a date.
+ *
+ * Reporting was never the right instrument here. An em dash is not a judgement call the model
+ * should get a second attempt at, it is a character we do not print, and the substitution is
+ * mechanical. So it is DONE deterministically, in the one pass both the base and tailored paths
+ * run, which is also the only place that can guarantee it for every field including the ones a
+ * later validator forgets to look at.
+ *
+ * En dashes go too. They are the same typographic family, they arrive from the same place (a model
+ * writing a date range), and PDF extraction treats them the same way.
+ *
+ * NAMED apart from grounding.ts's stripEmDashes on purpose. That one substitutes ", " and feeds the
+ * cover-letter and application-answer paths; this one substitutes " - " because it is fixing date
+ * ranges on a printed page. Two exports with one name and different output is a trap. */
+export function normalizeDashesForPrint<T>(value: T): T {
+  if (typeof value === 'string') return value.replace(/\s*[—–]\s*/g, ' - ') as unknown as T;
+  if (Array.isArray(value)) return value.map((v) => normalizeDashesForPrint(v)) as unknown as T;
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, normalizeDashesForPrint(v)]),
+    ) as T;
+  }
+  return value;
 }
