@@ -955,6 +955,10 @@ function drawEntrySection(
   });
 }
 
+/* A page of text through a synchronous compressor is a sub-second job, so this is far above any
+ * real render and exists only so the ATS gate cannot wait on a document that will never finish. */
+const RENDER_DEADLINE_MS = 20_000;
+
 export async function renderResumePdf(
   rawSpec: ResumeSpec,
   contact: ContactHeader,
@@ -973,18 +977,34 @@ export async function renderResumePdf(
   const doc = createResumeDocument(design);
   const chunks: Buffer[] = [];
   doc.on('data', (chunk) => chunks.push(chunk));
-  /* Rejects on a stream error, and not only on 'end'.
+  /* This promise must always settle, because the ATS gate on the base-resume build is designed to
+   * fail closed and an await that never returns defeats that completely: the function is killed at
+   * Vercel's 300s limit with the SSE half-written and neither a done nor an error frame ever sent.
+   * The student watches a build that stops and says nothing.
    *
-   * Without the error handler this promise had exactly one way to settle, so a PDFKit stream error
-   * left the await hanging forever rather than throwing. That was survivable while rendering only
-   * happened on the tailored path; it is not now. The base-resume build renders on EVERY run as part
-   * of the ATS gate, and its whole design is to fail closed - a hang defeats that, because the
-   * function is killed at Vercel's 300s limit with the SSE half-written and neither a done nor an
-   * error frame sent. Rejecting hands control to the gate's catch, which reports the failure and
-   * refuses to store the resume, which is the behaviour that was intended all along. */
+   * THE TIMEOUT IS THE REAL GUARD, not the error listener. Checked against pdfkit 0.19.1: the
+   * document is a Readable that emits only layout events ('line', 'pageAdded' and friends), never
+   * 'error', and never calls destroy(err). Compression is deflateSync, so doc.end() finalises
+   * synchronously and a genuine render failure - a missing font, a bad glyph - throws out of the
+   * drawing code rather than arriving as an event. The one way this can hang is the internal
+   * `_waiting` count never reaching zero, so `_finalize()` never runs and 'end' never fires, and
+   * that path emits nothing at all. An 'error' handler cannot catch it; a deadline can.
+   *
+   * The listener stays anyway. It costs nothing, it is correct if a later pdfkit ever does emit,
+   * and its absence is a trap for the next person who assumes a stream rejects on failure. */
   const done = new Promise<Buffer>((resolve, reject) => {
-    doc.on('end', () => resolve(Buffer.concat(chunks)));
-    doc.on('error', reject);
+    const deadline = setTimeout(
+      () => reject(new Error(`PDF render did not finish within ${RENDER_DEADLINE_MS}ms`)),
+      RENDER_DEADLINE_MS,
+    );
+    // unref so a pending deadline cannot hold a short-lived process open past its work.
+    deadline.unref?.();
+    const settle = <T,>(fn: (value: T) => void) => (value: T) => {
+      clearTimeout(deadline);
+      fn(value);
+    };
+    doc.on('end', settle(() => resolve(Buffer.concat(chunks))));
+    doc.on('error', settle(reject));
   });
 
   doc
