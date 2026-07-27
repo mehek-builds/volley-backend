@@ -29,7 +29,7 @@ import type { ResumeSpec } from '../llm/resumeSpec';
 
 const evidenceBodySchema = z.object({
   terms: z
-    .array(z.object({ term: z.string().min(1), display: z.string().min(1) }))
+    .array(z.object({ term: z.string().min(1).max(120), display: z.string().min(1).max(120) }))
     .max(60, 'too many terms to look up at once'),
   resume_text: z.string().min(1).max(30_000).optional(),
 });

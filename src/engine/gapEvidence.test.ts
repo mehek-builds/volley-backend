@@ -92,6 +92,23 @@ describe('findGapEvidence', () => {
     assert.equal(answer.evidence[0].already_on_resume, false, 'these are different bullets');
   });
 
+  test('a verbatim bullet containing an academic term is recognised as already present', () => {
+    // resumeCovers strips "Fall 2025" from the haystack but not the needle, so a bullet that was
+    // word-for-word on the resume reported false and the UI offered an accept that then no-opped.
+    const variant = 'Led the Fall 2025 Tableau rollout for the recruiting team';
+    const bank = [entry({ bullet_variants: [variant] })];
+    const [answer] = findGapEvidence([term('tableau')], bank, `Education. ${variant}. Skills.`);
+    assert.equal(answer.evidence[0].already_on_resume, true);
+  });
+
+  test('a merely similar bullet is NOT treated as the same bullet', () => {
+    // resumeCovers is substring and morphology tolerant, so "Ran Docker tests" matched inside
+    // "Ran Docker test suites nightly" and hid the accept button for real, different evidence.
+    const bank = [entry({ bullet_variants: ['Ran Docker tests'] })];
+    const [answer] = findGapEvidence([term('docker')], bank, 'Ran Docker test suites nightly');
+    assert.equal(answer.evidence[0].already_on_resume, false);
+  });
+
   test('matching uses the same rule as the score', () => {
     // If this drifted we would offer a bullet that does not move the number, or withhold one that
     // would. The import is the guard; this test states why it matters.

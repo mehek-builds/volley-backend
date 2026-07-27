@@ -1,5 +1,10 @@
 import type { ExperienceBankEntry } from '../db/schema';
-import { resumeCovers, type JdTerm } from './jdMatch';
+import { resumeCovers, normalizeTerm, type JdTerm } from './jdMatch';
+
+/** Whole-bullet identity key. Deliberately the same normalization the scorer uses for terms. */
+function normalizeBullet(text: string): string {
+  return normalizeTerm(text);
+}
 
 /**
  * Turning a missing requirement into a resume bullet, WITHOUT inventing one.
@@ -77,6 +82,16 @@ export function findGapEvidence(
   bank: ExperienceBankEntry[],
   resumeText: string,
 ): GapAnswer[] {
+  // Normalized ONCE. already_on_resume is computed per evidence hit, and resumeCovers rebuilt this
+  // from the whole (up to 30k character) resume every time, so a large bank turned one request into
+  // thousands of full-document normalizations on the event loop.
+  const resumeBullets = new Set(
+    resumeText
+      .split(/(?<=[.!?])\s+|\n+/)
+      .map((line) => normalizeBullet(line))
+      .filter(Boolean),
+  );
+
   return missing.map((term) => {
     const evidence: GapEvidence[] = [];
 
@@ -102,7 +117,12 @@ export function findGapEvidence(
           // resume carries the AWS phrasing of the same sentence. They share the first 60 chars,
           // so the Kubernetes variant was marked as already used and the student could never
           // accept the one that would actually close the gap.
-          already_on_resume: resumeCovers(resumeText, variant),
+          // EXACT identity, not the scorer's matcher. resumeCovers is morphology-tolerant and
+          // substring-based, and it strips academic terms from the haystack but not the needle, so
+          // it reported a verbatim bullet as absent ("Led the Fall 2025 Tableau rollout") and a
+          // merely-similar one as present ("Ran Docker tests" against "Ran Docker test suites").
+          // Both directions broke the accept button. Sameness needs an equality test.
+          already_on_resume: resumeBullets.has(normalizeBullet(variant)),
         });
       }
     }
