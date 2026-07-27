@@ -50,8 +50,8 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
       return reply.status(400).send({ error: message ?? 'Invalid request body' });
     }
 
-    let resumeText = body.resume_text;
-    if (resumeText === undefined) {
+    let storedResumeText: string | null = null;
+    if (body.resume_text === undefined) {
       const [profile] = await db.select().from(profiles).where(eq(profiles.user_id, userId));
       const spec = profile?.base_resume_json as ResumeSpec | null | undefined;
       if (!spec) {
@@ -59,9 +59,10 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
         // than showing them a 0% that is about the missing resume, not about their fit.
         return reply.status(404).send({ error: 'No base resume yet' });
       }
-      resumeText = resumeSpecText(spec);
+      storedResumeText = resumeSpecText(spec);
     }
 
+    const resumeText = body.resume_text ?? storedResumeText ?? '';
     const result = scoreJdMatch(resumeText, body.jd_text);
 
     return reply.status(200).send({
