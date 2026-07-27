@@ -1,8 +1,9 @@
 /**
  * The student's pipeline stage, and where a row starts when they have never moved it.
  *
- * TWO AXES, NOT ONE. spec._review.status is submission machinery: resume_ready, preparing, filling,
- * submitted, failed. It records what LITOS did, and Litos owns it. The pipeline stage records what
+ * TWO AXES, NOT ONE. spec._review.status is submission machinery; see ApplicationReviewState in
+ * lib/applicationReview.ts for the full twelve-value set, which is the source of truth rather than
+ * any list restated here. It records what LITOS did, and Litos owns it. The pipeline stage records what
  * the COMPANY did, and the student owns it. They move independently: a submission is "submitted"
  * forever while the student moves applied -> interview -> offer. Collapsing them, which is the
  * tempting shortcut because "submitted" looks like a stage, would make an interview
@@ -13,6 +14,10 @@
  * the thing that replaced their spreadsheet. What retains is not the columns, it is that the data
  * accumulates and stays theirs.
  */
+
+/** Most recent applications returned by the board. Bounded so a heavy account cannot ship
+ *  thousands of cards, each with its own control, to a page nobody scrolls that far down. */
+export const BOARD_LIMIT = 200;
 
 export const STAGES = ['saved', 'applied', 'interview', 'offer', 'closed'] as const;
 export type Stage = (typeof STAGES)[number];
@@ -41,6 +46,12 @@ export function deriveStage(stored: unknown, submissionStatus: unknown): Stage {
   // Anything the automation actually sent is at least "applied". Everything else is still "saved":
   // a prepared resume the student has not sent is not an application, and counting it as one is
   // the inflation the funnel refuses for the same reason.
+  //
+  // 'needs_attention' is the deliberate judgement call. The runner sets it when a submission was
+  // CLAIMED but the employer confirmation could not be verified, so the form was probably sent.
+  // It still derives to 'saved', erring the same direction as the funnel: a maybe is not an
+  // application. The student moves it the moment they know, and the derivation is only ever a
+  // starting position. Pinned by a test over all twelve statuses so this stays a decision.
   return submissionStatus === 'submitted' ? 'applied' : 'saved';
 }
 

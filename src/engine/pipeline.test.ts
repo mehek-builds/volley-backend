@@ -56,3 +56,41 @@ describe('stages', () => {
     assert.equal(canMove('applied', 'applied'), false);
   });
 });
+
+/**
+ * All twelve submission statuses, pinned.
+ *
+ * The doc comment used to restate five of them, so a reader auditing deriveStage against it would
+ * have concluded it was exhaustive while it omitted the seven that make the derivation ambiguous.
+ * This is the list, and every entry here is a decision rather than an accident.
+ */
+describe('deriveStage over the full submission status union', () => {
+  const EXPECTED: Record<string, string> = {
+    resume_ready: 'saved',
+    questions_ready: 'saved',
+    ready_to_submit: 'saved',
+    submit_requested: 'saved',
+    preparing: 'saved',
+    filling: 'saved',
+    // Set when a submission was CLAIMED but the employer confirmation could not be verified. Erring
+    // to 'saved' matches the funnel's rule that a maybe is not an application; the student moves it
+    // the moment they know.
+    needs_attention: 'saved',
+    ready_for_final_approval: 'saved',
+    submitting: 'saved',
+    submission_claimed: 'saved',
+    submitted: 'applied',
+    failed: 'saved',
+  };
+
+  for (const [status, expected] of Object.entries(EXPECTED)) {
+    test(`${status} derives to ${expected}`, () => {
+      assert.equal(deriveStage(null, status), expected);
+    });
+  }
+
+  test('only a confirmed submission derives to applied', () => {
+    const applied = Object.entries(EXPECTED).filter(([, stage]) => stage === 'applied');
+    assert.deepEqual(applied.map(([status]) => status), ['submitted']);
+  });
+});

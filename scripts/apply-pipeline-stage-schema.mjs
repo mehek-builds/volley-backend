@@ -52,7 +52,7 @@ async function main() {
     // failure that only surfaces later as a 500 on the first real build.
     const { rows } = await client.query(
       `select column_name from information_schema.columns
-        where table_name = 'generated_resumes' and column_name = any($1::text[])`,
+        where table_schema = current_schema() and table_name = 'generated_resumes' and column_name = any($1::text[])`,
       [COLUMNS.map((c) => c.name)],
     );
     const present = new Set(rows.map((r) => r.column_name));

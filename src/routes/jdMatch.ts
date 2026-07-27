@@ -9,7 +9,7 @@ import { scoreJdMatch, scoreBand, MIN_SCORABLE_TERMS } from '../engine/jdMatch';
 import { findGapEvidence } from '../engine/gapEvidence';
 import { checkResumeHealth } from '../engine/resumeHealth';
 import { buildFunnel } from '../engine/funnel';
-import { deriveStage, isStage, STAGES } from '../engine/pipeline';
+import { deriveStage, isStage, STAGES, BOARD_LIMIT } from '../engine/pipeline';
 import { generated_resumes, autofill_events } from '../db/schema';
 import { readExperienceBank } from '../db/experienceBank';
 import type { ResumeSpec } from '../llm/resumeSpec';
@@ -267,10 +267,14 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
       })
       .from(generated_resumes)
       .where(eq(generated_resumes.user_id, userId))
-      .orderBy(desc(generated_resumes.created_at));
+      .orderBy(desc(generated_resumes.created_at))
+      // Bounded. The dashboard prewarms up to 30 resumes a day, so an unbounded board sends
+      // thousands of cards the student will never scroll to and renders a select for each.
+      .limit(BOARD_LIMIT);
 
     return reply.status(200).send({
       stages: STAGES,
+      limit: BOARD_LIMIT,
       cards: rows.map((row) => {
         const context = (row.job_context ?? {}) as { company?: string; role?: string };
         return {
@@ -295,7 +299,11 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
    */
   fastify.patch('/applications/:id/stage', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
-    const { id } = request.params as { id: string };
+    // A malformed id reached Postgres as a uuid comparison and came back a 500. The repo's other
+    // id-bearing routes validate the param; this one skipped it.
+    const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
+    if (!params.success) return reply.status(400).send({ error: 'Invalid application id' });
+    const { id } = params.data;
     const stage = (request.body as { stage?: unknown } | undefined)?.stage;
 
     if (!isStage(stage)) {
