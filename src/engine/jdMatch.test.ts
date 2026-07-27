@@ -442,5 +442,10 @@ describe('route registration', () => {
     const root = readFileSync(path.join(__dirname, '..', 'index.ts'), 'utf8');
     assert.match(root, /import \{ jdMatchRoutes \} from '\.\/routes\/jdMatch'/, 'index.ts must import the route');
     assert.match(root, /register\(jdMatchRoutes\)/, 'index.ts must register the route');
+    // Both endpoints live in the same plugin, so one registration mounts both. Named here so a
+    // future split does not silently drop the evidence endpoint the way the first one was dropped.
+    const routeFile = readFileSync(path.join(__dirname, '..', 'routes', 'jdMatch.ts'), 'utf8');
+    assert.match(routeFile, /'\/jd-match'/);
+    assert.match(routeFile, /'\/jd-match\/evidence'/);
   });
 });
