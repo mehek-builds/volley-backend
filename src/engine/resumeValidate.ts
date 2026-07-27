@@ -670,27 +670,6 @@ export function courseworkIsUngrounded(rendered: string, allowed: string[] | und
 // Litos's generalized per-student spec (no LEADERSHIP section, entries aren't hardcoded).
 // When `bank` is provided, grounding violations are added as hard issues so the retry loop
 // regenerates; pass [] to skip grounding (form-only validation).
-/**
- * Every word a resume spec puts on the page, joined into one string.
- *
- * Extracted so the validator and the JD match scorer read the SAME text. This join has been wrong
- * once already: date_range was the one field it omitted, so an em dash in "Sept. 2019 - Present"
- * passed every content check and reached the rendered PDF. A second copy of the list in jdMatch's
- * caller would be a second chance to make that mistake, and a scorer reading fewer fields than the
- * validator would quietly under-credit the student for work that is genuinely on their resume.
- */
-export function resumeSpecText(spec: ResumeSpec): string {
-  return [
-    spec.target_role ?? '',
-    spec.school,
-    spec.degree,
-    spec.grad_date,
-    spec.coursework,
-    ...spec.experience.flatMap((e) => [e.org, e.title, e.date_range, ...e.bullets]),
-    ...spec.skills,
-  ].join(' ');
-}
-
 export function validateResumeSpec(
   spec: ResumeSpec,
   jdText: string,
@@ -702,7 +681,17 @@ export function validateResumeSpec(
   const issues: string[] = [];
   const warnings: BulletFlag[] = [];
 
-  const allText = resumeSpecText(spec);
+  const allText = [
+    spec.target_role ?? '',
+    spec.school,
+    spec.degree,
+    spec.grad_date,
+    spec.coursework,
+    // date_range included deliberately: it was the ONE spec field this join omitted, and an em dash
+    // in "Sept. 2019 - Present" therefore passed every content check and reached the rendered PDF.
+    ...spec.experience.flatMap((e) => [e.org, e.title, e.date_range, ...e.bullets]),
+    ...spec.skills,
+  ].join(' ');
 
   if (allText.includes('—')) issues.push('spec contains an em dash');
   if (targetRole !== undefined) {
