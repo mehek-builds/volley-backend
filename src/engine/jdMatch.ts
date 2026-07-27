@@ -430,8 +430,46 @@ function tokenizeSection(text: string): SectionToken[] {
   return out;
 }
 
-export function extractJdTerms(jdText: string): JdTerm[] {
-  const terms = extractFrom(segmentJd(jdText));
+/**
+ * Words the posting uses to describe ITSELF, which are never things to put on a resume.
+ *
+ * Found by looking at a real posting in production rather than a fixture. The gap list read:
+ * automation, Engineering Intern, Litos QA, Node.js, PostgreSQL, QA, React, Software Engineering,
+ * Summer, TypeScript, United States. Five of those eleven are the posting's own company name, its
+ * own job title, its season and its country. Litos was telling a student their resume "does not
+ * mention" the name of the company they were applying to.
+ *
+ * The company and the role come from job_context, which the caller already has, so this is an
+ * exact exclusion rather than a guess. The rest is a short list of the categories that recur:
+ * seasons (from "Summer 2027"), and country and work-authorization phrasing.
+ */
+const SELF_REFERENCE = new Set(
+  `summer spring fall winter autumn
+united states usa canada remote hybrid onsite
+intern internship co-op coop apprentice apprenticeship
+candidate applicant university college student undergraduate`
+    .split(/\s+/)
+    .filter(Boolean),
+);
+
+function selfReferenceTokens(context?: { company?: string; role?: string }): Set<string> {
+  const tokens = new Set(SELF_REFERENCE);
+  for (const value of [context?.company, context?.role]) {
+    if (!value) continue;
+    const normalized = normalizeTerm(value);
+    // The whole phrase AND each word: "Litos QA" must not survive as "Litos" or as "QA" either.
+    tokens.add(normalized);
+    for (const word of normalized.split(' ')) if (word.length > 1) tokens.add(word);
+  }
+  return tokens;
+}
+
+export function extractJdTerms(jdText: string, context?: { company?: string; role?: string }): JdTerm[] {
+  const self = selfReferenceTokens(context);
+  const strip = (list: JdTerm[]) =>
+    list.filter((t) => !self.has(t.term) && !t.term.split(' ').every((w) => self.has(w)));
+
+  const terms = strip(extractFrom(segmentJd(jdText)));
   if (terms.length >= MIN_SCORABLE_TERMS) return terms;
 
   // A noise heading runs until the next recognised heading, so a posting that OPENS with
@@ -440,11 +478,13 @@ export function extractJdTerms(jdText: string): JdTerm[] {
   // then told the posting "does not list enough specific requirements" about a posting full of
   // them. When zeroing the noise leaves us unable to score, re-read those sections as ordinary
   // body prose rather than throwing the posting away.
-  const salvaged = extractFrom(
-    segmentJd(jdText).map((section) =>
-      section.kind === 'noise'
-        ? { ...section, kind: 'body' as SectionKind, weight: SECTION_WEIGHT.body }
-        : section,
+  const salvaged = strip(
+    extractFrom(
+      segmentJd(jdText).map((section) =>
+        section.kind === 'noise'
+          ? { ...section, kind: 'body' as SectionKind, weight: SECTION_WEIGHT.body }
+          : section,
+      ),
     ),
   );
   return salvaged.length > terms.length ? salvaged : terms;
@@ -583,8 +623,12 @@ export interface JdMatchResult {
  * @param resumeText  the full rendered text of the resume being scored
  * @param jdText      the raw job description
  */
-export function scoreJdMatch(resumeText: string, jdText: string): JdMatchResult {
-  const terms = extractJdTerms(jdText);
+export function scoreJdMatch(
+  resumeText: string,
+  jdText: string,
+  context?: { company?: string; role?: string },
+): JdMatchResult {
+  const terms = extractJdTerms(jdText, context);
 
   const signalCount = terms.filter((t) => t.signal).length;
   if (terms.length < MIN_SCORABLE_TERMS || signalCount < MIN_SIGNAL_TERMS) {

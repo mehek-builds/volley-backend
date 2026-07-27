@@ -83,6 +83,9 @@ const bodySchema = z.object({
   // empty string used to score as a confident 0% "Weak match", a claim about them that the input
   // never supported.
   resume_text: z.string().min(1, 'resume_text cannot be empty').max(30_000).optional(),
+  // The posting's own company and role. Excluded from the requirement set: a posting never asks a
+  // student to have experience with the company they are applying to, or with its job title.
+  job_context: z.object({ company: z.string().max(200).optional(), role: z.string().max(200).optional() }).optional(),
 });
 
 export async function jdMatchRoutes(fastify: FastifyInstance) {
@@ -110,7 +113,7 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
     }
 
     const resumeText = body.resume_text ?? storedResumeText ?? '';
-    const result = scoreJdMatch(resumeText, body.jd_text);
+    const result = scoreJdMatch(resumeText, body.jd_text, body.job_context);
 
     return reply.status(200).send({
       score: result.score,
@@ -334,6 +337,7 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
     const parsed = z
       .object({
         jd_text: z.string().min(1).max(60_000),
+        job_context: z.object({ company: z.string().max(200).optional(), role: z.string().max(200).optional() }).optional(),
         spec: z
           .object({
             experience: z
@@ -363,7 +367,7 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
     // it merged two meaningful sets when `matched` is structurally always empty against an empty
     // resume, and it dragged the scorer's user-facing copy along with it into a panel that is not
     // about scoring.
-    const prep = buildInterviewPrep(extractJdTerms(parsed.data.jd_text), spec);
+    const prep = buildInterviewPrep(extractJdTerms(parsed.data.jd_text, parsed.data.job_context), spec);
     if (prep.items.length === 0) {
       return reply.status(200).send({
         ...prep,
