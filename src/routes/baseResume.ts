@@ -1,12 +1,23 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { eq } from 'drizzle-orm';
 import { db } from '../db/index';
-import { profiles } from '../db/schema';
+import { profiles, application_profile, targeting } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { readExperienceBank } from '../db/experienceBank';
 import { generateBaseResumeSpec, type BaseResumeEvent } from '../llm/baseResume';
 import { applyResumePolicy, type CandidateEducation } from '../engine/resumePolicy';
-import { validateResumeSpec, pruneUngroundedContent, weakVerbBullets } from '../engine/resumeValidate';
+import {
+  findPdfTextFidelityIssues,
+  renderResumePdf,
+  type ContactHeader,
+} from '../engine/resumeRender';
+import { extractPdfText } from '../lib/pdfText';
+import {
+  validateResumeSpec,
+  validatePdfLayout,
+  pruneUngroundedContent,
+  weakVerbBullets,
+} from '../engine/resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
 
 /* GET /resume/base        - the stored base resume, or 404 if never built.
@@ -26,14 +37,38 @@ import type { ResumeSpec } from '../llm/resumeSpec';
 
 const REQUEST_DEADLINE_MS = 120_000; // vercel.json allows 300s; this is the model-call bound.
 
+/* A short menu of approved verbs, handed to the model when a rewrite pass fails.
+ *
+ * Chosen to span the KINDS of work students actually describe rather than to be a best-of list:
+ * operations and service, people, analysis, building, and writing. The bullets that stall are
+ * almost always operational ones ("Stocked and handled food items"), which is exactly where a
+ * software-flavoured suggestion is no help. Every entry is on STRONG_VERBS. */
+export const VERB_SUGGESTIONS = [
+  'Managed', 'Organized', 'Coordinated', 'Processed', 'Administered',
+  'Delivered', 'Prepared', 'Trained', 'Supervised', 'Facilitated',
+  'Analyzed', 'Evaluated', 'Tracked', 'Documented',
+  'Built', 'Designed', 'Improved', 'Streamlined',
+];
+
 type Stage =
   | 'reading'
   | 'selecting'
   | 'writing'
   | 'polishing'
   | 'fitting'
+  | 'checking'
   | 'done'
   | 'failed';
+
+/** The ATS verdict, reported on every build whether it passes or not. */
+export interface AtsVerdict {
+  passed: boolean;
+  issues: string[];
+  pages: number;
+  extractable_chars: number;
+  keyword_coverage_pct: number;
+  scored_against: string;
+}
 
 /** One SSE frame. `stage` events narrate, the rest carry spec data the client paints immediately. */
 type StreamFrame =
@@ -42,7 +77,16 @@ type StreamFrame =
   // Clears what the client has painted, so a retry's shorter pass cannot leave stale entries.
   | { event: 'restart' }
   | ({ event: 'piece' } & BaseResumeEvent)
-  | { event: 'done'; spec: ResumeSpec; warnings: string[]; built_at: string }
+  | ({ event: 'ats' } & AtsVerdict)
+  | {
+      event: 'done';
+      spec: ResumeSpec;
+      warnings: string[];
+      ats: AtsVerdict;
+      // Bullets with no number in them, so /start can ask the student for the few that matter.
+      metrics: Array<{ org: string; bullet: string }>;
+      built_at: string;
+    }
   | { event: 'error'; message: string };
 
 function readSourcePages(parsed: unknown): number {
@@ -84,6 +128,67 @@ export function skillsSourceFor(declared: unknown, parsed: unknown): string[] | 
   return fromResume.length > 0 ? fromResume : null;
 }
 
+/* The header the ATS check renders and then looks for in the extracted text.
+ *
+ * Most of it is empty at this point in onboarding, and that is correct rather than a gap: the
+ * harvest fills phone and links from the first real application. findPdfTextFidelityIssues only
+ * asserts the fields that are actually present, so an empty phone is not a failure - it is a line
+ * the resume does not print yet. */
+export function contactHeaderFrom(
+  parsed: unknown,
+  appProfile: Record<string, unknown> | undefined,
+  email: string | undefined,
+): ContactHeader {
+  const p = (parsed ?? {}) as Record<string, unknown>;
+  const str = (v: unknown) => (typeof v === 'string' && v.trim().length > 0 ? v.trim() : undefined);
+  return {
+    full_name: str(p.full_name) ?? 'Applicant',
+    email: email ?? str(p.email),
+    // Links are plaintext on application_profile (not in ENCRYPTED_FIELDS), so they read directly.
+    linkedin_url: str(appProfile?.linkedin_url),
+    github_url: str(appProfile?.github_url),
+    portfolio_url: str(appProfile?.portfolio_url),
+  };
+}
+
+/* A stand-in for the posting the base resume does not have: the roles the student says they want.
+ *
+ * Titles first, because a student typed them. Categories are slugs, so their hyphens become spaces
+ * or the keyword scorer sees "software-engineering" as one unmatchable token. The parse's inferred
+ * target_roles come last as the fallback for a student who has not reached the targeting screen,
+ * which at the base step is most of them. */
+export function targetRoleText(
+  target: { titles?: unknown; categories?: unknown } | undefined,
+  parsed: unknown,
+): string {
+  const list = (v: unknown) =>
+    (Array.isArray(v) ? v : []).filter((s): s is string => typeof s === 'string' && s.trim().length > 0);
+  const parts = [
+    ...list(target?.titles),
+    ...list(target?.categories).map((c) => c.replace(/-/g, ' ')),
+    ...list((parsed as { target_roles?: unknown } | null)?.target_roles),
+  ];
+  return [...new Set(parts.map((p) => p.trim()))].join('. ');
+}
+
+/* Bullets carrying no number at all, worst first, for the screen that asks the student to supply
+ * one. A resume bullet without a metric is not wrong, it is just weaker than the same bullet with
+ * one, and the student is the only person who knows the number.
+ *
+ * Capped at five and sorted longest-first: a long bullet with no number is describing something
+ * substantial and is where a metric buys the most. Asking for every one of them turns onboarding
+ * into a form - a federal-style resume has fifteen - and drop-off is the real risk. */
+export function metricGapsIn(spec: ResumeSpec, limit = 5): Array<{ org: string; bullet: string }> {
+  const hasNumber = /\d/;
+  const gaps: Array<{ org: string; bullet: string }> = [];
+  for (const entry of spec.experience ?? []) {
+    for (const bullet of entry.bullets ?? []) {
+      if (!hasNumber.test(bullet)) gaps.push({ org: entry.org, bullet });
+    }
+  }
+  return gaps.sort((a, b) => b.bullet.length - a.bullet.length).slice(0, limit);
+}
+
 function educationFrom(parsed: unknown): CandidateEducation {
   const p = (parsed ?? {}) as Record<string, unknown>;
   const str = (v: unknown) => (typeof v === 'string' ? v : undefined);
@@ -114,9 +219,14 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
   fastify.post('/resume/base/stream', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
 
-    const [[profile], bank] = await Promise.all([
+    const email = request.jwtPayload!.email;
+    // appProfile and target are read for the ATS gate: the first supplies the contact lines the
+    // rendered PDF must round-trip, the second the roles its keyword coverage is scored against.
+    const [[profile], bank, [appProfile], [target]] = await Promise.all([
       db.select().from(profiles).where(eq(profiles.user_id, userId)),
       readExperienceBank(userId),
+      db.select().from(application_profile).where(eq(application_profile.user_id, userId)),
+      db.select().from(targeting).where(eq(targeting.user_id, userId)),
     ]);
 
     // Fail BEFORE opening the stream. A 400 the client can read is worth more than an SSE
@@ -184,28 +294,45 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
 
       let rawSpec = await generate();
 
-      /* THE HARD RULE, enforced rather than merely reported.
+      /* THE HARD RULE, enforced until it holds.
        *
-       * Every bullet opens with a strong action verb. The tailored path has always had a feedback
-       * retry for this; the base path had none, so a weak opener was written into the student's
-       * stored base resume and surfaced only as a note they could ignore. That is the one resume
-       * most likely to be sent unread, so it is the worst place to let the rule slide.
+       * Every bullet opens with a strong action verb, and this loop is what makes that true rather
+       * than merely reported. It used to run ONCE and then ship whatever came back, so a student
+       * whose second pass still opened a bullet with "Maintained" got the violation written into
+       * their stored base resume with a note underneath it. Measured across 30 real resumes on
+       * 2026-07-27: the single retry failed to converge on 4 of them.
        *
-       * One retry, naming the exact offenders. Bounded because a second failure means the bank's
-       * own wording is the problem, and at that point the honest move is to show the student what
-       * we produced and let them rewrite it in the editor rather than loop burning model calls.
+       * PARAPHRASE IS THE POINT. The model is explicitly allowed to reword a bullet to reach a
+       * strong opener, because the alternative is not a weaker verb, it is a resume that breaks the
+       * house rule. What it may never do is invent a fact, which is what the grounding pass below
+       * still checks independently.
+       *
+       * Bounded at three passes. Two is not enough (measured), and past three the bank's own wording
+       * is the problem, at which point the honest move is to show the student what we produced and
+       * let them fix it in the editor rather than loop burning model calls forever.
        */
-      const weak = weakVerbBullets(rawSpec);
-      if (weak.length > 0) {
+      const MAX_VERB_PASSES = 3;
+      for (let pass = 1; pass <= MAX_VERB_PASSES; pass += 1) {
+        const weak = weakVerbBullets(rawSpec);
+        if (weak.length === 0) break;
         send({ event: 'stage', stage: 'polishing' });
         // The client paints entries positionally, so it has to clear before the re-stream or a
-        // shorter second pass would leave stale entries from the first behind.
+        // shorter later pass would leave stale entries from the first behind.
         send({ event: 'restart' });
         rawSpec = await generate([
-          `These bullets do not start with a strong action verb from the allowed list. Rewrite each one to open with an approved verb, keeping the same facts: ${weak
+          `These bullets do not open with a strong action verb: ${weak
             .map((w) => `"${w.verb}" in ${w.org}`)
-            .join('; ')}`,
-        ]);
+            .join('; ')}.`,
+          'Rewrite each one so it OPENS with an approved strong verb. You may paraphrase freely to get there - reorder the sentence, change the framing, pick a different verb for the same action. Keep every fact and every number exactly as it is; do not invent, inflate or drop one.',
+          /* Naming candidates, not just the rule. The whole approved list is already in the system
+           * prompt and the model still returned "Stocked" three passes running on a food-service
+           * bullet (measured 2026-07-27), so repeating "use an approved verb" a fourth time was not
+           * the missing ingredient. A short concrete menu beside the offending word is. */
+          `For each one, pick whichever of these fits the action best: ${VERB_SUGGESTIONS.join(', ')}.`,
+          pass > 1
+            ? 'A previous attempt at this failed. Do not reuse the opener you used last time for these bullets.'
+            : '',
+        ].filter(Boolean));
       }
 
       send({ event: 'stage', stage: 'fitting' });
@@ -220,10 +347,61 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       // one a student is most likely to send unread, so an ungrounded claim here is more dangerous
       // than in a tailored resume they at least glanced at.
       const { spec, removed } = pruneUngroundedContent(policiedSpec, bank, declaredSkills);
-      // Empty jdText is correct, not a placeholder: the JD only drives keyword-coverage scoring,
-      // which is meaningless without a posting. Every grounding and writing check still runs.
-      const validation = validateResumeSpec(spec, '', bank, declaredSkills, education);
+      /* The base resume has no posting, so its keyword coverage is scored against the roles the
+       * student says they are chasing (targeting titles and categories, plus the target_roles the
+       * parse inferred). That number is ADVISORY and never gates: a synthetic JD is a guess at what
+       * they will apply to, and gating on it would push generic keyword-stuffing into the one resume
+       * they are most likely to send unread. It is reported so they can see it, nothing more. */
+      const targetText = targetRoleText(target, profile.parsed_json);
+      const validation = validateResumeSpec(spec, targetText, bank, declaredSkills, education);
       const warnings = [...removed, ...validation.issues];
+
+      /* THE ATS GATE. Every resume this product produces goes through it, and until now the base
+       * resume was the one that did not: it was stored as a spec and never rendered, so none of the
+       * post-render checks the tailored path runs had anything to run against. A resume that is not
+       * machine-readable is not a resume, and the student would have found that out from an employer.
+       *
+       * Fails CLOSED, including when the check itself cannot run. An unverified PDF stored as though
+       * it passed is exactly R-017's failure mode, and a spec saved behind a check that silently
+       * threw is the same lie in a different place. */
+      send({ event: 'stage', stage: 'checking' });
+      const contact = contactHeaderFrom(profile.parsed_json, appProfile, email);
+      let ats: AtsVerdict;
+      try {
+        const rendered = await renderResumePdf(spec, contact, targetText);
+        const parsedPdf = await extractPdfText(rendered.buffer);
+        const layout = validatePdfLayout(parsedPdf.text, parsedPdf.numpages);
+        ats = {
+          passed: layout.issues.length === 0,
+          issues: [...layout.issues, ...findPdfTextFidelityIssues(parsedPdf.text, spec, contact)],
+          pages: layout.page_count,
+          extractable_chars: layout.extractable_chars,
+          keyword_coverage_pct: validation.ats_keyword_coverage_pct,
+          scored_against: targetText ? 'target roles' : 'nothing on file',
+        };
+        ats.passed = ats.issues.length === 0;
+      } catch (err) {
+        fastify.log.error({ err, userId }, 'ATS CHECK DID NOT RUN on a base resume; refusing to store it');
+        ats = {
+          passed: false,
+          issues: ['the ATS check could not run on this resume, so it was not saved'],
+          pages: 0,
+          extractable_chars: 0,
+          keyword_coverage_pct: 0,
+          scored_against: 'nothing on file',
+        };
+      }
+
+      send({ event: 'ats', ...ats });
+
+      if (!ats.passed) {
+        send({ event: 'stage', stage: 'failed' });
+        send({
+          event: 'error',
+          message: `This resume did not pass the ATS check, so it has not been saved: ${ats.issues.join('; ')}`,
+        });
+        return;
+      }
 
       const builtAt = new Date();
       await db
@@ -232,7 +410,7 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
         .where(eq(profiles.user_id, userId));
 
       send({ event: 'stage', stage: 'done' });
-      send({ event: 'done', spec, warnings, built_at: builtAt.toISOString() });
+      send({ event: 'done', spec, warnings, ats, metrics: metricGapsIn(spec), built_at: builtAt.toISOString() });
     } catch (err) {
       fastify.log.error(err);
       send({ event: 'stage', stage: 'failed' });

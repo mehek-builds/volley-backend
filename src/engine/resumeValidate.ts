@@ -74,7 +74,8 @@ treated triaged screened rehabilitated cultivated consulted elected guided colle
 constructed assembled purified sequenced cultured calibrated administered dissected determined reported
 performed operated assessed simulated tested prototyped fabricated machined programmed coded
 debugged refactored migrated
-recorded logged compiled wrote installed reviewed tuned estimated computed soldered welded iterated`
+recorded logged compiled wrote installed reviewed tuned estimated computed soldered welded iterated
+characterized`
     .split(/\s+/)
     .filter(Boolean),
 );
@@ -89,15 +90,63 @@ recorded logged compiled wrote installed reviewed tuned estimated computed solde
  * Exported as a function rather than a bare Set so the "co-" rule and the punctuation stripping
  * cannot drift between callers.
  */
+/* A short quotation of a bullet, for a message the STUDENT reads.
+ *
+ * These issue strings are rendered verbatim on /start's base-resume screen, so a hard 40-character
+ * cut showed a chopped word: `"Maintained a caseload of 12-21 individua"` (measured 2026-07-27 on a
+ * real federal resume). Breaking on the last space instead costs nothing and stops the note looking
+ * like the resume itself is corrupted.
+ */
+export function excerpt(bullet: string, max = 40): string {
+  const text = bullet.trim();
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  const lastSpace = cut.lastIndexOf(' ');
+  // A single word longer than the budget has no boundary to find; cut it rather than print it whole.
+  return `${lastSpace > max * 0.5 ? cut.slice(0, lastSpace) : cut}…`;
+}
+
 export function firstWordOf(bullet: string): string {
   return (bullet.trim().split(/\s+/)[0] ?? '').replace(/[^a-zA-Z-]/g, '').toLowerCase();
+}
+
+/* The whitelist is written in the past tense, because most resume bullets are. A CV written in the
+ * PRESENT tense is not breaking the rule, it is describing a current role, and plenty of real ones
+ * do. Measured 2026-07-27 on a WVU biochemistry CV: "Synthesize organic ligands", "Characterize
+ * products with 1H NMR" and "Measure interactions of synthesized compounds" were all flagged, and
+ * `synthesized` and `measured` were sitting on the list the whole time.
+ *
+ * Storing both tenses would be two lists to keep in step, and the second one would drift. Deriving
+ * the past tense from the present is a handful of English spelling rules, and any word whose derived
+ * form is not on the list is rejected exactly as before - so this widens the gate by tense only,
+ * never by vocabulary. */
+/* English will not be derived. These are the irregulars among verbs the whitelist ALREADY admits,
+ * mapped from the present tense a CV writes to the past tense the list stores. Nothing here widens
+ * the vocabulary: every value on the right is on the list above. */
+const IRREGULAR_PAST: Record<string, string> = {
+  build: 'built', rebuild: 'rebuilt', lead: 'led', drive: 'drove', run: 'ran', win: 'won',
+  grow: 'grew', cut: 'cut', teach: 'taught', write: 'wrote', overhaul: 'overhauled',
+};
+
+function pastTenseCandidates(word: string): string[] {
+  const irregular = IRREGULAR_PAST[word];
+  const out = irregular ? [word, irregular] : [word];
+  if (word.endsWith('e')) out.push(`${word}d`); // measure -> measured, synthesize -> synthesized
+  else if (/[^aeiou]y$/.test(word)) out.push(`${word.slice(0, -1)}ied`); // identify -> identified
+  else out.push(`${word}ed`); // present -> presented
+  // A doubled final consonant: "plan" -> "planned". Only for a short consonant-vowel-consonant stem,
+  // which is where the rule actually applies.
+  if (/^[a-z]{2,5}[^aeiou][aeiou][^aeiouwxy]$/.test(word)) out.push(`${word}${word.slice(-1)}ed`);
+  return out;
 }
 
 export function startsWithStrongVerb(bullet: string): boolean {
   const first = firstWordOf(bullet);
   if (!first) return false;
   // "co-" inherits the base verb's strength: co-authoring a paper is as real as authoring one.
-  return STRONG_VERBS.has(first) || (first.startsWith('co-') && STRONG_VERBS.has(first.slice(3)));
+  const base = first.startsWith('co-') ? first.slice(3) : first;
+  if (!base) return false;
+  return pastTenseCandidates(base).some((form) => STRONG_VERBS.has(form));
 }
 
 /** Bullets in a spec that break the rule, as "Org: verb" strings for prompt feedback. */
@@ -607,7 +656,9 @@ export function validateResumeSpec(
     spec.degree,
     spec.grad_date,
     spec.coursework,
-    ...spec.experience.flatMap((e) => [e.org, e.title, ...e.bullets]),
+    // date_range included deliberately: it was the ONE spec field this join omitted, and an em dash
+    // in "Sept. 2019 - Present" therefore passed every content check and reached the rendered PDF.
+    ...spec.experience.flatMap((e) => [e.org, e.title, e.date_range, ...e.bullets]),
     ...spec.skills,
   ].join(' ');
 
@@ -652,8 +703,8 @@ export function validateResumeSpec(
 
     for (const bullet of entry.bullets) {
       const flags: string[] = [];
-      if (bullet.includes('—')) issues.push(`em dash in bullet: "${bullet.slice(0, 40)}"`);
-      if (bullet.length > BULLET_MAX_CHARS) issues.push(`bullet exceeds ${BULLET_MAX_CHARS} chars: "${bullet.slice(0, 40)}"`);
+      if (bullet.includes('—')) issues.push(`em dash in bullet: "${excerpt(bullet)}"`);
+      if (bullet.length > BULLET_MAX_CHARS) issues.push(`bullet exceeds ${BULLET_MAX_CHARS} chars: "${excerpt(bullet)}"`);
 
       const words = bullet.trim().split(/\s+/);
       const nWords = words.length;
@@ -668,7 +719,7 @@ export function validateResumeSpec(
       const andCount = (bullet.toLowerCase().match(/\band\b/g) ?? []).length;
       const hits = [...contentWords(bullet)].filter((w) => kw.has(w)).length;
 
-      if (!isAction) issues.push(`bullet not action-verb-first ("${words[0]}"): "${bullet.slice(0, 40)}"`);
+      if (!isAction) issues.push(`bullet not action-verb-first ("${words[0]}"): "${excerpt(bullet)}"`);
       if (nWords > 34) flags.push('verbose');
       if (andCount > 2) flags.push(`run-on(${andCount} "and"s)`);
       if (!hasMetric && hits < 2) flags.push('thin(no-metric+low-fit)');
@@ -742,7 +793,7 @@ export function validateResumeSpec(
       } else if (v.kind === 'claim') {
         issues.push(`grounding: a ${v.entry} bullet is not supported by any stored source bullet`);
       } else {
-        issues.push(`grounding: metric "${v.detail}" in a ${v.entry} bullet is not in the experience bank ("${(v.bullet ?? '').slice(0, 40)}")`);
+        issues.push(`grounding: metric "${v.detail}" in a ${v.entry} bullet is not in the experience bank ("${excerpt(v.bullet ?? '')}")`);
       }
     }
     // With a declared skills list the check is enforceable, so an off-list skill is a HARD issue
