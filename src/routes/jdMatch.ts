@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { db } from '../db/index';
 import { profiles } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
@@ -8,6 +8,8 @@ import { resumeSpecText } from '../engine/resumeValidate';
 import { scoreJdMatch, scoreBand, MIN_SCORABLE_TERMS } from '../engine/jdMatch';
 import { findGapEvidence } from '../engine/gapEvidence';
 import { checkResumeHealth } from '../engine/resumeHealth';
+import { buildFunnel } from '../engine/funnel';
+import { generated_resumes, autofill_events } from '../db/schema';
 import { readExperienceBank } from '../db/experienceBank';
 import type { ResumeSpec } from '../llm/resumeSpec';
 
@@ -183,5 +185,64 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
     }
 
     return reply.status(200).send(checkResumeHealth(body.spec as unknown as ResumeSpec));
+  });
+
+  /**
+   * GET /metrics/funnel
+   *
+   * The student's own throughput, from what Litos observed. No interview or response rate: nothing
+   * tells us when a company replies, and inferring it from silence would be a guess about their
+   * life dressed as a measurement.
+   */
+  fastify.get('/metrics/funnel', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const userId = request.jwtPayload!.userId;
+
+    // Minutes east of UTC, from the client. Weeks are the student's weeks: bucketing by UTC put a
+    // Dubai student's Monday-morning applications in the previous week's bar.
+    const rawOffset = Number((request.query as { tz_offset?: string } | undefined)?.tz_offset);
+    const offsetMinutes = Number.isFinite(rawOffset) && Math.abs(rawOffset) <= 14 * 60 ? rawOffset : 0;
+
+    // PROJECTED, not select *. generated_resumes.spec is a jsonb blob carrying the whole job
+    // description, the resume and the cover letter, 20-40KB a row, and the dashboard prewarms up to
+    // 30 resumes a day. Selecting the row to read two timestamps and one status string pulled tens
+    // of megabytes out of Neon on every dashboard mount.
+    const [resumeRows, fillRows] = await Promise.all([
+      db
+        .select({
+          created_at: generated_resumes.created_at,
+          status: sql<string | null>`${generated_resumes.spec}->'_review'->>'status'`,
+          submitted_at: sql<string | null>`${generated_resumes.spec}->'_review'->>'submitted_at'`,
+        })
+        .from(generated_resumes)
+        .where(eq(generated_resumes.user_id, userId)),
+      db
+        .select({ total: sql<number>`coalesce(sum(${autofill_events.fields_filled}), 0)::int` })
+        .from(autofill_events)
+        .where(eq(autofill_events.user_id, userId)),
+    ]);
+
+    const tailoredAt: Date[] = [];
+    const submittedAt: Date[] = [];
+    for (const row of resumeRows) {
+      if (row.created_at) tailoredAt.push(row.created_at);
+      // Only a genuine submitted status counts. A resume that exists is not an application sent,
+      // and conflating them would inflate the one number the student is here to watch.
+      if (row.status !== 'submitted') continue;
+      const parsed = row.submitted_at ? new Date(row.submitted_at) : null;
+      // A malformed timestamp costs the submission its place on the chart, never its place in the
+      // count: dropping it entirely would silently under-report a real application.
+      const at = parsed && !Number.isNaN(parsed.getTime()) ? parsed : row.created_at;
+      if (at) submittedAt.push(at);
+    }
+
+    return reply.status(200).send(
+      buildFunnel({
+        tailoredAt,
+        submittedAt,
+        fieldsFilled: fillRows[0]?.total ?? 0,
+        now: new Date(),
+        offsetMinutes,
+      }),
+    );
   });
 }
