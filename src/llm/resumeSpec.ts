@@ -115,7 +115,7 @@ Rules:
 - Use the applicant's real school, degree, and graduation date exactly as given in the Education line; never invent or
   upgrade a degree, and leave "degree" an empty string if none is provided.
 - "coursework": include only courses explicitly listed in the Education source. Never use the job description as evidence for a course.
-- Set education_position to "top" only when the Education source says the candidate is currently enrolled. Otherwise use "after_experience".
+- Set education_position to "top" when the Education source says the candidate is currently enrolled or graduated within the last two years, otherwise "after_experience". Note this field is RE-DERIVED server-side from the parsed education dates and your answer is not what ships; set it anyway so the object validates.
 - THE VERB RULE OUTRANKS VERBATIM REUSE. Reusing a stored bullet word for word is preferred, but not
   when it opens with a verb that is not on the approved list. In that case rewrite the OPENING only,
   keeping every fact, number and noun exactly as the source has them. A bullet that starts with

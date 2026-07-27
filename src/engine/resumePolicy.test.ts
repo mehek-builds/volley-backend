@@ -96,13 +96,13 @@ test('student status comes from uploaded education evidence, not a universal gra
     deriveCandidateContext({ school: 'USC', grad_date: 'May 2018', currently_enrolled: false }, now).education_position,
     'after_experience',
   );
-  // No date evidence at all. parse.ts returns currently_enrolled false when a resume simply does
-  // not say, so this must NOT be read as "graduated": for a student product, silence resolves
-  // toward student. Measured 2026-07-27: three of five real sample resumes land here, because
-  // they print a graduation date with no "Expected" and no parseable year.
+  // No date evidence in either direction. CHANGED 2026-07-27 with the audience: for a student
+  // product silence resolved toward student, for a job-seeker product it resolves toward finished,
+  // because leading with an undated degree buries the work history an employer reads for. A real
+  // current student is unaffected: a future graduation date already sets currently_enrolled above.
   assert.equal(
     deriveCandidateContext({ school: 'USC', currently_enrolled: false }, now).education_position,
-    'top',
+    'after_experience',
   );
 });
 
