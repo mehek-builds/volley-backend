@@ -46,6 +46,19 @@
 /** Below this many extracted requirement terms, we decline to show a score at all. */
 export const MIN_SCORABLE_TERMS = 6;
 
+/**
+ * ...and at least this many of them must be HARD SIGNAL: a curated lexicon skill, an acronym, or a
+ * token carrying a technical marker.
+ *
+ * A count alone is not evidence a posting stated requirements. The proper-noun rule admits company
+ * names, city names and people's names, so a JD that says nothing but "Join Acme Corp in Toronto.
+ * Contact Jane Doe or Bob Smith." cleared a floor of 6 and produced a confident 0% "Weak match"
+ * with `Bob Smith`, `Jane Doe` and `Toronto` on the missing list. That list is not just displayed:
+ * it is the input to the gap-to-bullet feature, which would have offered to write the student a
+ * resume bullet about Bob Smith.
+ */
+export const MIN_SIGNAL_TERMS = 3;
+
 /** Section classes, in descending signal. */
 type SectionKind = 'required' | 'preferred' | 'responsibilities' | 'body' | 'noise';
 
@@ -239,6 +252,9 @@ must should able eager self highly well very`
 export interface JdTerm {
   /** Lowercased, normalized. This is the match key. */
   term: string;
+  /** A lexicon skill, an acronym, or a technical marker, as opposed to a bare proper noun. Only
+   *  these count toward whether the posting is scorable at all. */
+  signal?: boolean;
   /** As it appeared in the JD, for display. */
   display: string;
   weight: number;
@@ -291,6 +307,15 @@ function inLexicon(t: string): boolean {
  *                          every bullet's first word ("Comfortable with Git", "Design REST APIs")
  *                          reads as a product name and lands on the missing list.
  */
+/** True for the subset of specific tokens that are evidence of a stated requirement, rather than
+ *  merely a capitalized word that might be a product name or might be a person. */
+function isHardSignal(token: string): boolean {
+  const t = normalizeTerm(token);
+  if (!t) return false;
+  if (t.length === 1) return /^[A-Z]$/.test(token) && SKILL_LEXICON.has(t);
+  return inLexicon(t) || ACRONYM.test(token) || TECH_MARKER.test(token);
+}
+
 function isSpecific(token: string, positionalCapital: boolean, nextIsCapitalized = false): boolean {
   const t = normalizeTerm(token);
   // Single-character lexicon entries (R, C) are real languages, but only when written as a
@@ -439,7 +464,13 @@ function extractFrom(sections: JdSection[]): JdTerm[] {
       const term = normalizeTerm(tok.text);
       const existing = byTerm.get(term);
       if (!existing || section.weight > existing.weight) {
-        byTerm.set(term, { term, display: tok.text, weight: section.weight, kind: section.kind });
+        byTerm.set(term, {
+          term,
+          display: tok.text,
+          weight: section.weight,
+          kind: section.kind,
+          signal: isHardSignal(tok.text),
+        });
       }
     }
 
@@ -474,6 +505,7 @@ function extractFrom(sections: JdSection[]): JdTerm[] {
           display: `${a.text} ${b.text}`,
           weight: section.weight,
           kind: section.kind,
+          signal: isHardSignal(a.text) || isHardSignal(b.text),
         });
       }
     }
@@ -554,7 +586,8 @@ export interface JdMatchResult {
 export function scoreJdMatch(resumeText: string, jdText: string): JdMatchResult {
   const terms = extractJdTerms(jdText);
 
-  if (terms.length < MIN_SCORABLE_TERMS) {
+  const signalCount = terms.filter((t) => t.signal).length;
+  if (terms.length < MIN_SCORABLE_TERMS || signalCount < MIN_SIGNAL_TERMS) {
     return {
       score: null,
       scorable: false,

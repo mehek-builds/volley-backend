@@ -11,6 +11,7 @@ import {
   scoreJdMatch,
   scoreBand,
   MIN_SCORABLE_TERMS,
+  MIN_SIGNAL_TERMS,
 } from './jdMatch';
 
 /**
@@ -412,6 +413,29 @@ Responsibilities
  * A behavioural test of jdMatch.ts can never catch this. Only a test that reads the composition
  * root can.
  */
+describe('scorability needs signal, not just a term count', () => {
+  test('a posting of company, city and people names is not scorable', () => {
+    // Cleared a floor of 6 and produced a confident 0% "Weak match" with Bob Smith, Jane Doe and
+    // Toronto on the missing list, which is the list the gap-to-bullet feature consumes.
+    const r = scoreJdMatch(
+      'nothing here',
+      'Join Acme Corp in Toronto. We use Slack and Notion daily. Contact Jane Doe or Bob Smith.',
+    );
+    assert.equal(r.scorable, false);
+    assert.equal(r.missing.length, 0, 'a person is never handed out as an unmet requirement');
+  });
+
+  test('a real posting with enough lexicon hits is still scorable', () => {
+    const r = scoreJdMatch('Python and Docker', 'Requirements\n- Python, Docker, AWS, Kubernetes, Terraform, React\n');
+    assert.equal(r.scorable, true);
+    assert.ok(r.missing.every((t) => t.display !== 'Toronto'));
+  });
+
+  test('the signal floor is lower than the term floor, so it gates rather than duplicates', () => {
+    assert.ok(MIN_SIGNAL_TERMS < MIN_SCORABLE_TERMS);
+  });
+});
+
 describe('route registration', () => {
   test('POST /jd-match is actually mounted in index.ts', () => {
     // __dirname, not import.meta.url: tsconfig targets CommonJS for the Vercel build.
