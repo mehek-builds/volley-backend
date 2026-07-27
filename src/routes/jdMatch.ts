@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { eq, sql } from 'drizzle-orm';
+import { eq, and, desc, sql } from 'drizzle-orm';
 import { db } from '../db/index';
 import { profiles } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
@@ -9,6 +9,7 @@ import { scoreJdMatch, scoreBand, MIN_SCORABLE_TERMS } from '../engine/jdMatch';
 import { findGapEvidence } from '../engine/gapEvidence';
 import { checkResumeHealth } from '../engine/resumeHealth';
 import { buildFunnel } from '../engine/funnel';
+import { deriveStage, isStage, STAGES } from '../engine/pipeline';
 import { generated_resumes, autofill_events } from '../db/schema';
 import { readExperienceBank } from '../db/experienceBank';
 import type { ResumeSpec } from '../llm/resumeSpec';
@@ -244,5 +245,70 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
         offsetMinutes,
       }),
     );
+  });
+
+  /**
+   * GET /applications/board
+   *
+   * One row per application, with the stage the student put it in. Projected, not select *: spec is
+   * a jsonb blob carrying the whole job description.
+   */
+  fastify.get('/applications/board', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const userId = request.jwtPayload!.userId;
+    const rows = await db
+      .select({
+        id: generated_resumes.id,
+        job_context: generated_resumes.job_context,
+        created_at: generated_resumes.created_at,
+        pipeline_stage: generated_resumes.pipeline_stage,
+        pipeline_stage_at: generated_resumes.pipeline_stage_at,
+        status: sql<string | null>`${generated_resumes.spec}->'_review'->>'status'`,
+        reviewable: sql<boolean>`${generated_resumes.spec}->'_review' is not null`,
+      })
+      .from(generated_resumes)
+      .where(eq(generated_resumes.user_id, userId))
+      .orderBy(desc(generated_resumes.created_at));
+
+    return reply.status(200).send({
+      stages: STAGES,
+      cards: rows.map((row) => {
+        const context = (row.job_context ?? {}) as { company?: string; role?: string };
+        return {
+          id: row.id,
+          company: context.company ?? 'Unknown company',
+          role: context.role ?? 'Unknown role',
+          created_at: row.created_at,
+          moved_at: row.pipeline_stage_at,
+          reviewable: row.reviewable,
+          submission_status: row.status,
+          stage: deriveStage(row.pipeline_stage, row.status),
+        };
+      }),
+    });
+  });
+
+  /**
+   * PATCH /applications/:id/stage
+   *
+   * The student moving a card. Scoped to their own rows by the where clause, so a guessed id
+   * touches nothing.
+   */
+  fastify.patch('/applications/:id/stage', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const userId = request.jwtPayload!.userId;
+    const { id } = request.params as { id: string };
+    const stage = (request.body as { stage?: unknown } | undefined)?.stage;
+
+    if (!isStage(stage)) {
+      return reply.status(400).send({ error: `stage must be one of: ${STAGES.join(', ')}` });
+    }
+
+    const updated = await db
+      .update(generated_resumes)
+      .set({ pipeline_stage: stage, pipeline_stage_at: new Date() })
+      .where(and(eq(generated_resumes.id, id), eq(generated_resumes.user_id, userId)))
+      .returning({ id: generated_resumes.id });
+
+    if (updated.length === 0) return reply.status(404).send({ error: 'Application not found' });
+    return reply.status(200).send({ id, stage });
   });
 }
