@@ -404,6 +404,12 @@ export const generated_resumes = pgTable('generated_resumes', {
   spec: jsonb('spec').notNull(), // the tailoring decision, kept for audit/debugging
   resume_object_key: text('resume_object_key').notNull(),
   template_id: uuid('template_id').references(() => resume_templates.id),
+  // Where the STUDENT says this stands: saved / applied / interview / offer / closed. A different
+  // axis from spec._review.status, which is submission machinery and records what Litos did. They
+  // move independently, and an interview must not be indistinguishable from a submission retry.
+  // NULL means never moved; the reader derives a starting stage from the submission status.
+  pipeline_stage: text('pipeline_stage'),
+  pipeline_stage_at: timestamp('pipeline_stage_at', { withTimezone: true }),
   created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
 }, (t) => ({
   userCreatedIdx: index('generated_resumes_user_created_idx').on(t.user_id, t.created_at),
