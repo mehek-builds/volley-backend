@@ -250,7 +250,7 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
     const userId = request.jwtPayload!.userId;
     const [profile] = await db.select().from(profiles).where(eq(profiles.user_id, userId));
     if (!profile?.base_resume_json) {
-      return reply.status(404).send({ error: 'No base resume yet' });
+      return reply.status(404).send({ error: 'No main resume yet' });
     }
     return reply.status(200).send({
       spec: profile.base_resume_json,
@@ -445,7 +445,7 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
           scored_against: targetText ? 'target roles' : 'nothing on file',
         };
       } catch (err) {
-        fastify.log.error({ err, userId }, 'ATS CHECK DID NOT RUN on a base resume; refusing to store it');
+        fastify.log.error({ err, userId }, 'ATS CHECK DID NOT RUN on a base resume; refusing to store it'); // vocab-allow: server log
         ats = {
           passed: false,
           issues: ['the ATS check could not run on this resume, so it was not saved'],
@@ -487,7 +487,7 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       send({ event: 'stage', stage: 'failed' });
       send({
         event: 'error',
-        message: err instanceof Error ? err.message : 'Could not build the base resume',
+        message: err instanceof Error ? err.message : 'Could not make your main resume',
       });
     } finally {
       if (!closed) reply.raw.end();

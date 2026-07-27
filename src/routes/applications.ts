@@ -286,7 +286,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         && detectPortal(current.portal_url) === 'controlled_test';
       if (!controlledTest && !isBrowserbaseConfigured()) {
         return reply.status(503).send({
-          error: 'The secure portal runner is not configured yet.',
+          error: 'Litos cannot fill in company pages yet.',
           code: 'PORTAL_RUNNER_NOT_CONFIGURED',
         });
       }
@@ -355,7 +355,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         return reply.status(409).send({ error: 'This application is not waiting for portal attention' });
       }
       if (current.handoff_expires_at && Date.parse(current.handoff_expires_at) < Date.now()) {
-        return reply.status(409).send({ error: 'The secure portal session expired. Start the submission again.' });
+        return reply.status(409).send({ error: 'That took too long and timed out. Start the application again.' });
       }
       const next = { ...current, status: 'ready_for_final_approval' as const, attention_reason: undefined, updated_at: new Date().toISOString() };
       const completed = await db.update(generated_resumes)
@@ -387,7 +387,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         return reply.status(409).send({ error: 'Review the prepared portal before final approval' });
       }
       if (current.handoff_expires_at && Date.parse(current.handoff_expires_at) < Date.now()) {
-        return reply.status(409).send({ error: 'The secure portal session expired. Start the submission again.' });
+        return reply.status(409).send({ error: 'That took too long and timed out. Start the application again.' });
       }
       const now = new Date().toISOString();
       const next = {
@@ -439,7 +439,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         ...current,
         status: parsed.data.status,
         updated_at: now,
-        submission_error: parsed.data.error ?? 'The company portal rejected the submission.',
+        submission_error: parsed.data.error ?? 'The company turned this application down.',
       };
       const updated = await db.update(generated_resumes)
         .set({ spec: reviewSpec(next) })

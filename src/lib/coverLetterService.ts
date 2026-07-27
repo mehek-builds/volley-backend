@@ -118,7 +118,7 @@ export async function generateStoredCoverLetter(row: ApplicationRow, force = fal
     if (validation.issues.length === 0) break;
   }
   if (validation.issues.length > 0) {
-    const error = new Error('The cover letter did not pass grounding checks.') as Error & { issues?: string[] };
+    const error = new Error('Some lines in the cover letter are not backed by your real work.') as Error & { issues?: string[] };
     error.issues = validation.issues;
     throw error;
   }

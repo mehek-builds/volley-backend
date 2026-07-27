@@ -32,7 +32,7 @@ export async function applicationAnswerRoutes(fastify: FastifyInstance) {
     // prefix, so an unstable order busts the cache as well as making drafts non-reproducible.
     const bank = await readExperienceBank(userId);
     if (bank.length === 0) {
-      return reply.status(400).send({ error: 'No experience bank found - complete onboarding first' });
+      return reply.status(400).send({ error: 'Nothing saved about your work yet. Finish setting up first.' });
     }
     const profileRows = await db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1);
     const parsedProfile = profileRows[0]?.parsed_json as { school?: string; grad_year?: number } | undefined;

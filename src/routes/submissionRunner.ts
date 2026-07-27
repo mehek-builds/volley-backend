@@ -597,7 +597,7 @@ async function submitControlled(row: ResumeRow, review: ApplicationReviewState, 
 
 async function submit(row: ResumeRow, fastify: FastifyInstance) {
   const current = readApplicationReview(row.spec);
-  if (!current?.submission_run_id || !current.portal_url) throw new Error('Prepared browser run is missing');
+  if (!current?.submission_run_id || !current.portal_url) throw new Error('The prepared run is missing');
   const authorization = await standingAuthorization(row.user_id);
   if (!mayClickFinalSubmit({
     source: current.submission_authorization?.source,
@@ -657,7 +657,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
     fastify.log.info({ applicationId: row.id }, 'Application submission receipt verified with Stratus Sandbox');
     return;
   }
-  if (!claimedReview.browser_session_id) throw new Error('Prepared browser session is missing');
+  if (!claimedReview.browser_session_id) throw new Error('The prepared run is missing its session.');
   const session = await getBrowserSession(claimedReview.browser_session_id);
   let browser;
   try {
@@ -744,7 +744,7 @@ export async function processSubmissionApplication(applicationId: string, fastif
 export async function submissionRunnerRoutes(fastify: FastifyInstance) {
   fastify.get('/internal/application-submission-runner', async (request: FastifyRequest, reply: FastifyReply) => {
     if (!isCronConfigured() || !isCronAuthorized(request)) return reply.status(401).send({ error: 'Unauthorized' });
-    if (!isBrowserbaseConfigured()) return reply.status(503).send({ error: 'Secure portal runner is not configured', processed: 0 });
+    if (!isBrowserbaseConfigured()) return reply.status(503).send({ error: 'Litos cannot fill in company pages yet. Not configured', processed: 0 });
     const rows = await db
       .select()
       .from(generated_resumes)
