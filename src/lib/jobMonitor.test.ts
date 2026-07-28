@@ -56,16 +56,30 @@ test('decodes the double-escaped text entities Greenhouse actually sends', () =>
 });
 
 test('keeps angle brackets that appear in prose rather than markup', () => {
-  /* The tag strip runs only while the text is still known to be markup. A strip
-   * after the final decode would eat "<b and c>", which is indistinguishable
-   * from a bold tag with attributes. */
+  /* The second strip matches a tag-name allowlist, so prose survives as long as
+   * the first token is not itself a tag name. Comparison operators are the
+   * common real case and are safe because a space or digit follows the "<". */
   const jobs = normalizeGreenhouseJobs({ jobs: [{
     id: 11,
     title: 'Analyst',
     absolute_url: 'https://job-boards.greenhouse.io/acme/jobs/11',
-    content: '&lt;p&gt;Use it if a&amp;lt;b and c&amp;gt;d. Latency &amp;lt; 100ms, &amp;gt; 5 years.&lt;/p&gt;',
+    content: '&lt;p&gt;Latency &amp;lt; 100ms, &amp;gt; 5 years. Ship &amp;lt;Karnataka, Delhi&amp;gt; too.&lt;/p&gt;',
   }] });
-  assert.equal(jobs[0].description, 'Use it if a<b and c>d. Latency < 100ms, > 5 years.');
+  assert.equal(jobs[0].description, 'Latency < 100ms, > 5 years. Ship <Karnataka, Delhi> too.');
+});
+
+test('the tag allowlist is a known trade: prose starting with a tag name is lost', () => {
+  /* Documented, accepted, and unobserved across 22,084 postings. "<b and c>" is
+   * genuinely indistinguishable from a bold tag carrying attributes, and the
+   * allowlist resolves the ambiguity toward markup. Asserted so that if someone
+   * later changes the resolution, they do it on purpose. */
+  const jobs = normalizeGreenhouseJobs({ jobs: [{
+    id: 12,
+    title: 'Analyst',
+    absolute_url: 'https://job-boards.greenhouse.io/acme/jobs/12',
+    content: '&lt;p&gt;Use it if a&amp;lt;b and c&amp;gt;d.&lt;/p&gt;',
+  }] });
+  assert.equal(jobs[0].description, 'Use it if a d.');
 });
 
 test('drops character references Postgres cannot store', () => {
@@ -101,6 +115,50 @@ test('still decodes legitimate numeric and hex references', () => {
     content: '&lt;p&gt;caf&#233; &#x2022; r&#233;sum&#233;&lt;/p&gt;',
   }] });
   assert.equal(jobs[0].description, 'caf\u00e9 \u2022 r\u00e9sum\u00e9');
+});
+
+test('keeps prose in brackets but strips markup that is double-escaped', () => {
+  /* Both arrive as `&amp;lt;...&amp;gt;` and are only told apart by whether the
+   * first token is an HTML tag name. Twilio really ships the first one. */
+  const jobs = normalizeGreenhouseJobs({ jobs: [{
+    id: 21,
+    title: 'Applications Engineer 2',
+    absolute_url: 'https://job-boards.greenhouse.io/twilio/jobs/21',
+    content: '&lt;p&gt;Based in India &amp;lt;Karnataka, Tamil Nadu, Telangana State&amp;gt;.&lt;/p&gt;&lt;p&gt;&amp;lt;div class="x"&amp;gt;Perks&amp;lt;/div&amp;gt;&lt;/p&gt;',
+  }] });
+  assert.match(jobs[0].description, /Based in India <Karnataka, Tamil Nadu, Telangana State>\./);
+  assert.doesNotMatch(jobs[0].description, /<\/?div/);
+  assert.match(jobs[0].description, /Perks/);
+});
+
+test('normalizes the two spellings of a non-breaking space to the same text', () => {
+  const named = normalizeGreenhouseJobs({ jobs: [{
+    id: 22, title: 'T', absolute_url: 'https://x/22',
+    content: '&lt;p&gt;Who we are&nbsp;now&lt;/p&gt;',
+  }] })[0].description;
+  const numeric = normalizeGreenhouseJobs({ jobs: [{
+    id: 23, title: 'T', absolute_url: 'https://x/23',
+    content: '&lt;p&gt;Who we are&#160;now&lt;/p&gt;',
+  }] })[0].description;
+  assert.equal(named, numeric);
+  assert.equal(named, 'Who we are now');
+});
+
+test('leaves a genuinely plain descriptionPlain untouched', () => {
+  /* Lever and Ashby indent bullets in this field. Running the HTML cleaner over
+   * it flattened that for no gain, so it now runs only when markup is present. */
+  const plain = 'What you will do:\n  - Ship features\n  - Talk to users\n\nWhat we offer:\n  - Equity';
+  const lever = normalizeLeverJobs([{
+    id: 'p1', text: 'Engineer', hostedUrl: 'https://jobs.lever.co/acme/p1',
+    applyUrl: 'https://jobs.lever.co/acme/p1/apply', descriptionPlain: plain, categories: {},
+  }]);
+  assert.equal(lever[0].description, plain);
+
+  const ashby = normalizeAshbyJobs({ jobs: [{
+    id: 'a1', title: 'Engineer', jobUrl: 'https://jobs.ashbyhq.com/acme/a1',
+    applyUrl: 'https://jobs.ashbyhq.com/acme/a1/apply', descriptionPlain: plain,
+  }] });
+  assert.equal(ashby[0].description, plain);
 });
 
 test('normalizes Lever postings with a distinct apply URL', () => {
