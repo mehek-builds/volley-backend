@@ -202,6 +202,20 @@ function isFixedPortalProfileField(portal: SupportedPortal, label: string): bool
   if (portal === 'smartrecruiters') {
     return key === 'phone' || key === 'linkedin_url' || key === 'portfolio_url';
   }
+  // Added 2026-07-29 with the three new fillable families. Each entry lists only the fields that
+  // family's fixed selectors ALREADY fill - anything else the employer asks stays a real question for
+  // the reviewed-answer path. Getting this wrong in the generous direction is the harmful one: a
+  // field listed here but not actually filled is silently dropped from the question list and then
+  // never answered by anyone.
+  if (portal === 'rippling' || portal === 'controlled_rippling') {
+    return key === 'phone';
+  }
+  if (portal === 'breezy' || portal === 'controlled_breezy') {
+    return key === 'phone' || key === 'address_city';
+  }
+  if (portal === 'bamboohr' || portal === 'controlled_bamboohr') {
+    return key === 'phone' || key === 'address_city' || key === 'linkedin_url' || key === 'portfolio_url';
+  }
   return false;
 }
 
