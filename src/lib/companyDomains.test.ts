@@ -79,3 +79,43 @@ describe('the map itself', () => {
     }
   });
 });
+
+describe('the failure classes this map has actually hit', () => {
+  test('a multi-word company is never resolved from its first word alone', () => {
+    // Epic Games -> epic.com (Epic Systems), Rocket Lab -> rocket.com, Marshall Wace ->
+    // marshall.com (amplifiers), Pure Storage -> pure.com. A generator once produced all four,
+    // because every one of those sites contains its own first word. Absent is the right answer.
+    for (const [company, wrong] of [
+      ['Epic Games', 'epic.com'],
+      ['Rocket Lab', 'rocket.com'],
+      ['Marshall Wace', 'marshall.com'],
+      ['Pure Storage', 'pure.com'],
+    ] as const) {
+      assert.notStrictEqual(companyDomainFor(company), wrong, `${company} must never map to ${wrong}`);
+    }
+  });
+
+  test('companies whose common word belongs to someone else are left unmapped', () => {
+    // Each was checked by hand: fireworks.com is a fireworks retailer, oldmission.org is a church,
+    // pinecone.com is a for-sale page, honor.com is the handset maker. An initial is correct here.
+    for (const company of ['Fireworks', 'Old Mission', 'Pinecone', 'honor', 'Depot']) {
+      assert.strictEqual(companyDomainFor(company), null, `${company} is not safely resolvable by name`);
+    }
+  });
+
+  test('no entry is a country redirect of itself', () => {
+    // Resolved from Dubai, bitgo.com answers as bitgo.ae and airbnb.com as airbnb.ae. The map must
+    // hold the canonical domain, not an accident of where the resolver ran.
+    for (const [name, domain] of Object.entries(COMPANY_DOMAINS)) {
+      assert.ok(!/\.(ae|de|fr|in|jp|co\.uk)$/.test(domain), `${name}: "${domain}" looks geo-localized`);
+    }
+  });
+
+  test('no entry is a known domain-parking host', () => {
+    for (const [name, domain] of Object.entries(COMPANY_DOMAINS)) {
+      for (const parked of ['aftermarket.com', 'hugedomains.com', 'sedo.com', 'dan.com', 'afternic.com']) {
+        assert.notStrictEqual(domain, parked, `${name} points at a domain broker`);
+      }
+    }
+  });
+});

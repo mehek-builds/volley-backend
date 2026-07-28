@@ -40,57 +40,192 @@
 
 /** Company name exactly as the job board reports it, mapped to the employer's own domain. */
 const COMPANY_DOMAINS: Record<string, string> = {
-  "Affirm": "affirm.com",                            // homepage
-  "Airbnb": "airbnb.com",                            // homepage
-  "Airtable": "airtable.com",                        // homepage
-  "Amplitude": "amplitude.com",                      // board backlink
-  "Anthropic": "anthropic.com",                      // board backlink
-  "Asana": "asana.com",                              // homepage
-  "Baseten": "baseten.co",                           // board backlink
-  "Betterment": "betterment.com",                    // homepage
-  "Brex": "brex.com",                                // homepage
-  "Carta": "carta.com",                              // board backlink
-  "Checkr": "checkr.com",                            // homepage
-  "Chime": "chime.com",                              // favicon+DNS
-  "Cloudflare": "cloudflare.com",                    // homepage
-  "Coinbase": "coinbase.com",                        // favicon+DNS
-  "Cursor": "cursor.com",                            // homepage
-  "Datadog": "datadoghq.com",                        // homepage
-  "Discord": "discord.com",                          // homepage
-  "Doximity": "doximity.com",                        // homepage
-  "Duolingo": "duolingo.com",                        // homepage
-  "Faire": "faire.com",                              // homepage
-  "Figma": "figma.com",                              // board backlink
-  "Flexport": "flexport.com",                        // homepage
-  "Gemini": "gemini.com",                            // homepage
-  "GitLab": "gitlab.com",                            // homepage
-  "Gusto": "gusto.com",                              // favicon+DNS
-  "IMC Trading": "imc.com",                          // homepage
-  "Instacart": "instacart.com",                      // homepage
-  "Khan Academy": "khanacademy.org",                 // homepage
-  "Linear": "linear.app",                            // board backlink
-  "Lyft": "lyft.com",                                // homepage
-  "Marqeta": "marqeta.com",                          // homepage
-  "Match Group": "mtch.com",                         // homepage
-  "MongoDB": "mongodb.com",                          // homepage
-  "Notion": "notion.so",                             // homepage
-  "Palantir": "palantir.com",                        // homepage
-  "Perplexity": "perplexity.ai",                     // favicon+DNS
-  "Pinterest": "pinterest.com",                      // homepage
-  "Point72": "point72.com",                          // homepage
-  "Qube Research & Technologies": "qube-rt.com",     // favicon+DNS
-  "Ramp": "ramp.com",                                // homepage
-  "Reddit": "reddit.com",                            // homepage
-  "Render": "render.com",                            // homepage
-  "Replit": "replit.com",                            // homepage
-  "Robinhood": "robinhood.com",                      // homepage
-  "Scale AI": "scale.com",                           // homepage
-  "SoFi": "sofi.com",                                // favicon+DNS
-  "Stripe": "stripe.com",                            // homepage
-  "Supabase": "supabase.com",                        // homepage
-  "Twitch": "twitch.tv",                             // homepage
-  "Vanta": "vanta.com",                              // homepage
-  "Zocdoc": "zocdoc.com",                            // favicon+DNS
+  "Abridge": "abridge.com",
+  "Adyen": "adyen.com",
+  "Affirm": "affirm.com",
+  "Airbnb": "airbnb.com",
+  "Airtable": "airtable.com",
+  "Alloy": "alloy.com",
+  "Amplitude": "amplitude.com",
+  "anomalo": "anomalo.com",
+  "Anthropic": "anthropic.com",
+  "Anyscale": "anyscale.com",
+  "aptoslabs": "aptoslabs.com",
+  "AQR": "aqr.com",
+  "Asana": "asana.com",
+  "atlan": "atlan.com",
+  "attio": "attio.com",
+  "Baseten": "baseten.co",
+  "betterhelp": "betterhelp.com",
+  "Betterment": "betterment.com",
+  "binalyze": "binalyze.com",
+  "bishopfox": "bishopfox.com",
+  "bitgo": "bitgo.com",
+  "Blend": "blend.com",
+  "blueconic": "blueconic.com",
+  "Braze": "braze.com",
+  "Brex": "brex.com",
+  "btgpactual": "btgpactual.com",
+  "buildkite": "buildkite.com",
+  "Calendly": "calendly.com",
+  "calm": "calm.com",
+  "Carta": "carta.com",
+  "causaly": "causaly.com",
+  "Cerebras": "cerebras.com",
+  "Checkr": "checkr.com",
+  "Chime": "chime.com",
+  "circleci": "circleci.com",
+  "Clickhouse": "clickhouse.com",
+  "Cloudflare": "cloudflare.com",
+  "Coder": "coder.com",
+  "Coinbase": "coinbase.com",
+  "consensys": "consensys.com",
+  "cresta": "cresta.com",
+  "crisp": "crisp.com",
+  "cultureamp": "cultureamp.com",
+  "curative": "curative.com",
+  "Cursor": "cursor.com",
+  "Datadog": "datadoghq.com",
+  "datafold": "datafold.com",
+  "Deepgram": "deepgram.com",
+  "Discord": "discord.com",
+  "Disney": "disney.com",
+  "doppel": "doppel.com",
+  "Doppler": "doppler.com",
+  "Doximity": "doximity.com",
+  "dremio": "dremio.com",
+  "Dropbox": "dropbox.com",
+  "Duolingo": "duolingo.com",
+  "elationhealth": "elationhealth.com",
+  "elicit": "elicit.com",
+  "evervault": "evervault.com",
+  "Faire": "faire.com",
+  "Figma": "figma.com",
+  "fireblocks": "fireblocks.com",
+  "Fivetran": "fivetran.com",
+  "Flexport": "flexport.com",
+  "Flow Traders": "flowtraders.com",
+  "found": "found.com",
+  "freenome": "freenome.com",
+  "Gemini": "gemini.com",
+  "GitLab": "gitlab.com",
+  "gorgias": "gorgias.com",
+  "graphcore": "graphcore.com",
+  "Gusto": "gusto.com",
+  "Harvey": "harvey.ai",
+  "Hightouch": "hightouch.com",
+  "IMC Trading": "imc.com",
+  "imply": "imply.com",
+  "Infisical": "infisical.com",
+  "inkeep": "inkeep.com",
+  "Inngest": "inngest.com",
+  "Instacart": "instacart.com",
+  "ionq": "ionq.com",
+  "Jane Street": "janestreet.com",
+  "jfrog": "jfrog.com",
+  "Jump Trading": "jumptrading.com",
+  "Khan Academy": "khanacademy.org",
+  "Klaviyo": "klaviyo.com",
+  "komodohealth": "komodohealth.com",
+  "kustomer": "kustomer.com",
+  "LangChain": "langchain.com",
+  "lattice": "lattice.com",
+  "launchdarkly": "launchdarkly.com",
+  "lightmatter": "lightmatter.com",
+  "Linear": "linear.app",
+  "lottie": "lottie.com",
+  "Lyft": "lyft.com",
+  "Man Group": "man.com",
+  "Marqeta": "marqeta.com",
+  "Match Group": "mtch.com",
+  "Mercury": "mercury.com",
+  "Mixpanel": "mixpanel.com",
+  "Modal": "modal.com",
+  "modernhealth": "modernhealth.com",
+  "MongoDB": "mongodb.com",
+  "Monzo": "monzo.com",
+  "Namespace": "namespace.com",
+  "nanonets": "nanonets.com",
+  "natera": "natera.com",
+  "Netlify": "netlify.com",
+  "Notion": "notion.so",
+  "Nuro": "nuro.com",
+  "omadahealth": "omadahealth.com",
+  "onemedical": "onemedical.com",
+  "openzeppelin": "openzeppelin.com",
+  "Opslevel": "opslevel.com",
+  "PagerDuty": "pagerduty.com",
+  "Palantir": "palantir.com",
+  "papa": "papa.com",
+  "parsleyhealth": "parsleyhealth.com",
+  "Peloton": "peloton.com",
+  "Perplexity": "perplexity.ai",
+  "phonepe": "phonepe.com",
+  "Physical Intelligence": "physicalintelligence.com",
+  "Pinterest": "pinterest.com",
+  "PlanetScale": "planetscale.com",
+  "Point72": "point72.com",
+  "postman": "postman.com",
+  "psiquantum": "psiquantum.com",
+  "Qube Research & Technologies": "qube-rt.com",
+  "Railway": "railway.com",
+  "Ramp": "ramp.com",
+  "Recursion": "recursion.com",
+  "Reddit": "reddit.com",
+  "Remote": "remote.com",
+  "Render": "render.com",
+  "Replit": "replit.com",
+  "Resend": "resend.com",
+  "Riot Games": "riotgames.com",
+  "ripple": "ripple.com",
+  "Robinhood": "robinhood.com",
+  "Roblox": "roblox.com",
+  "rogo": "rogo.com",
+  "Roku": "roku.com",
+  "rutter": "rutter.com",
+  "safebreach": "safebreach.com",
+  "Samsara": "samsara.com",
+  "sanity": "sanity.com",
+  "Scale AI": "scale.com",
+  "science37": "science37.com",
+  "scopely": "scopely.com",
+  "semgrep": "semgrep.com",
+  "signoz": "signoz.com",
+  "skyflow": "skyflow.com",
+  "SoFi": "sofi.com",
+  "Sophos": "sophos.com",
+  "SpaceX": "spacex.com",
+  "Squarespace": "squarespace.com",
+  "starburst": "starburst.com",
+  "stone": "stone.com",
+  "Stripe": "stripe.com",
+  "Stytch": "stytch.com",
+  "suki": "suki.com",
+  "Suno": "suno.com",
+  "Supabase": "supabase.com",
+  "talkspace": "talkspace.com",
+  "tebra": "tebra.com",
+  "tenstorrent": "tenstorrent.com",
+  "Tower Research": "towerresearch.com",
+  "Trustly": "trustly.com",
+  "truveta": "truveta.com",
+  "Twilio": "twilio.com",
+  "Twitch": "twitch.tv",
+  "Unit": "unit.com",
+  "Vanta": "vanta.com",
+  "veracode": "veracode.com",
+  "veracyte": "veracyte.com",
+  "Vercel": "vercel.com",
+  "Verkada": "verkada.com",
+  "Virtu": "virtu.com",
+  "Waymo": "waymo.com",
+  "Weaviate": "weaviate.com",
+  "Webflow": "webflow.com",
+  "workboard": "workboard.com",
+  "WorkOS": "workos.com",
+  "yugabyte": "yugabyte.com",
+  "Zocdoc": "zocdoc.com",
+  "zoominfo": "zoominfo.com",
 };
 
 /**
