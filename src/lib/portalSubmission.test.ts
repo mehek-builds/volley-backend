@@ -534,14 +534,139 @@ test('Paylocity re-runs the reviewed-question fills on every step, since screene
   assert.equal(asked.length, 4);
 });
 
-test('the terminal attestation step is recognised by its acknowledgement markers', () => {
-  // These ids are what Paylocity renders on the last page: the certification that the facts are
-  // true, plus the prior-conviction and work-authorisation declarations. Litos must never answer
-  // any of them on the student's behalf, so it must be able to tell that page apart.
-  assert.equal(isPaylocityTerminalStep('<span id="acknowledgements.priorConviction.notLastStep">'), true);
-  assert.equal(isPaylocityTerminalStep('<span id="acknowledgements.authorizedToWorkInUS.notLastStep">'), true);
-  assert.equal(isPaylocityTerminalStep('<span id="acknowledgements.eeoGenderEthnicity.notLastStepOrNotIncluded">'), true);
-  assert.equal(isPaylocityTerminalStep('<div id="info.firstName">'), false);
+test('the notLastStep markers mean NOT the last step, so a step-one page is never the attestation page', () => {
+  // Regression test for a real inversion caught in review. The marker ids end in `notLastStep`:
+  // they are Paylocity's own negative flags, present precisely when the page is NOT terminal. The
+  // first version treated their presence as proof of the terminal page, so it returned true on step
+  // one - which would have told the student "one page left, and it needs you" on page one of four.
+  const stepOne = '<div class="progress-header">Step 1 of 4</div>'
+    + '<span id="acknowledgements.priorConviction.notLastStep"></span>'
+    + '<span id="acknowledgements.authorizedToWorkInUS.notLastStep"></span>'
+    + '<input id="info.firstName"><button id="btn-submit">Next Step</button>';
+  assert.equal(isPaylocityTerminalStep(stepOne), false);
+
+  // The terminal page: the negative markers are gone, the wizard's control is still there.
+  const stepFour = '<div class="progress-header">Step 4 of 4</div>'
+    + '<label>By submitting your application you hereby certify...</label>'
+    + '<button id="btn-submit">Submit application</button>';
+  assert.equal(isPaylocityTerminalStep(stepFour), true);
+
+  // Not a wizard page at all (error, redirect, timeout) - absence of the markers alone is not proof.
+  assert.equal(isPaylocityTerminalStep('<h1>Something went wrong</h1>'), false);
+});
+
+test('a portal that cannot auto-submit is stopped before either provider path, not inside the action builder', () => {
+  // Regression test for the most serious review finding. The gate used to live ONLY inside
+  // buildManagedPortalActions, which removed the click from the managed action list but did nothing
+  // about (a) the code that then called readManagedReceipt and wrote status:'submitted' anyway, or
+  // (b) the direct-Playwright path, which calls clickFinalSubmit(page) unconditionally. The real
+  // guarantee has to be enforced by the caller, so assert the predicate the caller keys off.
+  for (const portal of ['jazzhr', 'paylocity', 'controlled_jazzhr', 'controlled_paylocity'] as const) {
+    assert.equal(portalCanAutoSubmit(portal), false, portal);
+    assert.ok(portalHandoffReason(portal), `${portal} must explain the handoff to the student`);
+  }
+  for (const portal of ['workable', 'greenhouse', 'lever', 'ashby'] as const) {
+    assert.equal(portalCanAutoSubmit(portal), true, portal);
+  }
+});
+
+test('each handoff reason names its own cause rather than a generic stop', () => {
+  const captcha = portalHandoffReason('jazzhr')!;
+  const wizard = portalHandoffReason('paylocity')!;
+  assert.match(captcha, /prove you are human/);
+  assert.match(wizard, /last page/);
+  assert.notEqual(captcha, wizard);
+  assert.equal(portalHandoffReason('controlled_jazzhr'), captcha);
+  assert.equal(portalHandoffReason('workable'), null);
+});
+
+test('the wizard is only walked on a real submit run, never on the preview that the human approves', () => {
+  // prepare() builds actions with submit=false to capture the preview screenshot. Traversing there
+  // advanced a real employer's wizard on a run that explicitly asked not to submit, and captured the
+  // preview of step 4 - showing the student an empty attestation page as the thing she was approving.
+  const preview = buildManagedPortalActions('paylocity', capturePacket, false);
+  assert.equal(preview.some((a) => a.type === 'click'), false, 'a preview run must not advance the wizard');
+  const real = buildManagedPortalActions('paylocity', capturePacket, true);
+  assert.ok(real.some((a) => a.type === 'click'), 'a submit run still walks it');
+});
+
+test('the QA harness routes to each new controlled adapter, by query param and by path', () => {
+  const previous = process.env.LITOS_ENABLE_TEST_PORTAL;
+  process.env.LITOS_ENABLE_TEST_PORTAL = 'true';
+  for (const board of ['workable', 'jazzhr', 'paylocity'] as const) {
+    assert.equal(detectPortal(`https://trylitos.com/qa/portal-submission?board=${board}`), `controlled_${board}`);
+    assert.equal(detectPortal(`https://trylitos.com/qa/portal-submission/${board}/${board}-01`), `controlled_${board}`);
+  }
+  if (previous === undefined) delete process.env.LITOS_ENABLE_TEST_PORTAL;
+  else process.env.LITOS_ENABLE_TEST_PORTAL = previous;
+});
+
+test('the new host rules reject marketing sites and the Paylocity employee login', () => {
+  // access.paylocity.com is a CREDENTIAL page on the same host space as the job boards, and
+  // www.workable.com is the vendor's marketing site. A bare host match claimed both, so a mistyped
+  // portal_url became a "supported portal" and earned a fill run against a login form.
+  assert.throws(() => detectPortal('https://access.paylocity.com/'), /cannot fill in/);
+  assert.throws(() => detectPortal('https://www.paylocity.com/company/careers/'), /cannot fill in/);
+  assert.throws(() => detectPortal('https://www.workable.com/'), /cannot fill in/);
+  assert.throws(() => detectPortal('https://jobs.workable.com/search'), /cannot fill in/);
+  // The real application pages still resolve.
+  assert.equal(detectPortal('https://apply.workable.com/suade/j/9C43981D17/apply'), 'workable');
+  assert.equal(detectPortal('https://2000recruiting.paylocity.com/Recruiting/Jobs/Apply/44457'), 'paylocity');
+  assert.equal(detectPortal('https://recruiting.paylocity.com/recruiting/jobs/Details/4084914/X/Y'), 'paylocity');
+});
+
+test('each new adapter pushes the exact selector read off the live form', () => {
+  // Mutation testing during review showed most of these were unpinned: changing the Workable phone
+  // selector, the JazzHR email selector, or deleting the Paylocity location fill all kept the suite
+  // green. A table is the cheap way to make every captured selector load-bearing.
+  const withRole = {
+    ...capturePacket,
+    coverLetter: Buffer.from('pdf'),
+    coverLetterName: 'cover.pdf',
+    mostRecentRole: { company: 'Traeco', title: 'Founding Engineer', summary: 'Built it.', startDate: 'Jun 2025', endDate: 'Present' },
+  };
+  const expected: Record<string, Record<string, string>> = {
+    workable: {
+      first_name: 'input[name="firstname"]', last_name: 'input[name="lastname"]',
+      email: 'input[name="email"]', phone: 'input[name="phone"]', location: 'input[name="city"]',
+      resume: 'input[type="file"][data-ui="resume"]',
+    },
+    jazzhr: {
+      first_name: 'input[name="resumator-firstname-value"]', last_name: 'input[name="resumator-lastname-value"]',
+      email: 'input[name="resumator-email-value"]', phone: 'input[name="resumator-phone-value"]',
+      location: 'input[name="resumator-city-value"]', linkedin: 'input[name="resumator-linkedin-value"]',
+      resume: 'input[type="file"][name="resumator-resume-value"]',
+    },
+    paylocity: {
+      first_name: '[id="info.firstName"]', last_name: '[id="info.lastName"]',
+      email: '[id="info.email"]', phone: '[id="info.cellPhone"]', linkedin: '[id="info.linkedIn"]',
+      location: '#public-site-address-city', resume: '#btn-resume', cover_letter: '#btn-coverLetter',
+      work_company: '[id="workHistory.companyName.0"]', work_title: '[id="workHistory.position.0"]',
+      work_summary: '[id="workHistory.responsibilities.0"]',
+      work_start: '#txt-workHistory-startDate-0', work_end: '#txt-workHistory-endDate-0',
+    },
+  };
+  for (const [portal, fields] of Object.entries(expected)) {
+    const actions = buildManagedPortalActions(portal as 'workable', withRole, true);
+    for (const [label, selector] of Object.entries(fields)) {
+      assert.equal(actions.find((a) => a.label === label)?.selector, selector, `${portal}.${label}`);
+    }
+  }
+});
+
+test('the Paylocity advance selector is exactly the label-scoped form, never the bare id', () => {
+  const actions = buildManagedPortalActions('paylocity', capturePacket, true);
+  const clicks = actions.filter((a) => a.type === 'click');
+  assert.ok(clicks.length > 0);
+  for (const click of clicks) assert.equal(click.selector, '#btn-submit:has-text("Next Step")');
+});
+
+test('Paylocity never answers EEO, OFCCP, the conviction question, or the attestation', () => {
+  const actions = buildManagedPortalActions('paylocity', capturePacket, true);
+  assert.ok(actions.some((a) => a.label === 'first_name'), 'sanity: the adapter actually ran');
+  for (const marker of ['acknowledgements.', 'eeoGenderEthnicity', 'priorConviction', 'authorizedToWorkInUS', 'useAttachedResume']) {
+    assert.equal(actions.some((a) => JSON.stringify(a).includes(marker)), false, marker);
+  }
 });
 
 test('Paylocity picks the resume file input out of the three the form renders', () => {

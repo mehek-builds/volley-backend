@@ -265,7 +265,12 @@ const WORKABLE_COVER_LETTER_SELECTOR =
 // portal would never find it. Moot in practice (see CAPTCHA_GATED_FAMILIES - JazzHR never
 // auto-submits) but recorded here so nobody "fixes" the omission later by wiring up the wrong one.
 const JAZZHR_RESUME_SELECTOR = 'input[type="file"][name="resumator-resume-value"]';
-const JAZZHR_COVER_LETTER_SELECTOR = 'textarea[name="resumator-coverletter-value"]';
+// NOTE: JazzHR takes a cover letter as `textarea[name="resumator-coverletter-value"]` - TEXT, not a
+// file. SubmissionPacket carries the cover letter only as a rendered PDF Buffer, so there is nothing
+// to type into it, and no selector is declared here on purpose: a declared-but-unused constant read
+// as though the field were handled. Today an approved cover letter is simply not sent to JazzHR.
+// Fixing it means threading the letter's text (not just its PDF) through the packet; until then this
+// is a known, deliberate gap rather than a silent one.
 
 // ─── Paylocity (recruiting.paylocity.com) ─────────────────────────────────────
 // Read off a live posting, 2026-07-28 (2000recruiting.paylocity.com/Recruiting/Jobs/Apply/44457).
@@ -322,10 +327,10 @@ const COVER_LETTER_UPLOAD_SELECTORS: Record<SupportedPortal, string> = {
   workable: WORKABLE_COVER_LETTER_SELECTOR,
   controlled_workable: WORKABLE_COVER_LETTER_SELECTOR,
   // JazzHR takes a cover letter as a TEXTAREA, not a file upload, so there is no file input for
-  // hasCoverLetterUpload() to find. Deliberately left as a never-matching file selector rather than
-  // pointed at the textarea: this map answers "can this portal accept a cover-letter FILE", and
-  // answering yes here would make the caller attach a PDF to a control that cannot hold one. The
-  // textarea is filled directly in pushFixedFieldActions instead.
+  // hasCoverLetterUpload() to find. Deliberately a never-matching file selector: this map answers
+  // "can this portal accept a cover-letter FILE", and answering yes would make the caller attach a
+  // PDF to a control that cannot hold one. See the JAZZHR_RESUME_SELECTOR note for why the textarea
+  // is not filled either.
   jazzhr: 'input[type="file"][name="resumator-coverletter-file"]',
   controlled_jazzhr: 'input[type="file"][name="resumator-coverletter-file"]',
   paylocity: PAYLOCITY_COVER_LETTER_SELECTOR,
@@ -542,7 +547,11 @@ export function buildManagedPortalActions(
   // Multi-step portals walk their wizard instead of submitting. This runs AFTER the reviewed-question
   // fills above, so step one is complete before the first advance; each later step then gets another
   // pass of the same question fills, since a screener question can appear on any page.
-  if (portalFamily(portal) === 'paylocity') pushPaylocityTraversal(actions, packet);
+  // Gated on `submit`, not just on family. prepare() calls this builder with submit=false to capture
+  // the preview screenshot the human approves. Traversing there advanced a real employer's wizard on
+  // a run that explicitly asked not to submit, and captured the preview of step 4 - so the student
+  // was shown an empty attestation page as the evidence of what she was approving.
+  if (submit && portalFamily(portal) === 'paylocity') pushPaylocityTraversal(actions, packet);
 
   if (submit && portalCanAutoSubmit(portal)) {
     actions.push({ type: 'click', selector: 'button[type="submit"], input[type="submit"]' });
@@ -589,12 +598,21 @@ function pushPaylocityTraversal(actions: ManagedBrowserAction[], packet: Submiss
   }
 }
 
-// Whether a page the runner landed on is Paylocity's terminal attestation step. Used by the caller
-// to explain the handoff precisely ("one page left, and it needs you") rather than reporting a
-// generic multi-step stop. Matches on the acknowledgement marker ids Paylocity renders, which are
-// stable and specific to that step.
+// Whether a page the runner landed on is Paylocity's terminal attestation step.
+//
+// READ THE SUFFIX BEFORE CHANGING THIS. The marker ids are `...notLastStep` and
+// `...notLastStepOrNotIncluded` - they are Paylocity's own negative flags, rendered precisely when
+// the page is NOT the last step. A first version of this function treated their PRESENCE as proof of
+// the terminal page and so returned true on step one, which is exactly backwards. Their presence
+// means "keep going"; their ABSENCE, on a page that still has the wizard's submit control, is what
+// identifies the end.
+//
+// Requiring the submit control too is what keeps this from firing on an unrelated page that merely
+// lacks the markers (an error page, a timeout, a redirect to the job board).
 export function isPaylocityTerminalStep(pageHtml: string): boolean {
-  return PAYLOCITY_TERMINAL_MARKERS.some((marker) => pageHtml.includes(marker));
+  const hasNotLastStepMarker = PAYLOCITY_TERMINAL_MARKERS.some((marker) => pageHtml.includes(marker));
+  if (hasNotLastStepMarker) return false;
+  return pageHtml.includes('btn-submit');
 }
 
 export function readManagedReceipt(result: ManagedBrowserResult): {
@@ -614,12 +632,23 @@ const HOSTS: Record<PortalFamily, RegExp> = {
   lever: /(^|\.)lever\.co$/i,
   ashby: /(^|\.)ashbyhq\.com$/i,
   smartrecruiters: /(^|\.)smartrecruiters\.com$/i,
-  workable: /(^|\.)workable\.com$/i,
+  // apply.* only. A bare workable.com match also claimed www.workable.com, which is the vendor's
+  // marketing site, so a mistyped portal_url became a "supported portal" and got a fill run against
+  // a page with no application on it.
+  workable: /^apply\.workable\.com$/i,
   // Every JazzHR tenant is its own subdomain of applytojob.com (ticketmanager.applytojob.com, ...),
   // so the leading (^|\.) form matches the tenant without an allowlist of employers.
   jazzhr: /(^|\.)applytojob\.com$/i,
+  // Tenant subdomains are arbitrary (2000recruiting.paylocity.com), so the host cannot be pinned the
+  // way Workable's can - but it MUST exclude access.paylocity.com, which is Paylocity's employee
+  // login. Litos filling an identity into a credential form is not a thing that should be reachable
+  // from a bad URL. The apply path check in detectPortal is what actually enforces this.
   paylocity: /(^|\.)paylocity\.com$/i,
 };
+
+// Paylocity alone needs a path check as well as a host check, because its host space includes a
+// login portal. Only the recruiting apply/details routes are application pages.
+const PAYLOCITY_APPLY_PATH = /^\/recruiting\/jobs\/(apply|details)\//i;
 
 export function detectPortal(rawUrl: string): SupportedPortal {
   const url = new URL(rawUrl);
@@ -641,7 +670,10 @@ export function detectPortal(rawUrl: string): SupportedPortal {
   }
   if (url.protocol !== 'https:') throw new Error('That application page is not a secure link');
   for (const [portal, host] of Object.entries(HOSTS)) {
-    if (host.test(url.hostname)) return portal as SupportedPortal;
+    if (!host.test(url.hostname)) continue;
+    // See PAYLOCITY_APPLY_PATH: access.paylocity.com is an employee login on the same host space.
+    if (portal === 'paylocity' && !PAYLOCITY_APPLY_PATH.test(url.pathname)) continue;
+    return portal as SupportedPortal;
   }
   throw new Error('Litos cannot fill in this company\u2019s application page yet. It works on Greenhouse, Lever, Ashby, SmartRecruiters, Workable, JazzHR and Paylocity.');
 }
