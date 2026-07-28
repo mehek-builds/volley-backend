@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/index';
 import { users } from '../db/schema';
@@ -116,6 +116,11 @@ export async function sponsorshipRoutes(fastify: FastifyInstance) {
       });
     }
 
+    /* THE WRITE IS THE GUARD, not the read above it.
+       `where sponsorship_declared_at is null` is what actually makes this one-way. The check above
+       is a read-then-write, and two requests arriving together both pass it - which is all it takes
+       to overwrite "needs_now" with "no" and unfilter a board that was meant to stay filtered
+       forever. Zero rows back means somebody else won the race, and that is the 409 path. */
     const requires = answerRequiresSponsorship(answer);
     const [updated] = await db
       .update(users)
@@ -124,13 +129,23 @@ export async function sponsorshipRoutes(fastify: FastifyInstance) {
         sponsorship_declared_at: new Date(),
         sponsorship_answer: answer,
       })
-      .where(eq(users.id, userId))
+      .where(and(eq(users.id, userId), isNull(users.sponsorship_declared_at)))
       .returning({
         declared: users.sponsorship_required_at_onboarding,
         declared_at: users.sponsorship_declared_at,
         answer: users.sponsorship_answer,
         setting: users.sponsor_only_jobs_enabled,
       });
+    if (!updated) {
+      // Lost the race. Re-read and answer with what is on file, exactly as the guard above would.
+      const current = await readAccount(userId);
+      if (!current) return reply.status(404).send({ error: 'No such user' });
+      if (current.answer === answer) return reply.send(state(current));
+      return reply.status(409).send({
+        error: 'Your sponsorship answer was recorded when you set up your account and cannot be changed here.',
+        ...state(current),
+      });
+    }
     return reply.send(state(updated));
   });
 

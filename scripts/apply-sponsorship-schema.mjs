@@ -130,12 +130,26 @@ try {
 
   /* An employer whose filings have since been withdrawn from the data has to LOSE its row, not
      keep the one it was seeded with. Cleared before relinking so a stale confirmation cannot
-     survive a refresh - the whole point of re-running the ingest is that the answer can change. */
+     survive a refresh - the whole point of re-running the ingest is that the answer can change.
+     THE EMPTY-LIST GUARD IS NOT DEFENSIVE PADDING. In Postgres `x <> ALL('{}')` is TRUE, so with no
+     confirmed employers this statement deletes EVERY row - verified against the real table, where
+     it matched all 45. The ON DELETE SET NULL on career_page_sources.sponsor_employer_id then
+     blanks every source in the same committed transaction, and the sponsor-only board silently
+     becomes empty for everyone who needs it. Reachable from a bad rebuild alone: boardCompanies()
+     parses jobSources.ts with a regex, and a change to that file's shape yields zero employers
+     rather than an error. */
+  const confirmed = H1B_EMPLOYERS.filter((e) => e.sponsors).map((e) => e.normalized);
+  if (confirmed.length === 0) {
+    await client.query('rollback');
+    console.error('Refusing to seed: the generated data contains no confirmed employers. Re-run: npm run sponsors:build');
+    await client.end();
+    process.exit(1);
+  }
   const stale = await client.query(
     `delete from sponsor_employers
       where normalized_name <> all ($1::text[])
       returning company_name`,
-    [H1B_EMPLOYERS.filter((e) => e.sponsors).map((e) => e.normalized)],
+    [confirmed],
   );
 
   /* 2. Link the boards. Matched on the normalised name, computed in JS by the same function the
@@ -176,13 +190,26 @@ try {
    outage. Each chunk is atomic, and a re-run is idempotent because the classification is a pure
    function of text that is already stored. */
 try {
-  const { rows } = await client.query(
-    `select id, left(description, 20000) as description, sponsorship_status from monitored_jobs`,
-  );
+  /* Paged by id rather than read in one go. The unpaged version pulled every posting's 20KB of
+     description into one array: ~140MB at today's 7,100 rows, and unbounded as the board grows, on
+     a pooled serverless connection. Keyset pagination rather than OFFSET so the cost per page does
+     not climb with the page number. */
   const changes = new Map();
-  for (const row of rows) {
-    const status = readPostingSponsorship(row.description);
-    if (status !== row.sponsorship_status) changes.set(row.id, status);
+  let scanned = 0;
+  let cursor = '00000000-0000-0000-0000-000000000000';
+  for (;;) {
+    const { rows } = await client.query(
+      `select id, left(description, 20000) as description, sponsorship_status
+         from monitored_jobs where id > $1 order by id limit 1000`,
+      [cursor],
+    );
+    if (rows.length === 0) break;
+    scanned += rows.length;
+    for (const row of rows) {
+      const status = readPostingSponsorship(row.description);
+      if (status !== row.sponsorship_status) changes.set(row.id, status);
+    }
+    cursor = rows[rows.length - 1].id;
   }
   const byStatus = { offers: [], refuses: [], unstated: [] };
   for (const [id, status] of changes) byStatus[status].push(id);
@@ -197,7 +224,7 @@ try {
   const summary = await client.query(
     `select sponsorship_status, count(*)::int as n from monitored_jobs where is_active group by 1 order by 2 desc`,
   );
-  console.log(`Backfilled ${changes.size} of ${rows.length} postings.`);
+  console.log(`Backfilled ${changes.size} of ${scanned} postings.`);
   for (const row of summary.rows) console.log(`  ${row.sponsorship_status}: ${row.n}`);
 } catch (error) {
   console.error('Backfill failed:', error instanceof Error ? error.message : String(error));

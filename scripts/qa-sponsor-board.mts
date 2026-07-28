@@ -210,7 +210,60 @@ check('a refused posting 404s by id for a declared account', byId.statusCode, 40
 const byIdAnon = await app.inject({ method: 'GET', url: `/jobs/${hidden[0].id}` });
 check('...and is still readable signed out', byIdAnon.statusCode, 200);
 
-// 7. Someone who did NOT declare can switch it on and off freely.
+// 7. THE GROUPED BOARD, which was a complete way around the filter until it honoured the account.
+//    It returns company, title, locations and an apply link, so serving it unfiltered handed a
+//    declared account the whole board through a different door.
+async function groupedTitles(headers: Record<string, string> = {}, query = '') {
+  const response = await app.inject({ method: 'GET', url: `/jobs/grouped?company=QA${query}`, headers });
+  const body = response.json();
+  return {
+    titles: (body.jobs as { title: string }[]).map((job) => job.title).sort(),
+    total: body.total,
+    evidence: Object.fromEntries((body.jobs as { title: string; sponsorship_evidence: string | null }[])
+      .map((job) => [job.title, job.sponsorship_evidence])),
+  };
+}
+check('grouped: signed out sees every role', (await groupedTitles()).titles, everything);
+check('grouped: the checkbox filters', (await groupedTitles({}, '&sponsor_only=true')).titles, sponsorOnlyTitles);
+check('grouped: a DECLARED account is filtered without asking', (await groupedTitles(auth)).titles, sponsorOnlyTitles);
+check('grouped: and the group count matches its list', (await groupedTitles(auth)).total, sponsorOnlyTitles.length);
+
+// A role posted twice under one title, where the copies DISAGREE. The tile speaks for the whole
+// group, so one refusal anywhere in it means the tile must say nothing at all.
+const [mixed] = await db.insert(monitored_jobs).values([
+  {
+    source_id: sponsoring.id, external_id: 'qa-sponsor-mixed-a', company_name: 'QA Sponsoring Employer',
+    title: 'QA Mixed Group', description: 'QA fixture posting.', apply_url: 'https://example.test/apply/m1',
+    posting_url: 'https://example.test/job/m1', sponsorship_status: 'offers',
+  },
+  {
+    source_id: sponsoring.id, external_id: 'qa-sponsor-mixed-b', company_name: 'QA Sponsoring Employer',
+    title: 'QA Mixed Group', description: 'QA fixture posting.', apply_url: 'https://example.test/apply/m2',
+    posting_url: 'https://example.test/job/m2', sponsorship_status: 'refuses',
+  },
+]).returning({ id: monitored_jobs.id });
+check(
+  'grouped: a group whose copies disagree claims nothing',
+  (await groupedTitles()).evidence['QA Mixed Group'],
+  null,
+);
+await db.delete(monitored_jobs).where(inArray(monitored_jobs.id, [mixed.id]));
+await db.delete(monitored_jobs).where(eq(monitored_jobs.external_id, 'qa-sponsor-mixed-b'));
+
+/* 8. The suggestions must describe the board the account can actually see. Asserted on TITLES
+   rather than companies on purpose: "QA Unconfirmed Employer" still belongs in the company list,
+   because one of its postings states its own sponsorship and is surfaced. The unit of the promise
+   is the posting, not the employer, and a test that got that backwards would demand the product
+   hide a job it is right to show. */
+const facets = await app.inject({ method: 'GET', url: '/jobs/facets', headers: auth });
+const facetTitles = facets.json().titles as string[];
+check(
+  'facets: a declared account is never suggested a hidden role',
+  facetTitles.filter((title) => title.startsWith('QA ')).sort(),
+  sponsorOnlyTitles,
+);
+
+// 9. Someone who did NOT declare can switch it on and off freely.
 const [second] = await db.insert(users).values({ email: 'qa-sponsor-2@litos.test' }).returning({ id: users.id });
 const secondToken = await new SignJWT({ userId: second.id, email: 'qa-sponsor-2@litos.test' })
   .setProtectedHeader({ alg: 'HS256' }).setIssuedAt().setExpirationTime('1h').sign(secret);
