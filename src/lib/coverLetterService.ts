@@ -61,7 +61,7 @@ async function persistCoverLetter(
   const review = readApplicationReview(stored);
   const contact = (stored._contact ?? {}) as { full_name?: string; email?: string };
   const job = row.job_context as { company?: string; role?: string };
-  if (!review?.jd_text || !job.company || !job.role || !contact.full_name) throw new Error('Application packet is incomplete');
+  if (!review?.jd_text || !job.company || !job.role || !contact.full_name) throw new Error('This application is missing something we need');
   const pdf = await renderCoverLetterPdf({ full_name: contact.full_name, email: contact.email }, job.company, body);
   const blob = await put(`users/${row.user_id}/resumes/${row.id}-cover-letter-${Date.now()}.pdf`, pdf, {
     access: 'public',
@@ -103,9 +103,9 @@ export async function generateStoredCoverLetter(row: ApplicationRow, force = fal
   const stored = row.spec as StoredSpec;
   const review = readApplicationReview(stored);
   const job = row.job_context as { company?: string; role?: string };
-  if (!review?.jd_text || !job.company || !job.role) throw new Error('Application packet is incomplete');
+  if (!review?.jd_text || !job.company || !job.role) throw new Error('This application is missing something we need');
   if (!canGenerateCoverLetter(review.cover_letter_supported, capabilityConfirmed)) {
-    throw new Error('The employer portal does not expose a cover-letter attachment field');
+    throw new Error('This company’s application page has nowhere to attach a cover letter');
   }
   const existing = storedCoverLetter(row);
   if (existing && !force) return { cover_letter: existing, blob_url: undefined };
@@ -129,7 +129,7 @@ export async function saveStoredCoverLetter(row: ApplicationRow, body: string) {
   const review = readApplicationReview(row.spec);
   const job = row.job_context as { company?: string; role?: string };
   if (!job.company || !job.role || review?.cover_letter_supported !== true) {
-    throw new Error('The employer portal does not expose a cover-letter attachment field');
+    throw new Error('This company’s application page has nowhere to attach a cover letter');
   }
   const source = await candidateContext(row);
   const validation = validateCoverLetter(body, job.company, job.role, source);

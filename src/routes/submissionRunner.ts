@@ -172,7 +172,7 @@ async function buildPacket(row: ResumeRow, controlledTest = false): Promise<Subm
   const app = appRow[0] ? decryptRow(appRow[0]) : {};
   const parsed = (profileRow[0]?.parsed_json ?? {}) as Record<string, unknown>;
   const review = readApplicationReview(stored);
-  if (!review) throw new Error('Application review packet is missing');
+  if (!review) throw new Error('We could not find this application');
   let resume: Buffer;
   if (controlledTest && process.env.LITOS_ENABLE_TEST_PORTAL === 'true') {
     resume = Buffer.from('%PDF-1.4\n% Litos controlled submission fixture\n%%EOF\n');
@@ -220,7 +220,7 @@ async function packetForCoverLetterCapability(row: ResumeRow, supported: boolean
   if (!supported) return omitCoverLetter(await buildPacket(row));
   if (!storedCoverLetter(row)) await generateStoredCoverLetter(row, false, true);
   const rows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, row.id)).limit(1);
-  if (!rows[0]) throw new Error('Application packet disappeared while generating its cover letter');
+  if (!rows[0]) throw new Error('This application went missing while we wrote the cover letter');
   return buildPacket(rows[0]);
 }
 
@@ -428,7 +428,7 @@ async function prepareManaged(
 async function prepare(row: ResumeRow, fastify: FastifyInstance) {
   const stored = row.spec as StoredSpec;
   const current = readApplicationReview(stored);
-  if (!current?.portal_url) throw new Error('Application portal URL is missing');
+  if (!current?.portal_url) throw new Error('We do not have a link to the company application page');
   const portal = detectPortal(current.portal_url);
   const runId = current.submission_run_id ?? randomUUID();
   const authorization = await standingAuthorization(row.user_id);

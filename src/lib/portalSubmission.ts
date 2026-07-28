@@ -350,7 +350,7 @@ export function readManagedReceipt(result: ManagedBrowserResult): {
 } {
   const body = result.text.replace(/\s+/g, ' ').trim();
   if (!/thank you|application (?:has been )?(?:submitted|received)|we received your application|success/i.test(body)) {
-    throw new Error('The portal did not show a verifiable submission confirmation');
+    throw new Error('The company never showed a confirmation we could check');
   }
   return { confirmationText: body.slice(0, 1000), finalUrl: result.url, referenceId: receiptReference(body) };
 }
@@ -377,11 +377,11 @@ export function detectPortal(rawUrl: string): SupportedPortal {
     if (board === 'smartrecruiters') return 'controlled_smartrecruiters';
     return 'controlled_test';
   }
-  if (url.protocol !== 'https:') throw new Error('Application portal must use HTTPS');
+  if (url.protocol !== 'https:') throw new Error('That application page is not a secure link');
   for (const [portal, host] of Object.entries(HOSTS)) {
     if (host.test(url.hostname)) return portal as SupportedPortal;
   }
-  throw new Error('This portal is not supported yet. Supported portals are Greenhouse, Lever, Ashby, and SmartRecruiters.');
+  throw new Error('Litos cannot fill in this company\u2019s application page yet. It works on Greenhouse, Lever, Ashby and SmartRecruiters.');
 }
 
 export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): string {
@@ -605,7 +605,7 @@ async function resolveFieldLabel(page: Page, field: Locator): Promise<string | n
 
 export async function clickFinalSubmit(page: Page): Promise<void> {
   const button = page.getByRole('button', { name: /submit application|submit|apply/i }).last();
-  if ((await button.count()) === 0) throw new Error('Final submit control was not found');
+  if ((await button.count()) === 0) throw new Error('We could not find the Submit button');
   await button.click();
   await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => undefined);
 }
@@ -613,7 +613,7 @@ export async function clickFinalSubmit(page: Page): Promise<void> {
 export async function readReceipt(page: Page): Promise<{ confirmationText: string; finalUrl: string; referenceId?: string }> {
   const body = (await page.locator('body').innerText()).replace(/\s+/g, ' ').trim();
   if (!/thank you|application (?:has been )?(?:submitted|received)|we received your application|success/i.test(body)) {
-    throw new Error('The portal did not show a verifiable submission confirmation');
+    throw new Error('The company never showed a confirmation we could check');
   }
   return { confirmationText: body.slice(0, 1000), finalUrl: page.url(), referenceId: receiptReference(body) };
 }

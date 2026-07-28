@@ -98,15 +98,15 @@ test('opens Ashby directly on its application tab for managed filling', () => {
 });
 
 test('rejects insecure and lookalike portal URLs', () => {
-  assert.throws(() => detectPortal('http://boards.greenhouse.io/acme/jobs/123'), /HTTPS/);
-  assert.throws(() => detectPortal('https://greenhouse.io.attacker.example/acme'), /not supported/);
-  assert.throws(() => detectPortal('https://example.com/apply'), /not supported/);
+  assert.throws(() => detectPortal('http://boards.greenhouse.io/acme/jobs/123'), /secure link/);
+  assert.throws(() => detectPortal('https://greenhouse.io.attacker.example/acme'), /cannot fill in/);
+  assert.throws(() => detectPortal('https://example.com/apply'), /cannot fill in/);
 });
 
 test('controlled portal is gated by an explicit server flag', () => {
   const previous = process.env.LITOS_ENABLE_TEST_PORTAL;
   delete process.env.LITOS_ENABLE_TEST_PORTAL;
-  assert.throws(() => detectPortal('https://trylitos.com/qa/portal-submission'), /not supported/);
+  assert.throws(() => detectPortal('https://trylitos.com/qa/portal-submission'), /cannot fill in/);
   process.env.LITOS_ENABLE_TEST_PORTAL = 'true';
   assert.equal(detectPortal('https://trylitos.com/qa/portal-submission'), 'controlled_test');
   assert.equal(detectPortal('http://localhost:3000/qa/portal-submission'), 'controlled_test');
@@ -254,7 +254,7 @@ test('managed receipt requires confirmation language and captures the reference'
     finalUrl: 'https://trylitos.com/qa/portal-submission?complete=1',
     referenceId: 'LITOS-QA-2027',
   });
-  assert.throws(() => readManagedReceipt({ title: 'Form', url: 'https://example.com', text: 'Apply now' }), /verifiable/);
+  assert.throws(() => readManagedReceipt({ title: 'Form', url: 'https://example.com', text: 'Apply now' }), /confirmation we could check/);
 });
 
 test('choice-shaped questions are recognised by their wording', () => {

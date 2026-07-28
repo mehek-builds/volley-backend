@@ -45,6 +45,17 @@ export const RETIRED: [string, string][] = [
   ["job-board scan", "we check for new ones"],
   ["monitored jobs", "the jobs we watch for you"],
   ["throughput", "applications you sent"],
+  // Found 2026-07-28 by hand-scanning the backend. These reach the dashboard
+  // verbatim: resumeHealth findings render as title/action, and thrown Errors
+  // surface as submission_error or a 4xx body.
+  ["quantified", "has a number in it"],
+  ["saved experience", "the work you told us about"],
+  ["retry window", "wait a few minutes"],
+  // Scoped to the PHRASES that appeared in copy, not the bare word: this is a
+  // TypeScript codebase full of SubmissionPacket / ReviewPacket types, and a bare
+  // "packet" rule reports those as copy.
+  ["application packet", "this application"],
+  ["review packet", "this application"],
   ["filler verb", "a weak word"],
   // Compliance vocabulary shown raw
   ["attestation", "something you have to swear to"],
@@ -86,7 +97,14 @@ const TAILWINDISH =
 export function userFacingStrings(src: string): string[] {
   const code = stripComments(src);
   const out: string[] = [];
-  for (const m of code.matchAll(/>([^<>{}]{4,})</g)) out.push(m[1]);
+  /* JSX text nodes. The `[^<>{}]` class alone spans newlines, so a `>` and a `<`
+     several lines apart swallow the code between them and the whole blob counts
+     as visible text, reporting identifiers as copy. A gate that cries wolf gets
+     switched off. Prose does not contain `;` or `=`. */
+  for (const m of code.matchAll(/>([^<>{}]{4,})</g)) {
+    if (/[;=]/.test(m[1])) continue;
+    out.push(m[1]);
+  }
   for (const m of code.matchAll(/(['"`])([^'"`\\\n]{6,})\1/g)) {
     const t = m[2];
     if (!t.includes(" ")) continue;
