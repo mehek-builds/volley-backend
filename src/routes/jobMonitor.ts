@@ -4,7 +4,8 @@ import { z } from 'zod';
 import { db } from '../db/index';
 import { career_page_sources, monitored_jobs, profiles } from '../db/schema';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
-import { fetchSourceJobs, type JobSourceInput, type SupportedJobBoard } from '../lib/jobMonitor';
+import { fetchSourceJobs, POLLABLE_JOB_BOARDS, type JobSourceInput, type SupportedJobBoard } from '../lib/jobMonitor';
+import { AUTONOMOUS_PORTAL_FAMILIES } from '../lib/portalSubmission';
 import { optionalAuth } from '../middleware/auth';
 import { scoreJdMatch } from '../engine/jdMatch';
 import { resumeSpecText } from '../engine/resumeValidate';
@@ -13,7 +14,12 @@ import { rankingCacheKey, readRanking, writeRanking } from '../lib/rankingCache'
 
 const sourceSchema = z.object({
   company_name: z.string().trim().min(1).max(200),
-  ats_name: z.enum(['greenhouse', 'lever', 'ashby']),
+  // Derived, never re-listed. This is the runtime gate on POST /internal/job-monitor/sources, and a
+  // hand-written copy of the board list here would be the easiest place for the guarantee to rot:
+  // it would accept a source the type system forbids, and the row would outlive the mistake.
+  // POLLABLE_JOB_BOARDS, not AUTONOMOUS_PORTAL_FAMILIES: a source also needs a fetcher, and
+  // accepting one without would store a row the daily poll can only ever record an error against.
+  ats_name: z.enum(POLLABLE_JOB_BOARDS),
   board_token: z.string().trim().min(1).max(300),
   career_url: z.string().url().max(4000),
   enabled: z.boolean().optional().default(true),
@@ -276,7 +282,18 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     const parsed = listQuerySchema.safeParse(request.query);
     if (!parsed.success) return reply.status(400).send({ error: 'Invalid job filters' });
     const { q, location, company, remote, limit, offset } = parsed.data;
-    const conditions = [eq(monitored_jobs.is_active, true), eq(career_page_sources.enabled, true)];
+    // Only surface jobs Litos can carry all the way to a confirmation on its own.
+    //
+    // Belt and braces with the compile-time constraint on SupportedJobBoard, and it earns its keep:
+    // that type stops NEW sources being added, but monitored_jobs rows outlive their source. A board
+    // polled before this rule existed, or one disabled rather than deleted, still has rows joined to
+    // a career_page_sources row whose ats_name is whatever it was then. This is the filter that
+    // keeps those out of the board and the dashboard, which both read this one route.
+    const conditions = [
+      eq(monitored_jobs.is_active, true),
+      eq(career_page_sources.enabled, true),
+      inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
+    ];
     if (q) conditions.push(or(ilike(monitored_jobs.title, `%${q}%`), ilike(monitored_jobs.description, `%${q}%`))!);
     if (location) conditions.push(ilike(monitored_jobs.location, `%${location}%`));
     if (company) conditions.push(ilike(monitored_jobs.company_name, `%${company}%`));
@@ -402,7 +419,17 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
           .select(selection)
           .from(monitored_jobs)
           .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
-          .where(and(eq(monitored_jobs.is_active, true), inArray(monitored_jobs.id, pageIds)))
+          .where(and(
+            eq(monitored_jobs.is_active, true),
+            inArray(monitored_jobs.id, pageIds),
+            /* The autonomy filter has to be repeated HERE, even though the pool that produced
+               pageIds was already filtered by `conditions`. This read is by id, and the ids can come
+               from readRanking() - a ranking computed before this rule existed, or before a source
+               changed, still holds ids from boards Litos cannot finish. Without this line the cache
+               resurrects exactly the jobs the board is meant to exclude, which is the same reasoning
+               as the comment below about deactivated postings. */
+            inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
+          ))
       : [];
 
     /* Back into ranked order, and silently dropping any id that no longer resolves — a posting
@@ -455,6 +482,10 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         eq(monitored_jobs.id, parsed.data.id),
         eq(monitored_jobs.is_active, true),
         eq(career_page_sources.enabled, true),
+        // Same rule as the list route. Without it a job filtered off the board is still reachable by
+        // id - from a bookmark, a shared link, or a dashboard row cached before the filter landed -
+        // and the detail page is exactly where a student commits to applying.
+        inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
       ))
       .limit(1);
     if (!rows[0]) return reply.status(404).send({ error: 'Job not found' });
