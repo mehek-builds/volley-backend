@@ -6,6 +6,7 @@ import {
   canFillReviewedQuestions,
   coverLetterUploadSelector,
   detectPortal,
+  isAutonomousPortalFamily,
   isChoiceQuestion,
   isPaylocityTerminalStep,
   managedResultHasCoverLetterUpload,
@@ -14,6 +15,7 @@ import {
   portalHandoffReason,
   readManagedReceipt,
 } from './portalSubmission';
+import { POLLABLE_JOB_BOARDS } from './jobMonitor';
 
 test('detects the four supported applicant portal families', () => {
   assert.equal(detectPortal('https://boards.greenhouse.io/acme/jobs/123'), 'greenhouse');
@@ -151,8 +153,35 @@ test('controlled portal variants exercise every real adapter selector family', (
   for (const [portal, expected] of selectors) {
     const actions = buildManagedPortalActions(portal, packet, true);
     assert.ok(actions.some((action) => action.type === 'fill' && action.selector?.includes(expected)));
-    assert.equal(actions.at(-1)?.type, 'click');
+    // A submit click is appended only where the portal can actually finish. SmartRecruiters moved
+    // out of that group on 2026-07-28: it was always step-one-only, and used to rely on the weaker
+    // guarantee that clickFinalSubmit would find nothing to press. Once the jobs board started
+    // deriving what to SHOW from portalCanAutoSubmit, a predicate that lied about SmartRecruiters
+    // would have surfaced postings the student could never complete.
+    assert.equal(
+      actions.at(-1)?.type === 'click',
+      portalCanAutoSubmit(portal),
+      `${portal}: a submit click must appear if and only if the portal can finish alone`,
+    );
   }
+});
+
+test('the jobs board may only source from portals Litos can finish alone', () => {
+  // The guarantee behind "only surface jobs we can complete autonomously". POLLABLE_JOB_BOARDS is
+  // constrained to AutonomousPortalFamily at compile time; this asserts the runtime lists agree, so
+  // a widening that somehow slips past the type checker still fails here.
+  for (const board of POLLABLE_JOB_BOARDS) {
+    assert.equal(portalCanAutoSubmit(board), true, `${board} is polled but cannot finish alone`);
+    assert.ok(isAutonomousPortalFamily(board), board);
+  }
+  // The portals that must never reach the board, and why.
+  for (const blocked of ['smartrecruiters', 'jazzhr', 'paylocity'] as const) {
+    assert.equal(portalCanAutoSubmit(blocked), false, blocked);
+    assert.equal(isAutonomousPortalFamily(blocked), false, blocked);
+    assert.equal((POLLABLE_JOB_BOARDS as readonly string[]).includes(blocked), false, blocked);
+  }
+  // Workable can finish alone, so it is eligible - it simply has no fetcher yet.
+  assert.equal(isAutonomousPortalFamily('workable'), true);
 });
 
 test('managed controlled-portal actions include reviewed fields, resume upload, and final submit', () => {
