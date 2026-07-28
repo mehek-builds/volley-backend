@@ -12,8 +12,15 @@ function quoteAttr(value: string): string {
   return value.replace(/["\\]/g, '\\$&');
 }
 
-type PortalFamily = 'greenhouse' | 'lever' | 'ashby' | 'smartrecruiters';
-type ControlledPortal = 'controlled_test' | 'controlled_lever' | 'controlled_ashby' | 'controlled_smartrecruiters';
+type PortalFamily = 'greenhouse' | 'lever' | 'ashby' | 'smartrecruiters' | 'workable' | 'jazzhr' | 'paylocity';
+type ControlledPortal =
+  | 'controlled_test'
+  | 'controlled_lever'
+  | 'controlled_ashby'
+  | 'controlled_smartrecruiters'
+  | 'controlled_workable'
+  | 'controlled_jazzhr'
+  | 'controlled_paylocity';
 export type SupportedPortal = PortalFamily | ControlledPortal;
 
 function portalFamily(portal: SupportedPortal): PortalFamily {
@@ -21,7 +28,48 @@ function portalFamily(portal: SupportedPortal): PortalFamily {
   if (portal === 'controlled_lever') return 'lever';
   if (portal === 'controlled_ashby') return 'ashby';
   if (portal === 'controlled_smartrecruiters') return 'smartrecruiters';
+  if (portal === 'controlled_workable') return 'workable';
+  if (portal === 'controlled_jazzhr') return 'jazzhr';
+  if (portal === 'controlled_paylocity') return 'paylocity';
   return portal;
+}
+
+// Portals whose first page is NOT the last page. A run against one of these fills what it can and
+// stops; it must never click its way forward, because the control that looks like a submit button
+// is a "Next Step"/"Continue" that leads to further pages this adapter has never seen. Letting one
+// through would produce a "submitted" state for an application the employer never received, which
+// is the single worst failure this module can have - worse than not supporting the portal at all.
+// Confirmed live 2026-07-28: Paylocity's #btn-submit is labelled "Next Step".
+//
+// NOT listed here, deliberately: 'smartrecruiters', which is equally multi-step. It relies instead
+// on the weaker guarantee documented at SMARTRECRUITERS_RESUME_SELECTOR - that clickFinalSubmit()
+// simply won't find a submit control on step one, so the click is pushed but lands on nothing.
+// Adding it here would be the stronger and probably correct guarantee, but it changes behaviour
+// that was verified live on a real posting, so it is left alone and raised separately rather than
+// altered as a side effect of adding Paylocity.
+const MULTI_STEP_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(['paylocity']);
+
+// Portals that gate submission behind a CAPTCHA. Litos fills these and hands off to the human; it
+// never attempts the challenge (standing rule, and the same correct stop the Ashby/CTGT run made).
+// Confirmed live 2026-07-28: every JazzHR application form carries a g-recaptcha-response field.
+const CAPTCHA_GATED_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(['jazzhr']);
+
+export function portalCanAutoSubmit(portal: SupportedPortal): boolean {
+  const family = portalFamily(portal);
+  return !MULTI_STEP_FAMILIES.has(family) && !CAPTCHA_GATED_FAMILIES.has(family);
+}
+
+// Why a run stopped short of submitting, in the student's words. Surfaced on the blocker card so
+// "needs attention" reads as a known platform limit rather than an unexplained failure.
+export function portalHandoffReason(portal: SupportedPortal): string | null {
+  const family = portalFamily(portal);
+  if (CAPTCHA_GATED_FAMILIES.has(family)) {
+    return 'This company’s application page asks you to prove you are human. Litos filled everything in, so all that is left is that check and the send button.';
+  }
+  if (MULTI_STEP_FAMILIES.has(family)) {
+    return 'Litos filled in this application and stopped on the last page. That page asks you to confirm the details are true, and it can ask about your background and your right to work, so those answers need to be yours.';
+  }
+  return null;
 }
 
 export type SubmissionPacket = {
@@ -36,6 +84,18 @@ export type SubmissionPacket = {
   resumeName: string;
   coverLetter?: Buffer;
   coverLetterName?: string;
+  // The single most recent role from the parsed resume, for portals that ask for work history as
+  // structured fields rather than accepting the resume file alone (Paylocity's step one). Only one
+  // entry, deliberately: portals render additional rows behind an "Add" button, and creating rows
+  // Litos may not be able to complete leaves the form messier than one clean entry the student
+  // extends herself. Optional throughout - a profile with no parsed experience simply skips these.
+  mostRecentRole?: {
+    company: string;
+    title: string;
+    summary?: string;
+    startDate?: string;
+    endDate?: string;
+  };
   questions: Array<{ question: string; answer: string }>;
 };
 
@@ -183,6 +243,78 @@ const CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR = '[id="website-input"]';
 const ASHBY_RESUME_SELECTOR = 'input#_systemfield_resume[type="file"], input[type="file"][name="_systemfield_resume"], input[type="file"][name*="resume" i]';
 const ASHBY_COVER_LETTER_SELECTOR = 'input#cover_letter[type="file"], input[type="file"][id*="cover" i], input[type="file"][name*="cover" i], input[type="file"][aria-label*="cover" i]';
 
+// ─── Workable (apply.workable.com) ────────────────────────────────────────────
+// Read off a live Suade posting, 2026-07-28 (apply.workable.com/suade/j/9C43981D17/apply). Plain
+// HTML, single step, stable `name` attributes - the simplest of the three added that day.
+//
+// THE ONE TRAP, and it is a real one: the resume input's id is randomised per render
+// (`input_files_input_Zos7eYaJDFVTg6xg`), so it can never be matched by id. Worse, the form ships a
+// SECOND file input, `data-ui="avatar"`, for a profile photo - so a bare `input[type="file"]` picks
+// whichever comes first and can file the resume as the candidate's headshot. `data-ui="resume"` is
+// the stable, correct hook. Same two-file-input hazard the extension's adapters/ashby.ts documents.
+const WORKABLE_RESUME_SELECTOR = 'input[type="file"][data-ui="resume"]';
+const WORKABLE_COVER_LETTER_SELECTOR =
+  'input[type="file"][data-ui="cover_letter"], input[type="file"][data-ui*="cover" i]';
+
+// ─── JazzHR (*.applytojob.com) ────────────────────────────────────────────────
+// Read off a live TicketManager posting, 2026-07-28. The cleanest naming of any ATS Litos supports:
+// every field is `resumator-<field>-value` on BOTH id and name, so no fallback chain is needed.
+//
+// Note JazzHR's submit control is `input[type="button"][name="submit_resume"]` - type BUTTON, not
+// submit. The generic `button[type="submit"], input[type="submit"]` selector used for every other
+// portal would never find it. Moot in practice (see CAPTCHA_GATED_FAMILIES - JazzHR never
+// auto-submits) but recorded here so nobody "fixes" the omission later by wiring up the wrong one.
+const JAZZHR_RESUME_SELECTOR = 'input[type="file"][name="resumator-resume-value"]';
+// NOTE: JazzHR takes a cover letter as `textarea[name="resumator-coverletter-value"]` - TEXT, not a
+// file. SubmissionPacket carries the cover letter only as a rendered PDF Buffer, so there is nothing
+// to type into it, and no selector is declared here on purpose: a declared-but-unused constant read
+// as though the field were handled. Today an approved cover letter is simply not sent to JazzHR.
+// Fixing it means threading the letter's text (not just its PDF) through the packet; until then this
+// is a known, deliberate gap rather than a silent one.
+
+// ─── Paylocity (recruiting.paylocity.com) ─────────────────────────────────────
+// Read off a live posting, 2026-07-28 (2000recruiting.paylocity.com/Recruiting/Jobs/Apply/44457).
+// Two structural quirks:
+//  1. Fields carry NO `name` attribute at all, and their ids contain dots (`info.firstName`), which
+//     is invalid in a `#id` selector. They must use the [id="..."] attribute form - exactly what
+//     quoteAttr() at the top of this file already exists for, so no new escaping is needed.
+//  2. THREE file inputs (#btn-resume, #btn-coverLetter, #btn-additionalFiles), so a bare file
+//     selector is wrong here too, for the same reason as Workable.
+// Paylocity is multi-step (see MULTI_STEP_FAMILIES); these fills cover page one only.
+const paylocityId = (id: string) => `[id="${quoteAttr(id)}"]`;
+const PAYLOCITY_RESUME_SELECTOR = '#btn-resume';
+const PAYLOCITY_COVER_LETTER_SELECTOR = '#btn-coverLetter';
+
+// ─── Paylocity multi-step traversal ───────────────────────────────────────────
+// Paylocity is a FOUR-step wizard ("Step 1 of 4" in .progress-header), and its composition is
+// per-posting, driven by flags on window.pageData: hasScreener, shouldIncludeEeoQuestions,
+// shouldIncludeOfccpQuestions, displayAcknowledgement. Read live 2026-07-28 off a real posting.
+//
+// THE HAZARD, and the reason this is one careful selector rather than a loop of clicks: the wizard
+// reuses the SAME id, #btn-submit, for both "Next Step" and the terminal submit. Clicking it N times
+// to walk the wizard therefore ends by pressing the real Submit on the last step. Scoping the click
+// by its visible text means the advance action CANNOT match the terminal button - the moment the
+// label stops saying "Next Step", the selector stops matching and the run simply stops advancing.
+// That is a structural guarantee, not a count we have to keep in sync with Paylocity's step logic.
+const PAYLOCITY_ADVANCE_SELECTOR = '#btn-submit:has-text("Next Step")';
+
+// Four steps total, so at most three advances ever. Bounded rather than "advance until it stops
+// matching" because the action list is built up-front and the managed runner cannot branch mid-run.
+// Every advance and every fill is optional, so a posting with fewer steps just no-ops the extras.
+const PAYLOCITY_MAX_ADVANCES = 3;
+
+// What Litos must never fill or click its way past on the final step. These are the exact things
+// the live model shows can appear there: EEO/OFCCP self-identification, a prior-conviction
+// declaration, a work-authorization declaration, and the acknowledgement whose own text reads "you
+// hereby certify that the facts set forth in the above employment application are true and
+// complete". Voluntary demographics belong to the student alone; the rest are legal attestations
+// made in her name. Litos fills everything up to that page and hands it over.
+const PAYLOCITY_TERMINAL_MARKERS = [
+  'acknowledgements.priorConviction',
+  'acknowledgements.authorizedToWorkInUS',
+  'acknowledgements.eeoGenderEthnicity',
+] as const;
+
 const COVER_LETTER_UPLOAD_SELECTORS: Record<SupportedPortal, string> = {
   greenhouse: 'input#cover_letter[type="file"], input[type="file"][name*="cover_letter" i], input[type="file"][id*="cover_letter" i], label:has-text("Cover Letter") input[type="file"]',
   lever: 'input[type="file"][name*="cover" i], input[type="file"][id*="cover" i], label:has-text("Cover Letter") input[type="file"]',
@@ -192,6 +324,17 @@ const COVER_LETTER_UPLOAD_SELECTORS: Record<SupportedPortal, string> = {
   controlled_lever: 'input[type="file"][name*="cover" i], input[type="file"][id*="cover" i], label:has-text("Cover Letter") input[type="file"]',
   controlled_ashby: ASHBY_COVER_LETTER_SELECTOR,
   controlled_smartrecruiters: 'input[type="file"][name*="cover" i], input[type="file"][id*="cover" i], label:has-text("Cover Letter") input[type="file"]',
+  workable: WORKABLE_COVER_LETTER_SELECTOR,
+  controlled_workable: WORKABLE_COVER_LETTER_SELECTOR,
+  // JazzHR takes a cover letter as a TEXTAREA, not a file upload, so there is no file input for
+  // hasCoverLetterUpload() to find. Deliberately a never-matching file selector: this map answers
+  // "can this portal accept a cover-letter FILE", and answering yes would make the caller attach a
+  // PDF to a control that cannot hold one. See the JAZZHR_RESUME_SELECTOR note for why the textarea
+  // is not filled either.
+  jazzhr: 'input[type="file"][name="resumator-coverletter-file"]',
+  controlled_jazzhr: 'input[type="file"][name="resumator-coverletter-file"]',
+  paylocity: PAYLOCITY_COVER_LETTER_SELECTOR,
+  controlled_paylocity: PAYLOCITY_COVER_LETTER_SELECTOR,
 };
 
 export function coverLetterUploadSelector(portal: SupportedPortal): string {
@@ -269,6 +412,61 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR : SMARTRECRUITERS_LINKEDIN_SELECTOR, packet.linkedinUrl, 'linkedin');
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR : SMARTRECRUITERS_WEBSITE_SELECTOR, packet.portfolioUrl ?? packet.githubUrl, 'portfolio');
     managedUpload(actions, SMARTRECRUITERS_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+  } else if (family === 'workable') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    managedFill(actions, 'input[name="firstname"]', parts[0], 'first_name');
+    managedFill(actions, 'input[name="lastname"]', parts.slice(1).join(' '), 'last_name');
+    managedFill(actions, 'input[name="email"]', packet.email, 'email');
+    managedFill(actions, 'input[name="phone"]', packet.phone, 'phone');
+    managedFill(actions, 'input[name="city"]', packet.city, 'location');
+    // Workable has no dedicated LinkedIn/GitHub field on the built-in form - those arrive as custom
+    // QA_<numeric> questions when an employer adds them, and so are handled by the reviewed-question
+    // path, not here. `headline` is the one free identity field, and it is left alone deliberately:
+    // it is candidate-authored positioning, not a fact from the profile, so guessing it would put
+    // words in the student's mouth on a real application.
+    managedUpload(actions, WORKABLE_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    managedUpload(actions, WORKABLE_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
+    // NOT filled: input[name="gdpr"]. It is a consent checkbox, and the standing rule below about
+    // never ticking a consent control on the student's behalf applies with full force here.
+  } else if (family === 'jazzhr') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    managedFill(actions, 'input[name="resumator-firstname-value"]', parts[0], 'first_name');
+    managedFill(actions, 'input[name="resumator-lastname-value"]', parts.slice(1).join(' '), 'last_name');
+    managedFill(actions, 'input[name="resumator-email-value"]', packet.email, 'email');
+    managedFill(actions, 'input[name="resumator-phone-value"]', packet.phone, 'phone');
+    managedFill(actions, 'input[name="resumator-city-value"]', packet.city, 'location');
+    managedFill(actions, 'input[name="resumator-linkedin-value"]', packet.linkedinUrl, 'linkedin');
+    managedUpload(actions, JAZZHR_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    // NOT filled: resumator-eeo_gender-value / resumator-eeo_race-value. Voluntary EEO
+    // self-identification belongs to the student alone and is never inferred or auto-answered.
+  } else if (family === 'paylocity') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    managedFill(actions, paylocityId('info.firstName'), parts[0], 'first_name');
+    managedFill(actions, paylocityId('info.lastName'), parts.slice(1).join(' '), 'last_name');
+    managedFill(actions, paylocityId('info.email'), packet.email, 'email');
+    managedFill(actions, paylocityId('info.cellPhone'), packet.phone, 'phone');
+    managedFill(actions, paylocityId('info.linkedIn'), packet.linkedinUrl, 'linkedin');
+    managedFill(actions, '#public-site-address-city', packet.city, 'location');
+    managedUpload(actions, PAYLOCITY_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    managedUpload(actions, PAYLOCITY_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
+    // Work history and education live on step ONE and were previously skipped entirely, which is
+    // why a Paylocity run used to hand back a page that looked half-done. Confirmed live: all seven
+    // workHistory.* controls and educationHistory.certificationsAndAwards render visible on step 1.
+    // Only the first row (index .0) is filled - Paylocity adds further rows through an "Add Work
+    // History" button, and clicking to create rows we may not be able to complete would leave the
+    // form in a worse state than one clean entry the student can extend herself.
+    if (packet.mostRecentRole) {
+      managedFill(actions, paylocityId('workHistory.companyName.0'), packet.mostRecentRole.company, 'work_company');
+      managedFill(actions, paylocityId('workHistory.position.0'), packet.mostRecentRole.title, 'work_title');
+      managedFill(actions, paylocityId('workHistory.responsibilities.0'), packet.mostRecentRole.summary, 'work_summary');
+      managedFill(actions, '#txt-workHistory-startDate-0', packet.mostRecentRole.startDate, 'work_start');
+      managedFill(actions, '#txt-workHistory-endDate-0', packet.mostRecentRole.endDate, 'work_end');
+    }
+    // NOT touched: #useAttachedResumeToFillOutApplication. Paylocity offers to parse the uploaded
+    // resume back into the form, which would race our own fills and overwrite them with whatever its
+    // parser inferred. Leaving it unchecked keeps the profile the single source of truth.
+    // Also not filled: the required address-1/county/state/zip block. The packet carries only `city`,
+    // so those surface as required-field blockers for the human rather than being invented here.
   } else {
     managedFill(actions, 'input[name="_systemfield_name"]', packet.fullName, 'name', false);
     managedFill(actions, 'input[name="_systemfield_email"]', packet.email, 'email', false);
@@ -339,8 +537,82 @@ export function buildManagedPortalActions(
   // acknowledgement or a consent box. Ticking the wrong consent on a real application is a harm
   // the student cannot undo, while an unanswered choice question is a blocker she resolves in
   // seconds. Choice controls stay with the human until they can be scoped to their own question.
-  if (submit) actions.push({ type: 'click', selector: 'button[type="submit"], input[type="submit"]' });
+  // portalCanAutoSubmit is the second gate, and it is deliberately NOT the caller's job. A caller
+  // passing submit=true is saying "the human approved sending this"; it is not saying the platform
+  // is capable of being sent in one run. Paylocity's "Next Step" button and JazzHR's reCAPTCHA both
+  // sit behind a control that LOOKS submittable, so a caller acting in good faith would otherwise
+  // click into a half-finished multi-page flow or bounce off a challenge, and in the Paylocity case
+  // the run could report success for an application no employer ever received. Gating here means the
+  // guarantee holds no matter who calls this.
+  // Multi-step portals walk their wizard instead of submitting. This runs AFTER the reviewed-question
+  // fills above, so step one is complete before the first advance; each later step then gets another
+  // pass of the same question fills, since a screener question can appear on any page.
+  // Gated on `submit`, not just on family. prepare() calls this builder with submit=false to capture
+  // the preview screenshot the human approves. Traversing there advanced a real employer's wizard on
+  // a run that explicitly asked not to submit, and captured the preview of step 4 - so the student
+  // was shown an empty attestation page as the evidence of what she was approving.
+  if (submit && portalFamily(portal) === 'paylocity') pushPaylocityTraversal(actions, packet);
+
+  if (submit && portalCanAutoSubmit(portal)) {
+    actions.push({ type: 'click', selector: 'button[type="submit"], input[type="submit"]' });
+  }
   return actions;
+}
+
+// Walk Paylocity's four-step wizard, filling each page, and stop at the last one.
+//
+// Every action here is optional, which is what makes a fixed sequence safe against a variable
+// wizard: a posting with only two steps simply no-ops the remaining advances rather than erroring.
+// The advance selector is scoped to the "Next Step" label (see PAYLOCITY_ADVANCE_SELECTOR), so the
+// sequence physically cannot press the terminal submit no matter how many advances are queued.
+//
+// What this deliberately does NOT do is answer the final step's content. The live model shows that
+// page can carry EEO/OFCCP self-identification, a prior-conviction declaration, a work-authorisation
+// declaration, and an acknowledgement reading "you hereby certify that the facts set forth in the
+// above employment application are true and complete". Demographics are the student's alone, and the
+// rest are legal attestations in her name - so Litos fills the pages before it and hands over one
+// page from the end, with everything else already done.
+function pushPaylocityTraversal(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
+  for (let step = 0; step < PAYLOCITY_MAX_ADVANCES; step += 1) {
+    actions.push({
+      type: 'click',
+      selector: PAYLOCITY_ADVANCE_SELECTOR,
+      label: `advance to step ${step + 2}`,
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
+    // Screener questions live on the steps after the first, and only reviewed answers are sent -
+    // the same rule as everywhere else. Choice controls stay with the human (see the note below
+    // about never matching a short answer like "Yes" against an arbitrary label).
+    for (const item of canFillReviewedQuestions('managed') ? packet.questions : []) {
+      if (!item.answer.trim()) continue;
+      actions.push({
+        type: 'fillByLabelText',
+        text: item.question,
+        value: item.answer,
+        label: `question:${item.question.slice(0, 80)}`,
+        optional: true,
+        timeout: MANAGED_FILL_TIMEOUT_MS,
+      });
+    }
+  }
+}
+
+// Whether a page the runner landed on is Paylocity's terminal attestation step.
+//
+// READ THE SUFFIX BEFORE CHANGING THIS. The marker ids are `...notLastStep` and
+// `...notLastStepOrNotIncluded` - they are Paylocity's own negative flags, rendered precisely when
+// the page is NOT the last step. A first version of this function treated their PRESENCE as proof of
+// the terminal page and so returned true on step one, which is exactly backwards. Their presence
+// means "keep going"; their ABSENCE, on a page that still has the wizard's submit control, is what
+// identifies the end.
+//
+// Requiring the submit control too is what keeps this from firing on an unrelated page that merely
+// lacks the markers (an error page, a timeout, a redirect to the job board).
+export function isPaylocityTerminalStep(pageHtml: string): boolean {
+  const hasNotLastStepMarker = PAYLOCITY_TERMINAL_MARKERS.some((marker) => pageHtml.includes(marker));
+  if (hasNotLastStepMarker) return false;
+  return pageHtml.includes('btn-submit');
 }
 
 export function readManagedReceipt(result: ManagedBrowserResult): {
@@ -360,7 +632,23 @@ const HOSTS: Record<PortalFamily, RegExp> = {
   lever: /(^|\.)lever\.co$/i,
   ashby: /(^|\.)ashbyhq\.com$/i,
   smartrecruiters: /(^|\.)smartrecruiters\.com$/i,
+  // apply.* only. A bare workable.com match also claimed www.workable.com, which is the vendor's
+  // marketing site, so a mistyped portal_url became a "supported portal" and got a fill run against
+  // a page with no application on it.
+  workable: /^apply\.workable\.com$/i,
+  // Every JazzHR tenant is its own subdomain of applytojob.com (ticketmanager.applytojob.com, ...),
+  // so the leading (^|\.) form matches the tenant without an allowlist of employers.
+  jazzhr: /(^|\.)applytojob\.com$/i,
+  // Tenant subdomains are arbitrary (2000recruiting.paylocity.com), so the host cannot be pinned the
+  // way Workable's can - but it MUST exclude access.paylocity.com, which is Paylocity's employee
+  // login. Litos filling an identity into a credential form is not a thing that should be reachable
+  // from a bad URL. The apply path check in detectPortal is what actually enforces this.
+  paylocity: /(^|\.)paylocity\.com$/i,
 };
+
+// Paylocity alone needs a path check as well as a host check, because its host space includes a
+// login portal. Only the recruiting apply/details routes are application pages.
+const PAYLOCITY_APPLY_PATH = /^\/recruiting\/jobs\/(apply|details)\//i;
 
 export function detectPortal(rawUrl: string): SupportedPortal {
   const url = new URL(rawUrl);
@@ -375,13 +663,19 @@ export function detectPortal(rawUrl: string): SupportedPortal {
     if (board === 'lever') return 'controlled_lever';
     if (board === 'ashby') return 'controlled_ashby';
     if (board === 'smartrecruiters') return 'controlled_smartrecruiters';
+    if (board === 'workable') return 'controlled_workable';
+    if (board === 'jazzhr') return 'controlled_jazzhr';
+    if (board === 'paylocity') return 'controlled_paylocity';
     return 'controlled_test';
   }
   if (url.protocol !== 'https:') throw new Error('That application page is not a secure link');
   for (const [portal, host] of Object.entries(HOSTS)) {
-    if (host.test(url.hostname)) return portal as SupportedPortal;
+    if (!host.test(url.hostname)) continue;
+    // See PAYLOCITY_APPLY_PATH: access.paylocity.com is an employee login on the same host space.
+    if (portal === 'paylocity' && !PAYLOCITY_APPLY_PATH.test(url.pathname)) continue;
+    return portal as SupportedPortal;
   }
-  throw new Error('Litos cannot fill in this company\u2019s application page yet. It works on Greenhouse, Lever, Ashby and SmartRecruiters.');
+  throw new Error('Litos cannot fill in this company\u2019s application page yet. It works on Greenhouse, Lever, Ashby, SmartRecruiters, Workable, JazzHR and Paylocity.');
 }
 
 export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): string {
@@ -498,6 +792,34 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR : SMARTRECRUITERS_LINKEDIN_SELECTOR], packet.linkedinUrl, 'linkedin', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR : SMARTRECRUITERS_WEBSITE_SELECTOR], packet.portfolioUrl ?? packet.githubUrl, 'portfolio', filledFields);
     await uploadFirst(page, [SMARTRECRUITERS_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+  } else if (family === 'workable') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    await fillFirst(page, ['input[name="firstname"]'], parts[0], 'first_name', filledFields);
+    await fillFirst(page, ['input[name="lastname"]'], parts.slice(1).join(' '), 'last_name', filledFields);
+    await fillFirst(page, ['input[name="email"]'], packet.email, 'email', filledFields);
+    await fillFirst(page, ['input[name="phone"]'], packet.phone, 'phone', filledFields);
+    await fillFirst(page, ['input[name="city"]'], packet.city, 'location', filledFields);
+    await uploadFirst(page, [WORKABLE_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, WORKABLE_COVER_LETTER_SELECTOR.split(', '), packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+  } else if (family === 'jazzhr') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    await fillFirst(page, ['input[name="resumator-firstname-value"]'], parts[0], 'first_name', filledFields);
+    await fillFirst(page, ['input[name="resumator-lastname-value"]'], parts.slice(1).join(' '), 'last_name', filledFields);
+    await fillFirst(page, ['input[name="resumator-email-value"]'], packet.email, 'email', filledFields);
+    await fillFirst(page, ['input[name="resumator-phone-value"]'], packet.phone, 'phone', filledFields);
+    await fillFirst(page, ['input[name="resumator-city-value"]'], packet.city, 'location', filledFields);
+    await fillFirst(page, ['input[name="resumator-linkedin-value"]'], packet.linkedinUrl, 'linkedin', filledFields);
+    await uploadFirst(page, [JAZZHR_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+  } else if (family === 'paylocity') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    await fillFirst(page, [paylocityId('info.firstName')], parts[0], 'first_name', filledFields);
+    await fillFirst(page, [paylocityId('info.lastName')], parts.slice(1).join(' '), 'last_name', filledFields);
+    await fillFirst(page, [paylocityId('info.email')], packet.email, 'email', filledFields);
+    await fillFirst(page, [paylocityId('info.cellPhone')], packet.phone, 'phone', filledFields);
+    await fillFirst(page, [paylocityId('info.linkedIn')], packet.linkedinUrl, 'linkedin', filledFields);
+    await fillFirst(page, ['#public-site-address-city'], packet.city, 'location', filledFields);
+    await uploadFirst(page, [PAYLOCITY_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, [PAYLOCITY_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
   } else {
     await fillFirst(page, ['input[name="_systemfield_name"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="_systemfield_email"]'], packet.email, 'email', filledFields);
