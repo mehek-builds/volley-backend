@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  AUTONOMOUS_PORTAL_FAMILIES,
   buildManagedDiscoveryActions,
   buildManagedPortalActions,
   canFillReviewedQuestions,
   coverLetterUploadSelector,
   detectPortal,
+  isAccountWalledFamily,
   isAutonomousPortalFamily,
   isChoiceQuestion,
   isPaylocityTerminalStep,
@@ -730,4 +732,243 @@ test('every controlled variant maps to its real family and keeps that family’s
     const viaLive = buildManagedPortalActions(live, capturePacket, false).map((a) => a.selector);
     assert.deepEqual(viaControlled, viaLive);
   }
+});
+
+// ─── 2026-07-29: Rippling, BreezyHR, BambooHR, and the four account-walled platforms ──────────────
+
+test('every autonomous family actually fills something before it is allowed to press submit', () => {
+  // The structural hazard this whole file's type design creates, made into a test.
+  //
+  // AutonomousPortalFamily is derived by EXCLUSION - a family is autonomous unless someone remembers
+  // to add it to the multi-step, CAPTCHA or account-walled sets. So a new family whose fill branch is
+  // missing or misspelled does not fail to compile and does not fail any selector test. It quietly
+  // becomes "autonomous", pushes zero fills, and the runner clicks submit on an empty form. That is
+  // the same shape as the 2026-07-28 finding where a gate existed but did not gate.
+  //
+  // Requiring a real identity fill plus the click closes it for every present and future member.
+  for (const family of AUTONOMOUS_PORTAL_FAMILIES) {
+    const actions = buildManagedPortalActions(family, capturePacket, true);
+    const fills = actions.filter((a) => a.type === 'fill');
+    assert.ok(fills.length >= 2, `${family}: an autonomous portal that fills nothing would submit an empty form`);
+    assert.ok(
+      actions.some((a) => a.type === 'fill' && a.label === 'email'),
+      `${family}: no email fill, so the form cannot identify the applicant`,
+    );
+    assert.ok(
+      actions.some((a) => a.type === 'upload' && a.label === 'resume'),
+      `${family}: no resume upload`,
+    );
+    assert.equal(actions.at(-1)?.type, 'click', `${family}: an autonomous portal must end in the submit click`);
+  }
+});
+
+test('the account-walled four push no actions at all, because there is no form to act on', () => {
+  // Jobvite/iCIMS/Oracle/UltiPro never reach an application field: a data-consent choice, a login
+  // wall, or an emailed code comes first. Firing optional fills at those pages would miss and produce
+  // a blocker card implying the form was found and merely refused, when it was never reached.
+  for (const portal of ['jobvite', 'icims', 'oraclecloud', 'ultipro'] as const) {
+    assert.deepEqual(buildManagedPortalActions(portal, capturePacket, true), [], portal);
+    assert.equal(portalCanAutoSubmit(portal), false, portal);
+    assert.equal(isAutonomousPortalFamily(portal), false, portal);
+    assert.ok(isAccountWalledFamily(portal), portal);
+    assert.equal(
+      (POLLABLE_JOB_BOARDS as readonly string[]).includes(portal),
+      false,
+      `${portal} must never reach the jobs board`,
+    );
+  }
+});
+
+test('an account-walled handoff never claims Litos filled a form it never reached', () => {
+  // The CAPTCHA and wizard sentences both open with "Litos filled everything in" / "Litos filled in
+  // this application", which is true for those families and a plain lie for these four. A student
+  // told that would go hunting for filled fields that do not exist.
+  for (const portal of ['jobvite', 'icims', 'oraclecloud', 'ultipro'] as const) {
+    const reason = portalHandoffReason(portal)!;
+    assert.ok(reason, portal);
+    assert.doesNotMatch(reason, /filled everything in|filled in this application/i, portal);
+  }
+  // And each names its own cause, rather than sharing one vague sentence.
+  const reasons = (['jobvite', 'icims', 'oraclecloud', 'ultipro'] as const).map((p) => portalHandoffReason(p)!);
+  assert.equal(new Set(reasons).size, 4, 'each account-walled platform explains its own gate');
+  assert.match(portalHandoffReason('jobvite')!, /privacy notice/i);
+  assert.match(portalHandoffReason('icims')!, /make an account/i);
+  assert.match(portalHandoffReason('oraclecloud')!, /code/i);
+});
+
+test('BambooHR is CAPTCHA-gated, so it fills and stops however inviting its form looks', () => {
+  // BambooHR's fields are the cleanest of the seven captured, which is exactly the trap: the form
+  // looks like a one-run submit. Confirmed live 2026-07-29 - g-recaptcha-response present,
+  // window.grecaptcha defined, badge rendered, api.js?render=explicit loaded.
+  assert.equal(portalCanAutoSubmit('bamboohr'), false);
+  assert.equal(portalCanAutoSubmit('controlled_bamboohr'), false);
+  assert.equal(isAutonomousPortalFamily('bamboohr'), false);
+  const actions = buildManagedPortalActions('bamboohr', capturePacket, true);
+  assert.ok(actions.some((a) => a.type === 'fill'), 'it still fills what it can');
+  const clicks = actions.filter((a) => a.type === 'click');
+  // The ONLY click is the one that reveals the form. Never a submit.
+  assert.equal(clicks.length, 1);
+  assert.equal(clicks[0]?.label, 'open application form');
+  assert.match(portalHandoffReason('bamboohr')!, /prove you are human/);
+});
+
+test('BambooHR clicks the reveal button first, since the form does not exist until it is pressed', () => {
+  // The form renders into the SAME url behind "Apply for This Job"; /careers/{id}/apply is blank.
+  // If this click is not first, every fill below it races a form that is not in the DOM yet.
+  const actions = buildManagedPortalActions('bamboohr', capturePacket, true);
+  assert.equal(actions[0]?.type, 'click');
+  assert.equal(actions[0]?.selector, 'button:has-text("Apply for This Job")');
+  assert.equal(actions[0]?.optional, true, 'a tenant already showing the form must not fail the run');
+});
+
+test('each 2026-07-29 adapter pushes the exact selector read off the live form', () => {
+  // Same mutation-testing lesson as the 07-28 table: without this, changing a captured selector
+  // keeps the suite green and the regression only shows up on a real employer's form.
+  const withCover = { ...capturePacket, coverLetter: Buffer.from('pdf'), coverLetterName: 'cover.pdf' };
+  const expected: Record<string, Record<string, string>> = {
+    // Both name and id are randomised per render on Rippling, so data-testid is the ONLY stable hook.
+    rippling: {
+      first_name: '[data-testid="input-first_name"]', last_name: '[data-testid="input-last_name"]',
+      email: '[data-testid="input-email"]', phone: '[data-testid="input-phone_number"]',
+      resume: 'input[type="file"][data-testid="input-resume"]',
+      cover_letter: 'input[type="file"][data-testid="input-cover_letter"]',
+    },
+    // cName is ONE full-name field, not a first/last pair.
+    breezy: {
+      name: 'input[name="cName"]', email: 'input[name="cEmail"]',
+      phone: 'input[name="cPhoneNumber"]', location: 'input[name="cAddress"]',
+      resume: 'input[type="file"][name="cResume"]',
+    },
+    bamboohr: {
+      first_name: 'input[name="firstName"]', last_name: 'input[name="lastName"]',
+      email: 'input[name="email"]', phone: 'input[name="phone"]',
+      location: 'input[name="city.value"]', linkedin: 'input[name="linkedinUrl"]',
+      portfolio: 'input[name="websiteUrl"]',
+      resume: 'input[type="file"][aria-label="file-input"]',
+    },
+  };
+  for (const [portal, fields] of Object.entries(expected)) {
+    const actions = buildManagedPortalActions(portal as 'breezy', withCover, true);
+    for (const [label, selector] of Object.entries(fields)) {
+      assert.equal(actions.find((a) => a.label === label)?.selector, selector, `${portal}.${label}`);
+    }
+  }
+});
+
+test('Breezy uses one full-name field and never splits it into first and last', () => {
+  const actions = buildManagedPortalActions('breezy', capturePacket, true);
+  assert.equal(actions.find((a) => a.label === 'name')?.value, 'Taylor Example');
+  for (const label of ['first_name', 'last_name']) {
+    assert.equal(actions.some((a) => a.label === label), false, `Breezy has no ${label} field`);
+  }
+});
+
+test('Breezy touches neither its honeypot nor its two consent checkboxes', () => {
+  // hp_<hex> is randomised per render AND defeats a naive visibility check: the input itself computes
+  // to opacity 1 / visibility visible / 250x43, concealed only by a height:0 overflow:hidden
+  // ancestor. This adapter is safe because it fills by explicit name, and this test keeps it that way.
+  const actions = buildManagedPortalActions('breezy', capturePacket, true);
+  const serialised = JSON.stringify(actions);
+  for (const forbidden of ['hp_', 'smsConsent', 'gdprAgreement']) {
+    assert.equal(serialised.includes(forbidden), false, forbidden);
+  }
+});
+
+test('Rippling answers none of the three things that are the applicant’s alone', () => {
+  // Its pronouns, phone-country and race controls all share ONE data-testid
+  // ("input-select-search-input") and so cannot even be told apart by selector. Two of the three are
+  // the applicant's own identity to declare or decline, so there is nothing here to type into.
+  // sms_opt_in is a marketing consent radio.
+  const actions = buildManagedPortalActions('rippling', capturePacket, true);
+  const serialised = JSON.stringify(actions);
+  for (const forbidden of ['input-select-search-input', 'sms_opt_in', 'aiOptOut', 'externalPlaceId', 'current_company']) {
+    assert.equal(serialised.includes(forbidden), false, forbidden);
+  }
+});
+
+test('BambooHR leaves its honeypot and the address fields the packet cannot know', () => {
+  const serialised = JSON.stringify(buildManagedPortalActions('bamboohr', capturePacket, true));
+  for (const forbidden of ['nickname_', 'streetAddress.value', 'zip.value', 'state.value', 'countryId.value', 'desiredPay']) {
+    assert.equal(serialised.includes(forbidden), false, forbidden);
+  }
+});
+
+test('the 2026-07-29 host rules reject every login, marketing and unrelated-product page on the same hosts', () => {
+  // Every one of these is the access.paylocity.com hazard in a new coat: a host that also serves a
+  // credential page, a marketing site, or - for Oracle - an entire unrelated product estate.
+  const rejected = [
+    'https://app.rippling.com/login',                      // Rippling's HR product, not its ATS
+    'https://www.rippling.com/careers',
+    'https://breezy.hr/',                                  // vendor marketing on the tenant host space
+    'https://breezy.hr/pricing',
+    'https://www.bamboohr.com/careers/application',        // BambooHR's OWN careers page (Greenhouse)
+    'https://www.bamboohr.com/careers/engineering-it-team',
+    'https://www.jobvite.com/',
+    'https://www.icims.com/',
+    'https://community.icims.com/s/article/anything',
+    'https://ultipro.com/',                                // UKG employee login
+    'https://recruiting.ultipro.com/',
+    // The one that would be actively dangerous without a path check: oraclecloud.com hosts every
+    // Oracle Cloud application there is, so a bare host match claims somebody's payroll or ERP login.
+    'https://myfin.fa.us2.oraclecloud.com/fscmUI/faces/FuseWelcome',
+    'https://login.oraclecloud.com/',
+  ];
+  for (const url of rejected) {
+    assert.throws(() => detectPortal(url), /cannot fill in/, url);
+  }
+  // And the real application pages still resolve, including tenant subdomains.
+  assert.equal(detectPortal('https://ats.rippling.com/rippling/jobs/875b2547-84de-4abd-a14e-34ab802e9b27/apply'), 'rippling');
+  assert.equal(detectPortal('https://zinier.breezy.hr/p/7eefd4d49b75-platform-support-engineer-l1/apply'), 'breezy');
+  assert.equal(detectPortal('https://recruiting.breezy.hr/p/05c7fcbfad27-welding-engineer/apply'), 'breezy');
+  assert.equal(detectPortal('https://prentkeromich.bamboohr.com/careers/480'), 'bamboohr');
+  assert.equal(detectPortal('https://jobs.jobvite.com/ness/job/o3mfAfwY/apply'), 'jobvite');
+  assert.equal(detectPortal('https://jobs-express.icims.com/jobs/48173/sales-associate/job'), 'icims');
+  assert.equal(
+    detectPortal('https://eeho.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/jobsearch/job/333913'),
+    'oraclecloud',
+  );
+  assert.equal(
+    detectPortal('https://recruiting.ultipro.com/she1011sphs/JobBoard/62d52737-46c1-4699-83e3-3a1747e3b981'),
+    'ultipro',
+  );
+});
+
+test('the QA harness routes to the three new controlled adapters, by query param and by path', () => {
+  const previous = process.env.LITOS_ENABLE_TEST_PORTAL;
+  process.env.LITOS_ENABLE_TEST_PORTAL = 'true';
+  for (const board of ['rippling', 'breezy', 'bamboohr'] as const) {
+    assert.equal(detectPortal(`https://trylitos.com/qa/portal-submission?board=${board}`), `controlled_${board}`);
+    assert.equal(detectPortal(`https://trylitos.com/qa/portal-submission/${board}/${board}-01`), `controlled_${board}`);
+  }
+  if (previous === undefined) delete process.env.LITOS_ENABLE_TEST_PORTAL;
+  else process.env.LITOS_ENABLE_TEST_PORTAL = previous;
+});
+
+test('the three new controlled variants exercise their live family’s selectors exactly', () => {
+  // A fixture that drifts from the production selectors proves nothing about production.
+  for (const [controlled, live] of [
+    ['controlled_rippling', 'rippling'],
+    ['controlled_breezy', 'breezy'],
+    ['controlled_bamboohr', 'bamboohr'],
+  ] as const) {
+    assert.equal(portalCanAutoSubmit(controlled), portalCanAutoSubmit(live), controlled);
+    assert.equal(portalHandoffReason(controlled), portalHandoffReason(live), controlled);
+    assert.deepEqual(
+      buildManagedPortalActions(controlled, capturePacket, false).map((a) => a.selector),
+      buildManagedPortalActions(live, capturePacket, false).map((a) => a.selector),
+      controlled,
+    );
+  }
+});
+
+test('no portal claims it can take a cover-letter file it has no input for', () => {
+  // Breezy takes long-form text as textarea[name="cSummary"] and BambooHR's captured form had exactly
+  // one file input (the resume). Declaring a real-looking cover-letter selector for either would make
+  // hasCoverLetterUpload answer yes and attach a PDF to a control that cannot hold one - the same
+  // reasoning as the JazzHR textarea note.
+  for (const portal of ['breezy', 'bamboohr', 'jobvite', 'icims', 'oraclecloud', 'ultipro'] as const) {
+    assert.match(coverLetterUploadSelector(portal), /DoesNotExist|noForm|NoForm/, portal);
+  }
+  // Rippling genuinely has one, read off the live form alongside the resume input.
+  assert.equal(coverLetterUploadSelector('rippling'), 'input[type="file"][data-testid="input-cover_letter"]');
 });

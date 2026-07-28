@@ -12,7 +12,21 @@ function quoteAttr(value: string): string {
   return value.replace(/["\\]/g, '\\$&');
 }
 
-type PortalFamily = 'greenhouse' | 'lever' | 'ashby' | 'smartrecruiters' | 'workable' | 'jazzhr' | 'paylocity';
+type PortalFamily =
+  | 'greenhouse'
+  | 'lever'
+  | 'ashby'
+  | 'smartrecruiters'
+  | 'workable'
+  | 'jazzhr'
+  | 'paylocity'
+  | 'rippling'
+  | 'breezy'
+  | 'bamboohr'
+  | 'jobvite'
+  | 'icims'
+  | 'oraclecloud'
+  | 'ultipro';
 type ControlledPortal =
   | 'controlled_test'
   | 'controlled_lever'
@@ -20,7 +34,10 @@ type ControlledPortal =
   | 'controlled_smartrecruiters'
   | 'controlled_workable'
   | 'controlled_jazzhr'
-  | 'controlled_paylocity';
+  | 'controlled_paylocity'
+  | 'controlled_rippling'
+  | 'controlled_breezy'
+  | 'controlled_bamboohr';
 export type SupportedPortal = PortalFamily | ControlledPortal;
 
 function portalFamily(portal: SupportedPortal): PortalFamily {
@@ -31,6 +48,9 @@ function portalFamily(portal: SupportedPortal): PortalFamily {
   if (portal === 'controlled_workable') return 'workable';
   if (portal === 'controlled_jazzhr') return 'jazzhr';
   if (portal === 'controlled_paylocity') return 'paylocity';
+  if (portal === 'controlled_rippling') return 'rippling';
+  if (portal === 'controlled_breezy') return 'breezy';
+  if (portal === 'controlled_bamboohr') return 'bamboohr';
   return portal;
 }
 
@@ -55,7 +75,7 @@ function portalFamily(portal: SupportedPortal): PortalFamily {
 // compile time and not only at runtime. That is what lets the jobs board's own union be checked
 // against this one by the type checker instead of by a test that someone can forget to run.
 type MultiStepFamily = 'paylocity' | 'smartrecruiters';
-type CaptchaGatedFamily = 'jazzhr';
+type CaptchaGatedFamily = 'jazzhr' | 'bamboohr';
 
 const MULTI_STEP_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
   ['paylocity', 'smartrecruiters'] satisfies MultiStepFamily[],
@@ -64,13 +84,53 @@ const MULTI_STEP_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
 // Portals that gate submission behind a CAPTCHA. Litos fills these and hands off to the human; it
 // never attempts the challenge (standing rule, and the same correct stop the Ashby/CTGT run made).
 // Confirmed live 2026-07-28: every JazzHR application form carries a g-recaptcha-response field.
+// Confirmed live 2026-07-29 for BambooHR on a real PRC-Saltillo posting: g-recaptcha-response is
+// present, window.grecaptcha is defined, the badge renders, and recaptcha/api.js?render=explicit is
+// loaded. BambooHR's fields are otherwise clean and fully fillable, which is exactly why the ceiling
+// has to be written down - the form LOOKS like a one-run submit and is not.
 const CAPTCHA_GATED_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
-  ['jazzhr'] satisfies CaptchaGatedFamily[],
+  ['jazzhr', 'bamboohr'] satisfies CaptchaGatedFamily[],
 );
+
+// Portals where there is no application form to fill AT ALL until a human passes a gate that only
+// they can pass: a data-consent choice, an account wall, or an emailed one-time code. This is a
+// different and stronger limit than the two above, which describe forms Litos fills and then stops
+// on. Here the first page carries no application fields whatsoever, so there is nothing to fill and
+// no selector worth writing.
+//
+// All four were read live on 2026-07-29 (see litos-ats-dom-capture-2026-07-29.md in the vault):
+//  - jobvite:     /apply renders a page headed "Data Consent" whose ONLY control is a select whose
+//                 only real option is "Data Privacy Acknowledgement -- Global". Choosing it IS the
+//                 act of acknowledging a privacy notice, which is the student's to make, not ours.
+//                 Confirmed identical on two unrelated tenants, so it is the platform, not a
+//                 customer's configuration.
+//  - icims:       the apply route redirects to /login, which is an email field plus an
+//                 h-captcha-response textarea. An account wall and a CAPTCHA, before any field.
+//  - oraclecloud: the apply route lands on an "Authentication screen" that emails a one-time code,
+//                 alongside a legal "I agree with the terms and conditions" checkbox. Litos cannot
+//                 read the code and must not tick the checkbox.
+//  - ultipro:     the board bootstraps through an AnonymousSessionCheck iframe and never rendered
+//                 its job content to an automated browser at all, so the apply form was never
+//                 reached. Nothing was captured, so per the standing rule nothing is guessed.
+//
+// Being in this set is NOT a claim the platform is unsupportable forever. It is a claim that today
+// Litos can recognise the page and explain it, which is worth more to a job seeker than a fill that
+// silently does nothing.
+type AccountWalledFamily = 'jobvite' | 'icims' | 'oraclecloud' | 'ultipro';
+
+const ACCOUNT_WALLED_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
+  ['jobvite', 'icims', 'oraclecloud', 'ultipro'] satisfies AccountWalledFamily[],
+);
+
+export function isAccountWalledFamily(portal: SupportedPortal): boolean {
+  return ACCOUNT_WALLED_FAMILIES.has(portalFamily(portal));
+}
 
 export function portalCanAutoSubmit(portal: SupportedPortal): boolean {
   const family = portalFamily(portal);
-  return !MULTI_STEP_FAMILIES.has(family) && !CAPTCHA_GATED_FAMILIES.has(family);
+  return !MULTI_STEP_FAMILIES.has(family)
+    && !CAPTCHA_GATED_FAMILIES.has(family)
+    && !ACCOUNT_WALLED_FAMILIES.has(family);
 }
 
 // The portal families Litos can carry all the way to a confirmation on its own.
@@ -82,9 +142,23 @@ export function portalCanAutoSubmit(portal: SupportedPortal): boolean {
 // This is what the jobs board is allowed to source from. Surfacing a posting Litos cannot finish is
 // worse than not surfacing it at all: the student picks it, tailors a resume to it, and only then
 // discovers the last step needs her anyway. Fewer jobs that all work beats more jobs that mostly do.
-export type AutonomousPortalFamily = Exclude<PortalFamily, MultiStepFamily | CaptchaGatedFamily>;
+export type AutonomousPortalFamily = Exclude<
+  PortalFamily,
+  MultiStepFamily | CaptchaGatedFamily | AccountWalledFamily
+>;
 
-export const AUTONOMOUS_PORTAL_FAMILIES = ['greenhouse', 'lever', 'ashby', 'workable'] as const satisfies readonly AutonomousPortalFamily[];
+export const AUTONOMOUS_PORTAL_FAMILIES = [
+  'greenhouse',
+  'lever',
+  'ashby',
+  'workable',
+  // Added 2026-07-29 from live capture. Both are single-step, CAPTCHA-free forms with a real submit
+  // button, which is the whole bar for this list. They were the only two of the seven platforms
+  // looked at that session that cleared it - the other five each stop on a CAPTCHA, a consent
+  // choice, or an account wall.
+  'rippling',
+  'breezy',
+] as const satisfies readonly AutonomousPortalFamily[];
 
 export function isAutonomousPortalFamily(value: string): value is AutonomousPortalFamily {
   return (AUTONOMOUS_PORTAL_FAMILIES as readonly string[]).includes(value);
@@ -92,8 +166,28 @@ export function isAutonomousPortalFamily(value: string): value is AutonomousPort
 
 // Why a run stopped short of submitting, in the student's words. Surfaced on the blocker card so
 // "needs attention" reads as a known platform limit rather than an unexplained failure.
+// The four account-walled platforms stop for four different reasons, and a job seeker who is told
+// "this one needs you" deserves to know which one so she knows what she is about to face. One shared
+// sentence would have been less code and less use.
+const ACCOUNT_WALLED_REASONS: Record<AccountWalledFamily, string> = {
+  jobvite:
+    'This company asks you to agree to their privacy notice before the application form opens. That choice is yours to make, so Litos stops here. Open the page and pick your country, and the form appears.',
+  icims:
+    'This company asks you to make an account and prove you are human before the application form opens. Litos cannot do either of those for you, so this one needs your hands.',
+  oraclecloud:
+    'This company emails you a code and asks you to agree to their terms before the application form opens. Both of those need you, so Litos stops here.',
+  ultipro:
+    'Litos can find this job but cannot read this company’s application form yet. Everything you need is ready to paste in, so open the page and apply there.',
+};
+
 export function portalHandoffReason(portal: SupportedPortal): string | null {
   const family = portalFamily(portal);
+  // Checked FIRST. An account-walled portal never reached a form, so telling the student "Litos
+  // filled everything in" (which both sentences below do) would be a plain lie about work that
+  // never happened, and she would go looking for filled fields that are not there.
+  if (ACCOUNT_WALLED_FAMILIES.has(family)) {
+    return ACCOUNT_WALLED_REASONS[family as AccountWalledFamily];
+  }
   if (CAPTCHA_GATED_FAMILIES.has(family)) {
     return 'This company’s application page asks you to prove you are human. Litos filled everything in, so all that is left is that check and the send button.';
   }
@@ -346,6 +440,81 @@ const PAYLOCITY_TERMINAL_MARKERS = [
   'acknowledgements.eeoGenderEthnicity',
 ] as const;
 
+// ─── Rippling (ats.rippling.com) ──────────────────────────────────────────────
+// Read off a live Rippling posting, 2026-07-29 (ats.rippling.com/rippling/jobs/875b2547-.../apply).
+//
+// THE TRAP: both `name` AND `id` are randomised per render - `name="Z9gMtYRYFO"`, `id="field-8"`.
+// Neither can ever be matched, which rules out every hook the other adapters in this file rely on.
+// `data-testid` is the one stable attribute, and it is present and stable on every field, so this is
+// the rare adapter where data-testid is the correct primary selector rather than a fallback.
+//
+// Two file inputs again (resume + cover letter), the same hazard as Workable's avatar input and
+// Paylocity's three inputs, so neither is matched by a bare input[type="file"].
+const RIPPLING_RESUME_SELECTOR = 'input[type="file"][data-testid="input-resume"]';
+const RIPPLING_COVER_LETTER_SELECTOR = 'input[type="file"][data-testid="input-cover_letter"]';
+
+// NOT filled, and this is the interesting part of the Rippling capture. The form has three
+// comboboxes and they ALL share one data-testid ("input-select-search-input"), so they cannot even
+// be told apart by selector. Reading the label above each one identifies them as: Pronouns, the
+// phone country code, and "Please identify your race". Two of those are the student's own identity
+// to declare or decline, and the third is part of a field we already fill. So there is nothing here
+// Litos should be typing into, and the ambiguity is moot.
+//
+// Also never touched: [data-testid="radio-sms_opt_in"], whose label reads "Yes - I consent to
+// receiving text messages". A consent control, covered by the standing rule below.
+
+// ─── BreezyHR (*.breezy.hr) ───────────────────────────────────────────────────
+// Read off a live Zinier posting, 2026-07-29 (zinier.breezy.hr/p/7eefd4d49b75-.../apply).
+// The cleanest naming of the seven: stable `c`-prefixed names on every field.
+//
+// Note cName is ONE full-name field, not a first/last pair, so this family does not split the name.
+const BREEZY_RESUME_SELECTOR = 'input[type="file"][name="cResume"]';
+
+// Breezy takes its long-form answer as `textarea[name="cSummary"]`, not a file, so there is no
+// cover-letter FILE input for hasCoverLetterUpload() to find. Deliberately a never-matching
+// selector, exactly as JazzHR does and for the same reason: this map answers "can this portal accept
+// a cover-letter FILE", and answering yes would attach a PDF to a control that cannot hold one.
+// An approved cover letter is therefore not sent to Breezy today. A known, deliberate gap - and the
+// same fix as JazzHR's would close both (thread the letter's TEXT through the packet, not just its
+// rendered PDF). Only one tenant was captured, so if a Breezy form is ever seen with a real
+// cover-letter file input, re-capture before widening this.
+const BREEZY_COVER_LETTER_SELECTOR = 'input[type="file"][name="cCoverLetterFileThatDoesNotExist"]';
+
+// NOT filled: input[name="smsConsent"] and input[name="gdprAgreement"]. Both consent checkboxes.
+//
+// AND NOT FILLED, the one worth reading: Breezy ships a honeypot at name="hp_<4 hex>" - randomised
+// per render, so it must be matched by prefix if it is ever matched at all. It defeats a naive
+// visibility check completely: the input itself computes to opacity 1, visibility visible, display
+// block, 250x43 px. It is concealed ONLY by an ancestor (.apply-field-extra) with height 0 and
+// overflow hidden. Same class of trap as the Workday 1px sr-only field the extension's
+// isHoneypotField already guards, and proof that ancestor geometry - not the element's own computed
+// style - is what a honeypot check has to look at. This adapter never touches it because it fills by
+// explicit name; the hazard is real for anything that fills generically.
+
+// ─── BambooHR ({tenant}.bamboohr.com/careers/{id}) ────────────────────────────
+// Read off a live PRC-Saltillo posting, 2026-07-29 (prentkeromich.bamboohr.com/careers/480). This
+// closes the "not yet captured" item left open by the 2026-07-28 capture.
+//
+// The form is revealed by an "Apply for This Job" button and renders into the SAME url - there is no
+// separate /apply route, and /careers/{id}/apply is a blank page. So the managed run has to click
+// that button before anything exists to fill, the same shape as SmartRecruiters' "I'm interested".
+//
+// ids are FabricTextField-<n>, sequential and render-dependent, so every field matches on `name`.
+// Dotted names (city.value) are fine inside a quoted attribute selector and need no escaping.
+const BAMBOOHR_OPEN_FORM_SELECTOR = 'button:has-text("Apply for This Job")';
+const BAMBOOHR_RESUME_SELECTOR = 'input[type="file"][aria-label="file-input"]';
+// One file input only on the captured form, and it is the resume. No cover-letter file control was
+// present, so the same never-matching declaration as Breezy/JazzHR applies rather than a guess.
+const BAMBOOHR_COVER_LETTER_SELECTOR = 'input[type="file"][name="bambooCoverLetterThatDoesNotExist"]';
+
+// NOT filled: input[name^="nickname_"], BambooHR's honeypot, labelled "Please leave this field
+// blank" and concealed the same zero-height-ancestor way Breezy's is.
+//
+// AND recorded because someone will otherwise "fix" it later: this form has TWO type="submit"
+// buttons, "Submit Application" and "Cancel". The generic `button[type="submit"]` selector used for
+// the autonomous families is ambiguous here and could press Cancel. Moot while BambooHR is
+// CAPTCHA-gated and therefore never auto-submits, which is exactly why it is written down.
+
 const COVER_LETTER_UPLOAD_SELECTORS: Record<SupportedPortal, string> = {
   greenhouse: 'input#cover_letter[type="file"], input[type="file"][name*="cover_letter" i], input[type="file"][id*="cover_letter" i], label:has-text("Cover Letter") input[type="file"]',
   lever: 'input[type="file"][name*="cover" i], input[type="file"][id*="cover" i], label:has-text("Cover Letter") input[type="file"]',
@@ -366,6 +535,19 @@ const COVER_LETTER_UPLOAD_SELECTORS: Record<SupportedPortal, string> = {
   controlled_jazzhr: 'input[type="file"][name="resumator-coverletter-file"]',
   paylocity: PAYLOCITY_COVER_LETTER_SELECTOR,
   controlled_paylocity: PAYLOCITY_COVER_LETTER_SELECTOR,
+  rippling: RIPPLING_COVER_LETTER_SELECTOR,
+  controlled_rippling: RIPPLING_COVER_LETTER_SELECTOR,
+  breezy: BREEZY_COVER_LETTER_SELECTOR,
+  controlled_breezy: BREEZY_COVER_LETTER_SELECTOR,
+  bamboohr: BAMBOOHR_COVER_LETTER_SELECTOR,
+  controlled_bamboohr: BAMBOOHR_COVER_LETTER_SELECTOR,
+  // The account-walled four never reach a form, so there is no file input of any kind to find. A
+  // never-matching selector is the honest answer to "can this portal accept a cover-letter file"
+  // here, and it keeps hasCoverLetterUpload() from having to special-case them.
+  jobvite: 'input[type="file"][name="noFormReachableWithoutConsent"]',
+  icims: 'input[type="file"][name="noFormReachableWithoutAccount"]',
+  oraclecloud: 'input[type="file"][name="noFormReachableWithoutAuthCode"]',
+  ultipro: 'input[type="file"][name="noFormCaptured"]',
 };
 
 export function coverLetterUploadSelector(portal: SupportedPortal): string {
@@ -395,6 +577,11 @@ export async function hasCoverLetterUpload(page: Page, portal: SupportedPortal):
 // instead of a third copy of them.
 function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: SupportedPortal, packet: SubmissionPacket) {
   const family = portalFamily(portal);
+  // Nothing to fill, so nothing is pushed. Returning an EMPTY action list rather than attempting the
+  // fills and letting them miss is deliberate: a run that fills nothing and says so is honest, while
+  // a run that fires ten optional fills at a consent page produces a blocker card implying the form
+  // was found and merely refused. It was never reached.
+  if (ACCOUNT_WALLED_FAMILIES.has(family)) return;
   if (family === 'greenhouse') {
     const parts = packet.fullName.trim().split(/\s+/);
     // optional (managedFill default) + bounded, not required: a branded-redirect Greenhouse customer
@@ -498,6 +685,52 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     // parser inferred. Leaving it unchecked keeps the profile the single source of truth.
     // Also not filled: the required address-1/county/state/zip block. The packet carries only `city`,
     // so those surface as required-field blockers for the human rather than being invented here.
+  } else if (family === 'rippling') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    managedFill(actions, '[data-testid="input-first_name"]', parts[0], 'first_name');
+    managedFill(actions, '[data-testid="input-last_name"]', parts.slice(1).join(' '), 'last_name');
+    managedFill(actions, '[data-testid="input-email"]', packet.email, 'email');
+    managedFill(actions, '[data-testid="input-phone_number"]', packet.phone, 'phone');
+    managedUpload(actions, RIPPLING_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    managedUpload(actions, RIPPLING_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
+    // input-current_company is left alone on purpose. The packet's mostRecentRole may be a past role
+    // rather than a current one, and stating a current employer the student does not have is a
+    // factual claim in her name on a real application. It surfaces as a blocker if required.
+    // Location is a places-autocomplete backed by a hidden input-externalPlaceId; typing text into it
+    // without selecting a suggestion leaves the hidden id empty, which is worse than leaving it.
+  } else if (family === 'breezy') {
+    // ONE full-name field, not a first/last pair. See BREEZY_RESUME_SELECTOR.
+    managedFill(actions, 'input[name="cName"]', packet.fullName, 'name');
+    managedFill(actions, 'input[name="cEmail"]', packet.email, 'email');
+    managedFill(actions, 'input[name="cPhoneNumber"]', packet.phone, 'phone');
+    managedFill(actions, 'input[name="cAddress"]', packet.city, 'location');
+    managedUpload(actions, BREEZY_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    // textarea[name="cSummary"] is left alone: it is candidate-authored positioning, the same
+    // judgement already made for Workable's `headline`.
+  } else if (family === 'bamboohr') {
+    // The form does not exist until this button is clicked, so this must be the FIRST action, the
+    // same shape as the SmartRecruiters apply link. Optional and bounded, so a page that already
+    // shows the form (or a tenant that routes differently) is a no-op rather than a failure.
+    actions.push({
+      type: 'click',
+      selector: BAMBOOHR_OPEN_FORM_SELECTOR,
+      label: 'open application form',
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
+    const parts = packet.fullName.trim().split(/\s+/);
+    managedFill(actions, 'input[name="firstName"]', parts[0], 'first_name');
+    managedFill(actions, 'input[name="lastName"]', parts.slice(1).join(' '), 'last_name');
+    managedFill(actions, 'input[name="email"]', packet.email, 'email');
+    managedFill(actions, 'input[name="phone"]', packet.phone, 'phone');
+    managedFill(actions, 'input[name="city.value"]', packet.city, 'location');
+    managedFill(actions, 'input[name="linkedinUrl"]', packet.linkedinUrl, 'linkedin');
+    managedFill(actions, 'input[name="websiteUrl"]', packet.portfolioUrl ?? packet.githubUrl, 'portfolio');
+    managedUpload(actions, BAMBOOHR_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    // NOT filled: state.value / countryId.value (selects, and the packet has no state), the required
+    // streetAddress.value and zip.value (the packet carries only city, so inventing them is out),
+    // desiredPay (R-031 governs salary and is currency-gated, handled by the reviewed-question path),
+    // and educationLevelId. All surface as required-field blockers for the human.
   } else {
     managedFill(actions, 'input[name="_systemfield_name"]', packet.fullName, 'name', false);
     managedFill(actions, 'input[name="_systemfield_email"]', packet.email, 'email', false);
@@ -675,11 +908,54 @@ const HOSTS: Record<PortalFamily, RegExp> = {
   // login. Litos filling an identity into a credential form is not a thing that should be reachable
   // from a bad URL. The apply path check in detectPortal is what actually enforces this.
   paylocity: /(^|\.)paylocity\.com$/i,
+  // ats.* ONLY. app.rippling.com is Rippling's HR product, where the equivalent-looking form is an
+  // employee login. Exactly the access.paylocity.com hazard, so it gets the same pinned-subdomain
+  // treatment rather than the (^|\.) form.
+  rippling: /^ats\.rippling\.com$/i,
+  // Tenant subdomains are arbitrary (zinier.breezy.hr, recruiting.breezy.hr), so the host cannot be
+  // pinned - but the bare breezy.hr is the vendor's marketing site, which the (^|\.) form also
+  // matches. The /p/ path check below is what excludes it.
+  breezy: /(^|\.)breezy\.hr$/i,
+  // Same shape: tenant subdomains, and www.bamboohr.com is the marketing site. Note BambooHR's OWN
+  // careers page runs on Greenhouse and lives at www.bamboohr.com/careers/application, which the
+  // numeric-id path check below excludes without needing to special-case the host.
+  bamboohr: /(^|\.)bamboohr\.com$/i,
+  // jobs.* only. The bare jobvite.com is the vendor's marketing site.
+  jobvite: /^jobs\.jobvite\.com$/i,
+  // Tenant subdomains (careers-uci, jobs-express). www.icims.com and community.icims.com are the
+  // vendor's own site and its documentation; the /jobs/ path check excludes both.
+  icims: /(^|\.)icims\.com$/i,
+  // The widest host space of any portal here BY FAR - oraclecloud.com hosts every Oracle Cloud
+  // application there is, not just recruiting. The path check is doing the real work, and this entry
+  // would be actively dangerous without it.
+  oraclecloud: /(^|\.)oraclecloud\.com$/i,
+  // Pinned exactly. The bare ultipro.com is the employee login for UKG's HR product.
+  ultipro: /^recruiting\.ultipro\.com$/i,
 };
 
-// Paylocity alone needs a path check as well as a host check, because its host space includes a
-// login portal. Only the recruiting apply/details routes are application pages.
-const PAYLOCITY_APPLY_PATH = /^\/recruiting\/jobs\/(apply|details)\//i;
+// Host alone is not enough for a portal whose host space also serves a login page, a marketing site
+// or an unrelated product. Started as one Paylocity special case; it is a map now because five of
+// the seven platforms added on 2026-07-29 need the same treatment, and a chain of `if (portal ===
+// ...)` in detectPortal would have been the wrong shape for that.
+//
+// A family absent from this map is matched on host alone, which is the old behaviour for the
+// portals that were already here.
+const APPLY_PATHS: Partial<Record<PortalFamily, RegExp>> = {
+  // access.paylocity.com is an employee login on the same host space. Litos filling an identity into
+  // a credential form is not a thing that should be reachable from a bad URL.
+  paylocity: /^\/recruiting\/jobs\/(apply|details)\//i,
+  // Excludes the bare breezy.hr marketing site; every real posting is /p/{id}-{slug}.
+  breezy: /^\/p\//i,
+  // Numeric job id. Excludes www.bamboohr.com/careers/application (their own Greenhouse-backed
+  // careers page) and the /careers/{department}-team marketing routes, without an ad-hoc host rule.
+  bamboohr: /^\/careers\/\d+/i,
+  jobvite: /^\/[^/]+\/job\//i,
+  icims: /^\/jobs\//i,
+  // The one that matters most. Without it this family would claim every Oracle Cloud application
+  // under the sun, including ones that are somebody's payroll or ERP login.
+  oraclecloud: /^\/hcmUI\/CandidateExperience\//i,
+  ultipro: /^\/[^/]+\/JobBoard\//i,
+};
 
 export function detectPortal(rawUrl: string): SupportedPortal {
   const url = new URL(rawUrl);
@@ -697,16 +973,24 @@ export function detectPortal(rawUrl: string): SupportedPortal {
     if (board === 'workable') return 'controlled_workable';
     if (board === 'jazzhr') return 'controlled_jazzhr';
     if (board === 'paylocity') return 'controlled_paylocity';
+    if (board === 'rippling') return 'controlled_rippling';
+    if (board === 'breezy') return 'controlled_breezy';
+    if (board === 'bamboohr') return 'controlled_bamboohr';
     return 'controlled_test';
   }
   if (url.protocol !== 'https:') throw new Error('That application page is not a secure link');
   for (const [portal, host] of Object.entries(HOSTS)) {
     if (!host.test(url.hostname)) continue;
-    // See PAYLOCITY_APPLY_PATH: access.paylocity.com is an employee login on the same host space.
-    if (portal === 'paylocity' && !PAYLOCITY_APPLY_PATH.test(url.pathname)) continue;
+    // See APPLY_PATHS. A family listed there must match its path too, because its host space also
+    // serves logins, marketing pages, or in Oracle's case entire unrelated products.
+    const applyPath = APPLY_PATHS[portal as PortalFamily];
+    if (applyPath && !applyPath.test(url.pathname)) continue;
     return portal as SupportedPortal;
   }
-  throw new Error('Litos cannot fill in this company\u2019s application page yet. It works on Greenhouse, Lever, Ashby, SmartRecruiters, Workable, JazzHR and Paylocity.');
+  // Names the platforms it can actually DO something useful on. The account-walled four are
+  // recognised by the loop above and explained by portalHandoffReason, but listing them here would
+  // read as a promise to fill them, which is the opposite of what recognising them is for.
+  throw new Error('Litos cannot fill in this company\u2019s application page yet. It works on Greenhouse, Lever, Ashby, SmartRecruiters, Workable, JazzHR, Paylocity, Rippling, BreezyHR and BambooHR.');
 }
 
 export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): string {
@@ -794,6 +1078,13 @@ async function fillReviewedQuestions(page: Page, packet: SubmissionPacket, out: 
 export async function fillPortal(page: Page, portal: SupportedPortal, packet: SubmissionPacket): Promise<FillResult> {
   const filledFields: string[] = [];
   const family = portalFamily(portal);
+  // Same stop as pushFixedFieldActions, and it has to be repeated here rather than inherited: these
+  // are two independent paths to the same portals (managed runner vs direct Playwright), and the
+  // 2026-07-28 review caught exactly this kind of gate existing on one path and not the other.
+  // The blocker is the reason, in the student's words, so the card explains itself.
+  if (ACCOUNT_WALLED_FAMILIES.has(family)) {
+    return { filledFields, blockers: [portalHandoffReason(portal)!] };
+  }
   if (family === 'greenhouse') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, ['#first_name', 'input[name="job_application[first_name]"]'], parts[0], 'first_name', filledFields);
@@ -851,6 +1142,36 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['#public-site-address-city'], packet.city, 'location', filledFields);
     await uploadFirst(page, [PAYLOCITY_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
     await uploadFirst(page, [PAYLOCITY_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+  } else if (family === 'rippling') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    await fillFirst(page, ['[data-testid="input-first_name"]'], parts[0], 'first_name', filledFields);
+    await fillFirst(page, ['[data-testid="input-last_name"]'], parts.slice(1).join(' '), 'last_name', filledFields);
+    await fillFirst(page, ['[data-testid="input-email"]'], packet.email, 'email', filledFields);
+    await fillFirst(page, ['[data-testid="input-phone_number"]'], packet.phone, 'phone', filledFields);
+    await uploadFirst(page, [RIPPLING_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, [RIPPLING_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+  } else if (family === 'breezy') {
+    await fillFirst(page, ['input[name="cName"]'], packet.fullName, 'name', filledFields);
+    await fillFirst(page, ['input[name="cEmail"]'], packet.email, 'email', filledFields);
+    await fillFirst(page, ['input[name="cPhoneNumber"]'], packet.phone, 'phone', filledFields);
+    await fillFirst(page, ['input[name="cAddress"]'], packet.city, 'location', filledFields);
+    await uploadFirst(page, [BREEZY_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+  } else if (family === 'bamboohr') {
+    // Unlike the managed path this one CAN branch, so the button is clicked only when it is there.
+    const opener = page.locator(BAMBOOHR_OPEN_FORM_SELECTOR).first();
+    if ((await opener.count()) > 0 && (await opener.isVisible().catch(() => false))) {
+      await opener.click().catch(() => undefined);
+      await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => undefined);
+    }
+    const parts = packet.fullName.trim().split(/\s+/);
+    await fillFirst(page, ['input[name="firstName"]'], parts[0], 'first_name', filledFields);
+    await fillFirst(page, ['input[name="lastName"]'], parts.slice(1).join(' '), 'last_name', filledFields);
+    await fillFirst(page, ['input[name="email"]'], packet.email, 'email', filledFields);
+    await fillFirst(page, ['input[name="phone"]'], packet.phone, 'phone', filledFields);
+    await fillFirst(page, ['input[name="city.value"]'], packet.city, 'location', filledFields);
+    await fillFirst(page, ['input[name="linkedinUrl"]'], packet.linkedinUrl, 'linkedin', filledFields);
+    await fillFirst(page, ['input[name="websiteUrl"]'], packet.portfolioUrl ?? packet.githubUrl, 'portfolio', filledFields);
+    await uploadFirst(page, [BAMBOOHR_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
   } else {
     await fillFirst(page, ['input[name="_systemfield_name"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="_systemfield_email"]'], packet.email, 'email', filledFields);
