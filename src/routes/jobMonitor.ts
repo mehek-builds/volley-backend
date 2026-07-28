@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { and, desc, eq, ilike, or, sql } from 'drizzle-orm';
+import { and, desc, eq, ilike, inArray, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/index';
 import { career_page_sources, monitored_jobs, profiles } from '../db/schema';
@@ -9,6 +9,7 @@ import { optionalAuth } from '../middleware/auth';
 import { scoreJdMatch } from '../engine/jdMatch';
 import { resumeSpecText } from '../engine/resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
+import { rankingCacheKey, readRanking, writeRanking } from '../lib/rankingCache';
 
 const sourceSchema = z.object({
   company_name: z.string().trim().min(1).max(200),
@@ -39,18 +40,21 @@ const jobParamsSchema = z.object({ id: z.string().uuid() });
  * THE NUMBER IS A BUDGET, AND THE BUDGET IS EVENT-LOOP TIME. Measured on this engine (Node 22,
  * warm, a ~2KB resume against SCORING_CHARS-capped postings): 0.3-0.5 ms per posting on synthetic
  * text, and up to ~1.3 ms on term-dense real postings. That cost is SYNCHRONOUS — Fastify serves
- * nothing else while it runs — so the pool size is directly a latency ceiling for every other
- * in-flight request. At 100 that is roughly 30-130 ms. It was 200, which doubled that for a second
- * page of results almost nobody scrolls to. An earlier version of this comment called the pass
- * "the low tens of milliseconds" and the per-call cost "well under a millisecond"; both were
- * asserted rather than measured, and the numbers above replaced them (2026-07-28).
+ * nothing else while it runs. An earlier version of this comment called the pass "the low tens of
+ * milliseconds" and the per-call cost "well under a millisecond"; both were asserted rather than
+ * measured, and the numbers above replaced them (2026-07-28).
  *
- * The consequence is real and is why the response carries `ranked_pool` and `pool_exhausted`: past
+ * 300 is affordable BECAUSE OF THE CACHE, and would not be without it. The ranking is now computed
+ * once per (student, resume, filters) and every page is a slice of it, so this cost is paid once
+ * per list rather than once per page — which is what makes a pool three times larger cheaper in
+ * practice than the old 200 was. Roughly 100-400 ms on a miss, and nothing on a hit.
+ *
+ * The cap is still real, and is why the response carries `ranked_pool` and `pool_exhausted`: past
  * RANKING_POOL matching postings, the next-newest is not considered for ranking however well it
  * fits. Filters are how a student narrows the pool, and the list has to SAY it stopped ranking
  * rather than quietly reporting no more results.
  */
-export const RANKING_POOL = 100;
+export const RANKING_POOL = 300;
 
 /**
  * How much of a posting gets scored.
@@ -307,40 +311,75 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       });
     }
 
-    /* The scored text is pulled for scoring only, and capped at SCORING_CHARS. It never reaches
-       the payload: `description` in `selection` is the 600-char preview, and the scored copy is
-       dropped when the response is built.
-       One row past the pool is fetched so the route can tell "the ranking stopped here" apart from
-       "the board ends here". They are different sentences and the UI says different things. */
-    const pool = await db
-      .select({
-        ...selection,
-        scored_description: sql<string>`left(${monitored_jobs.description}, ${SCORING_CHARS})`,
-      })
-      .from(monitored_jobs)
-      .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
-      .where(and(...conditions))
-      .orderBy(...newestFirst)
-      .limit(RANKING_POOL + 1);
+    /* One ranking per (student, resume, filters), reused across their pages.
+       This is what makes the pages TILE. Ranking a live pool on every request meant page 2 was cut
+       from a different ordering than page 1, so a posting could appear on both or on neither; now
+       the order is decided once and every page is a slice of the same list. It also means the
+       scoring pass is paid once per list rather than once per page.
+       See lib/rankingCache.ts for what is and is not cached, and for why a miss is always fine. */
+    const cacheKey = rankingCacheKey(
+      request.jwtPayload!.userId,
+      resumeText,
+      JSON.stringify([q ?? '', location ?? '', company ?? '', remote ?? '']),
+    );
+    let ranking = readRanking(cacheKey);
 
-    const poolExhausted = pool.length > RANKING_POOL;
-    const scored = rankByFit(pool.slice(0, RANKING_POOL), resumeText);
+    if (!ranking) {
+      /* The scored text is pulled for scoring only, and capped at SCORING_CHARS. It never reaches
+         the payload: `description` in `selection` is the 600-char preview.
+         One row past the pool is fetched so the route can tell "the ranking stopped here" apart
+         from "the board ends here". Different sentences, and the UI says different things. */
+      const pool = await db
+        .select({
+          id: monitored_jobs.id,
+          company_name: monitored_jobs.company_name,
+          title: monitored_jobs.title,
+          scored_description: sql<string>`left(${monitored_jobs.description}, ${SCORING_CHARS})`,
+        })
+        .from(monitored_jobs)
+        .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+        .where(and(...conditions))
+        .orderBy(...newestFirst)
+        .limit(RANKING_POOL + 1);
 
-    const page = scored.slice(offset, offset + limit);
+      const scored = rankByFit(pool.slice(0, RANKING_POOL), resumeText);
+      ranking = writeRanking(cacheKey, {
+        ids: scored.map(({ row }) => row.id),
+        scores: new Map(scored.map(({ row, score }) => [row.id, score])),
+        poolExhausted: pool.length > RANKING_POOL,
+      });
+    }
+
+    const pageIds = ranking.ids.slice(offset, offset + limit);
+    /* Rows are read fresh every time, never served from the cache, so a posting edited or pulled
+       since the ranking was computed is not resurrected by it. Only the ORDER is remembered. */
+    const rows = pageIds.length
+      ? await db
+          .select(selection)
+          .from(monitored_jobs)
+          .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+          .where(and(eq(monitored_jobs.is_active, true), inArray(monitored_jobs.id, pageIds)))
+      : [];
+
+    /* Back into ranked order, and silently dropping any id that no longer resolves — a posting
+       deactivated since the ranking was built is simply gone, which is the truth. */
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    const jobs = pageIds
+      .map((id) => byId.get(id))
+      .filter((row): row is (typeof rows)[number] => row !== undefined)
+      .map((row) => ({ ...row, match_score: ranking!.scores.get(row.id) ?? null }));
+
     return reply.send({
-      jobs: page.map(({ row, score }) => {
-        const { scored_description: _dropped, ...job } = row;
-        return { ...job, match_score: score };
-      }),
+      jobs,
       limit,
       offset,
-      has_more: scored.length > offset + limit,
+      has_more: ranking.ids.length > offset + limit,
       ranked: true,
-      ranked_pool: scored.length,
+      ranked_pool: ranking.ids.length,
       /* True when postings exist that were never ranked. Without this the client cannot tell the
          end of the ranking from the end of the board, and `has_more: false` at the pool boundary
          reads as "you have seen everything" when the truth is "we stopped ranking here". */
-      pool_exhausted: poolExhausted,
+      pool_exhausted: ranking.poolExhausted,
     });
   });
 
