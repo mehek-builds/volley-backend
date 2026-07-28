@@ -590,8 +590,33 @@ function stripAcademicTerms(text: string): string {
   return text.replace(/\b(spring|summer|fall|autumn|winter)\s+(19|20)\d{2}\b/gi, ' ');
 }
 
+/**
+ * Last-resume memo for the haystack `resumeCovers` searches.
+ *
+ * The resume is loop-invariant and the term is not: scoreJdMatch calls resumeCovers once PER TERM,
+ * so a posting with 40 requirements re-derived the same normalized resume 40 times, and GET /jobs
+ * ranking a pool of postings against one resume did that for every posting in the pool — thousands
+ * of identical normalizations of an unchanging string per request.
+ *
+ * One entry is the right size. Every caller works through a single resume at a time (one posting's
+ * terms, or one pool ranked against one resume), so a single slot hits on everything after the
+ * first call and a larger cache would only add eviction policy to a problem that does not have one.
+ * Keyed on the exact string, so a changed resume simply misses and refills; there is no staleness
+ * window and nothing to invalidate.
+ */
+let lastResumeInput: string | null = null;
+let lastResumeHaystack = '';
+
+function resumeHaystack(resumeText: string): string {
+  if (resumeText !== lastResumeInput) {
+    lastResumeHaystack = ` ${normalizeTerm(stripAcademicTerms(resumeText))} `;
+    lastResumeInput = resumeText;
+  }
+  return lastResumeHaystack;
+}
+
 export function resumeCovers(resumeText: string, term: string): boolean {
-  const hay = ` ${normalizeTerm(stripAcademicTerms(resumeText))} `;
+  const hay = resumeHaystack(resumeText);
   const needle = normalizeTerm(term);
   if (hay.includes(` ${needle} `)) return true;
   const singularNeedle = needle.split(' ').map(singular).join(' ');
