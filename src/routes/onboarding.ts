@@ -68,7 +68,7 @@ async function reviewedSubmitCount(userId: string): Promise<number> {
 // The one thing that IS stored is completion (users.onboarding_completed_at), because it gates
 // harvest and therefore has to be an explicit act rather than an inference. See harvest.ts.
 
-type Step = 'focus' | 'resume' | 'base' | 'install' | 'apply' | 'gaps' | 'targeting' | 'done';
+type Step = 'focus' | 'sponsorship' | 'resume' | 'base' | 'install' | 'apply' | 'gaps' | 'targeting' | 'done';
 
 // Asked on screen 03 only if the first application did not teach us. Order is the render order.
 //
@@ -194,6 +194,18 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     // own state machine reads.
     const has_focus = Array.isArray(target?.categories);
 
+    /* THE SPONSORSHIP QUESTION, and why it is a step of its own rather than a field on the focus
+       screen.
+       It is the only answer in the flow that permanently changes WHICH JOBS EXIST for this person
+       (see lib/sponsorship.ts), and an answer with that weight cannot be the fourth control on a
+       screen about job categories - it has to be asked on its own, with the consequence written
+       next to it. It sits second because it needs nothing from the resume and because a board
+       filtered from the first search is the point: the alternative is showing somebody a week of
+       postings they cannot take and then quietly removing them.
+       Derived from the timestamp, not from the boolean: "no, I do not need sponsorship" is a real
+       answer that stores `false`, and gating on the boolean would ask that person again forever. */
+    const has_sponsorship_answer = user.sponsorship_declared_at !== null;
+
     // Targeting counts as answered on the main period: it is the only one of the remaining three
     // with no sensible default, so a student who set it went through the screen on purpose.
     const has_targeting = !!target?.primary_period;
@@ -221,22 +233,29 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       ? 'done'
       : !has_focus
         ? 'focus'
-        : !has_resume
-          ? 'resume'
-          : !has_base_resume
-            ? 'base'
-            : !has_applied
-              ? 'install'
-              : !has_targeting
-                ? gaps.length > 0
-                  ? 'gaps'
-                  : 'targeting'
-                : 'done';
+        : !has_sponsorship_answer
+          ? 'sponsorship'
+          : !has_resume
+            ? 'resume'
+            : !has_base_resume
+              ? 'base'
+              : !has_applied
+                ? 'install'
+                : !has_targeting
+                  ? gaps.length > 0
+                    ? 'gaps'
+                    : 'targeting'
+                  : 'done';
 
     return reply.status(200).send({
       step,
       completed_at: user.onboarding_completed_at,
       has_focus,
+      has_sponsorship_answer,
+      // The declaration itself, so /start can show what was recorded and the dashboard can explain
+      // a filtered board without a second round trip.
+      sponsorship_answer: user.sponsorship_answer,
+      sponsorship_required: user.sponsorship_required_at_onboarding,
       has_resume,
       has_base_resume,
       has_applied,

@@ -23,6 +23,7 @@ import { targetingRoutes } from './routes/targeting';
 import { jdMatchRoutes } from './routes/jdMatch';
 import { harvestRoutes } from './routes/harvest';
 import { onboardingRoutes } from './routes/onboarding';
+import { sponsorshipRoutes } from './routes/sponsorship';
 import { assertEncryptionKeyConfigured } from './lib/fieldCrypto';
 import { metaRoutes } from './routes/meta';
 import { applicationRoutes } from './routes/applications';
@@ -190,6 +191,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await fastify.register(jdMatchRoutes);
   await fastify.register(harvestRoutes);
   await fastify.register(onboardingRoutes);
+  await fastify.register(sponsorshipRoutes);
   await fastify.register(applicationAnswerRoutes);
   await fastify.register(applicationRoutes);
   await fastify.register(submissionRunnerRoutes);

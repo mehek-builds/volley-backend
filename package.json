@@ -61,6 +61,9 @@
     "db:base-resume": "node scripts/apply-base-resume-migration.mjs",
     "db:lemon-squeezy": "node scripts/apply-lemon-squeezy-schema.mjs",
     "schema:check": "node scripts/check-schema-drift.mjs",
+    "db:sponsorship": "node --import tsx scripts/apply-sponsorship-schema.mjs",
+    "sponsors:build": "node scripts/build-h1b-sponsors.mjs",
+    "sponsors:check": "node scripts/build-h1b-sponsors.mjs --check",
     "db:pipeline-stage": "node scripts/apply-pipeline-stage-schema.mjs"
   }
 }
