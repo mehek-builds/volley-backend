@@ -35,17 +35,34 @@ export function sessionVersionIsStale(tokenVersion: unknown, storedVersion: numb
   return normalizedTokenVersion !== storedVersion;
 }
 
-export async function requireAuth(request: FastifyRequest, reply: FastifyReply) {
+/** Why a session either verifies or does not, with no third answer. */
+type SessionOutcome =
+  | { ok: true; payload: JWTPayload }
+  /** No credential was presented at all. Distinct from a bad one: optionalAuth continues here. */
+  | { ok: false; reason: 'anonymous' }
+  /** A credential was presented and did not hold up. Never treated as anonymous. */
+  | { ok: false; reason: 'invalid' }
+  | { ok: false; reason: 'misconfigured' };
+
+/**
+ * The ONE place a bearer token is turned into a session.
+ *
+ * requireAuth and optionalAuth both call this. That is the point: the epoch check, the
+ * session-version check, the guest-expiry check and the isGuest cross-check are the account
+ * revocation backstops, and a second hand-rolled copy of them in an "optional" variant is exactly
+ * how a route ends up honouring a token the real one would have killed.
+ */
+async function resolveSession(request: FastifyRequest): Promise<SessionOutcome> {
   const authHeader = request.headers['authorization'];
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return reply.status(401).send({ error: 'Missing or invalid Authorization header' });
+    return { ok: false, reason: 'anonymous' };
   }
 
   const token = authHeader.slice(7);
   const secret = process.env.JWT_SIGNING_SECRET;
 
   if (!secret) {
-    return reply.status(500).send({ error: 'JWT_SIGNING_SECRET not configured' });
+    return { ok: false, reason: 'misconfigured' };
   }
 
   try {
@@ -53,7 +70,7 @@ export async function requireAuth(request: FastifyRequest, reply: FastifyReply) 
     const { payload } = await jwtVerify(token, secretBytes);
 
     if (!payload['userId']) {
-      return reply.status(401).send({ error: 'Invalid token payload' });
+      return { ok: false, reason: 'invalid' };
     }
 
     const userId = payload['userId'] as string;
@@ -75,33 +92,67 @@ export async function requireAuth(request: FastifyRequest, reply: FastifyReply) 
       .where(eq(users.id, userId))
       .limit(1);
 
-    if (row.length === 0) {
-      return reply.status(401).send({ error: 'Invalid or expired token' });
-    }
-    if (issuedBeforeEpoch(payload.iat, row[0].session_valid_from)) {
-      return reply.status(401).send({ error: 'Invalid or expired token' });
-    }
-    if (sessionVersionIsStale(payload['sessionVersion'], row[0].session_version)) {
-      return reply.status(401).send({ error: 'Invalid or expired token' });
-    }
+    if (row.length === 0) return { ok: false, reason: 'invalid' };
+    if (issuedBeforeEpoch(payload.iat, row[0].session_valid_from)) return { ok: false, reason: 'invalid' };
+    if (sessionVersionIsStale(payload['sessionVersion'], row[0].session_version)) return { ok: false, reason: 'invalid' };
     if (row[0].is_guest && row[0].guest_expires_at && row[0].guest_expires_at <= new Date()) {
-      return reply.status(401).send({ error: 'Invalid or expired token' });
+      return { ok: false, reason: 'invalid' };
     }
-    if (Boolean(payload['isGuest']) !== row[0].is_guest) {
-      return reply.status(401).send({ error: 'Invalid or expired token' });
-    }
+    if (Boolean(payload['isGuest']) !== row[0].is_guest) return { ok: false, reason: 'invalid' };
 
-    request.jwtPayload = {
-      userId,
-      ...(row[0].email ? { email: row[0].email } : {}),
-      isGuest: row[0].is_guest,
-      authMethod: typeof payload['authMethod'] === 'string'
-        ? payload['authMethod'] as JWTPayload['authMethod']
-        : 'legacy',
-      sessionVersion: row[0].session_version,
-      authenticatedAt: payload.iat ?? 0,
+    return {
+      ok: true,
+      payload: {
+        userId,
+        ...(row[0].email ? { email: row[0].email } : {}),
+        isGuest: row[0].is_guest,
+        authMethod: typeof payload['authMethod'] === 'string'
+          ? payload['authMethod'] as JWTPayload['authMethod']
+          : 'legacy',
+        sessionVersion: row[0].session_version,
+        authenticatedAt: payload.iat ?? 0,
+      },
     };
-  } catch (err) {
-    return reply.status(401).send({ error: 'Invalid or expired token' });
+  } catch {
+    return { ok: false, reason: 'invalid' };
   }
+}
+
+export async function requireAuth(request: FastifyRequest, reply: FastifyReply) {
+  const outcome = await resolveSession(request);
+  if (outcome.ok) {
+    request.jwtPayload = outcome.payload;
+    return;
+  }
+  if (outcome.reason === 'misconfigured') {
+    return reply.status(500).send({ error: 'JWT_SIGNING_SECRET not configured' });
+  }
+  if (outcome.reason === 'anonymous') {
+    return reply.status(401).send({ error: 'Missing or invalid Authorization header' });
+  }
+  return reply.status(401).send({ error: 'Invalid or expired token' });
+}
+
+/**
+ * For routes that serve everyone but serve a signed-in person MORE.
+ *
+ * Sets `request.jwtPayload` when a session verifies and leaves it undefined otherwise, so the
+ * handler decides what the extra is. The route must still treat the anonymous case as the default:
+ * this middleware grants nothing on its own.
+ *
+ * A BAD token is not the same as no token, and this does not paper over one. If someone presents a
+ * revoked or forged credential we answer 401 rather than silently downgrading them to anonymous,
+ * because a client whose session just died needs to find that out and sign in again, not quietly
+ * receive a stranger's view of the page for the next thirty days.
+ */
+export async function optionalAuth(request: FastifyRequest, reply: FastifyReply) {
+  const outcome = await resolveSession(request);
+  if (outcome.ok) {
+    request.jwtPayload = outcome.payload;
+    return;
+  }
+  // Anonymous is the supported path here. A server misconfiguration is not the caller's fault
+  // either, and must not turn a public list into a 500, so it also falls through unscored.
+  if (outcome.reason === 'anonymous' || outcome.reason === 'misconfigured') return;
+  return reply.status(401).send({ error: 'Invalid or expired token' });
 }

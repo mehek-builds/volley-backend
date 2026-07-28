@@ -2,9 +2,13 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, desc, eq, ilike, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/index';
-import { career_page_sources, monitored_jobs } from '../db/schema';
+import { career_page_sources, monitored_jobs, profiles } from '../db/schema';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { fetchSourceJobs, type JobSourceInput, type SupportedJobBoard } from '../lib/jobMonitor';
+import { optionalAuth } from '../middleware/auth';
+import { scoreJdMatch } from '../engine/jdMatch';
+import { resumeSpecText } from '../engine/resumeValidate';
+import type { ResumeSpec } from '../llm/resumeSpec';
 
 const sourceSchema = z.object({
   company_name: z.string().trim().min(1).max(200),
@@ -24,6 +28,89 @@ const listQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).max(100_000).default(0),
 });
 const jobParamsSchema = z.object({ id: z.string().uuid() });
+
+/**
+ * How many postings get scored and ranked on a request.
+ *
+ * Sorting by fit cannot be expressed in the query, because the score is computed in this process,
+ * so the sort has to happen over a set this route holds in memory. That set is the newest
+ * RANKING_POOL postings that match the filters. 200 is the number because it is well past what a
+ * student pages through in a sitting, while a full description each keeps the row payload in the
+ * low megabytes and the scoring pass in the low tens of milliseconds.
+ *
+ * The consequence is real and is why the response carries `ranked_pool`: past 200 matching
+ * postings, the 201st-newest is not considered for ranking, however well it fits. The filters are
+ * how a student narrows the pool, and the list says how many were ranked rather than implying it
+ * read the whole board.
+ */
+const RANKING_POOL = 200;
+
+/**
+ * The student's main resume as plain text, or null if there is nothing to rank against.
+ *
+ * Null covers three different situations on purpose — signed out, signed in with no resume yet, and
+ * signed in with a resume that holds no text — because the list behaves identically in all three:
+ * unranked, unscored, newest first. Returning a 404 here (as POST /jd-match does) would be wrong;
+ * that route exists to answer a question about one posting, while this one has a perfectly good
+ * answer without a resume.
+ */
+/** The minimum a row needs to be rankable. Kept structural so the sort can be tested without a DB. */
+export type RankableJob = {
+  company_name: string;
+  title: string;
+  full_description: string | null;
+};
+
+/**
+ * Postings ordered best fit first, carrying the score that put them there.
+ *
+ * Exported for its own tests. The three behaviours worth pinning down, and each is a decision
+ * rather than an accident:
+ *
+ *  - Unscorable postings (jdMatch returned null) sort BELOW every scored one, and hold their
+ *    incoming order among themselves. They are not zeros; a zero would rank a posting we declined
+ *    to judge alongside one we judged and found nothing in.
+ *  - Equal scores keep the incoming order, which the caller has already set to newest first. Two
+ *    88% matches are separated by recency, which is the only other fact we have.
+ *  - The sort is stable by construction (the index tiebreak), not by trusting the engine's sort to
+ *    be. Array#sort stability is specified now, but the comparator saying so is what makes the
+ *    intent survive someone swapping the sort.
+ */
+export function rankByFit<T extends RankableJob>(
+  rows: readonly T[],
+  resumeText: string,
+): Array<{ row: T; score: number | null }> {
+  const scored = rows.map((row, index) => ({
+    row,
+    // The posting never asks for experience with its own company or job title, so both are excluded
+    // from the requirement set. Same context the review screen passes.
+    score: scoreJdMatch(resumeText, row.full_description ?? '', {
+      company: row.company_name,
+      role: row.title,
+    }).score,
+    index,
+  }));
+  scored.sort((a, b) => {
+    if (a.score === null && b.score === null) return a.index - b.index;
+    if (a.score === null) return 1;
+    if (b.score === null) return -1;
+    return b.score - a.score || a.index - b.index;
+  });
+  return scored.map(({ row, score }) => ({ row, score }));
+}
+
+async function baseResumeText(userId: string | undefined): Promise<string | null> {
+  if (!userId) return null;
+  const [profile] = await db
+    .select({ base_resume_json: profiles.base_resume_json })
+    .from(profiles)
+    .where(eq(profiles.user_id, userId))
+    .limit(1);
+  const spec = profile?.base_resume_json as ResumeSpec | null | undefined;
+  if (!spec) return null;
+  const text = resumeSpecText(spec).trim();
+  return text.length > 0 ? text : null;
+}
 
 function requireOperator(request: FastifyRequest, reply: FastifyReply): boolean {
   if (!isCronConfigured() || !isCronAuthorized(request)) {
@@ -109,7 +196,35 @@ async function pollSource(source: typeof career_page_sources.$inferSelect) {
 }
 
 export async function jobMonitorRoutes(fastify: FastifyInstance) {
-  fastify.get('/jobs', async (request: FastifyRequest, reply: FastifyReply) => {
+  /**
+   * GET /jobs
+   *
+   * The list of live postings, and — for a signed-in student with a main resume — how well each one
+   * matches it, best first.
+   *
+   * WHY THE RANKING HAPPENS HERE AND NOT IN THE BROWSER
+   * ---------------------------------------------------
+   * scoreJdMatch is a pure function over (resume text, posting text) and runs in well under a
+   * millisecond, so scoring a page of postings is cheaper than the query that fetched them. Doing
+   * it in the client would mean one request per row and, worse, a list that cannot be SORTED by fit
+   * until every one of those requests lands. Fit is the whole point of the ordering, so it has to
+   * be known before the page is cut.
+   *
+   * FOUR RULES THIS HOLDS
+   * ---------------------
+   *  - IT SCORES THE WHOLE POSTING, NOT THE PREVIEW. The payload's `description` is truncated to
+   *    600 characters for transport; the score reads the full column. Scoring the preview would
+   *    grade every posting on its intro paragraph, which is where the requirements are not.
+   *  - AN UNSCORABLE POSTING GETS null, NEVER 0. jdMatch refuses to score a posting that lists too
+   *    few real requirements, and 0 there is a claim about the student's resume that the input
+   *    never supported. Those rows sort last, keeping their newest-first order among themselves.
+   *  - NO RESUME MEANS NO SCORES AT ALL. Signed in without a main resume, the list behaves exactly
+   *    as it does signed out. There is nothing honest to rank against.
+   *  - THE RANKING POOL IS BOUNDED AND SAID OUT LOUD. Ordering by fit means the ordering cannot be
+   *    pushed into SQL, so the pool is the RANKING_POOL newest matching postings and the response
+   *    reports both `ranked` and `ranked_pool` rather than implying the whole board was considered.
+   */
+  fastify.get('/jobs', { preHandler: optionalAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const parsed = listQuerySchema.safeParse(request.query);
     if (!parsed.success) return reply.status(400).send({ error: 'Invalid job filters' });
     const { q, location, company, remote, limit, offset } = parsed.data;
@@ -118,29 +233,73 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     if (location) conditions.push(ilike(monitored_jobs.location, `%${location}%`));
     if (company) conditions.push(ilike(monitored_jobs.company_name, `%${company}%`));
     if (remote) conditions.push(eq(monitored_jobs.remote, remote === 'true'));
-    const rows = await db
-      .select({
-        id: monitored_jobs.id,
-        company_name: monitored_jobs.company_name,
-        title: monitored_jobs.title,
-        location: monitored_jobs.location,
-        department: monitored_jobs.department,
-        employment_type: monitored_jobs.employment_type,
-        description: sql<string>`left(${monitored_jobs.description}, 600)`,
-        apply_url: monitored_jobs.apply_url,
-        posting_url: monitored_jobs.posting_url,
-        remote: monitored_jobs.remote,
-        posted_at: monitored_jobs.posted_at,
-        first_seen_at: monitored_jobs.first_seen_at,
-        ats_name: career_page_sources.ats_name,
-      })
+
+    const resumeText = await baseResumeText(request.jwtPayload?.userId);
+
+    const selection = {
+      id: monitored_jobs.id,
+      company_name: monitored_jobs.company_name,
+      title: monitored_jobs.title,
+      location: monitored_jobs.location,
+      department: monitored_jobs.department,
+      employment_type: monitored_jobs.employment_type,
+      description: sql<string>`left(${monitored_jobs.description}, 600)`,
+      apply_url: monitored_jobs.apply_url,
+      posting_url: monitored_jobs.posting_url,
+      remote: monitored_jobs.remote,
+      posted_at: monitored_jobs.posted_at,
+      first_seen_at: monitored_jobs.first_seen_at,
+      ats_name: career_page_sources.ats_name,
+    };
+    const newestFirst = [
+      desc(monitored_jobs.posted_at),
+      desc(monitored_jobs.first_seen_at),
+      desc(monitored_jobs.id),
+    ] as const;
+
+    if (!resumeText) {
+      const rows = await db
+        .select(selection)
+        .from(monitored_jobs)
+        .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+        .where(and(...conditions))
+        .orderBy(...newestFirst)
+        .limit(limit + 1)
+        .offset(offset);
+      return reply.send({
+        jobs: rows.slice(0, limit).map((row) => ({ ...row, match_score: null })),
+        limit,
+        offset,
+        has_more: rows.length > limit,
+        ranked: false,
+        ranked_pool: null,
+      });
+    }
+
+    // The full description is pulled for scoring only. It never reaches the payload: `description`
+    // above is the truncated one, and the scored copy is dropped when the response is built.
+    const pool = await db
+      .select({ ...selection, full_description: monitored_jobs.description })
       .from(monitored_jobs)
       .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
       .where(and(...conditions))
-      .orderBy(desc(monitored_jobs.posted_at), desc(monitored_jobs.first_seen_at), desc(monitored_jobs.id))
-      .limit(limit + 1)
-      .offset(offset);
-    return reply.send({ jobs: rows.slice(0, limit), limit, offset, has_more: rows.length > limit });
+      .orderBy(...newestFirst)
+      .limit(RANKING_POOL);
+
+    const scored = rankByFit(pool, resumeText);
+
+    const page = scored.slice(offset, offset + limit);
+    return reply.send({
+      jobs: page.map(({ row, score }) => {
+        const { full_description: _dropped, ...job } = row;
+        return { ...job, match_score: score };
+      }),
+      limit,
+      offset,
+      has_more: scored.length > offset + limit,
+      ranked: true,
+      ranked_pool: scored.length,
+    });
   });
 
   fastify.get('/jobs/:id', async (request: FastifyRequest, reply: FastifyReply) => {
