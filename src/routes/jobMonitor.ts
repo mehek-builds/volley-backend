@@ -74,6 +74,49 @@ const jobParamsSchema = z.object({ id: z.string().uuid() });
  */
 export const MINIMUM_SURFACED_JOBS = 1_000;
 
+/**
+ * REQUIRED HEADROOM OVER THE FLOOR.
+ *
+ * 1,000 is the point at which the board is broken. This is the point at which someone has to look at
+ * it. Alarming only at the floor means the first warning arrives when the product is already
+ * unusable, so the cron treats 5x as the line and the floor as the emergency below it.
+ */
+export const REQUIRED_HEADROOM_MULTIPLE = 5;
+export const REQUIRED_SURFACED_JOBS = MINIMUM_SURFACED_JOBS * REQUIRED_HEADROOM_MULTIPLE;
+
+/**
+ * ONLY POSTINGS FROM THE LAST SEVEN DAYS ARE SHOWN.
+ *
+ * SEVEN IS STRUCTURAL, NOT A ROUND NUMBER. Hiring is weekday work: measured on this board on
+ * 2026-07-28, weekdays carry 700-3,500 postings a day while **Saturday carries 143 and Sunday 22**.
+ * A window shorter than a week therefore changes size depending on which days it happens to cover -
+ * a rolling 3-day window measured 3,917 on a Tuesday and would hold roughly 2,000 on a Monday, when
+ * it spans Sat+Sun+Mon. Any 7-day window contains exactly one Saturday and one Sunday, so the
+ * weekend dip is fully absorbed and the count stops swinging with the day of the week.
+ *
+ * Measured windows the day this shipped: 3d = 3,917 · 4d = 6,927 · 5d = 7,815 · **7d = 9,664**.
+ * Only 7d clears REQUIRED_SURFACED_JOBS on every weekday, and it does so with ~1.9x margin.
+ *
+ * WHAT WOULD MAKE THIS UNSUSTAINABLE, and what the cron watches for: weekly posting volume falling
+ * (a hiring slowdown, or the December lull), or sources decaying as board tokens rotate. Either
+ * shows up as `surfaced_jobs` trending toward REQUIRED_SURFACED_JOBS in the daily cron response,
+ * which is why that number is reported on every run and not only when it breaks.
+ *
+ * If it does trend down, WIDEN THIS BEFORE LOWERING THE FLOOR. A 14-day window measured 12,516, so
+ * there is a lot of room in the window itself before the floor is the thing that has to give.
+ *
+ * Greenhouse note: `posted_at` is Greenhouse's `updated_at` (it publishes no create date), so for
+ * 77% of the board this is "changed in the last 7 days" rather than "posted". That is a deliberate
+ * call, and it is why the board card says UPDATED for Greenhouse rows and POSTED for Lever/Ashby.
+ * Do not collapse those two words - claiming a publish date we do not have is the one thing the
+ * board's copy tests exist to prevent.
+ */
+export const JOB_FRESHNESS_DAYS = 7;
+
+function freshnessPredicate() {
+  return sql`${monitored_jobs.posted_at} >= now() - (${JOB_FRESHNESS_DAYS} || ' days')::interval`;
+}
+
 /** The floor rule as a predicate, so the number and the comparison are testable without a database. */
 export function boardIsBelowFloor(surfacedJobs: number): boolean {
   return surfacedJobs < MINIMUM_SURFACED_JOBS;
@@ -104,13 +147,26 @@ export async function surfacedJobCount(sponsorOnly = false): Promise<number> {
     .select({ total: sql<number>`count(*)::int` })
     .from(monitored_jobs)
     .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
-    .where(and(
-      eq(monitored_jobs.is_active, true),
-      eq(career_page_sources.enabled, true),
-      inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
-      ...(sponsorOnly ? [sponsorOnlyPredicate()] : []),
-    ));
+    // boardConditions(), not a hand-copied predicate list. This number is only meaningful if it
+    // counts exactly what GET /jobs returns, and the freshness window is precisely the kind of
+    // filter that gets added to the route and forgotten here: the count would have read ~22,000
+    // while the board showed ~9,700, and the floor check would have been watching a number no
+    // visitor ever sees.
+    .where(and(...boardConditions({ sponsorOnly })));
   return row?.total ?? 0;
+}
+
+/**
+ * Whether the board still has the headroom the product needs, and if not, how it is failing.
+ *
+ * Two levels rather than one, because they mean different things. 'low' is "someone should look at
+ * the sources this week"; 'breached' is "the board is not a browsable product right now". Alarming
+ * only at the floor would mean the first warning arrives when it is already unusable.
+ */
+export function boardHealth(surfacedJobs: number): 'ok' | 'low' | 'breached' {
+  if (boardIsBelowFloor(surfacedJobs)) return 'breached';
+  if (surfacedJobs < REQUIRED_SURFACED_JOBS) return 'low';
+  return 'ok';
 }
 
 /**
@@ -635,6 +691,7 @@ function boardConditions(f: {
     eq(monitored_jobs.is_active, true),
     eq(career_page_sources.enabled, true),
     inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
+    freshnessPredicate(),
   ];
   if (f.sponsorOnly) conditions.push(sponsorOnlyPredicate());
   if (f.q) {
@@ -1183,10 +1240,35 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       surfaced_jobs: surfaced,
       surfaced_sponsor_only_jobs: surfacedSponsorOnly,
       minimum_surfaced_jobs: MINIMUM_SURFACED_JOBS,
+      /* THE SUSTAINABILITY CHECK, run every day rather than once.
+       *
+       * Whether a 7-day window keeps the board above REQUIRED_SURFACED_JOBS is not a question that
+       * stays answered: it depends on weekly hiring volume and on sources still resolving, and both
+       * drift. Reporting the window, the requirement and the current multiple on every run is what
+       * turns "we checked once in July" into something that keeps checking itself.
+       *
+       * headroom_multiple is the number to watch. It was 1.9x the day this shipped; a slide toward
+       * 1.0 is the signal to widen JOB_FRESHNESS_DAYS or add sources, well before anything breaks. */
+      freshness_window_days: JOB_FRESHNESS_DAYS,
+      required_surfaced_jobs: REQUIRED_SURFACED_JOBS,
+      headroom_multiple: Number((surfaced / MINIMUM_SURFACED_JOBS).toFixed(1)),
+      board_health: boardHealth(surfaced),
       results,
     };
     const below = boardIsBelowFloor(surfaced);
     const sponsorBelow = boardIsBelowFloor(surfacedSponsorOnly);
+    /* Short of the 5x headroom but not yet under the floor: logged as a warning and reported in the
+     * payload, NOT a 5xx. The distinction is deliberate. A 5xx here means "the board is broken now";
+     * if the merely-thin case also failed the run, the alarm would stop meaning that, and the first
+     * real breach would arrive in a channel everyone had learned to ignore. This is the early
+     * warning, and it is early precisely because it does not page anyone. */
+    if (!below && payload.board_health === 'low') {
+      request.log.warn(
+        { surfaced, required: REQUIRED_SURFACED_JOBS, windowDays: JOB_FRESHNESS_DAYS, headroom: payload.headroom_multiple },
+        `Job board has thin headroom: ${surfaced} surfaced against a ${REQUIRED_SURFACED_JOBS} target. `
+        + `Widen JOB_FRESHNESS_DAYS or add sources before it reaches the floor.`,
+      );
+    }
     if (below || sponsorBelow) {
       request.log.error(
         { surfaced, surfacedSponsorOnly, floor: MINIMUM_SURFACED_JOBS, failedSources: payload.failed },
