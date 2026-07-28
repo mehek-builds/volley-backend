@@ -250,6 +250,12 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       posted_at: monitored_jobs.posted_at,
       first_seen_at: monitored_jobs.first_seen_at,
       ats_name: career_page_sources.ats_name,
+      /* The company's OWN careers page, which is the only field here that can carry the company's
+         own domain. Every other URL on the row points at the job board: apply_url and posting_url
+         are both greenhouse/lever/ashby, so a client deriving a company identity from either gets
+         the board's identity for every row instead. Operators sometimes register the board URL as
+         the careers URL too, so the client still has to check before trusting it. */
+      career_url: career_page_sources.career_url,
     };
     const newestFirst = [
       desc(monitored_jobs.posted_at),
@@ -321,6 +327,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         first_seen_at: monitored_jobs.first_seen_at,
         is_active: monitored_jobs.is_active,
         ats_name: career_page_sources.ats_name,
+        career_url: career_page_sources.career_url,
       })
       .from(monitored_jobs)
       .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
