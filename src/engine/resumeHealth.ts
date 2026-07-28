@@ -126,7 +126,7 @@ export function checkResumeHealth(spec: ResumeSpec): ResumeHealth {
         // if they estimate one. The action says where the number has to come from.
         severity: 'consider',
         title: 'This bullet has no number in it.',
-        action: 'If your saved experience records the scale, add it. Do not estimate one.',
+        action: 'If the work you told us about has the number, add it. Do not guess one.',
         org,
         bullet: excerpt(bullet, 90),
       });
@@ -161,8 +161,8 @@ export function checkResumeHealth(spec: ResumeSpec): ResumeHealth {
     findings.push({
       rule: 'no-metrics-anywhere',
       severity: 'fix',
-      title: 'Nothing on this resume is quantified.',
-      action: 'Put a number your saved experience already records on your strongest bullet.',
+      title: 'No bullet on this resume has a number in it.',
+      action: 'Put a number from the work you told us about on your strongest bullet.',
     });
   }
 
@@ -182,7 +182,7 @@ export function checkResumeHealth(spec: ResumeSpec): ResumeHealth {
       rule: 'no-skills',
       severity: 'consider',
       title: 'Your skills line is empty.',
-      action: 'A skills line is where an ATS looks first. Add the tools you actually use.',
+      action: 'The robot that reads your resume looks here first. Add the tools you actually use.',
     });
   }
 

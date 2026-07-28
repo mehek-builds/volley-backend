@@ -187,7 +187,7 @@ export function createRateLimitHook(
     reply.header('Retry-After', String(result.retryAfterSeconds));
     reply.header('Cache-Control', 'private, no-store');
     await reply.status(429).send({
-      error: 'Too many requests. Try again after the retry window.',
+      error: 'Too many tries. Wait a few minutes, then try again.',
       code: 'rate_limited',
       scope: policy.name,
       retry_after_seconds: result.retryAfterSeconds,

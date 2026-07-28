@@ -223,7 +223,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const row = await ownedResume(request, reply);
       if (!row) return;
       const parsed = reviewBodySchema.safeParse(request.body);
-      if (!parsed.success) return reply.status(400).send({ error: 'Invalid review packet', detail: parsed.error.issues });
+      if (!parsed.success) return reply.status(400).send({ error: 'We could not read this application', detail: parsed.error.issues });
       const stored = row.spec as StoredSpec;
       const current = readApplicationReview(stored);
       if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
@@ -352,7 +352,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const stored = row.spec as StoredSpec;
       const current = readApplicationReview(stored);
       if (!current || current.status !== 'needs_attention') {
-        return reply.status(409).send({ error: 'This application is not waiting for portal attention' });
+        return reply.status(409).send({ error: 'This application is not waiting on you' });
       }
       if (current.handoff_expires_at && Date.parse(current.handoff_expires_at) < Date.now()) {
         return reply.status(409).send({ error: 'That took too long and timed out. Start the application again.' });
@@ -384,7 +384,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const stored = row.spec as StoredSpec;
       const current = readApplicationReview(stored);
       if (!current || current.status !== 'ready_for_final_approval') {
-        return reply.status(409).send({ error: 'Review the prepared portal before final approval' });
+        return reply.status(409).send({ error: 'Look over the filled form before you send it' });
       }
       if (current.handoff_expires_at && Date.parse(current.handoff_expires_at) < Date.now()) {
         return reply.status(409).send({ error: 'That took too long and timed out. Start the application again.' });
