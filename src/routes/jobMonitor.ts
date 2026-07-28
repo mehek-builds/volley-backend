@@ -37,6 +37,69 @@ const listQuerySchema = z.object({
 const jobParamsSchema = z.object({ id: z.string().uuid() });
 
 /**
+ * THE BOARD MUST NEVER FALL BELOW THIS MANY SURFACED JOBS.
+ *
+ * A hard product floor, not a target and not a nice-to-have. Below a thousand postings the board
+ * stops being a place a job seeker can browse and becomes a list they exhaust in one sitting, so a
+ * board that quietly shrinks is a broken product that still returns HTTP 200.
+ *
+ * COUNTED THE WAY A USER SEES IT, which is the only count that means anything: active postings, from
+ * enabled sources, on portals Litos can finish autonomously. That last clause is why this constant
+ * lives next to the autonomy filter rather than off in a monitoring config - the two constraints
+ * pull against each other. Narrowing what Litos may surface (demoting a portal to multi-step, say)
+ * directly subtracts from this number, so whoever tightens the first has to answer for the second,
+ * and this check is what forces that conversation instead of letting the board silently drain.
+ *
+ * Headroom today: ~7,100 surfaced against a floor of 1,000, all from Greenhouse, Lever and Ashby.
+ *
+ * If this fires, DO NOT fix it by lowering the number. It is a symptom of one of:
+ *   - sources failing their polls (check career_page_sources.last_error)
+ *   - a portal demoted out of AUTONOMOUS_PORTAL_FAMILIES, taking its boards with it
+ *   - the deactivation sweep in pollSource wiping boards (see the empty-response guard there)
+ * The fix is more sources or a restored adapter. Adding a Workable fetcher is the cheapest lever:
+ * Workable is already autonomous and just has no poller (see POLLABLE_JOB_BOARDS).
+ */
+export const MINIMUM_SURFACED_JOBS = 1_000;
+
+/** The floor rule as a predicate, so the number and the comparison are testable without a database. */
+export function boardIsBelowFloor(surfacedJobs: number): boolean {
+  return surfacedJobs < MINIMUM_SURFACED_JOBS;
+}
+
+/**
+ * Whether a poll that came back empty should leave the existing postings alone.
+ *
+ * Extracted and exported for the same reason rankByFit is: it is the decision, and it is worth
+ * pinning down without standing up a database. See the long note in pollSource for the reasoning -
+ * in short, an empty board response is far more often a rotated token than a company closing every
+ * role at once, and the deactivation it would otherwise trigger is what takes the board under
+ * MINIMUM_SURFACED_JOBS in a single cron run.
+ */
+export function shouldKeepPostingsOnEmptyFetch(fetchedCount: number, activeNow: number): boolean {
+  return fetchedCount === 0 && activeNow > 0;
+}
+
+/**
+ * How many jobs the board would show right now, under exactly the filters GET /jobs applies.
+ *
+ * Deliberately re-derived from the same three predicates rather than counting monitored_jobs: a
+ * count that includes rows the board filters out would report a healthy number while the board
+ * itself was empty, which is the precise failure this whole check exists to catch.
+ */
+export async function surfacedJobCount(): Promise<number> {
+  const [row] = await db
+    .select({ total: sql<number>`count(*)::int` })
+    .from(monitored_jobs)
+    .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+    .where(and(
+      eq(monitored_jobs.is_active, true),
+      eq(career_page_sources.enabled, true),
+      inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
+    ));
+  return row?.total ?? 0;
+}
+
+/**
  * How many postings get scored and ranked on a request.
  *
  * Sorting by fit cannot be expressed in the query, because the score is computed in this process,
@@ -201,6 +264,39 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
       ats_name: source.ats_name as SupportedJobBoard,
       board_token: source.board_token,
     });
+
+    /* AN EMPTY RESPONSE NEVER DEACTIVATES A BOARD.
+     *
+     * The transaction below flips every one of this source's jobs to is_active = false and then
+     * re-inserts whatever the fetch returned. With `jobs` empty that is a silent wipe of the entire
+     * board: Databricks alone is ~600 postings, so two or three sources answering with an empty
+     * array takes the whole list under the floor in one cron run, and every check we had would still
+     * report success. That is the same shape as the failure this file already carries a comment
+     * about, where career_page_sources was empty for months and an empty board looked exactly like a
+     * healthy one.
+     *
+     * An empty array from a board API is overwhelmingly a rotated token, a changed endpoint, or a
+     * transient 200-with-no-body - not every job at a company closing between two polls. So it is
+     * treated as an error to investigate, and the previous postings stay up. Stale beats absent:
+     * a job that closed yesterday wastes one click, an empty board wastes the whole product.
+     *
+     * A board that genuinely empties recovers by hand (disable the source, or let the row age out).
+     * That is the correct trade - the manual step is on the rare true case, not the common false one.
+     */
+    if (jobs.length === 0) {
+      const [existing] = await db
+        .select({ active: sql<number>`count(*)::int` })
+        .from(monitored_jobs)
+        .where(and(eq(monitored_jobs.source_id, source.id), eq(monitored_jobs.is_active, true)));
+      if (shouldKeepPostingsOnEmptyFetch(jobs.length, existing?.active ?? 0)) {
+        const message = `Board returned no postings while ${existing!.active} are live; keeping them and not deactivating.`;
+        await db.update(career_page_sources)
+          .set({ last_polled_at: new Date(), last_error: message })
+          .where(eq(career_page_sources.id, source.id));
+        return { source_id: source.id, company: source.company_name, jobs: 0, ok: false as const, error: message };
+      }
+    }
+
     const now = new Date();
     await db.transaction(async (tx) => {
       await tx.update(monitored_jobs).set({ is_active: false }).where(eq(monitored_jobs.source_id, source.id));
@@ -512,11 +608,39 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     for (let index = 0; index < sources.length; index += POLL_CONCURRENCY) {
       results.push(...await Promise.all(sources.slice(index, index + POLL_CONCURRENCY).map(pollSource)));
     }
-    return reply.send({
+    /* THE FLOOR CHECK. See MINIMUM_SURFACED_JOBS.
+     *
+     * Reported on every run, not only on a breach, so the number is watchable while it is still
+     * healthy rather than only once it is already a problem. A board does not usually collapse in
+     * one step; it erodes as tokens rotate and boards go quiet, and a figure in every cron response
+     * is what makes that erosion visible before it crosses the line.
+     *
+     * A breach answers 5xx ON PURPOSE. This route is the daily Vercel cron, and a cron that returns
+     * 200 is a cron nobody looks at - which is exactly how career_page_sources sat empty for months
+     * while every check reported success. Failing the run is the only signal that reaches anyone.
+     * The poll itself still committed; this reports the state, it does not roll anything back.
+     */
+    const surfaced = await surfacedJobCount();
+    const payload = {
       sources: results.length,
       jobs: results.reduce((sum, result) => sum + result.jobs, 0),
       failed: results.filter((result) => !result.ok).length,
+      surfaced_jobs: surfaced,
+      minimum_surfaced_jobs: MINIMUM_SURFACED_JOBS,
       results,
-    });
+    };
+    if (boardIsBelowFloor(surfaced)) {
+      request.log.error(
+        { surfaced, floor: MINIMUM_SURFACED_JOBS, failedSources: payload.failed },
+        'Job board is below its minimum surfaced-jobs floor',
+      );
+      return reply.status(500).send({
+        ...payload,
+        error: `The job board is showing ${surfaced} jobs, below the floor of ${MINIMUM_SURFACED_JOBS}. `
+          + 'Check career_page_sources.last_error for failing polls, and whether a portal left '
+          + 'AUTONOMOUS_PORTAL_FAMILIES. Do not lower the floor to clear this.',
+      });
+    }
+    return reply.send(payload);
   });
 }
