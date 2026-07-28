@@ -91,6 +91,33 @@ const ALIASES = {
   Ramp: ['RAMP BUSINESS CORPORATION'],
   Render: ['RENDER SERVICES INC'],
   Baseten: ['BASETEN LABS INC'],
+  /* Added 2026-07-28 when the board grew from 51 to 239 sources and the coverage test fired. Each
+     one was read out of the FY2023 CSV, and the quant block matters most: those are the postings
+     the finance-track job seeker comes for, and without these aliases every one of them vanished
+     from the board of the people who need sponsorship most. */
+  'Jane Street': ['JANE STREET GROUP LLC'],
+  'Tower Research': ['TOWER RESEARCH CAPITAL LLC'],
+  'Old Mission': ['OLD MISSION CAPITAL LLC'],
+  'Marshall Wace': ['MARSHALL WACE NORTH AMERICA LP'],
+  'Flow Traders': ['FLOW TRADERS US LLC'],
+  AQR: ['AQR CAPITAL MANAGEMENT LLC'],
+  /* VIRTU FINANCIAL, not "VIRTUAL FRAMEWORKS INC D/B/A VIRTUALHEALTH", which the loose match would
+     otherwise have reached. */
+  Virtu: ['VIRTU FINANCIAL OPERATING LLC'],
+  SpaceX: ['SPACE EXPLORATION TECHNOLOGIES CORP'],
+  Spotify: ['SPOTIFY USA INC'],
+  Peloton: ['PELOTON INTERACTIVE INC'],
+  Elastic: ['ELASTICSEARCH INC'],
+  Cerebras: ['CEREBRAS SYSTEMS INC'],
+  Mercury: ['MERCURY TECHNOLOGIES INC'],
+  zoominfo: ['ZOOMINFO TECHNOLOGIES LLC'],
+  'Take-Two': ['TAKE TWO INTERACTIVE SOFTWARE INC'],
+  TCS: ['TATA CONSULTANCY SVCS LTD'],
+  Disney: ['DISNEY FINANCIAL SVCS LLC', 'DISNEY HUMAN RESOURCES SERVICES CO LLC'],
+  /* DELIBERATELY NOT ALIASED, and each was looked up and rejected rather than missed:
+     "Lucid" (LUCID GROUP USA INC is the carmaker, LUCID CONSULTING LLC a third company; our board's
+     Lucid is the diagramming tool), "lattice" (LATTICE SEMICONDUCTOR CORP is unrelated to the HR
+     platform), and "Linear" (LINEAR LABS INC makes motors). All three stay unconfirmed. */
   /* Deliberately NOT aliased to "LINEAR LABS INC", which is a motor manufacturer, not the issue
      tracker on our board. Linear has no petition in this window and stays unconfirmed. */
   Betterment: ['BETTERMENT HOLDINGS INC'],

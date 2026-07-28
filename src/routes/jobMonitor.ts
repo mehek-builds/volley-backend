@@ -12,6 +12,7 @@ import { scoreJdMatch } from '../engine/jdMatch';
 import { resumeSpecText } from '../engine/resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { rankingCacheKey, readRanking, writeRanking } from '../lib/rankingCache';
+import { companyDomainFor } from '../lib/companyDomains';
 
 const sourceSchema = z.object({
   company_name: z.string().trim().min(1).max(200),
@@ -180,6 +181,12 @@ const CANDIDATE_SCAN = 3_000;
  */
 const PER_COMPANY_CAP = 6;
 
+/* Two or three, Mehek's rule, and three is the generous end of it. Measured against a 24-row page:
+   three of anything is noticeable, four reads as a takeover. RANKED_PAGE_WINDOW is the page size the
+   dashboard actually asks for; the cap is meaningless without knowing the window it applies to. */
+const PER_PAGE_COMPANY_CAP = 3;
+const RANKED_PAGE_WINDOW = 24;
+
 /** The minimum a row needs to be rankable. Kept structural so the sort can be tested without a DB. */
 export type RankableJob = {
   company_name: string;
@@ -250,6 +257,49 @@ export function pickDiversePool<T extends { company_name: string }>(
     taken.push(row);
   }
   return taken;
+}
+
+/**
+ * The in-memory half of the one-employer-must-not-own-the-page rule, for the ranked list.
+ *
+ * The board can scatter in SQL because its order is recency. The dashboard's order is FIT, and a
+ * round-robin there would be actively wrong: it would put a 40% match from a rare employer above a
+ * 95% match, which is the opposite of what "Top matches for you" promises. So this keeps fit order
+ * and only defers the rows that would break the cap, pulling them back in as soon as the next page
+ * begins.
+ *
+ * Applied once, to the ranking that gets cached, so every page is a slice of one decided list —
+ * exactly the property the ranking cache exists to hold. Re-sorting each page instead would let a
+ * posting appear on two pages or none.
+ *
+ * A deferred row is never dropped. If a whole page could only be filled by breaking the cap, the
+ * cap gives way rather than the page coming up short: a short page is a worse lie than a repeated
+ * employer.
+ */
+export function scatterRanked<T extends { company_name: string }>(
+  rows: readonly T[],
+  perPage: number,
+  pageSize: number,
+): T[] {
+  const pending = [...rows];
+  const out: T[] = [];
+
+  while (pending.length) {
+    const windowStart = Math.floor(out.length / pageSize) * pageSize;
+    const counts = new Map<string, number>();
+    for (let i = windowStart; i < out.length; i += 1) {
+      const key = out[i].company_name.trim().toLowerCase();
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    let index = pending.findIndex(
+      (row) => (counts.get(row.company_name.trim().toLowerCase()) ?? 0) < perPage,
+    );
+    // Nothing left that fits the cap: take the best remaining rather than leave the page short.
+    if (index === -1) index = 0;
+    out.push(pending[index]);
+    pending.splice(index, 1);
+  }
+  return out;
 }
 
 export function rankByFit<T extends RankableJob>(
@@ -336,8 +386,21 @@ async function baseResumeText(userId: string | undefined): Promise<string | null
    (vercel.json) and a board fetch is one HTTP call plus one transaction, so
    eight at a time clears ~60 sources well inside the budget. Raise the source
    count past this and the limit needs raising with it, or the tail stops
-   refreshing daily and nothing says so. */
-const POLL_SOURCES_PER_RUN = 60;
+   refreshing daily and nothing says so.
+
+   RAISED TO 400 ON 2026-07-28, when the board went from 51 sources to 239. At 60
+   a run, 179 of them would have sat unpolled every night and come round once
+   every four days — the exact "tail stops refreshing and nothing says so"
+   failure the paragraph above warns about, reintroduced by growing the source
+   list rather than by lowering this number.
+
+   The budget is measured, not guessed: the 2026-07-28 18:19 UTC run polled 51
+   sources in 22s at this concurrency, so ~0.43s per source wall-clock. 239
+   sources is therefore ~103s, and 400 would be ~172s, both inside the 300s
+   Vercel ceiling. 400 leaves room to roughly double the board again before this
+   needs revisiting; past that, raise POLL_CONCURRENCY rather than this, since
+   the cost is network wait rather than CPU. */
+const POLL_SOURCES_PER_RUN = 400;
 const POLL_CONCURRENCY = 8;
 const UPSERT_CHUNK = 200;
 
@@ -478,7 +541,6 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
             last_seen_at: sql`excluded.last_seen_at`,
             is_active: sql`excluded.is_active`,
             sponsorship_status: sql`excluded.sponsorship_status`,
-            raw_json: sql`excluded.raw_json`,
           },
         });
       }
@@ -527,6 +589,40 @@ export function sponsorOnlyPredicate() {
   )!;
 }
 
+/**
+ * ONE EMPLOYER MUST NOT OWN THE PAGE.
+ *
+ * Mehek's rule, 2026-07-28: the same company should not appear more than two or three times on a
+ * page, on the signed-out board and on the dashboard's jobs list alike. A board where the first
+ * screen is nine Datadog roles reads as one employer's careers page with our name on it, however
+ * correct the ordering that produced it.
+ *
+ * This is the SQL half, for the routes whose pages are database slices. It cannot be done by
+ * re-sorting a page in memory: page 2 would be sorted independently of page 1, so a posting could
+ * appear on both pages or on neither, and `total` would stop describing the list. The ordering has
+ * to be a property of the whole set.
+ *
+ * `row_number() over (partition by company)` numbers each employer's postings 1, 2, 3… Ordering by
+ * that number FIRST is a round-robin: every company's newest posting comes before any company's
+ * second. With ~50 companies on the board that puts at most one row per employer in any 50
+ * consecutive rows, comfortably inside a 24-row page — stricter than "two or three", and the
+ * strictness is the point.
+ *
+ * What it does NOT do, deliberately:
+ * - It never outranks relevance. A title search still puts title matches first and scatters only
+ *   within them, or the first page of a search reads as unrelated.
+ * - It is skipped entirely when the visitor filtered BY company. Someone who typed "MongoDB" asked
+ *   for MongoDB's roles and must get all 267, not one per page.
+ * - Deep in the board, once the smaller employers are exhausted, the remaining pages are
+ *   necessarily the big ones. That is the shape of the data, not a failure of this rule.
+ */
+function companyScatter(filters: { company?: string }) {
+  if (filters.company) return [];
+  return [
+    sql`row_number() over (partition by lower(${monitored_jobs.company_name}) order by ${monitored_jobs.posted_at} desc nulls last, ${monitored_jobs.first_seen_at} desc, ${monitored_jobs.id} desc)`,
+  ];
+}
+
 function boardConditions(f: {
   q?: string;
   title?: string;
@@ -549,6 +645,18 @@ function boardConditions(f: {
   if (f.company) conditions.push(ilike(monitored_jobs.company_name, `%${f.company}%`));
   if (f.remote) conditions.push(eq(monitored_jobs.remote, f.remote === 'true'));
   return conditions;
+}
+
+/**
+ * The row as the client receives it, with the employer's own domain attached.
+ *
+ * Resolved here rather than in the browser because `career_url` cannot answer it: on every source
+ * polled today that field holds the JOB BOARD, so a client deriving an identity from it would paint
+ * one ATS logo across every row. See lib/companyDomains.ts for how each domain was established and
+ * why an unmapped company correctly gets null.
+ */
+function withCompanyDomain<T extends { company_name: string }>(row: T) {
+  return { ...row, company_domain: companyDomainFor(row.company_name) };
 }
 
 export async function jobMonitorRoutes(fastify: FastifyInstance) {
@@ -640,6 +748,8 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     const relevanceThenNewest = [
       ...(q ? [sql`case when ${monitored_jobs.title} ilike ${`%${q}%`} then 0 else 1 end`] : []),
       ...(title ? [sql`case when ${monitored_jobs.title} ilike ${`%${title}%`} then 0 else 1 end`] : []),
+      /* Relevance first, then one employer per turn, then recency. See companyScatter. */
+      ...companyScatter(parsed.data),
       desc(monitored_jobs.posted_at),
       desc(monitored_jobs.first_seen_at),
       desc(monitored_jobs.id),
@@ -669,7 +779,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         .offset(offset);
       return reply.send({
         jobs: rows.slice(0, limit).map((row) => ({
-          ...row,
+          ...withCompanyDomain(row),
           match_score: null,
           sponsorship_evidence: evidenceFor(row),
         })),
@@ -743,8 +853,17 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         .filter((row): row is (typeof pool)[number] => row !== undefined);
 
       const scored = rankByFit(orderedPool, resumeText);
+      /* Fit order decides WHICH jobs lead; this decides that no single employer owns the screen
+         while they do. pickDiversePool already spread the POOL across employers, but the pool is
+         300 rows and a page is a handful — six Datadog roles could still land together at the top.
+         Capped per page, not per pool. */
+      const spread = scatterRanked(
+        scored.map((entry) => ({ ...entry, company_name: entry.row.company_name })),
+        PER_PAGE_COMPANY_CAP,
+        RANKED_PAGE_WINDOW,
+      );
       ranking = writeRanking(cacheKey, {
-        ids: scored.map(({ row }) => row.id),
+        ids: spread.map(({ row }) => row.id),
         scores: new Map(scored.map(({ row, score }) => [row.id, score])),
         poolExhausted,
       });
@@ -785,7 +904,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       .map((id) => byId.get(id))
       .filter((row): row is (typeof rows)[number] => row !== undefined)
       .map((row) => ({
-        ...row,
+        ...withCompanyDomain(row),
         match_score: ranking!.scores.get(row.id) ?? null,
         sponsorship_evidence: evidenceFor(row),
       }));
@@ -873,6 +992,12 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         /* Same relevance-then-recency rule as /jobs: a title hit outranks a body-only hit, or the
            first page of a search reads as unrelated. */
         ...(title ? [sql`case when min(${monitored_jobs.title}) ilike ${`%${title}%`} then 0 else 1 end`] : []),
+        /* Scatter across employers, same rule as /jobs but over the grouped rows: the window runs
+           on the aggregate, so it numbers each company's ROLES rather than its postings, which is
+           what a reader of this board counts. */
+        ...(parsed.data.company
+          ? []
+          : [sql`row_number() over (partition by lower(${monitored_jobs.company_name}) order by max(${monitored_jobs.posted_at}) desc nulls last, min(${monitored_jobs.first_seen_at}) desc)`]),
         sql`max(${monitored_jobs.posted_at}) desc nulls last`,
         sql`min(${monitored_jobs.first_seen_at}) desc`,
       )
@@ -1007,7 +1132,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       ))
       .limit(1);
     if (!rows[0]) return reply.status(404).send({ error: 'Job not found' });
-    return reply.send({ job: { ...rows[0], sponsorship_evidence: evidenceFor(rows[0]) } });
+    return reply.send({ job: { ...withCompanyDomain(rows[0]), sponsorship_evidence: evidenceFor(rows[0]) } });
   });
 
   fastify.post('/internal/job-monitor/sources', async (request: FastifyRequest, reply: FastifyReply) => {

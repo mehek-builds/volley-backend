@@ -40,7 +40,6 @@ export type NormalizedJob = {
   posting_url: string;
   remote: boolean;
   posted_at?: Date;
-  raw_json: unknown;
 };
 
 const NAMED_ENTITIES: Record<string, string> = {
@@ -145,7 +144,6 @@ export function normalizeGreenhouseJobs(payload: unknown): NormalizedJob[] {
       posting_url: postingUrl,
       remote: /\bremote\b/i.test(location ?? ''),
       posted_at: date(job.updated_at),
-      raw_json: raw,
     }];
   });
 }
@@ -175,7 +173,6 @@ export function normalizeLeverJobs(payload: unknown): NormalizedJob[] {
       posting_url: postingUrl,
       remote: /\bremote\b/i.test([location, text(job.workplaceType)].filter(Boolean).join(' ')),
       posted_at: date(job.createdAt),
-      raw_json: raw,
     }];
   });
 }
@@ -204,7 +201,6 @@ export function normalizeAshbyJobs(payload: unknown): NormalizedJob[] {
       posting_url: postingUrl,
       remote: job.isRemote === true || /\bremote\b/i.test(location ?? ''),
       posted_at: date(job.publishedAt),
-      raw_json: raw,
     }];
   });
 }

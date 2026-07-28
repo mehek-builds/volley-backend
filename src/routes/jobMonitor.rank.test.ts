@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert';
-import { pickDiversePool, rankByFit, RANKING_POOL, SCORING_CHARS, type RankableJob } from './jobMonitor';
+import { pickDiversePool, rankByFit, RANKING_POOL, SCORING_CHARS, type RankableJob, scatterRanked } from './jobMonitor';
 
 /* A posting with enough real requirements for jdMatch to agree to score it. The requirements block
    is what carries the signal, so the terms that matter live there rather than in the intro. */
@@ -227,5 +227,72 @@ describe('pickDiversePool', () => {
 
   test('an empty board pools to nothing', () => {
     assert.deepStrictEqual(pickDiversePool([], 6, 10), []);
+  });
+});
+
+describe('scatterRanked', () => {
+  const rows = (spec: string) =>
+    spec.split('').map((c, i) => ({ company_name: c, id: `${c}${i}` }));
+  const worstPerPage = (out: { company_name: string }[], pageSize: number) => {
+    let worst = 0;
+    for (let start = 0; start < out.length; start += pageSize) {
+      const counts = new Map<string, number>();
+      for (const r of out.slice(start, start + pageSize)) {
+        counts.set(r.company_name, (counts.get(r.company_name) ?? 0) + 1);
+      }
+      worst = Math.max(worst, ...counts.values());
+    }
+    return worst;
+  };
+
+  test('holds the cap on a list that is one employer at the top', () => {
+    /* The real shape this exists for: production had 166 Datadog rows in a 300-row pool, so
+       "Top matches for you" was nine Datadog jobs on the first screen.
+       The tail deliberately contains no 'D': an earlier version of this test used A-X as the
+       "other" employers, which silently included D and made the test fail on its own fixture. */
+    const input = rows('D'.repeat(30) + 'ABCEFGHIJKLMNOPQRSTUVWXYZ');
+    const out = scatterRanked(input, 3, 8);
+    assert.equal(out.length, input.length, 'no row may be dropped');
+    /* Only while there is something else to show. Once the other employers are exhausted the cap
+       gives way on purpose, and the last test in this block is the one that pins that down. */
+    const early = out.slice(0, 32);
+    assert.ok(
+      worstPerPage(early, 8) <= 3,
+      `a page held ${worstPerPage(early, 8)} of one employer while others were available`,
+    );
+  });
+
+  test('keeps fit order wherever the cap allows it', () => {
+    /* Deferring is a last resort, not a reshuffle: a list that already obeys the cap must come
+       back untouched, or the dashboard stops being ranked by fit at all. */
+    const input = rows('ABCDEFGH');
+    assert.deepEqual(scatterRanked(input, 3, 8), input);
+  });
+
+  test('fills the page rather than leaving it short when only one employer is left', () => {
+    /* A short page is a worse lie than a repeated employer: it reads as "that is all there is". */
+    const input = rows('DDDDD');
+    const out = scatterRanked(input, 3, 8);
+    assert.equal(out.length, 5);
+  });
+
+  test('is stable for equal companies, so two runs of one ranking agree', () => {
+    const input = rows('DDDABCDDD');
+    assert.deepEqual(
+      scatterRanked(input, 2, 4).map((r) => r.id),
+      scatterRanked(input, 2, 4).map((r) => r.id),
+    );
+  });
+
+  test('treats employer names case-insensitively', () => {
+    const input = [
+      { company_name: 'Datadog', id: '1' },
+      { company_name: 'datadog', id: '2' },
+      { company_name: 'DATADOG', id: '3' },
+      { company_name: 'Stripe', id: '4' },
+    ];
+    const out = scatterRanked(input, 2, 3);
+    const firstPage = out.slice(0, 3).filter((r) => r.company_name.toLowerCase() === 'datadog');
+    assert.ok(firstPage.length <= 2, 'case variants must count as one employer');
   });
 });
