@@ -108,8 +108,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
     'https://trylitos.com',
     'https://www.trylitos.com',
     'https://role-quick-website.vercel.app',
-    'https://rolequick.com',
-    'https://www.rolequick.com',
+    // rolequick.com and www.rolequick.com were removed 2026-07-28: the domain
+    // stopped resolving after the rename, so allowing it granted nothing and
+    // only suggested a live surface that no longer exists.
     ...extraOrigins,
   ]);
   const isAllowedOrigin = (origin: string | undefined): boolean => {
