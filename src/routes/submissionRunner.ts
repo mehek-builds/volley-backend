@@ -25,6 +25,8 @@ import {
   managedResultHasCoverLetterUpload,
   navigateToApplicationForm,
   portalApplicationUrl,
+  portalCanAutoSubmit,
+  portalHandoffReason,
   readManagedReceipt,
   readReceipt,
   type SubmissionPacket,
@@ -208,8 +210,35 @@ async function buildPacket(row: ResumeRow, controlledTest = false): Promise<Subm
     coverLetterName: coverLetter
       ? String(coverLetterMeta.file_name ?? `litos-${row.id}-cover-letter.pdf`)
       : undefined,
+    mostRecentRole: readMostRecentRole(parsed),
     questions: review.questions.map((item) => ({ question: item.question, answer: item.answer })),
   };
+}
+
+// The first entry of the parsed resume's experience list, for portals that ask for work history as
+// structured fields (Paylocity). First, not "latest by date": resumes are written most-recent-first
+// and the parser preserves that order, whereas the date strings are free text ("Jun 2025 - Present",
+// "Summer 2024") and cannot be reliably compared. Trusting the resume's own ordering is both simpler
+// and closer to what the student actually wrote.
+export function readMostRecentRole(parsed: Record<string, unknown>): SubmissionPacket['mostRecentRole'] {
+  const experience = parsed.experience;
+  if (!Array.isArray(experience) || experience.length === 0) return undefined;
+  // The `as` cast below is only safe behind this guard: `experience` is whatever the resume parser
+  // wrote into parsed_json, so entry[0] can be null, a string, or an array. It used to throw a
+  // TypeError on `entry.company` for a null entry - and because buildPacket runs on EVERY prepare
+  // and submit, one malformed parsed profile would have failed Greenhouse/Lever/Ashby runs that
+  // previously succeeded. A portal-specific nicety must never break the portals that came before it.
+  const raw = experience[0];
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const entry = raw as Record<string, unknown>;
+  const str = (value: unknown) => (typeof value === 'string' && value.trim() ? value.trim() : undefined);
+  const company = str(entry.company) ?? str(entry.org);
+  const title = str(entry.title);
+  // Both are required by every portal that asks for work history at all, so a partial entry is
+  // worse than none: it produces a row the student must notice and finish rather than one she can
+  // simply confirm.
+  if (!company || !title) return undefined;
+  return { company, title, summary: str(entry.description), startDate: str(entry.start), endDate: str(entry.end) };
 }
 
 function omitCoverLetter(packet: SubmissionPacket): SubmissionPacket {
@@ -622,6 +651,27 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
   if (detectPortal(claimedReview.portal_url!) === 'controlled_test') {
     await submitControlled(row, claimedReview, fastify);
     return;
+  }
+  // Portals that cannot be submitted in one run stop HERE, before either provider path.
+  //
+  // This gate used to live only inside buildManagedPortalActions, which was wrong in two ways that
+  // a review caught before it shipped. Removing the click from the managed action list does not stop
+  // the code below from calling readManagedReceipt and writing status:'submitted' - so a JazzHR or
+  // Paylocity run that clicked nothing could still be recorded as submitted the moment the page text
+  // happened to contain "success". And it did nothing at all for the direct-Playwright path, which
+  // calls clickFinalSubmit(page) unconditionally: on JazzHR that presses submit behind an unsolved
+  // reCAPTCHA, and on Paylocity it presses a control halfway through a four-page wizard.
+  //
+  // Gating at the call site is the only place that covers both providers and the status write.
+  {
+    const portal = detectPortal(claimedReview.portal_url!);
+    if (!portalCanAutoSubmit(portal)) {
+      await writeReview(row, nextReview(claimedReview, {
+        status: 'needs_attention',
+        attention_reason: portalHandoffReason(portal) ?? undefined,
+      }));
+      return;
+    }
   }
   if (isManagedStratusProvider()) {
     const portal = detectPortal(claimedReview.portal_url!);

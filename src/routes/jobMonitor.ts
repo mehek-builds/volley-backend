@@ -139,6 +139,18 @@ async function baseResumeText(userId: string | undefined): Promise<string | null
   return text.length > 0 ? text : null;
 }
 
+/* One daily run has to touch EVERY enabled source, not a rotating slice of
+   them. At 20 per run a 40-source board took two days to come round, and a
+   source is only marked stale when it is polled, so a posting closed on Monday
+   sat on the public board until Wednesday. The Vercel function ceiling is 300s
+   (vercel.json) and a board fetch is one HTTP call plus one transaction, so
+   eight at a time clears ~60 sources well inside the budget. Raise the source
+   count past this and the limit needs raising with it, or the tail stops
+   refreshing daily and nothing says so. */
+const POLL_SOURCES_PER_RUN = 60;
+const POLL_CONCURRENCY = 8;
+const UPSERT_CHUNK = 200;
+
 function requireOperator(request: FastifyRequest, reply: FastifyReply): boolean {
   if (!isCronConfigured() || !isCronAuthorized(request)) {
     reply.status(401).send({ error: 'Unauthorized' });
@@ -161,7 +173,7 @@ function configuredSources(): JobSourceInput[] {
   return result.data;
 }
 
-async function upsertSources(sources: JobSourceInput[]) {
+export async function upsertSources(sources: JobSourceInput[]) {
   for (const source of sources) {
     const rows = await db.insert(career_page_sources).values(source).onConflictDoUpdate({
       target: [career_page_sources.ats_name, career_page_sources.board_token],
@@ -177,7 +189,7 @@ async function upsertSources(sources: JobSourceInput[]) {
   }
 }
 
-async function pollSource(source: typeof career_page_sources.$inferSelect) {
+export async function pollSource(source: typeof career_page_sources.$inferSelect) {
   try {
     const jobs = await fetchSourceJobs({
       ats_name: source.ats_name as SupportedJobBoard,
@@ -186,29 +198,37 @@ async function pollSource(source: typeof career_page_sources.$inferSelect) {
     const now = new Date();
     await db.transaction(async (tx) => {
       await tx.update(monitored_jobs).set({ is_active: false }).where(eq(monitored_jobs.source_id, source.id));
-      for (const job of jobs) {
-        await tx.insert(monitored_jobs).values({
+      /* One statement per posting meant 7,109 round trips for a full sweep and
+         a 469s run, against a 300s Vercel ceiling (vercel.json) — the daily
+         cron would have died halfway through the alphabet, leaving every
+         un-reached source's jobs flipped to is_active = false by the sweep
+         above. That failure empties the public board rather than staling it.
+         Chunked so a single board the size of Databricks still fits well
+         inside Postgres's 65,535-parameter cap: 14 columns x 200 rows. */
+      for (let index = 0; index < jobs.length; index += UPSERT_CHUNK) {
+        const chunk = jobs.slice(index, index + UPSERT_CHUNK).map((job) => ({
           source_id: source.id,
           company_name: source.company_name,
           ...job,
           last_seen_at: now,
           is_active: true,
-        }).onConflictDoUpdate({
+        }));
+        await tx.insert(monitored_jobs).values(chunk).onConflictDoUpdate({
           target: [monitored_jobs.source_id, monitored_jobs.external_id],
           set: {
-            company_name: source.company_name,
-            title: job.title,
-            location: job.location,
-            department: job.department,
-            employment_type: job.employment_type,
-            description: job.description,
-            apply_url: job.apply_url,
-            posting_url: job.posting_url,
-            remote: job.remote,
-            posted_at: job.posted_at,
-            last_seen_at: now,
-            is_active: true,
-            raw_json: job.raw_json,
+            company_name: sql`excluded.company_name`,
+            title: sql`excluded.title`,
+            location: sql`excluded.location`,
+            department: sql`excluded.department`,
+            employment_type: sql`excluded.employment_type`,
+            description: sql`excluded.description`,
+            apply_url: sql`excluded.apply_url`,
+            posting_url: sql`excluded.posting_url`,
+            remote: sql`excluded.remote`,
+            posted_at: sql`excluded.posted_at`,
+            last_seen_at: sql`excluded.last_seen_at`,
+            is_active: sql`excluded.is_active`,
+            raw_json: sql`excluded.raw_json`,
           },
         });
       }
@@ -285,11 +305,34 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
          the careers URL too, so the client still has to check before trusting it. */
       career_url: career_page_sources.career_url,
     };
-    const newestFirst = [
+
+    /* A search matches the title OR the body, and the body is the whole job description, so
+       "product manager" matched 707 postings of which most only mention the phrase in passing
+       ("you will work with our product manager"). Sorted by date alone, the top of that page was
+       Senior Machine Learning Engineer — a board that looks broken to anyone who types what they
+       actually want. Title hits first, then the same date order within each group. Recency alone
+       stays the order when there is no search term, which is what a browse wants.
+       This also decides WHICH postings enter the ranking pool below, so a search still puts title
+       matches in front of the scorer rather than letting them fall off the end of the pool. */
+    const relevanceThenNewest = [
+      ...(q ? [sql`case when ${monitored_jobs.title} ilike ${`%${q}%`} then 0 else 1 end`] : []),
       desc(monitored_jobs.posted_at),
       desc(monitored_jobs.first_seen_at),
       desc(monitored_jobs.id),
-    ] as const;
+    ];
+
+    /* The board on trylitos.com/browse-jobs prints how many jobs there are and paginates over the
+       whole set, and neither is derivable from has_more: a caller reading page 1 can only say
+       "more than 24". Counted under the same filters as the page, so the number always describes
+       the list beneath it rather than the table. */
+    const jobCount = async () => {
+      const [row] = await db
+        .select({ total: sql<number>`count(*)::int` })
+        .from(monitored_jobs)
+        .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+        .where(and(...conditions));
+      return row?.total ?? 0;
+    };
 
     if (!resumeText) {
       const rows = await db
@@ -297,11 +340,12 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         .from(monitored_jobs)
         .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
         .where(and(...conditions))
-        .orderBy(...newestFirst)
+        .orderBy(...relevanceThenNewest)
         .limit(limit + 1)
         .offset(offset);
       return reply.send({
         jobs: rows.slice(0, limit).map((row) => ({ ...row, match_score: null })),
+        total: await jobCount(),
         limit,
         offset,
         has_more: rows.length > limit,
@@ -339,7 +383,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         .from(monitored_jobs)
         .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
         .where(and(...conditions))
-        .orderBy(...newestFirst)
+        .orderBy(...relevanceThenNewest)
         .limit(RANKING_POOL + 1);
 
       const scored = rankByFit(pool.slice(0, RANKING_POOL), resumeText);
@@ -371,6 +415,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
 
     return reply.send({
       jobs,
+      total: await jobCount(),
       limit,
       offset,
       has_more: ranking.ids.length > offset + limit,
@@ -431,10 +476,10 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     const sources = await db.select().from(career_page_sources)
       .where(eq(career_page_sources.enabled, true))
       .orderBy(sql`${career_page_sources.last_polled_at} asc nulls first`)
-      .limit(20);
+      .limit(POLL_SOURCES_PER_RUN);
     const results = [];
-    for (let index = 0; index < sources.length; index += 4) {
-      results.push(...await Promise.all(sources.slice(index, index + 4).map(pollSource)));
+    for (let index = 0; index < sources.length; index += POLL_CONCURRENCY) {
+      results.push(...await Promise.all(sources.slice(index, index + POLL_CONCURRENCY).map(pollSource)));
     }
     return reply.send({
       sources: results.length,
