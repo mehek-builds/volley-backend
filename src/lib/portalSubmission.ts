@@ -448,8 +448,12 @@ const PAYLOCITY_TERMINAL_MARKERS = [
 // `data-testid` is the one stable attribute, and it is present and stable on every field, so this is
 // the rare adapter where data-testid is the correct primary selector rather than a fallback.
 //
-// Two file inputs again (resume + cover letter), the same hazard as Workable's avatar input and
-// Paylocity's three inputs, so neither is matched by a bare input[type="file"].
+// Two file inputs again (resume + cover letter). Weaker than Workable's avatar hazard, and worth
+// being precise about rather than borrowing that story: on the live form and on the fixture the
+// resume input comes FIRST, so a bare input[type="file"] happens to resolve to the right one today.
+// Verified in-browser 2026-07-29 - the naive selector and the captured one both resolved to
+// input-resume. The captured selector is still what ships, because "correct as long as the DOM order
+// never changes" is not a property worth depending on when a stable attribute is right there.
 const RIPPLING_RESUME_SELECTOR = 'input[type="file"][data-testid="input-resume"]';
 const RIPPLING_COVER_LETTER_SELECTOR = 'input[type="file"][data-testid="input-cover_letter"]';
 
@@ -483,13 +487,17 @@ const BREEZY_COVER_LETTER_SELECTOR = 'input[type="file"][name="cCoverLetterFileT
 // NOT filled: input[name="smsConsent"] and input[name="gdprAgreement"]. Both consent checkboxes.
 //
 // AND NOT FILLED, the one worth reading: Breezy ships a honeypot at name="hp_<4 hex>" - randomised
-// per render, so it must be matched by prefix if it is ever matched at all. It defeats a naive
-// visibility check completely: the input itself computes to opacity 1, visibility visible, display
-// block, 250x43 px. It is concealed ONLY by an ancestor (.apply-field-extra) with height 0 and
-// overflow hidden. Same class of trap as the Workday 1px sr-only field the extension's
-// isHoneypotField already guards, and proof that ancestor geometry - not the element's own computed
-// style - is what a honeypot check has to look at. This adapter never touches it because it fills by
-// explicit name; the hazard is real for anything that fills generically.
+// per render, so it must be matched by prefix if it is ever matched at all. It defeats a visibility
+// check completely, and this was measured rather than reasoned about: against the fixture that
+// reproduces it, Playwright's own isVisible() returns TRUE, because the input's own box is 293x38
+// with opacity 1 and visibility visible. It is concealed ONLY by an ancestor (.apply-field-extra)
+// with height 0 and overflow hidden.
+//
+// So ancestor geometry, not the element's own computed style and not isVisible(), is what a honeypot
+// check has to look at. Same class of trap as the Workday 1px sr-only field the extension's
+// isHoneypotField already guards. This adapter is safe because it fills by explicit name; anything
+// that fills generically walks straight into it, and a filled honeypot means the employer silently
+// discards the application.
 
 // ─── BambooHR ({tenant}.bamboohr.com/careers/{id}) ────────────────────────────
 // Read off a live PRC-Saltillo posting, 2026-07-29 (prentkeromich.bamboohr.com/careers/480). This
