@@ -43,28 +43,64 @@ test('strips tags from Greenhouse content that arrives HTML-escaped', () => {
   assert.doesNotMatch(jobs[0].description, /&(amp|lt|gt|#\d+);/i);
 });
 
-test('strips Greenhouse content whose markup is escaped more than once', () => {
-  /* Postings that already contained escaped markup come back from Greenhouse
-   * double-escaped at the tag level, so a fixed two-pass decode left a literal
-   * <div class="content-intro"> in the description. */
+test('decodes the double-escaped text entities Greenhouse actually sends', () => {
+  /* Greenhouse escapes the whole document, so an `&` in the posting's prose
+   * arrives as `&amp;amp;`. Measured 185-581 occurrences per board. */
   const jobs = normalizeGreenhouseJobs({ jobs: [{
     id: 9,
-    title: 'Staff Machine Learning Engineer',
-    absolute_url: 'https://job-boards.greenhouse.io/airbnb/jobs/9',
-    location: { name: 'San Francisco, CA' },
-    content: '&amp;lt;div class="content-intro"&amp;gt;&amp;lt;p&amp;gt;Airbnb was born in 2007.&amp;lt;/p&amp;gt;&amp;lt;/div&amp;gt;',
+    title: 'Research Engineer',
+    absolute_url: 'https://job-boards.greenhouse.io/acme/jobs/9',
+    content: '&lt;p&gt;Research &amp;amp; development, R&amp;amp;D.&lt;/p&gt;',
   }] });
-  assert.equal(jobs[0].description, 'Airbnb was born in 2007.');
+  assert.equal(jobs[0].description, 'Research & development, R&D.');
 });
 
-test('leaves comparison operators in prose alone', () => {
+test('keeps angle brackets that appear in prose rather than markup', () => {
+  /* The tag strip runs only while the text is still known to be markup. A strip
+   * after the final decode would eat "<b and c>", which is indistinguishable
+   * from a bold tag with attributes. */
   const jobs = normalizeGreenhouseJobs({ jobs: [{
     id: 11,
     title: 'Analyst',
     absolute_url: 'https://job-boards.greenhouse.io/acme/jobs/11',
-    content: '&lt;p&gt;We want latency &amp;lt; 100ms and &amp;gt; 5 years of experience.&lt;/p&gt;',
+    content: '&lt;p&gt;Use it if a&amp;lt;b and c&amp;gt;d. Latency &amp;lt; 100ms, &amp;gt; 5 years.&lt;/p&gt;',
   }] });
-  assert.equal(jobs[0].description, 'We want latency < 100ms and > 5 years of experience.');
+  assert.equal(jobs[0].description, 'Use it if a<b and c>d. Latency < 100ms, > 5 years.');
+});
+
+test('drops character references Postgres cannot store', () => {
+  /* A NUL fails the whole 200-row upsert chunk with "invalid byte sequence for
+   * encoding UTF8: 0x00", taking that board's poll down with it. */
+  const jobs = normalizeGreenhouseJobs({ jobs: [{
+    id: 13,
+    title: 'Engineer',
+    absolute_url: 'https://job-boards.greenhouse.io/acme/jobs/13',
+    content: '&lt;p&gt;Senior&#0;Engineer&#1;role&#x7f;here&lt;/p&gt;',
+  }] });
+  assert.equal(jobs[0].description, 'SeniorEngineerrolehere');
+  assert.doesNotMatch(jobs[0].description, /[\u0000-\u001f\u007f-\u009f]/);
+  assert.equal(Buffer.from(jobs[0].description, 'utf8').toString('utf8'), jobs[0].description);
+});
+
+test('drops lone surrogates that would not survive a UTF-8 roundtrip', () => {
+  const jobs = normalizeGreenhouseJobs({ jobs: [{
+    id: 14,
+    title: 'Engineer',
+    absolute_url: 'https://job-boards.greenhouse.io/acme/jobs/14',
+    content: '&lt;p&gt;a&#xD800;b&lt;/p&gt;',
+  }] });
+  assert.equal(jobs[0].description, 'ab');
+  assert.equal(Buffer.from(jobs[0].description, 'utf8').toString('utf8'), jobs[0].description);
+});
+
+test('still decodes legitimate numeric and hex references', () => {
+  const jobs = normalizeGreenhouseJobs({ jobs: [{
+    id: 15,
+    title: 'Engineer',
+    absolute_url: 'https://job-boards.greenhouse.io/acme/jobs/15',
+    content: '&lt;p&gt;caf&#233; &#x2022; r&#233;sum&#233;&lt;/p&gt;',
+  }] });
+  assert.equal(jobs[0].description, 'caf\u00e9 \u2022 r\u00e9sum\u00e9');
 });
 
 test('normalizes Lever postings with a distinct apply URL', () => {
