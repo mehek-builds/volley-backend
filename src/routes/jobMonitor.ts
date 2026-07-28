@@ -11,6 +11,7 @@ import { scoreJdMatch } from '../engine/jdMatch';
 import { resumeSpecText } from '../engine/resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { rankingCacheKey, readRanking, writeRanking } from '../lib/rankingCache';
+import { companyDomainFor } from '../lib/companyDomains';
 
 const sourceSchema = z.object({
   company_name: z.string().trim().min(1).max(200),
@@ -551,6 +552,18 @@ function boardConditions(f: {
   return conditions;
 }
 
+/**
+ * The row as the client receives it, with the employer's own domain attached.
+ *
+ * Resolved here rather than in the browser because `career_url` cannot answer it: on every source
+ * polled today that field holds the JOB BOARD, so a client deriving an identity from it would paint
+ * one ATS logo across every row. See lib/companyDomains.ts for how each domain was established and
+ * why an unmapped company correctly gets null.
+ */
+function withCompanyDomain<T extends { company_name: string }>(row: T) {
+  return { ...row, company_domain: companyDomainFor(row.company_name) };
+}
+
 export async function jobMonitorRoutes(fastify: FastifyInstance) {
   /**
    * GET /jobs
@@ -659,7 +672,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         .limit(limit + 1)
         .offset(offset);
       return reply.send({
-        jobs: rows.slice(0, limit).map((row) => ({ ...row, match_score: null })),
+        jobs: rows.slice(0, limit).map((row) => ({ ...withCompanyDomain(row), match_score: null })),
         total: await jobCount(),
         limit,
         offset,
@@ -768,7 +781,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     const jobs = pageIds
       .map((id) => byId.get(id))
       .filter((row): row is (typeof rows)[number] => row !== undefined)
-      .map((row) => ({ ...row, match_score: ranking!.scores.get(row.id) ?? null }));
+      .map((row) => ({ ...withCompanyDomain(row), match_score: ranking!.scores.get(row.id) ?? null }));
 
     return reply.send({
       jobs,
@@ -948,7 +961,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       ))
       .limit(1);
     if (!rows[0]) return reply.status(404).send({ error: 'Job not found' });
-    return reply.send({ job: rows[0] });
+    return reply.send({ job: withCompanyDomain(rows[0]) });
   });
 
   fastify.post('/internal/job-monitor/sources', async (request: FastifyRequest, reply: FastifyReply) => {
