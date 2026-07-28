@@ -25,6 +25,7 @@ import {
   managedResultHasCoverLetterUpload,
   navigateToApplicationForm,
   portalApplicationUrl,
+  isAccountWalledFamily,
   portalCanAutoSubmit,
   portalHandoffReason,
   readManagedReceipt,
@@ -463,6 +464,26 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
   const authorization = await standingAuthorization(row.user_id);
   if (portal === 'controlled_test') {
     await prepareControlled(row, current, runId, authorization, fastify);
+    return;
+  }
+  // Account-walled portals stop HERE, before any browser opens, and this is a second instance of
+  // the 2026-07-28 review finding rather than a new idea: a gate that only covers the submit path
+  // is not a gate. portalCanAutoSubmit is already checked at submit time, but prepare runs FIRST
+  // and independently, and for these four it would:
+  //   1. spend two managed-browser calls (they are billed) discovering and filling a page that has
+  //      no application fields on it at all, then
+  //   2. capture a preview screenshot of a data-consent page, a login form or an
+  //      "enter the code we emailed you" screen, and
+  //   3. present that screenshot to the student as the filled application she is approving to send.
+  // She would approve a login page, and only at submit time learn nothing was ever filled. Better
+  // to say so now, before spending anything, in the words that name her actual next step.
+  if (isAccountWalledFamily(portal)) {
+    await writeReview(row, nextReview(current, {
+      status: 'needs_attention',
+      submission_run_id: runId,
+      attention_reason: portalHandoffReason(portal) ?? undefined,
+      submission_error: undefined,
+    }));
     return;
   }
   if (isManagedStratusProvider()) {

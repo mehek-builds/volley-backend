@@ -42,3 +42,38 @@ test('org is the fallback for company, and the FIRST entry wins because resumes 
   assert.equal(two?.startDate, 'Jun 2025');
   assert.equal(two?.summary, 'Built it.');
 });
+
+// ─── The prepare-time gate for account-walled portals ─────────────────────────
+//
+// This is a SOURCE-LEVEL test, which is unusual here and deliberate. prepare() is not exported and
+// needs a live database and a browser provider, so a behavioural test would cost more than it is
+// worth. What it asserts is an ORDERING invariant, and ordering is exactly what went wrong twice:
+// the 2026-07-28 review found a gate that only covered the action builder while the caller went on
+// to write status:'submitted' anyway, and this branch shipped the same class of bug again - a
+// submit-time gate with prepare() left open in front of it.
+//
+// For Jobvite, iCIMS, Oracle Cloud and UltiPro there is no application form to reach. Without this
+// gate prepare() spends two billed managed-browser calls on a page with no fields, then screenshots
+// a data-consent page, a login form or an "enter the emailed code" screen and presents THAT to the
+// student as the filled application she is approving to send.
+test('prepare() stops account-walled portals before it opens any browser', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const source = readFileSync(join(__dirname, 'submissionRunner.ts'), 'utf8');
+  const prepareStart = source.indexOf('async function prepare(');
+  assert.ok(prepareStart > 0, 'prepare() must exist');
+  const prepareBody = source.slice(prepareStart, source.indexOf('\nasync function ', prepareStart + 10));
+
+  const gateAt = prepareBody.indexOf('isAccountWalledFamily(portal)');
+  assert.ok(gateAt > 0, 'prepare() must check isAccountWalledFamily');
+
+  // Every way prepare() can start paying for a browser. The gate has to come before all of them.
+  for (const spend of ['prepareManaged(', 'createBrowserContext(', 'createBrowserSession(']) {
+    const spendAt = prepareBody.indexOf(spend);
+    if (spendAt === -1) continue;
+    assert.ok(
+      gateAt < spendAt,
+      `the account-walled gate must precede ${spend} - otherwise the student approves a login page`,
+    );
+  }
+});

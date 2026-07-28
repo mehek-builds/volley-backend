@@ -1169,7 +1169,13 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     const opener = page.locator(BAMBOOHR_OPEN_FORM_SELECTOR).first();
     if ((await opener.count()) > 0 && (await opener.isVisible().catch(() => false))) {
       await opener.click().catch(() => undefined);
-      await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => undefined);
+      // Wait for the FIELD, not for the network. The form mounts client-side with no navigation and
+      // often no request at all, so waitForLoadState('networkidle') can resolve instantly and let
+      // every fill below race a form that is not in the DOM yet - which looks exactly like a bad
+      // selector when it fails.
+      await page.locator('input[name="firstName"]')
+        .waitFor({ state: 'attached', timeout: MANAGED_FILL_TIMEOUT_MS })
+        .catch(() => undefined);
     }
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, ['input[name="firstName"]'], parts[0], 'first_name', filledFields);
