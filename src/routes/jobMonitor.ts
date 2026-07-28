@@ -28,6 +28,11 @@ const sourceSchema = z.object({
 const sourcesBodySchema = z.object({ sources: z.array(sourceSchema).min(1).max(100) });
 const listQuerySchema = z.object({
   q: z.string().trim().max(200).optional(),
+  /* Title-only, and deliberately not the same thing as `q`. `q` matches the title OR the whole
+     description, which is right for one general-purpose box and wrong for a field labelled
+     "Job title": the board's title field would otherwise return every posting that merely mentions
+     the words somewhere in its body. Both are supported and they AND together. */
+  title: z.string().trim().max(200).optional(),
   location: z.string().trim().max(200).optional(),
   company: z.string().trim().max(200).optional(),
   remote: z.enum(['true', 'false']).optional(),
@@ -344,6 +349,36 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
   }
 }
 
+/* The board's filter set, in ONE place.
+ *
+ * /jobs and /jobs/grouped answer the same question with different shapes, so the filters have to be
+ * identical or the two disagree about what exists — and the autonomous-portal rule in particular is
+ * a product guarantee, not a detail: a posting Litos cannot finish is worse on the board than
+ * absent, because it looks like every other job right up until the student has tailored a resume
+ * for it. Copying these four lines into the second route is how that guarantee rots on one of them.
+ */
+function boardConditions(f: {
+  q?: string;
+  title?: string;
+  location?: string;
+  company?: string;
+  remote?: 'true' | 'false';
+}) {
+  const conditions = [
+    eq(monitored_jobs.is_active, true),
+    eq(career_page_sources.enabled, true),
+    inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
+  ];
+  if (f.q) {
+    conditions.push(or(ilike(monitored_jobs.title, `%${f.q}%`), ilike(monitored_jobs.description, `%${f.q}%`))!);
+  }
+  if (f.title) conditions.push(ilike(monitored_jobs.title, `%${f.title}%`));
+  if (f.location) conditions.push(ilike(monitored_jobs.location, `%${f.location}%`));
+  if (f.company) conditions.push(ilike(monitored_jobs.company_name, `%${f.company}%`));
+  if (f.remote) conditions.push(eq(monitored_jobs.remote, f.remote === 'true'));
+  return conditions;
+}
+
 export async function jobMonitorRoutes(fastify: FastifyInstance) {
   /**
    * GET /jobs
@@ -377,7 +412,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
   fastify.get('/jobs', { preHandler: optionalAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const parsed = listQuerySchema.safeParse(request.query);
     if (!parsed.success) return reply.status(400).send({ error: 'Invalid job filters' });
-    const { q, location, company, remote, limit, offset } = parsed.data;
+    const { q, title, location, company, remote, limit, offset } = parsed.data;
     // Only surface jobs Litos can carry all the way to a confirmation on its own.
     //
     // Belt and braces with the compile-time constraint on SupportedJobBoard, and it earns its keep:
@@ -385,15 +420,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     // polled before this rule existed, or one disabled rather than deleted, still has rows joined to
     // a career_page_sources row whose ats_name is whatever it was then. This is the filter that
     // keeps those out of the board and the dashboard, which both read this one route.
-    const conditions = [
-      eq(monitored_jobs.is_active, true),
-      eq(career_page_sources.enabled, true),
-      inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
-    ];
-    if (q) conditions.push(or(ilike(monitored_jobs.title, `%${q}%`), ilike(monitored_jobs.description, `%${q}%`))!);
-    if (location) conditions.push(ilike(monitored_jobs.location, `%${location}%`));
-    if (company) conditions.push(ilike(monitored_jobs.company_name, `%${company}%`));
-    if (remote) conditions.push(eq(monitored_jobs.remote, remote === 'true'));
+    const conditions = boardConditions(parsed.data);
 
     const resumeText = await baseResumeText(request.jwtPayload?.userId);
 
@@ -429,6 +456,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
        matches in front of the scorer rather than letting them fall off the end of the pool. */
     const relevanceThenNewest = [
       ...(q ? [sql`case when ${monitored_jobs.title} ilike ${`%${q}%`} then 0 else 1 end`] : []),
+      ...(title ? [sql`case when ${monitored_jobs.title} ilike ${`%${title}%`} then 0 else 1 end`] : []),
       desc(monitored_jobs.posted_at),
       desc(monitored_jobs.first_seen_at),
       desc(monitored_jobs.id),
@@ -477,7 +505,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     const cacheKey = rankingCacheKey(
       request.jwtPayload!.userId,
       resumeText,
-      JSON.stringify([q ?? '', location ?? '', company ?? '', remote ?? '']),
+      JSON.stringify([q ?? '', title ?? '', location ?? '', company ?? '', remote ?? '']),
     );
     let ranking = readRanking(cacheKey);
 
@@ -548,6 +576,129 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
          end of the ranking from the end of the board, and `has_more: false` at the pool boundary
          reads as "you have seen everything" when the truth is "we stopped ranking here". */
       pool_exhausted: ranking.poolExhausted,
+    });
+  });
+
+  /* The same role at the same company, in one row, carrying all of its locations.
+   *
+   * Companies routinely post one job once per city: Lyft's "Account Manager, Strategic Healthcare
+   * Partnerships" is a separate posting for San Francisco and for New York, and the board showed
+   * them as two tiles that were identical apart from a line of grey text. That is the same job
+   * twice as far as the reader is concerned.
+   *
+   * Grouped in SQL rather than in the page, because the page is paginated: merging client-side
+   * would only ever merge the copies that happened to land on the same page, `total` would still
+   * count the un-merged rows, and pages would hold inconsistent numbers of tiles. Grouping here
+   * keeps the count, the pagination and the tiles describing the same set.
+   *
+   * The grouping key is (company, title) EXACTLY — Mehek's rule, 2026-07-28. No fuzzy matching, no
+   * normalisation beyond what the employer typed: "Software Engineer II" and "Software Engineer"
+   * are different jobs, and a merge that guesses otherwise hides a real posting behind another
+   * one's apply link.
+   *
+   * Deliberately its own route rather than a flag on /jobs: that route now carries resume-based
+   * ranking, a ranking cache and a pool, all of which are per-posting concepts. Threading a
+   * grouped shape through them would put the board's needs inside the dashboard's hot path.
+   */
+  fastify.get('/jobs/grouped', async (request: FastifyRequest, reply: FastifyReply) => {
+    const parsed = listQuerySchema.safeParse(request.query);
+    if (!parsed.success) return reply.status(400).send({ error: 'Invalid job filters' });
+    const { title, limit, offset } = parsed.data;
+    const where = and(...boardConditions(parsed.data));
+
+    /* One row per (company, title). The aggregates are chosen so the row still describes something
+       true of the whole group: the newest timestamps, every distinct location, and the apply link
+       belonging to the newest posting in the group rather than an arbitrary member. */
+    const rows = await db
+      .select({
+        id: sql<string>`(array_agg(${monitored_jobs.id} order by ${monitored_jobs.posted_at} desc nulls last, ${monitored_jobs.id} desc))[1]`,
+        company_name: monitored_jobs.company_name,
+        title: monitored_jobs.title,
+        locations: sql<string[]>`array_remove(array_agg(distinct ${monitored_jobs.location}), null)`,
+        openings: sql<number>`count(*)::int`,
+        apply_url: sql<string>`(array_agg(${monitored_jobs.apply_url} order by ${monitored_jobs.posted_at} desc nulls last, ${monitored_jobs.id} desc))[1]`,
+        remote: sql<boolean>`bool_or(${monitored_jobs.remote})`,
+        posted_at: sql<string | null>`max(${monitored_jobs.posted_at})`,
+        first_seen_at: sql<string>`min(${monitored_jobs.first_seen_at})`,
+        ats_name: career_page_sources.ats_name,
+        career_url: sql<string>`min(${career_page_sources.career_url})`,
+      })
+      .from(monitored_jobs)
+      .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+      .where(where)
+      .groupBy(monitored_jobs.company_name, monitored_jobs.title, career_page_sources.ats_name)
+      .orderBy(
+        /* Same relevance-then-recency rule as /jobs: a title hit outranks a body-only hit, or the
+           first page of a search reads as unrelated. */
+        ...(title ? [sql`case when min(${monitored_jobs.title}) ilike ${`%${title}%`} then 0 else 1 end`] : []),
+        sql`max(${monitored_jobs.posted_at}) desc nulls last`,
+        sql`min(${monitored_jobs.first_seen_at}) desc`,
+      )
+      .limit(limit + 1)
+      .offset(offset);
+
+    /* count of GROUPS, not of postings. Counting rows here would print a number the page cannot
+       show, which is the same lie as the competitor's 644,546. */
+    const counted = await db.execute<{ total: number }>(sql`
+      select count(*)::int as total from (
+        select 1 from ${monitored_jobs}
+        inner join ${career_page_sources} on ${monitored_jobs.source_id} = ${career_page_sources.id}
+        where ${where}
+        group by ${monitored_jobs.company_name}, ${monitored_jobs.title}, ${career_page_sources.ats_name}
+      ) groups
+    `);
+
+    const countRow = counted.rows[0];
+
+    return reply.send({
+      jobs: rows.slice(0, limit),
+      total: Number(countRow?.total ?? 0),
+      limit,
+      offset,
+      has_more: rows.length > limit,
+    });
+  });
+
+  /* Suggestions for the board's three search fields.
+   *
+   * The fields accept free text too, so this is a convenience rather than a controlled vocabulary:
+   * it exists so a job seeker who does not already know that we watch "Qube Research &
+   * Technologies" can find it, and so the city field offers real cities rather than making them
+   * guess our formatting. Cities and titles are the most common ones, because the full lists are
+   * thousands long and nobody scrolls a datalist that size.
+   */
+  fastify.get('/jobs/facets', async (_request: FastifyRequest, reply: FastifyReply) => {
+    const where = and(...boardConditions({}));
+    const base = db
+      .select({ v: monitored_jobs.company_name, n: sql<number>`count(*)::int` })
+      .from(monitored_jobs)
+      .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+      .where(where);
+
+    const [companies, locations, titles] = await Promise.all([
+      base.groupBy(monitored_jobs.company_name).orderBy(sql`1 asc`),
+      db
+        .select({ v: monitored_jobs.location, n: sql<number>`count(*)::int` })
+        .from(monitored_jobs)
+        .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+        .where(where)
+        .groupBy(monitored_jobs.location)
+        .orderBy(sql`count(*) desc`)
+        .limit(120),
+      db
+        .select({ v: monitored_jobs.title, n: sql<number>`count(*)::int` })
+        .from(monitored_jobs)
+        .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+        .where(where)
+        .groupBy(monitored_jobs.title)
+        .orderBy(sql`count(*) desc`)
+        .limit(120),
+    ]);
+
+    return reply.send({
+      companies: companies.map((r) => r.v).filter(Boolean),
+      locations: locations.map((r) => r.v).filter(Boolean),
+      titles: titles.map((r) => r.v).filter(Boolean),
     });
   });
 
