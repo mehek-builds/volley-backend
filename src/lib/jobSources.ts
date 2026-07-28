@@ -292,6 +292,21 @@ const ENTRIES: Entry[] = [
   ['orca', 'ashby', 'orca'],
   ['rutter', 'ashby', 'rutter'],
   ['fullstory', 'ashby', 'fullstory'],
+  // Added later on 2026-07-28, large-board round (14 boards, ~1,700 postings)
+  ['stone', 'greenhouse', 'stone'],
+  ['btgpactual', 'greenhouse', 'btgpactual'],
+  ['graphcore', 'greenhouse', 'graphcore'],
+  ['scopely', 'greenhouse', 'scopely'],
+  ['tenstorrent', 'greenhouse', 'tenstorrent'],
+  ['postman', 'greenhouse', 'postman'],
+  ['ionq', 'greenhouse', 'ionq'],
+  ['psiquantum', 'greenhouse', 'psiquantum'],
+  ['quintoandar', 'greenhouse', 'quintoandar'],
+  ['phonepe', 'greenhouse', 'phonepe'],
+  ['lightmatter', 'greenhouse', 'lightmatter'],
+  ['dataiku', 'greenhouse', 'dataiku'],
+  ['groww', 'greenhouse', 'groww'],
+  ['sas', 'greenhouse', 'sas'],
 ];
 
 function careerUrl(ats: JobSourceInput['ats_name'], token: string): string {

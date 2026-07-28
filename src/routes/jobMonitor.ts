@@ -474,7 +474,6 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
             posted_at: sql`excluded.posted_at`,
             last_seen_at: sql`excluded.last_seen_at`,
             is_active: sql`excluded.is_active`,
-            raw_json: sql`excluded.raw_json`,
           },
         });
       }
