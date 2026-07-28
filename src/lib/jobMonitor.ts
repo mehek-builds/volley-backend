@@ -1,4 +1,25 @@
-export type SupportedJobBoard = 'greenhouse' | 'lever' | 'ashby';
+import type { AutonomousPortalFamily } from './portalSubmission';
+
+// The boards the job monitor may poll.
+//
+// CONSTRAINED, not just declared: `extends AutonomousPortalFamily` means this union can only ever
+// contain portals Litos can carry all the way to a confirmation by itself. Adding, say,
+// 'smartrecruiters' or 'jazzhr' here is a COMPILE ERROR, not a silent product regression - which is
+// the point, because the failure it prevents is invisible at the seam. A job from a portal Litos
+// cannot finish looks exactly like any other job on the board; the student only finds out after
+// choosing it and tailoring a resume to it.
+//
+// To add a board: make the portal genuinely autonomous in portalSubmission.ts first (an adapter that
+// reaches a real receipt), and it becomes available here automatically. 'workable' is eligible today
+// and not yet polled - adding sources for it is pure upside.
+// Two different questions, and a source has to satisfy BOTH:
+//   1. Can Litos finish an application on that portal alone?  -> AutonomousPortalFamily
+//   2. Can this module actually poll that portal's boards?     -> needs a fetchSourceJobs branch
+// Workable answers yes to (1) as of 2026-07-28 but has no fetcher, so it is not listed here yet.
+// Adding one makes it a one-word change, and the `satisfies` below is what keeps (1) enforced.
+export const POLLABLE_JOB_BOARDS = ['greenhouse', 'lever', 'ashby'] as const satisfies readonly AutonomousPortalFamily[];
+
+export type SupportedJobBoard = typeof POLLABLE_JOB_BOARDS[number];
 
 export type JobSourceInput = {
   company_name: string;
@@ -57,7 +78,7 @@ function stripTags(value: string): string {
  * description. One decode is not enough either: Greenhouse escapes the whole
  * document, so text-level entities arrive double-escaped (`&amp;amp;`), and a
  * posting whose source already contained escaped markup arrives with its tags
- * double-escaped too (`&amp;lt;div&amp;gt;` — 14 rows across Airbnb, Reddit,
+ * double-escaped too (`&amp;lt;div&amp;gt;`: 14 rows across Airbnb, Reddit,
  * Gusto and friends). Decode-and-strip to a fixed point instead of guessing a
  * depth; the bound just stops a pathological input from spinning.
  */

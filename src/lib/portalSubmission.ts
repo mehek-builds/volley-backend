@@ -41,22 +41,53 @@ function portalFamily(portal: SupportedPortal): PortalFamily {
 // is the single worst failure this module can have - worse than not supporting the portal at all.
 // Confirmed live 2026-07-28: Paylocity's #btn-submit is labelled "Next Step".
 //
-// NOT listed here, deliberately: 'smartrecruiters', which is equally multi-step. It relies instead
-// on the weaker guarantee documented at SMARTRECRUITERS_RESUME_SELECTOR - that clickFinalSubmit()
-// simply won't find a submit control on step one, so the click is pushed but lands on nothing.
-// Adding it here would be the stronger and probably correct guarantee, but it changes behaviour
-// that was verified live on a real posting, so it is left alone and raised separately rather than
-// altered as a side effect of adding Paylocity.
-const MULTI_STEP_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(['paylocity']);
+// 'smartrecruiters' joined this set on 2026-07-28. It was always equally multi-step - the scope
+// limit is documented at SMARTRECRUITERS_RESUME_SELECTOR - but it relied on the weaker guarantee
+// that clickFinalSubmit() finds no submit control on step one, so the click was pushed and landed on
+// nothing. That was tolerable while the only consumer was the submission runner.
+//
+// It stopped being tolerable when the jobs board began deriving "which jobs may we show" from
+// portalCanAutoSubmit(). A predicate that answers true for a portal that cannot actually finish
+// would surface postings the student can never complete through Litos, which is a worse failure than
+// the honest "not supported yet" - she'd spend the effort before finding out. Making the predicate
+// truthful is what lets anything else depend on it.
+// Declared as TYPES first, not just Sets, so "can this portal finish on its own" is answerable at
+// compile time and not only at runtime. That is what lets the jobs board's own union be checked
+// against this one by the type checker instead of by a test that someone can forget to run.
+type MultiStepFamily = 'paylocity' | 'smartrecruiters';
+type CaptchaGatedFamily = 'jazzhr';
+
+const MULTI_STEP_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
+  ['paylocity', 'smartrecruiters'] satisfies MultiStepFamily[],
+);
 
 // Portals that gate submission behind a CAPTCHA. Litos fills these and hands off to the human; it
 // never attempts the challenge (standing rule, and the same correct stop the Ashby/CTGT run made).
 // Confirmed live 2026-07-28: every JazzHR application form carries a g-recaptcha-response field.
-const CAPTCHA_GATED_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(['jazzhr']);
+const CAPTCHA_GATED_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
+  ['jazzhr'] satisfies CaptchaGatedFamily[],
+);
 
 export function portalCanAutoSubmit(portal: SupportedPortal): boolean {
   const family = portalFamily(portal);
   return !MULTI_STEP_FAMILIES.has(family) && !CAPTCHA_GATED_FAMILIES.has(family);
+}
+
+// The portal families Litos can carry all the way to a confirmation on its own.
+//
+// Subtracted from PortalFamily rather than hand-listed, so a portal that later turns out to be
+// multi-step or CAPTCHA-gated leaves this type the moment it is added to either set above. There is
+// no second list to remember to update, which is the only version of this that stays true.
+//
+// This is what the jobs board is allowed to source from. Surfacing a posting Litos cannot finish is
+// worse than not surfacing it at all: the student picks it, tailors a resume to it, and only then
+// discovers the last step needs her anyway. Fewer jobs that all work beats more jobs that mostly do.
+export type AutonomousPortalFamily = Exclude<PortalFamily, MultiStepFamily | CaptchaGatedFamily>;
+
+export const AUTONOMOUS_PORTAL_FAMILIES = ['greenhouse', 'lever', 'ashby', 'workable'] as const satisfies readonly AutonomousPortalFamily[];
+
+export function isAutonomousPortalFamily(value: string): value is AutonomousPortalFamily {
+  return (AUTONOMOUS_PORTAL_FAMILIES as readonly string[]).includes(value);
 }
 
 // Why a run stopped short of submitting, in the student's words. Surfaced on the blocker card so
