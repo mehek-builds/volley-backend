@@ -77,6 +77,33 @@ export const RANKING_POOL = 300;
  */
 export const SCORING_CHARS = 20_000;
 
+/**
+ * How many candidate rows are read before the pool is chosen from them.
+ *
+ * Only id and company_name are read at this stage — no descriptions — so this is a cheap two-column
+ * scan even at a few thousand rows. It exists so the pool can be chosen from a wide enough slice of
+ * the board for `PER_COMPANY_CAP` to actually have something to spread across.
+ */
+const CANDIDATE_SCAN = 3_000;
+
+/**
+ * How many postings any ONE employer may contribute to the ranking pool.
+ *
+ * WHY THIS EXISTS, measured against production 2026-07-28. The pool was the newest RANKING_POOL
+ * postings, full stop. On the real board that is not a sample of the market, it is a sample of
+ * whoever posted most recently: of 300 pooled rows, 166 were Datadog and 35 companies appeared out
+ * of the 53 sources being polled. The top ten "Top matches for you" were ten Datadog jobs.
+ *
+ * The ranking was working perfectly and the feature was still useless, because a student looking
+ * for the best-fitting job in a 7,115-posting board was being shown the best-fitting job at one
+ * company. No unit test could have caught it; it only shows up against real data.
+ *
+ * 6 is RANKING_POOL / 50, so the pool spreads across roughly fifty employers before the cap starts
+ * binding, while still letting a genuinely large employer contribute a handful of roles. A student
+ * who wants more from one company can search for it, which is what the company filter is for.
+ */
+const PER_COMPANY_CAP = 6;
+
 /** The minimum a row needs to be rankable. Kept structural so the sort can be tested without a DB. */
 export type RankableJob = {
   company_name: string;
@@ -100,6 +127,55 @@ export type RankableJob = {
  *    be. Array#sort stability is specified now, but the comparator saying so is what makes the
  *    intent survive someone swapping the sort.
  */
+/**
+ * The pool, chosen so it spans employers instead of echoing one.
+ *
+ * Walks the candidates in the order the query returned them (title matches first when there is a
+ * search, then newest) and takes each one unless its employer has already contributed `perCompany`.
+ * The result therefore keeps the incoming priority — the newest and most relevant postings still
+ * come first — while no single employer can crowd out the rest of the board.
+ *
+ * Two deliberate properties:
+ *
+ *  - IT NEVER RETURNS FEWER THAN IT COULD. If capping leaves the pool short of `poolSize` (a board
+ *    with only a handful of employers, or a narrow search), a second pass takes the skipped rows,
+ *    still in their original order. A student searching for one company must still get that
+ *    company's jobs; the cap is there to stop an employer dominating a BROWSE, not to withhold
+ *    results from a search that asked for it.
+ *  - ONE MORE THAN ASKED FOR, when available, so the caller can tell "the pool ends here" apart
+ *    from "the board ends here" exactly as it could before.
+ */
+export function pickDiversePool<T extends { company_name: string }>(
+  candidates: readonly T[],
+  perCompany: number,
+  poolSize: number,
+): T[] {
+  const taken: T[] = [];
+  const skipped: T[] = [];
+  const seen = new Map<string, number>();
+  // One past poolSize: the caller reads the overflow as "there was more we did not rank".
+  const want = poolSize + 1;
+
+  for (const row of candidates) {
+    if (taken.length >= want) break;
+    const key = row.company_name.trim().toLowerCase();
+    const count = seen.get(key) ?? 0;
+    if (count >= perCompany) {
+      skipped.push(row);
+      continue;
+    }
+    seen.set(key, count + 1);
+    taken.push(row);
+  }
+
+  // Backfill in original order, so a thin board still fills the page.
+  for (const row of skipped) {
+    if (taken.length >= want) break;
+    taken.push(row);
+  }
+  return taken;
+}
+
 export function rankByFit<T extends RankableJob>(
   rows: readonly T[],
   resumeText: string,
@@ -386,28 +462,51 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     let ranking = readRanking(cacheKey);
 
     if (!ranking) {
-      /* The scored text is pulled for scoring only, and capped at SCORING_CHARS. It never reaches
-         the payload: `description` in `selection` is the 600-char preview.
-         One row past the pool is fetched so the route can tell "the ranking stopped here" apart
-         from "the board ends here". Different sentences, and the UI says different things. */
-      const pool = await db
-        .select({
-          id: monitored_jobs.id,
-          company_name: monitored_jobs.company_name,
-          title: monitored_jobs.title,
-          scored_description: sql<string>`left(${monitored_jobs.description}, ${SCORING_CHARS})`,
-        })
+      /* TWO PHASES, and the cheap one comes first.
+         Phase 1 reads id and company_name only, for a wide slice of the board. No descriptions, so
+         a few thousand rows cost almost nothing, and it is what gives PER_COMPANY_CAP enough
+         candidates to spread the pool across employers rather than echoing whoever posted last. */
+      const candidates = await db
+        .select({ id: monitored_jobs.id, company_name: monitored_jobs.company_name })
         .from(monitored_jobs)
         .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
         .where(and(...conditions))
         .orderBy(...relevanceThenNewest)
-        .limit(RANKING_POOL + 1);
+        .limit(CANDIDATE_SCAN);
 
-      const scored = rankByFit(pool.slice(0, RANKING_POOL), resumeText);
+      const chosen = pickDiversePool(candidates, PER_COMPANY_CAP, RANKING_POOL);
+      const poolExhausted = chosen.length > RANKING_POOL;
+      const poolIds = chosen.slice(0, RANKING_POOL).map((row) => row.id);
+
+      /* Phase 2 reads the text to score, and ONLY for the rows that made the pool. The scored copy
+         is capped at SCORING_CHARS and never reaches the payload: `description` in `selection` is
+         the 600-char preview. */
+      const pool = poolIds.length
+        ? await db
+            .select({
+              id: monitored_jobs.id,
+              company_name: monitored_jobs.company_name,
+              title: monitored_jobs.title,
+              scored_description: sql<string>`left(${monitored_jobs.description}, ${SCORING_CHARS})`,
+            })
+            .from(monitored_jobs)
+            .where(inArray(monitored_jobs.id, poolIds))
+        : [];
+
+      /* Back into candidate order before scoring. `inArray` makes no ordering promise, and
+         rankByFit breaks score ties by incoming position — so without this, two equal matches would
+         be separated arbitrarily instead of by "most relevant, then newest", which is the only
+         other fact we have about them. */
+      const poolById = new Map(pool.map((row) => [row.id, row]));
+      const orderedPool = poolIds
+        .map((id) => poolById.get(id))
+        .filter((row): row is (typeof pool)[number] => row !== undefined);
+
+      const scored = rankByFit(orderedPool, resumeText);
       ranking = writeRanking(cacheKey, {
         ids: scored.map(({ row }) => row.id),
         scores: new Map(scored.map(({ row, score }) => [row.id, score])),
-        poolExhausted: pool.length > RANKING_POOL,
+        poolExhausted,
       });
     }
 

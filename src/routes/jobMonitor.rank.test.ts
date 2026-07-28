@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert';
-import { rankByFit, RANKING_POOL, SCORING_CHARS, type RankableJob } from './jobMonitor';
+import { pickDiversePool, rankByFit, RANKING_POOL, SCORING_CHARS, type RankableJob } from './jobMonitor';
 
 /* A posting with enough real requirements for jdMatch to agree to score it. The requirements block
    is what carries the signal, so the terms that matter live there rather than in the intro. */
@@ -158,5 +158,74 @@ describe('the ranking budget the comment claims', () => {
     );
     assert.ok(buried.length < SCORING_CHARS, 'a realistic posting fits inside the cap');
     assert.notStrictEqual(rankByFit([job({ scored_description: buried })], RESUME)[0]!.score, null);
+  });
+});
+
+/* Measured against production 2026-07-28: the newest 300 postings were 166 Datadog rows and 35
+   companies out of 53 sources, so "Top matches for you" was ten Datadog jobs. The ranking was
+   correct and the feature was useless. These pin the fix. */
+describe('pickDiversePool', () => {
+  const rows = (spec: Array<[string, number]>) =>
+    spec.flatMap(([company, n]) =>
+      Array.from({ length: n }, (_, i) => ({ id: `${company}-${i}`, company_name: company })),
+    );
+
+  test('one loud employer cannot crowd out the board', () => {
+    // 200 from one company followed by 1 each from 40 others: the shape production actually had.
+    const candidates = [
+      ...rows([['Datadog', 200]]),
+      ...rows(Array.from({ length: 40 }, (_, i) => [`Company${i}`, 1] as [string, number])),
+    ];
+    const pool = pickDiversePool(candidates, 6, 40);
+    const datadog = pool.filter((r) => r.company_name === 'Datadog').length;
+    assert.strictEqual(datadog, 6, 'the cap binds');
+    assert.ok(
+      new Set(pool.map((r) => r.company_name)).size >= 35,
+      `expected a wide spread, got ${new Set(pool.map((r) => r.company_name)).size} companies`,
+    );
+  });
+
+  test('the incoming priority order is preserved within the cap', () => {
+    const candidates = rows([['A', 3], ['B', 3]]);
+    const pool = pickDiversePool(candidates, 2, 10);
+    // A's first two, then B's first two, in the order they arrived; then the backfill.
+    assert.deepStrictEqual(pool.slice(0, 4).map((r) => r.id), ['A-0', 'A-1', 'B-0', 'B-1']);
+  });
+
+  test('a thin board still fills the pool rather than withholding rows', () => {
+    // Two employers and a cap of 2 would leave 4 rows; the backfill must return the rest.
+    const candidates = rows([['A', 10], ['B', 10]]);
+    const pool = pickDiversePool(candidates, 2, 12);
+    assert.strictEqual(pool.length, 13, 'poolSize + 1, so the caller can still detect overflow');
+  });
+
+  test('a search for one company still returns that company', () => {
+    // The cap exists to stop an employer dominating a BROWSE, never to answer a direct search with
+    // six results and a shrug.
+    const pool = pickDiversePool(rows([['Datadog', 50]]), 6, 20);
+    assert.strictEqual(pool.length, 21);
+    assert.ok(pool.every((r) => r.company_name === 'Datadog'));
+  });
+
+  test('company matching ignores case and padding', () => {
+    const pool = pickDiversePool(
+      [
+        { id: '1', company_name: 'Acme' },
+        { id: '2', company_name: ' acme ' },
+        { id: '3', company_name: 'ACME' },
+        { id: '4', company_name: 'Other' },
+      ],
+      2,
+      10,
+    );
+    assert.deepStrictEqual(pool.map((r) => r.id), ['1', '2', '4', '3'], 'the third Acme is backfilled last');
+  });
+
+  test('it returns one more than asked for, so overflow is still detectable', () => {
+    assert.strictEqual(pickDiversePool(rows([['A', 100]]), 6, 10).length, 11);
+  });
+
+  test('an empty board pools to nothing', () => {
+    assert.deepStrictEqual(pickDiversePool([], 6, 10), []);
   });
 });
