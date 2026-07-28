@@ -65,6 +65,8 @@
     "qa:sponsor-board": "node --import tsx scripts/qa-sponsor-board.mts",
     "sponsors:build": "node scripts/build-h1b-sponsors.mjs",
     "sponsors:check": "node scripts/build-h1b-sponsors.mjs --check",
-    "db:pipeline-stage": "node scripts/apply-pipeline-stage-schema.mjs"
+    "db:pipeline-stage": "node scripts/apply-pipeline-stage-schema.mjs",
+    "logo:check": "node --import tsx scripts/check-logo-coverage.mjs",
+    "logo:resolve": "node scripts/resolve-company-domains.mjs"
   }
 }

@@ -62,3 +62,19 @@ jobs:
             exit 0
           fi
           npm run schema:check
+
+  # The employer logo on a job row breaks WITHOUT FAILING: no exception, no red test, just a column
+  # of empty circles. It has happened twice (see scripts/check-logo-coverage.mjs). Nothing in the
+  # repo can see it, because the map stays internally consistent while the board grows past it —
+  # only a measurement against the live board can. Same idea as schema-drift, different drift.
+  logo-coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Check company-logo coverage against the live board
+        run: npm run logo:check
