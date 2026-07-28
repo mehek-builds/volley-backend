@@ -1,8 +1,9 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { and, desc, eq, ilike, inArray, or, sql } from 'drizzle-orm';
+import { and, desc, eq, ilike, inArray, isNotNull, ne, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/index';
-import { career_page_sources, monitored_jobs, profiles } from '../db/schema';
+import { career_page_sources, monitored_jobs, profiles, sponsor_employers, users } from '../db/schema';
+import { normalizeEmployerName, readPostingSponsorship, sponsorOnlyBoardRequired, sponsorshipVerdict, type PostingSponsorship } from '../lib/sponsorship';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { fetchSourceJobs, POLLABLE_JOB_BOARDS, type JobSourceInput, type SupportedJobBoard } from '../lib/jobMonitor';
 import { AUTONOMOUS_PORTAL_FAMILIES } from '../lib/portalSubmission';
@@ -37,6 +38,12 @@ const listQuerySchema = z.object({
   location: z.string().trim().max(200).optional(),
   company: z.string().trim().max(200).optional(),
   remote: z.enum(['true', 'false']).optional(),
+  /* Show only postings where visa sponsorship is confirmed. A filter anyone may ask for - the
+     public board at /browse-jobs offers it as a checkbox - and one that some accounts get whether
+     they ask or not. On GET /jobs the account's own answer is OR-ed with this, never overridden by
+     it: somebody who said at onboarding that they need sponsorship cannot turn the filter off by
+     omitting a query parameter. See sponsorOnlyBoardRequired in lib/sponsorship.ts. */
+  sponsor_only: z.enum(['true', 'false']).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
   offset: z.coerce.number().int().min(0).max(100_000).default(0),
 });
@@ -92,7 +99,7 @@ export function shouldKeepPostingsOnEmptyFetch(fetchedCount: number, activeNow: 
  * count that includes rows the board filters out would report a healthy number while the board
  * itself was empty, which is the precise failure this whole check exists to catch.
  */
-export async function surfacedJobCount(): Promise<number> {
+export async function surfacedJobCount(sponsorOnly = false): Promise<number> {
   const [row] = await db
     .select({ total: sql<number>`count(*)::int` })
     .from(monitored_jobs)
@@ -101,6 +108,7 @@ export async function surfacedJobCount(): Promise<number> {
       eq(monitored_jobs.is_active, true),
       eq(career_page_sources.enabled, true),
       inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
+      ...(sponsorOnly ? [sponsorOnlyPredicate()] : []),
     ));
   return row?.total ?? 0;
 }
@@ -326,6 +334,38 @@ export function rankByFit<T extends RankableJob>(
  * that route exists to answer a question about one posting, while this one has a perfectly good
  * answer without a resume.
  */
+/**
+ * Does this account's board only show employers who sponsor?
+ *
+ * Signed out, the answer is always no - there is no account to have declared anything - and the
+ * caller falls back to the query parameter, which is how the public board's checkbox works.
+ *
+ * The read is two columns and it happens on every /jobs request. That is deliberate rather than
+ * cached: this is the one filter where serving a stale `false` puts someone in front of jobs they
+ * cannot take, and the row is already the cheapest kind of lookup this route makes.
+ */
+async function accountRequiresSponsor(userId: string | undefined): Promise<boolean> {
+  if (!userId) return false;
+  const [row] = await db
+    .select({
+      declared: users.sponsorship_required_at_onboarding,
+      setting: users.sponsor_only_jobs_enabled,
+    })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+  if (!row) return false;
+  return sponsorOnlyBoardRequired({ declaredAtOnboarding: row.declared, settingEnabled: row.setting });
+}
+
+/** Which evidence, if any, lets this row be shown to someone who needs sponsorship. */
+function evidenceFor(row: { sponsorship_status: string | null; employer_sponsors: boolean | null }) {
+  return sponsorshipVerdict({
+    posting: (row.sponsorship_status ?? 'unstated') as PostingSponsorship,
+    employerFilesH1b: row.employer_sponsors === true,
+  }).evidence;
+}
+
 async function baseResumeText(userId: string | undefined): Promise<string | null> {
   if (!userId) return null;
   const [profile] = await db
@@ -386,14 +426,35 @@ function configuredSources(): JobSourceInput[] {
   return result.data;
 }
 
+/**
+ * The sponsor_employers row for a company name, or null when nothing confirms it.
+ *
+ * Resolved on every upsert rather than only by the seed script, and that is a correctness fix
+ * rather than tidiness: without it a source added after the last seed run stays NULL forever, which
+ * means invisible to everyone who needs sponsorship, and a source whose company_name is CORRECTED
+ * keeps the previous company's H-1B link - a posting surfaced on another company's filing record.
+ */
+async function sponsorEmployerIdFor(companyName: string): Promise<string | null> {
+  const [row] = await db
+    .select({ id: sponsor_employers.id })
+    .from(sponsor_employers)
+    .where(eq(sponsor_employers.normalized_name, normalizeEmployerName(companyName)))
+    .limit(1);
+  return row?.id ?? null;
+}
+
 export async function upsertSources(sources: JobSourceInput[]) {
   for (const source of sources) {
-    const rows = await db.insert(career_page_sources).values(source).onConflictDoUpdate({
+    const sponsorEmployerId = await sponsorEmployerIdFor(source.company_name);
+    const rows = await db.insert(career_page_sources).values({ ...source, sponsor_employer_id: sponsorEmployerId }).onConflictDoUpdate({
       target: [career_page_sources.ats_name, career_page_sources.board_token],
       set: {
         company_name: source.company_name,
         career_url: source.career_url,
         enabled: source.enabled ?? true,
+        // Recomputed, including back to NULL. A link that outlived its company name is the one
+        // failure here that surfaces jobs on the wrong employer's filing record.
+        sponsor_employer_id: sponsorEmployerId,
       },
     }).returning({ id: career_page_sources.id });
     if (source.enabled === false && rows[0]) {
@@ -458,6 +519,11 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
           ...job,
           last_seen_at: now,
           is_active: true,
+          /* Read here, at the moment the description arrives, so the board filter is a plain column
+             comparison. Recomputed on every poll rather than kept from the first sighting: employers
+             edit this sentence into and out of a live posting, and a policy that changed on their
+             page while ours still said the old thing is the one error this feature cannot afford. */
+          sponsorship_status: readPostingSponsorship(job.description),
         }));
         await tx.insert(monitored_jobs).values(chunk).onConflictDoUpdate({
           target: [monitored_jobs.source_id, monitored_jobs.external_id],
@@ -474,6 +540,7 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
             posted_at: sql`excluded.posted_at`,
             last_seen_at: sql`excluded.last_seen_at`,
             is_active: sql`excluded.is_active`,
+            sponsorship_status: sql`excluded.sponsorship_status`,
           },
         });
       }
@@ -495,6 +562,33 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
  * absent, because it looks like every other job right up until the student has tailored a resume
  * for it. Copying these four lines into the second route is how that guarantee rots on one of them.
  */
+/**
+ * THE SPONSOR-ONLY BOARD, as one SQL predicate, written ONCE.
+ *
+ * It is the rule in lib/sponsorship.ts (sponsorshipVerdict) expressed for the query planner: the
+ * posting says it sponsors, OR the employer has an H-1B filing record and this posting does not
+ * refuse.
+ *
+ * It is a function rather than three inline copies because it is needed in three places that are
+ * hundreds of lines apart - the list's WHERE clause, the ranked page's re-read by id, and the
+ * detail route - and a change to the rule that reached two of them would show a different board on
+ * the list, the ranked page and the posting somebody actually opens, with every test still green.
+ *
+ * It has to be in the WHERE clause rather than a filter over rows a page returned. Filtering after
+ * the fact would leave `total` counting postings the list does not contain, pages holding different
+ * numbers of tiles, and the ranking pool spending its 300 slots on postings dropped on the way out,
+ * which is the same page-tiling bug the ranking cache exists to prevent.
+ */
+export function sponsorOnlyPredicate() {
+  return or(
+    eq(monitored_jobs.sponsorship_status, 'offers'),
+    and(
+      isNotNull(career_page_sources.sponsor_employer_id),
+      ne(monitored_jobs.sponsorship_status, 'refuses'),
+    ),
+  )!;
+}
+
 /**
  * ONE EMPLOYER MUST NOT OWN THE PAGE.
  *
@@ -535,12 +629,14 @@ function boardConditions(f: {
   location?: string;
   company?: string;
   remote?: 'true' | 'false';
+  sponsorOnly?: boolean;
 }) {
   const conditions = [
     eq(monitored_jobs.is_active, true),
     eq(career_page_sources.enabled, true),
     inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
   ];
+  if (f.sponsorOnly) conditions.push(sponsorOnlyPredicate());
   if (f.q) {
     conditions.push(or(ilike(monitored_jobs.title, `%${f.q}%`), ilike(monitored_jobs.description, `%${f.q}%`))!);
   }
@@ -597,6 +693,11 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     const parsed = listQuerySchema.safeParse(request.query);
     if (!parsed.success) return reply.status(400).send({ error: 'Invalid job filters' });
     const { q, title, location, company, remote, limit, offset } = parsed.data;
+    /* OR, never override. The account's standing answer can only ever ADD the filter, so a request
+       that omits the parameter (or sends sponsor_only=false) cannot unfilter the board of someone
+       who declared at onboarding that they need sponsorship. */
+    const sponsorOnly = (await accountRequiresSponsor(request.jwtPayload?.userId))
+      || parsed.data.sponsor_only === 'true';
     // Only surface jobs Litos can carry all the way to a confirmation on its own.
     //
     // Belt and braces with the compile-time constraint on SupportedJobBoard, and it earns its keep:
@@ -604,7 +705,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     // polled before this rule existed, or one disabled rather than deleted, still has rows joined to
     // a career_page_sources row whose ats_name is whatever it was then. This is the filter that
     // keeps those out of the board and the dashboard, which both read this one route.
-    const conditions = boardConditions(parsed.data);
+    const conditions = boardConditions({ ...parsed.data, sponsorOnly });
 
     const resumeText = await baseResumeText(request.jwtPayload?.userId);
 
@@ -628,6 +729,12 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
          the board's identity for every row instead. Operators sometimes register the board URL as
          the careers URL too, so the client still has to check before trusting it. */
       career_url: career_page_sources.career_url,
+      /* The two facts behind the sponsorship badge, sent as facts rather than as a verdict. The row
+         says what the posting stated and whether the employer has a filing record; evidenceFor()
+         turns that into one word, using the same function the filter does. Sending a pre-baked
+         "sponsors: true" would let a badge outlive a change to the rule that drew it. */
+      sponsorship_status: monitored_jobs.sponsorship_status,
+      employer_sponsors: sql<boolean>`${career_page_sources.sponsor_employer_id} is not null`,
     };
 
     /* A search matches the title OR the body, and the body is the whole job description, so
@@ -671,7 +778,11 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         .limit(limit + 1)
         .offset(offset);
       return reply.send({
-        jobs: rows.slice(0, limit).map((row) => ({ ...withCompanyDomain(row), match_score: null })),
+        jobs: rows.slice(0, limit).map((row) => ({
+          ...withCompanyDomain(row),
+          match_score: null,
+          sponsorship_evidence: evidenceFor(row),
+        })),
         total: await jobCount(),
         limit,
         offset,
@@ -679,6 +790,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         ranked: false,
         ranked_pool: null,
         pool_exhausted: false,
+        sponsor_only: sponsorOnly,
       });
     }
 
@@ -691,7 +803,11 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     const cacheKey = rankingCacheKey(
       request.jwtPayload!.userId,
       resumeText,
-      JSON.stringify([q ?? '', title ?? '', location ?? '', company ?? '', remote ?? '']),
+      /* sponsorOnly is PART OF THE KEY. Without it, one account's two states - before and after the
+         filter turns on - share a cached ordering, and the id list computed on the whole board is
+         then replayed against the filtered one. Every id it holds still resolves, so the page comes
+         back full of exactly the postings the filter exists to hide. */
+      JSON.stringify([q ?? '', title ?? '', location ?? '', company ?? '', remote ?? '', sponsorOnly]),
     );
     let ranking = readRanking(cacheKey);
 
@@ -771,6 +887,13 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
                resurrects exactly the jobs the board is meant to exclude, which is the same reasoning
                as the comment below about deactivated postings. */
             inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
+            /* And the sponsorship filter, repeated for exactly the same reason, with a sharper
+               edge: the cache key includes sponsorOnly so a filtered read cannot reuse an
+               unfiltered ordering, but ids also outlive the FACTS behind them. A posting that said
+               nothing about sponsorship when it was ranked can be re-polled with a refusal in it,
+               and an employer's confirmation can be withdrawn when the ingest is refreshed. This
+               read is the last gate before the row reaches someone who cannot take the job. */
+            ...(sponsorOnly ? [sponsorOnlyPredicate()] : []),
           ))
       : [];
 
@@ -780,7 +903,11 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     const jobs = pageIds
       .map((id) => byId.get(id))
       .filter((row): row is (typeof rows)[number] => row !== undefined)
-      .map((row) => ({ ...withCompanyDomain(row), match_score: ranking!.scores.get(row.id) ?? null }));
+      .map((row) => ({
+        ...withCompanyDomain(row),
+        match_score: ranking!.scores.get(row.id) ?? null,
+        sponsorship_evidence: evidenceFor(row),
+      }));
 
     return reply.send({
       jobs,
@@ -790,6 +917,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       has_more: ranking.ids.length > offset + limit,
       ranked: true,
       ranked_pool: ranking.ids.length,
+      sponsor_only: sponsorOnly,
       /* True when postings exist that were never ranked. Without this the client cannot tell the
          end of the ranking from the end of the board, and `has_more: false` at the pool boundary
          reads as "you have seen everything" when the truth is "we stopped ranking here". */
@@ -818,11 +946,18 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
    * ranking, a ranking cache and a pool, all of which are per-posting concepts. Threading a
    * grouped shape through them would put the board's needs inside the dashboard's hot path.
    */
-  fastify.get('/jobs/grouped', async (request: FastifyRequest, reply: FastifyReply) => {
+  fastify.get('/jobs/grouped', { preHandler: optionalAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const parsed = listQuerySchema.safeParse(request.query);
     if (!parsed.success) return reply.status(400).send({ error: 'Invalid job filters' });
     const { title, limit, offset } = parsed.data;
-    const where = and(...boardConditions(parsed.data));
+    /* The account's answer counts HERE TOO, and leaving it out was a real hole: this route returns
+       company, title, locations and an apply link, so it is a complete substitute for the list it
+       mirrors, and a declared account calling it would have been handed the unfiltered board.
+       Most callers are anonymous - it serves the public board at /browse-jobs, which is
+       server-rendered with no session - and for them the page's checkbox is the whole answer. */
+    const sponsorOnly = (await accountRequiresSponsor(request.jwtPayload?.userId))
+      || parsed.data.sponsor_only === 'true';
+    const where = and(...boardConditions({ ...parsed.data, sponsorOnly }));
 
     /* One row per (company, title). The aggregates are chosen so the row still describes something
        true of the whole group: the newest timestamps, every distinct location, and the apply link
@@ -840,6 +975,14 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         first_seen_at: sql<string>`min(${monitored_jobs.first_seen_at})`,
         ats_name: career_page_sources.ats_name,
         career_url: sql<string>`min(${career_page_sources.career_url})`,
+        /* Sponsorship, aggregated the careful way round. A group is one role posted in several
+           cities, and those copies can disagree - the same title is routinely open in a country the
+           company sponsors in and one it does not. `refuses_any` is what stops the tile claiming
+           sponsorship on behalf of a copy that refuses it: one refusal anywhere in the group and
+           the tile says nothing at all, which is true of every member. */
+        offers_any: sql<boolean>`bool_or(${monitored_jobs.sponsorship_status} = 'offers')`,
+        refuses_any: sql<boolean>`bool_or(${monitored_jobs.sponsorship_status} = 'refuses')`,
+        employer_sponsors: sql<boolean>`bool_or(${career_page_sources.sponsor_employer_id} is not null)`,
       })
       .from(monitored_jobs)
       .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
@@ -875,11 +1018,20 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     const countRow = counted.rows[0];
 
     return reply.send({
-      jobs: rows.slice(0, limit),
+      jobs: rows.slice(0, limit).map(({ offers_any, refuses_any, employer_sponsors, ...row }) => ({
+        ...row,
+        sponsorship_evidence: refuses_any
+          ? null
+          : evidenceFor({
+            sponsorship_status: offers_any ? 'offers' : 'unstated',
+            employer_sponsors,
+          }),
+      })),
       total: Number(countRow?.total ?? 0),
       limit,
       offset,
       has_more: rows.length > limit,
+      sponsor_only: sponsorOnly,
     });
   });
 
@@ -891,8 +1043,19 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
    * guess our formatting. Cities and titles are the most common ones, because the full lists are
    * thousands long and nobody scrolls a datalist that size.
    */
-  fastify.get('/jobs/facets', async (_request: FastifyRequest, reply: FastifyReply) => {
-    const where = and(...boardConditions({}));
+  fastify.get('/jobs/facets', { preHandler: optionalAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    /* The suggestions have to describe the board the visitor is actually looking at. Offering
+       "GitLab" to someone browsing with the sponsorship filter on sends them to a search that
+       returns nothing, and reads as a broken board rather than as a company we cannot confirm.
+       The account's standing answer counts here too, for the same reason it counts on the list.
+       Parsed on its OWN rather than off listQuerySchema: this route reads no other filter, so
+       validating the whole query object meant an unrelated bad parameter (limit=500) failed the
+       parse and silently served unfiltered suggestions - the filter dropping out because of a
+       mistake in a field this route does not even look at. */
+    const sponsorOnly = (await accountRequiresSponsor(request.jwtPayload?.userId))
+      || z.object({ sponsor_only: z.enum(['true', 'false']).optional() })
+        .safeParse(request.query).data?.sponsor_only === 'true';
+    const where = and(...boardConditions({ sponsorOnly }));
     const base = db
       .select({ v: monitored_jobs.company_name, n: sql<number>`count(*)::int` })
       .from(monitored_jobs)
@@ -926,9 +1089,15 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     });
   });
 
-  fastify.get('/jobs/:id', async (request: FastifyRequest, reply: FastifyReply) => {
+  fastify.get('/jobs/:id', { preHandler: optionalAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const parsed = jobParamsSchema.safeParse(request.params);
     if (!parsed.success) return reply.status(400).send({ error: 'Invalid job id' });
+    /* Same reasoning as the autonomy rule below, applied to sponsorship: the list is not the only
+       way into a posting. A bookmark, a shared link, or a dashboard row cached before the filter
+       turned on all arrive here, and this is the page where somebody commits to applying. Signed
+       out there is no account to have declared anything, so the detail page stays open - the promise
+       is about a person's board, not about hiding postings from the world. */
+    const sponsorOnly = await accountRequiresSponsor(request.jwtPayload?.userId);
     const rows = await db
       .select({
         id: monitored_jobs.id,
@@ -946,6 +1115,8 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         is_active: monitored_jobs.is_active,
         ats_name: career_page_sources.ats_name,
         career_url: career_page_sources.career_url,
+        sponsorship_status: monitored_jobs.sponsorship_status,
+        employer_sponsors: sql<boolean>`${career_page_sources.sponsor_employer_id} is not null`,
       })
       .from(monitored_jobs)
       .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
@@ -957,10 +1128,11 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         // id - from a bookmark, a shared link, or a dashboard row cached before the filter landed -
         // and the detail page is exactly where a student commits to applying.
         inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
+        ...(sponsorOnly ? [sponsorOnlyPredicate()] : []),
       ))
       .limit(1);
     if (!rows[0]) return reply.status(404).send({ error: 'Job not found' });
-    return reply.send({ job: withCompanyDomain(rows[0]) });
+    return reply.send({ job: { ...withCompanyDomain(rows[0]), sponsorship_evidence: evidenceFor(rows[0]) } });
   });
 
   fastify.post('/internal/job-monitor/sources', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -996,24 +1168,37 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
      * The poll itself still committed; this reports the state, it does not roll anything back.
      */
     const surfaced = await surfacedJobCount();
+    /* THE FLOOR IS CHECKED TWICE, because there are two boards.
+     * A count over the whole board says nothing about the sponsor-only one, and the sponsor-only
+     * one is the fragile of the two: it drains when employer links go NULL, when a data refresh
+     * drops confirmations, or when employers add a refusal sentence. Measuring only the total meant
+     * the board a job seeker who needs sponsorship sees could fall to zero while this cron reported
+     * ~7,100 and returned 200 - which is precisely the failure the total-board floor exists to
+     * prevent, one audience over. */
+    const surfacedSponsorOnly = await surfacedJobCount(true);
     const payload = {
       sources: results.length,
       jobs: results.reduce((sum, result) => sum + result.jobs, 0),
       failed: results.filter((result) => !result.ok).length,
       surfaced_jobs: surfaced,
+      surfaced_sponsor_only_jobs: surfacedSponsorOnly,
       minimum_surfaced_jobs: MINIMUM_SURFACED_JOBS,
       results,
     };
-    if (boardIsBelowFloor(surfaced)) {
+    const below = boardIsBelowFloor(surfaced);
+    const sponsorBelow = boardIsBelowFloor(surfacedSponsorOnly);
+    if (below || sponsorBelow) {
       request.log.error(
-        { surfaced, floor: MINIMUM_SURFACED_JOBS, failedSources: payload.failed },
+        { surfaced, surfacedSponsorOnly, floor: MINIMUM_SURFACED_JOBS, failedSources: payload.failed },
         'Job board is below its minimum surfaced-jobs floor',
       );
       return reply.status(500).send({
         ...payload,
-        error: `The job board is showing ${surfaced} jobs, below the floor of ${MINIMUM_SURFACED_JOBS}. `
-          + 'Check career_page_sources.last_error for failing polls, and whether a portal left '
-          + 'AUTONOMOUS_PORTAL_FAMILIES. Do not lower the floor to clear this.',
+        error: `The job board is showing ${surfaced} jobs (${surfacedSponsorOnly} of them at employers `
+          + `confirmed to sponsor), below the floor of ${MINIMUM_SURFACED_JOBS}. `
+          + 'Check career_page_sources.last_error for failing polls, whether a portal left '
+          + 'AUTONOMOUS_PORTAL_FAMILIES, and whether career_page_sources.sponsor_employer_id went '
+          + 'NULL after a data refresh. Do not lower the floor to clear this.',
       });
     }
     return reply.send(payload);
