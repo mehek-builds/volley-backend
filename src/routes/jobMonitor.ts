@@ -157,7 +157,20 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       .from(monitored_jobs)
       .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
       .where(and(...conditions))
-      .orderBy(desc(monitored_jobs.posted_at), desc(monitored_jobs.first_seen_at), desc(monitored_jobs.id))
+      /* A search matches the title OR the body, and the body is the whole job
+         description, so "product manager" matched 707 postings of which most
+         only mention the phrase in passing ("you will work with our product
+         manager"). Sorted by date alone, the top of that page was Senior
+         Machine Learning Engineer — a board that looks broken to anyone who
+         types what they actually want. Title hits first, then the same date
+         order within each group. Recency alone stays the order when there is
+         no search term, which is what a browse wants. */
+      .orderBy(
+        ...(q ? [sql`case when ${monitored_jobs.title} ilike ${`%${q}%`} then 0 else 1 end`] : []),
+        desc(monitored_jobs.posted_at),
+        desc(monitored_jobs.first_seen_at),
+        desc(monitored_jobs.id),
+      )
       .limit(limit + 1)
       .offset(offset);
     /* The board on trylitos.com/browse-jobs prints how many jobs there are and
