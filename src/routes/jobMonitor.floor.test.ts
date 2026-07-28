@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  JOB_FRESHNESS_DAYS,
   MINIMUM_SURFACED_JOBS,
+  REQUIRED_HEADROOM_MULTIPLE,
+  REQUIRED_SURFACED_JOBS,
+  boardHealth,
   boardIsBelowFloor,
   shouldKeepPostingsOnEmptyFetch,
 } from './jobMonitor';
@@ -44,4 +48,37 @@ test('the floor and the autonomy rule are enforced against the same set of porta
     );
   }
   assert.ok(POLLABLE_JOB_BOARDS.length > 0, 'no pollable boards means the floor can never be met');
+});
+
+test('the freshness window is seven days, and seven is load-bearing', () => {
+  // Not a round number. Hiring is weekday work - measured 2026-07-28, weekdays carried 700-3,500
+  // postings a day against Saturday 143 and Sunday 22 - so any window SHORTER than a week changes
+  // size with the day it is measured on. A 3-day window read 3,917 on a Tuesday and would hold
+  // roughly 2,000 on a Monday, when it spans Sat+Sun+Mon. Seven always contains exactly one
+  // Saturday and one Sunday, which is what stops the count swinging.
+  assert.equal(JOB_FRESHNESS_DAYS, 7);
+  assert.ok(JOB_FRESHNESS_DAYS >= 7, 'a sub-week window is not stable against the weekend dip');
+});
+
+test('the headroom target is 5x the floor, and the two are not the same alarm', () => {
+  assert.equal(REQUIRED_HEADROOM_MULTIPLE, 5);
+  assert.equal(REQUIRED_SURFACED_JOBS, 5_000);
+  // Three distinct states. Alarming only at the floor would mean the first warning arrives when
+  // the board is already unusable.
+  assert.equal(boardHealth(9_664), 'ok', 'the measured launch figure must read healthy');
+  assert.equal(boardHealth(5_000), 'ok', 'exactly at the target is not thin');
+  assert.equal(boardHealth(4_999), 'low', 'thin: warn, do not page');
+  assert.equal(boardHealth(1_000), 'low', 'at the floor exactly is still not a breach');
+  assert.equal(boardHealth(999), 'breached');
+  assert.equal(boardHealth(0), 'breached');
+});
+
+test('a thin board warns without failing the run, so the 5xx keeps meaning "broken now"', () => {
+  // Encoded as a property of the two predicates rather than of the route: 'low' must never satisfy
+  // boardIsBelowFloor, or the early warning would page someone and the real breach signal would be
+  // trained away.
+  for (const n of [4_999, 3_000, 1_500, 1_000]) {
+    assert.equal(boardHealth(n), 'low', String(n));
+    assert.equal(boardIsBelowFloor(n), false, `${n} must warn, not 5xx`);
+  }
 });
