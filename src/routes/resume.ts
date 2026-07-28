@@ -503,7 +503,15 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       return reply.status(500).send({ error: 'Failed to store generated resume' });
     }
 
-    const jobContext = { company: body.company, role: body.role, jd_hash: jdHash };
+    // job_id is spread in only when the caller sent one, so rows generated from the extension or
+    // a hand-typed link keep exactly the three-key shape they have always had rather than gaining
+    // a `job_id: undefined` that serializes into the jsonb as an explicit null.
+    const jobContext = {
+      company: body.company,
+      role: body.role,
+      jd_hash: jdHash,
+      ...(body.job_id ? { job_id: body.job_id } : {}),
+    };
     const now = new Date().toISOString();
 
     const applicationReview = {

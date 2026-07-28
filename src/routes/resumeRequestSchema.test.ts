@@ -50,6 +50,26 @@ describe('resume generation request limits', () => {
     assert.equal(result.success, false);
   });
 
+  test('carries the monitored job id when the application came from the jobs list', () => {
+    const parsed = resumeGenerateBodySchema.parse({
+      ...validRequest,
+      job_id: 'd6693be1-9d1d-4f61-9911-8d95f1ad1b01',
+    });
+    assert.equal(parsed.job_id, 'd6693be1-9d1d-4f61-9911-8d95f1ad1b01');
+  });
+
+  /* The extension and the hand-typed link panel generate resumes for postings with no
+     monitored_jobs row. If this field were ever required, every one of those becomes a 400. */
+  test('accepts a request with no job id, because most callers have no posting to point at', () => {
+    const parsed = resumeGenerateBodySchema.parse(validRequest);
+    assert.equal(parsed.job_id, undefined);
+  });
+
+  test('rejects a job id that is not a uuid, so junk never reaches the stored job_context', () => {
+    const result = resumeGenerateBodySchema.safeParse({ ...validRequest, job_id: 'not-a-uuid' });
+    assert.equal(result.success, false);
+  });
+
   test('rejects a whitespace-only role before headline generation', () => {
     const result = resumeGenerateBodySchema.safeParse({
       ...validRequest,

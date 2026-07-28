@@ -17,6 +17,19 @@ export const resumeGenerateBodySchema = z.object({
   company: z.string().min(1).max(RESUME_REQUEST_LIMITS.company),
   role: z.string().trim().min(1).max(RESUME_REQUEST_LIMITS.role),
   jd_text: z.string().min(20).max(RESUME_REQUEST_LIMITS.jobDescription),
+  // Which monitored_jobs row this application is against, when the student came from the jobs
+  // list rather than pasting a link. It is what lets the jobs list say "Applied" on exactly the
+  // posting they applied to: company+role alone cannot tell two reqs apart, so one Mountain View
+  // application marked the NYC and London postings of the same title too.
+  //
+  // OPTIONAL, and must stay that way. The extension and the hand-typed "Add a job link" panel
+  // both generate resumes for postings that have no monitored_jobs row at all, and neither can
+  // invent one. A required field here would turn every one of those into a 400.
+  //
+  // Not validated against the table on purpose. It lands in a jsonb blob, so there is no foreign
+  // key to lean on, and the only consumer treats it as an equality probe: an id that matches no
+  // posting simply never matches a row, which is the same outcome as sending nothing.
+  job_id: z.string().uuid().optional(),
   application: z.object({
     portal_url: z.string().url().max(4000),
     ats_name: z.string().min(1).max(100),

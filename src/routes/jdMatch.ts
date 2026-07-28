@@ -281,9 +281,14 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
       stages: STAGES,
       limit: BOARD_LIMIT,
       cards: rows.map((row) => {
-        const context = (row.job_context ?? {}) as { company?: string; role?: string };
+        const context = (row.job_context ?? {}) as { company?: string; role?: string; job_id?: string };
         return {
           id: row.id,
+          // The monitored_jobs posting this application was started from, or null. The jobs list
+          // uses it to mark exactly one row "Applied" instead of every row that shares a company
+          // and a title. Null for rows written before it was recorded and for applications that
+          // never came from a posting, and those still fall back to the company+role match.
+          job_id: typeof context.job_id === 'string' ? context.job_id : null,
           company: context.company ?? 'Unknown company',
           role: context.role ?? 'Unknown role',
           created_at: row.created_at,

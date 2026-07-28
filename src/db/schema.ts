@@ -400,7 +400,11 @@ export const resume_templates = pgTable('resume_templates', {
 export const generated_resumes = pgTable('generated_resumes', {
   id: uuid('id').primaryKey().defaultRandom(),
   user_id: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
-  job_context: jsonb('job_context').notNull(), // { company, role, jd_hash }
+  // { company, role, jd_hash, job_id? }. job_id is the monitored_jobs row this application was
+  // started from and is ABSENT on every row written before 2026-07-28, plus on any row generated
+  // from the extension or a hand-typed link, which have no posting to point at. Readers must treat
+  // it as optional forever; it is the precise identity when it is there, not a guaranteed one.
+  job_context: jsonb('job_context').notNull(),
   spec: jsonb('spec').notNull(), // the tailoring decision, kept for audit/debugging
   resume_object_key: text('resume_object_key').notNull(),
   template_id: uuid('template_id').references(() => resume_templates.id),
