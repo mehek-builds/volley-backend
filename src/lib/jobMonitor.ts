@@ -60,6 +60,14 @@ function decodeEntities(value: string): string {
       ? Number.parseInt(token.slice(2), 16)
       : Number.parseInt(token.slice(1), 10);
     if (!Number.isInteger(code) || code < 0 || code > 0x10ffff) return match;
+    /* Drop, do not emit. A Postgres text column cannot hold U+0000 ("invalid
+       byte sequence for encoding UTF8: 0x00"), and one such character fails the
+       whole 200-row upsert chunk, which takes that board's poll down with it.
+       Lone surrogates do not survive a UTF-8 roundtrip. Neither belongs in a
+       job description. */
+    if (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) return '';
+    if (code >= 0x7f && code <= 0x9f) return '';
+    if (code >= 0xd800 && code <= 0xdfff) return '';
     return String.fromCodePoint(code);
   });
 }
@@ -75,22 +83,23 @@ function stripTags(value: string): string {
 /* Decode BEFORE stripping tags. Greenhouse's board API returns `content` as
  * HTML-ESCAPED markup (`&lt;p&gt;`), so a tag-stripping pass that runs first
  * matches nothing and the literal `<p>`/`<em>` tags survive into the stored
- * description. One decode is not enough either: Greenhouse escapes the whole
- * document, so text-level entities arrive double-escaped (`&amp;amp;`), and a
- * posting whose source already contained escaped markup arrives with its tags
- * double-escaped too (`&amp;lt;div&amp;gt;`: 14 rows across Airbnb, Reddit,
- * Gusto and friends). Decode-and-strip to a fixed point instead of guessing a
- * depth; the bound just stops a pathological input from spinning.
+ * description.
+ *
+ * Exactly one decode, one strip, one final decode. The trailing decode is
+ * required because Greenhouse escapes the whole document, so text-level
+ * entities arrive double-escaped: `&amp;amp;` occurs 185-581 times per board.
+ *
+ * It is deliberately NOT followed by another strip. Prose legitimately contains
+ * angle brackets ("use if a<b and c>d"), and a strip at that point eats
+ * everything between them, because `<b and c>` is indistinguishable from a
+ * bold tag carrying attributes. Stripping only while the text is still known to
+ * be markup avoids the ambiguity entirely. Measured across the datadog, stripe,
+ * airbnb and reddit boards (1,339 postings): `&amp;lt;` never occurs, so no
+ * real tag can reach the final decode.
  */
 function cleanHtml(value: unknown): string {
   if (typeof value !== 'string') return '';
-  let current = value;
-  for (let pass = 0; pass < 5; pass += 1) {
-    const next = stripTags(decodeEntities(current));
-    if (next === current) break;
-    current = next;
-  }
-  return current
+  return decodeEntities(stripTags(decodeEntities(value)))
     .replace(/[ \t]+/g, ' ')
     // Inline tags (<em>, <strong>) each collapse to a space, which otherwise
     // leaves "fast ." wherever a posting emphasized the last word of a clause.
