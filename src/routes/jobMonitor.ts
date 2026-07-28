@@ -1,10 +1,15 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { and, desc, eq, ilike, or, sql } from 'drizzle-orm';
+import { and, desc, eq, ilike, inArray, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/index';
-import { career_page_sources, monitored_jobs } from '../db/schema';
+import { career_page_sources, monitored_jobs, profiles } from '../db/schema';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { fetchSourceJobs, type JobSourceInput, type SupportedJobBoard } from '../lib/jobMonitor';
+import { optionalAuth } from '../middleware/auth';
+import { scoreJdMatch } from '../engine/jdMatch';
+import { resumeSpecText } from '../engine/resumeValidate';
+import type { ResumeSpec } from '../llm/resumeSpec';
+import { rankingCacheKey, readRanking, writeRanking } from '../lib/rankingCache';
 
 const sourceSchema = z.object({
   company_name: z.string().trim().min(1).max(200),
@@ -24,6 +29,115 @@ const listQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).max(100_000).default(0),
 });
 const jobParamsSchema = z.object({ id: z.string().uuid() });
+
+/**
+ * How many postings get scored and ranked on a request.
+ *
+ * Sorting by fit cannot be expressed in the query, because the score is computed in this process,
+ * so the sort has to happen over a set this route holds in memory: the newest RANKING_POOL
+ * postings that match the filters.
+ *
+ * THE NUMBER IS A BUDGET, AND THE BUDGET IS EVENT-LOOP TIME. Measured on this engine (Node 22,
+ * warm, a ~2KB resume against SCORING_CHARS-capped postings): 0.3-0.5 ms per posting on synthetic
+ * text, and up to ~1.3 ms on term-dense real postings. That cost is SYNCHRONOUS — Fastify serves
+ * nothing else while it runs. An earlier version of this comment called the pass "the low tens of
+ * milliseconds" and the per-call cost "well under a millisecond"; both were asserted rather than
+ * measured, and the numbers above replaced them (2026-07-28).
+ *
+ * 300 is affordable BECAUSE OF THE CACHE, and would not be without it. The ranking is now computed
+ * once per (student, resume, filters) and every page is a slice of it, so this cost is paid once
+ * per list rather than once per page — which is what makes a pool three times larger cheaper in
+ * practice than the old 200 was. Roughly 100-400 ms on a miss, and nothing on a hit.
+ *
+ * The cap is still real, and is why the response carries `ranked_pool` and `pool_exhausted`: past
+ * RANKING_POOL matching postings, the next-newest is not considered for ranking however well it
+ * fits. Filters are how a student narrows the pool, and the list has to SAY it stopped ranking
+ * rather than quietly reporting no more results.
+ */
+export const RANKING_POOL = 300;
+
+/**
+ * How much of a posting gets scored.
+ *
+ * `monitored_jobs.description` is an unbounded `text` column holding whatever the board returned,
+ * and the poller stores it verbatim. Without a cap, ranking pulled the FULL description for every
+ * row in the pool: at the 5-50KB postings that are ordinary, that is megabytes of detoasted text
+ * fetched, shipped from Neon, and held as JS strings in a serverless function on every keystroke
+ * of a debounced search.
+ *
+ * 20k characters is well past where a posting states its requirements (the whole reason this
+ * scores the full column instead of the 600-char preview) and it bounds both the transfer and the
+ * scoring pass. POST /jd-match already caps its input at 60k for the same reason.
+ */
+export const SCORING_CHARS = 20_000;
+
+/** The minimum a row needs to be rankable. Kept structural so the sort can be tested without a DB. */
+export type RankableJob = {
+  company_name: string;
+  title: string;
+  /** The posting text to score. Capped at SCORING_CHARS by the query, not the full column. */
+  scored_description: string | null;
+};
+
+/**
+ * Postings ordered best fit first, carrying the score that put them there.
+ *
+ * Exported for its own tests. The three behaviours worth pinning down, and each is a decision
+ * rather than an accident:
+ *
+ *  - Unscorable postings (jdMatch returned null) sort BELOW every scored one, and hold their
+ *    incoming order among themselves. They are not zeros; a zero would rank a posting we declined
+ *    to judge alongside one we judged and found nothing in.
+ *  - Equal scores keep the incoming order, which the caller has already set to newest first. Two
+ *    88% matches are separated by recency, which is the only other fact we have.
+ *  - The sort is stable by construction (the index tiebreak), not by trusting the engine's sort to
+ *    be. Array#sort stability is specified now, but the comparator saying so is what makes the
+ *    intent survive someone swapping the sort.
+ */
+export function rankByFit<T extends RankableJob>(
+  rows: readonly T[],
+  resumeText: string,
+): Array<{ row: T; score: number | null }> {
+  const scored = rows.map((row, index) => ({
+    row,
+    // The posting never asks for experience with its own company or job title, so both are excluded
+    // from the requirement set. Same context the review screen passes.
+    score: scoreJdMatch(resumeText, row.scored_description ?? '', {
+      company: row.company_name,
+      role: row.title,
+    }).score,
+    index,
+  }));
+  scored.sort((a, b) => {
+    if (a.score === null && b.score === null) return a.index - b.index;
+    if (a.score === null) return 1;
+    if (b.score === null) return -1;
+    return b.score - a.score || a.index - b.index;
+  });
+  return scored.map(({ row, score }) => ({ row, score }));
+}
+
+/**
+ * The student's main resume as plain text, or null if there is nothing to rank against.
+ *
+ * Null covers three different situations on purpose — signed out, signed in with no resume yet, and
+ * signed in with a resume that holds no text — because the list behaves identically in all three:
+ * unranked, unscored, newest first. Returning a 404 here (as POST /jd-match does) would be wrong;
+ * that route exists to answer a question about one posting, while this one has a perfectly good
+ * answer without a resume.
+ */
+async function baseResumeText(userId: string | undefined): Promise<string | null> {
+  if (!userId) return null;
+  const [profile] = await db
+    .select({ base_resume_json: profiles.base_resume_json })
+    .from(profiles)
+    .where(eq(profiles.user_id, userId))
+    .limit(1);
+  const spec = profile?.base_resume_json as ResumeSpec | null | undefined;
+  if (!spec) return null;
+  const text = resumeSpecText(spec).trim();
+  return text.length > 0 ? text : null;
+}
 
 /* One daily run has to touch EVERY enabled source, not a rotating slice of
    them. At 20 per run a 40-source board took two days to come round, and a
@@ -129,7 +243,36 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
 }
 
 export async function jobMonitorRoutes(fastify: FastifyInstance) {
-  fastify.get('/jobs', async (request: FastifyRequest, reply: FastifyReply) => {
+  /**
+   * GET /jobs
+   *
+   * The list of live postings, and — for a signed-in student with a main resume — how well each one
+   * matches it, best first.
+   *
+   * WHY THE RANKING HAPPENS HERE AND NOT IN THE BROWSER
+   * ---------------------------------------------------
+   * Not because it is free — see RANKING_POOL for the measured cost, which is real and synchronous.
+   * Because the ORDER cannot be known until every score is. Scoring in the client would mean one
+   * request per row and a list that cannot be SORTED by fit until all of them land, which is to say
+   * a list that is not sorted by fit. That argument stands on its own and does not need a
+   * performance claim propping it up; an earlier version of this paragraph had one, unmeasured, and
+   * it was wrong by roughly an order of magnitude.
+   *
+   * FOUR RULES THIS HOLDS
+   * ---------------------
+   *  - IT SCORES THE WHOLE POSTING, NOT THE PREVIEW. The payload's `description` is truncated to
+   *    600 characters for transport; the score reads the full column. Scoring the preview would
+   *    grade every posting on its intro paragraph, which is where the requirements are not.
+   *  - AN UNSCORABLE POSTING GETS null, NEVER 0. jdMatch refuses to score a posting that lists too
+   *    few real requirements, and 0 there is a claim about the student's resume that the input
+   *    never supported. Those rows sort last, keeping their newest-first order among themselves.
+   *  - NO RESUME MEANS NO SCORES AT ALL. Signed in without a main resume, the list behaves exactly
+   *    as it does signed out. There is nothing honest to rank against.
+   *  - THE RANKING POOL IS BOUNDED AND SAID OUT LOUD. Ordering by fit means the ordering cannot be
+   *    pushed into SQL, so the pool is the RANKING_POOL newest matching postings and the response
+   *    reports both `ranked` and `ranked_pool` rather than implying the whole board was considered.
+   */
+  fastify.get('/jobs', { preHandler: optionalAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const parsed = listQuerySchema.safeParse(request.query);
     if (!parsed.success) return reply.status(400).send({ error: 'Invalid job filters' });
     const { q, location, company, remote, limit, offset } = parsed.data;
@@ -138,52 +281,151 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     if (location) conditions.push(ilike(monitored_jobs.location, `%${location}%`));
     if (company) conditions.push(ilike(monitored_jobs.company_name, `%${company}%`));
     if (remote) conditions.push(eq(monitored_jobs.remote, remote === 'true'));
-    const rows = await db
-      .select({
-        id: monitored_jobs.id,
-        company_name: monitored_jobs.company_name,
-        title: monitored_jobs.title,
-        location: monitored_jobs.location,
-        department: monitored_jobs.department,
-        employment_type: monitored_jobs.employment_type,
-        description: sql<string>`left(${monitored_jobs.description}, 600)`,
-        apply_url: monitored_jobs.apply_url,
-        posting_url: monitored_jobs.posting_url,
-        remote: monitored_jobs.remote,
-        posted_at: monitored_jobs.posted_at,
-        first_seen_at: monitored_jobs.first_seen_at,
-        ats_name: career_page_sources.ats_name,
-      })
-      .from(monitored_jobs)
-      .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
-      .where(and(...conditions))
-      /* A search matches the title OR the body, and the body is the whole job
-         description, so "product manager" matched 707 postings of which most
-         only mention the phrase in passing ("you will work with our product
-         manager"). Sorted by date alone, the top of that page was Senior
-         Machine Learning Engineer — a board that looks broken to anyone who
-         types what they actually want. Title hits first, then the same date
-         order within each group. Recency alone stays the order when there is
-         no search term, which is what a browse wants. */
-      .orderBy(
-        ...(q ? [sql`case when ${monitored_jobs.title} ilike ${`%${q}%`} then 0 else 1 end`] : []),
-        desc(monitored_jobs.posted_at),
-        desc(monitored_jobs.first_seen_at),
-        desc(monitored_jobs.id),
-      )
-      .limit(limit + 1)
-      .offset(offset);
-    /* The board on trylitos.com/browse-jobs prints how many jobs there are and
-       paginates over the whole set, and neither is derivable from has_more: a
-       caller reading page 1 can only say "more than 24". Counted under the same
-       filters as the page, so the number always describes the list beneath it
-       rather than the table. */
-    const [{ total }] = await db
-      .select({ total: sql<number>`count(*)::int` })
-      .from(monitored_jobs)
-      .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
-      .where(and(...conditions));
-    return reply.send({ jobs: rows.slice(0, limit), total, limit, offset, has_more: rows.length > limit });
+
+    const resumeText = await baseResumeText(request.jwtPayload?.userId);
+
+    const selection = {
+      id: monitored_jobs.id,
+      company_name: monitored_jobs.company_name,
+      title: monitored_jobs.title,
+      location: monitored_jobs.location,
+      department: monitored_jobs.department,
+      employment_type: monitored_jobs.employment_type,
+      description: sql<string>`left(${monitored_jobs.description}, 600)`,
+      apply_url: monitored_jobs.apply_url,
+      posting_url: monitored_jobs.posting_url,
+      remote: monitored_jobs.remote,
+      posted_at: monitored_jobs.posted_at,
+      first_seen_at: monitored_jobs.first_seen_at,
+      ats_name: career_page_sources.ats_name,
+      /* The company's OWN careers page, which is the only field here that can carry the company's
+         own domain. Every other URL on the row points at the job board: apply_url and posting_url
+         are both greenhouse/lever/ashby, so a client deriving a company identity from either gets
+         the board's identity for every row instead. Operators sometimes register the board URL as
+         the careers URL too, so the client still has to check before trusting it. */
+      career_url: career_page_sources.career_url,
+    };
+
+    /* A search matches the title OR the body, and the body is the whole job description, so
+       "product manager" matched 707 postings of which most only mention the phrase in passing
+       ("you will work with our product manager"). Sorted by date alone, the top of that page was
+       Senior Machine Learning Engineer — a board that looks broken to anyone who types what they
+       actually want. Title hits first, then the same date order within each group. Recency alone
+       stays the order when there is no search term, which is what a browse wants.
+       This also decides WHICH postings enter the ranking pool below, so a search still puts title
+       matches in front of the scorer rather than letting them fall off the end of the pool. */
+    const relevanceThenNewest = [
+      ...(q ? [sql`case when ${monitored_jobs.title} ilike ${`%${q}%`} then 0 else 1 end`] : []),
+      desc(monitored_jobs.posted_at),
+      desc(monitored_jobs.first_seen_at),
+      desc(monitored_jobs.id),
+    ];
+
+    /* The board on trylitos.com/browse-jobs prints how many jobs there are and paginates over the
+       whole set, and neither is derivable from has_more: a caller reading page 1 can only say
+       "more than 24". Counted under the same filters as the page, so the number always describes
+       the list beneath it rather than the table. */
+    const jobCount = async () => {
+      const [row] = await db
+        .select({ total: sql<number>`count(*)::int` })
+        .from(monitored_jobs)
+        .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+        .where(and(...conditions));
+      return row?.total ?? 0;
+    };
+
+    if (!resumeText) {
+      const rows = await db
+        .select(selection)
+        .from(monitored_jobs)
+        .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+        .where(and(...conditions))
+        .orderBy(...relevanceThenNewest)
+        .limit(limit + 1)
+        .offset(offset);
+      return reply.send({
+        jobs: rows.slice(0, limit).map((row) => ({ ...row, match_score: null })),
+        total: await jobCount(),
+        limit,
+        offset,
+        has_more: rows.length > limit,
+        ranked: false,
+        ranked_pool: null,
+        pool_exhausted: false,
+      });
+    }
+
+    /* One ranking per (student, resume, filters), reused across their pages.
+       This is what makes the pages TILE. Ranking a live pool on every request meant page 2 was cut
+       from a different ordering than page 1, so a posting could appear on both or on neither; now
+       the order is decided once and every page is a slice of the same list. It also means the
+       scoring pass is paid once per list rather than once per page.
+       See lib/rankingCache.ts for what is and is not cached, and for why a miss is always fine. */
+    const cacheKey = rankingCacheKey(
+      request.jwtPayload!.userId,
+      resumeText,
+      JSON.stringify([q ?? '', location ?? '', company ?? '', remote ?? '']),
+    );
+    let ranking = readRanking(cacheKey);
+
+    if (!ranking) {
+      /* The scored text is pulled for scoring only, and capped at SCORING_CHARS. It never reaches
+         the payload: `description` in `selection` is the 600-char preview.
+         One row past the pool is fetched so the route can tell "the ranking stopped here" apart
+         from "the board ends here". Different sentences, and the UI says different things. */
+      const pool = await db
+        .select({
+          id: monitored_jobs.id,
+          company_name: monitored_jobs.company_name,
+          title: monitored_jobs.title,
+          scored_description: sql<string>`left(${monitored_jobs.description}, ${SCORING_CHARS})`,
+        })
+        .from(monitored_jobs)
+        .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+        .where(and(...conditions))
+        .orderBy(...relevanceThenNewest)
+        .limit(RANKING_POOL + 1);
+
+      const scored = rankByFit(pool.slice(0, RANKING_POOL), resumeText);
+      ranking = writeRanking(cacheKey, {
+        ids: scored.map(({ row }) => row.id),
+        scores: new Map(scored.map(({ row, score }) => [row.id, score])),
+        poolExhausted: pool.length > RANKING_POOL,
+      });
+    }
+
+    const pageIds = ranking.ids.slice(offset, offset + limit);
+    /* Rows are read fresh every time, never served from the cache, so a posting edited or pulled
+       since the ranking was computed is not resurrected by it. Only the ORDER is remembered. */
+    const rows = pageIds.length
+      ? await db
+          .select(selection)
+          .from(monitored_jobs)
+          .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+          .where(and(eq(monitored_jobs.is_active, true), inArray(monitored_jobs.id, pageIds)))
+      : [];
+
+    /* Back into ranked order, and silently dropping any id that no longer resolves — a posting
+       deactivated since the ranking was built is simply gone, which is the truth. */
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    const jobs = pageIds
+      .map((id) => byId.get(id))
+      .filter((row): row is (typeof rows)[number] => row !== undefined)
+      .map((row) => ({ ...row, match_score: ranking!.scores.get(row.id) ?? null }));
+
+    return reply.send({
+      jobs,
+      total: await jobCount(),
+      limit,
+      offset,
+      has_more: ranking.ids.length > offset + limit,
+      ranked: true,
+      ranked_pool: ranking.ids.length,
+      /* True when postings exist that were never ranked. Without this the client cannot tell the
+         end of the ranking from the end of the board, and `has_more: false` at the pool boundary
+         reads as "you have seen everything" when the truth is "we stopped ranking here". */
+      pool_exhausted: ranking.poolExhausted,
+    });
   });
 
   fastify.get('/jobs/:id', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -205,6 +447,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         first_seen_at: monitored_jobs.first_seen_at,
         is_active: monitored_jobs.is_active,
         ats_name: career_page_sources.ats_name,
+        career_url: career_page_sources.career_url,
       })
       .from(monitored_jobs)
       .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
