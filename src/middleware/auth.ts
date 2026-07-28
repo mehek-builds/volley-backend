@@ -151,8 +151,20 @@ export async function optionalAuth(request: FastifyRequest, reply: FastifyReply)
     request.jwtPayload = outcome.payload;
     return;
   }
-  // Anonymous is the supported path here. A server misconfiguration is not the caller's fault
-  // either, and must not turn a public list into a 500, so it also falls through unscored.
-  if (outcome.reason === 'anonymous' || outcome.reason === 'misconfigured') return;
+  if (outcome.reason === 'anonymous') return;
+  /* A missing signing secret is a server fault, and it answers like one — the SAME 500 requireAuth
+     gives, deliberately.
+     Degrading it to the anonymous path was the tempting version and it is the worse one: nobody
+     presenting a token is anonymous, and with the secret gone that branch would serve every
+     signed-in user the signed-out view, at 200, with no error anywhere, while the requireAuth
+     routes 500 loudly and nobody connects the two. A feature that silently evaporates for 100% of
+     users is harder to notice than an outage.
+     Note the ordering this depends on: resolveSession checks for the header BEFORE it reads the
+     secret, so a genuinely anonymous caller never reaches this branch and the public list keeps
+     working. */
+  if (outcome.reason === 'misconfigured') {
+    request.log.error('JWT_SIGNING_SECRET not configured; refusing to resolve a presented token');
+    return reply.status(500).send({ error: 'JWT_SIGNING_SECRET not configured' });
+  }
   return reply.status(401).send({ error: 'Invalid or expired token' });
 }

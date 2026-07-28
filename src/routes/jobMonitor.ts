@@ -33,32 +33,46 @@ const jobParamsSchema = z.object({ id: z.string().uuid() });
  * How many postings get scored and ranked on a request.
  *
  * Sorting by fit cannot be expressed in the query, because the score is computed in this process,
- * so the sort has to happen over a set this route holds in memory. That set is the newest
- * RANKING_POOL postings that match the filters. 200 is the number because it is well past what a
- * student pages through in a sitting, while a full description each keeps the row payload in the
- * low megabytes and the scoring pass in the low tens of milliseconds.
+ * so the sort has to happen over a set this route holds in memory: the newest RANKING_POOL
+ * postings that match the filters.
  *
- * The consequence is real and is why the response carries `ranked_pool`: past 200 matching
- * postings, the 201st-newest is not considered for ranking, however well it fits. The filters are
- * how a student narrows the pool, and the list says how many were ranked rather than implying it
- * read the whole board.
+ * THE NUMBER IS A BUDGET, AND THE BUDGET IS EVENT-LOOP TIME. Measured on this engine (Node 22,
+ * warm, a ~2KB resume against SCORING_CHARS-capped postings): 0.3-0.5 ms per posting on synthetic
+ * text, and up to ~1.3 ms on term-dense real postings. That cost is SYNCHRONOUS — Fastify serves
+ * nothing else while it runs — so the pool size is directly a latency ceiling for every other
+ * in-flight request. At 100 that is roughly 30-130 ms. It was 200, which doubled that for a second
+ * page of results almost nobody scrolls to. An earlier version of this comment called the pass
+ * "the low tens of milliseconds" and the per-call cost "well under a millisecond"; both were
+ * asserted rather than measured, and the numbers above replaced them (2026-07-28).
+ *
+ * The consequence is real and is why the response carries `ranked_pool` and `pool_exhausted`: past
+ * RANKING_POOL matching postings, the next-newest is not considered for ranking however well it
+ * fits. Filters are how a student narrows the pool, and the list has to SAY it stopped ranking
+ * rather than quietly reporting no more results.
  */
-const RANKING_POOL = 200;
+export const RANKING_POOL = 100;
 
 /**
- * The student's main resume as plain text, or null if there is nothing to rank against.
+ * How much of a posting gets scored.
  *
- * Null covers three different situations on purpose — signed out, signed in with no resume yet, and
- * signed in with a resume that holds no text — because the list behaves identically in all three:
- * unranked, unscored, newest first. Returning a 404 here (as POST /jd-match does) would be wrong;
- * that route exists to answer a question about one posting, while this one has a perfectly good
- * answer without a resume.
+ * `monitored_jobs.description` is an unbounded `text` column holding whatever the board returned,
+ * and the poller stores it verbatim. Without a cap, ranking pulled the FULL description for every
+ * row in the pool: at the 5-50KB postings that are ordinary, that is megabytes of detoasted text
+ * fetched, shipped from Neon, and held as JS strings in a serverless function on every keystroke
+ * of a debounced search.
+ *
+ * 20k characters is well past where a posting states its requirements (the whole reason this
+ * scores the full column instead of the 600-char preview) and it bounds both the transfer and the
+ * scoring pass. POST /jd-match already caps its input at 60k for the same reason.
  */
+export const SCORING_CHARS = 20_000;
+
 /** The minimum a row needs to be rankable. Kept structural so the sort can be tested without a DB. */
 export type RankableJob = {
   company_name: string;
   title: string;
-  full_description: string | null;
+  /** The posting text to score. Capped at SCORING_CHARS by the query, not the full column. */
+  scored_description: string | null;
 };
 
 /**
@@ -84,7 +98,7 @@ export function rankByFit<T extends RankableJob>(
     row,
     // The posting never asks for experience with its own company or job title, so both are excluded
     // from the requirement set. Same context the review screen passes.
-    score: scoreJdMatch(resumeText, row.full_description ?? '', {
+    score: scoreJdMatch(resumeText, row.scored_description ?? '', {
       company: row.company_name,
       role: row.title,
     }).score,
@@ -99,6 +113,15 @@ export function rankByFit<T extends RankableJob>(
   return scored.map(({ row, score }) => ({ row, score }));
 }
 
+/**
+ * The student's main resume as plain text, or null if there is nothing to rank against.
+ *
+ * Null covers three different situations on purpose — signed out, signed in with no resume yet, and
+ * signed in with a resume that holds no text — because the list behaves identically in all three:
+ * unranked, unscored, newest first. Returning a 404 here (as POST /jd-match does) would be wrong;
+ * that route exists to answer a question about one posting, while this one has a perfectly good
+ * answer without a resume.
+ */
 async function baseResumeText(userId: string | undefined): Promise<string | null> {
   if (!userId) return null;
   const [profile] = await db
@@ -204,11 +227,12 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
    *
    * WHY THE RANKING HAPPENS HERE AND NOT IN THE BROWSER
    * ---------------------------------------------------
-   * scoreJdMatch is a pure function over (resume text, posting text) and runs in well under a
-   * millisecond, so scoring a page of postings is cheaper than the query that fetched them. Doing
-   * it in the client would mean one request per row and, worse, a list that cannot be SORTED by fit
-   * until every one of those requests lands. Fit is the whole point of the ordering, so it has to
-   * be known before the page is cut.
+   * Not because it is free — see RANKING_POOL for the measured cost, which is real and synchronous.
+   * Because the ORDER cannot be known until every score is. Scoring in the client would mean one
+   * request per row and a list that cannot be SORTED by fit until all of them land, which is to say
+   * a list that is not sorted by fit. That argument stands on its own and does not need a
+   * performance claim propping it up; an earlier version of this paragraph had one, unmeasured, and
+   * it was wrong by roughly an order of magnitude.
    *
    * FOUR RULES THIS HOLDS
    * ---------------------
@@ -279,25 +303,33 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         has_more: rows.length > limit,
         ranked: false,
         ranked_pool: null,
+        pool_exhausted: false,
       });
     }
 
-    // The full description is pulled for scoring only. It never reaches the payload: `description`
-    // above is the truncated one, and the scored copy is dropped when the response is built.
+    /* The scored text is pulled for scoring only, and capped at SCORING_CHARS. It never reaches
+       the payload: `description` in `selection` is the 600-char preview, and the scored copy is
+       dropped when the response is built.
+       One row past the pool is fetched so the route can tell "the ranking stopped here" apart from
+       "the board ends here". They are different sentences and the UI says different things. */
     const pool = await db
-      .select({ ...selection, full_description: monitored_jobs.description })
+      .select({
+        ...selection,
+        scored_description: sql<string>`left(${monitored_jobs.description}, ${SCORING_CHARS})`,
+      })
       .from(monitored_jobs)
       .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
       .where(and(...conditions))
       .orderBy(...newestFirst)
-      .limit(RANKING_POOL);
+      .limit(RANKING_POOL + 1);
 
-    const scored = rankByFit(pool, resumeText);
+    const poolExhausted = pool.length > RANKING_POOL;
+    const scored = rankByFit(pool.slice(0, RANKING_POOL), resumeText);
 
     const page = scored.slice(offset, offset + limit);
     return reply.send({
       jobs: page.map(({ row, score }) => {
-        const { full_description: _dropped, ...job } = row;
+        const { scored_description: _dropped, ...job } = row;
         return { ...job, match_score: score };
       }),
       limit,
@@ -305,6 +337,10 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       has_more: scored.length > offset + limit,
       ranked: true,
       ranked_pool: scored.length,
+      /* True when postings exist that were never ranked. Without this the client cannot tell the
+         end of the ranking from the end of the board, and `has_more: false` at the pool boundary
+         reads as "you have seen everything" when the truth is "we stopped ranking here". */
+      pool_exhausted: poolExhausted,
     });
   });
 

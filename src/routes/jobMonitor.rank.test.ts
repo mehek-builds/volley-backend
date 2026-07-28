@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert';
-import { rankByFit, type RankableJob } from './jobMonitor';
+import { rankByFit, RANKING_POOL, SCORING_CHARS, type RankableJob } from './jobMonitor';
 
 /* A posting with enough real requirements for jdMatch to agree to score it. The requirements block
    is what carries the signal, so the terms that matter live there rather than in the intro. */
@@ -34,19 +34,19 @@ const RESUME = [
   'Owned the CI/CD pipeline and the Git workflow for a team of six.',
 ].join('\n');
 
-function job(over: Partial<RankableJob> & { full_description: string | null }): RankableJob & { id: string } {
+function job(over: Partial<RankableJob> & { scored_description: string | null }): RankableJob & { id: string } {
   return {
     id: over.title ?? 'job',
     company_name: over.company_name ?? 'Acme',
     title: over.title ?? 'Engineer',
-    full_description: over.full_description,
+    scored_description: over.scored_description,
   };
 }
 
 describe('rankByFit', () => {
   test('puts the posting the resume actually matches above the one it does not', () => {
     const ranked = rankByFit(
-      [job({ title: 'infra', full_description: INFRA }), job({ title: 'frontend', full_description: FRONTEND })],
+      [job({ title: 'infra', scored_description: INFRA }), job({ title: 'frontend', scored_description: FRONTEND })],
       RESUME,
     );
     assert.strictEqual(ranked[0]!.row.title, 'frontend');
@@ -57,8 +57,8 @@ describe('rankByFit', () => {
   test('an unscorable posting gets null and sorts below every scored one', () => {
     const ranked = rankByFit(
       [
-        job({ title: 'vague', full_description: 'Join Acme. We are hiring. Apply today.' }),
-        job({ title: 'infra', full_description: INFRA }),
+        job({ title: 'vague', scored_description: 'Join Acme. We are hiring. Apply today.' }),
+        job({ title: 'infra', scored_description: INFRA }),
       ],
       RESUME,
     );
@@ -70,15 +70,15 @@ describe('rankByFit', () => {
   });
 
   test('an empty description is unscorable rather than a zero', () => {
-    const ranked = rankByFit([job({ title: 'empty', full_description: null })], RESUME);
+    const ranked = rankByFit([job({ title: 'empty', scored_description: null })], RESUME);
     assert.strictEqual(ranked[0]!.score, null);
   });
 
   test('equal scores keep the order they came in, which is newest first', () => {
     const ranked = rankByFit(
       [
-        job({ company_name: 'Newer', title: 'a', full_description: FRONTEND }),
-        job({ company_name: 'Older', title: 'b', full_description: FRONTEND }),
+        job({ company_name: 'Newer', title: 'a', scored_description: FRONTEND }),
+        job({ company_name: 'Older', title: 'b', scored_description: FRONTEND }),
       ],
       RESUME,
     );
@@ -89,9 +89,9 @@ describe('rankByFit', () => {
   test('several unscorable postings keep their incoming order among themselves', () => {
     const ranked = rankByFit(
       [
-        job({ title: 'first', full_description: 'Hiring now.' }),
-        job({ title: 'second', full_description: 'Apply here.' }),
-        job({ title: 'frontend', full_description: FRONTEND }),
+        job({ title: 'first', scored_description: 'Hiring now.' }),
+        job({ title: 'second', scored_description: 'Apply here.' }),
+        job({ title: 'frontend', scored_description: FRONTEND }),
       ],
       RESUME,
     );
@@ -102,14 +102,61 @@ describe('rankByFit', () => {
     // "Kubernetes" appears only as the company name and the job title here. If those leaked into
     // the requirement set, a resume that never mentions them would be marked down for it.
     const named = rankByFit(
-      [job({ company_name: 'Kubernetes Inc', title: 'Kubernetes Engineer', full_description: FRONTEND })],
+      [job({ company_name: 'Kubernetes Inc', title: 'Kubernetes Engineer', scored_description: FRONTEND })],
       RESUME,
     );
-    const plain = rankByFit([job({ company_name: 'Acme', title: 'Engineer', full_description: FRONTEND })], RESUME);
+    const plain = rankByFit([job({ company_name: 'Acme', title: 'Engineer', scored_description: FRONTEND })], RESUME);
     assert.strictEqual(named[0]!.score, plain[0]!.score);
   });
 
   test('an empty list ranks to an empty list', () => {
     assert.deepStrictEqual(rankByFit([], RESUME), []);
+  });
+});
+
+/* The pool size is a latency budget, not a taste call: ranking runs synchronously on the event
+   loop, so every millisecond here is a millisecond Fastify serves nobody else. The RANKING_POOL
+   comment states a measured cost, and a comment is not enforcement — this is.
+   The ceiling is deliberately loose. It is a guard against an order-of-magnitude regression (a
+   quadratic added to the scorer, the SCORING_CHARS cap removed), not a benchmark, so it should not
+   go red because a laptop was busy. */
+describe('the ranking budget the comment claims', () => {
+  test(`ranking a full pool of ${RANKING_POOL} stays inside its budget`, () => {
+    const requirements = Array.from(
+      { length: 30 },
+      (_, i) => `- TypeScript, React, Node.js, PostgreSQL, Kubernetes, Terraform, Kafka, item ${i}`,
+    ).join('\n');
+    const jd = posting(requirements);
+    const resume = Array.from(
+      { length: 34 },
+      (_, i) => `Built a dashboard in TypeScript and React with PostgreSQL and CI/CD, line ${i}.`,
+    ).join('\n');
+    const pool = Array.from({ length: RANKING_POOL }, (_, i) =>
+      job({ company_name: `Company ${i}`, title: 'Engineer', scored_description: jd }),
+    );
+
+    rankByFit(pool.slice(0, 10), resume); // warm the JIT, as a real process would be
+    const started = process.hrtime.bigint();
+    rankByFit(pool, resume);
+    const ms = Number(process.hrtime.bigint() - started) / 1e6;
+
+    assert.ok(
+      ms < 600,
+      `ranking ${RANKING_POOL} postings took ${ms.toFixed(0)} ms of SYNCHRONOUS event-loop time; ` +
+        'the route serves no other request while this runs, so both RANKING_POOL and the decision ' +
+        'to score inline need revisiting',
+    );
+  });
+
+  test('the scoring cap is large enough to reach a requirements section', () => {
+    // The whole reason the route scores the full column instead of the 600-char preview is that
+    // requirements are never in the intro. The cap must not undo that.
+    assert.ok(SCORING_CHARS > 600, 'a cap at or below the preview length would defeat its purpose');
+    // Six terms clears MIN_SCORABLE_TERMS; five does not, and the scorer is right to refuse there.
+    const buried = posting(
+      '- TypeScript and React and PostgreSQL\n- Kubernetes, Terraform, Kafka, Go and gRPC',
+    );
+    assert.ok(buried.length < SCORING_CHARS, 'a realistic posting fits inside the cap');
+    assert.notStrictEqual(rankByFit([job({ scored_description: buried })], RESUME)[0]!.score, null);
   });
 });
