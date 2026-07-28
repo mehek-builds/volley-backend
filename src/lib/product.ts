@@ -12,7 +12,11 @@ export const PRODUCT_LINKS = {
   privacy:
     process.env.PRODUCT_PRIVACY_URL ||
     'https://trylitos.com/privacy',
-  supportEmail: process.env.PRODUCT_SUPPORT_EMAIL || 'hello@rolequick.com',
+  // Served publicly at /v1/meta, so this fallback was shipping a dead address
+  // under the old brand to every client that read it. rolequick.com does not
+  // resolve. This is the address the Chrome Web Store listing already
+  // publishes, so the two surfaces now agree.
+  supportEmail: process.env.PRODUCT_SUPPORT_EMAIL || 'mehekbuilds@gmail.com',
 } as const;
 
 export const CLIENT_COMPATIBILITY = {
