@@ -43,19 +43,59 @@ export type NormalizedJob = {
   raw_json: unknown;
 };
 
-function cleanHtml(value: unknown): string {
-  if (typeof value !== 'string') return '';
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+  nbsp: ' ',
+};
+
+function decodeEntities(value: string): string {
+  return value.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (match, entity: string) => {
+    const token = entity.toLowerCase();
+    if (token[0] !== '#') return NAMED_ENTITIES[token] ?? match;
+    const code = token[1] === 'x'
+      ? Number.parseInt(token.slice(2), 16)
+      : Number.parseInt(token.slice(1), 10);
+    if (!Number.isInteger(code) || code < 0 || code > 0x10ffff) return match;
+    return String.fromCodePoint(code);
+  });
+}
+
+function stripTags(value: string): string {
   return value
+    .replace(/<!--[\s\S]*?-->/g, ' ')
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/p>/gi, '\n\n')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&#39;/gi, "'")
-    .replace(/&quot;/gi, '"')
+    .replace(/<\/?[a-zA-Z][^>]*>/g, ' ');
+}
+
+/* Decode BEFORE stripping tags. Greenhouse's board API returns `content` as
+ * HTML-ESCAPED markup (`&lt;p&gt;`), so a tag-stripping pass that runs first
+ * matches nothing and the literal `<p>`/`<em>` tags survive into the stored
+ * description. One decode is not enough either: Greenhouse escapes the whole
+ * document, so text-level entities arrive double-escaped (`&amp;amp;`), and a
+ * posting whose source already contained escaped markup arrives with its tags
+ * double-escaped too (`&amp;lt;div&amp;gt;`: 14 rows across Airbnb, Reddit,
+ * Gusto and friends). Decode-and-strip to a fixed point instead of guessing a
+ * depth; the bound just stops a pathological input from spinning.
+ */
+function cleanHtml(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  let current = value;
+  for (let pass = 0; pass < 5; pass += 1) {
+    const next = stripTags(decodeEntities(current));
+    if (next === current) break;
+    current = next;
+  }
+  return current
     .replace(/[ \t]+/g, ' ')
+    // Inline tags (<em>, <strong>) each collapse to a space, which otherwise
+    // leaves "fast ." wherever a posting emphasized the last word of a clause.
+    .replace(/ +([.,;:!?)\]])/g, '$1')
+    .replace(/([([]) +/g, '$1')
     .replace(/\n[ \t]+/g, '\n')
     .replace(/\n\s*\n\s*\n+/g, '\n\n')
     .trim();
@@ -112,7 +152,7 @@ export function normalizeLeverJobs(payload: unknown): NormalizedJob[] {
     if (!id || !title || !postingUrl || !applyUrl) return [];
     const categories = (job.categories ?? {}) as Record<string, unknown>;
     const location = text(categories.location);
-    const description = [text(job.descriptionPlain), ...(Array.isArray(job.lists)
+    const description = [cleanHtml(job.descriptionPlain), ...(Array.isArray(job.lists)
       ? job.lists.map((item) => cleanHtml((item as Record<string, unknown>).content))
       : [])].filter(Boolean).join('\n\n');
     return [{
@@ -148,7 +188,9 @@ export function normalizeAshbyJobs(payload: unknown): NormalizedJob[] {
       location,
       department: text(job.department) ?? text(job.team),
       employment_type: text(job.employmentType),
-      description: text(job.descriptionPlain) ?? cleanHtml(job.descriptionHtml),
+      /* descriptionPlain is not reliably plain: Ashby leaks `</aside>` and
+         friends into it, and nothing downstream strips HTML. */
+      description: cleanHtml(text(job.descriptionPlain) ?? job.descriptionHtml),
       apply_url: applyUrl,
       posting_url: postingUrl,
       remote: job.isRemote === true || /\bremote\b/i.test(location ?? ''),
