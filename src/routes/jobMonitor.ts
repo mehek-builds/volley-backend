@@ -296,8 +296,21 @@ async function baseResumeText(userId: string | undefined): Promise<string | null
    (vercel.json) and a board fetch is one HTTP call plus one transaction, so
    eight at a time clears ~60 sources well inside the budget. Raise the source
    count past this and the limit needs raising with it, or the tail stops
-   refreshing daily and nothing says so. */
-const POLL_SOURCES_PER_RUN = 60;
+   refreshing daily and nothing says so.
+
+   RAISED TO 400 ON 2026-07-28, when the board went from 51 sources to 239. At 60
+   a run, 179 of them would have sat unpolled every night and come round once
+   every four days — the exact "tail stops refreshing and nothing says so"
+   failure the paragraph above warns about, reintroduced by growing the source
+   list rather than by lowering this number.
+
+   The budget is measured, not guessed: the 2026-07-28 18:19 UTC run polled 51
+   sources in 22s at this concurrency, so ~0.43s per source wall-clock. 239
+   sources is therefore ~103s, and 400 would be ~172s, both inside the 300s
+   Vercel ceiling. 400 leaves room to roughly double the board again before this
+   needs revisiting; past that, raise POLL_CONCURRENCY rather than this, since
+   the cost is network wait rather than CPU. */
+const POLL_SOURCES_PER_RUN = 400;
 const POLL_CONCURRENCY = 8;
 const UPSERT_CHUNK = 200;
 
