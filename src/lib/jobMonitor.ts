@@ -71,6 +71,22 @@ function decodeEntities(value: string): string {
   });
 }
 
+/* Escape depth is not fixed at two. Greenhouse escapes the document, and a
+   posting whose source text already spelled an entity out picks up a third
+   layer: `&amp;amp;amp;` reaches us and two decodes leave a visible `&amp;`.
+   Seven postings do this today (Gemini, Asana, SpaceX, Elastic, natera). Decode
+   to a fixed point instead of guessing the depth. Safe to iterate because this
+   only ever collapses entities, never strips, so it cannot eat prose. */
+function decodeFully(value: string): string {
+  let current = value;
+  for (let pass = 0; pass < 4; pass += 1) {
+    const next = decodeEntities(current);
+    if (next === current) break;
+    current = next;
+  }
+  return current;
+}
+
 function stripTags(value: string): string {
   return value
     .replace(/<!--[\s\S]*?-->/g, ' ')
@@ -79,26 +95,59 @@ function stripTags(value: string): string {
     .replace(/<\/?[a-zA-Z][^>]*>/g, ' ');
 }
 
+/* The tag vocabulary a job board actually emits. Used for the SECOND strip only,
+   where the text is no longer known to be markup, so "looks like <letter...>" is
+   not good enough a test. */
+const HTML_TAG_NAME = [
+  'a', 'abbr', 'address', 'article', 'aside', 'b', 'blockquote', 'br', 'caption',
+  'center', 'cite', 'code', 'col', 'colgroup', 'dd', 'del', 'details', 'div', 'dl',
+  'dt', 'em', 'figcaption', 'figure', 'font', 'footer', 'h1', 'h2', 'h3', 'h4',
+  'h5', 'h6', 'header', 'hr', 'i', 'iframe', 'img', 'ins', 'kbd', 'li', 'main',
+  'mark', 'nav', 'ol', 'p', 'picture', 'pre', 'q', 's', 'samp', 'script', 'section',
+  'small', 'source', 'span', 'strong', 'style', 'sub', 'summary', 'sup', 'table',
+  'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'u', 'ul', 'var', 'video', 'wbr',
+].join('|');
+const RESIDUAL_BR = new RegExp('<br\\s*/?>', 'gi');
+const RESIDUAL_P_CLOSE = new RegExp('</p\\s*>', 'gi');
+const RESIDUAL_TAG = new RegExp(`</?(?:${HTML_TAG_NAME})(?:\\s[^>]*)?/?>`, 'gi');
+
+function stripKnownTags(value: string): string {
+  return value
+    .replace(RESIDUAL_BR, '\n')
+    .replace(RESIDUAL_P_CLOSE, '\n\n')
+    .replace(RESIDUAL_TAG, ' ');
+}
+
 /* Decode BEFORE stripping tags. Greenhouse's board API returns `content` as
  * HTML-ESCAPED markup (`&lt;p&gt;`), so a tag-stripping pass that runs first
  * matches nothing and the literal `<p>`/`<em>` tags survive into the stored
  * description.
  *
- * Exactly one decode, one strip, one final decode. The trailing decode is
- * required because Greenhouse escapes the whole document, so text-level
- * entities arrive double-escaped: `&amp;amp;` occurs 185-581 times per board.
+ * Decode, strip, decode again, then strip ONLY known tag names. The second
+ * decode is required because Greenhouse escapes the whole document, so
+ * text-level entities arrive double-escaped (`&amp;amp;`, 185-581 per board).
  *
- * It is deliberately NOT followed by another strip. Prose legitimately contains
- * angle brackets ("use if a<b and c>d"), and a strip at that point eats
- * everything between them, because `<b and c>` is indistinguishable from a
- * bold tag carrying attributes. Stripping only while the text is still known to
- * be markup avoids the ambiguity entirely. Measured across the datadog, stripe,
- * airbnb and reddit boards (1,339 postings): `&amp;lt;` never occurs, so no
- * real tag can reach the final decode.
+ * That second decode can also expose angle brackets, and at that point the text
+ * is no longer known to be markup, so the two cases are genuinely ambiguous:
+ *
+ *   `&amp;lt;p&amp;gt;`          double-escaped markup, should be stripped
+ *   `&amp;lt;Karnataka, ...&amp;gt;`  prose in brackets, must be kept
+ *
+ * A "looks like <letter...>" strip cannot tell them apart and eats the prose.
+ * Measured across all 253 boards (22,084 postings): 9 postings carry prose in
+ * brackets (Twilio's "<Karnataka, Tamil Nadu, ...>", Amplitude's "<<NAMER
+ * version ...>>"), and 0 carry double-escaped markup. So the second strip
+ * matches a tag-name allowlist: it removes markup if it ever shows up, and
+ * leaves prose alone. The residual risk is prose like "<b and c>", where the
+ * first token really is a tag name; unobserved, and cheaper than losing the 9.
  */
 function cleanHtml(value: unknown): string {
   if (typeof value !== 'string') return '';
-  return decodeEntities(stripTags(decodeEntities(value)))
+  return stripKnownTags(decodeFully(stripTags(decodeEntities(value))))
+    /* `&nbsp;` decodes to a space but `&#160;` decodes to U+00A0, which no
+       later rule collapses. 879 descriptions carried one. Normalize so the two
+       spellings of the same character do not produce different text. */
+    .replace(/\u00a0/g, ' ')
     .replace(/[ \t]+/g, ' ')
     // Inline tags (<em>, <strong>) each collapse to a space, which otherwise
     // leaves "fast ." wherever a posting emphasized the last word of a clause.
@@ -111,6 +160,23 @@ function cleanHtml(value: unknown): string {
 
 function text(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+/* Lever and Ashby both offer a `descriptionPlain`, and it is USUALLY plain: real
+   line breaks, indented bullets, no markup. Running the HTML cleaner over it
+   unconditionally flattens that indentation for no gain. But it is not RELIABLY
+   plain either (a live Cursor posting carries `</aside>`), and nothing
+   downstream sanitizes. So clean it only when it is not actually plain. */
+const LOOKS_LIKE_MARKUP = /<\/?[a-zA-Z][^>]*>|&(?:[a-z]+|#\d+|#x[0-9a-f]+);/i;
+
+function cleanPlain(value: unknown): string {
+  const raw = text(value);
+  if (!raw) return '';
+  if (LOOKS_LIKE_MARKUP.test(raw)) return cleanHtml(raw);
+  /* Layout is preserved, but U+00A0 is a character detail rather than layout,
+     and 1,283 Lever/Ashby postings carry one. Normalizing it keeps the same
+     sentence identical across providers without flattening the indentation. */
+  return raw.replace(/\u00a0/g, ' ');
 }
 
 function date(value: unknown): Date | undefined {
@@ -159,7 +225,7 @@ export function normalizeLeverJobs(payload: unknown): NormalizedJob[] {
     if (!id || !title || !postingUrl || !applyUrl) return [];
     const categories = (job.categories ?? {}) as Record<string, unknown>;
     const location = text(categories.location);
-    const description = [cleanHtml(job.descriptionPlain), ...(Array.isArray(job.lists)
+    const description = [cleanPlain(job.descriptionPlain), ...(Array.isArray(job.lists)
       ? job.lists.map((item) => cleanHtml((item as Record<string, unknown>).content))
       : [])].filter(Boolean).join('\n\n');
     return [{
@@ -194,9 +260,7 @@ export function normalizeAshbyJobs(payload: unknown): NormalizedJob[] {
       location,
       department: text(job.department) ?? text(job.team),
       employment_type: text(job.employmentType),
-      /* descriptionPlain is not reliably plain: Ashby leaks `</aside>` and
-         friends into it, and nothing downstream strips HTML. */
-      description: cleanHtml(text(job.descriptionPlain) ?? job.descriptionHtml),
+      description: cleanPlain(job.descriptionPlain) || cleanHtml(job.descriptionHtml),
       apply_url: applyUrl,
       posting_url: postingUrl,
       remote: job.isRemote === true || /\bremote\b/i.test(location ?? ''),
