@@ -71,6 +71,22 @@ function decodeEntities(value: string): string {
   });
 }
 
+/* Escape depth is not fixed at two. Greenhouse escapes the document, and a
+   posting whose source text already spelled an entity out picks up a third
+   layer: `&amp;amp;amp;` reaches us and two decodes leave a visible `&amp;`.
+   Seven postings do this today (Gemini, Asana, SpaceX, Elastic, natera). Decode
+   to a fixed point instead of guessing the depth. Safe to iterate because this
+   only ever collapses entities, never strips, so it cannot eat prose. */
+function decodeFully(value: string): string {
+  let current = value;
+  for (let pass = 0; pass < 4; pass += 1) {
+    const next = decodeEntities(current);
+    if (next === current) break;
+    current = next;
+  }
+  return current;
+}
+
 function stripTags(value: string): string {
   return value
     .replace(/<!--[\s\S]*?-->/g, ' ')
@@ -127,7 +143,7 @@ function stripKnownTags(value: string): string {
  */
 function cleanHtml(value: unknown): string {
   if (typeof value !== 'string') return '';
-  return stripKnownTags(decodeEntities(stripTags(decodeEntities(value))))
+  return stripKnownTags(decodeFully(stripTags(decodeEntities(value))))
     /* `&nbsp;` decodes to a space but `&#160;` decodes to U+00A0, which no
        later rule collapses. 879 descriptions carried one. Normalize so the two
        spellings of the same character do not produce different text. */

@@ -131,6 +131,20 @@ test('keeps prose in brackets but strips markup that is double-escaped', () => {
   assert.match(jobs[0].description, /Perks/);
 });
 
+test('decodes entities however many layers of escaping they arrive under', () => {
+  /* Greenhouse escapes the document, so a posting whose source text already
+   * spelled the entity out arrives triple-escaped. Seven live postings do this
+   * and two decodes left a visible "&amp;" in the description. */
+  const jobs = normalizeGreenhouseJobs({ jobs: [{
+    id: 24,
+    title: 'Analyst',
+    absolute_url: 'https://job-boards.greenhouse.io/gemini/jobs/24',
+    content: '&lt;p&gt;Partner with FP&amp;amp;amp;A, Tax &amp;amp; Legal, payors&amp;amp;#39; teams.&lt;/p&gt;',
+  }] });
+  assert.equal(jobs[0].description, "Partner with FP&A, Tax & Legal, payors' teams.");
+  assert.doesNotMatch(jobs[0].description, /&(amp|lt|gt|quot|#\d+);/i);
+});
+
 test('normalizes the two spellings of a non-breaking space to the same text', () => {
   const named = normalizeGreenhouseJobs({ jobs: [{
     id: 22, title: 'T', absolute_url: 'https://x/22',
