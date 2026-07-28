@@ -7,8 +7,11 @@ import {
   coverLetterUploadSelector,
   detectPortal,
   isChoiceQuestion,
+  isPaylocityTerminalStep,
   managedResultHasCoverLetterUpload,
   portalApplicationUrl,
+  portalCanAutoSubmit,
+  portalHandoffReason,
   readManagedReceipt,
 } from './portalSubmission';
 
@@ -425,4 +428,152 @@ test('question wording alone cannot predict a control type', () => {
   // Recorded because it is the lesson that cost three deploys: this reads like free text and is a
   // checkbox group on Aquatic's Greenhouse form. The heuristic is a helper, never the guard.
   assert.equal(isChoiceQuestion('How did you hear about this job?'), true);
+});
+
+// ─── Workable / JazzHR / Paylocity (added 2026-07-28) ─────────────────────────
+// Every assertion below encodes something read off a LIVE form that day, not a naming pattern.
+// See litos-ats-dom-capture-2026-07-28.md. The point of each is to fail if someone "simplifies" a
+// selector back to the obvious-but-wrong version.
+
+const capturePacket = {
+  fullName: 'Taylor Example',
+  email: 'taylor@example.com',
+  phone: '+971500000000',
+  city: 'Dubai',
+  linkedinUrl: 'https://linkedin.com/in/taylor',
+  githubUrl: 'https://github.com/taylor',
+  portfolioUrl: 'https://taylor.example',
+  resume: Buffer.from('pdf'),
+  resumeName: 'resume.pdf',
+  questions: [],
+};
+
+test('the three new hostnames are detected, and their tenant subdomains are too', () => {
+  assert.equal(detectPortal('https://apply.workable.com/suade/j/9C43981D17/apply'), 'workable');
+  assert.equal(detectPortal('https://ticketmanager.applytojob.com/apply/jobs/details/z8b5ObES2F'), 'jazzhr');
+  assert.equal(detectPortal('https://2000recruiting.paylocity.com/Recruiting/Jobs/Apply/44457'), 'paylocity');
+});
+
+test('Workable uploads the resume by data-ui, never by id or a bare file selector', () => {
+  // The live form randomises the resume input's id per render AND ships a second file input for the
+  // profile photo (data-ui="avatar") that appears FIRST in the DOM. A bare input[type="file"] or any
+  // id-based match files the student's resume as her headshot.
+  const actions = buildManagedPortalActions('workable', capturePacket, true);
+  const upload = actions.find((action) => action.type === 'upload' && action.label === 'resume');
+  assert.ok(upload, 'Workable must push a resume upload');
+  assert.match(upload!.selector!, /data-ui="resume"/);
+  assert.doesNotMatch(upload!.selector!, /input_files_input/, 'must not match the per-render random id');
+  assert.notEqual(upload!.selector, 'input[type="file"]');
+});
+
+test('Workable never ticks the GDPR consent checkbox', () => {
+  const actions = buildManagedPortalActions('workable', capturePacket, true);
+  assert.equal(actions.some((action) => JSON.stringify(action).includes('gdpr')), false);
+});
+
+test('JazzHR fills the form but is never allowed to auto-submit, because of reCAPTCHA', () => {
+  // Every JazzHR application form carries a live g-recaptcha-response field. Filling is fine;
+  // submitting is not, and that stop is policy, not a missing selector.
+  assert.equal(portalCanAutoSubmit('jazzhr'), false);
+  const actions = buildManagedPortalActions('jazzhr', capturePacket, true);
+  assert.ok(actions.some((action) => action.type === 'fill' && action.selector?.includes('resumator-firstname-value')));
+  assert.notEqual(actions.at(-1)?.type, 'click', 'a submit click must NOT be appended');
+  assert.equal(actions.some((action) => action.type === 'click'), false);
+});
+
+test('JazzHR never answers the voluntary EEO questions', () => {
+  const actions = buildManagedPortalActions('jazzhr', capturePacket, true);
+  assert.equal(actions.some((action) => JSON.stringify(action).includes('eeo_')), false);
+});
+
+test('Paylocity matches its dotted ids by attribute, since #info.firstName is invalid CSS', () => {
+  const actions = buildManagedPortalActions('paylocity', capturePacket, true);
+  const first = actions.find((action) => action.label === 'first_name');
+  assert.ok(first);
+  assert.equal(first!.selector, '[id="info.firstName"]');
+  assert.doesNotMatch(first!.selector!, /#info\./, 'a #id selector cannot match an id containing a dot');
+});
+
+test('Paylocity walks its wizard, but every click is label-scoped and can never hit the terminal submit', () => {
+  // Paylocity reuses the id #btn-submit for BOTH "Next Step" and the final submit, so an advance
+  // selector that matches on the id alone would press Submit on the last step. Scoping by visible
+  // text is what makes the traversal structurally unable to submit, rather than relying on a step
+  // count staying in sync with Paylocity's own wizard logic.
+  assert.equal(portalCanAutoSubmit('paylocity'), false);
+  const actions = buildManagedPortalActions('paylocity', capturePacket, true);
+  const clicks = actions.filter((action) => action.type === 'click');
+  assert.ok(clicks.length > 0, 'Paylocity must advance through its wizard');
+  for (const click of clicks) {
+    assert.match(click.selector!, /:has-text\("Next Step"\)/, 'every click must be label-scoped');
+    assert.equal(click.optional, true, 'a missing advance button must be a no-op, not an error');
+  }
+  // The generic terminal submit selector used by single-step portals must never appear.
+  assert.equal(actions.some((a) => a.selector === 'button[type="submit"], input[type="submit"]'), false);
+});
+
+test('Paylocity fills work history from the parsed resume, and only the first row', () => {
+  const withRole = { ...capturePacket, mostRecentRole: { company: 'Traeco', title: 'Founding Engineer', summary: 'Built the ingest pipeline.', startDate: 'Jun 2025', endDate: 'Present' } };
+  const actions = buildManagedPortalActions('paylocity', withRole, true);
+  assert.equal(actions.find((a) => a.label === 'work_company')?.selector, '[id="workHistory.companyName.0"]');
+  assert.equal(actions.find((a) => a.label === 'work_title')?.value, 'Founding Engineer');
+  // Row 1 only - never creates additional rows it may not be able to complete.
+  assert.equal(actions.some((a) => /workHistory\.\w+\.[1-9]/.test(a.selector ?? '')), false);
+  assert.equal(actions.some((a) => /Add Work History/i.test(a.selector ?? '')), false);
+});
+
+test('a profile with no parsed experience simply skips the work-history fills', () => {
+  const actions = buildManagedPortalActions('paylocity', capturePacket, true);
+  assert.equal(actions.some((a) => a.label?.startsWith('work_')), false);
+});
+
+test('Paylocity re-runs the reviewed-question fills on every step, since screeners are not on page one', () => {
+  const withQuestions = { ...capturePacket, questions: [{ question: 'Why this role?', answer: 'Because it is backend-heavy.' }] };
+  const actions = buildManagedPortalActions('paylocity', withQuestions, true);
+  const asked = actions.filter((a) => a.type === 'fillByLabelText' && a.text === 'Why this role?');
+  // Once for step one, then once after each advance.
+  assert.equal(asked.length, 4);
+});
+
+test('the terminal attestation step is recognised by its acknowledgement markers', () => {
+  // These ids are what Paylocity renders on the last page: the certification that the facts are
+  // true, plus the prior-conviction and work-authorisation declarations. Litos must never answer
+  // any of them on the student's behalf, so it must be able to tell that page apart.
+  assert.equal(isPaylocityTerminalStep('<span id="acknowledgements.priorConviction.notLastStep">'), true);
+  assert.equal(isPaylocityTerminalStep('<span id="acknowledgements.authorizedToWorkInUS.notLastStep">'), true);
+  assert.equal(isPaylocityTerminalStep('<span id="acknowledgements.eeoGenderEthnicity.notLastStepOrNotIncluded">'), true);
+  assert.equal(isPaylocityTerminalStep('<div id="info.firstName">'), false);
+});
+
+test('Paylocity picks the resume file input out of the three the form renders', () => {
+  const actions = buildManagedPortalActions('paylocity', capturePacket, true);
+  const upload = actions.find((action) => action.type === 'upload' && action.label === 'resume');
+  assert.equal(upload?.selector, '#btn-resume');
+});
+
+test('Paylocity leaves the parse-my-resume checkbox alone so it cannot overwrite our fills', () => {
+  const actions = buildManagedPortalActions('paylocity', capturePacket, true);
+  assert.equal(actions.some((action) => JSON.stringify(action).includes('useAttachedResume')), false);
+});
+
+test('the portals that cannot auto-submit each explain why in plain language', () => {
+  for (const portal of ['jazzhr', 'paylocity'] as const) {
+    const reason = portalHandoffReason(portal);
+    assert.ok(reason && reason.length > 0, `${portal} must explain its handoff`);
+  }
+  assert.equal(portalHandoffReason('workable'), null, 'a fully supported portal has nothing to explain');
+});
+
+test('every controlled variant maps to its real family and keeps that family’s guarantees', () => {
+  for (const [controlled, live] of [
+    ['controlled_workable', 'workable'],
+    ['controlled_jazzhr', 'jazzhr'],
+    ['controlled_paylocity', 'paylocity'],
+  ] as const) {
+    assert.equal(portalCanAutoSubmit(controlled), portalCanAutoSubmit(live));
+    // The controlled fixture must exercise the SAME selectors as the live adapter, or the harness
+    // proves nothing about production.
+    const viaControlled = buildManagedPortalActions(controlled, capturePacket, false).map((a) => a.selector);
+    const viaLive = buildManagedPortalActions(live, capturePacket, false).map((a) => a.selector);
+    assert.deepEqual(viaControlled, viaLive);
+  }
 });

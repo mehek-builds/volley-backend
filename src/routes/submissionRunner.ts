@@ -208,8 +208,28 @@ async function buildPacket(row: ResumeRow, controlledTest = false): Promise<Subm
     coverLetterName: coverLetter
       ? String(coverLetterMeta.file_name ?? `litos-${row.id}-cover-letter.pdf`)
       : undefined,
+    mostRecentRole: readMostRecentRole(parsed),
     questions: review.questions.map((item) => ({ question: item.question, answer: item.answer })),
   };
+}
+
+// The first entry of the parsed resume's experience list, for portals that ask for work history as
+// structured fields (Paylocity). First, not "latest by date": resumes are written most-recent-first
+// and the parser preserves that order, whereas the date strings are free text ("Jun 2025 - Present",
+// "Summer 2024") and cannot be reliably compared. Trusting the resume's own ordering is both simpler
+// and closer to what the student actually wrote.
+function readMostRecentRole(parsed: Record<string, unknown>): SubmissionPacket['mostRecentRole'] {
+  const experience = parsed.experience;
+  if (!Array.isArray(experience) || experience.length === 0) return undefined;
+  const entry = experience[0] as Record<string, unknown>;
+  const str = (value: unknown) => (typeof value === 'string' && value.trim() ? value.trim() : undefined);
+  const company = str(entry.company) ?? str(entry.org);
+  const title = str(entry.title);
+  // Both are required by every portal that asks for work history at all, so a partial entry is
+  // worse than none: it produces a row the student must notice and finish rather than one she can
+  // simply confirm.
+  if (!company || !title) return undefined;
+  return { company, title, summary: str(entry.description), startDate: str(entry.start), endDate: str(entry.end) };
 }
 
 function omitCoverLetter(packet: SubmissionPacket): SubmissionPacket {
