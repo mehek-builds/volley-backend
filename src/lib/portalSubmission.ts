@@ -197,6 +197,27 @@ export function portalHandoffReason(portal: SupportedPortal): string | null {
   return null;
 }
 
+// What to say when an UNATTENDED run left this application alone.
+//
+// portalHandoffReason above cannot be reused here, and the reason is the one its own first comment
+// gives: both of its sentences promise "Litos filled everything in". On the unattended path nothing
+// was filled, because the run stopped before it opened a browser. Telling someone their application
+// is filled and waiting on one click, when the form is still blank, sends them to a page that does
+// not match what they were told and costs them the trust to believe the next message.
+export function unattendedHandoffReason(portal: SupportedPortal): string | null {
+  const family = portalFamily(portal);
+  if (ACCOUNT_WALLED_FAMILIES.has(family)) {
+    return ACCOUNT_WALLED_REASONS[family as AccountWalledFamily];
+  }
+  if (CAPTCHA_GATED_FAMILIES.has(family)) {
+    return 'This company asks you to prove you are human before it will take an application, so Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.';
+  }
+  if (MULTI_STEP_FAMILIES.has(family)) {
+    return 'This company asks its questions over several pages, and the last one needs answers only you can give. Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.';
+  }
+  return null;
+}
+
 export type SubmissionPacket = {
   fullName: string;
   email: string;
