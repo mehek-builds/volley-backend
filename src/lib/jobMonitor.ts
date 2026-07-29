@@ -40,6 +40,30 @@ export type NormalizedJob = {
   posting_url: string;
   remote: boolean;
   posted_at?: Date;
+  /**
+   * WHAT THE PORTAL SAYS THE COUNTRY IS, rather than what we guessed from the location string.
+   *
+   * All three boards publish it, in three shapes: Lever gives an ISO-3166 code ("GB"), Ashby gives
+   * a postal address with `addressCountry` ("United States"), and Greenhouse groups postings under
+   * named offices ("US", "India Locations"). Reading it is the whole reason this field exists -
+   * inferring it from free text meant "IN - Bengaluru" read as Indiana, "Amsterdam, NH" as New
+   * Hampshire, and "Georgia" as the state rather than the country, and each of those put a foreign
+   * job in front of somebody who needs a US work visa.
+   *
+   * Undefined when the portal published nothing, which is common on Greenhouse. The string
+   * classifier in lib/jobLocation.ts is the fallback for exactly that case, and only that case.
+   */
+  portal_country?: string;
+  /**
+   * The company as the PORTAL names it, for the boards that publish it (Greenhouse does, on every
+   * job). This is the authority on who a board belongs to.
+   *
+   * It exists because six of our sources were not the company their token suggested: `sas` is
+   * Superior Alarm Systems, `bcg` is Bohen Consulting Group, `tcs` is Thornbury Community Services,
+   * `disney` is a board called "Sgt. Pepper's Lonely Hearts Club Band". Each was found by hand
+   * after the fact; the portal was publishing the right answer the entire time.
+   */
+  portal_company_name?: string;
 };
 
 const NAMED_ENTITIES: Record<string, string> = {
@@ -200,6 +224,13 @@ export function normalizeGreenhouseJobs(payload: unknown): NormalizedJob[] {
       .map((item) => text((item as Record<string, unknown>)?.name))
       .filter(Boolean)
       .join(', ') || undefined;
+    /* Greenhouse groups every posting under named offices, and the OUTERMOST one is the country:
+       Stripe's Bengaluru roles sit under "India Locations", its San Francisco roles under "US".
+       That is a fact the employer configured, not a string we parsed. */
+    const offices = Array.isArray(job.offices) ? job.offices : [];
+    const officeNames = offices
+      .map((item) => text((item as Record<string, unknown>)?.name))
+      .filter((name): name is string => Boolean(name));
     return [{
       external_id: id,
       title,
@@ -210,6 +241,8 @@ export function normalizeGreenhouseJobs(payload: unknown): NormalizedJob[] {
       posting_url: postingUrl,
       remote: /\bremote\b/i.test(location ?? ''),
       posted_at: date(job.updated_at),
+      portal_country: officeNames.join(' | ') || undefined,
+      portal_company_name: text(job.company_name),
     }];
   });
 }
@@ -239,6 +272,9 @@ export function normalizeLeverJobs(payload: unknown): NormalizedJob[] {
       posting_url: postingUrl,
       remote: /\bremote\b/i.test([location, text(job.workplaceType)].filter(Boolean).join(' ')),
       posted_at: date(job.createdAt),
+      // An ISO-3166 alpha-2 code, published per posting. The least ambiguous signal any of the
+      // three boards gives us.
+      portal_country: text(job.country),
     }];
   });
 }
@@ -254,6 +290,8 @@ export function normalizeAshbyJobs(payload: unknown): NormalizedJob[] {
     const title = text(job.title);
     if (!id || !title || !postingUrl || !applyUrl) return [];
     const location = text(job.location);
+    const postal = ((job.address as Record<string, unknown> | undefined)?.postalAddress
+      ?? {}) as Record<string, unknown>;
     return [{
       external_id: id,
       title,
@@ -265,6 +303,8 @@ export function normalizeAshbyJobs(payload: unknown): NormalizedJob[] {
       posting_url: postingUrl,
       remote: job.isRemote === true || /\bremote\b/i.test(location ?? ''),
       posted_at: date(job.publishedAt),
+      // A structured postal address when the employer filled one in: "United States", "Germany".
+      portal_country: text(postal.addressCountry),
     }];
   });
 }

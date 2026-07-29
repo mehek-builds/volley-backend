@@ -242,6 +242,27 @@ check(
   true,
 );
 
+/* A BOARD THE PORTAL NAMES DIFFERENTLY THAN WE DO.
+   This is the `sas` / `tcs` shape: our label says one company, the portal says another. We cannot
+   identify whose board it is, so nothing on it may be surfaced as a confirmed sponsor - even
+   though the employer link is still sitting on the row. */
+await db.update(career_page_sources)
+  .set({ portal_company_name: 'Superior Alarm Systems', portal_name_mismatch: true })
+  .where(eq(career_page_sources.id, sponsoring.id));
+check(
+  'a board the portal names differently surfaces nothing on employer evidence',
+  (await boardTitles(auth)).titles,
+  ['QA Sponsored Abroad Offered', 'QA Sponsored Offered', 'QA Unconfirmed Offered'],
+);
+await db.update(career_page_sources)
+  .set({ portal_company_name: 'QA Sponsoring Employer', portal_name_mismatch: false })
+  .where(eq(career_page_sources.id, sponsoring.id));
+check(
+  '...and comes back when the names agree again',
+  (await boardTitles(auth)).titles,
+  sponsorOnlyTitles,
+);
+
 // 7. THE GROUPED BOARD, which was a complete way around the filter until it honoured the account.
 //    It returns company, title, locations and an apply link, so serving it unfiltered handed a
 //    declared account the whole board through a different door.
@@ -282,18 +303,33 @@ check(
 await db.delete(monitored_jobs).where(inArray(monitored_jobs.id, [mixed.id]));
 await db.delete(monitored_jobs).where(eq(monitored_jobs.external_id, 'qa-sponsor-mixed-b'));
 
-/* 8. The suggestions must describe the board the account can actually see. Asserted on TITLES
-   rather than companies on purpose: "QA Unconfirmed Employer" still belongs in the company list,
-   because one of its postings states its own sponsorship and is surfaced. The unit of the promise
-   is the posting, not the employer, and a test that got that backwards would demand the product
-   hide a job it is right to show. */
-const facets = await app.inject({ method: 'GET', url: '/jobs/facets', headers: auth });
-const facetTitles = facets.json().titles as string[];
+/* 8. The suggestions must describe the board the account can actually see.
+   Asserted on COMPANIES, because `titles` was removed from this endpoint (the board offers a
+   curated title vocabulary instead). A company every one of whose postings is hidden must not be
+   offered as a search suggestion: it sends the reader to a search that returns nothing, which
+   reads as a broken board rather than as a company we cannot confirm. */
+async function facetCompanies() {
+  const response = await app.inject({ method: 'GET', url: '/jobs/facets', headers: auth });
+  return ((response.json().companies ?? []) as string[]).filter((name) => name.startsWith('QA ')).sort();
+}
 check(
-  'facets: a declared account is never suggested a hidden role',
-  facetTitles.filter((title) => title.startsWith('QA ')).sort(),
-  sponsorOnlyTitles,
+  'facets: a company with a surfaced posting is still suggested',
+  await facetCompanies(),
+  ['QA Sponsoring Employer', 'QA Unconfirmed Employer'],
 );
+
+// Take away the one posting that carried the unconfirmed employer, and it should vanish entirely.
+await db.update(monitored_jobs)
+  .set({ sponsorship_status: 'unstated' })
+  .where(eq(monitored_jobs.external_id, 'qa-sponsor-5'));
+check(
+  'facets: a company with nothing left to show is not suggested',
+  await facetCompanies(),
+  ['QA Sponsoring Employer'],
+);
+await db.update(monitored_jobs)
+  .set({ sponsorship_status: 'offers' })
+  .where(eq(monitored_jobs.external_id, 'qa-sponsor-5'));
 
 // 9. Someone who did NOT declare can switch it on and off freely.
 const [second] = await db.insert(users).values({ email: 'qa-sponsor-2@litos.test' }).returning({ id: users.id });

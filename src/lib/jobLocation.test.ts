@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { employerEvidenceApplies, jobCountry } from './jobLocation';
+import { countryFromPortal, employerEvidenceApplies, jobCountry, resolveJobCountry } from './jobLocation';
 
 /**
  * An H-1B is a US work visa, so an employer's H-1B record is evidence about US roles and nothing
@@ -120,4 +120,38 @@ test('the ambiguous city names are left alone rather than guessed', () => {
   assert.equal(jobCountry('Birmingham'), 'unknown');
   // ...but with a state beside it there is no ambiguity left.
   assert.equal(jobCountry('Cambridge, MA'), 'us');
+});
+
+test('the portal is believed over the location string', () => {
+  /* THE FIX FOR THE WHOLE CLASS OF BUG. Every one of these strings was misread by the parser, and
+     every one of these postings carried the right answer in a structured field the whole time. */
+  assert.equal(resolveJobCountry('IN', 'IN - Bengaluru'), 'non_us', 'Lever ISO code');
+  assert.equal(resolveJobCountry('India Locations', 'Bengaluru'), 'non_us', 'Greenhouse office group');
+  assert.equal(resolveJobCountry('Netherlands', 'Amsterdam, NH'), 'non_us', 'Ashby postal address');
+  assert.equal(resolveJobCountry('GB', 'Oxford or  London-United Kingdom'), 'non_us');
+  assert.equal(resolveJobCountry('United States', 'Georgia'), 'us');
+  assert.equal(resolveJobCountry('US', 'Anywhere'), 'us');
+});
+
+test('a Greenhouse office list that includes the US is a US role', () => {
+  // A posting filed under both is one an American hire can take.
+  assert.equal(countryFromPortal('US | Bay Area'), 'us');
+  assert.equal(countryFromPortal('India Locations'), 'non_us');
+  assert.equal(countryFromPortal('EMEA'), 'non_us');
+});
+
+test('a two-letter code IS safe in a country field, unlike in a location string', () => {
+  // "IN" in a country field can only be India. In a location string it was Indiana, which is the
+  // bug this whole path exists to remove.
+  assert.equal(countryFromPortal('IN'), 'non_us');
+  assert.equal(countryFromPortal('DE'), 'non_us');
+  assert.equal(countryFromPortal('US'), 'us');
+  assert.equal(jobCountry('IN - Bengaluru'), 'non_us', 'the parser still has to cope alone');
+});
+
+test('an unrecognised portal country defers to the parser rather than guessing', () => {
+  assert.equal(countryFromPortal('Mars Office'), null);
+  assert.equal(resolveJobCountry('Mars Office', 'Austin, TX'), 'us');
+  assert.equal(resolveJobCountry(null, 'Austin, TX'), 'us');
+  assert.equal(resolveJobCountry('', 'Bengaluru, India'), 'non_us');
 });

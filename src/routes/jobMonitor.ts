@@ -4,7 +4,8 @@ import { z } from 'zod';
 import { db } from '../db/index';
 import { career_page_sources, monitored_jobs, profiles, sponsor_employers, users } from '../db/schema';
 import { normalizeEmployerName, readPostingSponsorship, sponsorOnlyBoardRequired, sponsorshipVerdict, type PostingSponsorship } from '../lib/sponsorship';
-import { jobCountry } from '../lib/jobLocation';
+import { resolveJobCountry } from '../lib/jobLocation';
+import { portalNameAgrees } from '../lib/sponsorIdentity';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { fetchSourceJobs, isIngestablePosting, POLLABLE_JOB_BOARDS, type JobSourceInput, type SupportedJobBoard } from '../lib/jobMonitor';
 import { AUTONOMOUS_PORTAL_FAMILIES } from '../lib/portalSubmission';
@@ -689,7 +690,10 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
              edit this sentence into and out of a live posting, and a policy that changed on their
              page while ours still said the old thing is the one error this feature cannot afford. */
           sponsorship_status: readPostingSponsorship(job.description),
-          job_country: jobCountry(job.location),
+          /* The portal's own country field first, the location string only when it published none.
+             Reading the string first is what made "IN - Bengaluru" Indiana and "Amsterdam, NH" New
+             Hampshire. */
+          job_country: resolveJobCountry(job.portal_country, job.location),
         }));
         await tx.insert(monitored_jobs).values(chunk).onConflictDoUpdate({
           target: [monitored_jobs.source_id, monitored_jobs.external_id],
@@ -753,6 +757,10 @@ export function sponsorOnlyPredicate() {
     eq(monitored_jobs.sponsorship_status, 'offers'),
     and(
       isNotNull(career_page_sources.sponsor_employer_id),
+      /* Belt and braces with the unlink in pollSource: a source whose portal name disagrees with
+         ours is one we cannot identify, so nothing on it may be called a confirmed sponsor - even
+         if a link survived from before the mismatch was noticed. */
+      eq(career_page_sources.portal_name_mismatch, false),
       ne(monitored_jobs.sponsorship_status, 'refuses'),
       /* AND THE ROLE HAS TO BE ONE AN H-1B COULD COVER. The employer-level evidence is a US
          petition record; applying it to a Bengaluru or Tokyo posting claims something about a

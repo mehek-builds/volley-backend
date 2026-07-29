@@ -156,3 +156,48 @@ export function jobCountry(location: string | null | undefined): JobCountry {
 export function employerEvidenceApplies(location: string | null | undefined): boolean {
   return jobCountry(location) !== 'non_us';
 }
+
+/* ISO-3166 alpha-2 and the country names the three boards actually publish. Lever sends "GB",
+   Ashby sends "United States", Greenhouse sends office-group names like "US" and "India
+   Locations" - so this has to read all three shapes. */
+const US_COUNTRY_TOKENS = new Set(['US', 'USA', 'UNITED STATES', 'UNITED STATES OF AMERICA', 'PR', 'PUERTO RICO']);
+
+/**
+ * The country as the PORTAL published it, which beats anything read out of a location string.
+ *
+ * Greenhouse office groups are a list ("US | Bay Area", "India Locations"), so any US token in the
+ * list makes it US: a posting filed under both is one an American hire can take. A named foreign
+ * group with no US token is foreign. Anything unrecognised returns null, and the caller falls back
+ * to the string classifier rather than guessing.
+ */
+export function countryFromPortal(portalCountry: string | null | undefined): JobCountry | null {
+  if (!portalCountry || !portalCountry.trim()) return null;
+  const parts = portalCountry.split('|').map((part) => normalise(part).trim());
+  if (parts.some((part) => US_COUNTRY_TOKENS.has(part) || / (USA|UNITED STATES) /.test(` ${part} `))) {
+    return 'us';
+  }
+  /* An office group NAMED after a foreign country ("India Locations", "EMEA"), or a two-letter code
+     that is not ours. Two letters is safe here in a way it never was in a location string: this is
+     a country field, so "IN" means India and cannot mean Indiana. */
+  const foreign = parts.some((part) => {
+    if (/^[A-Z]{2}$/.test(part)) return true;
+    return NON_US.some((name) => ` ${part} `.includes(` ${name.replace(/[^A-Z0-9]+/g, ' ')} `));
+  });
+  if (foreign) return 'non_us';
+  return null;
+}
+
+/**
+ * Where a posting is: the portal's answer if it gave one, ours if it did not.
+ *
+ * THE ORDER IS THE POINT. Every location bug this feature had came from reading a string the
+ * employer never meant as a country - "IN - Bengaluru", "Amsterdam, NH", "Georgia". All three
+ * boards publish the country as structured data, and the parser exists only for the postings where
+ * they do not.
+ */
+export function resolveJobCountry(
+  portalCountry: string | null | undefined,
+  location: string | null | undefined,
+): JobCountry {
+  return countryFromPortal(portalCountry) ?? jobCountry(location);
+}
