@@ -21,8 +21,15 @@ export function hasTimeForAnotherApplication(
 
 // Rows claimed per invocation. The real limiter is the time budget above, not this number; this
 // only bounds the SELECT so a huge queue does not pull thousands of rows into memory to discard
-// most of them. With the cron at every 15 minutes this is a ceiling of batch x 96 per day, far
-// above anything the daily cap will let through.
+// most of them.
+//
+// One invocation is the whole day's automatic throughput right now, because the Vercel account is
+// on Hobby and Hobby permits daily crons only: a */15 schedule is rejected at DEPLOY time, not at
+// run time, so it takes production down with it rather than degrading quietly. Whatever fits in
+// SUBMISSION_BATCH_TIME_BUDGET_MS is what gets sent. Two ways to lift it, both Mehek's call: the
+// Pro plan unlocks sub-daily crons, or an external scheduler (GitHub Actions on a schedule) calls
+// the endpoint with INTERNAL_CRON_SECRET as often as wanted. Nothing in this file changes either
+// way; only the schedule does.
 const DEFAULT_BATCH_SIZE = 12;
 
 export function submissionBatchSize(env: NodeJS.ProcessEnv = process.env): number {
