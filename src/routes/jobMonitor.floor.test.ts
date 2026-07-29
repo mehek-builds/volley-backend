@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  CLOSED_POSTING_RETENTION_DAYS,
+  PURGE_POSTINGS_OLDER_THAN_DAYS,
   JOB_FRESHNESS_DAYS,
   MINIMUM_SURFACED_JOBS,
   REQUIRED_HEADROOM_MULTIPLE,
@@ -81,4 +83,38 @@ test('a thin board warns without failing the run, so the 5xx keeps meaning "brok
     assert.equal(boardHealth(n), 'low', String(n));
     assert.equal(boardIsBelowFloor(n), false, `${n} must warn, not 5xx`);
   }
+});
+
+test('a board whose postings are all stale is NOT mistaken for a board that returned nothing', () => {
+  // The subtle one. The ingest filter drops postings outside the window, so it is tempting to feed
+  // the filtered count to the empty-response guard. That would make "the API returned nothing" and
+  // "the API returned nothing FRESH" indistinguishable, and the run would refuse to deactivate
+  // postings that genuinely aged out - the board would then keep showing them forever.
+  // Only the first of those is a fault, so the guard must key off the RAW fetch count.
+  const rawFetched = 400;   // the board answered with 400 postings...
+  const freshOfThem = 0;    // ...none from the last 7 days
+  assert.equal(shouldKeepPostingsOnEmptyFetch(rawFetched, 600), false,
+    'a board that answered with postings must still be swept, even if none are fresh');
+  assert.equal(shouldKeepPostingsOnEmptyFetch(freshOfThem, 600), true,
+    'and a genuinely empty answer must still be protected');
+});
+
+test('closed postings leave the product immediately, and the row lingers only briefly', () => {
+  // Two different clocks, and conflating them is the mistake worth guarding against. A posting is
+  // gone from the product the moment is_active flips (every board query filters on it); retention
+  // governs only how long the dead ROW survives so "why did these vanish" is still answerable.
+  assert.equal(CLOSED_POSTING_RETENTION_DAYS, 2);
+  assert.ok(CLOSED_POSTING_RETENTION_DAYS > 0,
+    'zero would delete the evidence on the same run that created it');
+  assert.ok(CLOSED_POSTING_RETENTION_DAYS < JOB_FRESHNESS_DAYS,
+    'a closed posting must not outlive the window it could have been shown in');
+});
+
+test('the purge keeps a full window of slack, so it cannot fight the poller', () => {
+  // Reads the constant the purge query actually uses. An earlier version of this test recomputed
+  // JOB_FRESHNESS_DAYS * 2 locally, which meant changing the query to purge at the boundary kept the
+  // test green - it was asserting its own arithmetic rather than the code's.
+  assert.ok(PURGE_POSTINGS_OLDER_THAN_DAYS > JOB_FRESHNESS_DAYS,
+    'purging at or inside the window churns rows the poller keeps restoring');
+  assert.equal(PURGE_POSTINGS_OLDER_THAN_DAYS, 14);
 });
