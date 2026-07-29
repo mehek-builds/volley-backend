@@ -106,12 +106,16 @@ const LCA_URL = (quarter) =>
  * The reason string is printed nowhere. It exists so the next person does not spend an afternoon
  * re-deriving why an obvious match is missing, and then "fix" it. */
 const REJECTED = {
-  sas: 'the greenhouse token `sas` is Superior Alarm Systems, a security-systems integrator, NOT SAS Institute',
-  BCG: 'the greenhouse token `bcg` is Bohen Consulting Group, NOT Boston Consulting Group',
-  TCS: 'the greenhouse token `tcs` is Thornbury Community Services (UK care work), NOT Tata Consultancy Services',
-  Disney: 'the greenhouse token `disney` is a board named "Sgt. Pepper\'s Lonely Hearts Club Band" holding two test postings, not Disney',
-  Latch: 'the lever token `latch` is LatchBio ("software in biology", Mission Bay), NOT Latch Systems the smart-lock company',
-  crisp: 'the ashby token `crisp` is the Dutch grocer: all 24 postings are Amsterdam-area and in Dutch. A US "Crisp, Inc." exists and normalises to the same key, which is why this is a rejection and not just a missing alias',
+  /* The four tokens that were a DIFFERENT COMPANY are no longer sources at all - they were removed
+     from jobSources.ts on 2026-07-29, and src/lib/jobSourceIdentity.test.ts fails if they return.
+     What remains here is the other shape of the problem: a source that IS the company we say it is,
+     whose name collides with a different company's filings. */
+  crisp: 'the ashby token `crisp` is the Dutch grocer, which really is called Crisp - the board is '
+    + 'correctly labelled. A US "Crisp, Inc." files H-1B petitions and normalises to the same key, '
+    + 'so this is a rejection of the FILING match, not of the source',
+  LatchBio: 'LatchBio is correctly labelled (the source was renamed from "Latch" on 2026-07-29). '
+    + 'LATCH SYSTEMS INC is the New York smart-lock company, a different business, and its '
+    + 'petitions must not be credited here',
 };
 
 const ALIASES = {

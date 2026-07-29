@@ -182,15 +182,16 @@ test('a confirmed employer carries the filings that confirmed it, from the sourc
   }
 });
 
-test('a board token that is not the company it looks like is never confirmed', () => {
-  /* Six board tokens resolve to a DIFFERENT company than their display name: `sas` is Superior
-     Alarm Systems, `bcg` is Bohen Consulting Group, `tcs` is Thornbury Community Services (UK care
-     work), `disney` is a two-posting test board, `latch` is LatchBio, `crisp` is a Dutch grocer
-     whose postings are all in Amsterdam. Every one was CONFIRMED by an earlier version of this
-     data, against the famous company's filings - TCS alone was credited with 24,287 approvals.
-     This is the regression test for the worst thing this feature can do: tell somebody who needs
-     sponsorship that a company sponsors when it does not. */
-  for (const company of ['sas', 'BCG', 'TCS', 'Disney', 'Latch', 'crisp']) {
+test('a board whose NAME collides with another company is never confirmed', () => {
+  /* Two shapes of the same problem, and only one of them survives as a source.
+     `sas`, `bcg`, `tcs` and `disney` were tokens that resolved to an entirely DIFFERENT company;
+     they were removed from jobSources.ts on 2026-07-29, and jobSourceIdentity.test.ts fails if they
+     come back.
+     These two remain because the board IS correctly labelled - the Dutch grocer really is called
+     Crisp, LatchBio really is LatchBio - and it is the FILING match that must be refused: a US
+     "Crisp, Inc." and "LATCH SYSTEMS INC" are different businesses that normalise to the same key.
+     Both were CONFIRMED by an earlier version of this data. */
+  for (const company of ['crisp', 'LatchBio']) {
     const employer = h1bEmployer(company);
     assert.ok(employer, `${company} is not in the data at all`);
     assert.equal(employer.sponsors, false, `${company} is confirmed and must not be`);
