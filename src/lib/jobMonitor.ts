@@ -224,13 +224,17 @@ export function normalizeGreenhouseJobs(payload: unknown): NormalizedJob[] {
       .map((item) => text((item as Record<string, unknown>)?.name))
       .filter(Boolean)
       .join(', ') || undefined;
-    /* Greenhouse groups every posting under named offices, and the OUTERMOST one is the country:
-       Stripe's Bengaluru roles sit under "India Locations", its San Francisco roles under "US".
-       That is a fact the employer configured, not a string we parsed. */
+    /* GREENHOUSE OFFICE NAMES ARE NOT COUNTRIES, and reading them as one was the same mistake in a
+       new place. Stripe's groups happen to be "US" and "India Locations", so it looked like a
+       country field - but Superior Alarm Systems names its office after itself, and that string
+       would then have been treated as a country.
+       `offices[].location` IS a real address ("Canoga Park, California, United States"), when the
+       employer filled one in. Stripe's India office has none, which is exactly why this returns
+       undefined there and lets the location parser answer instead. */
     const offices = Array.isArray(job.offices) ? job.offices : [];
-    const officeNames = offices
-      .map((item) => text((item as Record<string, unknown>)?.name))
-      .filter((name): name is string => Boolean(name));
+    const officeLocations = offices
+      .map((item) => text((item as Record<string, unknown>)?.location))
+      .filter((value): value is string => Boolean(value));
     return [{
       external_id: id,
       title,
@@ -241,7 +245,7 @@ export function normalizeGreenhouseJobs(payload: unknown): NormalizedJob[] {
       posting_url: postingUrl,
       remote: /\bremote\b/i.test(location ?? ''),
       posted_at: date(job.updated_at),
-      portal_country: officeNames.join(' | ') || undefined,
+      portal_country: officeLocations.join(' | ') || undefined,
       portal_company_name: text(job.company_name),
     }];
   });

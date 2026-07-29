@@ -93,6 +93,16 @@ test('REAL strings from the live board that a two-letter code got wrong', () => 
   assert.equal(jobCountry('DE - Berlin'), 'non_us', 'DE is Germany here, not Delaware');
 });
 
+test('a word ending in two letters is not a state code', () => {
+  /* "GEORGIA" ends in IA, which is Iowa. So do Austria, Slovakia and Somalia. The trailing-code
+     rule now needs a separator in front of it, or every one of those reads as American. */
+  assert.equal(jobCountry('Somalia'), 'unknown');
+  assert.equal(jobCountry('Slovakia'), 'non_us');
+  // The real shapes it exists to catch still work.
+  assert.equal(jobCountry('Remote - FL'), 'us');
+  assert.equal(jobCountry('Austin, TX'), 'us');
+});
+
 test('Georgia the country is not Georgia the state', () => {
   // Real string from the live board, and the last posting that slipped through: the country,
   // listed beside two other European ones.
