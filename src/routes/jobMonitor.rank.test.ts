@@ -138,6 +138,12 @@ describe('rankByFit', () => {
    the regression this exists to catch, multiplies that by the pool size. No clock, no threshold
    tuning, no flake: the same code gives the same count on any machine, busy or idle.
 
+   WHAT IT DOES NOT CATCH, stated so the guarantee is not overread: it sees work that TOUCHES THE
+   ROWS. A quadratic built some other way, say accumulating an n-by-n array of scores without
+   reading a row again, would not move this count. That is a narrower promise than a stopwatch
+   appeared to make, and it is still the better trade, because the stopwatch's broader promise was
+   not kept: it let the injected quadratic through at x8.32 while failing one healthy run in four.
+
    IT NO LONGER CLAIMS TO GUARD THE CAP. The old comment said this budget also caught "the
    SCORING_CHARS cap removed". It never could. The cap is applied by the QUERY, not by rankByFit:
    jobMonitor.ts builds scored_description as `left(description, SCORING_CHARS)`, so rankByFit only
@@ -205,10 +211,15 @@ describe('the ranking budget the comment claims', () => {
     const largePerRow = large.reads() / (RANKING_POOL * 4);
 
     /* The sharpest statement of linearity available without a clock: quadrupling the pool must not
-       change what each posting costs. Under a nested pass this would quadruple. */
-    assert.strictEqual(
-      largePerRow,
-      smallPerRow,
+       change what each posting costs. Under a nested pass this goes from 3 to 303 and then 1203.
+
+       A tolerance rather than strict equality, even though both sides are whole numbers today.
+       These are counts divided by pool sizes, so the moment any field is read conditionally for
+       some rows and not others the two averages stop being exactly equal, and this would fail on a
+       change that is perfectly linear. Half a read per posting is far below the signal it exists
+       to catch and far above that kind of drift. */
+    assert.ok(
+      Math.abs(largePerRow - smallPerRow) < 0.5,
       `each posting cost ${smallPerRow.toFixed(1)} property reads in a pool of ${RANKING_POOL} but ` +
         `${largePerRow.toFixed(1)} in a pool of ${RANKING_POOL * 4}. Per-posting work must not ` +
         'depend on how many other postings there are.',
