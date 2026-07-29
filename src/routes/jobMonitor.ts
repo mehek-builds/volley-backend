@@ -169,7 +169,29 @@ export async function purgeExpiredPostings(): Promise<number> {
        anyway, so this only ever removes rows nothing is refreshing. */
     sql`${monitored_jobs.posted_at} < now() - (${PURGE_POSTINGS_OLDER_THAN_DAYS} || ' days')::interval`,
   ));
-  return (result as { rowCount?: number }).rowCount ?? 0;
+  const purged = (result as { rowCount?: number }).rowCount ?? 0;
+
+  /* Reclaim after deleting, or the rolling window costs more space than it saves.
+   *
+   * A DELETE leaves dead tuples; it does not free anything. Measured on the first real purge run:
+   * 8,702 rows deleted and the database went UP, 158 MB -> 194 MB, because the churn is now daily
+   * and outpaces autovacuum's own schedule. A VACUUM FULL afterwards took it to 73 MB.
+   *
+   * Plain VACUUM here, NOT VACUUM FULL. Full takes an ACCESS EXCLUSIVE lock and rewrites the table,
+   * which would make the board unavailable in the middle of a cron run; plain VACUUM takes no such
+   * lock and returns the space for reuse by the next day's inserts, which is exactly what a bounded,
+   * high-churn table needs. Space is not returned to the OS - run VACUUM FULL by hand if the file
+   * size itself ever matters - but the table stops growing, which is the actual requirement.
+   *
+   * Best-effort: a failed vacuum must never fail the poll. The postings are already correct at this
+   * point; this is housekeeping. */
+  try {
+    await db.execute(sql`vacuum ${monitored_jobs}`);
+  } catch {
+    // Intentionally swallowed. See above: the board is correct with or without this.
+  }
+
+  return purged;
 }
 
 /** The floor rule as a predicate, so the number and the comparison are testable without a database. */
