@@ -43,6 +43,7 @@ const { users, career_page_sources, monitored_jobs, generated_resumes } = await 
 const { buildApp } = await import('../src/index.ts');
 const { buildAppliedIndex, isJobApplied } = await import('./website-job-rows.vendored.ts');
 
+const EXPECTED_DB = 'litos_e2e_jobid';
 const COMPANY = 'Google';
 const TITLE = 'Software Engineer';
 
@@ -84,6 +85,28 @@ async function fetchBoardAsUser(app: Awaited<ReturnType<typeof buildApp>>) {
   return JSON.parse(res.body).cards as Array<{ id: string; job_id: string | null; company: string; role: string; stage: string }>;
 }
 
+/**
+ * Refuse to touch anything but the throwaway database.
+ *
+ * This file truncates four tables on every run, and importing the app pulls in `dotenv/config`
+ * (src/index.ts:1), which loads the real `.env`. dotenv does not overwrite a variable that is
+ * already set, and DATABASE_URL is assigned at the top of this module before the dynamic imports,
+ * so the throwaway URL wins. That is two non-obvious behaviours deep for something whose failure
+ * mode is deleting a real table, so this asks the live connection what it is actually attached to
+ * rather than trusting the reasoning.
+ */
+async function assertThrowawayDatabase() {
+  const { rows } = await pool.query('select current_database() as db');
+  const name = rows[0]?.db;
+  if (name !== EXPECTED_DB) {
+    throw new Error(
+      `REFUSING TO RUN: connected to "${name}", expected "${EXPECTED_DB}". ` +
+      `This test truncates tables. Check DATABASE_URL.`,
+    );
+  }
+  console.log(`connected to ${name} (throwaway), safe to truncate`);
+}
+
 async function seedBase() {
   await db.delete(generated_resumes);
   await db.delete(monitored_jobs);
@@ -121,6 +144,7 @@ function check(label: string, fn: () => void) {
 }
 
 const app = await buildApp();
+await assertThrowawayDatabase();
 
 // ── Scenario 1: the fix. An application carrying the posting's id. ───────────────────────────
 console.log('\nScenario 1 — application records the posting id (the fix)');
