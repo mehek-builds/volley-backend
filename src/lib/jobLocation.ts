@@ -30,9 +30,14 @@ const US_STATE_CODES = new Set([
   'WI', 'WY', 'DC', 'PR',
 ]);
 
+/* GEORGIA IS NOT IN HERE, and that is the point. It is a US state and a country, and the live
+   board carries "Belgrade, Belgrade, Serbia; Berlin, Berlin, Germany; Georgia" - which is the
+   country, listed beside two other European ones, and which the state name turned into a US role.
+   The US sense is still caught by everything around it: "Atlanta, Georgia" has ATLANTA, "Savannah,
+   GA" has the code, "Georgia, United States" has the country. */
 const US_STATE_NAMES = [
   'ALABAMA', 'ALASKA', 'ARIZONA', 'ARKANSAS', 'CALIFORNIA', 'COLORADO', 'CONNECTICUT', 'DELAWARE',
-  'FLORIDA', 'GEORGIA', 'HAWAII', 'IDAHO', 'ILLINOIS', 'INDIANA', 'IOWA', 'KANSAS', 'KENTUCKY',
+  'FLORIDA', 'HAWAII', 'IDAHO', 'ILLINOIS', 'INDIANA', 'IOWA', 'KANSAS', 'KENTUCKY',
   'LOUISIANA', 'MAINE', 'MARYLAND', 'MASSACHUSETTS', 'MICHIGAN', 'MINNESOTA', 'MISSISSIPPI',
   'MISSOURI', 'MONTANA', 'NEBRASKA', 'NEVADA', 'NEW HAMPSHIRE', 'NEW JERSEY', 'NEW MEXICO',
   'NEW YORK', 'NORTH CAROLINA', 'NORTH DAKOTA', 'OHIO', 'OKLAHOMA', 'OREGON', 'PENNSYLVANIA',

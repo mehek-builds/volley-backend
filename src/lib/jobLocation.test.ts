@@ -93,6 +93,19 @@ test('REAL strings from the live board that a two-letter code got wrong', () => 
   assert.equal(jobCountry('DE - Berlin'), 'non_us', 'DE is Germany here, not Delaware');
 });
 
+test('Georgia the country is not Georgia the state', () => {
+  // Real string from the live board, and the last posting that slipped through: the country,
+  // listed beside two other European ones.
+  assert.equal(
+    jobCountry('Belgrade, Belgrade, Serbia; Berlin, Berlin, Germany; Georgia'),
+    'non_us',
+  );
+  // The US sense still reads as US, from the city, the code, or the country beside it.
+  assert.equal(jobCountry('Atlanta, Georgia'), 'us');
+  assert.equal(jobCountry('Savannah, GA'), 'us');
+  assert.equal(jobCountry('Georgia, United States'), 'us');
+});
+
 test('accents do not hide a foreign city', () => {
   // Both were surfaced as "unknown" until the folding went in: "São Paulo" normalised to "S O PAULO".
   assert.equal(jobCountry('São Paulo'), 'non_us');
