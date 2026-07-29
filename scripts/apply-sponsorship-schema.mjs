@@ -21,6 +21,7 @@
 
 import pg from 'pg';
 import { readPostingSponsorship } from '../src/lib/sponsorship.ts';
+import { jobCountry } from '../src/lib/jobLocation.ts';
 import { H1B_EMPLOYERS, H1B_SOURCE } from '../src/lib/sponsorEmployers.ts';
 
 const connectionString = process.env.DATABASE_URL;
@@ -70,11 +71,12 @@ try {
   `);
   await client.query(`
     alter table monitored_jobs
-      add column if not exists sponsorship_status text not null default 'unstated'
+      add column if not exists sponsorship_status text not null default 'unstated',
+      add column if not exists job_country text not null default 'unknown'
   `);
   await client.query(`
     create index if not exists monitored_jobs_sponsorship_idx
-      on monitored_jobs (is_active, sponsorship_status)
+      on monitored_jobs (is_active, sponsorship_status, job_country)
   `);
   await client.query(`
     alter table users
@@ -202,11 +204,12 @@ try {
      a pooled serverless connection. Keyset pagination rather than OFFSET so the cost per page does
      not climb with the page number. */
   const changes = new Map();
+  const countryChanges = new Map();
   let scanned = 0;
   let cursor = '00000000-0000-0000-0000-000000000000';
   for (;;) {
     const { rows } = await client.query(
-      `select id, left(description, 20000) as description, sponsorship_status
+      `select id, left(description, 20000) as description, sponsorship_status, location, job_country
          from monitored_jobs where id > $1 order by id limit 1000`,
       [cursor],
     );
@@ -215,6 +218,8 @@ try {
     for (const row of rows) {
       const status = readPostingSponsorship(row.description);
       if (status !== row.sponsorship_status) changes.set(row.id, status);
+      const country = jobCountry(row.location);
+      if (country !== row.job_country) countryChanges.set(row.id, country);
     }
     cursor = rows[rows.length - 1].id;
   }
@@ -228,10 +233,21 @@ try {
       ]);
     }
   }
+  const byCountry = { us: [], non_us: [], unknown: [] };
+  for (const [id, country] of countryChanges) byCountry[country].push(id);
+  for (const [country, ids] of Object.entries(byCountry)) {
+    for (let index = 0; index < ids.length; index += 500) {
+      await client.query('update monitored_jobs set job_country = $1 where id = any($2::uuid[])', [
+        country,
+        ids.slice(index, index + 500),
+      ]);
+    }
+  }
+
   const summary = await client.query(
     `select sponsorship_status, count(*)::int as n from monitored_jobs where is_active group by 1 order by 2 desc`,
   );
-  console.log(`Backfilled ${changes.size} of ${scanned} postings.`);
+  console.log(`Backfilled ${changes.size} sponsorship statuses and ${countryChanges.size} job countries, of ${scanned} postings.`);
   for (const row of summary.rows) console.log(`  ${row.sponsorship_status}: ${row.n}`);
 } catch (error) {
   console.error('Backfill failed:', error instanceof Error ? error.message : String(error));

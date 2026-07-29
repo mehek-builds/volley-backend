@@ -6,7 +6,13 @@ Called by scripts/build-h1b-sponsors.mjs, which cannot read these files itself: 
 them in read-only mode, so the whole fiscal year costs a few hundred MB of I/O and no memory to
 speak of.
 
-Prints one JSON object to stdout: {"<employer name>": <certified count>}. Progress goes to stderr.
+Prints one JSON object to stdout: {"<employer name>": {"certified": N, "cities": [...], "states": [...]}}.
+Progress goes to stderr.
+
+The geography is not evidence of sponsorship. It exists so scripts/verify-sponsor-matches.mjs can
+tell two same-named companies apart: an employer that filed from Hawthorne, California and a job
+board posting roles in Hawthorne, California are almost certainly one company, and the Amsterdam
+grocer that shares a name with a US filer is not.
 
 WHAT A CERTIFIED LCA IS, and why it counts as evidence: before filing an H-1B petition an employer
 must file a Labor Condition Application naming the role, the worksite and the wage, and attest to
@@ -29,7 +35,7 @@ except ImportError:
 # H-1B's cap-exempt cousins, which say nothing about whether the employer sponsors an H-1B.
 VISA_CLASSES = {"H-1B", "H-1B1 CHILE", "H-1B1 SINGAPORE"}
 
-employers = defaultdict(int)
+employers = defaultdict(lambda: {"certified": 0, "cities": set(), "states": set()})
 for path in sys.argv[1:]:
     book = openpyxl.load_workbook(path, read_only=True)
     try:
@@ -40,10 +46,12 @@ for path in sys.argv[1:]:
             i_status = header.index("CASE_STATUS")
             i_visa = header.index("VISA_CLASS")
             i_employer = header.index("EMPLOYER_NAME")
+            i_city = header.index("EMPLOYER_CITY")
+            i_state = header.index("EMPLOYER_STATE")
         except ValueError:
             print(f"{path}: unexpected columns, DOL changed the schema", file=sys.stderr)
             sys.exit(1)
-        widest = max(i_status, i_visa, i_employer)
+        widest = max(i_status, i_visa, i_employer, i_city, i_state)
         scanned = 0
         kept = 0
         for row in rows:
@@ -63,10 +71,27 @@ for path in sys.argv[1:]:
             # the difference decides whether they appear on somebody's board at all.
             if str(row[i_status]).strip().upper() != "CERTIFIED":
                 continue
-            employers[re.sub(r"\s+", " ", str(name)).strip()] += 1
+            entry = employers[re.sub(r"\s+", " ", str(name)).strip()]
+            entry["certified"] += 1
+            if row[i_city]:
+                entry["cities"].add(str(row[i_city]).strip().upper())
+            if row[i_state]:
+                entry["states"].add(str(row[i_state]).strip().upper())
             kept += 1
         print(f"{path}: {scanned} rows, {kept} certified H-1B", file=sys.stderr)
     finally:
         book.close()
 
-json.dump(employers, sys.stdout)
+json.dump(
+    {
+        name: {
+            "certified": data["certified"],
+            # Capped: a national employer files from dozens of cities and the verifier only needs
+            # enough of them to recognise a match.
+            "cities": sorted(data["cities"])[:12],
+            "states": sorted(data["states"])[:12],
+        }
+        for name, data in employers.items()
+    },
+    sys.stdout,
+)
