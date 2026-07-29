@@ -334,3 +334,34 @@ export function verdictFor(
   if (evidence.brandInText || corroborated) return 'verified';
   return evidence.textLength < 400 ? 'weak' : 'SUSPECT';
 }
+
+
+/**
+ * DOES THE PORTAL AGREE THAT THIS BOARD IS THE COMPANY WE SAY IT IS?
+ *
+ * Greenhouse publishes `company_name` on every posting: the employer's own name for itself, set by
+ * the employer. It is the authority, and it was publishing the right answer the whole time that six
+ * of our sources were mislabelled - `sas` is Superior Alarm Systems, `bcg` is Bohen Consulting
+ * Group, `tcs` is Thornbury Community Services, `disney` is a board called "Sgt. Pepper's Lonely
+ * Hearts Club Band". Each was found by hand, weeks apart. This is what makes that automatic.
+ *
+ * MATCHING IS DELIBERATELY LOOSE, because the two names are allowed to differ in ways that do not
+ * matter: "Tripadvisor" against "TripAdvisor", "Qube Research & Technologies" against "Qube
+ * Research and Technologies", "Pure Storage" against a stale display name of "Everpure" (which is
+ * a real, verified case). A shared identifying word is enough. What it catches is the case with NO
+ * overlap at all, which is every one of the six.
+ */
+export function portalNameAgrees(ourName: string, portalName: string | null | undefined): boolean | null {
+  if (!portalName || !portalName.trim()) return null;
+  const ours = new Set([...wordSet(ourName)].filter((word) => word.length >= 3 && !NOISE.has(word)));
+  const theirs = new Set([...wordSet(portalName)].filter((word) => word.length >= 3 && !NOISE.has(word)));
+  if (ours.size === 0 || theirs.size === 0) return null;
+  for (const word of ours) {
+    for (const other of theirs) {
+      // Prefix either way, so "Yugabyte" agrees with "YugabyteDB" and "Tripadvisor" with
+      // "TripAdvisor" once case is gone.
+      if (word === other || word.startsWith(other) || other.startsWith(word)) return true;
+    }
+  }
+  return false;
+}

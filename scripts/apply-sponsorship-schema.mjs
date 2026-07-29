@@ -67,7 +67,9 @@ try {
   `);
   await client.query(`
     alter table career_page_sources
-      add column if not exists sponsor_employer_id uuid references sponsor_employers(id) on delete set null
+      add column if not exists sponsor_employer_id uuid references sponsor_employers(id) on delete set null,
+      add column if not exists portal_company_name text,
+      add column if not exists portal_name_mismatch boolean not null default false
   `);
   await client.query(`
     alter table monitored_jobs
@@ -163,7 +165,7 @@ try {
 
   /* 2. Link the boards. Matched on the normalised name, computed in JS by the same function the
      rest of the product uses, rather than re-implemented in SQL. */
-  const sources = await client.query('select id, company_name from career_page_sources');
+  const sources = await client.query('select id, company_name, portal_name_mismatch from career_page_sources');
   const byNormalized = new Map(
     (await client.query('select id, normalized_name from sponsor_employers')).rows.map((row) => [
       row.normalized_name,
@@ -173,7 +175,17 @@ try {
   const { normalizeEmployerName } = await import('../src/lib/sponsorship.ts');
   let linked = 0;
   let unlinked = 0;
+  let mismatched = 0;
   for (const source of sources.rows) {
+    /* A board whose portal name disagrees with ours is one we cannot identify, so it gets no
+       employer link regardless of what the name matching says. The poller sets this flag; the seed
+       has to respect it or the next seed would quietly restore the link the poller removed. */
+    if (source.portal_name_mismatch) {
+      await client.query('update career_page_sources set sponsor_employer_id = null where id = $1', [source.id]);
+      mismatched += 1;
+      unlinked += 1;
+      continue;
+    }
     const employerId = byNormalized.get(normalizeEmployerName(source.company_name)) ?? null;
     await client.query('update career_page_sources set sponsor_employer_id = $1 where id = $2', [
       employerId,
@@ -185,7 +197,8 @@ try {
   await client.query('commit');
   console.log(`Seeded ${employers} sponsoring employers from ${H1B_SOURCE}.`);
   if (stale.rowCount) console.log(`Removed ${stale.rowCount} employer(s) no longer in the data: ${stale.rows.map((r) => r.company_name).join(', ')}`);
-  console.log(`Linked ${linked} career page sources; ${unlinked} have no confirmed sponsorship.`);
+  console.log(`Linked ${linked} career page sources; ${unlinked} have no confirmed sponsorship`
+    + `${mismatched ? `, of which ${mismatched} are boards the portal names differently than we do` : ''}.`);
 } catch (error) {
   await client.query('rollback');
   console.error('Seeding failed:', error instanceof Error ? error.message : String(error));

@@ -558,6 +558,17 @@ export const career_page_sources = pgTable('career_page_sources', {
   // request because the join key is a normalised NAME, and normalising in SQL would mean the board
   // query carried its own second copy of normalizeEmployerName.
   sponsor_employer_id: uuid('sponsor_employer_id').references(() => sponsor_employers.id, { onDelete: 'set null' }),
+  // The company as the PORTAL names itself, recorded on every poll (Greenhouse publishes it on
+  // every job; Lever and Ashby publish none, so it stays NULL there).
+  //
+  // It exists because six sources were not the company their token suggested - `sas` is Superior
+  // Alarm Systems, `tcs` is Thornbury Community Services - and the portal was saying so the entire
+  // time. Storing it makes the disagreement visible in one query instead of a hand audit.
+  portal_company_name: text('portal_company_name'),
+  // Set when the portal's name shares no identifying word with ours. A source in this state is
+  // NEVER linked to a sponsoring employer: we do not know whose board it is, so we cannot claim
+  // anything about who sponsors on it. See portalNameAgrees in lib/sponsorIdentity.ts.
+  portal_name_mismatch: boolean('portal_name_mismatch').default(false).notNull(),
   created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 }, (t) => ({
   boardUnique: uniqueIndex('career_page_sources_ats_board_unique').on(t.ats_name, t.board_token),

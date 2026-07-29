@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { hasUsPresence, hostLabels, identifyingTokens, identityCheck, verdictFor, wordSet } from './sponsorIdentity';
+import {
+  hasUsPresence, hostLabels, identifyingTokens, identityCheck, portalNameAgrees, verdictFor, wordSet,
+} from './sponsorIdentity';
 
 /**
  * THE VERIFIER HAS TO CATCH THE ERRORS IT EXISTS TO CATCH.
@@ -298,4 +300,27 @@ test('the helpers behave', () => {
   assert.equal(hasUsPresence(['Remote, California, United States, AMER']), true);
   assert.equal(hasUsPresence(['Austin, TX']), true);
   assert.equal(hasUsPresence(['London', 'Remote - US']), true);
+});
+
+test('the portal name catches every board that was not the company we labelled it', () => {
+  /* All six real cases, with the name Greenhouse was publishing the whole time. This check makes
+     the discovery automatic instead of a hand audit weeks later. */
+  assert.equal(portalNameAgrees('sas', 'Superior Alarm Systems'), false);
+  assert.equal(portalNameAgrees('BCG', 'Bohen Consulting Group'), false);
+  assert.equal(portalNameAgrees('TCS', 'Thornbury Community Services'), false);
+  assert.equal(portalNameAgrees('Disney', "Sgt. Pepper's Lonely Hearts Club Band"), false);
+});
+
+test('...and tolerates the ways a real name legitimately differs', () => {
+  assert.equal(portalNameAgrees('TripAdvisor', 'Tripadvisor'), true);
+  assert.equal(portalNameAgrees('yugabyte', 'YugabyteDB'), true);
+  assert.equal(portalNameAgrees('Qube Research & Technologies', 'Qube Research and Technologies'), true);
+  assert.equal(portalNameAgrees('Scale AI', 'Scale'), true);
+  assert.equal(portalNameAgrees('Point72', 'Point72 Asset Management'), true);
+});
+
+test('no published name is NO OPINION, never a pass', () => {
+  // Lever and Ashby publish no company name at all. Silence must not read as agreement.
+  assert.equal(portalNameAgrees('Notion', null), null);
+  assert.equal(portalNameAgrees('Notion', ''), null);
 });
