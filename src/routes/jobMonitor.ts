@@ -8,6 +8,7 @@ import { resolveJobCountry } from '../lib/jobLocation';
 import { portalNameAgrees } from '../lib/sponsorIdentity';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { fetchSourceJobs, isIngestablePosting, POLLABLE_JOB_BOARDS, type JobSourceInput, type SupportedJobBoard } from '../lib/jobMonitor';
+import { JOB_SOURCES } from '../lib/jobSources';
 import { AUTONOMOUS_PORTAL_FAMILIES } from '../lib/portalSubmission';
 import { rankCities } from '../lib/cities';
 import { optionalAuth } from '../middleware/auth';
@@ -597,6 +598,43 @@ export async function upsertSources(sources: JobSourceInput[]) {
       await db.update(monitored_jobs).set({ is_active: false }).where(eq(monitored_jobs.source_id, rows[0].id));
     }
   }
+}
+
+/**
+ * SOURCES THAT ARE NO LONGER ON THE LIST STOP BEING ON THE BOARD.
+ *
+ * Deleting a company from src/lib/jobSources.ts did NOT remove it: upsertSources only inserts and
+ * updates, so the row survived, the cron kept polling it, and its postings kept appearing. That is
+ * how `sas` (Superior Alarm Systems) and `tcs` (Thornbury Community Services) still had 6 and 17
+ * live postings on the board hours after being removed from the list for being the wrong company.
+ *
+ * DISABLED, NOT DELETED. `enabled = false` takes the source off every board query while keeping the
+ * row, its history and its last_error, so a removal made in error is one flag away from being
+ * undone and nothing about why it happened is lost.
+ *
+ * This makes the code list genuinely canonical, which is what jobSources.ts already claimed to be:
+ * a source exists because it is in a file somebody reviewed in a pull request, and it stops
+ * existing the same way.
+ */
+export async function retireUnlistedSources(listed: JobSourceInput[]) {
+  const keep = new Set(listed.map((source) => `${source.ats_name}/${source.board_token}`));
+  const live = await db
+    .select({
+      id: career_page_sources.id,
+      company_name: career_page_sources.company_name,
+      ats_name: career_page_sources.ats_name,
+      board_token: career_page_sources.board_token,
+    })
+    .from(career_page_sources)
+    .where(eq(career_page_sources.enabled, true));
+  const retire = live.filter((source) => !keep.has(`${source.ats_name}/${source.board_token}`));
+  if (retire.length === 0) return [];
+  const ids = retire.map((source) => source.id);
+  await db.update(career_page_sources).set({ enabled: false }).where(inArray(career_page_sources.id, ids));
+  // Their postings go inactive in the same breath, or the board keeps serving them until the next
+  // full sweep of a source that is no longer being swept.
+  await db.update(monitored_jobs).set({ is_active: false }).where(inArray(monitored_jobs.source_id, ids));
+  return retire.map((source) => `${source.company_name} (${source.ats_name}/${source.board_token})`);
 }
 
 export async function pollSource(source: typeof career_page_sources.$inferSelect) {
@@ -1416,6 +1454,9 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     if (!requireOperator(request, reply)) return;
     const envSources = configuredSources();
     if (envSources.length > 0) await upsertSources(envSources);
+    /* Every run reconciles the database against the reviewed list, so a company removed in a pull
+       request stops appearing on the board without anybody remembering to go and disable it. */
+    const retired = await retireUnlistedSources(JOB_SOURCES);
     const sources = await db.select().from(career_page_sources)
       .where(eq(career_page_sources.enabled, true))
       .orderBy(sql`${career_page_sources.last_polled_at} asc nulls first`)
@@ -1450,6 +1491,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
      * prevent, one audience over. */
     const surfacedSponsorOnly = await surfacedJobCount(true);
     const payload = {
+      retired_sources: retired,
       sources: results.length,
       jobs: results.reduce((sum, result) => sum + result.jobs, 0),
       failed: results.filter((result) => !result.ok).length,
