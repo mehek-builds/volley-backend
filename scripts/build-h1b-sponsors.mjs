@@ -366,12 +366,15 @@ async function readLcaFilings(cacheDir, uscisOnly) {
     );
   }
   const index = new Map();
-  for (const [name, certified] of Object.entries(JSON.parse(result.stdout))) {
+  for (const [name, data] of Object.entries(JSON.parse(result.stdout))) {
     const key = normalizeEmployerName(name);
     if (!key) continue;
-    const entry = index.get(key) ?? { legal_names: new Set(), certified: 0 };
+    const entry = index.get(key)
+      ?? { legal_names: new Set(), certified: 0, states: new Set(), cities: new Set() };
     entry.legal_names.add(name.replace(/\s+/g, ' ').trim());
-    entry.certified += certified;
+    entry.certified += data.certified;
+    for (const city of data.cities ?? []) entry.cities.add(city);
+    for (const state of data.states ?? []) entry.states.add(state);
     index.set(key, entry);
   }
   return index;
@@ -390,6 +393,8 @@ async function readFilings(cacheDir) {
     const iContinuingApproval = col('continuing approval');
     const iInitialDenial = col('initial denial');
     const iContinuingDenial = col('continuing denial');
+    const iState = col('state');
+    const iCity = col('city');
     if (iEmployer < 0 || iInitialApproval < 0) {
       throw new Error(`USCIS ${year} CSV header changed: ${header.join('|')}`);
     }
@@ -403,8 +408,15 @@ async function readFilings(cacheDir) {
       const denials = Number(row[iInitialDenial] || 0) + Number(row[iContinuingDenial] || 0);
       const key = normalizeEmployerName(employer);
       if (!key) continue;
-      const entry = index.get(key) ?? { legal_names: new Set(), years: new Map() };
+      const entry = index.get(key) ?? { legal_names: new Set(), years: new Map(), states: new Set(), cities: new Set() };
       entry.legal_names.add(employer.replace(/\s+/g, ' ').trim());
+      /* WHERE the petition was filed from. The only fact in this data that can tell two companies
+         with the same name apart: a US filer in Delaware is not the Amsterdam grocer whose board
+         we poll under the same word. */
+      const state = (row[iState] ?? '').trim();
+      const city = (row[iCity] ?? '').trim();
+      if (state) entry.states.add(state);
+      if (city) entry.cities.add(city);
       const yearEntry = entry.years.get(year) ?? { approvals: 0, denials: 0 };
       yearEntry.approvals += approvals;
       yearEntry.denials += denials;
@@ -467,6 +479,8 @@ function build(uscis, lca, companies) {
         denials: 0,
         fiscal_years: [],
         lca_certifications: 0,
+        filing_states: [],
+        filing_cities: [],
       });
       continue;
     }
@@ -476,10 +490,14 @@ function build(uscis, lca, companies) {
        than first-wins, or the count understates a company that split its petitions. */
     const legal_names = new Set();
     const years = new Map();
+    const states = new Set();
+    const cities = new Set();
     let matchedKey = null;
     for (const [key, hit] of collect(uscis, keys, token)) {
       matchedKey = matchedKey ?? key;
       for (const name of hit.legal_names) legal_names.add(name);
+      for (const state of hit.states ?? []) states.add(state);
+      for (const city of hit.cities ?? []) cities.add(city);
       for (const [year, value] of hit.years) {
         const current = years.get(year) ?? { approvals: 0, denials: 0 };
         years.set(year, {
@@ -492,6 +510,8 @@ function build(uscis, lca, companies) {
     for (const [key, hit] of collect(lca, keys, token)) {
       matchedKey = matchedKey ?? key;
       for (const name of hit.legal_names) legal_names.add(name);
+      for (const state of hit.states ?? []) states.add(state);
+      for (const city of hit.cities ?? []) cities.add(city);
       certified += hit.certified;
     }
 
@@ -520,6 +540,10 @@ function build(uscis, lca, companies) {
       /* Certified H-1B labor condition applications across LCA_QUARTERS. An attestation, not an
          approval, which is why it is counted in its own column and named in its own evidence tier. */
       lca_certifications: certified,
+      /* Corroboration, not evidence of sponsorship: where the filer said it was. Used by
+         scripts/verify-sponsor-matches.mjs to tell a same-named company apart from ours. */
+      filing_states: [...states].sort(),
+      filing_cities: [...cities].sort().slice(0, 8),
     });
   }
   employers.sort((a, b) => a.company.localeCompare(b.company));

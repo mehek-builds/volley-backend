@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { db } from '../db/index';
 import { career_page_sources, monitored_jobs, profiles, sponsor_employers, users } from '../db/schema';
 import { normalizeEmployerName, readPostingSponsorship, sponsorOnlyBoardRequired, sponsorshipVerdict, type PostingSponsorship } from '../lib/sponsorship';
+import { jobCountry } from '../lib/jobLocation';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { fetchSourceJobs, POLLABLE_JOB_BOARDS, type JobSourceInput, type SupportedJobBoard } from '../lib/jobMonitor';
 import { AUTONOMOUS_PORTAL_FAMILIES } from '../lib/portalSubmission';
@@ -676,6 +677,7 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
              edit this sentence into and out of a live posting, and a policy that changed on their
              page while ours still said the old thing is the one error this feature cannot afford. */
           sponsorship_status: readPostingSponsorship(job.description),
+          job_country: jobCountry(job.location),
         }));
         await tx.insert(monitored_jobs).values(chunk).onConflictDoUpdate({
           target: [monitored_jobs.source_id, monitored_jobs.external_id],
@@ -693,6 +695,7 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
             last_seen_at: sql`excluded.last_seen_at`,
             is_active: sql`excluded.is_active`,
             sponsorship_status: sql`excluded.sponsorship_status`,
+            job_country: sql`excluded.job_country`,
           },
         });
       }
@@ -733,10 +736,18 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
  */
 export function sponsorOnlyPredicate() {
   return or(
+    /* The posting's own words, wherever the role is. An employer writing "visa sponsorship
+       available" on a Berlin role is talking about Germany, and it is their statement to make. */
     eq(monitored_jobs.sponsorship_status, 'offers'),
     and(
       isNotNull(career_page_sources.sponsor_employer_id),
       ne(monitored_jobs.sponsorship_status, 'refuses'),
+      /* AND THE ROLE HAS TO BE ONE AN H-1B COULD COVER. The employer-level evidence is a US
+         petition record; applying it to a Bengaluru or Tokyo posting claims something about a
+         visa regime this product knows nothing about. 'unknown' (a bare "Remote") stays in: at a
+         company whose entire filing history is American, that is not evidence of a foreign role,
+         and hiding it would cost real US openings to avoid a hypothetical. */
+      ne(monitored_jobs.job_country, 'non_us'),
     ),
   )!;
 }
