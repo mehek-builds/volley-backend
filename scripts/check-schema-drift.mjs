@@ -101,8 +101,14 @@ async function main() {
       "select table_name from information_schema.tables where table_schema = current_schema() and table_type = 'BASE TABLE'",
     );
     for (const { table_name } of liveTables) {
-      if (DRIZZLE_INTERNAL.has(table_name) || declared[table_name]) continue;
-      const { rows: cnt } = await client.query(`select count(*)::int as n from "${table_name}"`);
+      // Object.hasOwn, not `declared[table_name]`: a table named `constructor` or `toString` would
+      // otherwise hit Object.prototype, read as declared, and be skipped by the check silently.
+      if (DRIZZLE_INTERNAL.has(table_name) || Object.hasOwn(declared, table_name)) continue;
+      // Identifiers cannot be parameterised, so this one is quoted the way Postgres quotes them,
+      // doubling any embedded quote. The name comes from information_schema rather than a user,
+      // but a count that reports a number is not worth leaving an interpolation question open.
+      const quoted = `"${table_name.replace(/"/g, '""')}"`;
+      const { rows: cnt } = await client.query(`select count(*)::int as n from ${quoted}`);
       extra.push({ what: `${table_name} (whole table)`, rows: cnt[0].n });
     }
 
