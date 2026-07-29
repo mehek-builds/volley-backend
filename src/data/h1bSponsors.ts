@@ -36,6 +36,34 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
   ],
   "employers": [
     {
+      "company": "Abnormal Security",
+      "normalized": "ABNORMAL SECURITY",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "ABNORMAL SECURITY",
+      "legal_names": [
+        "ABNORMAL SECURITY CORP",
+        "ABNORMAL SECURITY CORPORATION",
+        "Abnormal Security Corporation"
+      ],
+      "approvals": 28,
+      "denials": 0,
+      "fiscal_years": [
+        2021,
+        2022,
+        2023
+      ],
+      "lca_certifications": 10,
+      "filing_states": [
+        "CA",
+        "NV"
+      ],
+      "filing_cities": [
+        "LAS VEGAS",
+        "SAN FRANCISCO"
+      ]
+    },
+    {
       "company": "Abridge",
       "normalized": "ABRIDGE",
       "sponsors": true,
@@ -423,18 +451,30 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": []
     },
     {
-      "company": "assembledhq",
-      "normalized": "ASSEMBLEDHQ",
-      "sponsors": false,
-      "evidence": null,
-      "matched_key": null,
-      "legal_names": [],
-      "approvals": 0,
+      "company": "Assembled",
+      "normalized": "ASSEMBLED",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "ASSEMBLED",
+      "legal_names": [
+        "ASSEMBLED INC",
+        "Assembled, Inc."
+      ],
+      "approvals": 3,
       "denials": 0,
-      "fiscal_years": [],
-      "lca_certifications": 0,
-      "filing_states": [],
-      "filing_cities": []
+      "fiscal_years": [
+        2021,
+        2022,
+        2023
+      ],
+      "lca_certifications": 3,
+      "filing_states": [
+        "CA"
+      ],
+      "filing_cities": [
+        "PLEASANTON",
+        "SAN FRANCISCO"
+      ]
     },
     {
       "company": "astronomer",
@@ -527,21 +567,6 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": [
         "SAN FRANCISCO"
       ]
-    },
-    {
-      "company": "BCG",
-      "normalized": "BCG",
-      "sponsors": false,
-      "evidence": null,
-      "rejected": "the greenhouse token `bcg` is Bohen Consulting Group, NOT Boston Consulting Group",
-      "matched_key": null,
-      "legal_names": [],
-      "approvals": 0,
-      "denials": 0,
-      "fiscal_years": [],
-      "lca_certifications": 0,
-      "filing_states": [],
-      "filing_cities": []
     },
     {
       "company": "betterhelp",
@@ -944,6 +969,28 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Chainguard",
+      "normalized": "CHAINGUARD",
+      "sponsors": true,
+      "evidence": "uscis_h1b",
+      "matched_key": "CHAINGUARD",
+      "legal_names": [
+        "CHAINGUARD INC"
+      ],
+      "approvals": 1,
+      "denials": 0,
+      "fiscal_years": [
+        2023
+      ],
+      "lca_certifications": 0,
+      "filing_states": [
+        "WA"
+      ],
+      "filing_cities": [
+        "KIRKLAND"
+      ]
+    },
+    {
       "company": "checkly",
       "normalized": "CHECKLY",
       "sponsors": false,
@@ -1260,7 +1307,21 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "normalized": "CRISP",
       "sponsors": false,
       "evidence": null,
-      "rejected": "the ashby token `crisp` is the Dutch grocer: all 24 postings are Amsterdam-area and in Dutch. A US \"Crisp, Inc.\" exists and normalises to the same key, which is why this is a rejection and not just a missing alias",
+      "rejected": "the ashby token `crisp` is the Dutch grocer, which really is called Crisp - the board is correctly labelled. A US \"Crisp, Inc.\" files H-1B petitions and normalises to the same key, so this is a rejection of the FILING match, not of the source",
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
+      "company": "Crusoe",
+      "normalized": "CRUSOE",
+      "sponsors": false,
+      "evidence": null,
       "matched_key": null,
       "legal_names": [],
       "approvals": 0,
@@ -1497,21 +1558,6 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": [
         "SAN FRANCISCO"
       ]
-    },
-    {
-      "company": "Disney",
-      "normalized": "DISNEY",
-      "sponsors": false,
-      "evidence": null,
-      "rejected": "the greenhouse token `disney` is a board named \"Sgt. Pepper's Lonely Hearts Club Band\" holding two test postings, not Disney",
-      "matched_key": null,
-      "legal_names": [],
-      "approvals": 0,
-      "denials": 0,
-      "fiscal_years": [],
-      "lca_certifications": 0,
-      "filing_states": [],
-      "filing_cities": []
     },
     {
       "company": "doppel",
@@ -2746,11 +2792,11 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
-      "company": "Latch",
-      "normalized": "LATCH",
+      "company": "LatchBio",
+      "normalized": "LATCHBIO",
       "sponsors": false,
       "evidence": null,
-      "rejected": "the lever token `latch` is LatchBio (\"software in biology\", Mission Bay), NOT Latch Systems the smart-lock company",
+      "rejected": "LatchBio is correctly labelled (the source was renamed from \"Latch\" on 2026-07-29). LATCH SYSTEMS INC is the New York smart-lock company, a different business, and its petitions must not be credited here",
       "matched_key": null,
       "legal_names": [],
       "approvals": 0,
@@ -3034,6 +3080,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": [
         "DALLAS"
       ]
+    },
+    {
+      "company": "Mercor",
+      "normalized": "MERCOR",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "Mercury",
@@ -3424,6 +3484,31 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "lca_certifications": 0,
       "filing_states": [],
       "filing_cities": []
+    },
+    {
+      "company": "OpenAI",
+      "normalized": "OPENAI",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "OPENAI",
+      "legal_names": [
+        "OPENAI INC",
+        "OPENAI LP",
+        "OpenAI, L.L.C."
+      ],
+      "approvals": 27,
+      "denials": 0,
+      "fiscal_years": [
+        2021,
+        2022
+      ],
+      "lca_certifications": 1,
+      "filing_states": [
+        "CA"
+      ],
+      "filing_cities": [
+        "SAN FRANCISCO"
+      ]
     },
     {
       "company": "OpenEvidence",
@@ -4368,21 +4453,6 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": []
     },
     {
-      "company": "sas",
-      "normalized": "SAS",
-      "sponsors": false,
-      "evidence": null,
-      "rejected": "the greenhouse token `sas` is Superior Alarm Systems, a security-systems integrator, NOT SAS Institute",
-      "matched_key": null,
-      "legal_names": [],
-      "approvals": 0,
-      "denials": 0,
-      "fiscal_years": [],
-      "lca_certifications": 0,
-      "filing_states": [],
-      "filing_cities": []
-    },
-    {
       "company": "Scale AI",
       "normalized": "SCALE AI",
       "sponsors": true,
@@ -4409,8 +4479,8 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
-      "company": "science37",
-      "normalized": "SCIENCE37",
+      "company": "Science 37",
+      "normalized": "SCIENCE 37",
       "sponsors": true,
       "evidence": "uscis_h1b",
       "matched_key": "SCIENCE 37",
@@ -4480,6 +4550,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": [
         "SAN FRANCISCO"
       ]
+    },
+    {
+      "company": "Sierra",
+      "normalized": "SIERRA",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "sifflet",
@@ -4937,21 +5021,6 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": [
         "NEW YORK"
       ]
-    },
-    {
-      "company": "TCS",
-      "normalized": "TCS",
-      "sponsors": false,
-      "evidence": null,
-      "rejected": "the greenhouse token `tcs` is Thornbury Community Services (UK care work), NOT Tata Consultancy Services",
-      "matched_key": null,
-      "legal_names": [],
-      "approvals": 0,
-      "denials": 0,
-      "fiscal_years": [],
-      "lca_certifications": 0,
-      "filing_states": [],
-      "filing_cities": []
     },
     {
       "company": "tebra",

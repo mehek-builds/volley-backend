@@ -65,6 +65,7 @@
     "db:sponsorship": "node --import tsx scripts/apply-sponsorship-schema.mjs",
     "qa:sponsor-board": "node --import tsx scripts/qa-sponsor-board.mts",
     "sponsors:verify": "node --import tsx scripts/verify-sponsor-matches.mjs",
+    "sources:verify": "node --import tsx scripts/verify-job-sources.mjs",
     "sponsors:build": "node scripts/build-h1b-sponsors.mjs",
     "sponsors:check": "node scripts/build-h1b-sponsors.mjs --check",
     "db:pipeline-stage": "node scripts/apply-pipeline-stage-schema.mjs",

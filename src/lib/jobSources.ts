@@ -23,6 +23,25 @@ import type { JobSourceInput } from './jobMonitor';
 
 type Entry = [company: string, ats: JobSourceInput['ats_name'], token: string];
 
+/* FOUR TOKENS WERE REMOVED ON 2026-07-29, and this note is here so nobody adds them back.
+ *
+ *   sas    -> the board is Superior Alarm Systems, a security-systems integrator
+ *   bcg    -> Bohen Consulting Group, four postings, two of them called "Test Job Live"
+ *   tcs    -> Thornbury Community Services, UK care work
+ *   disney -> a board named "Sgt. Pepper's Lonely Hearts Club Band" with two test postings
+ *
+ * The companies somebody meant - SAS Institute, Boston Consulting Group, Tata Consultancy, Disney -
+ * do not publish on Greenhouse, Lever or Ashby at all, which is exactly why a guessed token landed
+ * on someone else. Checked 2026-07-29: sasinstitute, bostonconsultinggroup, bcgx,
+ * tataconsultancyservices, waltdisney and disneyparks are all 404.
+ *
+ * Three more were RENAMED rather than removed, because the board is a real company and only our
+ * label was wrong: `latch` is LatchBio, `assembledhq` is Assembled, and science37 writes itself
+ * "Science 37" with a space.
+ *
+ * `npm run sources:verify` is what catches this now. It asks each board who it is - Greenhouse
+ * publishes `company_name` on every posting - rather than the old check's "does the token return
+ * postings?", which every wrong token also answers yes to. */
 const ENTRIES: Entry[] = [
   // Consumer + marketplaces
   ['Airbnb', 'greenhouse', 'airbnb'],
@@ -125,10 +144,7 @@ const ENTRIES: Entry[] = [
   ['Spotify', 'lever', 'spotify'],
   ['Sophos', 'lever', 'sophos'],
   ['TripAdvisor', 'greenhouse', 'tripadvisor'],
-  ['TCS', 'greenhouse', 'tcs'],
   ['Take-Two', 'greenhouse', 'taketwo'],
-  ['BCG', 'greenhouse', 'bcg'],
-  ['Disney', 'greenhouse', 'disney'],
   // Mid-size and scale-ups (80 boards, ~5923 postings)
   ['Databricks', 'greenhouse', 'databricks'],
   ['Rocket Lab', 'greenhouse', 'rocketlab'],
@@ -156,7 +172,7 @@ const ENTRIES: Entry[] = [
   ['fireblocks', 'greenhouse', 'fireblocks'],
   ['Peloton', 'greenhouse', 'peloton'],
   ['Fastly', 'greenhouse', 'fastly'],
-  ['science37', 'greenhouse', 'science37'],
+  ['Science 37', 'greenhouse', 'science37'],
   ['truveta', 'greenhouse', 'truveta'],
   ['singlestore', 'greenhouse', 'singlestore'],
   ['bitgo', 'greenhouse', 'bitgo'],
@@ -236,7 +252,7 @@ const ENTRIES: Entry[] = [
   ['crisp', 'ashby', 'crisp'],
   ['Braintrust', 'ashby', 'braintrust'],
   ['socket', 'ashby', 'socket'],
-  ['assembledhq', 'ashby', 'assembledhq'],
+  ['Assembled', 'ashby', 'assembledhq'],
   ['Alloy', 'greenhouse', 'alloy'],
   ['Column', 'ashby', 'column'],
   ['Anyscale', 'ashby', 'anyscale'],
@@ -280,7 +296,7 @@ const ENTRIES: Entry[] = [
   ['datafold', 'ashby', 'datafold'],
   ['checkly', 'ashby', 'checkly'],
   ['inkeep', 'ashby', 'inkeep'],
-  ['Latch', 'lever', 'latch'],
+  ['LatchBio', 'lever', 'latch'],
   ['Zed', 'ashby', 'zed'],
   ['Depot', 'ashby', 'depot'],
   ['evervault', 'ashby', 'evervault'],
@@ -306,7 +322,16 @@ const ENTRIES: Entry[] = [
   ['lightmatter', 'greenhouse', 'lightmatter'],
   ['dataiku', 'greenhouse', 'dataiku'],
   ['groww', 'greenhouse', 'groww'],
-  ['sas', 'greenhouse', 'sas'],
+
+  /* ADDED 2026-07-29, and every one was probed BEFORE it was written down - which is the workflow
+     the new gate exists to make normal. Two more candidates were dropped in the same pass:
+     lever/sardine and lever/attentive both answer with something that is not a postings array. */
+  ['Chainguard', 'greenhouse', 'chainguard'],
+  ['Abnormal Security', 'greenhouse', 'abnormalsecurity'],
+  ['OpenAI', 'ashby', 'openai'],
+  ['Sierra', 'ashby', 'sierra'],
+  ['Mercor', 'ashby', 'mercor'],
+  ['Crusoe', 'ashby', 'crusoe'],
 ];
 
 function careerUrl(ats: JobSourceInput['ats_name'], token: string): string {

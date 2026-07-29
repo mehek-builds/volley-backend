@@ -78,3 +78,27 @@ jobs:
       - run: npm ci
       - name: Check company-logo coverage against the live board
         run: npm run logo:check
+
+  # DOES EVERY BOARD BELONG TO THE COMPANY WE CALL IT?
+  #
+  # A job source is three hand-written strings, and the only gate that ever ran on a new one asked
+  # "does this token return postings?" - a question every wrong token also answers yes to. Four
+  # boards therefore sat on the live list under a name that was not theirs: `sas` is Superior Alarm
+  # Systems, `bcg` is Bohen Consulting Group, `tcs` is Thornbury Community Services, `disney` is a
+  # board called "Sgt. Pepper's Lonely Hearts Club Band". Each was found by hand, weeks apart, by
+  # somebody chasing a different bug.
+  #
+  # Greenhouse publishes `company_name` on every posting, so the right answer was available on every
+  # poll in between. This asks for it, on every source, at pull-request time. Like logo-coverage it
+  # measures against the LIVE boards, because that is the only place the truth is.
+  source-identity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Check every job source against the company its portal names
+        run: npm run sources:verify
