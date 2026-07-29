@@ -254,11 +254,15 @@ const TITLE_TYPES: [RegExp, string][] = [
 ];
 
 /**
- * The employment type a Greenhouse title states outright, or undefined.
+ * The employment type a title states outright, or undefined.
  *
  * undefined is the common answer and the correct one: it means the posting did not say, and the
  * tile shows nothing. Never returns 'Full-time' — see the note above for why that would be a
  * fabrication rather than a default.
+ *
+ * HALF OF THE RULE. Exported for its own unit tests, but normalizers must call
+ * resolveEmploymentType instead: this function alone knows nothing about the employer's field, and a
+ * caller that used it directly on Lever or Ashby would throw that field away.
  */
 export function employmentTypeFromTitle(title: string): string | undefined {
   for (const [pattern, type] of TITLE_TYPES) {
@@ -289,6 +293,10 @@ const TYPE_SYNONYMS: [RegExp, string][] = [
  * field, so it is a fact about the posting even when this list has not seen it before, and a board
  * that quietly discards employer statements it does not recognize is how a field goes stale
  * without anyone noticing.
+ *
+ * THE OTHER HALF OF THE RULE. Exported for its own unit tests, but normalizers must call
+ * resolveEmploymentType instead: this function trusts the field unconditionally, which is exactly
+ * the behaviour that put "ML Research Intern" on the board as Full-time.
  */
 export function normalizeEmploymentType(value: string | undefined): string | undefined {
   const raw = value?.trim();
