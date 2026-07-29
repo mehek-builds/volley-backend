@@ -51,6 +51,7 @@ try {
       evidence_source text not null,
       approvals integer not null default 0,
       denials integer not null default 0,
+      lca_certifications integer not null default 0,
       fiscal_years jsonb not null default '[]'::jsonb,
       verified_at timestamptz not null default now()
     )
@@ -58,6 +59,10 @@ try {
   await client.query(`
     create unique index if not exists sponsor_employers_normalized_unique
       on sponsor_employers (normalized_name)
+  `);
+  /* For a table that already exists from the first run of this script. */
+  await client.query(`
+    alter table sponsor_employers add column if not exists lca_certifications integer not null default 0
   `);
   await client.query(`
     alter table career_page_sources
@@ -105,8 +110,8 @@ try {
     if (!employer.sponsors) continue;
     await client.query(
       `insert into sponsor_employers
-         (normalized_name, company_name, legal_names, evidence_source, approvals, denials, fiscal_years, verified_at)
-       values ($1, $2, $3::jsonb, $4, $5, $6, $7::jsonb, now())
+         (normalized_name, company_name, legal_names, evidence_source, approvals, denials, fiscal_years, lca_certifications, verified_at)
+       values ($1, $2, $3::jsonb, $4, $5, $6, $7::jsonb, $8, now())
        on conflict (normalized_name) do update set
          company_name = excluded.company_name,
          legal_names = excluded.legal_names,
@@ -114,15 +119,17 @@ try {
          approvals = excluded.approvals,
          denials = excluded.denials,
          fiscal_years = excluded.fiscal_years,
+         lca_certifications = excluded.lca_certifications,
          verified_at = now()`,
       [
         employer.normalized,
         employer.company,
         JSON.stringify(employer.legal_names),
-        'uscis_h1b',
+        employer.evidence,
         employer.approvals,
         employer.denials,
         JSON.stringify(employer.fiscal_years),
+        employer.lca_certifications,
       ],
     );
     employers += 1;

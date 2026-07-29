@@ -490,10 +490,18 @@ export const sponsor_employers = pgTable('sponsor_employers', {
   company_name: text('company_name').notNull(),
   // The employer's legal names exactly as filed. The audit trail for a wrong match.
   legal_names: jsonb('legal_names').$type<string[]>().notNull(),
-  evidence_source: text('evidence_source').notNull(), // 'uscis_h1b'
+  // 'uscis_h1b' (an approved petition), 'dol_lca' (a certified labor condition application), or
+  // 'both'. Two different claims, so the column records which one this row rests on rather than
+  // flattening them: an approval means somebody actually got a visa, a certification means the
+  // employer filed and attested. See SponsorEvidenceSource in lib/sponsorEmployers.ts.
+  evidence_source: text('evidence_source').notNull(),
   approvals: integer('approvals').default(0).notNull(),
   denials: integer('denials').default(0).notNull(),
   fiscal_years: jsonb('fiscal_years').$type<number[]>().notNull(),
+  // Certified H-1B labor condition applications. The current half of the evidence: USCIS has
+  // published nothing past FY2023, so every company founded since is confirmed by this or not
+  // at all.
+  lca_certifications: integer('lca_certifications').default(0).notNull(),
   verified_at: timestamp('verified_at', { withTimezone: true }).defaultNow().notNull(),
 }, (t) => ({
   normalizedUnique: uniqueIndex('sponsor_employers_normalized_unique').on(t.normalized_name),

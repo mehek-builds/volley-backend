@@ -2,14 +2,32 @@
 /**
  * BUILD THE SPONSORING-EMPLOYER DATABASE FROM REAL H-1B FILINGS.
  *
- * Source: the USCIS H-1B Employer Data Hub, which publishes one CSV per fiscal year listing every
- * employer that filed an H-1B petition, with approvals and denials. It is the government's own
- * record of who has actually sponsored somebody, which is the only employer-level evidence Litos
- * accepts (see src/lib/sponsorship.ts for why, and for the posting-level evidence that outranks it).
+ * TWO GOVERNMENT SOURCES, counted separately because they say different things.
  *
- *   node scripts/build-h1b-sponsors.mjs              # download the fiscal years and rebuild
- *   node scripts/build-h1b-sponsors.mjs --cache-dir DIR   # reuse CSVs already downloaded there
+ *   1. USCIS H-1B Employer Data Hub (one CSV per fiscal year, FY2021-2023): employers whose H-1B
+ *      petitions were APPROVED. The strongest employer-level evidence there is - somebody actually
+ *      got a visa - and the most stale, because USCIS has published nothing past FY2023.
+ *
+ *   2. DOL LCA disclosure data (one .xlsx per quarter, FY2025): CERTIFIED labor condition
+ *      applications. Before filing a petition an employer must name the role, the worksite and the
+ *      wage and attest to paying it; DOL certifying that is the attestation on the record. Weaker
+ *      than an approval, and two years more current, which is what makes it worth having: the whole
+ *      class of companies founded since 2022 sponsors people and appears nowhere in the USCIS file.
+ *      Added 2026-07-29 after 67 of 121 unconfirmed employers turned out to have nothing in USCIS
+ *      and real filings here.
+ *
+ * Both count as confirmed. Which one confirmed each employer is recorded, because "an approved
+ * petition" and "a certified application" are not the same claim and the product has to be able to
+ * say which it has.
+ *
+ *   node scripts/build-h1b-sponsors.mjs              # download both sources and rebuild
+ *   node scripts/build-h1b-sponsors.mjs --cache-dir DIR   # reuse files already downloaded there
+ *   node scripts/build-h1b-sponsors.mjs --uscis-only  # skip the DOL half (no python3/openpyxl)
  *   node scripts/build-h1b-sponsors.mjs --check      # rebuild in memory, fail if the file is stale
+ *
+ * The DOL half needs python3 with openpyxl (scripts/lca-employers.py streams the spreadsheets, which
+ * node cannot do without a new dependency). Without it, pass --uscis-only and accept the smaller
+ * answer rather than silently shipping one.
  *
  * WHAT IT WRITES: src/data/h1bSponsors.json - one entry FOR EVERY COMPANY ON THE LITOS BOARD,
  * including the ones with no filings, which carry `sponsors: false` and are listed anyway.
@@ -21,14 +39,16 @@
  * removal visible in a pull request, and lets a test assert board ⊆ file so that adding a job source
  * without re-running this script fails loudly instead of quietly surfacing an unchecked employer.
  *
- * NOT USED: the DOL LCA disclosure data (dol.gov, one 140MB xlsx per quarter). It is more current -
- * an LCA is filed before the petition - and it is the obvious second source when this needs one.
- * It was left out because the marginal employer it would add is one that filed an LCA and has not
- * yet had a petition approved, which is exactly the case where "confirmed" would be overclaiming.
+ * MATCHING is exact on the normalised name, plus two rules that are safe enough to automate:
+ * a d/b/a phrase ("FORMAGRID INC D/B/A AIRTABLE" is Airtable, and says so), and the alias list
+ * below, where every entry is a human decision visible in a diff. Nothing fuzzier, because a false
+ * match tells a job seeker their visa status is covered by a company that has never filed.
  */
 
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -47,6 +67,13 @@ const OUT_FILE = join(HERE, '..', 'src', 'data', 'h1bSponsors.ts');
 const FISCAL_YEARS = [2021, 2022, 2023];
 const SOURCE_URL = (year) =>
   `https://www.uscis.gov/sites/default/files/document/data/h1b_datahubexport-${year}.csv`;
+
+/* The most recent complete fiscal year DOL has published. Four quarters rather than one: a company
+   that sponsors a handful of people a year files a handful of LCAs a year, and a single quarter
+   misses most of them. FY2026 files do not exist yet. */
+const LCA_QUARTERS = ['FY2025_Q1', 'FY2025_Q2', 'FY2025_Q3', 'FY2025_Q4'];
+const LCA_URL = (quarter) =>
+  `https://www.dol.gov/sites/dolgov/files/ETA/oflc/pdfs/LCA_Disclosure_Data_${quarter}.xlsx`;
 
 /* Legal names that no mechanical rule reconciles with the brand on the job board, resolved by hand.
  * Every entry is a human decision and belongs in a diff, which is the entire reason this list is
@@ -114,19 +141,99 @@ const ALIASES = {
   'Take-Two': ['TAKE TWO INTERACTIVE SOFTWARE INC'],
   TCS: ['TATA CONSULTANCY SVCS LTD'],
   Disney: ['DISNEY FINANCIAL SVCS LLC', 'DISNEY HUMAN RESOURCES SERVICES CO LLC'],
-  /* DELIBERATELY NOT ALIASED, and each was looked up and rejected rather than missed:
-     "Lucid" (LUCID GROUP USA INC is the carmaker, LUCID CONSULTING LLC a third company; our board's
-     Lucid is the diagramming tool), "lattice" (LATTICE SEMICONDUCTOR CORP is unrelated to the HR
-     platform), and "Linear" (LINEAR LABS INC makes motors). All three stay unconfirmed. */
-  /* Deliberately NOT aliased to "LINEAR LABS INC", which is a motor manufacturer, not the issue
-     tracker on our board. Linear has no petition in this window and stays unconfirmed. */
+  /* Added 2026-07-29, after Mehek pointed out that unconfirmed employers were far more likely to
+     be name mismatches than genuine non-sponsors. She was right: 54 of the 121 had filings under a
+     legal name or a d/b/a nothing mechanical would reach. Every one below was read out of the raw
+     USCIS or DOL data, and each was checked against the BOARD TOKEN, not the display name - that
+     is what caught the Lucid mistake in the line this comment replaced. */
+  /* `lucidmotors` is the board token. Lucid IS the carmaker, and the previous version of this file
+     rejected LUCID USA INC on the assumption it was the diagramming tool. 736 approvals and 141
+     certified LCAs, wrongly discarded. */
+  Lucid: ['LUCID USA INC', 'LUCID GROUP USA INC'],
+  Airtable: ['FORMAGRID INC D/B/A AIRTABLE', 'FORMAGRID INC DBA AIRTABLE'],
+  Abridge: ['ABRIDGE AI INC'],
+  Akuna: ['AKUNA CAPITAL LLC'],
+  Alloy: ['FIRST MILE GROUP INC DBA ALLOY'],
+  aptoslabs: ['MATONEE INC D/B/A APTOS LABS'],
+  bishopfox: ['STACH AND LIU LLC DBA BISHOP FOX'],
+  Blend: ['BLEND LABS INC'],
+  btgpactual: ['BTG PACTUAL US CAPITAL LLC'],
+  cleo: ['CLEO AI INC'],
+  cockroachlabs: ['COCKROACH LABS INC'],
+  cresta: ['CRESTA INTELLIGENCE INC'],
+  elationhealth: ['ELATION HEALTH INC'],
+  freenome: ['FREENOME HOLDINGS INC'],
+  Ginkgo: ['GINKGO BIOWORKS INC'],
+  honor: ['HONOR TECHNOLOGY INC', 'HONOR TECH INC'],
+  imply: ['IMPLY DATA INC'],
+  komodohealth: ['KOMODO HEALTH INC'],
+  Latch: ['LATCH SYSTEMS INC'],
+  /* The HR platform files as Degree Inc. NOT "LATTICE SEMICONDUCTOR CORPORATION", which is a chip
+     company and outweighs it three to one in the data. */
+  lattice: ['DEGREE INC D/B/A LATTICE'],
+  Merge: ['MERGE API INC'],
+  modernhealth: ['MODERN LIFE INC DBA MODERN HEALTH'],
+  omadahealth: ['OMADA HEALTH INC'],
+  onemedical: ['ONE MEDICAL GROUP INC'],
+  phonepe: ['PHONEPE PRIVATE LTD'],
+  Pinecone: ['PINECONE SYSTEMS INC'],
+  ripple: ['RIPPLE LABS INC'],
+  rutter: ['LANGAPI COMPANY D/B/A RUTTER', 'LANGAPI COMPANY D B A RUTTER'],
+  sas: ['SAS INSTITUTE INC'],
+  science37: ['SCIENCE 37 INC'],
+  starburst: ['STARBURST DATA INC'],
+  suki: ['SUKI AI INC'],
+  tebra: ['TEBRA TECHNOLOGIES INC'],
+  tenstorrent: ['TENSTORRENT USA INC'],
+  /* Only in the DOL data: these companies are too young to appear in USCIS FY2021-2023, which is
+     the entire reason the second source was added. */
+  decagon: ['DECAGON AI INC'],
+  LangChain: ['LANGCHAIN INC'],
+  ElevenLabs: ['ELEVEN LABS INC'],
+  Perplexity: ['PERPLEXITY AI INC'],
+  'Physical Intelligence': ['PHYSICAL INTELLIGENCE PI INC'],
+  Poolside: ['POOLSIDE INC'],
+  'Reflection AI': ['REFLECTION AI INC'],
+  Quadrature: ['QUADRATURE US INC'],
+  Suno: ['SUNO INC'],
+  semgrep: ['SEMGREP INC'],
+  doppel: ['DOPPEL INC'],
+  Harvey: ['HARVEY AI CORPORATION'],
+  Braintrust: ['BRAINTRUST DATA INC'],
+  Fireworks: ['FIREWORKS AI INC'],
+  crisp: ['CRISP INC'],
+  /* Found on a second pass through the full legal names, after the first sweep left them out:
+     each files under a name that shares no token with the brand we display. */
+  BCG: ['THE BOSTON CONSULTING GROUP INC', 'BOSTON CONSULTING GROUP INC'],
+  'Jump Trading': ['JUMP OPERATIONS LLC'],
+  'Man Group': ['MAN INVESTMENTS USA HOLDINGS INC'],
+  /* CircleCI is CIRCLE INTERNET SERVICES. NOT "CIRCLE INTERNET FINANCIAL", which is Circle the
+     stablecoin company and files under a near-identical name - the closest call in this whole
+     list, and the reason the automated matcher is not allowed to guess at prefixes. */
+  circleci: ['CIRCLE INTERNET SERVICES INC'],
+
+  /* DELIBERATELY NOT ALIASED. Each was looked up in both sources and REJECTED, and the note is here
+     so nobody spends the afternoon re-deriving it:
+       Linear      LINEAR LABS INC makes motors; MAXLINEAR is a chip company.
+       Coder       CODER LOGICS INC is a Texas staffing firm, not coder.com.
+       Column      COLUMN TECHNOLOGIES INC is an Illinois consultancy, not the bank.
+       Depot       every match is Home Depot or Office Depot.
+       Remote      REMOTE TIGER INC is a Maryland staffing firm, not remote.com.
+       Unit        AMERICAN UNIT INC is unrelated; the rest are school districts.
+       Railway     freight railroads.
+       stone       our board's Stone is the Brazilian fintech; the matches are masonry and asset
+                   management.
+       found, incident, socket, opal, orca, gamma, Blacksmith, Namespace, GitLab, Man Group,
+       Jump Trading, Monzo, Trustly, groww, quintoandar, Rocket Lab and the rest of the
+       still-unconfirmed list: nothing in either source under any name we could tie to them. */
   Betterment: ['BETTERMENT HOLDINGS INC'],
 };
 
 function parseArgs(argv) {
-  const args = { check: false, cacheDir: null };
+  const args = { check: false, cacheDir: null, uscisOnly: false };
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === '--check') args.check = true;
+    else if (argv[i] === '--uscis-only') args.uscisOnly = true;
     else if (argv[i] === '--cache-dir') args.cacheDir = argv[++i];
   }
   return args;
@@ -168,6 +275,21 @@ function normalizeEmployerName(name) {
     .trim();
 }
 
+/* A d/b/a in the legal name IS the company naming itself.
+ *
+ * "FORMAGRID INC D/B/A AIRTABLE" is Airtable saying so on a federal form, and no normalisation
+ * rule reaches it from the word "Airtable". This is the one fuzzy match safe enough to automate,
+ * because the employer wrote the brand into the filing themselves. Everything looser stays in the
+ * hand-written alias list.
+ *
+ * Anchored at the END of the name, so "MERCY CLINICS INC D/B/A MERCYONE MEDICAL GROUP CENTRAL
+ * IOWA" does not match "One Medical": the trading name has to BE the brand, not merely contain it.
+ */
+function dbaMatches(normalizedLegalName, token) {
+  const match = normalizedLegalName.match(/ (?:D B A|DBA|FKA|F K A) (.+)$/);
+  return match ? match[1].trim() === token : false;
+}
+
 async function loadYear(year, cacheDir) {
   const cached = cacheDir ? join(cacheDir, `h1b_datahubexport-${year}.csv`) : null;
   if (cached && existsSync(cached)) return readFileSync(cached, 'utf8');
@@ -179,6 +301,50 @@ async function loadYear(year, cacheDir) {
     writeFileSync(cached, text);
   }
   return text;
+}
+
+/**
+ * Certified H-1B LCAs per employer, via python (see scripts/lca-employers.py for why).
+ *
+ * Returns an empty map under --uscis-only. It never returns an empty map SILENTLY on failure:
+ * a missing second source shrinks the sponsor board, and shrinking it without saying so is the
+ * failure this whole feature exists to avoid.
+ */
+async function readLcaFilings(cacheDir, uscisOnly) {
+  if (uscisOnly) return new Map();
+  const files = [];
+  for (const quarter of LCA_QUARTERS) {
+    const path = join(cacheDir ?? mkdtempSync(join(tmpdir(), 'lca-')), `LCA_Disclosure_Data_${quarter}.xlsx`);
+    if (!existsSync(path)) {
+      process.stderr.write(`Downloading ${quarter} (~100MB)...\n`);
+      const response = await fetch(LCA_URL(quarter), { signal: AbortSignal.timeout(900_000) });
+      if (!response.ok) throw new Error(`DOL ${quarter} returned HTTP ${response.status}`);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, Buffer.from(await response.arrayBuffer()));
+    }
+    files.push(path);
+  }
+  const result = spawnSync('python3', [join(HERE, 'lca-employers.py'), ...files], {
+    encoding: 'utf8',
+    maxBuffer: 256 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'inherit'],
+  });
+  if (result.status !== 0) {
+    throw new Error(
+      'Reading the DOL LCA files failed. Install python3 + openpyxl (pip3 install openpyxl), '
+      + 'or re-run with --uscis-only and accept the smaller answer.',
+    );
+  }
+  const index = new Map();
+  for (const [name, certified] of Object.entries(JSON.parse(result.stdout))) {
+    const key = normalizeEmployerName(name);
+    if (!key) continue;
+    const entry = index.get(key) ?? { legal_names: new Set(), certified: 0 };
+    entry.legal_names.add(name.replace(/\s+/g, ' ').trim());
+    entry.certified += certified;
+    index.set(key, entry);
+  }
+  return index;
 }
 
 /** normalized employer name -> { legal names seen, approvals and denials per fiscal year }. */
@@ -231,44 +397,75 @@ function boardCompanies() {
   });
 }
 
-function build(filings, companies) {
+/** Every filing entity that belongs to one board company, from one source. */
+function collect(index, keys, token) {
+  const hits = [];
+  for (const key of keys) {
+    const hit = index.get(key);
+    if (hit) hits.push([key, hit]);
+  }
+  /* The d/b/a sweep. Only worth the scan when nothing matched by name, and it looks at the whole
+     index because that is where "FORMAGRID INC D/B/A AIRTABLE" lives - under F, not under A. */
+  if (hits.length === 0) {
+    for (const [key, hit] of index) {
+      if (dbaMatches(key, token)) hits.push([key, hit]);
+    }
+  }
+  return hits;
+}
+
+function build(uscis, lca, companies) {
   const employers = [];
   for (const company of companies) {
-    const keys = [normalizeEmployerName(company), ...(ALIASES[company] ?? []).map(normalizeEmployerName)];
-    let matched = null;
+    const token = normalizeEmployerName(company);
+    const keys = [token, ...(ALIASES[company] ?? []).map(normalizeEmployerName)];
+
+    /* Aliases can name several filing entities for one employer (IMC files as two). Merged rather
+       than first-wins, or the count understates a company that split its petitions. */
+    const legal_names = new Set();
+    const years = new Map();
     let matchedKey = null;
-    for (const key of keys) {
-      const hit = filings.get(key);
-      if (hit) {
-        /* Aliases can name several filing entities for one employer (IMC files as two). Merge them
-           rather than taking the first, or the approval count understates a company that split its
-           petitions across entities. */
-        if (!matched) { matched = { legal_names: new Set(), years: new Map() }; matchedKey = key; }
-        for (const name of hit.legal_names) matched.legal_names.add(name);
-        for (const [year, value] of hit.years) {
-          const current = matched.years.get(year) ?? { approvals: 0, denials: 0 };
-          matched.years.set(year, {
-            approvals: current.approvals + value.approvals,
-            denials: current.denials + value.denials,
-          });
-        }
+    for (const [key, hit] of collect(uscis, keys, token)) {
+      matchedKey = matchedKey ?? key;
+      for (const name of hit.legal_names) legal_names.add(name);
+      for (const [year, value] of hit.years) {
+        const current = years.get(year) ?? { approvals: 0, denials: 0 };
+        years.set(year, {
+          approvals: current.approvals + value.approvals,
+          denials: current.denials + value.denials,
+        });
       }
     }
-    const years = matched ? [...matched.years.entries()].sort((a, b) => a[0] - b[0]) : [];
-    const approvals = years.reduce((sum, [, v]) => sum + v.approvals, 0);
+    let certified = 0;
+    for (const [key, hit] of collect(lca, keys, token)) {
+      matchedKey = matchedKey ?? key;
+      for (const name of hit.legal_names) legal_names.add(name);
+      certified += hit.certified;
+    }
+
+    const ordered = [...years.entries()].sort((a, b) => a[0] - b[0]);
+    const approvals = ordered.reduce((sum, [, v]) => sum + v.approvals, 0);
+    /* THE BAR IS ONE FILING, from either source, and it is deliberately not a volume threshold.
+       A company that sponsored one person has a sponsorship process; picking a number above one
+       would be us inventing a policy the data does not contain. Denials never disqualify - a denied
+       petition is still a company that files them. */
+    const evidence = approvals > 0 && certified > 0 ? 'both'
+      : approvals > 0 ? 'uscis_h1b'
+        : certified > 0 ? 'dol_lca'
+          : null;
     employers.push({
       company,
-      normalized: normalizeEmployerName(company),
-      /* The bar is one approved petition across the window. Not a threshold on volume: a company
-         that sponsored one person has a sponsorship process, and picking a number above one would
-         be us inventing a policy the data does not contain. Denials are recorded but never
-         disqualify - a denied petition is still a company that filed one. */
-      sponsors: approvals > 0,
-      matched_key: matched ? matchedKey : null,
-      legal_names: matched ? [...matched.legal_names].sort() : [],
+      normalized: token,
+      sponsors: evidence !== null,
+      evidence,
+      matched_key: evidence ? matchedKey : null,
+      legal_names: evidence ? [...legal_names].sort() : [],
       approvals,
-      denials: years.reduce((sum, [, v]) => sum + v.denials, 0),
-      fiscal_years: years.filter(([, v]) => v.approvals > 0).map(([year]) => year),
+      denials: ordered.reduce((sum, [, v]) => sum + v.denials, 0),
+      fiscal_years: ordered.filter(([, v]) => v.approvals > 0).map(([year]) => year),
+      /* Certified H-1B labor condition applications across LCA_QUARTERS. An attestation, not an
+         approval, which is why it is counted in its own column and named in its own evidence tier. */
+      lca_certifications: certified,
     });
   }
   employers.sort((a, b) => a.company.localeCompare(b.company));
@@ -276,16 +473,21 @@ function build(filings, companies) {
     source: 'USCIS H-1B Employer Data Hub',
     source_urls: FISCAL_YEARS.map(SOURCE_URL),
     fiscal_years: FISCAL_YEARS,
+    lca_source: 'DOL H-1B Labor Condition Applications',
+    lca_source_urls: LCA_QUARTERS.map(LCA_URL),
+    lca_quarters: LCA_QUARTERS,
     employers,
   };
 }
 
 const args = parseArgs(process.argv.slice(2));
 const filings = await readFilings(args.cacheDir);
-const built = build(filings, boardCompanies());
+const lcaFilings = await readLcaFilings(args.cacheDir, args.uscisOnly);
+const built = build(filings, lcaFilings, boardCompanies());
 const json = `/* GENERATED FILE - DO NOT EDIT BY HAND.
  *
- * Written by scripts/build-h1b-sponsors.mjs from the USCIS H-1B Employer Data Hub. Every employer
+ * Written by scripts/build-h1b-sponsors.mjs from two government sources: approved H-1B petitions
+ * (USCIS Employer Data Hub) and certified H-1B labor condition applications (DOL). Every employer
  * Litos watches is listed, including the ones with no filings: an absent company would be
  * ambiguous between "never checked" and "checked, nothing found", and those need opposite
  * responses. \`npm run sponsors:check\` fails when this file no longer matches the source data or
@@ -309,7 +511,9 @@ if (args.check) {
   writeFileSync(OUT_FILE, json);
   const confirmed = built.employers.filter((e) => e.sponsors);
   console.log(`Wrote ${OUT_FILE}`);
-  console.log(`${confirmed.length}/${built.employers.length} board employers have H-1B approvals in FY${FISCAL_YEARS[0]}-${FISCAL_YEARS.at(-1)}.`);
+  const byTier = (tier) => confirmed.filter((e) => e.evidence === tier).length;
+  console.log(`${confirmed.length}/${built.employers.length} board employers confirmed.`);
+  console.log(`  ${byTier('both')} in both sources, ${byTier('uscis_h1b')} USCIS approvals only (FY${FISCAL_YEARS[0]}-${FISCAL_YEARS.at(-1)}), ${byTier('dol_lca')} certified LCAs only (${LCA_QUARTERS[0]}-${LCA_QUARTERS.at(-1)}).`);
   const missing = built.employers.filter((e) => !e.sponsors).map((e) => e.company);
   if (missing.length) console.log(`No filings found for: ${missing.join(', ')}`);
 }

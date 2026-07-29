@@ -17,12 +17,29 @@
 import { H1B_SPONSOR_FILE } from '../data/h1bSponsors';
 import { normalizeEmployerName } from './sponsorship';
 
+/**
+ * WHICH GOVERNMENT RECORD CONFIRMED THIS EMPLOYER.
+ *
+ *   uscis_h1b  an H-1B petition was APPROVED (USCIS Employer Data Hub, FY2021-2023)
+ *   dol_lca    a labor condition application was CERTIFIED (DOL, FY2025). The employer named the
+ *              role, the worksite and the wage and attested to paying it. Not an approval, and two
+ *              years more current, which is what makes it worth having: a company founded in 2023
+ *              can sponsor people and appear nowhere in the USCIS file.
+ *   both       both records exist.
+ *
+ * Kept apart rather than collapsed to a boolean because they are different claims, and any surface
+ * that tells somebody why a job is on their board has to be able to make the weaker one honestly.
+ */
+export type SponsorEvidenceSource = 'uscis_h1b' | 'dol_lca' | 'both';
+
 export type H1bSponsorEmployer = {
   /** The company as the Litos board names it, matching career_page_sources.company_name. */
   company: string;
   normalized: string;
-  /** True only when an H-1B petition was APPROVED in the window. See the script for the bar. */
+  /** True when EITHER record exists. See the ingest script for why the bar is one filing. */
   sponsors: boolean;
+  /** Null exactly when `sponsors` is false. */
+  evidence: SponsorEvidenceSource | null;
   /** Which normalised key matched, or null. Kept so a wrong match is diagnosable from the data. */
   matched_key: string | null;
   /** The employer's legal names exactly as USCIS filed them. This is the audit trail. */
@@ -31,17 +48,24 @@ export type H1bSponsorEmployer = {
   denials: number;
   /** Fiscal years with at least one approval. Empty when nothing matched. */
   fiscal_years: number[];
+  /** Certified H-1B labor condition applications across the DOL quarters. */
+  lca_certifications: number;
 };
 
 export type H1bSponsorFile = {
   source: string;
   source_urls: string[];
   fiscal_years: number[];
+  lca_source: string;
+  lca_source_urls: string[];
+  lca_quarters: string[];
   employers: H1bSponsorEmployer[];
 };
 
 export const H1B_SOURCE = H1B_SPONSOR_FILE.source;
 export const H1B_FISCAL_YEARS = H1B_SPONSOR_FILE.fiscal_years;
+export const LCA_SOURCE = H1B_SPONSOR_FILE.lca_source;
+export const LCA_QUARTERS = H1B_SPONSOR_FILE.lca_quarters;
 
 /** Every employer we have checked, sponsoring or not. Includes the misses on purpose. */
 export const H1B_EMPLOYERS: readonly H1bSponsorEmployer[] = H1B_SPONSOR_FILE.employers;
