@@ -182,6 +182,24 @@ test('a confirmed employer carries the filings that confirmed it, from the sourc
   }
 });
 
+test('a board token that is not the company it looks like is never confirmed', () => {
+  /* Six board tokens resolve to a DIFFERENT company than their display name: `sas` is Superior
+     Alarm Systems, `bcg` is Bohen Consulting Group, `tcs` is Thornbury Community Services (UK care
+     work), `disney` is a two-posting test board, `latch` is LatchBio, `crisp` is a Dutch grocer
+     whose postings are all in Amsterdam. Every one was CONFIRMED by an earlier version of this
+     data, against the famous company's filings - TCS alone was credited with 24,287 approvals.
+     This is the regression test for the worst thing this feature can do: tell somebody who needs
+     sponsorship that a company sponsors when it does not. */
+  for (const company of ['sas', 'BCG', 'TCS', 'Disney', 'Latch', 'crisp']) {
+    const employer = h1bEmployer(company);
+    assert.ok(employer, `${company} is not in the data at all`);
+    assert.equal(employer.sponsors, false, `${company} is confirmed and must not be`);
+    assert.equal(employer.evidence, null);
+    assert.deepEqual(employer.legal_names, [], `${company} kept a legal name it must not claim`);
+    assert.ok(employer.rejected, `${company} has no recorded reason, so it will be "fixed" back`);
+  }
+});
+
 test('an employer with no filings is not confirmed, and is still listed', () => {
   const unconfirmed = H1B_EMPLOYERS.filter((employer) => !employer.sponsors);
   for (const employer of unconfirmed) {

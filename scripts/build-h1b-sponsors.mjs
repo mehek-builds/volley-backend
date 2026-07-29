@@ -91,6 +91,29 @@ const LCA_URL = (quarter) =>
  * nothing is harmless and is kept when the identity is known to be right (Cursor files as Anysphere
  * but has no approved petition in the window yet), because it is the record of a search already
  * done. */
+/* BOARD COMPANIES THAT MUST NEVER BE CONFIRMED, whatever the name matching says.
+ *
+ * Every one of these was CONFIRMED by an earlier version of this file and is wrong. They are here
+ * rather than merely un-aliased because for several of them the plain-name match fires on its own:
+ * "CRISP INC" normalises to exactly the same key as the board token `crisp`, so deleting an alias
+ * would change nothing.
+ *
+ * They were caught by scripts/verify-sponsor-matches.mjs, which asks each employer's own job board
+ * who they are. The lesson is in the shape of the errors: a board TOKEN is not a company. Somebody
+ * added 200 job sources by guessing tokens, and `sas`, `bcg`, `tcs`, `disney` and `latch` all
+ * resolve to a different company than the display name claims.
+ *
+ * The reason string is printed nowhere. It exists so the next person does not spend an afternoon
+ * re-deriving why an obvious match is missing, and then "fix" it. */
+const REJECTED = {
+  sas: 'the greenhouse token `sas` is Superior Alarm Systems, a security-systems integrator, NOT SAS Institute',
+  BCG: 'the greenhouse token `bcg` is Bohen Consulting Group, NOT Boston Consulting Group',
+  TCS: 'the greenhouse token `tcs` is Thornbury Community Services (UK care work), NOT Tata Consultancy Services',
+  Disney: 'the greenhouse token `disney` is a board named "Sgt. Pepper\'s Lonely Hearts Club Band" holding two test postings, not Disney',
+  Latch: 'the lever token `latch` is LatchBio ("software in biology", Mission Bay), NOT Latch Systems the smart-lock company',
+  crisp: 'the ashby token `crisp` is the Dutch grocer: all 24 postings are Amsterdam-area and in Dutch. A US "Crisp, Inc." exists and normalises to the same key, which is why this is a rejection and not just a missing alias',
+};
+
 const ALIASES = {
   'Scale AI': ['SCALE AI INC'],
   'Match Group': ['MATCH GROUP LLC'],
@@ -139,8 +162,6 @@ const ALIASES = {
   Mercury: ['MERCURY TECHNOLOGIES INC'],
   zoominfo: ['ZOOMINFO TECHNOLOGIES LLC'],
   'Take-Two': ['TAKE TWO INTERACTIVE SOFTWARE INC'],
-  TCS: ['TATA CONSULTANCY SVCS LTD'],
-  Disney: ['DISNEY FINANCIAL SVCS LLC', 'DISNEY HUMAN RESOURCES SERVICES CO LLC'],
   /* Added 2026-07-29, after Mehek pointed out that unconfirmed employers were far more likely to
      be name mismatches than genuine non-sponsors. She was right: 54 of the 121 had filings under a
      legal name or a d/b/a nothing mechanical would reach. Every one below was read out of the raw
@@ -167,7 +188,6 @@ const ALIASES = {
   honor: ['HONOR TECHNOLOGY INC', 'HONOR TECH INC'],
   imply: ['IMPLY DATA INC'],
   komodohealth: ['KOMODO HEALTH INC'],
-  Latch: ['LATCH SYSTEMS INC'],
   /* The HR platform files as Degree Inc. NOT "LATTICE SEMICONDUCTOR CORPORATION", which is a chip
      company and outweighs it three to one in the data. */
   lattice: ['DEGREE INC D/B/A LATTICE'],
@@ -179,7 +199,6 @@ const ALIASES = {
   Pinecone: ['PINECONE SYSTEMS INC'],
   ripple: ['RIPPLE LABS INC'],
   rutter: ['LANGAPI COMPANY D/B/A RUTTER', 'LANGAPI COMPANY D B A RUTTER'],
-  sas: ['SAS INSTITUTE INC'],
   science37: ['SCIENCE 37 INC'],
   starburst: ['STARBURST DATA INC'],
   suki: ['SUKI AI INC'],
@@ -198,13 +217,13 @@ const ALIASES = {
   Suno: ['SUNO INC'],
   semgrep: ['SEMGREP INC'],
   doppel: ['DOPPEL INC'],
-  Harvey: ['HARVEY AI CORPORATION'],
+  /* Both entities: Harvey filed as Counsel AI Corporation before the rename and still does under
+     it. Taking only the new name would have counted one certification instead of five. */
+  Harvey: ['HARVEY AI CORPORATION', 'COUNSEL AI CORPORATION'],
   Braintrust: ['BRAINTRUST DATA INC'],
   Fireworks: ['FIREWORKS AI INC'],
-  crisp: ['CRISP INC'],
   /* Found on a second pass through the full legal names, after the first sweep left them out:
      each files under a name that shares no token with the brand we display. */
-  BCG: ['THE BOSTON CONSULTING GROUP INC', 'BOSTON CONSULTING GROUP INC'],
   'Jump Trading': ['JUMP OPERATIONS LLC'],
   'Man Group': ['MAN INVESTMENTS USA HOLDINGS INC'],
   /* CircleCI is CIRCLE INTERNET SERVICES. NOT "CIRCLE INTERNET FINANCIAL", which is Circle the
@@ -223,9 +242,12 @@ const ALIASES = {
        Railway     freight railroads.
        stone       our board's Stone is the Brazilian fintech; the matches are masonry and asset
                    management.
-       found, incident, socket, opal, orca, gamma, Blacksmith, Namespace, GitLab, Man Group,
-       Jump Trading, Monzo, Trustly, groww, quintoandar, Rocket Lab and the rest of the
-       still-unconfirmed list: nothing in either source under any name we could tie to them. */
+       found, incident, socket, opal, orca, gamma, Blacksmith, Namespace, GitLab, Monzo, Trustly,
+                   groww, quintoandar, Rocket Lab and the rest of the still-unconfirmed list:
+                   nothing in either source under any name we could tie to them.
+     (Man Group and Jump Trading were in this list and are NOT rejections - both were found on the
+     second pass and are aliased above. A rejection note that contradicts the code is worse than
+     none, because it is the artefact the next person trusts instead of re-deriving.) */
   Betterment: ['BETTERMENT HOLDINGS INC'],
 };
 
@@ -286,7 +308,12 @@ function normalizeEmployerName(name) {
  * IOWA" does not match "One Medical": the trading name has to BE the brand, not merely contain it.
  */
 function dbaMatches(normalizedLegalName, token) {
-  const match = normalizedLegalName.match(/ (?:D B A|DBA|FKA|F K A) (.+)$/);
+  /* D/B/A ONLY. F/K/A was in this pattern and is the opposite claim: a d/b/a is what the filer
+     trades as NOW, an f/k/a is a name it has abandoned, usually after being acquired. Reading
+     "NEWCO LLC F/K/A <BRAND>" as <BRAND> confirms a board from an entity that is no longer that
+     business. The real data holds "AMOUNT SMALL BUSINESS LLC F/K/A LINEAR FINANCIAL TECHNOLOGIES
+     LLC", which is exactly that trap. */
+  const match = normalizedLegalName.match(/ (?:D B A|DBA) (.+)$/);
   return match ? match[1].trim() === token : false;
 }
 
@@ -313,8 +340,11 @@ async function loadYear(year, cacheDir) {
 async function readLcaFilings(cacheDir, uscisOnly) {
   if (uscisOnly) return new Map();
   const files = [];
+  /* Hoisted out of the loop. Inside it, every quarter got its own fresh temp directory, so
+     existsSync() could never be true and ~400MB was re-downloaded on every run and left behind. */
+  const dir = cacheDir ?? mkdtempSync(join(tmpdir(), 'lca-'));
   for (const quarter of LCA_QUARTERS) {
-    const path = join(cacheDir ?? mkdtempSync(join(tmpdir(), 'lca-')), `LCA_Disclosure_Data_${quarter}.xlsx`);
+    const path = join(dir, `LCA_Disclosure_Data_${quarter}.xlsx`);
     if (!existsSync(path)) {
       process.stderr.write(`Downloading ${quarter} (~100MB)...\n`);
       const response = await fetch(LCA_URL(quarter), { signal: AbortSignal.timeout(900_000) });
@@ -404,12 +434,15 @@ function collect(index, keys, token) {
     const hit = index.get(key);
     if (hit) hits.push([key, hit]);
   }
-  /* The d/b/a sweep. Only worth the scan when nothing matched by name, and it looks at the whole
-     index because that is where "FORMAGRID INC D/B/A AIRTABLE" lives - under F, not under A. */
-  if (hits.length === 0) {
-    for (const [key, hit] of index) {
-      if (dbaMatches(key, token)) hits.push([key, hit]);
-    }
+  /* The d/b/a sweep, over the whole index because that is where "FORMAGRID INC D/B/A AIRTABLE"
+     lives - under F, not under A.
+     It runs ALWAYS, not only when nothing matched by name. Gating it on hits.length === 0 hid the
+     second filing entity of every company that files under both its brand and a d/b/a, which
+     undercounts a real sponsor. Deduped by key so an alias and the sweep cannot count one entity
+     twice. */
+  const seen = new Set(hits.map(([key]) => key));
+  for (const [key, hit] of index) {
+    if (!seen.has(key) && dbaMatches(key, token)) hits.push([key, hit]);
   }
   return hits;
 }
@@ -418,6 +451,25 @@ function build(uscis, lca, companies) {
   const employers = [];
   for (const company of companies) {
     const token = normalizeEmployerName(company);
+    /* The denylist is checked FIRST and short-circuits everything. It has to sit ahead of the
+       plain-name match, not just the alias list, because several of these collide on the token
+       itself. */
+    if (REJECTED[company]) {
+      employers.push({
+        company,
+        normalized: token,
+        sponsors: false,
+        evidence: null,
+        rejected: REJECTED[company],
+        matched_key: null,
+        legal_names: [],
+        approvals: 0,
+        denials: 0,
+        fiscal_years: [],
+        lca_certifications: 0,
+      });
+      continue;
+    }
     const keys = [token, ...(ALIASES[company] ?? []).map(normalizeEmployerName)];
 
     /* Aliases can name several filing entities for one employer (IMC files as two). Merged rather
@@ -458,8 +510,10 @@ function build(uscis, lca, companies) {
       normalized: token,
       sponsors: evidence !== null,
       evidence,
-      matched_key: evidence ? matchedKey : null,
-      legal_names: evidence ? [...legal_names].sort() : [],
+      /* Kept whenever ANY filing entity matched, not only when one confirmed. An employer matched
+         to an entity with denials and no approvals is exactly the row where you want the name. */
+      matched_key: matchedKey,
+      legal_names: [...legal_names].sort(),
       approvals,
       denials: ordered.reduce((sum, [, v]) => sum + v.denials, 0),
       fiscal_years: ordered.filter(([, v]) => v.approvals > 0).map(([year]) => year),
@@ -497,6 +551,15 @@ import type { H1bSponsorFile } from '../lib/sponsorEmployers';
 
 export const H1B_SPONSOR_FILE: H1bSponsorFile = ${JSON.stringify(built, null, 2)};
 `;
+
+if (args.check && args.uscisOnly) {
+  /* The hash covers the whole file, so a USCIS-only rebuild would differ from a two-source file in
+     every lca_certifications and every `both` tier, and report "stale" when nothing is stale. The
+     header tells maintainers without python3 to pass --uscis-only; it must not turn a documented
+     fallback into a false failure. */
+  console.error('--check cannot run with --uscis-only: it would compare a one-source rebuild against a two-source file.');
+  process.exit(2);
+}
 
 if (args.check) {
   const existing = existsSync(OUT_FILE) ? readFileSync(OUT_FILE, 'utf8') : '';

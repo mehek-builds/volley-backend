@@ -40,9 +40,23 @@ export type H1bSponsorEmployer = {
   sponsors: boolean;
   /** Null exactly when `sponsors` is false. */
   evidence: SponsorEvidenceSource | null;
+  /**
+   * Why this employer is refused a match outright, or absent.
+   *
+   * A handful of board tokens resolve to a DIFFERENT company than their display name claims - the
+   * greenhouse token `sas` is Superior Alarm Systems, `tcs` is Thornbury Community Services - and
+   * each was confirmed by an earlier version of this data against the famous company's filings.
+   * The refusal is recorded rather than merely applied, so nobody restores it as an obvious fix.
+   */
+  rejected?: string;
   /** Which normalised key matched, or null. Kept so a wrong match is diagnosable from the data. */
   matched_key: string | null;
-  /** The employer's legal names exactly as USCIS filed them. This is the audit trail. */
+  /**
+   * The employer's legal names exactly as filed, from BOTH sources, which is why the same company
+   * often appears twice in different capitalisation ("MATONEE INC D/B/A APTOS LABS" from USCIS,
+   * "Matonee Inc. d/b/a Aptos Labs" from DOL). This is the audit trail: it is what a human reads
+   * when asking whether a match is real.
+   */
   legal_names: string[];
   approvals: number;
   denials: number;

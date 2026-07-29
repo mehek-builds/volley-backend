@@ -111,6 +111,10 @@ const rows = [
   { source: notSponsoring.id, company: 'QA Unconfirmed Employer', title: 'QA Unconfirmed Offered', status: 'offers', surfaced: true },
 ];
 
+/* posted_at is REQUIRED on a fixture now, not optional. The board gained a freshness window
+   (`posted_at >= now() - JOB_FRESHNESS_DAYS`), so a row without one is filtered out before any
+   sponsorship rule is reached and every check in this file fails with an empty board. */
+const postedAt = new Date();
 await db.insert(monitored_jobs).values(rows.map((row, index) => ({
   source_id: row.source,
   external_id: `qa-sponsor-${index}`,
@@ -119,6 +123,7 @@ await db.insert(monitored_jobs).values(rows.map((row, index) => ({
   description: 'QA fixture posting.',
   apply_url: `https://example.test/apply/${index}`,
   posting_url: `https://example.test/job/${index}`,
+  posted_at: postedAt,
   sponsorship_status: row.status,
 })));
 
@@ -234,12 +239,12 @@ const [mixed] = await db.insert(monitored_jobs).values([
   {
     source_id: sponsoring.id, external_id: 'qa-sponsor-mixed-a', company_name: 'QA Sponsoring Employer',
     title: 'QA Mixed Group', description: 'QA fixture posting.', apply_url: 'https://example.test/apply/m1',
-    posting_url: 'https://example.test/job/m1', sponsorship_status: 'offers',
+    posting_url: 'https://example.test/job/m1', posted_at: postedAt, sponsorship_status: 'offers',
   },
   {
     source_id: sponsoring.id, external_id: 'qa-sponsor-mixed-b', company_name: 'QA Sponsoring Employer',
     title: 'QA Mixed Group', description: 'QA fixture posting.', apply_url: 'https://example.test/apply/m2',
-    posting_url: 'https://example.test/job/m2', sponsorship_status: 'refuses',
+    posting_url: 'https://example.test/job/m2', posted_at: postedAt, sponsorship_status: 'refuses',
   },
 ]).returning({ id: monitored_jobs.id });
 check(

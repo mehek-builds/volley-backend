@@ -32,32 +32,41 @@ VISA_CLASSES = {"H-1B", "H-1B1 CHILE", "H-1B1 SINGAPORE"}
 employers = defaultdict(int)
 for path in sys.argv[1:]:
     book = openpyxl.load_workbook(path, read_only=True)
-    sheet = book[book.sheetnames[0]]
-    rows = sheet.iter_rows(values_only=True)
-    header = next(rows)
     try:
-        i_status = header.index("CASE_STATUS")
-        i_visa = header.index("VISA_CLASS")
-        i_employer = header.index("EMPLOYER_NAME")
-    except ValueError:
-        print(f"{path}: unexpected columns, DOL changed the schema", file=sys.stderr)
-        sys.exit(1)
-    scanned = 0
-    kept = 0
-    for row in rows:
-        scanned += 1
-        name = row[i_employer]
-        if not name:
-            continue
-        if str(row[i_visa]).strip().upper() not in VISA_CLASSES:
-            continue
-        # "CERTIFIED" and "CERTIFIED - WITHDRAWN" both mean DOL certified it. A withdrawal after
-        # certification is usually a role that changed or a candidate who declined, not a policy.
-        if not str(row[i_status]).strip().upper().startswith("CERTIFIED"):
-            continue
-        employers[re.sub(r"\s+", " ", str(name)).strip()] += 1
-        kept += 1
-    print(f"{path}: {scanned} rows, {kept} certified H-1B", file=sys.stderr)
-    book.close()
+        sheet = book[book.sheetnames[0]]
+        rows = sheet.iter_rows(values_only=True)
+        header = next(rows)
+        try:
+            i_status = header.index("CASE_STATUS")
+            i_visa = header.index("VISA_CLASS")
+            i_employer = header.index("EMPLOYER_NAME")
+        except ValueError:
+            print(f"{path}: unexpected columns, DOL changed the schema", file=sys.stderr)
+            sys.exit(1)
+        widest = max(i_status, i_visa, i_employer)
+        scanned = 0
+        kept = 0
+        for row in rows:
+            scanned += 1
+            # A ragged trailing row yields a short tuple, and an IndexError two hours into a 400MB
+            # parse costs the whole run.
+            if len(row) <= widest:
+                continue
+            name = row[i_employer]
+            if not name:
+                continue
+            if str(row[i_visa]).strip().upper() not in VISA_CLASSES:
+                continue
+            # DOL's status domain is Certified, Certified - Withdrawn, Denied, Withdrawn. Only the
+            # first is counted: a certification later withdrawn is frequently one where the petition
+            # was never filed, and six employers here are confirmed on a SINGLE certification, so
+            # the difference decides whether they appear on somebody's board at all.
+            if str(row[i_status]).strip().upper() != "CERTIFIED":
+                continue
+            employers[re.sub(r"\s+", " ", str(name)).strip()] += 1
+            kept += 1
+        print(f"{path}: {scanned} rows, {kept} certified H-1B", file=sys.stderr)
+    finally:
+        book.close()
 
 json.dump(employers, sys.stdout)

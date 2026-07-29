@@ -217,14 +217,19 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "matched_key": "ANTHROPIC",
       "legal_names": [
         "ANTHROPIC PBC",
+        "ANTHROPIC PBC D B A ANTHROPIC INC",
+        "ANTHROPIC PBC D/B/A ANTHROPIC INC",
+        "ANTHROPIC PBC DBA ANTHROPIC INC",
         "Anthropic, PBC"
       ],
-      "approvals": 1,
+      "approvals": 7,
       "denials": 0,
       "fiscal_years": [
-        2021
+        2021,
+        2022,
+        2023
       ],
-      "lca_certifications": 111
+      "lca_certifications": 107
     },
     {
       "company": "anydesk",
@@ -255,17 +260,16 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 33
+      "lca_certifications": 19
     },
     {
       "company": "aptoslabs",
       "normalized": "APTOSLABS",
       "sponsors": true,
-      "evidence": "both",
+      "evidence": "uscis_h1b",
       "matched_key": "MATONEE INC D B A APTOS LABS",
       "legal_names": [
-        "MATONEE INC D/B/A APTOS LABS",
-        "Matonee Inc. d/b/a Aptos Labs"
+        "MATONEE INC D/B/A APTOS LABS"
       ],
       "approvals": 16,
       "denials": 0,
@@ -273,7 +277,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 1
+      "lca_certifications": 0
     },
     {
       "company": "AQR",
@@ -292,7 +296,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 50
+      "lca_certifications": 36
     },
     {
       "company": "Asana",
@@ -311,7 +315,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 47
+      "lca_certifications": 43
     },
     {
       "company": "Ashby",
@@ -364,11 +368,13 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "matched_key": "ATLAN",
       "legal_names": [
         "ATLAN INC",
-        "Atlan Inc"
+        "Atlan Inc",
+        "MAHANTKESHAVJIVANDAS LLC DBA ATLAN"
       ],
-      "approvals": 2,
+      "approvals": 3,
       "denials": 0,
       "fiscal_years": [
+        2021,
         2022,
         2023
       ],
@@ -406,22 +412,15 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
     {
       "company": "BCG",
       "normalized": "BCG",
-      "sponsors": true,
-      "evidence": "both",
-      "matched_key": "THE BOSTON CONSULTING GROUP",
-      "legal_names": [
-        "Boston Consulting Group, Inc.",
-        "THE BOSTON CONSULTING GROUP INC",
-        "THE BOSTON CONSULTING GROUP, INC."
-      ],
-      "approvals": 1115,
-      "denials": 42,
-      "fiscal_years": [
-        2021,
-        2022,
-        2023
-      ],
-      "lca_certifications": 630
+      "sponsors": false,
+      "evidence": null,
+      "rejected": "the greenhouse token `bcg` is Bohen Consulting Group, NOT Boston Consulting Group",
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0
     },
     {
       "company": "betterhelp",
@@ -547,7 +546,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 261
+      "lca_certifications": 258
     },
     {
       "company": "blueconic",
@@ -583,7 +582,6 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "matched_key": "BRAZE",
       "legal_names": [
         "BRAZE INC",
-        "Braze, Inc",
         "Braze, Inc."
       ],
       "approvals": 26,
@@ -593,7 +591,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 16
+      "lca_certifications": 14
     },
     {
       "company": "Brex",
@@ -612,7 +610,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 32
+      "lca_certifications": 28
     },
     {
       "company": "btgpactual",
@@ -772,7 +770,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 131
+      "lca_certifications": 130
     },
     {
       "company": "circleci",
@@ -845,7 +843,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 122
+      "lca_certifications": 98
     },
     {
       "company": "cockroachlabs",
@@ -962,16 +960,15 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
     {
       "company": "crisp",
       "normalized": "CRISP",
-      "sponsors": true,
-      "evidence": "dol_lca",
-      "matched_key": "CRISP",
-      "legal_names": [
-        "Crisp, Inc."
-      ],
+      "sponsors": false,
+      "evidence": null,
+      "rejected": "the ashby token `crisp` is the Dutch grocer: all 24 postings are Amsterdam-area and in Dutch. A US \"Crisp, Inc.\" exists and normalises to the same key, which is why this is a rejection and not just a missing alias",
+      "matched_key": null,
+      "legal_names": [],
       "approvals": 0,
       "denials": 0,
       "fiscal_years": [],
-      "lca_certifications": 4
+      "lca_certifications": 0
     },
     {
       "company": "cultureamp",
@@ -1033,7 +1030,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 387
+      "lca_certifications": 378
     },
     {
       "company": "Datadog",
@@ -1084,7 +1081,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 10
+      "lca_certifications": 8
     },
     {
       "company": "decagon",
@@ -1098,24 +1095,23 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "approvals": 0,
       "denials": 0,
       "fiscal_years": [],
-      "lca_certifications": 10
+      "lca_certifications": 8
     },
     {
       "company": "Deepgram",
       "normalized": "DEEPGRAM",
       "sponsors": true,
-      "evidence": "both",
+      "evidence": "uscis_h1b",
       "matched_key": "DEEPGRAM",
       "legal_names": [
-        "DEEPGRAM INC",
-        "Deepgram, Inc."
+        "DEEPGRAM INC"
       ],
       "approvals": 2,
       "denials": 0,
       "fiscal_years": [
         2022
       ],
-      "lca_certifications": 2
+      "lca_certifications": 0
     },
     {
       "company": "Depot",
@@ -1137,7 +1133,6 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "matched_key": "DISCORD",
       "legal_names": [
         "DISCORD INC",
-        "Discord Inc.",
         "Discord, Inc."
       ],
       "approvals": 48,
@@ -1147,23 +1142,19 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 49
+      "lca_certifications": 26
     },
     {
       "company": "Disney",
       "normalized": "DISNEY",
-      "sponsors": true,
-      "evidence": "uscis_h1b",
-      "matched_key": "DISNEY FINANCIAL SVCS",
-      "legal_names": [
-        "DISNEY FINANCIAL SVCS LLC",
-        "DISNEY HUMAN RESOURCES SERVICES CO LLC"
-      ],
-      "approvals": 2,
+      "sponsors": false,
+      "evidence": null,
+      "rejected": "the greenhouse token `disney` is a board named \"Sgt. Pepper's Lonely Hearts Club Band\" holding two test postings, not Disney",
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
       "denials": 0,
-      "fiscal_years": [
-        2023
-      ],
+      "fiscal_years": [],
       "lca_certifications": 0
     },
     {
@@ -1178,7 +1169,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "approvals": 0,
       "denials": 0,
       "fiscal_years": [],
-      "lca_certifications": 4
+      "lca_certifications": 2
     },
     {
       "company": "Doppler",
@@ -1210,7 +1201,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 9
+      "lca_certifications": 8
     },
     {
       "company": "dremio",
@@ -1248,7 +1239,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 134
+      "lca_certifications": 67
     },
     {
       "company": "Duolingo",
@@ -1276,10 +1267,12 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "evidence": "both",
       "matched_key": "ELASTICSEARCH",
       "legal_names": [
+        "A52 LLC D B A ELASTIC",
+        "A52 LLC DBA ELASTIC",
         "ELASTICSEARCH INC",
         "Elasticsearch, Inc."
       ],
-      "approvals": 40,
+      "approvals": 45,
       "denials": 1,
       "fiscal_years": [
         2021,
@@ -1347,7 +1340,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 57
+      "lca_certifications": 56
     },
     {
       "company": "evervault",
@@ -1380,7 +1373,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 19
+      "lca_certifications": 18
     },
     {
       "company": "Fastly",
@@ -1648,7 +1641,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 7
+      "lca_certifications": 6
     },
     {
       "company": "graphcore",
@@ -1687,9 +1680,10 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "matched_key": "GUSTO",
       "legal_names": [
         "GUSTO INC",
-        "Gusto, Inc."
+        "Gusto, Inc.",
+        "ZENPAYROLL INC DBA GUSTO"
       ],
-      "approvals": 69,
+      "approvals": 76,
       "denials": 1,
       "fiscal_years": [
         2021,
@@ -1705,12 +1699,13 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "evidence": "dol_lca",
       "matched_key": "HARVEY AI",
       "legal_names": [
+        "Counsel AI Corporation",
         "HARVEY AI CORPORATION"
       ],
       "approvals": 0,
       "denials": 0,
       "fiscal_years": [],
-      "lca_certifications": 1
+      "lca_certifications": 22
     },
     {
       "company": "helpscout",
@@ -1775,7 +1770,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 25
+      "lca_certifications": 21
     },
     {
       "company": "imply",
@@ -1929,7 +1924,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 37
+      "lca_certifications": 34
     },
     {
       "company": "jfrog",
@@ -2091,26 +2086,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "approvals": 0,
       "denials": 0,
       "fiscal_years": [],
-      "lca_certifications": 12
+      "lca_certifications": 10
     },
     {
       "company": "Latch",
       "normalized": "LATCH",
-      "sponsors": true,
-      "evidence": "both",
-      "matched_key": "LATCH SYSTEMS",
-      "legal_names": [
-        "LATCH SYSTEMS INC",
-        "Latch Systems, Inc."
-      ],
-      "approvals": 32,
+      "sponsors": false,
+      "evidence": null,
+      "rejected": "the lever token `latch` is LatchBio (\"software in biology\", Mission Bay), NOT Latch Systems the smart-lock company",
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
       "denials": 0,
-      "fiscal_years": [
-        2021,
-        2022,
-        2023
-      ],
-      "lca_certifications": 1
+      "fiscal_years": [],
+      "lca_certifications": 0
     },
     {
       "company": "lattice",
@@ -2163,7 +2152,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 20
+      "lca_certifications": 17
     },
     {
       "company": "Linear",
@@ -2191,7 +2180,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "approvals": 0,
       "denials": 0,
       "fiscal_years": [],
-      "lca_certifications": 6
+      "lca_certifications": 5
     },
     {
       "company": "lottie",
@@ -2224,7 +2213,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 648
+      "lca_certifications": 636
     },
     {
       "company": "Lyft",
@@ -2281,7 +2270,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 57
+      "lca_certifications": 54
     },
     {
       "company": "Marshall Wace",
@@ -2305,11 +2294,10 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "company": "Match Group",
       "normalized": "MATCH GROUP",
       "sponsors": true,
-      "evidence": "both",
+      "evidence": "uscis_h1b",
       "matched_key": "MATCH GROUP",
       "legal_names": [
-        "MATCH GROUP LLC",
-        "Match Group LLC"
+        "MATCH GROUP LLC"
       ],
       "approvals": 282,
       "denials": 2,
@@ -2318,7 +2306,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 20
+      "lca_certifications": 0
     },
     {
       "company": "Mercury",
@@ -2347,12 +2335,16 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "matched_key": "MERGE API",
       "legal_names": [
         "MERGE API INC",
-        "Merge API, Inc."
+        "Merge API, Inc.",
+        "PARTNERS SIMONS INC D B A MERGE",
+        "PARTNERS SIMONS INC DBA MERGE"
       ],
-      "approvals": 1,
+      "approvals": 5,
       "denials": 0,
       "fiscal_years": [
-        2022
+        2021,
+        2022,
+        2023
       ],
       "lca_certifications": 2
     },
@@ -2373,7 +2365,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 12
+      "lca_certifications": 11
     },
     {
       "company": "Modal",
@@ -2420,7 +2412,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 157
+      "lca_certifications": 144
     },
     {
       "company": "Monzo",
@@ -2527,7 +2519,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 34
+      "lca_certifications": 30
     },
     {
       "company": "Nuro",
@@ -2762,7 +2754,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "approvals": 0,
       "denials": 0,
       "fiscal_years": [],
-      "lca_certifications": 12
+      "lca_certifications": 10
     },
     {
       "company": "phonepe",
@@ -2831,7 +2823,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 372
+      "lca_certifications": 355
     },
     {
       "company": "PlanetScale",
@@ -2867,7 +2859,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 47
+      "lca_certifications": 41
     },
     {
       "company": "Poolside",
@@ -2891,7 +2883,6 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "matched_key": "POSTMAN",
       "legal_names": [
         "POSTMAN INC",
-        "Postman Inc.",
         "Postman, Inc."
       ],
       "approvals": 10,
@@ -2901,7 +2892,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 21
+      "lca_certifications": 17
     },
     {
       "company": "prefect",
@@ -2952,7 +2943,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 169
+      "lca_certifications": 162
     },
     {
       "company": "Quadrature",
@@ -3060,7 +3051,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 99
+      "lca_certifications": 98
     },
     {
       "company": "Reflection AI",
@@ -3154,7 +3145,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 99
+      "lca_certifications": 95
     },
     {
       "company": "ripple",
@@ -3254,7 +3245,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 116
+      "lca_certifications": 114
     },
     {
       "company": "rutter",
@@ -3337,22 +3328,15 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
     {
       "company": "sas",
       "normalized": "SAS",
-      "sponsors": true,
-      "evidence": "both",
-      "matched_key": "SAS INSTITUTE",
-      "legal_names": [
-        "SAS INSTITUTE INC",
-        "SAS Institute Inc.",
-        "SAS Institute, Inc."
-      ],
-      "approvals": 123,
-      "denials": 6,
-      "fiscal_years": [
-        2021,
-        2022,
-        2023
-      ],
-      "lca_certifications": 42
+      "sponsors": false,
+      "evidence": null,
+      "rejected": "the greenhouse token `sas` is Superior Alarm Systems, a security-systems integrator, NOT SAS Institute",
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0
     },
     {
       "company": "Scale AI",
@@ -3362,7 +3346,6 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "matched_key": "SCALE AI",
       "legal_names": [
         "SCALE AI INC",
-        "Scale AI Inc",
         "Scale AI, Inc."
       ],
       "approvals": 74,
@@ -3372,7 +3355,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 164
+      "lca_certifications": 128
     },
     {
       "company": "science37",
@@ -3485,7 +3468,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 16
+      "lca_certifications": 13
     },
     {
       "company": "skyflow",
@@ -3526,7 +3509,6 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "matched_key": "SOCIAL FINANCE",
       "legal_names": [
         "SOCIAL FINANCE INC",
-        "Social Finance, Inc.",
         "Social Finance, LLC"
       ],
       "approvals": 208,
@@ -3536,7 +3518,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 216
+      "lca_certifications": 206
     },
     {
       "company": "Sophos",
@@ -3555,7 +3537,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 53
+      "lca_certifications": 48
     },
     {
       "company": "SpaceX",
@@ -3575,7 +3557,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 22
+      "lca_certifications": 21
     },
     {
       "company": "Spotify",
@@ -3613,7 +3595,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 29
+      "lca_certifications": 23
     },
     {
       "company": "starburst",
@@ -3773,19 +3755,14 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
     {
       "company": "TCS",
       "normalized": "TCS",
-      "sponsors": true,
-      "evidence": "uscis_h1b",
-      "matched_key": "TATA CONSULTANCY SVCS",
-      "legal_names": [
-        "TATA CONSULTANCY SVCS LTD"
-      ],
-      "approvals": 24287,
-      "denials": 1208,
-      "fiscal_years": [
-        2021,
-        2022,
-        2023
-      ],
+      "sponsors": false,
+      "evidence": null,
+      "rejected": "the greenhouse token `tcs` is Thornbury Community Services (UK care work), NOT Tata Consultancy Services",
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
       "lca_certifications": 0
     },
     {
@@ -3823,7 +3800,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 54
+      "lca_certifications": 51
     },
     {
       "company": "Tower Research",
@@ -3842,7 +3819,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 35
+      "lca_certifications": 30
     },
     {
       "company": "TripAdvisor",
@@ -3861,7 +3838,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 35
+      "lca_certifications": 34
     },
     {
       "company": "Trustly",
@@ -3911,7 +3888,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 214
+      "lca_certifications": 192
     },
     {
       "company": "Twitch",
@@ -4005,7 +3982,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 4
+      "lca_certifications": 2
     },
     {
       "company": "veracyte",
@@ -4054,8 +4031,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         "VERKADA INC",
         "Verkada Inc",
         "Verkada Inc.",
-        "Verkada, Inc",
-        "Verkada, Inc."
+        "Verkada, Inc"
       ],
       "approvals": 87,
       "denials": 0,
@@ -4064,7 +4040,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 80
+      "lca_certifications": 63
     },
     {
       "company": "Virtu",
@@ -4074,16 +4050,17 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "matched_key": "VIRTU FINANCIAL OPERATING",
       "legal_names": [
         "VIRTU FINANCIAL OPERATING LLC",
+        "VIRTUAL FRAMEWORKS INC D/B/A VIRTU",
         "Virtu Financial Operating LLC"
       ],
-      "approvals": 62,
+      "approvals": 63,
       "denials": 1,
       "fiscal_years": [
         2021,
         2022,
         2023
       ],
-      "lca_certifications": 28
+      "lca_certifications": 24
     },
     {
       "company": "Waymo",
@@ -4172,11 +4149,10 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "company": "yugabyte",
       "normalized": "YUGABYTE",
       "sponsors": true,
-      "evidence": "both",
+      "evidence": "uscis_h1b",
       "matched_key": "YUGABYTE",
       "legal_names": [
-        "YUGABYTE INC",
-        "Yugabyte, Inc."
+        "YUGABYTE INC"
       ],
       "approvals": 40,
       "denials": 0,
@@ -4185,7 +4161,7 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2022,
         2023
       ],
-      "lca_certifications": 2
+      "lca_certifications": 0
     },
     {
       "company": "Zed",
@@ -4226,16 +4202,18 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "evidence": "both",
       "matched_key": "ZOOMINFO TECHNOLOGIES",
       "legal_names": [
+        "ZOOMINFO TECH LLC DBA ZOOMINFO",
         "ZOOMINFO TECHNOLOGIES LLC",
         "ZoomInfo Technologies, LLC"
       ],
-      "approvals": 130,
+      "approvals": 200,
       "denials": 2,
       "fiscal_years": [
+        2021,
         2022,
         2023
       ],
-      "lca_certifications": 72
+      "lca_certifications": 70
     }
   ]
 };
