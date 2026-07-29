@@ -166,7 +166,7 @@ const app = await buildApp();
 await assertThrowawayDatabase();
 
 // ── Scenario 1: the fix. An application carrying the posting's id. ───────────────────────────
-console.log('\nScenario 1 — application records the posting id (the fix)');
+console.log('\nScenario 1: application records the posting id (the fix)');
 await seedBase();
 await db.insert(generated_resumes).values({
   user_id: userId,
@@ -191,7 +191,7 @@ check('New York, same company and title, does NOT read Applied', () => assert.eq
 check('London, same company and title, does NOT read Applied', () => assert.equal(isJobApplied(rows[2], index1), false));
 
 // ── Scenario 2: the bug, reproduced. A legacy row with no id. ────────────────────────────────
-console.log('\nScenario 2 — legacy application with no job_id (pre-fix rows, and the extension)');
+console.log('\nScenario 2: legacy application with no job_id (pre-fix rows, and the extension)');
 await seedBase();
 await db.insert(generated_resumes).values({
   user_id: userId,
@@ -216,7 +216,7 @@ check('and it still marks the siblings, which is the OLD bug and is unfixable fo
 });
 
 // ── Scenario 3: both kinds at once, each matching its own way. ───────────────────────────────
-console.log('\nScenario 3 — a legacy row and a new row coexisting');
+console.log('\nScenario 3: a legacy row and a new row coexisting');
 await seedBase();
 await db.insert(generated_resumes).values([
   {
@@ -240,7 +240,7 @@ check('the legacy row still matches by company+role', () =>
   assert.equal(isJobApplied({ id: 'other', company_name: 'Stripe', title: 'Data Analyst' }, index3), true));
 
 // ── Scenario 4: a saved (not applied) row must mark nothing. ─────────────────────────────────
-console.log('\nScenario 4 — a saved application is not an application');
+console.log('\nScenario 4: a saved application is not an application');
 await seedBase();
 await db.insert(generated_resumes).values({
   user_id: userId,
@@ -259,7 +259,7 @@ check('a saved row marks nothing at all', () => {
 // The dashboard prewarms a resume per matched job, so a real account holds packets for several
 // postings at once, including siblings. A naive "any id means applied" bug would pass every
 // scenario above and still fail here.
-console.log('\nScenario 5 — applications for two of three siblings');
+console.log('\nScenario 5: applications for two of three siblings');
 await seedBase();
 await db.insert(generated_resumes).values([
   {
@@ -287,7 +287,7 @@ check('New York, the one never applied to, still does NOT', () => assert.equal(i
 // A different question from the badge, on a different endpoint, and the one that decides whether
 // "Apply now" reuses a packet or builds a new one. A wrong match here showed the student a resume
 // tailored to a different posting AND skipped the build for the one they opened.
-console.log('\nScenario 6 — an existing packet is claimed by its own posting only');
+console.log('\nScenario 6: an existing packet is claimed by its own posting only');
 await seedBase();
 await db.insert(generated_resumes).values({
   user_id: userId,
