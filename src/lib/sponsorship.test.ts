@@ -156,16 +156,47 @@ test('the generated file agrees with this module about how names normalise', () 
   }
 });
 
-test('a confirmed employer carries the filings that confirmed it', () => {
-  // Not a snapshot of who sponsors - that changes when the data is refreshed. It asserts the
-  // SHAPE of a confirmation: nothing is marked as sponsoring without an approval count, a fiscal
-  // year, and the legal entity name that was matched.
+test('a confirmed employer carries the filings that confirmed it, from the source it names', () => {
+  // Not a snapshot of who sponsors - that changes when the data is refreshed. It asserts the SHAPE
+  // of a confirmation: nothing is marked as sponsoring without the numbers its own evidence tier
+  // claims, and the legal entity name that was matched.
   for (const employer of H1B_EMPLOYERS) {
     if (!employer.sponsors) continue;
-    assert.ok(employer.approvals > 0, `${employer.company} claims to sponsor with no approvals`);
-    assert.ok(employer.fiscal_years.length > 0, `${employer.company} has no fiscal year`);
     assert.ok(employer.legal_names.length > 0, `${employer.company} has no filing entity`);
     assert.equal(employerFilesH1b(employer.company), true);
+    if (employer.evidence === 'uscis_h1b' || employer.evidence === 'both') {
+      assert.ok(employer.approvals > 0, `${employer.company} claims USCIS evidence with no approvals`);
+      assert.ok(employer.fiscal_years.length > 0, `${employer.company} has no fiscal year`);
+    }
+    if (employer.evidence === 'dol_lca' || employer.evidence === 'both') {
+      assert.ok(employer.lca_certifications > 0, `${employer.company} claims DOL evidence with no certifications`);
+    }
+    if (employer.evidence === 'uscis_h1b') {
+      // The tier is exact, not "at least": an employer with both records must say `both`, or the
+      // product understates what it knows and the settings screen cites the weaker source.
+      assert.equal(employer.lca_certifications, 0, `${employer.company} has LCAs but claims USCIS only`);
+    }
+    if (employer.evidence === 'dol_lca') {
+      assert.equal(employer.approvals, 0, `${employer.company} has approvals but claims DOL only`);
+    }
+  }
+});
+
+test('a board token that is not the company it looks like is never confirmed', () => {
+  /* Six board tokens resolve to a DIFFERENT company than their display name: `sas` is Superior
+     Alarm Systems, `bcg` is Bohen Consulting Group, `tcs` is Thornbury Community Services (UK care
+     work), `disney` is a two-posting test board, `latch` is LatchBio, `crisp` is a Dutch grocer
+     whose postings are all in Amsterdam. Every one was CONFIRMED by an earlier version of this
+     data, against the famous company's filings - TCS alone was credited with 24,287 approvals.
+     This is the regression test for the worst thing this feature can do: tell somebody who needs
+     sponsorship that a company sponsors when it does not. */
+  for (const company of ['sas', 'BCG', 'TCS', 'Disney', 'Latch', 'crisp']) {
+    const employer = h1bEmployer(company);
+    assert.ok(employer, `${company} is not in the data at all`);
+    assert.equal(employer.sponsors, false, `${company} is confirmed and must not be`);
+    assert.equal(employer.evidence, null);
+    assert.deepEqual(employer.legal_names, [], `${company} kept a legal name it must not claim`);
+    assert.ok(employer.rejected, `${company} has no recorded reason, so it will be "fixed" back`);
   }
 });
 
@@ -173,6 +204,8 @@ test('an employer with no filings is not confirmed, and is still listed', () => 
   const unconfirmed = H1B_EMPLOYERS.filter((employer) => !employer.sponsors);
   for (const employer of unconfirmed) {
     assert.equal(employer.approvals, 0);
+    assert.equal(employer.lca_certifications, 0);
+    assert.equal(employer.evidence, null);
     assert.equal(employerFilesH1b(employer.company), false);
   }
   // A company we have never heard of is treated exactly like one we checked and found nothing for.

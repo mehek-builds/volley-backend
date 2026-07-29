@@ -9,7 +9,7 @@ import {
   sponsorOnlyBoardRequired,
   type SponsorshipAnswer,
 } from '../lib/sponsorship';
-import { H1B_EMPLOYERS, H1B_FISCAL_YEARS, H1B_SOURCE } from '../lib/sponsorEmployers';
+import { H1B_EMPLOYERS, H1B_FISCAL_YEARS, H1B_SOURCE, LCA_QUARTERS, LCA_SOURCE } from '../lib/sponsorEmployers';
 
 /**
  * THE VISA-SPONSORSHIP DECLARATION AND THE FILTER IT TURNS ON.
@@ -81,11 +81,14 @@ export async function sponsorshipRoutes(fastify: FastifyInstance) {
     return reply.send({
       ...state(row),
       /* What the filter is standing on, in numbers the person it affects can check. Somebody whose
-         board just lost a thousand postings is owed the reason, and "45 of 51 employers we watch
-         have approved H-1B petitions on file with USCIS for FY2021-2023" is one. */
+         board just lost several thousand postings is owed the reason, and "191 of the 253 employers
+         we watch have H-1B filings with the US government" is one. Both sources are named, because
+         an approved petition and a certified application are different claims. */
       evidence: {
         source: H1B_SOURCE,
         fiscal_years: H1B_FISCAL_YEARS,
+        lca_source: LCA_SOURCE,
+        lca_quarters: LCA_QUARTERS,
         confirmed_employers: confirmed.length,
         checked_employers: H1B_EMPLOYERS.length,
       },
