@@ -69,6 +69,7 @@
     "sponsors:check": "node scripts/build-h1b-sponsors.mjs --check",
     "db:pipeline-stage": "node scripts/apply-pipeline-stage-schema.mjs",
     "logo:check": "node --import tsx scripts/check-logo-coverage.mjs",
-    "logo:resolve": "node scripts/resolve-company-domains.mjs"
+    "logo:resolve": "node scripts/resolve-company-domains.mjs",
+    "db:job-pay": "node scripts/apply-job-pay-schema.mjs"
   }
 }
