@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  hasUsableDescription,
+  MIN_DESCRIPTION_CHARS,
   normalizeAshbyJobs,
   normalizeGreenhouseJobs,
   normalizeLeverJobs,
@@ -194,6 +196,102 @@ test('strips markup that leaks into the providers\' descriptionPlain fields', ()
 
   const lever = normalizeLeverJobs([{ id: 'x', text: 'Analyst', hostedUrl: 'https://jobs.lever.co/acme/x', applyUrl: 'https://jobs.lever.co/acme/x/apply', descriptionPlain: '<p>Analyze &amp; report.</p>', categories: {} }]);
   assert.equal(lever[0].description, 'Analyze & report.');
+});
+
+/* The description-quality rule. Every posting quoted below is one that was live on the board when
+   this was written, fetched from the raw ATS API, so these are regression cases and not fixtures. */
+
+const posting = (description: string, title = 'Software Engineer') => ({ description, title });
+
+test('rejects the placeholder descriptions employers actually ship', () => {
+  assert.equal(hasUsableDescription(posting('PLACEHOLDER', 'MASTER TEMPLATE')), false);
+  assert.equal(hasUsableDescription(posting('afdsfasdfasdf', 'prospecting test')), false);
+  assert.equal(hasUsableDescription(posting('(#LI-DNI)', 'Transferência BTG - PAN')), false);
+  assert.equal(hasUsableDescription(posting('', 'Analyst')), false);
+});
+
+test('rejects a description that is only the job title echoed back', () => {
+  /* 12 live Point72 postings. The damage is not cosmetic: jdMatch scores this text, so a title
+     repeated back produces a confident and meaningless match, and resumePolicy/resumeRender pick
+     bullets against it. */
+  assert.equal(hasUsableDescription(posting('Software Engineer, Bpm', 'Software Engineer, Bpm')), false);
+  assert.equal(hasUsableDescription(posting('Pnl Rec And Analysis Analyst', 'Pnl Rec And Analysis Analyst')), false);
+  // Punctuation and case drift must not defeat it - the comparison folds to letters and digits.
+  assert.equal(hasUsableDescription(posting('head of compliance hong kong', 'Head of Compliance, Hong Kong')), false);
+});
+
+test('rejects a title echo that drifts by a word, in either direction', () => {
+  // Point72 adds a word...
+  assert.equal(hasUsableDescription(posting(
+    'Software Engineer, Investor and Fund Administration Technology',
+    'Software Engineer, Investor and Fund Administration',
+  )), false);
+  // ...and Physical Intelligence drops one.
+  assert.equal(hasUsableDescription(posting('Internships', 'Research Internships')), false);
+});
+
+test('the title-echo rule does not fire on a real posting that opens with its own title', () => {
+  /* The false positive that a naive "description contains the title" rule would cause. Datadog,
+     Databricks and Match Group all open their Japanese and Korean listings with the role name and
+     then write 2,700-3,900 characters of real prose. The rule is bounded by what is LEFT OVER after
+     the title, not by whether the title appears, so those survive. */
+  const real = `Commercial Account Executive (AE)은 중소규모 시장에서 전략적으로 신규 고객을 유치하고 거래를 성사시켜 Datadog의 비즈니스 성장을 지원합니다. ${'영업 담당자는 잘 정의된 방법론을 따릅니다. '.repeat(40)}`;
+  assert.equal(hasUsableDescription(posting(real, 'Commercial Account Executive')), true);
+});
+
+test('keeps a description written entirely in a non-Latin script', () => {
+  /* The false positive that would have hit hardest, and it is not hypothetical: Riot Games ships
+     Chinese-only descriptions, Match Group Korean, Databricks Japanese. The fold that makes the
+     title comparison punctuation-proof keeps only a-z and 0-9, so text like this folds to the EMPTY
+     string. Judging length or emptiness on the folded form would have deleted these in bulk, so
+     both are judged on the raw text and the echo check is skipped when either side folds away. */
+  const riot = '关于我们，我们以玩家体验为核心，专注于创新与高性能的技术开发。你将与多元化团队协作，面向全球玩家开发和优化新一代游戏服务。'.repeat(4);
+  assert.equal(riot.replace(/[^a-z0-9]+/gi, ''), '', 'this description folds away entirely');
+  assert.ok(riot.length > MIN_DESCRIPTION_CHARS);
+  assert.equal(hasUsableDescription(posting(riot, 'Software Engineer, Services (Contract)')), true);
+  // ...including against a SHORT title, where an empty fold would otherwise look like an exact echo.
+  assert.equal(hasUsableDescription(posting(riot, 'PM')), true);
+});
+
+test('keeps a real description that merely carries a #LI-DNI tag in a corner', () => {
+  /* The measurement that decided the marker rule's shape. 6 live postings contain "#LI-DNI" and 5
+     of them are full, real descriptions (Cursor, Recursion x2, IMC Trading, btgpactual). Matching
+     the marker as a SUBSTRING would have deleted five good jobs to remove one bad one, so it is
+     only rejected when it is the entire description. */
+  const cursor = `Our mission is to automate coding. The first step in our journey is to build the best tool for professional programmers, using a combination of inventive research, design, and engineering. Our organization is very flat, and our team is small and talent dense. We particularly like people who are truth-seeking, passionate, and creative. #LI-DNI`;
+  assert.ok(cursor.length > MIN_DESCRIPTION_CHARS);
+  assert.equal(hasUsableDescription(posting(cursor, 'Software Engineer, Generalist')), true);
+});
+
+test('keeps the shortest descriptions that are genuinely real', () => {
+  /* The floor is measured, not guessed. Across all 253 boards (22,119 postings) the junk cluster
+     ends at 62 characters and the shortest real description is 353 - Latch's evergreen "I don't see
+     the right role" - with nothing at all between 177 and 353. These two pin the margin, so a
+     future change that raises the floor toward real data fails here instead of in production. */
+  const latch = `About Us\n\nThe convergence of laboratory automation, high-throughput assays, and machine learning is moving the medium of biological discovery to silicon. At LatchBio, our mission is to foster this revolution by creating a first-in-class platform that enables biologists to leverage the explosion of data that increases by orders of magnitude every year.`;
+  assert.equal(latch.length, 353);
+  assert.equal(hasUsableDescription(posting(latch, 'I don’t see the right role')), true);
+  assert.ok(MIN_DESCRIPTION_CHARS < 353, 'the floor must stay clear of the shortest real posting');
+});
+
+test('rejects prose that is real but far too short to evaluate a job from', () => {
+  const twoSentences = 'We are hiring an engineer. You will write code.';
+  assert.ok(twoSentences.length < MIN_DESCRIPTION_CHARS);
+  assert.equal(hasUsableDescription(posting(twoSentences)), false);
+});
+
+test('the normalizers still return junk postings, because the poller needs the raw count', () => {
+  /* Placement, asserted. Disney's board is 2 postings and BOTH are placeholders, so a filter inside
+     the normalizers would make its fetch return zero, trip shouldKeepPostingsOnEmptyFetch, and pin
+     those exact two rows on the board forever - the fix would be a no-op for the worst case it was
+     written for. The normalizers stay honest about what the API said; pollSource applies the rule
+     after that guard, next to the freshness filter. */
+  const disney = normalizeGreenhouseJobs({ jobs: [
+    { id: 7667872002, title: 'MASTER TEMPLATE', absolute_url: 'https://x/1', content: '&lt;p&gt;PLACEHOLDER&lt;/p&gt;' },
+    { id: 4460067002, title: 'prospecting test', absolute_url: 'https://x/2', content: '&lt;p&gt;afdsfasdfasdf&lt;/p&gt;' },
+  ] });
+  assert.equal(disney.length, 2, 'the raw fetch count must survive normalization');
+  assert.equal(disney.filter(hasUsableDescription).length, 0, 'and none of them may reach the table');
 });
 
 test('builds first-party ATS endpoints from board tokens', () => {

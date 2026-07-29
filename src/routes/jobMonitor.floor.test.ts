@@ -12,7 +12,7 @@ import {
   shouldKeepPostingsOnEmptyFetch,
 } from './jobMonitor';
 import { AUTONOMOUS_PORTAL_FAMILIES, portalCanAutoSubmit } from '../lib/portalSubmission';
-import { POLLABLE_JOB_BOARDS } from '../lib/jobMonitor';
+import { hasUsableDescription, POLLABLE_JOB_BOARDS } from '../lib/jobMonitor';
 
 test('the board floor is a thousand surfaced jobs, and it is not a suggestion', () => {
   // Pinned as a value, not just a comparison. If someone "fixes" a breach by lowering the number,
@@ -97,6 +97,25 @@ test('a board whose postings are all stale is NOT mistaken for a board that retu
     'a board that answered with postings must still be swept, even if none are fresh');
   assert.equal(shouldKeepPostingsOnEmptyFetch(freshOfThem, 600), true,
     'and a genuinely empty answer must still be protected');
+});
+
+test('a board whose postings are all placeholders is NOT mistaken for a board that returned nothing', () => {
+  /* The same trap as the freshness one above, and Disney is the live case: its board is exactly two
+     postings, "MASTER TEMPLATE" -> "PLACEHOLDER" and "prospecting test" -> "afdsfasdfasdf". Feeding
+     the usability-filtered count to the empty-response guard would read as "the API returned
+     nothing", protect those two rows from the sweep, and leave the junk on the board permanently -
+     the rule would be a no-op for the very worst board it exists to clean. So the guard keys off the
+     RAW fetch here too, and the filter runs after it. */
+  const disneyBoard = [
+    { title: 'MASTER TEMPLATE', description: 'PLACEHOLDER' },
+    { title: 'prospecting test', description: 'afdsfasdfasdf' },
+  ];
+  const usable = disneyBoard.filter(hasUsableDescription);
+  assert.equal(usable.length, 0, 'neither posting may be stored');
+  assert.equal(shouldKeepPostingsOnEmptyFetch(disneyBoard.length, 2), false,
+    'the board ANSWERED, so its rows must still be swept and the placeholders must disappear');
+  assert.equal(shouldKeepPostingsOnEmptyFetch(usable.length, 2), true,
+    'and this is the wrong count to guard on: it would pin the junk forever');
 });
 
 test('closed postings leave the product immediately, and the row lingers only briefly', () => {

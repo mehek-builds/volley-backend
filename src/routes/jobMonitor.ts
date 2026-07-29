@@ -5,7 +5,7 @@ import { db } from '../db/index';
 import { career_page_sources, monitored_jobs, profiles, sponsor_employers, users } from '../db/schema';
 import { normalizeEmployerName, readPostingSponsorship, sponsorOnlyBoardRequired, sponsorshipVerdict, type PostingSponsorship } from '../lib/sponsorship';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
-import { fetchSourceJobs, POLLABLE_JOB_BOARDS, type JobSourceInput, type SupportedJobBoard } from '../lib/jobMonitor';
+import { fetchSourceJobs, hasUsableDescription, POLLABLE_JOB_BOARDS, type JobSourceInput, type SupportedJobBoard } from '../lib/jobMonitor';
 import { AUTONOMOUS_PORTAL_FAMILIES } from '../lib/portalSubmission';
 import { optionalAuth } from '../middleware/auth';
 import { scoreJdMatch } from '../engine/jdMatch';
@@ -652,7 +652,15 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
      * that genuinely aged out. "The API returned nothing" and "the API returned nothing FRESH" are
      * different facts and only the first one is a fault. */
     const cutoff = new Date(Date.now() - JOB_FRESHNESS_DAYS * 86_400_000);
-    const fresh = jobs.filter((job) => job.posted_at instanceof Date && job.posted_at >= cutoff);
+    const fresh = jobs
+      .filter((job) => job.posted_at instanceof Date && job.posted_at >= cutoff)
+      /* Same reasoning as the window, and deliberately on the same side of the guard: a posting
+         whose description is a placeholder or the title repeated is not something a student can
+         evaluate or the matcher can score, so it never reaches the table. See
+         hasUsableDescription - it must run HERE and not inside the normalizers, because Disney's
+         board is two postings and both are placeholders, and filtering upstream would make that
+         board indistinguishable from one that answered with nothing. */
+      .filter(hasUsableDescription);
 
     const now = new Date();
     await db.transaction(async (tx) => {
