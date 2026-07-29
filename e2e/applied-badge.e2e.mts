@@ -42,6 +42,7 @@ const { db, pool } = await import('../src/db/index.ts');
 const { users, career_page_sources, monitored_jobs, generated_resumes } = await import('../src/db/schema.ts');
 const { buildApp } = await import('../src/index.ts');
 const { buildAppliedIndex, isJobApplied } = await import('./website-job-rows.vendored.ts');
+const { packetMatchesJob } = await import('./website-daily-matches.vendored.ts');
 
 const EXPECTED_DB = 'litos_e2e_jobid';
 const COMPANY = 'Google';
@@ -107,6 +108,24 @@ async function assertThrowawayDatabase() {
   console.log(`connected to ${name} (throwaway), safe to truncate`);
 }
 
+/** The packet list, fetched the way the dashboard fetches it. A DIFFERENT endpoint from the board:
+ *  the badge reads /applications/board, but "does a packet already exist for this posting" reads
+ *  /resume/history, and only this one proves job_id survives that projection too. */
+async function fetchHistoryAsUser(app: Awaited<ReturnType<typeof buildApp>>) {
+  const token = await new SignJWT({ userId, isGuest: false, sessionVersion: 0, authMethod: 'legacy' })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setIssuedAt()
+    .setExpirationTime('1h')
+    .sign(new TextEncoder().encode(process.env.JWT_SIGNING_SECRET!));
+  const res = await app.inject({
+    method: 'GET',
+    url: '/resume/history',
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(res.statusCode, 200, `history should answer, got ${res.statusCode}: ${res.body}`);
+  return JSON.parse(res.body).resumes as Array<{ job_context: { company?: string; role?: string; job_id?: string | null } }>;
+}
+
 async function seedBase() {
   await db.delete(generated_resumes);
   await db.delete(monitored_jobs);
@@ -147,7 +166,7 @@ const app = await buildApp();
 await assertThrowawayDatabase();
 
 // ── Scenario 1: the fix. An application carrying the posting's id. ───────────────────────────
-console.log('\nScenario 1 — application records the posting id (the fix)');
+console.log('\nScenario 1: application records the posting id (the fix)');
 await seedBase();
 await db.insert(generated_resumes).values({
   user_id: userId,
@@ -172,7 +191,7 @@ check('New York, same company and title, does NOT read Applied', () => assert.eq
 check('London, same company and title, does NOT read Applied', () => assert.equal(isJobApplied(rows[2], index1), false));
 
 // ── Scenario 2: the bug, reproduced. A legacy row with no id. ────────────────────────────────
-console.log('\nScenario 2 — legacy application with no job_id (pre-fix rows, and the extension)');
+console.log('\nScenario 2: legacy application with no job_id (pre-fix rows, and the extension)');
 await seedBase();
 await db.insert(generated_resumes).values({
   user_id: userId,
@@ -197,7 +216,7 @@ check('and it still marks the siblings, which is the OLD bug and is unfixable fo
 });
 
 // ── Scenario 3: both kinds at once, each matching its own way. ───────────────────────────────
-console.log('\nScenario 3 — a legacy row and a new row coexisting');
+console.log('\nScenario 3: a legacy row and a new row coexisting');
 await seedBase();
 await db.insert(generated_resumes).values([
   {
@@ -221,7 +240,7 @@ check('the legacy row still matches by company+role', () =>
   assert.equal(isJobApplied({ id: 'other', company_name: 'Stripe', title: 'Data Analyst' }, index3), true));
 
 // ── Scenario 4: a saved (not applied) row must mark nothing. ─────────────────────────────────
-console.log('\nScenario 4 — a saved application is not an application');
+console.log('\nScenario 4: a saved application is not an application');
 await seedBase();
 await db.insert(generated_resumes).values({
   user_id: userId,
@@ -240,7 +259,7 @@ check('a saved row marks nothing at all', () => {
 // The dashboard prewarms a resume per matched job, so a real account holds packets for several
 // postings at once, including siblings. A naive "any id means applied" bug would pass every
 // scenario above and still fail here.
-console.log('\nScenario 5 — applications for two of three siblings');
+console.log('\nScenario 5: applications for two of three siblings');
 await seedBase();
 await db.insert(generated_resumes).values([
   {
@@ -263,6 +282,41 @@ check('both ids are indexed, and still no fallback key', () => {
 check('Mountain View reads Applied', () => assert.equal(isJobApplied(rows[0], index5), true));
 check('London reads Applied', () => assert.equal(isJobApplied(rows[2], index5), true));
 check('New York, the one never applied to, still does NOT', () => assert.equal(isJobApplied(rows[1], index5), false));
+
+// ── Scenario 6: packet reuse. Which posting an existing packet belongs to. ───────────────────
+// A different question from the badge, on a different endpoint, and the one that decides whether
+// "Apply now" reuses a packet or builds a new one. A wrong match here showed the student a resume
+// tailored to a different posting AND skipped the build for the one they opened.
+console.log('\nScenario 6: an existing packet is claimed by its own posting only');
+await seedBase();
+await db.insert(generated_resumes).values({
+  user_id: userId,
+  job_context: { company: COMPANY, role: TITLE, jd_hash: 'f', job_id: mtvJobId },
+  spec: {}, resume_object_key: 'resumes/e2e-6.pdf', pipeline_stage: 'saved',
+});
+
+const history = await fetchHistoryAsUser(app);
+check('/resume/history returns the packet with its job_id intact', () => {
+  assert.equal(history.length, 1);
+  assert.equal(history[0].job_context.job_id, mtvJobId);
+});
+check('the packet is claimed by the posting it was built for', () =>
+  assert.equal(packetMatchesJob(history[0] as never, rows[0] as never), true));
+check('and NOT by the sibling req at the same company with the same title', () => {
+  assert.equal(packetMatchesJob(history[0] as never, rows[1] as never), false);
+  assert.equal(packetMatchesJob(history[0] as never, rows[2] as never), false);
+});
+
+// The legacy half, on this endpoint too.
+await seedBase();
+await db.insert(generated_resumes).values({
+  user_id: userId,
+  job_context: { company: COMPANY, role: TITLE, jd_hash: 'g' },
+  spec: {}, resume_object_key: 'resumes/e2e-6b.pdf', pipeline_stage: 'saved',
+});
+const legacyHistory = await fetchHistoryAsUser(app);
+check('a packet with no job_id still matches by company and role', () =>
+  assert.equal(packetMatchesJob(legacyHistory[0] as never, rows[0] as never), true));
 
 await app.close();
 await pool.end();

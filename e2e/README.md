@@ -40,11 +40,22 @@ Not covered: `POST /resume/generate` is never called. Reaching the line that wri
 needs a live Anthropic call, a PDF render and a blob upload. Rows are inserted in the exact shape
 that route builds; the request-schema half is covered by `src/routes/resumeRequestSchema.test.ts`.
 
-## The vendored file
+## The two questions this covers
 
-`website-job-rows.vendored.ts` is a copy of `lib/job-rows.ts` from the `role-quick-website` repo,
-with only its type-only import replaced. A test spanning two repos cannot import across them, and a
-shared package is more machinery than one test justifies.
+They are different questions, on different endpoints, and both were wrong the same way:
 
-**Nothing detects drift.** If the badge logic changes on the website side, re-copy it. The header in
-that file carries the commit it was taken from and the `diff` command to check it.
+- **"Has this posting been applied to?"** reads `GET /applications/board` and feeds
+  `buildAppliedIndex` / `isJobApplied`. Wrong answer showed a green "Applied" on a posting the
+  student never applied to, so they never applied.
+- **"Does a packet already exist for this posting?"** reads `GET /resume/history` and feeds
+  `packetMatchesJob`. Wrong answer made "Apply now" reuse a resume tailored to a *different*
+  posting and skip building one for the posting actually opened.
+
+## The vendored files
+
+`website-job-rows.vendored.ts` and `website-daily-matches.vendored.ts` are copies from the
+`role-quick-website` repo, each with only its type-only import line replaced. A test spanning two
+repos cannot import across them, and a shared package is more machinery than one test justifies.
+
+**Nothing detects drift.** If either piece of logic changes on the website side, re-copy it. Each
+header carries the commit it was taken from and the exact `diff` command to check it.
