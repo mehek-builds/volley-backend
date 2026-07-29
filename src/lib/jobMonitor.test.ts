@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   hasUsableDescription,
+  isIngestablePosting,
+  isSelfDeclaredTestPosting,
   MIN_DESCRIPTION_CHARS,
   normalizeAshbyJobs,
   normalizeGreenhouseJobs,
@@ -292,6 +294,67 @@ test('the normalizers still return junk postings, because the poller needs the r
   ] });
   assert.equal(disney.length, 2, 'the raw fetch count must survive normalization');
   assert.equal(disney.filter(hasUsableDescription).length, 0, 'and none of them may reach the table');
+});
+
+/* BCG's four self-declared fake postings, quoted from the live Greenhouse board. */
+const BCG_DISCLAIMER = 'This is a fake job. Do not apply unless you are a Greenhouse employee. This is for testing purposes only.';
+
+test('rejects a posting that declares itself a fake', () => {
+  assert.equal(isSelfDeclaredTestPosting({ description: `${BCG_DISCLAIMER} Test Description\n\nIf you do apply, your application will be deleted.` }), true);
+});
+
+test('rejects a fake posting even when it carries a full, convincing job description', () => {
+  /* The two BCG postings that a length rule can never catch: 1,641 and 1,742 characters of real
+     role prose with the disclaimer bolted on the front. This is why the fake-posting rule exists
+     separately from hasUsableDescription rather than as another length or title heuristic. */
+  const convincing = `${BCG_DISCLAIMER} Associate Customer Success Manager\n\nAbout the Role\n\nYou'll own a portfolio of accounts and be the primary relationship owner for a set of customers post-sale. Your job is to make sure they are successful, engaged, and renewing. ${'You will run onboarding, drive adoption, and coordinate across multiple teams. '.repeat(20)}`;
+  assert.ok(convincing.length > 1_600, 'the fixture must be long enough to clear every length rule');
+  assert.equal(hasUsableDescription({ description: convincing, title: 'Voice AI Test - CSM' }), true,
+    'the description itself is perfectly readable, which is exactly the problem');
+  assert.equal(isIngestablePosting({ description: convincing, title: 'Voice AI Test - CSM' }), false,
+    'and it must still never reach the table');
+});
+
+test('keeps the 325 real postings whose anti-scam boilerplate mentions fake jobs', () => {
+  /* The measurement that shaped this rule. "fake job" appears in 329 descriptions across the 253
+     boards and only 4 are fake; the other 325 are Samsara warning candidates about recruitment
+     scams. A substring match would have deleted 325 real jobs to remove 4, so every pattern must be
+     a statement ABOUT the posting, never a mention of fakery in passing. */
+  const samsara = `We are looking for an Account Executive to join our team. ${'You will own the full sales cycle and partner closely with customers. '.repeat(10)}\n\nFraudulent Employment Offers\n\nSamsara is aware of scams involving fake job interviews and offers. Please know we do not charge fees to applicants and all communications come from an @samsara.com address.`;
+  assert.match(samsara, /fake job/i, 'the fixture really does contain the phrase');
+  assert.equal(isSelfDeclaredTestPosting({ description: samsara }), false);
+  assert.equal(isIngestablePosting({ description: samsara, title: 'Account Executive, Commercial' }), true);
+});
+
+test('keeps real postings that tell some applicants not to apply here', () => {
+  /* The same trap from the other direction: 75 live postings use "do not apply" for routing. */
+  const stripe = `Note: if you are an intern, new grad, staff, front-end, or full-stack applicant, please do not apply using this link and visit our jobs page for those specific postings. ${'You will build and operate payment APIs at scale. '.repeat(12)}`;
+  const sofi = `Internal Employees\n\nIf you are a current employee, do not apply here - please navigate to our Internal Job Board in Greenhouse to apply. ${'You will partner with risk and product teams. '.repeat(12)}`;
+  for (const description of [stripe, sofi]) {
+    assert.equal(isSelfDeclaredTestPosting({ description }), false);
+  }
+});
+
+test('keeps real test-engineering roles, which are the bulk of what "test" matches', () => {
+  /* 199 postings carry "Test" in the title and essentially all are real hardware and software test
+     roles at SpaceX, Rocket Lab and graphcore. The rule reads the description only, and even there
+     it needs a self-declaration, so none of these are touched. */
+  const spacex = `Test Engineer, Avionics (Starship)\n\nSpaceX was founded under the belief that a future where humanity is out exploring the stars is fundamentally more exciting than one where we are not. ${'You will develop and execute test campaigns for flight avionics hardware. '.repeat(12)}`;
+  assert.equal(isSelfDeclaredTestPosting({ description: spacex }), false);
+  assert.equal(isIngestablePosting({ description: spacex, title: 'Test Engineer, Avionics (Starship)' }), true);
+  // Prose that merely discusses testing must not trip it either.
+  assert.equal(isSelfDeclaredTestPosting({ description: `${spacex} All hardware is built for testing purposes across the fleet.` }), false);
+});
+
+test('the ingest gate is the single place both rules are enforced', () => {
+  /* Guards the seam rather than the rules: pollSource applies exactly this one predicate, so a rule
+     added to either half takes effect for the daily cron without another call site being edited. */
+  const placeholder = { description: 'PLACEHOLDER', title: 'MASTER TEMPLATE' };
+  const fake = { description: `${BCG_DISCLAIMER} ${'Real sounding prose about the role. '.repeat(12)}`, title: 'PM' };
+  const real = { description: `${'We are hiring an engineer to build and ship product. '.repeat(12)}`, title: 'Software Engineer' };
+  assert.equal(isIngestablePosting(placeholder), false, 'no usable description');
+  assert.equal(isIngestablePosting(fake), false, 'declares itself fake');
+  assert.equal(isIngestablePosting(real), true);
 });
 
 test('builds first-party ATS endpoints from board tokens', () => {

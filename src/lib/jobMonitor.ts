@@ -367,6 +367,63 @@ export function hasUsableDescription(job: Pick<NormalizedJob, 'description' | 't
   return raw.length >= MIN_DESCRIPTION_CHARS;
 }
 
+/* A POSTING THAT SAYS IT IS NOT A REAL POSTING.
+ *
+ * A different failure from an empty description, and worse for the student: the text reads like a
+ * normal job, so nothing on the board looks wrong, but applying is pointless. BCG ships four of
+ * these from Greenhouse, and two of them carry a full, convincing role description with the
+ * disclaimer bolted on the front: "This is a fake job. Do not apply unless you are a Greenhouse
+ * employee. This is for testing purposes only... If you do apply, your application will be
+ * deleted." No length or title rule can catch that, because the description is real prose.
+ *
+ * EVERY PATTERN IS A STATEMENT ABOUT THE POSTING ITSELF, and that is the whole design, not a
+ * stylistic preference. Measured across all 253 boards (22,124 postings), the phrase "fake job"
+ * appears in 329 descriptions and only 4 of them are fake: the other 325 are Samsara's anti-scam
+ * boilerplate, "Samsara is aware of scams involving fake job interviews and offers". A substring
+ * match on "fake job" would delete 325 real jobs to remove 4. "do not apply" is the same trap from
+ * the other direction: 75 real postings use it for routing ("if you are an intern, please do not
+ * apply using this link" - Stripe; "if you are a current employee, do not apply here" - SoFi).
+ *
+ * So the rule matches only self-declarations - "THIS POSTING is a fake job" - never a mention of
+ * fakery or testing in passing. Verified: the set below matches exactly the 4 BCG postings, 0 of
+ * Samsara's 325, and 0 of the 199 postings with "Test" in the title (real SpaceX, Rocket Lab and
+ * graphcore test-engineering roles). Several patterns match nothing today; they are safe by
+ * construction, since no real posting describes itself as not real, and they cost one regex each.
+ */
+const TEST_POSTING_SUBJECT = '(?:job|posting|position|role|listing|req(?:uisition)?)';
+const TEST_POSTING_DECLARATIONS = [
+  new RegExp(`\\bthis (?:is|was) (?:a|an) fake ${TEST_POSTING_SUBJECT}\\b`, 'i'),
+  new RegExp(`\\bthis (?:is|was) (?:a|an) test ${TEST_POSTING_SUBJECT}\\b`, 'i'),
+  new RegExp(`\\bthis ${TEST_POSTING_SUBJECT} is (?:only )?for testing purposes\\b`, 'i'),
+  new RegExp(`\\bthis ${TEST_POSTING_SUBJECT} is not (?:a|an) real ${TEST_POSTING_SUBJECT}\\b`, 'i'),
+  new RegExp(`\\b(?:please )?disregard this ${TEST_POSTING_SUBJECT}\\b`, 'i'),
+  /* Not phrased as a declaration, but it can only mean one thing: an employer promising to bin
+     whatever you send is telling you the posting is not real. 4 matches, all BCG. */
+  /\byour application will be deleted\b/i,
+];
+
+/**
+ * Whether the posting declares itself a test or a fake.
+ *
+ * Deliberately reads the DESCRIPTION only. The title is not a usable signal here: 199 postings
+ * carry "Test" in the title and essentially all are real test-engineering roles, so a title rule
+ * would delete most of SpaceX's and Rocket Lab's hardware openings.
+ */
+export function isSelfDeclaredTestPosting(job: Pick<NormalizedJob, 'description'>): boolean {
+  return TEST_POSTING_DECLARATIONS.some((pattern) => pattern.test(job.description));
+}
+
+/**
+ * THE INGEST GATE. Everything the poller stores passes through here first, which is what makes this
+ * the one place to add the next rule rather than a fourth filter somewhere down the chain.
+ *
+ * Applied in pollSource, after the empty-response guard and next to the freshness window. See
+ * hasUsableDescription for why that placement is load-bearing rather than incidental.
+ */
+export function isIngestablePosting(job: Pick<NormalizedJob, 'description' | 'title'>): boolean {
+  return hasUsableDescription(job) && !isSelfDeclaredTestPosting(job);
+}
+
 export function sourceEndpoint(source: Pick<JobSourceInput, 'ats_name' | 'board_token'>): string {
   const token = encodeURIComponent(source.board_token.trim());
   if (source.ats_name === 'greenhouse') {
