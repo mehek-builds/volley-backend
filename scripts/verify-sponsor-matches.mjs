@@ -1,142 +1,206 @@
 #!/usr/bin/env node
 /**
- * ASK EACH EMPLOYER'S OWN JOB BOARD WHO THEY ARE, AND COMPARE.
+ * OPEN A REAL JOB POSTING AND CHECK WE HAVE THE RIGHT COMPANY.
  *
- *   node scripts/verify-sponsor-matches.mjs            # audit every confirmed employer
- *   node scripts/verify-sponsor-matches.mjs --all      # include the unconfirmed ones
+ *   npm run sponsors:verify              # every confirmed employer
+ *   npm run sponsors:verify -- --all     # include the unconfirmed ones
+ *   npm run sponsors:verify -- --json    # machine-readable, for diffing between runs
  *
- * WHY THIS EXISTS. The ingest matches a brand on our board to a legal entity in a federal filing.
- * Every input to that match is a NAME, and names lie: the token `sas` on Greenhouse is Superior
- * Alarm Systems, not SAS Institute; `bcg` is Bohen Consulting Group, not Boston Consulting Group;
- * `latch` on Lever is LatchBio, not the smart-lock company; `crisp` on Ashby is a Dutch grocer
- * whose postings are all in Amsterdam. All four were confirmed by the first version of the alias
- * list, and each one told a job seeker who needs sponsorship that a company sponsors when it does
- * not - the single worst thing this feature can do.
+ * WHY THIS READS THE POSTING RATHER THAN THE LABEL.
  *
- * The ATS knows something the filing data cannot: the board's OWN display name, typed by the
- * employer. Comparing it to the legal entity we matched catches a whole class of wrong answers
- * that no amount of care with the name-matching rules would.
+ * The ingest matches a brand on our board to a legal entity in a federal filing. Every input to
+ * that match is a NAME, and names lie in both directions:
  *
- * IT REPORTS, IT DOES NOT DECIDE. A mismatch is often innocent (Instacart's board says
- * "Instacart", its filings say "MAPLEBEAR INC D/B/A INSTACART"), so this prints a table for a
- * human to read rather than editing anything. Exit code 1 when something needs looking at, so it
- * can gate a release when somebody wants it to.
+ *   - the Greenhouse token `sas` is Superior Alarm Systems, not SAS Institute
+ *   - `bcg` is Bohen Consulting Group, not Boston Consulting Group
+ *   - `tcs` is Thornbury Community Services, a UK care provider, not Tata Consultancy
+ *   - `latch` on Lever is LatchBio, not the smart-lock company
+ *   - `crisp` on Ashby is a Dutch grocer whose postings are all in Amsterdam
+ *   - and in the other direction, `purestorage` DISPLAYS the stale name "Everpure" while its
+ *     postings are unmistakably Pure Storage's
+ *
+ * A display name is not evidence and a token is not a company. The posting is: it says who wrote
+ * it, in prose, with the company's own domain in its links. An earlier version of this file
+ * compared only the Greenhouse display name and had NO OPINION on the 46 employers whose boards
+ * are on Lever or Ashby, which publish no company name at all. That is the gap this closes.
+ *
+ * WHAT IT PROVES AND WHAT IT DOES NOT. A hit proves the board we poll belongs to the company we
+ * named. It does not prove that company filed the petition - that is the alias list's job.
  */
 
-import { readFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const all = process.argv.includes('--all');
+const args = process.argv.slice(2);
+const includeUnconfirmed = args.includes('--all');
+const asJson = args.includes('--json');
 
 const { H1B_SPONSOR_FILE } = await import('../src/data/h1bSponsors.ts');
 const { JOB_SOURCES } = await import('../src/lib/jobSources.ts');
+/* The judgement lives in src/lib/sponsorIdentity.ts, typechecked and unit-tested against the real
+   text of the boards that fooled the first version of this audit. This file is only the I/O. */
+const { identityCheck, verdictFor } = await import('../src/lib/sponsorIdentity.ts');
 
-/** The name the employer typed into their own applicant tracking system. */
-async function boardName(source) {
-  const timeout = AbortSignal.timeout(20_000);
-  try {
-    if (source.ats_name === 'greenhouse') {
-      const response = await fetch(`https://boards-api.greenhouse.io/v1/boards/${source.board_token}`, { signal: timeout });
-      if (!response.ok) return null;
-      const name = (await response.json()).name;
-      return name ? { name: String(name).trim(), sample: null } : null;
-    }
-    /* Lever and Ashby publish no company-name field at all - only Greenhouse does. So for those
-       two the audit has NO opinion to offer, and says so, rather than comparing a job title to a
-       legal entity and calling the inevitable mismatch a suspect. The first version did exactly
-       that and buried two real false matches under 40 false alarms.
-       The posting text is still printed, because a human reading "Warehouse Medewerker @
-       Amsterdam" against "Crisp, Inc." of Delaware needs one second to see the problem. */
-    const url = source.ats_name === 'lever'
-      ? `https://api.lever.co/v0/postings/${source.board_token}?mode=json&limit=1`
-      : `https://api.ashbyhq.com/posting-api/job-board/${source.board_token}`;
-    const response = await fetch(url, { signal: timeout });
-    if (!response.ok) return null;
-    const body = await response.json();
-    const job = source.ats_name === 'lever' ? body[0] : (body.jobs ?? [])[0];
-    if (!job) return null;
-    const title = job.text ?? job.title ?? '?';
-    const place = job.categories?.location ?? job.location ?? '?';
-    return { name: null, sample: `${title} @ ${place}` };
-  } catch {
-    return null;
-  }
-}
-
-function words(value) {
-  return new Set(
-    String(value)
-      .toUpperCase()
-      .replace(/[^A-Z0-9 ]+/g, ' ')
-      .split(/\s+/)
-      .filter((word) => word.length > 2
-        && !['INC', 'LLC', 'LTD', 'THE', 'AND', 'CORP', 'GROUP', 'USA', 'COM', 'DBA'].includes(word)),
-  );
+async function json(url) {
+  const response = await fetch(url, { signal: AbortSignal.timeout(25_000) });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
 }
 
 /**
- * Do the employer's own name and the filing entity's name share a real word?
+ * Real postings from this employer's board, with their prose.
  *
- * Null means NO OPINION, which is the honest answer for Lever and Ashby (they publish no company
- * name) and the reason this returns three states rather than a boolean. A false alarm is not free:
- * an audit that cries wolf on forty rows is one nobody reads, and the two rows that matter are the
- * ones it exists to surface.
- *
- * Prefix-tolerant, because a brand and its legal name routinely differ by a suffix that carries no
- * information: "YugabyteDB" against "YUGABYTE INC", "SoFi" against "Social Finance" (which fails,
- * correctly, and gets read by a human).
+ * Every branch asks for the DESCRIPTION, not just the title: a job title is the one part of a
+ * posting that never says who wrote it. Three postings rather than one, because a single posting
+ * can be a contractor's or a subsidiary's while the company's own name shows up across the set.
  */
-function agrees(board, legalNames) {
-  if (!board?.name) return null;
-  const boardWords = [...words(board.name)];
-  if (boardWords.length === 0) return null;
-  return legalNames.some((legal) => [...words(legal)].some((legalWord) =>
-    boardWords.some((boardWord) => boardWord.startsWith(legalWord) || legalWord.startsWith(boardWord))));
+async function fetchIdentity(source) {
+  if (source.ats_name === 'greenhouse') {
+    const [board, jobs] = await Promise.all([
+      json(`https://boards-api.greenhouse.io/v1/boards/${source.board_token}`).catch(() => null),
+      json(`https://boards-api.greenhouse.io/v1/boards/${source.board_token}/jobs?content=true`),
+    ]);
+    const list = jobs.jobs ?? [];
+    return {
+      displayName: board?.name ?? null,
+      count: list.length,
+      /* EVERY location, not just the sampled postings'. One short string each, and sampling three
+         of four hundred wrongly reported Cloudflare and Twilio as hiring nobody in the US. */
+      locations: list.map((job) => job.location?.name ?? '').filter(Boolean),
+      samples: list.slice(0, 3).map((job) => ({
+        title: job.title,
+        location: job.location?.name ?? null,
+        url: job.absolute_url ?? null,
+        text: String(job.content ?? '').replace(/<[^>]+>/g, ' '),
+      })),
+    };
+  }
+  if (source.ats_name === 'lever') {
+    const list = await json(`https://api.lever.co/v0/postings/${source.board_token}?mode=json`);
+    return {
+      displayName: null,
+      count: list.length,
+      locations: list.map((job) => job.categories?.location ?? '').filter(Boolean),
+      samples: list.slice(0, 3).map((job) => ({
+        title: job.text,
+        location: job.categories?.location ?? null,
+        url: job.hostedUrl ?? job.applyUrl ?? null,
+        text: `${job.descriptionPlain ?? ''} ${job.additionalPlain ?? ''}`,
+      })),
+    };
+  }
+  const body = await json(`https://api.ashbyhq.com/posting-api/job-board/${source.board_token}`);
+  const list = body.jobs ?? [];
+  return {
+    displayName: null,
+    count: list.length,
+    locations: list.map((job) => job.location ?? '').filter(Boolean),
+    samples: list.slice(0, 3).map((job) => ({
+      title: job.title,
+      location: job.location ?? null,
+      url: job.jobUrl ?? job.applyUrl ?? null,
+      text: String(job.descriptionPlain ?? job.descriptionHtml ?? '').replace(/<[^>]+>/g, ' '),
+    })),
+  };
 }
 
-/* Mismatches a human has already read and cleared, with what they checked. Kept so a run that
-   finds nothing new exits 0 and stays worth running: an audit whose output is always two known
-   rows is one people learn to skip past. */
-const VERIFIED = {
-  'Pure Storage': 'the greenhouse board displays the stale name "Everpure", but its 311 postings are '
-    + 'Pure Storage\'s ("reshaping the data storage industry", GSI/NTT partner roles)',
-  SoFi: 'SoFi trades under its brand and files as Social Finance, Inc. No word in common, same company',
+/* Employers a human opened, read, and cleared, with WHAT THEY READ.
+ *
+ * The automated checks cannot corroborate every match: an alias is only ever confirmed by the
+ * filing entity's own words, the company's domain, a d/b/a, or a shared filing city, and a dozen
+ * real companies offer none of those. Each of these was settled by opening the board and reading
+ * what the employer says about itself, on 2026-07-29. The quote is here so the next person can
+ * check the judgement rather than repeat the work - or overturn it. */
+const CLEARED_BY_HAND = {
+  Abridge: 'board: "ABOUT ABRIDGE ... powering deeper understanding in healthcare"; ABRIDGE AI INC filed from Pittsburgh and Philadelphia, PA, where Abridge is based',
+  anomalo: 'board: "Anomalo is the AI-powered data quality platform"; Anomalo, Inc. filed from Palo Alto, CA',
+  Blend: 'board: "Blend ... our cloud banking platform"; blend.com/terms-of-use names Blend Labs, and BLEND LABS INC filed from San Francisco and Novato, CA',
+  cleo: 'the Greenhouse board is titled "Cleo (US)"; CLEO AI INC filed from New York, which is Cleo the money app\'s US entity',
+  Fireworks: 'board: "Fireworks is the platform for specialized intelligence"; Fireworks.ai, Inc. filed from Redwood City, CA, and the board posts in San Mateo',
+  fullstory: 'board: "Fullstory is a remote first company"; FULLSTORY INC filed from Atlanta, GA, where Fullstory is headquartered',
+  'Marshall Wace': 'board: "Marshall Wace is a leading global alternatives investment manager"; MARSHALL WACE NORTH AMERICA LP is its US arm, filed from New York',
+  N26: 'board titled "N26", postings for the French MLRO function; N26 INC filed from New York. NOTE: N26 closed its US business, so its US filings are historical - it stays confirmed but its board carries no US roles, which the job_country rule now handles',
+  Netlify: 'board: "Netlify\'s self-serve funnel"; NETLIFY INC filed from San Francisco',
+  phonepe: 'the posting itself says "About PhonePe Limited: Headquartered in India", which is the matched entity verbatim',
+  science37: 'board: "Science 37\'s mission is to accelerate clinical research"; SCIENCE 37 INC filed from Culver City and Los Angeles, CA',
+  tebra: 'the posting lists tebra.com, patientpop.com and kareo.com as its own domains; TEBRA TECHNOLOGIES INC is the Kareo/PatientPop merger, filed from Corona del Mar, CA',
 };
 
 const byCompany = new Map(JOB_SOURCES.map((source) => [source.company_name, source]));
-const rows = [];
-const queue = H1B_SPONSOR_FILE.employers.filter((employer) => all || employer.sponsors);
+const queue = H1B_SPONSOR_FILE.employers.filter((employer) => includeUnconfirmed || employer.sponsors);
+const results = [];
 
-/* Serial, with a small pause. This hits three third-party APIs about 200 times and there is no
-   hurry: it is an audit somebody runs before a release, not anything on a request path. */
 for (const employer of queue) {
   const source = byCompany.get(employer.company);
   if (!source) continue;
-  const name = await boardName(source);
-  rows.push({ employer, source, board: name, agrees: agrees(name, employer.legal_names) });
-  await new Promise((resolve) => setTimeout(resolve, 120));
+  let identity = null;
+  let error = null;
+  try {
+    identity = await fetchIdentity(source);
+  } catch (reason) {
+    error = reason instanceof Error ? reason.message : String(reason);
+  }
+  const check = identity ? identityCheck(employer.company, employer, identity) : null;
+  const verdict = verdictFor(identity, check, error);
+  results.push({ company: employer.company, source, employer, identity, check, verdict, error });
+  process.stderr.write(verdict === 'verified' ? '.' : verdict === 'SUSPECT' ? 'X' : '?');
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
+process.stderr.write('\n');
+
+if (asJson) {
+  const path = join(HERE, '..', 'sponsor-verification.json');
+  writeFileSync(path, `${JSON.stringify(results.map((row) => ({
+    company: row.company,
+    verdict: row.verdict,
+    evidence: row.check,
+    display_name: row.identity?.displayName ?? null,
+    postings: row.identity?.count ?? 0,
+    sample: row.identity?.samples?.[0]
+      ? `${row.identity.samples[0].title} @ ${row.identity.samples[0].location}`
+      : null,
+    legal_names: row.employer.legal_names,
+    evidence_source: row.employer.evidence,
+  })), null, 2)}\n`);
+  console.log(`Wrote ${path}`);
 }
 
-const suspect = rows.filter((row) => row.agrees === false && !VERIFIED[row.employer.company]);
-const cleared = rows.filter((row) => row.agrees === false && VERIFIED[row.employer.company]);
-const unreachable = rows.filter((row) => row.board === null);
-const noOpinion = rows.filter((row) => row.board !== null && row.agrees === null);
+/* A hand-cleared employer is reported separately rather than silently promoted: the reader should
+   see that a human, not the checker, is what stands behind it. */
+for (const row of results) {
+  if (row.verdict !== 'verified' && CLEARED_BY_HAND[row.company]) row.verdict = 'cleared-by-hand';
+}
 
-for (const row of suspect) {
-  console.log(`SUSPECT  ${row.employer.company}  (${row.source.ats_name}:${row.source.board_token})`);
-  console.log(`         board says : ${row.board.name ?? row.board.sample}`);
-  console.log(`         matched    : ${row.employer.legal_names.join(' | ')}`);
-  console.log(`         credited   : ${row.employer.approvals} approvals, ${row.employer.lca_certifications} certified LCAs`);
+const bucket = (name) => results.filter((row) => row.verdict === name);
+if (bucket('cleared-by-hand').length) {
+  console.log(`\nCleared by hand (the checker had no corroboration; a person read the board):`);
+  for (const row of bucket('cleared-by-hand')) {
+    console.log(`  ${row.company}: ${CLEARED_BY_HAND[row.company]}`);
+  }
 }
-if (unreachable.length) {
-  console.log(`\nUnreachable boards (no opinion, not a failure): ${unreachable.map((row) => row.employer.company).join(', ')}`);
+for (const row of [...bucket('SUSPECT'), ...bucket('REVIEW'), ...bucket('weak'), ...bucket('empty-board'), ...bucket('error')]) {
+  console.log(`\n${row.verdict.toUpperCase()}  ${row.company}  (${row.source.ats_name}:${row.source.board_token})`);
+  console.log(`   matched   : ${row.employer.legal_names.join(' | ') || '(none)'}  [${row.employer.evidence}]`);
+  if (row.error) console.log(`   error     : ${row.error}`);
+  if (row.identity) {
+    console.log(`   board name: ${row.identity.displayName ?? '(none published)'}   postings: ${row.identity.count}`);
+    console.log(`   evidence  : brand=${row.check?.brandInText} legal=${row.check?.legalHit ?? '-'} domain=${row.check?.domainMatch} us=${row.check?.usPresence} geo=${row.check?.geoOverlap ?? '-'} kind=${row.check?.matchKind}`);
+    console.log(`   filed from: ${(row.employer.filing_cities ?? []).slice(0, 4).join(', ') || '(no city)'}  [${(row.employer.filing_states ?? []).join(' ')}]`);
+    console.log(`   locations : ${[...new Set(row.identity.locations)].slice(0, 5).join(' / ')}`);
+    for (const sample of row.identity.samples.slice(0, 2)) {
+      console.log(`   posting   : ${sample.title} @ ${sample.location ?? '?'}`);
+      console.log(`               ${sample.text.replace(/\s+/g, ' ').trim().slice(0, 160)}`);
+    }
+  }
 }
-if (cleared.length) {
-  console.log(`Cleared by hand (name differs, company is right): ${cleared.map((row) => row.employer.company).join(', ')}`);
-}
-console.log(`\n${rows.length} checked, ${suspect.length} suspect, ${cleared.length} cleared, ${noOpinion.length} no opinion (Lever/Ashby publish no company name), ${unreachable.length} unreachable.`);
-console.log('A mismatch is not proof of a wrong match - Instacart files as MAPLEBEAR - but every one');
-console.log('of them needs a human to look at the board and the filing side by side.');
-process.exit(suspect.length > 0 ? 1 : 0);
+
+const counts = ['verified', 'cleared-by-hand', 'REVIEW', 'weak', 'SUSPECT', 'empty-board', 'error']
+  .map((name) => `${bucket(name).length} ${name}`);
+console.log(`\n${results.length} employers checked: ${counts.join(', ')}.`);
+console.log("verified = the employer's own posting names the company or the filing entity we matched.");
+process.exit(
+  bucket('SUSPECT').length + bucket('REVIEW').length + bucket('weak').length
+    + bucket('empty-board').length + bucket('error').length > 0 ? 1 : 0,
+);

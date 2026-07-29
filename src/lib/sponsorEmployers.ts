@@ -64,6 +64,13 @@ export type H1bSponsorEmployer = {
   fiscal_years: number[];
   /** Certified H-1B labor condition applications across the DOL quarters. */
   lca_certifications: number;
+  /**
+   * Where the petitions were filed from. NOT evidence of sponsorship, and never read by the board:
+   * it exists so scripts/verify-sponsor-matches.mjs can tell a same-named company apart from ours.
+   * A US filer in Delaware is not the Amsterdam grocer whose board we poll under the same word.
+   */
+  filing_states: string[];
+  filing_cities: string[];
 };
 
 export type H1bSponsorFile = {

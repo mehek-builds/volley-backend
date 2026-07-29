@@ -102,6 +102,9 @@ const [notSponsoring] = await db.insert(career_page_sources).values({
   sponsor_employer_id: null,
 }).returning({ id: career_page_sources.id });
 
+/* `country` is part of the fixture now: an employer's H-1B record only reaches a role an H-1B
+   could cover, so a foreign posting at a sponsoring employer must NOT be surfaced, while the same
+   posting stating its own sponsorship must be. */
 const rows = [
   { source: sponsoring.id, company: 'QA Sponsoring Employer', title: 'QA Sponsored Unstated', status: 'unstated', surfaced: true },
   { source: sponsoring.id, company: 'QA Sponsoring Employer', title: 'QA Sponsored Refused', status: 'refuses', surfaced: false },
@@ -115,6 +118,11 @@ const rows = [
    (`posted_at >= now() - JOB_FRESHNESS_DAYS`), so a row without one is filtered out before any
    sponsorship rule is reached and every check in this file fails with an empty board. */
 const postedAt = new Date();
+rows.push(
+  { source: sponsoring.id, company: 'QA Sponsoring Employer', title: 'QA Sponsored Abroad', status: 'unstated', surfaced: false, country: 'non_us' },
+  { source: sponsoring.id, company: 'QA Sponsoring Employer', title: 'QA Sponsored Abroad Offered', status: 'offers', surfaced: true, country: 'non_us' },
+);
+
 await db.insert(monitored_jobs).values(rows.map((row, index) => ({
   source_id: row.source,
   external_id: `qa-sponsor-${index}`,
@@ -125,6 +133,7 @@ await db.insert(monitored_jobs).values(rows.map((row, index) => ({
   posting_url: `https://example.test/job/${index}`,
   posted_at: postedAt,
   sponsorship_status: row.status,
+  job_country: row.country ?? 'us',
 })));
 
 const [account] = await db.insert(users).values({
@@ -157,8 +166,13 @@ async function boardTitles(headers: Record<string, string> = {}, query = '') {
 const everything = [
   'QA Sponsored Offered', 'QA Sponsored Refused', 'QA Sponsored Unstated',
   'QA Unconfirmed Offered', 'QA Unconfirmed Refused', 'QA Unconfirmed Unstated',
+  'QA Sponsored Abroad', 'QA Sponsored Abroad Offered',
 ].sort();
-const sponsorOnlyTitles = ['QA Sponsored Offered', 'QA Sponsored Unstated', 'QA Unconfirmed Offered'].sort();
+const sponsorOnlyTitles = [
+  'QA Sponsored Offered', 'QA Sponsored Unstated', 'QA Unconfirmed Offered',
+  // Abroad AND stating its own sponsorship: the employer is speaking about that role.
+  'QA Sponsored Abroad Offered',
+].sort();
 
 // 1. Signed out, and signed in without a declaration: the whole board.
 check('signed out sees every posting', (await boardTitles()).titles, everything);
@@ -173,6 +187,8 @@ check('...and each row says what confirmed it', anonymousFiltered.evidence, {
   'QA Sponsored Offered': 'posting_offers',
   'QA Sponsored Unstated': 'employer_h1b_filings',
   'QA Unconfirmed Offered': 'posting_offers',
+  // Abroad, but the posting states its own sponsorship, so the posting is what carries it.
+  'QA Sponsored Abroad Offered': 'posting_offers',
 });
 
 // 3. The declaration.
@@ -214,6 +230,17 @@ const byId = await app.inject({ method: 'GET', url: `/jobs/${hidden[0].id}`, hea
 check('a refused posting 404s by id for a declared account', byId.statusCode, 404);
 const byIdAnon = await app.inject({ method: 'GET', url: `/jobs/${hidden[0].id}` });
 check('...and is still readable signed out', byIdAnon.statusCode, 200);
+
+check(
+  'a foreign posting is NOT carried by a US H-1B record',
+  (await boardTitles(auth)).titles.includes('QA Sponsored Abroad'),
+  false,
+);
+check(
+  '...but the same posting stating its own sponsorship is',
+  (await boardTitles(auth)).titles.includes('QA Sponsored Abroad Offered'),
+  true,
+);
 
 // 7. THE GROUPED BOARD, which was a complete way around the filter until it honoured the account.
 //    It returns company, title, locations and an apply link, so serving it unfiltered handed a

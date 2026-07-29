@@ -539,6 +539,15 @@ export const monitored_jobs = pgTable('monitored_jobs', {
   // government contract, a country it has no entity in), and the posting is the authority on
   // itself. Defaults to 'unstated', which surfaces nothing on its own.
   sponsorship_status: text('sponsorship_status').default('unstated').notNull(),
+  // 'us' | 'non_us' | 'unknown', from the location string at poll time (see lib/jobLocation.ts).
+  //
+  // An H-1B is a US work visa, so an EMPLOYER's filing record is evidence about its US roles and
+  // nothing else. Without this column the sponsor-only board showed 2,781 foreign postings -
+  // Bengaluru, Tokyo, London - to people who need US sponsorship, each labelled as a company "we
+  // can confirm sponsors visas" on the strength of a petition filed for a different country's
+  // hiring. A posting that states its OWN sponsorship is unaffected: that is the employer speaking
+  // about that role, wherever it is.
+  job_country: text('job_country').default('unknown').notNull(),
   /* Kept as a column, deliberately NOT dropped, but no longer written (2026-07-28).
    *
    * It was write-only from the day it shipped: the three normalizers set it, the upsert copied it,
@@ -555,7 +564,7 @@ export const monitored_jobs = pgTable('monitored_jobs', {
   activePostedIdx: index('monitored_jobs_active_posted_idx').on(t.is_active, t.posted_at),
   companyIdx: index('monitored_jobs_company_idx').on(t.company_name),
   // The sponsor-only board reads (is_active, sponsorship_status) on every request it serves.
-  sponsorshipIdx: index('monitored_jobs_sponsorship_idx').on(t.is_active, t.sponsorship_status),
+  sponsorshipIdx: index('monitored_jobs_sponsorship_idx').on(t.is_active, t.sponsorship_status, t.job_country),
 }));
 
 // ---- ats_adapters ----
