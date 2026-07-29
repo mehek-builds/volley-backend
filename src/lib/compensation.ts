@@ -254,11 +254,15 @@ const TITLE_TYPES: [RegExp, string][] = [
 ];
 
 /**
- * The employment type a Greenhouse title states outright, or undefined.
+ * The employment type a title states outright, or undefined.
  *
  * undefined is the common answer and the correct one: it means the posting did not say, and the
  * tile shows nothing. Never returns 'Full-time' — see the note above for why that would be a
  * fabrication rather than a default.
+ *
+ * HALF OF THE RULE. Exported for its own unit tests, but normalizers must call
+ * resolveEmploymentType instead: this function alone knows nothing about the employer's field, and a
+ * caller that used it directly on Lever or Ashby would throw that field away.
  */
 export function employmentTypeFromTitle(title: string): string | undefined {
   for (const [pattern, type] of TITLE_TYPES) {
@@ -289,6 +293,10 @@ const TYPE_SYNONYMS: [RegExp, string][] = [
  * field, so it is a fact about the posting even when this list has not seen it before, and a board
  * that quietly discards employer statements it does not recognize is how a field goes stale
  * without anyone noticing.
+ *
+ * THE OTHER HALF OF THE RULE. Exported for its own unit tests, but normalizers must call
+ * resolveEmploymentType instead: this function trusts the field unconditionally, which is exactly
+ * the behaviour that put "ML Research Intern" on the board as Full-time.
  */
 export function normalizeEmploymentType(value: string | undefined): string | undefined {
   const raw = value?.trim();
@@ -297,4 +305,35 @@ export function normalizeEmploymentType(value: string | undefined): string | und
     if (pattern.test(raw)) return type;
   }
   return raw;
+}
+
+/**
+ * The one employment type a posting gets, from the two things that can state it.
+ *
+ * The employer's own structured field normally WINS - it is the employer speaking about their own
+ * role, and the title is only an inference. There is exactly one exception, and it is Mehek's call
+ * (2026-07-29): A TITLE THAT SAYS INTERNSHIP BEATS THE FIELD.
+ *
+ * Why that one and nothing else. Employers use the field for two different questions and the board
+ * cannot tell which they meant: "is this permanent?" and "is this 40 hours?". Modal's live posting
+ * "ML Research Intern" is tagged FullTime, meaning full-time HOURS, and rendering that as a
+ * Full-time job on a tile tells a job seeker the opposite of the one fact the title states plainly.
+ * The title is unambiguous in a way the field is not - nobody writes "Intern" in a job title for a
+ * permanent role - so where they disagree about an internship, the title is the better evidence.
+ *
+ * NARROW ON PURPOSE. Part-time and Contract in a title do NOT override the field, because there the
+ * field is the more reliable of the two: "Contract" in a title is frequently the work rather than
+ * the arrangement ("Contract Manager", "Contracts Counsel" - both live), and a title saying
+ * part-time while the employer says full-time is a genuine ambiguity with no obvious winner. The
+ * asymmetry is the point: this fixes a case where the field is known to answer a different
+ * question, not every case where the two sources differ.
+ *
+ * Also the single entry point for all three boards, which is why Greenhouse routes through it too
+ * even though it has no field to pass: one function means the precedence rule cannot end up
+ * spelled differently in three normalizers.
+ */
+export function resolveEmploymentType(title: string, boardValue?: string): string | undefined {
+  const fromTitle = employmentTypeFromTitle(title);
+  if (fromTitle === 'Internship') return 'Internship';
+  return normalizeEmploymentType(boardValue) ?? fromTitle;
 }
