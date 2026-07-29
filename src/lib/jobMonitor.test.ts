@@ -335,6 +335,16 @@ test('keeps real postings that tell some applicants not to apply here', () => {
   }
 });
 
+test('keeps a real posting that tells SOME readers to disregard it', () => {
+  /* Pins a rule deliberately NOT added. "disregard this posting" reads like a self-declaration but
+     is usually conditional in real prose, which is the same shape as the "do not apply" routing
+     trap, and it catches nothing live. A pattern that is true for only some readers does not
+     belong in the set, so this asserts the omission rather than leaving it to be re-added. */
+  const conditional = `If you have already applied to this team, please disregard this posting. ${'You will design and ship data pipelines end to end. '.repeat(12)}`;
+  assert.equal(isSelfDeclaredTestPosting({ description: conditional }), false);
+  assert.equal(isIngestablePosting({ description: conditional, title: 'Data Engineer' }), true);
+});
+
 test('keeps real test-engineering roles, which are the bulk of what "test" matches', () => {
   /* 199 postings carry "Test" in the title and essentially all are real hardware and software test
      roles at SpaceX, Rocket Lab and graphcore. The rule reads the description only, and even there

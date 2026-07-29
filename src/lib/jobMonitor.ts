@@ -311,7 +311,7 @@ function fold(value: string): string {
    MIN_DESCRIPTION_CHARS, so this set catches nothing the length floor would not already catch - it
    earns its place by documenting the substring trap above, and by still holding if someone later
    pads a marker past the floor. */
-const PLACEHOLDER_DESCRIPTIONS = new Set(['placeholder', 'li dni', 'li dnp', 'li dni li dnp', 'n a', 'tbd']);
+const PLACEHOLDER_DESCRIPTIONS = new Set(['placeholder', 'li dni', 'li dnp', 'n a', 'tbd']);
 
 /* The title echoed back, with at most a word of drift: Point72 ships both the exact repeat and
    "Software Engineer, Investor and Fund Administration" -> "...Administration Technology", and
@@ -346,7 +346,10 @@ export function hasUsableDescription(job: Pick<NormalizedJob, 'description' | 't
   const description = fold(raw);
   if (description && PLACEHOLDER_DESCRIPTIONS.has(description)) return false;
 
-  const rawTitle = job.title.trim();
+  /* `?? ''` rather than a bare .trim(): the type says string and the normalizers guarantee one, but
+     this is now the single gate every ingested posting passes through, and a throw here aborts the
+     whole source's poll before the sweep, not just this posting. */
+  const rawTitle = (job.title ?? '').trim();
   const title = fold(rawTitle);
   /* Both sides must fold to something before comparing, for the same reason: an all-CJK description
      folds to '' and would otherwise read as a perfect echo of any short title.
@@ -386,9 +389,9 @@ export function hasUsableDescription(job: Pick<NormalizedJob, 'description' | 't
  *
  * So the rule matches only self-declarations - "THIS POSTING is a fake job" - never a mention of
  * fakery or testing in passing. Verified: the set below matches exactly the 4 BCG postings, 0 of
- * Samsara's 325, and 0 of the 199 postings with "Test" in the title (real SpaceX, Rocket Lab and
- * graphcore test-engineering roles). Several patterns match nothing today; they are safe by
- * construction, since no real posting describes itself as not real, and they cost one regex each.
+ * Samsara's 325, and 0 of the other 194 postings with "Test" in the title (real SpaceX, Rocket Lab
+ * and graphcore test-engineering roles; 198 carry it, 4 of which are BCG's). Two patterns match
+ * nothing today and are safe by construction, since no real posting describes itself as not real.
  */
 const TEST_POSTING_SUBJECT = '(?:job|posting|position|role|listing|req(?:uisition)?)';
 const TEST_POSTING_DECLARATIONS = [
@@ -396,9 +399,12 @@ const TEST_POSTING_DECLARATIONS = [
   new RegExp(`\\bthis (?:is|was) (?:a|an) test ${TEST_POSTING_SUBJECT}\\b`, 'i'),
   new RegExp(`\\bthis ${TEST_POSTING_SUBJECT} is (?:only )?for testing purposes\\b`, 'i'),
   new RegExp(`\\bthis ${TEST_POSTING_SUBJECT} is not (?:a|an) real ${TEST_POSTING_SUBJECT}\\b`, 'i'),
-  new RegExp(`\\b(?:please )?disregard this ${TEST_POSTING_SUBJECT}\\b`, 'i'),
   /* Not phrased as a declaration, but it can only mean one thing: an employer promising to bin
-     whatever you send is telling you the posting is not real. 4 matches, all BCG. */
+     whatever you send is telling you the posting is not real. 4 matches, all BCG.
+     NOT included, deliberately: "disregard this posting". It reads like a self-declaration but it
+     is usually CONDITIONAL in real prose ("if you have already applied, please disregard this
+     posting"), which is the same shape as the "do not apply" routing trap above, and it catches
+     nothing today. A pattern that can be true for only some readers does not belong here. */
   /\byour application will be deleted\b/i,
 ];
 
