@@ -89,6 +89,11 @@ const NON_US = [
   'MANCHESTER UK', 'GLASGOW', 'BELFAST', 'CORK', 'MALTA', 'CYPRUS', 'BULGARIA', 'CROATIA',
   'SLOVAKIA', 'SLOVENIA', 'UKRAINE', 'ARMENIA', 'GEORGIA COUNTRY', 'MOROCCO', 'TUNISIA', 'GHANA',
   'URUGUAY', 'PANAMA', 'GUATEMALA', 'ECUADOR', 'BOLIVIA', 'PARAGUAY', 'VENEZUELA',
+  /* Georgia the country. It is NOT in US_STATE_NAMES for the mirror-image reason - the live board
+     carries "Belgrade, Serbia; Berlin, Germany; Georgia", which is the country. The US sense is
+     still caught by everything around it: "Atlanta, Georgia" has the city, "Savannah, GA" the
+     code, "Georgia, United States" the country. */
+  'GEORGIA',
 ];
 
 function normalise(location: string): string {
@@ -138,9 +143,11 @@ export function jobCountry(location: string | null | undefined): JobCountry {
   const afterComma = upper.match(/,\s*([A-Z]{2})\b/g) ?? [];
   if (afterComma.some((match) => US_STATE_CODES.has(match.replace(/[^A-Z]/g, '')))) return 'us';
 
-  /* A code at the very END, which is how "Remote - FL" and "Remote - TX" are written. Safe only
-     because it runs AFTER the foreign check: "Amsterdam, NH" never reaches here. */
-  const trailing = upper.trim().match(/([A-Z]{2})$/);
+  /* A code at the very END, which is how "Remote - FL" and "Remote - TX" are written.
+     IT HAS TO BE ITS OWN TOKEN. Without the separator this matched the last two letters of any
+     word: "GEORGIA" ends in IA and became Iowa, and so would "Austria", "Slovakia" and "Somalia"
+     the moment one of them was missing from the foreign list. */
+  const trailing = upper.trim().match(/(?:^|[\s,\-/;])([A-Z]{2})$/);
   if (trailing && US_STATE_CODES.has(trailing[1])) return 'us';
 
   return 'unknown';

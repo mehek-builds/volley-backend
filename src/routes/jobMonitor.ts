@@ -716,8 +716,37 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
         });
       }
     });
-    await db.update(career_page_sources).set({ last_polled_at: now, last_error: null }).where(eq(career_page_sources.id, source.id));
-    return { source_id: source.id, company: source.company_name, jobs: fresh.length, fetched: jobs.length, ok: true as const };
+    /* WHO DOES THE PORTAL SAY THIS BOARD BELONGS TO?
+     *
+     * Recorded on every poll, and a disagreement UNLINKS the source from its sponsoring employer.
+     * Six boards on this list turned out to be a different company than their token suggested -
+     * `sas` is Superior Alarm Systems, `tcs` is Thornbury Community Services - and each was caught
+     * by hand, weeks after it started surfacing. Greenhouse was publishing the right answer on
+     * every poll in between.
+     *
+     * A mismatch does not disable the source: whether a board belongs on the list is a judgement
+     * about the board list. It does mean we no longer know WHOSE board it is, and an employer's
+     * H-1B record cannot be attached to a board we cannot identify.
+     *
+     * `jobs`, not `fresh`: the freshness window can empty the latter, and the portal's name for
+     * itself has nothing to do with how recently it posted. */
+    const portalName = jobs.map((job) => job.portal_company_name).find(Boolean) ?? null;
+    const agrees = portalNameAgrees(source.company_name, portalName);
+    await db.update(career_page_sources).set({
+      last_polled_at: now,
+      last_error: null,
+      ...(portalName ? { portal_company_name: portalName } : {}),
+      ...(agrees === null ? {} : { portal_name_mismatch: agrees === false }),
+      ...(agrees === false ? { sponsor_employer_id: null } : {}),
+    }).where(eq(career_page_sources.id, source.id));
+    return {
+      source_id: source.id,
+      company: source.company_name,
+      jobs: fresh.length,
+      fetched: jobs.length,
+      ok: true as const,
+      ...(agrees === false ? { portal_says: portalName } : {}),
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message.slice(0, 2000) : 'Career page poll failed';
     await db.update(career_page_sources).set({ last_polled_at: new Date(), last_error: message }).where(eq(career_page_sources.id, source.id));
