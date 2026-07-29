@@ -269,6 +269,167 @@ export function normalizeAshbyJobs(payload: unknown): NormalizedJob[] {
   });
 }
 
+/* A DESCRIPTION THAT DESCRIBES NOTHING IS NOT A POSTING.
+ *
+ * 14 live rows carried a placeholder instead of a job description: Disney's "MASTER TEMPLATE" ->
+ * "PLACEHOLDER" and "prospecting test" -> "afdsfasdfasdf", 12 Point72 postings whose entire
+ * description is the job title again ("Software Engineer, Bpm" -> "Software Engineer, Bpm"), plus
+ * btgpactual's "(#LI-DNI)" and Physical Intelligence's "Research Internships" -> "Internships"
+ * outside the freshness window. Verified against the raw board APIs, so this is employer data, not
+ * a normalizer bug.
+ *
+ * It is not only a browse-page blemish. jdMatch.ts scores this text, resumePolicy.ts and
+ * resumeRender.ts rank bullets against it, and the src/llm prompts write from it. A description
+ * that is the title repeated does not merely look empty - it produces a confident, meaningless
+ * match score and pulls the wrong bullets into a generated PDF. There is no consumer that does
+ * something useful with it, which is why these are DROPPED rather than flagged and hidden: a flag
+ * would need a migration, a board filter, and a check at every one of those call sites, all to
+ * preserve a row carrying no information. Dropping is also self-healing, exactly like the freshness
+ * filter - if the employer writes a real description, the next poll inserts it as normal.
+ *
+ * THE THRESHOLD IS MEASURED, NOT GUESSED. Across all 253 boards (22,119 postings): the junk cluster
+ * ends at 62 characters and the shortest REAL description is 353 (Latch's "I don't see the right
+ * role"), then Cursor's genuine 434-character "Software Engineer, Generalist". Nothing at all lives
+ * between 177 and 353. 120 sits inside that empty gap with ~3x margin under the shortest real
+ * posting, so a board that legitimately ships a terse description is not caught. */
+export const MIN_DESCRIPTION_CHARS = 120;
+
+/* Compared on letters and digits only, so "Software Engineer, Bpm" and "Software Engineer Bpm"
+   are the same string and punctuation drift cannot defeat the check. */
+function fold(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+/* Descriptions that are ONE marker and nothing else. Matched against the WHOLE folded description,
+   never as a substring, and the difference is not academic: 6 postings contain "#LI-DNI" and 5 of
+   them are real, full-length descriptions that merely carry the LinkedIn do-not-index tag in a
+   corner (Cursor, Recursion x2, IMC Trading, btgpactual's BTG Experience 2026). A `contains` rule
+   here would delete five good jobs to remove one bad one. Only btgpactual's "(#LI-DNI)", where the
+   marker IS the entire description, is junk.
+   "placeholder" and the LI-DNI spellings are observed; "n a" and "tbd" are not, and are here only
+   because a whole-description match cannot produce a false positive. Every entry is shorter than
+   MIN_DESCRIPTION_CHARS, so this set catches nothing the length floor would not already catch - it
+   earns its place by documenting the substring trap above, and by still holding if someone later
+   pads a marker past the floor. */
+const PLACEHOLDER_DESCRIPTIONS = new Set(['placeholder', 'li dni', 'li dnp', 'n a', 'tbd']);
+
+/* The title echoed back, with at most a word of drift: Point72 ships both the exact repeat and
+   "Software Engineer, Investor and Fund Administration" -> "...Administration Technology", and
+   Physical Intelligence ships the reverse containment ("Research Internships" -> "Internships").
+   Bounded by the RESIDUE rather than by absolute length, which is what makes it independent of the
+   length floor above: it still fires on a company with a 200-character title, and it cannot fire on
+   the real postings that simply OPEN with their own title - Datadog, Databricks and Match Group do
+   that in their Japanese and Korean listings, and leave 2,700-3,900 characters of prose after it. */
+const TITLE_ECHO_SLACK = 15;
+
+/**
+ * Whether a posting carries a description a student (or the matcher) can actually read.
+ *
+ * Applied in pollSource next to the freshness filter rather than inside the normalizers, and that
+ * placement is load-bearing. Disney's board is 2 postings and BOTH are placeholders, so a filter
+ * inside normalizeGreenhouseJobs would make its fetch return zero, trip
+ * shouldKeepPostingsOnEmptyFetch, and pin those exact two rows on the board permanently - the fix
+ * would be a no-op for the worst case it was written for. "The API returned nothing" and "the API
+ * returned nothing USABLE" are different facts, and only the first one is a fault.
+ */
+export function hasUsableDescription(job: Pick<NormalizedJob, 'description' | 'title'>): boolean {
+  /* Length and emptiness are judged on the RAW text, never on the folded form. Folding keeps only
+     letters and digits, and "letters" there means a-z, so a description written entirely in
+     Chinese, Japanese or Korean folds to the EMPTY string and a folded-length test would read it as
+     missing. Riot Games, Match Group and Databricks all ship CJK descriptions; none of them folds
+     fully away today, because each happens to carry a Latin token somewhere ("Riot", "UE5", "AI"),
+     so this is a near miss rather than an observed loss. It is guarded anyway because the margin is
+     one word wide and the failure would be silent and in bulk. */
+  const raw = job.description.trim();
+  if (!raw) return false;
+
+  const description = fold(raw);
+  if (description && PLACEHOLDER_DESCRIPTIONS.has(description)) return false;
+
+  /* `?? ''` rather than a bare .trim(): the type says string and the normalizers guarantee one, but
+     this is now the single gate every ingested posting passes through, and a throw here aborts the
+     whole source's poll before the sweep, not just this posting. */
+  const rawTitle = (job.title ?? '').trim();
+  const title = fold(rawTitle);
+  /* Both sides must fold to something before comparing, for the same reason: an all-CJK description
+     folds to '' and would otherwise read as a perfect echo of any short title.
+     The two halves of this test deliberately use different strings. CONTAINMENT is checked on the
+     folded text, so punctuation and case drift cannot defeat it. But SIZE is checked on the raw
+     text, because folding discards every non-Latin character: a 2,763-character Korean description
+     that opens with its English title folds down to roughly the title alone, and a folded-length
+     residue would have read it as an echo and dropped it. Datadog, Databricks and Match Group all
+     ship exactly that shape. */
+  if (description && title) {
+    const [shorter, longer] = description.length <= title.length
+      ? [description, title]
+      : [title, description];
+    const echoed = longer.includes(shorter) && Math.abs(raw.length - rawTitle.length) <= TITLE_ECHO_SLACK;
+    if (echoed) return false;
+  }
+
+  return raw.length >= MIN_DESCRIPTION_CHARS;
+}
+
+/* A POSTING THAT SAYS IT IS NOT A REAL POSTING.
+ *
+ * A different failure from an empty description, and worse for the student: the text reads like a
+ * normal job, so nothing on the board looks wrong, but applying is pointless. BCG ships four of
+ * these from Greenhouse, and two of them carry a full, convincing role description with the
+ * disclaimer bolted on the front: "This is a fake job. Do not apply unless you are a Greenhouse
+ * employee. This is for testing purposes only... If you do apply, your application will be
+ * deleted." No length or title rule can catch that, because the description is real prose.
+ *
+ * EVERY PATTERN IS A STATEMENT ABOUT THE POSTING ITSELF, and that is the whole design, not a
+ * stylistic preference. Measured across all 253 boards (22,124 postings), the phrase "fake job"
+ * appears in 329 descriptions and only 4 of them are fake: the other 325 are Samsara's anti-scam
+ * boilerplate, "Samsara is aware of scams involving fake job interviews and offers". A substring
+ * match on "fake job" would delete 325 real jobs to remove 4. "do not apply" is the same trap from
+ * the other direction: 75 real postings use it for routing ("if you are an intern, please do not
+ * apply using this link" - Stripe; "if you are a current employee, do not apply here" - SoFi).
+ *
+ * So the rule matches only self-declarations - "THIS POSTING is a fake job" - never a mention of
+ * fakery or testing in passing. Verified: the set below matches exactly the 4 BCG postings, 0 of
+ * Samsara's 325, and 0 of the other 194 postings with "Test" in the title (real SpaceX, Rocket Lab
+ * and graphcore test-engineering roles; 198 carry it, 4 of which are BCG's). Two patterns match
+ * nothing today and are safe by construction, since no real posting describes itself as not real.
+ */
+const TEST_POSTING_SUBJECT = '(?:job|posting|position|role|listing|req(?:uisition)?)';
+const TEST_POSTING_DECLARATIONS = [
+  new RegExp(`\\bthis (?:is|was) (?:a|an) fake ${TEST_POSTING_SUBJECT}\\b`, 'i'),
+  new RegExp(`\\bthis (?:is|was) (?:a|an) test ${TEST_POSTING_SUBJECT}\\b`, 'i'),
+  new RegExp(`\\bthis ${TEST_POSTING_SUBJECT} is (?:only )?for testing purposes\\b`, 'i'),
+  new RegExp(`\\bthis ${TEST_POSTING_SUBJECT} is not (?:a|an) real ${TEST_POSTING_SUBJECT}\\b`, 'i'),
+  /* Not phrased as a declaration, but it can only mean one thing: an employer promising to bin
+     whatever you send is telling you the posting is not real. 4 matches, all BCG.
+     NOT included, deliberately: "disregard this posting". It reads like a self-declaration but it
+     is usually CONDITIONAL in real prose ("if you have already applied, please disregard this
+     posting"), which is the same shape as the "do not apply" routing trap above, and it catches
+     nothing today. A pattern that can be true for only some readers does not belong here. */
+  /\byour application will be deleted\b/i,
+];
+
+/**
+ * Whether the posting declares itself a test or a fake.
+ *
+ * Deliberately reads the DESCRIPTION only. The title is not a usable signal here: 199 postings
+ * carry "Test" in the title and essentially all are real test-engineering roles, so a title rule
+ * would delete most of SpaceX's and Rocket Lab's hardware openings.
+ */
+export function isSelfDeclaredTestPosting(job: Pick<NormalizedJob, 'description'>): boolean {
+  return TEST_POSTING_DECLARATIONS.some((pattern) => pattern.test(job.description));
+}
+
+/**
+ * THE INGEST GATE. Everything the poller stores passes through here first, which is what makes this
+ * the one place to add the next rule rather than a fourth filter somewhere down the chain.
+ *
+ * Applied in pollSource, after the empty-response guard and next to the freshness window. See
+ * hasUsableDescription for why that placement is load-bearing rather than incidental.
+ */
+export function isIngestablePosting(job: Pick<NormalizedJob, 'description' | 'title'>): boolean {
+  return hasUsableDescription(job) && !isSelfDeclaredTestPosting(job);
+}
+
 export function sourceEndpoint(source: Pick<JobSourceInput, 'ats_name' | 'board_token'>): string {
   const token = encodeURIComponent(source.board_token.trim());
   if (source.ats_name === 'greenhouse') {
