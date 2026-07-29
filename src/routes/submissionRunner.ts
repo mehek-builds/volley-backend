@@ -29,6 +29,7 @@ import {
   portalCanAutoSubmit,
   portalHandoffReason,
   readManagedReceipt,
+  unattendedHandoffReason,
   readReceipt,
   type SubmissionPacket,
   type SupportedPortal,
@@ -59,6 +60,13 @@ import type { ApplicationReviewQuestion } from '../lib/applicationReview';
 import { generateStoredCoverLetter, storedCoverLetter } from '../lib/coverLetterService';
 import { mayClickFinalSubmit, preparedSubmissionStatus } from '../lib/submissionAuthorization';
 import { directPreparationIsSafe } from '../lib/submissionSafety';
+import {
+  autoRunShouldPrepare,
+  dailySubmissionCap,
+  hasTimeForAnotherApplication,
+  submissionBatchSize,
+  withinDailyCap,
+} from '../lib/submissionQueue';
 
 type ResumeRow = typeof generated_resumes.$inferSelect;
 type StoredSpec = Record<string, unknown>;
@@ -105,6 +113,23 @@ function preparedReviewPatch(authorization: StandingAuthorization, safe: boolean
       consent_version: authorization.consentVersion,
     },
   };
+}
+
+// Applications this user has actually had SENT since 00:00 UTC. Counted off submitted_at, the
+// timestamp written next to the employer receipt, so a run that failed, was held, or is still
+// mid-flight does not consume the day's allowance.
+async function countSubmittedToday(userId: string): Promise<number> {
+  const startOfDay = new Date();
+  startOfDay.setUTCHours(0, 0, 0, 0);
+  const [counted] = await db
+    .select({ total: sql<number>`count(*)::int` })
+    .from(generated_resumes)
+    .where(and(
+      eq(generated_resumes.user_id, userId),
+      sql`${generated_resumes.spec}->'_review'->>'status' = 'submitted'`,
+      sql`(${generated_resumes.spec}->'_review'->>'submitted_at')::timestamptz >= ${startOfDay.toISOString()}`,
+    ));
+  return counted?.total ?? 0;
 }
 
 async function claimSubmission(row: ResumeRow): Promise<ResumeRow | null> {
@@ -477,11 +502,21 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
   //   3. present that screenshot to the student as the filled application she is approving to send.
   // She would approve a login page, and only at submit time learn nothing was ever filled. Better
   // to say so now, before spending anything, in the words that name her actual next step.
-  if (isAccountWalledFamily(portal)) {
+  //
+  // The same stop applies to the multi-step and CAPTCHA-gated families once standing consent is on,
+  // for the same reason one step further down the funnel: see autoRunShouldPrepare.
+  if (
+    isAccountWalledFamily(portal)
+    || !autoRunShouldPrepare({
+      canAutoSubmit: portalCanAutoSubmit(portal),
+      standingConsentEnabled: authorization.enabled,
+    })
+  ) {
     await writeReview(row, nextReview(current, {
       status: 'needs_attention',
       submission_run_id: runId,
-      attention_reason: portalHandoffReason(portal) ?? undefined,
+      // Nothing was filled on this path, so the wording has to be the one that does not claim it was.
+      attention_reason: unattendedHandoffReason(portal) ?? undefined,
       submission_error: undefined,
     }));
     return;
@@ -816,21 +851,54 @@ export async function submissionRunnerRoutes(fastify: FastifyInstance) {
   fastify.get('/internal/application-submission-runner', async (request: FastifyRequest, reply: FastifyReply) => {
     if (!isCronConfigured() || !isCronAuthorized(request)) return reply.status(401).send({ error: 'Unauthorized' });
     if (!isBrowserbaseConfigured()) return reply.status(503).send({ error: 'Litos cannot fill in company pages yet. Not configured', processed: 0 });
+    const startedAt = Date.now();
+    // Oldest first. Without an order the queue is whatever Postgres returns, so a row could sit
+    // behind newer ones indefinitely once the queue is longer than one batch.
     const rows = await db
       .select()
       .from(generated_resumes)
       .where(sql`${generated_resumes.spec}->'_review'->>'status' in ('submit_requested', 'submitting')`)
-      .limit(2);
+      .orderBy(generated_resumes.created_at)
+      .limit(submissionBatchSize());
+    const cap = dailySubmissionCap();
+    // One count per user per invocation, not per row: the rows in a batch are usually the same
+    // user's, and the count is only a ceiling check.
+    const submittedToday = new Map<string, number>();
     let processed = 0;
+    let deferredForTime = 0;
+    let deferredForCap = 0;
     for (const row of rows) {
+      if (!hasTimeForAnotherApplication(Date.now() - startedAt)) {
+        deferredForTime = rows.length - processed - deferredForCap;
+        break;
+      }
+      let already = submittedToday.get(row.user_id);
+      if (already === undefined) {
+        already = await countSubmittedToday(row.user_id);
+        submittedToday.set(row.user_id, already);
+      }
+      if (!withinDailyCap(already, cap)) {
+        deferredForCap += 1;
+        continue;
+      }
       try {
-        await processSubmissionApplication(row.id, fastify);
+        const review = await processSubmissionApplication(row.id, fastify);
         processed += 1;
+        if (review?.status === 'submitted') submittedToday.set(row.user_id, already + 1);
       } catch (error) {
         fastify.log.error({ error, applicationId: row.id }, 'Application runner step failed');
         await fail(row, error);
       }
     }
-    return reply.send({ processed, configured: true });
+    // Logged, never silent. A queue that stops moving because everyone hit the cap looks exactly
+    // like an empty queue from the outside, which is the failure mode that kept the jobs board at
+    // zero postings for months.
+    if (deferredForTime || deferredForCap) {
+      fastify.log.info(
+        { deferredForTime, deferredForCap, cap },
+        'Submission batch ended with applications still queued',
+      );
+    }
+    return reply.send({ processed, deferred_for_time: deferredForTime, deferred_for_cap: deferredForCap, configured: true });
   });
 }
