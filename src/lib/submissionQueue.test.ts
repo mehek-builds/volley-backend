@@ -11,17 +11,20 @@ import {
 
 const env = (values: Record<string, string> = {}) => values as unknown as NodeJS.ProcessEnv;
 
-test('an auto-submittable portal is prepared with or without standing consent', () => {
-  assert.equal(autoRunShouldPrepare({ canAutoSubmit: true, standingConsentEnabled: true }), true);
-  assert.equal(autoRunShouldPrepare({ canAutoSubmit: true, standingConsentEnabled: false }), true);
+test('an auto-submittable portal is prepared attended or not', () => {
+  assert.equal(autoRunShouldPrepare({ canAutoSubmit: true, unattended: true }), true);
+  assert.equal(autoRunShouldPrepare({ canAutoSubmit: true, unattended: false }), true);
 });
 
 test('an unattended run spends nothing on a portal it could never submit', () => {
-  assert.equal(autoRunShouldPrepare({ canAutoSubmit: false, standingConsentEnabled: true }), false);
+  assert.equal(autoRunShouldPrepare({ canAutoSubmit: false, unattended: true }), false);
 });
 
-test('fill-and-hand-off survives for a user who is there to finish it', () => {
-  assert.equal(autoRunShouldPrepare({ canAutoSubmit: false, standingConsentEnabled: false }), true);
+// The regression a review caught: this predicate used to read standing consent, which is a
+// persistent setting and not evidence anyone is away. A user with auto-submit on, sitting at their
+// dashboard, must still get fill-and-hand-off on a multi-step or CAPTCHA portal.
+test('fill-and-hand-off survives for an attended run, whatever the consent setting says', () => {
+  assert.equal(autoRunShouldPrepare({ canAutoSubmit: false, unattended: false }), true);
 });
 
 test('the batch starts another application inside its time budget and stops at it', () => {

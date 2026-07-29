@@ -115,10 +115,21 @@ function preparedReviewPatch(authorization: StandingAuthorization, safe: boolean
   };
 }
 
-// Applications this user has actually had SENT since 00:00 UTC. Counted off submitted_at, the
-// timestamp written next to the employer receipt, so a run that failed, was held, or is still
-// mid-flight does not consume the day's allowance.
-async function countSubmittedToday(userId: string): Promise<number> {
+// Applications that may have REACHED an employer for this user since 00:00 UTC.
+//
+// Counted off submission_claimed_at, not submitted_at, and the difference is the whole point of the
+// cap. A run that clicks submit and then fails to parse the receipt, upload the screenshot or write
+// the row lands in needs_attention with no submitted_at, while the employer already has the
+// application. Counting confirmed receipts would let a systematic post-click failure send the
+// entire queue while the counter read zero, which is precisely the runaway the cap exists to bound.
+// The claim is written atomically immediately before the click, so it is the last honest marker of
+// "this one may already be out there".
+//
+// Compared as TEXT, not cast to timestamptz. _review is unvalidated JSON, and one malformed value
+// in one row would abort the whole cron request with "invalid input syntax for type timestamp with
+// time zone". Every writer of this field uses toISOString(), which is fixed-width UTC, so
+// lexicographic order and chronological order are the same thing and the comparison cannot throw.
+async function countSubmissionsClaimedToday(userId: string): Promise<number> {
   const startOfDay = new Date();
   startOfDay.setUTCHours(0, 0, 0, 0);
   const [counted] = await db
@@ -126,8 +137,7 @@ async function countSubmittedToday(userId: string): Promise<number> {
     .from(generated_resumes)
     .where(and(
       eq(generated_resumes.user_id, userId),
-      sql`${generated_resumes.spec}->'_review'->>'status' = 'submitted'`,
-      sql`(${generated_resumes.spec}->'_review'->>'submitted_at')::timestamptz >= ${startOfDay.toISOString()}`,
+      sql`${generated_resumes.spec}->'_review'->>'submission_claimed_at' >= ${startOfDay.toISOString()}`,
     ));
   return counted?.total ?? 0;
 }
@@ -480,7 +490,7 @@ async function prepareManaged(
   fastify.log.info({ applicationId: row.id, portal, status: review.status }, 'Application portal prepared with Stratus Sandbox');
 }
 
-async function prepare(row: ResumeRow, fastify: FastifyInstance) {
+async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = false) {
   const stored = row.spec as StoredSpec;
   const current = readApplicationReview(stored);
   if (!current?.portal_url) throw new Error('We do not have a link to the company application page');
@@ -507,10 +517,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance) {
   // for the same reason one step further down the funnel: see autoRunShouldPrepare.
   if (
     isAccountWalledFamily(portal)
-    || !autoRunShouldPrepare({
-      canAutoSubmit: portalCanAutoSubmit(portal),
-      standingConsentEnabled: authorization.enabled,
-    })
+    || !autoRunShouldPrepare({ canAutoSubmit: portalCanAutoSubmit(portal), unattended })
   ) {
     await writeReview(row, nextReview(current, {
       status: 'needs_attention',
@@ -821,7 +828,16 @@ async function fail(row: ResumeRow, error: unknown) {
   }));
 }
 
-export async function processSubmissionApplication(applicationId: string, fastify: FastifyInstance): Promise<ApplicationReviewState | null> {
+// `unattended` is the CRON path saying "nobody is watching this run", and it is deliberately not
+// derived from standing consent. Consent is a persistent setting: a user who turned auto-submit on
+// is still sitting at their dashboard when they press submit on a Paylocity job, and deriving
+// "away" from "consented" would take fill-and-hand-off away from exactly the people who opted into
+// the product most. Provenance is a property of the caller, so the caller passes it.
+export async function processSubmissionApplication(
+  applicationId: string,
+  fastify: FastifyInstance,
+  options: { unattended?: boolean } = {},
+): Promise<ApplicationReviewState | null> {
   const rows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, applicationId)).limit(1);
   const row = rows[0];
   if (!row) return null;
@@ -832,7 +848,7 @@ export async function processSubmissionApplication(applicationId: string, fastif
       const claimed = await claimPreparation(activeRow);
       if (!claimed) return review;
       activeRow = claimed;
-      await prepare(activeRow, fastify);
+      await prepare(activeRow, fastify, options.unattended === true);
       const prepared = await db.select().from(generated_resumes).where(eq(generated_resumes.id, applicationId)).limit(1);
       if (prepared[0]) activeRow = prepared[0];
       review = readApplicationReview(activeRow.spec);
@@ -854,16 +870,22 @@ export async function submissionRunnerRoutes(fastify: FastifyInstance) {
     const startedAt = Date.now();
     // Oldest first. Without an order the queue is whatever Postgres returns, so a row could sit
     // behind newer ones indefinitely once the queue is longer than one batch.
+    //
+    // Already-claimed rows are excluded, and ordering is exactly why that matters now. A row left
+    // in 'submitting' with a claim on it cannot be progressed by anyone: claimSubmission refuses a
+    // second claim, so processing it is a no-op. Unordered, such a row was one arbitrary pick among
+    // many. Oldest-first, it would sit at the head of every batch forever and consume a slot on
+    // every invocation, which turns one stranded row into a permanently narrower queue.
     const rows = await db
       .select()
       .from(generated_resumes)
-      .where(sql`${generated_resumes.spec}->'_review'->>'status' in ('submit_requested', 'submitting')`)
+      .where(and(
+        sql`${generated_resumes.spec}->'_review'->>'status' in ('submit_requested', 'submitting')`,
+        sql`${generated_resumes.spec}->'_review'->>'submission_claimed_at' is null`,
+      ))
       .orderBy(generated_resumes.created_at)
       .limit(submissionBatchSize());
     const cap = dailySubmissionCap();
-    // One count per user per invocation, not per row: the rows in a batch are usually the same
-    // user's, and the count is only a ceiling check.
-    const submittedToday = new Map<string, number>();
     let processed = 0;
     let deferredForTime = 0;
     let deferredForCap = 0;
@@ -872,19 +894,20 @@ export async function submissionRunnerRoutes(fastify: FastifyInstance) {
         deferredForTime = rows.length - processed - deferredForCap;
         break;
       }
-      let already = submittedToday.get(row.user_id);
-      if (already === undefined) {
-        already = await countSubmittedToday(row.user_id);
-        submittedToday.set(row.user_id, already);
-      }
+      // Recounted per row rather than cached per invocation. The count is a snapshot either way,
+      // but a per-invocation cache stays stale for the whole batch, so a run alongside the manual
+      // submit endpoint could overshoot by the length of the batch. Per row, the stale window
+      // shrinks to one application. This is a ceiling check on a rare path, not a lock: the exact
+      // guarantee is "about the cap", and buying an exact one costs a database counter updated
+      // inside the submission claim.
+      const already = await countSubmissionsClaimedToday(row.user_id);
       if (!withinDailyCap(already, cap)) {
         deferredForCap += 1;
         continue;
       }
       try {
-        const review = await processSubmissionApplication(row.id, fastify);
+        await processSubmissionApplication(row.id, fastify, { unattended: true });
         processed += 1;
-        if (review?.status === 'submitted') submittedToday.set(row.user_id, already + 1);
       } catch (error) {
         fastify.log.error({ error, applicationId: row.id }, 'Application runner step failed');
         await fail(row, error);

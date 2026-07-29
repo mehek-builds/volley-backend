@@ -46,22 +46,27 @@ export function withinDailyCap(submittedToday: number, cap: number): boolean {
   return submittedToday < cap;
 }
 
-// Whether an unattended run should open a browser for this portal at all.
+// Whether a run should open a browser for this portal at all.
 //
-// Standing consent means the user asked for applications to be SENT while they are away. On a
-// portal that cannot be finished in one run, an unattended run would spend billed managed-browser
-// calls and LLM answers filling a form it is then forbidden to submit (see portalCanAutoSubmit),
-// and park the result in needs_attention. The user wakes up to work they still have to do, having
-// paid for it. Stopping before the spend says the same thing sooner and cheaper.
+// `unattended` is the cron saying nobody is watching. On a portal that cannot be finished in one
+// run, an unattended run would spend billed managed-browser calls and LLM answers filling a form it
+// is then forbidden to submit (see portalCanAutoSubmit), and park the result in needs_attention.
+// The user wakes up to work they still have to do, having paid for it. Stopping before the spend
+// says the same thing sooner and cheaper.
 //
-// Deliberately still TRUE without standing consent: fill-and-hand-off on Paylocity, SmartRecruiters,
-// JazzHR and BambooHR is a shipped feature and genuinely useful when the user is sitting there to
-// finish it. This narrows the autonomous path, not the assisted one.
+// Takes `unattended` and NOT standing consent, which a review caught before this shipped. Consent
+// is a persistent setting; being away is a property of the run. Keying off consent would have
+// meant a user who enabled auto-submit and is sitting at their dashboard could no longer use
+// fill-and-hand-off on Paylocity or JazzHR at all, punishing the people who opted in hardest.
+//
+// Deliberately still TRUE for any attended run: fill-and-hand-off on Paylocity, SmartRecruiters,
+// JazzHR and BambooHR is a shipped feature and genuinely useful when someone is there to finish it.
+// This narrows the autonomous path, not the assisted one.
 export function autoRunShouldPrepare(options: {
   canAutoSubmit: boolean;
-  standingConsentEnabled: boolean;
+  unattended: boolean;
 }): boolean {
-  return options.canAutoSubmit || !options.standingConsentEnabled;
+  return options.canAutoSubmit || !options.unattended;
 }
 
 function positiveInt(raw: string | undefined, fallback: number): number {
