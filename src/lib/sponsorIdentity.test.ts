@@ -324,3 +324,12 @@ test('no published name is NO OPINION, never a pass', () => {
   assert.equal(portalNameAgrees('Notion', null), null);
   assert.equal(portalNameAgrees('Notion', ''), null);
 });
+
+test('a disagreement a human checked and cleared is not reported', () => {
+  /* Pure Storage's board displays the stale name "Everpure". The names really do disagree, and
+     unlinking it would cost a job seeker every Pure Storage posting - 353 approved petitions'
+     worth. The clearance is explicit and carries its evidence. */
+  assert.equal(portalNameAgrees('Pure Storage', 'Everpure'), true);
+  // ...and clearing one board clears only that board.
+  assert.equal(portalNameAgrees('sas', 'Superior Alarm Systems'), false);
+});

@@ -351,7 +351,25 @@ export function verdictFor(
  * a real, verified case). A shared identifying word is enough. What it catches is the case with NO
  * overlap at all, which is every one of the six.
  */
+/**
+ * Boards where the portal's name disagrees with ours and a HUMAN checked, and ours is right.
+ *
+ * The disagreement is real and worth flagging by default - four of the five it catches are boards
+ * that are not the company we labelled them. But a stale display name is a real thing too, and
+ * unlinking a genuine employer costs a job seeker every posting at that company.
+ *
+ * The bar for an entry is the same as everywhere else in this feature: somebody opened the board
+ * and read it. The evidence goes in the string so the judgement can be checked or overturned.
+ */
+const PORTAL_NAME_CLEARED: Record<string, string> = {
+  'Pure Storage': 'the Greenhouse board still displays the stale name "Everpure", but its 311 '
+    + 'postings are unmistakably Pure Storage\'s: "reshaping the data storage industry", GSI and '
+    + 'NTT partner roles. Checked 2026-07-29.',
+};
+
 export function portalNameAgrees(ourName: string, portalName: string | null | undefined): boolean | null {
+  // A cleared board is never reported as disagreeing, whatever the names say.
+  if (PORTAL_NAME_CLEARED[ourName]) return true;
   if (!portalName || !portalName.trim()) return null;
   const ours = new Set([...wordSet(ourName)].filter((word) => word.length >= 3 && !NOISE.has(word)));
   const theirs = new Set([...wordSet(portalName)].filter((word) => word.length >= 3 && !NOISE.has(word)));
