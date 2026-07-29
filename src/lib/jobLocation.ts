@@ -53,8 +53,8 @@ const US_CITIES = [
   'DURHAM', 'PITTSBURGH', 'PHILADELPHIA', 'BALTIMORE', 'ARLINGTON', 'CULVER CITY', 'SANTA MONICA',
   'HAWTHORNE', 'EL SEGUNDO', 'IRVINE', 'NEWPORT BEACH', 'CORONA DEL MAR', 'STARBASE', 'MCLEAN',
   'RESTON', 'CAMBRIDGE, MA', 'BOSTON', 'GREENWICH, CT', 'JERSEY CITY', 'NEWARK, NJ',
-  /* "SF Office" is how one board writes San Francisco. */
-  'SF OFFICE',
+  /* How individual boards write San Francisco. */
+  'SF OFFICE', 'SF',
 ];
 
 /* Countries and cities that are unmistakably NOT the US. The list only needs to cover what actually
@@ -96,22 +96,48 @@ function normalise(location: string): string {
 /**
  * Where a posting is, as far as a US work visa is concerned.
  *
- * US WINS A TIE, and that is deliberate. "Remote - US or London" and "New York / Dublin" are roles
- * an American hire can take, so an H-1B record is relevant to them. Only a location with no US
- * signal at all is 'non_us'.
+ * THE ORDER OF THE THREE TESTS IS THE WHOLE ALGORITHM, and getting it wrong put foreign jobs on
+ * the board of people who need US sponsorship. Every one of these is real text from the live board:
+ *
+ *   "IN - Bengaluru"                    IN is India in Stripe's format, and Indiana in ours
+ *   "Oxford or  London-United Kingdom"  the word "or" is Oregon
+ *   "Dublin OR London"                  again
+ *   "Amsterdam, NH"                     NH is Noord-Holland, and New Hampshire
+ *
+ * A two-letter code is the weakest signal there is, so it is tested LAST and only in the "City, ST"
+ * shape it actually appears in. A named country or city beats it every time.
+ *
+ * US STILL WINS A GENUINE TIE. "Remote - US or London" and "New York / Dublin" are roles an
+ * American hire can take, and those say "US" and "New York" outright - strong signals, tested
+ * first.
  */
 export function jobCountry(location: string | null | undefined): JobCountry {
   if (!location || !location.trim()) return 'unknown';
   const text = normalise(location);
 
-  const us = ` UNITED STATES `.split('|').some((needle) => text.includes(needle))
-    || / (USA|US|U S|AMERICAS|AMER) /.test(text)
+  // 1. Unambiguous US: the country, a full state name, or a city that is only ever American.
+  const strongUs = text.includes(' UNITED STATES ')
+    || / (USA|U S A|U S|AMERICAS|AMER) /.test(text)
+    || / US /.test(text)
     || US_STATE_NAMES.some((name) => text.includes(` ${name} `))
-    || [...US_STATE_CODES].some((code) => text.includes(` ${code} `))
     || US_CITIES.some((city) => text.includes(` ${city.replace(/[^A-Z0-9]+/g, ' ')} `));
-  if (us) return 'us';
+  if (strongUs) return 'us';
 
+  // 2. A named foreign country or city. Beats a two-letter code, which is what "Amsterdam, NH" and
+  //    "IN - Bengaluru" need.
   if (NON_US.some((name) => text.includes(` ${name.replace(/[^A-Z0-9]+/g, ' ')} `))) return 'non_us';
+
+  /* 3. "City, ST" and nothing else. The comma is what makes it a state rather than a country code
+        or an English word: "Austin, TX" qualifies, "IN - Bengaluru" does not. */
+  const upper = location.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+  const afterComma = upper.match(/,\s*([A-Z]{2})\b/g) ?? [];
+  if (afterComma.some((match) => US_STATE_CODES.has(match.replace(/[^A-Z]/g, '')))) return 'us';
+
+  /* A code at the very END, which is how "Remote - FL" and "Remote - TX" are written. Safe only
+     because it runs AFTER the foreign check: "Amsterdam, NH" never reaches here. */
+  const trailing = upper.trim().match(/([A-Z]{2})$/);
+  if (trailing && US_STATE_CODES.has(trailing[1])) return 'us';
+
   return 'unknown';
 }
 

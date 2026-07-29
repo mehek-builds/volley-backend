@@ -48,6 +48,17 @@ test('unmistakably foreign locations, which an H-1B says nothing about', () => {
   }
 });
 
+test('the shorthands the boards actually use for US locations', () => {
+  assert.equal(jobCountry('Remote U.S.'), 'us');
+  assert.equal(jobCountry('Remote - FL'), 'us');
+  assert.equal(jobCountry('Remote - TX'), 'us');
+  assert.equal(jobCountry('SF'), 'us');
+  // ...and the trailing-code rule still cannot rescue a foreign city, because the foreign check
+  // runs first.
+  assert.equal(jobCountry('Amsterdam, NH'), 'non_us');
+  assert.equal(jobCountry('Witten, NW'), 'unknown', 'NW is not a US state code');
+});
+
 test('a location that says nothing is surfaced, not hidden', () => {
   /* A bare "Remote" at a company whose entire filing history is American is not evidence of a
      foreign role. Hiding it would cost a job seeker real US openings to avoid a hypothetical. */
@@ -57,7 +68,8 @@ test('a location that says nothing is surfaced, not hidden', () => {
   }
 });
 
-test('US WINS A TIE, because an American hire can take the role', () => {
+test('US WINS A GENUINE TIE, because an American hire can take the role', () => {
+  // These say "US" or "New York" outright: strong signals, not a two-letter code.
   assert.equal(jobCountry('Remote - US or London'), 'us');
   assert.equal(jobCountry('New York / Dublin'), 'us');
   assert.equal(jobCountry('San Francisco, CA; London, UK'), 'us');
@@ -68,6 +80,17 @@ test('a foreign city is not turned American by a state abbreviation inside a wor
   assert.equal(jobCountry('India'), 'non_us');
   assert.equal(jobCountry('Paris'), 'non_us');
   assert.equal(jobCountry('Mindanao'), 'unknown');
+});
+
+test('REAL strings from the live board that a two-letter code got wrong', () => {
+  /* Every one of these was surfaced to somebody who needs US sponsorship, because a US state code
+     collided with a country code, a province, or an English word. */
+  assert.equal(jobCountry('IN - Bengaluru'), 'non_us', 'IN is India here, not Indiana');
+  assert.equal(jobCountry('IN-Bengaluru'), 'non_us');
+  assert.equal(jobCountry('Oxford or  London-United Kingdom'), 'non_us', '"or" is not Oregon');
+  assert.equal(jobCountry('Dublin OR London'), 'non_us');
+  assert.equal(jobCountry('Amsterdam, NH'), 'non_us', 'NH is Noord-Holland here, not New Hampshire');
+  assert.equal(jobCountry('DE - Berlin'), 'non_us', 'DE is Germany here, not Delaware');
 });
 
 test('accents do not hide a foreign city', () => {
