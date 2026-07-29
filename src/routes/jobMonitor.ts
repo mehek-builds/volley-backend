@@ -7,6 +7,7 @@ import { normalizeEmployerName, readPostingSponsorship, sponsorOnlyBoardRequired
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { fetchSourceJobs, isIngestablePosting, POLLABLE_JOB_BOARDS, type JobSourceInput, type SupportedJobBoard } from '../lib/jobMonitor';
 import { AUTONOMOUS_PORTAL_FAMILIES } from '../lib/portalSubmission';
+import { rankCities } from '../lib/cities';
 import { optionalAuth } from '../middleware/auth';
 import { scoreJdMatch } from '../engine/jdMatch';
 import { resumeSpecText } from '../engine/resumeValidate';
@@ -1220,36 +1221,47 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       || z.object({ sponsor_only: z.enum(['true', 'false']).optional() })
         .safeParse(request.query).data?.sponsor_only === 'true';
     const where = and(...boardConditions({ sponsorOnly }));
-    const base = db
+    /* FIFTY of each, ranked by how much of the board they actually account for
+       (Mehek, 2026-07-29). The lists used to be 202 companies alphabetically
+       and 120 raw location strings: a dropdown nobody scrolls, opening on "AQR"
+       rather than on the employers most of the board belongs to. */
+    const TOP = 50;
+
+    const companies = await db
       .select({ v: monitored_jobs.company_name, n: sql<number>`count(*)::int` })
       .from(monitored_jobs)
       .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
-      .where(where);
+      .where(where)
+      .groupBy(monitored_jobs.company_name)
+      .orderBy(sql`count(*) desc`)
+      .limit(TOP);
 
-    const [companies, locations, titles] = await Promise.all([
-      base.groupBy(monitored_jobs.company_name).orderBy(sql`1 asc`),
-      db
-        .select({ v: monitored_jobs.location, n: sql<number>`count(*)::int` })
-        .from(monitored_jobs)
-        .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
-        .where(where)
-        .groupBy(monitored_jobs.location)
-        .orderBy(sql`count(*) desc`)
-        .limit(120),
-      db
-        .select({ v: monitored_jobs.title, n: sql<number>`count(*)::int` })
-        .from(monitored_jobs)
-        .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
-        .where(where)
-        .groupBy(monitored_jobs.title)
-        .orderBy(sql`count(*) desc`)
-        .limit(120),
-    ]);
+    /* Cities, not location strings.
+       An employer's `location` is whatever they typed: often a list ("Boston;
+       New York City; Pennsylvania"), often carrying a country ("San Mateo, CA,
+       United States"), and the same place spelled three ways. Grouping the raw
+       column offered "United States" as a city and spent three of the fifty
+       slots on New York. A wide slice is read here and ranked in rankCities,
+       which merges the spellings — see src/lib/cities.ts for why that judgement
+       lives in a tested function rather than in SQL. */
+    const locationRows = await db
+      .select({ location: monitored_jobs.location, n: sql<number>`count(*)::int` })
+      .from(monitored_jobs)
+      .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+      .where(where)
+      .groupBy(monitored_jobs.location)
+      .orderBy(sql`count(*) desc`)
+      .limit(400);
 
     return reply.send({
       companies: companies.map((r) => r.v).filter(Boolean),
-      locations: locations.map((r) => r.v).filter(Boolean),
-      titles: titles.map((r) => r.v).filter(Boolean),
+      locations: rankCities(locationRows, TOP),
+      /* `titles` is gone on purpose. It returned the board's most common RAW
+         posting titles — "Senior Product Manager - Network Path" — which is not
+         what a person types into a field labelled Job title. The board now
+         offers a curated vocabulary of role families it holds in the website
+         (lib/job-titles.ts), so there is nothing useful for this endpoint to
+         say about titles. */
     });
   });
 
