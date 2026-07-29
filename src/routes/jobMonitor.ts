@@ -117,6 +117,61 @@ function freshnessPredicate() {
   return sql`${monitored_jobs.posted_at} >= now() - (${JOB_FRESHNESS_DAYS} || ' days')::interval`;
 }
 
+/**
+ * How long a posting that has left its board is kept before the row is deleted.
+ *
+ * A posting is REMOVED FROM THE PRODUCT the moment `is_active` goes false - that is what the poll's
+ * sweep does, and every board query filters on it, so nothing here affects what a visitor sees. This
+ * constant is only about how long the dead row survives in the table.
+ *
+ * Two days rather than zero, deliberately. `last_seen_at` on a closed row is the only record of when
+ * a posting disappeared, and deleting on the same run destroys the evidence for the one question
+ * worth asking after a bad poll: did these vanish because the employer closed them, or because a
+ * token rotated and a whole board went quiet? Two days is long enough to answer that and short
+ * enough that the dead rows never accumulate.
+ */
+export const CLOSED_POSTING_RETENTION_DAYS = 2;
+
+/**
+ * How old a posting must be before its row is deleted outright.
+ *
+ * A FULL WINDOW OF SLACK past the window itself, and the slack is the whole point: purging at the
+ * 7-day boundary would delete rows the very next poll re-inserts, forever, for any posting sitting
+ * near the edge. Exported so the relationship to JOB_FRESHNESS_DAYS is pinned by a test rather than
+ * recomputed in one.
+ */
+export const PURGE_POSTINGS_OLDER_THAN_DAYS = JOB_FRESHNESS_DAYS * 2;
+
+/**
+ * Delete rows that can never be shown again: closed postings past their retention, and anything that
+ * aged out of the window before the ingest filter existed.
+ *
+ * This is the "old listings get pushed off" half of the rolling window. The ingest filter in
+ * pollSource stops new stale rows being written; this clears what is already there, including the
+ * 12,117 rows that were active-but-invisible before the window was enforced at write time.
+ *
+ * Runs AFTER the poll, never before: the poll is what marks closed postings inactive in the first
+ * place, so purging first would delete a day late and always leave one run's worth behind.
+ *
+ * Returns the count so the cron can report it, because a purge that silently deletes the wrong thing
+ * looks exactly like a purge that works.
+ */
+export async function purgeExpiredPostings(): Promise<number> {
+  const result = await db.delete(monitored_jobs).where(or(
+    // Left its board, and the grace period for diagnosing why has passed.
+    and(
+      eq(monitored_jobs.is_active, false),
+      sql`${monitored_jobs.last_seen_at} < now() - (${CLOSED_POSTING_RETENTION_DAYS} || ' days')::interval`,
+    ),
+    /* Outside the window with a full window of slack. The slack matters: deleting exactly at the
+       boundary would fight the poller over any posting sitting near it, deleting a row the next run
+       re-inserts, forever. A posting still listed by its employer is re-added by the very next poll
+       anyway, so this only ever removes rows nothing is refreshing. */
+    sql`${monitored_jobs.posted_at} < now() - (${PURGE_POSTINGS_OLDER_THAN_DAYS} || ' days')::interval`,
+  ));
+  return (result as { rowCount?: number }).rowCount ?? 0;
+}
+
 /** The floor rule as a predicate, so the number and the comparison are testable without a database. */
 export function boardIsBelowFloor(surfacedJobs: number): boolean {
   return surfacedJobs < MINIMUM_SURFACED_JOBS;
@@ -558,6 +613,25 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
       }
     }
 
+    /* THE WINDOW IS ENFORCED AT INGEST, not only at read time.
+     *
+     * Filtering only in boardConditions() meant the table stored every posting a board had ever
+     * carried and then hid most of them on every single read: 22,125 rows active, 10,008 shown,
+     * 12,117 stored and re-upserted daily purely to be filtered out again. That is storage and write
+     * amplification for rows no visitor can reach, on a 512 MB database.
+     *
+     * Dropping them here is self-healing rather than lossy. If a board later re-dates a posting into
+     * the window - which Greenhouse does routinely, since its date is `updated_at` - the next poll
+     * simply sees it as fresh and inserts it. Nothing needs to remember what was skipped.
+     *
+     * NOTE the guard above keys off `jobs.length`, the RAW fetch, and must keep doing so. If it read
+     * this filtered count instead, a board whose postings are all older than the window would look
+     * identical to a board that returned nothing, and the run would refuse to deactivate postings
+     * that genuinely aged out. "The API returned nothing" and "the API returned nothing FRESH" are
+     * different facts and only the first one is a fault. */
+    const cutoff = new Date(Date.now() - JOB_FRESHNESS_DAYS * 86_400_000);
+    const fresh = jobs.filter((job) => job.posted_at instanceof Date && job.posted_at >= cutoff);
+
     const now = new Date();
     await db.transaction(async (tx) => {
       await tx.update(monitored_jobs).set({ is_active: false }).where(eq(monitored_jobs.source_id, source.id));
@@ -568,8 +642,8 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
          above. That failure empties the public board rather than staling it.
          Chunked so a single board the size of Databricks still fits well
          inside Postgres's 65,535-parameter cap: 14 columns x 200 rows. */
-      for (let index = 0; index < jobs.length; index += UPSERT_CHUNK) {
-        const chunk = jobs.slice(index, index + UPSERT_CHUNK).map((job) => ({
+      for (let index = 0; index < fresh.length; index += UPSERT_CHUNK) {
+        const chunk = fresh.slice(index, index + UPSERT_CHUNK).map((job) => ({
           source_id: source.id,
           company_name: source.company_name,
           ...job,
@@ -602,7 +676,7 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
       }
     });
     await db.update(career_page_sources).set({ last_polled_at: now, last_error: null }).where(eq(career_page_sources.id, source.id));
-    return { source_id: source.id, company: source.company_name, jobs: jobs.length, ok: true as const };
+    return { source_id: source.id, company: source.company_name, jobs: fresh.length, fetched: jobs.length, ok: true as const };
   } catch (error) {
     const message = error instanceof Error ? error.message.slice(0, 2000) : 'Career page poll failed';
     await db.update(career_page_sources).set({ last_polled_at: new Date(), last_error: message }).where(eq(career_page_sources.id, source.id));
@@ -1224,6 +1298,10 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
      * while every check reported success. Failing the run is the only signal that reaches anyone.
      * The poll itself still committed; this reports the state, it does not roll anything back.
      */
+    /* Purge before counting, so surfaced_jobs and purged_postings describe the same moment. Counting
+       first would report a board that includes rows this run was about to delete. */
+    const purged = await purgeExpiredPostings();
+
     const surfaced = await surfacedJobCount();
     /* THE FLOOR IS CHECKED TWICE, because there are two boards.
      * A count over the whole board says nothing about the sponsor-only one, and the sponsor-only
@@ -1250,6 +1328,11 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
        * headroom_multiple is the number to watch. It was 1.9x the day this shipped; a slide toward
        * 1.0 is the signal to widen JOB_FRESHNESS_DAYS or add sources, well before anything breaks. */
       freshness_window_days: JOB_FRESHNESS_DAYS,
+      /* The rolling window's two halves, reported so both are visible: how many stale/closed rows
+         this run removed, and how long a closed posting is kept before deletion. A purge that
+         suddenly deletes thousands, or nothing at all, is the first sign something upstream changed. */
+      purged_postings: purged,
+      closed_posting_retention_days: CLOSED_POSTING_RETENTION_DAYS,
       required_surfaced_jobs: REQUIRED_SURFACED_JOBS,
       headroom_multiple: Number((surfaced / MINIMUM_SURFACED_JOBS).toFixed(1)),
       board_health: boardHealth(surfaced),
