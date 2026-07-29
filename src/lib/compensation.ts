@@ -298,3 +298,34 @@ export function normalizeEmploymentType(value: string | undefined): string | und
   }
   return raw;
 }
+
+/**
+ * The one employment type a posting gets, from the two things that can state it.
+ *
+ * The employer's own structured field normally WINS - it is the employer speaking about their own
+ * role, and the title is only an inference. There is exactly one exception, and it is Mehek's call
+ * (2026-07-29): A TITLE THAT SAYS INTERNSHIP BEATS THE FIELD.
+ *
+ * Why that one and nothing else. Employers use the field for two different questions and the board
+ * cannot tell which they meant: "is this permanent?" and "is this 40 hours?". Modal's live posting
+ * "ML Research Intern" is tagged FullTime, meaning full-time HOURS, and rendering that as a
+ * Full-time job on a tile tells a job seeker the opposite of the one fact the title states plainly.
+ * The title is unambiguous in a way the field is not - nobody writes "Intern" in a job title for a
+ * permanent role - so where they disagree about an internship, the title is the better evidence.
+ *
+ * NARROW ON PURPOSE. Part-time and Contract in a title do NOT override the field, because there the
+ * field is the more reliable of the two: "Contract" in a title is frequently the work rather than
+ * the arrangement ("Contract Manager", "Contracts Counsel" - both live), and a title saying
+ * part-time while the employer says full-time is a genuine ambiguity with no obvious winner. The
+ * asymmetry is the point: this fixes a case where the field is known to answer a different
+ * question, not every case where the two sources differ.
+ *
+ * Also the single entry point for all three boards, which is why Greenhouse routes through it too
+ * even though it has no field to pass: one function means the precedence rule cannot end up
+ * spelled differently in three normalizers.
+ */
+export function resolveEmploymentType(title: string, boardValue?: string): string | undefined {
+  const fromTitle = employmentTypeFromTitle(title);
+  if (fromTitle === 'Internship') return 'Internship';
+  return normalizeEmploymentType(boardValue) ?? fromTitle;
+}

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   collapseRanges,
   employmentTypeFromTitle,
+  resolveEmploymentType,
   inferGreenhouseInterval,
   normalizeEmploymentType,
   readAshbyPay,
@@ -174,6 +175,40 @@ test('an unrecognized employer value is passed through, not discarded', () => {
   assert.equal(normalizeEmploymentType(undefined), undefined);
 });
 
+/* PRECEDENCE. The employer's field normally wins; a title saying internship is the one exception. */
+test('a title saying internship beats the employer field', () => {
+  // Modal's live posting: tagged FullTime, meaning full-time HOURS, on an internship. Rendering
+  // that as a Full-time job tells a job seeker the opposite of what the title plainly says.
+  assert.equal(resolveEmploymentType('ML Research Intern', 'FullTime'), 'Internship');
+  assert.equal(resolveEmploymentType('Software Engineering Co-op', 'Permanent'), 'Internship');
+});
+
+test('the employer field still wins everywhere else', () => {
+  assert.equal(resolveEmploymentType('Senior Backend Engineer', 'FullTime'), 'Full-time');
+  /* NARROW ON PURPOSE. "Contract" in a title is often the work rather than the arrangement -
+     "Contract Manager" and "Contracts Counsel" are both live full-time roles - so the field wins. */
+  assert.equal(resolveEmploymentType('Contract Manager', 'FullTime'), 'Full-time');
+  assert.equal(resolveEmploymentType('Part-Time Coordinator', 'FullTime'), 'Full-time');
+  // An unrecognized employer value is still passed through rather than dropped.
+  assert.equal(resolveEmploymentType('Field Organizer', 'Volunteer'), 'Volunteer');
+});
+
+test('with no employer field it falls back to the title, and still never invents Full-time', () => {
+  // The Greenhouse path: 84% of the board, no field at all.
+  assert.equal(resolveEmploymentType('Data Science Intern'), 'Internship');
+  assert.equal(resolveEmploymentType('Contract Recruiter'), 'Contract');
+  assert.equal(resolveEmploymentType('Senior Backend Engineer'), undefined);
+  assert.equal(resolveEmploymentType('Senior Backend Engineer', '   '), undefined);
+});
+
+test('the internship override cannot fire on an internal/international title', () => {
+  // The word-boundary false positives, now checked through the precedence path too: if these
+  // overrode the field, every "Internal Comms" role at a Lever employer would read Internship.
+  assert.equal(resolveEmploymentType('Internal Audit Manager', 'FullTime'), 'Full-time');
+  assert.equal(resolveEmploymentType('International Revenue Manager', 'FullTime'), 'Full-time');
+  assert.equal(resolveEmploymentType('Sr Internal Auditor', 'Permanent'), 'Full-time');
+});
+
 /* END TO END through the normalizers, in the payload shapes the live boards actually send. */
 test('each normalizer carries pay and type onto the posting', () => {
   const description = 'A real description, long enough to clear the ingest floor. '.repeat(4);
@@ -205,6 +240,16 @@ test('each normalizer carries pay and type onto the posting', () => {
   });
   assert.equal(ashby.employment_type, 'Full-time');
   assert.deepEqual(ashby.pay, { min: 150_000, max: 189_000, currency: 'USD', interval: 'year' });
+
+  /* The same board shape, but the title says intern and the field says FullTime. This is Modal's
+     live posting, and it must reach the tile as Internship. */
+  const [ashbyIntern] = normalizeAshbyJobs({
+    jobs: [{
+      id: 'a2', title: 'ML Research Intern', jobUrl: 'https://jobs.ashbyhq.com/x/2', applyUrl: 'https://jobs.ashbyhq.com/x/2/application',
+      employmentType: 'FullTime', location: 'New York', descriptionPlain: description,
+    }],
+  });
+  assert.equal(ashbyIntern.employment_type, 'Internship');
 });
 
 test('a posting that publishes no pay carries none, on every board', () => {

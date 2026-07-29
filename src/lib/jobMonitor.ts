@@ -1,7 +1,6 @@
 import type { AutonomousPortalFamily } from './portalSubmission';
 import {
-  employmentTypeFromTitle,
-  normalizeEmploymentType,
+  resolveEmploymentType,
   readAshbyPay,
   readGreenhousePay,
   readLeverPay,
@@ -254,8 +253,8 @@ export function normalizeGreenhouseJobs(payload: unknown): NormalizedJob[] {
       /* Greenhouse has no employment-type field, so the title is the only evidence. It yields the
          158 internships, 150 contract and 34 part-time roles on this board and NOTHING for the
          rest - deliberately, because "the title did not say" is not the same fact as "full-time".
-         See employmentTypeFromTitle. */
-      employment_type: employmentTypeFromTitle(title),
+         See resolveEmploymentType. */
+      employment_type: resolveEmploymentType(title),
       description: cleanHtml(job.content),
       apply_url: postingUrl,
       posting_url: postingUrl,
@@ -287,7 +286,9 @@ export function normalizeLeverJobs(payload: unknown): NormalizedJob[] {
       title,
       location,
       department: text(categories.department) ?? text(categories.team),
-      employment_type: normalizeEmploymentType(text(categories.commitment)),
+      /* The employer's own commitment field, EXCEPT that a title saying internship beats it -
+         see resolveEmploymentType for why that one exception and nothing else. */
+      employment_type: resolveEmploymentType(title, text(categories.commitment)),
       description,
       apply_url: applyUrl,
       posting_url: postingUrl,
@@ -319,7 +320,7 @@ export function normalizeAshbyJobs(payload: unknown): NormalizedJob[] {
       title,
       location,
       department: text(job.department) ?? text(job.team),
-      employment_type: normalizeEmploymentType(text(job.employmentType)),
+      employment_type: resolveEmploymentType(title, text(job.employmentType)),
       description: cleanPlain(job.descriptionPlain) || cleanHtml(job.descriptionHtml),
       apply_url: applyUrl,
       posting_url: postingUrl,
