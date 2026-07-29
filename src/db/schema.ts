@@ -7,6 +7,7 @@ import {
   jsonb,
   integer,
   real,
+  doublePrecision,
   boolean,
   index,
   uniqueIndex,
@@ -654,6 +655,33 @@ export const monitored_jobs = pgTable('monitored_jobs', {
   // hiring. A posting that states its OWN sponsorship is unaffected: that is the employer speaking
   // about that role, wherever it is.
   job_country: text('job_country').default('unknown').notNull(),
+  /* WHAT THE EMPLOYER PUBLISHED ABOUT PAY. All four are null together or set together.
+   *
+   * Null on roughly two thirds of the board, and that is the employer's silence rather than a gap
+   * in the crawl: 7,205 of 22,124 live postings publish a range (Greenhouse 31%, Ashby 46%, Lever
+   * 10%). A null here renders NOTHING - no "competitive", no "not listed" - for the same reason the
+   * board says UPDATED rather than POSTED on Greenhouse rows.
+   *
+   * Stored rather than derived per request, like sponsorship_status and for the same reason: the
+   * period on a Greenhouse figure is inferred from its magnitude (see lib/compensation.ts), and
+   * re-running that over thousands of descriptions inside a WHERE clause is not possible. Storing
+   * it also means a future "pay published" filter or a sort by salary is a plain column predicate.
+   *
+   * doublePrecision, not real: the largest annual figure on the live board is 14,878,400 (JPY), and
+   * float4 carries about 7 significant digits, so `real` would round it. Not numeric either, which
+   * drizzle hands back as a string - these values are displayed and range-compared, never summed,
+   * so binary float is exact enough and keeps the API sending a JSON number. */
+  salary_min: doublePrecision('salary_min'),
+  salary_max: doublePrecision('salary_max'),
+  /* ISO 4217. 19 distinct codes appear live, so this is NOT safe to assume is USD. */
+  salary_currency: text('salary_currency'),
+  /* 'year' | 'month' | 'hour'. Text rather than an enum to match every other vocabulary column on
+   * this table (sponsorship_status, job_country), which schema-push handles without a type
+   * migration dance. The period is the whole point of the column: Greenhouse states a number and
+   * never states its period, and a salary rendered as an hourly rate is worse than no salary at
+   * all, so a posting whose period could not be established stores null here AND in the three
+   * columns above. */
+  salary_interval: text('salary_interval'),
   /* Kept as a column, deliberately NOT dropped, but no longer written (2026-07-28).
    *
    * It was write-only from the day it shipped: the three normalizers set it, the upsert copied it,

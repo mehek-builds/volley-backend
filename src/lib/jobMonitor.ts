@@ -1,4 +1,12 @@
 import type { AutonomousPortalFamily } from './portalSubmission';
+import {
+  employmentTypeFromTitle,
+  normalizeEmploymentType,
+  readAshbyPay,
+  readGreenhousePay,
+  readLeverPay,
+  type NormalizedPay,
+} from './compensation';
 
 // The boards the job monitor may poll.
 //
@@ -64,6 +72,9 @@ export type NormalizedJob = {
    * after the fact; the portal was publishing the right answer the entire time.
    */
   portal_company_name?: string;
+  /* What the employer published about pay, or undefined where they published nothing - which is
+     two thirds of the board, and is left blank rather than filled in. See lib/compensation.ts. */
+  pay?: NormalizedPay;
 };
 
 const NAMED_ENTITIES: Record<string, string> = {
@@ -240,6 +251,11 @@ export function normalizeGreenhouseJobs(payload: unknown): NormalizedJob[] {
       title,
       location,
       department,
+      /* Greenhouse has no employment-type field, so the title is the only evidence. It yields the
+         158 internships, 150 contract and 34 part-time roles on this board and NOTHING for the
+         rest - deliberately, because "the title did not say" is not the same fact as "full-time".
+         See employmentTypeFromTitle. */
+      employment_type: employmentTypeFromTitle(title),
       description: cleanHtml(job.content),
       apply_url: postingUrl,
       posting_url: postingUrl,
@@ -247,6 +263,7 @@ export function normalizeGreenhouseJobs(payload: unknown): NormalizedJob[] {
       posted_at: date(job.updated_at),
       portal_country: officeLocations.join(' | ') || undefined,
       portal_company_name: text(job.company_name),
+      pay: readGreenhousePay(job) ?? undefined,
     }];
   });
 }
@@ -270,7 +287,7 @@ export function normalizeLeverJobs(payload: unknown): NormalizedJob[] {
       title,
       location,
       department: text(categories.department) ?? text(categories.team),
-      employment_type: text(categories.commitment),
+      employment_type: normalizeEmploymentType(text(categories.commitment)),
       description,
       apply_url: applyUrl,
       posting_url: postingUrl,
@@ -279,6 +296,7 @@ export function normalizeLeverJobs(payload: unknown): NormalizedJob[] {
       // An ISO-3166 alpha-2 code, published per posting. The least ambiguous signal any of the
       // three boards gives us.
       portal_country: text(job.country),
+      pay: readLeverPay(job) ?? undefined,
     }];
   });
 }
@@ -301,7 +319,7 @@ export function normalizeAshbyJobs(payload: unknown): NormalizedJob[] {
       title,
       location,
       department: text(job.department) ?? text(job.team),
-      employment_type: text(job.employmentType),
+      employment_type: normalizeEmploymentType(text(job.employmentType)),
       description: cleanPlain(job.descriptionPlain) || cleanHtml(job.descriptionHtml),
       apply_url: applyUrl,
       posting_url: postingUrl,
@@ -309,6 +327,7 @@ export function normalizeAshbyJobs(payload: unknown): NormalizedJob[] {
       posted_at: date(job.publishedAt),
       // A structured postal address when the employer filled one in: "United States", "Germany".
       portal_country: text(postal.addressCountry),
+      pay: readAshbyPay(job) ?? undefined,
     }];
   });
 }
@@ -474,15 +493,25 @@ export function isIngestablePosting(job: Pick<NormalizedJob, 'description' | 'ti
   return hasUsableDescription(job) && !isSelfDeclaredTestPosting(job);
 }
 
+/* THE PAY FLAGS ARE NOT OPTIONAL EXTRAS - THEY ARE WHY THE BOARD SHOWED NO SALARIES.
+ *
+ * Greenhouse omits `pay_input_ranges` and Ashby omits `compensation` unless the request asks for
+ * them, and neither errors or warns when you do not: the response is a complete, valid, healthy
+ * payload with the field simply absent. So this failed exactly the way the empty board did - every
+ * check passed, 7,205 postings' published salaries just never arrived.
+ *
+ * Lever needs no flag; `salaryRange` has always been in the response and the normalizer dropped it.
+ *
+ * If pay ever silently disappears from the board again, look here first. */
 export function sourceEndpoint(source: Pick<JobSourceInput, 'ats_name' | 'board_token'>): string {
   const token = encodeURIComponent(source.board_token.trim());
   if (source.ats_name === 'greenhouse') {
-    return `https://boards-api.greenhouse.io/v1/boards/${token}/jobs?content=true`;
+    return `https://boards-api.greenhouse.io/v1/boards/${token}/jobs?content=true&pay_transparency=true`;
   }
   if (source.ats_name === 'lever') {
     return `https://api.lever.co/v0/postings/${token}?mode=json`;
   }
-  return `https://api.ashbyhq.com/posting-api/job-board/${token}`;
+  return `https://api.ashbyhq.com/posting-api/job-board/${token}?includeCompensation=true`;
 }
 
 export async function fetchSourceJobs(

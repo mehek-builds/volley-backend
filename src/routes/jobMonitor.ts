@@ -677,12 +677,21 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
          un-reached source's jobs flipped to is_active = false by the sweep
          above. That failure empties the public board rather than staling it.
          Chunked so a single board the size of Databricks still fits well
-         inside Postgres's 65,535-parameter cap: 14 columns x 200 rows. */
+         inside Postgres's 65,535-parameter cap: 20 columns x 200 rows. */
       for (let index = 0; index < fresh.length; index += UPSERT_CHUNK) {
-        const chunk = fresh.slice(index, index + UPSERT_CHUNK).map((job) => ({
+        const chunk = fresh.slice(index, index + UPSERT_CHUNK).map(({ pay, ...job }) => ({
           source_id: source.id,
           company_name: source.company_name,
           ...job,
+          /* Destructured OUT of the spread above, never spread in. `pay` is a nested object on
+             NormalizedJob and there is no such column; drizzle would carry it into the INSERT and
+             fail the whole 200-row chunk, which takes that board's poll down with it.
+             All four move together - a posting whose pay period could not be established stores
+             null in all of them rather than a figure with no period. See lib/compensation.ts. */
+          salary_min: pay?.min ?? null,
+          salary_max: pay?.max ?? null,
+          salary_currency: pay?.currency ?? null,
+          salary_interval: pay?.interval ?? null,
           last_seen_at: now,
           is_active: true,
           /* Read here, at the moment the description arrives, so the board filter is a plain column
@@ -712,6 +721,14 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
             is_active: sql`excluded.is_active`,
             sponsorship_status: sql`excluded.sponsorship_status`,
             job_country: sql`excluded.job_country`,
+            /* Overwritten on every poll, not merged. An employer that REMOVES a published range
+               (or edits one into a shape we decline to guess a period for) must see it disappear
+               from the board on the next run; a COALESCE here would pin the old figure to the row
+               forever, which is the one error a salary display cannot afford. */
+            salary_min: sql`excluded.salary_min`,
+            salary_max: sql`excluded.salary_max`,
+            salary_currency: sql`excluded.salary_currency`,
+            salary_interval: sql`excluded.salary_interval`,
           },
         });
       }
@@ -929,6 +946,14 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       location: monitored_jobs.location,
       department: monitored_jobs.department,
       employment_type: monitored_jobs.employment_type,
+      /* Sent as four raw facts, not as a formatted string. The board and the dashboard render pay
+         differently (a tile has room for "$145K-200K/yr", a dashboard row shows the full figures),
+         and a currency the server has already turned into a symbol cannot be re-rendered for a
+         reader's locale. formatPay on the client is the single place that decides how it reads. */
+      salary_min: monitored_jobs.salary_min,
+      salary_max: monitored_jobs.salary_max,
+      salary_currency: monitored_jobs.salary_currency,
+      salary_interval: monitored_jobs.salary_interval,
       description: sql<string>`left(${monitored_jobs.description}, 600)`,
       apply_url: monitored_jobs.apply_url,
       posting_url: monitored_jobs.posting_url,
@@ -1188,6 +1213,22 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         first_seen_at: sql<string>`min(${monitored_jobs.first_seen_at})`,
         ats_name: career_page_sources.ats_name,
         career_url: sql<string>`min(${career_page_sources.career_url})`,
+        /* Pay and job type, aggregated with the same caution as sponsorship below: a group is one
+           role open in several cities, and those copies routinely disagree.
+           A range is shown only when every member that published one used the SAME currency and the
+           SAME period - a role paying USD in Austin and CAD in Toronto has no single range, and
+           spanning them would invent one. Where they do agree, the span runs lowest min to highest
+           max, so the row is true of every posting inside it.
+           count(distinct) ignores nulls, so members that published nothing neither block the range
+           nor get counted into it: the row reports what was stated, by the postings that stated it.
+           Job type is the same test with no arithmetic - one distinct value or nothing, so a group
+           mixing an internship with a full-time posting of the same title shows no chip rather than
+           picking whichever the aggregate happened to reach first. */
+        salary_min: sql<number | null>`case when count(distinct ${monitored_jobs.salary_currency}) = 1 and count(distinct ${monitored_jobs.salary_interval}) = 1 then min(${monitored_jobs.salary_min}) end`,
+        salary_max: sql<number | null>`case when count(distinct ${monitored_jobs.salary_currency}) = 1 and count(distinct ${monitored_jobs.salary_interval}) = 1 then max(${monitored_jobs.salary_max}) end`,
+        salary_currency: sql<string | null>`case when count(distinct ${monitored_jobs.salary_currency}) = 1 and count(distinct ${monitored_jobs.salary_interval}) = 1 then min(${monitored_jobs.salary_currency}) end`,
+        salary_interval: sql<string | null>`case when count(distinct ${monitored_jobs.salary_currency}) = 1 and count(distinct ${monitored_jobs.salary_interval}) = 1 then min(${monitored_jobs.salary_interval}) end`,
+        employment_type: sql<string | null>`case when count(distinct ${monitored_jobs.employment_type}) = 1 then min(${monitored_jobs.employment_type}) end`,
         /* Sponsorship, aggregated the careful way round. A group is one role posted in several
            cities, and those copies can disagree - the same title is routinely open in a country the
            company sponsors in and one it does not. `refuses_any` is what stops the tile claiming
@@ -1330,6 +1371,10 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         location: monitored_jobs.location,
         department: monitored_jobs.department,
         employment_type: monitored_jobs.employment_type,
+        salary_min: monitored_jobs.salary_min,
+        salary_max: monitored_jobs.salary_max,
+        salary_currency: monitored_jobs.salary_currency,
+        salary_interval: monitored_jobs.salary_interval,
         description: monitored_jobs.description,
         apply_url: monitored_jobs.apply_url,
         posting_url: monitored_jobs.posting_url,
