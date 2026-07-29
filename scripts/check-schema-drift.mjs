@@ -84,6 +84,34 @@ async function main() {
   const missing = [];
   const extra = [];
   try {
+    /* Whole tables that exist in the database and are declared nowhere.
+     *
+     * THE LOOP BELOW CANNOT SEE THESE. It iterates the tables schema.ts declares, so a table that
+     * is missing from schema.ts entirely is never looked up, and this check reported "the database
+     * holds nothing undeclared" while prod carried three of them: billing_webhook_events,
+     * pricing_experiment_assignments and pricing_offers, all created by codex/regional-pricing's
+     * apply script before the branch merged. A `db:push` from main would have dropped all three
+     * with whatever they held. That is precisely the EXTRA case this file's own header calls "the
+     * one that bites", so the check was blind to its own headline bug, one table at a time instead
+     * of one column at a time.
+     *
+     * drizzle's own bookkeeping table is excluded because it is not ours to declare. */
+    const DRIZZLE_INTERNAL = new Set(['__drizzle_migrations']);
+    const { rows: liveTables } = await client.query(
+      "select table_name from information_schema.tables where table_schema = current_schema() and table_type = 'BASE TABLE'",
+    );
+    for (const { table_name } of liveTables) {
+      // Object.hasOwn, not `declared[table_name]`: a table named `constructor` or `toString` would
+      // otherwise hit Object.prototype, read as declared, and be skipped by the check silently.
+      if (DRIZZLE_INTERNAL.has(table_name) || Object.hasOwn(declared, table_name)) continue;
+      // Identifiers cannot be parameterised, so this one is quoted the way Postgres quotes them,
+      // doubling any embedded quote. The name comes from information_schema rather than a user,
+      // but a count that reports a number is not worth leaving an interpolation question open.
+      const quoted = `"${table_name.replace(/"/g, '""')}"`;
+      const { rows: cnt } = await client.query(`select count(*)::int as n from ${quoted}`);
+      extra.push({ what: `${table_name} (whole table)`, rows: cnt[0].n });
+    }
+
     for (const [table, cols] of Object.entries(declared)) {
       const { rows } = await client.query(
         'select column_name from information_schema.columns where table_schema = current_schema() and table_name = $1',
