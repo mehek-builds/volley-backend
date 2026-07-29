@@ -116,35 +116,113 @@ describe('rankByFit', () => {
 
 /* The pool size is a latency budget, not a taste call: ranking runs synchronously on the event
    loop, so every millisecond here is a millisecond Fastify serves nobody else. The RANKING_POOL
-   comment states a measured cost, and a comment is not enforcement — this is.
-   The ceiling is deliberately loose. It is a guard against an order-of-magnitude regression (a
-   quadratic added to the scorer, the SCORING_CHARS cap removed), not a benchmark, so it should not
-   go red because a laptop was busy. */
+   comment states a measured cost, and a comment is not enforcement, this is.
+
+   THIS USED TO BE A STOPWATCH, AND THE STOPWATCH DID NOT WORK. It asserted one run of
+   RANKING_POOL finished under 600 ms. Measured 2026-07-29: 8 consecutive runs gave two failures,
+   at 864 ms and 673 ms, and the fastest of five back-to-back runs was still 651 ms. So the ceiling
+   was not noisy, it was wrong for this hardware, and an absolute millisecond count is not portable
+   across a laptop, a CI runner and whatever runs it next. A test that fails one time in four is
+   worse than no test, because a suite that fails at random stops being read.
+
+   A RATIO WAS TRIED NEXT AND ALSO FAILED, which is worth recording so nobody tries it a third
+   time. Comparing cost at one pool size against a bigger one is machine-independent in principle.
+   In practice, on healthy code, the 4x ratio measured min 3.15, median 5.48, max 6.90 across 8
+   runs, because bigger pools carry real allocation and GC cost on top of the scoring. Then a
+   deliberately injected quadratic measured 8.32. Healthy-but-noisy and genuinely-quadratic overlap,
+   so there is no threshold that catches the second without firing on the first.
+
+   SO IT COUNTS WORK INSTEAD OF TIMING IT, and is now fully deterministic. Every row is handed to
+   rankByFit behind a Proxy that counts property reads. Linear code reads a fixed handful of
+   properties per row, so the total scales with the pool. A nested pass over rows, which is exactly
+   the regression this exists to catch, multiplies that by the pool size. No clock, no threshold
+   tuning, no flake: the same code gives the same count on any machine, busy or idle.
+
+   WHAT IT DOES NOT CATCH, stated so the guarantee is not overread: it sees work that TOUCHES THE
+   ROWS. A quadratic built some other way, say accumulating an n-by-n array of scores without
+   reading a row again, would not move this count. That is a narrower promise than a stopwatch
+   appeared to make, and it is still the better trade, because the stopwatch's broader promise was
+   not kept: it let the injected quadratic through at x8.32 while failing one healthy run in four.
+
+   IT NO LONGER CLAIMS TO GUARD THE CAP. The old comment said this budget also caught "the
+   SCORING_CHARS cap removed". It never could. The cap is applied by the QUERY, not by rankByFit:
+   jobMonitor.ts builds scored_description as `left(description, SCORING_CHARS)`, so rankByFit only
+   ever sees text that is already truncated. A test here that feeds it longer strings measures a
+   code path production never takes. Guarding that cap needs a test against the query, and that is
+   not this file's job. */
+
+const RANKING_REQUIREMENTS = Array.from(
+  { length: 30 },
+  (_, i) => `- TypeScript, React, Node.js, PostgreSQL, Kubernetes, Terraform, Kafka, item ${i}`,
+).join('\n');
+const RANKING_RESUME = Array.from(
+  { length: 34 },
+  (_, i) => `Built a dashboard in TypeScript and React with PostgreSQL and CI/CD, line ${i}.`,
+).join('\n');
+
+/** The pool, with every row wrapped so its property reads can be counted. */
+function countingPool(size: number, description: string) {
+  let reads = 0;
+  const rows = Array.from({ length: size }, (_, i) => {
+    const row = job({ company_name: `Company ${i}`, title: 'Engineer', scored_description: description });
+    return new Proxy(row, {
+      get(target, key, receiver) {
+        reads++;
+        return Reflect.get(target, key, receiver);
+      },
+    });
+  });
+  return { rows, reads: () => reads };
+}
+
 describe('the ranking budget the comment claims', () => {
-  test(`ranking a full pool of ${RANKING_POOL} stays inside its budget`, () => {
-    const requirements = Array.from(
-      { length: 30 },
-      (_, i) => `- TypeScript, React, Node.js, PostgreSQL, Kubernetes, Terraform, Kafka, item ${i}`,
-    ).join('\n');
-    const jd = posting(requirements);
-    const resume = Array.from(
-      { length: 34 },
-      (_, i) => `Built a dashboard in TypeScript and React with PostgreSQL and CI/CD, line ${i}.`,
-    ).join('\n');
-    const pool = Array.from({ length: RANKING_POOL }, (_, i) =>
-      job({ company_name: `Company ${i}`, title: 'Engineer', scored_description: jd }),
-    );
+  test('ranking touches each posting a fixed number of times, so cost stays linear in the pool', () => {
+    const jd = posting(RANKING_REQUIREMENTS);
+    const { rows, reads } = countingPool(RANKING_POOL, jd);
 
-    rankByFit(pool.slice(0, 10), resume); // warm the JIT, as a real process would be
-    const started = process.hrtime.bigint();
-    rankByFit(pool, resume);
-    const ms = Number(process.hrtime.bigint() - started) / 1e6;
+    rankByFit(rows, RANKING_RESUME);
 
+    const perRow = reads() / RANKING_POOL;
+    console.log(`      ${reads()} property reads across ${RANKING_POOL} postings (${perRow.toFixed(1)} per posting)`);
+
+    /* Linear code reads a small fixed set per row: the description to score, and the company and
+       title excluded from the requirement set. A nested pass over rows would make this scale with
+       RANKING_POOL instead, so the gap between passing and failing is a factor of a hundred, not a
+       few percent. The bound is generous on purpose; it is the shape that matters, not the exact
+       count, and it must not go red because someone legitimately reads one more field. */
     assert.ok(
-      ms < 600,
-      `ranking ${RANKING_POOL} postings took ${ms.toFixed(0)} ms of SYNCHRONOUS event-loop time; ` +
-        'the route serves no other request while this runs, so both RANKING_POOL and the decision ' +
-        'to score inline need revisiting',
+      perRow <= 10,
+      `rankByFit read ${reads()} properties across ${RANKING_POOL} postings, ${perRow.toFixed(1)} ` +
+        'per posting. Linear code reads a fixed handful per row, so a number that scales with the ' +
+        'pool means something now walks the rows for every row. Ranking is synchronous, so the ' +
+        'route serves no other request while it runs.',
+    );
+  });
+
+  test('the per-posting work does not grow when the pool does', () => {
+    const jd = posting(RANKING_REQUIREMENTS);
+    const small = countingPool(RANKING_POOL, jd);
+    const large = countingPool(RANKING_POOL * 4, jd);
+
+    rankByFit(small.rows, RANKING_RESUME);
+    rankByFit(large.rows, RANKING_RESUME);
+
+    const smallPerRow = small.reads() / RANKING_POOL;
+    const largePerRow = large.reads() / (RANKING_POOL * 4);
+
+    /* The sharpest statement of linearity available without a clock: quadrupling the pool must not
+       change what each posting costs. Under a nested pass this goes from 3 to 303 and then 1203.
+
+       A tolerance rather than strict equality, even though both sides are whole numbers today.
+       These are counts divided by pool sizes, so the moment any field is read conditionally for
+       some rows and not others the two averages stop being exactly equal, and this would fail on a
+       change that is perfectly linear. Half a read per posting is far below the signal it exists
+       to catch and far above that kind of drift. */
+    assert.ok(
+      Math.abs(largePerRow - smallPerRow) < 0.5,
+      `each posting cost ${smallPerRow.toFixed(1)} property reads in a pool of ${RANKING_POOL} but ` +
+        `${largePerRow.toFixed(1)} in a pool of ${RANKING_POOL * 4}. Per-posting work must not ` +
+        'depend on how many other postings there are.',
     );
   });
 
