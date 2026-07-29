@@ -263,6 +263,28 @@ check(
   sponsorOnlyTitles,
 );
 
+/* A SOURCE REMOVED FROM THE CODE LIST LEAVES THE BOARD.
+   Deleting a company from jobSources.ts used to leave its row enabled and its postings live -
+   which is how Superior Alarm Systems and Thornbury Community Services were still being served
+   hours after being removed for being the wrong company. */
+const { retireUnlistedSources } = await import('../src/routes/jobMonitor');
+const retired = await retireUnlistedSources([
+  // The QA fixtures are not in jobSources.ts, so passing an empty-ish list retires both of them.
+]);
+check(
+  'a source that is no longer on the list is retired',
+  retired.some((entry) => entry.includes('qa-sponsor-yes')),
+  true,
+);
+check('...and its postings leave the board', (await boardTitles()).titles, []);
+// Put them back for the checks that follow.
+await db.update(career_page_sources)
+  .set({ enabled: true })
+  .where(inArray(career_page_sources.id, [sponsoring.id, notSponsoring.id]));
+await db.update(monitored_jobs)
+  .set({ is_active: true })
+  .where(inArray(monitored_jobs.source_id, [sponsoring.id, notSponsoring.id]));
+
 // 7. THE GROUPED BOARD, which was a complete way around the filter until it honoured the account.
 //    It returns company, title, locations and an apply link, so serving it unfiltered handed a
 //    declared account the whole board through a different door.
