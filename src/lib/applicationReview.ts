@@ -58,9 +58,10 @@ export type ApplicationReviewState = {
   receipt?: {
     confirmation_text: string;
     final_url: string;
-    screenshot_url: string;
+    screenshot_url?: string;
     captured_at: string;
     reference_id?: string;
+    source?: 'managed_browser' | 'chrome_extension';
   };
 };
 
