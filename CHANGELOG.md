@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.4] - 2026-07-31
+
+### Performance
+
+- Concurrent requests carrying the same session token now share one verification lookup while it is
+  in flight, reducing duplicate database reads without caching settled authentication results.
+
 ## [1.0.3] - 2026-07-26
 
 ### Changed
