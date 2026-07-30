@@ -108,6 +108,7 @@ test('distinct policy windows remain constant-bounded', () => {
 
 test('route policy protects auth and download routes without charging probes or preflights', () => {
   assert.equal(policyForRequest('GET', '/health', CONFIG), null);
+  assert.equal(policyForRequest('GET', '/dashboard/bootstrap', CONFIG), null);
   assert.equal(policyForRequest('OPTIONS', '/auth/request-code', CONFIG), null);
   assert.equal(policyForRequest('POST', '/auth/request-code', CONFIG)?.name, 'auth_start');
   assert.equal(policyForRequest('POST', '/auth/password/login', CONFIG)?.name, 'auth_start');

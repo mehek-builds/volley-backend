@@ -1,5 +1,4 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { requireAuth } from '../middleware/auth';
 
 const OPTIONAL_DEFAULTS = {
   targeting: {
@@ -48,22 +47,26 @@ export type DashboardBootstrapResponse = {
 export async function composeDashboardBootstrap(
   fetchResource: DashboardBootstrapFetcher,
 ): Promise<DashboardBootstrapResponse> {
-  const [me, jobs] = await Promise.all([
-    fetchResource('me'),
-    fetchResource('jobs'),
-  ]);
-
-  const warnings: DashboardBootstrapResource[] = [];
-  const optionalEntries = await Promise.all(
+  // Start the critical reads first so a nearly exhausted per-IP bucket cannot be spent on
+  // fail-soft projections before identity and jobs have a chance to complete.
+  const criticalEntriesPromise = Promise.all([fetchResource('me'), fetchResource('jobs')]);
+  const optionalEntriesPromise = Promise.all(
     (Object.keys(OPTIONAL_DEFAULTS) as Array<keyof typeof OPTIONAL_DEFAULTS>).map(async (resource) => {
       try {
-        return [resource, await fetchResource(resource)] as const;
+        return [resource, await fetchResource(resource), false] as const;
       } catch {
-        warnings.push(resource);
-        return [resource, OPTIONAL_DEFAULTS[resource]] as const;
+        return [resource, OPTIONAL_DEFAULTS[resource], true] as const;
       }
     }),
   );
+  const [[me, jobs], optionalResults] = await Promise.all([
+    criticalEntriesPromise,
+    optionalEntriesPromise,
+  ]);
+  const warnings = optionalResults
+    .filter(([, , degraded]) => degraded)
+    .map(([resource]) => resource);
+  const optionalEntries = optionalResults.map(([resource, value]) => [resource, value] as const);
 
   return {
     schema_version: 1,
@@ -97,8 +100,10 @@ function forwardedHeaders(request: FastifyRequest): Record<string, string> {
 export async function dashboardBootstrapRoutes(fastify: FastifyInstance) {
   fastify.get(
     '/dashboard/bootstrap',
-    { preHandler: requireAuth },
     async (request: FastifyRequest, reply: FastifyReply) => {
+      // Authentication is enforced by every private resource below, with /me acting as the
+      // critical gate for the aggregate response. Avoiding a second outer requireAuth check keeps
+      // one bootstrap equivalent to the eight authenticated reads it replaces, not nine.
       const headers = forwardedHeaders(request);
       const fetchResource: DashboardBootstrapFetcher = async (resource) => {
         const response = await fastify.inject({
