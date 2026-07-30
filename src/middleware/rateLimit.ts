@@ -150,7 +150,10 @@ export class InMemoryRateLimitStore {
   }
 }
 
-const UNMETERED_PATHS = new Set(['/health', '/v1/meta', '/install', '/privacy']);
+// The bootstrap request fans into the same eight protected resource routes the dashboard used to
+// call directly. Those internal requests remain metered, so charging the wrapper too would make a
+// page load consume nine general requests instead of eight.
+const UNMETERED_PATHS = new Set(['/health', '/v1/meta', '/install', '/privacy', '/dashboard/bootstrap']);
 
 export function policyForRequest(method: string, path: string, config: RateLimitConfig): RateLimitPolicy | null {
   if (method === 'OPTIONS' || UNMETERED_PATHS.has(path)) return null;

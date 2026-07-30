@@ -34,6 +34,7 @@ import { coverLetterRoutes } from './routes/coverLetter';
 import { emailConnectionRoutes } from './routes/emailConnections';
 import { API_VERSION, PRODUCT_NAME, PRODUCT_LINKS } from './lib/product';
 import { createRateLimitHook, defaultRateLimitConfig, type RateLimitConfig } from './middleware/rateLimit';
+import { dashboardBootstrapRoutes } from './routes/dashboardBootstrap';
 
 export interface BuildAppOptions {
   rateLimit?: RateLimitConfig;
@@ -204,6 +205,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await fastify.register(accountRoutes);
   await fastify.register(resumeRetentionRoutes);
   await fastify.register(adapterHealthRoutes);
+  await fastify.register(dashboardBootstrapRoutes);
 
   // Global error handler
   fastify.setErrorHandler((error, _request, reply) => {
