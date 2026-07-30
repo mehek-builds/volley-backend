@@ -44,6 +44,8 @@ type SessionOutcome =
   | { ok: false; reason: 'invalid' }
   | { ok: false; reason: 'misconfigured' };
 
+const inFlightSessions = new Map<string, Promise<SessionOutcome>>();
+
 /**
  * The ONE place a bearer token is turned into a session.
  *
@@ -65,6 +67,25 @@ async function resolveSession(request: FastifyRequest): Promise<SessionOutcome> 
     return { ok: false, reason: 'misconfigured' };
   }
 
+  const existing = inFlightSessions.get(token);
+  if (existing) return existing;
+
+  /* Dashboard bootstrap fans out into several authenticated projections at
+     once. They all carry the same token, so independently verifying the JWT
+     and reading the same user row turns one browser request into eight
+     identical auth queries. Share only the active resolution. The entry is
+     removed as soon as it settles, so revocation still reaches the next
+     request rather than waiting behind a time-based cache. */
+  const resolution = resolveToken(token, secret);
+  inFlightSessions.set(token, resolution);
+  const cleanup = () => {
+    if (inFlightSessions.get(token) === resolution) inFlightSessions.delete(token);
+  };
+  resolution.then(cleanup, cleanup);
+  return resolution;
+}
+
+async function resolveToken(token: string, secret: string): Promise<SessionOutcome> {
   try {
     const secretBytes = new TextEncoder().encode(secret);
     const { payload } = await jwtVerify(token, secretBytes);
