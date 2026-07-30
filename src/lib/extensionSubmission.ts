@@ -1,8 +1,17 @@
 import type { ApplicationReviewState } from './applicationReview';
 import { submitRequestDisposition } from './submissionSafety';
 
-export type ExtensionAuthorization = 'standing_consent' | 'per_application_approval';
+export type ExtensionAuthorization = 'standing_consent' | 'user_initiated';
 export type ExtensionOutcome = 'confirmed' | 'failed' | 'unknown';
+
+export function isSafeExtensionReceiptUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' || (url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname));
+  } catch {
+    return false;
+  }
+}
 
 export function canStartExtensionSubmission(
   review: ApplicationReviewState,
