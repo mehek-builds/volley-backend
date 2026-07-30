@@ -45,7 +45,7 @@ export type ApplicationReviewState = {
   filled_fields?: string[];
   preview_screenshot_url?: string;
   submission_authorization?: {
-    source: 'standing_consent' | 'per_application_approval';
+    source: 'standing_consent' | 'per_application_approval' | 'user_initiated_extension';
     authorized_at: string;
     consented_at?: string;
     consent_version?: string;
@@ -58,9 +58,10 @@ export type ApplicationReviewState = {
   receipt?: {
     confirmation_text: string;
     final_url: string;
-    screenshot_url: string;
+    screenshot_url?: string;
     captured_at: string;
     reference_id?: string;
+    source?: 'managed_browser' | 'chrome_extension';
   };
 };
 

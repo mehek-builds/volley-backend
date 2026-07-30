@@ -5,7 +5,7 @@ import { and, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/index';
 import { readExperienceBank } from '../db/experienceBank';
-import { generated_resumes, profiles } from '../db/schema';
+import { generated_resumes, profiles, users } from '../db/schema';
 import {
   findPdfTextFidelityIssues,
   renderResumePdf,
@@ -30,6 +30,8 @@ import { processSubmissionApplication } from './submissionRunner';
 import { isRefusedQuestion } from '../lib/questionDiscovery';
 import { submitRequestDisposition } from '../lib/submissionSafety';
 import { detectPortal } from '../lib/portalSubmission';
+import { dailySubmissionCap, withinDailyCap } from '../lib/submissionQueue';
+import { canStartExtensionSubmission, extensionOutcomePatch, isSafeExtensionReceiptUrl } from '../lib/extensionSubmission';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
 const questionSchema = z.object({
@@ -51,6 +53,16 @@ const submitBodySchema = z.object({
 const statusBodySchema = z.object({
   status: z.literal('failed'),
   error: z.string().max(2000).optional(),
+});
+const extensionStartBodySchema = z.object({
+  authorization: z.enum(['standing_consent', 'user_initiated']),
+});
+const extensionReceiptUrlSchema = z.string().url().max(4000).refine(isSafeExtensionReceiptUrl, 'Confirmation URL must use HTTPS');
+const extensionOutcomeBodySchema = z.object({
+  claim_id: z.string().uuid(),
+  outcome: z.enum(['confirmed', 'failed', 'unknown']),
+  confirmation_text: z.string().max(2000).optional(),
+  final_url: extensionReceiptUrlSchema,
 });
 
 type StoredSpec = Record<string, unknown>;
@@ -95,6 +107,112 @@ function editableResumeSpec(value: unknown): ResumeSpec {
 }
 
 export async function applicationRoutes(fastify: FastifyInstance) {
+  fastify.post(
+    '/applications/:id/submission/extension-start',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const parsed = extensionStartBodySchema.safeParse(request.body);
+      if (!parsed.success) return reply.status(400).send({ error: 'Invalid extension submission request' });
+      const params = paramsSchema.safeParse(request.params);
+      if (!params.success) return reply.status(400).send({ error: 'Invalid application id' });
+      const userId = request.jwtPayload!.userId;
+      const result = await db.transaction(async (tx) => {
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${userId}))`);
+        const rows = await tx.select().from(generated_resumes).where(and(
+          eq(generated_resumes.id, params.data.id),
+          eq(generated_resumes.user_id, userId),
+        )).limit(1);
+        const row = rows[0];
+        if (!row) return { kind: 'not_found' as const };
+        const current = readApplicationReview(row.spec);
+        if (!current) return { kind: 'no_review' as const };
+        const startOfDay = new Date();
+        startOfDay.setUTCHours(0, 0, 0, 0);
+        const [countRows, consent] = await Promise.all([
+          tx.select({ total: sql<number>`count(*)::int` }).from(generated_resumes).where(and(
+            eq(generated_resumes.user_id, userId),
+            sql`${generated_resumes.spec}->'_review'->>'submission_claimed_at' >= ${startOfDay.toISOString()}`,
+          )),
+          tx.select({
+          automatic_submission_enabled: users.automatic_submission_enabled,
+          automatic_submission_consented_at: users.automatic_submission_consented_at,
+          automatic_submission_consent_version: users.automatic_submission_consent_version,
+          }).from(users).where(eq(users.id, userId)).limit(1),
+        ]);
+        const consentRow = consent[0];
+        const disposition = canStartExtensionSubmission(current, parsed.data.authorization, consentRow?.automatic_submission_enabled === true);
+        if (disposition !== 'start') return { kind: disposition, row, current };
+        if (!withinDailyCap(countRows[0]?.total ?? 0, dailySubmissionCap())) return { kind: 'cap' as const };
+        const now = new Date().toISOString();
+        const claimId = randomUUID();
+        const next = {
+          ...current,
+          status: 'submitting' as const,
+          submission_claimed_at: now,
+          submission_claim_id: claimId,
+          submission_authorization: {
+            source: parsed.data.authorization === 'standing_consent' ? 'standing_consent' as const : 'user_initiated_extension' as const,
+            authorized_at: now,
+            ...(parsed.data.authorization === 'standing_consent' ? {
+              consented_at: consentRow?.automatic_submission_consented_at?.toISOString(),
+              consent_version: consentRow?.automatic_submission_consent_version,
+            } : {}),
+          },
+          updated_at: now,
+        };
+        const updated = await tx.update(generated_resumes).set({ spec: reviewSpec(next) }).where(and(
+          eq(generated_resumes.id, row.id),
+          eq(generated_resumes.user_id, userId),
+          sql`${generated_resumes.spec}->'_review'->>'status' = ${current.status}`,
+          sql`${generated_resumes.spec}->'_review'->>'submission_claimed_at' is null`,
+        )).returning({ id: generated_resumes.id });
+        return updated.length ? { kind: 'started' as const, row, claimId, next } : { kind: 'changed' as const };
+      });
+      if (result.kind === 'not_found') return reply.status(404).send({ error: 'Application not found' });
+      if (result.kind === 'no_review') return reply.status(409).send({ error: 'Application review is not available for this resume' });
+      if (result.kind === 'consent_required') return reply.status(403).send({ error: 'Automatic submission is turned off' });
+      if (result.kind === 'submitted') return reply.send({ application_id: result.row.id, already_submitted: true, review: result.current });
+      if (result.kind === 'in_flight') return reply.status(409).send({ error: 'This application already has an active submission' });
+      if (result.kind === 'reject') return reply.status(409).send({ error: 'This application cannot be submitted again from its current state' });
+      if (result.kind === 'cap') return reply.status(429).send({ error: 'Daily automatic submission safety limit reached' });
+      if (result.kind === 'changed') return reply.status(409).send({ error: 'The application state changed before the extension could reserve it' });
+      return reply.send({ application_id: result.row.id, claim_id: result.claimId, review: result.next });
+    },
+  );
+
+  fastify.post(
+    '/applications/:id/submission/extension-outcome',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      const parsed = extensionOutcomeBodySchema.safeParse(request.body);
+      if (!parsed.success) return reply.status(400).send({ error: 'Invalid extension submission outcome' });
+      const current = readApplicationReview(row.spec);
+      if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
+      if (current.status === 'submitted') return reply.send({ application_id: row.id, review: current });
+      if (current.submission_claim_id !== parsed.data.claim_id || current.status !== 'submitting') {
+        return reply.status(409).send({ error: 'This extension submission is no longer active' });
+      }
+      const now = new Date().toISOString();
+      const next = { ...current, ...extensionOutcomePatch(parsed.data.outcome, now, {
+        confirmationText: parsed.data.confirmation_text,
+        finalUrl: parsed.data.final_url,
+      }), updated_at: now };
+      const updated = await db.update(generated_resumes).set({
+        spec: reviewSpec(next),
+        ...(parsed.data.outcome === 'confirmed' ? { pipeline_stage: 'applied', pipeline_stage_at: new Date(now) } : {}),
+      }).where(and(
+        eq(generated_resumes.id, row.id),
+        eq(generated_resumes.user_id, request.jwtPayload!.userId),
+        sql`${generated_resumes.spec}->'_review'->>'submission_claim_id' = ${parsed.data.claim_id}`,
+        sql`${generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
+      )).returning({ id: generated_resumes.id });
+      if (!updated.length) return reply.status(409).send({ error: 'The application state changed before the outcome was recorded' });
+      return reply.send({ application_id: row.id, review: next });
+    },
+  );
+
   fastify.patch(
     '/applications/:id/resume',
     { preHandler: requireAuth },

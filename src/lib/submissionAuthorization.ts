@@ -1,4 +1,4 @@
-export type SubmissionAuthorizationSource = 'standing_consent' | 'per_application_approval';
+export type SubmissionAuthorizationSource = 'standing_consent' | 'per_application_approval' | 'user_initiated_extension';
 
 export function preparedSubmissionStatus(options: {
   safe: boolean;
