@@ -497,7 +497,8 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
   const portal = detectPortal(current.portal_url);
   const runId = current.submission_run_id ?? randomUUID();
   const authorization = await standingAuthorization(row.user_id);
-  if (portal === 'controlled_test') {
+  assertControlledPortalEnabled(portal);
+  if (shouldUseLocalControlledBrowser(portal)) {
     await prepareControlled(row, current, runId, authorization, fastify);
     return;
   }
@@ -625,6 +626,16 @@ function controlledChromeExecutable(): string {
     ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 }
 
+export function shouldUseLocalControlledBrowser(portal: SupportedPortal): boolean {
+  return portal === 'controlled_test' && !isManagedStratusProvider();
+}
+
+function assertControlledPortalEnabled(portal: SupportedPortal): void {
+  if (portal === 'controlled_test' && process.env.LITOS_ENABLE_TEST_PORTAL !== 'true') {
+    throw new Error('Controlled portal is disabled');
+  }
+}
+
 async function prepareControlled(
   row: ResumeRow,
   current: ApplicationReviewState,
@@ -711,7 +722,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
   row = claimedRow;
   const claimedReview = readApplicationReview(row.spec);
   if (!claimedReview) return;
-  if (detectPortal(claimedReview.portal_url!) === 'controlled_test') {
+  const claimedPortal = detectPortal(claimedReview.portal_url!);
+  assertControlledPortalEnabled(claimedPortal);
+  if (shouldUseLocalControlledBrowser(claimedPortal)) {
     await submitControlled(row, claimedReview, fastify);
     return;
   }
@@ -727,7 +740,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
   //
   // Gating at the call site is the only place that covers both providers and the status write.
   {
-    const portal = detectPortal(claimedReview.portal_url!);
+    const portal = claimedPortal;
     if (!portalCanAutoSubmit(portal)) {
       await writeReview(row, nextReview(claimedReview, {
         status: 'needs_attention',
@@ -737,7 +750,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
     }
   }
   if (isManagedStratusProvider()) {
-    const portal = detectPortal(claimedReview.portal_url!);
+    const portal = claimedPortal;
     if (!await authorizationValidAtClick(row, claimedReview)) {
       await holdRevokedSubmission(row, claimedReview);
       return;
