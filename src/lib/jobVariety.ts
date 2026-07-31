@@ -32,6 +32,12 @@ export const EMPLOYER_INDUSTRIES = [
 
 export type EmployerIndustry = typeof EMPLOYER_INDUSTRIES[number];
 
+/** Coverage warnings are operational signals, not inventory floors. */
+export const MINIMUM_JOB_FAMILY_CLASSIFICATION_COVERAGE = 0.8;
+export const MINIMUM_INDUSTRY_CLASSIFICATION_COVERAGE = 0.7;
+export const MINIMUM_ACTIVE_JOB_FAMILIES = 10;
+export const MINIMUM_ACTIVE_EMPLOYER_INDUSTRIES = 6;
+
 type VarietyRow = {
   company_name: string;
   title: string;
@@ -76,12 +82,29 @@ const MEDIA_GAMING = new Set([
 const EDUCATION = new Set(['elicit', 'khan academy']);
 
 const TECHNOLOGY = new Set([
-  'abnormal security', 'airtable', 'amplitude', 'anthropic', 'asana', 'ashby', 'baseten',
+  'abnormal ai', 'airtable', 'amplitude', 'anthropic', 'asana', 'ashby', 'baseten',
   'braze', 'checkr', 'clickhouse', 'cloudflare', 'cursor', 'databricks', 'datadog',
   'dataiku', 'dropbox', 'elastic', 'elevenlabs', 'figma', 'fivetran', 'gitlab', 'gusto',
   'harvey', 'klaviyo', 'linear', 'mongodb', 'netlify', 'notion', 'openai', 'pagerduty',
   'perplexity', 'postman', 'replit', 'render', 'scale ai', 'supabase', 'twilio', 'vanta',
   'vercel', 'webflow', 'zoominfo',
+  // Phase 2 technology employers. Keeping this reviewed list explicit prevents an unknown company
+  // from being labelled technology merely because it happens to publish software roles.
+  'palantir', 'pure storage', 'sophos', 'verkada', 'cerebras', 'justworks', 'cresta',
+  'sigma', 'fastly', 'singlestore', 'jfrog', 'cockroachlabs', 'launchdarkly', 'salesloft',
+  'cultureamp', 'nanonets', 'yugabyte', 'veracode', 'starburst', 'buildkite', 'anydesk',
+  'bishopfox', 'instabase', 'circleci', 'dremio', 'imply', 'aptoslabs', 'lattice',
+  'workboard', 'safebreach', 'openzeppelin', 'consensys', 'blueconic', 'figment', 'decagon',
+  'langchain', 'deepgram', 'reflection ai', 'fireworks', 'mixpanel', 'attio', 'modal', 'gamma',
+  'astronomer', 'sanity', 'physical intelligence', 'workos', 'crisp', 'braintrust', 'socket',
+  'assembled', 'anyscale', 'incident', 'merge', 'semgrep', 'gorgias', 'poolside', 'doppel',
+  'blacksmith', 'opal', 'signoz', 'coder', 'llamaindex', 'validio', 'helpscout', 'resend',
+  'namespace', 'planetscale', 'railway', 'infisical', 'unit', 'skyflow', 'pinecone', 'stytch',
+  'prefect', 'atlan', 'sifflet', 'unstructured', 'kustomer', 'weaviate', 'knock', 'doppler',
+  'datafold', 'checkly', 'inkeep', 'zed', 'depot', 'evervault', 'binalyze', 'inngest',
+  'hightouch', 'opslevel', 'anomalo', 'orca', 'rutter', 'fullstory', 'graphcore',
+  'chainguard', 'sierra', 'crusoe', 'okta', 'box', 'rubrik', 'grafana labs', 'hubspot',
+  'mozilla', 'recorded future', 'gong', 'wiz', 'opengov', 'code for america',
 ]);
 
 export function classifyEmployerIndustry(company: string): EmployerIndustry {
@@ -143,10 +166,13 @@ export function summarizeJobVariety(rows: readonly VarietyRow[]) {
   const ats: Record<string, number> = {};
   const employers = new Map<string, number>();
   let remote = 0;
+  let classifiedJobFamilyPostings = 0;
   let classifiedIndustryPostings = 0;
 
   for (const row of rows) {
-    jobFamilies[classifyJobFamily(row.title, row.department)] += 1;
+    const family = classifyJobFamily(row.title, row.department);
+    jobFamilies[family] += 1;
+    if (family !== 'other') classifiedJobFamilyPostings += 1;
     const industry = classifyEmployerIndustry(row.company_name);
     industries[industry] += 1;
     if (industry !== 'unclassified') classifiedIndustryPostings += 1;
@@ -175,6 +201,9 @@ export function summarizeJobVariety(rows: readonly VarietyRow[]) {
     distinct_employers: employers.size,
     job_families: jobFamilies,
     employer_industries: industries,
+    job_family_classification_coverage: total === 0
+      ? 0
+      : Number((classifiedJobFamilyPostings / total).toFixed(3)),
     industry_classification_coverage: total === 0 ? 0 : Number((classifiedIndustryPostings / total).toFixed(3)),
     employment_types: employmentTypes,
     geographies,
@@ -187,5 +216,36 @@ export function summarizeJobVariety(rows: readonly VarietyRow[]) {
       top_employer_share: total === 0 ? 0 : Number((top[1] / total).toFixed(3)),
       employers_for_half_of_inventory: employersForHalf,
     },
+  };
+}
+
+export type JobVarietySummary = ReturnType<typeof summarizeJobVariety>;
+
+export function classificationCoverage(summary: JobVarietySummary) {
+  const jobFamilyMet = summary.job_family_classification_coverage
+    >= MINIMUM_JOB_FAMILY_CLASSIFICATION_COVERAGE;
+  const industryMet = summary.industry_classification_coverage
+    >= MINIMUM_INDUSTRY_CLASSIFICATION_COVERAGE;
+  const activeJobFamilies = JOB_FAMILIES
+    .filter((family) => family !== 'other' && summary.job_families[family] > 0).length;
+  const activeEmployerIndustries = EMPLOYER_INDUSTRIES
+    .filter((industry) => industry !== 'unclassified' && summary.employer_industries[industry] > 0).length;
+  const jobFamilyBreadthMet = activeJobFamilies >= MINIMUM_ACTIVE_JOB_FAMILIES;
+  const industryBreadthMet = activeEmployerIndustries >= MINIMUM_ACTIVE_EMPLOYER_INDUSTRIES;
+  return {
+    minimum_job_family_classification_coverage: MINIMUM_JOB_FAMILY_CLASSIFICATION_COVERAGE,
+    minimum_industry_classification_coverage: MINIMUM_INDUSTRY_CLASSIFICATION_COVERAGE,
+    minimum_active_job_families: MINIMUM_ACTIVE_JOB_FAMILIES,
+    minimum_active_employer_industries: MINIMUM_ACTIVE_EMPLOYER_INDUSTRIES,
+    active_job_families: activeJobFamilies,
+    active_employer_industries: activeEmployerIndustries,
+    job_family_coverage_met: jobFamilyMet,
+    industry_coverage_met: industryMet,
+    job_family_breadth_met: jobFamilyBreadthMet,
+    industry_breadth_met: industryBreadthMet,
+    all_coverage_thresholds_met: jobFamilyMet
+      && industryMet
+      && jobFamilyBreadthMet
+      && industryBreadthMet,
   };
 }

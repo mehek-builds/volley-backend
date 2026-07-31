@@ -9,6 +9,7 @@ import {
   MONITOR_METRICS_STATEMENT_TIMEOUT_MS,
   MINIMUM_SURFACED_GROUPED_ROLES,
   MINIMUM_SURFACED_JOBS,
+  GROUPED_ROLE_ALERT_THRESHOLD,
   REQUIRED_HEADROOM_MULTIPLE,
   REQUIRED_SURFACED_GROUPED_ROLES,
   REQUIRED_SURFACED_JOBS,
@@ -16,6 +17,7 @@ import {
   TARGET_SURFACED_POSTINGS,
   boardHealth,
   boardIsBelowFloor,
+  groupedRoleAlertTriggered,
   inventoryTargetMet,
   mergeJobSources,
   shouldKeepPostingsOnEmptyFetch,
@@ -44,6 +46,10 @@ test('the scheduled cron summary always reports postings and grouped roles', () 
   assert.match(workflow, /target_surfaced_postings/);
   assert.match(workflow, /target_surfaced_grouped_roles/);
   assert.match(workflow, /inventory_target_met/);
+  assert.match(workflow, /grouped_role_alert_triggered/);
+  assert.match(workflow, /classification_coverage/);
+  assert.match(workflow, /target_role_coverage/);
+  assert.match(workflow, /poll_segment_size/);
   assert.match(workflow, /structured_monitor_response=false/);
   assert.match(workflow, /\(\.polling_complete \| type\) == "boolean"/);
 });
@@ -101,6 +107,10 @@ test('posting and grouped-role warnings are evaluated together', () => {
   assert.equal(REQUIRED_HEADROOM_MULTIPLE, 1.2);
   assert.equal(REQUIRED_SURFACED_JOBS, 12_000);
   assert.equal(REQUIRED_SURFACED_GROUPED_ROLES, 11_000);
+  assert.equal(GROUPED_ROLE_ALERT_THRESHOLD, 11_000);
+  assert.equal(groupedRoleAlertTriggered(11_000), false, 'the threshold itself is healthy');
+  assert.equal(groupedRoleAlertTriggered(10_999), true, 'the alert fires before the hard floor');
+  assert.equal(groupedRoleAlertTriggered(10_000), true, 'the hard-floor boundary remains alerted');
   assert.equal(boardHealth(12_001, 11_001), 'ok');
   assert.equal(boardHealth(12_000, 11_000), 'ok', 'exactly at both warning lines is healthy');
   assert.equal(boardHealth(11_999, 11_000), 'low', 'posting headroom warns');

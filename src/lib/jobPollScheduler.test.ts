@@ -1,6 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { pollSourcesWithinBudget, retryTransient, WORKABLE_START_INTERVAL_MS } from './jobPollScheduler';
+import {
+  POLL_SEGMENT_SIZE,
+  POLL_SOURCE_LIMIT,
+  pollSourcesWithinBudget,
+  retryTransient,
+  WORKABLE_START_INTERVAL_MS,
+} from './jobPollScheduler';
+
+test('polling is segmented at 400 sources before the catalog exceeds that boundary', () => {
+  assert.equal(POLL_SEGMENT_SIZE, 400);
+  assert.equal(POLL_SOURCE_LIMIT, POLL_SEGMENT_SIZE);
+});
 
 test('polls ordinary sources up to the configured concurrency', async () => {
   const sources = Array.from({ length: 10 }, (_, index) => ({ ats_name: 'greenhouse', index }));
@@ -53,7 +64,7 @@ test('leaves unattempted sources for the next run at the time budget', async () 
   assert.equal(outcome.stopped_for_time_budget, true);
 });
 
-test('five bounded passes can drain the full 800-source Workable ceiling safely', async () => {
+test('five time-bounded passes can drain 800 Workable sources safely', async () => {
   let remaining = Array.from({ length: 800 }, (_, index) => ({ ats_name: 'workable', index }));
   let passes = 0;
   while (remaining.length > 0 && passes < 5) {

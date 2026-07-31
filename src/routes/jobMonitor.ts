@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, desc, eq, ilike, inArray, isNotNull, ne, notInArray, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/index';
-import { career_page_sources, monitored_jobs, profiles, sponsor_employers, users } from '../db/schema';
+import { career_page_sources, monitored_jobs, profiles, sponsor_employers, targeting, users } from '../db/schema';
 import { normalizeEmployerName, readPostingSponsorship, sponsorOnlyBoardRequired, sponsorshipVerdict, type PostingSponsorship } from '../lib/sponsorship';
 import { resolveJobCountry } from '../lib/jobLocation';
 import { portalNameAgrees } from '../lib/sponsorIdentity';
@@ -18,9 +18,11 @@ import { resumeSpecText } from '../engine/resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { rankingCacheKey, readRanking, writeRanking } from '../lib/rankingCache';
 import { companyDomainFor } from '../lib/companyDomains';
-import { summarizeJobVariety } from '../lib/jobVariety';
+import { classificationCoverage, summarizeJobVariety } from '../lib/jobVariety';
+import { summarizeTargetRoleCoverage } from '../lib/targetRoleCoverage';
 import {
   POLL_CONCURRENCY,
+  POLL_SEGMENT_SIZE,
   POLL_SOURCE_LIMIT,
   POLL_START_RESERVE_MS,
   POLL_TIME_BUDGET_MS,
@@ -102,6 +104,12 @@ export const MINIMUM_SPONSOR_SURFACED_JOBS = 5_000;
 export const REQUIRED_HEADROOM_MULTIPLE = 1.2;
 export const REQUIRED_SURFACED_JOBS = MINIMUM_SURFACED_JOBS * REQUIRED_HEADROOM_MULTIPLE;
 export const REQUIRED_SURFACED_GROUPED_ROLES = 11_000;
+/** Early alert boundary, named separately so monitoring consumers do not infer it from health. */
+export const GROUPED_ROLE_ALERT_THRESHOLD = REQUIRED_SURFACED_GROUPED_ROLES;
+
+export function groupedRoleAlertTriggered(surfacedGroupedRoles: number): boolean {
+  return surfacedGroupedRoles < GROUPED_ROLE_ALERT_THRESHOLD;
+}
 
 /** Supply goals measured separately from the hard floor and early warning line. */
 export const TARGET_SURFACED_POSTINGS = 15_000;
@@ -315,8 +323,8 @@ export async function boardInventoryMetrics(executor: JobMonitorQueryExecutor = 
 }
 
 /** The mix behind the headline count, computed under the exact public-board predicates. */
-export async function boardVarietyMetrics(executor: JobMonitorQueryExecutor = db) {
-  const rows = await executor
+async function boardVarietyRows(executor: JobMonitorQueryExecutor = db) {
+  return executor
     .select({
       company_name: monitored_jobs.company_name,
       title: monitored_jobs.title,
@@ -329,7 +337,34 @@ export async function boardVarietyMetrics(executor: JobMonitorQueryExecutor = db
     .from(monitored_jobs)
     .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
     .where(and(...boardConditions({ sponsorOnly: false })));
-  return summarizeJobVariety(rows);
+}
+
+export async function boardVarietyMetrics(executor: JobMonitorQueryExecutor = db) {
+  return summarizeJobVariety(await boardVarietyRows(executor));
+}
+
+function targetTitlesFrom(rows: readonly { titles: unknown }[]): string[] {
+  return rows.flatMap(({ titles }) => (
+    Array.isArray(titles) ? titles.filter((title): title is string => typeof title === 'string') : []
+  ));
+}
+
+/** Zero-result monitoring for the literal target roles users entered during onboarding. */
+export async function targetRoleCoverageMetrics(
+  executor: JobMonitorQueryExecutor = db,
+  currentBoardTitles?: readonly string[],
+) {
+  const targetRows = await executor.select({ titles: targeting.titles }).from(targeting);
+  const boardTitles = currentBoardTitles ?? (await executor
+      .select({ title: monitored_jobs.title })
+      .from(monitored_jobs)
+      .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+      .where(and(...boardConditions({ sponsorOnly: false }))))
+    .map((row) => row.title);
+  return summarizeTargetRoleCoverage(
+    targetTitlesFrom(targetRows),
+    boardTitles,
+  );
 }
 
 /** A connection-bound, time-limited snapshot for every post-poll metric in the cron response. */
@@ -339,8 +374,13 @@ export async function boardMonitoringSnapshot() {
       `set local statement_timeout = '${MONITOR_METRICS_STATEMENT_TIMEOUT_MS}ms'`,
     ));
     const inventory = await boardInventoryMetrics(tx);
-    const variety = await boardVarietyMetrics(tx);
-    return { inventory, variety };
+    const varietyRows = await boardVarietyRows(tx);
+    const variety = summarizeJobVariety(varietyRows);
+    const targetRoleCoverage = await targetRoleCoverageMetrics(
+      tx,
+      varietyRows.map((row) => row.title),
+    );
+    return { inventory, variety, targetRoleCoverage };
   }, { isolationLevel: 'repeatable read' });
 }
 
@@ -1656,7 +1696,8 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
      * refusal sentence. Measuring only the full board would let that view fall to zero while this
      * cron reported a healthy total. The snapshot uses one serverless connection and bounds each
      * statement so a slow database still returns an error and releases the advisory lock. */
-    const { inventory, variety } = await boardMonitoringSnapshot();
+    const { inventory, variety, targetRoleCoverage } = await boardMonitoringSnapshot();
+    const coverage = classificationCoverage(variety);
     const {
       surfacedPostings: surfaced,
       surfacedGroupedRoles,
@@ -1673,6 +1714,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       polling_elapsed_ms: pollRun.elapsed_ms,
       polling_time_budget_ms: POLL_TIME_BUDGET_MS,
       polling_start_reserve_ms: POLL_START_RESERVE_MS,
+      poll_segment_size: POLL_SEGMENT_SIZE,
       poll_source_limit: POLL_SOURCE_LIMIT,
       poll_concurrency: POLL_CONCURRENCY,
       workable_start_interval_ms: WORKABLE_START_INTERVAL_MS,
@@ -1684,6 +1726,8 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       surfaced_jobs: surfaced,
       surfaced_sponsor_only_jobs: surfacedSponsorOnly,
       variety,
+      classification_coverage: coverage,
+      target_role_coverage: targetRoleCoverage,
       minimum_surfaced_jobs: MINIMUM_SURFACED_JOBS,
       minimum_surfaced_grouped_roles: MINIMUM_SURFACED_GROUPED_ROLES,
       minimum_sponsor_surfaced_jobs: MINIMUM_SPONSOR_SURFACED_JOBS,
@@ -1703,6 +1747,8 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       closed_posting_retention_days: CLOSED_POSTING_RETENTION_DAYS,
       required_surfaced_jobs: REQUIRED_SURFACED_JOBS,
       required_surfaced_grouped_roles: REQUIRED_SURFACED_GROUPED_ROLES,
+      grouped_role_alert_threshold: GROUPED_ROLE_ALERT_THRESHOLD,
+      grouped_role_alert_triggered: groupedRoleAlertTriggered(surfacedGroupedRoles),
       target_surfaced_postings: TARGET_SURFACED_POSTINGS,
       target_surfaced_grouped_roles: TARGET_SURFACED_GROUPED_ROLES,
       inventory_target_met: inventoryTargetMet(surfaced, surfacedGroupedRoles),
@@ -1722,6 +1768,16 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     const postingsBelow = boardIsBelowFloor(surfaced);
     const groupedRolesBelow = surfacedGroupedRoles < MINIMUM_SURFACED_GROUPED_ROLES;
     const sponsorBelow = surfacedSponsorOnly < MINIMUM_SPONSOR_SURFACED_JOBS;
+    if (!coverage.all_coverage_thresholds_met || !targetRoleCoverage.coverage_threshold_met) {
+      request.log.warn(
+        {
+          classificationCoverage: coverage,
+          zeroResultTargetRoles: targetRoleCoverage.zero_result_target_roles,
+          zeroResultRoleSamples: targetRoleCoverage.zero_result_role_samples,
+        },
+        'Job board coverage thresholds need attention',
+      );
+    }
     /* Short of the 1.2x headroom but not yet under the floor: logged as a warning and reported in the
      * payload, NOT a 5xx. The distinction is deliberate. A 5xx here means "the board is broken now";
      * if the merely-thin case also failed the run, the alarm would stop meaning that, and the first

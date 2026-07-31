@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { classifyEmployerIndustry, classifyJobFamily, summarizeJobVariety } from './jobVariety';
+import {
+  MINIMUM_INDUSTRY_CLASSIFICATION_COVERAGE,
+  MINIMUM_JOB_FAMILY_CLASSIFICATION_COVERAGE,
+  MINIMUM_ACTIVE_EMPLOYER_INDUSTRIES,
+  MINIMUM_ACTIVE_JOB_FAMILIES,
+  classificationCoverage,
+  classifyEmployerIndustry,
+  classifyJobFamily,
+  summarizeJobVariety,
+} from './jobVariety';
 
 test('classifies job families using title and department language', () => {
   assert.equal(classifyJobFamily('Account Executive'), 'sales_business_development');
@@ -35,6 +44,7 @@ test('summarizes employer, family, geography, type, ATS and concentration variet
   assert.equal(summary.employer_industries.financial_services, 2);
   assert.equal(summary.employer_industries.technology, 1);
   assert.equal(summary.employer_industries.unclassified, 1);
+  assert.equal(summary.job_family_classification_coverage, 1);
   assert.equal(summary.industry_classification_coverage, 0.75);
   assert.deepEqual(summary.employment_types, { full_time: 1, part_time: 1, contract: 1, internship: 0, unstated: 1 });
   assert.deepEqual(summary.geographies, { us: 1, non_us: 1, unknown: 2 });
@@ -48,8 +58,47 @@ test('summarizes employer, family, geography, type, ATS and concentration variet
 test('reports zero-safe ratios for an empty inventory', () => {
   const summary = summarizeJobVariety([]);
   assert.equal(summary.total_postings, 0);
+  assert.equal(summary.job_family_classification_coverage, 0);
   assert.equal(summary.industry_classification_coverage, 0);
   assert.equal(summary.remote_share, 0);
   assert.equal(summary.concentration.top_employer, null);
   assert.equal(summary.concentration.top_employer_share, 0);
+});
+
+test('classification coverage has explicit independently evaluated thresholds', () => {
+  assert.equal(MINIMUM_JOB_FAMILY_CLASSIFICATION_COVERAGE, 0.8);
+  assert.equal(MINIMUM_INDUSTRY_CLASSIFICATION_COVERAGE, 0.7);
+  assert.equal(MINIMUM_ACTIVE_JOB_FAMILIES, 10);
+  assert.equal(MINIMUM_ACTIVE_EMPLOYER_INDUSTRIES, 6);
+  const rows = [
+    ['Stripe', 'Account Executive'],
+    ['OpenAI', 'Software Engineer'],
+    ['OneMedical', 'Registered Nurse'],
+    ['Waymo', 'Hardware Engineer'],
+    ['Reddit', 'Product Manager'],
+    ['Spotify', 'Product Designer'],
+    ['Khan Academy', 'Teacher'],
+    ['Stripe', 'Financial Analyst'],
+    ['OpenAI', 'Research Scientist'],
+    ['OpenAI', 'People Operations Manager'],
+  ].map(([company_name, title]) => ({
+    company_name,
+    title,
+    remote: false,
+    job_country: 'us',
+    ats_name: 'greenhouse',
+  }));
+  const healthy = classificationCoverage(summarizeJobVariety(rows));
+  assert.equal(healthy.job_family_coverage_met, true);
+  assert.equal(healthy.industry_coverage_met, true);
+  assert.equal(healthy.job_family_breadth_met, true);
+  assert.equal(healthy.industry_breadth_met, true);
+  assert.equal(healthy.all_coverage_thresholds_met, true);
+
+  const uncovered = classificationCoverage(summarizeJobVariety([
+    { company_name: 'Unknown Co', title: 'Wizard', remote: false, job_country: 'unknown', ats_name: 'workable' },
+  ]));
+  assert.equal(uncovered.job_family_coverage_met, false);
+  assert.equal(uncovered.industry_coverage_met, false);
+  assert.equal(uncovered.all_coverage_thresholds_met, false);
 });

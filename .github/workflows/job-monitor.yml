@@ -86,9 +86,22 @@ jobs:
               echo "### Job monitor pass ${pass}"
               echo ""
               echo '```json'
-              jq '{sources, enabled_sources, deferred_sources, polling_complete, polling_elapsed_ms, failed, failed_sources: [.results[] | select(.ok == false) | {company, error}], surfaced_postings, surfaced_grouped_roles, surfaced_sponsor_only_jobs, target_surfaced_postings, target_surfaced_grouped_roles, inventory_target_met, board_health, variety}' "${response_file}"
+              jq '{sources, enabled_sources, selected_sources, deferred_sources, polling_complete, poll_segment_size, polling_elapsed_ms, failed, failed_sources: [.results[] | select(.ok == false) | {company, error}], surfaced_postings, surfaced_grouped_roles, surfaced_sponsor_only_jobs, grouped_role_alert_threshold, grouped_role_alert_triggered, target_surfaced_postings, target_surfaced_grouped_roles, inventory_target_met, board_health, variety, classification_coverage, target_role_coverage}' "${response_file}"
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
+
+            if jq -e '.grouped_role_alert_triggered == true' "${response_file}" > /dev/null; then
+              grouped_roles=$(jq -r '.surfaced_grouped_roles' "${response_file}")
+              threshold=$(jq -r '.grouped_role_alert_threshold' "${response_file}")
+              echo "::warning::Grouped roles are ${grouped_roles}, below the ${threshold} early-alert threshold."
+            fi
+            if jq -e '.classification_coverage.all_coverage_thresholds_met == false' "${response_file}" > /dev/null; then
+              echo "::warning::Job-family or industry coverage is below its Phase 3 threshold."
+            fi
+            if jq -e '.target_role_coverage.coverage_threshold_met == false' "${response_file}" > /dev/null; then
+              zero_roles=$(jq -r '.target_role_coverage.zero_result_target_roles' "${response_file}")
+              echo "::warning::${zero_roles} distinct user-entered target roles currently return zero jobs."
+            fi
 
             if jq -e '.polling_complete == true' "${response_file}" > /dev/null; then
               completed=true

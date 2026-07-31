@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { portalNameAgrees } from './sponsorIdentity';
 import { JOB_SOURCES } from './jobSources';
+import { POLL_SEGMENT_SIZE } from './jobPollScheduler';
 
 /**
  * THE GATE THAT SHOULD HAVE EXISTED FROM THE START.
@@ -71,7 +72,8 @@ test('Phase 2 adds 50 diverse employers across Greenhouse, Lever, and Ashby', ()
   assert.equal(JOB_SOURCES.length, 355, 'the reviewed Phase 2 catalog must not silently shrink');
   const families = new Set(JOB_SOURCES.map((source) => source.ats_name));
   assert.deepEqual([...families].sort(), ['ashby', 'greenhouse', 'lever', 'workable']);
-  assert.ok(JOB_SOURCES.length < 400, 'Phase 3 segmentation gate must not be crossed early');
+  assert.ok(JOB_SOURCES.length <= POLL_SEGMENT_SIZE, 'today\'s catalog fits one bounded segment');
+  assert.equal(POLL_SEGMENT_SIZE, 400, 'source 401 must begin a follow-up segment');
 });
 
 test('no two sources claim the same board, and none is blank', () => {
