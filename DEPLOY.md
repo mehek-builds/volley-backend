@@ -79,8 +79,10 @@ variable when the API is not hosted at `https://student-outreach-backend.vercel.
 
 Vercel starts the monitor daily at 06:00 UTC. The GitHub Actions workflow starts ten minutes later
 and makes up to five bounded follow-up passes to drain a large source queue. It fails visibly when
-sources fail, polling remains incomplete, or the surfaced board drops below either inventory floor.
-Each pass writes inventory and variety metrics to the workflow summary.
+sources fail, polling remains incomplete, or the 14-day surfaced board drops below an inventory
+floor. Each pass writes raw postings, distinct grouped roles, sponsor-only postings, and variety
+metrics to the workflow summary. The hard full-board floors are 10,000 postings and 10,000 grouped
+roles. Posting headroom warns below 12,000, while grouped-role headroom warns below 11,000.
 
 Before enabling Google sign-in, add the identity column without touching existing users:
 

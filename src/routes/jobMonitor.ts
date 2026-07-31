@@ -86,6 +86,9 @@ const jobParamsSchema = z.object({ id: z.string().uuid() });
  */
 export const MINIMUM_SURFACED_JOBS = 10_000;
 
+/** Distinct roles use the public board's exact grouping key: company, title, and ATS family. */
+export const MINIMUM_SURFACED_GROUPED_ROLES = 10_000;
+
 /** The sponsor-only view has a separate floor because it is a strict subset of the full board. */
 export const MINIMUM_SPONSOR_SURFACED_JOBS = 5_000;
 
@@ -97,37 +100,35 @@ export const MINIMUM_SPONSOR_SURFACED_JOBS = 5_000;
  */
 export const REQUIRED_HEADROOM_MULTIPLE = 1.2;
 export const REQUIRED_SURFACED_JOBS = MINIMUM_SURFACED_JOBS * REQUIRED_HEADROOM_MULTIPLE;
+export const REQUIRED_SURFACED_GROUPED_ROLES = 11_000;
 
 /**
- * ONLY POSTINGS FROM THE LAST SEVEN DAYS ARE SHOWN.
+ * ONLY POSTINGS FROM THE LAST FOURTEEN DAYS ARE SHOWN.
  *
- * SEVEN IS STRUCTURAL, NOT A ROUND NUMBER. Hiring is weekday work: measured on this board on
+ * FOURTEEN IS STRUCTURAL, NOT A ROUND NUMBER. Hiring is weekday work: measured on this board on
  * 2026-07-28, weekdays carry 700-3,500 postings a day while **Saturday carries 143 and Sunday 22**.
  * A window shorter than a week therefore changes size depending on which days it happens to cover -
  * a rolling 3-day window measured 3,917 on a Tuesday and would hold roughly 2,000 on a Monday, when
- * it spans Sat+Sun+Mon. Any 7-day window contains exactly one Saturday and one Sunday, so the
- * weekend dip is fully absorbed and the count stops swinging with the day of the week.
+ * it spans Sat+Sun+Mon. A 14-day window contains exactly two Saturdays and two Sundays, so the
+ * weekend dip is fully absorbed while roles remain discoverable long enough to meet the grouped
+ * inventory floor.
  *
  * Measured windows before the 10,000-job commitment: 3d = 3,917, 4d = 6,927, 5d = 7,815,
- * and 7d = 9,664. The seven-day window is stable against weekday mix, but the measurement also
- * proves the existing source set alone does not satisfy the new floor. Workable and additional
- * reviewed sources must close the gap.
+ * 7d = 9,664, and 14d = 12,516. The longer window is the immediate supply stabilizer while
+ * Workable and additional reviewed sources build durable headroom.
  *
  * WHAT WOULD MAKE THIS UNSUSTAINABLE, and what the cron watches for: weekly posting volume falling
  * (a hiring slowdown, or the December lull), or sources decaying as board tokens rotate. Either
- * shows up as `surfaced_jobs` trending toward REQUIRED_SURFACED_JOBS in the daily cron response,
- * which is why that number is reported on every run and not only when it breaks.
- *
- * If it does trend down, WIDEN THIS BEFORE LOWERING THE FLOOR. A 14-day window measured 12,516, so
- * there is a lot of room in the window itself before the floor is the thing that has to give.
+ * shows up as surfaced postings and grouped roles trending toward their warning thresholds in the
+ * daily cron response, which is why both numbers are reported on every run.
  *
  * Greenhouse note: `posted_at` is Greenhouse's `updated_at` (it publishes no create date), so for
- * 77% of the board this is "changed in the last 7 days" rather than "posted". That is a deliberate
+ * 77% of the board this is "changed in the last 14 days" rather than "posted". That is a deliberate
  * call, and it is why the board card says UPDATED for Greenhouse rows and POSTED for Lever/Ashby.
  * Do not collapse those two words - claiming a publish date we do not have is the one thing the
  * board's copy tests exist to prevent.
  */
-export const JOB_FRESHNESS_DAYS = 7;
+export const JOB_FRESHNESS_DAYS = 14;
 
 function freshnessPredicate() {
   return sql`${monitored_jobs.posted_at} >= now() - (${JOB_FRESHNESS_DAYS} || ' days')::interval`;
@@ -249,6 +250,26 @@ export async function surfacedJobCount(sponsorOnly = false): Promise<number> {
   return row?.total ?? 0;
 }
 
+/**
+ * How many distinct roles the public board would show under its exact grouping definition.
+ *
+ * A role is one case-sensitive employer title on one ATS family. This matches GET /jobs/grouped,
+ * including the ATS field in the key, so the cron, pagination total, and website headline cannot
+ * silently count different things.
+ */
+export async function surfacedGroupedRoleCount(sponsorOnly = false): Promise<number> {
+  const result = await db.execute<{ total: number }>(sql`
+    select count(*)::int as total from (
+      select 1 from ${monitored_jobs}
+      inner join ${career_page_sources}
+        on ${monitored_jobs.source_id} = ${career_page_sources.id}
+      where ${and(...boardConditions({ sponsorOnly }))}
+      group by ${monitored_jobs.company_name}, ${monitored_jobs.title}, ${career_page_sources.ats_name}
+    ) grouped_roles
+  `);
+  return Number(result.rows[0]?.total ?? 0);
+}
+
 /** The mix behind the headline count, computed under the exact public-board predicates. */
 export async function boardVarietyMetrics() {
   const rows = await db
@@ -274,9 +295,18 @@ export async function boardVarietyMetrics() {
  * the sources this week"; 'breached' is "the board is not a browsable product right now". Alarming
  * only at the floor would mean the first warning arrives when it is already unusable.
  */
-export function boardHealth(surfacedJobs: number): 'ok' | 'low' | 'breached' {
-  if (boardIsBelowFloor(surfacedJobs)) return 'breached';
-  if (surfacedJobs < REQUIRED_SURFACED_JOBS) return 'low';
+export function boardHealth(
+  surfacedPostings: number,
+  surfacedGroupedRoles: number,
+): 'ok' | 'low' | 'breached' {
+  if (
+    boardIsBelowFloor(surfacedPostings)
+    || surfacedGroupedRoles < MINIMUM_SURFACED_GROUPED_ROLES
+  ) return 'breached';
+  if (
+    surfacedPostings < REQUIRED_SURFACED_JOBS
+    || surfacedGroupedRoles < REQUIRED_SURFACED_GROUPED_ROLES
+  ) return 'low';
   return 'ok';
 }
 
@@ -1305,13 +1335,17 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
 
     /* count of GROUPS, not of postings. Counting rows here would print a number the page cannot
        show, which is the same lie as the competitor's 644,546. */
-    const counted = await db.execute<{ total: number }>(sql`
-      select count(*)::int as total from (
-        select 1 from ${monitored_jobs}
-        inner join ${career_page_sources} on ${monitored_jobs.source_id} = ${career_page_sources.id}
-        where ${where}
-        group by ${monitored_jobs.company_name}, ${monitored_jobs.title}, ${career_page_sources.ats_name}
-      ) groups
+    const counted = await db.execute<{ total: number; postings_total: number }>(sql`
+      select
+        count(*)::int as postings_total,
+        count(distinct (
+          ${monitored_jobs.company_name},
+          ${monitored_jobs.title},
+          ${career_page_sources.ats_name}
+        ))::int as total
+      from ${monitored_jobs}
+      inner join ${career_page_sources} on ${monitored_jobs.source_id} = ${career_page_sources.id}
+      where ${where}
     `);
 
     const countRow = counted.rows[0];
@@ -1327,6 +1361,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
           }),
       })),
       total: Number(countRow?.total ?? 0),
+      postings_total: Number(countRow?.postings_total ?? 0),
       limit,
       offset,
       has_more: rows.length > limit,
@@ -1500,11 +1535,12 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
      * while every check reported success. Failing the run is the only signal that reaches anyone.
      * The poll itself still committed; this reports the state, it does not roll anything back.
      */
-    /* Purge before counting, so surfaced_jobs and purged_postings describe the same moment. Counting
+    /* Purge before counting, so inventory and purged_postings describe the same moment. Counting
        first would report a board that includes rows this run was about to delete. */
     const purged = await purgeExpiredPostings();
 
     const surfaced = await surfacedJobCount();
+    const surfacedGroupedRoles = await surfacedGroupedRoleCount();
     /* THE FLOOR IS CHECKED TWICE, because there are two boards.
      * A count over the whole board says nothing about the sponsor-only one, and the sponsor-only
      * one is the fragile of the two: it drains when employer links go NULL, when a data refresh
@@ -1530,17 +1566,20 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       workable_start_interval_ms: WORKABLE_START_INTERVAL_MS,
       jobs: results.reduce((sum, result) => sum + result.jobs, 0),
       failed: results.filter((result) => !result.ok).length,
+      surfaced_postings: surfaced,
+      surfaced_grouped_roles: surfacedGroupedRoles,
+      /* Backward-compatible alias for existing consumers. */
       surfaced_jobs: surfaced,
       surfaced_sponsor_only_jobs: surfacedSponsorOnly,
       variety,
       minimum_surfaced_jobs: MINIMUM_SURFACED_JOBS,
+      minimum_surfaced_grouped_roles: MINIMUM_SURFACED_GROUPED_ROLES,
       minimum_sponsor_surfaced_jobs: MINIMUM_SPONSOR_SURFACED_JOBS,
       /* THE SUSTAINABILITY CHECK, run every day rather than once.
        *
-       * Whether a 7-day window keeps the board above REQUIRED_SURFACED_JOBS is not a question that
-       * stays answered: it depends on weekly hiring volume and on sources still resolving, and both
-       * drift. Reporting the window, the requirement and the current multiple on every run is what
-       * turns "we checked once in July" into something that keeps checking itself.
+       * Whether the 14-day window keeps both postings and grouped roles above their warning lines
+       * depends on hiring volume and sources still resolving. Reporting both makes the answer
+       * observable instead of relying on a one-time measurement.
        *
        * headroom_multiple is the number to watch. A slide toward 1.0 is the signal to widen
        * JOB_FRESHNESS_DAYS or add sources before anything breaks. */
@@ -1551,8 +1590,12 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       purged_postings: purged,
       closed_posting_retention_days: CLOSED_POSTING_RETENTION_DAYS,
       required_surfaced_jobs: REQUIRED_SURFACED_JOBS,
+      required_surfaced_grouped_roles: REQUIRED_SURFACED_GROUPED_ROLES,
       headroom_multiple: Number((surfaced / MINIMUM_SURFACED_JOBS).toFixed(1)),
-      board_health: boardHealth(surfaced),
+      grouped_role_headroom_multiple: Number(
+        (surfacedGroupedRoles / MINIMUM_SURFACED_GROUPED_ROLES).toFixed(1),
+      ),
+      board_health: boardHealth(surfaced, surfacedGroupedRoles),
       results,
     };
     if (deferredSources > 0) {
@@ -1561,36 +1604,46 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         'Job monitor deferred sources; the external scheduler should invoke another pass.',
       );
     }
-    const below = boardIsBelowFloor(surfaced);
+    const postingsBelow = boardIsBelowFloor(surfaced);
+    const groupedRolesBelow = surfacedGroupedRoles < MINIMUM_SURFACED_GROUPED_ROLES;
     const sponsorBelow = surfacedSponsorOnly < MINIMUM_SPONSOR_SURFACED_JOBS;
     /* Short of the 1.2x headroom but not yet under the floor: logged as a warning and reported in the
      * payload, NOT a 5xx. The distinction is deliberate. A 5xx here means "the board is broken now";
      * if the merely-thin case also failed the run, the alarm would stop meaning that, and the first
      * real breach would arrive in a channel everyone had learned to ignore. This is the early
      * warning, and it is early precisely because it does not page anyone. */
-    if (!below && payload.board_health === 'low') {
+    if (!postingsBelow && !groupedRolesBelow && payload.board_health === 'low') {
       request.log.warn(
-        { surfaced, required: REQUIRED_SURFACED_JOBS, windowDays: JOB_FRESHNESS_DAYS, headroom: payload.headroom_multiple },
-        `Job board has thin headroom: ${surfaced} surfaced against a ${REQUIRED_SURFACED_JOBS} target. `
+        {
+          surfacedPostings: surfaced,
+          surfacedGroupedRoles,
+          requiredPostings: REQUIRED_SURFACED_JOBS,
+          requiredGroupedRoles: REQUIRED_SURFACED_GROUPED_ROLES,
+          windowDays: JOB_FRESHNESS_DAYS,
+        },
+        `Job board has thin headroom: ${surfaced} postings and ${surfacedGroupedRoles} grouped roles. `
         + `Widen JOB_FRESHNESS_DAYS or add sources before it reaches the floor.`,
       );
     }
-    if (below || sponsorBelow) {
+    if (postingsBelow || groupedRolesBelow || sponsorBelow) {
       request.log.error(
         {
           surfaced,
+          surfacedGroupedRoles,
           surfacedSponsorOnly,
           floor: MINIMUM_SURFACED_JOBS,
+          groupedRoleFloor: MINIMUM_SURFACED_GROUPED_ROLES,
           sponsorFloor: MINIMUM_SPONSOR_SURFACED_JOBS,
           failedSources: payload.failed,
         },
-        'Job board is below its minimum surfaced-jobs floor',
+        'Job board is below an inventory floor',
       );
       return reply.status(500).send({
         ...payload,
-        error: `The job board is showing ${surfaced} jobs (${surfacedSponsorOnly} of them at employers `
-          + `confirmed to sponsor). The full-board floor is ${MINIMUM_SURFACED_JOBS} and the `
-          + `sponsor-only floor is ${MINIMUM_SPONSOR_SURFACED_JOBS}. `
+        error: `The job board is showing ${surfacedGroupedRoles} grouped roles across ${surfaced} postings `
+          + `(${surfacedSponsorOnly} postings at employers confirmed to sponsor). The floors are `
+          + `${MINIMUM_SURFACED_GROUPED_ROLES} grouped roles, ${MINIMUM_SURFACED_JOBS} postings, and `
+          + `${MINIMUM_SPONSOR_SURFACED_JOBS} sponsor-only postings. `
           + 'Check career_page_sources.last_error for failing polls, whether a portal left '
           + 'AUTONOMOUS_PORTAL_FAMILIES, and whether career_page_sources.sponsor_employer_id went '
           + 'NULL after a data refresh. Do not lower the floor to clear this.',

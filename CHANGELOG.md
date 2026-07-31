@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.0.6] - 2026-07-31
+
+### Added
+
+- Every monitor result reports both raw job postings and distinct roles grouped by employer,
+  title, and ATS family.
+- The board now enforces independent 10,000-posting and 10,000-grouped-role hard floors.
+
+### Changed
+
+- Eligible postings remain discoverable for 14 days.
+- Grouped-role inventory warns below 11,000, while posting inventory continues to warn below
+  12,000.
+
 ## [1.0.5] - 2026-07-31
 
 ### Added
