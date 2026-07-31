@@ -44,7 +44,7 @@ const only = onlyIndex >= 0 ? new Set(args[onlyIndex + 1].split(',')) : null;
 const { JOB_SOURCES } = await import('../src/lib/jobSources.ts');
 const { fetchSourceJobs } = await import('../src/lib/jobMonitor.ts');
 const { identityCheck, portalNameAgrees } = await import('../src/lib/sponsorIdentity.ts');
-const { pollSourcesWithinBudget } = await import('../src/lib/jobPollScheduler.ts');
+const { pollSourcesWithinBudget, retryTransient } = await import('../src/lib/jobPollScheduler.ts');
 
 /* Boards where no name is published and the postings name a BRAND rather than the company, checked
    by hand. The evidence is here so the judgement can be re-checked or overturned, and so a run that
@@ -64,7 +64,9 @@ const CLEARED_BY_HAND = {
 async function verify(source) {
   let jobs;
   try {
-    jobs = await fetchSourceJobs(source);
+    /* Public ATS endpoints occasionally exceed their single-request timeout in GitHub Actions.
+       Retry the fetch, but keep the final failure fatal so a genuinely dead source cannot pass. */
+    jobs = await retryTransient(() => fetchSourceJobs(source));
   } catch (error) {
     return { verdict: 'dead', detail: error instanceof Error ? error.message : String(error) };
   }
