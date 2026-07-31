@@ -28,6 +28,10 @@ export const POLLABLE_JOB_BOARDS = ['greenhouse', 'lever', 'ashby', 'workable'] 
 
 export type SupportedJobBoard = typeof POLLABLE_JOB_BOARDS[number];
 
+function assertNever(value: never): never {
+  throw new Error(`Unsupported job board: ${String(value)}`);
+}
+
 export type JobSourceInput = {
   company_name: string;
   ats_name: SupportedJobBoard;
@@ -341,8 +345,11 @@ export function normalizeWorkableJobs(payload: unknown): NormalizedJob[] {
     const job = raw as Record<string, unknown>;
     const id = text(job.shortcode);
     const title = text(job.title);
-    const postingUrl = text(job.url) ?? text(job.shortlink);
-    const applyUrl = text(job.application_url) ?? postingUrl;
+    const postingUrl = id ? validatedWorkableUrl(text(job.url) ?? text(job.shortlink), id) : null;
+    const applicationCandidate = text(job.application_url);
+    const applyUrl = id
+      ? (applicationCandidate ? validatedWorkableUrl(applicationCandidate, id, true) : postingUrl)
+      : null;
     if (!id || !title || !postingUrl || !applyUrl) return [];
 
     const locations = Array.isArray(job.locations) ? job.locations : [];
@@ -375,6 +382,25 @@ export function normalizeWorkableJobs(payload: unknown): NormalizedJob[] {
       portal_company_name: portalCompanyName,
     }];
   });
+}
+
+function validatedWorkableUrl(
+  value: string | undefined,
+  shortcode: string,
+  allowApplicationPath = false,
+): string | null {
+  if (!value || !/^[A-Za-z0-9]+$/.test(shortcode)) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || url.hostname !== 'apply.workable.com') return null;
+    if (url.username || url.password || url.port || url.search || url.hash) return null;
+    const basePath = `/j/${shortcode}`;
+    const paths = allowApplicationPath ? [basePath, `${basePath}/apply`] : [basePath];
+    if (!paths.includes(url.pathname.replace(/\/$/, ''))) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
 
 /* A DESCRIPTION THAT DESCRIBES NOTHING IS NOT A POSTING.
@@ -550,16 +576,18 @@ export function isIngestablePosting(job: Pick<NormalizedJob, 'description' | 'ti
  * If pay ever silently disappears from the board again, look here first. */
 export function sourceEndpoint(source: Pick<JobSourceInput, 'ats_name' | 'board_token'>): string {
   const token = encodeURIComponent(source.board_token.trim());
-  if (source.ats_name === 'greenhouse') {
-    return `https://boards-api.greenhouse.io/v1/boards/${token}/jobs?content=true&pay_transparency=true`;
+  switch (source.ats_name) {
+    case 'greenhouse':
+      return `https://boards-api.greenhouse.io/v1/boards/${token}/jobs?content=true&pay_transparency=true`;
+    case 'lever':
+      return `https://api.lever.co/v0/postings/${token}?mode=json`;
+    case 'ashby':
+      return `https://api.ashbyhq.com/posting-api/job-board/${token}?includeCompensation=true`;
+    case 'workable':
+      return `https://www.workable.com/api/accounts/${token}?details=true`;
+    default:
+      return assertNever(source.ats_name);
   }
-  if (source.ats_name === 'lever') {
-    return `https://api.lever.co/v0/postings/${token}?mode=json`;
-  }
-  if (source.ats_name === 'ashby') {
-    return `https://api.ashbyhq.com/posting-api/job-board/${token}?includeCompensation=true`;
-  }
-  return `https://www.workable.com/api/accounts/${token}?details=true`;
 }
 
 export async function fetchSourceJobs(
@@ -572,8 +600,11 @@ export async function fetchSourceJobs(
   });
   if (!response.ok) throw new Error(`${source.ats_name} board returned HTTP ${response.status}`);
   const payload = await response.json();
-  if (source.ats_name === 'greenhouse') return normalizeGreenhouseJobs(payload);
-  if (source.ats_name === 'lever') return normalizeLeverJobs(payload);
-  if (source.ats_name === 'ashby') return normalizeAshbyJobs(payload);
-  return normalizeWorkableJobs(payload);
+  switch (source.ats_name) {
+    case 'greenhouse': return normalizeGreenhouseJobs(payload);
+    case 'lever': return normalizeLeverJobs(payload);
+    case 'ashby': return normalizeAshbyJobs(payload);
+    case 'workable': return normalizeWorkableJobs(payload);
+    default: return assertNever(source.ats_name);
+  }
 }

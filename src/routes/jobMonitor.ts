@@ -21,10 +21,12 @@ import { summarizeJobVariety } from '../lib/jobVariety';
 import {
   POLL_CONCURRENCY,
   POLL_SOURCE_LIMIT,
+  POLL_START_RESERVE_MS,
   POLL_TIME_BUDGET_MS,
   WORKABLE_START_INTERVAL_MS,
   pollSourcesWithinBudget,
 } from '../lib/jobPollScheduler';
+import { tryAcquireJobMonitorLock } from '../lib/jobMonitorLock';
 
 const sourceSchema = z.object({
   company_name: z.string().trim().min(1).max(200),
@@ -1457,6 +1459,14 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
 
   fastify.get('/internal/job-monitor', async (request: FastifyRequest, reply: FastifyReply) => {
     if (!requireOperator(request, reply)) return;
+    const releaseMonitorLock = await tryAcquireJobMonitorLock();
+    if (!releaseMonitorLock) {
+      return reply.status(409).send({
+        error: 'A job-monitor run is already in progress. Retry after it finishes.',
+        polling_complete: false,
+      });
+    }
+    try {
     const envSources = configuredSources();
     if (envSources.length > 0) await upsertSources(envSources);
     /* Every run reconciles the database against the reviewed list, so a company removed in a pull
@@ -1471,9 +1481,10 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       .where(eq(career_page_sources.enabled, true))
       .orderBy(sql`${career_page_sources.last_polled_at} asc nulls first`)
       .limit(POLL_SOURCE_LIMIT);
-    /* Keep 60 seconds between our budget and Vercel's 300-second hard stop. A source that is not
-       attempted keeps its old last_polled_at, so the oldest-first query puts it first next time.
-       Workable starts are separately spaced to stay below its shared 10-per-10-second API limit. */
+    /* Stop starting work at three minutes and cap the scheduler at three and a half, leaving at
+       least 90 seconds before Vercel's 300-second hard stop for the final batch, metrics and reply.
+       A source that is not attempted keeps its old last_polled_at, so the oldest-first query puts
+       it first next time. Workable starts are separately spaced below its shared provider limit. */
     const pollRun = await pollSourcesWithinBudget(sources, pollSource);
     const results = pollRun.results;
     const deferredSources = Math.max(0, enabledSourceCount - results.length);
@@ -1513,6 +1524,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       stopped_for_time_budget: pollRun.stopped_for_time_budget,
       polling_elapsed_ms: pollRun.elapsed_ms,
       polling_time_budget_ms: POLL_TIME_BUDGET_MS,
+      polling_start_reserve_ms: POLL_START_RESERVE_MS,
       poll_source_limit: POLL_SOURCE_LIMIT,
       poll_concurrency: POLL_CONCURRENCY,
       workable_start_interval_ms: WORKABLE_START_INTERVAL_MS,
@@ -1585,5 +1597,8 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       });
     }
     return reply.send(payload);
+    } finally {
+      await releaseMonitorLock();
+    }
   });
 }

@@ -340,10 +340,12 @@ const ENTRIES: Entry[] = [
 ];
 
 function careerUrl(ats: JobSourceInput['ats_name'], token: string): string {
-  if (ats === 'greenhouse') return `https://job-boards.greenhouse.io/${token}`;
-  if (ats === 'lever') return `https://jobs.lever.co/${token}`;
-  if (ats === 'ashby') return `https://jobs.ashbyhq.com/${token}`;
-  return `https://apply.workable.com/${token}/`;
+  switch (ats) {
+    case 'greenhouse': return `https://job-boards.greenhouse.io/${token}`;
+    case 'lever': return `https://jobs.lever.co/${token}`;
+    case 'ashby': return `https://jobs.ashbyhq.com/${token}`;
+    case 'workable': return `https://apply.workable.com/${token}/`;
+  }
 }
 
 export const JOB_SOURCES: JobSourceInput[] = ENTRIES.map(([company_name, ats_name, board_token]) => ({

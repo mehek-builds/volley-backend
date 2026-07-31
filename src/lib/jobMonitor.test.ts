@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   hasUsableDescription,
+  fetchSourceJobs,
   isIngestablePosting,
   isSelfDeclaredTestPosting,
   MIN_DESCRIPTION_CHARS,
@@ -251,6 +252,26 @@ test('Workable preserves multiple countries and its explicit remote flag', () =>
   assert.equal(jobs[0].apply_url, 'https://apply.workable.com/j/ABC123');
 });
 
+test('Workable drops postings that leave its autonomous application host', () => {
+  for (const applicationUrl of [
+    'javascript:alert(1)',
+    'data:text/html,not-a-form',
+    'https://apply.workable.com.attacker.example/j/ABC123/apply',
+    'https://example.com/apply',
+    'https://apply.workable.com/j/DIFFERENT/apply',
+  ]) {
+    assert.deepEqual(normalizeWorkableJobs({
+      name: 'Acme',
+      jobs: [{
+        title: 'Engineer',
+        shortcode: 'ABC123',
+        url: 'https://apply.workable.com/j/ABC123',
+        application_url: applicationUrl,
+      }],
+    }), [], applicationUrl);
+  }
+});
+
 test('strips markup that leaks into the providers\' descriptionPlain fields', () => {
   const ashby = normalizeAshbyJobs({ jobs: [{ id: 'job-2', title: 'TPM', jobUrl: 'https://jobs.ashbyhq.com/cursor/job-2', applyUrl: 'https://jobs.ashbyhq.com/cursor/job-2/application', location: 'SF', descriptionPlain: '<aside>Note</aside>Build infrastructure.' }] });
   assert.equal(ashby[0].description, 'Note Build infrastructure.');
@@ -448,4 +469,44 @@ test('accepts explicit empty job collections', () => {
   assert.deepEqual(normalizeLeverJobs([]), []);
   assert.deepEqual(normalizeAshbyJobs({ jobs: [] }), []);
   assert.deepEqual(normalizeWorkableJobs({ name: 'Acme', jobs: [] }), []);
+});
+
+test('fetches and dispatches a Workable account response through the public ingestion function', async () => {
+  let requestedUrl = '';
+  const jobs = await fetchSourceJobs(
+    { ats_name: 'workable', board_token: 'acme team' },
+    async (input) => {
+      requestedUrl = String(input);
+      return new Response(JSON.stringify({
+        name: 'Acme',
+        jobs: [{
+          shortcode: 'WK1',
+          title: 'Operations Analyst',
+          url: 'https://apply.workable.com/j/WK1',
+          country: 'United States',
+          description: '<p>Improve business operations and reporting systems.</p>',
+        }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    },
+  );
+  assert.equal(requestedUrl, 'https://www.workable.com/api/accounts/acme%20team?details=true');
+  assert.equal(jobs[0]?.external_id, 'WK1');
+  assert.equal(jobs[0]?.portal_company_name, 'Acme');
+});
+
+test('Workable fetch rejects provider errors and malformed successful payloads', async () => {
+  await assert.rejects(
+    fetchSourceJobs(
+      { ats_name: 'workable', board_token: 'acme' },
+      async () => new Response('rate limited', { status: 429 }),
+    ),
+    /workable board returned HTTP 429/,
+  );
+  await assert.rejects(
+    fetchSourceJobs(
+      { ats_name: 'workable', board_token: 'acme' },
+      async () => new Response(JSON.stringify({ results: [] }), { status: 200 }),
+    ),
+    /invalid jobs payload/,
+  );
 });

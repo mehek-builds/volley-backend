@@ -1,6 +1,7 @@
 # Adds bounded follow-up passes to the daily Vercel job-monitor cron.
 #
-# The endpoint stops polling after four minutes, one minute before Vercel's hard limit. If the
+# The endpoint stops starting polls after three minutes and keeps another 30 seconds for the final
+# batch, leaving at least one minute before Vercel's hard limit. If the
 # source queue is larger than one bounded pass can finish, this workflow calls it again. Every pass
 # selects sources by oldest last_polled_at first, so it resumes the deferred tail automatically.
 name: job-monitor
@@ -19,7 +20,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Drain the bounded polling queue
         env:
@@ -35,14 +36,25 @@ jobs:
 
           completed=false
           final_status=unknown
-          for pass in 1 2 3; do
+          total_failed=0
+          for pass in 1 2 3 4 5; do
             response_file="response-${pass}.json"
-            http_status=$(curl -sS \
-              --max-time 300 \
-              -o "${response_file}" \
-              -w '%{http_code}' \
-              -H "x-internal-secret: ${INTERNAL_CRON_SECRET}" \
-              "${API_BASE}/internal/job-monitor")
+            http_status=409
+            for lock_attempt in $(seq 1 20); do
+              http_status=$(curl -sS \
+                --max-time 300 \
+                -o "${response_file}" \
+                -w '%{http_code}' \
+                -H "x-internal-secret: ${INTERNAL_CRON_SECRET}" \
+                "${API_BASE}/internal/job-monitor")
+              if [ "${http_status}" != 409 ]; then
+                break
+              fi
+              if [ "${lock_attempt}" -lt 20 ]; then
+                echo "Another monitor run holds the polling lock; retrying in 15 seconds (${lock_attempt}/20)."
+                sleep 15
+              fi
+            done
             final_status="${http_status}"
 
             # A 500 can be the board-floor alarm after a successful polling pass. Keep draining the
@@ -56,12 +68,14 @@ jobs:
             echo "pass=${pass}"
             cat "${response_file}"
             echo
+            pass_failed=$(jq -r '.failed // 0' "${response_file}")
+            total_failed=$((total_failed + pass_failed))
 
             {
               echo "### Job monitor pass ${pass}"
               echo ""
               echo '```json'
-              jq '{sources, enabled_sources, deferred_sources, polling_complete, polling_elapsed_ms, surfaced_jobs, surfaced_sponsor_only_jobs, board_health, variety}' "${response_file}"
+              jq '{sources, enabled_sources, deferred_sources, polling_complete, polling_elapsed_ms, failed, failed_sources: [.results[] | select(.ok == false) | {company, error}], surfaced_jobs, surfaced_sponsor_only_jobs, board_health, variety}' "${response_file}"
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
 
@@ -72,11 +86,16 @@ jobs:
           done
 
           if [ "${completed}" != true ]; then
-            echo "::error::Job-monitor queue still has deferred sources after three bounded passes."
+            echo "::error::Job-monitor queue still has deferred sources after five bounded passes."
             exit 1
           fi
 
           if [ "${final_status}" != 200 ]; then
             echo "::error::Polling completed, but the job board is below one of its inventory floors."
+            exit 1
+          fi
+
+          if [ "${total_failed}" -gt 0 ]; then
+            echo "::error::${total_failed} source polls failed across the completed monitor passes."
             exit 1
           fi

@@ -52,3 +52,21 @@ test('leaves unattempted sources for the next run at the time budget', async () 
   assert.equal(outcome.deferred, 3);
   assert.equal(outcome.stopped_for_time_budget, true);
 });
+
+test('five bounded passes can drain the full 800-source Workable ceiling safely', async () => {
+  let remaining = Array.from({ length: 800 }, (_, index) => ({ ats_name: 'workable', index }));
+  let passes = 0;
+  while (remaining.length > 0 && passes < 5) {
+    let clock = 0;
+    const outcome = await pollSourcesWithinBudget(remaining, async (source) => source.index, {
+      timeBudgetMs: 210_000,
+      startReserveMs: 30_000,
+      now: () => clock,
+      sleep: async (milliseconds) => { clock += milliseconds; },
+    });
+    remaining = remaining.slice(outcome.attempted);
+    passes += 1;
+  }
+  assert.equal(remaining.length, 0);
+  assert.equal(passes, 5);
+});

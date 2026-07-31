@@ -1,6 +1,7 @@
 export const POLL_SOURCE_LIMIT = 800;
 export const POLL_CONCURRENCY = 12;
-export const POLL_TIME_BUDGET_MS = 240_000;
+export const POLL_TIME_BUDGET_MS = 210_000;
+export const POLL_START_RESERVE_MS = 30_000;
 export const WORKABLE_START_INTERVAL_MS = 1_100;
 
 type PollSource = { ats_name: string };
@@ -9,6 +10,7 @@ type PollQueueOptions = {
   concurrency?: number;
   timeBudgetMs?: number;
   workableStartIntervalMs?: number;
+  startReserveMs?: number;
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
 };
@@ -30,6 +32,8 @@ export async function pollSourcesWithinBudget<TSource extends PollSource, TResul
   const concurrency = options.concurrency ?? POLL_CONCURRENCY;
   const timeBudgetMs = options.timeBudgetMs ?? POLL_TIME_BUDGET_MS;
   const workableStartIntervalMs = options.workableStartIntervalMs ?? WORKABLE_START_INTERVAL_MS;
+  const startReserveMs = options.startReserveMs
+    ?? Math.min(POLL_START_RESERVE_MS, Math.max(0, timeBudgetMs / 4));
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? ((milliseconds: number) => new Promise<void>((resolve) => {
     setTimeout(resolve, milliseconds);
@@ -42,7 +46,7 @@ export async function pollSourcesWithinBudget<TSource extends PollSource, TResul
 
   while (ordinary.length > 0 || workable.length > 0) {
     const elapsed = now() - startedAt;
-    if (elapsed >= timeBudgetMs) break;
+    if (elapsed >= timeBudgetMs - startReserveMs) break;
 
     const batch: TSource[] = [];
     if (workable.length > 0 && now() >= nextWorkableStart) {
