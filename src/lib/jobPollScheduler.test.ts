@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { pollSourcesWithinBudget, WORKABLE_START_INTERVAL_MS } from './jobPollScheduler';
+import { pollSourcesWithinBudget, retryTransient, WORKABLE_START_INTERVAL_MS } from './jobPollScheduler';
 
 test('polls ordinary sources up to the configured concurrency', async () => {
   const sources = Array.from({ length: 10 }, (_, index) => ({ ats_name: 'greenhouse', index }));
@@ -69,4 +69,27 @@ test('five bounded passes can drain the full 800-source Workable ceiling safely'
   }
   assert.equal(remaining.length, 0);
   assert.equal(passes, 5);
+});
+
+test('transient verification retries and still fails after the final attempt', async () => {
+  let attempts = 0;
+  const waits: number[] = [];
+  const value = await retryTransient(async () => {
+    attempts += 1;
+    if (attempts < 3) throw new Error('temporary timeout');
+    return 'ok';
+  }, { attempts: 3, delayMs: 10, sleep: async (ms) => { waits.push(ms); } });
+  assert.equal(value, 'ok');
+  assert.equal(attempts, 3);
+  assert.deepEqual(waits, [10, 20]);
+
+  attempts = 0;
+  await assert.rejects(
+    retryTransient(async () => {
+      attempts += 1;
+      throw new Error('still dead');
+    }, { attempts: 2, delayMs: 0, sleep: async () => {} }),
+    /still dead/,
+  );
+  assert.equal(attempts, 2, 'a persistent board remains a failing gate');
 });

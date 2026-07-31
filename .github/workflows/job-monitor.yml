@@ -86,7 +86,7 @@ jobs:
               echo "### Job monitor pass ${pass}"
               echo ""
               echo '```json'
-              jq '{sources, enabled_sources, deferred_sources, polling_complete, polling_elapsed_ms, failed, failed_sources: [.results[] | select(.ok == false) | {company, error}], surfaced_postings, surfaced_grouped_roles, surfaced_sponsor_only_jobs, board_health, variety}' "${response_file}"
+              jq '{sources, enabled_sources, deferred_sources, polling_complete, polling_elapsed_ms, failed, failed_sources: [.results[] | select(.ok == false) | {company, error}], surfaced_postings, surfaced_grouped_roles, surfaced_sponsor_only_jobs, target_surfaced_postings, target_surfaced_grouped_roles, inventory_target_met, board_health, variety}' "${response_file}"
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
 

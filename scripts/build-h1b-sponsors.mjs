@@ -116,9 +116,14 @@ const REJECTED = {
   LatchBio: 'LatchBio is correctly labelled (the source was renamed from "Latch" on 2026-07-29). '
     + 'LATCH SYSTEMS INC is the New York smart-lock company, a different business, and its '
     + 'petitions must not be credited here',
+  Digital: 'the Workable account is a distributed digital agency. The filings belong to Asian '
+    + 'Media Rights and CPX Interactive, two unrelated companies that used Digital as a d/b/a',
+  Pearl: 'the Workable account is Pearl Talent, a recruiting firm placing staff with client '
+    + 'companies. A bare PEARL INC filing does not establish that it belongs to this employer',
 };
 
 const ALIASES = {
+  'Abnormal AI': ['ABNORMAL SECURITY CORP', 'ABNORMAL SECURITY CORPORATION', 'ABNORMAL AI INC'],
   'Scale AI': ['SCALE AI INC'],
   'Match Group': ['MATCH GROUP LLC'],
   'Khan Academy': ['KHAN ACADEMY INC'],

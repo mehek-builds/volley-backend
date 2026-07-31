@@ -12,10 +12,15 @@ import {
   REQUIRED_HEADROOM_MULTIPLE,
   REQUIRED_SURFACED_GROUPED_ROLES,
   REQUIRED_SURFACED_JOBS,
+  TARGET_SURFACED_GROUPED_ROLES,
+  TARGET_SURFACED_POSTINGS,
   boardHealth,
   boardIsBelowFloor,
+  inventoryTargetMet,
+  mergeJobSources,
   shouldKeepPostingsOnEmptyFetch,
 } from './jobMonitor';
+import type { JobSourceInput } from '../lib/jobMonitor';
 import { AUTONOMOUS_PORTAL_FAMILIES, portalCanAutoSubmit } from '../lib/portalSubmission';
 import { hasUsableDescription, POLLABLE_JOB_BOARDS } from '../lib/jobMonitor';
 import { POLL_TIME_BUDGET_MS } from '../lib/jobPollScheduler';
@@ -36,8 +41,22 @@ test('the scheduled cron summary always reports postings and grouped roles', () 
   const workflow = readFileSync('.github/workflows/job-monitor.yml', 'utf8');
   assert.match(workflow, /surfaced_postings/);
   assert.match(workflow, /surfaced_grouped_roles/);
+  assert.match(workflow, /target_surfaced_postings/);
+  assert.match(workflow, /target_surfaced_grouped_roles/);
+  assert.match(workflow, /inventory_target_met/);
   assert.match(workflow, /structured_monitor_response=false/);
   assert.match(workflow, /\(\.polling_complete \| type\) == "boolean"/);
+});
+
+test('the scheduled catalog includes reviewed sources and deduplicated operator overrides', () => {
+  const reviewed: JobSourceInput[] = [
+    { company_name: 'Reviewed', ats_name: 'workable', board_token: 'same', career_url: 'https://example.com/reviewed' },
+    { company_name: 'Kept', ats_name: 'greenhouse', board_token: 'kept', career_url: 'https://example.com/kept' },
+  ];
+  const configured: JobSourceInput[] = [
+    { company_name: 'Override', ats_name: 'workable', board_token: 'same', career_url: 'https://example.com/override', enabled: false },
+  ];
+  assert.deepEqual(mergeJobSources(reviewed, configured), [configured[0], reviewed[1]]);
 });
 
 test('post-poll metric statements leave time for the cron to answer', () => {
@@ -90,6 +109,16 @@ test('posting and grouped-role warnings are evaluated together', () => {
   assert.equal(boardHealth(9_999, 12_000), 'breached', 'postings can breach independently');
   assert.equal(boardHealth(12_000, 9_999), 'breached', 'grouped roles can breach independently');
   assert.equal(boardHealth(0, 0), 'breached');
+});
+
+test('Phase 2 supply targets remain above both early warning lines', () => {
+  assert.equal(TARGET_SURFACED_POSTINGS, 15_000);
+  assert.equal(TARGET_SURFACED_GROUPED_ROLES, 12_000);
+  assert.ok(TARGET_SURFACED_POSTINGS > REQUIRED_SURFACED_JOBS);
+  assert.ok(TARGET_SURFACED_GROUPED_ROLES > REQUIRED_SURFACED_GROUPED_ROLES);
+  assert.equal(inventoryTargetMet(15_000, 12_000), true, 'exactly at both targets passes');
+  assert.equal(inventoryTargetMet(14_999, 12_000), false, 'posting target is independent');
+  assert.equal(inventoryTargetMet(15_000, 11_999), false, 'grouped-role target is independent');
 });
 
 test('a thin board warns without failing the run, so the 5xx keeps meaning "broken now"', () => {

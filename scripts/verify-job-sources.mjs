@@ -44,6 +44,7 @@ const only = onlyIndex >= 0 ? new Set(args[onlyIndex + 1].split(',')) : null;
 const { JOB_SOURCES } = await import('../src/lib/jobSources.ts');
 const { fetchSourceJobs } = await import('../src/lib/jobMonitor.ts');
 const { identityCheck, portalNameAgrees } = await import('../src/lib/sponsorIdentity.ts');
+const { pollSourcesWithinBudget, retryTransient } = await import('../src/lib/jobPollScheduler.ts');
 
 /* Boards where no name is published and the postings name a BRAND rather than the company, checked
    by hand. The evidence is here so the judgement can be re-checked or overturned, and so a run that
@@ -63,7 +64,9 @@ const CLEARED_BY_HAND = {
 async function verify(source) {
   let jobs;
   try {
-    jobs = await fetchSourceJobs(source);
+    /* Public ATS endpoints occasionally exceed their single-request timeout in GitHub Actions.
+       Retry the fetch, but keep the final failure fatal so a genuinely dead source cannot pass. */
+    jobs = await retryTransient(() => fetchSourceJobs(source));
   } catch (error) {
     return { verdict: 'dead', detail: error instanceof Error ? error.message : String(error) };
   }
@@ -99,17 +102,21 @@ async function verify(source) {
   };
 }
 
-const queue = JOB_SOURCES.filter((source) => !only || only.has(source.board_token));
+const selected = JOB_SOURCES.filter((source) => !only || only.has(source.board_token));
 const results = [];
-const workers = Array.from({ length: 6 }, async () => {
-  while (queue.length) {
-    const source = queue.shift();
-    const outcome = await verify(source);
-    results.push({ ...source, ...outcome });
-    process.stderr.write(outcome.verdict === 'named-mismatch' ? 'X' : outcome.verdict.endsWith('ok') ? '.' : '?');
-  }
+async function record(source) {
+  const outcome = await verify(source);
+  results.push({ ...source, ...outcome });
+  process.stderr.write(outcome.verdict === 'named-mismatch' ? 'X' : outcome.verdict.endsWith('ok') ? '.' : '?');
+}
+
+/* Use the same tested queue as production so provider pacing cannot drift between ingestion and
+   its CI gate. The verifier has no serverless deadline, so every selected source is attempted. */
+await pollSourcesWithinBudget(selected, record, {
+  concurrency: 6,
+  timeBudgetMs: Number.MAX_SAFE_INTEGER,
+  startReserveMs: 0,
 });
-await Promise.all(workers);
 process.stderr.write('\n');
 
 results.sort((a, b) => a.company_name.localeCompare(b.company_name));

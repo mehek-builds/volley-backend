@@ -36,24 +36,25 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
   ],
   "employers": [
     {
-      "company": "Abnormal Security",
-      "normalized": "ABNORMAL SECURITY",
+      "company": "Abnormal AI",
+      "normalized": "ABNORMAL AI",
       "sponsors": true,
       "evidence": "both",
       "matched_key": "ABNORMAL SECURITY",
       "legal_names": [
         "ABNORMAL SECURITY CORP",
         "ABNORMAL SECURITY CORPORATION",
+        "Abnormal AI, Inc.",
         "Abnormal Security Corporation"
       ],
-      "approvals": 28,
+      "approvals": 56,
       "denials": 0,
       "fiscal_years": [
         2021,
         2022,
         2023
       ],
-      "lca_certifications": 10,
+      "lca_certifications": 32,
       "filing_states": [
         "CA",
         "NV"
@@ -89,6 +90,34 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Access Bank PLC",
+      "normalized": "ACCESS BANK",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
+      "company": "AD Education",
+      "normalized": "AD EDUCATION",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "Adyen",
       "normalized": "ADYEN",
       "sponsors": true,
@@ -110,6 +139,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": [
         "SAN FRANCISCO"
       ]
+    },
+    {
+      "company": "Aerones",
+      "normalized": "AERONES",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "Affirm",
@@ -135,6 +178,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": [
         "SAN FRANCISCO"
       ]
+    },
+    {
+      "company": "AI Acquisition",
+      "normalized": "AI ACQUISITION",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "Airbnb",
@@ -273,6 +330,28 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "lca_certifications": 0,
       "filing_states": [],
       "filing_cities": []
+    },
+    {
+      "company": "Anduril Industries",
+      "normalized": "ANDURIL INDUSTRIES",
+      "sponsors": true,
+      "evidence": "uscis_h1b",
+      "matched_key": "ANDURIL INDUSTRIES",
+      "legal_names": [
+        "ANDURIL INDUSTRIES INC"
+      ],
+      "approvals": 1,
+      "denials": 0,
+      "fiscal_years": [
+        2021
+      ],
+      "lca_certifications": 0,
+      "filing_states": [
+        "CA"
+      ],
+      "filing_cities": [
+        "IRVINE"
+      ]
     },
     {
       "company": "anomalo",
@@ -546,6 +625,34 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": []
     },
     {
+      "company": "Axios",
+      "normalized": "AXIOS",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
+      "company": "Base.com",
+      "normalized": "BASE COM",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "Baseten",
       "normalized": "BASETEN",
       "sponsors": true,
@@ -668,6 +775,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Bitpanda",
+      "normalized": "BITPANDA",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "Blacksmith",
       "normalized": "BLACKSMITH",
       "sponsors": false,
@@ -708,6 +829,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Blink - The Employee App",
+      "normalized": "BLINK THE EMPLOYEE APP",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "Block",
       "normalized": "BLOCK",
       "sponsors": true,
@@ -745,6 +880,31 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "lca_certifications": 0,
       "filing_states": [],
       "filing_cities": []
+    },
+    {
+      "company": "Box",
+      "normalized": "BOX",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "BOX",
+      "legal_names": [
+        "BOX INC",
+        "Box, Inc."
+      ],
+      "approvals": 190,
+      "denials": 1,
+      "fiscal_years": [
+        2021,
+        2022,
+        2023
+      ],
+      "lca_certifications": 95,
+      "filing_states": [
+        "CA"
+      ],
+      "filing_cities": [
+        "REDWOOD CITY"
+      ]
     },
     {
       "company": "Braintrust",
@@ -859,6 +1019,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": []
     },
     {
+      "company": "C-Serv",
+      "normalized": "C SERV",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "Calendly",
       "normalized": "CALENDLY",
       "sponsors": true,
@@ -899,6 +1073,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": [
         "SAN FRANCISCO"
       ]
+    },
+    {
+      "company": "Capgemini",
+      "normalized": "CAPGEMINI",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "Carta",
@@ -988,6 +1176,31 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ],
       "filing_cities": [
         "KIRKLAND"
+      ]
+    },
+    {
+      "company": "Chan Zuckerberg Initiative",
+      "normalized": "CHAN ZUCKERBERG INITIATIVE",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "CHAN ZUCKERBERG INITIATIVE",
+      "legal_names": [
+        "CHAN ZUCKERBERG INITIATIVE LLC",
+        "CHAN ZUCKERBERG INITIATIVE, LLC"
+      ],
+      "approvals": 14,
+      "denials": 0,
+      "fiscal_years": [
+        2021,
+        2022,
+        2023
+      ],
+      "lca_certifications": 2,
+      "filing_states": [
+        "CA"
+      ],
+      "filing_cities": [
+        "REDWOOD CITY"
       ]
     },
     {
@@ -1154,6 +1367,26 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Clover Health",
+      "normalized": "CLOVER HEALTH",
+      "sponsors": true,
+      "evidence": "dol_lca",
+      "matched_key": "CLOVER HEALTH",
+      "legal_names": [
+        "CLOVER HEALTH, LLC."
+      ],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 2,
+      "filing_states": [
+        "NJ"
+      ],
+      "filing_cities": [
+        "JERSEY CITY"
+      ]
+    },
+    {
       "company": "cockroachlabs",
       "normalized": "COCKROACHLABS",
       "sponsors": true,
@@ -1198,6 +1431,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": [
         "NEW YORK"
       ]
+    },
+    {
+      "company": "Code for America",
+      "normalized": "CODE FOR AMERICA",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "Coder",
@@ -1254,6 +1501,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": []
     },
     {
+      "company": "Common App",
+      "normalized": "COMMON APP",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "consensys",
       "normalized": "CONSENSYS",
       "sponsors": true,
@@ -1274,6 +1535,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": [
         "WASHINGTON"
       ]
+    },
+    {
+      "company": "Create Wellness, Inc.",
+      "normalized": "CREATE WELLNESS",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "cresta",
@@ -1316,6 +1591,30 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "lca_certifications": 0,
       "filing_states": [],
       "filing_cities": []
+    },
+    {
+      "company": "Crunchyroll",
+      "normalized": "CRUNCHYROLL",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "CRUNCHYROLL",
+      "legal_names": [
+        "CRUNCHYROLL LLC",
+        "Crunchyroll, LLC"
+      ],
+      "approvals": 6,
+      "denials": 0,
+      "fiscal_years": [
+        2022,
+        2023
+      ],
+      "lca_certifications": 22,
+      "filing_states": [
+        "TX"
+      ],
+      "filing_cities": [
+        "COPPELL"
+      ]
     },
     {
       "company": "Crusoe",
@@ -1387,6 +1686,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": [
         "SAN FRANCISCO"
       ]
+    },
+    {
+      "company": "D-ploy",
+      "normalized": "D PLOY",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "Databricks",
@@ -1535,6 +1848,21 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": []
     },
     {
+      "company": "Digital",
+      "normalized": "DIGITAL",
+      "sponsors": false,
+      "evidence": null,
+      "rejected": "the Workable account is a distributed digital agency. The filings belong to Asian Media Rights and CPX Interactive, two unrelated companies that used Digital as a d/b/a",
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "Discord",
       "normalized": "DISCORD",
       "sponsors": true,
@@ -1558,6 +1886,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": [
         "SAN FRANCISCO"
       ]
+    },
+    {
+      "company": "Domes Resorts & Reserves",
+      "normalized": "DOMES RESORTS AND RESERVES",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "doppel",
@@ -1671,6 +2013,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "DRW",
+      "normalized": "DRW",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "Duolingo",
       "normalized": "DUOLINGO",
       "sponsors": true,
@@ -1747,6 +2103,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Elevation Capital",
+      "normalized": "ELEVATION CAPITAL",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "ElevenLabs",
       "normalized": "ELEVENLABS",
       "sponsors": true,
@@ -1808,6 +2178,57 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Epirus",
+      "normalized": "EPIRUS",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
+      "company": "EPOS",
+      "normalized": "EPOS",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
+      "company": "Everlane",
+      "normalized": "EVERLANE",
+      "sponsors": true,
+      "evidence": "uscis_h1b",
+      "matched_key": "EVERLANE",
+      "legal_names": [
+        "EVERLANE INC"
+      ],
+      "approvals": 5,
+      "denials": 0,
+      "fiscal_years": [
+        2022,
+        2023
+      ],
+      "lca_certifications": 0,
+      "filing_states": [
+        "CA"
+      ],
+      "filing_cities": [
+        "SAN FRANCISCO"
+      ]
+    },
+    {
       "company": "evervault",
       "normalized": "EVERVAULT",
       "sponsors": true,
@@ -1826,6 +2247,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": [
         "NEW YORK"
       ]
+    },
+    {
+      "company": "Facet",
+      "normalized": "FACET",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "Faire",
@@ -1850,6 +2285,32 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ],
       "filing_cities": [
         "SAN FRANCISCO"
+      ]
+    },
+    {
+      "company": "FanDuel",
+      "normalized": "FANDUEL",
+      "sponsors": true,
+      "evidence": "uscis_h1b",
+      "matched_key": "FANDUEL",
+      "legal_names": [
+        "FANDUEL INC"
+      ],
+      "approvals": 4,
+      "denials": 0,
+      "fiscal_years": [
+        2021,
+        2022,
+        2023
+      ],
+      "lca_certifications": 0,
+      "filing_states": [
+        "CA",
+        "NY"
+      ],
+      "filing_cities": [
+        "LOS ANGELES",
+        "NEW YORK"
       ]
     },
     {
@@ -1917,6 +2378,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": []
     },
     {
+      "company": "Financeit",
+      "normalized": "FINANCEIT",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "fireblocks",
       "normalized": "FIREBLOCKS",
       "sponsors": true,
@@ -1959,6 +2434,30 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ],
       "filing_cities": [
         "REDWOOD CITY"
+      ]
+    },
+    {
+      "company": "Five Rings",
+      "normalized": "FIVE RINGS",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "FIVE RINGS",
+      "legal_names": [
+        "FIVE RINGS LLC",
+        "Five Rings LLC"
+      ],
+      "approvals": 11,
+      "denials": 0,
+      "fiscal_years": [
+        2021,
+        2022
+      ],
+      "lca_certifications": 8,
+      "filing_states": [
+        "NY"
+      ],
+      "filing_cities": [
+        "NEW YORK"
       ]
     },
     {
@@ -2051,6 +2550,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": []
     },
     {
+      "company": "Foundation",
+      "normalized": "FOUNDATION",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "freenome",
       "normalized": "FREENOME",
       "sponsors": true,
@@ -2102,6 +2615,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Fuse Energy",
+      "normalized": "FUSE ENERGY",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "gamma",
       "normalized": "GAMMA",
       "sponsors": false,
@@ -2137,6 +2664,48 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ],
       "filing_cities": [
         "NEW YORK"
+      ]
+    },
+    {
+      "company": "Geotab",
+      "normalized": "GEOTAB",
+      "sponsors": true,
+      "evidence": "uscis_h1b",
+      "matched_key": "GEOTAB",
+      "legal_names": [
+        "GEOTAB INC"
+      ],
+      "approvals": 1,
+      "denials": 0,
+      "fiscal_years": [
+        2022
+      ],
+      "lca_certifications": 0,
+      "filing_states": [
+        "NV"
+      ],
+      "filing_cities": [
+        "LAS VEGAS"
+      ]
+    },
+    {
+      "company": "GetYourGuide",
+      "normalized": "GETYOURGUIDE",
+      "sponsors": true,
+      "evidence": "dol_lca",
+      "matched_key": "GETYOURGUIDE",
+      "legal_names": [
+        "GetYourGuide, Inc."
+      ],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 2,
+      "filing_states": [
+        "NY"
+      ],
+      "filing_cities": [
+        "NEW YORK CITY"
       ]
     },
     {
@@ -2179,6 +2748,57 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": []
     },
     {
+      "company": "GiveDirectly",
+      "normalized": "GIVEDIRECTLY",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "GIVEDIRECTLY",
+      "legal_names": [
+        "GIVEDIRECTLY INC",
+        "GiveDirectly, Inc."
+      ],
+      "approvals": 1,
+      "denials": 0,
+      "fiscal_years": [
+        2023
+      ],
+      "lca_certifications": 2,
+      "filing_states": [
+        "NY"
+      ],
+      "filing_cities": [
+        "NEW YORK"
+      ]
+    },
+    {
+      "company": "GoGlobal",
+      "normalized": "GOGLOBAL",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
+      "company": "Gong",
+      "normalized": "GONG",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "gorgias",
       "normalized": "GORGIAS",
       "sponsors": true,
@@ -2201,6 +2821,28 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ],
       "filing_cities": [
         "SAN FRANCISCO"
+      ]
+    },
+    {
+      "company": "Grafana Labs",
+      "normalized": "GRAFANA LABS",
+      "sponsors": true,
+      "evidence": "uscis_h1b",
+      "matched_key": "RAINTANK INC DBA GRAFANA LABS",
+      "legal_names": [
+        "RAINTANK INC DBA GRAFANA LABS"
+      ],
+      "approvals": 1,
+      "denials": 0,
+      "fiscal_years": [
+        2022
+      ],
+      "lca_certifications": 0,
+      "filing_states": [
+        "NY"
+      ],
+      "filing_cities": [
+        "NEW YORK"
       ]
     },
     {
@@ -2289,6 +2931,51 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Headway",
+      "normalized": "HEADWAY",
+      "sponsors": true,
+      "evidence": "uscis_h1b",
+      "matched_key": "THERAPYMATCH INC DBA HEADWAY",
+      "legal_names": [
+        "THERAPYMATCH INC DBA HEADWAY"
+      ],
+      "approvals": 2,
+      "denials": 0,
+      "fiscal_years": [
+        2022
+      ],
+      "lca_certifications": 0,
+      "filing_states": [
+        "NY"
+      ],
+      "filing_cities": [
+        "NEW YORK"
+      ]
+    },
+    {
+      "company": "HelloFresh",
+      "normalized": "HELLOFRESH",
+      "sponsors": true,
+      "evidence": "uscis_h1b",
+      "matched_key": "GROCERY DELIVERY E SERVICES USA INC DBA HELLOFRESH",
+      "legal_names": [
+        "GROCERY DELIVERY E SERVICES USA INC DBA HELLOFRESH"
+      ],
+      "approvals": 33,
+      "denials": 1,
+      "fiscal_years": [
+        2022,
+        2023
+      ],
+      "lca_certifications": 0,
+      "filing_states": [
+        "NY"
+      ],
+      "filing_cities": [
+        "NEW YORK"
+      ]
+    },
+    {
       "company": "helpscout",
       "normalized": "HELPSCOUT",
       "sponsors": false,
@@ -2344,6 +3031,85 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "HubSpot",
+      "normalized": "HUBSPOT",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "HUBSPOT",
+      "legal_names": [
+        "HUBSPOT INC",
+        "HubSpot, Inc",
+        "HubSpot, Inc."
+      ],
+      "approvals": 213,
+      "denials": 1,
+      "fiscal_years": [
+        2021,
+        2022,
+        2023
+      ],
+      "lca_certifications": 142,
+      "filing_states": [
+        "MA"
+      ],
+      "filing_cities": [
+        "CAMBRIDGE"
+      ]
+    },
+    {
+      "company": "Huckberry",
+      "normalized": "HUCKBERRY",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
+      "company": "Hudson River Trading",
+      "normalized": "HUDSON RIVER TRADING",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "HUDSON RIVER TRADING",
+      "legal_names": [
+        "HUDSON RIVER TRADING LLC",
+        "Hudson River Trading LLC"
+      ],
+      "approvals": 37,
+      "denials": 0,
+      "fiscal_years": [
+        2021,
+        2022,
+        2023
+      ],
+      "lca_certifications": 27,
+      "filing_states": [
+        "NY"
+      ],
+      "filing_cities": [
+        "NEW YORK"
+      ]
+    },
+    {
+      "company": "Huzzle",
+      "normalized": "HUZZLE",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "IMC Trading",
       "normalized": "IMC TRADING",
       "sponsors": true,
@@ -2371,6 +3137,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         "ATLANTA",
         "CHICAGO"
       ]
+    },
+    {
+      "company": "Impact Clients",
+      "normalized": "IMPACT CLIENTS",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "imply",
@@ -2508,6 +3288,29 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": [
         "SAN FRANCISCO",
         "SANTA CLARA"
+      ]
+    },
+    {
+      "company": "Instawork",
+      "normalized": "INSTAWORK",
+      "sponsors": true,
+      "evidence": "uscis_h1b",
+      "matched_key": "GARUDA LABS INC DBA INSTAWORK",
+      "legal_names": [
+        "GARUDA LABS INC DBA INSTAWORK"
+      ],
+      "approvals": 2,
+      "denials": 0,
+      "fiscal_years": [
+        2021,
+        2023
+      ],
+      "lca_certifications": 0,
+      "filing_states": [
+        "CA"
+      ],
+      "filing_cities": [
+        "SAN FRANCISCO"
       ]
     },
     {
@@ -2853,6 +3656,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Lifely",
+      "normalized": "LIFELY",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "lightmatter",
       "normalized": "LIGHTMATTER",
       "sponsors": true,
@@ -2928,6 +3745,29 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "lca_certifications": 0,
       "filing_states": [],
       "filing_cities": []
+    },
+    {
+      "company": "LRN Corporation",
+      "normalized": "LRN",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "LRN",
+      "legal_names": [
+        "LRN CORPORATION",
+        "LRN Corporation"
+      ],
+      "approvals": 1,
+      "denials": 0,
+      "fiscal_years": [
+        2023
+      ],
+      "lca_certifications": 1,
+      "filing_states": [
+        "NY"
+      ],
+      "filing_cities": [
+        "NEW YORK"
+      ]
     },
     {
       "company": "Lucid",
@@ -3009,6 +3849,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Manila Recruitment",
+      "normalized": "MANILA RECRUITMENT",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "Marqeta",
       "normalized": "MARQETA",
       "sponsors": true,
@@ -3082,6 +3936,59 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Maven Clinic",
+      "normalized": "MAVEN CLINIC",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "MAVEN CLINIC",
+      "legal_names": [
+        "MAVEN CLINIC CO",
+        "Maven Clinic Co",
+        "Maven Clinic Co."
+      ],
+      "approvals": 4,
+      "denials": 0,
+      "fiscal_years": [
+        2022,
+        2023
+      ],
+      "lca_certifications": 5,
+      "filing_states": [
+        "NY"
+      ],
+      "filing_cities": [
+        "NEW YORK"
+      ]
+    },
+    {
+      "company": "Mercari, Inc. (India)",
+      "normalized": "MERCARI INC INDIA",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
+      "company": "Mercata",
+      "normalized": "MERCATA",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "Mercor",
       "normalized": "MERCOR",
       "sponsors": false,
@@ -3150,6 +4057,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Middle Seat",
+      "normalized": "MIDDLE SEAT",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "Mixpanel",
       "normalized": "MIXPANEL",
       "sponsors": true,
@@ -3177,6 +4098,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
     {
       "company": "Modal",
       "normalized": "MODAL",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
+      "company": "Modern Family Law",
+      "normalized": "MODERN FAMILY LAW",
       "sponsors": false,
       "evidence": null,
       "matched_key": null,
@@ -3248,6 +4183,46 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "lca_certifications": 0,
       "filing_states": [],
       "filing_cities": []
+    },
+    {
+      "company": "Motive",
+      "normalized": "MOTIVE",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
+      "company": "Mozilla",
+      "normalized": "MOZILLA",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "MOZILLA",
+      "legal_names": [
+        "MOZILLA CORP",
+        "MOZILLA CORPORATION",
+        "Mozilla Corporation"
+      ],
+      "approvals": 7,
+      "denials": 0,
+      "fiscal_years": [
+        2021,
+        2022,
+        2023
+      ],
+      "lca_certifications": 2,
+      "filing_states": [
+        "CA"
+      ],
+      "filing_cities": [
+        "SAN FRANCISCO"
+      ]
     },
     {
       "company": "N26",
@@ -3326,6 +4301,40 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Nava PBC",
+      "normalized": "NAVA",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
+      "company": "Navan",
+      "normalized": "NAVAN",
+      "sponsors": true,
+      "evidence": "dol_lca",
+      "matched_key": "NAVAN",
+      "legal_names": [
+        "Navan, Inc."
+      ],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 45,
+      "filing_states": [
+        "CA"
+      ],
+      "filing_cities": [
+        "PALO ALTO"
+      ]
+    },
+    {
       "company": "Netlify",
       "normalized": "NETLIFY",
       "sponsors": true,
@@ -3345,6 +4354,31 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ],
       "filing_cities": [
         "SAN FRANCISCO"
+      ]
+    },
+    {
+      "company": "Newsela",
+      "normalized": "NEWSELA",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "NEWSELA",
+      "legal_names": [
+        "NEWSELA INC",
+        "Newsela, Inc."
+      ],
+      "approvals": 6,
+      "denials": 0,
+      "fiscal_years": [
+        2021,
+        2022,
+        2023
+      ],
+      "lca_certifications": 2,
+      "filing_states": [
+        "NY"
+      ],
+      "filing_cities": [
+        "NEW YORK"
       ]
     },
     {
@@ -3395,6 +4429,32 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ],
       "filing_cities": [
         "MOUNTAIN VIEW"
+      ]
+    },
+    {
+      "company": "Okta",
+      "normalized": "OKTA",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "OKTA",
+      "legal_names": [
+        "OKTA INC",
+        "Okta, Inc."
+      ],
+      "approvals": 366,
+      "denials": 2,
+      "fiscal_years": [
+        2021,
+        2022,
+        2023
+      ],
+      "lca_certifications": 117,
+      "filing_states": [
+        "CA"
+      ],
+      "filing_cities": [
+        "SAN FRANCISCO",
+        "SAN JOSE"
       ]
     },
     {
@@ -3525,6 +4585,34 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": []
     },
     {
+      "company": "OpenGov",
+      "normalized": "OPENGOV",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "OPENGOV",
+      "legal_names": [
+        "OPENGOV INC",
+        "OpenGov, Inc."
+      ],
+      "approvals": 18,
+      "denials": 1,
+      "fiscal_years": [
+        2021,
+        2022,
+        2023
+      ],
+      "lca_certifications": 22,
+      "filing_states": [
+        "CA",
+        "WI"
+      ],
+      "filing_cities": [
+        "MILWAUKEE",
+        "SAN FRANCISCO",
+        "SAN JOSE"
+      ]
+    },
+    {
       "company": "openzeppelin",
       "normalized": "OPENZEPPELIN",
       "sponsors": false,
@@ -3555,6 +4643,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
     {
       "company": "orca",
       "normalized": "ORCA",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
+      "company": "Oscar Health",
+      "normalized": "OSCAR HEALTH",
       "sponsors": false,
       "evidence": null,
       "matched_key": null,
@@ -3656,6 +4758,35 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": []
     },
     {
+      "company": "payabl.",
+      "normalized": "PAYABL",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
+      "company": "Pearl",
+      "normalized": "PEARL",
+      "sponsors": false,
+      "evidence": null,
+      "rejected": "the Workable account is Pearl Talent, a recruiting firm placing staff with client companies. A bare PEARL INC filing does not establish that it belongs to this employer",
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "Peloton",
       "normalized": "PELOTON",
       "sponsors": true,
@@ -3700,6 +4831,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": [
         "SAN FRANCISCO"
       ]
+    },
+    {
+      "company": "Peter Lucas Project Management Inc.",
+      "normalized": "PETER LUCAS PROJECT MANAGEMENT",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "phonepe",
@@ -3774,6 +4919,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Pinely",
+      "normalized": "PINELY",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "Pinterest",
       "normalized": "PINTEREST",
       "sponsors": true,
@@ -3799,6 +4958,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         "ARLINGTON",
         "SAN FRANCISCO"
       ]
+    },
+    {
+      "company": "Planet",
+      "normalized": "PLANET",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "PlanetScale",
@@ -3867,6 +5040,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": [
         "SAN FRANCISCO"
       ]
+    },
+    {
+      "company": "Portless",
+      "normalized": "PORTLESS",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "postman",
@@ -4048,6 +5235,29 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Recorded Future",
+      "normalized": "RECORDED FUTURE",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "RECORDED FUTURE",
+      "legal_names": [
+        "RECORDED FUTURE INC",
+        "Recorded Future Inc."
+      ],
+      "approvals": 4,
+      "denials": 0,
+      "fiscal_years": [
+        2022
+      ],
+      "lca_certifications": 1,
+      "filing_states": [
+        "MA"
+      ],
+      "filing_cities": [
+        "SOMERVILLE"
+      ]
+    },
+    {
       "company": "Recursion",
       "normalized": "RECURSION",
       "sponsors": true,
@@ -4098,6 +5308,31 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Redwood Materials",
+      "normalized": "REDWOOD MATERIALS",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "REDWOOD MATERIALS",
+      "legal_names": [
+        "REDWOOD MATERIALS INC",
+        "REDWOOD MATERIALS, INC."
+      ],
+      "approvals": 12,
+      "denials": 0,
+      "fiscal_years": [
+        2021,
+        2022,
+        2023
+      ],
+      "lca_certifications": 36,
+      "filing_states": [
+        "NV"
+      ],
+      "filing_cities": [
+        "CARSON CITY"
+      ]
+    },
+    {
       "company": "Reflection AI",
       "normalized": "REFLECTION AI",
       "sponsors": true,
@@ -4119,8 +5354,36 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Relativity Space",
+      "normalized": "RELATIVITY SPACE",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "Remote",
       "normalized": "REMOTE",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
+      "company": "Remote Raven",
+      "normalized": "REMOTE RAVEN",
       "sponsors": false,
       "evidence": null,
       "matched_key": null,
@@ -4153,6 +5416,33 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ],
       "filing_cities": [
         "SAN FRANCISCO"
+      ]
+    },
+    {
+      "company": "Rent the Runway",
+      "normalized": "RENT THE RUNWAY",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "RENT THE RUNWAY",
+      "legal_names": [
+        "RENT THE RUNWAY INC",
+        "Rent the Runway, Inc."
+      ],
+      "approvals": 17,
+      "denials": 0,
+      "fiscal_years": [
+        2021,
+        2022
+      ],
+      "lca_certifications": 5,
+      "filing_states": [
+        "NJ",
+        "NY"
+      ],
+      "filing_cities": [
+        "BROOKLYN",
+        "NEW YORK",
+        "SECAUCUS"
       ]
     },
     {
@@ -4311,6 +5601,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": []
     },
     {
+      "company": "Rockstar",
+      "normalized": "ROCKSTAR",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "rogo",
       "normalized": "ROGO",
       "sponsors": false,
@@ -4351,6 +5655,67 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Rondo Energy",
+      "normalized": "RONDO ENERGY",
+      "sponsors": true,
+      "evidence": "dol_lca",
+      "matched_key": "RONDO ENERGY",
+      "legal_names": [
+        "Rondo Energy, Inc."
+      ],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 5,
+      "filing_states": [
+        "CA"
+      ],
+      "filing_cities": [
+        "ALAMEDA"
+      ]
+    },
+    {
+      "company": "Rubrik",
+      "normalized": "RUBRIK",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "RUBRIK",
+      "legal_names": [
+        "RUBRIK INC",
+        "Rubrik, Inc."
+      ],
+      "approvals": 251,
+      "denials": 5,
+      "fiscal_years": [
+        2021,
+        2022,
+        2023
+      ],
+      "lca_certifications": 118,
+      "filing_states": [
+        "CA"
+      ],
+      "filing_cities": [
+        "PALI ALTO",
+        "PALO ALTO",
+        "PALTO ALTO"
+      ]
+    },
+    {
+      "company": "Runware",
+      "normalized": "RUNWARE",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "rutter",
       "normalized": "RUTTER",
       "sponsors": true,
@@ -4378,6 +5743,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
     {
       "company": "safebreach",
       "normalized": "SAFEBREACH",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
+      "company": "Sago",
+      "normalized": "SAGO",
       "sponsors": false,
       "evidence": null,
       "matched_key": null,
@@ -4441,6 +5820,34 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
     {
       "company": "sanity",
       "normalized": "SANITY",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
+      "company": "SAP Fioneer",
+      "normalized": "SAP FIONEER",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
+      "company": "Saronic",
+      "normalized": "SARONIC",
       "sponsors": false,
       "evidence": null,
       "matched_key": null,
@@ -4530,6 +5937,45 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         "CULVER",
         "CULVER CITY"
       ]
+    },
+    {
+      "company": "SeatGeek",
+      "normalized": "SEATGEEK",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "SEATGEEK",
+      "legal_names": [
+        "SEATGEEK INC",
+        "SeatGeek, Inc."
+      ],
+      "approvals": 13,
+      "denials": 0,
+      "fiscal_years": [
+        2021,
+        2022,
+        2023
+      ],
+      "lca_certifications": 14,
+      "filing_states": [
+        "NY"
+      ],
+      "filing_cities": [
+        "NEW YORK"
+      ]
+    },
+    {
+      "company": "Sedona Digital",
+      "normalized": "SEDONA DIGITAL",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "semgrep",
@@ -4665,6 +6111,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": [
         "PALO ALTO"
       ]
+    },
+    {
+      "company": "Skylight",
+      "normalized": "SKYLIGHT",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "socket",
@@ -4839,8 +6299,47 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "StockX",
+      "normalized": "STOCKX",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "STOCKX",
+      "legal_names": [
+        "STOCKX LLC",
+        "StockX LLC"
+      ],
+      "approvals": 43,
+      "denials": 0,
+      "fiscal_years": [
+        2021,
+        2022,
+        2023
+      ],
+      "lca_certifications": 3,
+      "filing_states": [
+        "MI"
+      ],
+      "filing_cities": [
+        "DETROIT"
+      ]
+    },
+    {
       "company": "stone",
       "normalized": "STONE",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
+      "company": "Street Child",
+      "normalized": "STREET CHILD",
       "sponsors": false,
       "evidence": null,
       "matched_key": null,
@@ -4988,6 +6487,45 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "SupportYourApp",
+      "normalized": "SUPPORTYOURAPP",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
+      "company": "sweetgreen",
+      "normalized": "SWEETGREEN",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "SWEETGREEN",
+      "legal_names": [
+        "SWEETGREEN INC",
+        "Sweetgreen, Inc."
+      ],
+      "approvals": 6,
+      "denials": 0,
+      "fiscal_years": [
+        2021,
+        2022,
+        2023
+      ],
+      "lca_certifications": 1,
+      "filing_states": [
+        "CA"
+      ],
+      "filing_cities": [
+        "LOS ANGELES"
+      ]
+    },
+    {
       "company": "Take-Two",
       "normalized": "TAKE TWO",
       "sponsors": true,
@@ -5011,6 +6549,31 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ],
       "filing_cities": [
         "NEW YORK"
+      ]
+    },
+    {
+      "company": "Tala",
+      "normalized": "TALA",
+      "sponsors": true,
+      "evidence": "uscis_h1b",
+      "matched_key": "INVENTURE CAPITAL CORP D B A TALA",
+      "legal_names": [
+        "INVENTURE CAPITAL CORP D/B/A TALA",
+        "INVENTURE CAPITAL CORPORATION D/B/A TALA"
+      ],
+      "approvals": 32,
+      "denials": 0,
+      "fiscal_years": [
+        2021,
+        2022,
+        2023
+      ],
+      "lca_certifications": 0,
+      "filing_states": [
+        "CA"
+      ],
+      "filing_cities": [
+        "SANTA MONICA"
       ]
     },
     {
@@ -5088,6 +6651,49 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "The New York Times",
+      "normalized": "THE NEW YORK TIMES",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
+      "company": "Toast",
+      "normalized": "TOAST",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "TOAST",
+      "legal_names": [
+        "KUDDAGE II INC DBA TOAST",
+        "TOAST INC",
+        "Toast Inc.",
+        "Toast, Inc."
+      ],
+      "approvals": 86,
+      "denials": 5,
+      "fiscal_years": [
+        2021,
+        2022,
+        2023
+      ],
+      "lca_certifications": 26,
+      "filing_states": [
+        "MA",
+        "NY"
+      ],
+      "filing_cities": [
+        "BOSTON",
+        "PATCHOGUE"
+      ]
+    },
+    {
       "company": "Tower Research",
       "normalized": "TOWER RESEARCH",
       "sponsors": true,
@@ -5112,6 +6718,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         "NEW YORK",
         "NEW YORK CITY"
       ]
+    },
+    {
+      "company": "Town Web",
+      "normalized": "TOWN WEB",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "TripAdvisor",
@@ -5234,6 +6854,31 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Udemy",
+      "normalized": "UDEMY",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "UDEMY",
+      "legal_names": [
+        "UDEMY INC",
+        "Udemy, Inc."
+      ],
+      "approvals": 57,
+      "denials": 1,
+      "fiscal_years": [
+        2021,
+        2022,
+        2023
+      ],
+      "lca_certifications": 19,
+      "filing_states": [
+        "CA"
+      ],
+      "filing_cities": [
+        "SAN FRANCISCO"
+      ]
+    },
+    {
       "company": "Unit",
       "normalized": "UNIT",
       "sponsors": false,
@@ -5299,6 +6944,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": [
         "SAN FRANCISCO"
       ]
+    },
+    {
+      "company": "Varda Space Industries",
+      "normalized": "VARDA SPACE INDUSTRIES",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "veracode",
@@ -5432,6 +7091,34 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Vitesse PSP",
+      "normalized": "VITESSE PSP",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
+      "company": "Vox Media Group",
+      "normalized": "VOX MEDIA GROUP",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "Waymo",
       "normalized": "WAYMO",
       "sponsors": true,
@@ -5495,6 +7182,43 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "webook.com",
+      "normalized": "WEBOOK COM",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
+      "company": "Wiz",
+      "normalized": "WIZ",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "WIZ",
+      "legal_names": [
+        "WIZ INC",
+        "Wiz Inc."
+      ],
+      "approvals": 2,
+      "denials": 0,
+      "fiscal_years": [
+        2022
+      ],
+      "lca_certifications": 2,
+      "filing_states": [
+        "NY"
+      ],
+      "filing_cities": [
+        "NEW YORK"
+      ]
+    },
+    {
       "company": "workboard",
       "normalized": "WORKBOARD",
       "sponsors": true,
@@ -5518,6 +7242,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "WorkMotion",
+      "normalized": "WORKMOTION",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "WorkOS",
       "normalized": "WORKOS",
       "sponsors": true,
@@ -5539,6 +7277,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": [
         "SAN FRANCISCO"
       ]
+    },
+    {
+      "company": "Wrisk",
+      "normalized": "WRISK",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "yugabyte",

@@ -32,6 +32,13 @@ if (!process.env.DATABASE_URL) {
 
 const { JOB_SOURCES } = await import('../src/lib/jobSources');
 const { fetchSourceJobs } = await import('../src/lib/jobMonitor');
+const { pollSourcesWithinBudget } = await import('../src/lib/jobPollScheduler');
+
+const COMPLETE_QUEUE_OPTIONS = {
+  concurrency: 8,
+  timeBudgetMs: Number.MAX_SAFE_INTEGER,
+  startReserveMs: 0,
+} as const;
 
 const host = process.env.DATABASE_URL.replace(/.*@/, '').split('/')[0];
 console.log(`database: ${host}`);
@@ -41,27 +48,21 @@ const checkOnly = args.includes('--check');
 const seedOnly = args.includes('--seed');
 
 if (checkOnly) {
-  let live = 0;
-  let dead = 0;
-  let jobs = 0;
-  const queue = [...JOB_SOURCES];
-  const worker = async () => {
-    while (queue.length) {
-      const source = queue.shift()!;
-      try {
-        const found = await fetchSourceJobs(source);
-        live += 1;
-        jobs += found.length;
-        console.log(`  ok    ${String(found.length).padStart(4)}  ${source.ats_name}/${source.board_token}`);
-      } catch (error) {
-        dead += 1;
-        console.log(`  DEAD        ${source.ats_name}/${source.board_token}: ${(error as Error).message}`);
-      }
+  const run = await pollSourcesWithinBudget(JOB_SOURCES, async (source) => {
+    try {
+      const found = await fetchSourceJobs(source);
+      console.log(`  ok    ${String(found.length).padStart(4)}  ${source.ats_name}/${source.board_token}`);
+      return { jobs: found.length, ok: true };
+    } catch (error) {
+      console.log(`  DEAD        ${source.ats_name}/${source.board_token}: ${(error as Error).message}`);
+      return { jobs: 0, ok: false };
     }
-  };
-  await Promise.all(Array.from({ length: 8 }, worker));
+  }, COMPLETE_QUEUE_OPTIONS);
+  const live = run.results.filter((result) => result.ok).length;
+  const dead = run.results.length - live;
+  const jobs = run.results.reduce((sum, result) => sum + result.jobs, 0);
   console.log(`\n${live} live boards, ${jobs} postings, ${dead} dead.`);
-  process.exit(dead > 0 ? 1 : 0);
+  process.exit(dead > 0 || run.deferred > 0 ? 1 : 0);
 }
 
 const { db } = await import('../src/db/index');
@@ -84,14 +85,12 @@ const rows = await db.select().from(career_page_sources)
 
 console.log(`polling ${rows.length} sources...\n`);
 const started = Date.now();
-const results: { company: string; jobs: number; ok: boolean; error?: string }[] = [];
-for (let index = 0; index < rows.length; index += 8) {
-  const batch = await Promise.all(rows.slice(index, index + 8).map(pollSource));
-  for (const r of batch) {
-    results.push(r);
-    console.log(`  ${r.ok ? 'ok  ' : 'FAIL'} ${String(r.jobs).padStart(4)}  ${r.company}${r.ok ? '' : `: ${r.error}`}`);
-  }
-}
+const run = await pollSourcesWithinBudget(rows, async (source) => {
+  const result = await pollSource(source);
+  console.log(`  ${result.ok ? 'ok  ' : 'FAIL'} ${String(result.jobs).padStart(4)}  ${result.company}${result.ok ? '' : `: ${result.error}`}`);
+  return result;
+}, COMPLETE_QUEUE_OPTIONS);
+const results = run.results;
 
 const total = results.reduce((sum, r) => sum + r.jobs, 0);
 const failed = results.filter((r) => !r.ok);
@@ -101,4 +100,4 @@ if (failed.length) console.log(`${failed.length} failed: ${failed.map((f) => f.c
 const active = await db.select({ n: career_page_sources.id }).from(career_page_sources).where(eq(career_page_sources.enabled, true));
 console.log(`${active.length} sources enabled.`);
 await pool.end();
-process.exit(failed.length === results.length ? 1 : 0);
+process.exit(failed.length > 0 || run.deferred > 0 ? 1 : 0);

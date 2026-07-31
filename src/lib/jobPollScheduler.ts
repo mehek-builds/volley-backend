@@ -15,6 +15,34 @@ type PollQueueOptions = {
   sleep?: (milliseconds: number) => Promise<void>;
 };
 
+type RetryOptions = {
+  attempts?: number;
+  delayMs?: number;
+  sleep?: (milliseconds: number) => Promise<void>;
+};
+
+/** Retry a live verification operation without converting a persistent failure into a pass. */
+export async function retryTransient<T>(
+  operation: () => Promise<T>,
+  options: RetryOptions = {},
+): Promise<T> {
+  const attempts = Math.max(1, options.attempts ?? 3);
+  const delayMs = Math.max(0, options.delayMs ?? 250);
+  const sleep = options.sleep ?? ((milliseconds: number) => new Promise<void>((resolve) => {
+    setTimeout(resolve, milliseconds);
+  }));
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) await sleep(delayMs * attempt);
+    }
+  }
+  throw lastError;
+}
+
 /**
  * Poll a mixed provider queue without letting one invocation consume the full function lifetime.
  *

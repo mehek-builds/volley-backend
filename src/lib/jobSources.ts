@@ -42,7 +42,7 @@ type Entry = [company: string, ats: JobSourceInput['ats_name'], token: string];
  * `npm run sources:verify` is what catches this now. It asks each board who it is - Greenhouse
  * publishes `company_name` on every posting - rather than the old check's "does the token return
  * postings?", which every wrong token also answers yes to. */
-const ENTRIES: Entry[] = [
+const BASE_ENTRIES: Entry[] = [
   // Consumer + marketplaces
   ['Airbnb', 'greenhouse', 'airbnb'],
   ['Pinterest', 'greenhouse', 'pinterest'],
@@ -327,7 +327,7 @@ const ENTRIES: Entry[] = [
      the new gate exists to make normal. Two more candidates were dropped in the same pass:
      lever/sardine and lever/attentive both answer with something that is not a postings array. */
   ['Chainguard', 'greenhouse', 'chainguard'],
-  ['Abnormal Security', 'greenhouse', 'abnormalsecurity'],
+  ['Abnormal AI', 'greenhouse', 'abnormalsecurity'],
   ['OpenAI', 'ashby', 'openai'],
   ['Sierra', 'ashby', 'sierra'],
   ['Mercor', 'ashby', 'mercor'],
@@ -337,6 +337,124 @@ const ENTRIES: Entry[] = [
      the portal rather than inferred from the token. This source also exercises the new ingestion
      path in production instead of leaving the fetcher dormant until a later sourcing round. */
   ['Suade', 'workable', 'suade'],
+];
+
+/* Phase 2 supply expansion, verified against live ATS feeds on 2026-07-31.
+ * Suade remains in the base catalog, so these 49 entries bring Workable to exactly 50 employers.
+ * The provider publishes one shared rate limit across accounts. jobPollScheduler spaces Workable
+ * request starts by 1.1 seconds, which keeps this larger catalog inside that limit. */
+const PHASE_2_WORKABLE_ENTRIES: readonly Entry[] = [
+  ['Huzzle', 'workable', 'huzzle'],
+  ['SupportYourApp', 'workable', 'supportyourapp'],
+  ['Digital', 'workable', 'digital-368'],
+  ['Capgemini', 'workable', 'capgemini-insurance'],
+  ['Pearl', 'workable', 'pearltalent'],
+  ['Manila Recruitment', 'workable', 'manilarecruitment'],
+  ['Domes Resorts & Reserves', 'workable', 'domes-resorts'],
+  ['SAP Fioneer', 'workable', 'fioneer'],
+  ['Fuse Energy', 'workable', 'fuseenergy'],
+  ['Peter Lucas Project Management Inc.', 'workable', 'peterlucas'],
+  ['Remote Raven', 'workable', 'remote-raven'],
+  ['Rockstar', 'workable', 'rockstar-3'],
+  ['Aerones', 'workable', 'aerones'],
+  ['Modern Family Law', 'workable', 'modern-family-law-1'],
+  ['WorkMotion', 'workable', 'workmotion'],
+  ['GoGlobal', 'workable', 'goglobal'],
+  ['LRN Corporation', 'workable', 'lrn-corporation'],
+  ['Sago', 'workable', 'sago-group'],
+  ['Base.com', 'workable', 'base-com'],
+  ['C-Serv', 'workable', 'c-serv'],
+  ['D-ploy', 'workable', 'd-ploy'],
+  ['EPOS', 'workable', 'epos'],
+  ['Impact Clients', 'workable', 'impact-clients'],
+  ['Financeit', 'workable', 'financeit'],
+  ['Access Bank PLC', 'workable', 'access-bank'],
+  ['AI Acquisition', 'workable', 'ai-acquisition'],
+  ['AD Education', 'workable', 'icmp-6'],
+  ['Common App', 'workable', 'commonapp'],
+  ['Sedona Digital', 'workable', 'sedona-digital'],
+  ['Skylight', 'workable', 'skylight-frame'],
+  ['webook.com', 'workable', 'webook'],
+  ['Mercata', 'workable', 'mercata'],
+  ['Create Wellness, Inc.', 'workable', 'create-wellness-inc'],
+  ['Facet', 'workable', 'facetwealth'],
+  ['payabl.', 'workable', 'payabl'],
+  ['Portless', 'workable', 'portless'],
+  ['Street Child', 'workable', 'streetchildcareers'],
+  ['Wrisk', 'workable', 'wrisk'],
+  ['Blink - The Employee App', 'workable', 'joinblink'],
+  ['Runware', 'workable', 'runware'],
+  ['Elevation Capital', 'workable', 'elevation-capital-3'],
+  ['Huckberry', 'workable', 'huckberry'],
+  ['Lifely', 'workable', 'lifely'],
+  ['Mercari, Inc. (India)', 'workable', 'mercari-india'],
+  ['Vitesse PSP', 'workable', 'vitesse-psp'],
+  ['Pinely', 'workable', 'pinely'],
+  ['Town Web', 'workable', 'town-web'],
+  ['Foundation', 'workable', 'foundation'],
+  ['Middle Seat', 'workable', 'middle-seat'],
+];
+
+/* Fifty additional employers chosen for both fresh yield and breadth. The catalog adds healthcare,
+ * hospitality, defense, climate, aerospace, travel, logistics, education, media, retail, finance,
+ * government technology, and nonprofits instead of optimizing only for software companies. */
+const PHASE_2_UNDERREPRESENTED_ENTRIES: readonly Entry[] = [
+  ['Anduril Industries', 'greenhouse', 'andurilindustries'],
+  ['Relativity Space', 'greenhouse', 'relativity'],
+  ['Okta', 'greenhouse', 'okta'],
+  ['Toast', 'greenhouse', 'toast'],
+  ['Navan', 'greenhouse', 'tripactions'],
+  ['HelloFresh', 'greenhouse', 'hellofresh'],
+  ['The New York Times', 'greenhouse', 'thenewyorktimes'],
+  ['Oscar Health', 'greenhouse', 'oscar'],
+  ['Redwood Materials', 'greenhouse', 'redwoodmaterials'],
+  ['Box', 'greenhouse', 'boxinc'],
+  ['Geotab', 'greenhouse', 'geotab'],
+  ['Rubrik', 'greenhouse', 'rubrik'],
+  ['FanDuel', 'greenhouse', 'fanduel'],
+  ['Planet', 'greenhouse', 'planetlabs'],
+  ['Motive', 'greenhouse', 'gomotive'],
+  ['Grafana Labs', 'greenhouse', 'grafanalabs'],
+  ['Clover Health', 'greenhouse', 'cloverhealth'],
+  ['HubSpot', 'greenhouse', 'hubspotjobs'],
+  ['GetYourGuide', 'greenhouse', 'getyourguide'],
+  ['Mozilla', 'greenhouse', 'mozilla'],
+  ['sweetgreen', 'greenhouse', 'sweetgreen'],
+  ['Recorded Future', 'greenhouse', 'recordedfuture'],
+  ['Gong', 'greenhouse', 'gongio'],
+  ['DRW', 'greenhouse', 'drweng'],
+  ['Varda Space Industries', 'greenhouse', 'vardaspace'],
+  ['Saronic', 'ashby', 'saronic'],
+  ['Bitpanda', 'greenhouse', 'bitpanda'],
+  ['Hudson River Trading', 'greenhouse', 'wehrtyou'],
+  ['Wiz', 'greenhouse', 'wizinc'],
+  ['Instawork', 'greenhouse', 'instawork'],
+  ['StockX', 'greenhouse', 'stockx'],
+  ['Maven Clinic', 'greenhouse', 'mavenclinic'],
+  ['Five Rings', 'greenhouse', 'fiveringsllc'],
+  ['Crunchyroll', 'greenhouse', 'crunchyroll'],
+  ['OpenGov', 'ashby', 'opengov'],
+  ['Newsela', 'greenhouse', 'newsela'],
+  ['GiveDirectly', 'greenhouse', 'givedirectly'],
+  ['Udemy', 'greenhouse', 'udemy'],
+  ['Chan Zuckerberg Initiative', 'greenhouse', 'chanzuckerberginitiative'],
+  ['Rent the Runway', 'greenhouse', 'renttherunway'],
+  ['Epirus', 'greenhouse', 'epirus'],
+  ['Nava PBC', 'greenhouse', 'navapbc'],
+  ['Everlane', 'greenhouse', 'everlane'],
+  ['SeatGeek', 'greenhouse', 'seatgeek'],
+  ['Code for America', 'greenhouse', 'codeforamerica'],
+  ['Vox Media Group', 'greenhouse', 'voxmedia'],
+  ['Axios', 'greenhouse', 'axios'],
+  ['Rondo Energy', 'greenhouse', 'rondoenergy'],
+  ['Tala', 'lever', 'tala'],
+  ['Headway', 'ashby', 'headway'],
+];
+
+const ENTRIES: readonly Entry[] = [
+  ...BASE_ENTRIES,
+  ...PHASE_2_WORKABLE_ENTRIES,
+  ...PHASE_2_UNDERREPRESENTED_ENTRIES,
 ];
 
 function careerUrl(ats: JobSourceInput['ats_name'], token: string): string {

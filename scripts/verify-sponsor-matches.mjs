@@ -42,6 +42,7 @@ const { JOB_SOURCES } = await import('../src/lib/jobSources.ts');
 /* The judgement lives in src/lib/sponsorIdentity.ts, typechecked and unit-tested against the real
    text of the boards that fooled the first version of this audit. This file is only the I/O. */
 const { identityCheck, verdictFor } = await import('../src/lib/sponsorIdentity.ts');
+const { pollSourcesWithinBudget } = await import('../src/lib/jobPollScheduler.ts');
 
 async function json(url) {
   const response = await fetch(url, { signal: AbortSignal.timeout(25_000) });
@@ -130,6 +131,9 @@ async function fetchIdentity(source) {
  * check the judgement rather than repeat the work - or overturn it. */
 const CLEARED_BY_HAND = {
   Abridge: 'board: "ABOUT ABRIDGE ... powering deeper understanding in healthcare"; ABRIDGE AI INC filed from Pittsburgh and Philadelphia, PA, where Abridge is based',
+  'Abnormal AI': 'board: "Abnormal AI is looking for"; the company announced on 2025-04-16 that '
+    + 'it rebranded from Abnormal Security to Abnormal AI and changed its legal name from Abnormal '
+    + 'Security Corporation to Abnormal AI, Inc.',
   anomalo: 'board: "Anomalo is the AI-powered data quality platform"; Anomalo, Inc. filed from Palo Alto, CA',
   Blend: 'board: "Blend ... our cloud banking platform"; blend.com/terms-of-use names Blend Labs, and BLEND LABS INC filed from San Francisco and Novato, CA',
   cleo: 'the Greenhouse board is titled "Cleo (US)"; CLEO AI INC filed from New York, which is Cleo the money app\'s US entity',
@@ -144,12 +148,13 @@ const CLEARED_BY_HAND = {
 };
 
 const byCompany = new Map(JOB_SOURCES.map((source) => [source.company_name, source]));
-const queue = H1B_SPONSOR_FILE.employers.filter((employer) => includeUnconfirmed || employer.sponsors);
-const results = [];
+const queue = H1B_SPONSOR_FILE.employers
+  .filter((employer) => includeUnconfirmed || employer.sponsors)
+  .map((employer) => ({ employer, source: byCompany.get(employer.company) }))
+  .filter((entry) => entry.source)
+  .map((entry) => ({ ...entry, ats_name: entry.source.ats_name }));
 
-for (const employer of queue) {
-  const source = byCompany.get(employer.company);
-  if (!source) continue;
+const run = await pollSourcesWithinBudget(queue, async ({ employer, source }) => {
   let identity = null;
   let error = null;
   try {
@@ -159,10 +164,14 @@ for (const employer of queue) {
   }
   const check = identity ? identityCheck(employer.company, employer, identity) : null;
   const verdict = verdictFor(identity, check, error);
-  results.push({ company: employer.company, source, employer, identity, check, verdict, error });
   process.stderr.write(verdict === 'verified' ? '.' : verdict === 'SUSPECT' ? 'X' : '?');
-  await new Promise((resolve) => setTimeout(resolve, 100));
-}
+  return { company: employer.company, source, employer, identity, check, verdict, error };
+}, {
+  concurrency: 6,
+  timeBudgetMs: Number.MAX_SAFE_INTEGER,
+  startReserveMs: 0,
+});
+const results = run.results;
 process.stderr.write('\n');
 
 if (asJson) {

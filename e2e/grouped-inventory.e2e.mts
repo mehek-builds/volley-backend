@@ -14,12 +14,15 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
 const { db, pool } = await import('../src/db/index.ts');
-const { career_page_sources, monitored_jobs } = await import('../src/db/schema.ts');
+const { career_page_sources, monitored_jobs, sponsor_employers } = await import('../src/db/schema.ts');
 const { buildApp } = await import('../src/index.ts');
 const {
   boardInventoryMetrics,
   surfacedGroupedRoleCount,
+  syncSponsorEmployers,
+  upsertSources,
 } = await import('../src/routes/jobMonitor.ts');
+const { JOB_SOURCES } = await import('../src/lib/jobSources.ts');
 
 const EXPECTED_DB = 'litos_e2e_jobid';
 const greenhouseSourceId = randomUUID();
@@ -115,6 +118,51 @@ assert.deepEqual(await boardInventoryMetrics(), {
   surfacedGroupedRoles: 2,
   surfacedSponsorOnly: 1,
 });
+
+// The production cron starts from an empty database after deployment. Prove that the checked-in
+// sponsor artifact and reviewed source catalog become queryable rows without a manual seed step.
+await db.delete(monitored_jobs);
+await db.delete(career_page_sources);
+await db.delete(sponsor_employers);
+await syncSponsorEmployers();
+await upsertSources(JOB_SOURCES);
+const syncedCounts = await pool.query(`
+  select
+    (select count(*)::int from sponsor_employers) as sponsors,
+    (select count(*)::int from career_page_sources) as sources
+`);
+assert.ok(syncedCounts.rows[0].sponsors > 0, 'the cron syncs confirmed sponsor employers');
+assert.equal(syncedCounts.rows[0].sources, JOB_SOURCES.length, 'the cron syncs every reviewed source');
+
+// A portal-name mismatch is a safety veto. Re-running the catalog sync must never restore the
+// sponsor link until a successful poll has cleared the mismatch.
+const sponsorSource = JOB_SOURCES.find((source) => source.company_name === 'Abnormal AI');
+assert.ok(sponsorSource, 'the reviewed catalog contains a confirmed sponsor source for this check');
+await pool.query(`
+  update career_page_sources
+     set portal_name_mismatch = true, sponsor_employer_id = null
+   where ats_name = $1 and board_token = $2
+`, [sponsorSource.ats_name, sponsorSource.board_token]);
+await upsertSources([sponsorSource]);
+const mismatch = await pool.query(`
+  select portal_name_mismatch, sponsor_employer_id
+    from career_page_sources
+   where ats_name = $1 and board_token = $2
+`, [sponsorSource.ats_name, sponsorSource.board_token]);
+assert.equal(mismatch.rows[0].portal_name_mismatch, true);
+assert.equal(mismatch.rows[0].sponsor_employer_id, null, 'catalog sync preserves the identity veto');
+
+await upsertSources([
+  { ...sponsorSource, company_name: 'Discarded duplicate' },
+  sponsorSource,
+]);
+const deduplicated = await pool.query(`
+  select company_name
+    from career_page_sources
+   where ats_name = $1 and board_token = $2
+`, [sponsorSource.ats_name, sponsorSource.board_token]);
+assert.equal(deduplicated.rowCount, 1, 'operator batches may repeat a source key safely');
+assert.equal(deduplicated.rows[0].company_name, sponsorSource.company_name, 'the final override wins');
 
 await app.close();
 await pool.end();

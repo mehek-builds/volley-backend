@@ -147,6 +147,15 @@ test('EVERY company on the board has been checked against the H-1B data', () => 
   );
 });
 
+test('ambiguous generic employer names never inherit unrelated H-1B filings', () => {
+  for (const company of ['Digital', 'Pearl']) {
+    const employer = h1bEmployer(company);
+    assert.ok(employer, `${company} must remain explicitly checked`);
+    assert.equal(employer.sponsors, false, `${company} has no proven filing identity`);
+    assert.ok(employer.rejected, `${company} must record why its name match was rejected`);
+  }
+});
+
 test('the generated file agrees with this module about how names normalise', () => {
   // The ingest script is plain .mjs and carries its own copy of normalizeEmployerName, because it
   // cannot import the TypeScript. This is what keeps the copy honest: every `normalized` value in
