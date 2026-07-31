@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readMostRecentRole } from './submissionRunner';
+import { readMostRecentRole, shouldUseLocalControlledBrowser } from './submissionRunner';
 
 // readMostRecentRole runs inside buildPacket, which every prepare and every submit goes through -
 // on EVERY portal, not just the one that needs work history. So its failure mode is not "Paylocity
@@ -41,6 +41,21 @@ test('org is the fallback for company, and the FIRST entry wins because resumes 
   assert.equal(two?.company, 'Now Co');
   assert.equal(two?.startDate, 'Jun 2025');
   assert.equal(two?.summary, 'Built it.');
+});
+
+test('the controlled QA portal uses the managed browser in production', () => {
+  const previousProvider = process.env.BROWSER_PROVIDER;
+  try {
+    process.env.BROWSER_PROVIDER = 'stratus-managed';
+    assert.equal(shouldUseLocalControlledBrowser('controlled_test'), false);
+    assert.equal(shouldUseLocalControlledBrowser('greenhouse'), false);
+
+    process.env.BROWSER_PROVIDER = 'browserbase';
+    assert.equal(shouldUseLocalControlledBrowser('controlled_test'), true);
+  } finally {
+    if (previousProvider === undefined) delete process.env.BROWSER_PROVIDER;
+    else process.env.BROWSER_PROVIDER = previousProvider;
+  }
 });
 
 // ─── The prepare-time gate for account-walled portals ─────────────────────────
