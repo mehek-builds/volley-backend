@@ -102,3 +102,24 @@ test('classification coverage has explicit independently evaluated thresholds', 
   assert.equal(uncovered.industry_coverage_met, false);
   assert.equal(uncovered.all_coverage_thresholds_met, false);
 });
+
+test('coverage thresholds compare exact counts instead of rounded display ratios', () => {
+  const rows = [
+    ['Stripe', 'Account Executive'], ['OpenAI', 'Software Engineer'],
+    ['OneMedical', 'Registered Nurse'], ['Waymo', 'Hardware Engineer'],
+    ['Reddit', 'Product Manager'], ['Spotify', 'Product Designer'],
+    ['Khan Academy', 'Teacher'], ['Stripe', 'Financial Analyst'],
+    ['OpenAI', 'Research Scientist'], ['OpenAI', 'People Operations Manager'],
+  ].map(([company_name, title]) => ({ company_name, title, remote: false, job_country: 'us', ats_name: 'greenhouse' }));
+  const summary = summarizeJobVariety(rows);
+  summary.total_postings = 10_000;
+  summary.job_families.other = 2_000;
+  summary.employer_industries.unclassified = 3_000;
+  assert.equal(classificationCoverage(summary).all_coverage_thresholds_met, true);
+
+  summary.job_families.other = 2_001;
+  assert.equal(classificationCoverage(summary).job_family_coverage_met, false);
+  summary.job_families.other = 2_000;
+  summary.employer_industries.unclassified = 3_001;
+  assert.equal(classificationCoverage(summary).industry_coverage_met, false);
+});

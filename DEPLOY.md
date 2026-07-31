@@ -81,8 +81,14 @@ Vercel starts the monitor daily at 06:00 UTC. The GitHub Actions workflow starts
 and makes up to five bounded follow-up passes to drain a large source queue. It fails visibly when
 sources fail, polling remains incomplete, or the 14-day surfaced board drops below an inventory
 floor. Each pass writes raw postings, distinct grouped roles, sponsor-only postings, and variety
-metrics to the workflow summary. The hard full-board floors are 10,000 postings and 10,000 grouped
-roles. Posting headroom warns below 12,000, while grouped-role headroom warns below 11,000.
+metrics to the workflow summary. Each invocation selects at most 400 oldest sources, so source 401
+starts a follow-up segment rather than extending one serverless run. Follow-up passes carry the
+first response's `drain_started_at` watermark, so each source is attempted once per drain run. The hard full-board floors are
+10,000 postings and 10,000 grouped roles. Posting headroom warns below 12,000, while grouped-role
+headroom warns below 11,000. The summary also warns when job-family or employer-industry coverage
+misses its configured threshold, or when any distinct user-entered target role returns zero jobs.
+If the bounded target-role query times out, monitoring reports `measurement_available=false` and
+keeps that coverage threshold unhealthy without aborting the inventory monitor.
 
 Before enabling Google sign-in, add the identity column without touching existing users:
 

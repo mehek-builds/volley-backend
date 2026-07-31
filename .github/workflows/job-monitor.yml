@@ -37,16 +37,21 @@ jobs:
           completed=false
           final_status=unknown
           total_failed=0
+          drain_started_at=""
           for pass in 1 2 3 4 5; do
             response_file="response-${pass}.json"
             http_status=409
             for lock_attempt in $(seq 1 20); do
+              monitor_url="${API_BASE}/internal/job-monitor"
+              if [ -n "${drain_started_at}" ]; then
+                monitor_url="${monitor_url}?drain_started_at=${drain_started_at}"
+              fi
               http_status=$(curl -sS \
                 --max-time 300 \
                 -o "${response_file}" \
                 -w '%{http_code}' \
                 -H "x-internal-secret: ${INTERNAL_CRON_SECRET}" \
-                "${API_BASE}/internal/job-monitor")
+                "${monitor_url}")
               if [ "${http_status}" != 409 ]; then
                 break
               fi
@@ -56,6 +61,9 @@ jobs:
               fi
             done
             final_status="${http_status}"
+            if [ -z "${drain_started_at}" ]; then
+              drain_started_at=$(jq -r '.drain_started_at // empty' "${response_file}")
+            fi
 
             # A 500 can be the structured board-floor alarm after a successful polling pass. Keep
             # draining only that response. A timeout or unexpected server error has no monitor
@@ -63,6 +71,7 @@ jobs:
             structured_monitor_response=false
             if jq -e '
               (.polling_complete | type) == "boolean"
+              and (.drain_started_at | type) == "string"
               and (.results | type) == "array"
               and (.minimum_surfaced_jobs | type) == "number"
             ' "${response_file}" > /dev/null 2>&1; then
@@ -86,7 +95,7 @@ jobs:
               echo "### Job monitor pass ${pass}"
               echo ""
               echo '```json'
-              jq '{sources, enabled_sources, selected_sources, deferred_sources, polling_complete, poll_segment_size, polling_elapsed_ms, failed, failed_sources: [.results[] | select(.ok == false) | {company, error}], surfaced_postings, surfaced_grouped_roles, surfaced_sponsor_only_jobs, grouped_role_alert_threshold, grouped_role_alert_triggered, target_surfaced_postings, target_surfaced_grouped_roles, inventory_target_met, board_health, variety, classification_coverage, target_role_coverage}' "${response_file}"
+              jq '{sources, enabled_sources, selected_sources, deferred_sources, polling_complete, poll_segment_size, drain_started_at, polling_elapsed_ms, failed, failed_sources: [.results[] | select(.ok == false) | {company, error}], surfaced_postings, surfaced_grouped_roles, surfaced_sponsor_only_jobs, grouped_role_alert_threshold, grouped_role_alert_triggered, target_surfaced_postings, target_surfaced_grouped_roles, inventory_target_met, board_health, variety, classification_coverage, target_role_coverage}' "${response_file}"
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
 
@@ -96,9 +105,11 @@ jobs:
               echo "::warning::Grouped roles are ${grouped_roles}, below the ${threshold} early-alert threshold."
             fi
             if jq -e '.classification_coverage.all_coverage_thresholds_met == false' "${response_file}" > /dev/null; then
-              echo "::warning::Job-family or industry coverage is below its Phase 3 threshold."
+              echo "::warning::Job-family or industry coverage is below its configured threshold."
             fi
-            if jq -e '.target_role_coverage.coverage_threshold_met == false' "${response_file}" > /dev/null; then
+            if jq -e '.target_role_coverage.measurement_available == false' "${response_file}" > /dev/null; then
+              echo "::warning::User target-role coverage could not be measured within its database budget."
+            elif jq -e '.target_role_coverage.coverage_threshold_met == false' "${response_file}" > /dev/null; then
               zero_roles=$(jq -r '.target_role_coverage.zero_result_target_roles' "${response_file}")
               echo "::warning::${zero_roles} distinct user-entered target roles currently return zero jobs."
             fi

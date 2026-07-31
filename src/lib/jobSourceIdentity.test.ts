@@ -3,6 +3,10 @@ import test from 'node:test';
 import { portalNameAgrees } from './sponsorIdentity';
 import { JOB_SOURCES } from './jobSources';
 import { POLL_SEGMENT_SIZE } from './jobPollScheduler';
+import {
+  MINIMUM_INDUSTRY_CLASSIFICATION_COVERAGE,
+  classifyEmployerIndustry,
+} from './jobVariety';
 
 /**
  * THE GATE THAT SHOULD HAVE EXISTED FROM THE START.
@@ -86,4 +90,14 @@ test('no two sources claim the same board, and none is blank', () => {
     assert.ok(source.company_name.trim().length > 0, `${key} has no company name`);
     assert.ok(source.board_token.trim().length > 0, `${source.company_name} has no board token`);
   }
+});
+
+test('the reviewed catalog meets the configured employer-industry coverage threshold', () => {
+  const classified = JOB_SOURCES.filter(
+    (source) => classifyEmployerIndustry(source.company_name) !== 'unclassified',
+  );
+  assert.ok(
+    classified.length / JOB_SOURCES.length >= MINIMUM_INDUSTRY_CLASSIFICATION_COVERAGE,
+    'a source addition or rename must update the reviewed industry taxonomy',
+  );
 });

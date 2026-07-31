@@ -7,12 +7,16 @@
 - Every monitor result reports both raw job postings and distinct roles grouped by employer,
   title, and ATS family.
 - The board now enforces independent 10,000-posting and 10,000-grouped-role hard floors.
+- Monitoring reports job-family and employer-industry breadth, classification coverage, and
+  aggregate zero-result coverage for user-entered target roles without copying literal role text.
 
 ### Changed
 
 - Eligible postings remain discoverable for 14 days.
 - Grouped-role inventory warns below 11,000, while posting inventory continues to warn below
   12,000.
+- Polling selects at most 400 oldest sources per invocation and drains later segments through
+  bounded follow-up passes that share a run watermark, so a 401-source catalog completes on pass two.
 
 ## [1.0.5] - 2026-07-31
 

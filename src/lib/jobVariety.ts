@@ -222,10 +222,14 @@ export function summarizeJobVariety(rows: readonly VarietyRow[]) {
 export type JobVarietySummary = ReturnType<typeof summarizeJobVariety>;
 
 export function classificationCoverage(summary: JobVarietySummary) {
-  const jobFamilyMet = summary.job_family_classification_coverage
-    >= MINIMUM_JOB_FAMILY_CLASSIFICATION_COVERAGE;
-  const industryMet = summary.industry_classification_coverage
-    >= MINIMUM_INDUSTRY_CLASSIFICATION_COVERAGE;
+  const classifiedJobFamilies = summary.total_postings - summary.job_families.other;
+  const classifiedIndustries = summary.total_postings - summary.employer_industries.unclassified;
+  const jobFamilyMet = summary.total_postings > 0
+    && classifiedJobFamilies / summary.total_postings
+      >= MINIMUM_JOB_FAMILY_CLASSIFICATION_COVERAGE;
+  const industryMet = summary.total_postings > 0
+    && classifiedIndustries / summary.total_postings
+      >= MINIMUM_INDUSTRY_CLASSIFICATION_COVERAGE;
   const activeJobFamilies = JOB_FAMILIES
     .filter((family) => family !== 'other' && summary.job_families[family] > 0).length;
   const activeEmployerIndustries = EMPLOYER_INDUSTRIES

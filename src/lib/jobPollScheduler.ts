@@ -8,7 +8,7 @@
  * silently expanding one serverless invocation.
  */
 export const POLL_SEGMENT_SIZE = 400;
-/** Backward-compatible name for existing imports and response consumers. */
+/** Deprecated response-field alias. Its value remains the actual per-invocation selection cap. */
 export const POLL_SOURCE_LIMIT = POLL_SEGMENT_SIZE;
 export const POLL_CONCURRENCY = 12;
 export const POLL_TIME_BUDGET_MS = 210_000;
