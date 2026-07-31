@@ -182,8 +182,9 @@ test('the jobs board may only source from portals Litos can finish alone', () =>
     assert.equal(isAutonomousPortalFamily(blocked), false, blocked);
     assert.equal((POLLABLE_JOB_BOARDS as readonly string[]).includes(blocked), false, blocked);
   }
-  // Workable can finish alone, so it is eligible - it simply has no fetcher yet.
+  // Workable can finish alone and has a public-board fetcher, so it belongs on the jobs board.
   assert.equal(isAutonomousPortalFamily('workable'), true);
+  assert.equal((POLLABLE_JOB_BOARDS as readonly string[]).includes('workable'), true);
 });
 
 test('managed controlled-portal actions include reviewed fields, resume upload, and final submit', () => {

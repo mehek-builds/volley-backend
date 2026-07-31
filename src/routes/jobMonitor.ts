@@ -17,6 +17,16 @@ import { resumeSpecText } from '../engine/resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { rankingCacheKey, readRanking, writeRanking } from '../lib/rankingCache';
 import { companyDomainFor } from '../lib/companyDomains';
+import { summarizeJobVariety } from '../lib/jobVariety';
+import {
+  POLL_CONCURRENCY,
+  POLL_SOURCE_LIMIT,
+  POLL_START_RESERVE_MS,
+  POLL_TIME_BUDGET_MS,
+  WORKABLE_START_INTERVAL_MS,
+  pollSourcesWithinBudget,
+} from '../lib/jobPollScheduler';
+import { tryAcquireJobMonitorLock } from '../lib/jobMonitorLock';
 
 const sourceSchema = z.object({
   company_name: z.string().trim().min(1).max(200),
@@ -56,7 +66,7 @@ const jobParamsSchema = z.object({ id: z.string().uuid() });
 /**
  * THE BOARD MUST NEVER FALL BELOW THIS MANY SURFACED JOBS.
  *
- * A hard product floor, not a target and not a nice-to-have. Below a thousand postings the board
+ * A hard product floor, not a target and not a nice-to-have. Below ten thousand postings the board
  * stops being a place a job seeker can browse and becomes a list they exhaust in one sitting, so a
  * board that quietly shrinks is a broken product that still returns HTTP 200.
  *
@@ -67,25 +77,25 @@ const jobParamsSchema = z.object({ id: z.string().uuid() });
  * directly subtracts from this number, so whoever tightens the first has to answer for the second,
  * and this check is what forces that conversation instead of letting the board silently drain.
  *
- * Headroom today: ~7,100 surfaced against a floor of 1,000, all from Greenhouse, Lever and Ashby.
- *
  * If this fires, DO NOT fix it by lowering the number. It is a symptom of one of:
  *   - sources failing their polls (check career_page_sources.last_error)
  *   - a portal demoted out of AUTONOMOUS_PORTAL_FAMILIES, taking its boards with it
  *   - the deactivation sweep in pollSource wiping boards (see the empty-response guard there)
- * The fix is more sources or a restored adapter. Adding a Workable fetcher is the cheapest lever:
- * Workable is already autonomous and just has no poller (see POLLABLE_JOB_BOARDS).
+ * The fix is more sources or a restored adapter. Workable is now both autonomous and pollable, so
+ * adding verified Workable account tokens is the cheapest source-expansion lever.
  */
-export const MINIMUM_SURFACED_JOBS = 1_000;
+export const MINIMUM_SURFACED_JOBS = 10_000;
+
+/** The sponsor-only view has a separate floor because it is a strict subset of the full board. */
+export const MINIMUM_SPONSOR_SURFACED_JOBS = 5_000;
 
 /**
  * REQUIRED HEADROOM OVER THE FLOOR.
  *
- * 1,000 is the point at which the board is broken. This is the point at which someone has to look at
- * it. Alarming only at the floor means the first warning arrives when the product is already
- * unusable, so the cron treats 5x as the line and the floor as the emergency below it.
+ * 10,000 is the committed inventory. The warning line is 20 percent above it, giving source decay
+ * room before the product breaks its commitment.
  */
-export const REQUIRED_HEADROOM_MULTIPLE = 5;
+export const REQUIRED_HEADROOM_MULTIPLE = 1.2;
 export const REQUIRED_SURFACED_JOBS = MINIMUM_SURFACED_JOBS * REQUIRED_HEADROOM_MULTIPLE;
 
 /**
@@ -98,8 +108,10 @@ export const REQUIRED_SURFACED_JOBS = MINIMUM_SURFACED_JOBS * REQUIRED_HEADROOM_
  * it spans Sat+Sun+Mon. Any 7-day window contains exactly one Saturday and one Sunday, so the
  * weekend dip is fully absorbed and the count stops swinging with the day of the week.
  *
- * Measured windows the day this shipped: 3d = 3,917 · 4d = 6,927 · 5d = 7,815 · **7d = 9,664**.
- * Only 7d clears REQUIRED_SURFACED_JOBS on every weekday, and it does so with ~1.9x margin.
+ * Measured windows before the 10,000-job commitment: 3d = 3,917, 4d = 6,927, 5d = 7,815,
+ * and 7d = 9,664. The seven-day window is stable against weekday mix, but the measurement also
+ * proves the existing source set alone does not satisfy the new floor. Workable and additional
+ * reviewed sources must close the gap.
  *
  * WHAT WOULD MAKE THIS UNSUSTAINABLE, and what the cron watches for: weekly posting volume falling
  * (a hiring slowdown, or the December lull), or sources decaying as board tokens rotate. Either
@@ -235,6 +247,24 @@ export async function surfacedJobCount(sponsorOnly = false): Promise<number> {
     // visitor ever sees.
     .where(and(...boardConditions({ sponsorOnly })));
   return row?.total ?? 0;
+}
+
+/** The mix behind the headline count, computed under the exact public-board predicates. */
+export async function boardVarietyMetrics() {
+  const rows = await db
+    .select({
+      company_name: monitored_jobs.company_name,
+      title: monitored_jobs.title,
+      department: monitored_jobs.department,
+      employment_type: monitored_jobs.employment_type,
+      remote: monitored_jobs.remote,
+      job_country: monitored_jobs.job_country,
+      ats_name: career_page_sources.ats_name,
+    })
+    .from(monitored_jobs)
+    .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+    .where(and(...boardConditions({ sponsorOnly: false })));
+  return summarizeJobVariety(rows);
 }
 
 /**
@@ -516,29 +546,6 @@ async function baseResumeText(userId: string | undefined): Promise<string | null
   return text.length > 0 ? text : null;
 }
 
-/* One daily run has to touch EVERY enabled source, not a rotating slice of
-   them. At 20 per run a 40-source board took two days to come round, and a
-   source is only marked stale when it is polled, so a posting closed on Monday
-   sat on the public board until Wednesday. The Vercel function ceiling is 300s
-   (vercel.json) and a board fetch is one HTTP call plus one transaction, so
-   eight at a time clears ~60 sources well inside the budget. Raise the source
-   count past this and the limit needs raising with it, or the tail stops
-   refreshing daily and nothing says so.
-
-   RAISED TO 400 ON 2026-07-28, when the board went from 51 sources to 239. At 60
-   a run, 179 of them would have sat unpolled every night and come round once
-   every four days — the exact "tail stops refreshing and nothing says so"
-   failure the paragraph above warns about, reintroduced by growing the source
-   list rather than by lowering this number.
-
-   The budget is measured, not guessed: the 2026-07-28 18:19 UTC run polled 51
-   sources in 22s at this concurrency, so ~0.43s per source wall-clock. 239
-   sources is therefore ~103s, and 400 would be ~172s, both inside the 300s
-   Vercel ceiling. 400 leaves room to roughly double the board again before this
-   needs revisiting; past that, raise POLL_CONCURRENCY rather than this, since
-   the cost is network wait rather than CPU. */
-const POLL_SOURCES_PER_RUN = 400;
-const POLL_CONCURRENCY = 8;
 const UPSERT_CHUNK = 200;
 
 function requireOperator(request: FastifyRequest, reply: FastifyReply): boolean {
@@ -1001,7 +1008,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       ats_name: career_page_sources.ats_name,
       /* The company's OWN careers page, which is the only field here that can carry the company's
          own domain. Every other URL on the row points at the job board: apply_url and posting_url
-         are both greenhouse/lever/ashby, so a client deriving a company identity from either gets
+         are all ATS-hosted, including Workable, so a client deriving a company identity from either gets
          the board's identity for every row instead. Operators sometimes register the board URL as
          the careers URL too, so the client still has to check before trusting it. */
       career_url: career_page_sources.career_url,
@@ -1452,19 +1459,35 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
 
   fastify.get('/internal/job-monitor', async (request: FastifyRequest, reply: FastifyReply) => {
     if (!requireOperator(request, reply)) return;
+    const releaseMonitorLock = await tryAcquireJobMonitorLock();
+    if (!releaseMonitorLock) {
+      return reply.status(409).send({
+        error: 'A job-monitor run is already in progress. Retry after it finishes.',
+        polling_complete: false,
+      });
+    }
+    try {
     const envSources = configuredSources();
     if (envSources.length > 0) await upsertSources(envSources);
     /* Every run reconciles the database against the reviewed list, so a company removed in a pull
        request stops appearing on the board without anybody remembering to go and disable it. */
     const retired = await retireUnlistedSources(JOB_SOURCES);
+    const [sourceCount] = await db
+      .select({ total: sql<number>`count(*)::int` })
+      .from(career_page_sources)
+      .where(eq(career_page_sources.enabled, true));
+    const enabledSourceCount = sourceCount?.total ?? 0;
     const sources = await db.select().from(career_page_sources)
       .where(eq(career_page_sources.enabled, true))
       .orderBy(sql`${career_page_sources.last_polled_at} asc nulls first`)
-      .limit(POLL_SOURCES_PER_RUN);
-    const results = [];
-    for (let index = 0; index < sources.length; index += POLL_CONCURRENCY) {
-      results.push(...await Promise.all(sources.slice(index, index + POLL_CONCURRENCY).map(pollSource)));
-    }
+      .limit(POLL_SOURCE_LIMIT);
+    /* Stop starting work at three minutes and cap the scheduler at three and a half, leaving at
+       least 90 seconds before Vercel's 300-second hard stop for the final batch, metrics and reply.
+       A source that is not attempted keeps its old last_polled_at, so the oldest-first query puts
+       it first next time. Workable starts are separately spaced below its shared provider limit. */
+    const pollRun = await pollSourcesWithinBudget(sources, pollSource);
+    const results = pollRun.results;
+    const deferredSources = Math.max(0, enabledSourceCount - results.length);
     /* THE FLOOR CHECK. See MINIMUM_SURFACED_JOBS.
      *
      * Reported on every run, not only on a breach, so the number is watchable while it is still
@@ -1487,17 +1510,31 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
      * one is the fragile of the two: it drains when employer links go NULL, when a data refresh
      * drops confirmations, or when employers add a refusal sentence. Measuring only the total meant
      * the board a job seeker who needs sponsorship sees could fall to zero while this cron reported
-     * ~7,100 and returned 200 - which is precisely the failure the total-board floor exists to
+     * a healthy total and returned 200, which is precisely the failure the total-board floor exists to
      * prevent, one audience over. */
     const surfacedSponsorOnly = await surfacedJobCount(true);
+    const variety = await boardVarietyMetrics();
     const payload = {
       retired_sources: retired,
       sources: results.length,
+      enabled_sources: enabledSourceCount,
+      selected_sources: sources.length,
+      deferred_sources: deferredSources,
+      polling_complete: deferredSources === 0,
+      stopped_for_time_budget: pollRun.stopped_for_time_budget,
+      polling_elapsed_ms: pollRun.elapsed_ms,
+      polling_time_budget_ms: POLL_TIME_BUDGET_MS,
+      polling_start_reserve_ms: POLL_START_RESERVE_MS,
+      poll_source_limit: POLL_SOURCE_LIMIT,
+      poll_concurrency: POLL_CONCURRENCY,
+      workable_start_interval_ms: WORKABLE_START_INTERVAL_MS,
       jobs: results.reduce((sum, result) => sum + result.jobs, 0),
       failed: results.filter((result) => !result.ok).length,
       surfaced_jobs: surfaced,
       surfaced_sponsor_only_jobs: surfacedSponsorOnly,
+      variety,
       minimum_surfaced_jobs: MINIMUM_SURFACED_JOBS,
+      minimum_sponsor_surfaced_jobs: MINIMUM_SPONSOR_SURFACED_JOBS,
       /* THE SUSTAINABILITY CHECK, run every day rather than once.
        *
        * Whether a 7-day window keeps the board above REQUIRED_SURFACED_JOBS is not a question that
@@ -1505,8 +1542,8 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
        * drift. Reporting the window, the requirement and the current multiple on every run is what
        * turns "we checked once in July" into something that keeps checking itself.
        *
-       * headroom_multiple is the number to watch. It was 1.9x the day this shipped; a slide toward
-       * 1.0 is the signal to widen JOB_FRESHNESS_DAYS or add sources, well before anything breaks. */
+       * headroom_multiple is the number to watch. A slide toward 1.0 is the signal to widen
+       * JOB_FRESHNESS_DAYS or add sources before anything breaks. */
       freshness_window_days: JOB_FRESHNESS_DAYS,
       /* The rolling window's two halves, reported so both are visible: how many stale/closed rows
          this run removed, and how long a closed posting is kept before deletion. A purge that
@@ -1518,9 +1555,15 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       board_health: boardHealth(surfaced),
       results,
     };
+    if (deferredSources > 0) {
+      request.log.warn(
+        { enabledSourceCount, attempted: results.length, deferredSources, elapsedMs: pollRun.elapsed_ms },
+        'Job monitor deferred sources; the external scheduler should invoke another pass.',
+      );
+    }
     const below = boardIsBelowFloor(surfaced);
-    const sponsorBelow = boardIsBelowFloor(surfacedSponsorOnly);
-    /* Short of the 5x headroom but not yet under the floor: logged as a warning and reported in the
+    const sponsorBelow = surfacedSponsorOnly < MINIMUM_SPONSOR_SURFACED_JOBS;
+    /* Short of the 1.2x headroom but not yet under the floor: logged as a warning and reported in the
      * payload, NOT a 5xx. The distinction is deliberate. A 5xx here means "the board is broken now";
      * if the merely-thin case also failed the run, the alarm would stop meaning that, and the first
      * real breach would arrive in a channel everyone had learned to ignore. This is the early
@@ -1534,18 +1577,28 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     }
     if (below || sponsorBelow) {
       request.log.error(
-        { surfaced, surfacedSponsorOnly, floor: MINIMUM_SURFACED_JOBS, failedSources: payload.failed },
+        {
+          surfaced,
+          surfacedSponsorOnly,
+          floor: MINIMUM_SURFACED_JOBS,
+          sponsorFloor: MINIMUM_SPONSOR_SURFACED_JOBS,
+          failedSources: payload.failed,
+        },
         'Job board is below its minimum surfaced-jobs floor',
       );
       return reply.status(500).send({
         ...payload,
         error: `The job board is showing ${surfaced} jobs (${surfacedSponsorOnly} of them at employers `
-          + `confirmed to sponsor), below the floor of ${MINIMUM_SURFACED_JOBS}. `
+          + `confirmed to sponsor). The full-board floor is ${MINIMUM_SURFACED_JOBS} and the `
+          + `sponsor-only floor is ${MINIMUM_SPONSOR_SURFACED_JOBS}. `
           + 'Check career_page_sources.last_error for failing polls, whether a portal left '
           + 'AUTONOMOUS_PORTAL_FAMILIES, and whether career_page_sources.sponsor_employer_id went '
           + 'NULL after a data refresh. Do not lower the floor to clear this.',
       });
     }
     return reply.send(payload);
+    } finally {
+      await releaseMonitorLock();
+    }
   });
 }

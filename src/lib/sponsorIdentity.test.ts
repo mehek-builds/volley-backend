@@ -131,10 +131,13 @@ test('a two-word brand is found spelled either way', () => {
 });
 
 test('the ATS host is never the company domain', () => {
-  const check = identityCheck('Notion', noFilings, board('We are hiring.', {
-    url: 'https://job-boards.greenhouse.io/notion/jobs/123',
-  }));
-  assert.equal(check.domainMatch, false, "greenhouse.io/notion is the board's URL, not Notion's domain");
+  for (const [company, url] of [
+    ['Notion', 'https://job-boards.greenhouse.io/notion/jobs/123'],
+    ['Suade', 'https://apply.workable.com/j/57B10F8875/apply'],
+  ] as const) {
+    const check = identityCheck(company, noFilings, board('We are hiring.', { url }));
+    assert.equal(check.domainMatch, false, `${url} is the ATS URL, not the company's domain`);
+  }
 });
 
 test('the company own domain does count', () => {

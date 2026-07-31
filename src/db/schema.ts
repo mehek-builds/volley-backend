@@ -546,7 +546,7 @@ export const generated_resumes = pgTable('generated_resumes', {
 export const career_page_sources = pgTable('career_page_sources', {
   id: uuid('id').primaryKey().defaultRandom(),
   company_name: text('company_name').notNull(),
-  ats_name: text('ats_name').notNull(), // 'greenhouse' | 'lever' | 'ashby'
+  ats_name: text('ats_name').notNull(), // 'greenhouse' | 'lever' | 'ashby' | 'workable'
   board_token: text('board_token').notNull(),
   career_url: text('career_url').notNull(),
   enabled: boolean('enabled').default(true).notNull(),

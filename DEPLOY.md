@@ -2,7 +2,7 @@
 
 The app is a Fastify server wrapped as a single Vercel serverless function
 (`api/index.ts`); `vercel.json` rewrites every path to it and raises the function
-timeout to 60s (Hunter + draft calls can take 10-40s). Postgres must be a hosted
+timeout to 300s (job polling and resume generation can be long-running). Postgres must be a hosted
 serverless database. Your laptop's local Postgres is not reachable from Vercel.
 
 ## One-time setup (steps only you can do: account + billing)
@@ -11,6 +11,10 @@ serverless database. Your laptop's local Postgres is not reachable from Vercel.
 Use **Vercel Postgres** (Storage tab → Create → Postgres) or **Neon** (neon.tech).
 Copy the **pooled** connection string (Neon: the host ending in `-pooler`). It must
 include `sslmode=require`.
+
+The job monitor also uses a dedicated PostgreSQL session for its advisory lock. For Neon, the app
+derives the direct hostname by removing `-pooler` from `DATABASE_URL`. For another provider, set
+`DATABASE_DIRECT_URL` to a direct, session-pinned connection instead.
 
 ### 2. Provision the schema (run once from your machine)
 The DB starts empty. From this folder, point drizzle at the new DB and push the schema:
@@ -51,6 +55,7 @@ Set these for Production (and Preview if you want):
 | Key | Value |
 |-----|-------|
 | `DATABASE_URL` | your Neon/Vercel Postgres **pooled** URL |
+| `DATABASE_DIRECT_URL` | optional direct, session-pinned Postgres URL; omit for Neon because it is derived from `DATABASE_URL` |
 | `JWT_SIGNING_SECRET` | any 32+ char random string |
 | `GOOGLE_CLIENT_ID` | Google OAuth web client ID, must match the website's `NEXT_PUBLIC_GOOGLE_CLIENT_ID` |
 | `ENCRYPTION_KEY` | any 32+ char random string, encrypts `application_profile` columns at rest |
@@ -60,11 +65,22 @@ Set these for Production (and Preview if you want):
 | `REOON_API_KEY` | your Reoon key (optional) |
 | `BOUNCEBAN_API_KEY` | your BounceBan key (optional) |
 | `APOLLO_API_KEY` | your Apollo key (optional fallback) |
-| `JOB_MONITOR_SOURCES_JSON` | JSON array of Greenhouse, Lever, and Ashby company boards to check every 15 minutes |
+| `INTERNAL_CRON_SECRET` | random secret shared with the GitHub Actions job-monitor workflow |
+| `JOB_MONITOR_SOURCES_JSON` | optional JSON array of extra Greenhouse, Lever, Ashby, or Workable boards loaded by each daily monitor run |
 | `LEMONSQUEEZY_CHECKOUT_URL` | reusable live product URL containing `/checkout/buy/` |
 | `LEMONSQUEEZY_VARIANT_ID` | numeric ID of the $49.99 monthly Pro variant |
 | `LEMONSQUEEZY_WEBHOOK_SECRET` | signing secret configured on the Lemon Squeezy webhook |
 | `NODE_ENV` | `production` |
+
+The reviewed source list lives in `src/lib/jobSources.ts`; use `JOB_MONITOR_SOURCES_JSON` only for
+temporary additions that cannot wait for a code review. In GitHub, add `INTERNAL_CRON_SECRET` as an
+Actions secret with the same value used by Vercel. Optionally set the `LITOS_API_BASE` Actions
+variable when the API is not hosted at `https://student-outreach-backend.vercel.app`.
+
+Vercel starts the monitor daily at 06:00 UTC. The GitHub Actions workflow starts ten minutes later
+and makes up to five bounded follow-up passes to drain a large source queue. It fails visibly when
+sources fail, polling remains incomplete, or the surfaced board drops below either inventory floor.
+Each pass writes inventory and variety metrics to the workflow summary.
 
 Before enabling Google sign-in, add the identity column without touching existing users:
 
@@ -133,5 +149,5 @@ Then rebuild: `npm run build`, and reload the unpacked extension in Chrome
 ## Notes
 - **Cold starts:** the free tier sleeps; first request after idle is slow (~1-3s).
 - **CORS** allows configured web origins and Chrome extension origins.
-- **Function timeout** is 60s (Hobby max). If a resolve ever exceeds it, lower the
-  per-resolve contact count or upgrade the plan (Pro allows 300s).
+- **Function timeout** is 300s. Polling stops starting new work early enough to return metrics and
+  leave deferred sources for the next bounded pass.

@@ -2,12 +2,14 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   hasUsableDescription,
+  fetchSourceJobs,
   isIngestablePosting,
   isSelfDeclaredTestPosting,
   MIN_DESCRIPTION_CHARS,
   normalizeAshbyJobs,
   normalizeGreenhouseJobs,
   normalizeLeverJobs,
+  normalizeWorkableJobs,
   sourceEndpoint,
 } from './jobMonitor';
 
@@ -192,6 +194,84 @@ test('normalizes Ashby postings and respects its remote flag', () => {
   assert.equal(jobs[0].description, 'Build products.');
 });
 
+test('normalizes Workable postings from the public account feed', () => {
+  const jobs = normalizeWorkableJobs({
+    name: 'Suade',
+    jobs: [{
+      title: 'Business Development Representative',
+      shortcode: '57B10F8875',
+      employment_type: 'Full-time',
+      telecommuting: false,
+      department: 'Sales',
+      url: 'https://apply.workable.com/j/57B10F8875',
+      application_url: 'https://apply.workable.com/j/57B10F8875/apply',
+      published_on: '2026-07-24',
+      created_at: '2026-07-23',
+      country: 'United Kingdom',
+      city: 'London',
+      state: 'England',
+      locations: [{ country: 'United Kingdom', countryCode: 'GB', city: 'London', region: 'England' }],
+      description: '<p>Build relationships &amp; create opportunities.</p><p>Work with the sales team.</p>',
+    }],
+  });
+
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0].external_id, '57B10F8875');
+  assert.equal(jobs[0].posting_url, 'https://apply.workable.com/j/57B10F8875');
+  assert.equal(jobs[0].apply_url, 'https://apply.workable.com/j/57B10F8875/apply');
+  assert.equal(jobs[0].location, 'London, England, United Kingdom');
+  assert.equal(jobs[0].portal_country, 'United Kingdom');
+  assert.equal(jobs[0].portal_company_name, 'Suade');
+  assert.equal(jobs[0].department, 'Sales');
+  assert.equal(jobs[0].employment_type, 'Full-time');
+  assert.equal(jobs[0].description, 'Build relationships & create opportunities.\n\nWork with the sales team.');
+  assert.equal(jobs[0].posted_at?.toISOString(), '2026-07-24T00:00:00.000Z');
+});
+
+test('Workable preserves multiple countries and its explicit remote flag', () => {
+  const jobs = normalizeWorkableJobs({
+    name: 'Acme',
+    jobs: [{
+      title: 'Remote Product Manager',
+      shortcode: 'ABC123',
+      telecommuting: true,
+      function: 'Product',
+      shortlink: 'https://apply.workable.com/j/ABC123',
+      locations: [
+        { country: 'United States', city: 'New York', region: 'New York' },
+        { country: 'Canada', city: 'Toronto', region: 'Ontario' },
+      ],
+      description: '<p>Own product strategy and delivery across a global team.</p>',
+    }],
+  });
+
+  assert.equal(jobs[0].remote, true);
+  assert.equal(jobs[0].department, 'Product');
+  assert.equal(jobs[0].location, 'New York, New York, United States | Toronto, Ontario, Canada');
+  assert.equal(jobs[0].portal_country, 'United States | Canada');
+  assert.equal(jobs[0].apply_url, 'https://apply.workable.com/j/ABC123');
+});
+
+test('Workable drops postings that leave its autonomous application host', () => {
+  for (const applicationUrl of [
+    'javascript:alert(1)',
+    'data:text/html,not-a-form',
+    'https://apply.workable.com.attacker.example/j/ABC123/apply',
+    'https://example.com/apply',
+    'https://apply.workable.com/j/DIFFERENT/apply',
+  ]) {
+    assert.deepEqual(normalizeWorkableJobs({
+      name: 'Acme',
+      jobs: [{
+        title: 'Engineer',
+        shortcode: 'ABC123',
+        url: 'https://apply.workable.com/j/ABC123',
+        application_url: applicationUrl,
+      }],
+    }), [], applicationUrl);
+  }
+});
+
 test('strips markup that leaks into the providers\' descriptionPlain fields', () => {
   const ashby = normalizeAshbyJobs({ jobs: [{ id: 'job-2', title: 'TPM', jobUrl: 'https://jobs.ashbyhq.com/cursor/job-2', applyUrl: 'https://jobs.ashbyhq.com/cursor/job-2/application', location: 'SF', descriptionPlain: '<aside>Note</aside>Build infrastructure.' }] });
   assert.equal(ashby[0].description, 'Note Build infrastructure.');
@@ -371,16 +451,62 @@ test('builds first-party ATS endpoints from board tokens', () => {
   assert.match(sourceEndpoint({ ats_name: 'greenhouse', board_token: 'acme' }), /boards-api\.greenhouse\.io/);
   assert.match(sourceEndpoint({ ats_name: 'lever', board_token: 'acme' }), /api\.lever\.co/);
   assert.match(sourceEndpoint({ ats_name: 'ashby', board_token: 'acme' }), /api\.ashbyhq\.com/);
+  assert.equal(
+    sourceEndpoint({ ats_name: 'workable', board_token: 'acme' }),
+    'https://www.workable.com/api/accounts/acme?details=true',
+  );
 });
 
 test('rejects malformed successful payloads instead of interpreting them as an empty board', () => {
   assert.throws(() => normalizeGreenhouseJobs({ error: 'rate limited' }), /invalid jobs payload/);
   assert.throws(() => normalizeLeverJobs({ postings: [] }), /invalid jobs payload/);
   assert.throws(() => normalizeAshbyJobs({ results: [] }), /invalid jobs payload/);
+  assert.throws(() => normalizeWorkableJobs({ results: [] }), /invalid jobs payload/);
 });
 
 test('accepts explicit empty job collections', () => {
   assert.deepEqual(normalizeGreenhouseJobs({ jobs: [] }), []);
   assert.deepEqual(normalizeLeverJobs([]), []);
   assert.deepEqual(normalizeAshbyJobs({ jobs: [] }), []);
+  assert.deepEqual(normalizeWorkableJobs({ name: 'Acme', jobs: [] }), []);
+});
+
+test('fetches and dispatches a Workable account response through the public ingestion function', async () => {
+  let requestedUrl = '';
+  const jobs = await fetchSourceJobs(
+    { ats_name: 'workable', board_token: 'acme team' },
+    async (input) => {
+      requestedUrl = String(input);
+      return new Response(JSON.stringify({
+        name: 'Acme',
+        jobs: [{
+          shortcode: 'WK1',
+          title: 'Operations Analyst',
+          url: 'https://apply.workable.com/j/WK1',
+          country: 'United States',
+          description: '<p>Improve business operations and reporting systems.</p>',
+        }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    },
+  );
+  assert.equal(requestedUrl, 'https://www.workable.com/api/accounts/acme%20team?details=true');
+  assert.equal(jobs[0]?.external_id, 'WK1');
+  assert.equal(jobs[0]?.portal_company_name, 'Acme');
+});
+
+test('Workable fetch rejects provider errors and malformed successful payloads', async () => {
+  await assert.rejects(
+    fetchSourceJobs(
+      { ats_name: 'workable', board_token: 'acme' },
+      async () => new Response('rate limited', { status: 429 }),
+    ),
+    /workable board returned HTTP 429/,
+  );
+  await assert.rejects(
+    fetchSourceJobs(
+      { ats_name: 'workable', board_token: 'acme' },
+      async () => new Response(JSON.stringify({ results: [] }), { status: 200 }),
+    ),
+    /invalid jobs payload/,
+  );
 });

@@ -198,8 +198,8 @@ export function hostLabels(urls: (string | null | undefined)[]): Set<string> {
     } catch {
       continue;
     }
-    // The ATS's own host is not the company's: every Greenhouse posting lives on greenhouse.io.
-    if (/(greenhouse|lever|ashbyhq)\.(io|co)$/.test(host)) continue;
+    // The ATS's own host is not the company's: every posting on these feeds lives on its vendor.
+    if (/(greenhouse|lever|ashbyhq)\.(io|co)$/.test(host) || host === 'apply.workable.com') continue;
     for (const label of host.split('.')) labels.add(label.toUpperCase());
   }
   return labels;

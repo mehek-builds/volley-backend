@@ -164,9 +164,9 @@ export function employerEvidenceApplies(location: string | null | undefined): bo
   return jobCountry(location) !== 'non_us';
 }
 
-/* ISO-3166 alpha-2 and the country names the three boards actually publish. Lever sends "GB",
-   Ashby sends "United States", Greenhouse sends office-group names like "US" and "India
-   Locations" - so this has to read all three shapes. */
+/* ISO-3166 alpha-2 and the country names the boards actually publish. Lever sends "GB", Ashby and
+   Workable send "United States", and Greenhouse sends office names and locations, so this has to
+   read every shape. */
 const US_COUNTRY_TOKENS = new Set(['US', 'USA', 'UNITED STATES', 'UNITED STATES OF AMERICA', 'PR', 'PUERTO RICO']);
 
 /**

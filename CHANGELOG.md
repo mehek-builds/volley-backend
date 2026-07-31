@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.0.5] - 2026-07-31
+
+### Added
+
+- Litos can ingest and automatically apply to eligible Workable postings.
+- Operators can measure job-board variety across role families, industries, locations,
+  employment types, ATS providers, remote status, and employer concentration.
+
+### Changed
+
+- Scheduled polling can safely process up to 800 sources across five bounded passes.
+- Inventory monitoring now enforces floors of 10,000 surfaced jobs and 5,000 sponsor-eligible
+  jobs, with an early warning below 12,000 total jobs.
+
+### Fixed
+
+- Overlapping monitor runs are excluded with a connection-bound database lock.
+- Polling source failures, unsafe Workable application URLs, and incomplete polling passes now
+  fail visibly instead of producing a misleading healthy result.
+
 ## [1.0.4] - 2026-07-31
 
 ### Performance
