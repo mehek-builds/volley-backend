@@ -6,6 +6,7 @@ import {
   PURGE_POSTINGS_OLDER_THAN_DAYS,
   JOB_FRESHNESS_DAYS,
   MINIMUM_SPONSOR_SURFACED_JOBS,
+  MONITOR_METRICS_STATEMENT_TIMEOUT_MS,
   MINIMUM_SURFACED_GROUPED_ROLES,
   MINIMUM_SURFACED_JOBS,
   REQUIRED_HEADROOM_MULTIPLE,
@@ -17,6 +18,7 @@ import {
 } from './jobMonitor';
 import { AUTONOMOUS_PORTAL_FAMILIES, portalCanAutoSubmit } from '../lib/portalSubmission';
 import { hasUsableDescription, POLLABLE_JOB_BOARDS } from '../lib/jobMonitor';
+import { POLL_TIME_BUDGET_MS } from '../lib/jobPollScheduler';
 
 test('the board has independent ten-thousand posting and grouped-role floors', () => {
   // Pinned as a value, not just a comparison. If someone "fixes" a breach by lowering the number,
@@ -34,6 +36,13 @@ test('the scheduled cron summary always reports postings and grouped roles', () 
   const workflow = readFileSync('.github/workflows/job-monitor.yml', 'utf8');
   assert.match(workflow, /surfaced_postings/);
   assert.match(workflow, /surfaced_grouped_roles/);
+  assert.match(workflow, /structured_monitor_response=false/);
+  assert.match(workflow, /\(\.polling_complete \| type\) == "boolean"/);
+});
+
+test('post-poll metric statements leave time for the cron to answer', () => {
+  assert.equal(MONITOR_METRICS_STATEMENT_TIMEOUT_MS, 30_000);
+  assert.ok(MONITOR_METRICS_STATEMENT_TIMEOUT_MS < 300_000 - POLL_TIME_BUDGET_MS);
 });
 
 test('an empty poll response never deactivates a board that currently has postings', () => {

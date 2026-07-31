@@ -57,9 +57,20 @@ jobs:
             done
             final_status="${http_status}"
 
-            # A 500 can be the board-floor alarm after a successful polling pass. Keep draining the
-            # queue in that case, then fail after the last pass so both freshness and alerting work.
-            if [ "${http_status}" != 200 ] && [ "${http_status}" != 500 ]; then
+            # A 500 can be the structured board-floor alarm after a successful polling pass. Keep
+            # draining only that response. A timeout or unexpected server error has no monitor
+            # payload and must fail immediately instead of repeating expensive polling five times.
+            structured_monitor_response=false
+            if jq -e '
+              (.polling_complete | type) == "boolean"
+              and (.results | type) == "array"
+              and (.minimum_surfaced_jobs | type) == "number"
+            ' "${response_file}" > /dev/null 2>&1; then
+              structured_monitor_response=true
+            fi
+            if [ "${http_status}" != 200 ] && {
+              [ "${http_status}" != 500 ] || [ "${structured_monitor_response}" != true ];
+            }; then
               echo "::error::Job-monitor request returned HTTP ${http_status}."
               cat "${response_file}"
               exit 1

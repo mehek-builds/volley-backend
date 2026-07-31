@@ -102,6 +102,9 @@ export const REQUIRED_HEADROOM_MULTIPLE = 1.2;
 export const REQUIRED_SURFACED_JOBS = MINIMUM_SURFACED_JOBS * REQUIRED_HEADROOM_MULTIPLE;
 export const REQUIRED_SURFACED_GROUPED_ROLES = 11_000;
 
+/** Bound each post-poll metrics statement so the cron still has time to answer and release its lock. */
+export const MONITOR_METRICS_STATEMENT_TIMEOUT_MS = 30_000;
+
 /**
  * ONLY POSTINGS FROM THE LAST FOURTEEN DAYS ARE SHOWN.
  *
@@ -153,9 +156,9 @@ export const CLOSED_POSTING_RETENTION_DAYS = 2;
  * How old a posting must be before its row is deleted outright.
  *
  * A FULL WINDOW OF SLACK past the window itself, and the slack is the whole point: purging at the
- * 7-day boundary would delete rows the very next poll re-inserts, forever, for any posting sitting
- * near the edge. Exported so the relationship to JOB_FRESHNESS_DAYS is pinned by a test rather than
- * recomputed in one.
+ * freshness boundary would delete rows the very next poll re-inserts, forever, for any posting
+ * sitting near the edge. Exported so the relationship to JOB_FRESHNESS_DAYS is pinned by a test
+ * rather than recomputed in one.
  */
 export const PURGE_POSTINGS_OLDER_THAN_DAYS = JOB_FRESHNESS_DAYS * 2;
 
@@ -270,9 +273,40 @@ export async function surfacedGroupedRoleCount(sponsorOnly = false): Promise<num
   return Number(result.rows[0]?.total ?? 0);
 }
 
+/** All cron inventory totals from one joined snapshot and one database round trip. */
+type JobMonitorQueryExecutor = Pick<typeof db, 'execute' | 'select'>;
+
+export async function boardInventoryMetrics(executor: JobMonitorQueryExecutor = db) {
+  const fullBoard = and(...boardConditions({ sponsorOnly: false }));
+  const sponsorBoard = and(...boardConditions({ sponsorOnly: true }));
+  const result = await executor.execute<{
+    surfaced_postings: number;
+    surfaced_grouped_roles: number;
+    surfaced_sponsor_only_jobs: number;
+  }>(sql`
+    select
+      count(*) filter (where ${fullBoard})::int as surfaced_postings,
+      count(distinct (
+        ${monitored_jobs.company_name},
+        ${monitored_jobs.title},
+        ${career_page_sources.ats_name}
+      )) filter (where ${fullBoard})::int as surfaced_grouped_roles,
+      count(*) filter (where ${sponsorBoard})::int as surfaced_sponsor_only_jobs
+    from ${monitored_jobs}
+    inner join ${career_page_sources}
+      on ${monitored_jobs.source_id} = ${career_page_sources.id}
+  `);
+  const row = result.rows[0];
+  return {
+    surfacedPostings: Number(row?.surfaced_postings ?? 0),
+    surfacedGroupedRoles: Number(row?.surfaced_grouped_roles ?? 0),
+    surfacedSponsorOnly: Number(row?.surfaced_sponsor_only_jobs ?? 0),
+  };
+}
+
 /** The mix behind the headline count, computed under the exact public-board predicates. */
-export async function boardVarietyMetrics() {
-  const rows = await db
+export async function boardVarietyMetrics(executor: JobMonitorQueryExecutor = db) {
+  const rows = await executor
     .select({
       company_name: monitored_jobs.company_name,
       title: monitored_jobs.title,
@@ -286,6 +320,18 @@ export async function boardVarietyMetrics() {
     .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
     .where(and(...boardConditions({ sponsorOnly: false })));
   return summarizeJobVariety(rows);
+}
+
+/** A connection-bound, time-limited snapshot for every post-poll metric in the cron response. */
+export async function boardMonitoringSnapshot() {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql.raw(
+      `set local statement_timeout = '${MONITOR_METRICS_STATEMENT_TIMEOUT_MS}ms'`,
+    ));
+    const inventory = await boardInventoryMetrics(tx);
+    const variety = await boardVarietyMetrics(tx);
+    return { inventory, variety };
+  }, { isolationLevel: 'repeatable read' });
 }
 
 /**
@@ -1250,10 +1296,9 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
    * count the un-merged rows, and pages would hold inconsistent numbers of tiles. Grouping here
    * keeps the count, the pagination and the tiles describing the same set.
    *
-   * The grouping key is (company, title) EXACTLY — Mehek's rule, 2026-07-28. No fuzzy matching, no
+   * The grouping key is (company, title, ATS family) exactly. No fuzzy matching and no
    * normalisation beyond what the employer typed: "Software Engineer II" and "Software Engineer"
-   * are different jobs, and a merge that guesses otherwise hides a real posting behind another
-   * one's apply link.
+   * are different jobs, and the ATS family keeps distinct apply systems from being folded together.
    *
    * Deliberately its own route rather than a flag on /jobs: that route now carries resume-based
    * ranking, a ranking cache and a pool, all of which are per-posting concepts. Threading a
@@ -1272,9 +1317,9 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       || parsed.data.sponsor_only === 'true';
     const where = and(...boardConditions({ ...parsed.data, sponsorOnly }));
 
-    /* One row per (company, title). The aggregates are chosen so the row still describes something
-       true of the whole group: the newest timestamps, every distinct location, and the apply link
-       belonging to the newest posting in the group rather than an arbitrary member. */
+    /* One row per (company, title, ATS family). The aggregates are chosen so the row still describes
+       something true of the whole group: the newest timestamps, every distinct location, and the
+       apply link belonging to the newest posting in the group rather than an arbitrary member. */
     const rows = await db
       .select({
         id: sql<string>`(array_agg(${monitored_jobs.id} order by ${monitored_jobs.posted_at} desc nulls last, ${monitored_jobs.id} desc))[1]`,
@@ -1539,17 +1584,18 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
        first would report a board that includes rows this run was about to delete. */
     const purged = await purgeExpiredPostings();
 
-    const surfaced = await surfacedJobCount();
-    const surfacedGroupedRoles = await surfacedGroupedRoleCount();
-    /* THE FLOOR IS CHECKED TWICE, because there are two boards.
-     * A count over the whole board says nothing about the sponsor-only one, and the sponsor-only
-     * one is the fragile of the two: it drains when employer links go NULL, when a data refresh
-     * drops confirmations, or when employers add a refusal sentence. Measuring only the total meant
-     * the board a job seeker who needs sponsorship sees could fall to zero while this cron reported
-     * a healthy total and returned 200, which is precisely the failure the total-board floor exists to
-     * prevent, one audience over. */
-    const surfacedSponsorOnly = await surfacedJobCount(true);
-    const variety = await boardVarietyMetrics();
+    /* Three thresholds from one inventory snapshot: postings and grouped roles over the full board,
+     * plus postings on the sponsor-only view. The sponsor view is the fragile one: it drains when
+     * employer links go NULL, when a data refresh drops confirmations, or when employers add a
+     * refusal sentence. Measuring only the full board would let that view fall to zero while this
+     * cron reported a healthy total. The snapshot uses one serverless connection and bounds each
+     * statement so a slow database still returns an error and releases the advisory lock. */
+    const { inventory, variety } = await boardMonitoringSnapshot();
+    const {
+      surfacedPostings: surfaced,
+      surfacedGroupedRoles,
+      surfacedSponsorOnly,
+    } = inventory;
     const payload = {
       retired_sources: retired,
       sources: results.length,
