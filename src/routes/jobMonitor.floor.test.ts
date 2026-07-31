@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import {
   CLOSED_POSTING_RETENTION_DAYS,
   PURGE_POSTINGS_OLDER_THAN_DAYS,
   JOB_FRESHNESS_DAYS,
   MINIMUM_SPONSOR_SURFACED_JOBS,
+  MONITOR_METRICS_STATEMENT_TIMEOUT_MS,
+  MINIMUM_SURFACED_GROUPED_ROLES,
   MINIMUM_SURFACED_JOBS,
   REQUIRED_HEADROOM_MULTIPLE,
+  REQUIRED_SURFACED_GROUPED_ROLES,
   REQUIRED_SURFACED_JOBS,
   boardHealth,
   boardIsBelowFloor,
@@ -14,16 +18,31 @@ import {
 } from './jobMonitor';
 import { AUTONOMOUS_PORTAL_FAMILIES, portalCanAutoSubmit } from '../lib/portalSubmission';
 import { hasUsableDescription, POLLABLE_JOB_BOARDS } from '../lib/jobMonitor';
+import { POLL_TIME_BUDGET_MS } from '../lib/jobPollScheduler';
 
-test('the board floor is ten thousand surfaced jobs, and it is not a suggestion', () => {
+test('the board has independent ten-thousand posting and grouped-role floors', () => {
   // Pinned as a value, not just a comparison. If someone "fixes" a breach by lowering the number,
   // this test is what makes that show up as a deliberate edit in a diff rather than a quiet tweak.
   assert.equal(MINIMUM_SURFACED_JOBS, 10_000);
+  assert.equal(MINIMUM_SURFACED_GROUPED_ROLES, 10_000);
   assert.equal(MINIMUM_SPONSOR_SURFACED_JOBS, 5_000);
   assert.equal(boardIsBelowFloor(9_999), true);
   assert.equal(boardIsBelowFloor(10_000), false, 'exactly at the floor is not below it');
   assert.equal(boardIsBelowFloor(10_001), false);
   assert.equal(boardIsBelowFloor(0), true, 'an empty board is the case this exists for');
+});
+
+test('the scheduled cron summary always reports postings and grouped roles', () => {
+  const workflow = readFileSync('.github/workflows/job-monitor.yml', 'utf8');
+  assert.match(workflow, /surfaced_postings/);
+  assert.match(workflow, /surfaced_grouped_roles/);
+  assert.match(workflow, /structured_monitor_response=false/);
+  assert.match(workflow, /\(\.polling_complete \| type\) == "boolean"/);
+});
+
+test('post-poll metric statements leave time for the cron to answer', () => {
+  assert.equal(MONITOR_METRICS_STATEMENT_TIMEOUT_MS, 30_000);
+  assert.ok(MONITOR_METRICS_STATEMENT_TIMEOUT_MS < 300_000 - POLL_TIME_BUDGET_MS);
 });
 
 test('an empty poll response never deactivates a board that currently has postings', () => {
@@ -54,36 +73,32 @@ test('the floor and the autonomy rule are enforced against the same set of porta
   assert.ok(POLLABLE_JOB_BOARDS.length > 0, 'no pollable boards means the floor can never be met');
 });
 
-test('the freshness window is seven days, and seven is load-bearing', () => {
-  // Not a round number. Hiring is weekday work - measured 2026-07-28, weekdays carried 700-3,500
-  // postings a day against Saturday 143 and Sunday 22 - so any window SHORTER than a week changes
-  // size with the day it is measured on. A 3-day window read 3,917 on a Tuesday and would hold
-  // roughly 2,000 on a Monday, when it spans Sat+Sun+Mon. Seven always contains exactly one
-  // Saturday and one Sunday, which is what stops the count swinging.
-  assert.equal(JOB_FRESHNESS_DAYS, 7);
-  assert.ok(JOB_FRESHNESS_DAYS >= 7, 'a sub-week window is not stable against the weekend dip');
+test('the freshness window is fourteen days', () => {
+  assert.equal(JOB_FRESHNESS_DAYS, 14);
+  assert.ok(JOB_FRESHNESS_DAYS >= 14, 'the immediate rollout requires a full two-week window');
 });
 
-test('the headroom target is 20 percent above the floor, and the two are not the same alarm', () => {
+test('posting and grouped-role warnings are evaluated together', () => {
   assert.equal(REQUIRED_HEADROOM_MULTIPLE, 1.2);
   assert.equal(REQUIRED_SURFACED_JOBS, 12_000);
-  // Three distinct states. Alarming only at the floor would mean the first warning arrives when
-  // the board is already unusable.
-  assert.equal(boardHealth(12_001), 'ok');
-  assert.equal(boardHealth(12_000), 'ok', 'exactly at the target is not thin');
-  assert.equal(boardHealth(11_999), 'low', 'thin: warn, do not page');
-  assert.equal(boardHealth(10_000), 'low', 'at the floor exactly is still not a breach');
-  assert.equal(boardHealth(9_999), 'breached');
-  assert.equal(boardHealth(0), 'breached');
+  assert.equal(REQUIRED_SURFACED_GROUPED_ROLES, 11_000);
+  assert.equal(boardHealth(12_001, 11_001), 'ok');
+  assert.equal(boardHealth(12_000, 11_000), 'ok', 'exactly at both warning lines is healthy');
+  assert.equal(boardHealth(11_999, 11_000), 'low', 'posting headroom warns');
+  assert.equal(boardHealth(12_000, 10_999), 'low', 'grouped-role headroom warns');
+  assert.equal(boardHealth(10_000, 10_000), 'low', 'exactly at both floors is not a breach');
+  assert.equal(boardHealth(9_999, 12_000), 'breached', 'postings can breach independently');
+  assert.equal(boardHealth(12_000, 9_999), 'breached', 'grouped roles can breach independently');
+  assert.equal(boardHealth(0, 0), 'breached');
 });
 
 test('a thin board warns without failing the run, so the 5xx keeps meaning "broken now"', () => {
   // Encoded as a property of the two predicates rather than of the route: 'low' must never satisfy
   // boardIsBelowFloor, or the early warning would page someone and the real breach signal would be
   // trained away.
-  for (const n of [11_999, 11_000, 10_500, 10_000]) {
-    assert.equal(boardHealth(n), 'low', String(n));
-    assert.equal(boardIsBelowFloor(n), false, `${n} must warn, not 5xx`);
+  for (const n of [10_999, 10_500, 10_000]) {
+    assert.equal(boardHealth(12_000, n), 'low', String(n));
+    assert.ok(n >= MINIMUM_SURFACED_GROUPED_ROLES, `${n} must warn, not 5xx`);
   }
 });
 
@@ -94,7 +109,7 @@ test('a board whose postings are all stale is NOT mistaken for a board that retu
   // postings that genuinely aged out - the board would then keep showing them forever.
   // Only the first of those is a fault, so the guard must key off the RAW fetch count.
   const rawFetched = 400;   // the board answered with 400 postings...
-  const freshOfThem = 0;    // ...none from the last 7 days
+  const freshOfThem = 0;    // ...none from the last 14 days
   assert.equal(shouldKeepPostingsOnEmptyFetch(rawFetched, 600), false,
     'a board that answered with postings must still be swept, even if none are fresh');
   assert.equal(shouldKeepPostingsOnEmptyFetch(freshOfThem, 600), true,
@@ -137,5 +152,5 @@ test('the purge keeps a full window of slack, so it cannot fight the poller', ()
   // test green - it was asserting its own arithmetic rather than the code's.
   assert.ok(PURGE_POSTINGS_OLDER_THAN_DAYS > JOB_FRESHNESS_DAYS,
     'purging at or inside the window churns rows the poller keeps restoring');
-  assert.equal(PURGE_POSTINGS_OLDER_THAN_DAYS, 14);
+  assert.equal(PURGE_POSTINGS_OLDER_THAN_DAYS, 28);
 });

@@ -19,6 +19,13 @@ never reads `.env`, so it cannot reach the dev database or prod: the URL, the JW
 encryption key are all set inside the test file to throwaway values. Do not point it at a database
 holding anything you want to keep.
 
+## What `grouped-inventory.e2e.mts` covers
+
+Phase 1 reports two inventory interpretations: raw postings and distinct roles grouped by
+employer, title, and ATS family. The test inserts two Greenhouse location postings for one role
+and one Lever posting with the same employer and title. It then proves that the public grouped API
+reports two roles across three openings and that the cron inventory query returns the same totals.
+
 ## What `applied-badge.e2e.mts` covers
 
 The jobs list shows a green "Applied" state on postings the student already applied to. It used to

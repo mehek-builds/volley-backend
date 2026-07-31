@@ -1,6 +1,6 @@
 {
   "name": "litos-backend",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Backend API for the Litos job-application Chrome extension",
   "main": "dist/index.js",
   "engines": {
@@ -48,7 +48,7 @@
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test 'src/**/*.test.ts'",
-    "test:e2e": "tsx e2e/applied-badge.e2e.mts",
+    "test:e2e": "tsx e2e/applied-badge.e2e.mts && tsx e2e/grouped-inventory.e2e.mts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
     "db:push": "drizzle-kit push:pg",
