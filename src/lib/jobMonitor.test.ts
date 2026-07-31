@@ -252,6 +252,44 @@ test('Workable preserves multiple countries and its explicit remote flag', () =>
   assert.equal(jobs[0].apply_url, 'https://apply.workable.com/j/ABC123');
 });
 
+test('Workable merges repeated shortcodes without dropping their locations', () => {
+  const shared = {
+    title: 'Account Executive',
+    shortcode: 'DUPLICATE1',
+    url: 'https://apply.workable.com/j/DUPLICATE1',
+    application_url: 'https://apply.workable.com/j/DUPLICATE1/apply',
+    published_on: '2026-07-31',
+    description: '<p>Build customer relationships and own the complete sales process.</p>',
+  };
+  const jobs = normalizeWorkableJobs({
+    name: 'Acme',
+    jobs: [
+      {
+        ...shared,
+        country: 'South Africa',
+        locations: [{ country: 'South Africa' }],
+      },
+      {
+        ...shared,
+        country: 'United States',
+        telecommuting: true,
+        locations: [{ country: 'United States' }],
+      },
+      {
+        ...shared,
+        country: 'South Africa',
+        locations: [{ country: 'South Africa' }],
+      },
+    ],
+  });
+
+  assert.equal(jobs.length, 1, 'one shortcode must become one database row');
+  assert.equal(jobs[0].external_id, 'DUPLICATE1');
+  assert.equal(jobs[0].location, 'South Africa | United States');
+  assert.equal(jobs[0].portal_country, 'South Africa | United States');
+  assert.equal(jobs[0].remote, true, 'a remote variant keeps the merged posting remote');
+});
+
 test('Workable drops postings that leave its autonomous application host', () => {
   for (const applicationUrl of [
     'javascript:alert(1)',
