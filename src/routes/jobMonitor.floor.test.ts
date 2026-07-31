@@ -4,6 +4,7 @@ import {
   CLOSED_POSTING_RETENTION_DAYS,
   PURGE_POSTINGS_OLDER_THAN_DAYS,
   JOB_FRESHNESS_DAYS,
+  MINIMUM_SPONSOR_SURFACED_JOBS,
   MINIMUM_SURFACED_JOBS,
   REQUIRED_HEADROOM_MULTIPLE,
   REQUIRED_SURFACED_JOBS,
@@ -14,13 +15,14 @@ import {
 import { AUTONOMOUS_PORTAL_FAMILIES, portalCanAutoSubmit } from '../lib/portalSubmission';
 import { hasUsableDescription, POLLABLE_JOB_BOARDS } from '../lib/jobMonitor';
 
-test('the board floor is a thousand surfaced jobs, and it is not a suggestion', () => {
+test('the board floor is ten thousand surfaced jobs, and it is not a suggestion', () => {
   // Pinned as a value, not just a comparison. If someone "fixes" a breach by lowering the number,
   // this test is what makes that show up as a deliberate edit in a diff rather than a quiet tweak.
-  assert.equal(MINIMUM_SURFACED_JOBS, 1_000);
-  assert.equal(boardIsBelowFloor(999), true);
-  assert.equal(boardIsBelowFloor(1_000), false, 'exactly at the floor is not below it');
-  assert.equal(boardIsBelowFloor(1_001), false);
+  assert.equal(MINIMUM_SURFACED_JOBS, 10_000);
+  assert.equal(MINIMUM_SPONSOR_SURFACED_JOBS, 5_000);
+  assert.equal(boardIsBelowFloor(9_999), true);
+  assert.equal(boardIsBelowFloor(10_000), false, 'exactly at the floor is not below it');
+  assert.equal(boardIsBelowFloor(10_001), false);
   assert.equal(boardIsBelowFloor(0), true, 'an empty board is the case this exists for');
 });
 
@@ -62,16 +64,16 @@ test('the freshness window is seven days, and seven is load-bearing', () => {
   assert.ok(JOB_FRESHNESS_DAYS >= 7, 'a sub-week window is not stable against the weekend dip');
 });
 
-test('the headroom target is 5x the floor, and the two are not the same alarm', () => {
-  assert.equal(REQUIRED_HEADROOM_MULTIPLE, 5);
-  assert.equal(REQUIRED_SURFACED_JOBS, 5_000);
+test('the headroom target is 20 percent above the floor, and the two are not the same alarm', () => {
+  assert.equal(REQUIRED_HEADROOM_MULTIPLE, 1.2);
+  assert.equal(REQUIRED_SURFACED_JOBS, 12_000);
   // Three distinct states. Alarming only at the floor would mean the first warning arrives when
   // the board is already unusable.
-  assert.equal(boardHealth(9_664), 'ok', 'the measured launch figure must read healthy');
-  assert.equal(boardHealth(5_000), 'ok', 'exactly at the target is not thin');
-  assert.equal(boardHealth(4_999), 'low', 'thin: warn, do not page');
-  assert.equal(boardHealth(1_000), 'low', 'at the floor exactly is still not a breach');
-  assert.equal(boardHealth(999), 'breached');
+  assert.equal(boardHealth(12_001), 'ok');
+  assert.equal(boardHealth(12_000), 'ok', 'exactly at the target is not thin');
+  assert.equal(boardHealth(11_999), 'low', 'thin: warn, do not page');
+  assert.equal(boardHealth(10_000), 'low', 'at the floor exactly is still not a breach');
+  assert.equal(boardHealth(9_999), 'breached');
   assert.equal(boardHealth(0), 'breached');
 });
 
@@ -79,7 +81,7 @@ test('a thin board warns without failing the run, so the 5xx keeps meaning "brok
   // Encoded as a property of the two predicates rather than of the route: 'low' must never satisfy
   // boardIsBelowFloor, or the early warning would page someone and the real breach signal would be
   // trained away.
-  for (const n of [4_999, 3_000, 1_500, 1_000]) {
+  for (const n of [11_999, 11_000, 10_500, 10_000]) {
     assert.equal(boardHealth(n), 'low', String(n));
     assert.equal(boardIsBelowFloor(n), false, `${n} must warn, not 5xx`);
   }

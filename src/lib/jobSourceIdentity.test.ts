@@ -58,6 +58,14 @@ test('the three renamed sources carry the name their board uses', () => {
   assert.equal(byToken.get('science37'), 'Science 37', 'written with a space, which the prose check needs');
 });
 
+test('the Workable ingestion path has a live source with a canonical careers URL', () => {
+  const source = JOB_SOURCES.find((candidate) => candidate.ats_name === 'workable');
+  assert.ok(source, 'a fetcher without a source is dormant in production');
+  assert.equal(source.company_name, 'Suade');
+  assert.equal(source.board_token, 'suade');
+  assert.equal(source.career_url, 'https://apply.workable.com/suade/');
+});
+
 test('no two sources claim the same board, and none is blank', () => {
   // A duplicate token means one company is polled twice and counted twice on the board.
   const seen = new Set<string>();

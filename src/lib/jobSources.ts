@@ -332,12 +332,18 @@ const ENTRIES: Entry[] = [
   ['Sierra', 'ashby', 'sierra'],
   ['Mercor', 'ashby', 'mercor'],
   ['Crusoe', 'ashby', 'crusoe'],
+
+  /* Workable publishes the account name with its public jobs feed, so identity is verified from
+     the portal rather than inferred from the token. This source also exercises the new ingestion
+     path in production instead of leaving the fetcher dormant until a later sourcing round. */
+  ['Suade', 'workable', 'suade'],
 ];
 
 function careerUrl(ats: JobSourceInput['ats_name'], token: string): string {
   if (ats === 'greenhouse') return `https://job-boards.greenhouse.io/${token}`;
   if (ats === 'lever') return `https://jobs.lever.co/${token}`;
-  return `https://jobs.ashbyhq.com/${token}`;
+  if (ats === 'ashby') return `https://jobs.ashbyhq.com/${token}`;
+  return `https://apply.workable.com/${token}/`;
 }
 
 export const JOB_SOURCES: JobSourceInput[] = ENTRIES.map(([company_name, ats_name, board_token]) => ({

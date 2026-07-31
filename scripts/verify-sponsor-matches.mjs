@@ -91,6 +91,21 @@ async function fetchIdentity(source) {
       })),
     };
   }
+  if (source.ats_name === 'workable') {
+    const body = await json(`https://www.workable.com/api/accounts/${source.board_token}?details=true`);
+    const list = body.jobs ?? [];
+    return {
+      displayName: body.name ?? null,
+      count: list.length,
+      locations: list.map((job) => [job.city, job.state, job.country].filter(Boolean).join(', ')),
+      samples: list.slice(0, 3).map((job) => ({
+        title: job.title,
+        location: [job.city, job.state, job.country].filter(Boolean).join(', ') || null,
+        url: job.application_url ?? job.url ?? job.shortlink ?? null,
+        text: String(job.description ?? '').replace(/<[^>]+>/g, ' '),
+      })),
+    };
+  }
   const body = await json(`https://api.ashbyhq.com/posting-api/job-board/${source.board_token}`);
   const list = body.jobs ?? [];
   return {

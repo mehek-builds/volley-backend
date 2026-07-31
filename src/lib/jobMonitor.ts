@@ -22,9 +22,9 @@ import {
 // Two different questions, and a source has to satisfy BOTH:
 //   1. Can Litos finish an application on that portal alone?  -> AutonomousPortalFamily
 //   2. Can this module actually poll that portal's boards?     -> needs a fetchSourceJobs branch
-// Workable answers yes to (1) as of 2026-07-28 but has no fetcher, so it is not listed here yet.
-// Adding one makes it a one-word change, and the `satisfies` below is what keeps (1) enforced.
-export const POLLABLE_JOB_BOARDS = ['greenhouse', 'lever', 'ashby'] as const satisfies readonly AutonomousPortalFamily[];
+// Workable answers yes to both as of 2026-07-31. Its public account feed is normalized below and
+// its application adapter already reaches a real receipt, so Workable jobs may now be surfaced.
+export const POLLABLE_JOB_BOARDS = ['greenhouse', 'lever', 'ashby', 'workable'] as const satisfies readonly AutonomousPortalFamily[];
 
 export type SupportedJobBoard = typeof POLLABLE_JOB_BOARDS[number];
 
@@ -50,9 +50,9 @@ export type NormalizedJob = {
   /**
    * WHAT THE PORTAL SAYS THE COUNTRY IS, rather than what we guessed from the location string.
    *
-   * All three boards publish it, in three shapes: Lever gives an ISO-3166 code ("GB"), Ashby gives
-   * a postal address with `addressCountry` ("United States"), and Greenhouse groups postings under
-   * named offices ("US", "India Locations"). Reading it is the whole reason this field exists -
+   * All four boards publish it in structured fields: Lever gives an ISO-3166 code ("GB"), Ashby
+   * gives a postal address with `addressCountry` ("United States"), Greenhouse gives office
+   * locations, and Workable gives a country per location. Reading it is the whole reason this field exists -
    * inferring it from free text meant "IN - Bengaluru" read as Indiana, "Amsterdam, NH" as New
    * Hampshire, and "Georgia" as the state rather than the country, and each of those put a foreign
    * job in front of somebody who needs a US work visa.
@@ -294,8 +294,8 @@ export function normalizeLeverJobs(payload: unknown): NormalizedJob[] {
       posting_url: postingUrl,
       remote: /\bremote\b/i.test([location, text(job.workplaceType)].filter(Boolean).join(' ')),
       posted_at: date(job.createdAt),
-      // An ISO-3166 alpha-2 code, published per posting. The least ambiguous signal any of the
-      // three boards gives us.
+      // An ISO-3166 alpha-2 code, published per posting. The least ambiguous signal any provider
+      // gives us.
       portal_country: text(job.country),
       pay: readLeverPay(job) ?? undefined,
     }];
@@ -329,6 +329,50 @@ export function normalizeAshbyJobs(payload: unknown): NormalizedJob[] {
       // A structured postal address when the employer filled one in: "United States", "Germany".
       portal_country: text(postal.addressCountry),
       pay: readAshbyPay(job) ?? undefined,
+    }];
+  });
+}
+
+export function normalizeWorkableJobs(payload: unknown): NormalizedJob[] {
+  const account = payload as { name?: unknown; jobs?: unknown[] } | null;
+  if (!Array.isArray(account?.jobs)) throw new Error('Workable board returned an invalid jobs payload');
+  const portalCompanyName = text(account?.name);
+  return account.jobs.flatMap((raw) => {
+    const job = raw as Record<string, unknown>;
+    const id = text(job.shortcode);
+    const title = text(job.title);
+    const postingUrl = text(job.url) ?? text(job.shortlink);
+    const applyUrl = text(job.application_url) ?? postingUrl;
+    if (!id || !title || !postingUrl || !applyUrl) return [];
+
+    const locations = Array.isArray(job.locations) ? job.locations : [];
+    const locationParts = [text(job.city), text(job.state), text(job.country)].filter(Boolean);
+    const location = locationParts.join(', ') || locations
+      .map((item) => {
+        const value = item as Record<string, unknown>;
+        return [text(value.city), text(value.region), text(value.country)].filter(Boolean).join(', ');
+      })
+      .filter(Boolean)
+      .join(' | ') || undefined;
+    const portalCountries = locations
+      .map((item) => text((item as Record<string, unknown>).country))
+      .filter((value): value is string => Boolean(value));
+    const topLevelCountry = text(job.country);
+    if (topLevelCountry && !portalCountries.includes(topLevelCountry)) portalCountries.push(topLevelCountry);
+
+    return [{
+      external_id: id,
+      title,
+      location,
+      department: text(job.department) ?? text(job.function),
+      employment_type: resolveEmploymentType(title, text(job.employment_type)),
+      description: cleanHtml(job.description),
+      apply_url: applyUrl,
+      posting_url: postingUrl,
+      remote: job.telecommuting === true || /\bremote\b/i.test(location ?? ''),
+      posted_at: date(job.published_on) ?? date(job.created_at),
+      portal_country: portalCountries.join(' | ') || undefined,
+      portal_company_name: portalCompanyName,
     }];
   });
 }
@@ -512,7 +556,10 @@ export function sourceEndpoint(source: Pick<JobSourceInput, 'ats_name' | 'board_
   if (source.ats_name === 'lever') {
     return `https://api.lever.co/v0/postings/${token}?mode=json`;
   }
-  return `https://api.ashbyhq.com/posting-api/job-board/${token}?includeCompensation=true`;
+  if (source.ats_name === 'ashby') {
+    return `https://api.ashbyhq.com/posting-api/job-board/${token}?includeCompensation=true`;
+  }
+  return `https://www.workable.com/api/accounts/${token}?details=true`;
 }
 
 export async function fetchSourceJobs(
@@ -527,5 +574,6 @@ export async function fetchSourceJobs(
   const payload = await response.json();
   if (source.ats_name === 'greenhouse') return normalizeGreenhouseJobs(payload);
   if (source.ats_name === 'lever') return normalizeLeverJobs(payload);
-  return normalizeAshbyJobs(payload);
+  if (source.ats_name === 'ashby') return normalizeAshbyJobs(payload);
+  return normalizeWorkableJobs(payload);
 }
