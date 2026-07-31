@@ -7,8 +7,10 @@ import {
   JOB_FRESHNESS_DAYS,
   MINIMUM_SPONSOR_SURFACED_JOBS,
   MONITOR_METRICS_STATEMENT_TIMEOUT_MS,
+  TARGET_ROLE_COVERAGE_STATEMENT_TIMEOUT_MS,
   MINIMUM_SURFACED_GROUPED_ROLES,
   MINIMUM_SURFACED_JOBS,
+  GROUPED_ROLE_ALERT_THRESHOLD,
   REQUIRED_HEADROOM_MULTIPLE,
   REQUIRED_SURFACED_GROUPED_ROLES,
   REQUIRED_SURFACED_JOBS,
@@ -16,9 +18,12 @@ import {
   TARGET_SURFACED_POSTINGS,
   boardHealth,
   boardIsBelowFloor,
+  groupedRoleAlertTriggered,
   inventoryTargetMet,
+  pollingQueueStatus,
   mergeJobSources,
   shouldKeepPostingsOnEmptyFetch,
+  targetRoleCoverageMetrics,
 } from './jobMonitor';
 import type { JobSourceInput } from '../lib/jobMonitor';
 import { AUTONOMOUS_PORTAL_FAMILIES, portalCanAutoSubmit } from '../lib/portalSubmission';
@@ -44,6 +49,10 @@ test('the scheduled cron summary always reports postings and grouped roles', () 
   assert.match(workflow, /target_surfaced_postings/);
   assert.match(workflow, /target_surfaced_grouped_roles/);
   assert.match(workflow, /inventory_target_met/);
+  assert.match(workflow, /grouped_role_alert_triggered/);
+  assert.match(workflow, /classification_coverage/);
+  assert.match(workflow, /target_role_coverage/);
+  assert.match(workflow, /poll_segment_size/);
   assert.match(workflow, /structured_monitor_response=false/);
   assert.match(workflow, /\(\.polling_complete \| type\) == "boolean"/);
 });
@@ -61,7 +70,36 @@ test('the scheduled catalog includes reviewed sources and deduplicated operator 
 
 test('post-poll metric statements leave time for the cron to answer', () => {
   assert.equal(MONITOR_METRICS_STATEMENT_TIMEOUT_MS, 30_000);
+  assert.equal(TARGET_ROLE_COVERAGE_STATEMENT_TIMEOUT_MS, 5_000);
+  assert.ok(TARGET_ROLE_COVERAGE_STATEMENT_TIMEOUT_MS < MONITOR_METRICS_STATEMENT_TIMEOUT_MS);
   assert.ok(MONITOR_METRICS_STATEMENT_TIMEOUT_MS < 300_000 - POLL_TIME_BUDGET_MS);
+});
+
+test('source 401 completes on the second pass of the same drain run', () => {
+  assert.deepEqual(pollingQueueStatus(401), { deferredSources: 401, pollingComplete: false });
+  assert.deepEqual(pollingQueueStatus(1), { deferredSources: 1, pollingComplete: false });
+  assert.deepEqual(pollingQueueStatus(0), { deferredSources: 0, pollingComplete: true });
+
+  const workflow = readFileSync('.github/workflows/job-monitor.yml', 'utf8');
+  assert.match(workflow, /drain_started_at=""/);
+  assert.match(workflow, /\?drain_started_at=\$\{drain_started_at\}/);
+});
+
+test('target-role database aggregates are shaped without exposing literal role text', async () => {
+  const executor = {
+    execute: async () => ({ rows: [{ distinct_target_roles: 5, covered_target_roles: 3 }] }),
+  };
+  const result = await targetRoleCoverageMetrics(executor as never);
+  assert.deepEqual(result, {
+    distinct_target_roles: 5,
+    covered_target_roles: 3,
+    zero_result_target_roles: 2,
+    zero_result_share: 0.4,
+    minimum_matches_per_target_role: 1,
+    coverage_threshold_met: false,
+    measurement_available: true,
+  });
+  assert.doesNotMatch(JSON.stringify(result), /role_samples/);
 });
 
 test('an empty poll response never deactivates a board that currently has postings', () => {
@@ -101,6 +139,10 @@ test('posting and grouped-role warnings are evaluated together', () => {
   assert.equal(REQUIRED_HEADROOM_MULTIPLE, 1.2);
   assert.equal(REQUIRED_SURFACED_JOBS, 12_000);
   assert.equal(REQUIRED_SURFACED_GROUPED_ROLES, 11_000);
+  assert.equal(GROUPED_ROLE_ALERT_THRESHOLD, 11_000);
+  assert.equal(groupedRoleAlertTriggered(11_000), false, 'the threshold itself is healthy');
+  assert.equal(groupedRoleAlertTriggered(10_999), true, 'the alert fires before the hard floor');
+  assert.equal(groupedRoleAlertTriggered(10_000), true, 'the hard-floor boundary remains alerted');
   assert.equal(boardHealth(12_001, 11_001), 'ok');
   assert.equal(boardHealth(12_000, 11_000), 'ok', 'exactly at both warning lines is healthy');
   assert.equal(boardHealth(11_999, 11_000), 'low', 'posting headroom warns');
