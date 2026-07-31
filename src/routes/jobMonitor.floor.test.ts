@@ -9,6 +9,8 @@ import {
   MONITOR_METRICS_STATEMENT_TIMEOUT_MS,
   MINIMUM_SURFACED_GROUPED_ROLES,
   MINIMUM_SURFACED_JOBS,
+  PHASE_2_TARGET_SURFACED_GROUPED_ROLES,
+  PHASE_2_TARGET_SURFACED_POSTINGS,
   REQUIRED_HEADROOM_MULTIPLE,
   REQUIRED_SURFACED_GROUPED_ROLES,
   REQUIRED_SURFACED_JOBS,
@@ -90,6 +92,13 @@ test('posting and grouped-role warnings are evaluated together', () => {
   assert.equal(boardHealth(9_999, 12_000), 'breached', 'postings can breach independently');
   assert.equal(boardHealth(12_000, 9_999), 'breached', 'grouped roles can breach independently');
   assert.equal(boardHealth(0, 0), 'breached');
+});
+
+test('Phase 2 supply targets remain above both early warning lines', () => {
+  assert.equal(PHASE_2_TARGET_SURFACED_POSTINGS, 15_000);
+  assert.equal(PHASE_2_TARGET_SURFACED_GROUPED_ROLES, 12_000);
+  assert.ok(PHASE_2_TARGET_SURFACED_POSTINGS > REQUIRED_SURFACED_JOBS);
+  assert.ok(PHASE_2_TARGET_SURFACED_GROUPED_ROLES > REQUIRED_SURFACED_GROUPED_ROLES);
 });
 
 test('a thin board warns without failing the run, so the 5xx keeps meaning "broken now"', () => {

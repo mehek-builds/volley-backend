@@ -102,6 +102,10 @@ export const REQUIRED_HEADROOM_MULTIPLE = 1.2;
 export const REQUIRED_SURFACED_JOBS = MINIMUM_SURFACED_JOBS * REQUIRED_HEADROOM_MULTIPLE;
 export const REQUIRED_SURFACED_GROUPED_ROLES = 11_000;
 
+/** Phase 2 supply goals. These are measured separately from the hard floor and early warning line. */
+export const PHASE_2_TARGET_SURFACED_POSTINGS = 15_000;
+export const PHASE_2_TARGET_SURFACED_GROUPED_ROLES = 12_000;
+
 /** Bound each post-poll metrics statement so the cron still has time to answer and release its lock. */
 export const MONITOR_METRICS_STATEMENT_TIMEOUT_MS = 30_000;
 
@@ -1637,6 +1641,10 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       closed_posting_retention_days: CLOSED_POSTING_RETENTION_DAYS,
       required_surfaced_jobs: REQUIRED_SURFACED_JOBS,
       required_surfaced_grouped_roles: REQUIRED_SURFACED_GROUPED_ROLES,
+      phase_2_target_surfaced_postings: PHASE_2_TARGET_SURFACED_POSTINGS,
+      phase_2_target_surfaced_grouped_roles: PHASE_2_TARGET_SURFACED_GROUPED_ROLES,
+      phase_2_target_met: surfaced >= PHASE_2_TARGET_SURFACED_POSTINGS
+        && surfacedGroupedRoles >= PHASE_2_TARGET_SURFACED_GROUPED_ROLES,
       headroom_multiple: Number((surfaced / MINIMUM_SURFACED_JOBS).toFixed(1)),
       grouped_role_headroom_multiple: Number(
         (surfacedGroupedRoles / MINIMUM_SURFACED_GROUPED_ROLES).toFixed(1),

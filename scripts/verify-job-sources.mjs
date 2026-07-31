@@ -99,17 +99,38 @@ async function verify(source) {
   };
 }
 
-const queue = JOB_SOURCES.filter((source) => !only || only.has(source.board_token));
+const selected = JOB_SOURCES.filter((source) => !only || only.has(source.board_token));
+const queue = selected.filter((source) => source.ats_name !== 'workable');
+const workableQueue = selected.filter((source) => source.ats_name === 'workable');
 const results = [];
+async function record(source) {
+  const outcome = await verify(source);
+  results.push({ ...source, ...outcome });
+  process.stderr.write(outcome.verdict === 'named-mismatch' ? 'X' : outcome.verdict.endsWith('ok') ? '.' : '?');
+}
+
 const workers = Array.from({ length: 6 }, async () => {
   while (queue.length) {
     const source = queue.shift();
-    const outcome = await verify(source);
-    results.push({ ...source, ...outcome });
-    process.stderr.write(outcome.verdict === 'named-mismatch' ? 'X' : outcome.verdict.endsWith('ok') ? '.' : '?');
+    await record(source);
   }
 });
-await Promise.all(workers);
+
+/* Workable applies one shared account-feed limit. Start one request every 1.1 seconds while the
+   other ATS workers continue independently, mirroring the production scheduler. */
+const workableWorker = (async () => {
+  while (workableQueue.length) {
+    const source = workableQueue.shift();
+    const startedAt = Date.now();
+    await record(source);
+    if (workableQueue.length > 0) {
+      const remaining = Math.max(0, 1_100 - (Date.now() - startedAt));
+      await new Promise((resolve) => setTimeout(resolve, remaining));
+    }
+  }
+})();
+
+await Promise.all([...workers, workableWorker]);
 process.stderr.write('\n');
 
 results.sort((a, b) => a.company_name.localeCompare(b.company_name));
