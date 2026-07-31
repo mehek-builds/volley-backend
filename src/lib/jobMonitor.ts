@@ -341,7 +341,7 @@ export function normalizeWorkableJobs(payload: unknown): NormalizedJob[] {
   const account = payload as { name?: unknown; jobs?: unknown[] } | null;
   if (!Array.isArray(account?.jobs)) throw new Error('Workable board returned an invalid jobs payload');
   const portalCompanyName = text(account?.name);
-  return account.jobs.flatMap((raw) => {
+  const normalized = account.jobs.flatMap((raw) => {
     const job = raw as Record<string, unknown>;
     const id = text(job.shortcode);
     const title = text(job.title);
@@ -382,6 +382,36 @@ export function normalizeWorkableJobs(payload: unknown): NormalizedJob[] {
       portal_company_name: portalCompanyName,
     }];
   });
+
+  /* Workable repeats one shortcode for every location attached to a posting. Huzzle's live feed,
+     for example, returns 2,220 records with 392 duplicated shortcodes. Passing those records to a
+     multi-row INSERT makes PostgreSQL reject the entire chunk because ON CONFLICT cannot update
+     the same (source_id, external_id) row twice in one statement. Collapse to the database's real
+     identity here while retaining every published location and country. */
+  const byShortcode = new Map<string, NormalizedJob>();
+  for (const job of normalized) {
+    const current = byShortcode.get(job.external_id);
+    if (!current) {
+      byShortcode.set(job.external_id, job);
+      continue;
+    }
+    byShortcode.set(job.external_id, {
+      ...current,
+      location: mergePipeSeparated(current.location, job.location),
+      portal_country: mergePipeSeparated(current.portal_country, job.portal_country),
+      remote: current.remote || job.remote,
+    });
+  }
+  return [...byShortcode.values()];
+}
+
+function mergePipeSeparated(...values: Array<string | undefined>): string | undefined {
+  const parts = values
+    .flatMap((value) => value?.split(' | ') ?? [])
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const unique = [...new Set(parts)];
+  return unique.length > 0 ? unique.join(' | ') : undefined;
 }
 
 function validatedWorkableUrl(
