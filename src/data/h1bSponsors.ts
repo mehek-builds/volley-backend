@@ -36,24 +36,25 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
   ],
   "employers": [
     {
-      "company": "Abnormal Security",
-      "normalized": "ABNORMAL SECURITY",
+      "company": "Abnormal AI",
+      "normalized": "ABNORMAL AI",
       "sponsors": true,
       "evidence": "both",
       "matched_key": "ABNORMAL SECURITY",
       "legal_names": [
         "ABNORMAL SECURITY CORP",
         "ABNORMAL SECURITY CORPORATION",
+        "Abnormal AI, Inc.",
         "Abnormal Security Corporation"
       ],
-      "approvals": 28,
+      "approvals": 56,
       "denials": 0,
       "fiscal_years": [
         2021,
         2022,
         2023
       ],
-      "lca_certifications": 10,
+      "lca_certifications": 32,
       "filing_states": [
         "CA",
         "NV"
@@ -1849,25 +1850,17 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
     {
       "company": "Digital",
       "normalized": "DIGITAL",
-      "sponsors": true,
-      "evidence": "uscis_h1b",
-      "matched_key": "ASIAN MEDIA RIGHTS LLC DBA DIGITAL",
-      "legal_names": [
-        "ASIAN MEDIA RIGHTS LLC DBA DIGITAL",
-        "CPX INTERACTIVE LLC DBA DIGITAL"
-      ],
-      "approvals": 3,
+      "sponsors": false,
+      "evidence": null,
+      "rejected": "the Workable account is a distributed digital agency. The filings belong to Asian Media Rights and CPX Interactive, two unrelated companies that used Digital as a d/b/a",
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
       "denials": 0,
-      "fiscal_years": [
-        2021
-      ],
+      "fiscal_years": [],
       "lca_certifications": 0,
-      "filing_states": [
-        "NY"
-      ],
-      "filing_cities": [
-        "NEW YORK"
-      ]
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "Discord",
@@ -4781,24 +4774,17 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
     {
       "company": "Pearl",
       "normalized": "PEARL",
-      "sponsors": true,
-      "evidence": "uscis_h1b",
-      "matched_key": "PEARL",
-      "legal_names": [
-        "PEARL INC"
-      ],
-      "approvals": 1,
+      "sponsors": false,
+      "evidence": null,
+      "rejected": "the Workable account is Pearl Talent, a recruiting firm placing staff with client companies. A bare PEARL INC filing does not establish that it belongs to this employer",
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
       "denials": 0,
-      "fiscal_years": [
-        2023
-      ],
+      "fiscal_years": [],
       "lca_certifications": 0,
-      "filing_states": [
-        "CA"
-      ],
-      "filing_cities": [
-        "W HOLLYWOOD"
-      ]
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "Peloton",

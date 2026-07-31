@@ -327,7 +327,7 @@ const BASE_ENTRIES: Entry[] = [
      the new gate exists to make normal. Two more candidates were dropped in the same pass:
      lever/sardine and lever/attentive both answer with something that is not a postings array. */
   ['Chainguard', 'greenhouse', 'chainguard'],
-  ['Abnormal Security', 'greenhouse', 'abnormalsecurity'],
+  ['Abnormal AI', 'greenhouse', 'abnormalsecurity'],
   ['OpenAI', 'ashby', 'openai'],
   ['Sierra', 'ashby', 'sierra'],
   ['Mercor', 'ashby', 'mercor'],
@@ -343,7 +343,7 @@ const BASE_ENTRIES: Entry[] = [
  * Suade remains in the base catalog, so these 49 entries bring Workable to exactly 50 employers.
  * The provider publishes one shared rate limit across accounts. jobPollScheduler spaces Workable
  * request starts by 1.1 seconds, which keeps this larger catalog inside that limit. */
-export const PHASE_2_WORKABLE_ENTRIES: readonly Entry[] = [
+const PHASE_2_WORKABLE_ENTRIES: readonly Entry[] = [
   ['Huzzle', 'workable', 'huzzle'],
   ['SupportYourApp', 'workable', 'supportyourapp'],
   ['Digital', 'workable', 'digital-368'],
@@ -398,7 +398,7 @@ export const PHASE_2_WORKABLE_ENTRIES: readonly Entry[] = [
 /* Fifty additional employers chosen for both fresh yield and breadth. The catalog adds healthcare,
  * hospitality, defense, climate, aerospace, travel, logistics, education, media, retail, finance,
  * government technology, and nonprofits instead of optimizing only for software companies. */
-export const PHASE_2_UNDERREPRESENTED_ENTRIES: readonly Entry[] = [
+const PHASE_2_UNDERREPRESENTED_ENTRIES: readonly Entry[] = [
   ['Anduril Industries', 'greenhouse', 'andurilindustries'],
   ['Relativity Space', 'greenhouse', 'relativity'],
   ['Okta', 'greenhouse', 'okta'],

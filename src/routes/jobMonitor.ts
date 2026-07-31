@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { and, desc, eq, ilike, inArray, isNotNull, ne, or, sql } from 'drizzle-orm';
+import { and, desc, eq, ilike, inArray, isNotNull, ne, notInArray, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/index';
 import { career_page_sources, monitored_jobs, profiles, sponsor_employers, users } from '../db/schema';
@@ -9,6 +9,7 @@ import { portalNameAgrees } from '../lib/sponsorIdentity';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { fetchSourceJobs, isIngestablePosting, POLLABLE_JOB_BOARDS, type JobSourceInput, type SupportedJobBoard } from '../lib/jobMonitor';
 import { JOB_SOURCES } from '../lib/jobSources';
+import { H1B_EMPLOYERS } from '../lib/sponsorEmployers';
 import { AUTONOMOUS_PORTAL_FAMILIES } from '../lib/portalSubmission';
 import { rankCities } from '../lib/cities';
 import { optionalAuth } from '../middleware/auth';
@@ -102,9 +103,14 @@ export const REQUIRED_HEADROOM_MULTIPLE = 1.2;
 export const REQUIRED_SURFACED_JOBS = MINIMUM_SURFACED_JOBS * REQUIRED_HEADROOM_MULTIPLE;
 export const REQUIRED_SURFACED_GROUPED_ROLES = 11_000;
 
-/** Phase 2 supply goals. These are measured separately from the hard floor and early warning line. */
-export const PHASE_2_TARGET_SURFACED_POSTINGS = 15_000;
-export const PHASE_2_TARGET_SURFACED_GROUPED_ROLES = 12_000;
+/** Supply goals measured separately from the hard floor and early warning line. */
+export const TARGET_SURFACED_POSTINGS = 15_000;
+export const TARGET_SURFACED_GROUPED_ROLES = 12_000;
+
+export function inventoryTargetMet(surfacedPostings: number, surfacedGroupedRoles: number): boolean {
+  return surfacedPostings >= TARGET_SURFACED_POSTINGS
+    && surfacedGroupedRoles >= TARGET_SURFACED_GROUPED_ROLES;
+}
 
 /** Bound each post-poll metrics statement so the cron still has time to answer and release its lock. */
 export const MONITOR_METRICS_STATEMENT_TIMEOUT_MS = 30_000;
@@ -651,39 +657,94 @@ function configuredSources(): JobSourceInput[] {
 }
 
 /**
- * The sponsor_employers row for a company name, or null when nothing confirms it.
- *
- * Resolved on every upsert rather than only by the seed script, and that is a correctness fix
- * rather than tidiness: without it a source added after the last seed run stays NULL forever, which
- * means invisible to everyone who needs sponsorship, and a source whose company_name is CORRECTED
- * keeps the previous company's H-1B link - a posting surfaced on another company's filing record.
+ * Combine the reviewed catalog with optional operator additions without polling a board twice.
+ * Runtime configuration wins for the same ATS/token so an operator can temporarily disable or
+ * correct a source while the reviewed catalog remains the durable default.
  */
-async function sponsorEmployerIdFor(companyName: string): Promise<string | null> {
-  const [row] = await db
-    .select({ id: sponsor_employers.id })
-    .from(sponsor_employers)
-    .where(eq(sponsor_employers.normalized_name, normalizeEmployerName(companyName)))
-    .limit(1);
-  return row?.id ?? null;
+export function mergeJobSources(
+  reviewed: readonly JobSourceInput[],
+  configured: readonly JobSourceInput[],
+): JobSourceInput[] {
+  const merged = new Map<string, JobSourceInput>();
+  for (const source of [...reviewed, ...configured]) {
+    merged.set(`${source.ats_name}/${source.board_token}`, source);
+  }
+  return [...merged.values()];
 }
 
-export async function upsertSources(sources: JobSourceInput[]) {
-  for (const source of sources) {
-    const sponsorEmployerId = await sponsorEmployerIdFor(source.company_name);
-    const rows = await db.insert(career_page_sources).values({ ...source, sponsor_employer_id: sponsorEmployerId }).onConflictDoUpdate({
+/** Keep the queryable sponsor table aligned with the reviewed generated artifact on every run. */
+export async function syncSponsorEmployers() {
+  const confirmed = H1B_EMPLOYERS.filter((employer) => employer.sponsors);
+  if (confirmed.length === 0) {
+    throw new Error('Refusing to sync an empty confirmed sponsor-employer list');
+  }
+  for (let start = 0; start < confirmed.length; start += UPSERT_CHUNK) {
+    const chunk = confirmed.slice(start, start + UPSERT_CHUNK);
+    await db.insert(sponsor_employers).values(chunk.map((employer) => ({
+      normalized_name: employer.normalized,
+      company_name: employer.company,
+      legal_names: employer.legal_names,
+      evidence_source: employer.evidence!,
+      approvals: employer.approvals,
+      denials: employer.denials,
+      fiscal_years: employer.fiscal_years,
+      lca_certifications: employer.lca_certifications,
+      verified_at: new Date(),
+    }))).onConflictDoUpdate({
+      target: sponsor_employers.normalized_name,
+      set: {
+        company_name: sql`excluded.company_name`,
+        legal_names: sql`excluded.legal_names`,
+        evidence_source: sql`excluded.evidence_source`,
+        approvals: sql`excluded.approvals`,
+        denials: sql`excluded.denials`,
+        fiscal_years: sql`excluded.fiscal_years`,
+        lca_certifications: sql`excluded.lca_certifications`,
+        verified_at: sql`excluded.verified_at`,
+      },
+    });
+  }
+  await db.delete(sponsor_employers).where(notInArray(
+    sponsor_employers.normalized_name,
+    confirmed.map((employer) => employer.normalized),
+  ));
+}
+
+/** Insert or refresh source metadata and its current sponsor link in bounded batches. */
+export async function upsertSources(sources: readonly JobSourceInput[]) {
+  // This is also called by the operator API, whose validated array may repeat a composite key.
+  // PostgreSQL rejects two rows targeting the same conflict key in one INSERT, so deduplicate at
+  // the shared write boundary rather than relying on every caller to remember. Last value wins.
+  const uniqueSources = mergeJobSources([], sources);
+  const sponsorRows = await db
+    .select({ id: sponsor_employers.id, normalized_name: sponsor_employers.normalized_name })
+    .from(sponsor_employers);
+  const sponsorIds = new Map(sponsorRows.map((row) => [row.normalized_name, row.id]));
+  const disabledIds: string[] = [];
+
+  for (let start = 0; start < uniqueSources.length; start += UPSERT_CHUNK) {
+    const chunk = uniqueSources.slice(start, start + UPSERT_CHUNK);
+    const rows = await db.insert(career_page_sources).values(chunk.map((source) => ({
+      ...source,
+      enabled: source.enabled ?? true,
+      sponsor_employer_id: sponsorIds.get(normalizeEmployerName(source.company_name)) ?? null,
+    }))).onConflictDoUpdate({
       target: [career_page_sources.ats_name, career_page_sources.board_token],
       set: {
-        company_name: source.company_name,
-        career_url: source.career_url,
-        enabled: source.enabled ?? true,
-        // Recomputed, including back to NULL. A link that outlived its company name is the one
-        // failure here that surfaces jobs on the wrong employer's filing record.
-        sponsor_employer_id: sponsorEmployerId,
+        company_name: sql`excluded.company_name`,
+        career_url: sql`excluded.career_url`,
+        enabled: sql`excluded.enabled`,
+        // A portal identity disagreement always wins. Once a later successful poll clears the
+        // mismatch, the next sync may restore the reviewed employer link.
+        sponsor_employer_id: sql`case when ${career_page_sources.portal_name_mismatch}
+          then null else excluded.sponsor_employer_id end`,
       },
-    }).returning({ id: career_page_sources.id });
-    if (source.enabled === false && rows[0]) {
-      await db.update(monitored_jobs).set({ is_active: false }).where(eq(monitored_jobs.source_id, rows[0].id));
-    }
+    }).returning({ id: career_page_sources.id, enabled: career_page_sources.enabled });
+    disabledIds.push(...rows.filter((row) => !row.enabled).map((row) => row.id));
+  }
+  if (disabledIds.length > 0) {
+    await db.update(monitored_jobs).set({ is_active: false })
+      .where(inArray(monitored_jobs.source_id, disabledIds));
   }
 }
 
@@ -1551,11 +1612,12 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       });
     }
     try {
-    const envSources = configuredSources();
-    if (envSources.length > 0) await upsertSources(envSources);
+    await syncSponsorEmployers();
+    const allSources = mergeJobSources(JOB_SOURCES, configuredSources());
+    await upsertSources(allSources);
     /* Every run reconciles the database against the reviewed list, so a company removed in a pull
        request stops appearing on the board without anybody remembering to go and disable it. */
-    const retired = await retireUnlistedSources(JOB_SOURCES);
+    const retired = await retireUnlistedSources(allSources);
     const [sourceCount] = await db
       .select({ total: sql<number>`count(*)::int` })
       .from(career_page_sources)
@@ -1641,10 +1703,9 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       closed_posting_retention_days: CLOSED_POSTING_RETENTION_DAYS,
       required_surfaced_jobs: REQUIRED_SURFACED_JOBS,
       required_surfaced_grouped_roles: REQUIRED_SURFACED_GROUPED_ROLES,
-      phase_2_target_surfaced_postings: PHASE_2_TARGET_SURFACED_POSTINGS,
-      phase_2_target_surfaced_grouped_roles: PHASE_2_TARGET_SURFACED_GROUPED_ROLES,
-      phase_2_target_met: surfaced >= PHASE_2_TARGET_SURFACED_POSTINGS
-        && surfacedGroupedRoles >= PHASE_2_TARGET_SURFACED_GROUPED_ROLES,
+      target_surfaced_postings: TARGET_SURFACED_POSTINGS,
+      target_surfaced_grouped_roles: TARGET_SURFACED_GROUPED_ROLES,
+      inventory_target_met: inventoryTargetMet(surfaced, surfacedGroupedRoles),
       headroom_multiple: Number((surfaced / MINIMUM_SURFACED_JOBS).toFixed(1)),
       grouped_role_headroom_multiple: Number(
         (surfacedGroupedRoles / MINIMUM_SURFACED_GROUPED_ROLES).toFixed(1),

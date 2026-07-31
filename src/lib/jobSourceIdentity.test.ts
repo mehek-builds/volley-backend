@@ -1,11 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { portalNameAgrees } from './sponsorIdentity';
-import {
-  JOB_SOURCES,
-  PHASE_2_UNDERREPRESENTED_ENTRIES,
-  PHASE_2_WORKABLE_ENTRIES,
-} from './jobSources';
+import { JOB_SOURCES } from './jobSources';
 
 /**
  * THE GATE THAT SHOULD HAVE EXISTED FROM THE START.
@@ -34,7 +30,7 @@ test('the four tokens that were somebody else are rejected by name', () => {
 
 test('and the ways a real name legitimately differs are accepted', () => {
   const fine: [string, string][] = [
-    ['Abnormal Security', 'Abnormal'],
+    ['Abnormal AI', 'Abnormal'],
     ['TripAdvisor', 'Tripadvisor'],
     ['yugabyte', 'YugabyteDB'],
     ['Qube Research & Technologies', 'Qube Research and Technologies'],
@@ -64,7 +60,6 @@ test('the three renamed sources carry the name their board uses', () => {
 
 test('Phase 2 configures exactly 50 Workable employers with canonical careers URLs', () => {
   const sources = JOB_SOURCES.filter((candidate) => candidate.ats_name === 'workable');
-  assert.equal(PHASE_2_WORKABLE_ENTRIES.length, 49, 'Suade plus 49 new accounts makes 50');
   assert.equal(sources.length, 50);
   assert.ok(sources.some((source) => source.board_token === 'suade'));
   for (const source of sources) {
@@ -73,9 +68,9 @@ test('Phase 2 configures exactly 50 Workable employers with canonical careers UR
 });
 
 test('Phase 2 adds 50 diverse employers across Greenhouse, Lever, and Ashby', () => {
-  assert.equal(PHASE_2_UNDERREPRESENTED_ENTRIES.length, 50);
-  const families = new Set(PHASE_2_UNDERREPRESENTED_ENTRIES.map(([, ats]) => ats));
-  assert.deepEqual([...families].sort(), ['ashby', 'greenhouse', 'lever']);
+  assert.equal(JOB_SOURCES.length, 355, 'the reviewed Phase 2 catalog must not silently shrink');
+  const families = new Set(JOB_SOURCES.map((source) => source.ats_name));
+  assert.deepEqual([...families].sort(), ['ashby', 'greenhouse', 'lever', 'workable']);
   assert.ok(JOB_SOURCES.length < 400, 'Phase 3 segmentation gate must not be crossed early');
 });
 

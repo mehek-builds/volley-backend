@@ -44,6 +44,7 @@ const only = onlyIndex >= 0 ? new Set(args[onlyIndex + 1].split(',')) : null;
 const { JOB_SOURCES } = await import('../src/lib/jobSources.ts');
 const { fetchSourceJobs } = await import('../src/lib/jobMonitor.ts');
 const { identityCheck, portalNameAgrees } = await import('../src/lib/sponsorIdentity.ts');
+const { pollSourcesWithinBudget } = await import('../src/lib/jobPollScheduler.ts');
 
 /* Boards where no name is published and the postings name a BRAND rather than the company, checked
    by hand. The evidence is here so the judgement can be re-checked or overturned, and so a run that
@@ -100,8 +101,6 @@ async function verify(source) {
 }
 
 const selected = JOB_SOURCES.filter((source) => !only || only.has(source.board_token));
-const queue = selected.filter((source) => source.ats_name !== 'workable');
-const workableQueue = selected.filter((source) => source.ats_name === 'workable');
 const results = [];
 async function record(source) {
   const outcome = await verify(source);
@@ -109,28 +108,13 @@ async function record(source) {
   process.stderr.write(outcome.verdict === 'named-mismatch' ? 'X' : outcome.verdict.endsWith('ok') ? '.' : '?');
 }
 
-const workers = Array.from({ length: 6 }, async () => {
-  while (queue.length) {
-    const source = queue.shift();
-    await record(source);
-  }
+/* Use the same tested queue as production so provider pacing cannot drift between ingestion and
+   its CI gate. The verifier has no serverless deadline, so every selected source is attempted. */
+await pollSourcesWithinBudget(selected, record, {
+  concurrency: 6,
+  timeBudgetMs: Number.MAX_SAFE_INTEGER,
+  startReserveMs: 0,
 });
-
-/* Workable applies one shared account-feed limit. Start one request every 1.1 seconds while the
-   other ATS workers continue independently, mirroring the production scheduler. */
-const workableWorker = (async () => {
-  while (workableQueue.length) {
-    const source = workableQueue.shift();
-    const startedAt = Date.now();
-    await record(source);
-    if (workableQueue.length > 0) {
-      const remaining = Math.max(0, 1_100 - (Date.now() - startedAt));
-      await new Promise((resolve) => setTimeout(resolve, remaining));
-    }
-  }
-})();
-
-await Promise.all([...workers, workableWorker]);
 process.stderr.write('\n');
 
 results.sort((a, b) => a.company_name.localeCompare(b.company_name));
