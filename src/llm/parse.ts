@@ -117,8 +117,11 @@ Rules:
   the printed order. Empty string when no degree is stated.
 - "target_roles" must contain exactly five distinct job titles, ordered from strongest to weakest
   fit. Infer them from the resume objective, the candidate's dated years of experience, past job
-  titles, projects, and skills. Match the seniority shown by the evidence and do not invent a field
-  the resume does not support.
+  titles, projects, skills, and stated degree. Match the seniority shown by the evidence and do not
+  invent a field the resume does not support. Each title must be supported by at least one of those
+  sources. Give the strongest role first, then adjacent careers the same evidence genuinely supports.
+  Do not return five cosmetic variations of one title, but never add an unsupported field merely to
+  create variety.
 - Return empty arrays for missing sections, never null
 - If grad_year is truly unknown, use 0`;
 
@@ -126,10 +129,11 @@ export function parsedProfileFromModelText(text: string): ParsedProfile {
   const cleaned = text.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
   const parsed = JSON.parse(cleaned) as ParsedProfile;
   const roles: string[] = [];
-  const candidates = [
-    ...(Array.isArray(parsed.target_roles) ? parsed.target_roles : []),
-    ...(Array.isArray(parsed.experience) ? parsed.experience.map((entry) => entry?.title) : []),
-  ];
+  // A prior fallback padded an incomplete recommendation with past experience titles. That made
+  // malformed output look valid and could present a former campus or volunteer title as a job the
+  // student should pursue. The model has the full evidence and one bounded repair attempt, so only
+  // its explicit target-role answer belongs in this field.
+  const candidates = Array.isArray(parsed.target_roles) ? parsed.target_roles : [];
   for (const candidate of candidates) {
     if (typeof candidate !== 'string') continue;
     const clean = candidate.trim().slice(0, 80).trim();
@@ -142,32 +146,39 @@ export function parsedProfileFromModelText(text: string): ParsedProfile {
   return parsed;
 }
 
-export async function parseResumeWithClaude(resumeText: string): Promise<ParsedProfile> {
-  const response = await client.messages.create({
-    model: 'claude-haiku-4-5-20251001',
-    max_tokens: 2048,
-    system: [
-      {
-        type: 'text',
-        text: SYSTEM_PROMPT,
-        cache_control: { type: 'ephemeral' },
-      },
-    ],
-    messages: [
-      {
-        role: 'user',
-        content: `Parse this resume text and return the JSON:\n\n${resumeText}`,
-      },
-    ],
-  });
-
-  const textBlock = response.content.find((block) => block.type === 'text');
-  const text = textBlock?.type === 'text' ? textBlock.text : '';
-
+export async function parsedProfileWithOneRepair(
+  initialText: string,
+  repair: (failure: string) => Promise<string>,
+): Promise<ParsedProfile> {
   try {
-    return parsedProfileFromModelText(text);
-  } catch {
-    throw new Error(`Claude returned invalid JSON for resume parsing: ${text.slice(0, 200)}`);
+    return parsedProfileFromModelText(initialText);
+  } catch (error) {
+    const failure = error instanceof Error ? error.message : 'invalid resume JSON';
+    return parsedProfileFromModelText(await repair(failure));
+  }
+}
+
+export async function parseResumeWithClaude(resumeText: string): Promise<ParsedProfile> {
+  try {
+    const request = async (repairFailure?: string) => {
+      const response = await client.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 2048,
+        system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+        messages: [{
+          role: 'user',
+          content: repairFailure
+            ? `Parse this resume again. The prior JSON failed validation: ${repairFailure}. Return one complete corrected JSON object, including exactly five supported and adjacent target_roles.\n\n${resumeText}`
+            : `Parse this resume text and return the JSON:\n\n${resumeText}`,
+        }],
+      });
+      const textBlock = response.content.find((block) => block.type === 'text');
+      return textBlock?.type === 'text' ? textBlock.text : '';
+    };
+    const initial = await request();
+    return await parsedProfileWithOneRepair(initial, request);
+  } catch (error) {
+    throw new Error(`Claude returned invalid JSON for resume parsing: ${error instanceof Error ? error.message.slice(0, 200) : 'unknown error'}`);
   }
 }
 
@@ -189,32 +200,34 @@ export async function parseResumeWithClaude(resumeText: string): Promise<ParsedP
  * exists to prevent.
  */
 export async function parseResumeFromPdf(pdf: Buffer): Promise<ParsedProfile> {
-  const response = await client.messages.create({
-    model: 'claude-sonnet-5',
-    max_tokens: 4096,
-    system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-    messages: [
-      {
-        role: 'user',
-        content: [
-          {
-            type: 'document',
-            source: { type: 'base64', media_type: 'application/pdf', data: pdf.toString('base64') },
-          },
-          {
-            type: 'text',
-            text: 'This resume is a scan or an image, so there is no text layer to read. Read the pages visually and return the JSON. Transcribe exactly what is printed; never guess at a word you cannot make out, and leave a field empty rather than inventing a plausible value.',
-          },
-        ],
-      },
-    ],
-  });
-
-  const textBlock = response.content.find((block) => block.type === 'text');
-  const text = textBlock?.type === 'text' ? textBlock.text : '';
   try {
-    return parsedProfileFromModelText(text);
-  } catch {
-    throw new Error(`Claude returned invalid JSON for scanned resume parsing: ${text.slice(0, 200)}`);
+    const request = async (repairFailure?: string) => {
+      const response = await client.messages.create({
+        model: 'claude-sonnet-5',
+        max_tokens: 4096,
+        system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+        messages: [{
+          role: 'user',
+          content: [
+            {
+              type: 'document',
+              source: { type: 'base64', media_type: 'application/pdf', data: pdf.toString('base64') },
+            },
+            {
+              type: 'text',
+              text: repairFailure
+                ? `Read this resume again. The prior JSON failed validation: ${repairFailure}. Return one complete corrected JSON object, including exactly five supported and adjacent target_roles. Transcribe exactly what is printed and leave uncertain fields empty.`
+                : 'This resume is a scan or an image, so there is no text layer to read. Read the pages visually and return the JSON. Transcribe exactly what is printed; never guess at a word you cannot make out, and leave a field empty rather than inventing a plausible value.',
+            },
+          ],
+        }],
+      });
+      const textBlock = response.content.find((block) => block.type === 'text');
+      return textBlock?.type === 'text' ? textBlock.text : '';
+    };
+    const initial = await request();
+    return await parsedProfileWithOneRepair(initial, request);
+  } catch (error) {
+    throw new Error(`Claude returned invalid JSON for scanned resume parsing: ${error instanceof Error ? error.message.slice(0, 200) : 'unknown error'}`);
   }
 }
