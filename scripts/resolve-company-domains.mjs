@@ -86,6 +86,7 @@ const CURATED_DOMAINS = new Map([
   ['abnormalai', 'abnormal.ai'],
   ['accessbank', 'accessbankplc.com'],
   ['affirm', 'affirm.com'],
+  ['airtable', 'airtable.com'],
   ['andurilindustries', 'anduril.com'],
   ['anydesk', 'anydesk.com'],
   ['astronomer', 'astronomer.io'],
@@ -110,9 +111,11 @@ const CURATED_DOMAINS = new Map([
   ['flexport', 'flexport.com'],
   ['fireworks', 'fireworks.ai'],
   ['givedirectly', 'givedirectly.org'],
+  ['gitlab', 'gitlab.com'],
   ['gusto', 'gusto.com'],
   ['hellofresh', 'hellofresh.com'],
   ['justworks', 'justworks.com'],
+  ['matchgroup', 'mtch.com'],
   ['n26', 'n26.com'],
   ['nuro', 'nuro.com'],
   ['openai', 'openai.com'],
@@ -198,17 +201,6 @@ async function fetchHome(domain) {
     } catch { /* try the www form, then give up */ }
   }
   return null;
-}
-
-/** Existing mappings must keep proving that their current homepage names the employer. */
-function pageNamesCompany(company, page) {
-  if (!page?.ok) return false;
-  const title = (page.html.match(/<title[^>]*>([\s\S]{0,300}?)<\/title>/i)?.[1] ?? '').replace(/\s+/g, ' ').trim();
-  const og = page.html.match(/property=["']og:site_name["'][^>]*content=["']([^"']{0,120})["']/i)?.[1] ?? '';
-  if (!title) return false;
-  const lowerHtml = `${title} ${page.html.slice(0, 4000)}`.toLowerCase();
-  if (PARKED_MARKERS.some((marker) => lowerHtml.includes(marker))) return false;
-  return norm(`${title} ${og}`).includes(nameKey(company));
 }
 
 /** The host and the page must agree that this is the company. Either signal alone is too weak. */
@@ -331,8 +323,9 @@ const HEADER_MARK = '/** Company name exactly as the job board reports it, mappe
       const key = nameKey(name);
       const domain = knownByNameKey.get(key)?.[1];
       const page = domain ? await fetchHome(domain) : null;
-      if (domain && pageNamesCompany(name, page)) {
-        resolvedByNameKey.set(key, [name, domain]);
+      const hit = domain ? accepts(name, domain, page) : null;
+      if (hit) {
+        resolvedByNameKey.set(key, [name, hit.domain]);
         revalidated++;
       } else {
         invalidated++;
