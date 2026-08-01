@@ -85,6 +85,7 @@ const TOO_GENERIC = new Set(['depot', 'fireworks', 'honor', 'oldmission', 'pinec
 const CURATED_DOMAINS = new Map([
   ['abnormalai', 'abnormal.ai'],
   ['accessbank', 'accessbankplc.com'],
+  ['affirm', 'affirm.com'],
   ['andurilindustries', 'anduril.com'],
   ['anydesk', 'anydesk.com'],
   ['astronomer', 'astronomer.io'],
@@ -94,26 +95,38 @@ const CURATED_DOMAINS = new Map([
   ['braintrust', 'usebraintrust.com'],
   ['codeforamerica', 'codeforamerica.org'],
   ['commonapp', 'commonapp.org'],
+  ['carta', 'carta.com'],
+  ['chime', 'chime.com'],
+  ['coinbase', 'coinbase.com'],
   ['databricks', 'databricks.com'],
   ['dataiku', 'dataiku.com'],
   ['decagon', 'decagon.ai'],
+  ['doximity', 'doximity.com'],
+  ['drw', 'drw.com'],
   ['elastic', 'elastic.co'],
   ['elevenlabs', 'elevenlabs.io'],
   ['epicgames', 'epicgames.com'],
   ['fastly', 'fastly.com'],
+  ['flexport', 'flexport.com'],
   ['fireworks', 'fireworks.ai'],
   ['givedirectly', 'givedirectly.org'],
+  ['gusto', 'gusto.com'],
   ['hellofresh', 'hellofresh.com'],
   ['justworks', 'justworks.com'],
   ['n26', 'n26.com'],
+  ['nuro', 'nuro.com'],
   ['openai', 'openai.com'],
   ['oscarhealth', 'hioscar.com'],
+  ['perplexity', 'perplexity.ai'],
   ['quintoandar', 'quintoandar.com.br'],
+  ['quberesearchtechnologies', 'qube-rt.com'],
+  ['ramp', 'ramp.com'],
   ['rocketlab', 'rocketlabcorp.com'],
   ['salesloft', 'salesloft.com'],
   ['seatgeek', 'seatgeek.com'],
   ['sierra', 'sierra.ai'],
   ['sigma', 'sigmacomputing.com'],
+  ['sofi', 'sofi.com'],
   ['spotify', 'spotify.com'],
   ['thenewyorktimes', 'nytco.com'],
   ['toast', 'toasttab.com'],
@@ -122,6 +135,7 @@ const CURATED_DOMAINS = new Map([
   ['vardaspaceindustries', 'varda.com'],
   ['voxmediagroup', 'voxmedia.com'],
   ['wiz', 'wiz.io'],
+  ['zocdoc', 'zocdoc.com'],
 ]);
 
 /** A parked or for-sale domain is not a company, however much its page repeats the name. */
@@ -184,6 +198,17 @@ async function fetchHome(domain) {
     } catch { /* try the www form, then give up */ }
   }
   return null;
+}
+
+/** Existing mappings must keep proving that their current homepage names the employer. */
+function pageNamesCompany(company, page) {
+  if (!page?.ok) return false;
+  const title = (page.html.match(/<title[^>]*>([\s\S]{0,300}?)<\/title>/i)?.[1] ?? '').replace(/\s+/g, ' ').trim();
+  const og = page.html.match(/property=["']og:site_name["'][^>]*content=["']([^"']{0,120})["']/i)?.[1] ?? '';
+  if (!title) return false;
+  const lowerHtml = `${title} ${page.html.slice(0, 4000)}`.toLowerCase();
+  if (PARKED_MARKERS.some((marker) => lowerHtml.includes(marker))) return false;
+  return norm(`${title} ${og}`).includes(nameKey(company));
 }
 
 /** The host and the page must agree that this is the company. Either signal alone is too weak. */
@@ -282,17 +307,39 @@ const HEADER_MARK = '/** Company name exactly as the job board reports it, mappe
   const names = await boardCompanies();
   console.error(`companies on the board: ${names.length}`);
 
-  const resolvedByNameKey = new Map();
+  const knownByNameKey = new Map();
   for (const m of existing.matchAll(/^\s{2}"([^"]+)":\s*"([^"]+)",/gm)) {
     const key = nameKey(m[1]);
-    if (!resolvedByNameKey.has(key)) resolvedByNameKey.set(key, [m[1], m[2]]);
+    if (!knownByNameKey.has(key)) knownByNameKey.set(key, [m[1], m[2]]);
   }
 
+  const resolvedByNameKey = new Map();
   for (const name of names) {
     const key = nameKey(name);
     const curatedDomain = CURATED_DOMAINS.get(key);
     if (curatedDomain) resolvedByNameKey.set(key, [name, curatedDomain]);
   }
+
+  let revalidated = 0, invalidated = 0, validationIndex = 0;
+  const existingQueue = names.filter((name) => {
+    const key = nameKey(name);
+    return !CURATED_DOMAINS.has(key) && knownByNameKey.has(key);
+  });
+  await Promise.all(Array.from({ length: 12 }, async () => {
+    while (validationIndex < existingQueue.length) {
+      const name = existingQueue[validationIndex++];
+      const key = nameKey(name);
+      const domain = knownByNameKey.get(key)?.[1];
+      const page = domain ? await fetchHome(domain) : null;
+      if (domain && pageNamesCompany(name, page)) {
+        resolvedByNameKey.set(key, [name, domain]);
+        revalidated++;
+      } else {
+        invalidated++;
+        console.error(`  ! ${name} -> ${domain ?? 'missing'} (existing mapping no longer proved)`);
+      }
+    }
+  }));
 
   let added = 0, failed = 0, i = 0;
   const queue = names.filter((n) => !resolvedByNameKey.has(nameKey(n)));
@@ -313,7 +360,7 @@ const HEADER_MARK = '/** Company name exactly as the job board reports it, mappe
   }));
 
   const entries = [...resolvedByNameKey.values()].sort((a, b) => a[0].localeCompare(b[0]));
-  console.error(`\nresolved ${added} new, ${failed} left unproven, ${entries.length} total`);
+  console.error(`\nrevalidated ${revalidated}, invalidated ${invalidated}, resolved ${added}, ${failed} left unproven, ${entries.length} total`);
   if (DRY) return;
   writeFileSync(OUT, `${head}\nconst COMPANY_DOMAINS: Record<string, string> = {\n${entries.map(([n, d]) => `  ${JSON.stringify(n)}: ${JSON.stringify(d)},`).join('\n')}\n${tail}`);
   console.error(`wrote ${OUT}`);
