@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { unsupportedTargetRoles } from './targetRoleEvidence';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -31,6 +32,7 @@ export interface ParsedProfile {
   grad_year: number;
   currently_enrolled?: boolean;
   coursework?: string[];
+  objective?: string;
   target_roles: string[];
   /* Academic record, PRINTED not inferred. These three exist because /start's gaps screen asks for
    * exactly them, and before this the parser had no field for any of them - so the screen asked
@@ -82,6 +84,7 @@ The JSON must match this exact shape:
   "grad_year": number,
   "currently_enrolled": boolean,
   "coursework": [string],
+  "objective": string,
   "target_roles": [string],
   "gpa": string,
   "gpa_scale": string,
@@ -106,6 +109,7 @@ Rules:
 - "grad_year" should be the 4-digit year from grad_date. Use 0 when it is absent.
 - "currently_enrolled" is true only when the resume explicitly says expected graduation, candidate, current student, or otherwise clearly shows an unfinished degree with a future graduation date.
 - "coursework" may contain only courses explicitly printed on the resume.
+- "objective" is the objective or summary copied from the resume. Use an empty string when absent.
 - "gpa" is the grade average printed on the resume, digits only, e.g. "3.75" from "GPA: 3.75/4.0".
   Empty string when the resume does not print one. NEVER estimate, round or infer a GPA from
   honours, Latin honours, or anything else - an invented GPA is a false claim on a job application.
@@ -127,7 +131,7 @@ Rules:
 - Return empty arrays for missing sections, never null
 - If grad_year is truly unknown, use 0`;
 
-export function parsedProfileFromModelText(text: string): ParsedProfile {
+export function parsedProfileFromModelText(text: string, rawResumeText = ''): ParsedProfile {
   const cleaned = text.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
   const parsed = JSON.parse(cleaned) as ParsedProfile;
   const roles: string[] = [];
@@ -144,6 +148,10 @@ export function parsedProfileFromModelText(text: string): ParsedProfile {
     if (roles.length === 5) break;
   }
   if (roles.length !== 5) throw new Error('resume parse did not contain five evidence-backed target roles');
+  const unsupported = unsupportedTargetRoles(roles, parsed, rawResumeText);
+  if (unsupported.length > 0) {
+    throw new Error(`resume parse contained unsupported target roles: ${unsupported.join(', ')}`);
+  }
   parsed.target_roles = roles;
   return parsed;
 }
@@ -151,12 +159,13 @@ export function parsedProfileFromModelText(text: string): ParsedProfile {
 export async function parsedProfileWithOneRepair(
   initialText: string,
   repair: (failure: string) => Promise<string>,
+  rawResumeText = '',
 ): Promise<ParsedProfile> {
   try {
-    return parsedProfileFromModelText(initialText);
+    return parsedProfileFromModelText(initialText, rawResumeText);
   } catch (error) {
     const failure = error instanceof Error ? error.message : 'invalid resume JSON';
-    return parsedProfileFromModelText(await repair(failure));
+    return parsedProfileFromModelText(await repair(failure), rawResumeText);
   }
 }
 
@@ -178,7 +187,7 @@ export async function parseResumeWithClaude(resumeText: string): Promise<ParsedP
       return textBlock?.type === 'text' ? textBlock.text : '';
     };
     const initial = await request();
-    return await parsedProfileWithOneRepair(initial, request);
+    return await parsedProfileWithOneRepair(initial, request, resumeText);
   } catch (error) {
     throw new Error(`Claude returned invalid JSON for resume parsing: ${error instanceof Error ? error.message.slice(0, 200) : 'unknown error'}`);
   }

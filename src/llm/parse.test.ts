@@ -67,7 +67,7 @@ function modelProfile(target_roles: unknown): string {
 test('the parser accepts exactly five distinct non-empty target roles and trims them', () => {
   const parsed = parsedProfileFromModelText(modelProfile([
     ' Software Engineer ', 'Backend Engineer', 'Frontend Engineer', 'Product Engineer', 'Data Engineer',
-  ]));
+  ]), 'Software backend frontend product and data engineering with TypeScript and SQL.');
   assert.deepEqual(parsed.target_roles, [
     'Software Engineer', 'Backend Engineer', 'Frontend Engineer', 'Product Engineer', 'Data Engineer',
   ]);
@@ -77,7 +77,7 @@ test('the parser normalizes roles without inventing unrelated fallback careers',
   assert.throws(() => parsedProfileFromModelText(modelProfile(undefined)), /five evidence-backed/);
   assert.throws(() => parsedProfileFromModelText(modelProfile(['Nurse', 'Teacher'])), /five evidence-backed/);
   assert.deepEqual(
-    parsedProfileFromModelText(modelProfile(['One', 'Two', 'Three', 'Four', 'Five', 'Six'])).target_roles,
+    parsedProfileFromModelText(modelProfile(['One', 'Two', 'Three', 'Four', 'Five', 'Six']), 'One Two Three Four Five Six').target_roles,
     ['One', 'Two', 'Three', 'Four', 'Five'],
   );
   assert.throws(
@@ -92,7 +92,7 @@ test('the parser normalizes roles without inventing unrelated fallback careers',
 test('the parser keeps every suggested title within the targeting API limit', () => {
   const parsed = parsedProfileFromModelText(modelProfile([
     'A'.repeat(120), 'Backend Engineer', 'Frontend Engineer', 'Product Engineer', 'Data Engineer',
-  ]));
+  ]), `${'A'.repeat(80)} backend frontend product data engineering`);
   assert.equal(parsed.target_roles[0].length, 80);
   assert.ok(parsed.target_roles.every((role) => role.length <= 80));
 });
@@ -103,7 +103,7 @@ test('a short role list gets exactly one bounded quality repair', async () => {
     calls += 1;
     assert.match(failure, /five evidence-backed target roles/);
     return modelProfile(['One', 'Two', 'Three', 'Four', 'Five']);
-  });
+  }, 'One Two Three Four Five');
 
   assert.equal(calls, 1);
   assert.deepEqual(repaired.target_roles, ['One', 'Two', 'Three', 'Four', 'Five']);
@@ -119,4 +119,30 @@ test('a failed repair is not retried indefinitely', async () => {
     /five evidence-backed target roles/,
   );
   assert.equal(calls, 1);
+});
+
+test('unsupported role suggestions trigger one evidence repair', async () => {
+  const profile = (roles: string[]) => JSON.stringify({
+    full_name: 'Nia Candidate',
+    experience: [{
+      company: 'University Hospital', title: 'Registered Nurse', start: '2023', end: 'Present',
+      description: 'Coordinated patient care and clinical research.',
+    }],
+    skills: ['Patient assessment', 'Care planning'], projects: [], school: 'State University',
+    degree: 'Bachelor of Science in Nursing', grad_year: 2023, target_roles: roles,
+  });
+  let calls = 0;
+  const repaired = await parsedProfileWithOneRepair(profile([
+    'Astronaut', 'Investment Banker', 'Film Director', 'Civil Engineer', 'Fashion Designer',
+  ]), async (failure) => {
+    calls += 1;
+    assert.match(failure, /unsupported target roles/);
+    return profile([
+      'Registered Nurse', 'Clinical Research Coordinator', 'Patient Care Coordinator',
+      'Health Educator', 'Nurse Researcher',
+    ]);
+  });
+
+  assert.equal(calls, 1);
+  assert.equal(repaired.target_roles[0], 'Registered Nurse');
 });
