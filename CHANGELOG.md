@@ -13,6 +13,8 @@
 
 - Model role suggestions are normalized, deduplicated, bounded, and safely filled without
   rejecting an otherwise valid resume parse.
+- Live job-board logo coverage is enforced at a minimum of 75%, and configuration can only raise
+  that threshold rather than weakening it.
 
 ## [1.0.6] - 2026-07-31
 

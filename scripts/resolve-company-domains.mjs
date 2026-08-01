@@ -71,6 +71,54 @@ const TLDS = ['com', 'ai', 'io', 'app', 'co', 'so', 'org', 'net', 'dev', 'tv'];
  */
 const TOO_GENERIC = new Set(['depot', 'fireworks', 'honor', 'oldmission', 'pinecone', 'knock', 'opal', 'column']);
 
+/**
+ * Official domains that the strict resolver cannot prove automatically because the company uses a
+ * non-obvious hostname, redirects to a differently named brand, or blocks automated requests.
+ * Each homepage was reviewed against the employer name on 2026-08-02. Keys use the same
+ * punctuation-insensitive normalization as the runtime lookup, so board spelling changes do not
+ * create aliases or duplicate domains.
+ */
+const CURATED_DOMAINS = new Map([
+  ['abnormalai', 'abnormal.ai'],
+  ['andurilindustries', 'anduril.com'],
+  ['anydesk', 'anydesk.com'],
+  ['astronomer', 'astronomer.io'],
+  ['axios', 'axios.com'],
+  ['block', 'block.xyz'],
+  ['box', 'box.com'],
+  ['braintrust', 'usebraintrust.com'],
+  ['codeforamerica', 'codeforamerica.org'],
+  ['commonapp', 'commonapp.org'],
+  ['databricks', 'databricks.com'],
+  ['dataiku', 'dataiku.com'],
+  ['decagon', 'decagon.ai'],
+  ['elastic', 'elastic.co'],
+  ['elevenlabs', 'elevenlabs.io'],
+  ['epicgames', 'epicgames.com'],
+  ['fastly', 'fastly.com'],
+  ['fireworks', 'fireworks.ai'],
+  ['givedirectly', 'givedirectly.org'],
+  ['hellofresh', 'hellofresh.com'],
+  ['justworks', 'justworks.com'],
+  ['n26', 'n26.com'],
+  ['openai', 'openai.com'],
+  ['oscarhealth', 'hioscar.com'],
+  ['quintoandar', 'quintoandar.com.br'],
+  ['rocketlab', 'rocketlabcorp.com'],
+  ['salesloft', 'salesloft.com'],
+  ['seatgeek', 'seatgeek.com'],
+  ['sierra', 'sierra.ai'],
+  ['sigma', 'sigmacomputing.com'],
+  ['spotify', 'spotify.com'],
+  ['thenewyorktimes', 'nytco.com'],
+  ['toast', 'toasttab.com'],
+  ['tripadvisor', 'tripadvisor.com'],
+  ['udemy', 'udemy.com'],
+  ['vardaspaceindustries', 'varda.com'],
+  ['voxmediagroup', 'voxmedia.com'],
+  ['wiz', 'wiz.io'],
+]);
+
 /** A parked or for-sale domain is not a company, however much its page repeats the name. */
 const PARKED_MARKERS = [
   'is for sale', 'domain for sale', 'buy this domain', 'aftermarket.com', 'hugedomains',
@@ -215,22 +263,37 @@ const HEADER_MARK = '/** Company name exactly as the job board reports it, mappe
   const names = await boardCompanies();
   console.error(`companies on the board: ${names.length}`);
 
-  const known = new Map();
-  for (const m of existing.matchAll(/^\s{2}"([^"]+)":\s*"([^"]+)",/gm)) known.set(m[1], m[2]);
+  const resolvedByNameKey = new Map();
+  for (const m of existing.matchAll(/^\s{2}"([^"]+)":\s*"([^"]+)",/gm)) {
+    const nameKey = norm(m[1]);
+    if (!resolvedByNameKey.has(nameKey)) resolvedByNameKey.set(nameKey, [m[1], m[2]]);
+  }
 
-  const resolved = new Map(known);
+  for (const name of names) {
+    const nameKey = norm(name);
+    const curatedDomain = CURATED_DOMAINS.get(nameKey);
+    if (curatedDomain) resolvedByNameKey.set(nameKey, [name, curatedDomain]);
+  }
+
   let added = 0, failed = 0, i = 0;
-  const queue = names.filter((n) => !known.has(n));
+  const queue = names.filter((n) => !resolvedByNameKey.has(norm(n)));
   await Promise.all(Array.from({ length: 8 }, async () => {
     while (i < queue.length) {
       const name = queue[i++];
       const hit = await resolveCompany(name).catch(() => null);
-      if (hit) { resolved.set(name, hit.domain); added++; console.error(`  + ${name} -> ${hit.domain}`); }
+      if (hit) {
+        const nameKey = norm(name);
+        if (!resolvedByNameKey.has(nameKey)) {
+          resolvedByNameKey.set(nameKey, [name, hit.domain]);
+          added++;
+          console.error(`  + ${name} -> ${hit.domain}`);
+        }
+      }
       else { failed++; console.error(`  ? ${name} (unproven, will show an initial)`); }
     }
   }));
 
-  const entries = [...resolved.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  const entries = [...resolvedByNameKey.values()].sort((a, b) => a[0].localeCompare(b[0]));
   console.error(`\nresolved ${added} new, ${failed} left unproven, ${entries.length} total`);
   if (DRY) return;
   writeFileSync(OUT, `${head}\nconst COMPANY_DOMAINS: Record<string, string> = {\n${entries.map(([n, d]) => `  ${JSON.stringify(n)}: ${JSON.stringify(d)},`).join('\n')}\n${tail}`);

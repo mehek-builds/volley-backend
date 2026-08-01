@@ -22,21 +22,22 @@
  * at a different kind of drift.
  *
  *   node scripts/check-logo-coverage.mjs         # exit 1 when coverage is below the floor
- *   MIN_LOGO_COVERAGE=0.6 node scripts/...       # override the floor
+ *   MIN_LOGO_COVERAGE=0.8 node scripts/...       # raise the floor
  *
  * WHEN IT FIRES, the fix is to regenerate the map, not to lower the number:
  *
  *   node scripts/resolve-company-domains.mjs && git diff src/lib/companyDomains.ts
  *
- * The floor is deliberately well below today's measurement. It is a smoke alarm for "the board grew
- * past the map again", not a quality target — a company the resolver cannot prove is CORRECTLY
- * absent, and its row shows an initial, so 100% is neither achievable nor desirable.
+ * The floor is both a quality target and a drift alarm. At least 75% of live job rows must show a
+ * verified employer logo. MIN_LOGO_COVERAGE may raise that bar for a stricter run, but can never
+ * lower it below the product guarantee.
  */
 
 import { companyDomainFor } from '../src/lib/companyDomains.ts';
+import { logoCoverageFloor } from '../src/lib/logoCoverage.ts';
 
 const API = process.env.JOBS_API ?? 'https://student-outreach-backend.vercel.app';
-const FLOOR = Number(process.env.MIN_LOGO_COVERAGE ?? 0.55);
+const FLOOR = logoCoverageFloor(process.env.MIN_LOGO_COVERAGE);
 const SAMPLE_PAGES = 5;
 
 async function sampleBoard() {
@@ -84,7 +85,7 @@ if (coverage < FLOOR) {
   console.error('\n  node scripts/resolve-company-domains.mjs && git diff src/lib/companyDomains.ts\n');
   console.error(`Unmapped companies in the sample: ${unmapped.slice(0, 25).join(', ')}`);
   if (unmapped.length > 25) console.error(`...and ${unmapped.length - 25} more.`);
-  console.error('\nDo NOT fix this by lowering MIN_LOGO_COVERAGE.');
+  console.error('\nMIN_LOGO_COVERAGE cannot lower the enforced 75% minimum.');
   process.exit(1);
 }
 
