@@ -37,6 +37,15 @@ describe('companyDomainFor', () => {
     assert.strictEqual(companyDomainFor('Khan Academy'), 'khanacademy.org');
     assert.strictEqual(companyDomainFor('Twitch'), 'twitch.tv');
   });
+
+  test('reviewed exceptions stay mapped when automated proof is blocked or non-obvious', () => {
+    assert.strictEqual(companyDomainFor('Access Bank PLC'), 'accessbankplc.com');
+    assert.strictEqual(companyDomainFor('Block'), 'block.xyz');
+    assert.strictEqual(companyDomainFor('Oscar Health'), 'hioscar.com');
+    assert.strictEqual(companyDomainFor('Rocket Lab'), 'rocketlabcorp.com');
+    assert.strictEqual(companyDomainFor('Sigma'), 'sigmacomputing.com');
+    assert.strictEqual(companyDomainFor('Toast'), 'toasttab.com');
+  });
 });
 
 describe('the map itself', () => {
@@ -98,9 +107,10 @@ describe('the failure classes this map has actually hit', () => {
   test('companies whose common word belongs to someone else are left unmapped', () => {
     // Each was checked by hand: fireworks.com is a fireworks retailer, oldmission.org is a church,
     // pinecone.com is a for-sale page, honor.com is the handset maker. An initial is correct here.
-    for (const company of ['Fireworks', 'Old Mission', 'Pinecone', 'honor', 'Depot']) {
+    for (const company of ['Old Mission', 'Pinecone', 'honor', 'Depot']) {
       assert.strictEqual(companyDomainFor(company), null, `${company} is not safely resolvable by name`);
     }
+    assert.strictEqual(companyDomainFor('Fireworks'), 'fireworks.ai', 'Fireworks has a reviewed override');
   });
 
   test('no entry is a country redirect of itself', () => {

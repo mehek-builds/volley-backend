@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { declaredSkillsList, serveProfileJson } from './profile';
+import { declaredSkillsList, parsedTargetRolesForSeed, serveProfileJson } from './profile';
 import { applyDeclaredSkills } from './draft';
 import { SYSTEM_PROMPT as DRAFT_SYSTEM_PROMPT } from '../llm/draft';
 
@@ -28,6 +28,17 @@ describe('declaredSkillsList', () => {
 
   test('filters junk out of a hand-edited jsonb row instead of forwarding it', () => {
     assert.deepEqual(declaredSkillsList(['Python', '', '   ', 42, null, 'SQL']), ['Python', 'SQL']);
+  });
+});
+
+describe('parsedTargetRolesForSeed', () => {
+  test('trims, deduplicates, bounds and rejects malformed parsed roles', () => {
+    assert.deepEqual(
+      parsedTargetRolesForSeed([' Nurse ', 'nurse', '', 42, 'A'.repeat(100)]),
+      ['Nurse', 'A'.repeat(80)],
+    );
+    assert.equal(parsedTargetRolesForSeed(Array.from({ length: 20 }, (_, i) => `Role ${i}`)).length, 12);
+    assert.deepEqual(parsedTargetRolesForSeed(null), []);
   });
 });
 

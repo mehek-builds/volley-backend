@@ -22,69 +22,138 @@
  * at a different kind of drift.
  *
  *   node scripts/check-logo-coverage.mjs         # exit 1 when coverage is below the floor
- *   MIN_LOGO_COVERAGE=0.6 node scripts/...       # override the floor
+ *   MIN_LOGO_COVERAGE=0.8 node scripts/...       # raise the floor
  *
  * WHEN IT FIRES, the fix is to regenerate the map, not to lower the number:
  *
  *   node scripts/resolve-company-domains.mjs && git diff src/lib/companyDomains.ts
  *
- * The floor is deliberately well below today's measurement. It is a smoke alarm for "the board grew
- * past the map again", not a quality target — a company the resolver cannot prove is CORRECTLY
- * absent, and its row shows an initial, so 100% is neither achievable nor desirable.
+ * The floor is both a quality target and a drift alarm. At least 75% of live job rows must show a
+ * verified employer logo. MIN_LOGO_COVERAGE may raise that bar for a stricter run, but can never
+ * lower it below the product guarantee.
  */
 
 import { companyDomainFor } from '../src/lib/companyDomains.ts';
+import { logoCoverageFloor } from '../src/lib/logoCoverage.ts';
+import { createHash } from 'node:crypto';
 
 const API = process.env.JOBS_API ?? 'https://student-outreach-backend.vercel.app';
-const FLOOR = Number(process.env.MIN_LOGO_COVERAGE ?? 0.55);
-const SAMPLE_PAGES = 5;
+const FLOOR = logoCoverageFloor(process.env.MIN_LOGO_COVERAGE);
+const PAGE_SIZE = 100;
+const MAX_ROWS = 100_000;
+const PAGE_CONCURRENCY = 12;
+const FAVICON_CONCURRENCY = 12;
+const FAVICON_ENDPOINT = 'https://www.google.com/s2/favicons';
 
-async function sampleBoard() {
-  const rows = [];
-  for (let page = 0; page < SAMPLE_PAGES; page++) {
-    const res = await fetch(`${API}/jobs?limit=100&offset=${page * 100}`);
-    if (!res.ok) throw new Error(`GET /jobs answered ${res.status}`);
-    const body = await res.json();
-    rows.push(...(body.jobs ?? []));
-    if (!body.has_more) break;
+async function readPage(offset) {
+  const res = await fetch(`${API}/jobs?limit=${PAGE_SIZE}&offset=${offset}`);
+  if (!res.ok) throw new Error(`GET /jobs answered ${res.status} at offset ${offset}`);
+  const body = await res.json();
+  if (!Array.isArray(body.jobs)) throw new Error(`GET /jobs returned invalid jobs at offset ${offset}`);
+  return body;
+}
+
+async function readBoard() {
+  const first = await readPage(0);
+  const total = Number(first.total);
+  if (!Number.isSafeInteger(total) || total < first.jobs.length) {
+    throw new Error('GET /jobs did not return a valid total');
+  }
+  if (total > MAX_ROWS) throw new Error(`job board has ${total} rows, above the ${MAX_ROWS}-row limit`);
+
+  const rows = [...first.jobs];
+  const offsets = [];
+  for (let offset = PAGE_SIZE; offset < total; offset += PAGE_SIZE) offsets.push(offset);
+  for (let i = 0; i < offsets.length; i += PAGE_CONCURRENCY) {
+    const pages = await Promise.all(offsets.slice(i, i + PAGE_CONCURRENCY).map(readPage));
+    for (const page of pages) rows.push(...page.jobs);
+  }
+  if (rows.length !== total) throw new Error(`expected ${total} rows but read ${rows.length}`);
+  const ids = rows.map((row) => row.id);
+  if (ids.some((id) => typeof id !== 'string') || new Set(ids).size !== total) {
+    throw new Error('job board changed during offset pagination; retry the complete scan');
   }
   return rows;
 }
 
+const fingerprint = (bytes) => createHash('sha256').update(bytes).digest('hex');
+
+async function faviconResponse(domain) {
+  let lastError;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const response = await fetch(`${FAVICON_ENDPOINT}?domain=${encodeURIComponent(domain)}&sz=64`);
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (response.status !== 404 && !response.ok) throw new Error(`favicon answered ${response.status} for ${domain}`);
+      if (!response.headers.get('content-type')?.startsWith('image/')) {
+        throw new Error(`favicon returned non-image content for ${domain}`);
+      }
+      return { status: response.status, fingerprint: fingerprint(bytes) };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
+async function workingLogoDomains(domains) {
+  const fallback = await faviconResponse('litos-guaranteed-missing-favicon.invalid');
+  const working = new Set();
+  for (let i = 0; i < domains.length; i += FAVICON_CONCURRENCY) {
+    const batch = domains.slice(i, i + FAVICON_CONCURRENCY);
+    const results = await Promise.all(batch.map(async (domain) => [domain, await faviconResponse(domain)]));
+    for (const [domain, response] of results) {
+      if (response.status === 200 && response.fingerprint !== fallback.fingerprint) working.add(domain);
+    }
+  }
+  return working;
+}
+
 let rows;
 try {
-  rows = await sampleBoard();
+  rows = await readBoard();
 } catch (error) {
-  /* Skips rather than fails when the board is unreachable, and says so LOUDLY. A network blip must
-     not turn a CI run red, but a silent skip would leave a green tick meaning "not checked", which
-     is the failure mode this whole file is about. */
-  console.error(`SKIPPED: could not read the board (${error.message}).`);
-  console.error('This check did NOT run. It is not a pass.');
-  process.exit(0);
+  console.error(`FAILED: could not verify the complete live board (${error.message}).`);
+  console.error('Coverage cannot be guaranteed when the measurement is incomplete.');
+  process.exit(1);
 }
 
 if (rows.length === 0) {
-  console.error('SKIPPED: the board returned no jobs, so there is nothing to measure.');
-  process.exit(0);
+  console.error('FAILED: the live board returned no jobs, so coverage cannot be verified.');
+  process.exit(1);
 }
 
 const companies = [...new Set(rows.map((row) => row.company_name).filter(Boolean))];
 const unmapped = companies.filter((name) => !companyDomainFor(name));
-const rowsWithLogo = rows.filter((row) => companyDomainFor(row.company_name)).length;
+const mappedDomains = [...new Set(companies.map(companyDomainFor).filter(Boolean))];
+let logoDomains;
+try {
+  logoDomains = await workingLogoDomains(mappedDomains);
+} catch (error) {
+  console.error(`FAILED: could not verify rendered favicons (${error.message}).`);
+  process.exit(1);
+}
+const brokenLogoDomains = mappedDomains.filter((domain) => !logoDomains.has(domain));
+const rowsWithLogo = rows.filter((row) => {
+  const domain = companyDomainFor(row.company_name);
+  return domain !== null && logoDomains.has(domain);
+}).length;
 const coverage = rowsWithLogo / rows.length;
 
-console.log(`Sampled ${rows.length} rows across ${companies.length} companies.`);
+console.log(`Checked all ${rows.length} live rows across ${companies.length} companies.`);
 console.log(`Rows that would show a logo: ${rowsWithLogo} (${(coverage * 100).toFixed(0)}%).`);
 console.log(`Companies with no verified domain: ${unmapped.length}.`);
+console.log(`Mapped domains with no favicon response: ${brokenLogoDomains.length}.`);
 
 if (coverage < FLOOR) {
   console.error(`\nLOGO COVERAGE BELOW FLOOR: ${(coverage * 100).toFixed(0)}% < ${(FLOOR * 100).toFixed(0)}%.`);
   console.error('The board has outgrown src/lib/companyDomains.ts, so job rows are showing initials');
   console.error('where they should show logos. Regenerate the map:');
   console.error('\n  node scripts/resolve-company-domains.mjs && git diff src/lib/companyDomains.ts\n');
-  console.error(`Unmapped companies in the sample: ${unmapped.slice(0, 25).join(', ')}`);
+  console.error(`Unmapped companies on the board: ${unmapped.slice(0, 25).join(', ')}`);
   if (unmapped.length > 25) console.error(`...and ${unmapped.length - 25} more.`);
-  console.error('\nDo NOT fix this by lowering MIN_LOGO_COVERAGE.');
+  if (brokenLogoDomains.length > 0) console.error(`Domains without a rendered favicon: ${brokenLogoDomains.join(', ')}`);
+  console.error('\nMIN_LOGO_COVERAGE cannot lower the enforced 75% minimum.');
   process.exit(1);
 }
 

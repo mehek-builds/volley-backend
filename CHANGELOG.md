@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.0.7] - 2026-08-01
+
+### Changed
+
+- Resume parsing now returns five ordered, distinct target-role suggestions based on dated work
+  experience, past titles, projects, skills, and supported seniority.
+- Onboarding now requires a usable resume before job focus and recognizes the new title and role
+  type selections for both new and existing accounts.
+
+### Fixed
+
+- Model role suggestions are normalized, deduplicated, bounded, and safely filled without
+  rejecting an otherwise valid resume parse.
+- Live job-board logo coverage is enforced at a minimum of 75%, and configuration can only raise
+  that threshold rather than weakening it.
+
 ## [1.0.6] - 2026-07-31
 
 ### Added

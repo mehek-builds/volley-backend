@@ -47,6 +47,9 @@ import { resolve4, resolve6 } from 'node:dns/promises';
 const API = process.env.JOBS_API ?? 'https://student-outreach-backend.vercel.app';
 const OUT = new URL('../src/lib/companyDomains.ts', import.meta.url).pathname;
 const DRY = process.argv.includes('--dry-run');
+const PAGE_SIZE = 100;
+const MAX_ROWS = 100_000;
+const PAGE_CONCURRENCY = 12;
 
 /** Tried in this order. `.com` first because it is right far more often than everything else. */
 const TLDS = ['com', 'ai', 'io', 'app', 'co', 'so', 'org', 'net', 'dev', 'tv'];
@@ -67,9 +70,76 @@ const TLDS = ['com', 'ai', 'io', 'app', 'co', 'so', 'org', 'net', 'dev', 'tv'];
  *   opal         opal.com is Open Advisors Limited; which Opal posts here is unclear
  *   Column       column.com serves no title, so there is nothing to verify against
  *
- * They render an initial, which is correct. Adding one back means proving it, not guessing it.
+ * They render an initial unless CURATED_DOMAINS below records a separately verified exception.
+ * Adding one back means proving it, not guessing it.
  */
 const TOO_GENERIC = new Set(['depot', 'fireworks', 'honor', 'oldmission', 'pinecone', 'knock', 'opal', 'column']);
+
+/**
+ * Official domains that the strict resolver cannot prove automatically because the company uses a
+ * non-obvious hostname, redirects to a differently named brand, or blocks automated requests.
+ * Each homepage was reviewed against the employer name on 2026-08-02. Keys use the same
+ * punctuation-insensitive normalization as the runtime lookup, so board spelling changes do not
+ * create aliases or duplicate domains.
+ */
+const CURATED_DOMAINS = new Map([
+  ['abnormalai', 'abnormal.ai'],
+  ['accessbank', 'accessbankplc.com'],
+  ['affirm', 'affirm.com'],
+  ['airtable', 'airtable.com'],
+  ['andurilindustries', 'anduril.com'],
+  ['anydesk', 'anydesk.com'],
+  ['astronomer', 'astronomer.io'],
+  ['axios', 'axios.com'],
+  ['block', 'block.xyz'],
+  ['box', 'box.com'],
+  ['braintrust', 'usebraintrust.com'],
+  ['codeforamerica', 'codeforamerica.org'],
+  ['commonapp', 'commonapp.org'],
+  ['carta', 'carta.com'],
+  ['chime', 'chime.com'],
+  ['coinbase', 'coinbase.com'],
+  ['databricks', 'databricks.com'],
+  ['dataiku', 'dataiku.com'],
+  ['decagon', 'decagon.ai'],
+  ['doximity', 'doximity.com'],
+  ['drw', 'drw.com'],
+  ['elastic', 'elastic.co'],
+  ['elevenlabs', 'elevenlabs.io'],
+  ['epicgames', 'epicgames.com'],
+  ['fastly', 'fastly.com'],
+  ['flexport', 'flexport.com'],
+  ['fireworks', 'fireworks.ai'],
+  ['givedirectly', 'givedirectly.org'],
+  ['gitlab', 'gitlab.com'],
+  ['gusto', 'gusto.com'],
+  ['hellofresh', 'hellofresh.com'],
+  ['justworks', 'justworks.com'],
+  ['matchgroup', 'mtch.com'],
+  ['n26', 'n26.com'],
+  ['nuro', 'nuro.com'],
+  ['openai', 'openai.com'],
+  ['oscarhealth', 'hioscar.com'],
+  ['perplexity', 'perplexity.ai'],
+  ['quintoandar', 'quintoandar.com.br'],
+  ['quberesearchtechnologies', 'qube-rt.com'],
+  ['ramp', 'ramp.com'],
+  ['rocketlab', 'rocketlabcorp.com'],
+  ['salesloft', 'salesloft.com'],
+  ['seatgeek', 'seatgeek.com'],
+  ['sierra', 'sierra.ai'],
+  ['sigma', 'sigmacomputing.com'],
+  ['sofi', 'sofi.com'],
+  ['spotify', 'spotify.com'],
+  ['thenewyorktimes', 'nytco.com'],
+  ['toast', 'toasttab.com'],
+  ['tripadvisor', 'tripadvisor.com'],
+  ['udemy', 'udemy.com'],
+  ['vardaspaceindustries', 'varda.com'],
+  ['voxmediagroup', 'voxmedia.com'],
+  ['wiz', 'wiz.io'],
+  ['zocdoc', 'zocdoc.com'],
+]);
 
 /** A parked or for-sale domain is not a company, however much its page repeats the name. */
 const PARKED_MARKERS = [
@@ -90,6 +160,7 @@ const NOT_COMPANIES = [
 const norm = (s) => s.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]/g, '');
 const LEGAL = /\s+(inc|llc|ltd|limited|corp|corporation|co|plc|gmbh|ag|bv|sa|pte)\s*$/i;
 const cleanName = (n) => n.replace(/[.,]/g, ' ').replace(LEGAL, '').replace(/\s+/g, ' ').trim();
+const nameKey = (name) => norm(cleanName(name));
 
 /**
  * Candidate hostnames for a company, WITHOUT the first-word shortcut.
@@ -188,12 +259,25 @@ async function resolveCompany(name) {
 
 async function boardCompanies() {
   const names = new Set();
-  for (let offset = 0; offset < 5000; offset += 100) {
-    const res = await fetch(`${API}/jobs?limit=100&offset=${offset}`);
-    if (!res.ok) break;
+  async function readPage(offset) {
+    const res = await fetch(`${API}/jobs?limit=${PAGE_SIZE}&offset=${offset}`);
+    if (!res.ok) throw new Error(`GET /jobs answered ${res.status} at offset ${offset}`);
     const body = await res.json();
-    for (const job of body.jobs ?? []) names.add(job.company_name);
-    if (!body.has_more) break;
+    if (!Array.isArray(body.jobs)) throw new Error(`GET /jobs returned invalid jobs at offset ${offset}`);
+    return body;
+  }
+
+  const first = await readPage(0);
+  const total = Number(first.total);
+  if (!Number.isSafeInteger(total) || total < first.jobs.length) throw new Error('GET /jobs did not return a valid total');
+  if (total > MAX_ROWS) throw new Error(`job board has ${total} rows, above the ${MAX_ROWS}-row limit`);
+  for (const job of first.jobs) names.add(job.company_name);
+
+  const offsets = [];
+  for (let offset = PAGE_SIZE; offset < total; offset += PAGE_SIZE) offsets.push(offset);
+  for (let i = 0; i < offsets.length; i += PAGE_CONCURRENCY) {
+    const pages = await Promise.all(offsets.slice(i, i + PAGE_CONCURRENCY).map(readPage));
+    for (const page of pages) for (const job of page.jobs) names.add(job.company_name);
   }
   return [...names].sort((a, b) => a.localeCompare(b));
 }
@@ -215,23 +299,61 @@ const HEADER_MARK = '/** Company name exactly as the job board reports it, mappe
   const names = await boardCompanies();
   console.error(`companies on the board: ${names.length}`);
 
-  const known = new Map();
-  for (const m of existing.matchAll(/^\s{2}"([^"]+)":\s*"([^"]+)",/gm)) known.set(m[1], m[2]);
+  const knownByNameKey = new Map();
+  for (const m of existing.matchAll(/^\s{2}"([^"]+)":\s*"([^"]+)",/gm)) {
+    const key = nameKey(m[1]);
+    if (!knownByNameKey.has(key)) knownByNameKey.set(key, [m[1], m[2]]);
+  }
 
-  const resolved = new Map(known);
+  const resolvedByNameKey = new Map();
+  for (const name of names) {
+    const key = nameKey(name);
+    const curatedDomain = CURATED_DOMAINS.get(key);
+    if (curatedDomain) resolvedByNameKey.set(key, [name, curatedDomain]);
+  }
+
+  let revalidated = 0, invalidated = 0, validationIndex = 0;
+  const existingQueue = names.filter((name) => {
+    const key = nameKey(name);
+    return !CURATED_DOMAINS.has(key) && knownByNameKey.has(key);
+  });
+  await Promise.all(Array.from({ length: 12 }, async () => {
+    while (validationIndex < existingQueue.length) {
+      const name = existingQueue[validationIndex++];
+      const key = nameKey(name);
+      const domain = knownByNameKey.get(key)?.[1];
+      const page = domain ? await fetchHome(domain) : null;
+      const hit = domain ? accepts(name, domain, page) : null;
+      if (hit) {
+        resolvedByNameKey.set(key, [name, hit.domain]);
+        revalidated++;
+      } else {
+        invalidated++;
+        console.error(`  ! ${name} -> ${domain ?? 'missing'} (existing mapping no longer proved)`);
+      }
+    }
+  }));
+
   let added = 0, failed = 0, i = 0;
-  const queue = names.filter((n) => !known.has(n));
+  const queue = names.filter((n) => !resolvedByNameKey.has(nameKey(n)));
   await Promise.all(Array.from({ length: 8 }, async () => {
     while (i < queue.length) {
       const name = queue[i++];
       const hit = await resolveCompany(name).catch(() => null);
-      if (hit) { resolved.set(name, hit.domain); added++; console.error(`  + ${name} -> ${hit.domain}`); }
+      if (hit) {
+        const key = nameKey(name);
+        if (!resolvedByNameKey.has(key)) {
+          resolvedByNameKey.set(key, [name, hit.domain]);
+          added++;
+          console.error(`  + ${name} -> ${hit.domain}`);
+        }
+      }
       else { failed++; console.error(`  ? ${name} (unproven, will show an initial)`); }
     }
   }));
 
-  const entries = [...resolved.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  console.error(`\nresolved ${added} new, ${failed} left unproven, ${entries.length} total`);
+  const entries = [...resolvedByNameKey.values()].sort((a, b) => a[0].localeCompare(b[0]));
+  console.error(`\nrevalidated ${revalidated}, invalidated ${invalidated}, resolved ${added}, ${failed} left unproven, ${entries.length} total`);
   if (DRY) return;
   writeFileSync(OUT, `${head}\nconst COMPANY_DOMAINS: Record<string, string> = {\n${entries.map(([n, d]) => `  ${JSON.stringify(n)}: ${JSON.stringify(d)},`).join('\n')}\n${tail}`);
   console.error(`wrote ${OUT}`);
