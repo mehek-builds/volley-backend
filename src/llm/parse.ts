@@ -48,6 +48,8 @@ export interface ParsedProfile {
   // routes/profile.ts - NOT produced by the model, which never sees the page structure. /start
   // states it back to the student when it shows the one-page base resume. 0 means unmeasured.
   source_pages?: number;
+  // Filled by the upload route after reconciling this parse with durable experience-bank rows.
+  bank_total?: number;
 }
 
 // R-047, the failure the degree rule below exists to prevent. An uploaded resume reading
