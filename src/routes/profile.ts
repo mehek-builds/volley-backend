@@ -1,7 +1,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { db } from '../db/index';
-import { profiles, experience_bank, application_profile } from '../db/schema';
-import { eq } from 'drizzle-orm';
+import { profiles, experience_bank, application_profile, targeting } from '../db/schema';
+import { eq, sql } from 'drizzle-orm';
 import { requireAuth } from '../middleware/auth';
 import { encryptField } from '../lib/fieldCrypto';
 import { parseResumeWithClaude, parseResumeFromPdf, ParsedProfile } from '../llm/parse';
@@ -114,6 +114,18 @@ export function declaredSkillsList(value: unknown): string[] {
   return (Array.isArray(value) ? value : []).filter(
     (s): s is string => typeof s === 'string' && s.trim().length > 0,
   );
+}
+
+export function parsedTargetRolesForSeed(value: unknown): string[] {
+  const roles: string[] = [];
+  for (const candidate of Array.isArray(value) ? value : []) {
+    if (typeof candidate !== 'string') continue;
+    const role = candidate.trim().slice(0, 80).trim();
+    if (!role || roles.some((existing) => existing.toLowerCase() === role.toLowerCase())) continue;
+    roles.push(role);
+    if (roles.length === 12) break;
+  }
+  return roles;
 }
 
 // What GET /profile serves (R-027). parsed_json is resume-INFERRED data; profiles.skills is the
@@ -443,6 +455,34 @@ export async function profileRoutes(fastify: FastifyInstance) {
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to save profile to database' });
+    }
+
+    // Compatibility bridge for clients that saved category and role type before uploading their
+    // resume. The new state machine requires titles too, and an old cached client has no title
+    // field to send. Seed only an absent or empty list from the parse, never overwrite titles the
+    // applicant already chose. New clients immediately show the focus step and can replace this
+    // seed with their confirmed selection.
+    const parsedTargetRoles = parsedTargetRolesForSeed(parsedProfile.target_roles);
+    if (parsedTargetRoles.length > 0) {
+      try {
+        const encodedRoles = JSON.stringify(parsedTargetRoles);
+        await db
+          .insert(targeting)
+          .values({ user_id: userId, titles: parsedTargetRoles, updated_at: new Date() })
+          .onConflictDoUpdate({
+            target: targeting.user_id,
+            set: {
+              titles: sql`case
+                when ${targeting.titles} is null or jsonb_array_length(${targeting.titles}) = 0
+                then ${encodedRoles}::jsonb
+                else ${targeting.titles}
+              end`,
+              updated_at: new Date(),
+            },
+          });
+      } catch (err) {
+        fastify.log.warn({ err, userId }, 'could not seed targeting titles from resume parse');
+      }
     }
 
     // Reconcile the parse into the experience bank without replacing anything the student edited.

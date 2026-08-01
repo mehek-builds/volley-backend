@@ -4,6 +4,8 @@ on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    - cron: '17 * * * *'
 
 # Least privilege: this job only needs to read the code (S1).
 permissions:
@@ -15,6 +17,7 @@ concurrency:
 
 jobs:
   test:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,6 +45,7 @@ jobs:
   # Separate job, not a step in `test`: this one needs a database and `test` deliberately does not,
   # so a missing/rotated secret must never be able to take the test suite down with it.
   schema-drift:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -92,6 +96,7 @@ jobs:
   # poll in between. This asks for it, on every source, at pull-request time. Like logo-coverage it
   # measures against the LIVE boards, because that is the only place the truth is.
   source-identity:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -42,7 +42,7 @@
 const COMPANY_DOMAINS: Record<string, string> = {
   "Abnormal AI": "abnormal.ai",
   "Abridge": "abridge.com",
-  "Access Bank PLC": "accessbank.com",
+  "Access Bank PLC": "accessbankplc.com",
   "Adyen": "adyen.com",
   "Aerones": "aerones.com",
   "Affirm": "affirm.com",

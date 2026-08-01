@@ -39,6 +39,7 @@ describe('companyDomainFor', () => {
   });
 
   test('reviewed exceptions stay mapped when automated proof is blocked or non-obvious', () => {
+    assert.strictEqual(companyDomainFor('Access Bank PLC'), 'accessbankplc.com');
     assert.strictEqual(companyDomainFor('Block'), 'block.xyz');
     assert.strictEqual(companyDomainFor('Oscar Health'), 'hioscar.com');
     assert.strictEqual(companyDomainFor('Rocket Lab'), 'rocketlabcorp.com');

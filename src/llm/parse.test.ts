@@ -72,18 +72,20 @@ test('the parser accepts exactly five distinct non-empty target roles and trims 
   ]);
 });
 
-test('the parser normalizes missing, short, long, duplicate, and empty target-role lists to five', () => {
-  for (const roles of [
-    undefined,
-    ['One', 'Two', 'Three', 'Four'],
-    ['One', 'Two', 'Three', 'Four', 'Five', 'Six'],
-    ['One', 'Two', 'Three', 'Four', 'one'],
-    ['One', 'Two', 'Three', 'Four', '   '],
-  ]) {
-    const parsed = parsedProfileFromModelText(modelProfile(roles));
-    assert.equal(parsed.target_roles.length, 5);
-    assert.equal(new Set(parsed.target_roles.map((role) => role.toLowerCase())).size, 5);
-  }
+test('the parser normalizes roles without inventing unrelated fallback careers', () => {
+  assert.deepEqual(parsedProfileFromModelText(modelProfile(undefined)).target_roles, []);
+  assert.deepEqual(parsedProfileFromModelText(modelProfile(['Nurse', 'Teacher'])).target_roles, ['Nurse', 'Teacher']);
+  assert.deepEqual(
+    parsedProfileFromModelText(modelProfile(['One', 'Two', 'Three', 'Four', 'Five', 'Six'])).target_roles,
+    ['One', 'Two', 'Three', 'Four', 'Five'],
+  );
+  assert.deepEqual(
+    parsedProfileFromModelText(JSON.stringify({
+      ...JSON.parse(modelProfile(['Nurse'])),
+      experience: [{ company: 'Hospital', title: 'Registered Nurse', start: '', end: '', description: '' }],
+    })).target_roles,
+    ['Nurse', 'Registered Nurse'],
+  );
 });
 
 test('the parser keeps every suggested title within the targeting API limit', () => {

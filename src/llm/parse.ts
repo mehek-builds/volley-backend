@@ -129,11 +129,6 @@ export function parsedProfileFromModelText(text: string): ParsedProfile {
   const candidates = [
     ...(Array.isArray(parsed.target_roles) ? parsed.target_roles : []),
     ...(Array.isArray(parsed.experience) ? parsed.experience.map((entry) => entry?.title) : []),
-    'Software Engineer',
-    'Product Manager',
-    'Data Analyst',
-    'Business Analyst',
-    'Program Manager',
   ];
   for (const candidate of candidates) {
     if (typeof candidate !== 'string') continue;
