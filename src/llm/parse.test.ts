@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parsedProfileFromModelText, SYSTEM_PROMPT } from './parse';
+import { parsedProfileFromModelText, parsedProfileWithOneRepair, SYSTEM_PROMPT } from './parse';
 
 // R-047, found in live QA 2026-07-23. Mehek's uploaded resume reads "Bachelor of Science in Computer
 // Science & Business Administration, Finance Emphasis". The parser stored "Bachelor of Science in
@@ -51,9 +51,10 @@ test('the parse prompt pins the five-role evidence and ordering contract', () =>
   const flat = SYSTEM_PROMPT.replace(/\s+/g, ' ');
   assert.match(flat, /exactly five distinct job titles/i);
   assert.match(flat, /ordered from strongest to weakest fit/i);
-  assert.match(flat, /dated years of experience, past job titles, projects, and skills/i);
+  assert.match(flat, /dated years of experience, past job titles, projects, skills, and stated degree/i);
   assert.match(flat, /match the seniority shown by the evidence/i);
   assert.match(flat, /do not invent a field the resume does not support/i);
+  assert.match(flat, /do not return five cosmetic variations/i);
 });
 
 function modelProfile(target_roles: unknown): string {
@@ -81,7 +82,7 @@ test('the parser normalizes roles without inventing unrelated fallback careers',
   );
   assert.throws(
     () => parsedProfileFromModelText(JSON.stringify({
-      ...JSON.parse(modelProfile(['Nurse'])),
+      ...JSON.parse(modelProfile(['Nurse', 'Clinical Researcher', 'Care Coordinator', 'Health Educator'])),
       experience: [{ company: 'Hospital', title: 'Registered Nurse', start: '', end: '', description: '' }],
     })),
     /five evidence-backed/,
@@ -94,4 +95,28 @@ test('the parser keeps every suggested title within the targeting API limit', ()
   ]));
   assert.equal(parsed.target_roles[0].length, 80);
   assert.ok(parsed.target_roles.every((role) => role.length <= 80));
+});
+
+test('a short role list gets exactly one bounded quality repair', async () => {
+  let calls = 0;
+  const repaired = await parsedProfileWithOneRepair(modelProfile(['One', 'Two']), async (failure) => {
+    calls += 1;
+    assert.match(failure, /five evidence-backed target roles/);
+    return modelProfile(['One', 'Two', 'Three', 'Four', 'Five']);
+  });
+
+  assert.equal(calls, 1);
+  assert.deepEqual(repaired.target_roles, ['One', 'Two', 'Three', 'Four', 'Five']);
+});
+
+test('a failed repair is not retried indefinitely', async () => {
+  let calls = 0;
+  await assert.rejects(
+    parsedProfileWithOneRepair(modelProfile(['One']), async () => {
+      calls += 1;
+      return modelProfile(['One', 'Two']);
+    }),
+    /five evidence-backed target roles/,
+  );
+  assert.equal(calls, 1);
 });

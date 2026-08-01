@@ -490,6 +490,7 @@ export async function profileRoutes(fastify: FastifyInstance) {
     // titles, and dates are never overwritten.
     let bank_seeded = 0;
     let bank_enriched = 0;
+    let bank_total = 0;
     try {
       const existing = await db
         .select({
@@ -506,6 +507,7 @@ export async function profileRoutes(fastify: FastifyInstance) {
         await db.insert(experience_bank).values(reconciliation.inserts);
         bank_seeded = reconciliation.inserts.length;
       }
+      bank_total = existing.length + bank_seeded;
       for (const enrichment of reconciliation.enrichments) {
         const values = {
           ...(enrichment.title ? { title: enrichment.title } : {}),
@@ -541,7 +543,7 @@ export async function profileRoutes(fastify: FastifyInstance) {
       fastify.log.warn({ err, userId }, 'could not prefill academic fields from resume parse');
     }
 
-    return reply.status(200).send({ ...parsedProfile, bank_seeded, bank_enriched, gaps_prefilled });
+    return reply.status(200).send({ ...parsedProfile, bank_seeded, bank_total, bank_enriched, gaps_prefilled });
   });
 
   // GET /profile - retrieve user profile
