@@ -73,18 +73,18 @@ test('the parser accepts exactly five distinct non-empty target roles and trims 
 });
 
 test('the parser normalizes roles without inventing unrelated fallback careers', () => {
-  assert.deepEqual(parsedProfileFromModelText(modelProfile(undefined)).target_roles, []);
-  assert.deepEqual(parsedProfileFromModelText(modelProfile(['Nurse', 'Teacher'])).target_roles, ['Nurse', 'Teacher']);
+  assert.throws(() => parsedProfileFromModelText(modelProfile(undefined)), /five evidence-backed/);
+  assert.throws(() => parsedProfileFromModelText(modelProfile(['Nurse', 'Teacher'])), /five evidence-backed/);
   assert.deepEqual(
     parsedProfileFromModelText(modelProfile(['One', 'Two', 'Three', 'Four', 'Five', 'Six'])).target_roles,
     ['One', 'Two', 'Three', 'Four', 'Five'],
   );
-  assert.deepEqual(
-    parsedProfileFromModelText(JSON.stringify({
+  assert.throws(
+    () => parsedProfileFromModelText(JSON.stringify({
       ...JSON.parse(modelProfile(['Nurse'])),
       experience: [{ company: 'Hospital', title: 'Registered Nurse', start: '', end: '', description: '' }],
-    })).target_roles,
-    ['Nurse', 'Registered Nurse'],
+    })),
+    /five evidence-backed/,
   );
 });
 

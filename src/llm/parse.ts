@@ -137,6 +137,7 @@ export function parsedProfileFromModelText(text: string): ParsedProfile {
     roles.push(clean);
     if (roles.length === 5) break;
   }
+  if (roles.length !== 5) throw new Error('resume parse did not contain five evidence-backed target roles');
   parsed.target_roles = roles;
   return parsed;
 }

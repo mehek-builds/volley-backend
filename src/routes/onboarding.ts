@@ -98,6 +98,14 @@ export function hasFocusTargeting(target: { categories?: unknown; titles?: unkno
     && target.role_types.length > 0;
 }
 
+export function hasFiveTargetRoles(parsed: { target_roles?: unknown } | null | undefined): boolean {
+  if (!Array.isArray(parsed?.target_roles)) return false;
+  const roles = parsed.target_roles
+    .filter((role): role is string => typeof role === 'string' && role.trim().length > 0)
+    .map((role) => role.trim().toLowerCase());
+  return new Set(roles).size >= 5;
+}
+
 // Asked on screen 03 only if the first application did not teach us. Order is the render order.
 //
 // This list is deliberately SHORT. Every field here is one the student has to type by hand, so
@@ -192,8 +200,8 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     // Checks a REQUIRED key, not object truthiness: `!!{}` is true, so a parse that returned
     // nothing usable would advance the student past step 01 with no name, school or grad_year -
     // and the targeting screen would then derive its period options from grad_year 0.
-    const parsed = profile?.parsed_json as { full_name?: string; source_pages?: number } | null | undefined;
-    const has_resume = !!parsed?.full_name && (bankCount?.n ?? 0) > 0;
+    const parsed = profile?.parsed_json as { full_name?: string; source_pages?: number; target_roles?: unknown } | null | undefined;
+    const has_resume = !!parsed?.full_name && hasFiveTargetRoles(parsed) && (bankCount?.n ?? 0) > 0;
     const has_applied = (applyCount?.n ?? 0) > 0;
 
     // The base resume: built once from the bank, with no job description. Stored rather than

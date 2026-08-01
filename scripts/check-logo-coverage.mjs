@@ -35,6 +35,7 @@
 
 import { companyDomainFor } from '../src/lib/companyDomains.ts';
 import { logoCoverageFloor } from '../src/lib/logoCoverage.ts';
+import { createHash } from 'node:crypto';
 
 const API = process.env.JOBS_API ?? 'https://student-outreach-backend.vercel.app';
 const FLOOR = logoCoverageFloor(process.env.MIN_LOGO_COVERAGE);
@@ -68,20 +69,26 @@ async function readBoard() {
     for (const page of pages) rows.push(...page.jobs);
   }
   if (rows.length !== total) throw new Error(`expected ${total} rows but read ${rows.length}`);
+  const ids = rows.map((row) => row.id);
+  if (ids.some((id) => typeof id !== 'string') || new Set(ids).size !== total) {
+    throw new Error('job board changed during offset pagination; retry the complete scan');
+  }
   return rows;
 }
 
-async function faviconLoads(domain) {
+const fingerprint = (bytes) => createHash('sha256').update(bytes).digest('hex');
+
+async function faviconResponse(domain) {
   let lastError;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       const response = await fetch(`${FAVICON_ENDPOINT}?domain=${encodeURIComponent(domain)}&sz=64`);
-      if (response.status === 404) return false;
-      if (!response.ok) throw new Error(`favicon answered ${response.status} for ${domain}`);
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (response.status !== 404 && !response.ok) throw new Error(`favicon answered ${response.status} for ${domain}`);
       if (!response.headers.get('content-type')?.startsWith('image/')) {
         throw new Error(`favicon returned non-image content for ${domain}`);
       }
-      return true;
+      return { status: response.status, fingerprint: fingerprint(bytes) };
     } catch (error) {
       lastError = error;
     }
@@ -90,11 +97,14 @@ async function faviconLoads(domain) {
 }
 
 async function workingLogoDomains(domains) {
+  const fallback = await faviconResponse('litos-guaranteed-missing-favicon.invalid');
   const working = new Set();
   for (let i = 0; i < domains.length; i += FAVICON_CONCURRENCY) {
     const batch = domains.slice(i, i + FAVICON_CONCURRENCY);
-    const results = await Promise.all(batch.map(async (domain) => [domain, await faviconLoads(domain)]));
-    for (const [domain, loads] of results) if (loads) working.add(domain);
+    const results = await Promise.all(batch.map(async (domain) => [domain, await faviconResponse(domain)]));
+    for (const [domain, response] of results) {
+      if (response.status === 200 && response.fingerprint !== fallback.fingerprint) working.add(domain);
+    }
   }
   return working;
 }

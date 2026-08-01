@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { gapsFrom, hasFocusTargeting, onboardingStepFrom } from './onboarding';
+import { gapsFrom, hasFiveTargetRoles, hasFocusTargeting, onboardingStepFrom } from './onboarding';
 import { encryptField } from '../lib/fieldCrypto';
 
 process.env.ENCRYPTION_KEY ??= 'test-encryption-key-at-least-32-chars-long';
@@ -96,5 +96,14 @@ describe('resume-informed focus completion', () => {
       titles: ['Software Engineer'],
       role_types: ['internship'],
     }), true);
+  });
+});
+
+describe('five-role resume contract', () => {
+  test('only five distinct non-empty parsed roles unlock focus suggestions', () => {
+    assert.equal(hasFiveTargetRoles({ target_roles: ['One', 'Two', 'Three', 'Four'] }), false);
+    assert.equal(hasFiveTargetRoles({ target_roles: ['One', 'Two', 'Three', 'Four', 'one'] }), false);
+    assert.equal(hasFiveTargetRoles({ target_roles: ['One', 'Two', 'Three', 'Four', 'Five'] }), true);
+    assert.equal(hasFiveTargetRoles(null), false);
   });
 });
