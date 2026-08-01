@@ -115,9 +115,36 @@ Rules:
   "Bachelor of Arts, Psychology" or "Computer Science" from "BS in Computer Science". Drop the
   award words (Bachelor, BS, Master). For a joint or dual degree carry both, comma-separated, in
   the printed order. Empty string when no degree is stated.
-- "target_roles" should be inferred from the resume objective, job titles, or skills (e.g. ["Software Engineer", "ML Engineer"])
+- "target_roles" must contain exactly five distinct job titles, ordered from strongest to weakest
+  fit. Infer them from the resume objective, the candidate's dated years of experience, past job
+  titles, projects, and skills. Match the seniority shown by the evidence and do not invent a field
+  the resume does not support.
 - Return empty arrays for missing sections, never null
 - If grad_year is truly unknown, use 0`;
+
+export function parsedProfileFromModelText(text: string): ParsedProfile {
+  const cleaned = text.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
+  const parsed = JSON.parse(cleaned) as ParsedProfile;
+  const roles: string[] = [];
+  const candidates = [
+    ...(Array.isArray(parsed.target_roles) ? parsed.target_roles : []),
+    ...(Array.isArray(parsed.experience) ? parsed.experience.map((entry) => entry?.title) : []),
+    'Software Engineer',
+    'Product Manager',
+    'Data Analyst',
+    'Business Analyst',
+    'Program Manager',
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue;
+    const clean = candidate.trim().slice(0, 80).trim();
+    if (!clean || roles.some((role) => role.toLowerCase() === clean.toLowerCase())) continue;
+    roles.push(clean);
+    if (roles.length === 5) break;
+  }
+  parsed.target_roles = roles;
+  return parsed;
+}
 
 export async function parseResumeWithClaude(resumeText: string): Promise<ParsedProfile> {
   const response = await client.messages.create({
@@ -142,9 +169,7 @@ export async function parseResumeWithClaude(resumeText: string): Promise<ParsedP
   const text = textBlock?.type === 'text' ? textBlock.text : '';
 
   try {
-    // Strip any accidental markdown code fences
-    const cleaned = text.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
-    return JSON.parse(cleaned) as ParsedProfile;
+    return parsedProfileFromModelText(text);
   } catch {
     throw new Error(`Claude returned invalid JSON for resume parsing: ${text.slice(0, 200)}`);
   }
@@ -192,8 +217,7 @@ export async function parseResumeFromPdf(pdf: Buffer): Promise<ParsedProfile> {
   const textBlock = response.content.find((block) => block.type === 'text');
   const text = textBlock?.type === 'text' ? textBlock.text : '';
   try {
-    const cleaned = text.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
-    return JSON.parse(cleaned) as ParsedProfile;
+    return parsedProfileFromModelText(text);
   } catch {
     throw new Error(`Claude returned invalid JSON for scanned resume parsing: ${text.slice(0, 200)}`);
   }

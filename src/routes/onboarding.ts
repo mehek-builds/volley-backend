@@ -70,6 +70,34 @@ async function reviewedSubmitCount(userId: string): Promise<number> {
 
 type Step = 'focus' | 'sponsorship' | 'resume' | 'base' | 'install' | 'apply' | 'gaps' | 'targeting' | 'done';
 
+export function onboardingStepFrom(input: {
+  completed: boolean;
+  hasResume: boolean;
+  hasFocus: boolean;
+  hasSponsorshipAnswer: boolean;
+  hasBaseResume: boolean;
+  hasApplied: boolean;
+  hasTargeting: boolean;
+  hasGaps: boolean;
+}): Step {
+  if (input.completed) return 'done';
+  if (!input.hasResume) return 'resume';
+  if (!input.hasFocus) return 'focus';
+  if (!input.hasSponsorshipAnswer) return 'sponsorship';
+  if (!input.hasBaseResume) return 'base';
+  if (!input.hasApplied) return 'install';
+  if (!input.hasTargeting) return input.hasGaps ? 'gaps' : 'targeting';
+  return 'done';
+}
+
+export function hasFocusTargeting(target: { categories?: unknown; titles?: unknown; role_types?: unknown } | null | undefined): boolean {
+  return Array.isArray(target?.categories)
+    && Array.isArray(target?.titles)
+    && target.titles.length > 0
+    && Array.isArray(target?.role_types)
+    && target.role_types.length > 0;
+}
+
 // Asked on screen 03 only if the first application did not teach us. Order is the render order.
 //
 // This list is deliberately SHORT. Every field here is one the student has to type by hand, so
@@ -175,24 +203,15 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     const learned = HARVEST_FIELDS.filter((f) => readable(appProfile, f) !== null);
     const gaps = gapsFrom(appProfile);
 
-    // The five targeting questions split on ONE fact: whether they need the resume.
-    //
-    // categories and role_types do not - a student knows what kind of work they want before they
-    // upload anything. titles are seeded from ParsedProfile.target_roles and the period options are
-    // computed from grad_year, so those three cannot be asked until the resume is parsed.
-    //
-    // So the two resume-independent ones move BEFORE the upload, as step 00. That is the honest
-    // version of what Simplify does: they open with two cheap questions ("how soon?", "where?")
-    // and only ask for the resume fourth, which earns commitment before the expensive ask. The
-    // difference is that their opener exists to manufacture a yes, while these are questions we
-    // were always going to ask - just reordered to the point where they cost nothing.
-    // Answered, not non-empty. `length > 0` looks stricter but it strands: a PUT of
-    // {categories: []} is valid per targetingBodySchema, saves fine, and then derives 'focus'
-    // forever with no way forward through the API. The UI already requires at least one before
-    // Continue enables, so tolerating [] costs nothing real and removes a footgun whose only
-    // guard would otherwise live in the client - the wrong layer for an invariant the server's
-    // own state machine reads.
-    const has_focus = Array.isArray(target?.categories);
+    // Targeting follows the upload. The parser now returns five ordered role suggestions based on
+    // dated experience, past titles and skills, and the client derives an initial employment type
+    // from the same profile. Putting the resume first means the first targeting screen is mostly a
+    // confirmation instead of a blank form.
+    // Require the resume-informed fields, not only the legacy category answer. Existing users may
+    // already have categories from the old pre-upload screen while titles are still null. Treating
+    // that row as complete would skip the new five-role confirmation and leave no later screen
+    // where those titles can be collected.
+    const has_focus = hasFocusTargeting(target);
 
     /* THE SPONSORSHIP QUESTION, and why it is a step of its own rather than a field on the focus
        screen.
@@ -229,23 +248,16 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     // depends on, not an optional detail screen. But the gate is the STORED SPEC, so a student who
     // rebuilds or hand-edits later never gets sent back here, and an account created before this
     // shipped derives 'base' exactly once and then moves on for good.
-    const step: Step = user.onboarding_completed_at
-      ? 'done'
-      : !has_focus
-        ? 'focus'
-        : !has_sponsorship_answer
-          ? 'sponsorship'
-          : !has_resume
-            ? 'resume'
-            : !has_base_resume
-              ? 'base'
-              : !has_applied
-                ? 'install'
-                : !has_targeting
-                  ? gaps.length > 0
-                    ? 'gaps'
-                    : 'targeting'
-                  : 'done';
+    const step = onboardingStepFrom({
+      completed: !!user.onboarding_completed_at,
+      hasResume: has_resume,
+      hasFocus: has_focus,
+      hasSponsorshipAnswer: has_sponsorship_answer,
+      hasBaseResume: has_base_resume,
+      hasApplied: has_applied,
+      hasTargeting: has_targeting,
+      hasGaps: gaps.length > 0,
+    });
 
     return reply.status(200).send({
       step,

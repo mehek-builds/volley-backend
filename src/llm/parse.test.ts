@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { SYSTEM_PROMPT } from './parse';
+import { parsedProfileFromModelText, SYSTEM_PROMPT } from './parse';
 
 // R-047, found in live QA 2026-07-23. Mehek's uploaded resume reads "Bachelor of Science in Computer
 // Science & Business Administration, Finance Emphasis". The parser stored "Bachelor of Science in
@@ -45,4 +45,51 @@ test('the parse prompt keeps the precise graduation date', () => {
   // Summer 2027 eligibility turns on this. A resume that loses "May 2027" down to a bare year, or
   // gains a year it never printed, changes whether the student qualifies for the posting at all.
   assert.match(SYSTEM_PROMPT, /most precise date printed on the resume/i);
+});
+
+test('the parse prompt pins the five-role evidence and ordering contract', () => {
+  const flat = SYSTEM_PROMPT.replace(/\s+/g, ' ');
+  assert.match(flat, /exactly five distinct job titles/i);
+  assert.match(flat, /ordered from strongest to weakest fit/i);
+  assert.match(flat, /dated years of experience, past job titles, projects, and skills/i);
+  assert.match(flat, /match the seniority shown by the evidence/i);
+  assert.match(flat, /do not invent a field the resume does not support/i);
+});
+
+function modelProfile(target_roles: unknown): string {
+  return JSON.stringify({
+    full_name: 'A Candidate', experience: [], skills: [], projects: [], school: '',
+    grad_year: 0, target_roles,
+  });
+}
+
+test('the parser accepts exactly five distinct non-empty target roles and trims them', () => {
+  const parsed = parsedProfileFromModelText(modelProfile([
+    ' Software Engineer ', 'Backend Engineer', 'Frontend Engineer', 'Product Engineer', 'Data Engineer',
+  ]));
+  assert.deepEqual(parsed.target_roles, [
+    'Software Engineer', 'Backend Engineer', 'Frontend Engineer', 'Product Engineer', 'Data Engineer',
+  ]);
+});
+
+test('the parser normalizes missing, short, long, duplicate, and empty target-role lists to five', () => {
+  for (const roles of [
+    undefined,
+    ['One', 'Two', 'Three', 'Four'],
+    ['One', 'Two', 'Three', 'Four', 'Five', 'Six'],
+    ['One', 'Two', 'Three', 'Four', 'one'],
+    ['One', 'Two', 'Three', 'Four', '   '],
+  ]) {
+    const parsed = parsedProfileFromModelText(modelProfile(roles));
+    assert.equal(parsed.target_roles.length, 5);
+    assert.equal(new Set(parsed.target_roles.map((role) => role.toLowerCase())).size, 5);
+  }
+});
+
+test('the parser keeps every suggested title within the targeting API limit', () => {
+  const parsed = parsedProfileFromModelText(modelProfile([
+    'A'.repeat(120), 'Backend Engineer', 'Frontend Engineer', 'Product Engineer', 'Data Engineer',
+  ]));
+  assert.equal(parsed.target_roles[0].length, 80);
+  assert.ok(parsed.target_roles.every((role) => role.length <= 80));
 });

@@ -1,6 +1,6 @@
 {
   "name": "litos-backend",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "Backend API for the Litos job-application Chrome extension",
   "main": "dist/index.js",
   "engines": {
