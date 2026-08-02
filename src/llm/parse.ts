@@ -1,5 +1,4 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { unsupportedTargetRoles } from './targetRoleEvidence';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -128,10 +127,13 @@ Rules:
   sources. Give the strongest role first, then adjacent careers the same evidence genuinely supports.
   Do not return five cosmetic variations of one title, but never add an unsupported field merely to
   create variety.
+- The space of valid job titles is open-ended. Never restrict recommendations to common careers, a
+  predefined occupation list, or the examples familiar to you. Specialized, emerging, regional and
+  interdisciplinary roles are valid when the resume evidence supports them.
 - Return empty arrays for missing sections, never null
 - If grad_year is truly unknown, use 0`;
 
-export function parsedProfileFromModelText(text: string, rawResumeText = ''): ParsedProfile {
+export function parsedProfileFromModelText(text: string): ParsedProfile {
   const cleaned = text.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
   const parsed = JSON.parse(cleaned) as ParsedProfile;
   const roles: string[] = [];
@@ -148,10 +150,6 @@ export function parsedProfileFromModelText(text: string, rawResumeText = ''): Pa
     if (roles.length === 5) break;
   }
   if (roles.length !== 5) throw new Error('resume parse did not contain five evidence-backed target roles');
-  const unsupported = unsupportedTargetRoles(roles, parsed, rawResumeText);
-  if (unsupported.length > 0) {
-    throw new Error(`resume parse contained unsupported target roles: ${unsupported.join(', ')}`);
-  }
   parsed.target_roles = roles;
   return parsed;
 }
@@ -159,13 +157,12 @@ export function parsedProfileFromModelText(text: string, rawResumeText = ''): Pa
 export async function parsedProfileWithOneRepair(
   initialText: string,
   repair: (failure: string) => Promise<string>,
-  rawResumeText = '',
 ): Promise<ParsedProfile> {
   try {
-    return parsedProfileFromModelText(initialText, rawResumeText);
+    return parsedProfileFromModelText(initialText);
   } catch (error) {
     const failure = error instanceof Error ? error.message : 'invalid resume JSON';
-    return parsedProfileFromModelText(await repair(failure), rawResumeText);
+    return parsedProfileFromModelText(await repair(failure));
   }
 }
 
@@ -187,7 +184,7 @@ export async function parseResumeWithClaude(resumeText: string): Promise<ParsedP
       return textBlock?.type === 'text' ? textBlock.text : '';
     };
     const initial = await request();
-    return await parsedProfileWithOneRepair(initial, request, resumeText);
+    return await parsedProfileWithOneRepair(initial, request);
   } catch (error) {
     throw new Error(`Claude returned invalid JSON for resume parsing: ${error instanceof Error ? error.message.slice(0, 200) : 'unknown error'}`);
   }
