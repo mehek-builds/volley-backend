@@ -16,6 +16,7 @@ export interface ResumeDesignTokens {
     };
   };
   spacing: {
+    headerSafeTop: number;
     contactTop: number;
     headerBottom: number;
     educationTop: number;
@@ -65,6 +66,7 @@ const COMPACT_DESIGN: ResumeDesignTokens = {
     },
   },
   spacing: {
+    headerSafeTop: 4,
     contactTop: 2,
     headerBottom: 4,
     educationTop: 2,
@@ -124,6 +126,7 @@ const SPACIOUS_DESIGN: ResumeDesignTokens = {
   },
   spacing: {
     ...COMPACT_DESIGN.spacing,
+    headerSafeTop: 4,
     contactTop: 6,
     headerBottom: 22,
     educationTop: 14,
@@ -163,6 +166,7 @@ export function resumeDesignAtExpansion(expansion: number): ResumeDesignTokens {
       lineGapRatio: { ...compact.typography.lineGapRatio },
     },
     spacing: {
+      headerSafeTop: compact.spacing.headerSafeTop,
       contactTop: interpolate(compact.spacing.contactTop, spacious.spacing.contactTop, amount),
       headerBottom: interpolate(compact.spacing.headerBottom, spacious.spacing.headerBottom, amount),
       educationTop: interpolate(compact.spacing.educationTop, spacious.spacing.educationTop, amount),

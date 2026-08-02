@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { ExperienceBankEntry } from '../db/schema';
 import { RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
+import { relevanceScore } from '../engine/resumePolicy';
 import { STRONG_VERBS } from '../engine/resumeValidate';
 import { normalizeSpec, type ResumeSpec } from './resumeSpec';
 
@@ -67,7 +68,9 @@ Selection rules (these differ from tailored generation - read them carefully):
   bullet for that entry. Within an entry, lead with the bullet carrying the clearest outcome.
 - NEVER give an entry fewer than ${RESUME_CONTENT_LIMITS.minBulletsPerEntry} bullets. A single-bullet entry looks like an afterthought and weakens the
   whole page. If an entry cannot support ${RESUME_CONTENT_LIMITS.minBulletsPerEntry}, it does not belong on the resume: choose a different entry
-  from the bank instead.
+  from the bank instead. The only exception is an entry named in the REQUIRED PRIORITY ENTRIES
+  block whose source contains exactly one bullet. Include that entry with its one grounded bullet;
+  never invent or duplicate a second bullet to satisfy the usual minimum.
 - Copy each entry's type from the experience bank. Do not turn a project into a job or a job into leadership.
 - "skills": 8-10 entries, EVERY one copied EXACTLY as written in the applicant's Skills list, character for
   character. Order them most broadly useful first. Never add a skill that is not on that list; if the list
@@ -99,6 +102,84 @@ export interface BaseResumeEducation {
   grad_year?: number;
   currently_enrolled?: boolean;
   coursework?: string[];
+}
+
+function normalizedIdentity(value: string | null | undefined): string {
+  return (value ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function entryIdentity(entry: Pick<ExperienceBankEntry, 'org' | 'title'>): string {
+  return `${normalizedIdentity(entry.org)}\u0000${normalizedIdentity(entry.title)}`;
+}
+
+function latestYear(entry: ExperienceBankEntry): number {
+  const years = (entry.date_range ?? '').match(/\b(?:19|20)\d{2}\b/g) ?? [];
+  return years.length > 0 ? Math.max(...years.map(Number)) : 0;
+}
+
+function isCurrentEntry(entry: ExperienceBankEntry): boolean {
+  return /\b(?:present|current|ongoing|now|today)\b/i.test(entry.date_range ?? '');
+}
+
+function bankEntryText(entry: ExperienceBankEntry): string {
+  const bullets = Array.isArray(entry.bullet_variants)
+    ? entry.bullet_variants.filter((bullet): bullet is string => typeof bullet === 'string')
+    : [];
+  return [entry.org, entry.title ?? '', entry.date_range ?? '', ...bullets].join(' ');
+}
+
+/**
+ * Evidence the base resume may not displace with older work.
+ *
+ * The model still chooses the full four-entry page, but these up-to-three entries are mandatory:
+ * the most recent source entry, every additional current entry that fits the cap, then the strongest
+ * role-defining entry supported by the applicant's target titles. This makes the failure direction
+ * explicit. A long resume may omit secondary history, but it cannot silently replace who the person
+ * is now with who they were twenty years ago.
+ */
+export function priorityEntriesForBaseResume(
+  bank: ExperienceBankEntry[],
+  targetRoleText: string,
+): ExperienceBankEntry[] {
+  if (bank.length === 0) return [];
+  const rankedByRecency = bank
+    .map((entry, index) => ({ entry, index }))
+    .sort((a, b) =>
+      Number(isCurrentEntry(b.entry)) - Number(isCurrentEntry(a.entry)) ||
+      latestYear(b.entry) - latestYear(a.entry) ||
+      a.index - b.index,
+    );
+  const selected: ExperienceBankEntry[] = [];
+  const add = (entry: ExperienceBankEntry | undefined) => {
+    if (!entry || selected.some((candidate) => entryIdentity(candidate) === entryIdentity(entry))) return;
+    if (selected.length < 3) selected.push(entry);
+  };
+
+  add(rankedByRecency[0]?.entry);
+  for (const { entry } of rankedByRecency.filter(({ entry }) => isCurrentEntry(entry))) add(entry);
+
+  if (targetRoleText.trim()) {
+    const roleRanked = rankedByRecency
+      .map(({ entry, index }) => ({
+        entry,
+        index,
+        score: relevanceScore(bankEntryText(entry), targetRoleText),
+      }))
+      .filter(({ score }) => score > 0)
+      .sort((a, b) => b.score - a.score || latestYear(b.entry) - latestYear(a.entry) || a.index - b.index);
+    for (const { entry } of roleRanked) add(entry);
+  }
+  return selected;
+}
+
+export function baseResumeSelectionIssues(
+  spec: ResumeSpec,
+  priorities: ExperienceBankEntry[],
+): string[] {
+  const selected = new Set(spec.experience.map((entry) => entryIdentity(entry)));
+  return priorities
+    .filter((entry) => !selected.has(entryIdentity(entry)))
+    .map((entry) => `required current or role-defining entry missing: ${entry.title ? `${entry.title} at ` : ''}${entry.org}`);
 }
 
 /** Emitted as the model streams, so /start can draw the resume as it is decided rather than after. */
@@ -242,7 +323,11 @@ export async function generateBaseResumeSpec(
   education: BaseResumeEducation,
   skills: string[] | null | undefined,
   onEvent: (event: BaseResumeEvent) => void,
-  options: { timeoutMs?: number; feedback?: string[] } = {},
+  options: {
+    timeoutMs?: number;
+    feedback?: string[];
+    priorityEntries?: ExperienceBankEntry[];
+  } = {},
 ): Promise<ResumeSpec> {
   const feedbackBlock = options.feedback?.length
     ? `\n\nThe previous attempt had these issues - fix them in this revision:\n${options.feedback.map((f) => `- ${f}`).join('\n')}`
@@ -253,7 +338,10 @@ export async function generateBaseResumeSpec(
   const skillsBlock = skills?.length
     ? `\n\nSkills list (the applicant's own skills - the ONLY skills that may appear in "skills"):\n${JSON.stringify(skills)}`
     : `\n\nSkills list: none provided. Use only skills clearly evidenced by a bullet you selected.`;
-  const contextBlock = `Education source (copy facts exactly; this is the only authority for school, degree, graduation date, enrollment, and coursework):\n${JSON.stringify(education)}${skillsBlock}\n\nExperience bank:\n${JSON.stringify(bank)}`;
+  const priorityBlock = options.priorityEntries?.length
+    ? `\n\nREQUIRED PRIORITY ENTRIES (include every one, copying org, title, dates, type and grounded bullets from the bank; these may not be displaced by older or secondary work):\n${JSON.stringify(options.priorityEntries)}`
+    : '';
+  const contextBlock = `Education source (copy facts exactly; this is the only authority for school, degree, graduation date, enrollment, and coursework):\n${JSON.stringify(education)}${skillsBlock}\n\nExperience bank:\n${JSON.stringify(bank)}${priorityBlock}`;
 
   const reader = new BaseResumeStreamReader();
 

@@ -4,13 +4,19 @@ import { db } from '../db/index';
 import { profiles, application_profile, targeting } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { readExperienceBank } from '../db/experienceBank';
-import { generateBaseResumeSpec, type BaseResumeEvent } from '../llm/baseResume';
+import {
+  baseResumeSelectionIssues,
+  generateBaseResumeSpec,
+  priorityEntriesForBaseResume,
+  type BaseResumeEvent,
+} from '../llm/baseResume';
 import {
   applyResumePolicy,
   normalizeDashesForPrint,
   type CandidateEducation,
 } from '../engine/resumePolicy';
 import {
+  findPdfSafeMarginIssues,
   findPdfTextFidelityIssues,
   renderResumePdf,
   type ContactHeader,
@@ -304,6 +310,8 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
 
     const education = educationFrom(profile.parsed_json);
     const declaredSkills = skillsSourceFor(profile.skills, profile.parsed_json);
+    const targetText = targetRoleText(target, profile.parsed_json);
+    const priorityEntries = priorityEntriesForBaseResume(bank, targetText);
 
     try {
       send({ event: 'stage', stage: 'reading' });
@@ -331,14 +339,14 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
             }
             send({ event: 'piece', ...piece });
           },
-          { timeoutMs: REQUEST_DEADLINE_MS, feedback },
+          { timeoutMs: REQUEST_DEADLINE_MS, feedback, priorityEntries },
         );
       };
 
       const buildStartedAt = Date.now();
       let rawSpec = await generate();
 
-      /* THE HARD RULE, enforced until it holds.
+      /* THE HARD RULES, enforced until they hold.
        *
        * Every bullet opens with a strong action verb, and this loop is what makes that true rather
        * than merely reported. It used to run ONCE and then ship whatever came back, so a student
@@ -358,7 +366,8 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       const MAX_VERB_PASSES = 3;
       for (let pass = 1; pass <= MAX_VERB_PASSES; pass += 1) {
         const weak = weakVerbBullets(rawSpec);
-        if (weak.length === 0) break;
+        const missingPriorities = baseResumeSelectionIssues(rawSpec, priorityEntries);
+        if (weak.length === 0 && missingPriorities.length === 0) break;
         /* REQUEST_DEADLINE_MS bounds one model call, not the request. Three retries plus the first
          * pass is 480s of model time against vercel.json's maxDuration of 300, and blowing that
          * kills the function mid-stream: the client gets a truncated SSE with neither a done nor an
@@ -373,16 +382,25 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
         // shorter later pass would leave stale entries from the first behind.
         send({ event: 'restart' });
         rawSpec = await generate([
-          `These bullets do not open with a strong action verb: ${weak
-            .map((w) => `"${w.verb}" in ${w.org}`)
-            .join('; ')}.`,
-          'Rewrite each one so it OPENS with an approved strong verb. You may paraphrase freely to get there - reorder the sentence, change the framing, pick a different verb for the same action. Keep every fact and every number exactly as it is; do not invent, inflate or drop one.',
+          weak.length > 0
+            ? `These bullets do not open with a strong action verb: ${weak
+              .map((w) => `"${w.verb}" in ${w.org}`)
+              .join('; ')}.`
+            : '',
+          missingPriorities.length > 0
+            ? `The previous selection displaced required current or role-defining work: ${missingPriorities.join('; ')}. Include every REQUIRED PRIORITY ENTRY, even when its source has only one grounded bullet.`
+            : '',
+          weak.length > 0
+            ? 'Rewrite each weak opener with an approved strong verb. You may paraphrase freely to get there, but keep every fact and number exactly as it is.'
+            : '',
           /* Naming candidates, not just the rule. The whole approved list is already in the system
            * prompt and the model still returned "Stocked" three passes running on a food-service
            * bullet (measured 2026-07-27), so repeating "use an approved verb" a fourth time was not
            * the missing ingredient. A short concrete menu beside the offending word is. */
-          `For each one, pick whichever of these fits the action best: ${VERB_SUGGESTIONS.join(', ')}.`,
-          pass > 1
+          weak.length > 0
+            ? `For each weak opener, pick whichever of these fits the action best: ${VERB_SUGGESTIONS.join(', ')}.`
+            : '',
+          weak.length > 0 && pass > 1
             ? 'A previous attempt at this failed. Do not reuse the opener you used last time for these bullets.'
             : '',
         ].filter(Boolean));
@@ -405,9 +423,7 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
        * parse inferred). That number is ADVISORY and never gates: a synthetic JD is a guess at what
        * they will apply to, and gating on it would push generic keyword-stuffing into the one resume
        * they are most likely to send unread. It is reported so they can see it, nothing more. */
-      const targetText = targetRoleText(target, profile.parsed_json);
-      const validation = validateResumeSpec(spec, targetText, bank, declaredSkills, education);
-      const warnings = [...removed, ...validation.issues];
+      const warnings = [...removed];
 
       /* THE ATS GATE. Every resume this product produces goes through it, and until now the base
        * resume was the one that did not: it was stored as a spec and never rendered, so none of the
@@ -432,8 +448,20 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
         printed = rendered.spec;
         const parsedPdf = await extractPdfText(rendered.buffer);
         const layout = validatePdfLayout(parsedPdf.text, parsedPdf.numpages);
+        const finalValidation = validateResumeSpec(
+          printed,
+          targetText,
+          bank,
+          declaredSkills,
+          education,
+          undefined,
+          { allowedSingleBulletEntries: priorityEntries },
+        );
         const issues = [
+          ...finalValidation.issues,
+          ...baseResumeSelectionIssues(printed, priorityEntries),
           ...layout.issues,
+          ...findPdfSafeMarginIssues(parsedPdf.pages, rendered.layout),
           ...findPdfTextFidelityIssues(parsedPdf.text, printed, contact),
         ];
         ats = {
@@ -441,7 +469,7 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
           issues,
           pages: layout.page_count,
           extractable_chars: layout.extractable_chars,
-          keyword_coverage_pct: validation.ats_keyword_coverage_pct,
+          keyword_coverage_pct: finalValidation.ats_keyword_coverage_pct,
           scored_against: targetText ? 'target roles' : 'nothing on file',
         };
       } catch (err) {

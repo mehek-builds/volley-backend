@@ -8,6 +8,7 @@ import { readExperienceBank } from '../db/experienceBank';
 import { generated_resumes, profiles, users } from '../db/schema';
 import {
   findPdfTextFidelityIssues,
+  findPdfSafeMarginIssues,
   renderResumePdf,
   validateResumeVisualLayout,
 } from '../engine/resumeRender';
@@ -287,6 +288,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const pdfIssues = [
         ...visual.issues,
         ...validatePdfLayout(parsedPdf.text, parsedPdf.numpages).issues,
+        ...findPdfSafeMarginIssues(parsedPdf.pages, rendered.layout),
         ...findPdfTextFidelityIssues(parsedPdf.text, rendered.spec, { ...contact, full_name: contact.full_name }),
       ];
       if (pdfIssues.length > 0) {

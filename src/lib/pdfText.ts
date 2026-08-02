@@ -16,8 +16,39 @@ import pdfParse from 'pdf-parse';
 // Copying into a fresh Uint8Array pins byteOffset to 0, the only layout the old parser handles.
 // The copy costs a few KB per call and buys back the whole safety net; swapping the library out
 // remains open as a follow-up, but this fixes the check without a new dependency.
-export async function extractPdfText(pdf: Buffer | Uint8Array): Promise<{ text: string; numpages: number }> {
+export interface PdfTextGeometryItem {
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export async function extractPdfText(
+  pdf: Buffer | Uint8Array,
+): Promise<{ text: string; numpages: number; pages: PdfTextGeometryItem[][] }> {
   const zeroOffset = new Uint8Array(pdf); // copies into a fresh ArrayBuffer, byteOffset 0
-  const parsed = await pdfParse(zeroOffset as unknown as Buffer);
-  return { text: parsed.text, numpages: parsed.numpages };
+  const pages: PdfTextGeometryItem[][] = [];
+  const parsed = await pdfParse(zeroOffset as unknown as Buffer, {
+    pagerender: async (pageData: {
+      getTextContent: (options: Record<string, boolean>) => Promise<{
+        items: Array<{ str: string; transform: number[]; width: number; height: number }>;
+      }>;
+    }) => {
+      const content = await pageData.getTextContent({
+        normalizeWhitespace: false,
+        disableCombineTextItems: false,
+      });
+      const items = content.items.map((item) => ({
+        text: item.str,
+        x: item.transform[4],
+        y: item.transform[5],
+        width: item.width,
+        height: item.height,
+      }));
+      pages.push(items);
+      return items.map((item) => item.text).join(' ');
+    },
+  });
+  return { text: parsed.text, numpages: parsed.numpages, pages };
 }

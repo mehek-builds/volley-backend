@@ -110,6 +110,70 @@ test('a faithfully-grounded bullet passes grounding', () => {
   assert.deepEqual(findGroundingViolations(s, BANK), []);
 });
 
+test('content rules make short, long, and unsupported one-bullet entries hard failures', () => {
+  const source = bankEntry({
+    id: 'content',
+    org: 'Content Lab',
+    title: 'Analyst',
+    date_range: '2024',
+    bullet_variants: [
+      'Built reliable tools',
+      'Designed one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twenty-one twenty-two twenty-three twenty-four twenty-five twenty-six twenty-seven twenty-eight twenty-nine thirty',
+    ],
+  });
+  const result = validateResumeSpec(
+    spec([{
+      org: source.org,
+      title: source.title ?? '',
+      date_range: source.date_range ?? '',
+      bullets: source.bullet_variants as string[],
+    }]),
+    '',
+    [source],
+  );
+
+  assert.ok(result.issues.some((issue) => /bullet has 3 words \(min 8\)/.test(issue)));
+  assert.ok(result.issues.some((issue) => /bullet has 31 words \(max 30\)/.test(issue)));
+
+  const oneBullet = validateResumeSpec(
+    spec([{
+      org: source.org,
+      title: source.title ?? '',
+      date_range: source.date_range ?? '',
+      bullets: ['Built reliable tools'],
+    }]),
+    '',
+    [source],
+  );
+  assert.ok(oneBullet.issues.some((issue) => /1 bullet selected \(min 2\)/.test(issue)));
+});
+
+test('a source-limited priority role may keep its only grounded bullet without invention', () => {
+  const current = bankEntry({
+    id: 'current',
+    org: 'Legal Aid',
+    title: 'Litigation Associate',
+    date_range: '2024 - Present',
+    bullet_variants: ['Represented clients through complex hearings and negotiated settlement proceedings'],
+  });
+  const result = validateResumeSpec(
+    spec([{
+      org: current.org,
+      title: current.title ?? '',
+      date_range: current.date_range ?? '',
+      bullets: current.bullet_variants as string[],
+    }]),
+    '',
+    [current],
+    undefined,
+    undefined,
+    undefined,
+    { allowedSingleBulletEntries: [current] },
+  );
+
+  assert.ok(!result.issues.some((issue) => /bullet selected \(min 2\)/.test(issue)));
+});
+
 test('target role headline must match the role for this application', () => {
   const s = spec([
     {

@@ -1,7 +1,13 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { BaseResumeStreamReader, parseSpecText } from './baseResume';
+import {
+  baseResumeSelectionIssues,
+  BaseResumeStreamReader,
+  parseSpecText,
+  priorityEntriesForBaseResume,
+} from './baseResume';
 import type { BaseResumeEvent } from './baseResume';
+import type { ExperienceBankEntry } from '../db/schema';
 
 /* The stream reader is the one piece here with no server to catch its mistakes: it runs against a
  * half-written JSON document and has to decide what is safe to paint. The bar it must clear is not
@@ -21,6 +27,21 @@ const SPEC = {
   ],
   skills: ['TypeScript', 'Python'],
 };
+
+function bankEntry(over: Partial<ExperienceBankEntry>): ExperienceBankEntry {
+  return {
+    id: crypto.randomUUID(),
+    user_id: 'user',
+    type: 'job',
+    org: 'Example',
+    title: 'Contributor',
+    date_range: '2020',
+    bullet_variants: ['Built grounded evidence for the source role'],
+    tags: [],
+    created_at: new Date(),
+    ...over,
+  } as ExperienceBankEntry;
+}
 
 /** Feed the serialized spec through the reader in fixed-size slices, as a real stream would. */
 function streamThrough(text: string, chunkSize: number): BaseResumeEvent[] {
@@ -117,5 +138,39 @@ describe('parseSpecText', () => {
 
   test('throws with a readable message on unrecoverable output', () => {
     assert.throws(() => parseSpecText('I cannot build this resume.'), /invalid JSON/);
+  });
+});
+
+describe('base resume priority selection', () => {
+  test('current one-bullet roles cannot be displaced by older multi-bullet history', () => {
+    const professor = bankEntry({ id: 'professor', org: 'State University', title: 'Adjunct Professor', date_range: '2024 - Present' });
+    const litigator = bankEntry({ id: 'litigator', org: 'Legal Aid', title: 'Litigation Associate', date_range: '2023 - Present' });
+    const oldRole = bankEntry({
+      id: 'old',
+      org: 'Old Firm',
+      title: 'Junior Associate',
+      date_range: '1997 - 2001',
+      bullet_variants: ['Built one grounded line', 'Led another grounded line', 'Drafted a third grounded line'],
+    });
+
+    const priorities = priorityEntriesForBaseResume([oldRole, professor, litigator], 'Attorney. Legal Counsel');
+    assert.deepEqual(priorities.slice(0, 2).map((entry) => entry.id), ['professor', 'litigator']);
+    assert.deepEqual(
+      baseResumeSelectionIssues(
+        { ...SPEC, education_position: 'top' as const, experience: [{ ...SPEC.experience[0], type: 'job' as const, org: oldRole.org, title: oldRole.title ?? '', date_range: oldRole.date_range ?? '' }] },
+        priorities,
+      ).length,
+      2,
+    );
+  });
+
+  test('role-defining work is protected alongside the most recent general role', () => {
+    const admin = bankEntry({ id: 'admin', org: 'Engineering Office', title: 'Administrator', date_range: '2019 - 2022' });
+    const nursing = bankEntry({ id: 'nursing', type: 'project', org: 'Clinical Nursing Study', title: 'Nursing Researcher', date_range: '2018' });
+    const convent = bankEntry({ id: 'convent', org: 'Convent', title: 'Resident Assistant', date_range: '2016 - 2017' });
+
+    const priorities = priorityEntriesForBaseResume([admin, nursing, convent], 'Registered Nurse. Nursing Research');
+    assert.equal(priorities[0]?.id, 'admin');
+    assert.ok(priorities.some((entry) => entry.id === 'nursing'));
   });
 });

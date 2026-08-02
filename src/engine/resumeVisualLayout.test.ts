@@ -7,6 +7,7 @@ import { validatePdfLayout } from './resumeValidate';
 import { RESUME_DESIGN, resumeDesignAtExpansion } from './resumeDesign';
 import {
   measureResumeLayout,
+  findPdfSafeMarginIssues,
   findPdfTextFidelityIssues,
   findResumeTypographyIssues,
   planResumeLayout,
@@ -59,29 +60,27 @@ async function renderedTextItems(pdf: Buffer): Promise<RenderedTextItem[][]> {
 /* Every text baseline on the rendered page, top to bottom. These are golden values: they exist to
  * catch layout drift nobody intended, so a diff here is a question, not automatically a bug.
  *
- * Last regenerated 2026-07-26, for the header rule between the name and the contact line. The
- * signature of that change is visible in the numbers and is what made them safe to accept: the
- * FIRST baseline (the name) is untouched in all three cases, and every baseline below it moves
- * down by the same ~4pt, which is the rule's stroke plus a contactTop gap either side of it. A
- * change that shifted only some rows, or shifted them by differing amounts, would have meant
- * something reflowed rather than translated, and would not have been snapshot drift at all.
+ * Last regenerated 2026-08-02, for the 4pt safe inset above the candidate name. Every name baseline
+ * moved down 4pt. The page-fill planner then reduced expansion slightly to keep the same 94% target,
+ * so later baselines move by progressively less. The section order and bullet line counts remain
+ * unchanged, and the rendered safe-margin check passes for all benchmark cases.
  */
 const RENDERED_BASELINE_SNAPSHOTS: Record<string, number[]> = {
   '04-sparse-two-short-jobs': [
-    737.3, 710, 660.8, 634, 615.1, 573.9, 547.1, 528.3, 507.1, 485.7, 453.3,
-    434.5, 413.3, 391.9, 350.5, 323.6,
+    733.3, 706, 656.8, 630, 611.1, 569.9, 543.1, 524.3, 503.1, 481.7, 449.3,
+    430.5, 409.3, 387.9, 346.5, 319.6,
   ],
   '09-normal-all-sections': [
-    737.6, 711.2, 664.6, 638.6, 620.2, 602.4, 562.9, 536.8, 518.5, 498, 484.7,
-    464, 450.8, 411.2, 385.2, 366.8, 346.3, 333, 312.4, 299.1, 259.5, 233.5,
-    215.1, 194.6, 181.4, 160.7, 147.4, 107.9, 81.8,
+    733.7, 707.4, 661.3, 635.4, 617.1, 599.4, 560.2, 534.3, 516, 495.6, 482.4,
+    461.8, 448.6, 409.4, 383.5, 365.2, 344.8, 331.6, 311, 297.8, 258.5, 232.6,
+    214.3, 194, 180.7, 160.2, 146.9, 107.7, 81.8,
   ],
   '24-dense-long-everything': [
-    741.2, 723.2, 712.4, 690.9, 672.6, 658.7, 645.5, 633.5, 612, 593.6, 579.8,
-    566.2, 554.3, 540.4, 528.5, 514.7, 502.8, 485.8, 472, 458.4, 446.4, 432.6,
-    420.7, 406.9, 395, 373.4, 355.1, 341.2, 327.6, 315.7, 301.9, 289.9, 276.1,
-    264.2, 242.6, 224.3, 210.5, 196.8, 184.9, 171.1, 159.2, 145.4, 133.4,
-    111.9, 93.5, 81.6,
+    737.2, 719.4, 708.6, 687.4, 669.2, 655.4, 642.2, 630.3, 609, 590.8, 577,
+    563.5, 551.6, 537.8, 525.9, 512.2, 500.3, 483.6, 469.8, 456.3, 444.3, 430.6,
+    418.7, 405, 393.1, 371.8, 353.5, 339.8, 326.2, 314.3, 300.6, 288.7, 275,
+    263.1, 241.7, 223.5, 209.8, 196.2, 184.3, 170.6, 158.7, 145, 133.1,
+    111.7, 93.5, 81.6,
   ],
 };
 
@@ -275,24 +274,22 @@ describe('resume visual layout controls', () => {
         })),
         bullet_lines: layout.bullets.map((bullet) => bullet.lines),
       },
-      /* Updated 2026-07-27 for the page-fill change. The headline number is bottom_whitespace:
-       * 297.7pt of empty page became 43.2pt, which is the whole point of the change. This resume
-       * now expands to 0.919 and lands at the 0.94 target instead of shipping compact at 0.586.
-       * Section heights all grow because the spacing scale grew; the order is unchanged and no
-       * bullet crossed the two-line limit. */
+      /* Updated 2026-08-02 for the 4pt header safe inset. Expansion adjusts from 0.919 to 0.905 so
+       * the resume still lands at the 0.94 fill target. Section order and bullet line counts stay
+       * unchanged while the candidate name moves clear of the top safe margin. */
       {
         body_font_size: 11.9,
-        density_expansion: 0.919,
+        density_expansion: 0.905,
         fill_ratio: 0.94,
-        bottom_whitespace: 43.2,
+        bottom_whitespace: 43.1,
         section_order: ['HEADER', 'EDUCATION', 'EXPERIENCE', 'PROJECTS', 'LEADERSHIP', 'SKILLS'],
         sections: [
-          { name: 'HEADER', top: 36, bottom: 103.8, height: 67.8 },
-          { name: 'EDUCATION', top: 103.8, bottom: 192.2, height: 88.4 },
-          { name: 'EXPERIENCE', top: 192.2, bottom: 343.9, height: 151.7 },
-          { name: 'PROJECTS', top: 343.9, bottom: 495.6, height: 151.7 },
-          { name: 'LEADERSHIP', top: 495.6, bottom: 647.2, height: 151.7 },
-          { name: 'SKILLS', top: 647.2, bottom: 712.8, height: 65.6 },
+          { name: 'HEADER', top: 36, bottom: 107.3, height: 71.3 },
+          { name: 'EDUCATION', top: 107.3, bottom: 195.2, height: 87.9 },
+          { name: 'EXPERIENCE', top: 195.2, bottom: 346.1, height: 150.8 },
+          { name: 'PROJECTS', top: 346.1, bottom: 496.9, height: 150.8 },
+          { name: 'LEADERSHIP', top: 496.9, bottom: 647.7, height: 150.8 },
+          { name: 'SKILLS', top: 647.7, bottom: 712.9, height: 65.1 },
         ],
         bullet_lines: [2, 2, 2, 2, 2, 2],
       },
@@ -349,6 +346,22 @@ describe('resume visual layout controls', () => {
     assert.deepEqual(findPdfTextFidelityIssues(parsed.text, rendered.spec, contact), []);
   });
 
+  test('safe-margin validation rejects an extractable header that clips above the page', () => {
+    const benchmark = RESUME_VISUAL_BENCHMARK.find((entry) => entry.id === '06-normal-two-jobs');
+    assert.ok(benchmark);
+    const layout = planResumeLayout(benchmark.spec, benchmark.contact, benchmark.jdText).layout;
+    const issues = findPdfSafeMarginIssues([[
+      {
+        text: benchmark.contact.full_name,
+        x: layout.margin,
+        y: layout.page_height - layout.margin - 8,
+        width: 120,
+        height: 12,
+      },
+    ]], layout);
+    assert.ok(issues.some((issue) => /top safe margin/.test(issue)));
+  });
+
   test('target role headline renders, wraps safely, and remains ATS-readable', async () => {
     const benchmark = RESUME_VISUAL_BENCHMARK.find((entry) => entry.id === '06-normal-two-jobs');
     assert.ok(benchmark);
@@ -361,7 +374,8 @@ describe('resume visual layout controls', () => {
     assert.match(parsed.text.replace(/\s+/g, ' '), /Senior Analytics Engineering and Data Governance Lead for Global Operations/);
     assert.deepEqual(validateResumeVisualLayout(rendered.layout).issues, []);
     assert.deepEqual(validatePdfLayout(parsed.text, parsed.numpages).issues, []);
-    assert.deepEqual(findPdfTextFidelityIssues(parsed.text, rendered.spec, benchmark.contact), []);
+      assert.deepEqual(findPdfTextFidelityIssues(parsed.text, rendered.spec, benchmark.contact), []);
+      assert.deepEqual(findPdfSafeMarginIssues(parsed.pages, rendered.layout), []);
   });
 
   test('PDF fidelity rejects a missing target role headline', () => {
