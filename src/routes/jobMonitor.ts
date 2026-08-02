@@ -660,10 +660,12 @@ export function rankByFit<T extends RankableJob>(
     row,
     // The posting never asks for experience with its own company or job title, so both are excluded
     // from the requirement set. Same context the review screen passes.
-    score: scoreJdMatch(resumeText, row.scored_description ?? '', {
-      company: row.company_name,
-      role: row.title,
-    }).score,
+    score: resumeText.trim()
+      ? scoreJdMatch(resumeText, row.scored_description ?? '', {
+          company: row.company_name,
+          role: row.title,
+        }).score
+      : null,
     preferenceScore: preferenceFit(row, targetingPreferences).score,
     index,
   }));
