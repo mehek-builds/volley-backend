@@ -11,6 +11,7 @@ import { allowHourly, claimCounterSlot, getCount, getEntitlements, LIMITS, month
 import { generateResumeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import {
   findPdfTextFidelityIssues,
+  findPdfSafeMarginIssues,
   findResumeTypographyIssues,
   renderResumePdf,
   validateResumeVisualLayout,
@@ -409,6 +410,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     try {
       const parsedPdf = await extractPdfText(pdfBuffer);
       layoutIssues.push(...validatePdfLayout(parsedPdf.text, parsedPdf.numpages).issues);
+      layoutIssues.push(...findPdfSafeMarginIssues(parsedPdf.pages, visualLayout));
       layoutIssues.push(...findPdfTextFidelityIssues(parsedPdf.text, spec, body.contact));
     } catch (err) {
       // Fail closed when validation cannot run. Returning or storing an unverified PDF would

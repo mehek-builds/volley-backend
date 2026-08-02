@@ -7,6 +7,7 @@ import {
   type ResumeDesignTokens,
 } from './resumeDesign';
 import { RESUME_CONTENT_LIMITS, RESUME_FIT_FALLBACKS } from './resumeContentPolicy';
+import type { PdfTextGeometryItem } from '../lib/pdfText';
 
 export interface ContactHeader {
   full_name: string;
@@ -166,6 +167,27 @@ export function findPdfTextFidelityIssues(
       return actualOccurrences < expectedOccurrences;
     })
     .map(({ label }) => `rendered PDF text does not faithfully preserve ${label}`);
+}
+
+/** Catch extractable text whose glyph box crosses the printable safe margin. */
+export function findPdfSafeMarginIssues(
+  pages: PdfTextGeometryItem[][],
+  layout: Pick<ResumeVisualLayout, 'page_width' | 'page_height' | 'margin'>,
+  tolerance = 1,
+): string[] {
+  const issues = new Set<string>();
+  const right = layout.page_width - layout.margin;
+  const top = layout.page_height - layout.margin;
+  for (const [pageIndex, page] of pages.entries()) {
+    for (const item of page.filter((candidate) => candidate.text.trim())) {
+      const label = `page ${pageIndex + 1} text "${item.text.trim().slice(0, 40)}"`;
+      if (item.x < layout.margin - tolerance) issues.add(`${label} crosses the left safe margin`);
+      if (item.x + item.width > right + tolerance) issues.add(`${label} crosses the right safe margin`);
+      if (item.y + item.height > top + tolerance) issues.add(`${label} crosses the top safe margin`);
+      if (item.y - item.height < layout.margin - tolerance) issues.add(`${label} crosses the bottom safe margin`);
+    }
+  }
+  return [...issues];
 }
 
 function educationPosition(spec: ResumeSpec): NonNullable<ResumeSpec['education_position']> {
@@ -468,7 +490,7 @@ export function measureResumeLayout(
       sections.push({ name, top, bottom: cursor, height: blockHeight });
     };
 
-    let headerHeight = textHeight(
+    let headerHeight = design.spacing.headerSafeTop + textHeight(
       doc,
       contact.full_name,
       RESUME_FONTS.bold,
@@ -1010,7 +1032,7 @@ export async function renderResumePdf(
   doc
     .font(RESUME_FONTS.bold)
     .fontSize(design.typography.name)
-    .text(contact.full_name, design.page.margin, design.page.margin, {
+    .text(contact.full_name, design.page.margin, design.page.margin + design.spacing.headerSafeTop, {
       width,
       align: 'center',
       lineGap: design.typography.name * design.typography.lineGapRatio.bold,

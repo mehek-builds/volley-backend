@@ -188,6 +188,8 @@ refined structured`
 );
 
 export const BULLET_MAX_CHARS = 235; // beyond this, a ~2-line bullet wraps to a 3rd line
+export const BULLET_MIN_WORDS = 8;
+export const BULLET_MAX_WORDS = 30;
 const MIN_KEYWORD_COVERAGE = 18; // % of JD terms that must appear (ATS safety floor)
 const METRIC_RE = /(\$|%|\d|\b0\.\d+\b|\b\d+x\b)/i;
 
@@ -698,6 +700,7 @@ export function validateResumeSpec(
   declaredSkills?: string[] | null,
   education?: CandidateEducation,
   targetRole?: string,
+  options: { allowedSingleBulletEntries?: ExperienceBankEntry[] } = {},
 ): ValidationResult {
   const issues: string[] = [];
   const warnings: BulletFlag[] = [];
@@ -741,7 +744,25 @@ export function validateResumeSpec(
         `${entry.org}: ${entry.bullets.length} bullets (max ${RESUME_CONTENT_LIMITS.maxBulletsPerEntry})`,
       );
     }
-    if (entry.bullets.length === 0) issues.push(`${entry.org}: no bullets selected`);
+    if (entry.bullets.length === 0) {
+      issues.push(`${entry.org}: no bullets selected`);
+    } else if (entry.bullets.length < RESUME_CONTENT_LIMITS.minBulletsPerEntry) {
+      const source = matchBankEntry(entry.org, bank, {
+        title: entry.title,
+        dateRange: entry.date_range,
+      });
+      const allowed = options.allowedSingleBulletEntries ?? [];
+      const sourceIsAllowed = source && allowed.some((candidate) => candidate.id === source.id);
+      const sourceBullets = Array.isArray(source?.bullet_variants)
+        ? source.bullet_variants.filter((bullet): bullet is string => typeof bullet === 'string' && bullet.trim().length > 0)
+        : [];
+      const sourceHasOneBullet = sourceBullets.length === 1;
+      if (!sourceIsAllowed || !sourceHasOneBullet) {
+        issues.push(
+          `${entry.org}: ${entry.bullets.length} bullet selected (min ${RESUME_CONTENT_LIMITS.minBulletsPerEntry})`,
+        );
+      }
+    }
 
     for (const bullet of entry.bullets) {
       const flags: string[] = [];
@@ -762,7 +783,12 @@ export function validateResumeSpec(
       const hits = [...contentWords(bullet)].filter((w) => kw.has(w)).length;
 
       if (!isAction) issues.push(`bullet not action-verb-first ("${words[0]}"): "${excerpt(bullet)}"`);
-      if (nWords > 34) flags.push('verbose');
+      if (nWords < BULLET_MIN_WORDS) {
+        issues.push(`bullet has ${nWords} words (min ${BULLET_MIN_WORDS}): "${excerpt(bullet)}"`);
+      }
+      if (nWords > BULLET_MAX_WORDS) {
+        issues.push(`bullet has ${nWords} words (max ${BULLET_MAX_WORDS}): "${excerpt(bullet)}"`);
+      }
       if (andCount > 2) flags.push(`run-on(${andCount} "and"s)`);
       if (!hasMetric && hits < 2) flags.push('thin(no-metric+low-fit)');
       if (!isInitiative && !hasMetric) flags.push('no-ownership-signal');
