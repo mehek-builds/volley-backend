@@ -4,7 +4,7 @@ import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { extractPdfText } from '../lib/pdfText';
 import { validatePdfLayout, validateResumeSpec } from './resumeValidate';
-import { applyResumePolicy, deriveCandidateContext } from './resumePolicy';
+import { applyResumePolicy, deriveCandidateContext, enforceExperienceBulletFloor } from './resumePolicy';
 import { planResumeLayout, renderResumePdf } from './resumeRender';
 
 function bankEntry(
@@ -236,4 +236,51 @@ test('policy preserves a generated target role when the route has no role contex
   input.target_role = 'Analytics Engineer';
   const result = applyResumePolicy(input, { school: 'USC' }, BANK, 'analytics engineering');
   assert.equal(result.spec.target_role, 'Analytics Engineer');
+});
+
+test('three-bullet backstop fills from grounded variants and drops unsupported sparse entries', () => {
+  const input = rawSpec();
+  const sourceBullets = BANK[0].bullet_variants as string[];
+  input.experience[0].bullets = [sourceBullets[0], sourceBullets[1]];
+  input.experience[1].bullets = ['Built one grounded line for a project that has no additional evidence'];
+  const sparseBank = BANK.map((entry) => entry.id === '2' ? { ...entry, bullet_variants: input.experience[1].bullets } : entry);
+  const result = enforceExperienceBulletFloor(input, sparseBank);
+  assert.equal(result.experience[0].bullets.length, 3);
+  assert.equal(result.experience.some((entry) => entry.org === 'Campus Search'), false);
+});
+
+test('three-bullet backstop uses the matching role when one organization has multiple roles', () => {
+  const analyst = bankEntry('analyst', 'job', 'Acme Labs', 'Data Analyst', [
+    'Analyzed customer cohorts and identified three activation opportunities',
+    'Built weekly dashboards for product and revenue leaders',
+    'Automated reporting workflows and reduced manual reconciliation time',
+  ]);
+  const managerBullets = [
+    'Led eight engineers across platform and infrastructure projects',
+    'Launched an incident review process across two technical teams',
+    'Mentored four engineers into expanded technical leadership roles',
+  ];
+  const manager = bankEntry('manager', 'job', 'Acme Labs', 'Engineering Manager', managerBullets);
+  const input = rawSpec();
+  input.experience = [{
+    type: 'job',
+    org: 'Acme Labs',
+    title: 'Engineering Manager',
+    date_range: '2025 - Present',
+    bullets: [managerBullets[0]],
+  }];
+  const result = enforceExperienceBulletFloor(input, [analyst, manager]);
+  assert.deepEqual(result.experience[0].bullets, managerBullets);
+});
+
+test('only an explicitly continued recent entry may remain sparse', () => {
+  const input = rawSpec();
+  const sourceBullets = BANK[0].bullet_variants as string[];
+  input.experience = [{ ...input.experience[0], bullets: [sourceBullets[0]] }];
+  const sparseBank = [{ ...BANK[0], bullet_variants: input.experience[0].bullets }];
+  assert.equal(enforceExperienceBulletFloor(input, sparseBank).experience.length, 0);
+  assert.equal(enforceExperienceBulletFloor(input, sparseBank, {
+    priorityEntryId: BANK[0].id,
+    allowSparsePriority: true,
+  }).experience[0].bullets.length, 1);
 });

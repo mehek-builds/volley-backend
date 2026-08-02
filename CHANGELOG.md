@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.1.0] - 2026-08-02
+
+### Added
+
+- Resume uploads now identify the newest or user-selected high-value experience and assess its
+  bullets for an action, subject, metric or scope, and outcome.
+- Applicants can enrich that experience with missing facts or explicitly continue with the
+  evidence Litos found, with accepted bullets appended to the matched experience-bank entry.
+
+### Changed
+
+- Base and tailored resumes always lead with the selected recent experience and normally print
+  exactly three grounded bullets for every included experience.
+- Sparse secondary experiences are omitted instead of weakening the three-bullet contract, while
+  an explicitly continued recent experience remains eligible with its available evidence.
+
+### Fixed
+
+- One-page fitting preserves the selected recent experience while reducing lower-priority entries.
+- Resume generation no longer repeats a metric follow-up already handled during onboarding.
+
 ## [1.0.7] - 2026-08-01
 
 ### Changed

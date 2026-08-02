@@ -627,8 +627,10 @@ function removeBullet(
 }
 
 function removeLowestEntry(spec: ResumeSpec, jdText: string, omissions: string[]): ResumeSpec {
-  let index = 0;
-  for (let i = 1; i < spec.experience.length; i += 1) {
+  // The first entry is the upload's reviewed recent experience. It is a resume invariant, not a
+  // relevance candidate, so one-page fitting may remove only entries after it.
+  let index = 1;
+  for (let i = 2; i < spec.experience.length; i += 1) {
     if (entryValue(spec.experience[i], jdText) < entryValue(spec.experience[index], jdText)) index = i;
   }
   const experience = [...spec.experience];
@@ -778,7 +780,8 @@ export function planResumeLayout(
       spec = removeBullet(spec, excessBullet, omissions);
     }
     if (spec.experience.length > RESUME_CONTENT_LIMITS.maxEntries) {
-      const ranked = spec.experience
+      const first = spec.experience[0];
+      const ranked = spec.experience.slice(1)
         .map((entry) => ({ entry, score: entryValue(entry, jdText) }))
         .sort((a, b) => b.score - a.score);
       for (const removed of ranked.slice(RESUME_CONTENT_LIMITS.maxEntries)) {
@@ -786,7 +789,7 @@ export function planResumeLayout(
       }
       spec = {
         ...spec,
-        experience: ranked.slice(0, RESUME_CONTENT_LIMITS.maxEntries).map(({ entry }) => entry),
+        experience: [first, ...ranked.slice(0, RESUME_CONTENT_LIMITS.maxEntries - 1).map(({ entry }) => entry)],
       };
     }
     let guard = 0;
@@ -818,15 +821,6 @@ export function planResumeLayout(
         const removed = spec.skills[spec.skills.length - 1];
         omissions.push(`Removed lower-fit skill: ${removed}`);
         spec = { ...spec, skills: spec.skills.slice(0, -1) };
-        continue;
-      }
-      const secondBullet = lowestValueBullet(
-        spec,
-        jdText,
-        RESUME_FIT_FALLBACKS.emergencyMinimumBullets,
-      );
-      if (secondBullet) {
-        spec = removeBullet(spec, secondBullet, omissions);
         continue;
       }
       if (spec.experience.length > 1) {

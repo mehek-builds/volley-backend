@@ -12,6 +12,7 @@ import {
 } from '../llm/baseResume';
 import {
   applyResumePolicy,
+  enforceExperienceBulletFloor,
   normalizeDashesForPrint,
   type CandidateEducation,
 } from '../engine/resumePolicy';
@@ -311,7 +312,11 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
     const education = educationFrom(profile.parsed_json);
     const declaredSkills = skillsSourceFor(profile.skills, profile.parsed_json);
     const targetText = targetRoleText(target, profile.parsed_json);
-    const priorityEntries = priorityEntriesForBaseResume(bank, targetText);
+    const recentReview = (profile.parsed_json as {
+      recent_experience_review?: { selected_entry_id?: string | null; continue_with_found?: boolean };
+    } | null)?.recent_experience_review;
+    const selectedEntryId = recentReview?.selected_entry_id;
+    const priorityEntries = priorityEntriesForBaseResume(bank, targetText, selectedEntryId);
 
     try {
       send({ event: 'stage', stage: 'reading' });
@@ -417,7 +422,12 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       // Grounding is not optional just because there is no JD to over-fit to. A base resume is the
       // one a student is most likely to send unread, so an ungrounded claim here is more dangerous
       // than in a tailored resume they at least glanced at.
-      const { spec, removed } = pruneUngroundedContent(policiedSpec, bank, declaredSkills);
+      const pruned = pruneUngroundedContent(policiedSpec, bank, declaredSkills);
+      const spec = enforceExperienceBulletFloor(pruned.spec, bank, {
+        priorityEntryId: selectedEntryId,
+        allowSparsePriority: recentReview?.continue_with_found === true,
+      });
+      const removed = pruned.removed;
       /* The base resume has no posting, so its keyword coverage is scored against the roles the
        * student says they are chasing (targeting titles and categories, plus the target_roles the
        * parse inferred). That number is ADVISORY and never gates: a synthetic JD is a guess at what
@@ -455,7 +465,11 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
           declaredSkills,
           education,
           undefined,
-          { allowedSingleBulletEntries: priorityEntries },
+          {
+            allowedSingleBulletEntries: recentReview?.continue_with_found && priorityEntries[0]
+              ? [priorityEntries[0]]
+              : [],
+          },
         );
         const issues = [
           ...finalValidation.issues,
@@ -507,7 +521,9 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
         spec: printed,
         warnings,
         ats,
-        metrics: metricGapsIn(printed),
+        // New uploads already received the specific, evidence-grounded impact prompt. Asking for
+        // numbers again here would duplicate that work and make the base-resume step feel broken.
+        metrics: selectedEntryId ? [] : metricGapsIn(printed),
         built_at: builtAt.toISOString(),
       });
     } catch (err) {

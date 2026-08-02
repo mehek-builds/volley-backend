@@ -9,6 +9,15 @@ import { extractPdfText } from '../lib/pdfText';
 import { put } from '@vercel/blob';
 import { MultipartFile } from '@fastify/multipart';
 import { z } from 'zod';
+import {
+  assessImpactBullet,
+  buildRecentExperienceReview,
+  composeImpactBullet,
+  type ImpactComponent,
+  type RecentExperienceEntry,
+  type RecentExperienceReview,
+} from '../engine/recentExperience';
+import { startsWithStrongVerb } from '../engine/resumeValidate';
 
 // R-052. Bounded on purpose: these are the only parsed fields a student may correct by hand, and
 // the ceilings stop a paste of an entire resume landing in the school field. Every value is trimmed
@@ -68,6 +77,63 @@ export const parsedProfilePatchSchema = z
   .refine((value) => Object.keys(value).length > 0, { message: 'Send at least one field to update' });
 
 export type ParsedProfilePatch = z.infer<typeof parsedProfilePatchSchema>;
+
+const impactAnswerSchema = z.object({
+  action: z.string().trim().max(40).optional(),
+  noun: z.string().trim().max(180).optional(),
+  metric_or_scope: z.string().trim().max(120).optional(),
+  outcome: z.string().trim().max(180).optional(),
+}).strict();
+
+const recentExperiencePatchSchema = z.object({
+  selected_entry_id: z.string().uuid(),
+  answers: z.array(impactAnswerSchema).max(3).default([]),
+  continue_with_found: z.boolean().default(false),
+}).strict();
+
+const storedImpactAssessmentSchema = z.object({
+  draft: z.string(),
+  score: z.number().int().min(0).max(4),
+  components: z.object({
+    action: z.object({ present: z.boolean(), evidence: z.string().nullable() }),
+    noun: z.object({ present: z.boolean(), evidence: z.string().nullable() }),
+    metric_or_scope: z.object({ present: z.boolean(), evidence: z.string().nullable() }),
+    outcome: z.object({ present: z.boolean(), evidence: z.string().nullable() }),
+  }),
+});
+
+const storedRecentExperienceReviewSchema = z.object({
+  status: z.enum(['ready', 'choose_entry', 'optional_enrichment', 'needs_input', 'continued']),
+  selected_entry_id: z.string().uuid().nullable(),
+  user_selected: z.boolean(),
+  impact_candidate: storedImpactAssessmentSchema.nullable(),
+  grounded_bullet_count: z.number().int().nonnegative(),
+  missing_bullets: z.number().int().min(0).max(3),
+  completed: z.boolean(),
+  continue_with_found: z.boolean(),
+});
+
+function reviewFromProfile(value: unknown): RecentExperienceReview | null {
+  if (!value || typeof value !== 'object') return null;
+  const review = (value as { recent_experience_review?: unknown }).recent_experience_review;
+  const parsed = storedRecentExperienceReviewSchema.safeParse(review);
+  return parsed.success ? parsed.data : null;
+}
+
+function reviewPayload(entries: RecentExperienceEntry[], review: RecentExperienceReview) {
+  return {
+    ...review,
+    candidates: entries.map((entry) => ({
+      entry_id: entry.id,
+      type: entry.type,
+      org: entry.org,
+      title: entry.title ?? '',
+      date_range: entry.date_range ?? '',
+      bullet_variants: (Array.isArray(entry.bullet_variants) ? entry.bullet_variants : [])
+        .filter((value): value is string => typeof value === 'string'),
+    })),
+  };
+}
 
 export function normalizeEditableList(values: string[]): string[] {
   const normalized: string[] = [];
@@ -549,6 +615,7 @@ export async function profileRoutes(fastify: FastifyInstance) {
     let bank_seeded = 0;
     let bank_enriched = 0;
     let bank_total = 0;
+    let recentReview: RecentExperienceReview | null = null;
     try {
       const existing = await db
         .select({
@@ -574,10 +641,16 @@ export async function profileRoutes(fastify: FastifyInstance) {
         await db.update(experience_bank).set(values).where(eq(experience_bank.id, enrichment.id));
         bank_enriched += 1;
       }
+      const bank = await db.select().from(experience_bank).where(eq(experience_bank.user_id, userId));
+      recentReview = buildRecentExperienceReview(bank as RecentExperienceEntry[]);
+      parsedProfile = { ...parsedProfile, recent_experience_review: recentReview };
+      await db
+        .update(profiles)
+        .set({ parsed_json: parsedProfile, updated_at: new Date() })
+        .where(eq(profiles.user_id, userId));
     } catch (err) {
-      // Loud: an account whose bank stayed empty cannot generate a resume or draft an answer,
-      // which is exactly the silent-broken-account failure this seeding exists to end.
       fastify.log.error({ err, userId }, 'failed to seed experience bank from resume parse'); // vocab-allow: server log
+      return reply.status(500).send({ error: 'Failed to prepare the recent experience review' });
     }
 
     // Fill the academic gaps the upload already answered. Best-effort and non-fatal for the same
@@ -601,7 +674,95 @@ export async function profileRoutes(fastify: FastifyInstance) {
       fastify.log.warn({ err, userId }, 'could not prefill academic fields from resume parse');
     }
 
-    return reply.status(200).send({ ...parsedProfile, bank_seeded, bank_total, bank_enriched, gaps_prefilled });
+    return reply.status(200).send({
+      ...parsedProfile,
+      bank_seeded,
+      bank_total,
+      bank_enriched,
+      gaps_prefilled,
+      recent_experience_review: recentReview,
+    });
+  });
+
+  fastify.get('/profile/recent-experience', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const userId = request.jwtPayload!.userId;
+    const [[profile], entries] = await Promise.all([
+      db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1),
+      db.select().from(experience_bank).where(eq(experience_bank.user_id, userId)),
+    ]);
+    if (!profile) return reply.status(404).send({ error: 'Profile not found - upload a resume first' });
+    const stored = reviewFromProfile(profile.parsed_json);
+    const review = stored ?? buildRecentExperienceReview(entries as RecentExperienceEntry[]);
+    return reply.status(200).send(reviewPayload(entries as RecentExperienceEntry[], review));
+  });
+
+  fastify.put('/profile/recent-experience', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const userId = request.jwtPayload!.userId;
+    const body = recentExperiencePatchSchema.safeParse(request.body ?? {});
+    if (!body.success) return reply.status(400).send({ error: 'Invalid recent experience review' });
+
+    try {
+      const result = await db.transaction(async (tx) => {
+        const [profile] = await tx.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1);
+        if (!profile) return { error: 'profile' as const };
+        // Serialize updates to this one bank row so a double click or request retry cannot read the
+        // same old bullet array twice and silently discard the first accepted enrichment.
+        await tx.execute(sql`select id from ${experience_bank}
+          where ${experience_bank.id} = ${body.data.selected_entry_id}
+          and ${experience_bank.user_id} = ${userId}
+          for update`);
+        const entries = await tx.select().from(experience_bank).where(eq(experience_bank.user_id, userId));
+        const selected = entries.find((entry) => entry.id === body.data.selected_entry_id);
+        if (!selected) return { error: 'entry' as const };
+
+        const existing = (Array.isArray(selected.bullet_variants) ? selected.bullet_variants : [])
+          .filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+        const composed = body.data.answers
+          .map((answers, index) => composeImpactBullet(index === 0 ? existing[0] ?? '' : '', answers as Partial<Record<ImpactComponent, string>>))
+          .filter((bullet) => bullet.length > 0);
+        for (const bullet of composed) {
+          if (!startsWithStrongVerb(bullet)) return { error: 'verb' as const };
+        }
+        const normalized = new Set(existing.map((bullet) => bullet.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()));
+        const additions = composed.filter((bullet) => {
+          const key = bullet.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+          if (!key || normalized.has(key)) return false;
+          normalized.add(key);
+          return true;
+        });
+        const bullets = [...existing, ...additions];
+        if (additions.length > 0) {
+          await tx.update(experience_bank).set({ bullet_variants: bullets }).where(eq(experience_bank.id, selected.id));
+        }
+        const assessment = assessImpactBullet(bullets);
+        const review: RecentExperienceReview = {
+          status: body.data.continue_with_found ? 'continued' : assessment.score < 4 || bullets.length < 3 ? 'optional_enrichment' : 'ready',
+          selected_entry_id: selected.id,
+          user_selected: reviewFromProfile(profile.parsed_json)?.selected_entry_id !== selected.id,
+          impact_candidate: assessment,
+          grounded_bullet_count: bullets.length,
+          missing_bullets: Math.max(0, 3 - bullets.length),
+          completed: body.data.continue_with_found || (assessment.score === 4 && bullets.length >= 3),
+          continue_with_found: body.data.continue_with_found,
+        };
+        const parsed = (profile.parsed_json ?? {}) as Record<string, unknown>;
+        await tx.update(profiles).set({
+          parsed_json: { ...parsed, recent_experience_review: review },
+          updated_at: new Date(),
+        }).where(eq(profiles.user_id, userId));
+        const nextEntries = entries.map((entry) => entry.id === selected.id ? { ...entry, bullet_variants: bullets } : entry);
+        return { review, entries: nextEntries as RecentExperienceEntry[] };
+      });
+      if ('error' in result) {
+        if (result.error === 'profile') return reply.status(404).send({ error: 'Profile not found - upload a resume first' });
+        if (result.error === 'entry') return reply.status(404).send({ error: 'Experience does not belong to this upload' });
+        return reply.status(400).send({ error: 'Each new bullet must start with a strong action verb' });
+      }
+      return reply.status(200).send(reviewPayload(result.entries, result.review));
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ error: 'Failed to save recent experience review' });
+    }
   });
 
   // GET /profile - retrieve user profile

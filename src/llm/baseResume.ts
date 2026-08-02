@@ -61,16 +61,18 @@ Selection rules (these differ from tailored generation - read them carefully):
   common way a good resume looks weak. If the selection above leaves the page short, add the
   next best entry from the bank and give every entry its full ${RESUME_CONTENT_LIMITS.maxBulletsPerEntry} bullets. Only drop back toward the
   minimum when the page would otherwise overflow.
-- Prefer each entry's strongest and most transferable stored bullet_variant, reused VERBATIM whenever one
-  fits. Only lightly rewrite when no stored variant reads well without a posting's context to lean on.
-  Never fabricate an achievement.
-- Give every entry ${RESUME_CONTENT_LIMITS.maxBulletsPerEntry} bullets. Drop to ${RESUME_CONTENT_LIMITS.minBulletsPerEntry} only when the bank genuinely holds nothing worth a third
-  bullet for that entry. Within an entry, lead with the bullet carrying the clearest outcome.
+ - Prefer each entry's strongest and most transferable stored bullet_variant, reused VERBATIM whenever one
+   fits. Only lightly rewrite when no stored variant reads well without a posting's context to lean on.
+   Never fabricate an achievement.
+ - When two stored variants for the same entry describe a clear cause and its result, you may combine
+   those exact facts into one stronger bullet. Never combine unrelated accomplishments or move facts
+   between entries.
+- Give every entry exactly ${RESUME_CONTENT_LIMITS.maxBulletsPerEntry} grounded bullets. Within an entry, lead with the bullet carrying the clearest outcome.
 - NEVER give an entry fewer than ${RESUME_CONTENT_LIMITS.minBulletsPerEntry} bullets. A single-bullet entry looks like an afterthought and weakens the
   whole page. If an entry cannot support ${RESUME_CONTENT_LIMITS.minBulletsPerEntry}, it does not belong on the resume: choose a different entry
   from the bank instead. The only exception is an entry named in the REQUIRED PRIORITY ENTRIES
-  block whose source contains exactly one bullet. Include that entry with its one grounded bullet;
-  never invent or duplicate a second bullet to satisfy the usual minimum.
+  block whose source contains fewer than three bullets because the applicant explicitly continued
+  with the evidence found. Include all of its grounded bullets and never invent or duplicate one.
 - Copy each entry's type from the experience bank. Do not turn a project into a job or a job into leadership.
 - "skills": 8-10 entries, EVERY one copied EXACTLY as written in the applicant's Skills list, character for
   character. Order them most broadly useful first. Never add a skill that is not on that list; if the list
@@ -131,17 +133,18 @@ function bankEntryText(entry: ExperienceBankEntry): string {
 /**
  * Evidence the base resume may not displace with older work.
  *
- * The model still chooses the full four-entry page, but these up-to-three entries are mandatory:
- * the most recent source entry, every additional current entry that fits the cap, then the strongest
- * role-defining entry supported by the applicant's target titles. This makes the failure direction
- * explicit. A long resume may omit secondary history, but it cannot silently replace who the person
- * is now with who they were twenty years ago.
+ * After onboarding, the entry the applicant confirmed is the one mandatory entry and must lead the
+ * page. Before that review exists, the legacy fallback protects up to three current or role-defining
+ * entries so older accounts retain the selection behavior they had before this flow shipped.
  */
 export function priorityEntriesForBaseResume(
   bank: ExperienceBankEntry[],
   targetRoleText: string,
+  selectedEntryId?: string | null,
 ): ExperienceBankEntry[] {
   if (bank.length === 0) return [];
+  const explicitlySelected = bank.find((entry) => entry.id === selectedEntryId);
+  if (explicitlySelected) return [explicitlySelected];
   const rankedByRecency = bank
     .map((entry, index) => ({ entry, index }))
     .sort((a, b) =>
@@ -177,9 +180,15 @@ export function baseResumeSelectionIssues(
   priorities: ExperienceBankEntry[],
 ): string[] {
   const selected = new Set(spec.experience.map((entry) => entryIdentity(entry)));
-  return priorities
+  const issues = priorities
     .filter((entry) => !selected.has(entryIdentity(entry)))
     .map((entry) => `required current or role-defining entry missing: ${entry.title ? `${entry.title} at ` : ''}${entry.org}`);
+  const first = spec.experience[0];
+  const priority = priorities[0];
+  if (priority && first && selected.has(entryIdentity(priority)) && entryIdentity(first) !== entryIdentity(priority)) {
+    issues.push(`required priority entry is not first: ${priority.title ? `${priority.title} at ` : ''}${priority.org}`);
+  }
+  return issues;
 }
 
 /** Emitted as the model streams, so /start can draw the resume as it is decided rather than after. */

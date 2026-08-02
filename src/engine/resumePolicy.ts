@@ -136,10 +136,52 @@ function orgScore(generated: string, source: string): number {
 }
 
 function matchingBankEntry(entry: ResumeSpec['experience'][number], bank: ExperienceBankEntry[]) {
+  const generatedTitle = tokens(entry.title ?? '');
+  const generatedYears = new Set((entry.date_range ?? '').match(/\b(?:19|20)\d{2}\b/g) ?? []);
   return bank
-    .map((source) => ({ source, score: orgScore(entry.org, source.org) }))
-    .filter(({ score }) => score >= 0.5)
+    .map((source) => {
+      const organization = orgScore(entry.org, source.org);
+      const sourceTitle = tokens(source.title ?? '');
+      let titleOverlap = 0;
+      for (const token of generatedTitle) if (sourceTitle.has(token)) titleOverlap += 1;
+      const title = generatedTitle.size > 0 && sourceTitle.size > 0
+        ? titleOverlap / Math.min(generatedTitle.size, sourceTitle.size)
+        : 0;
+      const sourceYears = (source.date_range ?? '').match(/\b(?:19|20)\d{2}\b/g) ?? [];
+      const sharedYear = sourceYears.some((year) => generatedYears.has(year));
+      return { source, organization, score: organization * 10 + title * 4 + Number(sharedYear) * 2 };
+    })
+    .filter(({ organization }) => organization >= 0.5)
     .sort((a, b) => b.score - a.score || b.source.org.length - a.source.org.length)[0]?.source;
+}
+
+/** Deterministic backstop for the three-bullet contract. */
+export function enforceExperienceBulletFloor(
+  spec: ResumeSpec,
+  bank: ExperienceBankEntry[],
+  options: { priorityEntryId?: string | null; allowSparsePriority?: boolean } = {},
+): ResumeSpec {
+  const experience = spec.experience.flatMap((entry) => {
+    const source = matchingBankEntry(entry, bank);
+    const variants = (Array.isArray(source?.bullet_variants) ? source.bullet_variants : [])
+      .filter((bullet): bullet is string => typeof bullet === 'string' && bullet.trim().length > 0)
+      .map((bullet) => bullet.trim());
+    const bullets = [...entry.bullets];
+    const normalized = new Set(bullets.map((bullet) => bullet.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()));
+    for (const variant of variants) {
+      if (bullets.length >= RESUME_CONTENT_LIMITS.minBulletsPerEntry) break;
+      const key = variant.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      if (!key || normalized.has(key)) continue;
+      normalized.add(key);
+      bullets.push(variant);
+    }
+    const sparsePriority = Boolean(
+      options.allowSparsePriority && source?.id && source.id === options.priorityEntryId,
+    );
+    if (bullets.length < RESUME_CONTENT_LIMITS.minBulletsPerEntry && !sparsePriority) return [];
+    return [{ ...entry, bullets: bullets.slice(0, RESUME_CONTENT_LIMITS.maxBulletsPerEntry) }];
+  });
+  return { ...spec, experience };
 }
 
 function metricCount(text: string): number {

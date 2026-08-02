@@ -64,6 +64,15 @@ describe('onboarding step order', () => {
     assert.equal(onboardingStepFrom({ ...ready, hasFocus: false }), 'focus');
   });
 
+  test('a new upload pauses for recent-experience review before targeting', () => {
+    assert.equal(onboardingStepFrom({ ...ready, hasImpactReview: false }), 'impact');
+  });
+
+  test('completed accounts return only when a new upload has an unfinished review', () => {
+    assert.equal(onboardingStepFrom({ ...ready, completed: true, hasImpactReview: false }), 'impact');
+    assert.equal(onboardingStepFrom({ ...ready, completed: true }), 'done');
+  });
+
   test('setup ends after the core resume and targeting decisions', () => {
     const cases: Array<[string, Parameters<typeof onboardingStepFrom>[0]]> = [
       ['done', { ...ready, completed: true, hasResume: false }],

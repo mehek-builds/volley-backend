@@ -27,7 +27,8 @@ import {
 } from './resumeResponseSchema';
 import { extractPdfText } from '../lib/pdfText';
 import { PRODUCT_NAME } from '../lib/product';
-import { applyResumePolicy, type CandidateEducation } from '../engine/resumePolicy';
+import { applyResumePolicy, enforceExperienceBulletFloor, type CandidateEducation } from '../engine/resumePolicy';
+import { baseResumeSelectionIssues } from '../llm/baseResume';
 import { deriveEditedTerms } from '../lib/applicationReview';
 
 const MAX_SPEC_ATTEMPTS = 2; // 1 initial pass + 1 feedback-driven retry, per PRD-v2 Section 6.4's
@@ -198,6 +199,11 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     // NULL is normal and must stay non-fatal: accounts created before the base-resume step exists,
     // and anyone who skipped it, generate exactly as they did before.
     const baseSpec = (profileRows[0]?.base_resume_json as ResumeSpec | null) ?? null;
+    const recentReview = (profileRows[0]?.parsed_json as {
+      recent_experience_review?: { selected_entry_id?: string | null; continue_with_found?: boolean };
+    } | null)?.recent_experience_review;
+    const selectedEntryId = recentReview?.selected_entry_id;
+    const priorityEntry = bank.find((entry) => entry.id === selectedEntryId) ?? null;
 
     const parsed = profileRows[0]?.parsed_json as {
       school?: string;
@@ -267,6 +273,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
                 // bank on every application - which is also what makes their /start edits reach a
                 // real submission instead of dying in base_resume_json.
                 baseSpec,
+                priorityEntry,
               );
               return applyResumePolicy(generated, education, bank, body.jd_text, { targetRole: body.role }).spec;
             } catch (err) {
@@ -318,6 +325,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       const result = validateResumeSpec(spec, body.jd_text, bank, declaredSkills, education, body.role);
       const typographyIssues = findResumeTypographyIssues(spec, body.contact);
       specIssues = [...result.issues, ...typographyIssues];
+      if (priorityEntry) specIssues.push(...baseResumeSelectionIssues(spec, [priorityEntry]));
       specWarnings = result.warnings;
       atsCoverage = result.ats_keyword_coverage_pct;
 
@@ -356,6 +364,10 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         groundingRemoved = pruned.removed;
       }
     }
+    spec = enforceExperienceBulletFloor(spec, bank, {
+      priorityEntryId: priorityEntry?.id,
+      allowSparsePriority: recentReview?.continue_with_found === true,
+    });
 
     let pdfBuffer: Buffer;
     let trimmedForFit: boolean;
@@ -385,7 +397,20 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     // extractPdfText, not bare pdfParse: the raw call threw "bad XRef entry" on every ~2.5KB
     // pooled render buffer (R-017; the byteOffset story lives in lib/pdfText.ts), so this check
     // had NEVER run and its empty issues array read downstream as a clean pass.
-    const finalSpecValidation = validateResumeSpec(spec, body.jd_text, bank, declaredSkills, education, body.role);
+    const finalSpecValidation = validateResumeSpec(
+      spec,
+      body.jd_text,
+      bank,
+      declaredSkills,
+      education,
+      body.role,
+      {
+        allowedSingleBulletEntries: recentReview?.continue_with_found && priorityEntry
+          ? [priorityEntry]
+          : [],
+      },
+    );
+    if (priorityEntry) finalSpecValidation.issues.push(...baseResumeSelectionIssues(spec, [priorityEntry]));
     specWarnings = finalSpecValidation.warnings;
     atsCoverage = finalSpecValidation.ats_keyword_coverage_pct;
     if (finalSpecValidation.issues.length > 0) {
