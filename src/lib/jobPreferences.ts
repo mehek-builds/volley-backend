@@ -27,6 +27,22 @@ const CATEGORY_TERMS: Record<string, string[]> = {
   other: [],
 };
 
+/**
+ * "Remote" is a place a student can pick, not only the standing checkbox.
+ *
+ * The checkbox is all-or-nothing: it hides every on-site job. A student who would take a job in
+ * London, in Dubai, or anywhere remote had no way to say so, because remote was not one of the
+ * options in the list of places. It is now, and the job side honours it against the `remote` flag
+ * rather than against the location text, since an employer who marks a posting remote often still
+ * writes a city in the location field.
+ */
+export const REMOTE_LOCATION = 'Remote';
+
+export function isRemoteLocation(value: string): boolean {
+  const folded = fold(value);
+  return folded === 'remote' || folded.startsWith('remote ') || folded === 'anywhere' || folded === 'work from home' || folded === 'wfh';
+}
+
 export function normalizeTargeting(row: Record<string, unknown> | null | undefined): JobTargeting {
   return {
     categories: strings(row?.categories),
@@ -94,12 +110,19 @@ export function preferenceFit(job: PreferenceJob, targeting: JobTargeting): { sc
     reasons.push(category.replaceAll('-', ' '));
   }
 
-  const preferredLocation = targeting.locations.find((wanted) => location.includes(fold(wanted)));
+  // Location and remote score independently: main made them additive, and a remote-flagged job in
+  // a city the student named is a better fit than either on its own.
+  const preferredLocation = targeting.locations
+    .filter((wanted) => !isRemoteLocation(wanted))
+    .find((wanted) => location.includes(fold(wanted)));
   if (preferredLocation) {
     score += 5;
     reasons.push(preferredLocation);
   }
-  if (targeting.remote_only && job.remote) {
+  // "Remote" picked as a place counts the same as the standing checkbox, and against the flag
+  // rather than the location text: a remote posting is often still labelled with a city.
+  const wantsRemote = targeting.remote_only || targeting.locations.some(isRemoteLocation);
+  if (wantsRemote && job.remote) {
     score += 5;
     reasons.push('remote preference');
   }
