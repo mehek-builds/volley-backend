@@ -1,10 +1,14 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth';
+import { eq } from 'drizzle-orm';
+import { db } from '../db';
+import { users } from '../db/schema';
 import {
   createEmailConnectionLink,
   disconnectEmailProvider,
   getEmailConnectionStates,
+  hasActiveEmailConnection,
   isComposioConfigured,
 } from '../lib/composioConnections';
 
@@ -35,7 +39,15 @@ export async function emailConnectionRoutes(fastify: FastifyInstance) {
     if (!isComposioConfigured()) return unavailable(reply);
     const parsed = providerParams.safeParse(request.params);
     if (!parsed.success) return reply.status(400).send({ error: 'Unsupported email provider' });
-    const removed = await disconnectEmailProvider(request.jwtPayload!.userId, parsed.data.provider);
+    const userId = request.jwtPayload!.userId;
+    const removed = await disconnectEmailProvider(userId, parsed.data.provider);
+    const anotherInboxIsConnected = await hasActiveEmailConnection(userId).catch(() => false);
+    if (!anotherInboxIsConnected) {
+      await db.update(users).set({
+        automatic_verification_enabled: false,
+        automatic_verification_consented_at: null,
+      }).where(eq(users.id, userId));
+    }
     return reply.send({ disconnected: true, removed });
   });
 }
