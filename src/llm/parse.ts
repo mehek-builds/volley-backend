@@ -51,6 +51,9 @@ export interface ParsedProfile {
   source_pages?: number;
   // Filled by the upload route after reconciling this parse with durable experience-bank rows.
   bank_total?: number;
+  // Replaced on every upload. It is the durable cursor for the evidence review that must happen
+  // before the uploaded experience becomes the spine of generated resumes.
+  recent_experience_review?: unknown;
 }
 
 // R-047, the failure the degree rule below exists to prevent. An uploaded resume reading

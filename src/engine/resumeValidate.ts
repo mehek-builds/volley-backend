@@ -756,8 +756,8 @@ export function validateResumeSpec(
       const sourceBullets = Array.isArray(source?.bullet_variants)
         ? source.bullet_variants.filter((bullet): bullet is string => typeof bullet === 'string' && bullet.trim().length > 0)
         : [];
-      const sourceHasOneBullet = sourceBullets.length === 1;
-      if (!sourceIsAllowed || !sourceHasOneBullet) {
+      const sourceIsSparse = sourceBullets.length < RESUME_CONTENT_LIMITS.minBulletsPerEntry;
+      if (!sourceIsAllowed || !sourceIsSparse) {
         issues.push(
           `${entry.org}: ${entry.bullets.length} bullet selected (min ${RESUME_CONTENT_LIMITS.minBulletsPerEntry})`,
         );

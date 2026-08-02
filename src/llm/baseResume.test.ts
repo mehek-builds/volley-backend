@@ -142,6 +142,17 @@ describe('parseSpecText', () => {
 });
 
 describe('base resume priority selection', () => {
+  test('an onboarding choice is the only mandatory base-resume entry', () => {
+    const chosen = bankEntry({ id: 'chosen', org: 'Selected Lab', title: 'Research Lead', date_range: '2024' });
+    const current = bankEntry({ id: 'current', org: 'Current Office', title: 'Assistant', date_range: '2026 - Present' });
+    const roleMatch = bankEntry({ id: 'role', org: 'Product Studio', title: 'Product Manager', date_range: '2025' });
+
+    assert.deepEqual(
+      priorityEntriesForBaseResume([current, chosen, roleMatch], 'Product Manager', chosen.id).map((entry) => entry.id),
+      [chosen.id],
+    );
+  });
+
   test('current one-bullet roles cannot be displaced by older multi-bullet history', () => {
     const professor = bankEntry({ id: 'professor', org: 'State University', title: 'Adjunct Professor', date_range: '2024 - Present' });
     const litigator = bankEntry({ id: 'litigator', org: 'Legal Aid', title: 'Litigation Associate', date_range: '2023 - Present' });

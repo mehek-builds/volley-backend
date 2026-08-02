@@ -145,7 +145,7 @@ test('content rules make short, long, and unsupported one-bullet entries hard fa
     '',
     [source],
   );
-  assert.ok(oneBullet.issues.some((issue) => /1 bullet selected \(min 2\)/.test(issue)));
+  assert.ok(oneBullet.issues.some((issue) => /1 bullet selected \(min 3\)/.test(issue)));
 });
 
 test('a source-limited priority role may keep its only grounded bullet without invention', () => {

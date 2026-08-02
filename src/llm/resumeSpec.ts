@@ -84,8 +84,11 @@ Rules:
 - Treat this resume as a proof document for THIS application, not a generic career summary.
 - Set "target_role" to the exact role named in the Job line. It is a targeting headline only.
 - Pick up to ${RESUME_CONTENT_LIMITS.maxEntries} entries across jobs, projects, and leadership that best match the JD, most relevant first.
-- Select ${RESUME_CONTENT_LIMITS.minBulletsPerEntry} or ${RESUME_CONTENT_LIMITS.maxBulletsPerEntry} bullets per entry based on evidence strength and available one-page space. Reuse a stored bullet_variant verbatim when one already fits well;
+- Select exactly ${RESUME_CONTENT_LIMITS.maxBulletsPerEntry} grounded bullets per entry. If an entry cannot support three, choose another entry instead. Reduce the number of entries rather than reducing bullet counts when one-page space is tight. Reuse a stored bullet_variant verbatim when one already fits well;
   only lightly rewrite (never fabricate achievements) when no stored variant surfaces the JD's language.
+- When two stored variants for the same entry describe a clear cause and its result, you may combine
+  those exact facts into one stronger bullet. Never combine unrelated accomplishments or move facts
+  between entries.
 - Follow the JD's priority order: the earliest clearly stated responsibilities and requirements get
   the strongest supported evidence first. Order entries and bullets so a recruiter can compare the
   resume with the posting from top to bottom.
@@ -197,6 +200,7 @@ export async function generateResumeSpec(
    *
    * Appended rather than inserted mid-signature so existing positional callers keep working. */
   baseSpec?: ResumeSpec | null,
+  priorityEntry?: ExperienceBankEntry | null,
 ): Promise<ResumeSpec> {
   /* THE BASE RESUME IS THE STARTING POINT, NOT MORE CONTEXT.
    *
@@ -227,6 +231,9 @@ How to use it:
   set of entries does not change.
 - Never invent. Everything must still trace to the bank or to the base resume above.`
     : '';
+  const priorityBlock = priorityEntry
+    ? `\n\nREQUIRED PRIORITY EXPERIENCE. Include this entry in the FIRST position on every resume. It may not be swapped out for job-description fit. Use only its grounded bank evidence. If the bank holds fewer than three bullets because the applicant explicitly continued with sparse evidence, include every grounded bullet and invent nothing:\n${JSON.stringify(priorityEntry)}`
+    : '';
 
   const feedbackBlock = feedback?.length
     ? `\n\nThe previous attempt had these issues - fix them in this revision:\n${feedback.map((f) => `- ${f}`).join('\n')}`
@@ -244,7 +251,7 @@ How to use it:
   const skillsBlock = skills?.length
     ? `\n\nSkills list (the applicant's own skills - the ONLY skills that may appear in "skills"):\n${JSON.stringify(skills)}`
     : `\n\nSkills list: none provided. Use only skills clearly evidenced by a bullet you selected, and do not add skills from the job description.`;
-  const contextBlock = `Job: ${role} at ${company}\n\nJob description:\n${jdText}\n\nEducation source (copy facts exactly; this is the only authority for school, degree, graduation date, enrollment, and coursework):\n${JSON.stringify(education)}${skillsBlock}${baseBlock}\n\nExperience bank:\n${JSON.stringify(bank)}`;
+  const contextBlock = `Job: ${role} at ${company}\n\nJob description:\n${jdText}\n\nEducation source (copy facts exactly; this is the only authority for school, degree, graduation date, enrollment, and coursework):\n${JSON.stringify(education)}${skillsBlock}${baseBlock}${priorityBlock}\n\nExperience bank:\n${JSON.stringify(bank)}`;
   const response = await client.messages.create(
     {
       model: 'claude-sonnet-5',

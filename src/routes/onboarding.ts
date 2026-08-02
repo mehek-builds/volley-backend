@@ -83,17 +83,19 @@ async function reviewedSubmitCount(userId: string): Promise<number> {
 // The one thing that IS stored is completion (users.onboarding_completed_at), because it gates
 // harvest and therefore has to be an explicit act rather than an inference. See harvest.ts.
 
-type Step = 'focus' | 'sponsorship' | 'resume' | 'base' | 'done';
+type Step = 'focus' | 'sponsorship' | 'resume' | 'impact' | 'base' | 'done';
 
 export function onboardingStepFrom(input: {
   completed: boolean;
   hasResume: boolean;
+  hasImpactReview?: boolean;
   hasFocus: boolean;
   hasSponsorshipAnswer: boolean;
   hasBaseResume: boolean;
 }): Step {
-  if (input.completed) return 'done';
+  if (input.completed && input.hasImpactReview !== false) return 'done';
   if (!input.hasResume) return 'resume';
+  if (input.hasImpactReview === false) return 'impact';
   if (!input.hasFocus) return 'focus';
   if (!input.hasSponsorshipAnswer) return 'sponsorship';
   if (!input.hasBaseResume) return 'base';
@@ -210,7 +212,12 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     // Checks a REQUIRED key, not object truthiness: `!!{}` is true, so a parse that returned
     // nothing usable would advance the student past step 01 with no name, school or grad_year -
     // and the targeting screen would then derive its period options from grad_year 0.
-    const parsed = profile?.parsed_json as { full_name?: string; source_pages?: number; target_roles?: unknown } | null | undefined;
+    const parsed = profile?.parsed_json as {
+      full_name?: string;
+      source_pages?: number;
+      target_roles?: unknown;
+      recent_experience_review?: { completed?: boolean };
+    } | null | undefined;
     const has_resume = !!parsed?.full_name && hasFiveTargetRoles(parsed) && (bankCount?.n ?? 0) > 0;
     const has_applied = (applyCount?.n ?? 0) > 0;
 
@@ -266,6 +273,7 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     const step = onboardingStepFrom({
       completed: !!user.onboarding_completed_at,
       hasResume: has_resume,
+      hasImpactReview: parsed?.recent_experience_review?.completed !== false,
       hasFocus: has_focus,
       hasSponsorshipAnswer: has_sponsorship_answer,
       hasBaseResume: has_base_resume,
@@ -281,6 +289,7 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       sponsorship_answer: user.sponsorship_answer,
       sponsorship_required: user.sponsorship_required_at_onboarding,
       has_resume,
+      has_impact_review: parsed?.recent_experience_review?.completed !== false,
       has_base_resume,
       has_applied,
       has_targeting,
