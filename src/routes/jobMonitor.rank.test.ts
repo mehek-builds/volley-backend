@@ -1,6 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert';
 import { pickDiversePool, rankByFit, RANKING_POOL, SCORING_CHARS, type RankableJob, scatterRanked } from './jobMonitor';
+import { normalizeTargeting } from '../lib/jobPreferences';
 
 /* A posting with enough real requirements for jdMatch to agree to score it. The requirements block
    is what carries the signal, so the terms that matter live there rather than in the intro. */
@@ -111,6 +112,18 @@ describe('rankByFit', () => {
 
   test('an empty list ranks to an empty list', () => {
     assert.deepStrictEqual(rankByFit([], RESUME), []);
+  });
+
+  test('account role preferences outrank resume similarity', () => {
+    const ranked = rankByFit(
+      [
+        job({ title: 'Frontend Engineer', scored_description: FRONTEND }),
+        job({ title: 'Product Manager', scored_description: INFRA }),
+      ],
+      RESUME,
+      normalizeTargeting({ categories: ['product'], titles: ['Product Manager'], role_types: ['full-time'] }),
+    );
+    assert.strictEqual(ranked[0]!.row.title, 'Product Manager');
   });
 });
 

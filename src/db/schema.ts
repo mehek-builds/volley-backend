@@ -471,7 +471,7 @@ export const application_profile = pgTable('application_profile', {
 
 // ---- targeting ----
 // What the student is going after: the five questions /start asks last (category, titles,
-// role types, main period, backup period).
+// role types, locations, remote preference, main period, backup period).
 //
 // Deliberately its OWN table, not columns on the two that already exist:
 //   - NOT application_profile, whose contract is "sensitive, encrypted, and never included in a
@@ -498,6 +498,10 @@ export const targeting = pgTable('targeting', {
   // hunting a summer internship will usually take a co-op, and the distinction is the
   // employer's vocabulary rather than the student's intent.
   role_types: jsonb('role_types'),
+  // Places where the student wants to work. These are search preferences, not the home address
+  // stored in application_profile, so they stay plaintext and may safely steer job discovery.
+  locations: jsonb('locations'),
+  remote_only: boolean('remote_only').default(false).notNull(),
   // Season slugs, e.g. 'summer-2027'. Free text rather than an enum: the set is derived from
   // grad_year at render time and slides forward every term, so pinning it in the DB would need
   // a migration each year to say nothing new.

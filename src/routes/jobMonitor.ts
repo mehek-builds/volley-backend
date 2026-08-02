@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { and, desc, eq, ilike, inArray, isNotNull, isNull, lt, ne, notInArray, or, sql } from 'drizzle-orm';
+import { and, desc, eq, ilike, inArray, isNotNull, isNull, lt, ne, notInArray, or, sql, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/index';
 import { career_page_sources, monitored_jobs, profiles, sponsor_employers, targeting, users } from '../db/schema';
@@ -34,6 +34,14 @@ import {
   pollSourcesWithinBudget,
 } from '../lib/jobPollScheduler';
 import { tryAcquireJobMonitorLock } from '../lib/jobMonitorLock';
+import {
+  hasTargeting,
+  normalizeTargeting,
+  preferenceFit,
+  roleTypePattern,
+  targetTitleTerms,
+  type JobTargeting,
+} from '../lib/jobPreferences';
 
 const sourceSchema = z.object({
   company_name: z.string().trim().min(1).max(200),
@@ -529,6 +537,9 @@ const RANKED_PAGE_WINDOW = 24;
 export type RankableJob = {
   company_name: string;
   title: string;
+  location?: string | null;
+  employment_type?: string | null;
+  remote?: boolean | null;
   /** The posting text to score. Capped at SCORING_CHARS by the query, not the full column. */
   scored_description: string | null;
 };
@@ -643,6 +654,7 @@ export function scatterRanked<T extends { company_name: string }>(
 export function rankByFit<T extends RankableJob>(
   rows: readonly T[],
   resumeText: string,
+  targetingPreferences: JobTargeting = normalizeTargeting(null),
 ): Array<{ row: T; score: number | null }> {
   const scored = rows.map((row, index) => ({
     row,
@@ -652,9 +664,11 @@ export function rankByFit<T extends RankableJob>(
       company: row.company_name,
       role: row.title,
     }).score,
+    preferenceScore: preferenceFit(row, targetingPreferences).score,
     index,
   }));
   scored.sort((a, b) => {
+    if (a.preferenceScore !== b.preferenceScore) return b.preferenceScore - a.preferenceScore;
     if (a.score === null && b.score === null) return a.index - b.index;
     if (a.score === null) return 1;
     if (b.score === null) return -1;
@@ -694,6 +708,12 @@ async function accountRequiresSponsor(userId: string | undefined): Promise<boole
     .limit(1);
   if (!row) return false;
   return sponsorOnlyBoardRequired({ declaredAtOnboarding: row.declared, settingEnabled: row.setting });
+}
+
+async function accountJobTargeting(userId: string | undefined): Promise<JobTargeting> {
+  if (!userId) return normalizeTargeting(null);
+  const [row] = await db.select().from(targeting).where(eq(targeting.user_id, userId)).limit(1);
+  return normalizeTargeting(row as unknown as Record<string, unknown> | undefined);
 }
 
 /** Which evidence, if any, lets this row be shown to someone who needs sponsorship. */
@@ -1130,8 +1150,9 @@ function boardConditions(f: {
   company?: string;
   remote?: 'true' | 'false';
   sponsorOnly?: boolean;
+  targeting?: JobTargeting;
 }) {
-  const conditions = [
+  const conditions: SQL[] = [
     eq(monitored_jobs.is_active, true),
     eq(career_page_sources.enabled, true),
     inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
@@ -1142,9 +1163,37 @@ function boardConditions(f: {
     conditions.push(or(ilike(monitored_jobs.title, `%${f.q}%`), ilike(monitored_jobs.description, `%${f.q}%`))!);
   }
   if (f.title) conditions.push(ilike(monitored_jobs.title, `%${f.title}%`));
-  if (f.location) conditions.push(ilike(monitored_jobs.location, `%${f.location}%`));
+  if (f.location) {
+    conditions.push(ilike(monitored_jobs.location, `%${f.location}%`));
+  } else if (!f.remote && f.targeting?.remote_only) {
+    conditions.push(eq(monitored_jobs.remote, true));
+  } else if (!f.remote && f.targeting?.locations.length) {
+    conditions.push(or(...f.targeting.locations.map((location) => ilike(monitored_jobs.location, `%${location}%`)))!);
+  }
   if (f.company) conditions.push(ilike(monitored_jobs.company_name, `%${f.company}%`));
   if (f.remote) conditions.push(eq(monitored_jobs.remote, f.remote === 'true'));
+
+  if (f.targeting?.role_types.length) {
+    const titlePattern = roleTypePattern(f.targeting.role_types);
+    const acceptsFullTime = f.targeting.role_types.includes('full-time');
+    const fullTime = sql`(
+      ${monitored_jobs.title} !~* ${'(^|[^a-z])(intern|internship|trainee|co-op|co op|coop)([^a-z]|$)'}
+      and ${monitored_jobs.title} !~* ${'(^|[^a-z])(part.?time|contract|temporary|freelance)([^a-z]|$)'}
+      and (${monitored_jobs.employment_type} ~* ${'full.?time'} or ${monitored_jobs.employment_type} is null)
+    )`;
+    if (titlePattern && acceptsFullTime) {
+      conditions.push(or(sql`${monitored_jobs.title} ~* ${titlePattern}`, fullTime)!);
+    } else if (titlePattern) {
+      conditions.push(sql`${monitored_jobs.title} ~* ${titlePattern}`);
+    } else if (acceptsFullTime) {
+      conditions.push(fullTime);
+    }
+  }
+
+  const desiredTitleTerms = f.targeting ? targetTitleTerms(f.targeting) : [];
+  if (desiredTitleTerms.length) {
+    conditions.push(or(...desiredTitleTerms.map((term) => ilike(monitored_jobs.title, `%${term}%`)))!);
+  }
   return conditions;
 }
 
@@ -1197,8 +1246,12 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     /* OR, never override. The account's standing answer can only ever ADD the filter, so a request
        that omits the parameter (or sends sponsor_only=false) cannot unfilter the board of someone
        who declared at onboarding that they need sponsorship. */
-    const sponsorOnly = (await accountRequiresSponsor(request.jwtPayload?.userId))
-      || parsed.data.sponsor_only === 'true';
+    const [accountSponsorOnly, jobTargeting, resumeText] = await Promise.all([
+      accountRequiresSponsor(request.jwtPayload?.userId),
+      accountJobTargeting(request.jwtPayload?.userId),
+      baseResumeText(request.jwtPayload?.userId),
+    ]);
+    const sponsorOnly = accountSponsorOnly || parsed.data.sponsor_only === 'true';
     // Only surface jobs Litos can carry all the way to a confirmation on its own.
     //
     // Belt and braces with the compile-time constraint on SupportedJobBoard, and it earns its keep:
@@ -1206,9 +1259,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     // polled before this rule existed, or one disabled rather than deleted, still has rows joined to
     // a career_page_sources row whose ats_name is whatever it was then. This is the filter that
     // keeps those out of the board and the dashboard, which both read this one route.
-    const conditions = boardConditions({ ...parsed.data, sponsorOnly });
-
-    const resumeText = await baseResumeText(request.jwtPayload?.userId);
+    const conditions = boardConditions({ ...parsed.data, sponsorOnly, targeting: jobTargeting });
 
     const selection = {
       id: monitored_jobs.id,
@@ -1277,7 +1328,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       return row?.total ?? 0;
     };
 
-    if (!resumeText) {
+    if (!resumeText && !hasTargeting(jobTargeting)) {
       const rows = await db
         .select(selection)
         .from(monitored_jobs)
@@ -1311,12 +1362,12 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
        See lib/rankingCache.ts for what is and is not cached, and for why a miss is always fine. */
     const cacheKey = rankingCacheKey(
       request.jwtPayload!.userId,
-      resumeText,
+      resumeText ?? '',
       /* sponsorOnly is PART OF THE KEY. Without it, one account's two states - before and after the
          filter turns on - share a cached ordering, and the id list computed on the whole board is
          then replayed against the filtered one. Every id it holds still resolves, so the page comes
          back full of exactly the postings the filter exists to hide. */
-      JSON.stringify([q ?? '', title ?? '', location ?? '', company ?? '', remote ?? '', sponsorOnly]),
+      JSON.stringify([q ?? '', title ?? '', location ?? '', company ?? '', remote ?? '', sponsorOnly, jobTargeting]),
     );
     let ranking = readRanking(cacheKey);
 
@@ -1346,6 +1397,9 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
               id: monitored_jobs.id,
               company_name: monitored_jobs.company_name,
               title: monitored_jobs.title,
+              location: monitored_jobs.location,
+              employment_type: monitored_jobs.employment_type,
+              remote: monitored_jobs.remote,
               scored_description: sql<string>`left(${monitored_jobs.description}, ${SCORING_CHARS})`,
             })
             .from(monitored_jobs)
@@ -1361,7 +1415,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         .map((id) => poolById.get(id))
         .filter((row): row is (typeof pool)[number] => row !== undefined);
 
-      const scored = rankByFit(orderedPool, resumeText);
+      const scored = rankByFit(orderedPool, resumeText ?? '', jobTargeting);
       /* Fit order decides WHICH jobs lead; this decides that no single employer owns the screen
          while they do. pickDiversePool already spread the POOL across employers, but the pool is
          300 rows and a page is a handful — six Datadog roles could still land together at the top.
@@ -1386,24 +1440,9 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
           .select(selection)
           .from(monitored_jobs)
           .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
-          .where(and(
-            eq(monitored_jobs.is_active, true),
-            inArray(monitored_jobs.id, pageIds),
-            /* The autonomy filter has to be repeated HERE, even though the pool that produced
-               pageIds was already filtered by `conditions`. This read is by id, and the ids can come
-               from readRanking() - a ranking computed before this rule existed, or before a source
-               changed, still holds ids from boards Litos cannot finish. Without this line the cache
-               resurrects exactly the jobs the board is meant to exclude, which is the same reasoning
-               as the comment below about deactivated postings. */
-            inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
-            /* And the sponsorship filter, repeated for exactly the same reason, with a sharper
-               edge: the cache key includes sponsorOnly so a filtered read cannot reuse an
-               unfiltered ordering, but ids also outlive the FACTS behind them. A posting that said
-               nothing about sponsorship when it was ranked can be re-polled with a refusal in it,
-               and an employer's confirmation can be withdrawn when the ingest is refreshed. This
-               read is the last gate before the row reaches someone who cannot take the job. */
-            ...(sponsorOnly ? [sponsorOnlyPredicate()] : []),
-          ))
+          /* Reapply the whole filter contract on the fresh row. A cached id must not survive a
+             change to its location, role type, title family, sponsorship facts, or source status. */
+          .where(and(...conditions, inArray(monitored_jobs.id, pageIds)))
       : [];
 
     /* Back into ranked order, and silently dropping any id that no longer resolves — a posting
@@ -1415,6 +1454,8 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       .map((row) => ({
         ...withCompanyDomain(row),
         match_score: ranking!.scores.get(row.id) ?? null,
+        preference_score: preferenceFit(row, jobTargeting).score,
+        preference_reasons: preferenceFit(row, jobTargeting).reasons,
         sponsorship_evidence: evidenceFor(row),
       }));
 

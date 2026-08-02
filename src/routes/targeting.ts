@@ -4,12 +4,11 @@ import { eq } from 'drizzle-orm';
 import { db } from '../db/index';
 import { targeting } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
+import { ROLE_TYPES } from '../lib/jobPreferences';
 
 // The five questions /start asks last. Nothing here is identity-sensitive - it is a stated
 // preference about future postings - so unlike application_profile this is plaintext and IS
 // allowed into a drafting prompt (it is what aims resume tailoring).
-
-const ROLE_TYPES = ['internship', 'co-op', 'new-grad', 'full-time'] as const;
 
 // e.g. "summer-2027". Derived from grad_year at render time rather than enumerated here: the
 // valid set slides forward every term, and an enum would need a migration each year to say
@@ -33,6 +32,7 @@ const period = z.string().regex(PERIOD_RE, 'period must look like "summer-2027"'
 // the question, but titles are seeded from their own resume, so there is no matching to protect.
 export const MAX_CATEGORIES = 3;
 export const MAX_ROLE_TYPES = 2;
+export const MAX_LOCATIONS = 5;
 
 /* The eight categories, mirrored from the web app's lib/periods.ts CATEGORIES.
  *
@@ -67,6 +67,8 @@ export const targetingBodySchema = z.object({
     .max(MAX_ROLE_TYPES, `pick at most ${MAX_ROLE_TYPES} role types`)
     .nullable()
     .optional(),
+  locations: z.array(z.string().trim().min(1).max(100)).max(MAX_LOCATIONS, `pick at most ${MAX_LOCATIONS} locations`).nullable().optional(),
+  remote_only: z.boolean().optional(),
   primary_period: period.nullable().optional(),
   backup_period: period.nullable().optional(),
 });
@@ -75,6 +77,8 @@ const EMPTY = {
   categories: null,
   titles: null,
   role_types: null,
+  locations: null,
+  remote_only: false,
   primary_period: null,
   backup_period: null,
 };
@@ -85,6 +89,8 @@ function shape(row: typeof targeting.$inferSelect | undefined) {
     categories: row.categories ?? null,
     titles: row.titles ?? null,
     role_types: row.role_types ?? null,
+    locations: row.locations ?? null,
+    remote_only: row.remote_only,
     primary_period: row.primary_period ?? null,
     backup_period: row.backup_period ?? null,
   };

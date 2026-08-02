@@ -178,6 +178,8 @@ describe('targeting schema', () => {
       categories: ['software-engineering', 'data-ml'],
       titles: ['Software Engineer Intern', 'ML Engineer Intern'],
       role_types: ['internship', 'co-op'],
+      locations: ['Dubai', 'London'],
+      remote_only: false,
       primary_period: 'summer-2027',
       backup_period: 'spring-2027',
     });
@@ -234,5 +236,12 @@ describe('targeting schema', () => {
   test('the caps do not block clearing', () => {
     assert.equal(targetingBodySchema.safeParse({ categories: null, role_types: null }).success, true);
     assert.equal(targetingBodySchema.safeParse({ categories: [], role_types: [] }).success, true);
+  });
+
+  test('locations are saved as a bounded preference list', () => {
+    assert.equal(targetingBodySchema.safeParse({ locations: ['Dubai', 'London'] }).success, true);
+    assert.equal(targetingBodySchema.safeParse({ locations: Array(6).fill('Dubai') }).success, false);
+    assert.equal(targetingBodySchema.safeParse({ locations: [''] }).success, false);
+    assert.equal(targetingBodySchema.safeParse({ remote_only: true }).success, true);
   });
 });
