@@ -40,6 +40,64 @@ export const educationPatchSchema = z
   })
   .refine((value) => Object.keys(value).length > 0, { message: 'Send at least one field to update' });
 
+const editableListItem = z.string().trim().min(1).max(80);
+
+// The resume review screen is the student's correction layer over an AI parse. Keep this bounded
+// to profile facts that are safe to edit as plain text. Work history has its own structured bank,
+// and account email comes from the verified login, so neither can be changed through this route.
+export const parsedProfilePatchSchema = z
+  .object({
+    full_name: z.string().trim().min(1).max(120).optional(),
+    phone: z.string().trim().max(40).optional(),
+    school: z.string().trim().min(1).max(200).optional(),
+    degree: z.string().trim().max(200).optional(),
+    grad_date: z.string().trim().max(40).optional(),
+    objective: z.string().trim().max(1200).optional(),
+    skills: z.array(editableListItem).max(100).optional(),
+    // The parser and onboarding contract both use five titles. Students may replace any inferred
+    // title with any real role, while keeping the downstream targeting shape complete.
+    target_roles: z
+      .array(editableListItem)
+      .length(5)
+      .refine((roles) => new Set(roles.map((role) => role.toLowerCase())).size === 5, {
+        message: 'Target roles must be distinct',
+      })
+      .optional(),
+  })
+  .strict()
+  .refine((value) => Object.keys(value).length > 0, { message: 'Send at least one field to update' });
+
+export type ParsedProfilePatch = z.infer<typeof parsedProfilePatchSchema>;
+
+export function normalizeEditableList(values: string[]): string[] {
+  const normalized: string[] = [];
+  for (const candidate of values) {
+    const value = candidate.trim();
+    if (!value || normalized.some((existing) => existing.toLowerCase() === value.toLowerCase())) continue;
+    normalized.push(value);
+  }
+  return normalized;
+}
+
+export function applyParsedProfilePatch(
+  current: Record<string, unknown>,
+  patch: ParsedProfilePatch,
+): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...current };
+  for (const key of ['full_name', 'phone', 'school', 'degree', 'grad_date', 'objective'] as const) {
+    if (patch[key] !== undefined) next[key] = patch[key];
+  }
+  if (patch.skills !== undefined) next.skills = normalizeEditableList(patch.skills);
+  if (patch.target_roles !== undefined) next.target_roles = normalizeEditableList(patch.target_roles);
+
+  if (patch.grad_date !== undefined) {
+    const year = graduationYearFrom(patch.grad_date);
+    if (year === undefined) delete next.grad_year;
+    else next.grad_year = year;
+  }
+  return next;
+}
+
 /* Tokens that end in a period without ending a sentence. Without these, splitting on ". " turns
  * "ZymoGenetics, Inc. Executed a DNA fingerprinting project" into two bullets and cuts the employer
  * name in half. Degrees are here for the same reason resumes are full of them. */
@@ -590,25 +648,58 @@ export async function profileRoutes(fastify: FastifyInstance) {
       }
 
       const current = (rows[0].parsed_json ?? {}) as Record<string, unknown>;
-      const patch = parsed.data;
-      const next: Record<string, unknown> = { ...current };
-      // Only overwrite keys the caller actually sent, so a form that submits one field cannot blank
-      // the other three.
-      for (const key of ['full_name', 'school', 'degree', 'grad_date'] as const) {
-        if (patch[key] !== undefined) next[key] = patch[key].trim();
-      }
-      // grad_year is what eligibility filters read, and it is derived rather than typed, so it must
-      // track grad_date or the two disagree about whether the student has already graduated.
-      if (patch.grad_date !== undefined) {
-        const year = graduationYearFrom(patch.grad_date);
-        if (year !== undefined) next.grad_year = year;
-      }
+      const next = applyParsedProfilePatch(current, parsed.data);
 
-      await db.update(profiles).set({ parsed_json: next }).where(eq(profiles.user_id, userId));
+      await db.update(profiles).set({ parsed_json: next, updated_at: new Date() }).where(eq(profiles.user_id, userId));
       return reply.status(200).send(serveProfileJson(next, rows[0].skills, request.jwtPayload!.email));
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to update education' });
+    }
+  });
+
+  // PATCH /profile/parsed - review and correct the safe, user-owned portion of an AI parse.
+  fastify.patch('/profile/parsed', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const userId = request.jwtPayload!.userId;
+    const parsed = parsedProfilePatchSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: 'Invalid profile changes', details: parsed.error.flatten().fieldErrors });
+    }
+
+    try {
+      const result = await db.transaction(async (tx) => {
+        const rows = await tx.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1);
+        if (rows.length === 0) return null;
+
+        const patch = parsed.data;
+        const current = (rows[0].parsed_json ?? {}) as Record<string, unknown>;
+        const next = applyParsedProfilePatch(current, patch);
+        const skills = patch.skills === undefined ? rows[0].skills : normalizeEditableList(patch.skills);
+
+        await tx
+          .update(profiles)
+          .set({ parsed_json: next, skills, updated_at: new Date() })
+          .where(eq(profiles.user_id, userId));
+
+        if (patch.target_roles !== undefined) {
+          const titles = normalizeEditableList(patch.target_roles);
+          await tx
+            .insert(targeting)
+            .values({ user_id: userId, titles, updated_at: new Date() })
+            .onConflictDoUpdate({
+              target: targeting.user_id,
+              set: { titles, updated_at: new Date() },
+            });
+        }
+
+        return serveProfileJson(next, skills, request.jwtPayload!.email);
+      });
+
+      if (!result) return reply.status(404).send({ error: 'Profile not found - upload a resume first' });
+      return reply.status(200).send(result);
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ error: 'Failed to update profile' });
     }
   });
 }
