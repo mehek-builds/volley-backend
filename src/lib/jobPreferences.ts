@@ -17,7 +17,7 @@ export type PreferenceJob = {
 };
 
 const CATEGORY_TERMS: Record<string, string[]> = {
-  'software-engineering': ['software', 'developer', 'frontend', 'backend', 'full stack', 'mobile', 'devops', 'site reliability', 'platform engineer'],
+  'software-engineering': ['software', 'developer', 'frontend', 'backend', 'full stack', 'mobile engineer', 'mobile developer', 'ios engineer', 'android engineer', 'devops', 'site reliability', 'platform engineer'],
   'data-ml': ['data', 'machine learning', 'ml ', 'ai ', 'artificial intelligence', 'analytics', 'scientist'],
   product: ['product manager', 'product management', 'product analyst', 'product operations'],
   design: ['designer', 'design', 'ux', 'ui ', 'user experience'],
@@ -94,15 +94,14 @@ export function preferenceFit(job: PreferenceJob, targeting: JobTargeting): { sc
     reasons.push(category.replaceAll('-', ' '));
   }
 
+  const preferredLocation = targeting.locations.find((wanted) => location.includes(fold(wanted)));
+  if (preferredLocation) {
+    score += 5;
+    reasons.push(preferredLocation);
+  }
   if (targeting.remote_only && job.remote) {
     score += 5;
     reasons.push('remote preference');
-  } else {
-    const preferredLocation = targeting.locations.find((wanted) => location.includes(fold(wanted)));
-    if (preferredLocation) {
-      score += 5;
-      reasons.push(preferredLocation);
-    }
   }
 
   const roleType = matchingRoleType(job, targeting.role_types);
