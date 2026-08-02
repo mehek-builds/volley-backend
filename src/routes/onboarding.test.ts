@@ -54,9 +54,6 @@ describe('onboarding step order', () => {
     hasFocus: true,
     hasSponsorshipAnswer: true,
     hasBaseResume: true,
-    hasApplied: true,
-    hasTargeting: true,
-    hasGaps: false,
   };
 
   test('a new account starts with the resume before targeting', () => {
@@ -67,16 +64,13 @@ describe('onboarding step order', () => {
     assert.equal(onboardingStepFrom({ ...ready, hasFocus: false }), 'focus');
   });
 
-  test('every derived step and the gaps fork follow the intended precedence', () => {
+  test('setup ends after the core resume and targeting decisions', () => {
     const cases: Array<[string, Parameters<typeof onboardingStepFrom>[0]]> = [
       ['done', { ...ready, completed: true, hasResume: false }],
       ['resume', { ...ready, hasResume: false, hasFocus: false, hasSponsorshipAnswer: false }],
       ['focus', { ...ready, hasFocus: false, hasSponsorshipAnswer: false }],
       ['sponsorship', { ...ready, hasSponsorshipAnswer: false, hasBaseResume: false }],
-      ['base', { ...ready, hasBaseResume: false, hasApplied: false }],
-      ['install', { ...ready, hasApplied: false, hasTargeting: false }],
-      ['gaps', { ...ready, hasTargeting: false, hasGaps: true }],
-      ['targeting', { ...ready, hasTargeting: false, hasGaps: false }],
+      ['base', { ...ready, hasBaseResume: false }],
       ['done', ready],
     ];
     for (const [expected, input] of cases) {

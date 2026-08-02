@@ -68,7 +68,7 @@ async function reviewedSubmitCount(userId: string): Promise<number> {
 // The one thing that IS stored is completion (users.onboarding_completed_at), because it gates
 // harvest and therefore has to be an explicit act rather than an inference. See harvest.ts.
 
-type Step = 'focus' | 'sponsorship' | 'resume' | 'base' | 'install' | 'apply' | 'gaps' | 'targeting' | 'done';
+type Step = 'focus' | 'sponsorship' | 'resume' | 'base' | 'done';
 
 export function onboardingStepFrom(input: {
   completed: boolean;
@@ -76,17 +76,12 @@ export function onboardingStepFrom(input: {
   hasFocus: boolean;
   hasSponsorshipAnswer: boolean;
   hasBaseResume: boolean;
-  hasApplied: boolean;
-  hasTargeting: boolean;
-  hasGaps: boolean;
 }): Step {
   if (input.completed) return 'done';
   if (!input.hasResume) return 'resume';
   if (!input.hasFocus) return 'focus';
   if (!input.hasSponsorshipAnswer) return 'sponsorship';
   if (!input.hasBaseResume) return 'base';
-  if (!input.hasApplied) return 'install';
-  if (!input.hasTargeting) return input.hasGaps ? 'gaps' : 'targeting';
   return 'done';
 }
 
@@ -233,20 +228,17 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
        answer that stores `false`, and gating on the boolean would ask that person again forever. */
     const has_sponsorship_answer = user.sponsorship_declared_at !== null;
 
-    // Targeting counts as answered on the main period: it is the only one of the remaining three
-    // with no sensible default, so a student who set it went through the screen on purpose.
+    // Period preferences remain editable in the dashboard, but they no longer gate setup. They do
+    // not currently change job ranking, so requiring them here would add a screen without changing
+    // what Litos can do for the student.
     const has_targeting = !!target?.primary_period;
 
-    // The extension cannot be detected from here (no externally_connectable, and adding it would
-    // widen the manifest mid-review). An autofill event IS proof of install - it can only be
-    // POSTed by a running extension - so install and apply collapse into one derived signal
-    // rather than a handshake the web app cannot perform.
-    // Gaps do NOT gate progress, and that is load-bearing rather than a preference. Every gap
-    // field is optional and skippable, so gating on `gaps.length` derives 'gaps' FOREVER for
-    // anyone who skipped them: targeting becomes unreachable, and worse, a student who reached
-    // targeting anyway and saved it still lands back on gaps on every reload. Gaps is a screen on
-    // the way to targeting, not a checkpoint. Targeting is the real gate, because it is the one
-    // thing nothing else can supply.
+    // The Chrome extension and a manually completed sample application are no longer onboarding
+    // gates. The dashboard is the primary product: it can prepare a real supported application,
+    // ask for missing facts in context, and let the student review it there. Requiring an extension
+    // event before setup can finish would make the secondary path a prerequisite for the primary
+    // one. Optional profile gaps follow the same rule and are collected only when a real job needs
+    // them.
     // The base resume sits directly after the upload and before the install, because it is the
     // payoff for the upload: the student has just handed over a two- or three-page document and
     // has no evidence we understood any of it. Showing them the one-page result closes that loop
@@ -262,9 +254,6 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       hasFocus: has_focus,
       hasSponsorshipAnswer: has_sponsorship_answer,
       hasBaseResume: has_base_resume,
-      hasApplied: has_applied,
-      hasTargeting: has_targeting,
-      hasGaps: gaps.length > 0,
     });
 
     return reply.status(200).send({
