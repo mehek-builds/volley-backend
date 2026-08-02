@@ -5,6 +5,7 @@ import {
   disconnectEmailProvider,
   emailConnectionCallbackUrl,
   getEmailConnectionStates,
+  hasActiveEmailConnection,
   isTrustedComposioConnectUrl,
   type ComposioLike,
 } from './composioConnections';
@@ -46,6 +47,20 @@ test('connection status prefers an active account over a newer expired attempt',
     },
     { provider: 'outlook', connected: false, status: 'NOT_CONNECTED', connected_at: undefined },
   ]);
+  assert.equal(await hasActiveEmailConnection('user-123', client), true);
+});
+
+test('automatic verification sees expired and missing accounts as disconnected', async () => {
+  const client = {
+    connectedAccounts: {
+      list: async () => ({ items: [
+        account('expired', 'gmail', 'EXPIRED', '2026-07-25T12:00:00.000Z'),
+      ] }),
+      delete: async () => undefined,
+    },
+    create: async () => { throw new Error('not used'); },
+  } as unknown as ComposioLike;
+  assert.equal(await hasActiveEmailConnection('user-123', client), false);
 });
 
 test('creates a hosted connection link for exactly one provider and user', async () => {

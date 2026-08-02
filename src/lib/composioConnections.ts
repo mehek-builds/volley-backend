@@ -167,6 +167,14 @@ export async function getEmailConnectionStates(
   });
 }
 
+export async function hasActiveEmailConnection(
+  userId: string,
+  client?: ComposioLike,
+): Promise<boolean> {
+  const connections = await getEmailConnectionStates(userId, client);
+  return connections.some((connection) => connection.connected);
+}
+
 export async function createEmailConnectionLink(
   userId: string,
   provider: EmailProvider,

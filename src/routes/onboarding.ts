@@ -16,6 +16,7 @@ import { ENCRYPTED_FIELDS } from './applicationProfile';
 import { AUTOMATIC_SUBMISSION_CONSENT_VERSION, automationConsentValues } from '../lib/automationConsent';
 import { standingConsentEligibility, mayChangeStandingConsent } from '../engine/standingConsent';
 import { generated_resumes } from '../db/schema';
+import { hasActiveEmailConnection, isComposioConfigured } from '../lib/composioConnections';
 
 /**
  * How many submissions has this student personally approved AND seen reach the employer?
@@ -43,6 +44,20 @@ async function gatedAutomationConsent(
   const verdict = mayChangeStandingConsent({ enabling: true, eligibility });
   if (verdict.allowed) return { ok: true };
   return { ok: false, status: 403, body: { error: verdict.reason, eligibility } };
+}
+
+async function verificationConnectionProblem(
+  userId: string,
+  settings: { automatic_verification_enabled?: boolean },
+): Promise<{ status: 409 | 503; error: string } | null> {
+  if (settings.automatic_verification_enabled !== true) return null;
+  if (!isComposioConfigured()) {
+    return { status: 503, error: 'Email connections are not configured yet' };
+  }
+  if (!await hasActiveEmailConnection(userId)) {
+    return { status: 409, error: 'Connect Gmail or Outlook before turning on email verification' };
+  }
+  return null;
 }
 
 async function reviewedSubmitCount(userId: string): Promise<number> {
@@ -304,6 +319,8 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     // time, which is the whole feature defeated by one curl.
     const gate = await gatedAutomationConsent(userId, parsed.data);
     if (!gate.ok) return reply.status(gate.status).send(gate.body);
+    const verificationProblem = await verificationConnectionProblem(userId, parsed.data);
+    if (verificationProblem) return reply.status(verificationProblem.status).send({ error: verificationProblem.error });
 
     try {
       const now = new Date();
@@ -331,6 +348,8 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     // state: a safety gate the student cannot re-arm is not a safety gate.
     const gate = await gatedAutomationConsent(userId, parsed.data);
     if (!gate.ok) return reply.status(gate.status).send(gate.body);
+    const verificationProblem = await verificationConnectionProblem(userId, parsed.data);
+    if (verificationProblem) return reply.status(verificationProblem.status).send({ error: verificationProblem.error });
 
     const now = new Date();
     const patch: Partial<typeof users.$inferInsert> = {};
