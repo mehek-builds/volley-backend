@@ -94,15 +94,14 @@ export function preferenceFit(job: PreferenceJob, targeting: JobTargeting): { sc
     reasons.push(category.replaceAll('-', ' '));
   }
 
+  const preferredLocation = targeting.locations.find((wanted) => location.includes(fold(wanted)));
+  if (preferredLocation) {
+    score += 5;
+    reasons.push(preferredLocation);
+  }
   if (targeting.remote_only && job.remote) {
     score += 5;
     reasons.push('remote preference');
-  } else {
-    const preferredLocation = targeting.locations.find((wanted) => location.includes(fold(wanted)));
-    if (preferredLocation) {
-      score += 5;
-      reasons.push(preferredLocation);
-    }
   }
 
   const roleType = matchingRoleType(job, targeting.role_types);

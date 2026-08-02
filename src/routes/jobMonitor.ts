@@ -1143,7 +1143,7 @@ function companyScatter(filters: { company?: string }) {
   ];
 }
 
-function boardConditions(f: {
+export function boardConditions(f: {
   q?: string;
   title?: string;
   location?: string;
@@ -1165,13 +1165,18 @@ function boardConditions(f: {
   if (f.title) conditions.push(ilike(monitored_jobs.title, `%${f.title}%`));
   if (f.location) {
     conditions.push(ilike(monitored_jobs.location, `%${f.location}%`));
-  } else if (!f.remote && f.targeting?.remote_only) {
-    conditions.push(eq(monitored_jobs.remote, true));
   } else if (!f.remote && f.targeting?.locations.length) {
     conditions.push(or(...f.targeting.locations.map((location) => ilike(monitored_jobs.location, `%${location}%`)))!);
   }
   if (f.company) conditions.push(ilike(monitored_jobs.company_name, `%${f.company}%`));
-  if (f.remote) conditions.push(eq(monitored_jobs.remote, f.remote === 'true'));
+  if (f.remote) {
+    conditions.push(eq(monitored_jobs.remote, f.remote === 'true'));
+  } else if (f.targeting?.remote_only) {
+    /* Remote-only and saved locations are independent account requirements. The previous
+       else-if made remote-only erase the location filter, so New York plus remote returned jobs
+       from every country as long as the posting was remote. */
+    conditions.push(eq(monitored_jobs.remote, true));
+  }
 
   if (f.targeting?.role_types.length) {
     const titlePattern = roleTypePattern(f.targeting.role_types);
