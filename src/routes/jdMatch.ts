@@ -203,8 +203,8 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
   fastify.get('/metrics/funnel', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
 
-    // Minutes east of UTC, from the client. Weeks are the student's weeks: bucketing by UTC put a
-    // Dubai student's Monday-morning applications in the previous week's bar.
+    // Minutes east of UTC, from the client. Days are the student's days: bucketing by UTC put a
+    // Dubai student's early-morning applications on the previous day's bar.
     const rawOffset = Number((request.query as { tz_offset?: string } | undefined)?.tz_offset);
     const offsetMinutes = Number.isFinite(rawOffset) && Math.abs(rawOffset) <= 14 * 60 ? rawOffset : 0;
 
