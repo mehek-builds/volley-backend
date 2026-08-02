@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert';
-import { matchingRoleType, normalizeTargeting, preferenceFit, roleTypePattern, targetTitleTerms } from './jobPreferences';
+import { isRemoteLocation, matchingRoleType, normalizeTargeting, preferenceFit, roleTypePattern, targetTitleTerms } from './jobPreferences';
 
 describe('job preferences', () => {
   test('normalizes saved account preferences without trusting jsonb values', () => {
@@ -61,5 +61,26 @@ describe('job preferences', () => {
     assert.ok(exact.score > broad.score);
     assert.ok(exact.reasons.includes('Product Manager'));
     assert.ok(exact.reasons.includes('Dubai'));
+  });
+
+  test('Remote is a place, and it reads the remote flag rather than the location text', () => {
+    assert.equal(isRemoteLocation('Remote'), true);
+    assert.equal(isRemoteLocation('remote (US)'), true);
+    assert.equal(isRemoteLocation('Anywhere'), true);
+    assert.equal(isRemoteLocation('Remotesville, TX'), false);
+    assert.equal(isRemoteLocation('London, UK'), false);
+
+    // Picked alongside real cities: a remote posting labelled with a head-office city still counts.
+    const targeting = normalizeTargeting({ locations: ['Remote', 'London, UK'] });
+    const remoteJob = preferenceFit({ title: 'Software Engineer', location: 'New York, NY', remote: true }, targeting);
+    assert.ok(remoteJob.reasons.includes('remote preference'));
+
+    // And an on-site job in one of the named cities is unaffected.
+    const cityJob = preferenceFit({ title: 'Software Engineer', location: 'London, UK', remote: false }, targeting);
+    assert.ok(cityJob.reasons.includes('London, UK'));
+
+    // "Remote" must never be matched as location text: a Remote, Oregon office job is not remote.
+    const decoy = preferenceFit({ title: 'Software Engineer', location: 'Remote, OR', remote: false }, targeting);
+    assert.ok(!decoy.reasons.includes('remote preference'));
   });
 });

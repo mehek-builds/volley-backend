@@ -17,22 +17,17 @@ import { ROLE_TYPES } from '../lib/jobPreferences';
 const PERIOD_RE = /^(spring|summer|fall|winter)-20\d{2}$/;
 const period = z.string().regex(PERIOD_RE, 'period must look like "summer-2027"');
 
-// The caps on categories and role_types are a PRODUCT rule, not just a bound on a
-// client-controlled jsonb column.
+// Categories and role types are NO LONGER CAPPED (Mehek, 2026-08-02). They used to be 3 and 2,
+// on the argument that "interested in everything" and "hasn't chosen" produce the same unusable
+// feed. The counter-argument won: a student who genuinely wants software engineering AND data AND
+// product AND research was being told by the product that they are not allowed to, and answered by
+// picking three and never coming back to fix it. A wide preference is still a stated preference,
+// and ranking already sorts a broad feed - a hard stop at three does not.
 //
-// An uncapped multi-select lets a student tick every category and quietly destroy their own
-// matching: "I'm interested in everything" is indistinguishable from "I haven't chosen", and both
-// produce a feed that matches nothing in particular. Simplify forces exactly one category and at
-// most two experience levels (walked 2026-07-17) - aggressive, but it means every answer they
-// hold is a real preference. These caps are looser than theirs, because our categories are
-// broader, while still forcing a choice: 3 of 8 categories, and 2 of 4 role types (internship +
-// co-op, or new-grad + full-time, are the real pairs a student actually wants).
-//
-// The titles cap stays a plain bound. A student with more than 12 target titles has not answered
-// the question, but titles are seeded from their own resume, so there is no matching to protect.
-export const MAX_CATEGORIES = 3;
-export const MAX_ROLE_TYPES = 2;
-export const MAX_LOCATIONS = 5;
+// Both lists are closed enums, so they bound themselves at 8 and 4. What remains below is a
+// payload guard on the free-text arrays, not a product rule: the column is a client-controlled
+// jsonb blob and something has to keep a script from writing ten thousand strings into it.
+export const MAX_FREE_TEXT_ENTRIES = 200;
 
 /* The eight categories, mirrored from the web app's lib/periods.ts CATEGORIES.
  *
@@ -56,18 +51,14 @@ export const CATEGORIES = [
 ] as const;
 
 export const targetingBodySchema = z.object({
-  categories: z
-    .array(z.enum(CATEGORIES))
-    .max(MAX_CATEGORIES, `pick at most ${MAX_CATEGORIES} categories`)
+  categories: z.array(z.enum(CATEGORIES)).nullable().optional(),
+  titles: z.array(z.string().min(1).max(80)).max(MAX_FREE_TEXT_ENTRIES).nullable().optional(),
+  role_types: z.array(z.enum(ROLE_TYPES)).nullable().optional(),
+  locations: z
+    .array(z.string().trim().min(1).max(100))
+    .max(MAX_FREE_TEXT_ENTRIES)
     .nullable()
     .optional(),
-  titles: z.array(z.string().min(1).max(80)).max(12).nullable().optional(),
-  role_types: z
-    .array(z.enum(ROLE_TYPES))
-    .max(MAX_ROLE_TYPES, `pick at most ${MAX_ROLE_TYPES} role types`)
-    .nullable()
-    .optional(),
-  locations: z.array(z.string().trim().min(1).max(100)).max(MAX_LOCATIONS, `pick at most ${MAX_LOCATIONS} locations`).nullable().optional(),
   remote_only: z.boolean().optional(),
   primary_period: period.nullable().optional(),
   backup_period: period.nullable().optional(),

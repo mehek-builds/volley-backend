@@ -36,6 +36,7 @@ import {
 import { tryAcquireJobMonitorLock } from '../lib/jobMonitorLock';
 import {
   hasTargeting,
+  isRemoteLocation,
   normalizeTargeting,
   preferenceFit,
   roleTypePattern,
@@ -1168,7 +1169,15 @@ export function boardConditions(f: {
   if (f.location) {
     conditions.push(ilike(monitored_jobs.location, `%${f.location}%`));
   } else if (!f.remote && f.targeting?.locations.length) {
-    conditions.push(or(...f.targeting.locations.map((location) => ilike(monitored_jobs.location, `%${location}%`)))!);
+    /* "Remote" is one of the places a student can pick, and it cannot be matched as location text:
+       a remote posting is routinely labelled with the head office's city, and a Cape Town office
+       job is not remote just because someone wrote "remote-friendly team" in the field. It matches
+       the flag instead, OR-ed with the real places so picking London and Remote returns both. */
+    const places = f.targeting.locations.filter((location) => !isRemoteLocation(location));
+    const wantsRemote = places.length < f.targeting.locations.length;
+    const clauses: SQL[] = places.map((location) => ilike(monitored_jobs.location, `%${location}%`));
+    if (wantsRemote) clauses.push(eq(monitored_jobs.remote, true));
+    if (clauses.length) conditions.push(clauses.length === 1 ? clauses[0]! : or(...clauses)!);
   }
   if (f.company) conditions.push(ilike(monitored_jobs.company_name, `%${f.company}%`));
   if (f.remote) {

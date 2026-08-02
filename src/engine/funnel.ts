@@ -5,6 +5,10 @@
  * retention: Simplify's users quote going from 3-5 applications a day to 10-15, and that self-
  * evident progress is the reason they open it again. Litos had the data and showed none of it.
  *
+ * The chart is DAILY. A weekly bar moved once every seven days, so a student who applied this
+ * morning opened the dashboard and saw the same picture they saw yesterday; the unit of a job
+ * search is the day, and that is the cadence the number has to answer to.
+ *
  * WHAT THIS DELIBERATELY DOES NOT REPORT
  *
  * Interview rate, response rate, and offer rate. Jobright, AIApply and LoopCV all headline those
@@ -18,9 +22,9 @@
  * that is what it says.
  */
 
-export interface FunnelWeek {
-  /** ISO date of the Monday that starts the week. */
-  week_start: string;
+export interface FunnelDay {
+  /** ISO date of the day, in the student's own timezone. */
+  day: string;
   submitted: number;
   tailored: number;
 }
@@ -32,32 +36,30 @@ export interface FunnelSummary {
   fields_filled: number;
   /** Submissions in the last 7 days, the number a student checks. */
   submitted_this_week: number;
-  /** Oldest to newest. Empty when there is no history yet. */
-  weeks: FunnelWeek[];
-  /** True until there is enough history for a weekly shape to mean anything. */
+  /** Oldest to newest, one entry per day in the window. */
+  days: FunnelDay[];
+  /** True until there is enough history for a daily shape to mean anything. */
   too_early: boolean;
 }
 
-/** Below this many submissions, a per-week chart is noise shaped like a trend. */
-export const MIN_SUBMISSIONS_FOR_WEEKLY = 3;
+/** Below this many submissions, a per-day chart is noise shaped like a trend. */
+export const MIN_SUBMISSIONS_FOR_DAILY = 3;
+
+/** How many days the chart covers. Two weeks: long enough to show a habit, short enough to read. */
+export const DEFAULT_FUNNEL_DAYS = 14;
 
 /**
- * The Monday that starts the week containing `date`, IN THE STUDENT'S OWN TIMEZONE.
+ * The calendar day containing `date`, IN THE STUDENT'S OWN TIMEZONE.
  *
- * Bucketing by UTC put a Los Angeles student's Sunday-evening applications into the following
- * week's bar, and a Dubai student's Monday-morning ones into the previous week's. Both are the
- * common case rather than an edge: applying in the evening and applying before work are when
- * students apply. The offset is minutes EAST of UTC (the inverse of Date#getTimezoneOffset), sent
- * by the client, defaulting to 0 so a caller that omits it gets the old UTC behaviour rather than
- * a wrong one.
+ * Bucketing by UTC put a Los Angeles student's evening applications on the following day's bar, and
+ * a Dubai student's early-morning ones on the previous day's. Both are the common case rather than
+ * an edge: applying in the evening and applying before work are when students apply, and on a daily
+ * chart the error is a whole bar rather than a rounding. The offset is minutes EAST of UTC (the
+ * inverse of Date#getTimezoneOffset), sent by the client, defaulting to 0 so a caller that omits it
+ * gets UTC rather than a wrong guess.
  */
-export function mondayOf(date: Date, offsetMinutes = 0): string {
-  const local = new Date(date.getTime() + offsetMinutes * 60_000);
-  const d = new Date(Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate()));
-  // getUTCDay: 0 is Sunday, so Sunday belongs to the week that started six days earlier.
-  const shift = (d.getUTCDay() + 6) % 7;
-  d.setUTCDate(d.getUTCDate() - shift);
-  return d.toISOString().slice(0, 10);
+export function localDay(date: Date, offsetMinutes = 0): string {
+  return new Date(date.getTime() + offsetMinutes * 60_000).toISOString().slice(0, 10);
 }
 
 export interface FunnelInput {
@@ -66,10 +68,10 @@ export interface FunnelInput {
   /** submitted_at (or the review timestamp) of every submitted application. */
   submittedAt: Date[];
   fieldsFilled: number;
-  /** Injected so the weekly buckets are testable and do not depend on the wall clock. */
+  /** Injected so the daily buckets are testable and do not depend on the wall clock. */
   now: Date;
-  weeks?: number;
-  /** Minutes east of UTC, from the client. Weeks are the student's weeks, not the server's. */
+  days?: number;
+  /** Minutes east of UTC, from the client. Days are the student's days, not the server's. */
   offsetMinutes?: number;
 }
 
@@ -78,15 +80,15 @@ export function buildFunnel({
   submittedAt,
   fieldsFilled,
   now,
-  weeks = 8,
+  days = DEFAULT_FUNNEL_DAYS,
   offsetMinutes = 0,
 }: FunnelInput): FunnelSummary {
-  const buckets = new Map<string, FunnelWeek>();
+  const buckets = new Map<string, FunnelDay>();
   const cursor = new Date(now);
-  for (let i = 0; i < weeks; i++) {
-    const key = mondayOf(cursor, offsetMinutes);
-    buckets.set(key, { week_start: key, submitted: 0, tailored: 0 });
-    cursor.setUTCDate(cursor.getUTCDate() - 7);
+  for (let i = 0; i < days; i++) {
+    const key = localDay(cursor, offsetMinutes);
+    buckets.set(key, { day: key, submitted: 0, tailored: 0 });
+    cursor.setUTCDate(cursor.getUTCDate() - 1);
   }
 
   // A timestamp in the future cannot be bucketed and would otherwise inflate the headline while
@@ -94,16 +96,16 @@ export function buildFunnel({
   const clamp = (at: Date) => (at > now ? now : at);
 
   for (const at of tailoredAt) {
-    const bucket = buckets.get(mondayOf(clamp(at), offsetMinutes));
+    const bucket = buckets.get(localDay(clamp(at), offsetMinutes));
     if (bucket) bucket.tailored += 1;
   }
   for (const at of submittedAt) {
-    const bucket = buckets.get(mondayOf(clamp(at), offsetMinutes));
+    const bucket = buckets.get(localDay(clamp(at), offsetMinutes));
     if (bucket) bucket.submitted += 1;
   }
 
   const windowStart = new Date(now);
-  windowStart.setUTCDate(windowStart.getUTCDate() - weeks * 7);
+  windowStart.setUTCDate(windowStart.getUTCDate() - days);
   const inWindow = submittedAt.filter((at) => clamp(at) >= windowStart).length;
 
   const weekAgo = new Date(now);
@@ -114,10 +116,10 @@ export function buildFunnel({
     applications_submitted: submittedAt.length,
     fields_filled: fieldsFilled,
     submitted_this_week: submittedAt.filter((at) => clamp(at) >= weekAgo).length,
-    weeks: [...buckets.values()].sort((a, b) => a.week_start.localeCompare(b.week_start)),
+    days: [...buckets.values()].sort((a, b) => a.day.localeCompare(b.day)),
     // Gated on submissions INSIDE the charted window, not on the all-time total. A returning
     // student with 40 applications in February and one in July was shown a confident chart of
     // empty bars under a headline of 41.
-    too_early: inWindow < MIN_SUBMISSIONS_FOR_WEEKLY,
+    too_early: inWindow < MIN_SUBMISSIONS_FOR_DAILY,
   };
 }

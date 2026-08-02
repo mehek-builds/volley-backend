@@ -1,23 +1,17 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildFunnel, mondayOf, MIN_SUBMISSIONS_FOR_WEEKLY } from './funnel';
+import { buildFunnel, localDay, MIN_SUBMISSIONS_FOR_DAILY } from './funnel';
 
 const d = (iso: string) => new Date(`${iso}T12:00:00.000Z`);
-const NOW = d('2026-07-27'); // a Monday
+const NOW = d('2026-07-27');
 
-describe('mondayOf', () => {
-  test('a Monday is its own week start', () => {
-    assert.equal(mondayOf(d('2026-07-27')), '2026-07-27');
+describe('localDay', () => {
+  test('a timestamp maps to its own calendar day', () => {
+    assert.equal(localDay(d('2026-07-27')), '2026-07-27');
   });
 
-  test('SUNDAY belongs to the week that started six days earlier, not the next one', () => {
-    // getUTCDay() is 0 on Sunday, so the naive shift puts Sunday's work in next week's bucket and
-    // a student who applies on Sunday sees an empty week.
-    assert.equal(mondayOf(d('2026-08-02')), '2026-07-27');
-  });
-
-  test('a mid-week day maps back to its Monday', () => {
-    assert.equal(mondayOf(d('2026-07-30')), '2026-07-27');
+  test('an evening timestamp does not roll into the next day', () => {
+    assert.equal(localDay(new Date('2026-07-27T23:59:00.000Z')), '2026-07-27');
   });
 });
 
@@ -46,11 +40,13 @@ describe('buildFunnel', () => {
     assert.equal(f.submitted_this_week, 2);
   });
 
-  test('weeks come back oldest first, so a chart reads left to right', () => {
-    const f = buildFunnel({ tailoredAt: [], submittedAt: [], fieldsFilled: 0, now: NOW, weeks: 4 });
-    assert.equal(f.weeks.length, 4);
-    const sorted = [...f.weeks].sort((a, b) => a.week_start.localeCompare(b.week_start));
-    assert.deepEqual(f.weeks, sorted);
+  test('days come back oldest first, so a chart reads left to right', () => {
+    const f = buildFunnel({ tailoredAt: [], submittedAt: [], fieldsFilled: 0, now: NOW, days: 7 });
+    assert.equal(f.days.length, 7);
+    const sorted = [...f.days].sort((a, b) => a.day.localeCompare(b.day));
+    assert.deepEqual(f.days, sorted);
+    assert.equal(f.days.at(-1)?.day, '2026-07-27', 'the window ends today');
+    assert.equal(f.days[0]?.day, '2026-07-21');
   });
 
   test('activity older than the window is counted in the total but not bucketed', () => {
@@ -59,10 +55,10 @@ describe('buildFunnel', () => {
       submittedAt: [d('2025-01-01')],
       fieldsFilled: 0,
       now: NOW,
-      weeks: 4,
+      days: 7,
     });
     assert.equal(f.applications_submitted, 1);
-    assert.equal(f.weeks.reduce((n, w) => n + w.submitted, 0), 0);
+    assert.equal(f.days.reduce((n, w) => n + w.submitted, 0), 0);
   });
 
   test('too few submissions is flagged, so a chart is not drawn from noise', () => {
@@ -76,7 +72,7 @@ describe('buildFunnel', () => {
 
     const enough = buildFunnel({
       tailoredAt: [],
-      submittedAt: Array.from({ length: MIN_SUBMISSIONS_FOR_WEEKLY }, () => d('2026-07-27')),
+      submittedAt: Array.from({ length: MIN_SUBMISSIONS_FOR_DAILY }, () => d('2026-07-27')),
       fieldsFilled: 0,
       now: NOW,
     });
@@ -87,32 +83,43 @@ describe('buildFunnel', () => {
     const f = buildFunnel({ tailoredAt: [], submittedAt: [], fieldsFilled: 0, now: NOW });
     assert.equal(f.applications_submitted, 0);
     assert.equal(f.too_early, true);
-    assert.equal(f.weeks.every((w) => w.submitted === 0 && w.tailored === 0), true);
+    assert.equal(f.days.every((w) => w.submitted === 0 && w.tailored === 0), true);
   });
 
-  test('a submission and its resume land in the same week bucket', () => {
+  test('a submission and its resume land in the same day bucket', () => {
     const f = buildFunnel({
-      tailoredAt: [d('2026-07-29')],
-      submittedAt: [d('2026-07-30')],
+      tailoredAt: [d('2026-07-26')],
+      submittedAt: [d('2026-07-26')],
       fieldsFilled: 0,
       now: NOW,
     });
-    const week = f.weeks.find((w) => w.week_start === '2026-07-27');
-    assert.deepEqual([week?.tailored, week?.submitted], [1, 1]);
+    const day = f.days.find((w) => w.day === '2026-07-26');
+    assert.deepEqual([day?.tailored, day?.submitted], [1, 1]);
+  });
+
+  test('two submissions on different days do not share a bar', () => {
+    // The whole point of the daily chart: a weekly bucket collapsed these into one.
+    const f = buildFunnel({
+      tailoredAt: [],
+      submittedAt: [d('2026-07-26'), d('2026-07-27')],
+      fieldsFilled: 0,
+      now: NOW,
+    });
+    assert.equal(f.days.find((w) => w.day === '2026-07-26')?.submitted, 1);
+    assert.equal(f.days.find((w) => w.day === '2026-07-27')?.submitted, 1);
   });
 });
 
 /** Regressions from the pre-merge review. */
 describe('review regressions', () => {
-  test('a Dubai student\'s Monday morning is in THEIR week, not the previous one', () => {
-    // 2026-08-03 01:00 +04 is 2026-08-02T21:00Z, a Sunday in UTC, so UTC bucketing put it in the
-    // week that had just ended.
-    assert.equal(mondayOf(new Date('2026-08-02T21:00:00.000Z'), 4 * 60), '2026-08-03');
+  test("a Dubai student's early morning is on THEIR day, not the previous one", () => {
+    // 2026-08-03 01:00 +04 is 2026-08-02T21:00Z, so UTC bucketing put it on the day before.
+    assert.equal(localDay(new Date('2026-08-02T21:00:00.000Z'), 4 * 60), '2026-08-03');
   });
 
-  test('a Los Angeles student\'s Sunday evening is in THEIR week, not the next one', () => {
-    // 2026-08-02 21:00 PDT is 2026-08-03T04:00Z, a Monday in UTC.
-    assert.equal(mondayOf(new Date('2026-08-03T04:00:00.000Z'), -7 * 60), '2026-07-27');
+  test("a Los Angeles student's evening is on THEIR day, not the next one", () => {
+    // 2026-08-02 21:00 PDT is 2026-08-03T04:00Z.
+    assert.equal(localDay(new Date('2026-08-03T04:00:00.000Z'), -7 * 60), '2026-08-02');
   });
 
   test('too_early looks at the charted window, not all time', () => {
@@ -126,7 +133,7 @@ describe('review regressions', () => {
       now: NOW,
     });
     assert.equal(f.applications_submitted, 41);
-    assert.equal(f.too_early, true, 'one submission in eight weeks is not a trend');
+    assert.equal(f.too_early, true, 'one submission in two weeks is not a trend');
   });
 
   test('a future timestamp is counted where it can be seen, not only in the headline', () => {
@@ -137,10 +144,10 @@ describe('review regressions', () => {
       now: NOW,
     });
     assert.equal(f.applications_submitted, 1);
-    assert.equal(f.weeks.reduce((n, w) => n + w.submitted, 0), 1, 'clamped into the current week');
+    assert.equal(f.days.reduce((n, w) => n + w.submitted, 0), 1, 'clamped onto today');
   });
 
-  test('an omitted offset keeps the old UTC behaviour rather than guessing', () => {
-    assert.equal(mondayOf(d('2026-07-30')), mondayOf(d('2026-07-30'), 0));
+  test('an omitted offset keeps UTC rather than guessing', () => {
+    assert.equal(localDay(d('2026-07-30')), localDay(d('2026-07-30'), 0));
   });
 });

@@ -2,7 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { toBullets, bankEntriesFrom, planBankReconciliation } from './profile';
 import type { ParsedProfile } from '../llm/parse';
-import { targetingBodySchema } from './targeting';
+import { CATEGORIES, targetingBodySchema } from './targeting';
 
 const UID = '00000000-0000-4000-8000-000000000001';
 
@@ -203,45 +203,46 @@ describe('targeting schema', () => {
     assert.equal(targetingBodySchema.safeParse({}).success, true);
   });
 
-  test('titles cap is a plain bound', () => {
-    assert.equal(targetingBodySchema.safeParse({ titles: Array(13).fill('Engineer') }).success, false);
-    assert.equal(targetingBodySchema.safeParse({ titles: Array(12).fill('Engineer') }).success, true);
+  test('titles take as many as a student wants, up to the payload guard', () => {
+    assert.equal(targetingBodySchema.safeParse({ titles: Array(13).fill('Engineer') }).success, true);
+    assert.equal(targetingBodySchema.safeParse({ titles: Array(201).fill('Engineer') }).success, false);
   });
 
-  // These two caps are a PRODUCT rule, not a bound. An uncapped multi-select lets a student tick
-  // every category and quietly destroy their own matching - "interested in everything" and
-  // "hasn't chosen" become the same answer, and both match nothing in particular. Walking
-  // Simplify's flow (2026-07-17) showed them forcing exactly one category and at most two
-  // experience levels for this reason. Ours are looser because our categories are broader, but
-  // they still force a choice.
-  test('categories cap at 3, and say so', () => {
+  // Categories and role types used to cap at 3 and 2 as a product rule. They no longer cap at all
+  // (2026-08-02): a wide preference is still a preference, and the old rule disabled a chip under
+  // the cursor rather than letting a student say what they meant.
+  test('every category at once is accepted', () => {
+    assert.equal(targetingBodySchema.safeParse({ categories: [...CATEGORIES] }).success, true);
+  });
+
+  test('every role type at once is accepted', () => {
     assert.equal(
-      targetingBodySchema.safeParse({ categories: ['software-engineering', 'data-ml', 'research'] }).success,
+      targetingBodySchema.safeParse({ role_types: ['internship', 'co-op', 'new-grad', 'full-time'] }).success,
       true,
     );
-    const r = targetingBodySchema.safeParse({
-      categories: ['software-engineering', 'data-ml', 'research', 'product'],
-    });
-    assert.equal(r.success, false);
-    assert.match(r.error!.issues[0].message, /at most 3 categories/);
   });
 
-  test('role types cap at 2 - internship+co-op is a real pair, all four is not a preference', () => {
-    assert.equal(targetingBodySchema.safeParse({ role_types: ['internship', 'co-op'] }).success, true);
-    const r = targetingBodySchema.safeParse({ role_types: ['internship', 'co-op', 'new-grad'] });
-    assert.equal(r.success, false);
-    assert.match(r.error!.issues[0].message, /at most 2 role types/);
+  test('the closed lists still reject junk', () => {
+    assert.equal(targetingBodySchema.safeParse({ categories: ['everything'] }).success, false);
+    assert.equal(targetingBodySchema.safeParse({ role_types: ['contract'] }).success, false);
   });
 
-  test('the caps do not block clearing', () => {
+  test('clearing still works', () => {
     assert.equal(targetingBodySchema.safeParse({ categories: null, role_types: null }).success, true);
     assert.equal(targetingBodySchema.safeParse({ categories: [], role_types: [] }).success, true);
   });
 
-  test('locations are saved as a bounded preference list', () => {
+  test('locations take as many places as a student wants, up to a payload guard', () => {
     assert.equal(targetingBodySchema.safeParse({ locations: ['Dubai', 'London'] }).success, true);
-    assert.equal(targetingBodySchema.safeParse({ locations: Array(6).fill('Dubai') }).success, false);
+    assert.equal(targetingBodySchema.safeParse({ locations: Array(6).fill('Dubai') }).success, true);
+    assert.equal(targetingBodySchema.safeParse({ locations: Array(50).fill('Dubai') }).success, true);
+    // Not a product rule, just a bound on a client-controlled jsonb column.
+    assert.equal(targetingBodySchema.safeParse({ locations: Array(201).fill('Dubai') }).success, false);
     assert.equal(targetingBodySchema.safeParse({ locations: [''] }).success, false);
     assert.equal(targetingBodySchema.safeParse({ remote_only: true }).success, true);
+  });
+
+  test('Remote is a place a student can save, not only the checkbox', () => {
+    assert.equal(targetingBodySchema.safeParse({ locations: ['Remote', 'London, UK'] }).success, true);
   });
 });
