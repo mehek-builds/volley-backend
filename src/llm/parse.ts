@@ -237,9 +237,15 @@ export function splitSpokenLanguages(skills: unknown): { skills: string[]; langu
   return { skills: technical, languages };
 }
 
-// Case-insensitive union that keeps first-seen spelling and order. The model's own "languages"
-// answer leads because it read the page; anything the reclassifier recovered from `skills` follows.
-function mergeLanguages(fromModel: unknown, reclassified: string[]): string[] {
+/* Case-insensitive union that keeps first-seen spelling and order. The DIRECT statement leads and
+ * anything the reclassifier recovered from `skills` follows: on the parse path that is the model's
+ * own "languages" answer, because it read the page; on the PATCH path (routes/profile.ts) it is the
+ * student's own edit of the languages box on the review screen.
+ *
+ * Exported for the same reason splitSpokenLanguages is. The two always travel together - a split
+ * that produces recovered languages and no union to put them in silently deletes them - so keeping
+ * one implementation is what stops the second caller from inventing a subtly different merge. */
+export function mergeLanguages(fromModel: unknown, reclassified: string[]): string[] {
   const merged: string[] = [];
   const candidates = [...(Array.isArray(fromModel) ? fromModel : []), ...reclassified];
   for (const candidate of candidates) {

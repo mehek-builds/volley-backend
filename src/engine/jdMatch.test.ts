@@ -582,6 +582,83 @@ describe('a posting does not ask for its own address', () => {
   });
 });
 
+/**
+ * ISSUE-024. Two more ways the denominator filled with terms no resume could ever match, both found
+ * while fixing ISSUE-014 on the same Databricks posting and deliberately left out of scope there.
+ *
+ * The discipline is ISSUE-014's discipline. This denominator is the one the score divides by, so a
+ * WRONG exclusion deletes a real requirement, which both inflates the score and drops the term off
+ * the missing list the student is supposed to act on. That is worse than the junk. Every exclusion
+ * below is therefore keyed on something the posting or the job row stated outright.
+ */
+describe('the requirement denominator excludes prose and branding, not requirements', () => {
+  // The same real posting ISSUE-014 was found on, so the two fixes are asserted against one text.
+  const DATABRICKS_JD =
+    'At Databricks we build the best data and AI infrastructure platform. As a Product Management ' +
+    "Intern you will learn how to be a successful PM. We're hiring across all of our teams, " +
+    'including AI Platform, Genie, Machine Learning, Unity Catalog, Databricks SQL, ETL, Streaming, ' +
+    'and EDA. This is a 12 week paid summer internship in either San Francisco, CA, Mountain View, ' +
+    'CA, or Bellevue, WA. You will prototype and test early ideas with customers using Python.';
+  const DATABRICKS_CONTEXT = {
+    company: 'Databricks',
+    role: 'Product Management Intern (Summer 2027)',
+    location: 'Bellevue, Washington; Mountain View, California; San Francisco, California',
+  };
+
+  test('an example marker is not a requirement', () => {
+    // "(e.g. AWS)" tokenizes to "e.g", normalizes to "eg", and the dot is what admitted it:
+    // TECH_MARKER reads '.' as the punctuation of a technical name. Nearly every JD names examples.
+    const keys = extractJdTerms(
+      'Requirements\n- Experience with cloud platforms (e.g. AWS) and CI/CD\n- Scripting, i.e. Python or Bash\n',
+    ).map((t) => t.term);
+
+    assert.ok(!keys.includes('eg'), '"e.g." is prose punctuation, not a requirement');
+    assert.ok(!keys.includes('ie'), '"i.e." is prose punctuation, not a requirement');
+    for (const real of ['aws', 'ci cd', 'python', 'bash']) {
+      assert.ok(keys.includes(real), `"${real}" is what the example was an example OF`);
+    }
+  });
+
+  test("a phrase carrying the company's own name is that company's product, not a requirement", () => {
+    // "Databricks SQL" survived the ISSUE-014 strip because `sql` is not a self-reference word, so
+    // only the whole-term and every-word tests ran and neither matched.
+    const keys = extractJdTerms(DATABRICKS_JD, DATABRICKS_CONTEXT).map((t) => t.term);
+    assert.ok(!keys.includes('databricks sql'), 'the employer cannot require experience with its own branding');
+    assert.ok(keys.includes('sql'), 'the real skill inside the phrase stands on its own unigram');
+  });
+
+  test('a company name that is itself a real skill does not delete phrases for everyone', () => {
+    // The guard that makes the rule above safe. At a posting from Spring Health, `spring` is the
+    // employer AND `spring boot` is the requirement, and the phrase rule declines to act on a
+    // company word the lexicon already knows. `spring` alone is still excluded, as it was before.
+    const jd = 'Requirements\n- Strong Spring Boot and Python experience\n';
+    const keys = extractJdTerms(jd, { company: 'Spring Health', role: 'Engineer' }).map((t) => t.term);
+    assert.ok(keys.includes('spring boot'), 'the framework is the requirement, the employer is the name');
+    assert.ok(keys.includes('python'));
+  });
+
+  test('the branding rule is driven by job_context and never guessed from the prose', () => {
+    const keys = extractJdTerms(DATABRICKS_JD, { location: DATABRICKS_CONTEXT.location }).map((t) => t.term);
+    assert.ok(keys.includes('databricks sql'), 'with no company on the row there is nothing to strip');
+  });
+
+  /**
+   * THE RESIDUAL, stated rather than hidden.
+   *
+   * The same posting lists "Genie" and "Unity Catalog", which are also Databricks products, and both
+   * still land in the denominator. Neither is spelled with the company name, so nothing the posting
+   * or the job row said separates them from "Snowflake" or "Airflow" - bare proper nouns in body
+   * prose that ARE real requirements on other postings. A rule broad enough to catch them would be a
+   * guess at which capitalized words are products, and guessing wrong here deletes a requirement and
+   * inflates the score, which ISSUE-014 established is the worse failure. Left in on purpose.
+   */
+  test('product names not spelled with the company name are a known residual', () => {
+    const keys = extractJdTerms(DATABRICKS_JD, DATABRICKS_CONTEXT).map((t) => t.term);
+    assert.ok(keys.includes('genie'), 'documented residual: a bare product name is not separable from a bare skill');
+    assert.ok(keys.includes('unity catalog'), 'documented residual, same reason');
+  });
+});
+
 describe('scorability needs signal, not just a term count', () => {
   test('a posting of company, city and people names is not scorable', () => {
     // Cleared a floor of 6 and produced a confident 0% "Weak match" with Bob Smith, Jane Doe and

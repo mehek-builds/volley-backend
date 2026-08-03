@@ -210,9 +210,19 @@ proficiency proficient expertise fluency familiarity exposure comfort`
     .filter(Boolean),
 );
 
+/* `eg` and `ie` are the normalized forms of "e.g." and "i.e.", and they are in this list because a
+ * prose connective is exactly as much of a requirement as "etc" is, which was already here.
+ *
+ * They were reaching the term set through TECH_MARKER rather than through the lexicon. normalizeTerm
+ * deletes dots so that node.js and nodejs key the same, and the tokenizer trims the trailing dot, so
+ * "(e.g. AWS)" arrives as the token "e.g" - which contains a '.', which is the punctuation that says
+ * "technical name" - and left as `eg` in the denominator, marked signal, on the missing list. Every
+ * JD that names examples has one. Fixing it in the stopword list rather than in TECH_MARKER is the
+ * narrow move: the marker rule is what admits node.js, C# and CI/CD, and weakening it to spot Latin
+ * abbreviations would cost far more than this enumeration of the two that actually occur. */
 const GENERIC_STOPWORDS = new Set(
   `the and for with you your our are will from that this have their they who whom able use used
-per via etc a an of to in on at by as is be we it its or if not but all any more most than then
+per via etc eg ie a an of to in on at by as is be we it its or if not but all any more most than then
 what when where how why which while into out up down over under about after before during through
 been was were has had do does did been being also may might could each both few own same so too
 very just now here there these those them he she his her him us me my mine i`
@@ -561,13 +571,50 @@ function selfReferenceTokens(context?: JdContext): Set<string> {
   return tokens;
 }
 
+/**
+ * The company's own name as it appears INSIDE a longer phrase, which is that company's branding.
+ *
+ * selfReferenceTokens excludes a term only when the whole term, or every word of it, is the
+ * posting's own name. That leaves the half-stripped case: the Databricks posting from ISSUE-014
+ * names "Databricks SQL", and because `sql` is not a self-reference word the bigram
+ * `databricks sql` survived the strip and sat in the denominator as a requirement no resume can
+ * match. A phrase carrying the employer's own name is that employer's product or team, and the
+ * employer cannot require experience with its own branding any more than with its own name.
+ *
+ * WHY THE LEXICON GUARD, which is the same guard locationTokens uses and for the same reason. A
+ * one-word company name that is also a real skill would otherwise delete real requirements through
+ * every phrase it appears in: at a posting from Spring Health, `spring boot` is the requirement and
+ * `spring` is the employer. So a company word that is itself a lexicon skill is not treated as
+ * branding here. It stays excluded as a bare unigram, exactly as before; only the phrase rule
+ * declines to act on it.
+ *
+ * Dropping the whole bigram never costs a real skill, because unigrams are extracted independently:
+ * `databricks sql` goes and `sql` remains, on its own weight, matched and displayed on its own.
+ */
+function companyBrandTokens(company: string | null | undefined): Set<string> {
+  const tokens = new Set<string>();
+  const normalized = normalizeTerm(company ?? '');
+  if (!normalized) return tokens;
+  for (const word of normalized.split(' ')) {
+    if (word.length > 1 && !inLexicon(word)) tokens.add(word);
+  }
+  return tokens;
+}
+
 export function extractJdTerms(jdText: string, context?: JdContext): JdTerm[] {
   const self = selfReferenceTokens(context);
   const places = new Set(locationTokens(context?.location));
+  const brand = companyBrandTokens(context?.company);
   const excluded = (t: JdTerm, words: Set<string>) =>
     words.has(t.term) || t.term.split(' ').every((w) => words.has(w));
+  // Only multi-word terms. A unigram equal to a brand word is already gone via `self`, and the
+  // `some` test on a unigram would just be that same equality with none of the phrase reasoning.
+  const branded = (t: JdTerm) =>
+    t.term.includes(' ') && t.term.split(' ').some((w) => brand.has(w));
   const strip = (list: JdTerm[]) =>
-    list.filter((t) => !excluded(t, self) && !(PLACE_SAFE_KINDS.has(t.kind) && excluded(t, places)));
+    list.filter(
+      (t) => !excluded(t, self) && !branded(t) && !(PLACE_SAFE_KINDS.has(t.kind) && excluded(t, places)),
+    );
 
   const terms = strip(extractFrom(segmentJd(jdText)));
   if (terms.length >= MIN_SCORABLE_TERMS) return terms;
