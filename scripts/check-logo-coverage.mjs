@@ -26,7 +26,7 @@
  *
  * WHEN IT FIRES, the fix is to regenerate the map, not to lower the number:
  *
- *   node scripts/resolve-company-domains.mjs && git diff src/lib/companyDomains.ts
+ *   npm run logo:resolve && git diff src/lib/companyDomains.ts
  *
  * The floor is both a quality target and a drift alarm. At least 75% of live job rows must show a
  * verified employer logo. MIN_LOGO_COVERAGE may raise that bar for a stricter run, but can never
@@ -152,7 +152,7 @@ if (coverage < FLOOR) {
   console.error(`\nLOGO COVERAGE BELOW FLOOR: ${(coverage * 100).toFixed(0)}% < ${(FLOOR * 100).toFixed(0)}%.`);
   console.error('The board has outgrown src/lib/companyDomains.ts, so job rows are showing initials');
   console.error('where they should show logos. Regenerate the map:');
-  console.error('\n  node scripts/resolve-company-domains.mjs && git diff src/lib/companyDomains.ts\n');
+  console.error('\n  npm run logo:resolve && git diff src/lib/companyDomains.ts\n');
   console.error(`Unmapped companies on the board: ${unmapped.slice(0, 25).join(', ')}`);
   if (unmapped.length > 25) console.error(`...and ${unmapped.length - 25} more.`);
   if (brokenLogoDomains.length > 0) console.error(`Domains without a rendered favicon: ${brokenLogoDomains.join(', ')}`);
