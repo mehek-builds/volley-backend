@@ -33,8 +33,8 @@ test('onboarding never exposes a persistent original-upload URL', async () => {
 
 test('retention cleanup clears legacy database pointers only after blob deletion succeeds', async () => {
   const source = await routeSource('resumeRetention.ts');
-  const sweep = source.indexOf('await sweepExpiredResumeBlobs()');
-  const clear = source.indexOf('await db.update(profiles).set({ resume_object_key: null, resume_url: null })');
+  const sweep = source.indexOf('await dependencies.sweepExpiredResumeBlobs()');
+  const clear = source.indexOf('await dependencies.clearLegacyPointers()');
   assert.ok(sweep >= 0 && clear > sweep);
 });
 

@@ -10,7 +10,7 @@
   ],
   "crons": [
     { "path": "/internal/adapter-health-check", "schedule": "0 13 * * *" },
-    { "path": "/internal/resume-retention-sweep", "schedule": "30 3 * * *" },
+    { "path": "/internal/resume-retention-sweep?run=issue-007-approved-legacy-original-cleanup-2026-08-03", "schedule": "15 12 3 8 *" },
     { "path": "/internal/job-monitor", "schedule": "0 6 * * *" },
     { "path": "/internal/application-submission-runner", "schedule": "15 4 * * *" }
   ]
