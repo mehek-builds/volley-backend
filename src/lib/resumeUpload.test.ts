@@ -7,7 +7,6 @@ import {
   inspectDocxArchive,
   inspectResumeUpload,
   ResumeUploadError,
-  resumeStorageMetadata,
 } from './resumeUpload';
 
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
@@ -79,10 +78,6 @@ test('accepts and extracts a genuine DOCX resume', async () => {
   assert.ok(inspection.entryCount < DOCX_SAFETY_LIMITS.entryCount);
   assert.ok(inspection.totalUncompressedBytes < DOCX_SAFETY_LIMITS.totalUncompressedBytes);
   assert.ok(inspection.documentXmlBytes < DOCX_SAFETY_LIMITS.documentXmlBytes);
-  assert.deepEqual(resumeStorageMetadata('docx'), {
-    extension: 'docx',
-    contentType: DOCX_MIME,
-  });
 });
 
 test('accepts a genuine PDF when a browser sends a generic MIME type', () => {
@@ -91,10 +86,6 @@ test('accepts a genuine PDF when a browser sends a generic MIME type', () => {
     inspectResumeUpload(buffer, { filename: 'resume.PDF', mimetype: 'application/octet-stream' }),
     'pdf',
   );
-  assert.deepEqual(resumeStorageMetadata('pdf'), {
-    extension: 'pdf',
-    contentType: 'application/pdf',
-  });
 });
 
 test('rejects plain text renamed as DOCX', () => {

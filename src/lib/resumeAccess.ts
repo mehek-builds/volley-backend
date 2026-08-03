@@ -40,6 +40,36 @@ export function resumePrefix(userId: string): string {
   return `users/${userId}/resumes/`;
 }
 
+export function userBlobPrefix(userId: string): string {
+  return `users/${userId}/`;
+}
+
+export interface StoredResumeBlob {
+  url: string;
+  pathname: string;
+  uploadedAt: Date;
+}
+
+/** Raw profile uploads used the user root. Generated files live below resumes/. */
+export function isUploadedResumeBlob(pathname: string): boolean {
+  return /^users\/[^/]+\/resume(?:-[^/]*)?\.(?:pdf|docx)$/i.test(pathname);
+}
+
+/**
+ * Original uploads are deleted regardless of age. Generated files retain their approved window.
+ */
+export function resumeBlobsDueForDeletion(
+  blobs: StoredResumeBlob[],
+  now = Date.now(),
+  retentionDays = RESUME_RETENTION_DAYS,
+): StoredResumeBlob[] {
+  const cutoff = now - retentionDays * 24 * 60 * 60 * 1000;
+  return blobs.filter((blob) =>
+    isUploadedResumeBlob(blob.pathname)
+    || (blob.pathname.includes('/resumes/') && blob.uploadedAt.getTime() < cutoff),
+  );
+}
+
 // Domain-separated from fieldCrypto's application_profile key: same ENCRYPTION_KEY env var,
 // different scrypt salt, so a download token can never be confused with (or decrypt) an
 // encrypted profile column.
@@ -136,8 +166,8 @@ export async function resolveBlobUrl(objectKey: string): Promise<string | null> 
   return blobs.find((b) => b.pathname === objectKey)?.url ?? null;
 }
 
-async function listAll(prefix: string): Promise<Array<{ url: string; pathname: string; uploadedAt: Date }>> {
-  const out: Array<{ url: string; pathname: string; uploadedAt: Date }> = [];
+async function listAll(prefix: string): Promise<StoredResumeBlob[]> {
+  const out: StoredResumeBlob[] = [];
   let cursor: string | undefined;
   do {
     const res = await list({ prefix, cursor, limit: 1000 });
@@ -152,26 +182,45 @@ async function listAll(prefix: string): Promise<Array<{ url: string; pathname: s
 // the only pointer to these blobs - and orphans public PII files with no way left to find them.
 //
 // Scoped to the whole `users/<id>/` prefix rather than just `users/<id>/resumes/`, so that
-// anything else ever written under a user is deleted with them by default. profile.ts already
-// computes `users/<id>/resume.pdf` for the uploaded master resume (it never actually writes it
-// today, so nothing is stored there yet); the day someone wires that up, a resumes-only prefix
-// would silently leave a public PII PDF behind with its pointer already cascade-deleted. Deleting
-// by owner rather than by category means that whole class of mistake cannot happen.
+// anything else ever written under a user is deleted with them by default. Older profile uploads
+// were stored at `users/<id>/resume.pdf` or `.docx`, and the retention sweep removes those legacy
+// originals. Keeping account deletion owner-scoped prevents any future category from being missed.
 export async function deleteBlobsForUser(userId: string): Promise<number> {
-  const blobs = await listAll(`users/${userId}/`);
+  const blobs = await listAll(userBlobPrefix(userId));
   if (blobs.length === 0) return 0;
   await del(blobs.map((b) => b.url));
   return blobs.length;
 }
 
-// Deletes resume files older than RESUME_RETENTION_DAYS across all users.
+/** Delete legacy raw uploads for one user without touching generated application artifacts. */
+export async function deleteUploadedResumeBlobsForUser(userId: string): Promise<number> {
+  const blobs = (await listAll(userBlobPrefix(userId))).filter((blob) =>
+    isUploadedResumeBlob(blob.pathname),
+  );
+  if (blobs.length === 0) return 0;
+  await del(blobs.map((blob) => blob.url));
+  return blobs.length;
+}
+
+/**
+ * Preserve the recovery pointer unless storage deletion succeeds. The callback boundary also
+ * makes failure and retry ordering testable without a live Blob store or database.
+ */
+export async function deleteUploadedResumeThenClear(
+  deleteUploadedResume: () => Promise<unknown>,
+  clearLegacyPointers: () => Promise<unknown>,
+): Promise<void> {
+  await deleteUploadedResume();
+  await clearLegacyPointers();
+}
+
+// Deletes legacy original uploads immediately and generated files after RESUME_RETENTION_DAYS.
 export async function sweepExpiredResumeBlobs(
   now = Date.now(),
   retentionDays = RESUME_RETENTION_DAYS,
 ): Promise<{ scanned: number; deleted: number }> {
-  const cutoff = now - retentionDays * 24 * 60 * 60 * 1000;
   const blobs = await listAll('users/');
-  const expired = blobs.filter((b) => b.pathname.includes('/resumes/') && b.uploadedAt.getTime() < cutoff);
-  if (expired.length > 0) await del(expired.map((b) => b.url));
-  return { scanned: blobs.length, deleted: expired.length };
+  const due = resumeBlobsDueForDeletion(blobs, now, retentionDays);
+  if (due.length > 0) await del(due.map((blob) => blob.url));
+  return { scanned: blobs.length, deleted: due.length };
 }
