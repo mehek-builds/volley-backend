@@ -35,12 +35,31 @@ const MAX_SPEC_ATTEMPTS = 2; // 1 initial pass + 1 feedback-driven retry, per PR
 // "automated quality gate" - bounded so a stubborn JD can't loop the endpoint indefinitely.
 
 // Hard wall-clock ceiling for the whole request, measured from function entry (reqStart) so it
-// accounts for the pre-loop work (auth, quota, bank/profile reads) too. Vercel kills the function at
-// 60s; every model call is bounded to (deadline - post-gen reserve - elapsed), so a slow Anthropic
-// response fails fast instead of 504ing AND there is guaranteed room after the last spec for the PDF
-// render + parse + blob upload + audit inserts.
-const REQUEST_DEADLINE_MS = 55000;
+// accounts for the pre-loop work (auth, quota, bank/profile reads) too. Every model call is bounded
+// to (deadline - post-gen reserve - elapsed), so a slow Anthropic response fails fast instead of
+// 504ing AND there is guaranteed room after the last spec for the PDF render + parse + blob upload
+// + audit inserts.
+//
+// DERIVED FROM vercel.json, NOT HAND-SET. This was the literal 55000, chosen on 2026-07-17 when
+// maxDuration was 60. On 2026-07-23 (98a5777, "prepare modern portals within runtime budget")
+// maxDuration went to 300 and this number did not move, so for eleven days the route gave itself
+// 46s of model budget out of an available 300 and returned
+// "Resume generation is taking too long" to students whose first Claude call simply ran past 46s.
+// A long JD plus the whole experience bank is exactly the request that does that. baseResume.ts was
+// updated for the new ceiling; this route was missed, and nothing in the build could notice because
+// the coupling lived only in a comment. resume.test.ts now reads vercel.json and asserts the two
+// agree, so the next maxDuration change either updates this or fails the build.
+const VERCEL_MAX_DURATION_MS = 300_000;
+// Left to Vercel for its own teardown, and to absorb cold-start time that reqStart never sees.
+const PLATFORM_SAFETY_MARGIN_MS = 60_000;
+export const REQUEST_DEADLINE_MS = VERCEL_MAX_DURATION_MS - PLATFORM_SAFETY_MARGIN_MS;
 const POST_GEN_RESERVE_MS = 9000;
+
+export const RESUME_DEADLINE_FOR_TEST = {
+  vercelMaxDurationMs: VERCEL_MAX_DURATION_MS,
+  requestDeadlineMs: REQUEST_DEADLINE_MS,
+  postGenReserveMs: POST_GEN_RESERVE_MS,
+};
 
 // ─── Transient model-capacity handling (live QA 2026-07-16) ──────────────────
 // A real Anthropic `overloaded_error` incident killed a whole fill: the card showed "Failed to
@@ -55,15 +74,17 @@ const POST_GEN_RESERVE_MS = 9000;
 //    real (non-transient) error or an exhausted budget ends the attempt.
 //
 // 2. THE CEILING. In-request retry CANNOT be the whole fix, and it is important not to pretend it
-//    is. Vercel kills this function at 60s (vercel.json maxDuration), REQUEST_DEADLINE_MS is 55s,
-//    and the observed incident needed ~6 attempts over ~2.5 MINUTES to get a 200. No in-request
-//    retry can outlive a 60s function, so surviving an incident of that length is necessarily the
-//    CLIENT's job: only a fresh request escapes the ceiling. That is why exhausting these retries
-//    returns a 503 + `code: 'llm_overloaded'` + `retry_after_ms` rather than a generic 500 - it is
-//    a machine-readable "come back", and the extension retries on it across requests while showing
-//    a "capacity busy" state. A 500 is indistinguishable from a bad JD, so the client could only
-//    give up. Large prompts are shed first during an overload and this route sends the JD plus the
-//    whole experience bank, so it is most fragile exactly when capacity is tight.
+//    is. The observed incident needed ~6 attempts over ~2.5 MINUTES to get a 200. The function
+//    ceiling has since moved (60s -> 300s, so REQUEST_DEADLINE_MS is now 240s), which means a
+//    single request can now in principle outlast that particular incident where it once could not.
+//    It is still not the whole fix: MAX_OVERLOAD_ATTEMPTS bounds the retries by COUNT, a longer
+//    incident still outlives any one function, and a request that spends four minutes retrying is
+//    a student watching a spinner. So exhausting these retries still returns a 503 +
+//    `code: 'llm_overloaded'` + `retry_after_ms` rather than a generic 500 - it is a
+//    machine-readable "come back", and the extension retries on it across requests while showing a
+//    "capacity busy" state. A 500 is indistinguishable from a bad JD, so the client could only give
+//    up. Large prompts are shed first during an overload and this route sends the JD plus the whole
+//    experience bank, so it is most fragile exactly when capacity is tight.
 const MAX_OVERLOAD_ATTEMPTS = 4;
 const MIN_CALL_BUDGET_MS = 6000; // never start a model call with less than this left
 const MAX_BACKOFF_MS = 6000;
