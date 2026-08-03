@@ -353,3 +353,39 @@ test('the employer vocabulary is normalized, but "Full Time Contractor" is still
   assert.equal(normalizeEmploymentType('International Office Entity'), 'International Office Entity');
   assert.equal(normalizeEmploymentType('Other'), 'Other');
 });
+
+test('a programme-owner role is not an internship, in all the ways it gets titled', () => {
+  /* The guard's job is to keep salaried programme staff out of the one filter a student uses to
+     stop reading them. These titles all missed the first version of the guard. */
+  const body = 'This internship program places 200 students each summer, and our interns love it.';
+  for (const title of [
+    'Manager, Early Careers Programs',
+    'Program Lead, Emerging Talent',
+    'Head of Student Programs',
+    'Employer Brand Manager',
+    'Campus Recruiter',
+    'University Recruiter, Contract',
+    'Early Talent Program Coordinator',
+    'Events Coordinator - Recruiting',
+  ]) {
+    assert.notEqual(resolveEmploymentType(title, undefined, body), 'Internship', title);
+  }
+});
+
+test('the recruiting guard applies to the DESCRIPTION rule only, never to the title', () => {
+  /* MEASURED, and it is why the asymmetry exists. Eleven live titles contain both an intern word
+     and a programme-owner noun, and TEN of them are genuine internships: "Talent Acquisition Intern
+     Fall 2026" (Rocket Lab), "Recruiting Operations Internship - Fall 2026" (Varda), "Recruitment
+     Intern (Working Student)" (Optiver), "Operations Program Management Intern" (Skydio). Extending
+     RECRUITING_TITLES to veto the title rule would strip the type off all of them to catch the one
+     ambiguous case, so the guard stays where the title is SILENT and inference is all we have. */
+  for (const title of [
+    'Talent Acquisition Intern Fall 2026',
+    'Recruitment Intern (Working Student)',
+    'Recruiting Operations Internship - Fall 2026',
+    'Operations Program Management Intern',
+    'Software Engineer - 2027 Internship Program (June Start)',
+  ]) {
+    assert.equal(resolveEmploymentType(title), 'Internship', title);
+  }
+});

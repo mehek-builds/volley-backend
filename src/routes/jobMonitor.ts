@@ -77,7 +77,7 @@ const listQuerySchema = z.object({
      it: somebody who said at onboarding that they need sponsorship cannot turn the filter off by
      omitting a query parameter. See sponsorOnlyBoardRequired in lib/sponsorship.ts. */
   sponsor_only: z.enum(['true', 'false']).optional(),
-  /* The four product words resolveEmploymentType emits, as an ENUM rather than free text.
+  /* The five product words resolveEmploymentType emits, as an ENUM rather than free text.
      Constrained on purpose: the column also holds pass-through values from employers whose spelling
      the normalizer did not recognise, and letting a caller filter on those would expose one
      employer's vocabulary as though it were a board-wide category. These four are the ones every
@@ -1793,10 +1793,22 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
        validating the whole query object meant an unrelated bad parameter (limit=500) failed the
        parse and silently served unfiltered suggestions - the filter dropping out because of a
        mistake in a field this route does not even look at. */
+    const facetQuery = z.object({
+      sponsor_only: z.enum(['true', 'false']).optional(),
+      /* Job type belongs here for exactly the reason the comment above gives. Filtered to
+         Internship the board is ~2% of its size, so suggesting the top-50 companies of the FULL
+         board would send almost every click to an empty result - the same broken-board reading
+         the sponsorship filter was added here to avoid, only worse because the ratio is bigger. */
+      employment_type: z
+        .enum(['Full-time', 'Part-time', 'Internship', 'Apprenticeship', 'Contract'])
+        .optional(),
+    }).safeParse(request.query).data;
     const sponsorOnly = (await accountRequiresSponsor(request.jwtPayload?.userId))
-      || z.object({ sponsor_only: z.enum(['true', 'false']).optional() })
-        .safeParse(request.query).data?.sponsor_only === 'true';
-    const where = and(...boardConditions({ sponsorOnly }));
+      || facetQuery?.sponsor_only === 'true';
+    const where = and(...boardConditions({
+      sponsorOnly,
+      employmentType: facetQuery?.employment_type,
+    }));
     /* FIFTY of each, ranked by how much of the board they actually account for
        (Mehek, 2026-07-29). The lists used to be 202 companies alphabetically
        and 120 raw location strings: a dropdown nobody scrolls, opening on "AQR"

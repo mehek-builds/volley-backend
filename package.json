@@ -76,6 +76,7 @@
     "db:pipeline-stage": "node scripts/apply-pipeline-stage-schema.mjs",
     "logo:check": "node --import tsx scripts/check-logo-coverage.mjs",
     "logo:resolve": "node scripts/resolve-company-domains.mjs",
-    "db:job-pay": "node scripts/apply-job-pay-schema.mjs"
+    "db:job-pay": "node scripts/apply-job-pay-schema.mjs",
+    "db:employment-type-index": "node scripts/apply-employment-type-index.mjs"
   }
 }

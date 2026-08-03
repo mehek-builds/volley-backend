@@ -389,10 +389,16 @@ const INTERNSHIP_DESCRIPTION = new RegExp(
 
 /** Roles that RUN an internship programme rather than being one. All full-time. */
 const RECRUITING_TITLES =
-  /\brecruit(er|ing|ment)\b|\btalent acquisition\b|\bprogram (coordinator|manager)\b|\bevents? coordinator\b|\bearly talent\b|\bcampus\b|\buniversity\b/i;
+  /\brecruit(er|ing|ment)\b|\btalent acquisition\b|\bprograms?\s+(coordinator|manager|lead)\b|\b(coordinator|manager|lead|head)\s*(of|,)?\s*[a-z ]*\bprograms?\b|\bevents? coordinator\b|\bearly (talent|careers?)\b|\bemerging talent\b|\bstudent programs?\b|\bintern(ship)?s?\s+(operations|programs?|programmes?)\b|\bemployer brand\b|\bcampus\b|\buniversity\b/i;
 
 /**
  * The internship a posting describes but never names, or undefined.
+ *
+ * PASS THE CLEANED TEXT, NOT THE RAW PAYLOAD. Greenhouse returns entity-escaped markup, so the
+ * phrases above have to be matched against decoded text or a tag inside the phrase silently drops
+ * the posting: "As an intern, you..." matches, "As an <strong>intern</strong>, you..." does not, and
+ * neither does an &nbsp; between the words. Every normalizer therefore cleans once and passes the
+ * result here, which also stops the same string being decoded twice per posting on every poll.
  *
  * Exported for its own tests; callers want resolveEmploymentType, which knows where in the
  * precedence order this belongs (last, and only when nothing else spoke).
@@ -402,19 +408,7 @@ export function employmentTypeFromDescription(
   description?: string,
 ): string | undefined {
   if (!description || RECRUITING_TITLES.test(title)) return undefined;
-  return INTERNSHIP_DESCRIPTION.test(stripMarkup(description)) ? 'Internship' : undefined;
-}
-
-/* Board descriptions arrive as HTML, and Greenhouse double-escapes its own. "as an intern" can
-   therefore be split by a tag or arrive as &amp;nbsp; between the words, so the phrases above have
-   to be matched against text rather than markup. */
-function stripMarkup(value: string): string {
-  return value
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;|&#160;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&#39;|&apos;/gi, "'")
-    .replace(/\s+/g, ' ');
+  return INTERNSHIP_DESCRIPTION.test(description) ? 'Internship' : undefined;
 }
 
 export function resolveEmploymentType(

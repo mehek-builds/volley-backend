@@ -702,6 +702,15 @@ export const monitored_jobs = pgTable('monitored_jobs', {
   companyIdx: index('monitored_jobs_company_idx').on(t.company_name),
   // The sponsor-only board reads (is_active, sponsorship_status) on every request it serves.
   sponsorshipIdx: index('monitored_jobs_sponsorship_idx').on(t.is_active, t.sponsorship_status, t.job_country),
+  /* Added with the job-type filter and the internship window (2026-08-04). Two query shapes need
+     it and activePostedIdx serves neither:
+       1. `employment_type = 'Internship'` selects ~2% of the table, and without an index on the
+          column that is a full scan on the board's flagship filter.
+       2. freshnessPredicate is now `posted_at >= now()-14d OR (employment_type = 'Internship' AND
+          posted_at >= now()-90d)`. Postgres will not collapse that OR into one range, so
+          activePostedIdx stops being usable as a range scan on EVERY board surface - /jobs,
+          /jobs/grouped, /jobs/facets, surfacedJobCount and boardInventoryMetrics all share it. */
+  typePostedIdx: index('monitored_jobs_type_posted_idx').on(t.is_active, t.employment_type, t.posted_at),
 }));
 
 // ---- ats_adapters ----
