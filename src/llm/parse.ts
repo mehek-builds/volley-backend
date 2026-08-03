@@ -12,6 +12,25 @@ export interface ParsedProfile {
     description: string;
   }>;
   skills: string[];
+  /* Spoken languages the resume PRINTED, e.g. ["English","Hindi","French"].
+   *
+   * WHY THIS FIELD EXISTS. Before it, the schema had nowhere to put a spoken language, so the model
+   * did the only thing left and filed them under `skills`. Measured 2026-08-03 on the live account
+   * used to demo the product: `skills` read English, Hindi, Punjabi, French, Arabic, Spanish, MS
+   * PowerPoint, Adobe Photoshop, C++, Figma, Python - six of eleven were spoken languages, and
+   * because a resume's language line usually sits above its technical line they sorted FIRST. That
+   * list is not decorative: baseResume.ts's skillsSourceFor falls back to it whenever the declared
+   * profiles.skills column is null, which is every student at onboarding, and it is authoritative in
+   * declared mode. So every tailored resume Litos generated for that account led its skills section
+   * with six languages before reaching C++.
+   *
+   * SEPARATE FROM application_profile.languages, deliberately and permanently. That column is the
+   * student's own declaration of FLUENCY, collected once in onboarding, and schema.ts spells out why
+   * it may never be inferred - including from resume text. This field is weaker by construction: it
+   * records what a page printed, and "French" on a resume line is not a claim of fluency to an
+   * employer. Nothing here may flow into that column without the student confirming it.
+   */
+  languages?: string[];
   projects: Array<{
     name: string;
     role?: string;
@@ -78,6 +97,7 @@ The JSON must match this exact shape:
   "full_name": string,
   "experience": [{"company": string, "title": string, "start": string, "end": string, "description": string}],
   "skills": [string],
+  "languages": [string],
   "projects": [{"name": string, "role": string, "date_range": string, "description": string}],
   "leadership": [{"organization": string, "title": string, "start": string, "end": string, "description": string}],
   "school": string,
@@ -110,6 +130,15 @@ Rules:
 - "grad_date" must preserve the most precise date printed on the resume, such as "May 2028". Use an empty string when absent.
 - "grad_year" should be the 4-digit year from grad_date. Use 0 when it is absent.
 - "currently_enrolled" is true only when the resume explicitly says expected graduation, candidate, current student, or otherwise clearly shows an unfinished degree with a future graduation date.
+- "skills" is TECHNICAL and professional ability only: tools, software, programming languages,
+  methods, certifications. It must NEVER contain a spoken or natural language such as English,
+  Hindi, French, Arabic, Mandarin or Spanish. Those go in "languages" and nowhere else. A resume
+  usually prints its language line above its technical line, so copying the page order puts spoken
+  languages at the head of the skills list, which is exactly the failure this rule prevents.
+- "languages" holds the spoken or natural languages printed on the resume, copied as printed and
+  keeping any proficiency the resume states, e.g. "Spanish (conversational)". Programming languages
+  are NOT spoken languages and belong in "skills". Return an empty array when the resume prints no
+  language line; never infer a language from the applicant's name, school, or country.
 - "coursework" may contain only courses explicitly printed on the resume.
 - "objective" is the objective or summary copied from the resume. Use an empty string when absent.
 - "gpa" is the grade average printed on the resume, digits only, e.g. "3.75" from "GPA: 3.75/4.0".
@@ -136,9 +165,102 @@ Rules:
 - Return empty arrays for missing sections, never null
 - If grad_year is truly unknown, use 0`;
 
+/* Spoken language names, lowercased, used to pull a language back out of `skills`.
+ *
+ * WHY A LIST AND NOT JUST THE PROMPT. R-047's comment argues the prompt is the only defence for the
+ * degree line, and that is right THERE, because a degree is free text no list could enumerate. A
+ * spoken language is the opposite: the set is small, closed and stable, so it can be checked without
+ * a model. That matters because the text path runs on Haiku, the prompt rule is one instruction
+ * among twenty, and the cost of the rule being ignored is silent - a language sitting in `skills`
+ * looks exactly like a skill to every consumer downstream. This is the deterministic floor under the
+ * instruction, and it is what the tests can actually assert.
+ *
+ * NO PROGRAMMING LANGUAGES OR TOOL NAMES APPEAR HERE, and the omissions are load-bearing rather than
+ * accidental: Go, R, Rust, Swift, Ruby, Julia, Scheme, Basic and Processing are all names a careless
+ * language list would swallow, and each one is a real technical skill on a real student's resume.
+ * "Javanese" is listed while "Java" deliberately is not, for the same reason. A false positive here
+ * deletes an engineering skill from a resume, which is strictly worse than the bug being fixed, so
+ * anything ambiguous stays off the list. */
+const SPOKEN_LANGUAGES = new Set([
+  'english', 'spanish', 'french', 'german', 'italian', 'portuguese', 'dutch', 'flemish',
+  'russian', 'polish', 'ukrainian', 'belarusian', 'czech', 'slovak', 'romanian', 'hungarian',
+  'greek', 'turkish', 'swedish', 'norwegian', 'danish', 'finnish', 'icelandic', 'estonian',
+  'latvian', 'lithuanian', 'serbian', 'croatian', 'bosnian', 'slovenian', 'bulgarian',
+  'macedonian', 'albanian', 'maltese', 'luxembourgish', 'catalan', 'basque', 'galician',
+  'irish', 'welsh', 'scottish gaelic', 'latin',
+  'arabic', 'hebrew', 'persian', 'farsi', 'dari', 'pashto', 'kurdish', 'armenian', 'georgian',
+  'azerbaijani', 'kazakh', 'uzbek', 'turkmen', 'mongolian',
+  'hindi', 'urdu', 'punjabi', 'gujarati', 'marathi', 'bengali', 'bangla', 'tamil', 'telugu',
+  'kannada', 'malayalam', 'sinhala', 'nepali', 'sindhi', 'assamese', 'odia', 'oriya',
+  'hindustani', 'sanskrit',
+  'chinese', 'mandarin', 'mandarin chinese', 'simplified chinese', 'traditional chinese',
+  'cantonese', 'japanese', 'korean', 'vietnamese', 'thai', 'khmer', 'lao', 'burmese',
+  'indonesian', 'malay', 'bahasa indonesia', 'bahasa melayu', 'filipino', 'tagalog', 'javanese',
+  'swahili', 'amharic', 'somali', 'hausa', 'yoruba', 'igbo', 'zulu', 'xhosa', 'afrikaans',
+  'american sign language', 'asl', 'british sign language', 'bsl',
+  'haitian creole', 'creole', 'yiddish', 'esperanto',
+]);
+
+/* One skills entry reduced to the bare language name it might be.
+ *
+ * Resumes annotate a language rather than naming it alone: "Spanish (conversational)", "French -
+ * fluent", "Hindi: native", "Arabic (professional working proficiency)". Matching the raw string
+ * would miss every one of those, so the qualifier is stripped for the COMPARISON only. The entry is
+ * still stored verbatim, because the proficiency is the honest part of the claim and dropping it
+ * would turn "Spanish (basic)" into a bare "Spanish" that reads as fluency. */
+function languageKeyOf(entry: string): string {
+  return entry
+    .replace(/\s*[([{].*$/, '')
+    // \u2013 and \u2014 are the en and em dash. Written as escapes rather than literals so the
+    // separators a resume actually prints are still matched without those characters appearing here.
+    .replace(/\s*[-\u2013\u2014:|/]\s.*$/, '')
+    .trim()
+    .toLowerCase();
+}
+
+/* Split a parsed `skills` array into the technical skills it should have held and the spoken
+ * languages that were only ever there because the schema had no other field.
+ *
+ * Exported as a pure function on purpose. It is the same operation a one-off backfill over stored
+ * parsed_json rows would need, and keeping it callable means such a script can reuse this exact
+ * classification rather than growing a second, drifting copy of the language list. */
+export function splitSpokenLanguages(skills: unknown): { skills: string[]; languages: string[] } {
+  const technical: string[] = [];
+  const languages: string[] = [];
+  for (const entry of Array.isArray(skills) ? skills : []) {
+    if (typeof entry !== 'string') continue;
+    const value = entry.trim();
+    if (!value) continue;
+    if (SPOKEN_LANGUAGES.has(languageKeyOf(value))) languages.push(value);
+    else technical.push(value);
+  }
+  return { skills: technical, languages };
+}
+
+// Case-insensitive union that keeps first-seen spelling and order. The model's own "languages"
+// answer leads because it read the page; anything the reclassifier recovered from `skills` follows.
+function mergeLanguages(fromModel: unknown, reclassified: string[]): string[] {
+  const merged: string[] = [];
+  const candidates = [...(Array.isArray(fromModel) ? fromModel : []), ...reclassified];
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue;
+    const value = candidate.trim();
+    if (!value || merged.some((existing) => existing.toLowerCase() === value.toLowerCase())) continue;
+    merged.push(value);
+  }
+  return merged;
+}
+
 export function parsedProfileFromModelText(text: string): ParsedProfile {
   const cleaned = text.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
   const parsed = JSON.parse(cleaned) as ParsedProfile;
+  /* Runs on EVERY parse, which is also how an already-polluted account repairs itself: parsed_json
+   * is rewritten wholesale by each resume upload, so the next upload lands a clean `skills`. No
+   * stored row is touched here - a student who has since declared their own profiles.skills list
+   * keeps it untouched, because that declaration is theirs and outranks any parse (R-015). */
+  const split = splitSpokenLanguages(parsed.skills);
+  parsed.skills = split.skills;
+  parsed.languages = mergeLanguages(parsed.languages, split.languages);
   const roles: string[] = [];
   // A prior fallback padded an incomplete recommendation with past experience titles. That made
   // malformed output look valid and could present a former campus or volunteer title as a job the
