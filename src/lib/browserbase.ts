@@ -103,9 +103,13 @@ export function isManagedStratusProvider(): boolean {
   return process.env.BROWSER_PROVIDER === 'stratus-managed';
 }
 
+// `screenshot` defaults to true because every existing caller wants the receipt image. The CAPTCHA
+// probe does not: it reads one attribute and throws the result away, so a full-page PNG would be
+// rendered, transferred and retained by the third-party runner for nothing.
 export async function runManagedBrowser(
   portalUrl: string,
   actions: ManagedBrowserAction[],
+  options: { screenshot?: boolean } = {},
 ): Promise<ManagedBrowserResult> {
   const baseUrl = process.env.STRATUS_BASE_URL?.replace(/\/$/, '');
   const apiKey = process.env.STRATUS_API_KEY?.trim();
@@ -121,7 +125,13 @@ export async function runManagedBrowser(
       ...(apiKey ? { 'X-Stratus-API-Key': apiKey } : {}),
       ...(authorization ? { Authorization: authorization } : {}),
     },
-    body: JSON.stringify({ url: portalUrl, actions, screenshot: true, fullPage: true, waitUntil: 'domcontentloaded' }),
+    body: JSON.stringify({
+      url: portalUrl,
+      actions,
+      screenshot: options.screenshot ?? true,
+      fullPage: true,
+      waitUntil: 'domcontentloaded',
+    }),
   });
   const payload = await response.json().catch(() => ({})) as { run?: ManagedBrowserResult; error?: ManagedBrowserError };
   if (!response.ok || !payload.run) {

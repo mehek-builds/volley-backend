@@ -55,6 +55,11 @@ const FINANCIAL = new Set([
   'man group', 'marqeta', 'marshall wace', 'mercury', 'monzo', 'n26', 'old mission',
   'phonepe', 'point72', 'quadrature', 'qube research & technologies', 'ramp', 'ripple',
   'robinhood', 'sofi', 'stone', 'stripe', 'suade', 'tower research', 'trustly', 'virtu',
+  /* The quant and prop-trading half of the 2026-08-03 internship-density round. Sourced as one
+     block because it is the densest internship tier the board has, so it is also the block most
+     likely to grow again. */
+  'optiver', 'worldquant', 'schonfeld', 'squarepoint capital', 'transmarket group',
+  'gsa capital', 'vatic labs', 'engineers gate', 'dv trading', 'jump crypto', 'airwallex',
 ]);
 
 const HEALTH = new Set([
@@ -62,11 +67,17 @@ const HEALTH = new Set([
   'freenome', 'ginkgo', 'honor', 'komodohealth', 'modernhealth', 'natera', 'omadahealth',
   'onemedical', 'openevidence', 'papa', 'parsleyhealth', 'recursion', 'science 37',
   'suki', 'talkspace', 'tebra', 'truveta', 'veracyte', 'zocdoc',
+  'twist bioscience',
 ]);
 
 const AEROSPACE_MOBILITY = new Set([
   'flexport', 'ionq', 'lightmatter', 'lucid', 'lyft', 'nuro', 'psiquantum', 'rocket lab',
   'samsara', 'spacex', 'tenstorrent', 'waymo',
+  /* Space, defense and robotics from the 2026-08-03 round. Formlabs and Protolabs are advanced
+     manufacturing rather than mobility, but this is the set that carries hardware employers and a
+     seventh industry for two sources would be a taxonomy change, not a classification. */
+  'astranis', 'figure', 'hermeus', 'shield ai', 'vannevar labs', 'skydio', 'motional',
+  'formlabs', 'protolabs',
 ]);
 
 const CONSUMER = new Set([
@@ -105,6 +116,8 @@ const TECHNOLOGY = new Set([
   'hightouch', 'opslevel', 'anomalo', 'orca', 'rutter', 'fullstory', 'graphcore',
   'chainguard', 'sierra', 'crusoe', 'okta', 'box', 'rubrik', 'grafana labs', 'hubspot',
   'mozilla', 'recorded future', 'gong', 'wiz', 'opengov', 'code for america',
+  // Infra, security and AI from the 2026-08-03 internship-density round.
+  'zscaler', 'etched', 'snowflake', 'cohere', 'together ai',
 ]);
 
 export function classifyEmployerIndustry(company: string): EmployerIndustry {

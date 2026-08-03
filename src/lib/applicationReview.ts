@@ -37,6 +37,41 @@ export type ApplicationReviewState = {
   browser_context_id?: string;
   browser_session_id?: string;
   attention_reason?: string;
+  /* The TYPED half of attention_reason, which is prose and always will be.
+   *
+   * attention_reason is written for a person and is the right thing to show them. It is the wrong
+   * thing to count: "how often does a challenge stop us, on which boards, and how long until it
+   * clears" cannot be answered by grepping sentences. This is the machine-readable companion.
+   * Nothing here is meant for DISPLAY, but it is not server-private either: the whole review object
+   * is serialized to the dashboard and the extension, so this reaches clients.
+   *
+   * stalled_at is the QUEUE'S SORT KEY, not a duplicate of updated_at. updated_at moves on every
+   * write, including writes that have nothing to do with the stall, so ordering a "waiting on you"
+   * list by it would reshuffle the queue under the applicant. It survives re-observation of the
+   * same challenge and only restarts after a resolved stall.
+   *
+   * A stall is CLOSED (resolved_at), never deleted, when the application stops waiting on a human.
+   * See settleStall in applicationStall.ts: deleting it broke the clock and threw away the
+   * time-to-resolution measurement. The queue selects on status, so a resolved stall is invisible
+   * to it without needing to be destroyed. */
+  stall?: {
+    kind: 'human_verification';
+    stalled_at: string;
+    /* Where it stopped, because the two surfaces owe the applicant different next actions: a
+     * server run needs them to open the portal themselves, an extension stall is already in front
+     * of them. Only 'server_run' is written today; the extension writes 'extension' in step 4. */
+    surface: 'server_run' | 'extension';
+    provider: 'recaptcha_v2' | 'recaptcha_v3' | 'hcaptcha' | 'turnstile' | 'arkose' | 'unknown';
+    /* 'before_fill' means nothing was filled and the form is still blank. Governs which sentence
+     * the applicant gets, and stops the queue promising a filled form that does not exist. */
+    stage: 'before_fill' | 'at_submit';
+    /* Whether the provider was seen on a live page or inferred from the portal family. An inferred
+     * label must never be counted as evidence a family really uses that provider. */
+    source: 'observed' | 'assumed';
+    /* Set when the application stops waiting on a human. Presence means "this stall is over", and
+     * resolved_at minus stalled_at is the time-to-resolution the instrumentation needs. */
+    resolved_at?: string;
+  };
   handoff_expires_at?: string;
   final_approved_at?: string;
   cover_letter_supported?: boolean;

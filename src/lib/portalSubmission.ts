@@ -126,6 +126,20 @@ export function isAccountWalledFamily(portal: SupportedPortal): boolean {
   return ACCOUNT_WALLED_FAMILIES.has(portalFamily(portal));
 }
 
+export function isCaptchaGatedFamily(portal: SupportedPortal): boolean {
+  return CAPTCHA_GATED_FAMILIES.has(portalFamily(portal));
+}
+
+// Only for the paths that stop WITHOUT a live Page, where the provider cannot be observed. Both
+// values are measured, not assumed: JazzHR carries g-recaptcha-response on every application form
+// (confirmed 2026-07-28) and BambooHR does too, with window.grecaptcha defined and the badge
+// rendering, on a real PRC-Saltillo posting (confirmed 2026-07-29). Anything else returns 'unknown'
+// rather than a guess - a wrong provider label is worse than an absent one, because the whole point
+// of recording it is to decide which families are worth building around.
+export function captchaProviderForFamily(portal: SupportedPortal): CaptchaProvider {
+  return isCaptchaGatedFamily(portal) ? 'recaptcha_v2' : 'unknown';
+}
+
 export function portalCanAutoSubmit(portal: SupportedPortal): boolean {
   const family = portalFamily(portal);
   return !MULTI_STEP_FAMILIES.has(family)
@@ -1223,8 +1237,9 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
   await fillReviewedQuestions(page, packet, filledFields);
 
   const blockers: string[] = [];
-  if ((await page.locator('iframe[src*="captcha" i], [class*="captcha" i], [id*="captcha" i]').count()) > 0) {
-    blockers.push('CAPTCHA requires your attention');
+  // String kept verbatim: it is already surfaced to applicants and matched downstream.
+  if (await hasUnresolvedCaptcha(page)) {
+    blockers.push(CAPTCHA_BLOCKER);
   }
   const required = page.locator('input[required], textarea[required], select[required]');
   const labelledBlockers: string[] = [];
@@ -1249,6 +1264,232 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
   blockers.push(...new Set(labelledBlockers));
   if (unlabelledCount > 0) blockers.push(describeUnlabelledBlockers(unlabelledCount));
   return { filledFields, blockers };
+}
+
+// ---- human-verification (CAPTCHA) detection ----
+//
+// Litos NEVER solves a challenge and never sends one anywhere to be solved. These functions only
+// answer "is a human being asked to do something here", so the run can stop, keep what it filled,
+// and hand the page back to the person whose application it is. `solveCaptchas: false` in
+// browserbase.ts is the other half of that promise and there is a test pinning it.
+//
+// The check this replaced counted `iframe[src*=captcha], [class*=captcha], [id*=captcha]` and
+// called any hit a blocker. That is wrong in both directions. reCAPTCHA v2 ALWAYS ships a
+// `g-recaptcha-response` textarea, solved or not, so the old check called every reCAPTCHA page
+// blocked forever; and it could not tell a widget the person already cleared from one still
+// waiting. Token state is what distinguishes them: an empty response field under a rendered
+// widget means a human still has to act.
+
+// Widget count is deliberately NOT compared to token count. Providers render a variable number of
+// visible nodes per widget (wrapper div, anchor iframe, and on Turnstile a shadow host), so
+// "3 visible nodes, 1 token" is one solved widget, not two missing ones. The honest signal is:
+// something is rendered, and at least one response field is still empty.
+export function captchaSnapshotRequiresAttention(responseTokens: string[], visibleChallengeCount: number): boolean {
+  if (visibleChallengeCount === 0) return false;
+  if (responseTokens.length === 0) return true;
+  return responseTokens.some((token) => token.trim().length === 0);
+}
+
+export const CAPTCHA_RESPONSE_SELECTOR = [
+  'textarea[name*="captcha-response" i]',
+  'input[name*="captcha-response" i]',
+  'textarea[id*="captcha-response" i]',
+  'input[id*="captcha-response" i]',
+  'textarea[name="cf-turnstile-response"]',
+  'input[name="cf-turnstile-response"]',
+].join(', ');
+
+// One source, two consumers. The direct path joins these as-is; the managed path maps the same
+// parts through a CSS badge exclusion. Adding a sixth shape here reaches both, which a duplicated
+// literal did not.
+const CAPTCHA_CHALLENGE_SELECTOR_PARTS = [
+  'iframe[src*="captcha" i]',
+  'iframe[src*="challenges.cloudflare.com" i]',
+  '[class*="captcha" i]',
+  '[id*="captcha" i]',
+  '[data-sitekey]',
+];
+
+export const CAPTCHA_CHALLENGE_SELECTOR = CAPTCHA_CHALLENGE_SELECTOR_PARTS.join(', ');
+
+// reCAPTCHA v3 and invisible v2 render a floating "protected by reCAPTCHA" badge on pages that ask
+// the human for NOTHING - the score is computed from behaviour and the token is minted on submit.
+// The badge matches [class*="captcha"] and is genuinely visible, so counting it stops a page that
+// was never blocked, on exactly the two families already typed as CAPTCHA-gated. Measured on
+// BambooHR 2026-07-29: badge present, window.grecaptcha defined, no interactive widget.
+//
+// Matched with closest(), NOT a self-or-descendant check. The badge is a CONTAINER: `div.grecaptcha-badge`
+// wraps an anchor `<iframe src=".../recaptcha/api2/anchor...">`, and that iframe matches
+// `iframe[src*="captcha" i]` on its own. A self check misses it (its own class list is not the
+// badge's) and a descendant check misses it too (it contains no badge). It would have been counted,
+// so a v3 page would still have reported blocked - the exact false positive this exclusion exists to
+// remove. closest() covers the badge node and everything inside it in one probe.
+//
+// Excluding it means a v3 page reports "not blocked", which is correct: there is no challenge for a
+// human to clear. If v3 scores the session badly it escalates to a real interactive widget, and
+// THAT widget is rendered outside the badge, so closest() returns null and it is counted normally.
+const CAPTCHA_BADGE_CLASS = 'grecaptcha-badge';
+
+// Same discipline, and the same reason, as LABEL_PROBE_TIMEOUT_MS below: locator actions AUTO-WAIT
+// at 30s by default, this cost is paid once per candidate node, and every probe here is wrapped in
+// a swallowing catch - so an unbounded stall would burn the run's whole budget and leave no trace of
+// why. isVisible() and count() do not auto-wait; inputValue() and evaluate() do, so they are bounded.
+const CAPTCHA_PROBE_TIMEOUT_MS = 750;
+
+// A page whose CSS framework happens to use "captcha" in a utility class can match this selector
+// dozens of times. The probe is per-node, so cap the scan: past ~20 candidates the page is telling
+// us about its class names, not about a challenge.
+const CAPTCHA_MAX_CANDIDATE_NODES = 20;
+
+// The managed path asks a DIFFERENT question than the direct path, and the difference is the point.
+//
+// The direct path asks "is a challenge still waiting?", because a human may be sitting in front of
+// it. The managed path is unattended by definition - the run happens inside a remote browser nobody
+// is watching - so the only question worth asking there is "is there an interactive challenge on
+// this page at all?". If there is, auto-submitting is wrong whatever the token says, because nobody
+// is present to clear it. Presence is therefore the whole rule here.
+//
+// That difference is what lets this probe avoid the token entirely, which matters three ways:
+//   1. Litos never handles a challenge token it does not have to. Asking a third-party runner to
+//      read one and hand it back would move the token out of the applicant's session and into our
+//      infrastructure for no gain, which is the boundary this feature exists to respect.
+//   2. `g-recaptcha-response` is a <textarea>, which has no `value` ATTRIBUTE at all - the token
+//      lives in the DOM property. An attribute read returns null on a solved widget, so a cleared
+//      challenge would have read as unsolved and blocked a legitimate submission.
+//   3. data-sitekey is present on every node this now matches, so a match cannot be silently
+//      discarded as null the way an attribute-that-is-usually-absent would be.
+//
+// Narrower than the direct path on purpose: [data-sitekey] is the container reCAPTCHA v2 explicit,
+// hCaptcha and Turnstile all render, and it is absent on a pure v3 page, which is exactly the page
+// that must NOT be stopped. It will miss shapes the direct path catches. A narrow signal that is
+// always right beats a broad one that misfires in both directions.
+const MANAGED_CAPTCHA_CHALLENGE_SELECTOR = '[data-sitekey]:not(.grecaptcha-badge):not(.grecaptcha-badge *)';
+
+// The managed runner's /api/run is STATELESS and executes the whole action list before returning,
+// so a check placed inside the submit list cannot stop the click it is meant to gate - by the time
+// the result comes back the application is already sent. This is a separate, cheap call made first:
+// navigate and read one attribute, no fills, no upload, no screenshot. Same two-call idiom as
+// buildManagedDiscoveryActions.
+//
+// TWO KNOWN LIMITS, stated rather than hidden:
+//   - It reads the page as it LOADS. A challenge that renders only after the fields are filled, or
+//     after submit is pressed, is not caught.
+//   - It is a SEPARATE page load from the one that submits. An anti-bot that escalates on a repeat
+//     visit can challenge the submit session while the probe session saw nothing.
+// Both mean this narrows the gap rather than closing it. portalCanAutoSubmit stays load-bearing.
+export function buildManagedCaptchaProbeActions(): ManagedBrowserAction[] {
+  return [
+    {
+      type: 'extract',
+      selector: MANAGED_CAPTCHA_CHALLENGE_SELECTOR,
+      attribute: 'data-sitekey',
+      label: 'captcha_challenge',
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    },
+  ];
+}
+
+// Fails OPEN by construction, and that is deliberate rather than lazy. The remote runner's extract
+// semantics are not defined in this repo, so if it returns a shape this does not recognise the
+// verdict is "no challenge seen" - exactly the behaviour the managed path had before this probe
+// existed. That makes the probe a strict improvement in every case and a regression in none, at the
+// cost of needing one live run against the QA portal to confirm it actually fires.
+export function managedResultRequiresCaptchaAttention(result: ManagedBrowserResult | null): boolean {
+  const extracted = result?.extracted;
+  if (!extracted) return false;
+  // some(), not find(). managedResultHasCoverLetterUpload scans every entry for exactly this reason:
+  // the selector is multi-match and the runner may echo one entry per matched node, so inspecting
+  // only the first would let a real widget in a later entry through.
+  return extracted.some((item) => (
+    item.selector === MANAGED_CAPTCHA_CHALLENGE_SELECTOR && item.value !== null
+  ));
+}
+
+// Which provider is asking. Recorded on the stall so the instrumentation can answer "which families
+// actually gate us, and how long does each take to clear" instead of a single undifferentiated
+// count. Deliberately a closed set with an 'unknown' member: a provider nobody has seen yet must
+// record as unknown rather than be silently bucketed into the nearest known one.
+export type CaptchaProvider =
+  | 'recaptcha_v2'
+  | 'recaptcha_v3'
+  | 'hcaptcha'
+  | 'turnstile'
+  | 'arkose'
+  | 'unknown';
+
+export const RECAPTCHA_INTERACTIVE_SELECTOR = `iframe[src*="recaptcha" i]:not(.${CAPTCHA_BADGE_CLASS} *)`;
+
+export const CAPTCHA_PROVIDER_MARKERS: ReadonlyArray<{ provider: CaptchaProvider; selector: string }> = [
+  { provider: 'turnstile', selector: '[name="cf-turnstile-response"], iframe[src*="challenges.cloudflare.com" i]' },
+  { provider: 'hcaptcha', selector: '[name="h-captcha-response"], iframe[src*="hcaptcha.com" i]' },
+  { provider: 'arkose', selector: 'iframe[src*="arkoselabs" i], iframe[src*="funcaptcha" i]' },
+  { provider: 'recaptcha_v2', selector: '[name="g-recaptcha-response"], iframe[src*="recaptcha" i]' },
+];
+
+// Ordered, and the order matters: reCAPTCHA is checked LAST because its response field is the one
+// most likely to co-exist with another provider on a page that switched vendors and left markup
+// behind. A page carrying both reads as the newer one, which is the one actually gating it.
+//
+// The reCAPTCHA branch splits v2 from v3 on the same signal the exclusion uses: if the only thing
+// rendered is the badge, nothing is being asked of a human, so it is v3. Anything outside the badge
+// is an interactive widget, so it is v2.
+export async function detectCaptchaProvider(page: Page): Promise<CaptchaProvider> {
+  for (const marker of CAPTCHA_PROVIDER_MARKERS) {
+    const count = await page.locator(marker.selector).count().catch(() => 0);
+    if (count === 0) continue;
+    if (marker.provider !== 'recaptcha_v2') return marker.provider;
+    // Fails toward v2, the BLOCKING classification, for the same reason the visibility probe fails
+    // closed. v3 means "nothing is being asked of a human"; recording that because a probe threw
+    // would tell the instrumentation a page was harmless precisely when we could not see it.
+    const interactive = await page.locator(RECAPTCHA_INTERACTIVE_SELECTOR).count().catch(() => -1);
+    return interactive === 0 ? 'recaptcha_v3' : 'recaptcha_v2';
+  }
+  return 'unknown';
+}
+
+// The blocker line fillPortal emits when a challenge is still waiting. Exported because the runner
+// matches on it to decide whether an attention state is a human-verification stall: it is a
+// contract between two files, not a local string, and re-typing the literal at the match site is how
+// that contract silently breaks.
+export const CAPTCHA_BLOCKER = 'CAPTCHA requires your attention';
+
+export function blockersIncludeCaptcha(blockers: readonly string[]): boolean {
+  return blockers.includes(CAPTCHA_BLOCKER);
+}
+
+export async function hasUnresolvedCaptcha(page: Page): Promise<boolean> {
+  const responseFields = page.locator(CAPTCHA_RESPONSE_SELECTOR);
+  const responseTokens: string[] = [];
+  // count() is hoisted out of the loop CONDITION deliberately: it is a round-trip to the browser, so
+  // leaving it there paid one extra crossing per iteration and let the bound move mid-scan.
+  const fieldCount = await responseFields.count();
+  for (let index = 0; index < fieldCount; index += 1) {
+    responseTokens.push(
+      await responseFields.nth(index).inputValue({ timeout: CAPTCHA_PROBE_TIMEOUT_MS }).catch(() => ''),
+    );
+  }
+
+  const challenges = page.locator(CAPTCHA_CHALLENGE_SELECTOR);
+  const challengeCount = Math.min(await challenges.count(), CAPTCHA_MAX_CANDIDATE_NODES);
+  let visibleChallengeCount = 0;
+  for (let index = 0; index < challengeCount; index += 1) {
+    const challenge = challenges.nth(index);
+    // Fails CLOSED, and it is the only probe here that had to be argued about. Every other catch in
+    // this function pushes toward "a human is needed"; a visibility probe that swallowed its error
+    // as `false` pushed the other way, so a widget that detached mid-probe (routine during a
+    // reCAPTCHA re-render) would drop the count to zero and let the submit click through under an
+    // uncleared challenge. A guard that cannot see must assume the thing it guards against.
+    if (!await challenge.isVisible().catch(() => true)) continue;
+    const insideBadge = await challenge
+      .evaluate((node, badgeClass) => node.closest(`.${badgeClass}`) !== null, CAPTCHA_BADGE_CLASS, {
+        timeout: CAPTCHA_PROBE_TIMEOUT_MS,
+      })
+      .catch(() => false);
+    if (insideBadge) continue;
+    visibleChallengeCount += 1;
+  }
+  return captchaSnapshotRequiresAttention(responseTokens, visibleChallengeCount);
 }
 
 // Playwright's locator actions AUTO-WAIT, defaulting to 30s. Probing four label sources per field
@@ -1312,9 +1553,45 @@ async function resolveFieldLabel(page: Page, field: Locator): Promise<string | n
   return null;
 }
 
+// Thrown when a challenge is still unresolved at the moment of the final click. A class, not a
+// message prefix, so the runner narrows on `instanceof` the way it already does for
+// FieldDecryptError and ResumeUploadError. The message is plain English because it lands in
+// submission_error, which is read by a person.
+// `stage` exists because the two stop points owe the applicant DIFFERENT sentences, and getting that
+// wrong is the specific mistake this whole feature was built to avoid. At 'at_submit' the form is
+// filled and one check remains. At 'before_fill' the managed probe stopped the run before it touched
+// anything, so the page is blank - telling that applicant "Litos filled everything in, just finish
+// the last step" sends them to a form that does not match what they were told. Exactly the
+// distinction portalHandoffReason and unattendedHandoffReason already draw, for the same reason.
+export type CaptchaStopStage = 'before_fill' | 'at_submit';
+
+export class CaptchaUnresolvedError extends Error {
+  constructor(
+    readonly stage: CaptchaStopStage = 'at_submit',
+    readonly provider: CaptchaProvider = 'unknown',
+    message = 'The submit button was not pressed: a human verification check is still waiting.',
+  ) {
+    super(message);
+    this.name = 'CaptchaUnresolvedError';
+  }
+}
+
 export async function clickFinalSubmit(page: Page): Promise<void> {
   const button = page.getByRole('button', { name: /submit application|submit|apply/i }).last();
   if ((await button.count()) === 0) throw new Error('We could not find the Submit button');
+  // Defence in depth, and it covers a case the call-site gate cannot. portalCanAutoSubmit() stops
+  // the families KNOWN to be gated (JazzHR, BambooHR) before this function is ever reached. It
+  // knows nothing about a Greenhouse or Lever board whose employer switched a challenge on last
+  // week. Pressing submit under an unsolved challenge does not just fail: it submits the applicant
+  // as bot traffic, and the posting can discard the application with no error shown to anyone.
+  //
+  // NOTE: this guard only covers the direct-Playwright path. The managed-Stratus path in
+  // submissionRunner never builds a Page, so it never reaches here. See the CAPTCHA note there.
+  if (await hasUnresolvedCaptcha(page)) {
+    // Identified HERE, while the Page is still open. By the time the error reaches fail() the
+    // browser is closed and the provider is unrecoverable, so it rides along on the error.
+    throw new CaptchaUnresolvedError('at_submit', await detectCaptchaProvider(page));
+  }
   await button.click();
   await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => undefined);
 }

@@ -699,6 +699,7 @@ export function resumeSpecText(spec: ResumeSpec): string {
     spec.school,
     spec.degree,
     spec.grad_date,
+    spec.gpa ?? '',
     spec.coursework,
     ...spec.experience.flatMap((e) => [e.org, e.title, e.date_range, ...e.bullets]),
     ...spec.skills,

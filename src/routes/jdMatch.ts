@@ -5,7 +5,9 @@ import { db } from '../db/index';
 import { profiles } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { resumeSpecText } from '../engine/resumeValidate';
-import { scoreJdMatch, scoreBand, MIN_SCORABLE_TERMS } from '../engine/jdMatch';
+import { scoreJdMatch, scoreBand, MIN_SCORABLE_TERMS, segmentJd } from '../engine/jdMatch';
+import { scorePosting, type CandidateFacts } from '../engine/clauseMatch';
+import { judgeCompetenciesCached } from '../llm/competencyCache';
 import { findGapEvidence } from '../engine/gapEvidence';
 import { checkResumeHealth } from '../engine/resumeHealth';
 import { buildFunnel } from '../engine/funnel';
@@ -75,7 +77,20 @@ const healthBodySchema = z.object({
 const bodySchema = z.object({
   // 60k is well past the longest posting we have seen (the 4.8k Cohere JD in the model's tests is
   // typical); the cap exists so a pasted page of HTML cannot pin the event loop.
-  jd_text: z.string().min(1, 'jd_text is required').max(60_000, 'jd_text is too long to score'),
+  // OPTIONAL, and omitting it is the right call for any caller holding a job_id.
+  //
+  // GET /jobs sends `left(description, 600)`, a preview sized for a list row. A caller that scores
+  // that preview is scoring six hundred characters of company blurb: measured on the live board it
+  // yields two or three requirement terms, every posting falls under MIN_SCORABLE_TERMS, and every
+  // card renders as unscorable. That is exactly what shipped on 2026-08-04 and what a check on a
+  // real account caught - the dashboard drew no number at all, for anyone.
+  //
+  // So the rule mirrors resume_text directly above: absent means "you hold the authority, read it
+  // yourself". The server loads the posting's full stored description from the job row. Present
+  // means the caller has text the server does not have, which is the review screen, holding the
+  // JD captured in the packet at the moment the resume was tailored to it. That text must win: it
+  // is what the resume was written against, and the live row may have been edited since.
+  jd_text: z.string().min(1, 'jd_text cannot be empty').max(60_000, 'jd_text is too long to score').optional(),
   // Optional override: score arbitrary resume text instead of the stored base resume. The tailored
   // per-application resume flows through here, and so does the "what if" editor in the dashboard.
   // .min(1) matters: an empty string is NOT the same as an absent field. Absent falls through to
@@ -108,6 +123,46 @@ const bodySchema = z.object({
     .optional(),
 });
 
+const requirementsSchema = z.object({
+  jd_text: z.string().min(1).max(60_000).optional(),
+  /**
+   * The tailored packet's spec, when the review screen holds one. Falls back to the base resume.
+   *
+   * Same shape as healthBodySchema's, and for the same reason recorded there: a REAL schema rather
+   * than a cast, so a malformed body is a 400 instead of a 500 deep inside the matcher. Education
+   * fields are carried too, because the degree and graduation clauses are checked against them.
+   */
+  spec: z
+    .object({
+      school: z.string().max(300).optional(),
+      degree: z.string().max(300).optional(),
+      grad_date: z.string().max(100).optional(),
+      coursework: z.string().max(1_000).optional(),
+      target_role: z.string().max(200).optional(),
+      experience: z
+        .array(
+          z.object({
+            org: z.string().max(200).default(''),
+            title: z.string().max(200).optional(),
+            date_range: z.string().max(100).optional(),
+            bullets: z.array(z.string().max(2_000)).max(30).default([]),
+          }),
+        )
+        .max(20)
+        .default([]),
+      skills: z.array(z.string().max(120)).max(100).default([]),
+    })
+    .optional(),
+  job_context: z
+    .object({
+      company: z.string().max(200).optional(),
+      role: z.string().max(200).optional(),
+      location: z.string().max(500).nullish(),
+      job_id: z.string().uuid().nullish(),
+    })
+    .optional(),
+});
+
 /**
  * The offices of the posting a saved packet was built for, or null when we cannot tell.
  *
@@ -120,17 +175,108 @@ const bodySchema = z.object({
  * GET /jobs already serves unauthenticated, and one nullable location column of a row the student
  * is holding an application for discloses nothing they were not already shown.
  */
-async function postingLocation(jobId: string | null | undefined): Promise<string | null> {
+async function postingRow(
+  jobId: string | null | undefined,
+): Promise<{ location: string | null; description: string | null } | null> {
   if (!jobId) return null;
   const [row] = await db
-    .select({ location: monitored_jobs.location })
+    .select({
+      location: monitored_jobs.location,
+      // Capped at the same 60k the request schema allows, so a posting cannot arrive here longer
+      // than the engine's own bound just because it skipped the schema on its way in.
+      description: sql<string>`left(${monitored_jobs.description}, 60000)`,
+    })
     .from(monitored_jobs)
     .where(eq(monitored_jobs.id, jobId))
     .limit(1);
-  return row?.location ?? null;
+  return row ? { location: row.location ?? null, description: row.description ?? null } : null;
 }
 
 export async function jdMatchRoutes(fastify: FastifyInstance) {
+  /**
+   * The requirement-by-requirement breakdown, for the REVIEW SCREEN ONLY.
+   *
+   * Deliberately not on /jd-match and deliberately not on a list. This costs one Sonnet call the
+   * first time a posting is read against a resume, and the review screen is the one place a student
+   * is deciding about a single job rather than scanning twenty. Repeat views cost nothing: the
+   * judge is content-addressed cached on (clause, bullets), so re-opening a packet is a database
+   * read. The route reports `judged` and `from_cache` so that stays visible rather than assumed.
+   *
+   * WHAT THIS ANSWERS THAT /jd-match CANNOT. The term scorer sees only requirements that name a
+   * technology, which measured over 600 live postings is 34.6% of the clauses employers write. The
+   * rest - a degree in the right field, five years of something, communicating with partners - were
+   * invisible, and they are disproportionately the ones a student MEETS, so the number ran low in
+   * one direction. This returns every stated clause with a verdict and, when met, the student's own
+   * bullet as the reason.
+   */
+  fastify.post('/jd-match/requirements', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const userId = request.jwtPayload!.userId;
+    const parsed = requirementsSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.issues[0]?.message ?? 'Invalid request body' });
+    }
+
+    const [profile] = await db.select().from(profiles).where(eq(profiles.user_id, userId));
+    const stored = profile?.base_resume_json as ResumeSpec | null | undefined;
+    const spec = (parsed.data.spec as ResumeSpec | undefined) ?? stored;
+    if (!spec) return reply.status(404).send({ error: 'No main resume yet' });
+
+    const posting = await postingRow(parsed.data.job_context?.job_id);
+    const jdText = parsed.data.jd_text ?? posting?.description ?? '';
+    if (!jdText) {
+      return reply
+        .status(400)
+        .send({ error: 'jd_text is required unless job_context.job_id names a posting we hold' });
+    }
+
+    const bullets = spec.experience.flatMap((e) => e.bullets ?? []);
+    const facts: CandidateFacts = {
+      degree: spec.degree,
+      school: spec.school,
+      gradDate: spec.grad_date,
+      resumeText: resumeSpecText(spec),
+      bullets,
+    };
+
+    let judged = 0;
+    let fromCache = 0;
+    const result = await scorePosting(
+      jdText,
+      facts,
+      {
+        ...parsed.data.job_context,
+        location: parsed.data.job_context?.location ?? posting?.location ?? null,
+      },
+      segmentJd,
+      async (b, qs) => {
+        const r = await judgeCompetenciesCached(b, qs);
+        judged = r.judged;
+        fromCache = r.fromCache;
+        return { verdicts: r.verdicts, rejected: r.rejected };
+      },
+    );
+
+    return reply.status(200).send({
+      score: result.score,
+      // Clauses the model could not be asked about are absent from the denominator, so a reader can
+      // see the count they were scored on rather than inferring it.
+      scored: result.clauses.filter((c) => c.verdict !== 'unscoreable').length,
+      met: result.clauses.filter((c) => c.verdict === 'met').length,
+      clauses: result.clauses.map((c) => ({
+        text: c.text,
+        verdict: c.verdict,
+        basis: c.basis,
+        evidence: c.evidence ?? null,
+        missing_terms: c.missingTerms ?? [],
+      })),
+      judged,
+      from_cache: fromCache,
+      // Non-empty means the model returned a verdict it could not ground in a real bullet and it
+      // was thrown away. Surfaced rather than swallowed so a bad run is visible.
+      rejected: result.rejected,
+    });
+  });
+
   fastify.post('/jd-match', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
 
@@ -154,10 +300,24 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
       storedResumeText = resumeSpecText(spec);
     }
 
+    const posting = await postingRow(body.job_context?.job_id);
+
+    /* The caller's text wins when it has one. See the jd_text note on bodySchema: the review screen
+       holds the JD the packet was tailored against, which is the text its number has to be about. */
+    const jdText = body.jd_text ?? posting?.description ?? '';
+    if (!jdText) {
+      // Neither supplied nor resolvable. Distinguished from a thin posting on purpose: this is a
+      // wiring fault, and answering it with the engine's "this posting did not list enough" would
+      // tell a student something about a job when the truth is about us.
+      return reply
+        .status(400)
+        .send({ error: 'jd_text is required unless job_context.job_id names a posting we hold' });
+    }
+
     const resumeText = body.resume_text ?? storedResumeText ?? '';
-    const result = scoreJdMatch(resumeText, body.jd_text, {
+    const result = scoreJdMatch(resumeText, jdText, {
       ...body.job_context,
-      location: body.job_context?.location ?? (await postingLocation(body.job_context?.job_id)),
+      location: body.job_context?.location ?? posting?.location ?? null,
     });
 
     return reply.status(200).send({
@@ -430,7 +590,10 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
     const prep = buildInterviewPrep(
       extractJdTerms(parsed.data.jd_text, {
         ...parsed.data.job_context,
-        location: parsed.data.job_context?.location ?? (await postingLocation(parsed.data.job_context?.job_id)),
+        location:
+          parsed.data.job_context?.location ??
+          (await postingRow(parsed.data.job_context?.job_id))?.location ??
+          null,
       }),
       spec,
     );

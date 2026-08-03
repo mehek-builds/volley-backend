@@ -11,6 +11,7 @@ const bank: ExperienceBankEntry[] = [
     type: 'job',
     org: 'Elemental AI',
     title: 'Engineer',
+    location: 'Dubai, UAE',
     date_range: '2026',
     bullet_variants: ['Built a client handoff tool used by 18 projects.'],
     tags: [],

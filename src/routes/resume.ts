@@ -28,6 +28,7 @@ import {
 import { extractPdfText } from '../lib/pdfText';
 import { PRODUCT_NAME } from '../lib/product';
 import { applyResumePolicy, enforceExperienceBulletFloor, type CandidateEducation } from '../engine/resumePolicy';
+import { warmRequirementCache } from '../engine/warmRequirements';
 import { baseResumeSelectionIssues } from '../llm/baseResume';
 import { deriveEditedTerms } from '../lib/applicationReview';
 
@@ -233,6 +234,9 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       grad_year?: number;
       currently_enrolled?: boolean;
       coursework?: string[];
+      gpa?: string;
+      gpa_scale?: string;
+      school_location?: string;
       full_name?: string;
     } | undefined;
     const education: CandidateEducation = {
@@ -241,6 +245,9 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       grad_date: parsed?.grad_date || (parsed?.grad_year ? String(parsed.grad_year) : undefined),
       grad_year: parsed?.grad_year,
       currently_enrolled: parsed?.currently_enrolled,
+      gpa: parsed?.gpa,
+      gpa_scale: parsed?.gpa_scale,
+      school_location: parsed?.school_location,
       coursework: Array.isArray(parsed?.coursework)
         ? parsed.coursework.filter((course): course is string => typeof course === 'string')
         : [],
@@ -614,6 +621,35 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       // The file is already generated and returned below; failing to log it for audit
       // shouldn't block the student from getting their resume.
     }
+
+    /* Warm the requirement breakdown for this posting while nobody is waiting on it.
+     *
+     * A packet is built ahead of time, minutes or hours before the student opens it, so the one
+     * model call the breakdown needs is free HERE and was 24 seconds of spinner on the review
+     * screen. Bounded and non-fatal by construction: a slow or unavailable model leaves the cache
+     * cold and the student pays for the judgement on open, which is exactly today's behaviour.
+     * It can never fail a generation, and it writes nothing the review screen would not have. */
+    const warm = await warmRequirementCache(
+      body.jd_text,
+      {
+        degree: storedSpec.degree,
+        school: storedSpec.school,
+        gradDate: storedSpec.grad_date,
+        resumeText: [
+          storedSpec.school,
+          storedSpec.degree,
+          storedSpec.grad_date,
+          storedSpec.coursework,
+          ...storedSpec.experience.flatMap((e) => [e.org, e.title, e.date_range, ...(e.bullets ?? [])]),
+          ...(storedSpec.skills ?? []),
+        ]
+          .filter(Boolean)
+          .join(' '),
+        bullets: storedSpec.experience.flatMap((entry) => entry.bullets ?? []),
+      },
+      { company: jobContext.company, role: jobContext.role, job_id: jobContext.job_id ?? null },
+    );
+    if (warm.skipped) fastify.log.warn({ warm }, 'requirement cache not warmed');
 
     return reply.status(200).send({
       ...responseTemplate,

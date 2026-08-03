@@ -16,16 +16,23 @@ import {
   runManagedBrowser,
 } from '../lib/browserbase';
 import {
+  blockersIncludeCaptcha,
+  buildManagedCaptchaProbeActions,
   buildManagedDiscoveryActions,
+  detectCaptchaProvider,
+  captchaProviderForFamily,
   buildManagedPortalActions,
+  CaptchaUnresolvedError,
   clickFinalSubmit,
   detectPortal,
+  managedResultRequiresCaptchaAttention,
   fillPortal,
   hasCoverLetterUpload,
   managedResultHasCoverLetterUpload,
   navigateToApplicationForm,
   portalApplicationUrl,
   isAccountWalledFamily,
+  isCaptchaGatedFamily,
   portalCanAutoSubmit,
   portalHandoffReason,
   readManagedReceipt,
@@ -34,6 +41,7 @@ import {
   type SubmissionPacket,
   type SupportedPortal,
 } from '../lib/portalSubmission';
+import { applyReviewPatch, beginStall } from '../lib/applicationStall';
 import { sanitizeProviderBlockers } from '../lib/fieldLabel';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { resolveBlobUrl } from '../lib/resumeAccess';
@@ -77,8 +85,11 @@ type StandingAuthorization = {
   consentVersion?: string;
 };
 
+// Thin wrapper. The merge and the stall bookkeeping live in applicationStall.ts so that
+// routes/applications.ts, which writes _review directly and knows nothing about stalls, goes
+// through exactly the same code.
 function nextReview(current: ApplicationReviewState, patch: Partial<ApplicationReviewState>): ApplicationReviewState {
-  return { ...current, ...patch, updated_at: new Date().toISOString() };
+  return applyReviewPatch(current, patch);
 }
 
 async function writeReview(row: ResumeRow, review: ApplicationReviewState) {
@@ -483,6 +494,10 @@ async function prepareManaged(
     questions: mergedQuestions,
     cover_letter_supported: coverLetterSupported,
     attention_reason: [...blockers, ...discoveryAttention].join('\n') || undefined,
+    // No stall write here, deliberately. CAPTCHA_BLOCKER is pushed in exactly one place -
+    // fillPortal - and the managed path never calls it, so matching on that string here would be
+    // dead code that reads like coverage. The managed path's real challenge signal is the probe in
+    // submitManaged, which throws CaptchaUnresolvedError and records the stall through fail().
     handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
     submission_error: undefined,
   });
@@ -525,6 +540,18 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       submission_run_id: runId,
       // Nothing was filled on this path, so the wording has to be the one that does not claim it was.
       attention_reason: unattendedHandoffReason(portal) ?? undefined,
+      // Only the CAPTCHA-gated families produce a stall. This branch also catches multi-step and
+      // account-walled portals, and those are waiting on something else entirely - typing them as
+      // human_verification would put "prove you are human" rows in the queue for a wizard that just
+      // needs its last page answered.
+      ...(isCaptchaGatedFamily(portal)
+        ? beginStall(current, {
+          surface: 'server_run',
+          provider: captchaProviderForFamily(portal),
+          stage: 'before_fill',
+          source: 'assumed',
+        })
+        : {}),
       submission_error: undefined,
     }));
     return;
@@ -613,6 +640,19 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       // guarantee and a future change to either cannot quietly reintroduce identifiers.
       attention_reason:
         [...sanitizedBlockers, ...discoveryAttention].join('\n') || undefined,
+      // The only path that OBSERVES a challenge on a board nobody had typed as gated, which makes it
+      // the one that matters most. Without it the stall is written only for JazzHR and BambooHR,
+      // families already known to gate, so the instrumentation could confirm what was already
+      // assumed and could never discover anything new. Provider is read off the live page here, so
+      // it is 'observed'.
+      ...(blockersIncludeCaptcha(sanitizedBlockers)
+        ? beginStall(current, {
+          surface: 'server_run',
+          provider: await detectCaptchaProvider(page),
+          stage: 'at_submit',
+          source: 'observed',
+        })
+        : {}),
       handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
       submission_error: undefined,
     });
@@ -745,6 +785,16 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
       await writeReview(row, nextReview(claimedReview, {
         status: 'needs_attention',
         attention_reason: portalHandoffReason(portal) ?? undefined,
+        // Same family test as the unattended branch above, different stage: this path DID fill the
+        // form, so the applicant is finishing a filled application rather than starting a blank one.
+        ...(isCaptchaGatedFamily(portal)
+          ? beginStall(claimedReview, {
+            surface: 'server_run',
+            provider: captchaProviderForFamily(portal),
+            stage: 'at_submit',
+            source: 'assumed',
+          })
+          : {}),
       }));
       return;
     }
@@ -755,9 +805,37 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
       await holdRevokedSubmission(row, claimedReview);
       return;
     }
+    const applicationUrl = portalApplicationUrl(portal, claimedReview.portal_url!);
+    // There is no Playwright Page on this path - the actions run inside the remote runner - so
+    // neither fillPortal's blocker check nor clickFinalSubmit's guard executes here, and the code
+    // below writes status:'submitted' on a receipt screenshot. Without this probe, portalCanAutoSubmit
+    // would be the only CAPTCHA protection: fine for JazzHR and BambooHR, useless for a Greenhouse or
+    // Lever board whose employer switched a challenge on last week.
+    //
+    // A separate call, because /api/run is stateless and runs the whole list before returning: a
+    // check inside the submit list cannot stop the click it exists to gate. Deliberately placed
+    // ABOVE buildPacket so a stopped application pays for neither the packet nor the fill run, and
+    // asks for no screenshot, so it transfers one attribute rather than a full-page PNG.
+    //
+    // Costs one extra remote session and page load per managed submission. That is the price of the
+    // statelessness, and it is worth naming: the challenge state is read from a DIFFERENT page load
+    // than the one that submits.
+    const captchaProbe = await runManagedBrowser(applicationUrl, buildManagedCaptchaProbeActions(), { screenshot: false })
+      // A probe that cannot run must not take down a submission that would otherwise succeed. It
+      // fails open to the pre-probe behaviour, same as managedResultRequiresCaptchaAttention does.
+      // Only the message is logged, bounded: the runner's error string is remote-controlled and
+      // Playwright-shaped failures embed page markup.
+      .catch((error: unknown) => {
+        const detail = String(error instanceof Error ? error.message : error).slice(0, 200);
+        fastify.log.warn({ applicationId: row.id, detail }, 'CAPTCHA probe failed, continuing unprobed');
+        return null;
+      });
+    if (managedResultRequiresCaptchaAttention(captchaProbe)) {
+      throw new CaptchaUnresolvedError('before_fill');
+    }
     const builtPacket = await buildPacket(row);
     const packet = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
-    const result = await runManagedBrowser(portalApplicationUrl(portal, claimedReview.portal_url!), buildManagedPortalActions(portal, packet, true));
+    const result = await runManagedBrowser(applicationUrl, buildManagedPortalActions(portal, packet, true));
     const receipt = readManagedReceipt(result);
     if (!result.screenshot) throw new Error('Stratus managed browser did not return a receipt screenshot');
     const capturedAt = new Date().toISOString();
@@ -832,12 +910,40 @@ async function fail(row: ResumeRow, error: unknown) {
   const message = error instanceof Error ? error.message : 'Submission runner failed';
   const externalGate = /browserbase|stratus managed browser is not configured|secure browser provider is not configured/i.test(message);
   const uncertainAfterClaim = Boolean(current.submission_claimed_at);
+
+  // Takes precedence over uncertainAfterClaim, and that precedence is the whole point. The claim is
+  // taken at the top of the run, so by the time clickFinalSubmit refuses to press the button this is
+  // ALWAYS "uncertain after claim" - and that branch says the submission was attempted and could not
+  // be verified. Here the opposite is true and known: the click provably did not happen, so nothing
+  // was sent. Telling someone to go check their email for a confirmation of an application that was
+  // never submitted sends them looking for a receipt that cannot exist, and costs the trust to
+  // believe the next message. Same reasoning as portalHandoffReason vs unattendedHandoffReason.
+  //
+  // Derived rather than early-returned so there stays exactly ONE writeReview call here: a second
+  // one drifts the moment a field is added to the other.
+  const captchaError = error instanceof CaptchaUnresolvedError ? error : null;
+  const captchaStop = captchaError?.stage ?? null;
+
   await writeReview(latestRows[0], nextReview(current, {
-    status: uncertainAfterClaim ? 'needs_attention' : externalGate ? 'submit_requested' : 'failed',
+    ...(captchaError
+      ? beginStall(current, {
+        surface: 'server_run',
+        provider: captchaError.provider,
+        stage: captchaError.stage,
+        source: 'observed',
+      })
+      : {}),
+    status: captchaStop || uncertainAfterClaim ? 'needs_attention' : externalGate ? 'submit_requested' : 'failed',
     submission_error: message,
-    attention_reason: uncertainAfterClaim
-      ? 'The final submission was attempted, but Litos could not verify the employer confirmation. Check the portal or your email before trying again.'
-      : current.attention_reason,
+    attention_reason: captchaStop === 'at_submit'
+      ? 'This company’s application page asks you to prove you are human, and that check is still waiting. Litos filled everything in and stopped there, so nothing has been sent. Open it when you have a minute and finish the last step.'
+      : captchaStop === 'before_fill'
+        // Nothing was filled on this path: the probe stopped the run before it touched the form.
+        // Promising a filled form here would send someone to a blank page.
+        ? 'This company asks you to prove you are human before it will take an application, so Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.'
+        : uncertainAfterClaim
+          ? 'The final submission was attempted, but Litos could not verify the employer confirmation. Check the portal or your email before trying again.'
+          : current.attention_reason,
   }));
 }
 

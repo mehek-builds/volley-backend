@@ -77,6 +77,17 @@ const listQuerySchema = z.object({
      it: somebody who said at onboarding that they need sponsorship cannot turn the filter off by
      omitting a query parameter. See sponsorOnlyBoardRequired in lib/sponsorship.ts. */
   sponsor_only: z.enum(['true', 'false']).optional(),
+  /* The five product words resolveEmploymentType emits, as an ENUM rather than free text.
+     Constrained on purpose: the column also holds pass-through values from employers whose spelling
+     the normalizer did not recognise, and letting a caller filter on those would expose one
+     employer's vocabulary as though it were a board-wide category. These four are the ones every
+     posting is mapped into and the only ones the UI offers.
+     Internship is why this parameter exists at all - it was previously renderable on a tile and not
+     queryable, so the one category a student most needs to isolate could only be reached by typing
+     "intern" into the title box and hoping. */
+  employment_type: z
+    .enum(['Full-time', 'Part-time', 'Internship', 'Apprenticeship', 'Contract'])
+    .optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
   offset: z.coerce.number().int().min(0).max(100_000).default(0),
 });
@@ -110,6 +121,37 @@ export const MINIMUM_SURFACED_GROUPED_ROLES = 10_000;
 
 /** The sponsor-only view has a separate floor because it is a strict subset of the full board. */
 export const MINIMUM_SPONSOR_SURFACED_JOBS = 5_000;
+
+/**
+ * THE INTERNSHIP COMMITMENT: 2,000 surfaced internships (Mehek's call, 2026-08-03).
+ *
+ * NOT YET ENFORCED AS A 5xx, AND THE GAP IS THE REASON. Measured the day it was set: the board
+ * surfaced 158 internships and every source we have, probed live at any age, carried 367 in
+ * 36,435 postings - 1.0%. Adding the 26 densest boards we could find took it to ~240. So 2,000 is
+ * roughly 8x the entire supply reachable through the four pollable board APIs today, and wiring it
+ * to a 500 now would make the daily cron permanently red. That would not surface the shortfall; it
+ * would retire the one alarm that currently means "the board is broken NOW", which is exactly the
+ * failure MINIMUM_SURFACED_JOBS exists to prevent. Reported on every run instead, so the distance
+ * is watched daily rather than asserted once.
+ *
+ * WHAT WOULD ACTUALLY CLOSE IT, measured, in descending order:
+ *   1. Seasonality. Internship supply is not flat. On 2026-08-03 the board's own sources carried
+ *      110 internships dated in the trailing week against 23 four weeks earlier. Summer-2027 hiring
+ *      opens Aug-Oct, so this number climbs on its own into the autumn - and falls again by spring,
+ *      which is the reason a year-round floor is the hard version of this problem.
+ *   2. A longer window for internships specifically. An internship req is posted once and stays
+ *      open for months; nobody re-saves it, and Greenhouse's date is updated_at, so it ages out of
+ *      JOB_FRESHNESS_DAYS while still live. That single mechanism costs 54% - 367 open internships
+ *      exist upstream against 170 inside the window.
+ *   3. More density-sourced boards. Real but slow: 1,501 probed tokens returned 26 usable sources.
+ *
+ * DO NOT close the gap by loosening what counts as an internship. That was measured too:
+ * "University Recruiter", "Campus Recruiter" and "Early Career - Family Medicine Physician" are all
+ * live full-time postings that a broader pattern picks up. Inflating this number with full-time
+ * roles is worse than missing it, because a student filters to internships precisely to stop
+ * reading them.
+ */
+export const MINIMUM_SURFACED_INTERNSHIPS = 2_000;
 
 /**
  * REQUIRED HEADROOM OVER THE FLOOR.
@@ -168,8 +210,45 @@ export const TARGET_ROLE_COVERAGE_STATEMENT_TIMEOUT_MS = 5_000;
  */
 export const JOB_FRESHNESS_DAYS = 14;
 
+/**
+ * HOW LONG AN INTERNSHIP STAYS ON THE BOARD. Ninety days, not fourteen.
+ *
+ * An internship req is posted once and stays open for months, and NOBODY EVER RE-SAVES IT. That is
+ * the whole difference. Greenhouse publishes no create date so `posted_at` is its `updated_at`, and
+ * a full-time req is edited often enough to keep re-entering a 14-day window; an internship posted
+ * in the August burst is untouched from then until it closes. So it aged out of the board in
+ * mid-September while still open, and still the most valuable posting on the board for the student
+ * it was written for.
+ *
+ * Measured 2026-08-03, which is what set the number: 367 internships were open across our sources
+ * and only 170 were inside 14 days. The window alone was costing 54% of internship supply.
+ *
+ * THIS DOES NOT SURFACE CLOSED INTERNSHIPS. `is_active` is a separate predicate and the poll's
+ * sweep flips it the moment a posting leaves its board, so a 90-day window can still only show reqs
+ * the employer is listing today. The window governs how long an untouched DATE stays believable,
+ * not how long a dead posting survives.
+ *
+ * Ninety is a season, chosen against the shape of the thing: summer hiring opens Aug-Oct and runs
+ * interviews into the winter, so a shorter window still drops live autumn reqs, while a longer one
+ * starts surfacing reqs whose date can no longer be told apart from abandoned.
+ */
+export const INTERNSHIP_FRESHNESS_DAYS = 90;
+
+/**
+ * The window, which is now two windows.
+ *
+ * Still ONE helper, for the reason the single-window version was: `/jobs`, `/jobs/grouped`,
+ * `/jobs/facets` and `surfacedJobCount()` all call it, and a second copy of this rule is precisely
+ * how the floor check ends up watching a number no visitor ever sees.
+ */
 function freshnessPredicate() {
-  return sql`${monitored_jobs.posted_at} >= now() - (${JOB_FRESHNESS_DAYS} || ' days')::interval`;
+  return sql`(
+    ${monitored_jobs.posted_at} >= now() - (${JOB_FRESHNESS_DAYS} || ' days')::interval
+    or (
+      ${monitored_jobs.employment_type} = 'Internship'
+      and ${monitored_jobs.posted_at} >= now() - (${INTERNSHIP_FRESHNESS_DAYS} || ' days')::interval
+    )
+  )`;
 }
 
 /**
@@ -198,6 +277,19 @@ export const CLOSED_POSTING_RETENTION_DAYS = 2;
 export const PURGE_POSTINGS_OLDER_THAN_DAYS = JOB_FRESHNESS_DAYS * 2;
 
 /**
+ * The same rule for internships, derived from THEIR window rather than the board's.
+ *
+ * Not optional bookkeeping: the purge is what decides whether the longer internship window can
+ * actually be honoured. Purging internships at 28 days while the board is willing to show them for
+ * 90 would delete the row every night and re-fetch it every morning, so the window would read as
+ * "90 days" in the code and behave as 28 in production - and only for the one category the longer
+ * window exists to serve.
+ *
+ * Same doubling, same reason: a full window of slack so the purge can never fight the poller.
+ */
+export const PURGE_INTERNSHIPS_OLDER_THAN_DAYS = INTERNSHIP_FRESHNESS_DAYS * 2;
+
+/**
  * Delete rows that can never be shown again: closed postings past their retention, and anything that
  * aged out of the window before the ingest filter existed.
  *
@@ -221,8 +313,25 @@ export async function purgeExpiredPostings(): Promise<number> {
     /* Outside the window with a full window of slack. The slack matters: deleting exactly at the
        boundary would fight the poller over any posting sitting near it, deleting a row the next run
        re-inserts, forever. A posting still listed by its employer is re-added by the very next poll
-       anyway, so this only ever removes rows nothing is refreshing. */
-    sql`${monitored_jobs.posted_at} < now() - (${PURGE_POSTINGS_OLDER_THAN_DAYS} || ' days')::interval`,
+       anyway, so this only ever removes rows nothing is refreshing.
+
+       Internships are held to their OWN window, which is the half of the longer-window change that
+       is easy to leave out: this predicate is what makes 90 days real rather than something the
+       read path claims while the purge quietly enforces 28. */
+    and(
+      ne(monitored_jobs.employment_type, 'Internship'),
+      sql`${monitored_jobs.posted_at} < now() - (${PURGE_POSTINGS_OLDER_THAN_DAYS} || ' days')::interval`,
+    ),
+    and(
+      eq(monitored_jobs.employment_type, 'Internship'),
+      sql`${monitored_jobs.posted_at} < now() - (${PURGE_INTERNSHIPS_OLDER_THAN_DAYS} || ' days')::interval`,
+    ),
+    /* employment_type is NULL for most of the board (Greenhouse states no type), and `ne` does not
+       match NULL, so the two branches above would together leave every untyped posting immortal. */
+    and(
+      isNull(monitored_jobs.employment_type),
+      sql`${monitored_jobs.posted_at} < now() - (${PURGE_POSTINGS_OLDER_THAN_DAYS} || ' days')::interval`,
+    ),
   ));
   const purged = (result as { rowCount?: number }).rowCount ?? 0;
 
@@ -318,6 +427,7 @@ export async function boardInventoryMetrics(executor: JobMonitorQueryExecutor = 
     surfaced_postings: number;
     surfaced_grouped_roles: number;
     surfaced_sponsor_only_jobs: number;
+    surfaced_internships: number;
   }>(sql`
     select
       count(*) filter (where ${fullBoard})::int as surfaced_postings,
@@ -326,7 +436,10 @@ export async function boardInventoryMetrics(executor: JobMonitorQueryExecutor = 
         ${monitored_jobs.title},
         ${career_page_sources.ats_name}
       )) filter (where ${fullBoard})::int as surfaced_grouped_roles,
-      count(*) filter (where ${sponsorBoard})::int as surfaced_sponsor_only_jobs
+      count(*) filter (where ${sponsorBoard})::int as surfaced_sponsor_only_jobs,
+      count(*) filter (
+        where ${fullBoard} and ${monitored_jobs.employment_type} = 'Internship'
+      )::int as surfaced_internships
     from ${monitored_jobs}
     inner join ${career_page_sources}
       on ${monitored_jobs.source_id} = ${career_page_sources.id}
@@ -336,6 +449,7 @@ export async function boardInventoryMetrics(executor: JobMonitorQueryExecutor = 
     surfacedPostings: Number(row?.surfaced_postings ?? 0),
     surfacedGroupedRoles: Number(row?.surfaced_grouped_roles ?? 0),
     surfacedSponsorOnly: Number(row?.surfaced_sponsor_only_jobs ?? 0),
+    surfacedInternships: Number(row?.surfaced_internships ?? 0),
   };
 }
 
@@ -949,9 +1063,16 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
      * identical to a board that returned nothing, and the run would refuse to deactivate postings
      * that genuinely aged out. "The API returned nothing" and "the API returned nothing FRESH" are
      * different facts and only the first one is a fault. */
+    /* Two cutoffs, matching freshnessPredicate. The ingest gate is the THIRD place the window is
+       enforced (read, purge, here) and the one that decides what exists at all: an internship the
+       poll refuses to store can never be shown by a longer read window, so leaving this at 14 days
+       would make the other two changes inert. The employment type is resolved by the normalizers
+       before this point, which is what lets the gate ask. */
     const cutoff = new Date(Date.now() - JOB_FRESHNESS_DAYS * 86_400_000);
+    const internshipCutoff = new Date(Date.now() - INTERNSHIP_FRESHNESS_DAYS * 86_400_000);
     const fresh = jobs
-      .filter((job) => job.posted_at instanceof Date && job.posted_at >= cutoff)
+      .filter((job) => job.posted_at instanceof Date
+        && job.posted_at >= (job.employment_type === 'Internship' ? internshipCutoff : cutoff))
       /* Same reasoning as the window, and deliberately on the same side of the guard. Two things
          never reach the table: a posting whose description is a placeholder or the title repeated
          (nothing a student can evaluate or the matcher can score), and a posting that declares
@@ -1154,6 +1275,7 @@ export function boardConditions(f: {
   company?: string;
   remote?: 'true' | 'false';
   sponsorOnly?: boolean;
+  employmentType?: string;
   targeting?: JobTargeting;
 }) {
   const conditions: SQL[] = [
@@ -1163,6 +1285,16 @@ export function boardConditions(f: {
     freshnessPredicate(),
   ];
   if (f.sponsorOnly) conditions.push(sponsorOnlyPredicate());
+  /* EXACT MATCH, never ilike. The column holds one normalized product word per posting
+     (resolveEmploymentType is the only writer), so a substring match here would make "Contract"
+     also match "Contractor" if the vocabulary ever grew, and "Internship" is the one value a
+     student filters on expecting a complete, honest set.
+
+     A posting with NO stated type is correctly excluded by this filter rather than swept in as
+     Full-time. That is the same call the tile makes: ~84% of the board states no type because
+     Greenhouse has no such field, and the product refuses to invent one. So filtering to Full-time
+     returns only employers who SAID full-time, and the empty chip stays honest. */
+  if (f.employmentType) conditions.push(eq(monitored_jobs.employment_type, f.employmentType));
   if (f.q) {
     conditions.push(or(ilike(monitored_jobs.title, `%${f.q}%`), ilike(monitored_jobs.description, `%${f.q}%`))!);
   }
@@ -1276,7 +1408,12 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     // polled before this rule existed, or one disabled rather than deleted, still has rows joined to
     // a career_page_sources row whose ats_name is whatever it was then. This is the filter that
     // keeps those out of the board and the dashboard, which both read this one route.
-    const conditions = boardConditions({ ...parsed.data, sponsorOnly, targeting: jobTargeting });
+    const conditions = boardConditions({
+      ...parsed.data,
+      employmentType: parsed.data.employment_type,
+      sponsorOnly,
+      targeting: jobTargeting,
+    });
 
     const selection = {
       id: monitored_jobs.id,
@@ -1536,7 +1673,11 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
        server-rendered with no session - and for them the page's checkbox is the whole answer. */
     const sponsorOnly = (await accountRequiresSponsor(request.jwtPayload?.userId))
       || parsed.data.sponsor_only === 'true';
-    const where = and(...boardConditions({ ...parsed.data, sponsorOnly }));
+    const where = and(...boardConditions({
+      ...parsed.data,
+      employmentType: parsed.data.employment_type,
+      sponsorOnly,
+    }));
 
     /* One row per (company, title, ATS family). The aggregates are chosen so the row still describes
        something true of the whole group: the newest timestamps, every distinct location, and the
@@ -1652,10 +1793,22 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
        validating the whole query object meant an unrelated bad parameter (limit=500) failed the
        parse and silently served unfiltered suggestions - the filter dropping out because of a
        mistake in a field this route does not even look at. */
+    const facetQuery = z.object({
+      sponsor_only: z.enum(['true', 'false']).optional(),
+      /* Job type belongs here for exactly the reason the comment above gives. Filtered to
+         Internship the board is ~2% of its size, so suggesting the top-50 companies of the FULL
+         board would send almost every click to an empty result - the same broken-board reading
+         the sponsorship filter was added here to avoid, only worse because the ratio is bigger. */
+      employment_type: z
+        .enum(['Full-time', 'Part-time', 'Internship', 'Apprenticeship', 'Contract'])
+        .optional(),
+    }).safeParse(request.query).data;
     const sponsorOnly = (await accountRequiresSponsor(request.jwtPayload?.userId))
-      || z.object({ sponsor_only: z.enum(['true', 'false']).optional() })
-        .safeParse(request.query).data?.sponsor_only === 'true';
-    const where = and(...boardConditions({ sponsorOnly }));
+      || facetQuery?.sponsor_only === 'true';
+    const where = and(...boardConditions({
+      sponsorOnly,
+      employmentType: facetQuery?.employment_type,
+    }));
     /* FIFTY of each, ranked by how much of the board they actually account for
        (Mehek, 2026-07-29). The lists used to be 202 companies alphabetically
        and 120 raw location strings: a dropdown nobody scrolls, opening on "AQR"
@@ -1836,6 +1989,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       surfacedPostings: surfaced,
       surfacedGroupedRoles,
       surfacedSponsorOnly,
+      surfacedInternships,
     } = inventory;
     const payload = {
       retired_sources: retired,
@@ -1860,6 +2014,15 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       /* Backward-compatible alias for existing consumers. */
       surfaced_jobs: surfaced,
       surfaced_sponsor_only_jobs: surfacedSponsorOnly,
+      /* Reported every run from the day the commitment was made, while the board is still far
+         under it. A number that only starts being reported once it looks good is a number nobody
+         can show a trend for. See MINIMUM_SURFACED_INTERNSHIPS for why this is not yet a 5xx. */
+      surfaced_internships: surfacedInternships,
+      minimum_surfaced_internships: MINIMUM_SURFACED_INTERNSHIPS,
+      internship_floor_enforced: false,
+      internship_headroom_multiple: Number(
+        (surfacedInternships / MINIMUM_SURFACED_INTERNSHIPS).toFixed(2),
+      ),
       variety,
       classification_coverage: coverage,
       target_role_coverage: targetRoleCoverage,
@@ -1928,6 +2091,18 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         },
         `Job board has thin headroom: ${surfaced} postings and ${surfacedGroupedRoles} grouped roles. `
         + `Widen JOB_FRESHNESS_DAYS or add sources before it reaches the floor.`,
+      );
+    }
+    if (surfacedInternships < MINIMUM_SURFACED_INTERNSHIPS) {
+      request.log.warn(
+        {
+          surfacedInternships,
+          committedInternships: MINIMUM_SURFACED_INTERNSHIPS,
+          windowDays: JOB_FRESHNESS_DAYS,
+        },
+        `Internship inventory is ${surfacedInternships} against a committed ${MINIMUM_SURFACED_INTERNSHIPS}. `
+        + 'Levers, measured, in order: internship-specific freshness window, seasonal ramp, more '
+        + 'density-sourced boards. Never by widening what counts as an internship.',
       );
     }
     if (postingsBelow || groupedRolesBelow || sponsorBelow) {

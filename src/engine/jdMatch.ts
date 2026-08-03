@@ -166,13 +166,42 @@ const HEADING_PATTERNS: Array<{ kind: SectionKind; re: RegExp }> = [
  * "What you'll do:" all survive this, while a 20-word sentence containing the word "requirements"
  * does not.
  */
-/** Strip the decoration a heading arrives wrapped in: "## Requirements", "**Requirements**". */
+/**
+ * Strip the decoration a heading arrives wrapped in: "## Requirements", "**Requirements**".
+ *
+ * IT ALSO FOLDS TYPOGRAPHIC APOSTROPHES TO THE ASCII ONE, and that is not cosmetic. Every
+ * apostrophe in HEADING_PATTERNS is written `'`, because a regex literal in this file is typed on a
+ * keyboard. Real postings are not: a scraped ATS page carries U+2019 (and U+2018, and the modifier
+ * letter U+02BC) because that is what a rich-text editor produces. So "What We're Looking For" and
+ * "What You'll Do" matched, and the curly spellings of the same two headings did not.
+ *
+ * The cost of that near-miss is not the heading. It is EVERY LINE UNDER IT, for the reason set out
+ * at NOISE_BLOCK: an unrecognised heading does not close the section above it. Measured on cresta's
+ * "Software Engineer Intern" (job 6e584f84, 7867 characters, found on a real Pro account
+ * 2026-08-04), the posting opens with "About the Role", which the noise pattern's `^about` rule
+ * correctly zeroes. The next two headings are the curly spellings of "What You'll Do" and "What
+ * We're Looking For", so neither closed it: the entire stated-requirements block sat at weight 0
+ * and the only scorable text left was the four paragraphs of company marketing at the top. The
+ * twelve "requirements we counted" were `AI, Born, CEO, Cox, Google, Greylock, Marriott, Ping,
+ * Sequoia, Stanford AI, United Airlines, Vertex AI`, the student matched `AI` alone, and the review
+ * screen printed 8/100 next to a resume Litos had itself tailored to that posting.
+ *
+ * The salvage pass in extractJdTerms did not catch it either, and could not have: it re-reads noise
+ * sections only when zeroing leaves the posting UNSCORABLE, and twelve investor names clear
+ * MIN_SCORABLE_TERMS comfortably. A confidently wrong number is exactly the failure it cannot see.
+ *
+ * normalizeTerm already folds these characters at the token layer. This is the same fold, at the
+ * layer that decides what those tokens are worth.
+ */
 function headingCore(line: string): string {
   return line
     .trim()
     .replace(/^#{1,6}\s*/, '')
     .replace(/^\*\*|\*\*$/g, '')
     .replace(/^__|__$/g, '')
+    // U+2018 / U+2019 curly quotes and U+02BC modifier letter apostrophe, all written as `'` in
+    // HEADING_PATTERNS. Folded before any pattern is tested, never after.
+    .replace(/[‘’ʼ]/g, "'")
     .trim();
 }
 

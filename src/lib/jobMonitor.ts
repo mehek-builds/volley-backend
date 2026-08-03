@@ -249,17 +249,24 @@ export function normalizeGreenhouseJobs(payload: unknown): NormalizedJob[] {
     const officeLocations = offices
       .map((item) => text((item as Record<string, unknown>)?.location))
       .filter((value): value is string => Boolean(value));
+    /* Cleaned ONCE. resolveEmploymentType has to read decoded text - Greenhouse returns
+       entity-escaped markup, so "As an <strong>intern</strong>" would not match against the raw
+       payload - and cleaning it twice per posting is ~30,000 redundant decodes per poll. */
+    const greenhouseDescription = cleanHtml(job.content);
     return [{
       external_id: id,
       title,
       location,
       department,
-      /* Greenhouse has no employment-type field, so the title is the only evidence. It yields the
-         158 internships, 150 contract and 34 part-time roles on this board and NOTHING for the
-         rest - deliberately, because "the title did not say" is not the same fact as "full-time".
+      /* Greenhouse has no employment-type field, so the title and the body are the only evidence,
+         and NOTHING is the answer for most of the board - deliberately, because "the title did not
+         say" is not the same fact as "full-time".
+         The description is passed because on this board it is sometimes the ONLY evidence: Jane
+         Street posts its summer internships under the same plain titles as its full-time reqs
+         ("Software Engineer", "Quantitative Trader") and only the body says which is which.
          See resolveEmploymentType. */
-      employment_type: resolveEmploymentType(title),
-      description: cleanHtml(job.content),
+      employment_type: resolveEmploymentType(title, undefined, greenhouseDescription),
+      description: greenhouseDescription,
       apply_url: postingUrl,
       posting_url: postingUrl,
       remote: /\bremote\b/i.test(location ?? ''),
@@ -292,7 +299,7 @@ export function normalizeLeverJobs(payload: unknown): NormalizedJob[] {
       department: text(categories.department) ?? text(categories.team),
       /* The employer's own commitment field, EXCEPT that a title saying internship beats it -
          see resolveEmploymentType for why that one exception and nothing else. */
-      employment_type: resolveEmploymentType(title, text(categories.commitment)),
+      employment_type: resolveEmploymentType(title, text(categories.commitment), description),
       description,
       apply_url: applyUrl,
       posting_url: postingUrl,
@@ -319,13 +326,14 @@ export function normalizeAshbyJobs(payload: unknown): NormalizedJob[] {
     const location = text(job.location);
     const postal = ((job.address as Record<string, unknown> | undefined)?.postalAddress
       ?? {}) as Record<string, unknown>;
+    const ashbyDescription = cleanPlain(job.descriptionPlain) || cleanHtml(job.descriptionHtml);
     return [{
       external_id: id,
       title,
       location,
       department: text(job.department) ?? text(job.team),
-      employment_type: resolveEmploymentType(title, text(job.employmentType)),
-      description: cleanPlain(job.descriptionPlain) || cleanHtml(job.descriptionHtml),
+      employment_type: resolveEmploymentType(title, text(job.employmentType), ashbyDescription),
+      description: ashbyDescription,
       apply_url: applyUrl,
       posting_url: postingUrl,
       remote: job.isRemote === true || /\bremote\b/i.test(location ?? ''),
@@ -367,13 +375,14 @@ export function normalizeWorkableJobs(payload: unknown): NormalizedJob[] {
     const topLevelCountry = text(job.country);
     if (topLevelCountry && !portalCountries.includes(topLevelCountry)) portalCountries.push(topLevelCountry);
 
+    const workableDescription = cleanHtml(job.description);
     return [{
       external_id: id,
       title,
       location,
       department: text(job.department) ?? text(job.function),
-      employment_type: resolveEmploymentType(title, text(job.employment_type)),
-      description: cleanHtml(job.description),
+      employment_type: resolveEmploymentType(title, text(job.employment_type), workableDescription),
+      description: workableDescription,
       apply_url: applyUrl,
       posting_url: postingUrl,
       remote: job.telecommuting === true || /\bremote\b/i.test(location ?? ''),

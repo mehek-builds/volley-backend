@@ -132,6 +132,9 @@ export function findPdfTextFidelityIssues(
     { label: 'education school', value: spec.school },
     { label: 'education degree', value: spec.degree },
     { label: 'graduation date', value: spec.grad_date },
+    // A GPA that renders as a different number than it was stored as is a misstated academic claim,
+    // so it gets the same character-for-character check every other printed fact here gets.
+    { label: 'education GPA', value: spec.gpa },
     { label: 'coursework', value: spec.coursework },
     ...spec.experience.flatMap((entry, entryIndex) => [
       { label: `entry ${entryIndex + 1} organization`, value: entry.org },
@@ -246,7 +249,7 @@ function textLines(
 }
 
 function hasEducation(spec: ResumeSpec): boolean {
-  return Boolean(spec.school || spec.degree || spec.grad_date || spec.coursework);
+  return Boolean(spec.school || spec.degree || spec.grad_date || spec.gpa || spec.coursework);
 }
 
 type ResumeContentBlock =
@@ -326,16 +329,22 @@ function splitLineHeight(
   left: string,
   right: string,
   design: ResumeDesignTokens,
+  options: { leftFont?: string } = {},
 ): number {
   const width = usableWidth(design);
+  const leftFont = options.leftFont ?? RESUME_FONTS.bold;
+  const leftGapRatio =
+    leftFont === RESUME_FONTS.italic
+      ? design.typography.lineGapRatio.italic
+      : design.typography.lineGapRatio.bold;
   return Math.max(
     textHeight(
       doc,
       left,
-      RESUME_FONTS.bold,
+      leftFont,
       design.typography.body,
       width * design.geometry.splitLeftRatio,
-      design.typography.lineGapRatio.bold,
+      leftGapRatio,
     ),
     textHeight(
       doc,
@@ -357,17 +366,27 @@ function educationHeight(
   if (!hasEducation(spec)) return 0;
   const width = usableWidth(design);
   let height = sectionHeaderHeight(doc, 'EDUCATION', topGap, design);
-  height += splitLineHeight(doc, spec.school, spec.grad_date, design);
-  if (spec.degree) {
+  // Mirrors drawEducation exactly: school with the place, then degree with the date.
+  height += splitLineHeight(doc, spec.school, spec.school_location ?? '', design);
+  if (spec.degree || spec.grad_date) {
+    height +=
+      design.spacing.detailTop +
+      splitLineHeight(doc, spec.degree, spec.grad_date, design, { leftFont: RESUME_FONTS.italic });
+  }
+  /* Measured because it is drawn. The target-role removal was a lesson in the other direction:
+     measurement and drawing have to move together or the layout search solves for a page that is
+     not the page, and here the error would be an education block one line taller than budgeted,
+     pushing the last entry off a resume that reports itself as fitting. */
+  if (spec.gpa) {
     height +=
       design.spacing.detailTop +
       textHeight(
         doc,
-        spec.degree,
-        RESUME_FONTS.italic,
+        `GPA: ${spec.gpa}`,
+        RESUME_FONTS.regular,
         design.typography.body,
         width,
-        design.typography.lineGapRatio.italic,
+        design.typography.lineGapRatio.regular,
       );
   }
   if (spec.coursework) {
@@ -395,18 +414,12 @@ function entryHeight(
   entryIndex: number,
 ): number {
   const width = usableWidth(design);
-  let height = gapBefore + splitLineHeight(doc, entry.org, entry.date_range, design);
-  if (entry.title) {
+  // Mirrors drawEntrySection exactly: org with the place, then role with the dates.
+  let height = gapBefore + splitLineHeight(doc, entry.org, entry.location ?? '', design);
+  if (entry.title || entry.date_range) {
     height +=
       design.spacing.detailTop +
-      textHeight(
-        doc,
-        entry.title,
-        RESUME_FONTS.italic,
-        design.typography.body,
-        width,
-        design.typography.lineGapRatio.italic,
-      );
+      splitLineHeight(doc, entry.title, entry.date_range, design, { leftFont: RESUME_FONTS.italic });
   }
   for (let bulletIndex = 0; bulletIndex < entry.bullets.length; bulletIndex += 1) {
     const bullet = entry.bullets[bulletIndex];
@@ -865,22 +878,32 @@ function drawSectionHeader(
   doc.y = ruleY + design.spacing.sectionRuleAfter;
 }
 
+/* The second line of an entry uses the SAME split, in italic on the left. Passing the font in
+   rather than writing a near-copy of this function is deliberate: the two lines have to agree about
+   the column ratios and the right-hand alignment forever, and two functions that must not drift are
+   one function with an argument. */
 function drawSplitLine(
   doc: PDFKit.PDFDocument,
   left: string,
   right: string,
   gapBefore: number,
   design: ResumeDesignTokens,
+  options: { leftFont?: string } = {},
 ) {
   const width = usableWidth(design);
+  const leftFont = options.leftFont ?? RESUME_FONTS.bold;
+  const leftGapRatio =
+    leftFont === RESUME_FONTS.italic
+      ? design.typography.lineGapRatio.italic
+      : design.typography.lineGapRatio.bold;
   doc.y += gapBefore;
   const y = doc.y;
   doc
-    .font(RESUME_FONTS.bold)
+    .font(leftFont)
     .fontSize(design.typography.body)
     .text(left, design.page.margin, y, {
       width: width * design.geometry.splitLeftRatio,
-      lineGap: design.typography.body * design.typography.lineGapRatio.bold,
+      lineGap: design.typography.body * leftGapRatio,
     });
   const leftBottom = doc.y;
   doc
@@ -903,15 +926,28 @@ function drawEducation(
   if (!hasEducation(spec)) return;
   const width = usableWidth(design);
   drawSectionHeader(doc, 'EDUCATION', topGap, design);
-  drawSplitLine(doc, spec.school, spec.grad_date, 0, design);
-  if (spec.degree) {
+  /* TWO SPLIT LINES, not one split line plus a full-width line. The place goes on the right of the
+     school and the date drops to the right of the degree, which is how a resume is actually set:
+     the left edge is the institution and the role, the right edge is where and when. Previously the
+     date sat beside the school and the degree line had no right column at all, so the eye had
+     nowhere consistent to read dates from. */
+  drawSplitLine(doc, spec.school, spec.school_location ?? '', 0, design);
+  if (spec.degree || spec.grad_date) {
+    doc.y += design.spacing.detailTop;
+    drawSplitLine(doc, spec.degree, spec.grad_date, 0, design, { leftFont: RESUME_FONTS.italic });
+  }
+  /* Between the degree and the coursework, which is where a student's own resume puts it. Absent is
+     the normal case and prints nothing: a resume that never stated a GPA is not missing one, and
+     the product's standing rule is that it does not keep asking for a number the student chose not
+     to give. */
+  if (spec.gpa) {
     doc.y += design.spacing.detailTop;
     doc
-      .font(RESUME_FONTS.italic)
+      .font(RESUME_FONTS.regular)
       .fontSize(design.typography.body)
-      .text(spec.degree, design.page.margin, doc.y, {
+      .text(`GPA: ${spec.gpa}`, design.page.margin, doc.y, {
         width,
-        lineGap: design.typography.body * design.typography.lineGapRatio.italic,
+        lineGap: design.typography.body * design.typography.lineGapRatio.regular,
       });
   }
   if (spec.coursework) {
@@ -937,16 +973,11 @@ function drawEntrySection(
   const width = usableWidth(design);
   drawSectionHeader(doc, title, topGap, design);
   entries.forEach((entry, index) => {
-    drawSplitLine(doc, entry.org, entry.date_range, index === 0 ? 0 : design.spacing.entryTop, design);
-    if (entry.title) {
+    // Same two-line shape as education: org and place, then role and dates.
+    drawSplitLine(doc, entry.org, entry.location ?? '', index === 0 ? 0 : design.spacing.entryTop, design);
+    if (entry.title || entry.date_range) {
       doc.y += design.spacing.detailTop;
-      doc
-        .font(RESUME_FONTS.italic)
-        .fontSize(design.typography.body)
-        .text(entry.title, design.page.margin, doc.y, {
-          width,
-          lineGap: design.typography.body * design.typography.lineGapRatio.italic,
-        });
+      drawSplitLine(doc, entry.title, entry.date_range, 0, design, { leftFont: RESUME_FONTS.italic });
     }
     for (const bullet of entry.bullets) {
       doc.y += design.spacing.bulletTop;

@@ -353,6 +353,34 @@ export const resolve_cache = pgTable('resolve_cache', {
   cached_at: timestamp('cached_at', { withTimezone: true }).defaultNow().notNull(),
 });
 
+// ---- competency_verdicts ----
+/**
+ * One model judgement about one requirement clause against one resume, cached forever.
+ *
+ * SAFE TO CACHE FOREVER because both inputs are content-addressed. The key is a hash of the
+ * clause text and a hash of the resume bullets, so an edited resume or an edited posting is a
+ * different key rather than a stale hit. Nothing here expires; a row simply stops being asked for.
+ *
+ * WHY IT EXISTS. Judging competency clauses is a Sonnet call, and a student re-opens the same
+ * application review across sessions while the posting and their resume sit still. Without this,
+ * reading a packet twice costs twice. Measured on the live board, a posting states five to eight
+ * competency clauses, so the cache turns a repeat view from one call into none.
+ *
+ * NOT KEYED BY USER, deliberately. The inputs are the clause and the bullets, and two students with
+ * the same bullet would get the same verdict, so keying on user_id would only lower the hit rate.
+ * The quote stored here is the STUDENT'S OWN sentence, already in the row that produced the hash.
+ */
+export const competency_verdicts = pgTable('competency_verdicts', {
+  /** sha256(clause) + ':' + sha256(bullets joined). Content-addressed, so it cannot go stale. */
+  cache_key: text('cache_key').primaryKey(),
+  met: boolean('met').notNull(),
+  /** The bullet the verdict was grounded in, verbatim. Null when unmet. */
+  quote: text('quote'),
+  /** One short sentence for the gap list. */
+  why: text('why'),
+  cached_at: timestamp('cached_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
 // ---- learning_signals ----
 export const learning_signals = pgTable('learning_signals', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -378,6 +406,14 @@ export const experience_bank = pgTable('experience_bank', {
   org: text('org').notNull(),
   title: text('title'),
   date_range: text('date_range'),
+  /* Where the work happened, e.g. "Los Angeles, CA". Nullable and usually null on rows created
+     before 2026-08-04: the parser only started reading it then, and existing rows are backfilled
+     only when the student uploads again. The renderer prints nothing for a null, which is correct
+     rather than a gap - a resume line missing its city is not wrong, it is shorter.
+     GROUNDED LIKE EVERY OTHER FIELD HERE: applyResumePolicy copies location off this row, never
+     off the model's output. A plausible invented city on an employment document is a fabricated
+     fact about where someone worked. */
+  location: text('location'),
   bullet_variants: jsonb('bullet_variants').notNull(), // string[]
   tags: jsonb('tags'), // string[] of skills/keywords this entry supports
   created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
@@ -702,6 +738,15 @@ export const monitored_jobs = pgTable('monitored_jobs', {
   companyIdx: index('monitored_jobs_company_idx').on(t.company_name),
   // The sponsor-only board reads (is_active, sponsorship_status) on every request it serves.
   sponsorshipIdx: index('monitored_jobs_sponsorship_idx').on(t.is_active, t.sponsorship_status, t.job_country),
+  /* Added with the job-type filter and the internship window (2026-08-04). Two query shapes need
+     it and activePostedIdx serves neither:
+       1. `employment_type = 'Internship'` selects ~2% of the table, and without an index on the
+          column that is a full scan on the board's flagship filter.
+       2. freshnessPredicate is now `posted_at >= now()-14d OR (employment_type = 'Internship' AND
+          posted_at >= now()-90d)`. Postgres will not collapse that OR into one range, so
+          activePostedIdx stops being usable as a range scan on EVERY board surface - /jobs,
+          /jobs/grouped, /jobs/facets, surfacedJobCount and boardInventoryMetrics all share it. */
+  typePostedIdx: index('monitored_jobs_type_posted_idx').on(t.is_active, t.employment_type, t.posted_at),
 }));
 
 // ---- ats_adapters ----
@@ -778,3 +823,5 @@ export type NewMonitoredJob = typeof monitored_jobs.$inferInsert;
 export type AtsAdapter = typeof ats_adapters.$inferSelect;
 export type AutofillEvent = typeof autofill_events.$inferSelect;
 export type NewAutofillEvent = typeof autofill_events.$inferInsert;
+export type CompetencyVerdictRow = typeof competency_verdicts.$inferSelect;
+export type NewCompetencyVerdictRow = typeof competency_verdicts.$inferInsert;

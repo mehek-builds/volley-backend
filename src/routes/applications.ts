@@ -4,6 +4,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/index';
+import { settleStall } from '../lib/applicationStall';
+import type { ApplicationReviewState } from '../lib/applicationReview';
 import { readExperienceBank } from '../db/experienceBank';
 import { generated_resumes, profiles, users, type ExperienceBankEntry } from '../db/schema';
 import {
@@ -68,8 +70,16 @@ const extensionOutcomeBodySchema = z.object({
 
 type StoredSpec = Record<string, unknown>;
 
+// Every _review write in this file goes through settleStall, including the six that predate stalls
+// and know nothing about them. Enforcing it HERE rather than at each call site is the whole point:
+// the handoff-complete route moves an application out of needs_attention immediately after the
+// applicant clears a challenge, and a rule that each writer has to remember is a rule that holds
+// only until someone adds the next writer.
 function reviewSpec(review: unknown) {
-  return sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(review)}::jsonb, true)`;
+  const settled = review && typeof review === 'object' && !Array.isArray(review)
+    ? settleStall(review as ApplicationReviewState)
+    : review;
+  return sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(settled)}::jsonb, true)`;
 }
 
 function approvedReviewSpec(review: unknown, approvedAt: string) {
@@ -278,6 +288,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         grad_year?: number;
         currently_enrolled?: boolean;
         coursework?: string[];
+        gpa?: string;
+        gpa_scale?: string;
+        school_location?: string;
         recent_experience_review?: { selected_entry_id?: string | null; continue_with_found?: boolean };
       } | undefined;
       const education = {
@@ -286,6 +299,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         grad_date: parsed?.grad_date || (parsed?.grad_year ? String(parsed.grad_year) : undefined),
         grad_year: parsed?.grad_year,
         currently_enrolled: parsed?.currently_enrolled,
+        gpa: parsed?.gpa,
+        gpa_scale: parsed?.gpa_scale,
+        school_location: parsed?.school_location,
         coursework: Array.isArray(parsed?.coursework) ? parsed.coursework : [],
       };
       const validation = validateResumeSpec(
@@ -330,7 +346,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const updatedSpec = {
         ...rendered.spec,
         _contact: contact,
-        _review: updatedReview,
+        // Through settleStall like every other writer: this route can run on an application that is
+      // waiting on a challenge, and abandoning that wait has to close it rather than carry an open
+      // stall into a status the queue no longer looks at.
+      _review: settleStall(updatedReview as ApplicationReviewState),
         ...(stored._cover_letter ? { _cover_letter: stored._cover_letter } : {}),
         _quality: {
           ...(stored._quality as Record<string, unknown> | undefined),

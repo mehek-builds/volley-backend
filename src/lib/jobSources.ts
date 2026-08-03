@@ -451,10 +451,71 @@ const PHASE_2_UNDERREPRESENTED_ENTRIES: readonly Entry[] = [
   ['Headway', 'ashby', 'headway'],
 ];
 
+/* ── Added 2026-08-03: sourced FOR INTERNSHIP DENSITY ────────────────────────
+ *
+ * Every earlier round picked sources by postings-per-board, and that metric selects
+ * against internships about as hard as any metric could. Measured across all 355
+ * sources on 2026-08-03: 36,435 live postings carry 367 internships, 1.0%. The
+ * biggest boards are the thinnest - Stripe publishes 1 internship in 545 postings,
+ * Databricks 2 in 807, Anthropic 0 in 397 - because a company's main board is its
+ * experienced-hire board.
+ *
+ * DENSITY VARIES ~100x BY SECTOR, and that is the whole lever. Measured live:
+ *   quant / prop trading   Jump 29/105, Virtu 13/48, Akuna 8/34, Optiver 12/177
+ *   space / defense hw     Astranis 23/94, Rocket Lab 32/387
+ *   large tech             Stripe 0.2%, Databricks 0.25%
+ * So probe a quant shop with 40 postings before a platform company with 800.
+ *
+ * 1,501 candidate tokens were probed to find the 26 below; 112 answered (7.5%) and
+ * 26 carried an internship. That hit rate is WORSE than the general-sourcing rounds
+ * and it is not a sign the method is wrong - it is the supply being genuinely thin.
+ * Do not read the low count here as a round that was run lazily.
+ *
+ * Identity was checked per token, not just "did it return postings?" - the failure
+ * that put Superior Alarm Systems on the board under `sas`. All 26 answered as
+ * themselves.
+ */
+const INTERNSHIP_DENSITY_ENTRIES: Entry[] = [
+  // Quant, prop trading and systematic funds. The densest tier that exists.
+  ['Optiver', 'greenhouse', 'optiverus'],
+  ['WorldQuant', 'greenhouse', 'worldquant'],
+  ['Schonfeld', 'greenhouse', 'schonfeld'],
+  ['Squarepoint Capital', 'greenhouse', 'squarepointcapital'],
+  ['TransMarket Group', 'greenhouse', 'transmarketgroup'],
+  ['GSA Capital', 'greenhouse', 'gsacapital'],
+  ['Vatic Labs', 'greenhouse', 'vaticlabs'],
+  ['Engineers Gate', 'greenhouse', 'engineersgate'],
+  ['DV Trading', 'greenhouse', 'dvtrading'],
+  ['Jump Crypto', 'greenhouse', 'jumpcrypto'],
+
+  // Space, defense and robotics. Hardware programs run large intern cohorts.
+  ['Astranis', 'greenhouse', 'astranis'],
+  ['Figure', 'greenhouse', 'figureai'],
+  ['Hermeus', 'lever', 'hermeus'],
+  ['Shield AI', 'lever', 'shieldai'],
+  ['Vannevar Labs', 'greenhouse', 'vannevarlabs'],
+  ['Skydio', 'ashby', 'skydio'],
+  ['Motional', 'greenhouse', 'motional'],
+
+  // Advanced manufacturing and life sciences.
+  ['Formlabs', 'greenhouse', 'formlabs'],
+  ['Protolabs', 'lever', 'protolabs'],
+  ['Twist Bioscience', 'greenhouse', 'twistbioscience'],
+
+  // Infra, security and AI with live intern reqs.
+  ['Zscaler', 'greenhouse', 'zscaler'],
+  ['Etched', 'ashby', 'etched'],
+  ['Snowflake', 'ashby', 'snowflake'],
+  ['Cohere', 'ashby', 'cohere'],
+  ['Together AI', 'greenhouse', 'togetherai'],
+  ['Airwallex', 'ashby', 'airwallex'],
+];
+
 const ENTRIES: readonly Entry[] = [
   ...BASE_ENTRIES,
   ...PHASE_2_WORKABLE_ENTRIES,
   ...PHASE_2_UNDERREPRESENTED_ENTRIES,
+  ...INTERNSHIP_DENSITY_ENTRIES,
 ];
 
 function careerUrl(ats: JobSourceInput['ats_name'], token: string): string {

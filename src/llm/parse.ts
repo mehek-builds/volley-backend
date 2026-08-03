@@ -7,6 +7,10 @@ export interface ParsedProfile {
   experience: Array<{
     company: string;
     title: string;
+    /* Transcribed from the page, never inferred: see the "location" rule in the system prompt.
+       Optional because every parse predating 2026-08-04 lacks it, and an older profile is not
+       malformed for having no city on a job. */
+    location?: string;
     start: string;
     end: string;
     description: string;
@@ -40,11 +44,13 @@ export interface ParsedProfile {
   leadership?: Array<{
     organization: string;
     title: string;
+    location?: string;
     start: string;
     end: string;
     description: string;
   }>;
   school: string;
+  school_location?: string;
   degree?: string;
   grad_date?: string;
   grad_year: number;
@@ -95,12 +101,13 @@ export const SYSTEM_PROMPT = `You are a resume parser. Extract structured inform
 The JSON must match this exact shape:
 {
   "full_name": string,
-  "experience": [{"company": string, "title": string, "start": string, "end": string, "description": string}],
+  "experience": [{"company": string, "title": string, "location": string, "start": string, "end": string, "description": string}],
   "skills": [string],
   "languages": [string],
   "projects": [{"name": string, "role": string, "date_range": string, "description": string}],
-  "leadership": [{"organization": string, "title": string, "start": string, "end": string, "description": string}],
+  "leadership": [{"organization": string, "title": string, "location": string, "start": string, "end": string, "description": string}],
   "school": string,
+  "school_location": string,
   "degree": string,
   "grad_date": string,
   "grad_year": number,
@@ -116,6 +123,14 @@ The JSON must match this exact shape:
 Rules:
 - "full_name" is the applicant's name from the resume header, not a company or school name
 - "end" should be "Present" if the role is current
+- "location" is the place printed beside that role, copied verbatim, e.g. "Los Angeles, CA" or
+  "London, United Kingdom". TRANSCRIBE, NEVER INFER. Do not derive it from the company's
+  headquarters, from where the company is famous for being, from the school, or from anywhere else
+  on the page. A resume that prints no place for a role gets an empty string, and an empty string
+  is the correct answer far more often than a guessed city. Where someone worked is a checkable
+  claim on an employment document.
+- "school_location" follows the same rule for the education entry: the place printed beside the
+  school, verbatim, or an empty string.
 - "description" must keep the resume's own bullet structure: one printed bullet per line, separated
   by a newline character, with the bullet marker itself removed. Do not merge separate bullets into
   a paragraph. Each bullet is a distinct achievement, and running them together destroys the only
