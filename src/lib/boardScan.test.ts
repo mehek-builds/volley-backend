@@ -130,6 +130,36 @@ test('a quiet board that reads short gets no churn allowance at all', async () =
   );
 });
 
+/**
+ * A full scan is hundreds of requests. One flaky response must not put a red X on an unrelated PR,
+ * which is the same failure class the churn handling exists to remove.
+ */
+test('a transient page failure is retried rather than failing the scan', async () => {
+  const board = fakeBoard({ startRows: 1_500 });
+  let failures = 0;
+  const readPage = async (offset: number, limit: number) => {
+    if (offset === 500 && failures < 2) {
+      failures++;
+      throw new Error('GET /jobs answered 502 at offset 500');
+    }
+    return board.readPage(offset, limit);
+  };
+
+  const scan = await scanBoard({ readPage, idOf });
+  assert.equal(failures, 2, 'the flaky page must actually have failed twice');
+  assert.equal(scan.rows.length, 1_500, 'the retried page still lands in the result');
+});
+
+test('an endpoint that is genuinely down still fails the scan', async () => {
+  const readPage = async () => {
+    throw new Error('GET /jobs answered 503 at offset 0');
+  };
+  await assert.rejects(
+    () => scanBoard({ readPage, idOf }),
+    (error: unknown) => /503/.test((error as Error).message),
+  );
+});
+
 test('a row without a usable id is rejected rather than counted', async () => {
   const readPage = async () => ({ jobs: [{ id: '' } as Row], total: 1 });
   await assert.rejects(

@@ -54,7 +54,7 @@ const MAX_ROWS = 100_000;
 const FAVICON_CONCURRENCY = 12;
 const FAVICON_ENDPOINT = 'https://www.google.com/s2/favicons';
 
-async function readPage(offset, limit) {
+async function readPage(offset, limit = PAGE_SIZE) {
   const res = await fetch(`${API}/jobs?limit=${limit}&offset=${offset}`);
   if (!res.ok) throw new Error(`GET /jobs answered ${res.status} at offset ${offset}`);
   const body = await res.json();

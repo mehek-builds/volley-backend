@@ -34,6 +34,8 @@ export interface ScanOptions<Row> {
   topupRounds?: number;
   /** Full re-reads allowed when a mid-scan purge shifts offsets backwards. */
   scanAttempts?: number;
+  /** Tries per individual page before the whole scan gives up. */
+  pageAttempts?: number;
   /** Largest share of the board the scan may fail to reach and still report. */
   maxShortfall?: number;
   onRetry?: (reason: string) => void;
@@ -51,6 +53,12 @@ export const DEFAULT_MAX_OFFSET = 100_000;
 export const DEFAULT_PAGE_CONCURRENCY = 12;
 export const DEFAULT_TOPUP_ROUNDS = 3;
 export const DEFAULT_SCAN_ATTEMPTS = 3;
+/**
+ * A full scan is ~210 requests against a Hobby-tier deployment. Without a per-page retry a single
+ * transient 502 fails the whole check, which is the same spurious-CI-failure class this module
+ * exists to remove. Matches the two-try retry faviconResponse already uses in the caller.
+ */
+export const DEFAULT_PAGE_ATTEMPTS = 3;
 /**
  * 0.5%. Small enough that it cannot carry a board across the 75% logo-coverage floor, which is the
  * only verdict taken on top of this scan.
@@ -70,9 +78,33 @@ function settle<Row>(options: ScanOptions<Row>): Settled<Row> {
     pageConcurrency: options.pageConcurrency ?? DEFAULT_PAGE_CONCURRENCY,
     topupRounds: options.topupRounds ?? DEFAULT_TOPUP_ROUNDS,
     scanAttempts: options.scanAttempts ?? DEFAULT_SCAN_ATTEMPTS,
+    pageAttempts: options.pageAttempts ?? DEFAULT_PAGE_ATTEMPTS,
     maxShortfall: options.maxShortfall ?? DEFAULT_MAX_SHORTFALL,
     onRetry: options.onRetry,
   };
+}
+
+/**
+ * One page, retried on transport failure.
+ *
+ * A full scan is hundreds of requests; without this, one flaky response fails the run and puts a
+ * red X on an unrelated PR, which is the exact failure this module exists to stop. A permanently
+ * broken endpoint still fails, just after pageAttempts tries rather than one.
+ */
+async function readPageWithRetry<Row>(
+  config: Settled<Row>,
+  offset: number,
+  limit: number,
+): Promise<BoardPage<Row>> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= config.pageAttempts; attempt++) {
+    try {
+      return await config.readPage(offset, limit);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
 }
 
 /**
@@ -95,7 +127,7 @@ async function sweep<Row>(
   let highest = 0;
   for (let i = 0; i < offsets.length; i += config.pageConcurrency) {
     const batch = offsets.slice(i, i + config.pageConcurrency);
-    const pages = await Promise.all(batch.map((offset) => config.readPage(offset, config.pageSize)));
+    const pages = await Promise.all(batch.map((offset) => readPageWithRetry(config, offset, config.pageSize)));
     for (const page of pages) {
       for (const row of page.jobs) {
         const id = config.idOf(row);
@@ -147,7 +179,7 @@ async function scanOnce<Row>(config: Settled<Row>): Promise<Attempt<Row>> {
       highest = Math.max(highest, seen.highest);
     }
 
-    const probe = await config.readPage(0, 1);
+    const probe = await readPageWithRetry(config, 0, 1);
     lowest = Math.min(lowest, probe.total);
     highest = Math.max(highest, probe.total);
 
