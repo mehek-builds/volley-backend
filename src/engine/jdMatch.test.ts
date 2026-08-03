@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
-  MIN_SCORABLE_TERMS as _MIN,
   segmentJd,
   extractJdTerms,
   normalizeTerm,
@@ -21,6 +20,9 @@ import {
  * that, these tests fail rather than the dashboard quietly showing a number that means nothing.
  */
 const MIN_SEPARATION = 30;
+
+/** Mirrors STATED_KINDS in jdMatch.ts: the sections where an employer states what the job needs. */
+const STATED_KINDS_FOR_TEST = new Set(['required', 'preferred', 'responsibilities']);
 
 // A realistic software JD, headings and all, including the noise sections that poisoned the old
 // denominator (benefits, EEO, about us).
@@ -219,9 +221,15 @@ You have some first hand experience with SQL and/or Python
     const weightOf = (term: string) => terms.find((t) => t.term === term)?.weight;
     assert.equal(weightOf('sql'), 1, 'SQL is stated under "What we look for"');
     assert.equal(weightOf('python'), 1, 'Python is stated under "What we look for"');
-    for (const roster of ['genie', 'unity catalog', 'ai platform', 'streaming']) {
-      const w = weightOf(roster);
-      if (w !== undefined) assert.ok(w < 1, `"${roster}" names a team, so it cannot weigh as much as a requirement`);
+    // No `if (w !== undefined)` guard here, deliberately: as a guard this whole loop degraded to a
+    // no-op the moment a roster term stopped being extracted, which is exactly when it stops
+    // proving anything. Asserted as a relation instead, so it holds whether or not the roster term
+    // survives extraction at all.
+    for (const roster of ['genie', 'unity catalog', 'streaming']) {
+      assert.ok(
+        (weightOf(roster) ?? 0) < weightOf('sql')!,
+        `"${roster}" names a team, so it cannot weigh as much as a stated requirement`,
+      );
     }
 
     // required_coverage is null whenever nothing parses as required, which silently disables the
@@ -309,7 +317,7 @@ Reasonable Accommodations are available on request.
     // The deny-lists are checked BEFORE the lexicon, so a skill whose singular collides with one of
     // them would vanish from every posting that states it. This asserts the collision set is empty
     // rather than assuming it, because both lists are expected to keep growing.
-    const src = readFileSync(new URL('./jdMatch.ts', import.meta.url), 'utf8');
+    const src = readFileSync(path.join(__dirname, 'jdMatch.ts'), 'utf8');
     const grab = (name: string) =>
       new Set(new RegExp(`const ${name} = new Set\\(\\s*\`([^\`]*)\``).exec(src)![1].split(/\s+/).filter(Boolean));
     const lexicon = grab('SKILL_LEXICON');
@@ -553,6 +561,16 @@ describe('scoreBand', () => {
 
     // The top band sits above the on-field p95 of 33, so it stays rare enough to be worth reading.
     assert.equal(scoreBand(33).tone, 'fair', 'p95 of a student\'s own field is not automatically strong');
+
+    // Exact cut-offs. Without these the constants only had to land somewhere in an open range:
+    // BAND_STRONG could drift 40 -> 45 with the suite still green, and the labels themselves were
+    // pinned by nothing at all, so renaming "Solid match" back to the old "Partial match" passed.
+    assert.equal(scoreBand(9).label, 'Not much overlap');
+    assert.equal(scoreBand(10).label, 'Some overlap');
+    assert.equal(scoreBand(21).label, 'Some overlap');
+    assert.equal(scoreBand(22).label, 'Solid match');
+    assert.equal(scoreBand(39).label, 'Solid match');
+    assert.equal(scoreBand(40).label, 'Strong match');
   });
 
   test('the requirements gate still outranks the band', () => {
@@ -665,6 +683,73 @@ Requirements
     const survivors = prose.filter((p) => keys.includes(p));
     assert.deepEqual(survivors, [], 'a posting that states its requirements is not scored on its prose');
     assert.ok(keys.length < EMPHASIS_LIMIT, 'the denominator is allowed to be smaller than the cap');
+  });
+
+  test('a four-term posting is scored, not refused', () => {
+    // MIN_SCORABLE_TERMS was 6 and is 4, and nothing pinned it: reverting the constant left the
+    // whole suite green, because every other test refers to it symbolically. The literal is
+    // asserted here because 4 is the number preferStatedRequirements needs in order to fire on a
+    // posting that states four things, which is the case the whole pass exists for.
+    assert.equal(MIN_SCORABLE_TERMS, 4);
+    assert.ok(MIN_SIGNAL_TERMS < MIN_SCORABLE_TERMS, 'the refusal floor must sit above the signal floor');
+
+    const jd = `What we look for:
+- First hand experience with SQL and/or Python
+- Familiarity with Docker
+- Comfortable with Git
+`;
+    const terms = extractJdTerms(jd);
+    assert.equal(terms.length, 4, 'four stated requirements');
+    const scored = scoreJdMatch('Python and Docker and Git and SQL.', jd);
+    assert.equal(scored.scorable, true, 'four terms is enough to be honest about');
+    assert.notEqual(scored.score, null);
+  });
+
+  test('the shrink stops rather than pushing a posting into refusal', () => {
+    // Both halves of the keepsScorable guard were unpinned: replacing either with `true` left the
+    // suite green, because the only fallback test used a posting whose stated set was EMPTY, which
+    // passes under either mutation. These two cover the real case, where the employer stated
+    // something but not enough to stand on its own.
+
+    // (a) a stated set too small to stand alone. Three stated terms, ALL hard signal, so the
+    // signal half of the guard passes. Prose sits ABOVE the heading, because a heading closes the
+    // section before it and a blank line does not.
+    //
+    // This pins the OUTCOME, not the count half of isScorable. Mutating that half to `true` does
+    // not fail this test and cannot: the salvage pass in extractJdTerms re-extracts without
+    // preferStatedRequirements and its larger result wins, so the prose returns by another route.
+    // See the note beside isScorable. What this test guarantees is the behaviour a student sees.
+    const tooFewStated = `We are a team that loves Datadog and Splunk and Grafana and Sentry and Snowplow every day.
+
+What we look for:
+- Experience with Kubernetes, Terraform and Kafka
+`;
+    const statedA = extractJdTerms(tooFewStated).filter((t) => STATED_KINDS_FOR_TEST.has(t.kind));
+    assert.equal(statedA.length, 3, 'fixture must sit just under MIN_SCORABLE_TERMS');
+    assert.equal(statedA.filter((t) => t.signal).length, MIN_SIGNAL_TERMS, 'and must clear the signal half');
+    const keysA = extractJdTerms(tooFewStated).map((t) => t.term);
+    assert.ok(keysA.includes('kubernetes'), 'the stated requirements survive');
+    assert.ok(
+      keysA.includes('datadog') && keysA.includes('splunk'),
+      'body prose is retained when the stated set alone is too small to score',
+    );
+
+    // (b) the SIGNAL half, isolated. Enough stated terms to clear the count, but only proper-noun
+    // ones, so the posting would refuse if the prose were dropped.
+    const tooLittleSignal = `We are a team that loves Python and Docker and Kubernetes and Terraform and Postgres.
+
+What we look for:
+- Familiarity with Contentful Delivery, Optimizely Feature, Amplitude Experiment and Braze Canvas
+- Comfortable with Segment Protocols and Iterable Journeys
+`;
+    const statedB = extractJdTerms(tooLittleSignal).filter((t) => STATED_KINDS_FOR_TEST.has(t.kind));
+    assert.ok(statedB.length >= MIN_SCORABLE_TERMS, 'fixture must clear the count half');
+    assert.ok(statedB.filter((t) => t.signal).length < MIN_SIGNAL_TERMS, 'and must fail the signal half');
+    const keysB = extractJdTerms(tooLittleSignal).map((t) => t.term);
+    assert.ok(
+      keysB.includes('python') && keysB.includes('docker'),
+      'body prose is retained when the stated set carries too little hard signal',
+    );
   });
 
   test('prose still carries the whole denominator when nothing was stated', () => {

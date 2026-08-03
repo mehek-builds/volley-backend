@@ -507,7 +507,7 @@ const ACRONYM = /^[A-Z]{2,5}$/;
  */
 const NON_REQUIREMENT_ACRONYMS = new Set(
   `usd cad eur gbp aud inr chf jpy sgd aed
-pto ote oe rsu esop hsa fsa hra cobra fmla pfl ltd std
+pto ote rsu esop hsa fsa hra cobra fmla pfl ltd std
 ms bs ba bsc msc beng meng
 eeo ada faq tbd asap eod eta`
     .split(/\s+/)
@@ -663,10 +663,11 @@ function inLexicon(t: string): boolean {
  * than assumed. It is empty today, and the test is what keeps it that way when either list grows.
  */
 function isDenied(t: string): boolean {
+  // Exact match first: it is the common case (every stopword), and it lets the singular() call and
+  // its four regexes be skipped entirely rather than paid on every token of every posting.
+  if (GENERIC_STOPWORDS.has(t) || BOILERPLATE.has(t)) return true;
   const s = singular(t);
-  return (
-    GENERIC_STOPWORDS.has(t) || BOILERPLATE.has(t) || GENERIC_STOPWORDS.has(s) || BOILERPLATE.has(s)
-  );
+  return GENERIC_STOPWORDS.has(s) || BOILERPLATE.has(s);
 }
 
 /**
@@ -729,8 +730,9 @@ function isSpecific(
   if (WEB_ADDRESS.test(token)) return false;
   if (DOTTED_INITIALISM.test(token)) return false;
   if (isDenied(t)) return false;
+  if (NON_REQUIREMENT_ACRONYMS.has(t)) return false;
   if (inLexicon(t)) return true;
-  if (ACRONYM.test(token)) return !NON_REQUIREMENT_ACRONYMS.has(t);
+  if (ACRONYM.test(token)) return true;
   if (TECH_MARKER.test(token)) return true;
   // Proper-noun cased: product and vendor names we do not carry in the lexicon (a long tail we
   // will never finish enumerating).
@@ -753,6 +755,11 @@ function isSpecific(
   // work-authorization clause and the application-process copy are a closed and stable set. The
   // earlier failure this file records - "POSITIONAL_OPENERS alone was a deny-list against the open
   // set of English verbs, and it lost" - does not apply: verbs are open, boilerplate is not.
+  //
+  // SIX OF THE SEVEN ABOVE ARE NOW IN BOILERPLATE. `state` is deliberately NOT, even though it was
+  // measured at 23: "state management" is a real requirement on front-end postings, and the same
+  // word carries both senses. It is caught by the lowercase-occurrence rule below instead, on every
+  // posting that also writes "state" in prose, which is most of them.
   if (/^[A-Z][a-zA-Z]{2,}$/.test(token)) {
     // The posting spells this word lowercase somewhere else, so the capital here is decoration.
     // Applies at every position: it is evidence about the word, not about where it sits.
@@ -1073,10 +1080,42 @@ function preferStatedRequirements(list: JdTerm[]): JdTerm[] {
   // number it replaced. Same principle as "the cap never turns a scorable posting into an
   // unscorable one", and measured over 600 live postings it is the difference between 16.7% of
   // resume/posting pairs refusing to score and 13.5%.
-  const keepsScorable =
-    stated.length >= MIN_SCORABLE_TERMS && stated.filter((t) => t.signal).length >= MIN_SIGNAL_TERMS;
-  return keepsScorable ? stated : list;
+  return isScorable(stated) ? stated : list;
 }
+
+/**
+ * The one definition of "enough to be honest about".
+ *
+ * Written twice before this: once here in the positive and once in scoreJdMatch in the negative.
+ * The comment above ties preferStatedRequirements' correctness to matching scoreJdMatch's refusal
+ * exactly, which is a property two hand-copied expressions cannot keep. A third condition added to
+ * one of them would have diverged silently, and the symptom would be a posting this pass declares
+ * safe to shrink that the scorer then refuses to score.
+ */
+function isScorable(terms: JdTerm[]): boolean {
+  return (
+    terms.length >= MIN_SCORABLE_TERMS &&
+    terms.filter((t) => t.signal).length >= MIN_SIGNAL_TERMS
+  );
+}
+
+/*
+ * ONLY THE SIGNAL HALF OF isScorable IS OBSERVABLE THROUGH preferStatedRequirements, and it is
+ * worth knowing which half is load-bearing before either is edited.
+ *
+ * Verified by mutation 2026-08-03: replacing `terms.filter(signal).length >= MIN_SIGNAL_TERMS`
+ * with `true` fails the suite, and replacing `terms.length >= MIN_SCORABLE_TERMS` with `true`
+ * does NOT. The count half is masked downstream. If the stated set comes back under
+ * MIN_SCORABLE_TERMS, extractJdTerms' own `terms.length >= MIN_SCORABLE_TERMS` gate fails on the
+ * next line, the salvage pass re-extracts WITHOUT preferStatedRequirements, and the larger
+ * body-inclusive set wins the `salvaged.length > terms.length` comparison. The prose comes back
+ * either way.
+ *
+ * The count half is kept because it states the intent at the point the decision is made rather
+ * than relying on a downstream accident, and because the salvage pass exists for an unrelated
+ * reason (zero-weight noise sections) and could be narrowed without anyone thinking about this.
+ * But nobody should read it as the thing protecting the refusal path: that is the signal half.
+ */
 
 /**
  * How many requirements the score is computed over, however long the posting is.
@@ -1129,7 +1168,8 @@ function preferStatedRequirements(list: JdTerm[]): JdTerm[] {
  * hard signal above section weight, on the theory that the proper-noun rule is the loose one and so
  * should be what gets cut. Measured per resume rather than in aggregate, that was wrong, and badly:
  *
- *   - isHardSignal is `lexicon OR ACRONYM OR TECH_MARKER`, and ACRONYM is any 2-5 letter capital
+ *   - isHardSignal is `lexicon OR ACRONYM OR TECH_MARKER`, minus NON_REQUIREMENT_ACRONYMS and
+ *     dotted initialisms, and ACRONYM is any 2-5 letter capital
  *     run. Acronyms are DENSE in exactly the prose this cap exists to remove: benefits tables,
  *     regulator names, country codes, requisition ids. Sorting on signal promoted all of it.
  *   - On non-technical postings the lexicon has almost nothing to say, so signal-first ranking had
@@ -1445,8 +1485,7 @@ export function scoreJdMatch(
 ): JdMatchResult {
   const terms = extractJdTerms(jdText, context);
 
-  const signalCount = terms.filter((t) => t.signal).length;
-  if (terms.length < MIN_SCORABLE_TERMS || signalCount < MIN_SIGNAL_TERMS) {
+  if (!isScorable(terms)) {
     return {
       score: null,
       scorable: false,
@@ -1490,54 +1529,44 @@ export function scoreJdMatch(
 
 /**
  * The band label shown next to the number. Thresholds are set against what this scorer actually
- * produces (see jdMatch.test.ts), not copied from Jobscan's 75-80% advice, which is calibrated to a
- * completely different denominator and would mislabel a good Litos resume as failing.
- *
- * THE THRESHOLDS DID NOT MOVE FOR ISSUE-023, and that is the point of fixing the denominator
- * instead. They now sit against a bounded set rather than an unbounded one, because the cap holds
- * the requirement count at EMPHASIS_LIMIT or fewer.
+ * produces, not copied from Jobscan's 75-80% advice, which is calibrated to a completely different
+ * denominator and would mislabel a good Litos resume as failing.
  *
  * THE SCORE AND THE CAPTION ARE NOT THE SAME ARITHMETIC, and a reader of this file needs to know
  * that before reasoning about the anchors below. scoreJdMatch accumulates got/total by SECTION
  * WEIGHT (1 required, 0.7 responsibilities, 0.6 preferred, 0.4 body), while MatchScore.tsx renders
  * an UNWEIGHTED "N of M". They coincide only when every kept term carries the same weight.
  *
- * So the anchors are stated for the equal-weight case, which is the one a reader can check:
+ * So the anchors are stated for the equal-weight case, which is the one a reader can check. The
+ * denominator is no longer always twelve (see preferStatedRequirements), so these are stated per
+ * term rather than per twelfth:
  *
- *   65  is 8 of 12 when the twelve are equally weighted. "You have most of what they emphasise."
- *   40  is 5 of 12 when the twelve are equally weighted. "You have some of it."
+ *   40  is 2 of 5, or 5 of 12, when the terms are equally weighted. "You have a good part of it."
+ *   22  is 1 of 5, or 3 of 12.                                     "You have some of it."
+ *   10  is 1 of 10.                                                "There is a thread here."
  *
  * When the weights differ the same COUNT spans a range, and the spread is wide enough to matter.
  * On the SWE_JD fixture, which keeps 8 terms at weight 1 and 4 at 0.7 for a total of 10.8, "8 of
- * 12" is 74 if the eight are the weight-1 terms and 63 if they are not, so it straddles the
- * "Strong match" line. That is intended: covering the Requirements block is worth more than
- * covering the same number of Responsibilities lines, which is the whole reason for the weights.
- * It does mean the caption cannot be used to predict the band, and neither number is wrong.
+ * 12" is 74 if the eight are the weight-1 terms and 63 if they are not. Both are Strong match
+ * today, but the same spread straddles the line lower down: "5 of 12" is 46 or 32, which is Strong
+ * or Solid depending only on WHICH five. That is intended, because covering the Requirements block
+ * is worth more than covering the same number of Responsibilities lines, which is the whole reason
+ * for the weights. It does mean the caption cannot be used to predict the band, and neither number
+ * is wrong.
  *
- * Measured after the fix, over the 400 newest active postings against three real base resumes:
- * "Strong match" fires on 2 of 1116 scorable pairs, and both are the right ones. Both belong to the
- * USC CS student carrying React/TypeScript/Node/Postgres/Docker: bitgo's Backend Engineer E2 at 68
- * (8 of 12) and OpenAI's Software Engineer, API Multimodal at 70 (4 of 6).
- *
- * The second one is worth reading twice, because it is the weighting and the caption coming apart
- * exactly as described above: 4 of 6 scores HIGHER than 8 of 12. That posting states six
- * requirements and the student has four of the heaviest, which is a better fit than eight of twelve
- * and is what the number is supposed to say.
- *
- * Narrowed to that student's own field, 75 software-titled postings run p50=23, p75=33, p90=42,
- * max=68, a real spread rather than the flat line the old denominator produced. Reachable, and
- * still meaning what it says.
- *
- * WHY THE BOTTOM BAND WAS RENAMED. "Weak match" is the only one of these four labels that grades
+ * WHY THE BOTTOM BAND IS WORDED AS IT IS. "Weak match" was the only one of these labels that graded
  * the STUDENT rather than describing the pair, and on a board where most postings are in someone
  * else's field it is the one they read most. The number underneath it is honest and should not be
  * inflated to spare anyone: a first-year undergraduate really does not match a Staff Engineer role.
  * But the honest content of a low score is "this posting asks for things that are not on your
  * resume", not "you are weak", and the label is free to say the true thing in the words that are
  * actually about the job. The tone stays 'weak', so nothing about the styling changes.
- */
-/**
- * Band thresholds, calibrated 2026-08-03 to what this scorer actually produces.
+ *
+ * ---
+ *
+ * Thresholds recalibrated 2026-08-03, and the earlier measurement in this file (400 postings,
+ * three resumes, "Strong match" fires on 2 of 1116 pairs) is the ISSUE-023 BASELINE, not a
+ * current reading. It is superseded by the sweep below.
  *
  * ISSUE-023: the thresholds were 65 and 40, and 96.0% of ON-FIELD pairs read "Not much overlap".
  * "Strong match" was reached by 0.6%. A label with four values that returns one of them 24 times
@@ -1566,6 +1595,9 @@ export function scoreJdMatch(
  * can see the denominator the band was drawn on. What changed is where the lines sit, not what the
  * number counts.
  */
+/** A requirements block more than half unmet caps the band, whatever the score. */
+const REQUIRED_COVERAGE_GATE = 0.5;
+
 const BAND_STRONG = 40;
 const BAND_SOLID = 22;
 const BAND_SOME = 10;
@@ -1579,7 +1611,7 @@ export function scoreBand(
   // Measured: a posting requiring Kubernetes, Terraform and Kafka scored 61 with every weight-1
   // term missed. Calling that a strong match is the one thing this number must never do, so the
   // band is capped when the requirements block is more than half unmet.
-  const gatedByRequirements = requiredCoverage !== null && requiredCoverage < 0.5;
+  const gatedByRequirements = requiredCoverage !== null && requiredCoverage < REQUIRED_COVERAGE_GATE;
   if (score >= BAND_STRONG && !gatedByRequirements) return { label: 'Strong match', tone: 'strong' };
   if (gatedByRequirements && score >= BAND_SOLID) return { label: 'Missing key requirements', tone: 'fair' };
   if (score >= BAND_SOLID) return { label: 'Solid match', tone: 'fair' };
