@@ -60,7 +60,7 @@ export const STRONG_VERBS = new Set(
   `built shipped designed engineered developed led drove owned launched analyzed
 delivered diagnosed ran secured founded co-founded managed presented translated instrumented deployed
 architected automated optimized scaled quantified benchmarked researched synthesized negotiated
-coordinated spearheaded established pioneered cut reduced improved increased grew won earned created
+coordinated spearheaded established pioneered cut reduced improved increased grew won earned created added
 implemented conducted partnered collaborated evaluated modeled sized identified uncovered cracked
 recruited mentored trained structured forecasted tracked documented demoed integrated resolved isolated
 refined applied profiled solved interviewed communicated prepared produced drafted executed
@@ -107,7 +107,13 @@ export function excerpt(bullet: string, max = 40): string {
 }
 
 export function firstWordOf(bullet: string): string {
-  return (bullet.trim().split(/\s+/)[0] ?? '').replace(/[^a-zA-Z-]/g, '').toLowerCase();
+  const token = bullet.trim().split(/\s+/)[0] ?? '';
+  /* Preserve the token instead of deleting arbitrary characters from it. Deletion made malformed
+   * openers such as "Ad,ded" and "Added123" collapse into the approved verb "added". Quotes,
+   * brackets and sentence punctuation are valid at token boundaries; an internal hyphen remains
+   * part of the token so the explicit co-author rule can handle it without admitting added-value. */
+  const match = token.match(/^[('"“‘{\[]*([a-zA-Z]+(?:-[a-zA-Z]+)?)[,.;:!?\)'"”’}\]]*$/);
+  return (match?.[1] ?? '').toLowerCase();
 }
 
 /* The whitelist is written in the past tense, because most resume bullets are. A CV written in the
