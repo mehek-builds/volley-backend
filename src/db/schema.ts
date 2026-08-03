@@ -353,6 +353,34 @@ export const resolve_cache = pgTable('resolve_cache', {
   cached_at: timestamp('cached_at', { withTimezone: true }).defaultNow().notNull(),
 });
 
+// ---- competency_verdicts ----
+/**
+ * One model judgement about one requirement clause against one resume, cached forever.
+ *
+ * SAFE TO CACHE FOREVER because both inputs are content-addressed. The key is a hash of the
+ * clause text and a hash of the resume bullets, so an edited resume or an edited posting is a
+ * different key rather than a stale hit. Nothing here expires; a row simply stops being asked for.
+ *
+ * WHY IT EXISTS. Judging competency clauses is a Sonnet call, and a student re-opens the same
+ * application review across sessions while the posting and their resume sit still. Without this,
+ * reading a packet twice costs twice. Measured on the live board, a posting states five to eight
+ * competency clauses, so the cache turns a repeat view from one call into none.
+ *
+ * NOT KEYED BY USER, deliberately. The inputs are the clause and the bullets, and two students with
+ * the same bullet would get the same verdict, so keying on user_id would only lower the hit rate.
+ * The quote stored here is the STUDENT'S OWN sentence, already in the row that produced the hash.
+ */
+export const competency_verdicts = pgTable('competency_verdicts', {
+  /** sha256(clause) + ':' + sha256(bullets joined). Content-addressed, so it cannot go stale. */
+  cache_key: text('cache_key').primaryKey(),
+  met: boolean('met').notNull(),
+  /** The bullet the verdict was grounded in, verbatim. Null when unmet. */
+  quote: text('quote'),
+  /** One short sentence for the gap list. */
+  why: text('why'),
+  cached_at: timestamp('cached_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
 // ---- learning_signals ----
 export const learning_signals = pgTable('learning_signals', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -795,3 +823,5 @@ export type NewMonitoredJob = typeof monitored_jobs.$inferInsert;
 export type AtsAdapter = typeof ats_adapters.$inferSelect;
 export type AutofillEvent = typeof autofill_events.$inferSelect;
 export type NewAutofillEvent = typeof autofill_events.$inferInsert;
+export type CompetencyVerdictRow = typeof competency_verdicts.$inferSelect;
+export type NewCompetencyVerdictRow = typeof competency_verdicts.$inferInsert;

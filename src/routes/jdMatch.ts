@@ -5,7 +5,9 @@ import { db } from '../db/index';
 import { profiles } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { resumeSpecText } from '../engine/resumeValidate';
-import { scoreJdMatch, scoreBand, MIN_SCORABLE_TERMS } from '../engine/jdMatch';
+import { scoreJdMatch, scoreBand, MIN_SCORABLE_TERMS, segmentJd } from '../engine/jdMatch';
+import { scorePosting, type CandidateFacts } from '../engine/clauseMatch';
+import { judgeCompetenciesCached } from '../llm/competencyCache';
 import { findGapEvidence } from '../engine/gapEvidence';
 import { checkResumeHealth } from '../engine/resumeHealth';
 import { buildFunnel } from '../engine/funnel';
@@ -121,6 +123,46 @@ const bodySchema = z.object({
     .optional(),
 });
 
+const requirementsSchema = z.object({
+  jd_text: z.string().min(1).max(60_000).optional(),
+  /**
+   * The tailored packet's spec, when the review screen holds one. Falls back to the base resume.
+   *
+   * Same shape as healthBodySchema's, and for the same reason recorded there: a REAL schema rather
+   * than a cast, so a malformed body is a 400 instead of a 500 deep inside the matcher. Education
+   * fields are carried too, because the degree and graduation clauses are checked against them.
+   */
+  spec: z
+    .object({
+      school: z.string().max(300).optional(),
+      degree: z.string().max(300).optional(),
+      grad_date: z.string().max(100).optional(),
+      coursework: z.string().max(1_000).optional(),
+      target_role: z.string().max(200).optional(),
+      experience: z
+        .array(
+          z.object({
+            org: z.string().max(200).default(''),
+            title: z.string().max(200).optional(),
+            date_range: z.string().max(100).optional(),
+            bullets: z.array(z.string().max(2_000)).max(30).default([]),
+          }),
+        )
+        .max(20)
+        .default([]),
+      skills: z.array(z.string().max(120)).max(100).default([]),
+    })
+    .optional(),
+  job_context: z
+    .object({
+      company: z.string().max(200).optional(),
+      role: z.string().max(200).optional(),
+      location: z.string().max(500).nullish(),
+      job_id: z.string().uuid().nullish(),
+    })
+    .optional(),
+});
+
 /**
  * The offices of the posting a saved packet was built for, or null when we cannot tell.
  *
@@ -151,6 +193,90 @@ async function postingRow(
 }
 
 export async function jdMatchRoutes(fastify: FastifyInstance) {
+  /**
+   * The requirement-by-requirement breakdown, for the REVIEW SCREEN ONLY.
+   *
+   * Deliberately not on /jd-match and deliberately not on a list. This costs one Sonnet call the
+   * first time a posting is read against a resume, and the review screen is the one place a student
+   * is deciding about a single job rather than scanning twenty. Repeat views cost nothing: the
+   * judge is content-addressed cached on (clause, bullets), so re-opening a packet is a database
+   * read. The route reports `judged` and `from_cache` so that stays visible rather than assumed.
+   *
+   * WHAT THIS ANSWERS THAT /jd-match CANNOT. The term scorer sees only requirements that name a
+   * technology, which measured over 600 live postings is 34.6% of the clauses employers write. The
+   * rest - a degree in the right field, five years of something, communicating with partners - were
+   * invisible, and they are disproportionately the ones a student MEETS, so the number ran low in
+   * one direction. This returns every stated clause with a verdict and, when met, the student's own
+   * bullet as the reason.
+   */
+  fastify.post('/jd-match/requirements', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const userId = request.jwtPayload!.userId;
+    const parsed = requirementsSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.issues[0]?.message ?? 'Invalid request body' });
+    }
+
+    const [profile] = await db.select().from(profiles).where(eq(profiles.user_id, userId));
+    const stored = profile?.base_resume_json as ResumeSpec | null | undefined;
+    const spec = (parsed.data.spec as ResumeSpec | undefined) ?? stored;
+    if (!spec) return reply.status(404).send({ error: 'No main resume yet' });
+
+    const posting = await postingRow(parsed.data.job_context?.job_id);
+    const jdText = parsed.data.jd_text ?? posting?.description ?? '';
+    if (!jdText) {
+      return reply
+        .status(400)
+        .send({ error: 'jd_text is required unless job_context.job_id names a posting we hold' });
+    }
+
+    const bullets = spec.experience.flatMap((e) => e.bullets ?? []);
+    const facts: CandidateFacts = {
+      degree: spec.degree,
+      school: spec.school,
+      gradDate: spec.grad_date,
+      resumeText: resumeSpecText(spec),
+      bullets,
+    };
+
+    let judged = 0;
+    let fromCache = 0;
+    const result = await scorePosting(
+      jdText,
+      facts,
+      {
+        ...parsed.data.job_context,
+        location: parsed.data.job_context?.location ?? posting?.location ?? null,
+      },
+      segmentJd,
+      async (b, qs) => {
+        const r = await judgeCompetenciesCached(b, qs);
+        judged = r.judged;
+        fromCache = r.fromCache;
+        return { verdicts: r.verdicts, rejected: r.rejected };
+      },
+    );
+
+    return reply.status(200).send({
+      score: result.score,
+      // Clauses the model could not be asked about are absent from the denominator, so a reader can
+      // see the count they were scored on rather than inferring it.
+      scored: result.clauses.filter((c) => c.verdict !== 'unscoreable').length,
+      met: result.clauses.filter((c) => c.verdict === 'met').length,
+      clauses: result.clauses.map((c) => ({
+        text: c.text,
+        verdict: c.verdict,
+        basis: c.basis,
+        evidence: c.evidence ?? null,
+        missing_terms: c.missingTerms ?? [],
+      })),
+      judged,
+      from_cache: fromCache,
+      // Non-empty means the model returned a verdict it could not ground in a real bullet and it
+      // was thrown away. Surfaced rather than swallowed so a bad run is visible.
+      rejected: result.rejected,
+    });
+  });
+
   fastify.post('/jd-match', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
 
