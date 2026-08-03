@@ -13,13 +13,31 @@ test('records each granted permission separately with an auditable submission ve
     automatic_submission_consent_version: AUTOMATIC_SUBMISSION_CONSENT_VERSION,
     automatic_verification_enabled: false,
     automatic_verification_consented_at: null,
-    // Absent from the input, so it must come back explicitly OFF rather than undefined: this
-    // object is spread straight into a column update, and an undefined would leave whatever the row
-    // already held. A permission that survives its own revocation is the failure worth pinning.
-    automatic_captcha_enabled: false,
-    automatic_captcha_consented_at: null,
-    automatic_captcha_consent_version: null,
+    // Absent from the input, so absent from the output. This object is spread into a column update,
+    // so naming the column here would make every writer that does not mention captcha resume revoke
+    // it - including POST /onboarding/complete, which would take the permission away every time
+    // someone re-ran /start.
   });
+});
+
+test('omitting captcha resume leaves the stored permission alone', () => {
+  const values = automationConsentValues({
+    automatic_submission_enabled: false,
+    automatic_verification_enabled: false,
+  }, new Date('2026-08-04T00:00:00.000Z'));
+  assert.equal('automatic_captcha_enabled' in values, false);
+  assert.equal('automatic_captcha_consent_version' in values, false);
+});
+
+test('an explicit false is a revocation and clears the version with it', () => {
+  const values = automationConsentValues({
+    automatic_submission_enabled: false,
+    automatic_verification_enabled: false,
+    automatic_captcha_enabled: false,
+  }, new Date('2026-08-04T00:00:00.000Z'));
+  assert.equal(values.automatic_captcha_enabled, false);
+  assert.equal(values.automatic_captcha_consent_version, null);
+  assert.equal(values.automatic_captcha_consented_at, null);
 });
 
 test('revocation clears submission consent evidence instead of leaving stale authorization', () => {
@@ -65,9 +83,7 @@ test('a disabled permission is never granted, whatever the version says', () => 
   assert.equal(captchaResumeGranted(undefined), false);
 });
 
-// Turning it on stamps the version; turning it off clears both, so a later re-read cannot mistake a
-// revoked permission for a current one.
-test('the consent values record and revoke the version together', () => {
+test('granting captcha resume stamps the current version', () => {
   const now = new Date('2026-08-04T00:00:00.000Z');
   const on = automationConsentValues({
     automatic_submission_enabled: false,
@@ -77,15 +93,6 @@ test('the consent values record and revoke the version together', () => {
   assert.equal(on.automatic_captcha_enabled, true);
   assert.equal(on.automatic_captcha_consent_version, AUTOMATIC_CAPTCHA_CONSENT_VERSION);
   assert.deepEqual(on.automatic_captcha_consented_at, now);
-
-  const off = automationConsentValues({
-    automatic_submission_enabled: false,
-    automatic_verification_enabled: false,
-    automatic_captcha_enabled: false,
-  }, now);
-  assert.equal(off.automatic_captcha_enabled, false);
-  assert.equal(off.automatic_captcha_consent_version, null);
-  assert.equal(off.automatic_captcha_consented_at, null);
 });
 
 // Submission permission has never implied this one, and the reverse is equally true: finishing the
@@ -95,6 +102,5 @@ test('turning on automatic submission does not turn on captcha resume', () => {
     automatic_submission_enabled: true,
     automatic_verification_enabled: true,
   }, new Date('2026-08-04T00:00:00.000Z'));
-  assert.equal(values.automatic_captcha_enabled, false);
-  assert.equal(values.automatic_captcha_consent_version, null);
+  assert.equal('automatic_captcha_enabled' in values, false);
 });

@@ -134,7 +134,10 @@ const GAP_FIELDS = ['gpa', 'gpa_scale', 'major', 'languages', 'desired_salary', 
 const completeBodySchema = z.object({
   automatic_submission_enabled: z.boolean().default(false),
   automatic_verification_enabled: z.boolean().default(false),
-  automatic_captcha_enabled: z.boolean().default(false),
+  // OPTIONAL, deliberately not .default(false). automationConsentValues spreads into a column
+  // update, so a default would make every /start finish silently revoke a permission granted in
+  // settings. Undefined means "leave it alone".
+  automatic_captcha_enabled: z.boolean().optional(),
 });
 const automationBodySchema = z.object({
   automatic_submission_enabled: z.boolean().optional(),
@@ -442,6 +445,10 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       automatic_captcha_consent_version: users.automatic_captcha_consent_version,
     });
     if (!updated) return reply.status(404).send({ error: 'No such user' });
-    return reply.send(updated);
+    // The VERDICT, matching /onboarding/state exactly. Returning the raw column here would give the
+    // same field name two meanings on two endpoints: for the accounts holding a stale consent
+    // version this would echo true while the state route reported false, and a settings page
+    // hydrating from this response would show a permission the backend does not honour.
+    return reply.send({ ...updated, automatic_captcha_enabled: captchaResumeGranted(updated) });
   });
 }

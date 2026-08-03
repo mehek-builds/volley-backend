@@ -46,10 +46,17 @@ export function automationConsentValues(settings: AutomationPermissions, now: Da
       : null,
     automatic_verification_enabled: settings.automatic_verification_enabled,
     automatic_verification_consented_at: settings.automatic_verification_enabled ? now : null,
-    automatic_captcha_enabled: settings.automatic_captcha_enabled === true,
-    automatic_captcha_consented_at: settings.automatic_captcha_enabled === true ? now : null,
-    automatic_captcha_consent_version: settings.automatic_captcha_enabled === true
-      ? AUTOMATIC_CAPTCHA_CONSENT_VERSION
-      : null,
+    /* OMITTED when undefined, not defaulted to false. This object is spread into a column update, so
+     * naming the column always would make every writer that does not mention captcha resume revoke
+     * it: POST /onboarding/complete does not send the field, so re-running /start after granting the
+     * permission in settings would silently take it away with no user-visible act. Undefined means
+     * "leave it alone"; an explicit false is a revocation and still clears the version with it. */
+    ...(settings.automatic_captcha_enabled === undefined ? {} : {
+      automatic_captcha_enabled: settings.automatic_captcha_enabled,
+      automatic_captcha_consented_at: settings.automatic_captcha_enabled ? now : null,
+      automatic_captcha_consent_version: settings.automatic_captcha_enabled
+        ? AUTOMATIC_CAPTCHA_CONSENT_VERSION
+        : null,
+    }),
   };
 }
