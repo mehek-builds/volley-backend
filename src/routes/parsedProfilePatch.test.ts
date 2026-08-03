@@ -1,7 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import {
   applyParsedProfilePatch,
+  declaredSkillsForPatch,
   normalizeEditableList,
   parsedProfilePatchSchema,
 } from './profile';
@@ -81,4 +84,298 @@ test('clearing graduation text also clears the derived eligibility year', () => 
 
   assert.equal(next.grad_date, '');
   assert.equal('grad_year' in next, false);
+});
+
+/* ISSUE-027. `languages` had no test at all against this schema, which is the one field the review
+ * screen added most recently and the one it now sends on EVERY save. The schema is .strict(), so
+ * the failure mode is not a bad value quietly stored - it is a 400 on the whole patch, on every
+ * save, for every student, from a payload shape nothing here was asserting. */
+test('the languages field is accepted in the shapes the review screen actually sends', () => {
+  // Empty is a real answer: a resume with no language line, or a student clearing a bad parse.
+  assert.equal(parsedProfilePatchSchema.safeParse({ languages: [] }).success, true);
+  assert.equal(parsedProfilePatchSchema.safeParse({ languages: ['English', 'Hindi', 'French'] }).success, true);
+  // Exactly at the cap, and one past it. A list this long is a parse failure, not a polyglot.
+  assert.equal(
+    parsedProfilePatchSchema.safeParse({ languages: Array.from({ length: 30 }, (_, i) => `Language ${i}`) }).success,
+    true,
+  );
+  assert.equal(
+    parsedProfilePatchSchema.safeParse({ languages: Array.from({ length: 31 }, (_, i) => `Language ${i}`) }).success,
+    false,
+  );
+});
+
+test('a mistyped languages value is rejected rather than stored', () => {
+  assert.equal(parsedProfilePatchSchema.safeParse({ languages: 'English' }).success, false);
+  assert.equal(parsedProfilePatchSchema.safeParse({ languages: [7] }).success, false);
+  assert.equal(parsedProfilePatchSchema.safeParse({ languages: [''] }).success, false);
+  assert.equal(parsedProfilePatchSchema.safeParse({ languages: ['x'.repeat(81)] }).success, false);
+});
+
+test('the full editor save the review screen sends validates against the strict schema', () => {
+  // Every field the resume page puts in one PATCH body, together, in the shape it sends them. A
+  // .strict() schema fails the WHOLE patch on one unexpected key, so the fields have to be
+  // exercised as a payload and not only one at a time.
+  const result = parsedProfilePatchSchema.safeParse({
+    full_name: 'Mehek Mandal',
+    phone: '+1 213 555 0100',
+    school: 'University of Southern California',
+    degree: 'BS Computer Science and Business Administration',
+    grad_date: 'May 2027',
+    objective: 'Builder interested in investing and technology.',
+    skills: ['Python', 'Figma', 'Financial modeling'],
+    languages: ['English', 'Hindi', 'French'],
+    target_roles: [
+      'Private Equity Associate',
+      'Growth Equity Analyst',
+      'Venture Capital Analyst',
+      'Investment Banking Analyst',
+      'Strategy Associate',
+    ],
+  });
+
+  assert.equal(result.success, true);
+});
+
+/* ISSUE-020b. ISSUE-020 stopped the PARSER filing spoken languages under skills. It did not stop
+ * them being PROMOTED into the declared profiles.skills column through this patch, and that path is
+ * the worse one: the declared column is read with no parsed fallback, so a re-upload cannot repair
+ * it, and the review screen sends `skills` unconditionally on every save. */
+test('a spoken language cannot be promoted into the declared skills list', () => {
+  const next = applyParsedProfilePatch(
+    {},
+    { skills: ['Python', 'Hindi', 'Figma', 'Spanish (conversational)'] },
+  );
+
+  assert.deepEqual(next.skills, ['Python', 'Figma']);
+  // Moved, not dropped: the student left the word on their own review screen, so it goes to the
+  // field that screen already edits rather than being deleted behind their back.
+  assert.deepEqual(next.languages, ['Hindi', 'Spanish (conversational)']);
+});
+
+test('a programming language is not mistaken for a spoken one on the promotion path', () => {
+  const next = applyParsedProfilePatch({}, { skills: ['Java', 'R', 'Go', 'Swift', 'Javanese'] });
+
+  assert.deepEqual(next.skills, ['Java', 'R', 'Go', 'Swift']);
+  assert.deepEqual(next.languages, ['Javanese']);
+});
+
+test('an explicit languages edit leads the union and the recovered entries dedupe against it', () => {
+  const next = applyParsedProfilePatch(
+    {},
+    { skills: ['Python', 'english', 'Tamil'], languages: ['English'] },
+  );
+
+  assert.deepEqual(next.skills, ['Python']);
+  // The student's own spelling of English wins; Tamil follows because it was only ever in skills.
+  assert.deepEqual(next.languages, ['English', 'Tamil']);
+});
+
+test('a save that only touches skills does not wipe the stored language list', () => {
+  const next = applyParsedProfilePatch(
+    { languages: ['English', 'Hindi'] },
+    { skills: ['Python', 'French'] },
+  );
+
+  assert.deepEqual(next.skills, ['Python']);
+  assert.deepEqual(next.languages, ['English', 'Hindi', 'French']);
+});
+
+/* The declared column, which is the write ISSUE-020b is actually about.
+ *
+ * parsed_json is self-healing - the next resume upload rewrites it wholesale - so every test above
+ * this one is about a value that repairs itself. profiles.skills does not: routes/resume.ts reads
+ * it with no parsed fallback, so a spoken language that reaches it is there forever. These tests
+ * exist because the five behavioural ones above all exercise applyParsedProfilePatch in isolation
+ * and a mutation of the handler's own skills expression survived every one of them. */
+test('the declared skills column never takes a spoken language from a patch', () => {
+  assert.deepEqual(
+    declaredSkillsForPatch({ skills: ['Python', 'Hindi', 'Figma', 'Spanish (conversational)'] }, ['Stored']),
+    ['Python', 'Figma'],
+  );
+  // Programming languages are not spoken languages, on this path as on every other.
+  assert.deepEqual(declaredSkillsForPatch({ skills: ['Java', 'R', 'Go', 'Javanese'] }, null), ['Java', 'R', 'Go']);
+});
+
+test('a patch that omits skills leaves the declared column exactly as it was', () => {
+  // An omitted field is not an instruction to clear a permanent column.
+  const stored = ['Python', 'Figma'];
+  assert.equal(declaredSkillsForPatch({ objective: 'Builder.' }, stored), stored);
+  assert.equal(declaredSkillsForPatch({ languages: ['Hindi'] }, null), null);
+  // An EMPTY array is an instruction, and a different one: the student cleared the box.
+  assert.deepEqual(declaredSkillsForPatch({ skills: [] }, stored), []);
+});
+
+test('the declared column and the parsed skills list cannot drift apart', () => {
+  // Two call sites, one decision. If either side stops sorting languages the other becomes a lie,
+  // and the pair is exactly what serveProfileJson chooses between when it serves a profile.
+  for (const skills of [
+    ['Python', 'Hindi', 'Figma'],
+    ['English', 'Spanish', 'French'],
+    ['Java', 'Javanese', 'R'],
+    [],
+  ]) {
+    assert.deepEqual(
+      declaredSkillsForPatch({ skills }, null),
+      applyParsedProfilePatch({}, { skills }).skills,
+      `the declared and parsed skills lists disagree for ${JSON.stringify(skills)}`,
+    );
+  }
+});
+
+test('the PATCH /profile/parsed handler computes the declared column through the guard', () => {
+  /* A source-level assertion, for the same reason the jd-match suite reads index.ts: the defect
+   * this guards against is not a wrong value, it is the handler computing the value SOMEWHERE
+   * ELSE. Reverting that one line to the unguarded spelling restores the permanent-pollution bug
+   * and leaves every behavioural test above green, because none of them can see the handler.
+   *
+   * Standing the route up for real would need the db, the auth middleware and field crypto, none of
+   * which profileRoutes takes by injection today. Until it does, the composition root is the only
+   * place the wiring is visible, so this reads it. */
+  const source = readFileSync(path.join(__dirname, 'profile.ts'), 'utf8');
+  /* Scoped to the one handler, so nothing below can be satisfied by an identically spelled line
+   * elsewhere in an 1100-line file.
+   *
+   * The terminator is a route-level `fastify.` at TWO-SPACE indent, not any `fastify.`. The loose
+   * version ended the slice at the first mention of the identifier anywhere, so a single
+   * `fastify.log.info(...)` added inside this handler truncated the slice to the route prologue and
+   * failed the call assertion while the call itself sat untouched three lines below. It survived at
+   * all only because line 1062 happens to read `applicationRowForProfile(userId, fastify)` with a
+   * closing paren rather than a dot. A one-character margin on a guard is not a guard. */
+  const start = source.indexOf("fastify.patch('/profile/parsed'");
+  assert.notEqual(start, -1, 'PATCH /profile/parsed must exist for this guard to mean anything');
+  const nextRoute = source.slice(start + 1).search(/\n {2}fastify\./);
+  const handler = nextRoute === -1 ? source.slice(start) : source.slice(start, start + 1 + nextRoute);
+
+  /* Whitespace-insensitive and tolerant of a non-null assertion, on purpose. The first cut of this
+   * pinned the exact one-line spelling, which then failed on a Prettier reflow across three lines
+   * and on the `rows[0]!.skills` that a strictNullChecks tightening produces. Failing closed on
+   * innocent formatting work is how a guard gets loosened by an irritated maintainer and then
+   * protects nothing, so it flexes on layout while staying rigid about the call. */
+  assert.match(
+    handler,
+    /const skills = declaredSkillsForPatch\(\s*patch,\s*rows\[0\]!?\.skills,?\s*\)/,
+    'the declared profiles.skills value must be COMPUTED by declaredSkillsForPatch',
+  );
+
+  /* Computing the guarded value is only half of it. The value has to REACH the column, and there
+   * are more ways for it not to than the obvious one. Each assertion below closes a specific hole
+   * that a green suite and a clean tsc both missed:
+   *
+   *  - `skills: patch.skills ?? rows[0].skills` at the write, guard line untouched. The guarded
+   *    local just becomes unused, which this tsconfig does not flag.
+   *  - a SECOND `tx.update(profiles).set(...)` after the guarded one, which is what an ordinary
+   *    follow-up write to the same table looks like and is the likeliest of these to happen for
+   *    real. Whoever writes it will not know this column is special.
+   *  - a decoy first write on a dead `.where(sql`false`)`, with the live write re-deriving.
+   *  - a trailing `...(patch.skills ? { skills: patch.skills } : {})` spread that overrides the
+   *    honest property from the right.
+   *  - a block around the write redeclaring `const skills` from the raw patch, shadowing the guard.
+   *
+   * So: exactly one write to this table in the handler, exactly one `skills` binding, and inside
+   * that write's object every mention of `skills` is one of the accepted spellings of "the guarded
+   * local". */
+  const writes = handler.match(/\.update\(profiles\)/g) ?? [];
+  assert.equal(
+    writes.length,
+    1,
+    'exactly one write to profiles in this handler. A second .update(profiles) can set the ' +
+      'declared skills column again, after the guarded write and out of its reach.',
+  );
+
+  const declarations = handler.match(/\bconst skills\b/g) ?? [];
+  assert.equal(
+    declarations.length,
+    1,
+    'exactly one `skills` binding in this handler, so no inner block can shadow the guarded one',
+  );
+
+  // Balanced-brace extraction, not a non-greedy regex. A non-greedy `\}\)` stops at the first
+  // `}` that happens to be followed by `)`, which an inner `: {})` supplies, silently truncating
+  // the object under examination to a prefix that looks innocent.
+  const setAt = handler.indexOf('.set({', handler.indexOf('.update(profiles)'));
+  assert.notEqual(setAt, -1, 'the profiles write must go through a .set({ ... }) call');
+  const objectStart = handler.indexOf('{', setAt);
+  let depth = 0;
+  let objectEnd = -1;
+  for (let i = objectStart; i < handler.length; i++) {
+    if (handler[i] === '{') depth += 1;
+    else if (handler[i] === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        objectEnd = i;
+        break;
+      }
+    }
+  }
+  assert.notEqual(objectEnd, -1, 'the .set({ ... }) object literal must be balanced');
+  const setObject = handler.slice(objectStart + 1, objectEnd);
+
+  /* All three spellings mean the same thing and all three are correct code: the shorthand the
+   * handler uses today, the `skills: skills` longhand, and a `...{ skills }` spread. An earlier cut
+   * accepted only the shorthand and failed the other two while telling the author their correct
+   * code was "an expression at the call", which is both wrong and the kind of message that gets a
+   * check deleted rather than obeyed. */
+  const ACCEPTED = /(^|,)\s*(?:skills|skills\s*:\s*skills|\.\.\.\s*\{\s*skills\s*\})\s*(?=,|$)/g;
+  assert.match(
+    setObject,
+    new RegExp(ACCEPTED.source),
+    'profiles.skills must be written from the guarded `skills` local. Accepted: the `skills` ' +
+      'shorthand, `skills: skills`, or `...{ skills }`. Anything else re-derives the value at the ' +
+      'write and bypasses declaredSkillsForPatch.',
+  );
+  assert.ok(
+    !/\bskills\b/.test(setObject.replace(ACCEPTED, '$1')),
+    'the write object mentions `skills` somewhere other than the guarded local. A duplicate key, ' +
+      'a computed `["skills"]`, or a trailing conditional spread all override the honest property ' +
+      'and put the unsorted list back in the permanent column.',
+  );
+
+  assert.ok(
+    !source.includes('normalizeEditableList(patch.skills)'),
+    'Forbidden spelling. normalizeEditableList trims and dedupes but does NOT sort spoken ' +
+      'languages out, so this expression promotes a language into whichever list it feeds. On the ' +
+      'declared column that is permanent (routes/resume.ts reads profiles.skills with no parsed ' +
+      'fallback, and no re-upload rewrites it), and on the parsed path it drops the recovered ' +
+      'languages instead of moving them to `languages`. Both correct paths already exist: use ' +
+      'declaredSkillsForPatch for the column and applyParsedProfilePatch for parsed_json. If you ' +
+      'are here because you tripped this, fix the call rather than deleting the check.',
+  );
+});
+
+test('the merged language list stays inside the shape the next save may send back', () => {
+  // The union can add entries the caller never sent, which is the only way this list can cross the
+  // schema cap. A stored value one entry over it would 400 the student's next save on our own data.
+  const next = applyParsedProfilePatch(
+    { languages: Array.from({ length: 30 }, (_, i) => `Declared ${i}`) },
+    { skills: ['Python', 'Hindi', 'Tamil'] },
+  );
+
+  assert.equal((next.languages as string[]).length, 30);
+  assert.equal(parsedProfilePatchSchema.safeParse({ languages: next.languages }).success, true);
+});
+
+test('a recovered language past the cap is dropped outright, which is the chosen tradeoff', () => {
+  /* Asserted so the loss stays visible rather than being discovered later as a surprise. Past the
+   * cap the entries are DELETED, not moved: they were already taken out of skills, and the slice
+   * then takes them off the end of the union, so they survive in neither field.
+   *
+   * Kept on purpose. Reaching it needs a student who already stores 30 languages, which the schema
+   * calls a parse failure rather than a polyglot, and the alternative is storing 31 and 400ing
+   * every later save of their entire profile. A truncated list they can still edit beats a profile
+   * they can no longer save. What survives is their own declared list, never the recovered guess. */
+  const declared = Array.from({ length: 30 }, (_, i) => `Declared ${i}`);
+  const next = applyParsedProfilePatch(
+    { languages: declared },
+    { skills: ['Python', 'Tamil', 'Telugu', 'Kannada'] },
+  );
+
+  assert.deepEqual(next.skills, ['Python'], 'the languages left skills, as on every other path');
+  assert.deepEqual(next.languages, declared, 'the student declaration is what survives the cap');
+  for (const lost of ['Tamil', 'Telugu', 'Kannada']) {
+    assert.ok(
+      !(next.skills as string[]).includes(lost) && !(next.languages as string[]).includes(lost),
+      `"${lost}" is gone from BOTH fields: real loss, accepted over a profile that cannot be saved`,
+    );
+  }
 });

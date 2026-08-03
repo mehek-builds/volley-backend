@@ -5,7 +5,13 @@ import { eq, sql } from 'drizzle-orm';
 import { requireAuth } from '../middleware/auth';
 import { encryptField } from '../lib/fieldCrypto';
 import { decryptRow } from './applicationProfile';
-import { parseResumeWithClaude, parseResumeFromPdf, ParsedProfile } from '../llm/parse';
+import {
+  parseResumeWithClaude,
+  parseResumeFromPdf,
+  mergeLanguages,
+  splitSpokenLanguages,
+  ParsedProfile,
+} from '../llm/parse';
 import { extractPdfText } from '../lib/pdfText';
 import { MultipartFile } from '@fastify/multipart';
 import { z } from 'zod';
@@ -61,6 +67,15 @@ export const educationPatchSchema = z
 
 const editableListItem = z.string().trim().min(1).max(80);
 
+/* The cap on the languages list, named because applyParsedProfilePatch has to respect it too.
+ *
+ * The patch schema is the shape the review screen sends AND, on the next visit, the shape it sends
+ * back after the server has written parsed_json. So anything this route STORES in `languages` must
+ * still validate here, or the student's next Save is a 400 on a value we produced ourselves. The
+ * language reclassifier below can add entries the caller never sent, which is exactly how that
+ * ceiling gets crossed, so the constant is shared rather than written twice. */
+const MAX_EDITABLE_LANGUAGES = 30;
+
 // The resume review screen is the student's correction layer over an AI parse. Keep this bounded
 // to profile facts that are safe to edit as plain text. Work history has its own structured bank,
 // and account email comes from the verified login, so neither can be changed through this route.
@@ -81,7 +96,7 @@ export const parsedProfilePatchSchema = z
      * student's declaration of fluency and is collected by the onboarding question - see schema.ts
      * on why a fluency claim may not be inferred from a resume line. Bounded lower than skills
      * because a language list that runs past twenty is a parse failure, not a polyglot. */
-    languages: z.array(editableListItem).max(30).optional(),
+    languages: z.array(editableListItem).max(MAX_EDITABLE_LANGUAGES).optional(),
     // The parser and onboarding contract both use five titles. Students may replace any inferred
     // title with any real role, while keeping the downstream targeting shape complete.
     target_roles: z
@@ -164,6 +179,30 @@ export function normalizeEditableList(values: string[]): string[] {
   return normalized;
 }
 
+/**
+ * The value the DECLARED `profiles.skills` column takes for a given patch.
+ *
+ * A named function rather than an expression inline in the handler, because this is the single most
+ * consequential line on this route and it needs to be reachable by a test. `profiles.skills` is read
+ * with NO parsed fallback (routes/resume.ts, the resume generator's SKILLS line), so unlike
+ * parsed_json it is never rewritten by a later upload: whatever lands here is permanent. The
+ * handler used to normalize the raw patch list straight into it, which sorts nothing and therefore
+ * promoted spoken languages into the permanent column the moment a student pressed Save.
+ *
+ * The obvious repair - guarding applyParsedProfilePatch and reading its result - leaves that
+ * unguarded one-liner a plausible thing for a future edit to reach for, and a unit test of the
+ * patch function cannot see the handler reach for it. So the guarded computation lives HERE, the
+ * handler is one call, and parsedProfilePatch.test.ts asserts that the unguarded spelling appears
+ * nowhere in this file.
+ *
+ * `stored` is returned untouched when the patch omits skills, because an omitted field is not an
+ * instruction to clear a column.
+ */
+export function declaredSkillsForPatch(patch: ParsedProfilePatch, stored: unknown): unknown {
+  if (patch.skills === undefined) return stored;
+  return normalizeEditableList(splitSpokenLanguages(patch.skills).skills);
+}
+
 export function applyParsedProfilePatch(
   current: Record<string, unknown>,
   patch: ParsedProfilePatch,
@@ -172,8 +211,43 @@ export function applyParsedProfilePatch(
   for (const key of ['full_name', 'phone', 'school', 'degree', 'grad_date', 'objective'] as const) {
     if (patch[key] !== undefined) next[key] = patch[key];
   }
-  if (patch.skills !== undefined) next.skills = normalizeEditableList(patch.skills);
+  /* Spoken languages are pulled back out of `skills` HERE as well as in the parser (ISSUE-020).
+   *
+   * Not belt and braces, and not a duplicate of that fix. The parser guard is SELF-HEALING: it runs
+   * on parsed_json, which every resume upload rewrites wholesale, so a polluted parse repairs
+   * itself on the next upload. This path is the opposite. `patch.skills` is also what the PATCH
+   * /profile/parsed handler writes to the DECLARED profiles.skills column, and that column is read
+   * with NO parsed fallback (routes/resume.ts, the resume generator's skills line), so a language
+   * that lands in it is permanent - no re-upload, no re-parse and no later edit of the parse can
+   * take it back out. The review screen sends `skills` on EVERY save with no change-gate, so a
+   * student whose profile was parsed before ISSUE-020 shipped only has to open that screen and
+   * click Save once to make the pollution permanent. That is why the second guard sits on the
+   * promotion path rather than only on the parse.
+   *
+   * The recovered languages MOVE, they are not dropped. The student is looking at both boxes on
+   * that screen and left the word in one of them, so deleting it is deleting their content; the
+   * field it belongs in is the one the same form already edits. An explicit `languages` in the same
+   * patch LEADS the union, exactly as the model's own answer leads on the parse path, because it is
+   * the more direct statement of the same fact - and when the caller sent no `languages` at all,
+   * the union starts from what is already stored, so a save that only touches skills cannot wipe a
+   * language list the student set earlier. */
+  const sorted = patch.skills === undefined ? null : splitSpokenLanguages(patch.skills);
+  if (sorted) next.skills = normalizeEditableList(sorted.skills);
   if (patch.languages !== undefined) next.languages = normalizeEditableList(patch.languages);
+  if (sorted && sorted.languages.length > 0) {
+    /* Capped at the schema's own ceiling: this value comes back through parsedProfilePatchSchema on
+     * the student's next save, and a stored list one entry over the limit is a 400 on our own data.
+     *
+     * THE TRADEOFF THIS SLICE MAKES, stated rather than hidden. Entries past the cap are DELETED,
+     * not moved: they were already taken out of `skills` above, so a recovered language that falls
+     * off the end of the union is gone from both fields. That is real data loss and it is chosen on
+     * purpose. It needs a student who already has 30 stored languages, which the schema comment
+     * calls a parse failure rather than a polyglot, and the only alternative is storing 31 and
+     * 400ing every subsequent save of their whole profile. A truncated list the student can still
+     * edit beats a profile they can no longer save. The declared list leads the union, so what
+     * survives is always the student's own statement and never the reclassifier's guess. */
+    next.languages = mergeLanguages(next.languages, sorted.languages).slice(0, MAX_EDITABLE_LANGUAGES);
+  }
   if (patch.target_roles !== undefined) next.target_roles = normalizeEditableList(patch.target_roles);
 
   if (patch.grad_date !== undefined) {
@@ -993,7 +1067,10 @@ export async function profileRoutes(fastify: FastifyInstance) {
         const patch = parsed.data;
         const current = (rows[0].parsed_json ?? {}) as Record<string, unknown>;
         const next = applyParsedProfilePatch(current, patch);
-        const skills = patch.skills === undefined ? rows[0].skills : normalizeEditableList(patch.skills);
+        // One call, deliberately. Computing this inline is how the unguarded promotion got here in
+        // the first place: profiles.skills is the write no re-upload can repair, so the decision
+        // belongs in a function a test can reach rather than in an expression only prod exercises.
+        const skills = declaredSkillsForPatch(patch, rows[0].skills);
 
         await tx
           .update(profiles)
