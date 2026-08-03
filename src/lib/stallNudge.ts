@@ -53,8 +53,10 @@ export function nudgeSubject(applications: readonly NudgeApplication[]): string 
  * HTML body, per the standing rule that every Litos email is HTML. Plain semantic tags only: no
  * inline layout, no width wrappers, nothing that renders differently across clients.
  */
-export function nudgeHtml(applications: readonly NudgeApplication[], firstName?: string): string {
-  const greeting = firstName?.trim() ? `Hi ${escapeHtml(firstName.trim())},` : 'Hi,';
+export function nudgeHtml(applications: readonly NudgeApplication[]): string {
+  // No name. The signature used to accept one and every caller passed undefined, which is worse
+  // than not offering it: it reads as personalised mail that silently never was.
+  const greeting = 'Hi,';
   const opener = applications.length === 1
     ? 'One of your applications is filled in and waiting on a single step that only you can do: the company asks you to prove you are human.'
     : 'A few of your applications are filled in and waiting on a single step that only you can do: these companies ask you to prove you are human.';

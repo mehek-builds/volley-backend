@@ -115,9 +115,15 @@ export function stallRate(stalled: number, totalApplications: number): { rate: n
 /**
  * Stalls old enough to be worth an email.
  *
- * Only OPEN ones, and only past the threshold. The point is to catch the application someone has
- * genuinely forgotten, not to chase someone who stepped away for ten minutes - a nudge that arrives
- * while they are still looking at the page teaches them to ignore the next one.
+ * Only OPEN ones, only past the threshold, and only ONCE.
+ *
+ * The threshold catches the application someone has genuinely forgotten rather than chasing someone
+ * who stepped away for ten minutes: a nudge that arrives while they are still looking at the page
+ * teaches them to ignore the next one.
+ *
+ * The once is just as load-bearing. A stall stays open until the applicant acts, so without an
+ * already-nudged check every open stall re-qualifies on every run and the reminder becomes a daily
+ * letter about something they may have deliberately decided not to do. Declining is an answer.
  */
 export function nudgeableStalls<T extends { stall: StallRecord }>(
   rows: readonly T[],
@@ -126,6 +132,7 @@ export function nudgeableStalls<T extends { stall: StallRecord }>(
 ): T[] {
   return rows.filter((row) => {
     if (row.stall.resolved_at) return false;
+    if (row.stall.nudged_at) return false;
     const started = Date.parse(row.stall.stalled_at);
     if (Number.isNaN(started)) return false;
     return now - started >= olderThanMs;

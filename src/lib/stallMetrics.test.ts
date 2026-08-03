@@ -118,6 +118,15 @@ test('an unreadable timestamp is skipped rather than nudged forever', () => {
   assert.equal(nudgeableStalls([{ stall: stall({ stalled_at: 'not a date' }) }], NOW, TWELVE_HOURS).length, 0);
 });
 
+/* The rule that keeps this a nudge rather than a daily letter. A stall stays open until the
+ * applicant acts, so without it every open stall re-qualifies on every run and someone who saw the
+ * check and decided not to finish that application hears about it again every day. Declining is an
+ * answer. */
+test('an application that has already been nudged is never nudged again', () => {
+  const rows = [{ stall: stall({ stalled_at: '2026-08-01T06:00:00.000Z', nudged_at: '2026-08-01T18:00:00.000Z' }) }];
+  assert.equal(nudgeableStalls(rows, NOW, TWELVE_HOURS).length, 0);
+});
+
 // ---- the email ----
 
 const APP = { company: 'Acme', role: 'Analyst', portalUrl: 'https://boards.greenhouse.io/acme/jobs/1', stall: stall() };
@@ -131,15 +140,16 @@ test('several applications are counted rather than listed in the subject', () =>
 });
 
 test('the body is HTML with semantic tags, per the standing rule', () => {
-  const html = nudgeHtml([APP], 'Mehek');
-  assert.match(html, /^<p>Hi Mehek,<\/p>/);
+  const html = nudgeHtml([APP]);
+  assert.match(html, /^<p>Hi,<\/p>/);
   assert.match(html, /<ul><li>/);
   assert.match(html, /<a href="https:\/\/boards\.greenhouse\.io\/acme\/jobs\/1">Analyst at Acme<\/a>/);
 });
 
-test('a missing name degrades to a plain greeting', () => {
+// The signature used to accept a name and every caller passed undefined, which reads as
+// personalised mail that silently never was.
+test('the greeting is plain rather than pretending to be personalised', () => {
   assert.match(nudgeHtml([APP]), /^<p>Hi,<\/p>/);
-  assert.match(nudgeHtml([APP], '   '), /^<p>Hi,<\/p>/);
 });
 
 // The email says what is actually left, the same distinction every other surface draws.
