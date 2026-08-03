@@ -22,12 +22,20 @@ export interface ResumeSpec {
      complete, not malformed, and nothing should have to migrate to say so. normalizeSpec still
      fills it with '' so the render path only ever sees a string. */
   gpa?: string;
+  /** The place printed beside the school. Same provenance rule as an entry location: transcribed
+   *  from the student's own resume, never inferred. */
+  school_location?: string;
   coursework: string;
   education_position?: 'top' | 'after_experience';
   experience: Array<{
     type?: 'job' | 'project' | 'leadership';
     org: string;
     title: string;
+    /* Where the work happened, printed to the right of the organisation. Copied from the
+       experience bank by applyResumePolicy, never written by the model: an invented city is a
+       fabricated fact about where someone worked, and it is the kind that reads as plausible.
+       Optional, and empty for every entry banked before 2026-08-04. */
+    location?: string;
     date_range: string;
     bullets: string[];
   }>;
@@ -157,6 +165,7 @@ export function normalizeSpec(raw: unknown): ResumeSpec {
       type: (e.type === 'project' || e.type === 'leadership' ? e.type : 'job') as 'job' | 'project' | 'leadership',
       org: str(e.org),
       title: str(e.title),
+      location: str(e.location),
       date_range: str(e.date_range),
       bullets: strArr(e.bullets),
     }));
@@ -177,6 +186,7 @@ export function normalizeSpec(raw: unknown): ResumeSpec {
     degree: str(o.degree),
     grad_date: str(o.grad_date),
     gpa: str(o.gpa),
+    school_location: str(o.school_location),
     coursework: str(o.coursework),
     education_position: o.education_position === 'after_experience' ? 'after_experience' : 'top',
     experience,

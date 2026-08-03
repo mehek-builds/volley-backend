@@ -235,6 +235,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       coursework?: string[];
       gpa?: string;
       gpa_scale?: string;
+      school_location?: string;
       full_name?: string;
     } | undefined;
     const education: CandidateEducation = {
@@ -245,6 +246,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       currently_enrolled: parsed?.currently_enrolled,
       gpa: parsed?.gpa,
       gpa_scale: parsed?.gpa_scale,
+      school_location: parsed?.school_location,
       coursework: Array.isArray(parsed?.coursework)
         ? parsed.coursework.filter((course): course is string => typeof course === 'string')
         : [],

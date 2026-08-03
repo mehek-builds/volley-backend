@@ -456,6 +456,7 @@ export function bankEntriesFrom(parsed: ParsedProfile, userId: string) {
       type: 'job',
       org: e.company.trim(),
       title: e.title?.trim() || null,
+      location: e.location?.trim() || null,
       date_range: [e.start, e.end].filter(Boolean).join(' - ') || null,
       bullet_variants: toBullets(e.description ?? ''),
       tags: [] as string[],
@@ -467,6 +468,9 @@ export function bankEntriesFrom(parsed: ParsedProfile, userId: string) {
       type: 'project',
       org: p.name.trim(),
       title: p.role?.trim() || null,
+      // Projects carry no location: a personal project has no workplace, and a resume does not
+      // print one beside it.
+      location: null,
       date_range: p.date_range?.trim() || null,
       bullet_variants: toBullets(p.description ?? ''),
       tags: [] as string[],
@@ -478,6 +482,7 @@ export function bankEntriesFrom(parsed: ParsedProfile, userId: string) {
       type: 'leadership',
       org: entry.organization.trim(),
       title: entry.title?.trim() || null,
+      location: entry.location?.trim() || null,
       date_range: [entry.start, entry.end].filter(Boolean).join(' - ') || null,
       bullet_variants: toBullets(entry.description ?? ''),
       tags: [] as string[],

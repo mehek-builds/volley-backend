@@ -230,6 +230,7 @@ export function educationFrom(parsed: unknown): CandidateEducation {
        documents, which is precisely why it exists at all. */
     gpa: str(p.gpa),
     gpa_scale: str(p.gpa_scale),
+    school_location: str(p.school_location),
     coursework: Array.isArray(p.coursework) ? p.coursework.filter((c): c is string => typeof c === 'string') : undefined,
   };
 }
