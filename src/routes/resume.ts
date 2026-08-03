@@ -28,6 +28,7 @@ import {
 import { extractPdfText } from '../lib/pdfText';
 import { PRODUCT_NAME } from '../lib/product';
 import { applyResumePolicy, enforceExperienceBulletFloor, type CandidateEducation } from '../engine/resumePolicy';
+import { warmRequirementCache } from '../engine/warmRequirements';
 import { baseResumeSelectionIssues } from '../llm/baseResume';
 import { deriveEditedTerms } from '../lib/applicationReview';
 
@@ -620,6 +621,35 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       // The file is already generated and returned below; failing to log it for audit
       // shouldn't block the student from getting their resume.
     }
+
+    /* Warm the requirement breakdown for this posting while nobody is waiting on it.
+     *
+     * A packet is built ahead of time, minutes or hours before the student opens it, so the one
+     * model call the breakdown needs is free HERE and was 24 seconds of spinner on the review
+     * screen. Bounded and non-fatal by construction: a slow or unavailable model leaves the cache
+     * cold and the student pays for the judgement on open, which is exactly today's behaviour.
+     * It can never fail a generation, and it writes nothing the review screen would not have. */
+    const warm = await warmRequirementCache(
+      body.jd_text,
+      {
+        degree: storedSpec.degree,
+        school: storedSpec.school,
+        gradDate: storedSpec.grad_date,
+        resumeText: [
+          storedSpec.school,
+          storedSpec.degree,
+          storedSpec.grad_date,
+          storedSpec.coursework,
+          ...storedSpec.experience.flatMap((e) => [e.org, e.title, e.date_range, ...(e.bullets ?? [])]),
+          ...(storedSpec.skills ?? []),
+        ]
+          .filter(Boolean)
+          .join(' '),
+        bullets: storedSpec.experience.flatMap((entry) => entry.bullets ?? []),
+      },
+      { company: jobContext.company, role: jobContext.role, job_id: jobContext.job_id ?? null },
+    );
+    if (warm.skipped) fastify.log.warn({ warm }, 'requirement cache not warmed');
 
     return reply.status(200).send({
       ...responseTemplate,
