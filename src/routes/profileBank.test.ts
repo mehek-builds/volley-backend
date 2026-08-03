@@ -289,3 +289,50 @@ describe('planBankReconciliation: location', () => {
     assert.deepEqual(result.enrichments, []);
   });
 });
+
+/* THREE WRITERS TOUCH THE BANK, and a field has to be in all of them.
+ *
+ *   bankEntriesFrom          inserts rows on upload
+ *   planBankReconciliation   enriches rows that already exist
+ *   PUT /profile/experience-bank  DELETES THE WHOLE BANK and rewrites it
+ *
+ * location shipped in the first only. That looked fine on a new account and was invisible
+ * everywhere else: existing rows never gained one (enrichment ignored it), and one trip through
+ * the work-history editor erased the rest, because a replace-everything route drops whatever its
+ * schema omits. Measured live: 17 rows recreated in a single batch with every city gone.
+ *
+ * Source-scanned rather than executed because the third writer is an HTTP handler with a database
+ * transaction in it, and the property worth pinning is textual anyway: does the field appear in
+ * every writer.
+ */
+import { readFileSync } from 'node:fs';
+
+describe('every bank writer carries every bank field', () => {
+  const BANK_FIELDS = ['location'] as const;
+  const writers = {
+    'bankEntriesFrom (insert on upload)': readFileSync('src/routes/profile.ts', 'utf8'),
+    'PUT /profile/experience-bank (replace)': readFileSync('src/routes/experienceBank.ts', 'utf8'),
+  };
+
+  for (const field of BANK_FIELDS) {
+    for (const [name, source] of Object.entries(writers)) {
+      test(`${name} writes ${field}`, () => {
+        const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+        assert.ok(
+          new RegExp(`\\b${field}\\b`).test(code),
+          `${name} does not mention ${field}; a writer that omits a field erases or never sets it`,
+        );
+      });
+    }
+  }
+
+  test('the replace route accepts the field from the client, or it cannot round-trip', () => {
+    const source = readFileSync('src/routes/experienceBank.ts', 'utf8');
+    const schema = source.slice(source.indexOf('const entrySchema'), source.indexOf('const putBodySchema'));
+    assert.match(
+      schema.replace(/\/\*[\s\S]*?\*\//g, ''),
+      /location:/,
+      'zod strips unknown keys, so a field absent from entrySchema is dropped before the insert',
+    );
+  });
+});
