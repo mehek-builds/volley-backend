@@ -132,6 +132,7 @@ describe('planBankReconciliation', () => {
       org: 'Traeco',
       title: 'Founder',
       date_range: '2025 - 2026',
+      location: null,
     }]);
     assert.deepEqual(result.inserts.map((entry) => entry.type), ['leadership']);
     assert.deepEqual(result.enrichments, []);
@@ -147,6 +148,7 @@ describe('planBankReconciliation', () => {
       org: 'litos',
       title: null,
       date_range: null,
+      location: null,
     }]);
     assert.deepEqual(result.inserts, []);
     assert.deepEqual(result.enrichments, [{
@@ -166,6 +168,7 @@ describe('planBankReconciliation', () => {
       org: 'Acme',
       title: 'Engineering Intern',
       date_range: '2025',
+      location: null,
     }]);
     assert.equal(result.inserts.length, 1);
     assert.equal(result.inserts[0].title, 'Product Intern');
@@ -244,5 +247,45 @@ describe('targeting schema', () => {
 
   test('Remote is a place a student can save, not only the checkbox', () => {
     assert.equal(targetingBodySchema.safeParse({ locations: ['Remote', 'London, UK'] }).success, true);
+  });
+});
+
+/* An existing row is the ONLY way most students will ever get a location: their bank was built
+   before the column existed, and every org they re-upload matches and takes the enrichment branch.
+   Location shipped on the insert path alone and was therefore unreachable for all 135 real rows,
+   which is what these pin. */
+describe('planBankReconciliation: location', () => {
+  test('backfills a location onto a row that has none', () => {
+    const parsed = profile({
+      experience: [{ company: 'Tri Coast Capital', title: 'Analyst', location: 'Los Angeles, CA', start: '2024', end: 'Present', description: 'Did the work' }],
+    });
+    const result = planBankReconciliation(parsed, UID, [{
+      id: 'job-1', type: 'job', org: 'Tri Coast Capital', title: 'Analyst',
+      date_range: '2024 - Present', location: null,
+    }]);
+    assert.deepEqual(result.inserts, []);
+    assert.deepEqual(result.enrichments, [{ id: 'job-1', location: 'Los Angeles, CA' }]);
+  });
+
+  test('a later resume that omits the place does not erase the stored one', () => {
+    const parsed = profile({
+      experience: [{ company: 'Tri Coast Capital', title: 'Analyst', start: '2024', end: 'Present', description: 'Did the work' }],
+    });
+    const result = planBankReconciliation(parsed, UID, [{
+      id: 'job-1', type: 'job', org: 'Tri Coast Capital', title: 'Analyst',
+      date_range: '2024 - Present', location: 'Los Angeles, CA',
+    }]);
+    assert.deepEqual(result.enrichments, []);
+  });
+
+  test('a stored place is never overwritten by a different one', () => {
+    const parsed = profile({
+      experience: [{ company: 'Tri Coast Capital', title: 'Analyst', location: 'New York, NY', start: '2024', end: 'Present', description: 'Did the work' }],
+    });
+    const result = planBankReconciliation(parsed, UID, [{
+      id: 'job-1', type: 'job', org: 'Tri Coast Capital', title: 'Analyst',
+      date_range: '2024 - Present', location: 'Los Angeles, CA',
+    }]);
+    assert.deepEqual(result.enrichments, []);
   });
 });

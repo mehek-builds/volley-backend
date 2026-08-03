@@ -589,6 +589,7 @@ interface ExistingBankEntry {
   org: string;
   title: string | null;
   date_range: string | null;
+  location: string | null;
 }
 
 export function planBankReconciliation(
@@ -599,7 +600,12 @@ export function planBankReconciliation(
   const normalize = (value: string | null | undefined) =>
     (value ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   const inserts: ReturnType<typeof bankEntriesFrom> = [];
-  const enrichments: Array<{ id: string; title?: string; date_range?: string }> = [];
+  /* ENRICHMENT IS HOW AN EXISTING ROW EVER GAINS A NEW FIELD, and forgetting to list one here makes
+     that field unreachable for everybody who already has a bank - which, for any field added after
+     launch, is everybody. `location` shipped on the insert path only and was therefore dead on
+     arrival: 135 real rows matched by org and took this branch, so no amount of re-uploading could
+     have filled a single city in. */
+  const enrichments: Array<{ id: string; title?: string; date_range?: string; location?: string }> = [];
 
   for (const candidate of bankEntriesFrom(parsed, userId)) {
     const candidateTitle = normalize(candidate.title);
@@ -612,10 +618,14 @@ export function planBankReconciliation(
       inserts.push(candidate);
       continue;
     }
-    const enrichment: { id: string; title?: string; date_range?: string } = { id: match.id };
+    const enrichment: { id: string; title?: string; date_range?: string; location?: string } = { id: match.id };
     if (!match.title && candidate.title) enrichment.title = candidate.title;
     if (!match.date_range && candidate.date_range) enrichment.date_range = candidate.date_range;
-    if (enrichment.title || enrichment.date_range) enrichments.push(enrichment);
+    /* Fill-only, never overwrite, exactly like the two above. A stored location came off an earlier
+       upload of the student's own resume; a later resume that omits the city is silence, not a
+       correction, and silence must not erase a fact they already gave us. */
+    if (!match.location && candidate.location) enrichment.location = candidate.location;
+    if (enrichment.title || enrichment.date_range || enrichment.location) enrichments.push(enrichment);
   }
 
   return { inserts, enrichments };
@@ -831,6 +841,7 @@ export async function profileRoutes(fastify: FastifyInstance) {
           org: experience_bank.org,
           title: experience_bank.title,
           date_range: experience_bank.date_range,
+          location: experience_bank.location,
         })
         .from(experience_bank)
         .where(eq(experience_bank.user_id, userId));
@@ -844,6 +855,7 @@ export async function profileRoutes(fastify: FastifyInstance) {
         const values = {
           ...(enrichment.title ? { title: enrichment.title } : {}),
           ...(enrichment.date_range ? { date_range: enrichment.date_range } : {}),
+          ...(enrichment.location ? { location: enrichment.location } : {}),
         };
         await db.update(experience_bank).set(values).where(eq(experience_bank.id, enrichment.id));
         bank_enriched += 1;
