@@ -18,6 +18,7 @@ import {
 import {
   buildManagedDiscoveryActions,
   buildManagedPortalActions,
+  CAPTCHA_UNRESOLVED_ERROR,
   clickFinalSubmit,
   detectPortal,
   fillPortal,
@@ -832,6 +833,23 @@ async function fail(row: ResumeRow, error: unknown) {
   const message = error instanceof Error ? error.message : 'Submission runner failed';
   const externalGate = /browserbase|stratus managed browser is not configured|secure browser provider is not configured/i.test(message);
   const uncertainAfterClaim = Boolean(current.submission_claimed_at);
+
+  // Checked BEFORE uncertainAfterClaim, and that order is the whole point. The claim is taken at
+  // the top of the run, so by the time clickFinalSubmit refuses to press the button this is always
+  // "uncertain after claim" - and that branch says the submission WAS attempted and could not be
+  // verified. Here the opposite is true and known: the click provably did not happen, so nothing
+  // was sent. Telling someone to go check their email for a confirmation of an application that
+  // was never submitted sends them looking for a receipt that cannot exist, and costs the trust to
+  // believe the next message. Same reasoning as portalHandoffReason vs unattendedHandoffReason.
+  if (message.startsWith(CAPTCHA_UNRESOLVED_ERROR)) {
+    await writeReview(latestRows[0], nextReview(current, {
+      status: 'needs_attention',
+      submission_error: message,
+      attention_reason: 'This company’s application page asks you to prove you are human, and that check is still waiting. Litos filled everything in and stopped there, so nothing has been sent. Open it when you have a minute and finish the last step.',
+    }));
+    return;
+  }
+
   await writeReview(latestRows[0], nextReview(current, {
     status: uncertainAfterClaim ? 'needs_attention' : externalGate ? 'submit_requested' : 'failed',
     submission_error: message,

@@ -1223,7 +1223,8 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
   await fillReviewedQuestions(page, packet, filledFields);
 
   const blockers: string[] = [];
-  if ((await page.locator('iframe[src*="captcha" i], [class*="captcha" i], [id*="captcha" i]').count()) > 0) {
+  // String kept verbatim: it is already surfaced to applicants and matched downstream.
+  if (await hasUnresolvedCaptcha(page)) {
     blockers.push('CAPTCHA requires your attention');
   }
   const required = page.locator('input[required], textarea[required], select[required]');
@@ -1249,6 +1250,97 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
   blockers.push(...new Set(labelledBlockers));
   if (unlabelledCount > 0) blockers.push(describeUnlabelledBlockers(unlabelledCount));
   return { filledFields, blockers };
+}
+
+// ---- human-verification (CAPTCHA) detection ----
+//
+// Litos NEVER solves a challenge and never sends one anywhere to be solved. These functions only
+// answer "is a human being asked to do something here", so the run can stop, keep what it filled,
+// and hand the page back to the person whose application it is. `solveCaptchas: false` in
+// browserbase.ts is the other half of that promise and there is a test pinning it.
+//
+// The check this replaced counted `iframe[src*=captcha], [class*=captcha], [id*=captcha]` and
+// called any hit a blocker. That is wrong in both directions. reCAPTCHA v2 ALWAYS ships a
+// `g-recaptcha-response` textarea, solved or not, so the old check called every reCAPTCHA page
+// blocked forever; and it could not tell a widget the person already cleared from one still
+// waiting. Token state is what distinguishes them: an empty response field under a rendered
+// widget means a human still has to act.
+
+// Widget count is deliberately NOT compared to token count. Providers render a variable number of
+// visible nodes per widget (wrapper div, anchor iframe, and on Turnstile a shadow host), so
+// "3 visible nodes, 1 token" is one solved widget, not two missing ones. The honest signal is:
+// something is rendered, and at least one response field is still empty.
+export function captchaSnapshotRequiresAttention(responseTokens: string[], visibleChallengeCount: number): boolean {
+  if (visibleChallengeCount === 0) return false;
+  if (responseTokens.length === 0) return true;
+  return responseTokens.some((token) => token.trim().length === 0);
+}
+
+const CAPTCHA_RESPONSE_SELECTOR = [
+  'textarea[name*="captcha-response" i]',
+  'input[name*="captcha-response" i]',
+  'textarea[id*="captcha-response" i]',
+  'input[id*="captcha-response" i]',
+  'textarea[name="cf-turnstile-response"]',
+  'input[name="cf-turnstile-response"]',
+].join(', ');
+
+const CAPTCHA_CHALLENGE_SELECTOR = [
+  'iframe[src*="captcha" i]',
+  'iframe[src*="challenges.cloudflare.com" i]',
+  '[class*="captcha" i]',
+  '[id*="captcha" i]',
+  '[data-sitekey]',
+].join(', ');
+
+// reCAPTCHA v3 and invisible v2 render a floating "protected by reCAPTCHA" badge on pages that ask
+// the human for NOTHING - the score is computed from behaviour and the token is minted on submit.
+// The badge matches [class*="captcha"] and is genuinely visible, so counting it stops a page that
+// was never blocked, on exactly the two families already typed as CAPTCHA-gated. Measured on
+// BambooHR 2026-07-29: badge present, window.grecaptcha defined, no interactive widget.
+//
+// Excluding it means a v3 page reports "not blocked", which is correct: there is no challenge for a
+// human to clear. If v3 scores the session badly it escalates to a real interactive widget, and
+// THAT widget is not a badge and is counted normally.
+const CAPTCHA_BADGE_SELECTOR = '.grecaptcha-badge';
+
+export async function hasUnresolvedCaptcha(page: Page): Promise<boolean> {
+  const responseFields = page.locator(CAPTCHA_RESPONSE_SELECTOR);
+  const responseTokens: string[] = [];
+  for (let index = 0; index < await responseFields.count(); index += 1) {
+    responseTokens.push(await responseFields.nth(index).inputValue().catch(() => ''));
+  }
+
+  const challenges = page.locator(CAPTCHA_CHALLENGE_SELECTOR);
+  let visibleChallengeCount = 0;
+  for (let index = 0; index < await challenges.count(); index += 1) {
+    const challenge = challenges.nth(index);
+    if (!await challenge.isVisible().catch(() => false)) continue;
+    // Bounded like every other probe in this file: an unbounded auto-waiting call here would be
+    // paid once per candidate node and can blow the run's whole time budget.
+    if (await challenge.locator(CAPTCHA_BADGE_SELECTOR).count().catch(() => 0) > 0) continue;
+    if (await challenge.evaluate((node) => node.classList.contains('grecaptcha-badge')).catch(() => false)) continue;
+    visibleChallengeCount += 1;
+  }
+  return captchaSnapshotRequiresAttention(responseTokens, visibleChallengeCount);
+}
+
+// Bounded on purpose. This is the "the applicant is solving it right now, in their own session"
+// wait, not a retry loop: it never re-opens a page, never re-runs a submission, and gives up with a
+// plain false so the caller can stop and hand off. An unbounded version would hold a paid browser
+// session open against a page nobody is looking at.
+export async function waitForCaptchaResolution(
+  page: Page,
+  timeoutMs = 35_000,
+  pollMs = 1_000,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (await hasUnresolvedCaptcha(page)) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await page.waitForTimeout(Math.min(pollMs, remaining));
+  }
+  return true;
 }
 
 // Playwright's locator actions AUTO-WAIT, defaulting to 30s. Probing four label sources per field
@@ -1312,9 +1404,22 @@ async function resolveFieldLabel(page: Page, field: Locator): Promise<string | n
   return null;
 }
 
+// Thrown when a challenge is still unresolved at the moment of the final click. The prefix is a
+// MACHINE token, matched in submissionRunner's fail() to write honest copy; the sentence after it is
+// never shown to anyone. Do not reword the prefix without changing that matcher.
+export const CAPTCHA_UNRESOLVED_ERROR = 'CAPTCHA_UNRESOLVED';
+
 export async function clickFinalSubmit(page: Page): Promise<void> {
   const button = page.getByRole('button', { name: /submit application|submit|apply/i }).last();
   if ((await button.count()) === 0) throw new Error('We could not find the Submit button');
+  // Defence in depth, and it covers a case the call-site gate cannot. portalCanAutoSubmit() stops
+  // the families KNOWN to be gated (JazzHR, BambooHR) before this function is ever reached. It
+  // knows nothing about a Greenhouse or Lever board whose employer switched a challenge on last
+  // week. Pressing submit under an unsolved challenge does not just fail: it submits the applicant
+  // as bot traffic, and the posting can discard the application with no error shown to anyone.
+  if (await hasUnresolvedCaptcha(page)) {
+    throw new Error(`${CAPTCHA_UNRESOLVED_ERROR}: final submit was not clicked`);
+  }
   await button.click();
   await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => undefined);
 }
