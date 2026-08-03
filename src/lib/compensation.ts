@@ -248,7 +248,18 @@ const TITLE_TYPES: [RegExp, string][] = [
   /* Internship first: "Contract Intern" is an internship, and a co-op is one in everything but
      name. \b on both sides so "Internal Audit" and "Internationalization Engineer" — both live on
      the board — are not read as internships. */
-  [/\b(intern|interns|internship|internships)\b|\bco-?op\b|\bapprentice(ship)?s?\b/i, 'Internship'],
+  [/\b(intern|interns|internship|internships)\b|\bco-?op\b/i, 'Internship'],
+  /* APPRENTICESHIP IS ITS OWN CATEGORY, not a kind of internship (2026-08-04, Mehek's call).
+     It used to share the rule above, and the two are genuinely different jobs. An internship is
+     a student's fixed-length placement, usually a summer. A trade apprenticeship is a paid,
+     multi-year, full-time route into a skilled trade, open to people who are not students at all:
+     the live examples are Crusoe's Apprentice Electrician, SpaceX's Apprentice Weld Support
+     Technician, Rocket Lab's Apprentice Aerospace Technician and Figure's Apprentice Robot Service
+     Technician. Filing those under Internship told a career-changer they were student roles and
+     told a student they were summer ones, and both were wrong.
+     Below Internship on purpose: "Apprentice Intern" would be an internship, and the intern rule
+     should win that. */
+  [/\bapprentice(ship)?s?\b/i, 'Apprenticeship'],
   [/\bpart[-\s]?time\b/i, 'Part-time'],
   [/\bcontract(or)?\b|\btemporary\b|\bfixed[-\s]?term\b|\bseasonal\b/i, 'Contract'],
 ];
@@ -280,9 +291,19 @@ export function employmentTypeFromTitle(title: string): string | undefined {
    'Permanent' (190 Lever postings) folds into Full-time: it is the same thing said in British and
    European job-ad register, and it is Lever's commitment field, so it is the employer speaking. */
 const TYPE_SYNONYMS: [RegExp, string][] = [
-  [/^full[-\s]?time$|^permanent$|^fulltime$/i, 'Full-time'],
+  /* "Full Time Employee" is Workable's wording and was passing straight through, so 55 live
+     postings carried a chip reading "Full Time Employee" and were invisible to the Full-time
+     filter - the employer had answered and the board was not listening.
+     ANCHORED, NOT A PREFIX. `^full[-\s]?time` on its own would also swallow "Full Time
+     Contractor", which is a contract and has to keep falling through to the Contract rule below. */
+  [/^full[-\s]?time$|^full[-\s]?time employee$|^permanent$|^fulltime$/i, 'Full-time'],
   [/^part[-\s]?time$|^parttime$/i, 'Part-time'],
-  [/^intern(ship)?$|^apprentice(ship)?$|^co-?op$|^scholarship$/i, 'Internship'],
+  [/^intern(ship)?$|^co-?op$|^scholarship$/i, 'Internship'],
+  /* Split out of Internship 2026-08-04. Lever emits this for Match Group's four "Apprenticeship -
+     Junior ..." postings, which are the genuine early-career kind rather than trade routes, but
+     they are still apprenticeships and belong in the same bucket as the trade ones. The category
+     is "apprenticeship", not "how junior the apprentice is". */
+  [/^apprentice(ship)?$/i, 'Apprenticeship'],
   [/contract|temporary|^temp$|fixed[-\s]?term|short[-\s]?term|agency/i, 'Contract'],
 ];
 
@@ -332,8 +353,91 @@ export function normalizeEmploymentType(value: string | undefined): string | und
  * even though it has no field to pass: one function means the precedence rule cannot end up
  * spelled differently in three normalizers.
  */
-export function resolveEmploymentType(title: string, boardValue?: string): string | undefined {
+/* WHEN THE TITLE SAYS NOTHING AND THE EMPLOYER STATES NOTHING, THE DESCRIPTION IS THE ONLY EVIDENCE.
+ *
+ * Jane Street posts "Software Engineer" thirteen times. Some are full-time roles, some are the
+ * summer internship, and the ONLY thing that tells them apart is the body copy - the internships
+ * open "As an intern, you are paired with full-time employees who act as mentors", the full-time
+ * reqs open "We're looking for Software Engineers who want to help us design and build...". Same
+ * board, same title, same employer, no employment-type field, opposite answers. Measured
+ * 2026-08-04: 38 live Jane Street postings are internships that the title rule reads as untyped.
+ *
+ * SECOND PERSON IS THE DISCRIMINATOR, and it is what makes this safe. A job that IS an internship
+ * addresses the person who will be the intern ("as an intern, you...", "during your internship").
+ * A job ABOUT the internship programme - a campus recruiter, an early-talent coordinator - talks
+ * about interns in the third person ("our interns", "our internship program"). Matching only the
+ * applicant-addressed phrasings separates them, and the RECRUITING_TITLES guard below is the
+ * belt-and-braces: those roles are full-time and describing them as internships would put a
+ * salaried recruiting job in front of a student filtering for one.
+ *
+ * Hand-verified on every one of the 38 hits, because there was no labelled data to check it
+ * against: employers who state a type essentially always ALSO say "intern" in the title, so the
+ * title-silent internship is a Greenhouse phenomenon with no ground truth to score against. All 38
+ * are unambiguously internships and there were zero false positives.
+ */
+const INTERNSHIP_DESCRIPTION = new RegExp(
+  [
+    '\\bas an intern\\b',
+    '\\bas our intern\\b',
+    '\\bduring (the|your) internship\\b',
+    '\\bthis internship\\b',
+    '\\byour internship\\b',
+    '\\bthe internship (is|will|runs|lasts|begins|starts)\\b',
+  ].join('|'),
+  'i',
+);
+
+/** Roles that RUN an internship programme rather than being one. All full-time. */
+const RECRUITING_TITLES =
+  /\brecruit(er|ing|ment)\b|\btalent acquisition\b|\bprograms?\s+(coordinator|manager|lead)\b|\b(coordinator|manager|lead|head)\s*(of|,)?\s*[a-z ]*\bprograms?\b|\bevents? coordinator\b|\bearly (talent|careers?)\b|\bemerging talent\b|\bstudent programs?\b|\bintern(ship)?s?\s+(operations|programs?|programmes?)\b|\bemployer brand\b|\bcampus\b|\buniversity\b/i;
+
+/**
+ * The internship a posting describes but never names, or undefined.
+ *
+ * PASS THE CLEANED TEXT, NOT THE RAW PAYLOAD. Greenhouse returns entity-escaped markup, so the
+ * phrases above have to be matched against decoded text or a tag inside the phrase silently drops
+ * the posting: "As an intern, you..." matches, "As an <strong>intern</strong>, you..." does not, and
+ * neither does an &nbsp; between the words. Every normalizer therefore cleans once and passes the
+ * result here, which also stops the same string being decoded twice per posting on every poll.
+ *
+ * Exported for its own tests; callers want resolveEmploymentType, which knows where in the
+ * precedence order this belongs (last, and only when nothing else spoke).
+ */
+export function employmentTypeFromDescription(
+  title: string,
+  description?: string,
+): string | undefined {
+  if (!description || RECRUITING_TITLES.test(title)) return undefined;
+  return INTERNSHIP_DESCRIPTION.test(description) ? 'Internship' : undefined;
+}
+
+export function resolveEmploymentType(
+  title: string,
+  boardValue?: string,
+  description?: string,
+): string | undefined {
+  /* A TITLE NAMING A TRAINING ROUTE BEATS THE EMPLOYER'S FIELD - now for two categories, not one.
+   *
+   * The original exception was Internship, because employers use their one field for two different
+   * questions ("is this permanent?" and "is this 40 hours?") and Modal's "ML Research Intern" is
+   * tagged FullTime meaning the hours. Apprenticeship has exactly the same problem and it is worse,
+   * because a trade apprenticeship genuinely IS full-time and multi-year, so the employer answering
+   * "FullTime" is not even loosely wrong - it is answering a different question. Crusoe's
+   * "Apprentice Electrician" is tagged FullTime; so, in the same shape, are SpaceX's Apprentice Weld
+   * Support Technician, Rocket Lab's Apprentice Aerospace Technician and Figure's Apprentice Robot
+   * Service Technician. Rendering those as plain Full-time hides the one fact that makes them worth
+   * finding, which is that they train someone with no experience in the trade.
+   *
+   * Both are narrow and for the same reason: the title states a specific fact the field is not
+   * contradicting. Part-time and Contract in a title still do NOT override, because there the title
+   * is frequently the WORK rather than the arrangement ("Contract Manager", "Contracts Counsel"). */
   const fromTitle = employmentTypeFromTitle(title);
-  if (fromTitle === 'Internship') return 'Internship';
-  return normalizeEmploymentType(boardValue) ?? fromTitle;
+  if (fromTitle === 'Internship' || fromTitle === 'Apprenticeship') return fromTitle;
+
+  const stated = normalizeEmploymentType(boardValue);
+  if (stated) return stated;
+  /* Description LAST, and only when both the title and the employer said nothing. Deliberately the
+     weakest evidence in the chain: it is inference from prose, so it never overrules an employer
+     stating their own answer, and it only ever fills a silence. */
+  return fromTitle ?? employmentTypeFromDescription(title, description);
 }

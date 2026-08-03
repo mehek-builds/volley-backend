@@ -548,3 +548,45 @@ test('Workable fetch rejects provider errors and malformed successful payloads',
     /invalid jobs payload/,
   );
 });
+
+test('a Greenhouse internship is classified through the DECODED description, not raw markup', () => {
+  /* THE BUG THIS PINS. Greenhouse returns entity-escaped markup and the classifier was being fed
+     the raw payload. "As an intern, you..." matched anyway because the phrase itself carries no
+     tags, which is why production looked correct - but a tag or an &nbsp; INSIDE the phrase
+     silently dropped the posting. Jane Street is the reason this path exists: it posts its summer
+     internships under the same plain titles as its full-time reqs, so the body is the only
+     evidence, and it is the board most likely to wrap a word in <strong>.
+     Asserted through the NORMALIZER, because "clean once, then classify" is a contract between
+     the normalizer and resolveEmploymentType, not something either half can prove alone. */
+  const escaped = (inner: string) => `&lt;p&gt;Our goal is to give you a real sense of what it&#39;s`
+    + ` like to work here full time. ${inner}&lt;/p&gt;`;
+  const cases: [string, string][] = [
+    ['plain phrase', escaped('As an intern, you are paired with full-time employees.')],
+    ['tag inside the phrase', escaped('As an &lt;strong&gt;intern&lt;/strong&gt;, you are paired with mentors.')],
+    ['nbsp inside the phrase', escaped('As&amp;nbsp;an&amp;nbsp;intern, you are paired with mentors.')],
+  ];
+  for (const [name, content] of cases) {
+    const [job] = normalizeGreenhouseJobs({
+      jobs: [{
+        id: 1,
+        title: 'Software Engineer',
+        absolute_url: 'https://job-boards.greenhouse.io/acme/jobs/1',
+        updated_at: new Date().toISOString(),
+        content,
+      }],
+    });
+    assert.equal(job?.employment_type, 'Internship', name);
+  }
+
+  // The full-time twin on the same board with the same title must stay untyped.
+  const [fullTime] = normalizeGreenhouseJobs({
+    jobs: [{
+      id: 2,
+      title: 'Software Engineer',
+      absolute_url: 'https://job-boards.greenhouse.io/acme/jobs/2',
+      updated_at: new Date().toISOString(),
+      content: escaped('We are looking for Software Engineers to build the systems that run the firm.'),
+    }],
+  });
+  assert.equal(fullTime?.employment_type, undefined);
+});

@@ -232,7 +232,8 @@ test('the internship commitment is pinned at 2,000 and is not yet a 5xx', async 
   // downward to match whatever the board happens to hold is not a commitment.
   assert.equal(MINIMUM_SURFACED_INTERNSHIPS, 2_000);
 
-  const source = readFileSync(new URL('./jobMonitor.ts', import.meta.url), 'utf8');
+  // Repo-relative, matching the workflow reads above; import.meta is not available under this tsconfig.
+  const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
   /* The internship shortfall must WARN, never fail the run. The board floor's 5xx means "the
      board is broken now"; the internship number is ~8x under its commitment on the day it was
      set, so wiring it to the same 5xx would make the cron permanently red and retire the alarm
@@ -264,4 +265,49 @@ test('internship supply is never grown by loosening what counts as an internship
   // And the genuine ones still resolve.
   assert.equal(resolveEmploymentType('Platform Engineer Intern, Summer 2027'), 'Internship');
   assert.equal(resolveEmploymentType('Software Engineering Co-Op'), 'Internship');
+});
+
+test('internships get a ninety-day window, and the purge honours it', async () => {
+  const {
+    INTERNSHIP_FRESHNESS_DAYS,
+    PURGE_INTERNSHIPS_OLDER_THAN_DAYS,
+    JOB_FRESHNESS_DAYS: boardWindow,
+  } = await import('./jobMonitor');
+  assert.equal(INTERNSHIP_FRESHNESS_DAYS, 90);
+  assert.ok(INTERNSHIP_FRESHNESS_DAYS > boardWindow, 'the whole point is that it is longer');
+
+  /* The purge must keep a full internship window of slack, exactly as the board window does.
+     Purging internships on the BOARD's schedule would delete the row nightly and re-fetch it each
+     morning, so the 90 would be true in the read path and false in production. */
+  assert.equal(PURGE_INTERNSHIPS_OLDER_THAN_DAYS, INTERNSHIP_FRESHNESS_DAYS * 2);
+
+  const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  /* Enforced in all THREE places or it is enforced in none: the read predicate, the ingest gate,
+     and the purge. An internship the poll refuses to store cannot be shown by any read window. */
+  assert.ok(/freshnessPredicate[\s\S]{0,600}INTERNSHIP_FRESHNESS_DAYS/.test(source), 'read path');
+  assert.ok(/internshipCutoff/.test(source), 'ingest gate');
+  assert.ok(/PURGE_INTERNSHIPS_OLDER_THAN_DAYS/.test(source), 'purge');
+  /* Untyped postings are the majority of the board (Greenhouse states no type) and `ne` does not
+     match NULL, so a two-branch purge would leave every untyped row immortal. */
+  assert.ok(/isNull\(monitored_jobs\.employment_type\)/.test(source), 'the NULL branch of the purge');
+});
+
+test('employment type is filterable, and an unstated type is not swept into Full-time', async () => {
+  const { boardConditions } = await import('./jobMonitor');
+  const withFilter = boardConditions({ employmentType: 'Internship' });
+  const without = boardConditions({});
+  assert.equal(
+    withFilter.length,
+    without.length + 1,
+    'the filter adds exactly one predicate, and only when asked for',
+  );
+
+  const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  /* eq, never ilike. "Internship" is the value a student filters on expecting a complete and honest
+     set, and a substring match would quietly widen it as the vocabulary grows. */
+  assert.ok(
+    /if \(f\.employmentType\) conditions\.push\(eq\(monitored_jobs\.employment_type, f\.employmentType\)\)/
+      .test(source),
+    'employment type filters on an exact match',
+  );
 });
