@@ -10,6 +10,13 @@ import { put } from '@vercel/blob';
 import { MultipartFile } from '@fastify/multipart';
 import { z } from 'zod';
 import {
+  extractDocxText,
+  inspectResumeUpload,
+  ResumeUploadError,
+  resumeStorageMetadata,
+  type ResumeSourceFormat,
+} from '../lib/resumeUpload';
+import {
   assessImpactBullet,
   buildRecentExperienceReview,
   composeImpactBullet,
@@ -446,12 +453,17 @@ export async function profileRoutes(fastify: FastifyInstance) {
     const userId = request.jwtPayload!.userId;
 
     let resumeBuffer: Buffer | null = null;
+    let resumeFilename: string | undefined;
+    let resumeMimetype: string | undefined;
     let voice_pref: string | undefined;
 
     try {
       const parts = request.parts();
       for await (const part of parts) {
         if (part.type === 'file' && part.fieldname === 'resume') {
+          const resumePart = part as MultipartFile;
+          resumeFilename = resumePart.filename;
+          resumeMimetype = resumePart.mimetype;
           const chunks: Buffer[] = [];
           for await (const chunk of part.file) {
             chunks.push(chunk);
@@ -470,6 +482,20 @@ export async function profileRoutes(fastify: FastifyInstance) {
       return reply.status(400).send({ error: 'resume file is required' });
     }
 
+    let sourceFormat: ResumeSourceFormat;
+    try {
+      sourceFormat = inspectResumeUpload(resumeBuffer, {
+        filename: resumeFilename,
+        mimetype: resumeMimetype,
+      });
+    } catch (err) {
+      fastify.log.info({ err, resumeFilename, resumeMimetype }, 'rejected unsupported resume upload');
+      const message = err instanceof ResumeUploadError
+        ? err.message
+        : 'Unsupported resume file type. Upload a PDF or DOCX file.';
+      return reply.status(400).send({ error: message });
+    }
+
     let resumeText: string;
     // The uploaded file's real page count. Measured here and nowhere else: the buffer is gone by
     // the time anything downstream runs, so a page count not captured now can only ever be guessed
@@ -481,12 +507,21 @@ export async function profileRoutes(fastify: FastifyInstance) {
       // chunks lands in Node's shared buffer pool, where pdf-parse's byteOffset bug (R-017, see
       // lib/pdfText.ts) rejects a perfectly valid file as "bad XRef entry" - which here would
       // 400 a student's real resume at signup.
-      const parsed = await extractPdfText(resumeBuffer);
-      resumeText = parsed.text;
-      sourcePages = parsed.numpages;
+      if (sourceFormat === 'pdf') {
+        const parsed = await extractPdfText(resumeBuffer);
+        resumeText = parsed.text;
+        sourcePages = parsed.numpages;
+      } else {
+        resumeText = await extractDocxText(resumeBuffer);
+      }
     } catch (err) {
       fastify.log.error(err);
-      return reply.status(400).send({ error: 'Failed to parse PDF - ensure the file is a valid PDF' });
+      const error = err instanceof ResumeUploadError
+        ? err.message
+        : sourceFormat === 'pdf'
+          ? 'Failed to parse PDF. Ensure the file is a valid PDF and try again.'
+          : 'Failed to parse DOCX. Ensure the file is a valid Word document and try again.';
+      return reply.status(400).send({ error });
     }
 
     /* A scanned resume extracts as a trickle of text, not as nothing, so a flat 50-character floor
@@ -503,7 +538,7 @@ export async function profileRoutes(fastify: FastifyInstance) {
      * anyone whose only copy of their resume is a scan or a phone photo. Two of eight real resumes
      * tested were image-only. We read those pages visually instead. */
     const minimumChars = Math.max(50, 700 * Math.max(1, sourcePages));
-    const looksScanned = !resumeText || resumeText.trim().length < minimumChars;
+    const looksScanned = sourceFormat === 'pdf' && (!resumeText || resumeText.trim().length < minimumChars);
 
     // Annotated rather than inferred: an evolving `let` takes its type from every later use, so the
     // narrow Pick that academicSeedFrom accepts would otherwise become this variable's type and
@@ -519,7 +554,7 @@ export async function profileRoutes(fastify: FastifyInstance) {
       parsedProfile = {
         ...parsedProfile,
         full_name: normalizeDisplayName(parsedProfile.full_name ?? ''),
-        source_pages: sourcePages,
+        ...(sourcePages > 0 ? { source_pages: sourcePages } : {}),
       };
     } catch (err) {
       fastify.log.error(err);
@@ -538,7 +573,8 @@ export async function profileRoutes(fastify: FastifyInstance) {
       });
     }
 
-    const resumeObjectKey = `users/${userId}/resume.pdf`;
+    const storage = resumeStorageMetadata(sourceFormat);
+    const resumeObjectKey = `users/${userId}/resume.${storage.extension}`;
 
     // Actually store the file this time. Best-effort on purpose: the parse above is what the
     // student came for, and a blob outage (or a missing BLOB_READ_WRITE_TOKEN in local dev)
@@ -547,7 +583,7 @@ export async function profileRoutes(fastify: FastifyInstance) {
     try {
       const blob = await put(resumeObjectKey, resumeBuffer, {
         access: 'public',
-        contentType: 'application/pdf',
+        contentType: storage.contentType,
       });
       resumeUrl = blob.url;
     } catch (err) {
