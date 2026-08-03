@@ -366,3 +366,20 @@ test('the education block carries the GPA from the profile, never from the model
   );
   assert.equal(out.gpa, '3.8/4.0');
 });
+
+/* Every path that builds a CandidateEducation has to carry the GPA, or the student is shown a base
+   resume without one and a tailored resume with one, which reads as the product changing their
+   education between screens. baseResume.ts builds its own via educationFrom and was missed on the
+   first pass; this is the reminder for the next field. */
+test('the base resume path carries the same education fields the tailored path does', async () => {
+  const { educationFrom } = await import('../routes/baseResume');
+  const education = educationFrom({
+    school: 'USC',
+    degree: 'BS CS',
+    grad_date: 'May 2027',
+    gpa: '3.8',
+    gpa_scale: '4.0',
+    coursework: ['Algorithms'],
+  });
+  assert.equal(educationGpaLine(education), '3.8/4.0');
+});
