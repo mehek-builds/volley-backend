@@ -1299,48 +1299,61 @@ const CAPTCHA_CHALLENGE_SELECTOR = [
 // was never blocked, on exactly the two families already typed as CAPTCHA-gated. Measured on
 // BambooHR 2026-07-29: badge present, window.grecaptcha defined, no interactive widget.
 //
+// Matched with closest(), NOT a self-or-descendant check. The badge is a CONTAINER: `div.grecaptcha-badge`
+// wraps an anchor `<iframe src=".../recaptcha/api2/anchor...">`, and that iframe matches
+// `iframe[src*="captcha" i]` on its own. A self check misses it (its own class list is not the
+// badge's) and a descendant check misses it too (it contains no badge). It would have been counted,
+// so a v3 page would still have reported blocked - the exact false positive this exclusion exists to
+// remove. closest() covers the badge node and everything inside it in one probe.
+//
 // Excluding it means a v3 page reports "not blocked", which is correct: there is no challenge for a
 // human to clear. If v3 scores the session badly it escalates to a real interactive widget, and
-// THAT widget is not a badge and is counted normally.
-const CAPTCHA_BADGE_SELECTOR = '.grecaptcha-badge';
+// THAT widget is rendered outside the badge, so closest() returns null and it is counted normally.
+const CAPTCHA_BADGE_CLASS = 'grecaptcha-badge';
+
+// Same discipline, and the same reason, as LABEL_PROBE_TIMEOUT_MS below: locator actions AUTO-WAIT
+// at 30s by default, this cost is paid once per candidate node, and every probe here is wrapped in
+// a swallowing catch - so an unbounded stall would burn the run's whole budget and leave no trace of
+// why. isVisible() and count() do not auto-wait; inputValue() and evaluate() do, so they are bounded.
+const CAPTCHA_PROBE_TIMEOUT_MS = 750;
+
+// A page whose CSS framework happens to use "captcha" in a utility class can match this selector
+// dozens of times. The probe is per-node, so cap the scan: past ~20 candidates the page is telling
+// us about its class names, not about a challenge.
+const CAPTCHA_MAX_CANDIDATE_NODES = 20;
 
 export async function hasUnresolvedCaptcha(page: Page): Promise<boolean> {
   const responseFields = page.locator(CAPTCHA_RESPONSE_SELECTOR);
   const responseTokens: string[] = [];
-  for (let index = 0; index < await responseFields.count(); index += 1) {
-    responseTokens.push(await responseFields.nth(index).inputValue().catch(() => ''));
+  // count() is hoisted out of the loop CONDITION deliberately: it is a round-trip to the browser, so
+  // leaving it there paid one extra crossing per iteration and let the bound move mid-scan.
+  const fieldCount = await responseFields.count();
+  for (let index = 0; index < fieldCount; index += 1) {
+    responseTokens.push(
+      await responseFields.nth(index).inputValue({ timeout: CAPTCHA_PROBE_TIMEOUT_MS }).catch(() => ''),
+    );
   }
 
   const challenges = page.locator(CAPTCHA_CHALLENGE_SELECTOR);
+  const challengeCount = Math.min(await challenges.count(), CAPTCHA_MAX_CANDIDATE_NODES);
   let visibleChallengeCount = 0;
-  for (let index = 0; index < await challenges.count(); index += 1) {
+  for (let index = 0; index < challengeCount; index += 1) {
     const challenge = challenges.nth(index);
-    if (!await challenge.isVisible().catch(() => false)) continue;
-    // Bounded like every other probe in this file: an unbounded auto-waiting call here would be
-    // paid once per candidate node and can blow the run's whole time budget.
-    if (await challenge.locator(CAPTCHA_BADGE_SELECTOR).count().catch(() => 0) > 0) continue;
-    if (await challenge.evaluate((node) => node.classList.contains('grecaptcha-badge')).catch(() => false)) continue;
+    // Fails CLOSED, and it is the only probe here that had to be argued about. Every other catch in
+    // this function pushes toward "a human is needed"; a visibility probe that swallowed its error
+    // as `false` pushed the other way, so a widget that detached mid-probe (routine during a
+    // reCAPTCHA re-render) would drop the count to zero and let the submit click through under an
+    // uncleared challenge. A guard that cannot see must assume the thing it guards against.
+    if (!await challenge.isVisible().catch(() => true)) continue;
+    const insideBadge = await challenge
+      .evaluate((node, badgeClass) => node.closest(`.${badgeClass}`) !== null, CAPTCHA_BADGE_CLASS, {
+        timeout: CAPTCHA_PROBE_TIMEOUT_MS,
+      })
+      .catch(() => false);
+    if (insideBadge) continue;
     visibleChallengeCount += 1;
   }
   return captchaSnapshotRequiresAttention(responseTokens, visibleChallengeCount);
-}
-
-// Bounded on purpose. This is the "the applicant is solving it right now, in their own session"
-// wait, not a retry loop: it never re-opens a page, never re-runs a submission, and gives up with a
-// plain false so the caller can stop and hand off. An unbounded version would hold a paid browser
-// session open against a page nobody is looking at.
-export async function waitForCaptchaResolution(
-  page: Page,
-  timeoutMs = 35_000,
-  pollMs = 1_000,
-): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (await hasUnresolvedCaptcha(page)) {
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) return false;
-    await page.waitForTimeout(Math.min(pollMs, remaining));
-  }
-  return true;
 }
 
 // Playwright's locator actions AUTO-WAIT, defaulting to 30s. Probing four label sources per field
@@ -1404,10 +1417,16 @@ async function resolveFieldLabel(page: Page, field: Locator): Promise<string | n
   return null;
 }
 
-// Thrown when a challenge is still unresolved at the moment of the final click. The prefix is a
-// MACHINE token, matched in submissionRunner's fail() to write honest copy; the sentence after it is
-// never shown to anyone. Do not reword the prefix without changing that matcher.
-export const CAPTCHA_UNRESOLVED_ERROR = 'CAPTCHA_UNRESOLVED';
+// Thrown when a challenge is still unresolved at the moment of the final click. A class, not a
+// message prefix, so the runner narrows on `instanceof` the way it already does for
+// FieldDecryptError and ResumeUploadError. The message is plain English because it lands in
+// submission_error, which is read by a person.
+export class CaptchaUnresolvedError extends Error {
+  constructor(message = 'The submit button was not pressed: a human verification check is still waiting.') {
+    super(message);
+    this.name = 'CaptchaUnresolvedError';
+  }
+}
 
 export async function clickFinalSubmit(page: Page): Promise<void> {
   const button = page.getByRole('button', { name: /submit application|submit|apply/i }).last();
@@ -1417,8 +1436,11 @@ export async function clickFinalSubmit(page: Page): Promise<void> {
   // knows nothing about a Greenhouse or Lever board whose employer switched a challenge on last
   // week. Pressing submit under an unsolved challenge does not just fail: it submits the applicant
   // as bot traffic, and the posting can discard the application with no error shown to anyone.
+  //
+  // NOTE: this guard only covers the direct-Playwright path. The managed-Stratus path in
+  // submissionRunner never builds a Page, so it never reaches here. See the CAPTCHA note there.
   if (await hasUnresolvedCaptcha(page)) {
-    throw new Error(`${CAPTCHA_UNRESOLVED_ERROR}: final submit was not clicked`);
+    throw new CaptchaUnresolvedError();
   }
   await button.click();
   await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => undefined);

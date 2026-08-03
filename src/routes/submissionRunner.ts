@@ -18,7 +18,7 @@ import {
 import {
   buildManagedDiscoveryActions,
   buildManagedPortalActions,
-  CAPTCHA_UNRESOLVED_ERROR,
+  CaptchaUnresolvedError,
   clickFinalSubmit,
   detectPortal,
   fillPortal,
@@ -758,6 +758,15 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
     }
     const builtPacket = await buildPacket(row);
     const packet = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
+    // KNOWN GAP, stated so nobody reads the clickFinalSubmit guard as covering this path. There is
+    // no Playwright Page here - the actions run inside the remote runner - so neither fillPortal's
+    // blocker check nor clickFinalSubmit's unresolved-challenge guard executes, and the code below
+    // writes status:'submitted' on a receipt screenshot. The family-level portalCanAutoSubmit() gate
+    // above is therefore the ONLY CAPTCHA protection on this path, which covers JazzHR and BambooHR
+    // but not a Greenhouse or Lever board whose employer switched a challenge on last week.
+    // Closing it needs a probe action in the managed protocol (read the response-field values and a
+    // visible-challenge count, feed both to captchaSnapshotRequiresAttention) before the submit
+    // click. Tracked separately; do not assume this path is guarded.
     const result = await runManagedBrowser(portalApplicationUrl(portal, claimedReview.portal_url!), buildManagedPortalActions(portal, packet, true));
     const receipt = readManagedReceipt(result);
     if (!result.screenshot) throw new Error('Stratus managed browser did not return a receipt screenshot');
@@ -834,28 +843,26 @@ async function fail(row: ResumeRow, error: unknown) {
   const externalGate = /browserbase|stratus managed browser is not configured|secure browser provider is not configured/i.test(message);
   const uncertainAfterClaim = Boolean(current.submission_claimed_at);
 
-  // Checked BEFORE uncertainAfterClaim, and that order is the whole point. The claim is taken at
-  // the top of the run, so by the time clickFinalSubmit refuses to press the button this is always
-  // "uncertain after claim" - and that branch says the submission WAS attempted and could not be
-  // verified. Here the opposite is true and known: the click provably did not happen, so nothing
-  // was sent. Telling someone to go check their email for a confirmation of an application that
-  // was never submitted sends them looking for a receipt that cannot exist, and costs the trust to
+  // Takes precedence over uncertainAfterClaim, and that precedence is the whole point. The claim is
+  // taken at the top of the run, so by the time clickFinalSubmit refuses to press the button this is
+  // ALWAYS "uncertain after claim" - and that branch says the submission was attempted and could not
+  // be verified. Here the opposite is true and known: the click provably did not happen, so nothing
+  // was sent. Telling someone to go check their email for a confirmation of an application that was
+  // never submitted sends them looking for a receipt that cannot exist, and costs the trust to
   // believe the next message. Same reasoning as portalHandoffReason vs unattendedHandoffReason.
-  if (message.startsWith(CAPTCHA_UNRESOLVED_ERROR)) {
-    await writeReview(latestRows[0], nextReview(current, {
-      status: 'needs_attention',
-      submission_error: message,
-      attention_reason: 'This company’s application page asks you to prove you are human, and that check is still waiting. Litos filled everything in and stopped there, so nothing has been sent. Open it when you have a minute and finish the last step.',
-    }));
-    return;
-  }
+  //
+  // Derived rather than early-returned so there stays exactly ONE writeReview call here: a second
+  // one drifts the moment a field is added to the other.
+  const captchaStop = error instanceof CaptchaUnresolvedError;
 
   await writeReview(latestRows[0], nextReview(current, {
-    status: uncertainAfterClaim ? 'needs_attention' : externalGate ? 'submit_requested' : 'failed',
+    status: captchaStop || uncertainAfterClaim ? 'needs_attention' : externalGate ? 'submit_requested' : 'failed',
     submission_error: message,
-    attention_reason: uncertainAfterClaim
-      ? 'The final submission was attempted, but Litos could not verify the employer confirmation. Check the portal or your email before trying again.'
-      : current.attention_reason,
+    attention_reason: captchaStop
+      ? 'This company’s application page asks you to prove you are human, and that check is still waiting. Litos filled everything in and stopped there, so nothing has been sent. Open it when you have a minute and finish the last step.'
+      : uncertainAfterClaim
+        ? 'The final submission was attempted, but Litos could not verify the employer confirmation. Check the portal or your email before trying again.'
+        : current.attention_reason,
   }));
 }
 
