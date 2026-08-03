@@ -214,7 +214,7 @@ export function metricGapsIn(
   return gaps.sort((a, b) => b.bullet.length - a.bullet.length).slice(0, limit);
 }
 
-function educationFrom(parsed: unknown): CandidateEducation {
+export function educationFrom(parsed: unknown): CandidateEducation {
   const p = (parsed ?? {}) as Record<string, unknown>;
   const str = (v: unknown) => (typeof v === 'string' ? v : undefined);
   return {
@@ -223,6 +223,13 @@ function educationFrom(parsed: unknown): CandidateEducation {
     grad_date: str(p.grad_date) ?? (typeof p.grad_year === 'number' && p.grad_year > 0 ? String(p.grad_year) : undefined),
     grad_year: typeof p.grad_year === 'number' ? p.grad_year : undefined,
     currently_enrolled: typeof p.currently_enrolled === 'boolean' ? p.currently_enrolled : undefined,
+    /* The base resume is built by the same applyResumePolicy pass the tailored path runs, and it is
+       the document the student approves on /start. Omitting these here would have shown them a base
+       resume with no GPA and then a tailored one with it, which reads as the product changing their
+       education between screens. Every field this function forgets is a difference between the two
+       documents, which is precisely why it exists at all. */
+    gpa: str(p.gpa),
+    gpa_scale: str(p.gpa_scale),
     coursework: Array.isArray(p.coursework) ? p.coursework.filter((c): c is string => typeof c === 'string') : undefined,
   };
 }

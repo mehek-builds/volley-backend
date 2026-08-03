@@ -4,7 +4,7 @@ import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { extractPdfText } from '../lib/pdfText';
 import { validatePdfLayout, validateResumeSpec } from './resumeValidate';
-import { applyResumePolicy, deriveCandidateContext, enforceExperienceBulletFloor } from './resumePolicy';
+import { applyResumePolicy, deriveCandidateContext, educationGpaLine, enforceExperienceBulletFloor } from './resumePolicy';
 import { planResumeLayout, renderResumePdf } from './resumeRender';
 
 function bankEntry(
@@ -324,4 +324,62 @@ test('only an explicitly continued recent entry may remain sparse', () => {
     priorityEntryId: BANK[0].id,
     allowSparsePriority: true,
   }).experience[0].bullets.length, 1);
+});
+
+/* GPA, printed only when the student's own resume printed one.
+ *
+ * The denominator is the part worth pinning. A bare "3.8" is a different claim on a 4.0 than on a
+ * 5.0, so defaulting the missing case would be a fabricated academic claim on an employment
+ * document. The parser records a scale only when the page states one; this keeps that promise all
+ * the way to the paper. */
+test('a GPA renders only with the denominator the resume actually printed', () => {
+  assert.equal(educationGpaLine({ gpa: '3.8', gpa_scale: '4.0' }), '3.8/4.0');
+  assert.equal(educationGpaLine({ gpa: '3.8' }), '3.8');
+  assert.equal(educationGpaLine({ gpa: '3.8', gpa_scale: '' }), '3.8');
+});
+
+test('no GPA on file prints nothing, and is never treated as a missing field', () => {
+  assert.equal(educationGpaLine({}), '');
+  assert.equal(educationGpaLine({ gpa: '' }), '');
+  assert.equal(educationGpaLine({ gpa: '   ' }), '');
+  assert.equal(educationGpaLine({ gpa_scale: '4.0' }), '');
+});
+
+/* parsed_json is jsonb and a hand-edited row can hold anything. A value that is not a number is a
+   claim nobody read off the page, so it does not reach the document. */
+test('a value that is not a grade is refused rather than printed', () => {
+  assert.equal(educationGpaLine({ gpa: 'first class honours' }), '');
+  assert.equal(educationGpaLine({ gpa: '3.8; Dean\'s List' }), '');
+  assert.equal(educationGpaLine({ gpa: '<script>' }), '');
+  // A junk scale drops the scale, it does not drop a legitimate grade.
+  assert.equal(educationGpaLine({ gpa: '3.8', gpa_scale: 'excellent' }), '3.8');
+});
+
+test('the education block carries the GPA from the profile, never from the model', () => {
+  const spec = rawSpec();
+  (spec as { gpa?: string }).gpa = '9.9/10.0';
+  const { spec: out } = applyResumePolicy(
+    spec,
+    { school: 'USC', degree: 'BS CS', grad_date: 'May 2027', gpa: '3.8', gpa_scale: '4.0' },
+    BANK,
+    'engineering role',
+  );
+  assert.equal(out.gpa, '3.8/4.0');
+});
+
+/* Every path that builds a CandidateEducation has to carry the GPA, or the student is shown a base
+   resume without one and a tailored resume with one, which reads as the product changing their
+   education between screens. baseResume.ts builds its own via educationFrom and was missed on the
+   first pass; this is the reminder for the next field. */
+test('the base resume path carries the same education fields the tailored path does', async () => {
+  const { educationFrom } = await import('../routes/baseResume');
+  const education = educationFrom({
+    school: 'USC',
+    degree: 'BS CS',
+    grad_date: 'May 2027',
+    gpa: '3.8',
+    gpa_scale: '4.0',
+    coursework: ['Algorithms'],
+  });
+  assert.equal(educationGpaLine(education), '3.8/4.0');
 });

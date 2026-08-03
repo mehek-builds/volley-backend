@@ -13,6 +13,15 @@ export interface ResumeSpec {
   school: string;
   degree: string;
   grad_date: string;
+  /* Already formatted for print, e.g. "3.8/4.0" or "3.8". Written by applyResumePolicy from the
+     parsed profile, never by the model: see educationGpaLine for why the denominator is never
+     defaulted. Empty is normal and means the resume simply does not state one.
+
+     OPTIONAL, unlike the other education fields. Most students have no GPA on file, and a resume
+     that never printed one is not missing anything - so a stored spec predating this field is
+     complete, not malformed, and nothing should have to migrate to say so. normalizeSpec still
+     fills it with '' so the render path only ever sees a string. */
+  gpa?: string;
   coursework: string;
   education_position?: 'top' | 'after_experience';
   experience: Array<{
@@ -167,6 +176,7 @@ export function normalizeSpec(raw: unknown): ResumeSpec {
     school: str(o.school),
     degree: str(o.degree),
     grad_date: str(o.grad_date),
+    gpa: str(o.gpa),
     coursework: str(o.coursework),
     education_position: o.education_position === 'after_experience' ? 'after_experience' : 'top',
     experience,

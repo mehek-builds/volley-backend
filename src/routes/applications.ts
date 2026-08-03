@@ -278,6 +278,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         grad_year?: number;
         currently_enrolled?: boolean;
         coursework?: string[];
+        gpa?: string;
+        gpa_scale?: string;
         recent_experience_review?: { selected_entry_id?: string | null; continue_with_found?: boolean };
       } | undefined;
       const education = {
@@ -286,6 +288,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         grad_date: parsed?.grad_date || (parsed?.grad_year ? String(parsed.grad_year) : undefined),
         grad_year: parsed?.grad_year,
         currently_enrolled: parsed?.currently_enrolled,
+        gpa: parsed?.gpa,
+        gpa_scale: parsed?.gpa_scale,
         coursework: Array.isArray(parsed?.coursework) ? parsed.coursework : [],
       };
       const validation = validateResumeSpec(

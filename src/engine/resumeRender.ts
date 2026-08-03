@@ -132,6 +132,9 @@ export function findPdfTextFidelityIssues(
     { label: 'education school', value: spec.school },
     { label: 'education degree', value: spec.degree },
     { label: 'graduation date', value: spec.grad_date },
+    // A GPA that renders as a different number than it was stored as is a misstated academic claim,
+    // so it gets the same character-for-character check every other printed fact here gets.
+    { label: 'education GPA', value: spec.gpa },
     { label: 'coursework', value: spec.coursework },
     ...spec.experience.flatMap((entry, entryIndex) => [
       { label: `entry ${entryIndex + 1} organization`, value: entry.org },
@@ -246,7 +249,7 @@ function textLines(
 }
 
 function hasEducation(spec: ResumeSpec): boolean {
-  return Boolean(spec.school || spec.degree || spec.grad_date || spec.coursework);
+  return Boolean(spec.school || spec.degree || spec.grad_date || spec.gpa || spec.coursework);
 }
 
 type ResumeContentBlock =
@@ -368,6 +371,22 @@ function educationHeight(
         design.typography.body,
         width,
         design.typography.lineGapRatio.italic,
+      );
+  }
+  /* Measured because it is drawn. The target-role removal was a lesson in the other direction:
+     measurement and drawing have to move together or the layout search solves for a page that is
+     not the page, and here the error would be an education block one line taller than budgeted,
+     pushing the last entry off a resume that reports itself as fitting. */
+  if (spec.gpa) {
+    height +=
+      design.spacing.detailTop +
+      textHeight(
+        doc,
+        `GPA: ${spec.gpa}`,
+        RESUME_FONTS.regular,
+        design.typography.body,
+        width,
+        design.typography.lineGapRatio.regular,
       );
   }
   if (spec.coursework) {
@@ -912,6 +931,20 @@ function drawEducation(
       .text(spec.degree, design.page.margin, doc.y, {
         width,
         lineGap: design.typography.body * design.typography.lineGapRatio.italic,
+      });
+  }
+  /* Between the degree and the coursework, which is where a student's own resume puts it. Absent is
+     the normal case and prints nothing: a resume that never stated a GPA is not missing one, and
+     the product's standing rule is that it does not keep asking for a number the student chose not
+     to give. */
+  if (spec.gpa) {
+    doc.y += design.spacing.detailTop;
+    doc
+      .font(RESUME_FONTS.regular)
+      .fontSize(design.typography.body)
+      .text(`GPA: ${spec.gpa}`, design.page.margin, doc.y, {
+        width,
+        lineGap: design.typography.body * design.typography.lineGapRatio.regular,
       });
   }
   if (spec.coursework) {
