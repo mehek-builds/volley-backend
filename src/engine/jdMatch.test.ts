@@ -12,6 +12,7 @@ import {
   scoreBand,
   MIN_SCORABLE_TERMS,
   MIN_SIGNAL_TERMS,
+  EMPHASIS_LIMIT,
 } from './jdMatch';
 
 /**
@@ -83,6 +84,78 @@ Python, TypeScript, React, PostgreSQL, Docker, AWS, Git, GraphQL
 `;
 
 describe('segmentJd', () => {
+  test('a boilerplate banner too wordy to be a heading still closes the section above it', () => {
+    // phonepe's "Senior Executive, Compliance". The line below is 80 characters and 12 words, so
+    // isHeadingLine rejects it, and an unrecognised heading does not CLOSE the section it
+    // interrupts: the whole benefits table was read as REQUIRED at weight 1, and the extracted
+    // requirements for that posting were `adoption assistance`, `car lease` and `pf contribution`
+    // while `merchant compliance` and `risk management` were pushed out of the denominator.
+    const jd = `Requirements
+- Deep knowledge of Merchant Compliance and Risk Management
+- Experience with Regulatory Reporting, Governance Management and Change Management
+- Familiarity with Python, SQL, Docker, Tableau and Excel for controls testing
+PhonePe Full Time Employee Benefits (Not applicable for Intern or Contract Roles)
+Parental Support - Maternity Benefit, Adoption Assistance Program, Day-care Support
+Other Benefits - Higher Education Assistance, Car Lease, Salary Advance Policy
+`;
+    const kinds = segmentJd(jd).map((s) => s.kind);
+    assert.deepEqual(kinds, ['required', 'noise']);
+    const keys = extractJdTerms(jd).map((t) => t.term);
+    for (const junk of ['car lease', 'adoption assistance', 'day-care support']) {
+      assert.ok(!keys.includes(junk), `"${junk}" is a perk, not a requirement`);
+    }
+  });
+
+  test('a requirement sentence mentioning benefits is not mistaken for the benefits block', () => {
+    // One of the two shape guards. A requirement written as a full sentence ends in a full stop; a
+    // boilerplate banner is a label and does not.
+    const jd = `Requirements
+Ability to explain the benefits of our compliance platform to enterprise customers.
+Experience with Regulatory Reporting and Governance Management.
+`;
+    assert.deepEqual(segmentJd(jd).map((s) => s.kind), ['required']);
+  });
+
+  test('KNOWN LIMIT: an unbulleted, unpunctuated requirement line IS misread as boilerplate', () => {
+    // Pinned as a limitation rather than asserted as correct, because it is neither hypothetical
+    // nor currently harmful and the file must not claim otherwise.
+    //
+    // Measured over the 400-posting corpus: 3127 of 6440 lines inside required, preferred and
+    // responsibilities sections (48.6%) carry no leading bullet and no terminal full stop, so on
+    // nearly half the corpus NEITHER shape guard applies and only the narrowness of the NOISE_BLOCK
+    // vocabulary is preventing a false positive. The live rate is zero; the margin is vocabulary
+    // luck, not the guards.
+    //
+    // This test exists so that anyone widening NOISE_BLOCK sees the failure mode written down and
+    // has a place to check their addition. If a future change makes these classify as `required`,
+    // that is an IMPROVEMENT: update the assertion, do not delete the test.
+    for (const line of [
+      'Ability to explain the benefits of our platform to prospective customers',
+      'Knowledge of EEO and affirmative action reporting requirements',
+    ]) {
+      const kinds = segmentJd(`Requirements\n- Python and Docker and SQL\n${line}\n- React and Git\n`).map(
+        (s) => s.kind,
+      );
+      assert.deepEqual(
+        kinds,
+        ['required', 'noise'],
+        `"${line}" is expected to truncate the block today; if it no longer does, tighten this test`,
+      );
+    }
+  });
+
+  test('"About <Company>" is the company blurb, whoever the company is', () => {
+    // The old pattern enumerated "about us|about the company|about our", so every posting that
+    // named itself went unrecognised. OpenAI's "Counsel, Litigation" ran its Responsibilities
+    // section straight through "About OpenAI" and into the EEO footer, and the twelve terms it
+    // yielded were `affirmative action`, `california fair`, `chance ordinance`, `fair chance`,
+    // `los angeles`, `san francisco` and `eeo policy statementpdf`.
+    for (const heading of ['About OpenAI', 'About PhonePe Limited:', 'About us', 'About the Team']) {
+      const [, second] = segmentJd(`Responsibilities\n- Handle litigation matters\n${heading}\nWe are a company.\n`);
+      assert.equal(second?.kind, 'noise', `"${heading}" should open a noise section`);
+    }
+  });
+
   test('classifies the sections that carry signal and the ones that do not', () => {
     const kinds = segmentJd(SWE_JD).map((s) => s.kind);
     assert.ok(kinds.includes('required'), 'Requirements is a required section');
@@ -120,22 +193,32 @@ describe('extractJdTerms', () => {
   });
 
   test('keeps the real requirements', () => {
+    // `kubernetes` left this list when EMPHASIS_LIMIT shipped. It is real, and it is the LAST word
+    // of the last Responsibilities bullet in a posting that then states seven weight-1 requirements
+    // below it, so it is the thirteenth most emphasised thing here and the cap stops at twelve.
+    // That is the cap doing its job; every term the Requirements block states still survives.
     const terms = extractJdTerms(SWE_JD).map((t) => t.term);
-    for (const real of ['python', 'typescript', 'react', 'postgresql', 'docker', 'kubernetes']) {
+    for (const real of ['python', 'typescript', 'react', 'postgresql', 'docker', 'git']) {
       assert.ok(terms.includes(real), `"${real}" should be a requirement term`);
     }
   });
 
   test('the denominator is a size a one-page resume can actually cover', () => {
+    // The old bound here was 60, which this posting passed while its score stayed unreachable. A
+    // ceiling that no real posting could hit was not a bound at all: see EMPHASIS_LIMIT.
     const terms = extractJdTerms(SWE_JD);
     assert.ok(
-      terms.length >= MIN_SCORABLE_TERMS && terms.length <= 60,
+      terms.length >= MIN_SCORABLE_TERMS && terms.length <= EMPHASIS_LIMIT,
       `expected a human-reachable term count, got ${terms.length}`,
     );
   });
 
   test('a required term outweighs a preferred one', () => {
-    const terms = extractJdTerms(SWE_JD);
+    // Deliberately a SHORT posting rather than SWE_JD. SWE_JD states twelve requirements and
+    // responsibilities before it reaches its Preferred block, so EMPHASIS_LIMIT drops Terraform
+    // from the set entirely, which is the cap working rather than the weighting failing. The
+    // weighting itself is what this test is about, so it is asserted where the cap does not bind.
+    const terms = extractJdTerms('Requirements\n- Python\n\nPreferred\n- Terraform\n');
     const python = terms.find((t) => t.term === 'python');
     const terraform = terms.find((t) => t.term === 'terraform');
     assert.ok(python && terraform);
@@ -291,6 +374,283 @@ describe('scoreBand', () => {
     assert.equal(scoreBand(80).tone, 'strong');
     assert.equal(scoreBand(50).tone, 'fair');
     assert.equal(scoreBand(20).tone, 'weak');
+  });
+
+  test('the bottom band describes the pair, not the student', () => {
+    // ISSUE-023. On a board of 400 postings most are in someone else's field, so this is the label
+    // a student reads most often, and it was the only one of the four that graded THEM. The number
+    // is not softened; the words are just about the job, which is what they were always measuring.
+    const { label, tone } = scoreBand(5);
+    assert.equal(tone, 'weak', 'the styling is unchanged');
+    assert.ok(!/weak/i.test(label), `"${label}" grades the student rather than the fit`);
+  });
+});
+
+/**
+ * ISSUE-023: the denominator, and the reachability of the label sitting next to it.
+ *
+ * Measured before this change against the 400 newest active postings scored against three real
+ * production base resumes: p50 = 3, p90 = 11, max = 57, and 1105 of 1107 scorable pairs read "Weak
+ * match". "Strong match" at 65 was unreached on the entire board.
+ *
+ * These tests pin the INTENT, not the constants. The reachability test in particular would still
+ * fail if someone kept EMPHASIS_LIMIT at 12 and quietly went back to a denominator of every term
+ * the posting mentions, because it asserts on the score a genuinely well-matched resume gets.
+ */
+describe('the denominator is capped to what the posting emphasises', () => {
+  test('THE REACHABILITY TEST: a genuinely strong resume reaches the Strong band', () => {
+    // The assertion the shipped scorer could not pass. SWE_RESUME states Python, TypeScript, React,
+    // PostgreSQL, Docker, AWS, Git, GraphQL and a CI/CD workflow; SWE_JD requires that list almost
+    // exactly. If THIS pair cannot read as a strong match then no pair can, and the label is
+    // decoration.
+    const r = scoreJdMatch(SWE_RESUME, SWE_JD);
+    assert.ok(r.score !== null);
+    const band = scoreBand(r.score!, r.required_coverage);
+    assert.equal(
+      band.tone,
+      'strong',
+      `a resume carrying nearly every stated requirement scored ${r.score} (${r.matched.length} of ${r.term_count}) and read "${band.label}"`,
+    );
+  });
+
+  test('a long posting is scored against at most EMPHASIS_LIMIT requirements', () => {
+    // A 6k posting and a 1.5k posting must ask the student a question of the same size, or the
+    // score measures how much the employer wrote rather than how well the student fits.
+    const suffix = 'abcdefghijklmnopqrstuvwxyz'.split('');
+    const long = `Requirements\n${suffix
+      .map((s) => `- Experience with Vendor${s}x Platform`)
+      .join('\n')}\n`;
+    assert.equal(extractJdTerms(long).length, EMPHASIS_LIMIT);
+  });
+
+  test('a posting that states fewer requirements is scored against all of them', () => {
+    // The cap is a ceiling, never a floor. A short honest posting is not padded out.
+    const terms = extractJdTerms('Requirements\n- Python, Docker, AWS, React, PostgreSQL, Git\n');
+    assert.ok(terms.length >= MIN_SCORABLE_TERMS && terms.length < EMPHASIS_LIMIT);
+  });
+
+  test('a stated requirement outlives unheaded prose that names a real product', () => {
+    // NOT asserted against SWE_JD. Its sections are [noise, responsibilities, required, preferred,
+    // noise, noise] with no body section at all, so an assertion that no `body` term survives the
+    // cap there passes whatever capToEmphasis does, and an earlier version of this test made
+    // exactly that mistake while claiming to cover this change's central promise.
+    //
+    // So the fixture below OPENS with unheaded prose, which segments as `body` at weight 0.4, and
+    // fills it with Title Case product names that the proper-noun rule really does admit. Run
+    // uncapped they are all requirement terms; the cap has to be what removes them, and the
+    // weight-1 block below has to be what survives.
+    const jd = `We are a team that loves Datadog and Splunk and Grafana and Sentry and Snowplow.
+Our office runs on Notion Calendar, Linear Roadmaps and Superhuman Mail every single day.
+
+Requirements
+- Strong experience with Python and TypeScript
+- Familiarity with React, PostgreSQL, and Docker
+- Comfortable with Git and CI/CD pipelines
+- Bachelor's degree in Computer Science or equivalent experience
+`;
+    const uncapped = new Set(extractJdTerms(jd.split('\nRequirements')[0]).map((t) => t.term));
+    assert.ok(
+      uncapped.has('datadog') && uncapped.has('splunk'),
+      'the prose terms must be admitted uncapped, or this test proves nothing',
+    );
+
+    const keys = extractJdTerms(jd).map((t) => t.term);
+    assert.equal(keys.length, EMPHASIS_LIMIT);
+
+    // EVERY stated requirement survives. This is the half that bites if weight ever stops leading
+    // the emphasis ranking: put body above required and these are the terms that get evicted.
+    for (const stated of ['python', 'typescript', 'react', 'postgresql', 'docker', 'git']) {
+      assert.ok(keys.includes(stated), `"${stated}" is stated under Requirements`);
+    }
+
+    // The prose does not vanish, and asserting that it did would be the same untestable claim in a
+    // new costume. The Requirements block supplies 8 terms, the cap keeps 12, so 4 slots are left
+    // and body prose fills them. What must hold is that it fills only the LEFTOVER slots: eight
+    // stated requirements first, prose in what remains, never the other way round.
+    const prose = ['datadog', 'splunk', 'grafana', 'sentry', 'snowplow', 'notion calendar', 'linear roadmaps', 'superhuman mail'];
+    const survivors = prose.filter((p) => keys.includes(p));
+    assert.ok(
+      survivors.length <= EMPHASIS_LIMIT - 8,
+      `prose took more than the leftover slots: ${survivors.join(', ')}`,
+    );
+    assert.ok(survivors.length < prose.length, 'the cap must actually be cutting prose here');
+  });
+
+  test('a Preferred item yields to a full block of stated requirements', () => {
+    const keys = extractJdTerms(SWE_JD).map((t) => t.term);
+    assert.ok(keys.includes('python') && keys.includes('typescript'));
+    assert.ok(!keys.includes('terraform'), 'a Preferred item yields to twelve stated requirements');
+  });
+
+  test('the cap never turns a scorable posting into an unscorable one', () => {
+    // MIN_SIGNAL_TERMS is the refusal path, and a change to the denominator must not be able to
+    // trigger it. This is the constraint that RESERVES MIN_SIGNAL_TERMS slots for hard signal: a
+    // set of proper nouns under a Requirements heading outranks the lexicon hits on section weight
+    // alone, and without the reservation it would crowd them out of the denominator and leave a
+    // perfectly scorable posting looking like it stated nothing.
+    const jd = `Requirements\n${'abcdefghijklmnopqrstuvwxyz'
+      .split('')
+      .map((s) => `- Familiarity with Vendor${s}y Platform\n`)
+      .join('')}
+Responsibilities
+- Write Python and SQL against a PostgreSQL warehouse using Docker
+`;
+    const terms = extractJdTerms(jd);
+    assert.equal(terms.length, EMPHASIS_LIMIT);
+    assert.ok(
+      terms.filter((t) => t.signal).length >= MIN_SIGNAL_TERMS,
+      'the cap must not manufacture a refusal by dropping every hard-signal term',
+    );
+    assert.equal(scoreJdMatch(SWE_RESUME, jd).scorable, true);
+  });
+
+  test('with no requirements section, repetition is what decides emphasis', () => {
+    // 47% of postings on the board have no requirements block at all. There every term is body
+    // prose at one weight, so mention count is the only thing the employer said on purpose. The
+    // alternative tiebreak was alphabetical order, which is not a statement about the job.
+    const jd = `We build data tooling. ${'Our team uses Kubernetes daily. '.repeat(6)}
+Someone here once used Fortran. We also touched Cobol once, and Perl once.
+${'Kubernetes runs everything. '.repeat(4)}
+We use Python and Docker and SQL and React and AWS and Git and Kafka and Redis and Airflow.`;
+    const terms = extractJdTerms(jd);
+    const kubernetes = terms.find((t) => t.term === 'kubernetes');
+    assert.ok(kubernetes, 'the term named ten times must survive the cap');
+    assert.ok((kubernetes!.mentions ?? 0) > 1, 'repeat mentions are counted, not collapsed');
+  });
+
+  test('BOILERPLATE ACRONYMS DO NOT EVICT STATED REQUIREMENTS', () => {
+    // The regression that failed the first version of this cap. isHardSignal is
+    // `lexicon OR ACRONYM OR TECH_MARKER`, and ACRONYM is any 2-5 letter capital run, which is
+    // dense in benefits tables and regulator names. Ranking on signal promoted all of it: phonepe's
+    // Senior Executive Compliance kept `ca, cs, kyc, mba, npci, nps, rbi` and dropped
+    // `merchant compliance`, `risk management` and `change management`.
+    //
+    // Hard signal now RESERVES MIN_SIGNAL_TERMS slots instead of sorting first, so the acronyms can
+    // take three slots and never more.
+    const jd = `Requirements
+- In-depth knowledge of the Merchant Compliance space and its regulatory environment
+- Experience with Risk Management and Change Management frameworks
+- Track record in Regulatory Reporting and Governance Management
+- Familiarity with RBI and NPCI circulars, KYC, AML and NPS
+- MBA or CA or CS qualification
+`;
+    const keys = extractJdTerms(jd).map((t) => t.term);
+    for (const real of ['merchant compliance', 'risk management', 'change management']) {
+      assert.ok(keys.includes(real), `"${real}" is a stated requirement, got ${keys.join(', ')}`);
+    }
+    // Beyond the reservation the acronyms compete on document order like everything else, and this
+    // fixture does name them, so some of them belonging in the set is correct. What must never
+    // happen again is the denominator being MOSTLY them.
+    const acronyms = keys.filter((k) => ['ca', 'cs', 'mba', 'nps', 'npci', 'rbi', 'kyc', 'aml'].includes(k));
+    assert.ok(
+      acronyms.length <= EMPHASIS_LIMIT / 2,
+      `acronym boilerplate took ${acronyms.length} of ${EMPHASIS_LIMIT} slots: ${acronyms.join(', ')}`,
+    );
+  });
+
+  test('the lexicon reaches the disciplines Litos actually serves', () => {
+    // Measured 2026-08-03: a real UW law-and-policy base resume matched ZERO lexicon entries across
+    // all 400 postings on the board, because the list carried no litigation, compliance, regulatory,
+    // policy or contracts. Every match it ever got came from the loose proper-noun path, and no
+    // amount of denominator work can help a student the lexicon cannot see: the reserved hard-signal
+    // slots reserve nothing when there is no hard signal to match.
+    for (const [discipline, jd] of [
+      ['law', 'Requirements\n- litigation, compliance, and regulatory experience\n- contracts and governance\n'],
+      ['policy', 'Requirements\n- legislative advocacy, rulemaking, and policy analysis\n- grants and appropriations\n'],
+      ['health', 'Requirements\n- epidemiology and biostatistics\n- triage and pharmacology\n'],
+      ['ops', 'Requirements\n- logistics, inventory, and warehousing\n- lean and kaizen practice\n'],
+    ] as const) {
+      const signal = extractJdTerms(jd).filter((t) => t.signal).map((t) => t.term);
+      assert.ok(
+        signal.length >= MIN_SIGNAL_TERMS,
+        `a ${discipline} posting produced only ${signal.length} hard-signal terms: ${signal.join(', ')}`,
+      );
+    }
+  });
+
+  test('the applicant-privacy footer stays out of the denominator', () => {
+    // PINS THE `privacy` / `notice` BOILERPLATE ENTRIES. Removing both from that list passed 90 of
+    // 90 tests before this existed, so anyone tidying it would have silently put the footer back
+    // into 35 postings' denominators with a fully green suite.
+    //
+    // The footer line below is the real one, and it defeats every other filter on the way in:
+    // 9 words exceeds isHeadingLine's 7-word budget, and NOISE_BLOCK lists `applicant privacy` and
+    // `privacy policy` but not `privacy notice`. So BOILERPLATE is the only thing standing between
+    // it and the score, which is exactly why it needs a test of its own.
+    //
+    // Asserted on the OUTCOME, not on membership of the constant: what must hold is that no
+    // privacy-footer term reaches the requirement set, however that exclusion comes to be
+    // implemented. Blocking `notice` is what also kills the BIGRAM, since a bigram forms only from
+    // two independently specific tokens.
+    const jd = `Requirements
+- Deep knowledge of Merchant Compliance and Risk Management
+- Experience with Regulatory Reporting and Governance Management
+Global Data Privacy Notice for Job Candidates and Applicants
+`;
+    const keys = extractJdTerms(jd).map((t) => t.term);
+    for (const junk of ['privacy', 'notice', 'privacy notice', 'data privacy']) {
+      assert.ok(!keys.includes(junk), `"${junk}" is the applicant-privacy footer, not a requirement`);
+    }
+    // ...and the block above it is untouched, so the exclusion is not just truncating the posting.
+    for (const real of ['merchant compliance', 'risk management', 'governance management']) {
+      assert.ok(keys.includes(real), `"${real}" is a stated requirement, got ${keys.join(', ')}`);
+    }
+  });
+
+  test('blocking the privacy footer does not cost a real privacy-engineering posting', () => {
+    // The counterweight to the test above, and the reason it is safe. `privacy` is blocked as a
+    // bare word, but a posting that genuinely hires for privacy work states the surrounding
+    // practice, and that is what survives. Checked against the one real privacy-engineering posting
+    // on the board (Asana, Senior Privacy Engineer), which keeps compliance, data protection,
+    // regulatory and security.
+    const keys = extractJdTerms(
+      'Requirements\n- Lead compliance and data protection reviews across regulatory regimes\n' +
+        '- Partner with security engineering on GDPR and CCPA obligations\n',
+    ).map((t) => t.term);
+    assert.ok(
+      ['compliance', 'regulatory', 'data protection'].some((k) => keys.includes(k)),
+      `a privacy posting must still be scorable on its practice vocabulary, got ${keys.join(', ')}`,
+    );
+  });
+
+  test("a posting's own web address is not a requirement", () => {
+    // These reach the set through TECH_MARKER (a domain has dots) and are marked hard signal, so
+    // under the emphasis ranking they sort to the TOP of the denominator. Measured 2026-08-03:
+    // 130 of the 400 newest postings carried at least one.
+    const keys = extractJdTerms(
+      'Requirements\n- Python and Docker and SQL and React and AWS and Git\n- Read more at www.spacex.com or spacex.com or careers.toasttab.com\n',
+    ).map((t) => t.term);
+    for (const junk of ['wwwspacexcom', 'spacexcom', 'careerstoasttabcom']) {
+      assert.ok(!keys.includes(junk), `"${junk}" is a place to read about the job, not a skill`);
+    }
+    assert.ok(keys.includes('python') && keys.includes('docker'));
+  });
+
+  test('.NET survives the web-address rule', () => {
+    // The suffix list deliberately omits .net. ASP.NET and C#.NET are real stated requirements on
+    // this board, and deleting them to catch a domain trades a requirement for a nuisance.
+    const keys = extractJdTerms('Requirements\n- Strong ASP.NET and C#.NET experience\n').map(
+      (t) => t.term,
+    );
+    assert.ok(
+      keys.some((k) => k.includes('aspnet')),
+      `ASP.NET must survive, got ${keys.join(', ')}`,
+    );
+  });
+
+  test('the two shipped denominator fixes are still in force under the cap', () => {
+    // PLACE_SAFE_KINDS and the e.g. stopword predate this change and must not be undone by it.
+    const placed = extractJdTerms(
+      'We work out of Bellevue, WA and Mountain View, CA. You will use Python, SQL and Docker here.',
+      { company: 'Databricks', role: 'Product Management Intern', location: 'Bellevue, Washington' },
+    ).map((t) => t.term);
+    for (const junk of ['bellevue', 'wa']) {
+      assert.ok(!placed.includes(junk), `"${junk}" is the commute, not the resume`);
+    }
+    const eg = extractJdTerms(
+      'Requirements\n- Cloud experience (e.g. AWS), plus Python, Docker, SQL, React, Git\n',
+    ).map((t) => t.term);
+    assert.ok(!eg.includes('eg'), 'a prose connective is not a requirement');
   });
 });
 
@@ -499,7 +859,15 @@ describe('a posting does not ask for its own address', () => {
   });
 
   test('without a location nothing geographic is excluded', () => {
-    const keys = extractJdTerms(JD, { company: CONTEXT.company, role: CONTEXT.role }).map((t) => t.term);
+    // A SHORT posting, so the cap does not bind and the only thing that can remove `bellevue` is
+    // the location exclusion. Asserted against JD would have passed for the wrong reason: that
+    // fixture states more than EMPHASIS_LIMIT terms and `bellevue` is body prose, so emphasis alone
+    // drops it whether or not any exclusion fired.
+    const short =
+      'This is a 12 week paid summer internship in Bellevue, WA. You will use Python, SQL, ' +
+      'Docker, React and Git, and prototype early ideas with customers.';
+    const keys = extractJdTerms(short, { company: CONTEXT.company, role: CONTEXT.role }).map((t) => t.term);
+    assert.ok(keys.length < EMPHASIS_LIMIT, 'the cap must not be what removes it');
     assert.ok(keys.includes('bellevue'), 'the exclusion is driven by the job row, not guessed from prose');
   });
 
