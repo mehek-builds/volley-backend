@@ -18,7 +18,10 @@
  *
  * HOW THESE WERE ESTABLISHED, because a wrong logo is worse than no logo: it tells a job seeker
  * this row is a different company than it is. Nothing here was typed from memory and left at that.
- * Every entry was checked on 2026-07-28 by at least one of:
+ * Every entry is proven before it lands, never guessed. The first set was hand-checked on
+ * 2026-07-28; everything added since comes from scripts/resolve-company-domains.mjs, which applies
+ * these same standards automatically and simply omits any company it cannot prove. Either way an
+ * entry got here by one of:
  *
  *   board backlink  the company's own careers page links to THIS company's board on THIS ATS
  *                   (`ashbyhq.com/linear`). A lookalike domain cannot fake that, and it is what

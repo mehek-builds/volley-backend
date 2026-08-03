@@ -272,7 +272,7 @@ async function resolveCompany(name) {
  * same race loudly (it asserted an exact row count) and that is what boardScan.ts was written for.
  */
 async function boardCompanies() {
-  async function readPage(offset, limit) {
+  async function readPage(offset, limit = PAGE_SIZE) {
     const res = await fetch(`${API}/jobs?limit=${limit}&offset=${offset}`);
     if (!res.ok) throw new Error(`GET /jobs answered ${res.status} at offset ${offset}`);
     const body = await res.json();
