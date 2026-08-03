@@ -104,6 +104,29 @@ describe('the verb gate reads both tenses', () => {
     assert.equal(startsWithStrongVerb('Co-author the paper.'), true);
   });
 
+  test('accepts added as a concrete implementation action', () => {
+    for (const bullet of [
+      'Added automated tests and improved release confidence across the deployment pipeline.',
+      'Add automated tests and improve release confidence across the deployment pipeline.',
+      'Added: automated tests improved release confidence across the deployment pipeline.',
+      '"Added" automated tests and improved release confidence across the deployment pipeline.',
+    ]) {
+      assert.equal(startsWithStrongVerb(bullet), true, bullet);
+    }
+  });
+
+  test('malformed or derived lookalikes cannot collapse into added', () => {
+    for (const bullet of [
+      'Ad,ded automated tests to the deployment pipeline.',
+      'Added123 automated tests to the deployment pipeline.',
+      'Readded automated tests to the deployment pipeline.',
+      'Addedness improved across the deployment pipeline.',
+      'Added-value improved across the deployment pipeline.',
+    ]) {
+      assert.equal(startsWithStrongVerb(bullet), false, bullet);
+    }
+  });
+
   test('tense does not widen the vocabulary: a weak verb stays weak in every tense', () => {
     for (const bullet of [
       'Maintain the lab inventory.',

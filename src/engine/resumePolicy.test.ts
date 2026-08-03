@@ -249,6 +249,47 @@ test('three-bullet backstop fills from grounded variants and drops unsupported s
   assert.equal(result.experience.some((entry) => entry.org === 'Campus Search'), false);
 });
 
+test('ATS validation checks the exact post-backstop resume, not unused source-bank bullets', () => {
+  const printedBullets = [
+    'Implemented automated tests that improved deployment confidence across the release pipeline',
+    'Improved continuous integration checks for every production pull request and release',
+    'Added automated tests and improved release confidence across the deployment pipeline',
+  ];
+  const source = bankEntry('final-content', 'project', 'Release Toolkit', 'Software Engineer', [
+    ...printedBullets,
+    'Maintained the repository and helped teammates with routine deployment tasks',
+  ]);
+  const streamed: ResumeSpec = {
+    school: 'USC',
+    degree: 'BS Computer Science',
+    grad_date: 'May 2028',
+    coursework: '',
+    experience: [{
+      type: 'project',
+      org: source.org,
+      title: source.title ?? '',
+      date_range: source.date_range ?? '',
+      bullets: printedBullets.slice(0, 2),
+    }],
+    skills: [],
+  };
+
+  const finalResume = enforceExperienceBulletFloor(streamed, [source]);
+  assert.deepEqual(finalResume.experience[0].bullets, printedBullets);
+
+  const validation = validateResumeSpec(finalResume, '', [source]);
+  assert.equal(
+    validation.issues.some((issue) => issue.includes('bullet not action-verb-first')),
+    false,
+    validation.issues.join('; '),
+  );
+  assert.equal(
+    validation.issues.some((issue) => issue.includes('Maintained')),
+    false,
+    'an unused source-bank bullet is not part of the final resume ATS gate',
+  );
+});
+
 test('three-bullet backstop uses the matching role when one organization has multiple roles', () => {
   const analyst = bankEntry('analyst', 'job', 'Acme Labs', 'Data Analyst', [
     'Analyzed customer cohorts and identified three activation opportunities',
