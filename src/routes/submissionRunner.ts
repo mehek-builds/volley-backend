@@ -16,11 +16,13 @@ import {
   runManagedBrowser,
 } from '../lib/browserbase';
 import {
+  buildManagedCaptchaProbeActions,
   buildManagedDiscoveryActions,
   buildManagedPortalActions,
   CaptchaUnresolvedError,
   clickFinalSubmit,
   detectPortal,
+  managedResultRequiresCaptchaAttention,
   fillPortal,
   hasCoverLetterUpload,
   managedResultHasCoverLetterUpload,
@@ -758,16 +760,28 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
     }
     const builtPacket = await buildPacket(row);
     const packet = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
-    // KNOWN GAP, stated so nobody reads the clickFinalSubmit guard as covering this path. There is
-    // no Playwright Page here - the actions run inside the remote runner - so neither fillPortal's
-    // blocker check nor clickFinalSubmit's unresolved-challenge guard executes, and the code below
-    // writes status:'submitted' on a receipt screenshot. The family-level portalCanAutoSubmit() gate
-    // above is therefore the ONLY CAPTCHA protection on this path, which covers JazzHR and BambooHR
-    // but not a Greenhouse or Lever board whose employer switched a challenge on last week.
-    // Closing it needs a probe action in the managed protocol (read the response-field values and a
-    // visible-challenge count, feed both to captchaSnapshotRequiresAttention) before the submit
-    // click. Tracked separately; do not assume this path is guarded.
-    const result = await runManagedBrowser(portalApplicationUrl(portal, claimedReview.portal_url!), buildManagedPortalActions(portal, packet, true));
+    const applicationUrl = portalApplicationUrl(portal, claimedReview.portal_url!);
+    // There is no Playwright Page on this path - the actions run inside the remote runner - so
+    // neither fillPortal's blocker check nor clickFinalSubmit's guard executes here, and the code
+    // below writes status:'submitted' on a receipt screenshot. Without this probe, portalCanAutoSubmit
+    // would be the only CAPTCHA protection: fine for JazzHR and BambooHR, useless for a Greenhouse or
+    // Lever board whose employer switched a challenge on last week.
+    //
+    // A separate call, because /api/run is stateless and runs the whole list before returning: a
+    // check inside the submit list cannot stop the click it exists to gate. Cheap by design - it
+    // navigates and reads two values, no fills and no upload - and it runs BEFORE the fill run so a
+    // stopped application is never touched at all.
+    const captchaProbe = await runManagedBrowser(applicationUrl, buildManagedCaptchaProbeActions())
+      // A probe that cannot run must not take down a submission that would otherwise succeed. It
+      // fails open to the pre-probe behaviour, same as managedResultRequiresCaptchaAttention does.
+      .catch((error) => {
+        fastify.log.warn({ applicationId: row.id, err: error }, 'CAPTCHA probe failed, continuing unprobed');
+        return null;
+      });
+    if (managedResultRequiresCaptchaAttention(captchaProbe)) {
+      throw new CaptchaUnresolvedError();
+    }
+    const result = await runManagedBrowser(applicationUrl, buildManagedPortalActions(portal, packet, true));
     const receipt = readManagedReceipt(result);
     if (!result.screenshot) throw new Error('Stratus managed browser did not return a receipt screenshot');
     const capturedAt = new Date().toISOString();

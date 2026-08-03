@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Page } from 'playwright-core';
-import { browserSessionBody } from './browserbase';
+import { browserSessionBody, type ManagedBrowserResult } from './browserbase';
 import {
+  buildManagedCaptchaProbeActions,
   captchaSnapshotRequiresAttention,
   clickFinalSubmit,
   hasUnresolvedCaptcha,
+  managedResultRequiresCaptchaAttention,
   CaptchaUnresolvedError,
 } from './portalSubmission';
 
@@ -196,6 +198,68 @@ test('the final click still happens on a page with no challenge', async () => {
 
   await clickFinalSubmit(page);
   assert.equal(clickCount, 1);
+});
+
+// ---- the managed-path probe ----
+//
+// The managed runner has no Page, so the direct-path guard cannot reach it. These cover the pure
+// decision function; the extract semantics of the remote runner itself are NOT verified here and
+// need one live run against the QA portal.
+
+function probeResult(entries: Array<{ selector: string; value: string | null }>): ManagedBrowserResult {
+  return { title: '', url: '', text: '', extracted: entries };
+}
+
+const RESPONSE_SEL = buildManagedCaptchaProbeActions()[0]!.selector!;
+const CHALLENGE_SEL = buildManagedCaptchaProbeActions()[1]!.selector!;
+
+test('the managed probe excludes the v3 badge in CSS, mirroring closest()', () => {
+  assert.match(CHALLENGE_SEL, /:not\(\.grecaptcha-badge\):not\(\.grecaptcha-badge \*\)/);
+});
+
+test('a matched widget with an empty token stops the managed submit', () => {
+  assert.equal(
+    managedResultRequiresCaptchaAttention(probeResult([
+      { selector: CHALLENGE_SEL, value: 'site-key-abc' },
+      { selector: RESPONSE_SEL, value: '' },
+    ])),
+    true,
+  );
+});
+
+test('a matched widget with a token does not stop the managed submit', () => {
+  assert.equal(
+    managedResultRequiresCaptchaAttention(probeResult([
+      { selector: CHALLENGE_SEL, value: 'site-key-abc' },
+      { selector: RESPONSE_SEL, value: 'provider-token' },
+    ])),
+    false,
+  );
+});
+
+test('a matched widget with no response field at all stops the managed submit', () => {
+  assert.equal(
+    managedResultRequiresCaptchaAttention(probeResult([{ selector: CHALLENGE_SEL, value: 'site-key-abc' }])),
+    true,
+  );
+});
+
+test('no matched widget does not stop the managed submit', () => {
+  assert.equal(
+    managedResultRequiresCaptchaAttention(probeResult([
+      { selector: CHALLENGE_SEL, value: null },
+      { selector: RESPONSE_SEL, value: '' },
+    ])),
+    false,
+  );
+});
+
+// Fails open, on purpose: an unrecognised shape leaves the managed path exactly where it was before
+// the probe existed rather than blocking submissions on a protocol mismatch.
+test('an unreadable probe result never blocks a submission', () => {
+  assert.equal(managedResultRequiresCaptchaAttention(null), false);
+  assert.equal(managedResultRequiresCaptchaAttention(probeResult([])), false);
+  assert.equal(managedResultRequiresCaptchaAttention({ title: '', url: '', text: '' }), false);
 });
 
 // ---- the boundary itself ----

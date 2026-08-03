@@ -1322,6 +1322,73 @@ const CAPTCHA_PROBE_TIMEOUT_MS = 750;
 // us about its class names, not about a challenge.
 const CAPTCHA_MAX_CANDIDATE_NODES = 20;
 
+// CSS mirror of the closest() exclusion above, for the managed path, which has no Page to run
+// closest() against. `:not(.grecaptcha-badge *)` is Selectors Level 4 and excludes descendants, so
+// this pair reproduces "the badge node and everything inside it" in a plain selector string.
+const CAPTCHA_CHALLENGE_SELECTOR_OUTSIDE_BADGE = [
+  'iframe[src*="captcha" i]',
+  'iframe[src*="challenges.cloudflare.com" i]',
+  '[class*="captcha" i]',
+  '[id*="captcha" i]',
+  '[data-sitekey]',
+].map((selector) => `${selector}:not(.grecaptcha-badge):not(.grecaptcha-badge *)`).join(', ');
+
+export const MANAGED_CAPTCHA_RESPONSE_LABEL = 'captcha_response';
+export const MANAGED_CAPTCHA_CHALLENGE_LABEL = 'captcha_challenge';
+
+// The managed runner's /api/run is STATELESS and executes the whole action list before returning,
+// so a check placed inside the submit list cannot stop the click it is meant to gate - by the time
+// the result comes back the application is already sent. This is a separate, cheap call made first:
+// navigate and read two values, no fills, no upload. Same two-call idiom as buildManagedDiscoveryActions.
+//
+// KNOWN LIMIT, stated rather than hidden: this sees the page as it loads. A challenge that only
+// renders after the fields are filled or after the submit button is pressed is not caught here. The
+// families known to gate every application (JazzHR, BambooHR) render at load and are in any case
+// stopped earlier by portalCanAutoSubmit; this probe exists for the board that turned a challenge on
+// without telling anyone.
+export function buildManagedCaptchaProbeActions(): ManagedBrowserAction[] {
+  return [
+    {
+      type: 'extract',
+      selector: CAPTCHA_RESPONSE_SELECTOR,
+      attribute: 'value',
+      label: MANAGED_CAPTCHA_RESPONSE_LABEL,
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    },
+    {
+      type: 'extract',
+      selector: CAPTCHA_CHALLENGE_SELECTOR_OUTSIDE_BADGE,
+      attribute: 'data-sitekey',
+      label: MANAGED_CAPTCHA_CHALLENGE_LABEL,
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    },
+  ];
+}
+
+// Fails OPEN by construction, and that is deliberate rather than lazy. The remote runner's extract
+// semantics are not defined in this repo, so if it returns a shape this does not recognise the
+// verdict is "no challenge seen" - exactly the behaviour the managed path had before this probe
+// existed. That makes the probe a strict improvement in every case and a regression in none, at the
+// cost of needing one live run against the QA portal to confirm it actually fires. Until that run
+// happens, portalCanAutoSubmit remains the load-bearing gate on this path.
+export function managedResultRequiresCaptchaAttention(result: ManagedBrowserResult | null): boolean {
+  const extracted = result?.extracted;
+  if (!extracted) return false;
+  const challenge = extracted.find((item) => item.selector === CAPTCHA_CHALLENGE_SELECTOR_OUTSIDE_BADGE);
+  // A missing entry means the selector matched nothing. Only a matched node is a challenge.
+  if (!challenge || challenge.value === null) return false;
+  const response = extracted.find((item) => item.selector === CAPTCHA_RESPONSE_SELECTOR);
+  // Same rule as captchaSnapshotRequiresAttention: rendered widget, and no token in the field the
+  // provider writes into, means a human still has to act. No response field at all is the strongest
+  // form of that, not a reason to continue.
+  return captchaSnapshotRequiresAttention(
+    response?.value === null || response?.value === undefined ? [] : [response.value],
+    1,
+  );
+}
+
 export async function hasUnresolvedCaptcha(page: Page): Promise<boolean> {
   const responseFields = page.locator(CAPTCHA_RESPONSE_SELECTOR);
   const responseTokens: string[] = [];
