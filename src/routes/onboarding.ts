@@ -184,6 +184,47 @@ export function gapsFrom(row: Record<string, unknown> | undefined) {
   });
 }
 
+/* The most a gap question may be pre-answered with: what the student's own resume printed.
+ *
+ * WHY THIS IS NOT INFERENCE, and why it does not weaken the rule in schema.ts that
+ * application_profile.languages may never be inferred - "not from citizenship, not from resume
+ * text, not from where a posting is based". Nothing here writes that column. It offers the parsed
+ * list back as the starting value of a question the student still has to answer, and their Save is
+ * the declaration. Inference would be Litos deciding they are fluent; this is Litos declining to
+ * ask them to retype six languages it already has on file.
+ *
+ * The gap it closes: the parser has extracted `languages` into parsed_json since 2026-08-03, and
+ * academicSeedFrom seeds gpa, gpa_scale and major from a parse but deliberately not this. So the
+ * screen opened blank for a student whose resume listed six languages, and if they skipped it saved
+ * [], discarding what was already known. Asking is correct; asking blank was not.
+ *
+ * Suggestions are offered ONLY for fields listed as gaps. A field already answered is not a
+ * question, and overwriting a student's own declaration with resume text is the exact thing the
+ * rule forbids.
+ */
+export const MAX_SUGGESTED_LANGUAGES = 30;
+
+export function gapSuggestionsFrom(
+  gaps: readonly string[],
+  parsed: { languages?: unknown } | null | undefined,
+): { languages?: string[] } {
+  if (!gaps.includes('languages')) return {};
+  const raw = Array.isArray(parsed?.languages) ? parsed.languages : [];
+  const seen = new Set<string>();
+  const printed: string[] = [];
+  for (const value of raw) {
+    if (typeof value !== 'string') continue;
+    const name = value.trim();
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    printed.push(name);
+    if (printed.length === MAX_SUGGESTED_LANGUAGES) break;
+  }
+  return printed.length > 0 ? { languages: printed } : {};
+}
+
 export async function onboardingRoutes(fastify: FastifyInstance) {
   fastify.get('/onboarding/state', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
@@ -216,6 +257,7 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       full_name?: string;
       source_pages?: number;
       target_roles?: unknown;
+      languages?: unknown;
       recent_experience_review?: { completed?: boolean };
     } | null | undefined;
     const has_resume = !!parsed?.full_name && hasFiveTargetRoles(parsed) && (bankCount?.n ?? 0) > 0;
@@ -295,6 +337,9 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       has_targeting,
       learned,
       gaps,
+      // Starting values for the gap questions, from the student's own resume. Never a stored
+      // answer: see gapSuggestionsFrom for why offering one is not the inference schema.ts forbids.
+      gap_suggestions: gapSuggestionsFrom(gaps, parsed),
       // Measured from the uploaded file at parse time (routes/profile.ts). 0 means we never got a
       // page count - an older upload, or a parse that predates the measurement - and the base
       // screen simply omits the "from N pages" line rather than guessing one.
