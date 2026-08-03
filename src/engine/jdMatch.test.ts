@@ -1361,9 +1361,32 @@ describe('route registration', () => {
     assert.match(routeFile, /job_id: z\.string\(\)\.uuid\(\)\.nullish\(\)/, 'the schema must accept an id');
     assert.match(
       routeFile,
-      /location: body\.job_context\?\.location \?\? \(await postingLocation\(body\.job_context\?\.job_id\)\)/,
+      /location:\s*body\.job_context\?\.location \?\?\s*posting\?\.location/,
       'an explicit location wins; the id is the fallback',
     );
     assert.match(routeFile, /from\(monitored_jobs\)/, 'the id must be resolved against the live row');
+  });
+
+  test('POST /jd-match reads the posting itself when the caller sends no jd_text', () => {
+    /* The defect this closes, found on a real account 2026-08-04: GET /jobs sends
+       `left(description, 600)`, a preview sized for a list row, and the dashboard scored THAT.
+       Six hundred characters of company blurb yields two or three requirement terms, every posting
+       lands under MIN_SCORABLE_TERMS, and the number never rendered for anyone. The suite was green
+       throughout, because nothing tied the text the client sends to the text the row holds. */
+    const routeFile = readFileSync(path.join(__dirname, '..', 'routes', 'jdMatch.ts'), 'utf8');
+
+    assert.match(routeFile, /jd_text: z\s*[\s\S]{0,200}?\.optional\(\)/, 'jd_text must be omittable');
+    assert.match(
+      routeFile,
+      /description: sql<string>`left\(\$\{monitored_jobs\.description\}, 60000\)`/,
+      'the row read must be capped at the same bound the schema enforces',
+    );
+    // The caller's text WINS when present. The review screen holds the JD its packet was tailored
+    // against, and the live row may have been edited since; scoring the row there would put a
+    // number next to a resume that was written for different text.
+    assert.match(routeFile, /const jdText = body\.jd_text \?\? posting\?\.description \?\? '';/);
+    // Neither supplied nor resolvable is a WIRING fault, and must not borrow the engine's
+    // "this posting did not list enough requirements" copy, which is a claim about the job.
+    assert.match(routeFile, /jd_text is required unless job_context\.job_id names a posting we hold/);
   });
 });
