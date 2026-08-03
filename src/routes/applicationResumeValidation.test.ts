@@ -1,0 +1,83 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import type { ExperienceBankEntry } from '../db/schema';
+import { checkResumeHealth } from '../engine/resumeHealth';
+import { validateResumeSpec } from '../engine/resumeValidate';
+import type { ResumeSpec } from '../llm/resumeSpec';
+import { allowedSparseEntriesForApplicationEdit } from './applications';
+
+const source: ExperienceBankEntry = {
+  id: 'recent-role',
+  user_id: 'user-1',
+  type: 'job',
+  org: 'Northwind Labs',
+  title: 'Software Engineer',
+  date_range: 'June 2024 - Present',
+  bullet_variants: [
+    'Built TypeScript services and React interfaces used by operations teams',
+    'Added automated tests, improved deployment checks, and reduced production errors by 35 percent',
+  ],
+  tags: [],
+  created_at: new Date('2026-08-03T00:00:00Z'),
+} as ExperienceBankEntry;
+
+const resume: ResumeSpec = {
+  school: 'Example University',
+  degree: 'BS Computer Science',
+  grad_date: '2024',
+  coursework: '',
+  experience: [{
+    type: 'job',
+    org: source.org,
+    title: source.title ?? '',
+    date_range: source.date_range ?? '',
+    bullets: source.bullet_variants as string[],
+  }],
+  skills: ['TypeScript', 'React'],
+};
+
+const continuedReview = {
+  recent_experience_review: {
+    selected_entry_id: source.id,
+    continue_with_found: true,
+  },
+};
+
+function validate(spec: ResumeSpec, parsed: unknown = continuedReview) {
+  return validateResumeSpec(spec, '', [source], undefined, undefined, undefined, {
+    allowedSingleBulletEntries: allowedSparseEntriesForApplicationEdit(parsed, [source]),
+  });
+}
+
+test('an advisory no-number finding does not block an already-approved sparse resume', () => {
+  const health = checkResumeHealth(resume);
+  const noMetric = health.findings.find((finding) => finding.rule === 'no-metric');
+  assert.equal(noMetric?.severity, 'consider');
+
+  const validation = validate(resume);
+  assert.deepEqual(validation.issues, []);
+});
+
+test('the sparse exception requires the recorded continue decision and selected bank entry', () => {
+  assert.deepEqual(allowedSparseEntriesForApplicationEdit({}, [source]), []);
+  assert.deepEqual(allowedSparseEntriesForApplicationEdit({
+    recent_experience_review: { selected_entry_id: source.id, continue_with_found: false },
+  }, [source]), []);
+  assert.deepEqual(allowedSparseEntriesForApplicationEdit({
+    recent_experience_review: { selected_entry_id: 'another-entry', continue_with_found: true },
+  }, [source]), []);
+
+  const validation = validate(resume, {});
+  assert.ok(validation.issues.some((issue) => issue.includes('2 bullet selected (min 3)')));
+});
+
+test('real content errors remain blocking even when sparse source content is allowed', () => {
+  const weak = structuredClone(resume);
+  weak.experience[0].bullets[0] = 'Helped with TypeScript services and React interfaces used by operations teams';
+  assert.ok(validate(weak).issues.some((issue) => issue.includes('bullet not action-verb-first')));
+
+  const fabricated = structuredClone(resume);
+  fabricated.experience[0].bullets[1] =
+    'Added automated tests, improved deployment checks, and reduced production errors by 40 percent';
+  assert.ok(validate(fabricated).issues.some((issue) => issue.includes('grounding: metric "40"')));
+});
