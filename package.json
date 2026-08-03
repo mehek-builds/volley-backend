@@ -77,6 +77,7 @@
     "logo:check": "node --import tsx scripts/check-logo-coverage.mjs",
     "logo:resolve": "node scripts/resolve-company-domains.mjs",
     "db:job-pay": "node scripts/apply-job-pay-schema.mjs",
-    "db:employment-type-index": "node scripts/apply-employment-type-index.mjs"
+    "db:employment-type-index": "node scripts/apply-employment-type-index.mjs",
+    "verify:classification": "tsx scripts/verify-classification.mts"
   }
 }

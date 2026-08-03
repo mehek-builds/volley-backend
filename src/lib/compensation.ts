@@ -249,6 +249,23 @@ const TITLE_TYPES: [RegExp, string][] = [
      name. \b on both sides so "Internal Audit" and "Internationalization Engineer" — both live on
      the board — are not read as internships. */
   [/\b(intern|interns|internship|internships)\b|\bco-?op\b/i, 'Internship'],
+  /* "SUMMER ANALYST" AND "SUMMER ASSOCIATE" ARE THE FINANCE AND LAW WORDS FOR INTERN.
+   *
+   * Not a season plus a job title - a term of art naming the summer intern class, which is why
+   * banks and firms use it in place of the word intern entirely. Added because the description
+   * rule caught eight of AQR's nine and missed the ninth: "2027 Research and Portfolio Management
+   * Engineering Summer Analyst" is the one posting where AQR left the programme paragraph out, so
+   * there was no body evidence to find. Its eight siblings are identical roles.
+   *
+   * NARROW EVIDENCE BASE, stated plainly so it can be revisited: all nine live examples are AQR.
+   * Zero counterexamples across 39,868 titles - nothing on the board is a Summer Analyst that is
+   * not an internship - but one employer is one employer. If a full-time "Summer Analyst" ever
+   * appears, this rule is the first thing to look at.
+   *
+   * A BARE SEASON IS NOT ENOUGH and never became a rule: 28 live titles carry a season word
+   * without an intern word and only 9 are internships. Fifteen are Astranis post-grad "Associate
+   * (Fall 2026)" roles and one is Gusto's "Summer Opportunities - Retirement Sales AE". */
+  [/\bsummer\s+(analyst|associate)s?\b/i, 'Internship'],
   /* THE SAME WORD IN THE LANGUAGE THE POSTING WAS WRITTEN IN.
    *
    * The board is not English-only and the title rule was. Measured 2026-08-04 across 39,868 live
