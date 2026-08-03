@@ -168,6 +168,7 @@ describe('planBankReconciliation', () => {
       org: 'Acme',
       title: 'Engineering Intern',
       date_range: '2025',
+      location: null,
     }]);
     assert.equal(result.inserts.length, 1);
     assert.equal(result.inserts[0].title, 'Product Intern');
