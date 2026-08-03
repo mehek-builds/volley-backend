@@ -43,6 +43,20 @@
  *     if this model ever regresses to the ~2 points the old one managed.
  */
 
+import { label as placeLabel, parsePlace, splitLocations } from '../lib/cities';
+
+/**
+ * What the caller already knows about the posting, and therefore must not be asked to have on a
+ * resume. Every field here is an EXACT exclusion taken from the job row, never a guess made from
+ * the prose. See SELF_REFERENCE and locationTokens for what each one costs us if it is missing.
+ */
+export interface JdContext {
+  company?: string;
+  role?: string;
+  /** The posting's location field, verbatim. Multi-site strings are fine; cities.ts splits them. */
+  location?: string | null;
+}
+
 /** Below this many extracted requirement terms, we decline to show a score at all. */
 export const MIN_SCORABLE_TERMS = 6;
 
@@ -452,7 +466,90 @@ candidate applicant university college student undergraduate`
     .filter(Boolean),
 );
 
-function selfReferenceTokens(context?: { company?: string; role?: string }): Set<string> {
+/**
+ * The posting's own places, which are requirements of the commute and never of the resume.
+ *
+ * Same class of bug as the company name, found the same way. Databricks' "Product Management Intern
+ * (Summer 2027)" extracted 19 terms, of which `bellevue`, `wa`, `mountain view`, `ca` and
+ * `san francisco` were five: the office list, harvested by the proper-noun rule, sitting in the
+ * denominator and on the missing list. That list is not only displayed. It is the input to
+ * gap-to-bullet, so the product was one click from offering to write a student a resume bullet
+ * about Bellevue.
+ *
+ * MIN_SIGNAL_TERMS names city names as a known contaminant and defends against a term set that is
+ * NOTHING but proper nouns. It cannot help here, because the same posting also mentions Python and
+ * SQL in passing, so the signal floor clears while the denominator stays full of geography.
+ *
+ * The location comes from the row the caller already holds, so this is an exact exclusion like the
+ * company and the role rather than a guess at which capitalized words are places. Both the raw
+ * field and the canonical parse are folded in: the field says "Bellevue, Washington" while the
+ * posting body says "Bellevue, WA", and only cities.ts knows those are one place.
+ *
+ * WHY THIS IS NOT SAFE ON ITS OWN, and what actually makes it safe: see PLACE_SAFE_KINDS below.
+ * Place names collide with real requirements constantly. "Mobile, AL" and "Reading, UK" and "Split,
+ * Croatia" and "Cork" and "Bath" are all real cities on real boards, and mobile, reading and split
+ * are all terms a posting can genuinely require. Deleting one of those is WORSE than leaving the
+ * geography in: a requirement the student lacks vanishes from the denominator, which INFLATES the
+ * score, and vanishes from the missing list the student is supposed to act on.
+ *
+ * The curated lexicon catches some of the collisions (java, angular, oracle) and it is applied to
+ * the whole normalized string as well as to each word, because a location field of exactly "Java"
+ * normalizes to one token and would otherwise skip the per-word guard entirely. But the lexicon is
+ * ~250 words and the collision set is open-ended: mobile, reading, split, cork, bath, salem,
+ * sandwich, boring, chad and georgia are all outside it. A longer list is not the fix.
+ */
+function locationTokens(location: string | null | undefined): string[] {
+  if (!location?.trim()) return [];
+  const spellings = [location];
+  for (const part of splitLocations(location)) {
+    spellings.push(part);
+    for (const place of parsePlace(part)) spellings.push(placeLabel(place));
+  }
+  const out: string[] = [];
+  const admit = (value: string) => {
+    // Guards the WHOLE string as well as each word. A bare-city field ("Java", "Oracle", "Angular")
+    // produces a single token, so a guard that only ran inside the per-word loop never saw it.
+    if (value.length > 1 && !inLexicon(value)) out.push(value);
+  };
+  for (const spelling of spellings) {
+    const normalized = normalizeTerm(spelling);
+    if (!normalized) continue;
+    admit(normalized);
+    for (const word of normalized.split(' ')) admit(word);
+  }
+  return out;
+}
+
+/**
+ * The sections a place name may be deleted from, and the reason the location exclusion is safe.
+ *
+ * An employer states requirements in a Requirements or Preferred block and states its address in
+ * prose. So a term that arrived from a STATED section is a requirement the employer wrote down on
+ * purpose, and no location field may overrule it. "Mobile, AL" cannot delete a Requirements bullet
+ * reading "Mobile development experience"; a posting in Java, Indonesia cannot delete "Java".
+ *
+ * The Databricks posting that opened ISSUE-014 has no requirements block at all: its 19 terms are
+ * every one of them `body`, harvested from prose, which is exactly where an office list lives and
+ * exactly where the exclusion still needs to fire. That is why the discriminator is the section
+ * rather than the signal flag, which does not separate these at all: `ca` and `wa` are hard signal
+ * (two-letter acronyms) while `mobile` and `reading` are not, so a signal-based guard would keep
+ * the geography and delete the requirements, precisely backwards.
+ *
+ * THE RESIDUAL CASE, stated rather than hidden: on a posting with no stated sections, a genuine
+ * body-prose requirement that is spelled the same as the posting's own city is still dropped. On
+ * that evidence the two readings are indistinguishable and the location field is the only thing
+ * either of them said out loud, so it wins.
+ */
+const PLACE_SAFE_KINDS: ReadonlySet<SectionKind> = new Set<SectionKind>(['body']);
+
+/**
+ * The company and the role, which are excluded from EVERY section rather than only from prose.
+ *
+ * Deliberately unlike the location exclusion above. A posting genuinely cannot require experience
+ * with its own name or its own job title, wherever that name appears, so there is no collision to
+ * defend against and no reason to narrow it by section.
+ */
+function selfReferenceTokens(context?: JdContext): Set<string> {
   const tokens = new Set(SELF_REFERENCE);
   for (const value of [context?.company, context?.role]) {
     if (!value) continue;
@@ -464,10 +561,13 @@ function selfReferenceTokens(context?: { company?: string; role?: string }): Set
   return tokens;
 }
 
-export function extractJdTerms(jdText: string, context?: { company?: string; role?: string }): JdTerm[] {
+export function extractJdTerms(jdText: string, context?: JdContext): JdTerm[] {
   const self = selfReferenceTokens(context);
+  const places = new Set(locationTokens(context?.location));
+  const excluded = (t: JdTerm, words: Set<string>) =>
+    words.has(t.term) || t.term.split(' ').every((w) => words.has(w));
   const strip = (list: JdTerm[]) =>
-    list.filter((t) => !self.has(t.term) && !t.term.split(' ').every((w) => self.has(w)));
+    list.filter((t) => !excluded(t, self) && !(PLACE_SAFE_KINDS.has(t.kind) && excluded(t, places)));
 
   const terms = strip(extractFrom(segmentJd(jdText)));
   if (terms.length >= MIN_SCORABLE_TERMS) return terms;
@@ -651,7 +751,7 @@ export interface JdMatchResult {
 export function scoreJdMatch(
   resumeText: string,
   jdText: string,
-  context?: { company?: string; role?: string },
+  context?: JdContext,
 ): JdMatchResult {
   const terms = extractJdTerms(jdText, context);
 

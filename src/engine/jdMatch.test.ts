@@ -449,6 +449,139 @@ describe('a posting does not ask for itself', () => {
   });
 });
 
+/**
+ * ISSUE-014. The posting that started it, verbatim in the parts that matter.
+ *
+ * Databricks' "Product Management Intern (Summer 2027)" extracted 19 terms against a real student
+ * resume and scored 0. Five of the 19 were the office list: bellevue, wa, mountain view, ca,
+ * san francisco. They sat in the denominator AND on the missing list, which is the list
+ * gap-to-bullet consumes, so the product was one click from offering to write a bullet about
+ * Bellevue.
+ *
+ * The signal floor above cannot catch this. It defends against a term set that is NOTHING but
+ * proper nouns, and this posting also mentions Python, SQL, ETL and EDA while listing which TEAMS
+ * are hiring, so the floor clears with the geography still in.
+ */
+describe('a posting does not ask for its own address', () => {
+  const JD =
+    'At Databricks we build the best data and AI infrastructure platform. As a Product Management ' +
+    "Intern you will learn how to be a successful PM. We're hiring across all of our teams, " +
+    'including AI Platform, Genie, Machine Learning, Unity Catalog, Databricks SQL, ETL, Streaming, ' +
+    'and EDA. This is a 12 week paid summer internship in either San Francisco, CA, Mountain View, ' +
+    'CA, or Bellevue, WA. You will prototype and test early ideas with customers using Python.';
+  const CONTEXT = {
+    company: 'Databricks',
+    role: 'Product Management Intern (Summer 2027)',
+    // Exactly as the row stores it: three sites, semicolon separated, states spelled out.
+    location: 'Bellevue, Washington; Mountain View, California; San Francisco, California',
+  };
+
+  test('the offices are not requirements', () => {
+    const keys = extractJdTerms(JD, CONTEXT).map((t) => t.term);
+    for (const place of ['bellevue', 'mountain view', 'san francisco', 'wa', 'ca']) {
+      assert.ok(!keys.includes(place), `"${place}" is where the job is, not something to have done`);
+    }
+  });
+
+  test('the state is excluded under the spelling the BODY uses, not the one the FIELD uses', () => {
+    // The location field says "Washington" and the posting body says "WA". Only cities.ts knows
+    // those are one place, which is the whole reason the canonical parse is folded in as well as
+    // the raw string.
+    const keys = extractJdTerms(JD, CONTEXT).map((t) => t.term);
+    assert.ok(!keys.includes('wa'), 'WA in the prose is Washington in the field');
+  });
+
+  test('the real requirements survive', () => {
+    const keys = extractJdTerms(JD, CONTEXT).map((t) => t.term);
+    for (const real of ['python', 'machine learning', 'etl', 'streaming']) {
+      assert.ok(keys.includes(real), `"${real}" is a real requirement`);
+    }
+  });
+
+  test('without a location nothing geographic is excluded', () => {
+    const keys = extractJdTerms(JD, { company: CONTEXT.company, role: CONTEXT.role }).map((t) => t.term);
+    assert.ok(keys.includes('bellevue'), 'the exclusion is driven by the job row, not guessed from prose');
+  });
+
+  /**
+   * A location field may never delete a STATED requirement, whatever it is spelled like.
+   *
+   * The first cut of this fix excluded every word of the location from every section, guarded only
+   * by the ~250-word curated lexicon. That deleted `mobile` on a posting located in Mobile, AL, and
+   * `reading`, `split`, `cork`, `bath`, `salem` and `georgia` for their cities. Deleting a real
+   * requirement is worse than leaving geography in: the term leaves the denominator, which INFLATES
+   * the score, and leaves the missing list the student is supposed to act on.
+   *
+   * The bare-city cases are separate and were separately broken: a location field of exactly "Java"
+   * normalizes to ONE token, which skipped a guard that only ran inside the per-word loop. The
+   * original test used "Java, Indonesia", two tokens, so it passed without ever exercising that
+   * path.
+   */
+  const COLLISIONS: Array<[string, string]> = [
+    ['Java', 'Java'],
+    ['Angular', 'Angular'],
+    ['Oracle', 'Oracle'],
+    // The same city written the other common way. The bare and the regioned form must agree.
+    ['Oracle', 'Oracle, Arizona'],
+    ['Mobile', 'Mobile, AL'],
+    ['Mobile', 'Mobile, Alabama'],
+    ['Reading', 'Reading, UK'],
+    ['Split', 'Split, Croatia'],
+    ['Cork', 'Cork'],
+    ['Bath', 'Bath, UK'],
+    ['Georgia', 'Atlanta, Georgia'],
+    ['Texas', 'Austin, Texas'],
+  ];
+
+  for (const [word, location] of COLLISIONS) {
+    test(`a Requirements bullet for ${word} survives a posting located in ${location}`, () => {
+      const jd = `Requirements\n- Strong ${word}, Docker, Kubernetes and React experience\n- 3 years of Python\n`;
+      const keys = extractJdTerms(jd, { company: 'Acme', role: 'Engineer', location }).map((t) => t.term);
+      assert.ok(
+        keys.includes(word.toLowerCase()),
+        `"${word}" is under Requirements, so the address may not delete it`,
+      );
+    });
+  }
+
+  test('the section is the discriminator, because the signal flag is exactly backwards here', () => {
+    // `ca` and `wa` are hard signal (two-letter acronyms) while `mobile` and `reading` are not, so
+    // a signal-based guard would have kept the geography and deleted the requirements.
+    const stated = extractJdTerms('Requirements\n- Mobile, Docker, Kubernetes, React and Python\n', {
+      company: 'Acme',
+      role: 'Engineer',
+      location: 'Mobile, AL',
+    });
+    assert.ok(stated.some((t) => t.term === 'mobile' && t.kind === 'required'));
+
+    const prose = extractJdTerms(JD, CONTEXT).map((t) => t.term);
+    assert.ok(!prose.includes('ca') && !prose.includes('wa'), 'body-prose geography still goes');
+  });
+
+  test('a null or empty location is simply no exclusion, never a crash', () => {
+    const base = extractJdTerms(JD, { company: CONTEXT.company, role: CONTEXT.role }).length;
+    for (const location of [null, undefined, '', '   ']) {
+      assert.equal(extractJdTerms(JD, { ...CONTEXT, location }).length, base);
+    }
+  });
+
+  test('the score rises once the geography leaves the denominator', () => {
+    // Not a claim about the absolute number. Only that removing terms no resume should carry
+    // cannot make the same resume look worse against the same posting.
+    const resume = 'Product management intern. Built dashboards with Python and SQL. ETL pipelines.';
+    const withPlaces = scoreJdMatch(resume, JD, { company: CONTEXT.company, role: CONTEXT.role });
+    const withoutPlaces = scoreJdMatch(resume, JD, CONTEXT);
+    assert.ok(
+      (withoutPlaces.score ?? 0) > (withPlaces.score ?? 0),
+      `expected the geography-free score to be higher, got ${withoutPlaces.score} vs ${withPlaces.score}`,
+    );
+    assert.ok(
+      withoutPlaces.missing.every((t) => !['Bellevue', 'Mountain View', 'San Francisco'].includes(t.display)),
+      'no office may reach the missing list that gap-to-bullet reads',
+    );
+  });
+});
+
 describe('scorability needs signal, not just a term count', () => {
   test('a posting of company, city and people names is not scorable', () => {
     // Cleared a floor of 6 and produced a confident 0% "Weak match" with Bob Smith, Jane Doe and
@@ -483,5 +616,22 @@ describe('route registration', () => {
     const routeFile = readFileSync(path.join(__dirname, '..', 'routes', 'jdMatch.ts'), 'utf8');
     assert.match(routeFile, /'\/jd-match'/);
     assert.match(routeFile, /'\/jd-match\/evidence'/);
+  });
+
+  /**
+   * The review screen is the one surface that still shows resume coverage, so it is the surface
+   * that most needs the geography out of its denominator and its missing list. It holds a saved
+   * packet, not a job row, and a packet has never stored a location. Passing the id and resolving
+   * it here is what covers packets that already exist.
+   */
+  test('POST /jd-match resolves the posting location from job_id when the caller has no location', () => {
+    const routeFile = readFileSync(path.join(__dirname, '..', 'routes', 'jdMatch.ts'), 'utf8');
+    assert.match(routeFile, /job_id: z\.string\(\)\.uuid\(\)\.nullish\(\)/, 'the schema must accept an id');
+    assert.match(
+      routeFile,
+      /location: body\.job_context\?\.location \?\? \(await postingLocation\(body\.job_context\?\.job_id\)\)/,
+      'an explicit location wins; the id is the fallback',
+    );
+    assert.match(routeFile, /from\(monitored_jobs\)/, 'the id must be resolved against the live row');
   });
 });
