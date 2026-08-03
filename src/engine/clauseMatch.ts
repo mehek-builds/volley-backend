@@ -309,3 +309,67 @@ export function matchClause(
   // Nothing in this clause is checkable. It leaves rather than counting as a miss.
   return { ...base, verdict: 'unscoreable', basis: 'none' };
 }
+
+/* ---------- the two-phase scorer ---------- */
+
+import type { CompetencyQuestion, CompetencyVerdict } from '../llm/competencyJudge';
+
+export interface ScoredPosting {
+  score: number | null;
+  clauses: RequirementClause[];
+  /** Verdicts the judge returned ungrounded, so a bad run is visible rather than silently generous. */
+  rejected: string[];
+}
+
+/** Sections that state what the CANDIDATE must have. `responsibilities` describes the job instead,
+ *  and scoring a student against what they will do rather than what they need is how the prototype
+ *  credited "ship features on the Databricks platform" to someone who has never worked there. */
+const CANDIDATE_KINDS = new Set<string>(['required', 'preferred']);
+
+/**
+ * Score a posting clause by clause, sending ONLY the competency clauses for judgement.
+ *
+ * Two phases on purpose. Everything decidable without judgement is decided first and locally, so a
+ * model outage, a rate limit or a bad response can never change whether Python is on a resume or
+ * whether a graduation date falls inside a stated window. The judge is injected rather than
+ * imported so the deterministic half stays testable without a network.
+ */
+export async function scorePosting(
+  jdText: string,
+  facts: CandidateFacts,
+  context: JdContext | undefined,
+  segment: (jd: string) => Array<{ kind: string; weight: number; text: string }>,
+  judge: (bullets: string[], qs: CompetencyQuestion[]) => Promise<{ verdicts: CompetencyVerdict[]; rejected: string[] }>,
+): Promise<ScoredPosting> {
+  const clauses: RequirementClause[] = [];
+  for (const sec of segment(jdText)) {
+    if (!CANDIDATE_KINDS.has(sec.kind)) continue;
+    for (const text of splitClauses(sec.text)) clauses.push(matchClause(text, sec.weight, facts, context));
+  }
+
+  const pending = clauses.map((c, i) => ({ c, i })).filter(({ c }) => c.basis === 'competency');
+  let rejected: string[] = [];
+  if (pending.length > 0) {
+    const questions: CompetencyQuestion[] = pending.map(({ i }) => ({ id: `c${i}`, clause: clauses[i].text }));
+    const result = await judge(facts.bullets ?? [], questions);
+    rejected = result.rejected;
+    const byId = new Map(result.verdicts.map((v) => [v.id, v]));
+    for (const { i } of pending) {
+      const v = byId.get(`c${i}`);
+      if (!v) continue;
+      clauses[i] = {
+        ...clauses[i],
+        verdict: v.met ? 'met' : 'unmet',
+        evidence: v.met ? `"${v.quote}"` : v.why ?? clauses[i].evidence,
+      };
+    }
+  }
+
+  let got = 0, total = 0;
+  for (const c of clauses) {
+    if (c.verdict === 'unscoreable') continue;
+    total += c.weight;
+    if (c.verdict === 'met') got += c.weight;
+  }
+  return { score: total > 0 ? Math.round((100 * got) / total) : null, clauses, rejected };
+}
