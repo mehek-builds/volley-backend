@@ -4,7 +4,7 @@ import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { extractPdfText } from '../lib/pdfText';
 import { validatePdfLayout, validateResumeSpec } from './resumeValidate';
-import { applyResumePolicy, deriveCandidateContext, educationGpaLine, enforceExperienceBulletFloor } from './resumePolicy';
+import { applyResumePolicy, deriveCandidateContext, educationGpaLine, enforceExperienceBulletFloor, sameOrganization } from './resumePolicy';
 import { planResumeLayout, renderResumePdf } from './resumeRender';
 
 function bankEntry(
@@ -382,4 +382,55 @@ test('the base resume path carries the same education fields the tailored path d
     coursework: ['Algorithms'],
   });
   assert.equal(educationGpaLine(education), '3.8/4.0');
+});
+
+/* Location is a claim about WHERE someone worked, so it is held to a stricter match than the
+   bullets are. matchingBankEntry accepts a 0.5 organisation overlap, which is right for pulling a
+   student's own bullets onto the right row and wrong for asserting a city. */
+test('a location is copied only when the organisation is unmistakably the same', () => {
+  const spec = rawSpec();
+  spec.experience = [{ ...spec.experience[0], org: 'Company 2', title: 'Engineer', date_range: '2024', bullets: spec.experience[0].bullets }];
+  const near = [{
+    ...BANK[0], org: 'Company 1', title: 'Engineer', date_range: '2024',
+    location: 'Princeton, NJ', bullet_variants: spec.experience[0].bullets,
+  }] as typeof BANK;
+  const { spec: out } = applyResumePolicy(spec, { school: 'USC' }, near, 'engineering');
+  // The row still matches well enough to carry bullets; the city does not come with it.
+  assert.equal(out.experience[0].location, '');
+});
+
+test('an exact organisation match does carry the location', () => {
+  const spec = rawSpec();
+  const org = spec.experience[0].org;
+  const exact = [{
+    ...BANK[0], org, title: spec.experience[0].title, date_range: spec.experience[0].date_range,
+    location: 'Los Angeles, CA', bullet_variants: spec.experience[0].bullets,
+  }] as typeof BANK;
+  const { spec: out } = applyResumePolicy(spec, { school: 'USC' }, exact, 'engineering');
+  assert.equal(out.experience[0].location, 'Los Angeles, CA');
+});
+
+test('a bank row with no location prints none, rather than inheriting a neighbour', () => {
+  const spec = rawSpec();
+  const org = spec.experience[0].org;
+  const noPlace = [{
+    ...BANK[0], org, title: spec.experience[0].title, date_range: spec.experience[0].date_range,
+    location: null, bullet_variants: spec.experience[0].bullets,
+  }] as typeof BANK;
+  const { spec: out } = applyResumePolicy(spec, { school: 'USC' }, noPlace, 'engineering');
+  assert.equal(out.experience[0].location, '');
+});
+
+/* The specific near-miss that motivated identity matching. orgScore cannot see the difference:
+   tokens() drops single characters, so both names reduce to {company} and score a perfect 1.0. */
+test('organisations differing only by a number are not the same employer', () => {
+  assert.equal(sameOrganization('Company 1', 'Company 2'), false);
+  assert.equal(sameOrganization('Site 1', 'Site 2'), false);
+  assert.equal(sameOrganization('Bank of America', 'Bank of the West'), false);
+});
+
+test('punctuation, spacing and case are noise, not a different employer', () => {
+  assert.equal(sameOrganization("St. Jude's", 'St Judes'), true);
+  assert.equal(sameOrganization('TRI COAST CAPITAL', 'Tri Coast Capital'), true);
+  assert.equal(sameOrganization('', ''), false);
 });

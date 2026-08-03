@@ -17,6 +17,7 @@ export interface CandidateEducation {
      application_profile, not the reverse. */
   gpa?: string;
   gpa_scale?: string;
+  school_location?: string;
 }
 
 /* "3.8/4.0", or "3.8" when the resume printed no denominator, or nothing at all.
@@ -163,6 +164,16 @@ function orgScore(generated: string, source: string): number {
   return acronymMatch ? Math.max(overlap, 1) : overlap;
 }
 
+/* Is this the SAME employer, not merely a close one. Punctuation, spacing and case are noise ("St.
+   Jude's" vs "St Judes"); everything else has to agree, including the digits and initials orgScore
+   discards. Used only to gate a printed location, where a near-miss is a false factual claim rather
+   than a slightly worse bullet. */
+export function sameOrganization(a: string, b: string): boolean {
+  const compact = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const left = compact(a);
+  return left.length > 0 && left === compact(b);
+}
+
 function matchingBankEntry(entry: ResumeSpec['experience'][number], bank: ExperienceBankEntry[]) {
   const generatedTitle = tokens(entry.title ?? '');
   const generatedYears = new Set((entry.date_range ?? '').match(/\b(?:19|20)\d{2}\b/g) ?? []);
@@ -254,6 +265,27 @@ export function applyResumePolicy(
       return {
         ...entry,
         type,
+        /* From the BANK, exactly like `type` above and for the same reason: the model is never the
+           source of a fact about where the student worked. It selects and phrases evidence, it does
+           not author the record.
+
+           HELD TO A HIGHER BAR THAN THE REST OF THE MATCH, deliberately. matchingBankEntry accepts
+           an organisation overlap of 0.5, which is right for pulling bullets - half a name plus a
+           title and a shared year is ample evidence it is the same job. It is not ample evidence
+           about a CITY. "Company 1" and "Company 2" score exactly 0.5 against each other, as would
+           "Bank of America" and "Bank of the West", and the cost of that near-miss is different in
+           kind here: a wrong bullet is the student's own text on the wrong row, while a wrong city
+           is a false statement about where they worked, printed in the one column an employer scans
+           to check it. Below the bar the line simply prints no place, which is what the resume
+           looked like yesterday and is never wrong.
+
+           THE BAR IS IDENTITY, not a high score, and orgScore is the reason. tokens() drops
+           single characters, so "Company 1" and "Company 2" both reduce to {company} and score a
+           PERFECT 1.0 against each other - no threshold on that scale can separate them. The same
+           holds for "Site 1"/"Site 2" and any pair differing only by a number or initial. Matching
+           on the normalised name itself is the only test that actually answers "is this the same
+           employer", which is the question a printed city depends on. */
+        location: sameOrganization(entry.org, source?.org ?? '') ? source?.location ?? '' : '',
         bullets,
       };
     })
@@ -270,6 +302,7 @@ export function applyResumePolicy(
       /* Comes from the profile, exactly like school and degree, and never from the model. The
          education block is student-owned facts throughout: nothing in it is the LLM's to write. */
       gpa: educationGpaLine(education),
+      school_location: education.school_location?.trim() ?? '',
       coursework: sourceCoursework.join(', '),
       education_position: context.education_position,
       experience,

@@ -60,27 +60,33 @@ async function renderedTextItems(pdf: Buffer): Promise<RenderedTextItem[][]> {
 /* Every text baseline on the rendered page, top to bottom. These are golden values: they exist to
  * catch layout drift nobody intended, so a diff here is a question, not automatically a bug.
  *
- * Last regenerated 2026-08-02, for the 4pt safe inset above the candidate name. Every name baseline
+ * Last regenerated 2026-08-04, for the two-split-line entry layout: the place moved to the right of
+ * the organisation and the date dropped to the right of the role. The ITEM COUNT is unchanged in all
+ * three cases, which is the reassuring part - nothing was added or lost, the date's baseline simply
+ * coincides with the role's now instead of the organisation's. The remaining deltas are all under
+ * 0.3pt and come from the italic line-gap ratio applying to the second line's left column.
+ *
+ * Previously regenerated 2026-08-02, for the 4pt safe inset above the candidate name. Every name baseline
  * moved down 4pt. The page-fill planner then reduced expansion slightly to keep the same 94% target,
  * so later baselines move by progressively less. The section order and bullet line counts remain
  * unchanged, and the rendered safe-margin check passes for all benchmark cases.
  */
 const RENDERED_BASELINE_SNAPSHOTS: Record<string, number[]> = {
   '04-sparse-two-short-jobs': [
-    733.3, 706, 656.8, 630, 611.1, 569.9, 543.1, 524.3, 503.1, 481.7, 449.3,
-    430.5, 409.3, 387.9, 346.5, 319.6,
+    733.3, 706, 656.8, 630, 611.1, 569.8, 542.9, 524.1, 502.7, 481.3, 448.9,
+    430.1, 408.7, 387.3, 345.9, 319.1,
   ],
   '09-normal-all-sections': [
-    733.7, 707.4, 661.3, 635.4, 617.1, 599.4, 560.2, 534.3, 516, 495.6, 482.4,
-    461.8, 448.6, 409.4, 383.5, 365.2, 344.8, 331.6, 311, 297.8, 258.5, 232.6,
-    214.3, 194, 180.7, 160.2, 146.9, 107.7, 81.8,
+    733.7, 707.5, 661.4, 635.5, 617.3, 599.4, 560.3, 534.4, 516.1, 495.6, 482.4,
+    461.8, 448.6, 409.4, 383.6, 365.3, 344.7, 331.5, 311, 297.7, 258.6, 232.7,
+    214.4, 193.9, 180.7, 160.1, 146.9, 107.7, 81.9,
   ],
   '24-dense-long-everything': [
-    737.2, 719.4, 708.6, 687.4, 669.2, 655.4, 642.2, 630.3, 609, 590.8, 577,
-    563.5, 551.6, 537.8, 525.9, 512.2, 500.3, 483.6, 469.8, 456.3, 444.3, 430.6,
-    418.7, 405, 393.1, 371.8, 353.5, 339.8, 326.2, 314.3, 300.6, 288.7, 275,
-    263.1, 241.7, 223.5, 209.8, 196.2, 184.3, 170.6, 158.7, 145, 133.1,
-    111.7, 93.5, 81.6,
+    737.2, 719.4, 708.6, 687.5, 669.3, 655.6, 642.2, 630.3, 609, 590.8, 577.1,
+    563.4, 551.5, 537.8, 525.9, 512.2, 500.3, 483.6, 469.8, 456.1, 444.2, 430.5,
+    418.6, 404.9, 393, 371.7, 353.5, 339.8, 326.1, 314.2, 300.5, 288.6, 274.9,
+    263, 241.7, 223.5, 209.8, 196.1, 184.2, 170.5, 158.6, 144.9, 133, 111.7,
+    93.5, 81.6,
   ],
 };
 
@@ -274,22 +280,26 @@ describe('resume visual layout controls', () => {
         })),
         bullet_lines: layout.bullets.map((bullet) => bullet.lines),
       },
-      /* Updated 2026-08-02 for the 4pt header safe inset. Expansion adjusts from 0.919 to 0.905 so
-       * the resume still lands at the 0.94 fill target. Section order and bullet line counts stay
-       * unchanged while the candidate name moves clear of the top safe margin. */
+      /* Updated 2026-08-04 for the two-split-line entry layout. Expansion adjusts from 0.905 to
+       * 0.902 so the resume still lands at the 0.94 fill target, and the EDUCATION block grows a
+       * tenth of a point because the second line's left column is now italic. What matters is what
+       * did NOT move: the section order, all six bullet line counts, and every section boundary
+       * beyond a rounding tick. The dates changed columns, not the shape of the page.
+       *
+       * Previously updated 2026-08-02 for the 4pt header safe inset. */
       {
         body_font_size: 11.9,
-        density_expansion: 0.905,
+        density_expansion: 0.902,
         fill_ratio: 0.94,
-        bottom_whitespace: 43.1,
+        bottom_whitespace: 43.2,
         section_order: ['HEADER', 'EDUCATION', 'EXPERIENCE', 'PROJECTS', 'LEADERSHIP', 'SKILLS'],
         sections: [
-          { name: 'HEADER', top: 36, bottom: 107.3, height: 71.3 },
-          { name: 'EDUCATION', top: 107.3, bottom: 195.2, height: 87.9 },
+          { name: 'HEADER', top: 36, bottom: 107.2, height: 71.2 },
+          { name: 'EDUCATION', top: 107.2, bottom: 195.2, height: 88 },
           { name: 'EXPERIENCE', top: 195.2, bottom: 346.1, height: 150.8 },
           { name: 'PROJECTS', top: 346.1, bottom: 496.9, height: 150.8 },
-          { name: 'LEADERSHIP', top: 496.9, bottom: 647.7, height: 150.8 },
-          { name: 'SKILLS', top: 647.7, bottom: 712.9, height: 65.1 },
+          { name: 'LEADERSHIP', top: 496.9, bottom: 647.8, height: 150.8 },
+          { name: 'SKILLS', top: 647.8, bottom: 712.8, height: 65 },
         ],
         bullet_lines: [2, 2, 2, 2, 2, 2],
       },
@@ -372,6 +382,59 @@ describe('resume visual layout controls', () => {
      Height and drawing move together here for the same reason the target-role removal had to: a
      line drawn but not measured makes the layout search solve for a page that is not the page, and
      the error surfaces as the last entry sliding off a resume that reports itself as fitting. */
+  /* The two-split-line shape, which is what a resume actually looks like: the left edge is the
+     institution and the role, the right edge is where and when. Pinned by GEOMETRY rather than by
+     text order, because "Los Angeles, CA appears somewhere" would pass even if it rendered on the
+     wrong line or in the left column. */
+  test('place sits right of the organisation, date right of the role', async () => {
+    const benchmark = RESUME_VISUAL_BENCHMARK.find((entry) => entry.id === '06-normal-two-jobs');
+    assert.ok(benchmark);
+    const spec = structuredClone(benchmark.spec);
+    spec.school_location = 'Los Angeles, CA';
+    spec.experience[0].location = 'Princeton, NJ';
+
+    const rendered = await renderResumePdf(spec, benchmark.contact, benchmark.jdText);
+    const parsed = await extractPdfText(rendered.buffer);
+    const items = parsed.pages.flat().filter((item) => item.text.trim());
+    const find = (text: string) => items.find((item) => item.text.includes(text));
+
+    const school = find(spec.school.slice(0, 20));
+    const place = find('Los Angeles');
+    const degree = find(spec.degree.slice(0, 20));
+    const gradDate = find(spec.grad_date);
+    assert.ok(school && place && degree && gradDate);
+
+    // Same line as its left-hand partner, and further right than it.
+    assert.ok(Math.abs(school.y - place.y) < 1, 'the place shares the school baseline');
+    assert.ok(place.x > school.x, 'the place is the right-hand column');
+    assert.ok(Math.abs(degree.y - gradDate.y) < 1, 'the date shares the degree baseline');
+    assert.ok(gradDate.x > degree.x, 'the date is the right-hand column');
+    // And the date is genuinely BELOW the school line now, not beside it.
+    assert.ok(gradDate.y < school.y, 'the date dropped to the second line');
+
+    const org = find(spec.experience[0].org);
+    const entryPlace = find('Princeton');
+    const title = find(spec.experience[0].title.slice(0, 15));
+    const range = find(spec.experience[0].date_range);
+    assert.ok(org && entryPlace && title && range);
+    assert.ok(Math.abs(org.y - entryPlace.y) < 1 && entryPlace.x > org.x);
+    assert.ok(Math.abs(title.y - range.y) < 1 && range.x > title.x);
+
+    assert.equal(parsed.numpages, 1);
+    assert.deepEqual(findPdfTextFidelityIssues(parsed.text, rendered.spec, benchmark.contact), []);
+    assert.deepEqual(findPdfSafeMarginIssues(parsed.pages, rendered.layout), []);
+  });
+
+  test('a resume with no places on file still renders, one line short', async () => {
+    const benchmark = RESUME_VISUAL_BENCHMARK.find((entry) => entry.id === '06-normal-two-jobs');
+    assert.ok(benchmark);
+    const rendered = await renderResumePdf(benchmark.spec, benchmark.contact, benchmark.jdText);
+    const parsed = await extractPdfText(rendered.buffer);
+    assert.equal(parsed.numpages, 1);
+    assert.deepEqual(findPdfTextFidelityIssues(parsed.text, rendered.spec, benchmark.contact), []);
+    assert.deepEqual(validateResumeVisualLayout(rendered.layout).issues, []);
+  });
+
   test('a GPA renders between the degree and the coursework, and is measured', async () => {
     const benchmark = RESUME_VISUAL_BENCHMARK.find((entry) => entry.id === '06-normal-two-jobs');
     assert.ok(benchmark);

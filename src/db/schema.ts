@@ -378,6 +378,14 @@ export const experience_bank = pgTable('experience_bank', {
   org: text('org').notNull(),
   title: text('title'),
   date_range: text('date_range'),
+  /* Where the work happened, e.g. "Los Angeles, CA". Nullable and usually null on rows created
+     before 2026-08-04: the parser only started reading it then, and existing rows are backfilled
+     only when the student uploads again. The renderer prints nothing for a null, which is correct
+     rather than a gap - a resume line missing its city is not wrong, it is shorter.
+     GROUNDED LIKE EVERY OTHER FIELD HERE: applyResumePolicy copies location off this row, never
+     off the model's output. A plausible invented city on an employment document is a fabricated
+     fact about where someone worked. */
+  location: text('location'),
   bullet_variants: jsonb('bullet_variants').notNull(), // string[]
   tags: jsonb('tags'), // string[] of skills/keywords this entry supports
   created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
