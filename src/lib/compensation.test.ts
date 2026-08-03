@@ -389,3 +389,106 @@ test('the recruiting guard applies to the DESCRIPTION rule only, never to the ti
     assert.equal(resolveEmploymentType(title), 'Internship', title);
   }
 });
+
+test('an internship word in the language the posting was written in', () => {
+  /* Twenty live internships were missed for no reason but language. Every title below is real. */
+  for (const title of [
+    'Estágio em Data Analytics',            // btgpactual, pt
+    'Estágio | Research – Fundos de Investimento e Renda Fixa',
+    'Programa Estágio de Férias 2027.1',
+    'Field Marketing Stagiair (f/m/x)',     // HelloFresh, nl
+    'Social Media & Influencer Stagiair(e) (m/v/x)',
+    'IT Asset Management Stagiair(e)',      // Lucid
+    'Werkstudent Finance',                  // crisp, de
+  ]) {
+    assert.equal(resolveEmploymentType(title), 'Internship', title);
+  }
+  // Werkstudent is tagged FullTime by its employer, meaning full-time HOURS. Same Modal case.
+  assert.equal(resolveEmploymentType('Werkstudent Finance', 'FullTime'), 'Internship');
+});
+
+test('bare "stage" is NOT an internship word in an English title', () => {
+  /* Why the multilingual list is hand-picked rather than a translation table. All live titles. */
+  for (const title of [
+    'Account Executive, Early Stage - EMEA',
+    'Senior Account Executive, Growth Stage',
+    'Senior Stage Fluids Engineer I',
+    'Account Manager, Growth Stage',
+  ]) {
+    assert.notEqual(resolveEmploymentType(title), 'Internship', title);
+  }
+});
+
+test('an intern word in a QUALIFICATIONS list is not the job on offer', () => {
+  /* Rocket Lab's Security Officer, live, and five postings wide. The phrase is identical to Jane
+     Street's until you look for the second person after it. */
+  const rocketLab = 'THESE QUALIFICATIONS WOULD BE NICE TO HAVE: Industrial work experience, '
+    + 'preferably in aerospace. Previous or current employment with Rocket Lab as an intern, '
+    + 'employee or contractor, or work experience at another aerospace company.';
+  assert.equal(resolveEmploymentType('Security Officer', undefined, rocketLab), undefined);
+
+  // N26 publishes this benefits block on every posting it lists, internship or not.
+  const n26 = 'A Premium N26 bank account. Varying vacation days depending on your location of '
+    + 'work and duration of your internship. A high degree of autonomy.';
+  assert.equal(
+    resolveEmploymentType('Social Media Customer Service Team Lead', undefined, n26),
+    undefined,
+  );
+
+  // And the real thing still resolves.
+  assert.equal(
+    resolveEmploymentType('Software Engineer', undefined,
+      'As an intern, you are paired with full-time employees who act as mentors.'),
+    'Internship',
+  );
+});
+
+test('a posting that POINTS AT the internship is not the internship', () => {
+  /* Astranis runs paired postings: a post-grad Associate and an Intern for the same role. The
+     Associate one sends students away, in the exact words a real internship would use. Twelve
+     live postings, and all twelve were on the board as internships. */
+  const associate = 'Many past interns have designed hardware that is heading to space. If you '
+    + 'have not already graduated from a four-year university, please apply to our internship '
+    + 'program. Role: work with the GNC team to design satellite software.';
+  assert.equal(
+    resolveEmploymentType('Guidance, Navigation, and Control Engineer Associate (Fall 2026)',
+      undefined, associate),
+    undefined,
+  );
+  const pointer2 = 'If you are still a college student, please apply to join us as an Intern.';
+  assert.equal(resolveEmploymentType('Flight Software Associate (Fall 2026)', undefined, pointer2),
+    undefined);
+
+  // A posting that points at one internship AND describes its own still counts as an internship.
+  const both = 'For our other openings please apply to our internship program. During your '
+    + 'internship, you will work alongside the research team.';
+  assert.equal(resolveEmploymentType('Research Associate', undefined, both), 'Internship');
+});
+
+test('the finance "Summer Analyst" convention is caught from the body', () => {
+  /* AQR posts eight of these and the word intern appears in none of the titles. This is the shape
+     Mehek flagged: a fixed-period summer role that only the description confirms. */
+  const aqr = 'We recognize the power of collaboration. The Internship Program Our 10-week summer '
+    + 'program puts real work of the firm in your hands. You will work alongside brilliant people.';
+  assert.equal(resolveEmploymentType('2027 Research Summer Analyst', undefined, aqr), 'Internship');
+
+  const aqr2 = "AQR's 10-week internship experience features the Quanta Academy Summer Term.";
+  assert.equal(resolveEmploymentType('2027 Risk Summer Analyst', undefined, aqr2), 'Internship');
+
+  const mozilla = 'As part of our internship program, you will be mentored one-on-one.';
+  assert.equal(resolveEmploymentType('Necko Student Worker', undefined, mozilla), 'Internship');
+});
+
+test('a season word in the title is NOT on its own an internship signal', () => {
+  /* Measured: 28 live titles carry a season word without an intern word, and only 9 are
+     internships. Fifteen are Astranis post-grad "Associate (Fall 2026)" roles and one is Gusto's
+     "Summer Opportunities - Retirement Sales AE", a full-time sales job. The season goes in the
+     title; the evidence stays in the body. */
+  for (const title of [
+    'Summer Opportunities - Retirement Sales AE',
+    'Mission Engineering Associate (Fall 2026)',
+    'Campus AI/ML Researcher (Fall 2026)',
+  ]) {
+    assert.equal(resolveEmploymentType(title), undefined, title);
+  }
+});

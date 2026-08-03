@@ -249,6 +249,32 @@ const TITLE_TYPES: [RegExp, string][] = [
      name. \b on both sides so "Internal Audit" and "Internationalization Engineer" — both live on
      the board — are not read as internships. */
   [/\b(intern|interns|internship|internships)\b|\bco-?op\b/i, 'Internship'],
+  /* THE SAME WORD IN THE LANGUAGE THE POSTING WAS WRITTEN IN.
+   *
+   * The board is not English-only and the title rule was. Measured 2026-08-04 across 39,868 live
+   * titles: TWENTY internships were being missed for no reason but language - 16 btgpactual
+   * "Estágio em Data Analytics", 3 HelloFresh/Lucid "Stagiair(e)", and crisp's "Werkstudent
+   * Finance". Every one is unambiguous in its own language, and none carries an English intern
+   * word anywhere in the title, so nothing else was ever going to catch them.
+   *
+   * BARE "stage" IS DELIBERATELY ABSENT, and it is the whole reason this list is hand-picked
+   * rather than a translation table. It means internship in French and Dutch and something else
+   * entirely in an English job title: 22 live titles contain it, and they are "Account Executive,
+   * Early Stage", "Senior Stage Fluids Engineer I" and "Account Manager, Growth Stage". Catching
+   * the two real ones ("Category Management stage") is not worth relabelling twenty full-time
+   * sales and engineering jobs as internships. Every token below is distinctive enough to have no
+   * English homograph, which is the bar for adding another. */
+  [
+    new RegExp(
+      '\\bestágios?\\b|\\bestagiári[oa]s?\\b'
+      + '|\\bstagiaires?\\b|\\bstagiair\\b'
+      + '|\\bpraktikums?\\b|\\bpraktikant(?:in)?\\b|\\bwerkstudent(?:in)?\\b'
+      + '|\\bbecari[oa]s?\\b|\\bpasantías?\\b|\\bprácticas\\b'
+      + '|\\btirocini[oa]\\b',
+      'i',
+    ),
+    'Internship',
+  ],
   /* APPRENTICESHIP IS ITS OWN CATEGORY, not a kind of internship (2026-08-04, Mehek's call).
      It used to share the rule above, and the two are genuinely different jobs. An internship is
      a student's fixed-length placement, usually a summer. A trade apprenticeship is a paid,
@@ -377,15 +403,48 @@ export function normalizeEmploymentType(value: string | undefined): string | und
  */
 const INTERNSHIP_DESCRIPTION = new RegExp(
   [
-    '\\bas an intern\\b',
-    '\\bas our intern\\b',
-    '\\bduring (the|your) internship\\b',
-    '\\bthis internship\\b',
-    '\\byour internship\\b',
-    '\\bthe internship (is|will|runs|lasts|begins|starts)\\b',
+    /* SECOND PERSON IS REQUIRED AFTER "as an intern", and this is the single most load-bearing
+       character in the file. The first version matched the bare phrase and put THIRTEEN full-time
+       jobs on the board as internships, because the phrase reads identically in a qualifications
+       list: Rocket Lab's Security Officer says "Previous or current employment with Rocket Lab as
+       an intern, employee or contractor". Requiring ", you" keeps Jane Street's "As an intern, you
+       are paired with mentors" and drops every one of those. */
+    '\\bas an intern,?\\s+you\\b',
+    '\\bas our intern,?\\s+you\\b',
+    '\\bduring (?:the|your) internship\\b',
+    '\\bin this internship,?\\s+you\\b',
+    '\\byour internship,?\\s+you\\b',
+    /* "over the COURSE of your internship" and "the BULK of your internship", never "DURATION of".
+       N26 publishes one benefits block on every posting it lists, and it ends "...vacation days
+       depending on your location of work and duration of your internship" - which put a Social
+       Media Customer Service TEAM LEAD in the internship filter. */
+    '\\b(?:course|bulk|remainder) of your internship\\b',
+    '\\bthe internship (?:is|will|runs|lasts|begins|starts)\\b',
+    /* THE PROGRAMME NAMED AS THE THING ON OFFER. This is what catches the finance convention the
+       title rule can never see: AQR posts "2027 Research Summer Analyst" and the body says "The
+       Internship Program Our 10-week summer program puts real work of the firm in your hands".
+       Eight live postings, and the word "intern" appears nowhere in any of their titles. Mozilla's
+       "Necko Student Worker" is the same shape ("As part of our internship program, you'll..."). */
+    '\\b(?:our|the)\\s+(?:\\d{1,2}[-\\s]?week\\s+)?(?:summer\\s+)?internship\\s+(?:program(?:me)?|experience)\\b',
+    '\\b\\d{1,2}[-\\s]?week\\s+internship\\b',
   ].join('|'),
   'i',
 );
+
+/**
+ * A POSTING THAT POINTS AT THE INTERNSHIP IS NOT THE INTERNSHIP.
+ *
+ * Astranis runs paired postings for the same role: a post-grad "Flight Software Associate (Fall
+ * 2026)" and a "Flight Software Intern (Fall 2026)". The Associate one sends students away - "If
+ * you have not already graduated from a four-year university, please apply to our internship
+ * program" - and names the internship in exactly the words a real one would. TWELVE live postings,
+ * every one a redirect, and every one was on the board as an internship.
+ *
+ * So a phrase only counts when it is NOT the object of "apply to" or "please see". Checked per
+ * match rather than per posting: a description may point at the internship in one sentence and
+ * describe its own in another, and only the second should decide.
+ */
+const INTERNSHIP_POINTER = /\b(?:apply|applying)\s+(?:to|for)\b[^.]{0,60}$|\bplease\s+(?:see|visit|check)\b[^.]{0,60}$/i;
 
 /** Roles that RUN an internship programme rather than being one. All full-time. */
 const RECRUITING_TITLES =
@@ -408,7 +467,14 @@ export function employmentTypeFromDescription(
   description?: string,
 ): string | undefined {
   if (!description || RECRUITING_TITLES.test(title)) return undefined;
-  return INTERNSHIP_DESCRIPTION.test(description) ? 'Internship' : undefined;
+  /* Every match is checked, not just the first: an Astranis Associate posting points at the
+     internship early and describes its own role later, and a posting that both points AND offers
+     should be read as offering. One non-pointer match is enough. */
+  for (const match of description.matchAll(new RegExp(INTERNSHIP_DESCRIPTION.source, 'gi'))) {
+    const before = description.slice(Math.max(0, match.index - 80), match.index);
+    if (!INTERNSHIP_POINTER.test(before)) return 'Internship';
+  }
+  return undefined;
 }
 
 export function resolveEmploymentType(
