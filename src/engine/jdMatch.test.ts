@@ -182,6 +182,162 @@ Experience with Regulatory Reporting and Governance Management.
     assert.equal(s.length, 1);
     assert.equal(s[0].kind, 'body');
   });
+
+  test('"What we look for" and "The impact you will have" are the sections they say they are', () => {
+    // Databricks' "Product Management Intern (Summer 2027)", found 2026-08-03. Both lines pass
+    // isHeadingLine and both were one word away from the patterns: `what we're looking for` did not
+    // cover "what we look for", and `your impact` did not cover "the impact you will have".
+    //
+    // The cost was not the headings. An unrecognised heading does not close the section above it,
+    // so the ENTIRE posting stayed `body` at 0.4 and the denominator filled from the culture
+    // paragraph: the score was built from `genie`, `unity catalog`, `ai platform` and `streaming`,
+    // which is the sentence naming the TEAMS Databricks hires across, while the one real ask -
+    // "first hand experience with SQL and/or Python" - never reached weight 1. 8/100 for a
+    // resume that has Python and the CS degree the posting asks for.
+    //
+    // Both are house templates, not one posting's quirk: over 600 live postings this heading pair
+    // was the difference on 5, split across Databricks and Affirm.
+    const jd = `As a Product Management Intern, you will join a team. We're hiring across all of our teams, including AI Platform, Genie, Machine Learning, Unity Catalog, Databricks SQL, ETL, Streaming, and EDA.
+
+The impact you will have:
+
+Prototype and test early ideas with customers and engineers
+Work with engineers and designers to ship features on the platform
+
+What we look for:
+
+Pursuing a bachelor's in computer science or a related engineering field
+You have some first hand experience with SQL and/or Python
+`;
+    const kinds = segmentJd(jd).map((s) => s.kind);
+    assert.deepEqual(kinds, ['body', 'responsibilities', 'required']);
+
+    // The team-roster nouns are still admitted, but out of `body` at 0.4, so they can no longer
+    // outweigh the stated requirement. That is the part that makes the number wrong, not their
+    // presence: `sql` and `python` must carry more than `genie` does.
+    const terms = extractJdTerms(jd);
+    const weightOf = (term: string) => terms.find((t) => t.term === term)?.weight;
+    assert.equal(weightOf('sql'), 1, 'SQL is stated under "What we look for"');
+    assert.equal(weightOf('python'), 1, 'Python is stated under "What we look for"');
+    for (const roster of ['genie', 'unity catalog', 'ai platform', 'streaming']) {
+      const w = weightOf(roster);
+      if (w !== undefined) assert.ok(w < 1, `"${roster}" names a team, so it cannot weigh as much as a requirement`);
+    }
+
+    // required_coverage is null whenever nothing parses as required, which silently disables the
+    // scoreBand guard that stops "covered the responsibilities, missed every hard requirement"
+    // from reading as a strong match. Restoring the section restores the guard's input.
+    const result = scoreJdMatch('Python. Computer science.', jd, { company: 'Databricks' });
+    assert.notEqual(result.required_coverage, null, 'a posting with a requirements section has required coverage');
+  });
+
+  test('the widened heading patterns still do not swallow the company blurb', () => {
+    // `(your|the) impact` is the looser of the two. Noise is tested before responsibilities for
+    // exactly this reason, and this pins that order rather than trusting it.
+    for (const heading of ['About our impact', 'Our mission and impact']) {
+      const [, second] = segmentJd(`Responsibilities\n- Ship features\n${heading}\nWe are a company.\n`);
+      assert.equal(second?.kind, 'noise', `"${heading}" is a blurb, not a responsibilities block`);
+    }
+  });
+});
+
+describe('the admission gate, measured 2026-08-03 over 600 live postings', () => {
+  /* The attribution that drove all of these. Of 6950 terms that reached a scored denominator:
+   *
+   *   55.1%  proper-noun mid-sentence   please(31) english(49) employer(27) fortune(25) state(23)
+   *   24.7%  lexicon                    ai(124) python(78) compliance(72) sql(36)
+   *   13.4%  acronym                    usd(22) cad(16) ms(13) bs(12) pto(10) ote(9)
+   *    4.8%  proper-noun title-case run
+   *    1.7%  tech marker                c++(24) usc(17)
+   *
+   * Against the six real base resumes on the system, proper-noun terms were matched 3.6% of the
+   * time and hard-signal terms 6.4%, so the loosest rule was filling most of the denominator with
+   * the least earnable half of it. */
+
+  test('the compensation block is not a requirements block', () => {
+    const jd = `Requirements
+- Experience with Python and Kubernetes
+- Familiarity with SQL
+The base salary range for this role is 120,000 USD to 160,000 USD, plus PTO and an OTE bonus.
+`;
+    const terms = extractJdTerms(jd).map((t) => t.term);
+    for (const junk of ['usd', 'pto', 'ote']) {
+      assert.ok(!terms.includes(junk), `"${junk}" is what the job pays, not a thing to have done`);
+    }
+    assert.ok(terms.includes('python') && terms.includes('kubernetes'), 'the real requirements survive');
+  });
+
+  test('a real acronym that happens to share the shape is untouched', () => {
+    // The reason NON_REQUIREMENT_ACRONYMS is an enumeration and not a shape rule: these are the
+    // same shape as USD and PTO and they are genuine stated requirements.
+    const jd = `Requirements\n- ITAR and SOX compliance experience\n- Familiarity with SAML and REST\n`;
+    const terms = extractJdTerms(jd).map((t) => t.term);
+    for (const real of ['itar', 'sox', 'saml', 'rest']) {
+      assert.ok(terms.includes(real), `"${real}" is a stated requirement`);
+    }
+  });
+
+  test('a legal citation is not a technical name', () => {
+    // `U.S.C` reached the denominator as HARD SIGNAL on 34 of 600 postings, every one out of the
+    // work-authorization paragraph, because dots are the punctuation that says "node.js".
+    const jd = `Requirements
+- Applicants must be a U.S. citizen, a Refugee under 8 U.S.C. § 1157, or an Asylee under 8 U.S.C. § 1158
+- Strong Python and SQL experience with Docker and Kubernetes
+`;
+    const terms = extractJdTerms(jd).map((t) => t.term);
+    for (const junk of ['usc', 'us', 'asylee', 'refugee']) {
+      assert.ok(!terms.includes(junk), `"${junk}" is immigration boilerplate, not a requirement`);
+    }
+    assert.ok(terms.includes('python'), 'the real requirement survives');
+  });
+
+  test('a deny-listed word is denied in the plural too', () => {
+    // inLexicon has always singularised and the deny-lists never did, so every entry in them was
+    // singular-only. `requirement` was listed, `requirements` was the most common junk term left
+    // after everything else, at 47 of 600 postings: HTML-stripped postings put the heading inline,
+    // where segmentJd cannot strip it and it reads as the head of a Title Case run.
+    const jd = `We ship fast and iterate. Requirements Demonstrated experience with Python, SQL and Docker.
+Reasonable Accommodations are available on request.
+`;
+    const terms = extractJdTerms(jd).map((t) => t.term);
+    assert.ok(!terms.includes('requirements'), '"requirements" is the heading, not the requirement');
+    assert.ok(!terms.includes('accommodations'), '"accommodations" is the application-process copy');
+    assert.ok(terms.includes('python'), 'the real requirement survives');
+  });
+
+  test('singularising the deny-lists deletes no real skill', () => {
+    // The deny-lists are checked BEFORE the lexicon, so a skill whose singular collides with one of
+    // them would vanish from every posting that states it. This asserts the collision set is empty
+    // rather than assuming it, because both lists are expected to keep growing.
+    const src = readFileSync(new URL('./jdMatch.ts', import.meta.url), 'utf8');
+    const grab = (name: string) =>
+      new Set(new RegExp(`const ${name} = new Set\\(\\s*\`([^\`]*)\``).exec(src)![1].split(/\s+/).filter(Boolean));
+    const lexicon = grab('SKILL_LEXICON');
+    const denied = new Set([...grab('BOILERPLATE'), ...grab('GENERIC_STOPWORDS')]);
+    const singular = (w: string) =>
+      /(ss|us|is)$/.test(w) ? w
+      : /ies$/.test(w) ? w.slice(0, -3) + 'y'
+      : /es$/.test(w) && /(ch|sh|x|s)es$/.test(w) ? w.slice(0, -2)
+      : /s$/.test(w) ? w.slice(0, -1) : w;
+
+    const introduced = [...lexicon].filter((w) => singular(w) !== w && denied.has(singular(w)) && !denied.has(w));
+    assert.deepEqual(introduced, [], 'singularising the deny-lists must not shadow a lexicon skill');
+  });
+
+  test('a capital the posting itself spells lowercase is decoration, not a name', () => {
+    // What the deny-list could not reach. After the vocabulary pass the junk left was `microsoft`,
+    // `engineering`, `data`, `product`, `security`, `sales`, `finance`, `legal` - ordinary nouns,
+    // an open set. A product name is capitalized every time it appears; a common noun that carries
+    // one capital is written lowercase somewhere else in the same posting.
+    const jd = `Requirements
+- We use Data and Security tooling daily, and strong data and security instincts matter here
+- Experience with Redux and Datadog
+`;
+    const terms = extractJdTerms(jd).map((t) => t.term);
+    assert.ok(!terms.includes('data'), 'the posting also writes "data"');
+    assert.ok(!terms.includes('security'), 'the posting also writes "security"');
+    assert.ok(terms.includes('redux') && terms.includes('datadog'), 'a name is never written lowercase');
+  });
 });
 
 describe('extractJdTerms', () => {
@@ -372,8 +528,41 @@ describe('scoreJdMatch', () => {
 describe('scoreBand', () => {
   test('bands are calibrated to what this scorer produces', () => {
     assert.equal(scoreBand(80).tone, 'strong');
-    assert.equal(scoreBand(50).tone, 'fair');
-    assert.equal(scoreBand(20).tone, 'weak');
+    assert.equal(scoreBand(50).tone, 'strong');
+    assert.equal(scoreBand(30).tone, 'fair');
+    assert.equal(scoreBand(15).tone, 'fair');
+    assert.equal(scoreBand(5).tone, 'weak');
+  });
+
+  test('ISSUE-023: every band is reachable, and the top one still means something', () => {
+    // The thresholds were 65 and 40, and measured over 600 live postings against the six real base
+    // resumes on the system, 96.0% of ON-FIELD pairs read "Not much overlap" and 0.6% reached
+    // "Strong match". A four-valued label that returns one value 24 times in 25 tells a student
+    // nothing, and it is the label they use to decide where to apply.
+    //
+    // This pins the SHAPE rather than the constants: four distinct labels, ordered, each reachable
+    // by a score this scorer produces. The on-field p90 is 25 and p99 is 50, so a threshold set
+    // that put every one of those in the same band would fail here.
+    const at = (s: number) => scoreBand(s).label;
+    const labels = [at(50), at(30), at(15), at(5)];
+    assert.equal(new Set(labels).size, 4, `every band must be reachable, got ${labels.join(' / ')}`);
+
+    // Monotone: a better-covered posting never reads as a worse match.
+    const tones = [50, 30, 15, 5].map((s) => scoreBand(s).tone);
+    assert.deepEqual(tones, ['strong', 'fair', 'fair', 'weak']);
+
+    // The top band sits above the on-field p95 of 33, so it stays rare enough to be worth reading.
+    assert.equal(scoreBand(33).tone, 'fair', 'p95 of a student\'s own field is not automatically strong');
+  });
+
+  test('the requirements gate still outranks the band', () => {
+    // Unchanged by the recalibration, and the one thing this number must never do: a score built
+    // from a long responsibilities list while the requirements block is more than half unmet does
+    // not read as a strong match at any threshold.
+    const gated = scoreBand(50, 0.25);
+    assert.equal(gated.tone, 'fair');
+    assert.equal(gated.label, 'Missing key requirements');
+    assert.equal(scoreBand(50, 0.75).tone, 'strong', 'a met requirements block is not penalised');
   });
 
   test('the bottom band describes the pair, not the student', () => {
@@ -455,7 +644,6 @@ Requirements
     );
 
     const keys = extractJdTerms(jd).map((t) => t.term);
-    assert.equal(keys.length, EMPHASIS_LIMIT);
 
     // EVERY stated requirement survives. This is the half that bites if weight ever stops leading
     // the emphasis ranking: put body above required and these are the terms that get evicted.
@@ -463,17 +651,31 @@ Requirements
       assert.ok(keys.includes(stated), `"${stated}" is stated under Requirements`);
     }
 
-    // The prose does not vanish, and asserting that it did would be the same untestable claim in a
-    // new costume. The Requirements block supplies 8 terms, the cap keeps 12, so 4 slots are left
-    // and body prose fills them. What must hold is that it fills only the LEFTOVER slots: eight
-    // stated requirements first, prose in what remains, never the other way round.
+    // THE PROSE NOW VANISHES ENTIRELY, and this assertion is the change of contract.
+    //
+    // It used to read "prose fills only the LEFTOVER slots", because the denominator was always
+    // EMPHASIS_LIMIT and the only question was who got the twelve. Measured 2026-08-03 over 600
+    // live postings, 87.3% sat exactly at that cap, which makes a fixed denominator a padding rule:
+    // delete a junk term and the next one is promoted into the vacancy, so filtering could never
+    // change the score. preferStatedRequirements drops `body` whenever the employer stated
+    // requirements of their own, so the denominator is now eight here rather than twelve, and the
+    // four slots that used to go to whatever the culture paragraph happened to name are simply not
+    // filled. A student is scored on what the posting asked for and on nothing else.
     const prose = ['datadog', 'splunk', 'grafana', 'sentry', 'snowplow', 'notion calendar', 'linear roadmaps', 'superhuman mail'];
     const survivors = prose.filter((p) => keys.includes(p));
-    assert.ok(
-      survivors.length <= EMPHASIS_LIMIT - 8,
-      `prose took more than the leftover slots: ${survivors.join(', ')}`,
-    );
-    assert.ok(survivors.length < prose.length, 'the cap must actually be cutting prose here');
+    assert.deepEqual(survivors, [], 'a posting that states its requirements is not scored on its prose');
+    assert.ok(keys.length < EMPHASIS_LIMIT, 'the denominator is allowed to be smaller than the cap');
+  });
+
+  test('prose still carries the whole denominator when nothing was stated', () => {
+    // The other side of preferStatedRequirements, and the reason it is conditional. A short unheaded
+    // posting has no required/preferred/responsibilities section at all, and `body` at 0.4 is what
+    // SECTION_WEIGHT.body exists for. Dropping it unconditionally would make these unscorable.
+    const jd = `We are a team that loves Datadog and Splunk and Grafana and Sentry and Snowplow.
+Our office runs on Notion Calendar, Linear Roadmaps and Superhuman Mail every single day.
+`;
+    const keys = extractJdTerms(jd).map((t) => t.term);
+    assert.ok(keys.includes('datadog') && keys.includes('splunk'), 'unheaded prose is still the denominator');
   });
 
   test('a Preferred item yields to a full block of stated requirements', () => {
