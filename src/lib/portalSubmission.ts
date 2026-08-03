@@ -1285,13 +1285,18 @@ const CAPTCHA_RESPONSE_SELECTOR = [
   'input[name="cf-turnstile-response"]',
 ].join(', ');
 
-const CAPTCHA_CHALLENGE_SELECTOR = [
+// One source, two consumers. The direct path joins these as-is; the managed path maps the same
+// parts through a CSS badge exclusion. Adding a sixth shape here reaches both, which a duplicated
+// literal did not.
+const CAPTCHA_CHALLENGE_SELECTOR_PARTS = [
   'iframe[src*="captcha" i]',
   'iframe[src*="challenges.cloudflare.com" i]',
   '[class*="captcha" i]',
   '[id*="captcha" i]',
   '[data-sitekey]',
-].join(', ');
+];
+
+const CAPTCHA_CHALLENGE_SELECTOR = CAPTCHA_CHALLENGE_SELECTOR_PARTS.join(', ');
 
 // reCAPTCHA v3 and invisible v2 render a floating "protected by reCAPTCHA" badge on pages that ask
 // the human for NOTHING - the score is computed from behaviour and the token is minted on submit.
@@ -1322,45 +1327,49 @@ const CAPTCHA_PROBE_TIMEOUT_MS = 750;
 // us about its class names, not about a challenge.
 const CAPTCHA_MAX_CANDIDATE_NODES = 20;
 
-// CSS mirror of the closest() exclusion above, for the managed path, which has no Page to run
-// closest() against. `:not(.grecaptcha-badge *)` is Selectors Level 4 and excludes descendants, so
-// this pair reproduces "the badge node and everything inside it" in a plain selector string.
-const CAPTCHA_CHALLENGE_SELECTOR_OUTSIDE_BADGE = [
-  'iframe[src*="captcha" i]',
-  'iframe[src*="challenges.cloudflare.com" i]',
-  '[class*="captcha" i]',
-  '[id*="captcha" i]',
-  '[data-sitekey]',
-].map((selector) => `${selector}:not(.grecaptcha-badge):not(.grecaptcha-badge *)`).join(', ');
-
-export const MANAGED_CAPTCHA_RESPONSE_LABEL = 'captcha_response';
-export const MANAGED_CAPTCHA_CHALLENGE_LABEL = 'captcha_challenge';
+// The managed path asks a DIFFERENT question than the direct path, and the difference is the point.
+//
+// The direct path asks "is a challenge still waiting?", because a human may be sitting in front of
+// it. The managed path is unattended by definition - the run happens inside a remote browser nobody
+// is watching - so the only question worth asking there is "is there an interactive challenge on
+// this page at all?". If there is, auto-submitting is wrong whatever the token says, because nobody
+// is present to clear it. Presence is therefore the whole rule here.
+//
+// That difference is what lets this probe avoid the token entirely, which matters three ways:
+//   1. Litos never handles a challenge token it does not have to. Asking a third-party runner to
+//      read one and hand it back would move the token out of the applicant's session and into our
+//      infrastructure for no gain, which is the boundary this feature exists to respect.
+//   2. `g-recaptcha-response` is a <textarea>, which has no `value` ATTRIBUTE at all - the token
+//      lives in the DOM property. An attribute read returns null on a solved widget, so a cleared
+//      challenge would have read as unsolved and blocked a legitimate submission.
+//   3. data-sitekey is present on every node this now matches, so a match cannot be silently
+//      discarded as null the way an attribute-that-is-usually-absent would be.
+//
+// Narrower than the direct path on purpose: [data-sitekey] is the container reCAPTCHA v2 explicit,
+// hCaptcha and Turnstile all render, and it is absent on a pure v3 page, which is exactly the page
+// that must NOT be stopped. It will miss shapes the direct path catches. A narrow signal that is
+// always right beats a broad one that misfires in both directions.
+const MANAGED_CAPTCHA_CHALLENGE_SELECTOR = '[data-sitekey]:not(.grecaptcha-badge):not(.grecaptcha-badge *)';
 
 // The managed runner's /api/run is STATELESS and executes the whole action list before returning,
 // so a check placed inside the submit list cannot stop the click it is meant to gate - by the time
 // the result comes back the application is already sent. This is a separate, cheap call made first:
-// navigate and read two values, no fills, no upload. Same two-call idiom as buildManagedDiscoveryActions.
+// navigate and read one attribute, no fills, no upload, no screenshot. Same two-call idiom as
+// buildManagedDiscoveryActions.
 //
-// KNOWN LIMIT, stated rather than hidden: this sees the page as it loads. A challenge that only
-// renders after the fields are filled or after the submit button is pressed is not caught here. The
-// families known to gate every application (JazzHR, BambooHR) render at load and are in any case
-// stopped earlier by portalCanAutoSubmit; this probe exists for the board that turned a challenge on
-// without telling anyone.
+// TWO KNOWN LIMITS, stated rather than hidden:
+//   - It reads the page as it LOADS. A challenge that renders only after the fields are filled, or
+//     after submit is pressed, is not caught.
+//   - It is a SEPARATE page load from the one that submits. An anti-bot that escalates on a repeat
+//     visit can challenge the submit session while the probe session saw nothing.
+// Both mean this narrows the gap rather than closing it. portalCanAutoSubmit stays load-bearing.
 export function buildManagedCaptchaProbeActions(): ManagedBrowserAction[] {
   return [
     {
       type: 'extract',
-      selector: CAPTCHA_RESPONSE_SELECTOR,
-      attribute: 'value',
-      label: MANAGED_CAPTCHA_RESPONSE_LABEL,
-      optional: true,
-      timeout: MANAGED_FILL_TIMEOUT_MS,
-    },
-    {
-      type: 'extract',
-      selector: CAPTCHA_CHALLENGE_SELECTOR_OUTSIDE_BADGE,
+      selector: MANAGED_CAPTCHA_CHALLENGE_SELECTOR,
       attribute: 'data-sitekey',
-      label: MANAGED_CAPTCHA_CHALLENGE_LABEL,
+      label: 'captcha_challenge',
       optional: true,
       timeout: MANAGED_FILL_TIMEOUT_MS,
     },
@@ -1371,22 +1380,16 @@ export function buildManagedCaptchaProbeActions(): ManagedBrowserAction[] {
 // semantics are not defined in this repo, so if it returns a shape this does not recognise the
 // verdict is "no challenge seen" - exactly the behaviour the managed path had before this probe
 // existed. That makes the probe a strict improvement in every case and a regression in none, at the
-// cost of needing one live run against the QA portal to confirm it actually fires. Until that run
-// happens, portalCanAutoSubmit remains the load-bearing gate on this path.
+// cost of needing one live run against the QA portal to confirm it actually fires.
 export function managedResultRequiresCaptchaAttention(result: ManagedBrowserResult | null): boolean {
   const extracted = result?.extracted;
   if (!extracted) return false;
-  const challenge = extracted.find((item) => item.selector === CAPTCHA_CHALLENGE_SELECTOR_OUTSIDE_BADGE);
-  // A missing entry means the selector matched nothing. Only a matched node is a challenge.
-  if (!challenge || challenge.value === null) return false;
-  const response = extracted.find((item) => item.selector === CAPTCHA_RESPONSE_SELECTOR);
-  // Same rule as captchaSnapshotRequiresAttention: rendered widget, and no token in the field the
-  // provider writes into, means a human still has to act. No response field at all is the strongest
-  // form of that, not a reason to continue.
-  return captchaSnapshotRequiresAttention(
-    response?.value === null || response?.value === undefined ? [] : [response.value],
-    1,
-  );
+  // some(), not find(). managedResultHasCoverLetterUpload scans every entry for exactly this reason:
+  // the selector is multi-match and the runner may echo one entry per matched node, so inspecting
+  // only the first would let a real widget in a later entry through.
+  return extracted.some((item) => (
+    item.selector === MANAGED_CAPTCHA_CHALLENGE_SELECTOR && item.value !== null
+  ));
 }
 
 export async function hasUnresolvedCaptcha(page: Page): Promise<boolean> {
@@ -1488,8 +1491,19 @@ async function resolveFieldLabel(page: Page, field: Locator): Promise<string | n
 // message prefix, so the runner narrows on `instanceof` the way it already does for
 // FieldDecryptError and ResumeUploadError. The message is plain English because it lands in
 // submission_error, which is read by a person.
+// `stage` exists because the two stop points owe the applicant DIFFERENT sentences, and getting that
+// wrong is the specific mistake this whole feature was built to avoid. At 'at_submit' the form is
+// filled and one check remains. At 'before_fill' the managed probe stopped the run before it touched
+// anything, so the page is blank - telling that applicant "Litos filled everything in, just finish
+// the last step" sends them to a form that does not match what they were told. Exactly the
+// distinction portalHandoffReason and unattendedHandoffReason already draw, for the same reason.
+export type CaptchaStopStage = 'before_fill' | 'at_submit';
+
 export class CaptchaUnresolvedError extends Error {
-  constructor(message = 'The submit button was not pressed: a human verification check is still waiting.') {
+  constructor(
+    readonly stage: CaptchaStopStage = 'at_submit',
+    message = 'The submit button was not pressed: a human verification check is still waiting.',
+  ) {
     super(message);
     this.name = 'CaptchaUnresolvedError';
   }

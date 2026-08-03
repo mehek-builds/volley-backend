@@ -210,34 +210,32 @@ function probeResult(entries: Array<{ selector: string; value: string | null }>)
   return { title: '', url: '', text: '', extracted: entries };
 }
 
-const RESPONSE_SEL = buildManagedCaptchaProbeActions()[0]!.selector!;
-const CHALLENGE_SEL = buildManagedCaptchaProbeActions()[1]!.selector!;
+const probeActions = buildManagedCaptchaProbeActions();
+const challengeAction = probeActions.find((action) => action.label === 'captcha_challenge')!;
+const CHALLENGE_SEL = challengeAction.selector!;
 
-test('the managed probe excludes the v3 badge in CSS, mirroring closest()', () => {
+test('the managed probe excludes the v3 badge in CSS', () => {
   assert.match(CHALLENGE_SEL, /:not\(\.grecaptcha-badge\):not\(\.grecaptcha-badge \*\)/);
 });
 
-test('a matched widget with an empty token stops the managed submit', () => {
-  assert.equal(
-    managedResultRequiresCaptchaAttention(probeResult([
-      { selector: CHALLENGE_SEL, value: 'site-key-abc' },
-      { selector: RESPONSE_SEL, value: '' },
-    ])),
-    true,
-  );
+// The probe must never ask the remote runner to read the token. The applicant's session is where
+// that value belongs, and g-recaptcha-response is a <textarea> whose value is a DOM property, so an
+// attribute read would have returned null on a solved widget and blocked a cleared challenge.
+test('the managed probe never asks the runner for a response token', () => {
+  for (const action of probeActions) {
+    assert.doesNotMatch(action.selector ?? '', /response/i);
+    assert.notEqual(action.attribute, 'value');
+  }
 });
 
-test('a matched widget with a token does not stop the managed submit', () => {
-  assert.equal(
-    managedResultRequiresCaptchaAttention(probeResult([
-      { selector: CHALLENGE_SEL, value: 'site-key-abc' },
-      { selector: RESPONSE_SEL, value: 'provider-token' },
-    ])),
-    false,
-  );
+// Every node this selector matches carries data-sitekey by definition, so a match can never come
+// back as a null value and be silently discarded.
+test('the managed probe keys on an attribute every matched node has', () => {
+  assert.equal(challengeAction.attribute, 'data-sitekey');
+  assert.match(CHALLENGE_SEL, /^\[data-sitekey\]/);
 });
 
-test('a matched widget with no response field at all stops the managed submit', () => {
+test('a rendered widget stops the managed submit', () => {
   assert.equal(
     managedResultRequiresCaptchaAttention(probeResult([{ selector: CHALLENGE_SEL, value: 'site-key-abc' }])),
     true,
@@ -246,9 +244,27 @@ test('a matched widget with no response field at all stops the managed submit', 
 
 test('no matched widget does not stop the managed submit', () => {
   assert.equal(
+    managedResultRequiresCaptchaAttention(probeResult([{ selector: CHALLENGE_SEL, value: null }])),
+    false,
+  );
+});
+
+// If the runner echoes one entry per matched node, a first entry that did not match must not hide a
+// real widget behind it. find() would have stopped at the first; some() does not.
+test('a later matched node is not hidden by an earlier unmatched one', () => {
+  assert.equal(
     managedResultRequiresCaptchaAttention(probeResult([
       { selector: CHALLENGE_SEL, value: null },
-      { selector: RESPONSE_SEL, value: '' },
+      { selector: CHALLENGE_SEL, value: 'site-key-abc' },
+    ])),
+    true,
+  );
+});
+
+test('an entry for a different selector never stops the managed submit', () => {
+  assert.equal(
+    managedResultRequiresCaptchaAttention(probeResult([
+      { selector: 'input[type="file"]', value: 'file' },
     ])),
     false,
   );
