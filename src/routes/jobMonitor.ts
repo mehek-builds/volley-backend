@@ -85,7 +85,9 @@ const listQuerySchema = z.object({
      Internship is why this parameter exists at all - it was previously renderable on a tile and not
      queryable, so the one category a student most needs to isolate could only be reached by typing
      "intern" into the title box and hoping. */
-  employment_type: z.enum(['Full-time', 'Part-time', 'Internship', 'Contract']).optional(),
+  employment_type: z
+    .enum(['Full-time', 'Part-time', 'Internship', 'Apprenticeship', 'Contract'])
+    .optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
   offset: z.coerce.number().int().min(0).max(100_000).default(0),
 });

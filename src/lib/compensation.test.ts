@@ -158,8 +158,12 @@ test('a dozen board spellings become one product word', () => {
   for (const value of ['FullTime', 'Full-time', 'Permanent']) {
     assert.equal(normalizeEmploymentType(value), 'Full-time');
   }
-  for (const value of ['Intern', 'Internship', 'Apprenticeship', 'Scholarship']) {
+  for (const value of ['Intern', 'Internship', 'Scholarship']) {
     assert.equal(normalizeEmploymentType(value), 'Internship');
+  }
+  // Split out of Internship 2026-08-04; see the apprenticeship test below.
+  for (const value of ['Apprentice', 'Apprenticeship']) {
+    assert.equal(normalizeEmploymentType(value), 'Apprenticeship');
   }
   for (const value of ['Contract', 'Contractor', 'Fixed Term', 'Short Term', 'Temporary']) {
     assert.equal(normalizeEmploymentType(value), 'Contract');
@@ -308,20 +312,31 @@ test('the description never overrules an employer who stated a type', () => {
   );
 });
 
-test('a trade apprenticeship is not an internship when the employer says otherwise', () => {
-  /* Narrowed 2026-08-04. The title-beats-field override was written for "Intern", on the argument
-     that nobody puts it in a permanent role's title. That is simply not true of "Apprentice": a
-     trade apprenticeship is a permanent skilled job. Crusoe's posting is live and tagged FullTime. */
-  assert.equal(resolveEmploymentType('Apprentice Electrician', 'FullTime'), 'Full-time');
-  assert.equal(resolveEmploymentType('Apprentice Aerospace Technician', 'Full-time'), 'Full-time');
-  // Match Group's are the genuine early-career kind, and their employer says so.
+test('an apprenticeship is its own category, not a kind of internship', () => {
+  /* The four live trade apprenticeships. Each is a paid multi-year route into a skilled trade,
+     open to people who are not students, so Internship was the wrong label and so was the plain
+     Full-time their employers state. Crusoe's is tagged FullTime and the title still wins. */
+  for (const title of [
+    'Apprentice Electrician',
+    'Apprentice Aerospace Technician',
+    'Apprentice Weld Support Technician',
+    'Apprentice Robot Service Technician',
+  ]) {
+    assert.equal(resolveEmploymentType(title, 'FullTime'), 'Apprenticeship', title);
+    assert.equal(resolveEmploymentType(title), 'Apprenticeship', `${title} with no employer field`);
+  }
+  // Match Group's four are the early-career kind, and their employer names the category outright.
   assert.equal(
     resolveEmploymentType('Apprenticeship - Junior Brand Designer', 'Apprenticeship'),
-    'Internship',
+    'Apprenticeship',
   );
-  // Intern and co-op still override the field: that is the Modal case and it has not changed.
+  assert.equal(normalizeEmploymentType('Apprenticeship'), 'Apprenticeship');
+
+  // Intern and co-op are unchanged: still their own category, still beating the field (Modal).
   assert.equal(resolveEmploymentType('ML Research Intern', 'FullTime'), 'Internship');
   assert.equal(resolveEmploymentType('Software Engineering Co-Op', 'FullTime'), 'Internship');
+  // And an internship that also says apprentice is an internship: the intern rule is listed first.
+  assert.equal(resolveEmploymentType('Apprentice Intern, Manufacturing'), 'Internship');
 });
 
 test('the employer vocabulary is normalized, but "Full Time Contractor" is still a contract', () => {

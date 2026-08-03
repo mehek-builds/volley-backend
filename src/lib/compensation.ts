@@ -248,7 +248,18 @@ const TITLE_TYPES: [RegExp, string][] = [
   /* Internship first: "Contract Intern" is an internship, and a co-op is one in everything but
      name. \b on both sides so "Internal Audit" and "Internationalization Engineer" — both live on
      the board — are not read as internships. */
-  [/\b(intern|interns|internship|internships)\b|\bco-?op\b|\bapprentice(ship)?s?\b/i, 'Internship'],
+  [/\b(intern|interns|internship|internships)\b|\bco-?op\b/i, 'Internship'],
+  /* APPRENTICESHIP IS ITS OWN CATEGORY, not a kind of internship (2026-08-04, Mehek's call).
+     It used to share the rule above, and the two are genuinely different jobs. An internship is
+     a student's fixed-length placement, usually a summer. A trade apprenticeship is a paid,
+     multi-year, full-time route into a skilled trade, open to people who are not students at all:
+     the live examples are Crusoe's Apprentice Electrician, SpaceX's Apprentice Weld Support
+     Technician, Rocket Lab's Apprentice Aerospace Technician and Figure's Apprentice Robot Service
+     Technician. Filing those under Internship told a career-changer they were student roles and
+     told a student they were summer ones, and both were wrong.
+     Below Internship on purpose: "Apprentice Intern" would be an internship, and the intern rule
+     should win that. */
+  [/\bapprentice(ship)?s?\b/i, 'Apprenticeship'],
   [/\bpart[-\s]?time\b/i, 'Part-time'],
   [/\bcontract(or)?\b|\btemporary\b|\bfixed[-\s]?term\b|\bseasonal\b/i, 'Contract'],
 ];
@@ -287,7 +298,12 @@ const TYPE_SYNONYMS: [RegExp, string][] = [
      Contractor", which is a contract and has to keep falling through to the Contract rule below. */
   [/^full[-\s]?time$|^full[-\s]?time employee$|^permanent$|^fulltime$/i, 'Full-time'],
   [/^part[-\s]?time$|^parttime$/i, 'Part-time'],
-  [/^intern(ship)?$|^apprentice(ship)?$|^co-?op$|^scholarship$/i, 'Internship'],
+  [/^intern(ship)?$|^co-?op$|^scholarship$/i, 'Internship'],
+  /* Split out of Internship 2026-08-04. Lever emits this for Match Group's four "Apprenticeship -
+     Junior ..." postings, which are the genuine early-career kind rather than trade routes, but
+     they are still apprenticeships and belong in the same bucket as the trade ones. The category
+     is "apprenticeship", not "how junior the apprentice is". */
+  [/^apprentice(ship)?$/i, 'Apprenticeship'],
   [/contract|temporary|^temp$|fixed[-\s]?term|short[-\s]?term|agency/i, 'Contract'],
 ];
 
@@ -406,22 +422,23 @@ export function resolveEmploymentType(
   boardValue?: string,
   description?: string,
 ): string | undefined {
-  /* NARROWED 2026-08-04: intern and co-op override the employer's field, apprentice no longer does.
+  /* A TITLE NAMING A TRAINING ROUTE BEATS THE EMPLOYER'S FIELD - now for two categories, not one.
    *
-   * The override exists because "nobody writes Intern in a job title for a permanent role", and
-   * that argument simply is not true of "Apprentice": a trade apprenticeship is a permanent,
-   * full-time skilled job that says so in its title. Crusoe's "Apprentice Electrician" is tagged
-   * FullTime by the employer and was being rendered as an internship over the top of them, and
-   * Rocket Lab, Figure and SpaceX each post the same shape (Apprentice Aerospace Technician,
-   * Apprentice Weld Support Technician). Match Group's four "Apprenticeship - Junior ..." postings
-   * are the genuine early-career kind and their employer says Apprenticeship, so they still land on
-   * Internship - through the field now rather than over it.
+   * The original exception was Internship, because employers use their one field for two different
+   * questions ("is this permanent?" and "is this 40 hours?") and Modal's "ML Research Intern" is
+   * tagged FullTime meaning the hours. Apprenticeship has exactly the same problem and it is worse,
+   * because a trade apprenticeship genuinely IS full-time and multi-year, so the employer answering
+   * "FullTime" is not even loosely wrong - it is answering a different question. Crusoe's
+   * "Apprentice Electrician" is tagged FullTime; so, in the same shape, are SpaceX's Apprentice Weld
+   * Support Technician, Rocket Lab's Apprentice Aerospace Technician and Figure's Apprentice Robot
+   * Service Technician. Rendering those as plain Full-time hides the one fact that makes them worth
+   * finding, which is that they train someone with no experience in the trade.
    *
-   * KNOWN RESIDUE: the three trade apprenticeships on Greenhouse have no field to defer to, so they
-   * are still classified Internship. Fixing that needs a trade-title heuristic, and three postings
-   * is not enough evidence to write one on. */
+   * Both are narrow and for the same reason: the title states a specific fact the field is not
+   * contradicting. Part-time and Contract in a title still do NOT override, because there the title
+   * is frequently the WORK rather than the arrangement ("Contract Manager", "Contracts Counsel"). */
   const fromTitle = employmentTypeFromTitle(title);
-  if (fromTitle === 'Internship' && !/\bapprentice(ship)?s?\b/i.test(title)) return 'Internship';
+  if (fromTitle === 'Internship' || fromTitle === 'Apprenticeship') return fromTitle;
 
   const stated = normalizeEmploymentType(boardValue);
   if (stated) return stated;
