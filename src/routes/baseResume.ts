@@ -31,6 +31,7 @@ import {
   weakVerbBullets,
 } from '../engine/resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
+import { openSseResponse, trackSseConnection } from '../lib/sseResponse';
 
 /* GET /resume/base        - the stored base resume, or 404 if never built.
  * POST /resume/base/stream - build it, streaming each piece as it is decided (SSE).
@@ -289,23 +290,14 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       return reply.status(400).send({ error: 'No experience entries to build from' });
     }
 
-    reply.raw.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache, no-transform',
-      Connection: 'keep-alive',
-      // Vercel and most reverse proxies buffer a response body by default, which would hold every
-      // frame until the stream closed and silently turn this back into the plain 200 it exists to
-      // avoid. The stream still WORKS without it; it just stops being a stream.
-      'X-Accel-Buffering': 'no',
-    });
-
-    let closed = false;
-    request.raw.on('close', () => {
-      closed = true;
-    });
+    // Includes the CORS headers installed by Fastify. Writing directly to reply.raw with only the
+    // stream headers strips those hook-managed headers, so the browser hides the successful 200 as
+    // a network-level failure.
+    openSseResponse(reply);
+    const connection = trackSseConnection(request, reply);
 
     const send = (frame: StreamFrame) => {
-      if (closed) return;
+      if (connection.closed) return;
       reply.raw.write(`data: ${JSON.stringify(frame)}\n\n`);
     };
 
@@ -534,7 +526,7 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
         message: err instanceof Error ? err.message : 'Could not make your main resume',
       });
     } finally {
-      if (!closed) reply.raw.end();
+      if (!connection.closed) reply.raw.end();
     }
   });
 
