@@ -75,7 +75,20 @@ const healthBodySchema = z.object({
 const bodySchema = z.object({
   // 60k is well past the longest posting we have seen (the 4.8k Cohere JD in the model's tests is
   // typical); the cap exists so a pasted page of HTML cannot pin the event loop.
-  jd_text: z.string().min(1, 'jd_text is required').max(60_000, 'jd_text is too long to score'),
+  // OPTIONAL, and omitting it is the right call for any caller holding a job_id.
+  //
+  // GET /jobs sends `left(description, 600)`, a preview sized for a list row. A caller that scores
+  // that preview is scoring six hundred characters of company blurb: measured on the live board it
+  // yields two or three requirement terms, every posting falls under MIN_SCORABLE_TERMS, and every
+  // card renders as unscorable. That is exactly what shipped on 2026-08-04 and what a check on a
+  // real account caught - the dashboard drew no number at all, for anyone.
+  //
+  // So the rule mirrors resume_text directly above: absent means "you hold the authority, read it
+  // yourself". The server loads the posting's full stored description from the job row. Present
+  // means the caller has text the server does not have, which is the review screen, holding the
+  // JD captured in the packet at the moment the resume was tailored to it. That text must win: it
+  // is what the resume was written against, and the live row may have been edited since.
+  jd_text: z.string().min(1, 'jd_text cannot be empty').max(60_000, 'jd_text is too long to score').optional(),
   // Optional override: score arbitrary resume text instead of the stored base resume. The tailored
   // per-application resume flows through here, and so does the "what if" editor in the dashboard.
   // .min(1) matters: an empty string is NOT the same as an absent field. Absent falls through to
@@ -120,14 +133,21 @@ const bodySchema = z.object({
  * GET /jobs already serves unauthenticated, and one nullable location column of a row the student
  * is holding an application for discloses nothing they were not already shown.
  */
-async function postingLocation(jobId: string | null | undefined): Promise<string | null> {
+async function postingRow(
+  jobId: string | null | undefined,
+): Promise<{ location: string | null; description: string | null } | null> {
   if (!jobId) return null;
   const [row] = await db
-    .select({ location: monitored_jobs.location })
+    .select({
+      location: monitored_jobs.location,
+      // Capped at the same 60k the request schema allows, so a posting cannot arrive here longer
+      // than the engine's own bound just because it skipped the schema on its way in.
+      description: sql<string>`left(${monitored_jobs.description}, 60000)`,
+    })
     .from(monitored_jobs)
     .where(eq(monitored_jobs.id, jobId))
     .limit(1);
-  return row?.location ?? null;
+  return row ? { location: row.location ?? null, description: row.description ?? null } : null;
 }
 
 export async function jdMatchRoutes(fastify: FastifyInstance) {
@@ -154,10 +174,24 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
       storedResumeText = resumeSpecText(spec);
     }
 
+    const posting = await postingRow(body.job_context?.job_id);
+
+    /* The caller's text wins when it has one. See the jd_text note on bodySchema: the review screen
+       holds the JD the packet was tailored against, which is the text its number has to be about. */
+    const jdText = body.jd_text ?? posting?.description ?? '';
+    if (!jdText) {
+      // Neither supplied nor resolvable. Distinguished from a thin posting on purpose: this is a
+      // wiring fault, and answering it with the engine's "this posting did not list enough" would
+      // tell a student something about a job when the truth is about us.
+      return reply
+        .status(400)
+        .send({ error: 'jd_text is required unless job_context.job_id names a posting we hold' });
+    }
+
     const resumeText = body.resume_text ?? storedResumeText ?? '';
-    const result = scoreJdMatch(resumeText, body.jd_text, {
+    const result = scoreJdMatch(resumeText, jdText, {
       ...body.job_context,
-      location: body.job_context?.location ?? (await postingLocation(body.job_context?.job_id)),
+      location: body.job_context?.location ?? posting?.location ?? null,
     });
 
     return reply.status(200).send({
@@ -430,7 +464,10 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
     const prep = buildInterviewPrep(
       extractJdTerms(parsed.data.jd_text, {
         ...parsed.data.job_context,
-        location: parsed.data.job_context?.location ?? (await postingLocation(parsed.data.job_context?.job_id)),
+        location:
+          parsed.data.job_context?.location ??
+          (await postingRow(parsed.data.job_context?.job_id))?.location ??
+          null,
       }),
       spec,
     );
