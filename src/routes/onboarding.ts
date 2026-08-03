@@ -13,7 +13,7 @@ import {
 import { requireAuth } from '../middleware/auth';
 import { decryptField } from '../lib/fieldCrypto';
 import { ENCRYPTED_FIELDS } from './applicationProfile';
-import { AUTOMATIC_SUBMISSION_CONSENT_VERSION, automationConsentValues } from '../lib/automationConsent';
+import { AUTOMATIC_CAPTCHA_CONSENT_VERSION, AUTOMATIC_SUBMISSION_CONSENT_VERSION, automationConsentValues, captchaResumeGranted } from '../lib/automationConsent';
 import { standingConsentEligibility, mayChangeStandingConsent } from '../engine/standingConsent';
 import { generated_resumes } from '../db/schema';
 import { hasActiveEmailConnection, isComposioConfigured } from '../lib/composioConnections';
@@ -134,11 +134,17 @@ const GAP_FIELDS = ['gpa', 'gpa_scale', 'major', 'languages', 'desired_salary', 
 const completeBodySchema = z.object({
   automatic_submission_enabled: z.boolean().default(false),
   automatic_verification_enabled: z.boolean().default(false),
+  automatic_captcha_enabled: z.boolean().default(false),
 });
 const automationBodySchema = z.object({
   automatic_submission_enabled: z.boolean().optional(),
   automatic_verification_enabled: z.boolean().optional(),
-}).refine((value) => value.automatic_submission_enabled !== undefined || value.automatic_verification_enabled !== undefined, {
+  automatic_captcha_enabled: z.boolean().optional(),
+}).refine((value) => (
+  value.automatic_submission_enabled !== undefined
+  || value.automatic_verification_enabled !== undefined
+  || value.automatic_captcha_enabled !== undefined
+), {
   message: 'At least one automation permission is required',
 });
 
@@ -355,6 +361,10 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       automatic_submission_consented_at: user.automatic_submission_consented_at,
       automatic_submission_consent_version: user.automatic_submission_consent_version,
       automatic_verification_enabled: user.automatic_verification_enabled,
+      // Sent as the ALREADY-VERSION-CHECKED verdict, not the raw column. The 25 accounts carrying a
+      // stale version from the branch that never merged must not read as consented here, and a
+      // client re-deriving that rule is a client that will get it wrong.
+      automatic_captcha_enabled: captchaResumeGranted(user),
     });
   });
 
@@ -413,10 +423,23 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       patch.automatic_verification_enabled = parsed.data.automatic_verification_enabled;
       patch.automatic_verification_consented_at = parsed.data.automatic_verification_enabled ? now : null;
     }
+    // Ungated on purpose, unlike standing submission consent. Resuming a fill after the applicant
+    // clears a challenge sends nothing to anyone: it finishes the boxes and stops at the submit
+    // button, which is what the unpermissioned path already does. The gate that matters for sending
+    // is automatic_submission_enabled, and it still applies afterwards.
+    if (parsed.data.automatic_captcha_enabled !== undefined) {
+      patch.automatic_captcha_enabled = parsed.data.automatic_captcha_enabled;
+      patch.automatic_captcha_consented_at = parsed.data.automatic_captcha_enabled ? now : null;
+      patch.automatic_captcha_consent_version = parsed.data.automatic_captcha_enabled
+        ? AUTOMATIC_CAPTCHA_CONSENT_VERSION
+        : null;
+    }
     const [updated] = await db.update(users).set(patch).where(eq(users.id, userId)).returning({
       automatic_submission_enabled: users.automatic_submission_enabled,
       automatic_submission_consent_version: users.automatic_submission_consent_version,
       automatic_verification_enabled: users.automatic_verification_enabled,
+      automatic_captcha_enabled: users.automatic_captcha_enabled,
+      automatic_captcha_consent_version: users.automatic_captcha_consent_version,
     });
     if (!updated) return reply.status(404).send({ error: 'No such user' });
     return reply.send(updated);
