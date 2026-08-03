@@ -1546,3 +1546,250 @@ describe('a posting written with typographic apostrophes', () => {
     assert.match(core, /replace\(\/\[[‘’ʼ]+\]\/g, "'"\)/, 'headingCore must fold curly apostrophes to ASCII');
   });
 });
+
+/**
+ * VENDOR_SPELLINGS, the month block and the dead-entry removal, 2026-08-04.
+ *
+ * Every test here pins the INTENT of a change rather than the constant, the regex or the wording
+ * that implements it, because the file this suite guards carries comments that were found to be
+ * factually false. A test that reads a comment proves nothing about the code.
+ */
+describe('one product spelled two ways is one requirement', () => {
+  /**
+   * The subsumption residual: a posting naming "Microsoft Excel" also names "Excel", the pass that
+   * spares a lexicon part kept both, and the same requirement was credited once and charged once
+   * against the same resume.
+   *
+   * The second half is what keeps the fix honest. The general form of this merge was implemented
+   * and measured first: over 400 live postings it produced 89 merges, most of them NARROWINGS
+   * ("merchant compliance" into "compliance", "cost accounting" into "accounting"), under which a
+   * resume saying "compliance" was credited for "merchant compliance". That is the laundering the
+   * module header forbids, so both directions are pinned here.
+   */
+  test('a vendor spelling merges, and a narrowing modifier does not', () => {
+    const merged = extractJdTerms(`Requirements:
+- Advanced Microsoft Excel and Excel modelling
+- Familiarity with Docker
+- Comfortable with Git
+- Working knowledge of Linux
+`);
+    assert.ok(
+      !merged.some((t) => t.term === 'microsoft excel'),
+      'the vendor spelling is not a second requirement',
+    );
+    const excel = merged.find((t) => t.term === 'excel');
+    assert.ok(excel?.alternatives?.includes('microsoft excel'), 'both spellings still match');
+
+    const narrowed = extractJdTerms(`Requirements:
+- Experience with merchant compliance and compliance reporting
+- Familiarity with Docker
+- Comfortable with Git
+- Working knowledge of Linux
+`);
+    const compliance = narrowed.find((t) => t.term === 'compliance');
+    assert.ok(
+      !compliance?.alternatives?.includes('merchant compliance'),
+      'a resume saying "compliance" must not be credited for "merchant compliance"',
+    );
+  });
+
+  /**
+   * The merge is worth nothing unless BOTH spellings satisfy the merged slot. Asserted through the
+   * score, which is what a student sees: a resume writing only "Excel" and a resume writing only
+   * "Microsoft Excel" must read the same on a posting that used both.
+   */
+  test('either spelling satisfies the merged requirement', () => {
+    const jd = `Requirements:
+- Advanced Microsoft Excel and Excel modelling
+- Familiarity with Docker
+- Comfortable with Git
+- Working knowledge of Linux
+`;
+    const bare = scoreJdMatch('Excel, Docker, Git and Linux.', jd).score;
+    const vendor = scoreJdMatch('Microsoft Excel, Docker, Git and Linux.', jd).score;
+    assert.equal(bare, vendor, 'the two spellings of one product cannot score differently');
+    assert.equal(bare, 100, 'covering the product once covers the requirement');
+  });
+});
+
+describe('the lexicon is honest about what it covers', () => {
+  /**
+   * A lexicon entry that is also in BOILERPLATE or GENERIC_STOPWORDS is DEAD, because isDenied is
+   * consulted before inLexicon in isSpecific. Two were dead and had been since they were written:
+   * `next` and `recruiting`, so the HR line did not in fact cover the word recruiting.
+   *
+   * Probed through behaviour rather than by reading the two lists out of the source, because the
+   * point is not that the sets are disjoint, it is that an entry the list claims to carry can
+   * actually be admitted. A source-level set-difference would still pass if isDenied moved.
+   */
+  test('no lexicon entry is silently dead', () => {
+    const admits = (word: string) => {
+      const jd = `Requirements:\n- Experience with ${word} and with Kubernetes\n- Comfortable with Git\n- Working knowledge of Linux\n- Familiarity with Docker\n`;
+      return extractJdTerms(jd).some((t) => (t.alternatives ?? [t.term]).includes(normalizeTerm(word)));
+    };
+    for (const word of ['litigation', 'compliance', 'excel', 'payroll', 'journalism']) {
+      assert.ok(admits(word), `the list claims to carry "${word}", so it has to be admissible`);
+    }
+    for (const dead of ['next', 'recruiting']) {
+      assert.ok(!admits(dead), `"${dead}" is BOILERPLATE, so it must not be claimed by the lexicon`);
+    }
+
+    // AND the lists themselves must not collide, which the behavioural probe above cannot see: a
+    // dead entry is behaviourally INDISTINGUISHABLE from an absent one, so re-adding `recruiting`
+    // to the lexicon changes nothing a caller could observe. That is exactly the defect - the list
+    // claiming coverage it does not have - so it is asserted at the only level where it is visible.
+    const source = readFileSync(path.join(__dirname, 'jdMatch.ts'), 'utf8');
+    const listOf = (name: string) =>
+      new Set(
+        (new RegExp(`const ${name} = new Set\\(\\s*\`([\\s\\S]*?)\``).exec(source)?.[1] ?? '')
+          .split(/\s+/)
+          .filter(Boolean),
+      );
+    const lexicon = listOf('SKILL_LEXICON');
+    assert.ok(lexicon.size > 0, 'the lexicon has to be readable for this assertion to mean anything');
+    // Mirrors singular() in jdMatch.ts. isDenied checks the SINGULAR of every token as well as the
+    // token, so a lexicon entry whose singular sits in a deny list is dead in the same way as an
+    // exact collision - and an exact-string set intersection cannot see it.
+    const singularOf = (w: string) => {
+      if (/(ss|us|is)$/.test(w)) return w;
+      if (/ies$/.test(w)) return `${w.slice(0, -3)}y`;
+      if (/es$/.test(w) && /(ch|sh|x|s)es$/.test(w)) return w.slice(0, -2);
+      if (/s$/.test(w)) return w.slice(0, -1);
+      return w;
+    };
+    for (const denied of ['BOILERPLATE', 'GENERIC_STOPWORDS']) {
+      const list = listOf(denied);
+      assert.ok(list.size > 0, `${denied} must be readable, or every check below passes vacuously`);
+      assert.deepEqual(
+        [...lexicon].filter((w) => list.has(w)),
+        [],
+        `these lexicon entries can never be admitted, because ${denied} wins`,
+      );
+      // Only that direction. The reverse - a deny-list PLURAL over a lexicon singular - is not a
+      // collision, because isDenied singularises the token and never the list, so denying `excels`
+      // leaves `excel` fully reachable. That asymmetry is load-bearing: it is how the verb is
+      // blocked without costing the spreadsheet.
+      assert.deepEqual(
+        [...lexicon].filter((w) => list.has(singularOf(w))),
+        [],
+        `${denied} holds the singular of these lexicon entries`,
+      );
+    }
+  });
+
+  /**
+   * A date is not a requirement, and this one paid out. Month names were the largest block of junk
+   * left in the final denominator, and a student resume dates every entry, so "June 2025" on a
+   * resume MATCHED `june` in a trading firm's denominator and earned a twelfth of a score for
+   * having graduated in the right month.
+   *
+   * Pinned as "the resume gains nothing", which is the harm, rather than as "the term is absent".
+   */
+  test('a date in the posting cannot be earned by a date on the resume', () => {
+    const jd = `Requirements:
+- Start date is June 2027 and the programme runs through December
+- Familiarity with Docker
+- Comfortable with Git
+- Working knowledge of Linux
+`;
+    const dated = scoreJdMatch('Bachelor of Arts, June 2025. Docker, Git and Linux.', jd);
+    const undated = scoreJdMatch('Bachelor of Arts. Docker, Git and Linux.', jd);
+    assert.equal(dated.score, undated.score, 'a graduation month is not a qualification');
+    assert.ok(
+      !dated.matched.some((t) => ['june', 'december'].includes(t.term)),
+      'no month may be a matched requirement',
+    );
+
+    // THE WEEKDAYS ARE THE SAME CLASS AND WORSE PER POSTING. An on-site schedule line sits INSIDE
+    // a requirements block, so a weekday lands at weight 1: Roblox's "Content Designer" spent five
+    // of its twelve required slots on monday through friday. Rarer than the months across the
+    // board and a much larger share of the score on the postings that carry it.
+    // Four real requirements beside the schedule line, deliberately: with the weekdays gone this
+    // posting must still clear MIN_SCORABLE_TERMS, or the test would be asserting a refusal rather
+    // than a clean score.
+    const schedule = `Requirements:
+- On site Monday, Tuesday, Wednesday, Thursday and Friday
+- Familiarity with Docker
+- Comfortable with Git
+- Working knowledge of Linux
+- Experience with Kubernetes
+`;
+    const terms = extractJdTerms(schedule);
+    assert.deepEqual(
+      terms.filter((t) => ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'].includes(t.term)),
+      [],
+      'a day of the week is a condition of the job, never a requirement to have met',
+    );
+    assert.equal(
+      scoreJdMatch('Docker, Git, Linux and Kubernetes.', schedule).score,
+      100,
+      'a resume covering every real requirement is not diluted by the schedule line',
+    );
+  });
+
+  /**
+   * `excels` is the verb. inLexicon strips a trailing s for tokens over three characters, so
+   * "excels at turning ambiguity into execution" was admitted as the spreadsheet and matched
+   * against a resume that lists Excel. The product is never written in the plural.
+   */
+  test('the verb "excels" is not the spreadsheet', () => {
+    const jd = `Requirements:
+- A problem solver who excels at ambiguity
+- Familiarity with Docker
+- Comfortable with Git
+- Working knowledge of Linux
+`;
+    const scored = scoreJdMatch('Excel, Docker, Git and Linux.', jd);
+    assert.ok(
+      !scored.matched.some((t) => t.term === 'excels' || t.term === 'excel'),
+      'a spreadsheet on the resume must not answer a verb in the posting',
+    );
+  });
+
+  /**
+   * EVERY VENDOR PAIR MUST ACTUALLY FIRE, which is the half of this list that can be checked
+   * mechanically and the half that was already broken once.
+   *
+   * The merge sits inside the branch that spares a lexicon part, so a pair whose words are BOTH
+   * absent from SKILL_LEXICON is dead: the phrase keeps its own slot, no `alternatives` are
+   * written, and the list silently claims a merge it never performs. `microsoft powerpoint` was
+   * exactly that - `powerpoint` is not a lexicon entry - and it sat here undetected because the
+   * previous version of this test only checked that the phrase was two words and that
+   * resumeCovers("I used <phrase> daily", secondWord) was true, which is plain substring matching
+   * and therefore true of every two-word string ever written. It asserted nothing.
+   *
+   * WHAT THIS TEST CANNOT DO, stated so nobody trusts it further than it goes: it cannot tell a
+   * genuine spelling pair from a NARROWING. Adding 'google analytics' would pass every assertion
+   * here, because `analytics` is a lexicon entry and the merge would fire - and it would be wrong,
+   * for the reason VENDOR_SPELLINGS gives. That judgement is human and this test does not make it.
+   */
+  test('every vendor spelling actually merges into the product it names', () => {
+    const source = readFileSync(path.join(__dirname, 'jdMatch.ts'), 'utf8');
+    const block = /const VENDOR_SPELLINGS = new Set\(\[([\s\S]*?)\]\);/.exec(source)?.[1] ?? '';
+    const pairs = [...block.matchAll(/'([^']+)'/g)].map((m) => m[1]);
+    assert.ok(pairs.length > 0, 'the list has to be readable for this assertion to mean anything');
+
+    for (const phrase of pairs) {
+      // Exercised through extraction, not by reading the lexicon: what matters is that the merge
+      // HAPPENS, not that a word appears in a list the merge might stop consulting.
+      // Written the way a posting writes it: Title Case. A lowercase "microsoft" is not a specific
+      // token, so the bigram would never form and the test would pass for the wrong reason.
+      const titled = phrase.split(' ').map((w) => w[0].toUpperCase() + w.slice(1));
+      const jd = `Requirements:\n- Advanced ${titled.join(' ')} and ${titled[1]} modelling\n- Familiarity with Docker\n- Comfortable with Git\n- Working knowledge of Linux\n`;
+      const terms = extractJdTerms(jd);
+      assert.ok(
+        !terms.some((t) => t.term === phrase),
+        `"${phrase}" is a DEAD pair: it survives as its own slot, so the merge never fired`,
+      );
+      const merged = terms.find((t) => t.alternatives?.includes(phrase));
+      assert.ok(merged, `"${phrase}" merged into nothing, so no alternative was written`);
+      // The representative must be a WORD of the phrase. This is what makes covering the phrase
+      // cover the requirement, and it is why gapEvidence.ts and interviewPrep.ts can still match a
+      // JdTerm through resumeCovers without being wrong.
+      assert.ok(
+        phrase.split(' ').includes(merged.term),
+        `"${phrase}" merged into "${merged.term}", which is not one of its words`,
+      );
+    }
+  });
+});
