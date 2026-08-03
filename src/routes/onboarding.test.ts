@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { gapsFrom, hasFiveTargetRoles, hasFocusTargeting, onboardingStepFrom } from './onboarding';
+import { gapSuggestionsFrom, gapsFrom, hasFiveTargetRoles, hasFocusTargeting, onboardingStepFrom } from './onboarding';
 import { encryptField } from '../lib/fieldCrypto';
 
 process.env.ENCRYPTION_KEY ??= 'test-encryption-key-at-least-32-chars-long';
@@ -33,6 +33,45 @@ describe('onboarding gaps: languages', () => {
     assert.equal(gapsFrom({ languages: null }).includes('languages'), true);
     assert.equal(gapsFrom({ languages: 'English' }).includes('languages'), true);
     assert.equal(gapsFrom({ languages: { fluent: true } }).includes('languages'), true);
+  });
+
+  /* The screen used to open blank for a student whose resume listed six languages, and saving a
+     skip wrote [] over information already on file. These pin the one rule that keeps the
+     suggestion from becoming the inference schema.ts forbids: it is offered only where the student
+     has not answered, and it never becomes the answer on its own. */
+  test('a gap is pre-answered with what the resume printed', () => {
+    const gaps = gapsFrom({ languages: [] });
+    assert.deepEqual(gapSuggestionsFrom(gaps, { languages: ['English', 'Hindi', 'French'] }), {
+      languages: ['English', 'Hindi', 'French'],
+    });
+  });
+
+  test('an answered field is never suggested over, however much the resume printed', () => {
+    const gaps = gapsFrom({ languages: ['Spanish'] });
+    assert.deepEqual(gapSuggestionsFrom(gaps, { languages: ['English', 'Hindi'] }), {});
+  });
+
+  test('nothing parsed means nothing suggested, and the question still gets asked', () => {
+    const gaps = gapsFrom(undefined);
+    assert.ok(gaps.includes('languages'));
+    assert.deepEqual(gapSuggestionsFrom(gaps, null), {});
+    assert.deepEqual(gapSuggestionsFrom(gaps, { languages: [] }), {});
+    assert.deepEqual(gapSuggestionsFrom(gaps, { languages: ['  ', ''] }), {});
+  });
+
+  test('a malformed parse suggests nothing rather than throwing', () => {
+    const gaps = gapsFrom(undefined);
+    assert.deepEqual(gapSuggestionsFrom(gaps, { languages: 'English' }), {});
+    assert.deepEqual(gapSuggestionsFrom(gaps, { languages: [1, null, 'English'] }), {
+      languages: ['English'],
+    });
+  });
+
+  test('duplicates collapse case-insensitively, keeping the first spelling', () => {
+    const gaps = gapsFrom(undefined);
+    assert.deepEqual(gapSuggestionsFrom(gaps, { languages: ['English', 'english', ' ENGLISH '] }), {
+      languages: ['English'],
+    });
   });
 
   test('text gap fields keep their readable() semantics beside it', () => {
