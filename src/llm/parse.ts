@@ -279,6 +279,134 @@ export function parsedProfileFromModelText(text: string): ParsedProfile {
   return parsed;
 }
 
+/* The GPA the resume itself prints, read deterministically from the source text.
+ *
+ * Exists because the model does not always transcribe the number correctly. Caught on a live
+ * account 2026-08-03: a resume printing "GPA: 3.89/4.0" parsed to gpa "3.8", scale "4.0". The scale
+ * survived and the last digit of the grade did not, which is the worst shape this failure can take
+ * - "3.8" is a plausible GPA, so nothing downstream had any reason to doubt it, and the number
+ * feeds application_profile (see routes/profile.ts academicSeedFrom) which is what autofill types
+ * into employer forms. A misread GPA is a false factual claim about a real person on a real job
+ * application, and it is not the kind of error a student is likely to spot in a JSON dump.
+ *
+ * DECLINING IS ALWAYS SAFE HERE AND GUESSING NEVER IS. This function only ever overrules the model,
+ * and it only fires when it DISAGREES with the model, so every wrong reading it produces lands on a
+ * case where the model was already right. The first draft of it took the first number after the
+ * label and did exactly that: "GPA (out of 4.0): 3.89" read as 4.0, turning a correct 3.89 into a
+ * claimed perfect score on an employment application. Every rule below therefore returns null on
+ * doubt rather than picking, and a null costs nothing - the model's own answer stands.
+ *
+ * It returns a reading only when ALL of the following hold:
+ *
+ *   - Nothing between the label and the number announces a denominator ("out of", "scale", "/").
+ *     Those phrasings put the SCALE first and the grade second, which is common on international
+ *     resumes and is precisely how a 3.89 becomes a 4.0.
+ *   - Nothing immediately after the number announces one either, when no "x/y" was captured. Same
+ *     reversal written the other way round ("GPA on a 4.0 scale: 3.89").
+ *   - The number is not a percentage, is not cut short by a following digit, and is not the integer
+ *     half of a European decimal comma ("3,89/4,0" must never read as 3).
+ *   - The grade does not exceed its denominator, captured or implied. A GPA above its own scale is
+ *     not a GPA, it is a misread of something else on the line.
+ *   - Every GPA-labelled number in the document is the same number. A resume printing a major GPA
+ *     and a cumulative GPA states two different facts, and choosing between them is the judgement
+ *     the model is here to make.
+ *
+ * The scale is taken ONLY from an explicit "x/y" denominator, never from prose, because inventing a
+ * denominator restates an Indian 10.0 or a German 5.0 record as a near-perfect one - the same rule
+ * the system prompt states above.
+ */
+const PRINTED_GPA =
+  // "CGPA" is the same label outside the US and is spelled as one word, so the leading C is part of
+  // the alternation rather than left to a word boundary that would never fire inside it.
+  // "cumulative average" is deliberately NOT here: it is the usual label for a percentage average,
+  // and reading "Cumulative Average: 92.4" as a GPA is the same falsification in another costume.
+  /(?:\bc?gpa\b|grade[\s-]?point[\s-]?average)([^0-9\n]{0,15})(\d{1,2}(?:\.\d{1,3})?)(?:\s*\/\s*(\d{1,2}(?:\.\d{1,2})?))?/gi;
+
+// A denominator announced BEFORE the number, so the number captured is the scale, not the grade.
+const SCALE_LEADS = /out\s*of|scale|\//i;
+// The same announcement made AFTER the number, which the "x/y" branch cannot see.
+const SCALE_TRAILS = /^\s*\)?\s*(?:out\s*of\b|(?:point[\s-]*)?scale\b|-?point\b)/i;
+
+export function printedGpaIn(resumeText: string): { gpa: string; scale?: string } | null {
+  if (!resumeText) return null;
+  let reading: { gpa: string; scale?: string } | null = null;
+  for (const match of resumeText.matchAll(PRINTED_GPA)) {
+    const [whole, gap, gpa, scale] = match;
+    const trailing = resumeText.slice((match.index ?? 0) + whole.length);
+
+    if (SCALE_LEADS.test(gap)) return null;
+    if (!scale && SCALE_TRAILS.test(trailing)) return null;
+    // A percentage, a number the pattern cut short, or a comma decimal. None of the three is the
+    // grade this resume printed, and all three are silently plausible once stored.
+    if (/^(?:%|\d|,\d)/.test(trailing)) return null;
+
+    const grade = Number(gpa);
+    if (!Number.isFinite(grade)) return null;
+    if (scale) {
+      const denominator = Number(scale);
+      if (!Number.isFinite(denominator) || denominator <= 0 || grade > denominator) return null;
+    } else if (grade > 10) {
+      // No printed denominator, and no grading scale in use tops out below the number we read. This
+      // is a percentage, a credit count or a year that happened to sit next to the label.
+      return null;
+    }
+
+    if (!reading) {
+      reading = scale ? { gpa, scale } : { gpa };
+      continue;
+    }
+    // Two GPA-labelled numbers that disagree: ambiguous document, no deterministic answer.
+    if (reading.gpa !== gpa) return null;
+    // Same grade printed twice, one occurrence carrying the denominator. Keep the denominator.
+    if (!reading.scale && scale) reading.scale = scale;
+  }
+  return reading;
+}
+
+/* Correct a transcription error in the parsed GPA against what the resume text actually prints.
+ *
+ * Deliberately one-directional: this only ever REPLACES a value the model already claimed. When the
+ * model returned no GPA it stays empty, even if the text prints one, because an empty answer can be
+ * a deliberate one - a resume printing only "Major GPA: 3.95" states no overall grade, and filling
+ * the field from that line would turn a careful abstention into a claim the student never made.
+ *
+ * Only the text path can use this. A scanned or photographed resume has no reliable text layer to
+ * check against (that is why parseResumeFromPdf exists), so its GPA remains model-transcribed and
+ * unverified. That gap is why application_profile, not this parse, is the source of truth for the
+ * GPA that reaches an employer - see routes/profile.ts.
+ */
+export function reconcileGpaWithSource<T extends { gpa?: string; gpa_scale?: string }>(
+  parsed: T,
+  resumeText: string,
+): T {
+  const claimed = parsed.gpa?.trim();
+  if (!claimed) return parsed;
+  const printed = printedGpaIn(resumeText);
+  if (!printed || printed.gpa === claimed) return parsed;
+
+  /* The denominator has to be reconciled along with the grade, not left behind.
+   *
+   * A printed "x/y" is authoritative and replaces whatever the model said. Where the resume printed
+   * no denominator the model's stays - EXCEPT when the corrected grade no longer fits inside it. A
+   * kept "4.0" under a corrected 8.94 reads as "8.94 out of 4.0", which is not a record anyone has,
+   * and it is the model's scale that is now unsupported, not the printed grade. Blanking it puts
+   * the field back on /start's gaps screen for the student to answer, which is what an unknown
+   * denominator is supposed to do (see the gpa_scale rule in the system prompt above). */
+  const modelScale = parsed.gpa_scale?.trim();
+  let gpa_scale = modelScale;
+  if (printed.scale) {
+    gpa_scale = printed.scale;
+  } else if (modelScale && Number(printed.gpa) > Number(modelScale)) {
+    gpa_scale = '';
+  }
+
+  return {
+    ...parsed,
+    gpa: printed.gpa,
+    ...(gpa_scale === modelScale ? {} : { gpa_scale }),
+  };
+}
+
 export async function parsedProfileWithOneRepair(
   initialText: string,
   repair: (failure: string) => Promise<string>,
@@ -309,7 +437,10 @@ export async function parseResumeWithClaude(resumeText: string): Promise<ParsedP
       return textBlock?.type === 'text' ? textBlock.text : '';
     };
     const initial = await request();
-    return await parsedProfileWithOneRepair(initial, request);
+    const parsed = await parsedProfileWithOneRepair(initial, request);
+    // The one field on this parse that becomes a factual claim to an employer, checked against the
+    // document instead of trusted. See reconcileGpaWithSource for the live misread that forced it.
+    return reconcileGpaWithSource(parsed, resumeText);
   } catch (error) {
     throw new Error(`Claude returned invalid JSON for resume parsing: ${error instanceof Error ? error.message.slice(0, 200) : 'unknown error'}`);
   }
