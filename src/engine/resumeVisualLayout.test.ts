@@ -368,6 +368,52 @@ describe('resume visual layout controls', () => {
      them without putting this in its place would leave the header's most contested line unpinned,
      and it is the line most likely to be reintroduced by someone reading the still-present
      `spec.target_role` and assuming it is meant to be printed. */
+  /* The GPA reaches the paper, sits where a student's own resume puts it, and is budgeted for.
+     Height and drawing move together here for the same reason the target-role removal had to: a
+     line drawn but not measured makes the layout search solve for a page that is not the page, and
+     the error surfaces as the last entry sliding off a resume that reports itself as fitting. */
+  test('a GPA renders between the degree and the coursework, and is measured', async () => {
+    const benchmark = RESUME_VISUAL_BENCHMARK.find((entry) => entry.id === '06-normal-two-jobs');
+    assert.ok(benchmark);
+    const withGpa = structuredClone(benchmark.spec);
+    withGpa.gpa = '3.89/4.0';
+    const withoutGpa = structuredClone(benchmark.spec);
+    withoutGpa.gpa = '';
+
+    const rendered = await renderResumePdf(withGpa, benchmark.contact, benchmark.jdText);
+    const parsed = await extractPdfText(rendered.buffer);
+    const flat = parsed.text.replace(/\s+/g, ' ');
+
+    assert.equal(parsed.numpages, 1);
+    assert.match(flat, /GPA: 3\.89\/4\.0/);
+    // Order on the page: degree, then GPA, then coursework.
+    assert.ok(flat.indexOf(withGpa.degree) < flat.indexOf('GPA: 3.89/4.0'));
+    assert.ok(flat.indexOf('GPA: 3.89/4.0') < flat.indexOf('Relevant coursework'));
+    assert.deepEqual(findPdfTextFidelityIssues(parsed.text, rendered.spec, benchmark.contact), []);
+    assert.deepEqual(validateResumeVisualLayout(rendered.layout).issues, []);
+    assert.deepEqual(findPdfSafeMarginIssues(parsed.pages, rendered.layout), []);
+
+    // Budgeted, not drawn for free: the measured education block has to grow by the line.
+    const tall = planResumeLayout(withGpa, benchmark.contact, benchmark.jdText);
+    const short = planResumeLayout(withoutGpa, benchmark.contact, benchmark.jdText);
+    assert.ok(tall && short);
+    assert.ok(
+      tall.layout.content_height > short.layout.content_height,
+      'the education block must measure taller with a GPA than without one',
+    );
+  });
+
+  test('no GPA on file prints no GPA line at all', async () => {
+    const benchmark = RESUME_VISUAL_BENCHMARK.find((entry) => entry.id === '06-normal-two-jobs');
+    assert.ok(benchmark);
+    const spec = structuredClone(benchmark.spec);
+    spec.gpa = '';
+    const rendered = await renderResumePdf(spec, benchmark.contact, benchmark.jdText);
+    const parsed = await extractPdfText(rendered.buffer);
+    assert.doesNotMatch(parsed.text, /GPA/);
+    assert.deepEqual(findPdfTextFidelityIssues(parsed.text, rendered.spec, benchmark.contact), []);
+  });
+
   test('the target role is never printed on the document', async () => {
     const benchmark = RESUME_VISUAL_BENCHMARK.find((entry) => entry.id === '06-normal-two-jobs');
     assert.ok(benchmark);

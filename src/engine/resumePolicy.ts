@@ -9,6 +9,34 @@ export interface CandidateEducation {
   grad_year?: number;
   currently_enrolled?: boolean;
   coursework?: string[];
+  /* Read from parsed_json, which is what the student's OWN resume printed, and never from
+     application_profile. That column holds the same number encrypted, and a decrypt failure there
+     is a deliberate hard error (see decryptRow) - correct for a route serving the profile, wrong
+     for resume generation, where it would turn a key problem into "no student can generate a
+     resume". The parse is also the origin for almost everyone: academicSeedFrom copies parsed ->
+     application_profile, not the reverse. */
+  gpa?: string;
+  gpa_scale?: string;
+}
+
+/* "3.8/4.0", or "3.8" when the resume printed no denominator, or nothing at all.
+ *
+ * NOTHING IS INVENTED HERE, including the scale. A bare "3.8" is genuinely ambiguous - it is a
+ * different claim on a 4.0 than on a 5.0 - and the parser's own rule is to record the denominator
+ * only when the page states one. Defaulting the missing case to "/4.0" would be a fabricated
+ * academic claim on an employment document, which is the one thing this codebase refuses to do
+ * anywhere else either.
+ *
+ * Shape-guarded rather than trusted: parsed_json is jsonb and a hand-edited row can hold anything,
+ * and "GPA: first class honours" printed in the education block would be a claim we never read off
+ * the page. */
+const GPA_VALUE = /^\d{1,2}(?:\.\d{1,3})?$/;
+
+export function educationGpaLine(education: Pick<CandidateEducation, 'gpa' | 'gpa_scale'>): string {
+  const value = education.gpa?.trim() ?? '';
+  if (!GPA_VALUE.test(value)) return '';
+  const scale = education.gpa_scale?.trim() ?? '';
+  return GPA_VALUE.test(scale) ? `${value}/${scale}` : value;
 }
 
 export interface CandidateContext {
@@ -239,6 +267,9 @@ export function applyResumePolicy(
       school: education.school?.trim() ?? '',
       degree: education.degree?.trim() ?? '',
       grad_date: education.grad_date?.trim() ?? '',
+      /* Comes from the profile, exactly like school and degree, and never from the model. The
+         education block is student-owned facts throughout: nothing in it is the LLM's to write. */
+      gpa: educationGpaLine(education),
       coursework: sourceCoursework.join(', '),
       education_position: context.education_position,
       experience,
