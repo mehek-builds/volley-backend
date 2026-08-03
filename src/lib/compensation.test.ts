@@ -260,3 +260,81 @@ test('a posting that publishes no pay carries none, on every board', () => {
   assert.equal(gh.pay, undefined);
   assert.equal(gh.employment_type, undefined);
 });
+
+test('an internship that never says so in its title is still an internship', () => {
+  /* Jane Street posts "Software Engineer" thirteen times: some are full-time reqs and some are the
+     summer internship, and the body copy is the only thing that separates them. These two strings
+     are the real openings of two live postings with the SAME title on the SAME board. */
+  const internBody = '<p>Our goal is to give you a real sense of what it\'s like to work at Jane '
+    + 'Street full time while also providing a truly unparalleled educational experience. As an '
+    + 'intern, you are paired with full-time employees who act as mentors.</p>';
+  const fullTimeBody = '<p>We’re looking for Software Engineers who want to help us design and '
+    + 'build the systems and tools that run the firm.</p>';
+
+  assert.equal(resolveEmploymentType('Software Engineer', undefined, internBody), 'Internship');
+  assert.equal(resolveEmploymentType('Software Engineer', undefined, fullTimeBody), undefined,
+    'the full-time twin must stay untyped, not be swept along with its namesake');
+
+  // The other phrasings on live postings, all second person.
+  for (const body of [
+    'Over the course of your internship, you will explore ways to approach problems.',
+    'During the internship, your work is reinforced with intensive classes.',
+    'The internship is a fast-paced, immersive experience.',
+  ]) {
+    assert.equal(resolveEmploymentType('Quantitative Trader', undefined, body), 'Internship', body);
+  }
+});
+
+test('a job that RUNS the internship programme is not an internship', () => {
+  /* The failure mode this guard exists for. All live full-time postings, and each one talks about
+     interns in the third person, which is exactly how they differ from the postings above. */
+  const body = 'You will manage our internship program and support our interns through the summer.';
+  for (const title of [
+    'Campus Recruiter',
+    'University Recruiter, Contract',
+    'Talent Acquisition - Campus',
+    'Early Talent Program Coordinator',
+    'Events Coordinator - Recruiting',
+  ]) {
+    assert.notEqual(resolveEmploymentType(title, undefined, body), 'Internship', title);
+  }
+});
+
+test('the description never overrules an employer who stated a type', () => {
+  // Weakest evidence in the chain: it fills a silence, it does not argue with the employer.
+  assert.equal(
+    resolveEmploymentType('Software Engineer', 'FullTime', 'As an intern, you are paired with...'),
+    'Full-time',
+  );
+});
+
+test('a trade apprenticeship is not an internship when the employer says otherwise', () => {
+  /* Narrowed 2026-08-04. The title-beats-field override was written for "Intern", on the argument
+     that nobody puts it in a permanent role's title. That is simply not true of "Apprentice": a
+     trade apprenticeship is a permanent skilled job. Crusoe's posting is live and tagged FullTime. */
+  assert.equal(resolveEmploymentType('Apprentice Electrician', 'FullTime'), 'Full-time');
+  assert.equal(resolveEmploymentType('Apprentice Aerospace Technician', 'Full-time'), 'Full-time');
+  // Match Group's are the genuine early-career kind, and their employer says so.
+  assert.equal(
+    resolveEmploymentType('Apprenticeship - Junior Brand Designer', 'Apprenticeship'),
+    'Internship',
+  );
+  // Intern and co-op still override the field: that is the Modal case and it has not changed.
+  assert.equal(resolveEmploymentType('ML Research Intern', 'FullTime'), 'Internship');
+  assert.equal(resolveEmploymentType('Software Engineering Co-Op', 'FullTime'), 'Internship');
+});
+
+test('the employer vocabulary is normalized, but "Full Time Contractor" is still a contract', () => {
+  assert.equal(normalizeEmploymentType('Full Time Employee'), 'Full-time');
+  assert.equal(normalizeEmploymentType('FullTime'), 'Full-time');
+  assert.equal(normalizeEmploymentType('Permanent'), 'Full-time');
+  /* The reason the Full-time patterns are anchored rather than prefixes. A prefix match would read
+     this as full-time and lose the one word that says what it actually is. */
+  assert.equal(normalizeEmploymentType('Full Time Contractor'), 'Contract');
+  assert.equal(normalizeEmploymentType('Contractor No Legal Entity'), 'Contract');
+  /* Still passed through, deliberately: these describe the legal engagement model rather than
+     hours or permanence, so mapping them to Full-time would be our inference wearing the
+     employer's voice. They stay visible on the tile and outside the four filterable words. */
+  assert.equal(normalizeEmploymentType('International Office Entity'), 'International Office Entity');
+  assert.equal(normalizeEmploymentType('Other'), 'Other');
+});

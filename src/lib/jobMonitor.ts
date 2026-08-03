@@ -254,11 +254,14 @@ export function normalizeGreenhouseJobs(payload: unknown): NormalizedJob[] {
       title,
       location,
       department,
-      /* Greenhouse has no employment-type field, so the title is the only evidence. It yields the
-         158 internships, 150 contract and 34 part-time roles on this board and NOTHING for the
-         rest - deliberately, because "the title did not say" is not the same fact as "full-time".
+      /* Greenhouse has no employment-type field, so the title and the body are the only evidence,
+         and NOTHING is the answer for most of the board - deliberately, because "the title did not
+         say" is not the same fact as "full-time".
+         The description is passed because on this board it is sometimes the ONLY evidence: Jane
+         Street posts its summer internships under the same plain titles as its full-time reqs
+         ("Software Engineer", "Quantitative Trader") and only the body says which is which.
          See resolveEmploymentType. */
-      employment_type: resolveEmploymentType(title),
+      employment_type: resolveEmploymentType(title, undefined, job.content as string | undefined),
       description: cleanHtml(job.content),
       apply_url: postingUrl,
       posting_url: postingUrl,
@@ -292,7 +295,7 @@ export function normalizeLeverJobs(payload: unknown): NormalizedJob[] {
       department: text(categories.department) ?? text(categories.team),
       /* The employer's own commitment field, EXCEPT that a title saying internship beats it -
          see resolveEmploymentType for why that one exception and nothing else. */
-      employment_type: resolveEmploymentType(title, text(categories.commitment)),
+      employment_type: resolveEmploymentType(title, text(categories.commitment), description),
       description,
       apply_url: applyUrl,
       posting_url: postingUrl,
@@ -324,7 +327,8 @@ export function normalizeAshbyJobs(payload: unknown): NormalizedJob[] {
       title,
       location,
       department: text(job.department) ?? text(job.team),
-      employment_type: resolveEmploymentType(title, text(job.employmentType)),
+      employment_type: resolveEmploymentType(title, text(job.employmentType),
+        text(job.descriptionPlain) ?? text(job.descriptionHtml)),
       description: cleanPlain(job.descriptionPlain) || cleanHtml(job.descriptionHtml),
       apply_url: applyUrl,
       posting_url: postingUrl,
@@ -372,7 +376,7 @@ export function normalizeWorkableJobs(payload: unknown): NormalizedJob[] {
       title,
       location,
       department: text(job.department) ?? text(job.function),
-      employment_type: resolveEmploymentType(title, text(job.employment_type)),
+      employment_type: resolveEmploymentType(title, text(job.employment_type), text(job.description)),
       description: cleanHtml(job.description),
       apply_url: applyUrl,
       posting_url: postingUrl,
