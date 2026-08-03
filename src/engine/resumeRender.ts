@@ -124,7 +124,6 @@ export function findPdfTextFidelityIssues(
   const renderedWithoutWhitespace = rendered.replace(/\s+/g, '');
   const expected: Array<{ label: string; value: string | undefined }> = [
     { label: 'header name', value: contact.full_name },
-    { label: 'target role headline', value: spec.target_role },
     { label: 'contact email', value: contact.email },
     { label: 'contact phone', value: contact.phone },
     { label: 'LinkedIn URL', value: contact.linkedin_url },
@@ -498,18 +497,9 @@ export function measureResumeLayout(
       width,
       design.typography.lineGapRatio.bold,
     );
-    if (spec.target_role) {
-      headerHeight +=
-        design.spacing.contactTop +
-        textHeight(
-          doc,
-          spec.target_role,
-          RESUME_FONTS.bold,
-          design.typography.contact,
-          width,
-          design.typography.lineGapRatio.bold,
-        );
-    }
+    /* No target-role line is measured here because none is drawn. Measurement and drawing have to
+       move together: reserving height for a line the header does not print pushes every section
+       below it down by that much and eats page fill the layout search then tries to win back. */
     const line = contactLine(contact);
     if (line) {
       headerHeight +=
@@ -1031,16 +1021,15 @@ export async function renderResumePdf(
       align: 'center',
       lineGap: design.typography.name * design.typography.lineGapRatio.bold,
     });
-  if (spec.target_role) {
-    doc
-      .font(RESUME_FONTS.bold)
-      .fontSize(design.typography.contact)
-      .text(spec.target_role, design.page.margin, doc.y + design.spacing.contactTop, {
-        width,
-        align: 'center',
-        lineGap: design.typography.contact * design.typography.lineGapRatio.bold,
-      });
-  }
+  /* NO TARGET-ROLE HEADLINE. Added 2026-07-22 (d670e5d, "align generated resumes with job
+     criteria") as an ATS device: stamp the posting's exact title under the name so a filter on job
+     title gets a literal hit. Removed 2026-08-04 by Mehek's call, against her own resume template,
+     which has the name, a rule, and the contact line, and nothing else.
+
+     The cost was never worth the hit. The line reads as a claim about the applicant in the position
+     a person looks for one, and the first thing anyone asked on seeing a generated resume was why
+     it led with a job title instead of their name. `spec.target_role` is still set, still validated
+     against the posting, and still drives targeting; it is simply not printed on the document. */
   const line = contactLine(contact);
   if (line) {
     // A rule between the name and the contact details, full usable width. The identity sits above

@@ -362,28 +362,39 @@ describe('resume visual layout controls', () => {
     assert.ok(issues.some((issue) => /top safe margin/.test(issue)));
   });
 
-  test('target role headline renders, wraps safely, and remains ATS-readable', async () => {
+  /* Replaces two tests that asserted the opposite: that the target role rendered under the name and
+     that fidelity FAILED when it was absent. Both guarded a feature removed 2026-08-04 (the header
+     is the name, a rule, and the contact line, matching the applicant's own template). Deleting
+     them without putting this in its place would leave the header's most contested line unpinned,
+     and it is the line most likely to be reintroduced by someone reading the still-present
+     `spec.target_role` and assuming it is meant to be printed. */
+  test('the target role is never printed on the document', async () => {
     const benchmark = RESUME_VISUAL_BENCHMARK.find((entry) => entry.id === '06-normal-two-jobs');
     assert.ok(benchmark);
     const spec = structuredClone(benchmark.spec);
     spec.target_role = 'Senior Analytics Engineering and Data Governance Lead for Global Operations';
     const rendered = await renderResumePdf(spec, benchmark.contact, benchmark.jdText);
     const parsed = await extractPdfText(rendered.buffer);
+    const flat = parsed.text.replace(/\s+/g, ' ');
 
     assert.equal(parsed.numpages, 1);
-    assert.match(parsed.text.replace(/\s+/g, ' '), /Senior Analytics Engineering and Data Governance Lead for Global Operations/);
+    assert.doesNotMatch(flat, /Senior Analytics Engineering and Data Governance Lead/);
+    // The name still leads, and EDUCATION still follows the contact line rather than a headline.
+    assert.match(flat.trimStart(), new RegExp(`^${benchmark.contact.full_name}`));
     assert.deepEqual(validateResumeVisualLayout(rendered.layout).issues, []);
     assert.deepEqual(validatePdfLayout(parsed.text, parsed.numpages).issues, []);
-      assert.deepEqual(findPdfTextFidelityIssues(parsed.text, rendered.spec, benchmark.contact), []);
-      assert.deepEqual(findPdfSafeMarginIssues(parsed.pages, rendered.layout), []);
+    assert.deepEqual(findPdfTextFidelityIssues(parsed.text, rendered.spec, benchmark.contact), []);
+    assert.deepEqual(findPdfSafeMarginIssues(parsed.pages, rendered.layout), []);
   });
 
-  test('PDF fidelity rejects a missing target role headline', () => {
+  /* A target role that is set but unprinted must not be treated as missing content. This is the
+     regression the old fidelity expectation would now cause if it were left in place. */
+  test('fidelity does not demand a target role that is deliberately unprinted', () => {
     const benchmark = RESUME_VISUAL_BENCHMARK.find((entry) => entry.id === '06-normal-two-jobs');
     assert.ok(benchmark);
     const spec = { ...benchmark.spec, target_role: 'Analytics Engineer' };
     const issues = findPdfTextFidelityIssues('Candidate Name EDUCATION EXPERIENCE', spec, benchmark.contact);
-    assert.ok(issues.includes('rendered PDF text does not faithfully preserve target role headline'));
+    assert.ok(!issues.some((issue) => /target role/.test(issue)));
   });
 
   test('PDF text fidelity fails closed for unsupported name glyphs', async () => {
