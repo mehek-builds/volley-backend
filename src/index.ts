@@ -28,6 +28,7 @@ import { assertEncryptionKeyConfigured } from './lib/fieldCrypto';
 import { metaRoutes } from './routes/meta';
 import { applicationRoutes } from './routes/applications';
 import { submissionRunnerRoutes } from './routes/submissionRunner';
+import { captchaStallRoutes } from './routes/captchaStalls';
 import { jobExtractRoutes } from './routes/jobExtract';
 import { jobMonitorRoutes } from './routes/jobMonitor';
 import { coverLetterRoutes } from './routes/coverLetter';
@@ -177,6 +178,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   });
 
   // Routes
+  await fastify.register(captchaStallRoutes);
   await fastify.register(authRoutes);
   await fastify.register(metaRoutes);
   await fastify.register(profileRoutes);
