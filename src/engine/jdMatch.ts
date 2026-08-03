@@ -87,8 +87,24 @@ export interface JdContext {
  *
  * Raising this above EMPHASIS_LIMIT would make every posting unscorable, because the cap can never
  * hand back more terms than that.
+ *
+ * WAS 6, LOWERED TO 4 on 2026-08-03 as the other half of preferStatedRequirements. That pass drops
+ * `body` prose whenever the employer stated requirements of their own, and a posting that states
+ * four is common: Databricks' PM intern names three requirements and one responsibility. At a floor
+ * of 6 the drop could not fire on those postings, so the honest four-term denominator was padded
+ * back up with the culture paragraph rather than being allowed to stand.
+ *
+ * Measured over 600 live postings and the six real base resumes on the system, against the same
+ * board scored on-field vs off-field:
+ *
+ *   floor 6   separation 6.5 points (2.47x)   14 of 600 more postings refuse
+ *   floor 4   separation 7.0 points (2.59x)
+ *
+ * Four terms is a smaller denominator than this file used to allow, and that is the point: a score
+ * over four things the employer actually asked for says more than a score over twelve things where
+ * eight came from the prose around them.
  */
-export const MIN_SCORABLE_TERMS = 6;
+export const MIN_SCORABLE_TERMS = 4;
 
 /**
  * ...and at least this many of them must be HARD SIGNAL: a curated lexicon skill, an acronym, or a
@@ -132,8 +148,16 @@ const HEADING_PATTERNS: Array<{ kind: SectionKind; re: RegExp }> = [
   // because an unrecognised heading does not close the section it interrupts. See NOISE_BLOCK.
   { kind: 'noise', re: /^about\b|\b(who we are|our (story|mission|values|culture)|benefits|perks|what we offer|compensation|salary|pay range|equal opportunity|eeo|diversity|accommodation|privacy|how to apply|why join)\b/i },
   { kind: 'preferred', re: /\b(preferred|nice[- ]to[- ]have|bonus|plus(es)?|desired|good to have|additional qualifications)\b/i },
-  { kind: 'required', re: /\b(requirements?|qualifications?|what you'?ll need|what we'?re looking for|must[- ]have|minimum|basic qualifications|skills?|you have|your background)\b/i },
-  { kind: 'responsibilities', re: /\b(responsibilities|what you'?ll do|the role|your impact|day[- ]to[- ]day|in this role|duties)\b/i },
+  // `what we('?re)? look(ing)? for` and `(your|the) impact`, not the tighter `what we're looking
+  // for` / `your impact` they replaced. Databricks' "Product Management Intern (Summer 2027)"
+  // heads its two real sections "What we look for:" and "The impact you will have:". Both pass
+  // isHeadingLine; neither matched, so the whole posting stayed `body` at 0.4 and the denominator
+  // filled from the culture paragraph instead: 8/100 built from `genie`, `unity catalog`,
+  // `ai platform` and `streaming` - the sentence naming the TEAMS Databricks hires across - while
+  // "first hand experience with SQL and/or Python" never reached weight 1. A near-miss on a
+  // heading does not cost you the heading, it costs you every line under it.
+  { kind: 'required', re: /\b(requirements?|qualifications?|what you'?ll need|what we('?re)? look(ing)? for|must[- ]have|minimum|basic qualifications|skills?|you have|your background)\b/i },
+  { kind: 'responsibilities', re: /\b(responsibilities|what you'?ll do|the role|(your|the) impact|day[- ]to[- ]day|in this role|duties)\b/i },
 ];
 
 /**
@@ -414,7 +438,16 @@ degree bachelor bachelors master masters phd university college school graduate 
 work working works help helps helping support supporting supports ensure ensuring provide providing
 new next high level levels across within using various multiple related relevant similar other
 plus bonus nice have having make making take taking build building
-proficiency proficient expertise fluency familiarity exposure comfort`
+proficiency proficient expertise fluency familiarity exposure comfort
+please note kindly submit cv letter recruiter
+employer employers applicant applicants candidacy offer offers
+asylee refugee citizen citizenship resident residency immigration sponsorship visa
+authorization authorized protected affirmative accommodation accommodations
+fortune award recognized ranked ranking workplace workplaces
+english fluent bilingual
+federal municipal county province
+department departments
+learn transparency hourly`
     .split(/\s+/)
     .filter(Boolean),
 );
@@ -453,6 +486,47 @@ const TECH_MARKER = /[+#./]/;
 
 /** ALL-CAPS 2-5 letter tokens are acronyms (REST, SAML, GDPR) that the lexicon will never finish. */
 const ACRONYM = /^[A-Z]{2,5}$/;
+
+/**
+ * ALL-CAPS tokens that are shaped exactly like a skill acronym and are never a thing to have done.
+ *
+ * Measured 2026-08-03 over 600 live postings: the acronym rule supplied 13.4% of every scored term,
+ * and its most frequent products were `usd`(22), `cad`(16), `ms`(13), `bs`(12), `ba`(12), `pto`(10)
+ * and `ote`(9). Those are the compensation and benefits block, not the requirements block, and they
+ * are marked HARD SIGNAL, so they take the reserved slots in capToEmphasis ahead of real skills.
+ *
+ * An enumeration rather than a shape rule, for the same reason SKILL_LEXICON is: ITAR, GAAP and
+ * SOC2 are the same shape and are real stated requirements. There is no property of the token that
+ * separates them, only knowledge of what the word means.
+ *
+ * THE DEGREE ABBREVIATIONS ARE THE ARGUABLE ONES and they are here deliberately. "BS in Computer
+ * Science" IS a requirement. It is not an EARNABLE one: resumes write the degree out ("Bachelor of
+ * Science"), so `bs` scored as a miss against every one of the six real base resumes on the system.
+ * A requirement no resume can match is denominator weight that only ever subtracts. `mba` and `phd`
+ * are NOT here, because those two are written as the acronym on a resume as often as not.
+ */
+const NON_REQUIREMENT_ACRONYMS = new Set(
+  `usd cad eur gbp aud inr chf jpy sgd aed
+pto ote rsu esop hsa fsa hra cobra fmla pfl ltd std
+ms bs ba bsc msc beng meng
+eeo ada faq tbd asap eod eta`
+    .split(/\s+/)
+    .filter(Boolean),
+);
+
+/**
+ * A dotted initialism: U.S., U.S.C., E.U., i.e.
+ *
+ * These reach the term set through TECH_MARKER, because a dot is the punctuation that says
+ * "technical name" (node.js, ci/cd). `U.S.C` alone was admitted as a HARD SIGNAL requirement on 34
+ * of 600 postings, every one of them out of the work-authorization paragraph: "(iii) Refugee under
+ * 8 U.S.C. § 1157, or (iv) Asylee under 8 U.S.C. § 1158". The tokenizer trims the trailing dot, so
+ * what arrives here is `U.S.C`, hence the optional final letter.
+ *
+ * Single letters separated by dots is a shape no technology name has: node.js, asp.net and
+ * scikit.learn all carry a multi-letter part, so the rule needs no exception list.
+ */
+const DOTTED_INITIALISM = /^(?:[A-Za-z]\.)+[A-Za-z]?$/;
 
 /**
  * A web address, which is a place to read about the job and never a thing to have done.
@@ -575,6 +649,28 @@ function inLexicon(t: string): boolean {
 }
 
 /**
+ * The deny-lists, checked in the plural too.
+ *
+ * inLexicon has always singularised and these two never did, so every entry in them was singular-
+ * only and the plural walked straight past. `requirement` is in BOILERPLATE; `requirements` was the
+ * single most common junk term left after the proper-noun rule was tightened, at 47 of 600 postings.
+ * It arrives from HTML-stripped postings where the heading never gets its own line, so segmentJd
+ * cannot strip it and it lands inline as "...readiness for launch. Requirements Demonstrated
+ * experience with...", where it reads as the head of a Title Case run.
+ *
+ * SAFE BECAUSE THE DENY-LISTS ARE CHECKED BEFORE THE LEXICON: a word whose singular collides with
+ * BOILERPLATE would now be lost, so the collision set is asserted empty in jdMatch.test.ts rather
+ * than assumed. It is empty today, and the test is what keeps it that way when either list grows.
+ */
+function isDenied(t: string): boolean {
+  // Exact match first: it is the common case (every stopword), and it lets the singular() call and
+  // its four regexes be skipped entirely rather than paid on every token of every posting.
+  if (GENERIC_STOPWORDS.has(t) || BOILERPLATE.has(t)) return true;
+  const s = singular(t);
+  return GENERIC_STOPWORDS.has(s) || BOILERPLATE.has(s);
+}
+
+/**
  * Is this token a real requirement?
  *
  * @param token             the token as it appeared, casing intact
@@ -589,10 +685,42 @@ function isHardSignal(token: string): boolean {
   const t = normalizeTerm(token);
   if (!t) return false;
   if (t.length === 1) return /^[A-Z]$/.test(token) && SKILL_LEXICON.has(t);
+  if (DOTTED_INITIALISM.test(token)) return false;
+  if (NON_REQUIREMENT_ACRONYMS.has(t)) return false;
   return inLexicon(t) || ACRONYM.test(token) || TECH_MARKER.test(token);
 }
 
-function isSpecific(token: string, positionalCapital: boolean, nextIsCapitalized = false): boolean {
+/**
+ * Every token this posting ever writes in lowercase.
+ *
+ * The evidence that separates a name from a capitalized common word, taken from the document itself
+ * rather than from a list we would have to keep topping up. A product name is capitalized every
+ * time it appears: a posting that says "Redux" never says "redux". A common noun that happens to
+ * carry a capital once - opening a sentence, heading a fragment, or written for emphasis - is
+ * written lowercase somewhere else in the same posting, because that is how the word is normally
+ * spelled. "We use Data to drive decisions... strong data skills" is one word, and the lowercase
+ * occurrence is the posting telling us so.
+ *
+ * This is what the deny-list could not do. The junk left after the vocabulary pass was `microsoft`,
+ * `engineering`, `data`, `product`, `security`, `sales`, `finance`, `legal`, `account`,
+ * `competitive` - a long tail of ordinary nouns, which is the open set this file already refused to
+ * chase once with POSITIONAL_OPENERS.
+ */
+function lowercaseTokens(jdText: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of jdText.matchAll(/[a-z][a-z0-9+#./_-]*/g)) {
+    const t = normalizeTerm(m[0]);
+    if (t) out.add(t);
+  }
+  return out;
+}
+
+function isSpecific(
+  token: string,
+  positionalCapital: boolean,
+  nextIsCapitalized = false,
+  alsoLowercased?: Set<string>,
+): boolean {
   const t = normalizeTerm(token);
   // Single-character lexicon entries (R, C) are real languages, but only when written as a
   // standalone capital. Without this the length guard made them unreachable and a data-science
@@ -600,13 +728,42 @@ function isSpecific(token: string, positionalCapital: boolean, nextIsCapitalized
   if (t.length === 1) return /^[A-Z]$/.test(token) && SKILL_LEXICON.has(t);
   if (!t) return false;
   if (WEB_ADDRESS.test(token)) return false;
-  if (GENERIC_STOPWORDS.has(t) || BOILERPLATE.has(t)) return false;
+  if (DOTTED_INITIALISM.test(token)) return false;
+  if (isDenied(t)) return false;
+  if (NON_REQUIREMENT_ACRONYMS.has(t)) return false;
   if (inLexicon(t)) return true;
   if (ACRONYM.test(token)) return true;
   if (TECH_MARKER.test(token)) return true;
   // Proper-noun cased: product and vendor names we do not carry in the lexicon (a long tail we
   // will never finish enumerating).
+  //
+  // A LONE MID-SENTENCE CAPITAL IS STILL ADMITTED, and the attempt to change that is recorded here
+  // because the reasoning for it was good and the measurement that killed it was better.
+  //
+  // This rule supplies 55.1% of every scored term (600 live postings, measured 2026-08-03), and
+  // what it supplied was `please`(31), `english`(49), `employer`(27), `fortune`(25), `state`(23),
+  // `asylee`(16), `refugee`(16). So the obvious fix was to require the Title Case run here that is
+  // already required at line start: a real multi-word product name continues in Title Case and a
+  // stray capital does not, which reads like a property of names rather than a position rule.
+  //
+  // IT DELETES REAL REQUIREMENTS. Under that rule the suite lost `Redux` (from "React/Redux", where
+  // the slash split leaves a lone capital), `Streaming`, `Risk Management` and a framework named as
+  // a bare word in a requirements bullet. Single-word product names are not a long tail that
+  // SKILL_LEXICON can absorb; they are most of how requirements are actually written.
+  //
+  // So the junk is removed by VOCABULARY instead, in BOILERPLATE, where the EEO paragraph, the
+  // work-authorization clause and the application-process copy are a closed and stable set. The
+  // earlier failure this file records - "POSITIONAL_OPENERS alone was a deny-list against the open
+  // set of English verbs, and it lost" - does not apply: verbs are open, boilerplate is not.
+  //
+  // SIX OF THE SEVEN ABOVE ARE NOW IN BOILERPLATE. `state` is deliberately NOT, even though it was
+  // measured at 23: "state management" is a real requirement on front-end postings, and the same
+  // word carries both senses. It is caught by the lowercase-occurrence rule below instead, on every
+  // posting that also writes "state" in prose, which is most of them.
   if (/^[A-Z][a-zA-Z]{2,}$/.test(token)) {
+    // The posting spells this word lowercase somewhere else, so the capital here is decoration.
+    // Applies at every position: it is evidence about the word, not about where it sits.
+    if (alsoLowercased?.has(t)) return false;
     if (!positionalCapital) return true;
     // From a bullet-initial position the capital is grammar, so it needs more than case to count.
     // POSITIONAL_OPENERS alone was a deny-list against the open set of English verbs, and it lost:
@@ -869,7 +1026,8 @@ export function extractJdTerms(jdText: string, context?: JdContext): JdTerm[] {
       (t) => !excluded(t, self) && !branded(t) && !(PLACE_SAFE_KINDS.has(t.kind) && excluded(t, places)),
     );
 
-  const terms = strip(extractFrom(segmentJd(jdText)));
+  const lowercased = lowercaseTokens(jdText);
+  const terms = preferStatedRequirements(strip(extractFrom(segmentJd(jdText), lowercased)));
   if (terms.length >= MIN_SCORABLE_TERMS) return capToEmphasis(terms);
 
   // A noise heading runs until the next recognised heading, so a posting that OPENS with
@@ -885,10 +1043,79 @@ export function extractJdTerms(jdText: string, context?: JdContext): JdTerm[] {
           ? { ...section, kind: 'body' as SectionKind, weight: SECTION_WEIGHT.body }
           : section,
       ),
+      lowercased,
     ),
   );
   return capToEmphasis(salvaged.length > terms.length ? salvaged : terms);
 }
+
+/** The sections where an employer states what the job needs, as opposed to prose around them. */
+const STATED_KINDS = new Set<SectionKind>(['required', 'preferred', 'responsibilities']);
+
+/**
+ * When a posting says what it wants, score against THAT, not against the paragraph beside it.
+ *
+ * This is the half of the denominator problem that filtering could never reach. EMPHASIS_LIMIT caps
+ * the denominator at 12 and, measured 2026-08-03, 87.3% of live postings sit AT that cap. A capped
+ * denominator refilled from a ranked pool means deleting a junk term does not remove it from the
+ * score, it promotes the next junk term into the vacancy. Tightening the proper-noun rule on its own
+ * moved junk share 58.2% -> 46.8% and left the score a student sees identical at p50 0 / p90 17,
+ * because the twelve slots were always going to be filled.
+ *
+ * So the fix is not a better filter, it is refusing to pad. Databricks' PM intern posting states
+ * three requirements and one responsibility. Scored against those four, a resume carrying Python
+ * reads 27. Scored against those four PLUS eight terms lifted from the sentence naming which teams
+ * are hiring, the same resume reads 8. The first number is about the job; the second is about how
+ * much prose the employer wrote around it.
+ *
+ * `body` still carries the whole denominator when nothing was stated, which is the short unheaded
+ * posting SECTION_WEIGHT.body exists for. This only fires when the employer gave us something
+ * better, and only when what they gave us is enough to score honestly on its own.
+ */
+function preferStatedRequirements(list: JdTerm[]): JdTerm[] {
+  const stated = list.filter((t) => STATED_KINDS.has(t.kind));
+  // Never trade a score for a refusal. Dropping prose is an improvement to a number that still
+  // gets shown; dropping it so hard that the posting stops being scorable just moves a student
+  // from "here is what you match" to "we could not work this out", which is worse than the padded
+  // number it replaced. Same principle as "the cap never turns a scorable posting into an
+  // unscorable one", and measured over 600 live postings it is the difference between 16.7% of
+  // resume/posting pairs refusing to score and 13.5%.
+  return isScorable(stated) ? stated : list;
+}
+
+/**
+ * The one definition of "enough to be honest about".
+ *
+ * Written twice before this: once here in the positive and once in scoreJdMatch in the negative.
+ * The comment above ties preferStatedRequirements' correctness to matching scoreJdMatch's refusal
+ * exactly, which is a property two hand-copied expressions cannot keep. A third condition added to
+ * one of them would have diverged silently, and the symptom would be a posting this pass declares
+ * safe to shrink that the scorer then refuses to score.
+ */
+function isScorable(terms: JdTerm[]): boolean {
+  return (
+    terms.length >= MIN_SCORABLE_TERMS &&
+    terms.filter((t) => t.signal).length >= MIN_SIGNAL_TERMS
+  );
+}
+
+/*
+ * ONLY THE SIGNAL HALF OF isScorable IS OBSERVABLE THROUGH preferStatedRequirements, and it is
+ * worth knowing which half is load-bearing before either is edited.
+ *
+ * Verified by mutation 2026-08-03: replacing `terms.filter(signal).length >= MIN_SIGNAL_TERMS`
+ * with `true` fails the suite, and replacing `terms.length >= MIN_SCORABLE_TERMS` with `true`
+ * does NOT. The count half is masked downstream. If the stated set comes back under
+ * MIN_SCORABLE_TERMS, extractJdTerms' own `terms.length >= MIN_SCORABLE_TERMS` gate fails on the
+ * next line, the salvage pass re-extracts WITHOUT preferStatedRequirements, and the larger
+ * body-inclusive set wins the `salvaged.length > terms.length` comparison. The prose comes back
+ * either way.
+ *
+ * The count half is kept because it states the intent at the point the decision is made rather
+ * than relying on a downstream accident, and because the salvage pass exists for an unrelated
+ * reason (zero-weight noise sections) and could be narrowed without anyone thinking about this.
+ * But nobody should read it as the thing protecting the refusal path: that is the signal half.
+ */
 
 /**
  * How many requirements the score is computed over, however long the posting is.
@@ -941,7 +1168,8 @@ export function extractJdTerms(jdText: string, context?: JdContext): JdTerm[] {
  * hard signal above section weight, on the theory that the proper-noun rule is the loose one and so
  * should be what gets cut. Measured per resume rather than in aggregate, that was wrong, and badly:
  *
- *   - isHardSignal is `lexicon OR ACRONYM OR TECH_MARKER`, and ACRONYM is any 2-5 letter capital
+ *   - isHardSignal is `lexicon OR ACRONYM OR TECH_MARKER`, minus NON_REQUIREMENT_ACRONYMS and
+ *     dotted initialisms, and ACRONYM is any 2-5 letter capital
  *     run. Acronyms are DENSE in exactly the prose this cap exists to remove: benefits tables,
  *     regulator names, country codes, requisition ids. Sorting on signal promoted all of it.
  *   - On non-technical postings the lexicon has almost nothing to say, so signal-first ranking had
@@ -1059,7 +1287,7 @@ function capToEmphasis(terms: JdTerm[]): JdTerm[] {
   return [...kept.values()].sort((x, y) => y.weight - x.weight || x.term.localeCompare(y.term));
 }
 
-function extractFrom(sections: JdSection[]): JdTerm[] {
+function extractFrom(sections: JdSection[], alsoLowercased?: Set<string>): JdTerm[] {
   const byTerm = new Map<string, JdTerm>();
   // A character offset, not a counter over the extraction passes.
   //
@@ -1088,7 +1316,7 @@ function extractFrom(sections: JdSection[]): JdTerm[] {
 
     // Unigrams. Match on the original casing so isSpecific can see proper nouns.
     for (const tok of tokens) {
-      if (!isSpecific(tok.text, tok.positional, tok.nextIsCapitalized)) continue;
+      if (!isSpecific(tok.text, tok.positional, tok.nextIsCapitalized, alsoLowercased)) continue;
       const term = normalizeTerm(tok.text);
       const existing = byTerm.get(term);
       // The count survives the weight upgrade below: a term named three times in prose and once
@@ -1123,8 +1351,8 @@ function extractFrom(sections: JdSection[]): JdTerm[] {
       const gap = section.text.slice(a.end, b.start);
       if (!/^ +$/.test(gap)) continue;
       if (
-        !isSpecific(a.text, a.positional, a.nextIsCapitalized) ||
-        !isSpecific(b.text, b.positional, b.nextIsCapitalized)
+        !isSpecific(a.text, a.positional, a.nextIsCapitalized, alsoLowercased) ||
+        !isSpecific(b.text, b.positional, b.nextIsCapitalized, alsoLowercased)
       ) {
         continue;
       }
@@ -1257,8 +1485,7 @@ export function scoreJdMatch(
 ): JdMatchResult {
   const terms = extractJdTerms(jdText, context);
 
-  const signalCount = terms.filter((t) => t.signal).length;
-  if (terms.length < MIN_SCORABLE_TERMS || signalCount < MIN_SIGNAL_TERMS) {
+  if (!isScorable(terms)) {
     return {
       score: null,
       scorable: false,
@@ -1302,52 +1529,79 @@ export function scoreJdMatch(
 
 /**
  * The band label shown next to the number. Thresholds are set against what this scorer actually
- * produces (see jdMatch.test.ts), not copied from Jobscan's 75-80% advice, which is calibrated to a
- * completely different denominator and would mislabel a good Litos resume as failing.
- *
- * THE THRESHOLDS DID NOT MOVE FOR ISSUE-023, and that is the point of fixing the denominator
- * instead. They now sit against a bounded set rather than an unbounded one, because the cap holds
- * the requirement count at EMPHASIS_LIMIT or fewer.
+ * produces, not copied from Jobscan's 75-80% advice, which is calibrated to a completely different
+ * denominator and would mislabel a good Litos resume as failing.
  *
  * THE SCORE AND THE CAPTION ARE NOT THE SAME ARITHMETIC, and a reader of this file needs to know
  * that before reasoning about the anchors below. scoreJdMatch accumulates got/total by SECTION
  * WEIGHT (1 required, 0.7 responsibilities, 0.6 preferred, 0.4 body), while MatchScore.tsx renders
  * an UNWEIGHTED "N of M". They coincide only when every kept term carries the same weight.
  *
- * So the anchors are stated for the equal-weight case, which is the one a reader can check:
+ * So the anchors are stated for the equal-weight case, which is the one a reader can check. The
+ * denominator is no longer always twelve (see preferStatedRequirements), so these are stated per
+ * term rather than per twelfth:
  *
- *   65  is 8 of 12 when the twelve are equally weighted. "You have most of what they emphasise."
- *   40  is 5 of 12 when the twelve are equally weighted. "You have some of it."
+ *   40  is 2 of 5, or 5 of 12, when the terms are equally weighted. "You have a good part of it."
+ *   22  is 1 of 5, or 3 of 12.                                     "You have some of it."
+ *   10  is 1 of 10.                                                "There is a thread here."
  *
  * When the weights differ the same COUNT spans a range, and the spread is wide enough to matter.
  * On the SWE_JD fixture, which keeps 8 terms at weight 1 and 4 at 0.7 for a total of 10.8, "8 of
- * 12" is 74 if the eight are the weight-1 terms and 63 if they are not, so it straddles the
- * "Strong match" line. That is intended: covering the Requirements block is worth more than
- * covering the same number of Responsibilities lines, which is the whole reason for the weights.
- * It does mean the caption cannot be used to predict the band, and neither number is wrong.
+ * 12" is 74 if the eight are the weight-1 terms and 63 if they are not. Both are Strong match
+ * today, but the same spread straddles the line lower down: "5 of 12" is 46 or 32, which is Strong
+ * or Solid depending only on WHICH five. That is intended, because covering the Requirements block
+ * is worth more than covering the same number of Responsibilities lines, which is the whole reason
+ * for the weights. It does mean the caption cannot be used to predict the band, and neither number
+ * is wrong.
  *
- * Measured after the fix, over the 400 newest active postings against three real base resumes:
- * "Strong match" fires on 2 of 1116 scorable pairs, and both are the right ones. Both belong to the
- * USC CS student carrying React/TypeScript/Node/Postgres/Docker: bitgo's Backend Engineer E2 at 68
- * (8 of 12) and OpenAI's Software Engineer, API Multimodal at 70 (4 of 6).
- *
- * The second one is worth reading twice, because it is the weighting and the caption coming apart
- * exactly as described above: 4 of 6 scores HIGHER than 8 of 12. That posting states six
- * requirements and the student has four of the heaviest, which is a better fit than eight of twelve
- * and is what the number is supposed to say.
- *
- * Narrowed to that student's own field, 75 software-titled postings run p50=23, p75=33, p90=42,
- * max=68, a real spread rather than the flat line the old denominator produced. Reachable, and
- * still meaning what it says.
- *
- * WHY THE BOTTOM BAND WAS RENAMED. "Weak match" is the only one of these four labels that grades
+ * WHY THE BOTTOM BAND IS WORDED AS IT IS. "Weak match" was the only one of these labels that graded
  * the STUDENT rather than describing the pair, and on a board where most postings are in someone
  * else's field it is the one they read most. The number underneath it is honest and should not be
  * inflated to spare anyone: a first-year undergraduate really does not match a Staff Engineer role.
  * But the honest content of a low score is "this posting asks for things that are not on your
  * resume", not "you are weak", and the label is free to say the true thing in the words that are
  * actually about the job. The tone stays 'weak', so nothing about the styling changes.
+ *
+ * ---
+ *
+ * Thresholds recalibrated 2026-08-03, and the earlier measurement in this file (400 postings,
+ * three resumes, "Strong match" fires on 2 of 1116 pairs) is the ISSUE-023 BASELINE, not a
+ * current reading. It is superseded by the sweep below.
+ *
+ * ISSUE-023: the thresholds were 65 and 40, and 96.0% of ON-FIELD pairs read "Not much overlap".
+ * "Strong match" was reached by 0.6%. A label with four values that returns one of them 24 times
+ * out of 25 carries no information, and it is the label a student uses to choose where to apply.
+ *
+ * Measured over 600 live postings against the six real base resumes on the system, split by whether
+ * the posting's title shares a word with a title the student has actually held:
+ *
+ *   ON-FIELD  (n=655)   p50 8   p75 17   p90 25   p95 33   p99 50   max 80
+ *   OFF-FIELD (n=2459)  p50 0   p75  8   p90 16   p95 19   p99 33   max 57
+ *
+ * Candidates trialled against that distribution, as share of on-field pairs per band:
+ *
+ *   65/40/20   strong  0.6%   solid  3.4%   some 14.0%   none 82.0%
+ *   45/25/12   strong  1.5%   solid 13.3%   some 18.8%   none 66.4%
+ *   40/22/10   strong  4.0%   solid 12.1%   some 22.7%   none 61.2%   <- shipped
+ *   30/18/ 8   strong  8.7%   solid 11.8%   some 37.4%   none 42.1%
+ *
+ * 40/22/10 is the point where every band is reachable and the top band still means something: it is
+ * hit by 4.0% of on-field pairs and 0.4% of off-field ones, so "Strong match" is ten times more
+ * likely on a posting in the student's own field than off it. 61% remains in the bottom band, which
+ * is the honest answer for a board where most postings are in somebody else's discipline.
+ *
+ * THESE ARE NOT A CURVE, and the number is never restated. 40 means the resume covers 40% of what
+ * the posting weighted, and the caption next to the band says "N of M requirements" so the student
+ * can see the denominator the band was drawn on. What changed is where the lines sit, not what the
+ * number counts.
  */
+/** A requirements block more than half unmet caps the band, whatever the score. */
+const REQUIRED_COVERAGE_GATE = 0.5;
+
+const BAND_STRONG = 40;
+const BAND_SOLID = 22;
+const BAND_SOME = 10;
+
 export function scoreBand(
   score: number,
   requiredCoverage: number | null = null,
@@ -1357,9 +1611,10 @@ export function scoreBand(
   // Measured: a posting requiring Kubernetes, Terraform and Kafka scored 61 with every weight-1
   // term missed. Calling that a strong match is the one thing this number must never do, so the
   // band is capped when the requirements block is more than half unmet.
-  const gatedByRequirements = requiredCoverage !== null && requiredCoverage < 0.5;
-  if (score >= 65 && !gatedByRequirements) return { label: 'Strong match', tone: 'strong' };
-  if (gatedByRequirements && score >= 40) return { label: 'Missing key requirements', tone: 'fair' };
-  if (score >= 40) return { label: 'Partial match', tone: 'fair' };
+  const gatedByRequirements = requiredCoverage !== null && requiredCoverage < REQUIRED_COVERAGE_GATE;
+  if (score >= BAND_STRONG && !gatedByRequirements) return { label: 'Strong match', tone: 'strong' };
+  if (gatedByRequirements && score >= BAND_SOLID) return { label: 'Missing key requirements', tone: 'fair' };
+  if (score >= BAND_SOLID) return { label: 'Solid match', tone: 'fair' };
+  if (score >= BAND_SOME) return { label: 'Some overlap', tone: 'fair' };
   return { label: 'Not much overlap', tone: 'weak' };
 }
