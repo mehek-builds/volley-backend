@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {
   parsedProfileFromModelText,
   parsedProfileWithOneRepair,
+  printedGpaIn,
+  reconcileGpaWithSource,
   splitSpokenLanguages,
   SYSTEM_PROMPT,
 } from './parse';
@@ -229,4 +231,119 @@ test('the parse prompt keeps spoken languages out of the skills field', () => {
   assert.match(flat, /programming languages are NOT spoken languages and belong in "skills"/i);
   // The parser may not manufacture a fluency claim the page never printed.
   assert.match(flat, /never infer a language from the applicant's name, school, or country/i);
+});
+
+/* ISSUE-021, found on Mehek's live production account 2026-08-03. Her uploaded resume prints
+ * "GPA: 3.89/4.0". The parser stored gpa "3.8" with gpa_scale "4.0": the denominator survived and
+ * the last digit of the grade did not. The parse feeds application_profile through
+ * academicSeedFrom, and application_profile is what the extension types into an employer's GPA
+ * field, so a dropped digit here is a false factual claim on a real job application.
+ *
+ * The defence is deterministic and lives in reconcileGpaWithSource: the resume text says what the
+ * resume prints, so the model's transcription is checked against it rather than trusted. */
+
+test('a truncated GPA is corrected against what the resume prints', () => {
+  const source = 'EDUCATION\nUniversity of Southern California\nBS Computer Science, GPA: 3.89/4.0\n';
+  const fixed = reconcileGpaWithSource({ gpa: '3.8', gpa_scale: '4.0' }, source);
+  assert.equal(fixed.gpa, '3.89');
+  assert.equal(fixed.gpa_scale, '4.0');
+});
+
+test('a correctly transcribed GPA is left exactly as the model returned it', () => {
+  const source = 'Cumulative GPA: 3.89/4.0';
+  const fixed = reconcileGpaWithSource({ gpa: '3.89', gpa_scale: '4.0' }, source);
+  assert.equal(fixed.gpa, '3.89');
+  assert.equal(fixed.gpa_scale, '4.0');
+});
+
+test('a printed denominator travels with a corrected grade', () => {
+  // A 10.0-scale record misread as 8.9/4.0 would restate an Indian CGPA as a near-perfect US one.
+  const fixed = reconcileGpaWithSource({ gpa: '8.9', gpa_scale: '4.0' }, 'CGPA: 8.94/10.0');
+  assert.equal(fixed.gpa, '8.94');
+  assert.equal(fixed.gpa_scale, '10.0');
+});
+
+test('a scale the resume never printed is not invented by the correction', () => {
+  const fixed = reconcileGpaWithSource<{ gpa?: string; gpa_scale?: string }>(
+    { gpa: '3.8' },
+    'Grade point average 3.89',
+  );
+  assert.equal(fixed.gpa, '3.89');
+  assert.equal(fixed.gpa_scale, undefined, 'guessing 4.0 misstates a 10.0-scale record');
+});
+
+test('an empty model answer is never filled in from the source text', () => {
+  // A resume printing only a major GPA states no overall grade. The model abstaining is an answer,
+  // and turning it into a number would be the fabrication the whole GPA rule exists to prevent.
+  const fixed = reconcileGpaWithSource({ gpa: '' }, 'Major GPA: 3.95/4.0');
+  assert.equal(fixed.gpa, '');
+});
+
+test('two disagreeing printed GPAs leave the judgement with the model', () => {
+  const source = 'Major GPA: 3.95/4.0 | Cumulative GPA: 3.89/4.0';
+  assert.equal(printedGpaIn(source), null);
+  assert.equal(reconcileGpaWithSource({ gpa: '3.8' }, source).gpa, '3.8');
+});
+
+test('the same GPA printed twice is still one unambiguous reading', () => {
+  const reading = printedGpaIn('GPA 3.89\nOverall GPA: 3.89/4.0');
+  assert.deepEqual(reading, { gpa: '3.89', scale: '4.0' });
+});
+
+test('a resume that prints no GPA yields no reading', () => {
+  assert.equal(printedGpaIn('EDUCATION\nBS Computer Science, May 2027\n'), null);
+});
+
+/* The reconciliation itself can falsify a credential if it guesses, and it only ever runs on cases
+ * where the model DISAGREES with it - which on a correct model answer means these strings would
+ * turn a right answer into a wrong one. Caught in review before shipping: the first draft took the
+ * first number after the label, so "GPA (out of 4.0): 3.89" read as 4.0 and a real 3.89 would have
+ * been written into application_profile, and typed into employer forms, as a perfect score.
+ *
+ * Every string here must DECLINE. A decline costs nothing: the model's own answer stands. */
+
+test('a denominator printed before the grade is never read as the grade', () => {
+  for (const source of [
+    'GPA (out of 4.0): 3.89',
+    'GPA out of 4.0: 3.89',
+    'GPA on a 4.0 scale: 3.89',
+    'Cumulative GPA (4.0 scale): 3.89',
+    'CGPA (out of 10): 8.94',
+  ]) {
+    assert.equal(printedGpaIn(source), null, source);
+    // And the correct model answer survives untouched.
+    const kept = reconcileGpaWithSource({ gpa: '3.89', gpa_scale: '4.0' }, source);
+    assert.equal(kept.gpa, '3.89', source);
+    assert.equal(kept.gpa_scale, '4.0', source);
+  }
+});
+
+test('a European decimal comma is declined rather than read as its integer half', () => {
+  const source = 'GPA: 3,89/4,0';
+  assert.equal(printedGpaIn(source), null);
+  assert.equal(reconcileGpaWithSource({ gpa: '3.89', gpa_scale: '4.0' }, source).gpa, '3.89');
+});
+
+test('a percentage is not a GPA, however it is labelled', () => {
+  assert.equal(printedGpaIn('GPA: 85%'), null);
+  assert.equal(printedGpaIn('Cumulative Average: 92.4'), null);
+  assert.equal(printedGpaIn('Grade point average: 78.5%'), null);
+});
+
+test('a grade above its own denominator is a misread, not a record', () => {
+  assert.equal(printedGpaIn('GPA: 8.9/4.0'), null);
+  // No printed denominator either: no grading scale tops out below this.
+  assert.equal(printedGpaIn('GPA 87'), null);
+});
+
+test('a number the pattern cut short is declined', () => {
+  // Four decimal places overrun the capture, so what was read is not what was printed.
+  assert.equal(printedGpaIn('GPA: 3.8912'), null);
+});
+
+test('a corrected grade never keeps a denominator it no longer fits inside', () => {
+  // "8.94 out of 4.0" is not a record anyone has. The model's scale is what is now unsupported.
+  const fixed = reconcileGpaWithSource({ gpa: '8.9', gpa_scale: '4.0' }, 'Grade point average 8.94');
+  assert.equal(fixed.gpa, '8.94');
+  assert.equal(fixed.gpa_scale, '', 'an unsupported denominator goes back to being a gap');
 });

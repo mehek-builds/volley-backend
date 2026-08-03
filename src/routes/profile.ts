@@ -4,6 +4,7 @@ import { profiles, experience_bank, application_profile, targeting } from '../db
 import { eq, sql } from 'drizzle-orm';
 import { requireAuth } from '../middleware/auth';
 import { encryptField } from '../lib/fieldCrypto';
+import { decryptRow } from './applicationProfile';
 import { parseResumeWithClaude, parseResumeFromPdf, ParsedProfile } from '../llm/parse';
 import { extractPdfText } from '../lib/pdfText';
 import { MultipartFile } from '@fastify/multipart';
@@ -279,10 +280,92 @@ export function parsedTargetRolesForSeed(value: unknown): string[] {
 // profile, and the R-015 fix reached the resume only. A non-empty declared list now overrides
 // parsed_json.skills; parsed_json stays the fallback so un-onboarded users (skills = NULL) are
 // served exactly what they were before.
-export function serveProfileJson(parsedJson: unknown, declaredSkills: unknown, email?: string): Record<string, unknown> {
+/* THE SOURCE OF TRUTH FOR THE ACADEMIC RECORD IS application_profile, NOT THIS PARSE.
+ *
+ * Two stores held the same real-world fact and nothing reconciled them. On a live account on
+ * 2026-08-03 the parse said gpa "3.8" while application_profile said "3.89"; the resume printed
+ * "GPA: 3.89/4.0", so the parse was simply wrong (fixed at the source in llm/parse.ts). The number
+ * that reaches an employer comes from application_profile - the extension reads GET
+ * /profile/application (adapters/grades.ts) and the managed runner reads the same row
+ * (submissionRunner.ts) - so autofill was already correct. The parse was the wrong copy, and it was
+ * the copy the dashboard displayed back to the student as her profile.
+ *
+ * That ordering is not an accident and is now enforced here rather than left implicit:
+ *
+ *   application_profile  - what the student typed, or what /profile/harvest watched her type into a
+ *                          real employer form. A first-hand claim by the person it is about.
+ *   parsed_json          - an LLM's reading of a PDF, seeded into the blanks of the above by
+ *                          academicSeedFrom and never allowed to overwrite it.
+ *
+ * So an existing application_profile row is the whole answer for these three fields, including when
+ * it is blank: blank there means "not on record", and the value autofill would send is nothing.
+ * Serving the parse's number in that case would show the student a grade the product will never
+ * use. Users with no row at all are untouched - there is no second value to contradict.
+ *
+ * This is a read-time override only. Nothing here is written back: PATCH /profile/education and
+ * PATCH /profile/parsed both patch the STORED parsed_json and cannot address gpa, gpa_scale or
+ * major, and the application-profile round-trip re-reads its own row.
+ */
+const ACADEMIC_FIELDS = ['gpa', 'gpa_scale', 'major'] as const;
+
+export function academicsOfRecord(
+  applicationRow: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  if (!applicationRow) return {};
+  const out: Record<string, unknown> = {};
+  for (const field of ACADEMIC_FIELDS) {
+    const value = applicationRow[field];
+    out[field] = typeof value === 'string' && value.trim().length > 0 ? value.trim() : '';
+  }
+  return out;
+}
+
+export function serveProfileJson(
+  parsedJson: unknown,
+  declaredSkills: unknown,
+  email?: string,
+  // The decrypted application_profile row, when the student has one. Undefined means "no row",
+  // which leaves the parse's academic fields exactly as they were.
+  applicationRow?: Record<string, unknown>,
+): Record<string, unknown> {
   const base = (parsedJson && typeof parsedJson === 'object' ? parsedJson : {}) as Record<string, unknown>;
   const declared = declaredSkillsList(declaredSkills);
-  return { ...base, ...(declared.length > 0 ? { skills: declared } : {}), ...(email ? { email } : {}) };
+  return {
+    ...base,
+    ...(declared.length > 0 ? { skills: declared } : {}),
+    ...(email ? { email } : {}),
+    ...academicsOfRecord(applicationRow),
+  };
+}
+
+/* The application_profile row behind serveProfileJson's academic override, decrypted.
+ *
+ * gpa is in ENCRYPTED_FIELDS, so reading it can fail on a wrong or rotated ENCRYPTION_KEY. This
+ * route does not 500 on that the way GET /profile/application does (R-021), because the caller here
+ * wants a resume profile and a config problem with one field should not take the whole page down.
+ * It returns a row with the academic fields blank instead, which suppresses the number rather than
+ * falling back to the parse: falling back is what put a contradicting grade on the screen in the
+ * first place. Nothing is written, so the ciphertext stays recoverable.
+ */
+async function applicationRowForProfile(
+  userId: string,
+  fastify: FastifyInstance,
+): Promise<Record<string, unknown> | undefined> {
+  const [row] = await db
+    .select()
+    .from(application_profile)
+    .where(eq(application_profile.user_id, userId))
+    .limit(1);
+  if (!row) return undefined;
+  try {
+    return decryptRow(row) as Record<string, unknown>;
+  } catch (err) {
+    fastify.log.error(
+      { err, userId },
+      'application_profile could not be decrypted while serving the resume profile. Serving the academic record as blank rather than falling back to the resume parse, which is not the source of truth for it.',
+    );
+    return {};
+  }
 }
 
 // ParsedProfile -> experience_bank rows.
@@ -701,11 +784,13 @@ export async function profileRoutes(fastify: FastifyInstance) {
     // Fill the academic gaps the upload already answered. Best-effort and non-fatal: the parse is
     // what the student came for, and a failure here costs one extra question rather than signup.
     let gaps_prefilled: string[] = [];
+    let seedRowExists = false;
     try {
       const [existing] = await db
         .select()
         .from(application_profile)
         .where(eq(application_profile.user_id, userId));
+      seedRowExists = Boolean(existing);
       const seed = academicSeedFrom(parsedProfile, existing as Record<string, unknown> | undefined);
       if (Object.keys(seed).length > 0) {
         await db
@@ -713,13 +798,32 @@ export async function profileRoutes(fastify: FastifyInstance) {
           .values({ user_id: userId, ...seed })
           .onConflictDoUpdate({ target: application_profile.user_id, set: seed });
         gaps_prefilled = Object.keys(seed);
+        seedRowExists = true;
       }
     } catch (err) {
       fastify.log.warn({ err, userId }, 'could not prefill academic fields from resume parse');
     }
 
+    /* The academic record as it stands AFTER seeding, so this response states the same gpa, scale
+     * and major that GET /profile will serve and that autofill will type. Without it a re-upload
+     * answers with the parse's own numbers, which is the contradiction the seed rule (never
+     * overwrite) creates by design: a held value wins in the database and loses in the reply.
+     *
+     * Read in its own try, NOT inside the seeding one above. Sharing that catch meant a failed read
+     * left this undefined, which serves the parse's numbers - the precise fallback the other three
+     * serving sites refuse to make. A row that is known to exist but could not be read resolves to
+     * {} instead, which blanks the three fields rather than stating a number nothing will use. */
+    let academicRecord: Record<string, unknown> | undefined;
+    try {
+      academicRecord = await applicationRowForProfile(userId, fastify);
+    } catch (err) {
+      fastify.log.warn({ err, userId }, 'could not read the academic record back after seeding');
+      academicRecord = seedRowExists ? {} : undefined;
+    }
+
     return reply.status(200).send({
       ...parsedProfile,
+      ...academicsOfRecord(academicRecord),
       bank_seeded,
       bank_total,
       bank_enriched,
@@ -825,7 +929,12 @@ export async function profileRoutes(fastify: FastifyInstance) {
       // more reliable source and autofill (Lever/Greenhouse/etc.) needs one to fill the email
       // field at all - confirmed missing on every live-tested application until this fix.
       // Skills come from serveProfileJson: declared list first, parsed_json as fallback (R-027).
-      return reply.status(200).send(serveProfileJson(profile[0].parsed_json, profile[0].skills, request.jwtPayload!.email));
+      // The academic record comes from application_profile, which is the store autofill actually
+      // types from - see the source-of-truth note on serveProfileJson.
+      const applicationRow = await applicationRowForProfile(userId, fastify);
+      return reply.status(200).send(
+        serveProfileJson(profile[0].parsed_json, profile[0].skills, request.jwtPayload!.email, applicationRow),
+      );
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to retrieve profile' });
@@ -856,7 +965,8 @@ export async function profileRoutes(fastify: FastifyInstance) {
       const next = applyParsedProfilePatch(current, parsed.data);
 
       await db.update(profiles).set({ parsed_json: next, updated_at: new Date() }).where(eq(profiles.user_id, userId));
-      return reply.status(200).send(serveProfileJson(next, rows[0].skills, request.jwtPayload!.email));
+      const applicationRow = await applicationRowForProfile(userId, fastify);
+      return reply.status(200).send(serveProfileJson(next, rows[0].skills, request.jwtPayload!.email, applicationRow));
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to update education' });
@@ -872,6 +982,10 @@ export async function profileRoutes(fastify: FastifyInstance) {
     }
 
     try {
+      // Read outside the transaction on purpose: this patch cannot touch the academic fields (they
+      // are not in parsedProfilePatchSchema), so the row it overrides with is the same row before
+      // and after, and holding the transaction open for it would buy nothing.
+      const applicationRow = await applicationRowForProfile(userId, fastify);
       const result = await db.transaction(async (tx) => {
         const rows = await tx.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1);
         if (rows.length === 0) return null;
@@ -897,7 +1011,7 @@ export async function profileRoutes(fastify: FastifyInstance) {
             });
         }
 
-        return serveProfileJson(next, skills, request.jwtPayload!.email);
+        return serveProfileJson(next, skills, request.jwtPayload!.email, applicationRow);
       });
 
       if (!result) return reply.status(404).send({ error: 'Profile not found - upload a resume first' });
