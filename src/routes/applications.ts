@@ -5,7 +5,7 @@ import { and, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/index';
 import { readExperienceBank } from '../db/experienceBank';
-import { generated_resumes, profiles, users } from '../db/schema';
+import { generated_resumes, profiles, users, type ExperienceBankEntry } from '../db/schema';
 import {
   findPdfTextFidelityIssues,
   findPdfSafeMarginIssues,
@@ -105,6 +105,26 @@ function editableResumeSpec(value: unknown): ResumeSpec {
     throw new Error('Resume content is empty');
   }
   return spec;
+}
+
+/**
+ * Preserve the same explicit sparse-source decision that certified the generated resume.
+ *
+ * A student can continue onboarding when their selected recent role truthfully has fewer than
+ * three source bullets. Resume generation records that decision and allows only that bank entry
+ * through the minimum-bullet gate. The dashboard edit path used to omit the exception, so saving
+ * the unchanged, already-approved resume failed immediately before form filling.
+ */
+export function allowedSparseEntriesForApplicationEdit(
+  parsed: unknown,
+  bank: ExperienceBankEntry[],
+): ExperienceBankEntry[] {
+  const review = (parsed as {
+    recent_experience_review?: { selected_entry_id?: unknown; continue_with_found?: unknown };
+  } | null)?.recent_experience_review;
+  if (review?.continue_with_found !== true || typeof review.selected_entry_id !== 'string') return [];
+  const selected = bank.find((entry) => entry.id === review.selected_entry_id);
+  return selected ? [selected] : [];
 }
 
 export async function applicationRoutes(fastify: FastifyInstance) {
@@ -258,6 +278,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         grad_year?: number;
         currently_enrolled?: boolean;
         coursework?: string[];
+        recent_experience_review?: { selected_entry_id?: string | null; continue_with_found?: boolean };
       } | undefined;
       const education = {
         school: parsed?.school ?? '',
@@ -274,6 +295,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         declaredSkillsList(profileRows[0]?.skills),
         education,
         review.role,
+        {
+          allowedSingleBulletEntries: allowedSparseEntriesForApplicationEdit(parsed, bank),
+        },
       );
       if (validation.issues.length > 0) {
         return reply.status(422).send({
