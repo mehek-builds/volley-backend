@@ -199,11 +199,19 @@ test('target role validation rejects an empty normalized job title', () => {
   assert.ok(result.issues.includes('target role headline requires a non-empty job title'));
 });
 
-test('target role headline participates in banned punctuation validation', () => {
+/* The em-dash scan reads resumeSpecText, which is every word the resume PRINTS, and the target role
+   is no longer printed. So a dash in it is no longer a punctuation issue, and asserting that it is
+   would be asserting against a line that does not exist.
+
+   It is still caught, by a stricter check. resumeSafeTargetRole normalises en and em dashes to
+   hyphens, so a raw dashed value cannot equal the resume-safe title and fails the exact-match rule
+   instead. Same defect, named accurately. */
+test('a dashed target role fails the exact-match rule, not the printed-punctuation rule', () => {
   const s = spec([]);
   s.target_role = `Analytics Engineer ${String.fromCharCode(0x2014)} Growth`;
-  const result = validateResumeSpec(s, 'analytics engineering role');
-  assert.ok(result.issues.includes('spec contains an em dash'));
+  const result = validateResumeSpec(s, 'analytics engineering role', [], undefined, undefined, 'Analytics Engineer - Growth');
+  assert.ok(!result.issues.includes('spec contains an em dash'));
+  assert.ok(result.issues.includes('target role headline does not exactly match the resume-safe job title'));
 });
 
 test('a title swapped for a completely different one is flagged, a light rewrite is not', () => {

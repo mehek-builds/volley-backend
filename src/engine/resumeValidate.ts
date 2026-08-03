@@ -689,7 +689,13 @@ export function courseworkIsUngrounded(rendered: string, allowed: string[] | und
  */
 export function resumeSpecText(spec: ResumeSpec): string {
   return [
-    spec.target_role ?? '',
+    /* NO target_role. This is "every word a resume spec puts on the page", and since the header
+       stopped printing the posting's job title, that title is no longer on the page. Leaving it in
+       would credit the student's match score for text no employer will ever read, and the score is
+       defined as their resume against the posting's requirements. It also scored a free hit every
+       time: the string came FROM the posting, so it matched the posting by construction.
+
+       Match scores drop slightly and correctly as a result. */
     spec.school,
     spec.degree,
     spec.grad_date,
