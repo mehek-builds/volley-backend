@@ -49,27 +49,35 @@ export function beginStall(
 }
 
 /**
- * Close a stall when the application stops waiting on a human. Does NOT delete it.
+ * Statuses that mean the PIPELINE moved the row, not that a human acted.
  *
- * An earlier version deleted the stall on any status other than 'needs_attention'. That was wrong
- * twice over, and the two mistakes hid each other:
+ * A stall stays open across all of them. This is the distinction the first two attempts at this
+ * function both missed: an automated re-run walks a stalled application through 'submit_requested',
+ * 'preparing', 'filling' and 'submitting' on its way to stalling again, and treating any of those
+ * as "the wait ended" resets the clock on the next beginStall and stamps a resolution time on a
+ * challenge nobody touched. Deleting the stall and closing the stall were equally wrong here for
+ * exactly the same reason: what matters is not whether the record survives, it is whether the WAIT
+ * is over. Machinery moving is not the applicant acting.
+ */
+const IN_FLIGHT: ReadonlySet<ApplicationReviewState['status']> = new Set([
+  'submit_requested',
+  'preparing',
+  'filling',
+  'submitting',
+  'submission_claimed',
+]);
+
+/**
+ * Close a stall when the wait genuinely ends.
  *
- *  1. It broke the clock it was supposed to protect. A re-run moves the row through 'preparing' and
- *     'submitting' before it can stall again, and those transitions deleted the stall, so
- *     `beginStall` never saw a previous `stalled_at` and minted a new one every cycle. The set-once
- *     rule was unreachable in production while its unit test passed on a hand-built object the
- *     pipeline could not produce.
- *  2. It threw away the measurement. Time-to-resolution is the number that decides whether a
- *     challenge is a two-second annoyance or the reason applications never get sent, and it can only
- *     be computed from a stall that outlives its own resolution.
- *
- * Deleting was never necessary anyway: the queue selects on status, so a resolved stall on a
- * submitted application is invisible to it regardless. Keeping the record is strictly more useful
- * and strictly less fragile.
+ * Closed, never deleted: the queue selects on status, so a resolved stall is already invisible to
+ * it, and keeping the record preserves resolved_at minus stalled_at - the time-to-resolution number
+ * that decides whether a challenge is a two-second annoyance or the reason applications never get
+ * sent.
  */
 export function settleStall(review: ApplicationReviewState, now: () => string = () => new Date().toISOString()): ApplicationReviewState {
   if (!review.stall || review.stall.resolved_at) return review;
-  if (review.status === 'needs_attention') return review;
+  if (review.status === 'needs_attention' || IN_FLIGHT.has(review.status)) return review;
   return { ...review, stall: { ...review.stall, resolved_at: now() } };
 }
 

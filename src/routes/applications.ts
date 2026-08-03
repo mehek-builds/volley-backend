@@ -344,7 +344,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const updatedSpec = {
         ...rendered.spec,
         _contact: contact,
-        _review: updatedReview,
+        // Through settleStall like every other writer: this route can run on an application that is
+      // waiting on a challenge, and abandoning that wait has to close it rather than carry an open
+      // stall into a status the queue no longer looks at.
+      _review: settleStall(updatedReview as ApplicationReviewState),
         ...(stored._cover_letter ? { _cover_letter: stored._cover_letter } : {}),
         _quality: {
           ...(stored._quality as Record<string, unknown> | undefined),

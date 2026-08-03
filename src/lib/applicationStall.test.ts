@@ -119,17 +119,57 @@ test('a stall stays open while the application is still waiting on a human', () 
   assert.deepEqual(settleStall(review({ status: 'needs_attention', stall: STALL })).stall, STALL);
 });
 
+// In-flight statuses are the pipeline moving the row, NOT the applicant acting, so the wait is
+// still running and the stall stays open. Closing here is what reset the clock twice.
+const STILL_WAITING = new Set<ApplicationReviewState['status']>([
+  'needs_attention',
+  'submit_requested',
+  'preparing',
+  'filling',
+  'submitting',
+  'submission_claimed',
+]);
+
 for (const status of ALL_STATUSES) {
-  test(`status ${status}: the stall is open only while needs_attention`, () => {
+  test(`status ${status}: the stall closes only when the wait is genuinely over`, () => {
     const settled = settleStall(review({ status, stall: STALL }), AT('2026-08-04T12:00:00.000Z'));
     assert.equal(
       settled.stall?.resolved_at,
-      status === 'needs_attention' ? undefined : '2026-08-04T12:00:00.000Z',
+      STILL_WAITING.has(status) ? undefined : '2026-08-04T12:00:00.000Z',
     );
     // Closed, never deleted: resolved_at minus stalled_at is the time-to-resolution measurement.
     assert.equal(settled.stall?.stalled_at, STALL.stalled_at);
   });
 }
+
+// The end-to-end regression. An automated re-run walks a stalled application through
+// submit_requested -> preparing -> filling before it stalls again. Two earlier versions of this
+// module broke here: the first deleted the stall on those transitions, the second closed it, and
+// both made the next beginStall mint a new clock. The queue would then send the longest-waiting
+// application to the back of its own queue on every poll, burying the one case it exists to raise.
+test('a full automated re-run does not restart the clock or fake a resolution', () => {
+  let state = applyReviewPatch(review({ status: 'submitting' }), {
+    status: 'needs_attention',
+    ...beginStall({}, { surface: 'server_run', provider: 'recaptcha_v2', stage: 'at_submit', source: 'observed' }, AT('2026-08-01T00:00:00.000Z')),
+  }, AT('2026-08-01T00:00:00.000Z'));
+
+  for (const [status, at] of [
+    ['submit_requested', '2026-08-01T00:05:00.000Z'],
+    ['preparing', '2026-08-01T00:06:00.000Z'],
+    ['filling', '2026-08-01T00:06:30.000Z'],
+  ] as const) {
+    state = applyReviewPatch(state, { status }, AT(at));
+    assert.equal(state.stall?.resolved_at, undefined, `${status} must not fake a resolution`);
+  }
+
+  state = applyReviewPatch(state, {
+    status: 'needs_attention',
+    ...beginStall(state, { surface: 'server_run', provider: 'recaptcha_v2', stage: 'at_submit', source: 'observed' }, AT('2026-08-01T00:07:00.000Z')),
+  }, AT('2026-08-01T00:07:00.000Z'));
+
+  assert.equal(state.stall?.stalled_at, '2026-08-01T00:00:00.000Z');
+  assert.equal(isWaitingOnHuman(state), true);
+});
 
 test('settling twice does not move the resolution time', () => {
   const once = settleStall(review({ status: 'submitted', stall: STALL }), AT('2026-08-04T12:00:00.000Z'));
@@ -198,7 +238,7 @@ test('a patch that stalls an application keeps the stall open', () => {
 
 // The interaction that the runner's fail() depends on: a stall spread into a patch whose status is
 // NOT needs_attention is closed on the way in, so a non-CAPTCHA failure cannot leave an open stall.
-test('a patch that ends in a non-attention status closes the stall it carries', () => {
+test('a patch that ends in a genuinely finished status closes the stall it carries', () => {
   const merged = applyReviewPatch(
     review({ status: 'needs_attention', stall: STALL }),
     { status: 'failed' },

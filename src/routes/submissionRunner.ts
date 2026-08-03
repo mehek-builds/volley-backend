@@ -494,18 +494,10 @@ async function prepareManaged(
     questions: mergedQuestions,
     cover_letter_supported: coverLetterSupported,
     attention_reason: [...blockers, ...discoveryAttention].join('\n') || undefined,
-    // Same observation as the direct path, but the provider stays 'unknown': the managed runner
-    // reports a finished blocker sentence and there is no Page here to identify the vendor from.
-    // Recorded as 'observed' regardless, because the challenge itself genuinely was seen - it is the
-    // PROVIDER that is unknown, not the stall.
-    ...(blockersIncludeCaptcha(blockers)
-      ? beginStall(current, {
-        surface: 'server_run',
-        provider: 'unknown',
-        stage: 'at_submit',
-        source: 'observed',
-      })
-      : {}),
+    // No stall write here, deliberately. CAPTCHA_BLOCKER is pushed in exactly one place -
+    // fillPortal - and the managed path never calls it, so matching on that string here would be
+    // dead code that reads like coverage. The managed path's real challenge signal is the probe in
+    // submitManaged, which throws CaptchaUnresolvedError and records the stall through fail().
     handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
     submission_error: undefined,
   });
