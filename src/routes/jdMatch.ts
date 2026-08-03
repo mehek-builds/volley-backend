@@ -12,7 +12,7 @@ import { buildFunnel } from '../engine/funnel';
 import { deriveStage, isStage, STAGES, BOARD_LIMIT } from '../engine/pipeline';
 import { buildInterviewPrep } from '../engine/interviewPrep';
 import { extractJdTerms } from '../engine/jdMatch';
-import { generated_resumes, autofill_events } from '../db/schema';
+import { generated_resumes, autofill_events, monitored_jobs } from '../db/schema';
 import { readExperienceBank } from '../db/experienceBank';
 import type { ResumeSpec } from '../llm/resumeSpec';
 
@@ -83,10 +83,52 @@ const bodySchema = z.object({
   // empty string used to score as a confident 0% "Weak match", a claim about them that the input
   // never supported.
   resume_text: z.string().min(1, 'resume_text cannot be empty').max(30_000).optional(),
-  // The posting's own company and role. Excluded from the requirement set: a posting never asks a
-  // student to have experience with the company they are applying to, or with its job title.
-  job_context: z.object({ company: z.string().max(200).optional(), role: z.string().max(200).optional() }).optional(),
+  // The posting's own company, role and offices. Excluded from the requirement set: a posting never
+  // asks a student to have experience with the company they are applying to, with its job title, or
+  // with the city it sits in.
+  //
+  // TWO WAYS TO SUPPLY THE LOCATION, and the id is the one clients should send.
+  //
+  // `location` is for a caller that already holds the job row (the ranking pass inside GET /jobs).
+  // `job_id` is for the review screen, which holds a saved application packet instead. The packet
+  // stores company, role and job_id and has never stored a location, so a client-side wiring would
+  // have covered only packets generated after the change and left every existing one scoring with
+  // its geography in the denominator. Resolving the id here covers all of them, and reads the LIVE
+  // row rather than a copy that was already stale by the time it was written.
+  //
+  // Nullable rather than merely optional because the job row the caller reads it from is, and
+  // forcing every caller to translate null to undefined is how a multi-site string ends up dropped.
+  job_context: z
+    .object({
+      company: z.string().max(200).optional(),
+      role: z.string().max(200).optional(),
+      location: z.string().max(500).nullish(),
+      job_id: z.string().uuid().nullish(),
+    })
+    .optional(),
 });
+
+/**
+ * The offices of the posting a saved packet was built for, or null when we cannot tell.
+ *
+ * Null is the ordinary answer for every packet that has no job_id: applications started from the
+ * extension or from a hand-typed link point at no monitored posting, and there is nothing to look
+ * up. Those score exactly as they did before, with the geography still in, which is the honest
+ * outcome rather than a guess at where the employer sits.
+ *
+ * Not scoped to the caller, and it does not need to be: `monitored_jobs` is the public board that
+ * GET /jobs already serves unauthenticated, and one nullable location column of a row the student
+ * is holding an application for discloses nothing they were not already shown.
+ */
+async function postingLocation(jobId: string | null | undefined): Promise<string | null> {
+  if (!jobId) return null;
+  const [row] = await db
+    .select({ location: monitored_jobs.location })
+    .from(monitored_jobs)
+    .where(eq(monitored_jobs.id, jobId))
+    .limit(1);
+  return row?.location ?? null;
+}
 
 export async function jdMatchRoutes(fastify: FastifyInstance) {
   fastify.post('/jd-match', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
@@ -113,7 +155,10 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
     }
 
     const resumeText = body.resume_text ?? storedResumeText ?? '';
-    const result = scoreJdMatch(resumeText, body.jd_text, body.job_context);
+    const result = scoreJdMatch(resumeText, body.jd_text, {
+      ...body.job_context,
+      location: body.job_context?.location ?? (await postingLocation(body.job_context?.job_id)),
+    });
 
     return reply.status(200).send({
       score: result.score,
@@ -342,7 +387,17 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
     const parsed = z
       .object({
         jd_text: z.string().min(1).max(60_000),
-        job_context: z.object({ company: z.string().max(200).optional(), role: z.string().max(200).optional() }).optional(),
+        /* Same three exclusions as POST /jd-match, for the same reason and via the same helper.
+           This route runs extractJdTerms too, so without them it turns the employer's office list
+           into interview questions: "tell me about your experience with Bellevue". */
+        job_context: z
+          .object({
+            company: z.string().max(200).optional(),
+            role: z.string().max(200).optional(),
+            location: z.string().max(500).nullish(),
+            job_id: z.string().uuid().nullish(),
+          })
+          .optional(),
         spec: z
           .object({
             experience: z
@@ -372,7 +427,13 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
     // it merged two meaningful sets when `matched` is structurally always empty against an empty
     // resume, and it dragged the scorer's user-facing copy along with it into a panel that is not
     // about scoring.
-    const prep = buildInterviewPrep(extractJdTerms(parsed.data.jd_text, parsed.data.job_context), spec);
+    const prep = buildInterviewPrep(
+      extractJdTerms(parsed.data.jd_text, {
+        ...parsed.data.job_context,
+        location: parsed.data.job_context?.location ?? (await postingLocation(parsed.data.job_context?.job_id)),
+      }),
+      spec,
+    );
     if (prep.items.length === 0) {
       return reply.status(200).send({
         ...prep,

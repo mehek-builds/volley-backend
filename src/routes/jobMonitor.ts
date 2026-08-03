@@ -659,12 +659,13 @@ export function rankByFit<T extends RankableJob>(
 ): Array<{ row: T; score: number | null }> {
   const scored = rows.map((row, index) => ({
     row,
-    // The posting never asks for experience with its own company or job title, so both are excluded
-    // from the requirement set. Same context the review screen passes.
+    // The posting never asks for experience with its own company, job title or offices, so all
+    // three are excluded from the requirement set. Same context the review screen passes.
     score: resumeText.trim()
       ? scoreJdMatch(resumeText, row.scored_description ?? '', {
           company: row.company_name,
           role: row.title,
+          location: row.location,
         }).score
       : null,
     preferenceScore: preferenceFit(row, targetingPreferences).score,
@@ -1464,16 +1465,29 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     /* Back into ranked order, and silently dropping any id that no longer resolves — a posting
        deactivated since the ranking was built is simply gone, which is the truth. */
     const byId = new Map(rows.map((row) => [row.id, row]));
+    /* NULL WHEN THE STUDENT HAS SAVED NO PREFERENCES, not 0.
+       preferenceFit floors at 0, and it returns 0 for two situations that are nothing alike: the
+       account asked for nothing, and the account asked for things this posting has none of. Only
+       this route can tell them apart, because only this route holds the targeting row. Sending 0
+       for both destroyed the distinction at the only point it existed, and the client then had to
+       invent one: Home drew a "0" ring labelled "fit" for accounts that had never been asked what
+       they wanted, while Jobs drew nothing, so the two screens contradicted each other about the
+       same posting in the same session. That is ISSUE-014 in a second shape.
+       hasTargeting is the exact signal and it is already computed above for the unranked branch. */
+    const scored = hasTargeting(jobTargeting);
     const jobs = pageIds
       .map((id) => byId.get(id))
       .filter((row): row is (typeof rows)[number] => row !== undefined)
-      .map((row) => ({
-        ...withCompanyDomain(row),
-        match_score: ranking!.scores.get(row.id) ?? null,
-        preference_score: preferenceFit(row, jobTargeting).score,
-        preference_reasons: preferenceFit(row, jobTargeting).reasons,
-        sponsorship_evidence: evidenceFor(row),
-      }));
+      .map((row) => {
+        const fit = preferenceFit(row, jobTargeting);
+        return {
+          ...withCompanyDomain(row),
+          match_score: ranking!.scores.get(row.id) ?? null,
+          preference_score: scored ? fit.score : null,
+          preference_reasons: scored ? fit.reasons : [],
+          sponsorship_evidence: evidenceFor(row),
+        };
+      });
 
     return reply.send({
       jobs,
