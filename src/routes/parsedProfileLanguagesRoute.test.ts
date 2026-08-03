@@ -99,8 +99,10 @@ before(async () => {
   db = dbModule.db;
   pool = dbModule.pool;
 
-  // The whole schema, generated from db/schema.ts itself. Statement by statement because PGlite
-  // takes one at a time, and unsupported index/extension statements are not worth failing over.
+  // The whole schema, generated from db/schema.ts itself, one statement at a time because that is
+  // what PGlite takes. Deliberately not wrapped in a try: a statement this fixture cannot execute
+  // means the tables under test are not the tables in schema.ts, and a silently half-built fixture
+  // is worse than a failing one.
   const statements = await generateMigration(
     generateDrizzleJson({}),
     generateDrizzleJson(schema as unknown as Record<string, unknown>),
