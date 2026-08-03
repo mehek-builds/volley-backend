@@ -16,8 +16,10 @@ import {
   runManagedBrowser,
 } from '../lib/browserbase';
 import {
+  blockersIncludeCaptcha,
   buildManagedCaptchaProbeActions,
   buildManagedDiscoveryActions,
+  detectCaptchaProvider,
   captchaProviderForFamily,
   buildManagedPortalActions,
   CaptchaUnresolvedError,
@@ -39,7 +41,7 @@ import {
   type SubmissionPacket,
   type SupportedPortal,
 } from '../lib/portalSubmission';
-import { beginStall, withStallInvariant } from '../lib/applicationStall';
+import { applyReviewPatch, beginStall } from '../lib/applicationStall';
 import { sanitizeProviderBlockers } from '../lib/fieldLabel';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { resolveBlobUrl } from '../lib/resumeAccess';
@@ -83,11 +85,11 @@ type StandingAuthorization = {
   consentVersion?: string;
 };
 
-// withStallInvariant is applied to EVERY review write, which is why it lives here and not at the
-// call sites: the stall-only-while-needs_attention rule has to hold for writers that know nothing
-// about stalls. See applicationStall.ts for what it prevents.
+// Thin wrapper. The merge and the stall bookkeeping live in applicationStall.ts so that
+// routes/applications.ts, which writes _review directly and knows nothing about stalls, goes
+// through exactly the same code.
 function nextReview(current: ApplicationReviewState, patch: Partial<ApplicationReviewState>): ApplicationReviewState {
-  return withStallInvariant({ ...current, ...patch, updated_at: new Date().toISOString() });
+  return applyReviewPatch(current, patch);
 }
 
 async function writeReview(row: ResumeRow, review: ApplicationReviewState) {
@@ -492,6 +494,18 @@ async function prepareManaged(
     questions: mergedQuestions,
     cover_letter_supported: coverLetterSupported,
     attention_reason: [...blockers, ...discoveryAttention].join('\n') || undefined,
+    // Same observation as the direct path, but the provider stays 'unknown': the managed runner
+    // reports a finished blocker sentence and there is no Page here to identify the vendor from.
+    // Recorded as 'observed' regardless, because the challenge itself genuinely was seen - it is the
+    // PROVIDER that is unknown, not the stall.
+    ...(blockersIncludeCaptcha(blockers)
+      ? beginStall(current, {
+        surface: 'server_run',
+        provider: 'unknown',
+        stage: 'at_submit',
+        source: 'observed',
+      })
+      : {}),
     handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
     submission_error: undefined,
   });
@@ -543,6 +557,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
           surface: 'server_run',
           provider: captchaProviderForFamily(portal),
           stage: 'before_fill',
+          source: 'assumed',
         })
         : {}),
       submission_error: undefined,
@@ -633,6 +648,19 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       // guarantee and a future change to either cannot quietly reintroduce identifiers.
       attention_reason:
         [...sanitizedBlockers, ...discoveryAttention].join('\n') || undefined,
+      // The only path that OBSERVES a challenge on a board nobody had typed as gated, which makes it
+      // the one that matters most. Without it the stall is written only for JazzHR and BambooHR,
+      // families already known to gate, so the instrumentation could confirm what was already
+      // assumed and could never discover anything new. Provider is read off the live page here, so
+      // it is 'observed'.
+      ...(blockersIncludeCaptcha(sanitizedBlockers)
+        ? beginStall(current, {
+          surface: 'server_run',
+          provider: await detectCaptchaProvider(page),
+          stage: 'at_submit',
+          source: 'observed',
+        })
+        : {}),
       handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
       submission_error: undefined,
     });
@@ -772,6 +800,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
             surface: 'server_run',
             provider: captchaProviderForFamily(portal),
             stage: 'at_submit',
+            source: 'assumed',
           })
           : {}),
       }));
@@ -909,6 +938,7 @@ async function fail(row: ResumeRow, error: unknown) {
         surface: 'server_run',
         provider: captchaError.provider,
         stage: captchaError.stage,
+        source: 'observed',
       })
       : {}),
     status: captchaStop || uncertainAfterClaim ? 'needs_attention' : externalGate ? 'submit_requested' : 'failed',

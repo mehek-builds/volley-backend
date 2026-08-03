@@ -6,6 +6,8 @@ import {
   buildManagedCaptchaProbeActions,
   CAPTCHA_CHALLENGE_SELECTOR,
   CAPTCHA_RESPONSE_SELECTOR,
+  CAPTCHA_PROVIDER_MARKERS,
+  RECAPTCHA_INTERACTIVE_SELECTOR,
   captchaProviderForFamily,
   captchaSnapshotRequiresAttention,
   detectCaptchaProvider,
@@ -317,13 +319,34 @@ test('Stratus pauses on a challenge rather than clearing it', () => {
 // Recorded on the stall so instrumentation can answer "which families actually gate us" rather than
 // producing one undifferentiated count.
 
-function providerPage(selectorsPresent: Record<string, number>): Page {
+// Keys off the PRODUCTION constants and throws on anything else. Transcribing the selectors into
+// the test would let a production selector drift while every zero-count expectation kept passing
+// against a selector that no longer exists.
+const KNOWN_PROVIDER_SELECTORS = new Set<string>([
+  ...CAPTCHA_PROVIDER_MARKERS.map((marker) => marker.selector),
+  RECAPTCHA_INTERACTIVE_SELECTOR,
+]);
+
+function providerPage(selectorsPresent: Record<string, number | 'throws'>): Page {
   return {
-    locator: (selector: string) => ({
-      count: async () => selectorsPresent[selector] ?? 0,
-    }),
+    locator: (selector: string) => {
+      if (!KNOWN_PROVIDER_SELECTORS.has(selector)) {
+        throw new Error(`unexpected selector in providerPage: ${selector}`);
+      }
+      return {
+        count: async () => {
+          const value = selectorsPresent[selector] ?? 0;
+          if (value === 'throws') throw new Error('element is not attached to the DOM');
+          return value;
+        },
+      };
+    },
   } as unknown as Page;
 }
+
+const MARKER = Object.fromEntries(
+  CAPTCHA_PROVIDER_MARKERS.map((marker) => [marker.provider, marker.selector]),
+) as Record<string, string>;
 
 test('a page with no challenge markup reports an unknown provider', async () => {
   assert.equal(await detectCaptchaProvider(providerPage({})), 'unknown');
@@ -332,7 +355,7 @@ test('a page with no challenge markup reports an unknown provider', async () => 
 test('Turnstile is identified by its response field', async () => {
   assert.equal(
     await detectCaptchaProvider(providerPage({
-      '[name="cf-turnstile-response"], iframe[src*="challenges.cloudflare.com" i]': 1,
+      [MARKER.turnstile!]: 1,
     })),
     'turnstile',
   );
@@ -341,7 +364,7 @@ test('Turnstile is identified by its response field', async () => {
 test('hCaptcha is identified by its response field', async () => {
   assert.equal(
     await detectCaptchaProvider(providerPage({
-      '[name="h-captcha-response"], iframe[src*="hcaptcha.com" i]': 1,
+      [MARKER.hcaptcha!]: 1,
     })),
     'hcaptcha',
   );
@@ -350,7 +373,7 @@ test('hCaptcha is identified by its response field', async () => {
 test('Arkose is identified by its frame', async () => {
   assert.equal(
     await detectCaptchaProvider(providerPage({
-      'iframe[src*="arkoselabs" i], iframe[src*="funcaptcha" i]': 2,
+      [MARKER.arkose!]: 2,
     })),
     'arkose',
   );
@@ -361,8 +384,8 @@ test('Arkose is identified by its frame', async () => {
 test('a reCAPTCHA page with an interactive widget is v2', async () => {
   assert.equal(
     await detectCaptchaProvider(providerPage({
-      '[name="g-recaptcha-response"], iframe[src*="recaptcha" i]': 2,
-      'iframe[src*="recaptcha" i]:not(.grecaptcha-badge *)': 1,
+      [MARKER.recaptcha_v2!]: 2,
+      [RECAPTCHA_INTERACTIVE_SELECTOR]: 1,
     })),
     'recaptcha_v2',
   );
@@ -371,8 +394,8 @@ test('a reCAPTCHA page with an interactive widget is v2', async () => {
 test('a reCAPTCHA page with only the badge is v3', async () => {
   assert.equal(
     await detectCaptchaProvider(providerPage({
-      '[name="g-recaptcha-response"], iframe[src*="recaptcha" i]': 2,
-      'iframe[src*="recaptcha" i]:not(.grecaptcha-badge *)': 0,
+      [MARKER.recaptcha_v2!]: 2,
+      [RECAPTCHA_INTERACTIVE_SELECTOR]: 0,
     })),
     'recaptcha_v3',
   );
@@ -383,8 +406,8 @@ test('a reCAPTCHA page with only the badge is v3', async () => {
 test('a page carrying both reCAPTCHA and Turnstile reports Turnstile', async () => {
   assert.equal(
     await detectCaptchaProvider(providerPage({
-      '[name="cf-turnstile-response"], iframe[src*="challenges.cloudflare.com" i]': 1,
-      '[name="g-recaptcha-response"], iframe[src*="recaptcha" i]': 1,
+      [MARKER.turnstile!]: 1,
+      [MARKER.recaptcha_v2!]: 1,
     })),
     'turnstile',
   );
@@ -424,4 +447,26 @@ test('the submit guard carries the provider it saw while the page was open', asy
     assert.equal(error.stage, 'at_submit');
     return true;
   });
+});
+
+// The v2/v3 split decides whether a page is recorded as blocking a human at all, so a probe that
+// throws must not be read as the harmless variant.
+test('a reCAPTCHA page whose interactive probe throws is not recorded as the harmless v3', async () => {
+  assert.equal(
+    await detectCaptchaProvider(providerPage({
+      [MARKER.recaptcha_v2!]: 2,
+      [RECAPTCHA_INTERACTIVE_SELECTOR]: 'throws',
+    })),
+    'recaptcha_v2',
+  );
+});
+
+test('a marker probe that throws does not misreport a different provider', async () => {
+  assert.equal(
+    await detectCaptchaProvider(providerPage({
+      [MARKER.turnstile!]: 'throws',
+      [MARKER.hcaptcha!]: 1,
+    })),
+    'hcaptcha',
+  );
 });

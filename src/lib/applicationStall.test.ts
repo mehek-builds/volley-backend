@@ -1,7 +1,36 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { ApplicationReviewState } from './applicationReview';
-import { beginStall, orderByStalledAt, withStallInvariant } from './applicationStall';
+import {
+  applyReviewPatch,
+  beginStall,
+  isWaitingOnHuman,
+  orderByStalledAt,
+  settleStall,
+} from './applicationStall';
+
+// Compiler-checked exhaustive list. `satisfies` makes a new member of the status union a BUILD
+// failure here rather than a silently uncovered case: the previous version of this file listed five
+// statuses by hand and missed 'submit_requested' and 'submission_claimed', both of which this
+// feature's own code paths write.
+const ALL_STATUSES = [
+  'resume_ready',
+  'questions_ready',
+  'ready_to_submit',
+  'submit_requested',
+  'preparing',
+  'filling',
+  'needs_attention',
+  'ready_for_final_approval',
+  'submitting',
+  'submission_claimed',
+  'submitted',
+  'failed',
+] as const satisfies readonly ApplicationReviewState['status'][];
+
+type Status = ApplicationReviewState['status'];
+const _exhaustive: Status extends (typeof ALL_STATUSES)[number] ? true : never = true;
+void _exhaustive;
 
 function review(patch: Partial<ApplicationReviewState> = {}): ApplicationReviewState {
   return {
@@ -21,7 +50,10 @@ const STALL = {
   surface: 'server_run',
   provider: 'recaptcha_v2',
   stage: 'at_submit',
+  source: 'observed',
 } as const;
+
+const AT = (iso: string) => () => iso;
 
 // ---- beginStall ----
 
@@ -30,25 +62,25 @@ test('a new stall records when it began', () => {
     surface: 'server_run',
     provider: 'hcaptcha',
     stage: 'before_fill',
-  }, () => '2026-08-04T10:00:00.000Z');
+    source: 'observed',
+  }, AT('2026-08-04T10:00:00.000Z'));
   assert.deepEqual(stall, {
     kind: 'human_verification',
     stalled_at: '2026-08-04T10:00:00.000Z',
     surface: 'server_run',
     provider: 'hcaptcha',
     stage: 'before_fill',
+    source: 'observed',
   });
 });
 
-// The queue is ordered oldest-first, and the application nobody has dealt with is precisely the one
-// that keeps getting re-polled. Refreshing stalled_at on every re-observation would send it to the
-// back of its own queue every day, so the worst case would be the one thing never surfaced.
-test('re-observing the same stall does not restart its clock', () => {
+test('re-observing an open stall does not restart its clock', () => {
   const { stall } = beginStall({ stall: STALL }, {
     surface: 'server_run',
     provider: 'recaptcha_v2',
     stage: 'at_submit',
-  }, () => '2026-08-04T23:00:00.000Z');
+    source: 'observed',
+  }, AT('2026-08-04T23:00:00.000Z'));
   assert.equal(stall?.stalled_at, '2026-08-04T09:00:00.000Z');
 });
 
@@ -57,40 +89,70 @@ test('a stall that reaches a new stage updates the stage but keeps the clock', (
     surface: 'server_run',
     provider: 'turnstile',
     stage: 'before_fill',
-  }, () => '2026-08-04T09:00:00.000Z');
+    source: 'observed',
+  }, AT('2026-08-04T09:00:00.000Z'));
   const after = beginStall(before, {
     surface: 'server_run',
     provider: 'turnstile',
     stage: 'at_submit',
-  }, () => '2026-08-04T09:30:00.000Z');
+    source: 'observed',
+  }, AT('2026-08-04T09:30:00.000Z'));
   assert.equal(after.stall?.stage, 'at_submit');
   assert.equal(after.stall?.stalled_at, '2026-08-04T09:00:00.000Z');
 });
 
-// ---- the invariant ----
-
-test('a stall survives while the application is still waiting on a human', () => {
-  const kept = withStallInvariant(review({ status: 'needs_attention', stall: STALL }));
-  assert.deepEqual(kept.stall, STALL);
+// A resolved stall is finished business. Something stopping the application again is a NEW wait and
+// gets a new clock, otherwise the queue would age it from a challenge the applicant already cleared.
+test('a stall that follows a resolved one starts a fresh clock', () => {
+  const { stall } = beginStall(
+    { stall: { ...STALL, resolved_at: '2026-08-04T09:05:00.000Z' } },
+    { surface: 'server_run', provider: 'turnstile', stage: 'at_submit', source: 'observed' },
+    AT('2026-08-05T11:00:00.000Z'),
+  );
+  assert.equal(stall?.stalled_at, '2026-08-05T11:00:00.000Z');
+  assert.equal(stall?.resolved_at, undefined);
 });
 
-// The bug this exists to prevent: an application stalls on a challenge, is submitted on a later
-// run, and keeps its stall record forever. The queue then shows someone a job they already
-// finished, and they trust it less every time it happens.
-test('submitting an application clears its stall', () => {
-  const cleared = withStallInvariant(review({ status: 'submitted', stall: STALL }));
-  assert.equal('stall' in cleared, false);
+// ---- settleStall ----
+
+test('a stall stays open while the application is still waiting on a human', () => {
+  assert.deepEqual(settleStall(review({ status: 'needs_attention', stall: STALL })).stall, STALL);
 });
 
-for (const status of ['submitting', 'filling', 'preparing', 'failed', 'ready_to_submit'] as const) {
-  test(`leaving needs_attention for ${status} clears the stall`, () => {
-    assert.equal('stall' in withStallInvariant(review({ status, stall: STALL })), false);
+for (const status of ALL_STATUSES) {
+  test(`status ${status}: the stall is open only while needs_attention`, () => {
+    const settled = settleStall(review({ status, stall: STALL }), AT('2026-08-04T12:00:00.000Z'));
+    assert.equal(
+      settled.stall?.resolved_at,
+      status === 'needs_attention' ? undefined : '2026-08-04T12:00:00.000Z',
+    );
+    // Closed, never deleted: resolved_at minus stalled_at is the time-to-resolution measurement.
+    assert.equal(settled.stall?.stalled_at, STALL.stalled_at);
   });
 }
 
-test('the invariant leaves an unstalled review untouched', () => {
+test('settling twice does not move the resolution time', () => {
+  const once = settleStall(review({ status: 'submitted', stall: STALL }), AT('2026-08-04T12:00:00.000Z'));
+  const twice = settleStall(once, AT('2026-08-04T18:00:00.000Z'));
+  assert.equal(twice.stall?.resolved_at, '2026-08-04T12:00:00.000Z');
+});
+
+test('settling a review with no stall leaves it untouched', () => {
   const input = review({ status: 'submitted' });
-  assert.equal(withStallInvariant(input), input);
+  assert.equal(settleStall(input), input);
+});
+
+// ---- the queue predicate ----
+
+test('only an open stall in needs_attention is waiting on a human', () => {
+  assert.equal(isWaitingOnHuman({ status: 'needs_attention', stall: STALL }), true);
+  assert.equal(isWaitingOnHuman({ status: 'submitted', stall: STALL }), false);
+  assert.equal(
+    isWaitingOnHuman({ status: 'needs_attention', stall: { ...STALL, resolved_at: '2026-08-04T10:00:00.000Z' } }),
+    false,
+  );
+  // needs_attention for some other reason (a missing field, an attestation) is not this queue's job.
+  assert.equal(isWaitingOnHuman({ status: 'needs_attention' }), false);
 });
 
 // ---- ordering ----
@@ -104,6 +166,16 @@ test('the queue puts the longest wait first', () => {
   assert.deepEqual(ordered.map((row) => row.id), ['oldest', 'middle', 'newest']);
 });
 
+// An empty sort key compares BEFORE every ISO timestamp, so the naive `?? ''` put rows that never
+// stalled at the head of a queue that promises the longest wait is on top.
+test('a row that never stalled does not jump the queue', () => {
+  const ordered = orderByStalledAt([
+    { id: 'never-stalled' },
+    { id: 'waiting-since-august', stall: { stalled_at: '2026-08-01T08:00:00.000Z' } },
+  ]);
+  assert.deepEqual(ordered.map((row) => row.id), ['waiting-since-august', 'never-stalled']);
+});
+
 test('ordering does not mutate the caller’s array', () => {
   const rows = [
     { id: 'b', stall: { stalled_at: '2026-08-04T12:00:00.000Z' } },
@@ -111,4 +183,38 @@ test('ordering does not mutate the caller’s array', () => {
   ];
   orderByStalledAt(rows);
   assert.deepEqual(rows.map((row) => row.id), ['b', 'a']);
+});
+
+// ---- the merge every writer passes through ----
+
+test('a patch that stalls an application keeps the stall open', () => {
+  const merged = applyReviewPatch(
+    review({ status: 'submitting' }),
+    { status: 'needs_attention', ...beginStall({}, { surface: 'server_run', provider: 'hcaptcha', stage: 'at_submit', source: 'observed' }, AT('2026-08-04T09:00:00.000Z')) },
+    AT('2026-08-04T09:00:00.000Z'),
+  );
+  assert.equal(isWaitingOnHuman(merged), true);
+});
+
+// The interaction that the runner's fail() depends on: a stall spread into a patch whose status is
+// NOT needs_attention is closed on the way in, so a non-CAPTCHA failure cannot leave an open stall.
+test('a patch that ends in a non-attention status closes the stall it carries', () => {
+  const merged = applyReviewPatch(
+    review({ status: 'needs_attention', stall: STALL }),
+    { status: 'failed' },
+    AT('2026-08-04T12:00:00.000Z'),
+  );
+  assert.equal(merged.stall?.resolved_at, '2026-08-04T12:00:00.000Z');
+  assert.equal(isWaitingOnHuman(merged), false);
+});
+
+test('an application that submits after stalling leaves the queue but keeps its history', () => {
+  const stalled = applyReviewPatch(review({ status: 'submitting' }), {
+    status: 'needs_attention',
+    ...beginStall({}, { surface: 'server_run', provider: 'recaptcha_v2', stage: 'at_submit', source: 'observed' }, AT('2026-08-04T09:00:00.000Z')),
+  }, AT('2026-08-04T09:00:00.000Z'));
+  const submitted = applyReviewPatch(stalled, { status: 'submitted' }, AT('2026-08-04T09:04:00.000Z'));
+  assert.equal(isWaitingOnHuman(submitted), false);
+  assert.equal(submitted.stall?.stalled_at, '2026-08-04T09:00:00.000Z');
+  assert.equal(submitted.stall?.resolved_at, '2026-08-04T09:04:00.000Z');
 });

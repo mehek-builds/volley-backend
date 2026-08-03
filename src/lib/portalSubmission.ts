@@ -1239,7 +1239,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
   const blockers: string[] = [];
   // String kept verbatim: it is already surfaced to applicants and matched downstream.
   if (await hasUnresolvedCaptcha(page)) {
-    blockers.push('CAPTCHA requires your attention');
+    blockers.push(CAPTCHA_BLOCKER);
   }
   const required = page.locator('input[required], textarea[required], select[required]');
   const labelledBlockers: string[] = [];
@@ -1418,7 +1418,9 @@ export type CaptchaProvider =
   | 'arkose'
   | 'unknown';
 
-const CAPTCHA_PROVIDER_MARKERS: ReadonlyArray<{ provider: CaptchaProvider; selector: string }> = [
+export const RECAPTCHA_INTERACTIVE_SELECTOR = `iframe[src*="recaptcha" i]:not(.${CAPTCHA_BADGE_CLASS} *)`;
+
+export const CAPTCHA_PROVIDER_MARKERS: ReadonlyArray<{ provider: CaptchaProvider; selector: string }> = [
   { provider: 'turnstile', selector: '[name="cf-turnstile-response"], iframe[src*="challenges.cloudflare.com" i]' },
   { provider: 'hcaptcha', selector: '[name="h-captcha-response"], iframe[src*="hcaptcha.com" i]' },
   { provider: 'arkose', selector: 'iframe[src*="arkoselabs" i], iframe[src*="funcaptcha" i]' },
@@ -1437,13 +1439,23 @@ export async function detectCaptchaProvider(page: Page): Promise<CaptchaProvider
     const count = await page.locator(marker.selector).count().catch(() => 0);
     if (count === 0) continue;
     if (marker.provider !== 'recaptcha_v2') return marker.provider;
-    const interactive = await page
-      .locator(`iframe[src*="recaptcha" i]:not(.${CAPTCHA_BADGE_CLASS} *)`)
-      .count()
-      .catch(() => 0);
-    return interactive > 0 ? 'recaptcha_v2' : 'recaptcha_v3';
+    // Fails toward v2, the BLOCKING classification, for the same reason the visibility probe fails
+    // closed. v3 means "nothing is being asked of a human"; recording that because a probe threw
+    // would tell the instrumentation a page was harmless precisely when we could not see it.
+    const interactive = await page.locator(RECAPTCHA_INTERACTIVE_SELECTOR).count().catch(() => -1);
+    return interactive === 0 ? 'recaptcha_v3' : 'recaptcha_v2';
   }
   return 'unknown';
+}
+
+// The blocker line fillPortal emits when a challenge is still waiting. Exported because the runner
+// matches on it to decide whether an attention state is a human-verification stall: it is a
+// contract between two files, not a local string, and re-typing the literal at the match site is how
+// that contract silently breaks.
+export const CAPTCHA_BLOCKER = 'CAPTCHA requires your attention';
+
+export function blockersIncludeCaptcha(blockers: readonly string[]): boolean {
+  return blockers.includes(CAPTCHA_BLOCKER);
 }
 
 export async function hasUnresolvedCaptcha(page: Page): Promise<boolean> {

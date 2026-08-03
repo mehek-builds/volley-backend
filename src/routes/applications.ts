@@ -4,6 +4,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/index';
+import { settleStall } from '../lib/applicationStall';
+import type { ApplicationReviewState } from '../lib/applicationReview';
 import { readExperienceBank } from '../db/experienceBank';
 import { generated_resumes, profiles, users, type ExperienceBankEntry } from '../db/schema';
 import {
@@ -68,8 +70,16 @@ const extensionOutcomeBodySchema = z.object({
 
 type StoredSpec = Record<string, unknown>;
 
+// Every _review write in this file goes through settleStall, including the six that predate stalls
+// and know nothing about them. Enforcing it HERE rather than at each call site is the whole point:
+// the handoff-complete route moves an application out of needs_attention immediately after the
+// applicant clears a challenge, and a rule that each writer has to remember is a rule that holds
+// only until someone adds the next writer.
 function reviewSpec(review: unknown) {
-  return sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(review)}::jsonb, true)`;
+  const settled = review && typeof review === 'object' && !Array.isArray(review)
+    ? settleStall(review as ApplicationReviewState)
+    : review;
+  return sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(settled)}::jsonb, true)`;
 }
 
 function approvedReviewSpec(review: unknown, approvedAt: string) {
