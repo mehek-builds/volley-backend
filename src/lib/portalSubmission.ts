@@ -126,6 +126,20 @@ export function isAccountWalledFamily(portal: SupportedPortal): boolean {
   return ACCOUNT_WALLED_FAMILIES.has(portalFamily(portal));
 }
 
+export function isCaptchaGatedFamily(portal: SupportedPortal): boolean {
+  return CAPTCHA_GATED_FAMILIES.has(portalFamily(portal));
+}
+
+// Only for the paths that stop WITHOUT a live Page, where the provider cannot be observed. Both
+// values are measured, not assumed: JazzHR carries g-recaptcha-response on every application form
+// (confirmed 2026-07-28) and BambooHR does too, with window.grecaptcha defined and the badge
+// rendering, on a real PRC-Saltillo posting (confirmed 2026-07-29). Anything else returns 'unknown'
+// rather than a guess - a wrong provider label is worse than an absent one, because the whole point
+// of recording it is to decide which families are worth building around.
+export function captchaProviderForFamily(portal: SupportedPortal): CaptchaProvider {
+  return isCaptchaGatedFamily(portal) ? 'recaptcha_v2' : 'unknown';
+}
+
 export function portalCanAutoSubmit(portal: SupportedPortal): boolean {
   const family = portalFamily(portal);
   return !MULTI_STEP_FAMILIES.has(family)
@@ -1276,7 +1290,7 @@ export function captchaSnapshotRequiresAttention(responseTokens: string[], visib
   return responseTokens.some((token) => token.trim().length === 0);
 }
 
-const CAPTCHA_RESPONSE_SELECTOR = [
+export const CAPTCHA_RESPONSE_SELECTOR = [
   'textarea[name*="captcha-response" i]',
   'input[name*="captcha-response" i]',
   'textarea[id*="captcha-response" i]',
@@ -1296,7 +1310,7 @@ const CAPTCHA_CHALLENGE_SELECTOR_PARTS = [
   '[data-sitekey]',
 ];
 
-const CAPTCHA_CHALLENGE_SELECTOR = CAPTCHA_CHALLENGE_SELECTOR_PARTS.join(', ');
+export const CAPTCHA_CHALLENGE_SELECTOR = CAPTCHA_CHALLENGE_SELECTOR_PARTS.join(', ');
 
 // reCAPTCHA v3 and invisible v2 render a floating "protected by reCAPTCHA" badge on pages that ask
 // the human for NOTHING - the score is computed from behaviour and the token is minted on submit.
@@ -1390,6 +1404,46 @@ export function managedResultRequiresCaptchaAttention(result: ManagedBrowserResu
   return extracted.some((item) => (
     item.selector === MANAGED_CAPTCHA_CHALLENGE_SELECTOR && item.value !== null
   ));
+}
+
+// Which provider is asking. Recorded on the stall so the instrumentation can answer "which families
+// actually gate us, and how long does each take to clear" instead of a single undifferentiated
+// count. Deliberately a closed set with an 'unknown' member: a provider nobody has seen yet must
+// record as unknown rather than be silently bucketed into the nearest known one.
+export type CaptchaProvider =
+  | 'recaptcha_v2'
+  | 'recaptcha_v3'
+  | 'hcaptcha'
+  | 'turnstile'
+  | 'arkose'
+  | 'unknown';
+
+const CAPTCHA_PROVIDER_MARKERS: ReadonlyArray<{ provider: CaptchaProvider; selector: string }> = [
+  { provider: 'turnstile', selector: '[name="cf-turnstile-response"], iframe[src*="challenges.cloudflare.com" i]' },
+  { provider: 'hcaptcha', selector: '[name="h-captcha-response"], iframe[src*="hcaptcha.com" i]' },
+  { provider: 'arkose', selector: 'iframe[src*="arkoselabs" i], iframe[src*="funcaptcha" i]' },
+  { provider: 'recaptcha_v2', selector: '[name="g-recaptcha-response"], iframe[src*="recaptcha" i]' },
+];
+
+// Ordered, and the order matters: reCAPTCHA is checked LAST because its response field is the one
+// most likely to co-exist with another provider on a page that switched vendors and left markup
+// behind. A page carrying both reads as the newer one, which is the one actually gating it.
+//
+// The reCAPTCHA branch splits v2 from v3 on the same signal the exclusion uses: if the only thing
+// rendered is the badge, nothing is being asked of a human, so it is v3. Anything outside the badge
+// is an interactive widget, so it is v2.
+export async function detectCaptchaProvider(page: Page): Promise<CaptchaProvider> {
+  for (const marker of CAPTCHA_PROVIDER_MARKERS) {
+    const count = await page.locator(marker.selector).count().catch(() => 0);
+    if (count === 0) continue;
+    if (marker.provider !== 'recaptcha_v2') return marker.provider;
+    const interactive = await page
+      .locator(`iframe[src*="recaptcha" i]:not(.${CAPTCHA_BADGE_CLASS} *)`)
+      .count()
+      .catch(() => 0);
+    return interactive > 0 ? 'recaptcha_v2' : 'recaptcha_v3';
+  }
+  return 'unknown';
 }
 
 export async function hasUnresolvedCaptcha(page: Page): Promise<boolean> {
@@ -1502,6 +1556,7 @@ export type CaptchaStopStage = 'before_fill' | 'at_submit';
 export class CaptchaUnresolvedError extends Error {
   constructor(
     readonly stage: CaptchaStopStage = 'at_submit',
+    readonly provider: CaptchaProvider = 'unknown',
     message = 'The submit button was not pressed: a human verification check is still waiting.',
   ) {
     super(message);
@@ -1521,7 +1576,9 @@ export async function clickFinalSubmit(page: Page): Promise<void> {
   // NOTE: this guard only covers the direct-Playwright path. The managed-Stratus path in
   // submissionRunner never builds a Page, so it never reaches here. See the CAPTCHA note there.
   if (await hasUnresolvedCaptcha(page)) {
-    throw new CaptchaUnresolvedError();
+    // Identified HERE, while the Page is still open. By the time the error reaches fail() the
+    // browser is closed and the provider is unrecoverable, so it rides along on the error.
+    throw new CaptchaUnresolvedError('at_submit', await detectCaptchaProvider(page));
   }
   await button.click();
   await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => undefined);

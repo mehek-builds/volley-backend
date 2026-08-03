@@ -37,6 +37,32 @@ export type ApplicationReviewState = {
   browser_context_id?: string;
   browser_session_id?: string;
   attention_reason?: string;
+  /* The TYPED half of attention_reason, which is prose and always will be.
+   *
+   * attention_reason is written for a person and is the right thing to show them. It is the wrong
+   * thing to count: "how often does a challenge stop us, on which boards, and how long until it
+   * clears" cannot be answered by grepping sentences. This is the machine-readable companion, and
+   * nothing here is ever rendered.
+   *
+   * stalled_at is the QUEUE'S SORT KEY, not a duplicate of updated_at. updated_at moves on every
+   * write, including writes that have nothing to do with the stall, so ordering a "waiting on you"
+   * list by it would reshuffle the queue under the applicant. This is set once, when the stall
+   * begins, and left alone.
+   *
+   * Invariant, enforced in nextReview rather than by convention: a stall exists only while status
+   * is 'needs_attention'. Any transition away clears it. */
+  stall?: {
+    kind: 'human_verification';
+    stalled_at: string;
+    /* Where it stopped, because the two surfaces owe the applicant different next actions: a
+     * server run needs them to open the portal themselves, an extension stall is already in front
+     * of them. Only 'server_run' is written today; the extension writes 'extension' in step 4. */
+    surface: 'server_run' | 'extension';
+    provider: 'recaptcha_v2' | 'recaptcha_v3' | 'hcaptcha' | 'turnstile' | 'arkose' | 'unknown';
+    /* 'before_fill' means nothing was filled and the form is still blank. Governs which sentence
+     * the applicant gets, and stops the queue promising a filled form that does not exist. */
+    stage: 'before_fill' | 'at_submit';
+  };
   handoff_expires_at?: string;
   final_approved_at?: string;
   cover_letter_supported?: boolean;

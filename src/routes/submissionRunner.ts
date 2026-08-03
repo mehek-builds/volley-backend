@@ -18,6 +18,7 @@ import {
 import {
   buildManagedCaptchaProbeActions,
   buildManagedDiscoveryActions,
+  captchaProviderForFamily,
   buildManagedPortalActions,
   CaptchaUnresolvedError,
   clickFinalSubmit,
@@ -29,6 +30,7 @@ import {
   navigateToApplicationForm,
   portalApplicationUrl,
   isAccountWalledFamily,
+  isCaptchaGatedFamily,
   portalCanAutoSubmit,
   portalHandoffReason,
   readManagedReceipt,
@@ -37,6 +39,7 @@ import {
   type SubmissionPacket,
   type SupportedPortal,
 } from '../lib/portalSubmission';
+import { beginStall, withStallInvariant } from '../lib/applicationStall';
 import { sanitizeProviderBlockers } from '../lib/fieldLabel';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { resolveBlobUrl } from '../lib/resumeAccess';
@@ -80,8 +83,11 @@ type StandingAuthorization = {
   consentVersion?: string;
 };
 
+// withStallInvariant is applied to EVERY review write, which is why it lives here and not at the
+// call sites: the stall-only-while-needs_attention rule has to hold for writers that know nothing
+// about stalls. See applicationStall.ts for what it prevents.
 function nextReview(current: ApplicationReviewState, patch: Partial<ApplicationReviewState>): ApplicationReviewState {
-  return { ...current, ...patch, updated_at: new Date().toISOString() };
+  return withStallInvariant({ ...current, ...patch, updated_at: new Date().toISOString() });
 }
 
 async function writeReview(row: ResumeRow, review: ApplicationReviewState) {
@@ -528,6 +534,17 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       submission_run_id: runId,
       // Nothing was filled on this path, so the wording has to be the one that does not claim it was.
       attention_reason: unattendedHandoffReason(portal) ?? undefined,
+      // Only the CAPTCHA-gated families produce a stall. This branch also catches multi-step and
+      // account-walled portals, and those are waiting on something else entirely - typing them as
+      // human_verification would put "prove you are human" rows in the queue for a wizard that just
+      // needs its last page answered.
+      ...(isCaptchaGatedFamily(portal)
+        ? beginStall(current, {
+          surface: 'server_run',
+          provider: captchaProviderForFamily(portal),
+          stage: 'before_fill',
+        })
+        : {}),
       submission_error: undefined,
     }));
     return;
@@ -748,6 +765,15 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
       await writeReview(row, nextReview(claimedReview, {
         status: 'needs_attention',
         attention_reason: portalHandoffReason(portal) ?? undefined,
+        // Same family test as the unattended branch above, different stage: this path DID fill the
+        // form, so the applicant is finishing a filled application rather than starting a blank one.
+        ...(isCaptchaGatedFamily(portal)
+          ? beginStall(claimedReview, {
+            surface: 'server_run',
+            provider: captchaProviderForFamily(portal),
+            stage: 'at_submit',
+          })
+          : {}),
       }));
       return;
     }
@@ -874,9 +900,17 @@ async function fail(row: ResumeRow, error: unknown) {
   //
   // Derived rather than early-returned so there stays exactly ONE writeReview call here: a second
   // one drifts the moment a field is added to the other.
-  const captchaStop = error instanceof CaptchaUnresolvedError ? error.stage : null;
+  const captchaError = error instanceof CaptchaUnresolvedError ? error : null;
+  const captchaStop = captchaError?.stage ?? null;
 
   await writeReview(latestRows[0], nextReview(current, {
+    ...(captchaError
+      ? beginStall(current, {
+        surface: 'server_run',
+        provider: captchaError.provider,
+        stage: captchaError.stage,
+      })
+      : {}),
     status: captchaStop || uncertainAfterClaim ? 'needs_attention' : externalGate ? 'submit_requested' : 'failed',
     submission_error: message,
     attention_reason: captchaStop === 'at_submit'

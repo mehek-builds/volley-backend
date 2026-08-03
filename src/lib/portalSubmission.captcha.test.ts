@@ -4,7 +4,12 @@ import type { Page } from 'playwright-core';
 import { browserSessionBody, type ManagedBrowserResult } from './browserbase';
 import {
   buildManagedCaptchaProbeActions,
+  CAPTCHA_CHALLENGE_SELECTOR,
+  CAPTCHA_RESPONSE_SELECTOR,
+  captchaProviderForFamily,
   captchaSnapshotRequiresAttention,
+  detectCaptchaProvider,
+  isCaptchaGatedFamily,
   clickFinalSubmit,
   hasUnresolvedCaptcha,
   managedResultRequiresCaptchaAttention,
@@ -92,10 +97,15 @@ function fakePage(options: { tokens: string[]; challenges: FakeNode[] }): Page {
       };
     },
   };
+  // Dispatch on selector IDENTITY, not a substring. A substring test silently misroutes the moment
+  // another selector in this file happens to contain the same fragment - which it did: the Turnstile
+  // provider marker contains "turnstile-response" and was being answered by the response locator.
   return {
-    locator: (selector: string) => (selector.includes('captcha-response') || selector.includes('turnstile-response')
-      ? responseLocator
-      : challengeLocator),
+    locator: (selector: string) => {
+      if (selector === CAPTCHA_RESPONSE_SELECTOR) return responseLocator;
+      if (selector === CAPTCHA_CHALLENGE_SELECTOR) return challengeLocator;
+      throw new Error(`unexpected selector in fakePage: ${selector}`);
+    },
   } as unknown as Page;
 }
 
@@ -178,7 +188,7 @@ test('the final click guard does not click while any widget is unresolved', asyn
   };
   const button = { count: async () => 1, click: async () => { clickCount += 1; } };
   const page = {
-    locator: (selector: string) => (selector.includes('response') ? responseLocator : challengeLocator),
+    locator: (selector: string) => (selector === CAPTCHA_RESPONSE_SELECTOR ? responseLocator : challengeLocator),
     getByRole: () => ({ last: () => button }),
     waitForLoadState: async () => undefined,
   } as unknown as Page;
@@ -300,4 +310,118 @@ test('Stratus pauses on a challenge rather than clearing it', () => {
     browserSettings: { protectionPolicy: { challengeBehavior: string } };
   };
   assert.equal(body.browserSettings.protectionPolicy.challengeBehavior, 'pause');
+});
+
+// ---- provider identification ----
+//
+// Recorded on the stall so instrumentation can answer "which families actually gate us" rather than
+// producing one undifferentiated count.
+
+function providerPage(selectorsPresent: Record<string, number>): Page {
+  return {
+    locator: (selector: string) => ({
+      count: async () => selectorsPresent[selector] ?? 0,
+    }),
+  } as unknown as Page;
+}
+
+test('a page with no challenge markup reports an unknown provider', async () => {
+  assert.equal(await detectCaptchaProvider(providerPage({})), 'unknown');
+});
+
+test('Turnstile is identified by its response field', async () => {
+  assert.equal(
+    await detectCaptchaProvider(providerPage({
+      '[name="cf-turnstile-response"], iframe[src*="challenges.cloudflare.com" i]': 1,
+    })),
+    'turnstile',
+  );
+});
+
+test('hCaptcha is identified by its response field', async () => {
+  assert.equal(
+    await detectCaptchaProvider(providerPage({
+      '[name="h-captcha-response"], iframe[src*="hcaptcha.com" i]': 1,
+    })),
+    'hcaptcha',
+  );
+});
+
+test('Arkose is identified by its frame', async () => {
+  assert.equal(
+    await detectCaptchaProvider(providerPage({
+      'iframe[src*="arkoselabs" i], iframe[src*="funcaptcha" i]': 2,
+    })),
+    'arkose',
+  );
+});
+
+// The v2/v3 split runs off the same signal as the badge exclusion: an interactive widget lives
+// OUTSIDE the badge, so a page whose only reCAPTCHA markup is the badge is v3 and asks nothing.
+test('a reCAPTCHA page with an interactive widget is v2', async () => {
+  assert.equal(
+    await detectCaptchaProvider(providerPage({
+      '[name="g-recaptcha-response"], iframe[src*="recaptcha" i]': 2,
+      'iframe[src*="recaptcha" i]:not(.grecaptcha-badge *)': 1,
+    })),
+    'recaptcha_v2',
+  );
+});
+
+test('a reCAPTCHA page with only the badge is v3', async () => {
+  assert.equal(
+    await detectCaptchaProvider(providerPage({
+      '[name="g-recaptcha-response"], iframe[src*="recaptcha" i]': 2,
+      'iframe[src*="recaptcha" i]:not(.grecaptcha-badge *)': 0,
+    })),
+    'recaptcha_v3',
+  );
+});
+
+// A page that switched vendors and left markup behind reads as the newer one, which is the one
+// actually gating it.
+test('a page carrying both reCAPTCHA and Turnstile reports Turnstile', async () => {
+  assert.equal(
+    await detectCaptchaProvider(providerPage({
+      '[name="cf-turnstile-response"], iframe[src*="challenges.cloudflare.com" i]': 1,
+      '[name="g-recaptcha-response"], iframe[src*="recaptcha" i]': 1,
+    })),
+    'turnstile',
+  );
+});
+
+test('the known-gated families carry their measured provider, others stay unknown', () => {
+  assert.equal(captchaProviderForFamily('jazzhr'), 'recaptcha_v2');
+  assert.equal(captchaProviderForFamily('bamboohr'), 'recaptcha_v2');
+  assert.equal(captchaProviderForFamily('greenhouse'), 'unknown');
+  assert.equal(isCaptchaGatedFamily('jazzhr'), true);
+  assert.equal(isCaptchaGatedFamily('greenhouse'), false);
+});
+
+test('the submit guard carries the provider it saw while the page was open', async () => {
+  const page = {
+    locator: (selector: string) => {
+      if (selector === CAPTCHA_RESPONSE_SELECTOR) {
+        return { count: async () => 1, nth: () => ({ inputValue: async () => '' }) };
+      }
+      if (selector.includes('hcaptcha.com')) return { count: async () => 1 };
+      if (selector.includes('cf-turnstile-response')) return { count: async () => 0 };
+      return {
+        count: async () => 1,
+        nth: () => ({
+          isVisible: async () => true,
+          evaluate: async (fn: (el: unknown, arg: string) => boolean, arg: string) => fn(stubElement({}), arg),
+        }),
+      };
+    },
+    getByRole: () => ({ last: () => ({ count: async () => 1, click: async () => undefined }) }),
+    waitForLoadState: async () => undefined,
+  } as unknown as Page;
+
+  await assert.rejects(clickFinalSubmit(page), (error: unknown) => {
+    assert.ok(error instanceof CaptchaUnresolvedError);
+    assert.equal(error.provider, 'hcaptcha');
+    assert.equal(error.stage, 'at_submit');
+    return true;
+  });
 });
