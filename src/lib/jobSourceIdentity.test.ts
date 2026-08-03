@@ -73,9 +73,12 @@ test('Phase 2 configures exactly 50 Workable employers with canonical careers UR
 });
 
 test('Phase 2 adds 50 diverse employers across Greenhouse, Lever, and Ashby', () => {
-  assert.equal(JOB_SOURCES.length, 355, 'the reviewed Phase 2 catalog must not silently shrink');
+  // 355 reviewed employers + the 26 internship-density boards added 2026-08-03.
+  assert.equal(JOB_SOURCES.length, 381, 'the reviewed Phase 2 catalog must not silently shrink');
   const families = new Set(JOB_SOURCES.map((source) => source.ats_name));
   assert.deepEqual([...families].sort(), ['ashby', 'greenhouse', 'lever', 'workable']);
+  /* 19 sources of headroom left. The NEXT sourcing round crosses POLL_SEGMENT_SIZE and must add
+     the follow-up segment rather than quietly leaving the tail of the catalog unpolled. */
   assert.ok(JOB_SOURCES.length <= POLL_SEGMENT_SIZE, 'today\'s catalog fits one bounded segment');
   assert.equal(POLL_SEGMENT_SIZE, 400, 'source 401 must begin a follow-up segment');
 });
