@@ -72,6 +72,15 @@ export const parsedProfilePatchSchema = z
     grad_date: z.string().trim().max(40).optional(),
     objective: z.string().trim().max(1200).optional(),
     skills: z.array(editableListItem).max(100).optional(),
+    /* Spoken languages the resume printed. Editable here for the same reason skills is: the parser
+     * used to file languages under skills, so this screen is where a student both sees the
+     * separation and fixes a language the reader mis-sorted.
+     *
+     * This writes parsed_json ONLY. It must never reach application_profile.languages, which is the
+     * student's declaration of fluency and is collected by the onboarding question - see schema.ts
+     * on why a fluency claim may not be inferred from a resume line. Bounded lower than skills
+     * because a language list that runs past twenty is a parse failure, not a polyglot. */
+    languages: z.array(editableListItem).max(30).optional(),
     // The parser and onboarding contract both use five titles. Students may replace any inferred
     // title with any real role, while keeping the downstream targeting shape complete.
     target_roles: z
@@ -163,6 +172,7 @@ export function applyParsedProfilePatch(
     if (patch[key] !== undefined) next[key] = patch[key];
   }
   if (patch.skills !== undefined) next.skills = normalizeEditableList(patch.skills);
+  if (patch.languages !== undefined) next.languages = normalizeEditableList(patch.languages);
   if (patch.target_roles !== undefined) next.target_roles = normalizeEditableList(patch.target_roles);
 
   if (patch.grad_date !== undefined) {

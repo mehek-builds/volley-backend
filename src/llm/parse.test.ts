@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parsedProfileFromModelText, parsedProfileWithOneRepair, SYSTEM_PROMPT } from './parse';
+import {
+  parsedProfileFromModelText,
+  parsedProfileWithOneRepair,
+  splitSpokenLanguages,
+  SYSTEM_PROMPT,
+} from './parse';
 
 // R-047, found in live QA 2026-07-23. Mehek's uploaded resume reads "Bachelor of Science in Computer
 // Science & Business Administration, Finance Emphasis". The parser stored "Bachelor of Science in
@@ -138,4 +143,90 @@ test('open-ended real job titles do not depend on a hard-coded occupation vocabu
 
   assert.equal(calls, 0);
   assert.equal(parsed.target_roles[0], 'Private Equity Associate');
+});
+
+/* ISSUE-020, found on the live demo account 2026-08-03. ParsedProfile had no `languages` key, so
+ * the extractor filed spoken languages under `skills`: English, Hindi, Punjabi, French, Arabic and
+ * Spanish arrived AHEAD of C++, Figma and Python, because a resume prints its language line above
+ * its technical line. baseResume.ts's skillsSourceFor falls back to this array whenever the declared
+ * profiles.skills column is null, which is every student at onboarding, so every tailored resume the
+ * account produced led its skills section with six spoken languages. */
+
+const FIVE_ROLES = ['One', 'Two', 'Three', 'Four', 'Five'];
+
+function modelSkills(skills: unknown, languages?: unknown): string {
+  return JSON.stringify({
+    full_name: 'A Candidate', experience: [], skills, projects: [], school: '',
+    grad_year: 0, target_roles: FIVE_ROLES, ...(languages === undefined ? {} : { languages }),
+  });
+}
+
+test('spoken languages do not land in skills', () => {
+  const parsed = parsedProfileFromModelText(modelSkills([
+    'English', 'Hindi', 'Punjabi', 'French', 'Arabic', 'Spanish',
+    'MS PowerPoint', 'Adobe Photoshop', 'C++', 'Figma', 'Python',
+  ]));
+
+  assert.deepEqual(parsed.skills, ['MS PowerPoint', 'Adobe Photoshop', 'C++', 'Figma', 'Python']);
+  assert.deepEqual(parsed.languages, ['English', 'Hindi', 'Punjabi', 'French', 'Arabic', 'Spanish']);
+  // The regression was as much about ORDER as membership: the first skill on the generated resume
+  // must now be a technical one.
+  assert.equal(parsed.skills[0], 'MS PowerPoint');
+});
+
+test('programming languages and tools survive the language split', () => {
+  // Every name here is one a careless spoken-language list would swallow. Losing any of them
+  // deletes a real engineering skill from the student's resume, which is worse than the bug.
+  const technical = ['Go', 'R', 'Rust', 'Swift', 'Ruby', 'Julia', 'Scheme', 'Java', 'Basic', 'Processing'];
+  const parsed = parsedProfileFromModelText(modelSkills(technical));
+
+  assert.deepEqual(parsed.skills, technical);
+  assert.deepEqual(parsed.languages, []);
+});
+
+test('a stated proficiency is carried across rather than flattened to bare fluency', () => {
+  // "Spanish (basic)" reduced to "Spanish" would read as fluency the student never claimed.
+  const parsed = parsedProfileFromModelText(modelSkills([
+    'Spanish (conversational)', 'French - fluent', 'Mandarin Chinese: native', 'Python',
+  ]));
+
+  assert.deepEqual(parsed.skills, ['Python']);
+  assert.deepEqual(parsed.languages, [
+    'Spanish (conversational)', 'French - fluent', 'Mandarin Chinese: native',
+  ]);
+});
+
+test('the model answer leads and the reclassified remainder is merged in without duplicates', () => {
+  const parsed = parsedProfileFromModelText(modelSkills(['Hindi', 'english', 'Figma'], ['English', 'Tamil']));
+
+  assert.deepEqual(parsed.skills, ['Figma']);
+  // "english" off the skills line is the same language as the model's "English", so the first
+  // spelling wins and the entry is not repeated.
+  assert.deepEqual(parsed.languages, ['English', 'Tamil', 'Hindi']);
+});
+
+test('a resume printing no language line yields an empty list, never an inferred one', () => {
+  const parsed = parsedProfileFromModelText(modelSkills(['Python', 'Figma']));
+
+  assert.deepEqual(parsed.skills, ['Python', 'Figma']);
+  assert.deepEqual(parsed.languages, []);
+});
+
+test('the split tolerates the malformed skills arrays the model actually emits', () => {
+  assert.deepEqual(splitSpokenLanguages(null), { skills: [], languages: [] });
+  assert.deepEqual(splitSpokenLanguages('English'), { skills: [], languages: [] });
+  assert.deepEqual(
+    splitSpokenLanguages(['  ', 7, null, ' Hindi ', 'Figma']),
+    { skills: ['Figma'], languages: ['Hindi'] },
+  );
+});
+
+test('the parse prompt keeps spoken languages out of the skills field', () => {
+  const flat = SYSTEM_PROMPT.replace(/\s+/g, ' ');
+  assert.match(flat, /"skills" is TECHNICAL and professional ability only/i);
+  assert.match(flat, /never contain a spoken or natural language/i);
+  assert.match(flat, /"languages" holds the spoken or natural languages printed on the resume/i);
+  assert.match(flat, /programming languages are NOT spoken languages and belong in "skills"/i);
+  // The parser may not manufacture a fluency claim the page never printed.
+  assert.match(flat, /never infer a language from the applicant's name, school, or country/i);
 });
