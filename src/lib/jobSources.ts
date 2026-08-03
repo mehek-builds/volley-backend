@@ -511,11 +511,56 @@ const INTERNSHIP_DENSITY_ENTRIES: Entry[] = [
   ['Airwallex', 'ashby', 'airwallex'],
 ];
 
+
+/* ── Added 2026-08-04: sourced OUTSIDE THE US, because that is where the internships are ──────
+ *
+ * Measured on the live board the day this landed: non-US postings are 3.53% internships and US
+ * postings are 1.67%. TWICE the density, and the catalog was weighted the wrong way - 14,039 US
+ * postings against 6,351 non-US. The board had been sourced almost entirely from US tech, which
+ * is both the thinnest internship tier AND the one everybody else already lists.
+ *
+ * The probe yield says the same thing. 593 international tokens returned 130 live boards (22%)
+ * and 46 fresh internships; the equivalent US round earlier returned 6% and needed 1,054 probes
+ * for 26. Roughly three times the internships per probe.
+ *
+ * BUT IT DECAYS AS FAST AS ANYTHING ELSE, and the second round is the honest half of the story:
+ * another 603 tokens, this time regional names rather than international tech (Brazilian retail,
+ * LatAm banks, German energy), returned 24 boards and ONE with internships. Companies outside the
+ * US tech orbit mostly do not publish on Greenhouse, Lever, Ashby or Workable at all. Probe
+ * international COMPANIES ON THESE FOUR ATSs, not international companies.
+ */
+const INTERNATIONAL_INTERNSHIP_ENTRIES: Entry[] = [
+  // Europe
+  ['Celonis', 'greenhouse', 'celonis'],
+  ['Enpal', 'ashby', 'enpal'],
+  ['Alan', 'ashby', 'alan'],
+  ['Solaris', 'greenhouse', 'solarisbank'],
+  ['Raisin', 'greenhouse', 'raisin'],
+  ['Mollie', 'ashby', 'mollie'],
+  ['Ledger', 'ashby', 'ledger'],
+  ['Sorare', 'ashby', 'sorare'],
+  ['trivago', 'greenhouse', 'trivago'],
+  ['Musixmatch', 'lever', 'musixmatch'],
+  ['Cabify', 'greenhouse', 'cabify'],
+
+  // Latin America. btgpactual alone carries 16 internships, all titled "Estágio ...", which is
+  // what surfaced the multilingual gap in the title rule in the first place.
+  ['Inter', 'greenhouse', 'inter'],
+  ['Wildlife Studios', 'greenhouse', 'wildlifestudios'],
+  ['VTEX', 'greenhouse', 'vtex'],
+  ['Wellhub', 'greenhouse', 'gympass'],
+  ['Despegar', 'lever', 'despegar'],
+
+  // Southeast Asia
+  ['Ninja Van', 'lever', 'ninjavan'],
+];
+
 const ENTRIES: readonly Entry[] = [
   ...BASE_ENTRIES,
   ...PHASE_2_WORKABLE_ENTRIES,
   ...PHASE_2_UNDERREPRESENTED_ENTRIES,
   ...INTERNSHIP_DENSITY_ENTRIES,
+  ...INTERNATIONAL_INTERNSHIP_ENTRIES,
 ];
 
 function careerUrl(ats: JobSourceInput['ats_name'], token: string): string {
