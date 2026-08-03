@@ -112,6 +112,37 @@ export const MINIMUM_SURFACED_GROUPED_ROLES = 10_000;
 export const MINIMUM_SPONSOR_SURFACED_JOBS = 5_000;
 
 /**
+ * THE INTERNSHIP COMMITMENT: 2,000 surfaced internships (Mehek's call, 2026-08-03).
+ *
+ * NOT YET ENFORCED AS A 5xx, AND THE GAP IS THE REASON. Measured the day it was set: the board
+ * surfaced 158 internships and every source we have, probed live at any age, carried 367 in
+ * 36,435 postings - 1.0%. Adding the 26 densest boards we could find took it to ~240. So 2,000 is
+ * roughly 8x the entire supply reachable through the four pollable board APIs today, and wiring it
+ * to a 500 now would make the daily cron permanently red. That would not surface the shortfall; it
+ * would retire the one alarm that currently means "the board is broken NOW", which is exactly the
+ * failure MINIMUM_SURFACED_JOBS exists to prevent. Reported on every run instead, so the distance
+ * is watched daily rather than asserted once.
+ *
+ * WHAT WOULD ACTUALLY CLOSE IT, measured, in descending order:
+ *   1. Seasonality. Internship supply is not flat. On 2026-08-03 the board's own sources carried
+ *      110 internships dated in the trailing week against 23 four weeks earlier. Summer-2027 hiring
+ *      opens Aug-Oct, so this number climbs on its own into the autumn - and falls again by spring,
+ *      which is the reason a year-round floor is the hard version of this problem.
+ *   2. A longer window for internships specifically. An internship req is posted once and stays
+ *      open for months; nobody re-saves it, and Greenhouse's date is updated_at, so it ages out of
+ *      JOB_FRESHNESS_DAYS while still live. That single mechanism costs 54% - 367 open internships
+ *      exist upstream against 170 inside the window.
+ *   3. More density-sourced boards. Real but slow: 1,501 probed tokens returned 26 usable sources.
+ *
+ * DO NOT close the gap by loosening what counts as an internship. That was measured too:
+ * "University Recruiter", "Campus Recruiter" and "Early Career - Family Medicine Physician" are all
+ * live full-time postings that a broader pattern picks up. Inflating this number with full-time
+ * roles is worse than missing it, because a student filters to internships precisely to stop
+ * reading them.
+ */
+export const MINIMUM_SURFACED_INTERNSHIPS = 2_000;
+
+/**
  * REQUIRED HEADROOM OVER THE FLOOR.
  *
  * 10,000 is the committed inventory. The warning line is 20 percent above it, giving source decay
@@ -318,6 +349,7 @@ export async function boardInventoryMetrics(executor: JobMonitorQueryExecutor = 
     surfaced_postings: number;
     surfaced_grouped_roles: number;
     surfaced_sponsor_only_jobs: number;
+    surfaced_internships: number;
   }>(sql`
     select
       count(*) filter (where ${fullBoard})::int as surfaced_postings,
@@ -326,7 +358,10 @@ export async function boardInventoryMetrics(executor: JobMonitorQueryExecutor = 
         ${monitored_jobs.title},
         ${career_page_sources.ats_name}
       )) filter (where ${fullBoard})::int as surfaced_grouped_roles,
-      count(*) filter (where ${sponsorBoard})::int as surfaced_sponsor_only_jobs
+      count(*) filter (where ${sponsorBoard})::int as surfaced_sponsor_only_jobs,
+      count(*) filter (
+        where ${fullBoard} and ${monitored_jobs.employment_type} = 'Internship'
+      )::int as surfaced_internships
     from ${monitored_jobs}
     inner join ${career_page_sources}
       on ${monitored_jobs.source_id} = ${career_page_sources.id}
@@ -336,6 +371,7 @@ export async function boardInventoryMetrics(executor: JobMonitorQueryExecutor = 
     surfacedPostings: Number(row?.surfaced_postings ?? 0),
     surfacedGroupedRoles: Number(row?.surfaced_grouped_roles ?? 0),
     surfacedSponsorOnly: Number(row?.surfaced_sponsor_only_jobs ?? 0),
+    surfacedInternships: Number(row?.surfaced_internships ?? 0),
   };
 }
 
@@ -1836,6 +1872,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       surfacedPostings: surfaced,
       surfacedGroupedRoles,
       surfacedSponsorOnly,
+      surfacedInternships,
     } = inventory;
     const payload = {
       retired_sources: retired,
@@ -1860,6 +1897,15 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       /* Backward-compatible alias for existing consumers. */
       surfaced_jobs: surfaced,
       surfaced_sponsor_only_jobs: surfacedSponsorOnly,
+      /* Reported every run from the day the commitment was made, while the board is still far
+         under it. A number that only starts being reported once it looks good is a number nobody
+         can show a trend for. See MINIMUM_SURFACED_INTERNSHIPS for why this is not yet a 5xx. */
+      surfaced_internships: surfacedInternships,
+      minimum_surfaced_internships: MINIMUM_SURFACED_INTERNSHIPS,
+      internship_floor_enforced: false,
+      internship_headroom_multiple: Number(
+        (surfacedInternships / MINIMUM_SURFACED_INTERNSHIPS).toFixed(2),
+      ),
       variety,
       classification_coverage: coverage,
       target_role_coverage: targetRoleCoverage,
@@ -1928,6 +1974,18 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         },
         `Job board has thin headroom: ${surfaced} postings and ${surfacedGroupedRoles} grouped roles. `
         + `Widen JOB_FRESHNESS_DAYS or add sources before it reaches the floor.`,
+      );
+    }
+    if (surfacedInternships < MINIMUM_SURFACED_INTERNSHIPS) {
+      request.log.warn(
+        {
+          surfacedInternships,
+          committedInternships: MINIMUM_SURFACED_INTERNSHIPS,
+          windowDays: JOB_FRESHNESS_DAYS,
+        },
+        `Internship inventory is ${surfacedInternships} against a committed ${MINIMUM_SURFACED_INTERNSHIPS}. `
+        + 'Levers, measured, in order: internship-specific freshness window, seasonal ramp, more '
+        + 'density-sourced boards. Never by widening what counts as an internship.',
       );
     }
     if (postingsBelow || groupedRolesBelow || sponsorBelow) {

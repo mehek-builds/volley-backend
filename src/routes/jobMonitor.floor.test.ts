@@ -225,3 +225,43 @@ test('the purge keeps a full window of slack, so it cannot fight the poller', ()
     'purging at or inside the window churns rows the poller keeps restoring');
   assert.equal(PURGE_POSTINGS_OLDER_THAN_DAYS, 28);
 });
+
+test('the internship commitment is pinned at 2,000 and is not yet a 5xx', async () => {
+  const { MINIMUM_SURFACED_INTERNSHIPS } = await import('./jobMonitor');
+  // Pinned as a value for the same reason the board floor is: a commitment that can be edged
+  // downward to match whatever the board happens to hold is not a commitment.
+  assert.equal(MINIMUM_SURFACED_INTERNSHIPS, 2_000);
+
+  const source = readFileSync(new URL('./jobMonitor.ts', import.meta.url), 'utf8');
+  /* The internship shortfall must WARN, never fail the run. The board floor's 5xx means "the
+     board is broken now"; the internship number is ~8x under its commitment on the day it was
+     set, so wiring it to the same 5xx would make the cron permanently red and retire the alarm
+     that still means something. If this ever becomes an error path, it should be because the
+     supply arrived first - and then this test is the thing that has to be deliberately changed. */
+  assert.ok(
+    !/surfacedInternships\s*<\s*MINIMUM_SURFACED_INTERNSHIPS[\s\S]{0,400}?reply\.status\(5/.test(source),
+    'the internship shortfall must not return a 5xx while the board is this far under it',
+  );
+  assert.ok(
+    /surfaced_internships:/.test(source),
+    'the internship count is reported on every cron run, including while it is far short',
+  );
+});
+
+test('internship supply is never grown by loosening what counts as an internship', async () => {
+  const { resolveEmploymentType } = await import('../lib/compensation');
+  /* All three are live full-time postings that a broader early-career pattern picks up. Measured
+     2026-08-03 across 36,435 postings while looking for a way to close the gap to 2,000: widening
+     the pattern to university/campus/early-career adds 198 titles, and these are what it adds. */
+  for (const title of [
+    'University Recruiter',
+    'Campus Recruiter',
+    'Early Career - Family Medicine Physician',
+    'Trainee Spa Therapist',
+  ]) {
+    assert.notEqual(resolveEmploymentType(title), 'Internship', `${title} is not an internship`);
+  }
+  // And the genuine ones still resolve.
+  assert.equal(resolveEmploymentType('Platform Engineer Intern, Summer 2027'), 'Internship');
+  assert.equal(resolveEmploymentType('Software Engineering Co-Op'), 'Internship');
+});
