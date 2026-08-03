@@ -6,16 +6,18 @@ import { requireAuth } from '../middleware/auth';
 import { encryptField } from '../lib/fieldCrypto';
 import { parseResumeWithClaude, parseResumeFromPdf, ParsedProfile } from '../llm/parse';
 import { extractPdfText } from '../lib/pdfText';
-import { put } from '@vercel/blob';
 import { MultipartFile } from '@fastify/multipart';
 import { z } from 'zod';
 import {
   extractDocxText,
   inspectResumeUpload,
   ResumeUploadError,
-  resumeStorageMetadata,
   type ResumeSourceFormat,
 } from '../lib/resumeUpload';
+import {
+  deleteUploadedResumeBlobsForUser,
+  deleteUploadedResumeThenClear,
+} from '../lib/resumeAccess';
 import {
   assessImpactBullet,
   buildRecentExperienceReview,
@@ -573,31 +575,16 @@ export async function profileRoutes(fastify: FastifyInstance) {
       });
     }
 
-    const storage = resumeStorageMetadata(sourceFormat);
-    const resumeObjectKey = `users/${userId}/resume.${storage.extension}`;
-
-    // Actually store the file this time. Best-effort on purpose: the parse above is what the
-    // student came for, and a blob outage (or a missing BLOB_READ_WRITE_TOKEN in local dev)
-    // must not fail their signup. resume_url stays NULL and everything else still works.
-    let resumeUrl: string | null = null;
-    try {
-      const blob = await put(resumeObjectKey, resumeBuffer, {
-        access: 'public',
-        contentType: storage.contentType,
-      });
-      resumeUrl = blob.url;
-    } catch (err) {
-      fastify.log.warn({ err }, 'could not store original resume; continuing with the parse');
-    }
-
     try {
       await db
         .insert(profiles)
         .values({
           user_id: userId,
           parsed_json: parsedProfile,
-          resume_object_key: resumeObjectKey,
-          resume_url: resumeUrl,
+          // The uploaded bytes are parsing input, not account storage. A new row starts with no
+          // pointers. Conflict updates omit these fields until legacy Blob deletion succeeds.
+          resume_object_key: null,
+          resume_url: null,
           voice_pref: voice_pref ?? null,
           updated_at: new Date(),
         })
@@ -605,9 +592,6 @@ export async function profileRoutes(fastify: FastifyInstance) {
           target: profiles.user_id,
           set: {
             parsed_json: parsedProfile,
-            resume_object_key: resumeObjectKey,
-            // Don't null out a previously stored file just because this upload failed.
-            ...(resumeUrl ? { resume_url: resumeUrl } : {}),
             voice_pref: voice_pref ?? null,
             updated_at: new Date(),
           },
@@ -615,6 +599,21 @@ export async function profileRoutes(fastify: FastifyInstance) {
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to save profile to database' });
+    }
+
+    // Replacement must not strand the previous raw upload. Keep its legacy DB pointers until Blob
+    // deletion succeeds, then clear them. A failure leaves a recoverable pointer and the daily
+    // sweep retries the same delete-then-clear order. The new upload itself is never stored.
+    try {
+      await deleteUploadedResumeThenClear(
+        () => deleteUploadedResumeBlobsForUser(userId),
+        () => db
+          .update(profiles)
+          .set({ resume_object_key: null, resume_url: null })
+          .where(eq(profiles.user_id, userId)),
+      );
+    } catch (err) {
+      fastify.log.warn({ err, userId }, 'could not retire legacy uploaded resume; retention sweep will retry');
     }
 
     // Compatibility bridge for clients that saved category and role type before uploading their
@@ -689,9 +688,8 @@ export async function profileRoutes(fastify: FastifyInstance) {
       return reply.status(500).send({ error: 'Failed to prepare the recent experience review' });
     }
 
-    // Fill the academic gaps the upload already answered. Best-effort and non-fatal for the same
-    // reason the blob write is: the parse is what the student came for, and a failure here costs
-    // them one extra question rather than their signup.
+    // Fill the academic gaps the upload already answered. Best-effort and non-fatal: the parse is
+    // what the student came for, and a failure here costs one extra question rather than signup.
     let gaps_prefilled: string[] = [];
     try {
       const [existing] = await db

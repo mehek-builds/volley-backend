@@ -236,12 +236,9 @@ export const profiles = pgTable('profiles', {
     .primaryKey()
     .references(() => users.id, { onDelete: 'cascade' }),
   parsed_json: jsonb('parsed_json'),
+  // Legacy nullable columns. New uploads never write an original file, and the retention sweep
+  // clears pointers left by the brief storage implementation before this privacy correction.
   resume_object_key: text('resume_object_key'),
-  // The stored original. resume_object_key has always been written and never read, and it pointed
-  // at a blob that was never uploaded: POST /profile parsed the PDF and dropped the buffer on the
-  // floor. A Vercel Blob URL carries a random token, so the key alone cannot reconstruct it - the
-  // URL has to be kept or the file is unreachable even once it is really uploaded.
-  // NULL is normal: the upload is best-effort and a blob outage must not fail a signup.
   resume_url: text('resume_url'),
   voice_pref: text('voice_pref'),
   // string[] of the skills the student ACTUALLY has, in their own words. The one authoritative

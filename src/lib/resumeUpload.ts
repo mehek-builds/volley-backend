@@ -305,9 +305,3 @@ export async function extractDocxText(buffer: Buffer): Promise<string> {
     );
   }
 }
-
-export function resumeStorageMetadata(format: ResumeSourceFormat): { extension: string; contentType: string } {
-  return format === 'pdf'
-    ? { extension: 'pdf', contentType: PDF_MIME }
-    : { extension: 'docx', contentType: DOCX_MIME };
-}

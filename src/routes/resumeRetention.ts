@@ -1,8 +1,10 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import { db } from '../db/index';
+import { profiles } from '../db/schema';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { sweepExpiredResumeBlobs, RESUME_RETENTION_DAYS } from '../lib/resumeAccess';
 
-// Daily sweep deleting generated resume files past the retention window.
+// Daily sweep deleting legacy originals immediately and generated files past the retention window.
 //
 // This is the only control that reaches blobs whose URL was already handed to a client. Before
 // the /resume/download change, POST /resume/generate returned the raw public blob URL, so those
@@ -38,6 +40,9 @@ async function handleSweep(request: FastifyRequest, reply: FastifyReply, fastify
 
   try {
     const { scanned, deleted } = await sweepExpiredResumeBlobs();
+    // The blob deletion succeeded, so stale legacy pointers can no longer lead an export or
+    // onboarding response to claim the original still exists.
+    await db.update(profiles).set({ resume_object_key: null, resume_url: null });
     // Logged at info on every run, including no-op runs: a retention promise that quietly stops
     // running looks identical to one that has nothing to do, and the privacy policy now states
     // this window as fact.

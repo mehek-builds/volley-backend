@@ -299,14 +299,9 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       // page count - an older upload, or a parse that predates the measurement - and the base
       // screen simply omits the "from N pages" line rather than guessing one.
       source_pages: typeof parsed?.source_pages === 'number' ? parsed.source_pages : 0,
-      // The student's ORIGINAL upload, so /start can show it beside the rebuilt one. NULL is a
-      // normal state, not an error: storing the file is best-effort (a blob outage must not fail a
-      // signup), and every account created before resume_url was written has none. The comparison
-      // view degrades to describing the original rather than displaying it.
-      //
-      // Safe to serve here: it is this user's own file, behind requireAuth, and the URL already
-      // carries its own unguessable blob token.
-      source_resume_url: profile?.resume_url ?? null,
+      // Uploaded originals are parsing input and are never retained server-side. A same-session
+      // comparison can use the browser's local File object; a reload degrades to the parsed facts.
+      source_resume_url: null,
       // True while the extension is allowed to read values back out of a form. Surfaced so the
       // student can always see whether it is on, rather than having to trust that it stopped.
       harvest_active: !user.onboarding_completed_at,
