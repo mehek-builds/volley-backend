@@ -492,3 +492,12 @@ test('a season word in the title is NOT on its own an internship signal', () => 
     assert.equal(resolveEmploymentType(title), undefined, title);
   }
 });
+
+test('employers keep inventing new spellings of full-time', () => {
+  // Each of these was found live, on a different board, after the previous one was fixed.
+  assert.equal(normalizeEmploymentType('Full Time Employee'), 'Full-time');      // Workable
+  assert.equal(normalizeEmploymentType('Permanent, Full-time'), 'Full-time');    // Ninja Van
+  assert.equal(normalizeEmploymentType('Permanent'), 'Full-time');               // Lever
+  // And the anchor still holds where it matters.
+  assert.equal(normalizeEmploymentType('Full Time Contractor'), 'Contract');
+});

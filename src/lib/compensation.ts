@@ -322,7 +322,11 @@ const TYPE_SYNONYMS: [RegExp, string][] = [
      filter - the employer had answered and the board was not listening.
      ANCHORED, NOT A PREFIX. `^full[-\s]?time` on its own would also swallow "Full Time
      Contractor", which is a contract and has to keep falling through to the Contract rule below. */
-  [/^full[-\s]?time$|^full[-\s]?time employee$|^permanent$|^fulltime$/i, 'Full-time'],
+  /* "Permanent, Full-time" is Ninja Van's wording, found the day international sources landed and
+     6 postings wide. Employers keep inventing new spellings of the same fact, which is why the
+     verify:classification gate reports pass-through values rather than hiding them.
+     STILL ANCHORED. "Full Time Contractor" has to keep falling through to Contract below. */
+  [/^full[-\s]?time$|^full[-\s]?time employee$|^permanent,?\s*full[-\s]?time$|^permanent$|^fulltime$/i, 'Full-time'],
   [/^part[-\s]?time$|^parttime$/i, 'Part-time'],
   [/^intern(ship)?$|^co-?op$|^scholarship$/i, 'Internship'],
   /* Split out of Internship 2026-08-04. Lever emits this for Match Group's four "Apprenticeship -
@@ -477,6 +481,36 @@ export function employmentTypeFromDescription(
   return undefined;
 }
 
+/* "SUMMER ANALYST" AND "SUMMER ASSOCIATE" ARE THE FINANCE AND LAW WORDS FOR INTERN.
+ *
+ * Not a season plus a job title - a term of art naming the summer intern class, which is why banks
+ * and firms use it in place of the word intern entirely. Added because the description rule caught
+ * eight of AQR's nine and missed the ninth: "2027 Research and Portfolio Management Engineering
+ * Summer Analyst" is the one posting where AQR left the programme paragraph out, so there was no
+ * body evidence to find.
+ *
+ * DELIBERATELY THE WEAKEST SIGNAL IN THE CHAIN, and it does NOT live in TITLE_TYPES. Putting it
+ * there gave it the field-override that "Intern" has, and the evidence does not support that: the
+ * intern override rests on "nobody writes Intern in a job title for a permanent role", which is a
+ * claim about the whole language, while this rests on nine postings from ONE employer. In
+ * TITLE_TYPES it read "Seasonal Summer Associate" tagged Contract as an internship, and a
+ * "Summer Associate, Retail" tagged Part-time too. Below the employer's field, an employer who
+ * states anything at all is believed and only a silent one reaches this.
+ *
+ * Two vetoes for the cases a bare season cannot separate: a programme-owner title ("Summer Analyst
+ * Program Manager") and an explicitly seasonal one, which is a different job with a similar name.
+ *
+ * NARROW EVIDENCE BASE, stated plainly so it can be revisited: all nine live examples are AQR.
+ * Zero counterexamples across 39,868 titles, but one employer is one employer.
+ */
+const SUMMER_INTERN_TITLE = /\bsummer\s+(analyst|associate)s?\b/i;
+
+function summerInternTitle(title: string): string | undefined {
+  if (!SUMMER_INTERN_TITLE.test(title)) return undefined;
+  if (RECRUITING_TITLES.test(title) || /\bseasonal\b/i.test(title)) return undefined;
+  return 'Internship';
+}
+
 export function resolveEmploymentType(
   title: string,
   boardValue?: string,
@@ -505,5 +539,5 @@ export function resolveEmploymentType(
   /* Description LAST, and only when both the title and the employer said nothing. Deliberately the
      weakest evidence in the chain: it is inference from prose, so it never overrules an employer
      stating their own answer, and it only ever fills a silence. */
-  return fromTitle ?? employmentTypeFromDescription(title, description);
+  return fromTitle ?? employmentTypeFromDescription(title, description) ?? summerInternTitle(title);
 }

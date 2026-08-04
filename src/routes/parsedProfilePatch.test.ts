@@ -51,9 +51,21 @@ test('target roles remain a complete five-title targeting set', () => {
 });
 
 test('account and structured work fields cannot be changed through the parsed profile route', () => {
-  assert.equal(parsedProfilePatchSchema.safeParse({ email: 'other@example.com' }).success, false);
-  assert.equal(parsedProfilePatchSchema.safeParse({ experience: [] }).success, false);
-  assert.equal(parsedProfilePatchSchema.safeParse({ grad_year: 2035 }).success, false);
+  /* Each of these is asserted with a REASON, not just a false. A single-unknown-key payload is
+   * rejected by two independent rules: `.strict()` refuses the key, and the non-empty refine
+   * refuses the `{}` that stripping the key would leave behind. So `success === false` alone does
+   * not prove `.strict()` is alive. Delete `.strict()` and these three still fail, for the wrong
+   * rule. Pinning the message is what makes them mean what they say. */
+  for (const forbidden of [{ email: 'other@example.com' }, { experience: [] }, { grad_year: 2035 }]) {
+    const result = parsedProfilePatchSchema.safeParse(forbidden);
+    assert.equal(result.success, false);
+    assert.match(
+      result.success ? '' : result.error.issues[0].message,
+      /Unrecognized key/,
+      `${JSON.stringify(forbidden)} must be refused for being an unknown key, not for being empty ` +
+        'after the key was silently stripped',
+    );
+  }
 });
 
 test('skills and objective may be deliberately cleared', () => {
@@ -416,6 +428,59 @@ test('the whole editor save payload parses with languages alongside every other 
   });
 
   assert.equal(result.success, true);
+});
+
+/* ISSUE-027 negative control. Everything above about `languages` asserts that a shape is ACCEPTED,
+ * and every one of those assertions gets MORE true as the schema gets looser. Delete `.strict()`
+ * and they all stay green, which was verified by mutation rather than assumed: the whole 1505-test
+ * backend suite passed with `.strict()` removed from parsedProfilePatchSchema.
+ *
+ * That matters because the two failure modes here are opposites and the fix for one is the sabotage
+ * of the other. Dropping `languages` from the schema 400s every save while `.strict()` stands;
+ * dropping `.strict()` makes `languages` parse again while also making every typo, every renamed
+ * field and every stale client key parse silently into a patch that then writes nothing. A future
+ * maintainer who hits the 400 and reaches for `.strict()` instead of the field has to break this. */
+test('an unknown key is refused even alongside a valid languages value', () => {
+  /* The key detail is that this payload carries a VALID field too. Strip the unknown key and what
+   * remains is `{ languages: [] }`, which is non-empty and parses fine, so the non-empty refine
+   * cannot rescue this assertion the way it rescues a lone-unknown-key payload. `.strict()` is the
+   * only rule that can fail this, which is what makes it a real control. */
+  const withValidField = parsedProfilePatchSchema.safeParse({ languages: [], unexpected_field: 'x' });
+  assert.equal(
+    withValidField.success,
+    false,
+    'a patch carrying an unknown key must be refused whole. If this passes, `.strict()` is gone and ' +
+      'every "languages is accepted" case above has stopped proving anything.',
+  );
+  assert.match(
+    withValidField.success ? '' : withValidField.error.issues[0].message,
+    /Unrecognized key/,
+    'refused for the unknown key specifically, not incidentally by some other rule',
+  );
+
+  // The same control with a full, otherwise-perfect editor payload, so the guard is not satisfied
+  // by the minimal case alone.
+  const fullPayload = parsedProfilePatchSchema.safeParse({
+    full_name: 'Mehek Mandal',
+    skills: ['Python'],
+    languages: ['English', 'Hindi'],
+    linkedin_url: 'https://linkedin.com/in/example',
+  });
+  assert.equal(fullPayload.success, false, 'one unknown key fails the WHOLE patch, however valid the rest is');
+});
+
+test('languages absent entirely is accepted and is not coerced into an empty list', () => {
+  /* The field is `.optional()`, and absence has to stay a real third state. A save from a client
+   * that predates the field must still parse, and it must NOT arrive at the handler looking like
+   * `languages: []`, because applyParsedProfilePatch reads an empty array as "the student cleared
+   * the box" and would wipe a stored language list that nobody touched. */
+  const result = parsedProfilePatchSchema.safeParse({ skills: ['Python'], objective: 'Builder.' });
+  assert.equal(result.success, true);
+  assert.equal(
+    result.success && 'languages' in result.data,
+    false,
+    'an omitted languages field must stay omitted, not become an empty array that clears stored data',
+  );
 });
 
 test('a blank language is rejected rather than stored as whitespace', () => {
