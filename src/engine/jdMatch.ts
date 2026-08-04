@@ -251,7 +251,35 @@ const HEADING_PATTERNS: Array<{ kind: SectionKind; re: RegExp }> = [
   // A lexicon hit inside a hiring-process disclosure is still a hiring-process disclosure. This is
   // the only section-based route by which a lexicon skill leaves the denominator at all, and on
   // this corpus it has not once removed a stated requirement.
-  { kind: 'noise', re: new RegExp(String.raw`^about\b(?!\s+${SECOND_PERSON_SUBJECT}\b)|\b(who we are|our (story|mission|values|culture)|benefits|perks|what we offer|compensation|salary|pay range|hourly rate|pay rate|stipend|equal opportunity|eeo|diversity|accommodation|privacy|how to apply|why join|interview process|hiring process|selection process|background check)\b`, 'i') },
+  { kind: 'noise', re: new RegExp(String.raw`^about\b(?!\s+${SECOND_PERSON_SUBJECT}\b)|\b(who we are|our (story|mission|values|culture)|benefits|perks|what we offer|compensation|salary|pay range|equal opportunity|eeo|diversity|accommodation|privacy|how to apply|why join)\b`, 'i') },
+  // THE PROCESS-AND-PAY FOOTER IS MATCHED AT THE END OF THE HEADING, NOT ANYWHERE IN IT.
+  //
+  // These four were originally alternates in the substring list above. Retrospective review of
+  // ISSUE-026 found the substring form truncates real requirements blocks, because a heading is
+  // only boilerplate when the phrase is what the heading IS, not something it mentions:
+  //
+  //   "The interview process"          section header   -> noise, correct
+  //   "Interview Process Design"       requirements sub-heading, on a recruiter posting
+  //   "Background Check Operations"    ditto, on a trust-and-safety posting
+  //   "Pay Rate Administration:"       ditto, on a comp-analyst posting
+  //   "Own the interview process end to end"   a responsibilities bullet written without a marker
+  //
+  // Under the substring form all five were noise at weight 0. Measured on a recruiter posting whose
+  // requirements block carries an "Interview Process Design" sub-heading, that zeroed the block and
+  // took `greenhouse`, `ashby`, `lever` and `workday` - the entire requirement - to an unscorable
+  // refusal for a resume that listed all four. That is the failure PLACE_SAFE_KINDS exists to
+  // refuse: deleting a requirement is worse than keeping a nuisance.
+  //
+  // Ending the heading with the phrase is the discriminator, and it is a property of headings
+  // rather than another list: a section header naming the process STOPS there ("The interview
+  // process", "Use of AI in Our Hiring Process", "Housing/Commuter Stipend", "Hourly Rate"), while
+  // a requirements sub-heading continues into the thing being required.
+  //
+  // THE COST, measured on the same 400-posting corpus: two of the 27 headings the substring form
+  // caught no longer match, "WHAT DOES THE HIRING PROCESS LOOK LIKE?" and one like it, because the
+  // sentence continues past the phrase. Those footers stay in the denominator. A nuisance term on
+  // two postings is the right price for not deleting a stated requirement on any.
+  { kind: 'noise', re: /^(the|our|your)?\s*(interview|hiring|selection|recruitment)\s+process(es)?[\s:.]*$/i },
   { kind: 'preferred', re: /\b(preferred|nice[- ]to[- ]have|bonus|plus(es)?|desired|good to have|additional qualifications)\b/i },
   // `what we('?re)? look(ing)? for` and `(your|the) impact`, not the tighter `what we're looking
   // for` / `your impact` they replaced. Databricks' "Product Management Intern (Summer 2027)"
@@ -618,46 +646,31 @@ copywriting analytics automation visualization prototyping wireframing benchmark
  * `ccpa` do not survive into its final twelve at all. Both tests are in jdMatch.test.ts: one pins
  * the footer out of the denominator, the other pins that a real privacy role stays scorable. */
 
-/* THE BENEFIT-AND-LOGISTICS BLOCK (`stipend` through `screening`), added 2026-08-04 for ISSUE-026.
- * This is the SECOND line of defence on the psiquantum footer described at HEADING_PATTERNS, and it
- * is worth being exact about which line actually does the work, because the two are not equivalent:
+/* THE BENEFIT-AND-LOGISTICS ROW THAT USED TO BE HERE WAS REMOVED, and this note is what remains of
+ * it, because the reasoning that added it is the reasoning most likely to add it back.
  *
- *   heading fix only   8 terms, all 8 genuine requirements
- *   this list only    10 terms, still carrying `HR` and `Near`
- *   both              8 terms, all 8 genuine requirements
+ * ISSUE-026 added `stipend housing commuter relocation lodging shuttle parking wage rate allowance
+ * reimbursement police background check screening` as a second line of defence on a pay table. It
+ * was measured at the time as changing 8 of 400 postings, and shipped as "insurance". Retrospective
+ * review found the insurance cost more than the risk:
  *
- * So the heading fix carries this posting on its own and this list changes nothing on it. It is
- * here for the shape the heading fix cannot see: the same pay table written as bullets, or as one
- * run-on line, or under a heading nobody thought to enumerate. `housing`, `commuter` and `stipend`
- * are the terms that posting actually produced; the rest of the row is the same vocabulary at the
- * same specificity, which is the standard the `privacy` note above sets.
+ *   "Run Sanctions Screening reviews"      loses `sanctions screening`, and INVENTS `run sanctions`
+ *   "Process Wage Garnishment orders"      loses `wage garnishment`, leaves `garnishment`, `process`
+ *   "a public Housing Authority program"   loses `housing authority`, UNMASKS bare `authority`
+ *   "Draft Police Accountability rules"    loses `police accountability`, UNMASKS `draft`
+ *   "the Rate Limiting Service"            loses `rate limiting`
  *
- * Over 400 live postings pulled full-text from the production board on 2026-08-04 it changes the
- * extracted set on 8 of them, so its value is almost entirely insurance rather than measured yield.
- * That is stated because it is the kind of list that grows on intuition, and the number to beat
- * before adding to it is 8 in 400.
+ * `payroll`, `aml`, `kyc`, `sanctions`, `zoning` and `eeoc` are all SKILL_LEXICON entries, so these
+ * are the disciplines the lexicon pass exists to serve rather than hypotheticals. Every one is the
+ * failure the `completion`/`Near` note above already describes: a deny-list entry that breaks a junk
+ * bigram into junk parts has moved the problem, not fixed it. Removing the row was measured to leave
+ * the psiquantum posting this all started from unchanged, because the heading fix carries it alone.
  *
- * `completion` AND `completed` WERE IN THIS LIST AND WERE REMOVED, and the reason is a general
- * caution about stop-lists rather than a fact about those two words. The pay table's degree column
- * reads "PhD: Near Completion", which extracts as the bigram `near completion`. Denying `completion`
- * does not delete that requirement, it UNMASKS `Near` as a unigram - a strictly worse term, since it
- * is a preposition rather than an identifiable piece of boilerplate. That is measured, not reasoned:
- * the vocab-only run above shows `Near` in the ten. A deny-list entry that breaks a junk bigram into
- * junk parts has moved the problem, so any addition here needs checking against what the SURVIVING
- * unigrams would be, not just against the term it targets.
- *
- * `rate` IS THE ARGUABLE ENTRY and it is taken deliberately. It costs the bigram `conversion rate`
- * on marketing postings, which is a real thing to have done. It is kept because "Hourly Rate",
- * "Rate", "Pay Rate" is the head of the compensation table on every posting that has one, `hourly`
- * was already denied here for exactly that reason, and `conversion` survives on its own as the term
- * a marketing resume is actually matched on.
- *
- * `hr` IS NOT HERE, though `HR` was one of the five junk terms on the psiquantum posting. It came in
- * through the ACRONYM rule out of "at least two interviews with the hiring team and HR", which is
- * the interview paragraph and is now noise. HR work is a real discipline this file already serves
- * (`recruiting`, `payroll` are in SKILL_LEXICON), so denying the acronym would delete a stated
- * requirement from every HR posting to fix one sentence in a physics one. Same trade
- * NON_REQUIREMENT_ACRONYMS refuses for `mba` and `phd`. */
+ * THE COLLISION TEST DOES NOT PROTECT AGAINST THIS and should not be cited as though it does. It
+ * intersects SKILL_LEXICON with BOILERPLATE, and none of `rate`, `wage`, `housing`, `police` or
+ * `screening` is a lexicon entry, so it passed vacuously on every one of them. What catches this
+ * class is asking what the SURVIVING unigrams are, which is a question only a real posting answers.
+ */
 
 /* THE MONTH NAMES ARE HERE BECAUSE A DATE IS NOT A REQUIREMENT, and they were expensive. Measured
  * 2026-08-04 over 400 live postings, in the FINAL capped denominator, they were the single largest
@@ -734,9 +747,7 @@ whether expect actual additionally president stem gpa opt person excels
 federal municipal county province
 department departments
 learn transparency hourly
-stipend stipends housing commuter relocation lodging shuttle parking wage wages rate rates
-allowance allowances reimbursement reimbursements
-police background check checks screening`
+`
     .split(/\s+/)
     .filter(Boolean),
 );
@@ -865,7 +876,7 @@ scaling write writing test testing deploy deploying monitor monitoring analyze a
 reporting present presenting coordinate coordinating execute executing implement implementing
 comfortable familiar proficient fluent skilled versed competent capable
 strong deep advanced basic solid prior proven demonstrated extensive significant substantial
-hands exposure ability willingness eagerness passion desire interest curiosity
+hands exposure ability willing willingness eager eagerness passion desire interest curious curiosity
 excellent outstanding exceptional thorough working practical relevant
 bachelor bachelors master masters degree currently pursuing enrolled rising
 must should able eager self highly well very`
@@ -1195,6 +1206,7 @@ const VENDOR_SPELLINGS = new Set([
 /** Slash forms that are ONE skill, not two. Checked against the normalized (space-joined) key,
  *  because normalizeTerm turns "CI/CD" into "ci cd" and the lexicon carries ci and cd separately. */
 const SLASH_FORMS = new Set(['ci cd', 'a b', 'r d']);
+
 
 function tokenizeSection(text: string): SectionToken[] {
   const raw = [...text.matchAll(/[A-Za-z][A-Za-z0-9+#./_-]*/g)];

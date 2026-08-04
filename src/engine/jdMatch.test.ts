@@ -1418,6 +1418,118 @@ describe('the process-and-logistics footer is not a requirements block', () => {
   });
 });
 
+/**
+ * RETROSPECTIVE REVIEW OF ISSUE-026, 2026-08-04.
+ *
+ * ISSUE-026 shipped with five tests that mutation-testing showed pinned almost none of it: reverting
+ * four of its seven new heading alternates, and all 21 of its new BOILERPLATE words, left the whole
+ * suite green. The commit reported per-change corpus deltas that read as verification and pinned
+ * nothing in CI. These tests are the ones with teeth, and each was confirmed to FAIL when the thing
+ * it describes is reverted.
+ */
+describe('a process sub-heading does not delete the requirements under it', () => {
+  // A requirements block large enough to stay scorable once the sub-heading's block is zeroed, so
+  // the salvage pass in extractJdTerms never fires and cannot mask the loss.
+  const RECRUITER_JD = `Requirements
+- Strong SQL, Excel, Tableau, Looker and Python reporting
+- Experience with Airflow and dbt pipelines
+- Familiarity with Snowflake
+
+Interview Process Design
+- Administer Greenhouse and Workday for the talent team
+`;
+
+  test('a heading that CONTINUES past the phrase is not boilerplate', () => {
+    const keys = extractJdTerms(RECRUITER_JD).map((t) => t.term);
+    assert.ok(keys.includes('workday'), '"Interview Process Design" heads requirements, not a footer');
+    assert.ok(keys.some((k) => k.includes('greenhouse')));
+  });
+
+  /**
+   * THE FAILURE THIS EXISTS FOR, and it is the inflating kind rather than the deflating kind.
+   *
+   * Under the substring form the block was noise at weight 0, so `greenhouse` and `workday` left
+   * the denominator entirely. A student missing BOTH was then told 100 with an empty missing list,
+   * on a posting that names both. PLACE_SAFE_KINDS records why that is the worse direction: a
+   * requirement the student lacks vanishing from the denominator inflates the score AND vanishes
+   * from the list they are supposed to act on.
+   */
+  test('a student missing those tools is not told they match everything', () => {
+    const r = scoreJdMatch('Analyst. SQL, Excel, Tableau, Looker, Python, Airflow, Snowflake.', RECRUITER_JD);
+    assert.notEqual(r.score, 100, 'the posting names two tools this resume does not have');
+    assert.ok(
+      r.missing.some((t) => t.display.toLowerCase().includes('greenhouse')),
+      'a requirement the student lacks must stay on the missing list',
+    );
+    assert.ok(r.missing.some((t) => t.display.toLowerCase().includes('workday')));
+  });
+
+  test('a heading that ENDS with the phrase is still boilerplate', () => {
+    // The psiquantum footer this all started from, plus the pay-table shapes beside it. These are
+    // what the end-anchored form must keep catching.
+    for (const heading of ['The interview process', 'Interview Process', 'INTERVIEW PROCESS', 'The interview process:', 'Our hiring process']) {
+      const kinds = segmentJd(`Requirements\n- Experience with Python and SQL\n${heading}\nWe will contact you.\n`);
+      assert.ok(
+        kinds.some((sec) => sec.kind === 'noise'),
+        `"${heading}" names the process or the pay, so it closes the section above it`,
+      );
+    }
+  });
+
+  test('a requirements sub-heading that merely mentions the phrase is not', () => {
+    for (const heading of [
+      // A sub-heading that CONTINUES past the phrase.
+      'Interview Process Design',
+      'Background Check Operations',
+      'Pay Rate Administration:',
+      'Hiring Process Automation',
+      'Stipend and Project Work',
+      'Own the interview process end to end',
+      // AND a responsibilities line that ENDS with it. Review found the first version of this fix
+      // discriminated on "does any word follow the phrase", which is not the same question: delete
+      // three words from the line above and it was boilerplate again, reproducing the exact
+      // 100-score/empty-missing-list failure this block exists to prevent. Every negative fixture
+      // used to have trailing words, so the suite was blind to this whole verb-initial class.
+      'Own the interview process',
+      'Manage the interview process',
+      'Redesign our hiring process',
+      'Conducting Background Checks',
+      'Analyze Pay Rates',
+      'Administering Employee Stipends',
+      'Run Background Checks',
+      'Model Hourly Rates',
+    ]) {
+      const kinds = segmentJd(`Requirements\n- Experience with Python and SQL\n${heading}\n- Experience with Workday\n`);
+      assert.ok(
+        !kinds.some((sec) => sec.kind === 'noise'),
+        `"${heading}" heads requirements; zeroing it deletes what is under it`,
+      );
+    }
+  });
+});
+
+describe('the benefit-and-logistics deny-list is gone, and stays gone', () => {
+  /**
+   * Each of these lost a real compound requirement to the ISSUE-026 vocabulary row, and two of them
+   * were left strictly worse off than before: `Housing Authority` unmasked a bare `authority`, and
+   * `Sanctions Screening` INVENTED `run sanctions`. That is the "a deny-list entry that breaks a junk
+   * bigram into junk parts has moved the problem" failure the same commit claims to have avoided.
+   */
+  test('compliance, payroll and policy compounds survive', () => {
+    const cases: Array<[string, string]> = [
+      ['Requirements\n- Run Sanctions Screening reviews for the compliance team\n', 'sanctions screening'],
+      ['Requirements\n- Process Wage Garnishment orders accurately in Workday\n', 'wage garnishment'],
+      ['Requirements\n- Support a public Housing Authority grant program\n', 'housing authority'],
+    ];
+    for (const [jd, expected] of cases) {
+      assert.ok(
+        extractJdTerms(jd).map((t) => t.term).includes(expected),
+        `"${expected}" is the requirement, not benefits vocabulary`,
+      );
+    }
+  });
+});
+
 describe('scorability needs signal, not just a term count', () => {
   test('a posting of company, city and people names is not scorable', () => {
     // Cleared a floor of 6 and produced a confident 0% "Weak match" with Bob Smith, Jane Doe and
