@@ -4,8 +4,19 @@ on:
   pull_request:
   push:
     branches: [main]
+  # DAILY, and deliberately not hourly. This workflow runs four jobs, and GitHub bills Actions by
+  # the JOB rounded up to the whole minute, so one run costs ~7 billed minutes rather than the ~4
+  # it spends. At hourly that is ~170 minutes a day from the schedule alone, against the 2,000
+  # minutes a month a private repo gets on the Free plan. On 2026-08-04 the allowance ran out and
+  # every job on every branch, including main, started failing in two seconds with no runner
+  # assigned and no logs to read. Nothing in the repo could explain it, because a job that never
+  # starts leaves nothing behind.
+  #
+  # 07:17 UTC because the board poll is 06:00 UTC (vercel.json). The scheduled run exists to catch
+  # drift in the LIVE board and schema, so it has to read a board the poll has already refreshed;
+  # running before it would measure yesterday and call it today.
   schedule:
-    - cron: '17 * * * *'
+    - cron: '17 7 * * *'
 
 # Least privilege: this job only needs to read the code (S1).
 permissions:
