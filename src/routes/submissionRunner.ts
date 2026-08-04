@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { decide, isBlocked } from '../engine/eligibility';
 import { put } from '@vercel/blob';
 import { chromium, type Page } from 'playwright-core';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -558,6 +559,44 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
   if (!current?.portal_url) throw new Error('We do not have a link to the company application page');
   const portal = detectPortal(current.portal_url);
   const runId = current.submission_run_id ?? randomUUID();
+
+  /* THE GRADUATION BLOCK, and it stops the unattended run before anything is spent or sent.
+   *
+   * Only on the UNATTENDED path. A student who clicks Prepare on a role has looked at it and
+   * chosen it, and this gate is arithmetic over a parsed title - it is not entitled to overrule a
+   * person about their own application. Autopilot has made no such choice, so it gets the strict
+   * reading: an application auto-sent to an internship the student cannot legally hold spends a
+   * real application slot and a real employer relationship on their behalf, and they never
+   * decided to.
+   *
+   * Placed above prepareControlled and above the account-walled stop for the same reason those
+   * sit where they do: a gate that only covers the submit path is not a gate, because prepare
+   * runs first, independently, and costs billed browser calls of its own. */
+  if (unattended) {
+    /* StoredSpec is Record<string, unknown> - the packet spec is not typed at this layer - so the
+       two fields are read defensively. A spec missing either one yields `unknown` from decide(),
+       which never blocks, and that is the right default for a record we cannot read. */
+    const role = typeof (stored.job_context as { role?: unknown } | undefined)?.role === 'string'
+      ? ((stored.job_context as { role?: string }).role as string)
+      : '';
+    const gradDate = typeof stored.grad_date === 'string' ? stored.grad_date : null;
+    const gate = decide({ title: role, employment_type: null }, gradDate);
+    if (isBlocked(gate)) {
+      fastify.log.warn(
+        { userId: row.user_id, resumeId: row.id, role, reason: gate.reason },
+        'autopilot blocked: graduation',
+      );
+      await writeReview(row, nextReview(current, {
+        status: 'needs_attention',
+        submission_run_id: runId,
+        /* Named plainly, because this one is worth reading. The student is being told a fact about
+           themselves and this role, not that something went wrong. */
+        attention_reason: `Not sent: this role ${gate.reason}. Autopilot does not apply to roles you are not eligible for.`,
+      }));
+      return;
+    }
+  }
+
   const authorization = await standingAuthorization(row.user_id);
   assertControlledPortalEnabled(portal);
   if (shouldUseLocalControlledBrowser(portal)) {
