@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { quoteIsGrounded, validateVerdicts, COMPETENCY_SYSTEM_PROMPT } from './competencyJudge';
+import type { CandidateProfile, CompetencyQuestion } from './competencyJudge';
 import { scorePosting, type CandidateFacts } from '../engine/clauseMatch';
 import { segmentJd } from '../engine/jdMatch';
 
@@ -152,7 +153,25 @@ describe('scorePosting keeps the deterministic half deterministic', () => {
     assert.equal(called, 1, 'exactly one batched call, never one per clause');
     const byBasis = Object.fromEntries(r.clauses.map((c) => [c.basis, c.verdict]));
     assert.equal(byBasis.terms, 'met', 'Python satisfies "SQL and/or Python" locally');
-    assert.equal(byBasis.graduation, 'unmet', 'May 2027 is before the stated window, decided locally');
+    /* Graduation now rides the SAME batched call, and that is the point of asserting called === 1
+       above: routing it to the judge must not turn one request per posting into two. */
+    assert.equal(byBasis.graduation, 'unmet', 'the judge answered, and its answer is what stands');
+  });
+
+  test('the graduation clause is sent as eligibility, and the facts go with it', async () => {
+    let seen: { qs: CompetencyQuestion[]; profile?: CandidateProfile } | null = null;
+    await scorePosting(jd, facts, undefined, segmentJd as never, async (_b, qs, profile) => {
+      seen = { qs, profile };
+      return { verdicts: qs.map((q) => ({ id: q.id, met: false })), rejected: [] };
+    });
+    const grad = seen!.qs.find((q) => /graduating/.test(q.clause));
+    assert.ok(grad, 'the graduation clause reached the judge at all');
+    /* Without the kind, the judge grounds it against the BULLETS, no bullet can carry a graduation
+       date, and every eligibility verdict is rejected as ungrounded: the clause would silently
+       stop being checked. */
+    assert.equal(grad!.kind, 'eligibility');
+    assert.equal(seen!.qs.find((q) => /communicate nuance/.test(q.clause))!.kind, 'competency');
+    assert.equal(seen!.profile?.gradDate, 'May 2027', 'the fact it must be judged against');
   });
 
   test('a judge that fails does not change a term or structured verdict', async () => {
@@ -161,8 +180,12 @@ describe('scorePosting keeps the deterministic half deterministic', () => {
       rejected: [{ reason: 'model unavailable' }],
     }));
     const byBasis = Object.fromEntries(r.clauses.map((c) => [c.basis, c.verdict]));
-    assert.equal(byBasis.terms, 'met');
-    assert.equal(byBasis.graduation, 'unmet');
+    assert.equal(byBasis.terms, 'met', 'a term match is local and survives an outage');
+    /* Graduation is no longer deterministic, so an outage leaves it UNSCOREABLE. That is the
+       honest state and the safe one: the alternative, defaulting it to met, is exactly the bug
+       that shipped a 100% score on a posting the student did not qualify for. */
+    assert.equal(byBasis.graduation, 'unscoreable');
+    assert.equal(r.score, null, 'and no headline number is published on a partial answer');
   });
 
   test('responsibilities are not scored against the candidate', async () => {
@@ -197,22 +220,77 @@ describe('a response we could not read is never a verdict', () => {
   });
 });
 
-describe('a bare-year graduation date is still a graduation date', () => {
-  test('pointsIn reads the candidate field without a cue word', async () => {
-    const { matchClause } = await import('../engine/clauseMatch');
-    const facts = (gradDate: string) => ({
-      degree: 'Bachelor of Science in Computer Science',
-      school: 'USC',
-      gradDate,
-      resumeText: 'Python.',
-      bullets: ['Led a 4-person team, analyzing 350 survey responses.'],
-    });
-    const clause = "Pursuing a bachelor's in computer science graduating in Fall 2027 or Spring 2028";
-    /* submissionEducationGuard builds grad_date from grad_year, so "2027" is a real stored value.
-       Running it through the employer-text cue gate returned no points, ownGrad was null, and every
-       window silently passed: the headline bug surviving inside its own fix. */
-    assert.equal(matchClause(clause, 1, facts('2030')).verdict, 'unmet');
-    assert.equal(matchClause(clause, 1, facts('2027')).verdict, 'met');
+describe('an eligibility verdict grounds in the facts, not the bullets', () => {
+  const profile: CandidateProfile = {
+    degree: 'Bachelor of Science in Computer Science',
+    school: 'University of Southern California',
+    gradDate: 'May 2027',
+  };
+  const q: CompetencyQuestion[] = [
+    { id: 'c1', clause: 'graduating in Fall 2027 or Spring 2028', kind: 'eligibility' },
+  ];
+
+  test('a met verdict must quote a fact verbatim', () => {
+    const ok = validateVerdicts(
+      { verdicts: [{ id: 'c1', met: true, quote: 'May 2027', why: 'inside the window' }] },
+      q,
+      BULLETS,
+      profile,
+    );
+    assert.equal(ok.verdicts[0]?.met, true);
+  });
+
+  test('a met verdict quoting a bullet is rejected, however true it sounds', () => {
+    /* The grounding gate is the whole reason this is safe to hand to a model. A bullet cannot
+       establish a graduation date, so a verdict citing one is not evidence, it is the model
+       reaching for the nearest text. */
+    const bad = validateVerdicts(
+      { verdicts: [{ id: 'c1', met: true, quote: BULLETS[0], why: 'seems recent' }] },
+      q,
+      BULLETS,
+      profile,
+    );
+    // Downgraded, not dropped: the question still has an answer and the answer is no. Dropping it
+    // would shrink the denominator by exactly the clauses the model got creative about.
+    assert.equal(bad.verdicts[0]?.met, false);
+    assert.equal(bad.rejected.length, 1, 'and it is reported, so a drifting model is visible');
+    assert.match(bad.verdicts[0]?.why ?? '', /profile/i, 'not "no bullet supports this"');
+  });
+
+  test('a date the student never entered cannot be invented', () => {
+    const invented = validateVerdicts(
+      { verdicts: [{ id: 'c1', met: true, quote: 'December 2027', why: 'inside the window' }] },
+      q,
+      BULLETS,
+      profile,
+    );
+    assert.equal(invented.verdicts[0]?.met, false, 'May 2027 is the only date on file');
+    assert.equal(invented.rejected.length, 1);
+  });
+
+  test('a competency verdict still grounds in the bullets, not the facts', () => {
+    const cross = validateVerdicts(
+      { verdicts: [{ id: 'c2', met: true, quote: 'May 2027', why: 'graduating soon' }] },
+      [{ id: 'c2', clause: 'experience leading a team', kind: 'competency' }],
+      BULLETS,
+      profile,
+    );
+    assert.equal(cross.verdicts[0]?.met, false, 'the corpora do not cross');
+  });
+});
+
+describe('the prompt states the direction rules the regex never had', () => {
+  /* Round six found "not graduating before 2027" read as a closed range and inverted, and
+     "Fall 2027 or Spring 2028" treated as a floor. Both are direction, and both are now written
+     into the prompt rather than into a pattern. */
+  test('it names polarity, alternatives and non-graduation dates', () => {
+    assert.match(COMPETENCY_SYSTEM_PROMPT, /not graduating before/i);
+    assert.match(COMPETENCY_SYSTEM_PROMPT, /no later than/i);
+    assert.match(COMPETENCY_SYSTEM_PROMPT, /requisition number, a funding round, a cohort year/i);
+  });
+
+  test('it forbids inventing a condition the posting never stated', () => {
+    assert.match(COMPETENCY_SYSTEM_PROMPT, /do not invent one/i);
   });
 });
 

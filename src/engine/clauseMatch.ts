@@ -65,7 +65,7 @@ export interface CandidateFacts {
   monthsOfExperience?: number | null;
 }
 
-export type ClauseVerdict = 'met' | 'unmet' | 'unscoreable';
+export type ClauseVerdict = 'met' | 'unmet' | 'unscoreable' | 'pending';
 
 export interface RequirementClause {
   /** The employer's sentence, verbatim, trimmed of bullet decoration. */
@@ -138,157 +138,31 @@ type GradPoint = { year: number; half: 1 | 2 };
 type GradSpan = { from: GradPoint; to: GradPoint };
 
 const ordinal = (p: GradPoint) => p.year * 2 + p.half;
-const overlaps = (a: GradSpan, b: GradSpan) =>
-  ordinal(a.to) >= ordinal(b.from) && ordinal(a.from) <= ordinal(b.to);
-
-/**
- * Graduation dates in ONE pass: find the graduation context, read dates from THAT, then compare.
+/* GRADUATION IS JUDGED, NOT PARSED.
  *
- * REWRITTEN after the same defect survived three rounds of review in three costumes. A stray bare
- * year invented a window; then a stray numeric date did; then a requisition number widened a real
- * window until the candidate the clause exists to exclude came back met. Every one was the same
- * structural fault: extraction and context-detection were separate passes that did not know about
- * each other, so each new format I taught the extractor walked past the gate the previous format
- * had been fixed behind.
+ * Six review rounds killed five regex designs here, and the sixth found seven independent leaks in
+ * the fifth: a disqualifier only checked on one side of the date, a cue reaching across a sentence
+ * boundary, propagation chaining through commas into unrelated years, two separate requirements
+ * collapsing into one hull window, and no handling of polarity at all - "not graduating before
+ * 2027" read as a closed range and inverted.
  *
- * They are one pass now. Dates are only ever read from the text FOLLOWING a graduation cue, so a
- * date the clause never connected to graduating cannot reach the comparison whatever its format.
- * Adding a format is safe by construction rather than by remembering to re-gate it.
+ * That is not a parser with bugs in it. A graduation requirement carries direction ("by", "no
+ * later than", "or later"), alternatives in one breath ("Fall 2027 or Spring 2028"), scope (which
+ * cue governs which of three years), and disqualifying context in both directions (a requisition
+ * number, a funding round, a cohort year). Deciding which number in a sentence is the graduation
+ * date, and which way the requirement points, is reading comprehension.
  *
- * BOTH SIDES ARE SPANS, which removes the other repeat offender. A bare year is a whole year on the
- * employer's side as much as the student's: "graduating in 2026" has to admit a December 2026
- * graduate, and pinning bare years to Spring at both endpoints failed them. Spans match when they
- * OVERLAP, which is the real question - could this student have graduated when this posting wants -
- * rather than whether one arbitrary point sits inside a range.
- */
-/**
- * A date qualifies as a graduation date on ITS OWN evidence, not by sitting in a blessed region.
- *
- * FIFTH ATTEMPT, and the first four all failed the same way because they shared a primitive: pick
- * a region of text, take every date inside it. Every version of "the region" leaked.
- *
- *   1. no region at all      -> a stray bare year invented a window
- *   2. cue-gated bare years  -> a stray NUMERIC date invented one
- *   3. cue to sentence end   -> a requisition number AFTER the cue widened a real window
- *   4. (same, re-measured)   -> a window stated BEFORE the cue was invisible entirely
- *
- * Regions cannot work, because "requisition 2026-03" and "graduating Fall 2027" live in the same
- * sentence and no boundary separates them. So attribution is per date now: each one is qualified or
- * rejected by what sits immediately around IT, and a window is the span of the qualified ones.
- *
- * Three rules, in order:
- *   DISQUALIFY  a date introduced by a non-graduation noun ("requisition 2026-03", "Series B in
- *               03/2019"). This beats everything else, so a stray date inside a graduation sentence
- *               still cannot enter.
- *   QUALIFY     a date with a graduation cue nearby on EITHER side, which is what makes
- *               "graduating Fall 2027" and "Fall 2027 graduation date" behave the same.
- *   PROPAGATE   across connectives: "Fall 2027 or Spring 2028" states one requirement, and only the
- *               first half of it sits next to the cue.
- */
-const GRADUATION_CUE = /\b(graduat|class of|degree conferred|conferral|completion|completing|expected|anticipated)/i;
-/** Nouns that introduce a date which is emphatically not a graduation date. */
-const NOT_A_GRADUATION = /\b(requisition|req|job\s*id|posting|series|round|founded|established|since|incorporated|revenue|arr)\b[^.;]{0,20}$/i;
-/** Text that joins two dates into one stated requirement. */
-const DATE_CONNECTIVE = /^[\s]*([,-]|or|and|to|through|until|[-–—/])[\s]*$/i;
+ * So it goes to the judge, under the same contract every competency clause has: the model may
+ * select and reason, never invent, and a "met" verdict is discarded unless it quotes the fact it
+ * relied on verbatim. The difference is the corpus. A competency grounds in the resume BULLETS; an
+ * eligibility clause grounds in the student's structured FACTS, because that is the only place the
+ * answer lives and no bullet can carry it. See llm/competencyJudge.ts. */
+const GRADUATION_CUE = /\b(graduat|class of|degree conferred|conferral|completing|expected to complete|anticipated)/i;
+const YEAR = /\b(19|20)\d{2}\b/;
 
-const MONTH_NAMES = 'jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec';
-const LATE_MONTHS = new Set(['jul', 'aug', 'sep', 'oct', 'nov', 'dec']);
-const halfOfMonth = (n: number): 1 | 2 => (n >= 7 ? 2 : 1);
-
-/** A date found in text, with where it sat, so its neighbourhood can be inspected. */
-type FoundDate = { span: GradSpan; start: number; end: number; precise: boolean };
-
-/** Every date in the text, precise ones and bare years, each with its position. */
-function findDates(text: string): FoundDate[] {
-  const found: FoundDate[] = [];
-  const at = (year: number, half: 1 | 2): GradSpan => ({ from: { year, half }, to: { year, half } });
-  const push = (m: RegExpMatchArray, span: GradSpan, precise: boolean) =>
-    found.push({ span, start: m.index ?? 0, end: (m.index ?? 0) + m[0].length, precise });
-
-  for (const m of text.matchAll(/\b(fall|autumn|winter|spring|summer)\s+(20\d\d)\b/gi)) {
-    const s = m[1].toLowerCase();
-    push(m, at(Number(m[2]), s === 'spring' || s === 'summer' ? 1 : 2), true);
-  }
-  for (const m of text.matchAll(new RegExp(`\\b(${MONTH_NAMES})[a-z]*\\s+(20\\d\\d)\\b`, 'gi'))) {
-    push(m, at(Number(m[2]), LATE_MONTHS.has(m[1].toLowerCase()) ? 2 : 1), true);
-  }
-  for (const m of text.matchAll(/\b(20\d\d)[-/.](0?[1-9]|1[0-2])(?![-/.]?\d)/g)) {
-    push(m, at(Number(m[1]), halfOfMonth(Number(m[2]))), true);
-  }
-  for (const m of text.matchAll(/(?<!\d[-/.])\b(0?[1-9]|1[0-2])[-/.](20\d\d)\b/g)) {
-    push(m, at(Number(m[2]), halfOfMonth(Number(m[1]))), true);
-  }
-  /* Bare years PER TOKEN, not as an all-or-nothing fallback. Skipping them whenever any precise
-     date existed made "Aug 2023 - 2027" resolve to 2023: the bare 2027 was dropped and the student
-     was scored against the year they started, which is the bug the last commit claimed to fix. */
-  for (const m of text.matchAll(/\b(20\d\d)\b/g)) {
-    const start = m.index ?? 0;
-    const covered = found.some((d) => d.precise && start >= d.start && start < d.end);
-    if (covered) continue;
-    push(m, { from: { year: Number(m[1]), half: 1 }, to: { year: Number(m[1]), half: 2 } }, false);
-  }
-  return found.sort((a, b) => a.start - b.start);
-}
-
-/** How much text either side of a date counts as "next to" it. */
-const NEIGHBOURHOOD = 44;
-
-function qualifiedDates(text: string): GradSpan[] {
-  const dates = findDates(text);
-  if (dates.length === 0) return [];
-
-  const verdicts = dates.map((d) => {
-    const before = text.slice(Math.max(0, d.start - NEIGHBOURHOOD), d.start);
-    const after = text.slice(d.end, d.end + NEIGHBOURHOOD);
-    // Disqualification wins: a stray date inside a graduation sentence still does not count.
-    if (NOT_A_GRADUATION.test(before)) return false;
-    return GRADUATION_CUE.test(before) || GRADUATION_CUE.test(after);
-  });
-
-  /* "Fall 2027 or Spring 2028" is ONE requirement and only its first half touches the cue, so a
-     qualified date lends its status across a connective. Run both directions until settled, because
-     the cue can sit at either end of the chain. */
-  for (let pass = 0; pass < dates.length; pass++) {
-    let changed = false;
-    for (let i = 0; i < dates.length - 1; i++) {
-      const gap = text.slice(dates[i].end, dates[i + 1].start);
-      if (!DATE_CONNECTIVE.test(gap)) continue;
-      const joinedOk = verdicts[i] || verdicts[i + 1];
-      // A disqualified neighbour does not inherit: "graduating 2027, requisition 2026-03" must not
-      // pull the requisition in just because a comma joins them.
-      const left = text.slice(Math.max(0, dates[i].start - NEIGHBOURHOOD), dates[i].start);
-      const right = text.slice(Math.max(0, dates[i + 1].start - NEIGHBOURHOOD), dates[i + 1].start);
-      if (joinedOk && !verdicts[i] && !NOT_A_GRADUATION.test(left)) { verdicts[i] = true; changed = true; }
-      if (joinedOk && !verdicts[i + 1] && !NOT_A_GRADUATION.test(right)) { verdicts[i + 1] = true; changed = true; }
-    }
-    if (!changed) break;
-  }
-  return dates.filter((_, i) => verdicts[i]).map((d) => d.span);
-}
-
-/** What the posting asks for: the outer bounds of the dates it states ABOUT GRADUATING. */
-export function graduationWindow(clause: string): GradSpan | null {
-  const dates = qualifiedDates(clause);
-  if (dates.length === 0) return null;
-  return {
-    from: dates.reduce((a, b) => (ordinal(b.from) < ordinal(a.from) ? b : a)).from,
-    to: dates.reduce((a, b) => (ordinal(b.to) > ordinal(a.to) ? b : a)).to,
-  };
-}
-
-/**
- * When the student graduates. The field IS a graduation date, so it needs no cue.
- *
- * The LATEST date wins. grad_date is free-typed and the resume parser preserves what was printed,
- * so it often holds a study range: "Aug 2023 - Dec 2027" means graduating Dec 2027, and taking the
- * first date scored that student against the year they STARTED.
- */
-export function graduationOf(gradDate: string | null | undefined): GradSpan | null {
-  const dates = findDates(gradDate ?? '');
-  if (dates.length === 0) return null;
-  // No cue needed: the field IS the graduation date. The LATEST wins, because a study range
-  // ("Aug 2023 - Dec 2027") means start-of-study to graduation.
-  return dates.reduce((a, b) => (ordinal(b.span.to) > ordinal(a.span.to) ? b : a)).span;
+/** Does this degree clause turn on WHEN, not just WHAT. Those are the ones the judge must read. */
+export function statesTiming(clause: string): boolean {
+  return GRADUATION_CUE.test(clause) || YEAR.test(clause);
 }
 
 const YEARS_CLAUSE = /(\d+)\s*\+?\s*(?:or more\s*)?years?\b/i;
@@ -361,6 +235,7 @@ export const MIN_COMPETENCY_BULLETS = 2;
 
 /* ---------- the matcher ---------- */
 
+
 export function matchClause(
   text: string,
   weight: number,
@@ -403,34 +278,29 @@ export function matchClause(
     };
   }
 
-  // 2b. Degree level and field, and the graduation window when the clause states one.
+  // 2b. Degree level and field. Timing, when the clause states any, is deferred to the judge.
   if (DEGREE_CLAUSE.test(text)) {
     const degree = facts.degree ?? '';
     const school = facts.school ?? '';
     if (!degree && !school) return { ...base, verdict: 'unscoreable', basis: 'degree' };
 
+    /* A clause that says WHEN goes to the judge whole, rather than being split into a field half
+       we decide and a date half we guess at. Splitting it was how "BS graduating 2027; MS
+       graduating 2029" came back met for a 2028 graduate: both halves passed something. */
+    if (statesTiming(text)) {
+      if (!facts.gradDate) return { ...base, verdict: 'unscoreable', basis: 'graduation' };
+      return { ...base, verdict: 'pending', basis: 'graduation' };
+    }
+
     const fieldsAsked = Object.entries(FIELD_SYNONYMS).filter(([, re]) => re.test(text));
     const fieldMet =
       fieldsAsked.length === 0 || fieldsAsked.some(([, re]) => re.test(degree) || re.test(school));
-
-    const wantedGrad = graduationWindow(text);
-    const ownGrad = graduationOf(facts.gradDate);
-    /* Two spans MATCH WHEN THEY OVERLAP: could this student have graduated when this posting wants.
-       Not "is this point inside that range", which was the shape that kept failing - it forced a
-       bare year on either side to become one arbitrary half, and every fix for one side left the
-       other pinned. */
-    const gradMet = !wantedGrad || !ownGrad ? true : overlaps(ownGrad, wantedGrad);
-
-    const met = fieldMet && gradMet;
-    const why = [
-      fieldsAsked.length ? (fieldMet ? `field matches (${degree})` : `field asked: ${fieldsAsked.map(([n]) => n).join('/')}`) : null,
-      wantedGrad && ownGrad
-        ? gradMet
-          ? `graduates ${facts.gradDate}`
-          : `graduates ${facts.gradDate}, outside the window this posting states`
-        : null,
-    ].filter(Boolean).join('; ');
-    return { ...base, verdict: met ? 'met' : 'unmet', basis: wantedGrad ? 'graduation' : 'degree', evidence: why || undefined };
+    const why = fieldsAsked.length
+      ? fieldMet
+        ? `field matches (${degree})`
+        : `field asked: ${fieldsAsked.map(([n]) => n).join('/')}`
+      : '';
+    return { ...base, verdict: fieldMet ? 'met' : 'unmet', basis: 'degree', evidence: why || undefined };
   }
 
   // 3. Competencies, evidenced by what the resume shows the student DOING, in their own bullets.
@@ -456,7 +326,7 @@ export function matchClause(
 
 /* ---------- the two-phase scorer ---------- */
 
-import type { CompetencyQuestion, CompetencyRejection, CompetencyVerdict } from '../llm/competencyJudge';
+import type { CandidateProfile, CompetencyQuestion, CompetencyRejection, CompetencyVerdict } from '../llm/competencyJudge';
 
 export interface ScoredPosting {
   score: number | null;
@@ -483,7 +353,11 @@ export async function scorePosting(
   facts: CandidateFacts,
   context: JdContext | undefined,
   segment: (jd: string) => Array<{ kind: string; weight: number; text: string }>,
-  judge: (bullets: string[], qs: CompetencyQuestion[]) => Promise<{ verdicts: CompetencyVerdict[]; rejected: CompetencyRejection[] }>,
+  judge: (
+    bullets: string[],
+    qs: CompetencyQuestion[],
+    profile?: CandidateProfile,
+  ) => Promise<{ verdicts: CompetencyVerdict[]; rejected: CompetencyRejection[] }>,
 ): Promise<ScoredPosting> {
   const clauses: RequirementClause[] = [];
   for (const sec of segment(jdText)) {
@@ -491,10 +365,21 @@ export async function scorePosting(
     for (const text of splitClauses(sec.text)) clauses.push(matchClause(text, sec.weight, facts, context));
   }
 
-  const pending = clauses.map((c, i) => ({ c, i })).filter(({ c }) => c.basis === 'competency');
+  /* Both classes are asked in ONE call. They are the same request with different corpora, and
+     splitting them would double the latency and the cost for no gain. */
+  const pending = clauses
+    .map((c, i) => ({ c, i }))
+    .filter(({ c }) => c.basis === 'competency' || (c.basis === 'graduation' && c.verdict === 'pending'));
   let rejected: CompetencyRejection[] = [];
+  /* Clauses we sent and got nothing back for. Scoped to the whole function because it decides
+     whether a headline number may be published at the end, not just inside the judge branch. */
+  let unanswered = 0;
   if (pending.length > 0) {
-    const questions: CompetencyQuestion[] = pending.map(({ i }) => ({ id: `c${i}`, clause: clauses[i].text }));
+    const questions: CompetencyQuestion[] = pending.map(({ i }) => ({
+      id: `c${i}`,
+      clause: clauses[i].text,
+      kind: clauses[i].basis === 'graduation' ? 'eligibility' : 'competency',
+    }));
     /* A judge failure leaves the deterministic verdicts EXACTLY where they were.
      *
      * This call was unguarded, and judgeCompetencies throws on any Anthropic error and on a
@@ -505,7 +390,11 @@ export async function scorePosting(
      * Python is on a resume". It could, and it did. */
     let result: { verdicts: CompetencyVerdict[]; rejected: CompetencyRejection[] };
     try {
-      result = await judge(facts.bullets ?? [], questions);
+      result = await judge(facts.bullets ?? [], questions, {
+        degree: facts.degree,
+        school: facts.school,
+        gradDate: facts.gradDate,
+      });
     } catch (err) {
       // The competency clauses stay UNSCOREABLE rather than unmet: we did not ask and got no
       // answer, which is not the same as asking and being told no.
@@ -525,7 +414,14 @@ export async function scorePosting(
     const byId = new Map(result.verdicts.map((v) => [v.id, v]));
     for (const { i } of pending) {
       const v = byId.get(`c${i}`);
-      if (!v) continue;
+      /* No answer, so it stays a question we never got an answer to. A clause left PENDING would
+         leak an internal state to the caller, and worse, aggregate() would have to guess what it
+         meant. Unscoreable is the honest reading and the one the outage path already uses. */
+      if (!v) {
+        clauses[i] = { ...clauses[i], verdict: 'unscoreable' };
+        unanswered++;
+        continue;
+      }
       clauses[i] = {
         ...clauses[i],
         verdict: v.met ? 'met' : 'unmet',
@@ -534,6 +430,12 @@ export async function scorePosting(
     }
   }
 
+  /* THE SAME RULE AS THE OUTAGE PATH, reached a different way. A judge that returns an EMPTY
+     verdict list has not thrown, so the catch above never runs, and dropping its clauses from the
+     denominator left the deterministic survivors to publish a number on their own - 100, on a
+     posting where nothing about the candidate was actually checked. A question we did not get an
+     answer to suppresses the headline exactly like a question we could not ask. */
+  if (unanswered > 0) return { score: null, clauses, rejected };
   return { score: aggregate(clauses), clauses, rejected };
 }
 
@@ -542,7 +444,10 @@ function aggregate(clauses: RequirementClause[]): number | null {
   let got = 0;
   let total = 0;
   for (const c of clauses) {
-    if (c.verdict === 'unscoreable') continue;
+    /* PENDING counts as unscoreable, not as unmet. It only reaches here if a caller drove
+       matchClause directly without a judge; scoring it against the student would charge them for a
+       question nobody asked. */
+    if (c.verdict === 'unscoreable' || c.verdict === 'pending') continue;
     total += c.weight;
     if (c.verdict === 'met') got += c.weight;
   }
