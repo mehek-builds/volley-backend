@@ -63,6 +63,19 @@ const sourcesBodySchema = z.object({ sources: z.array(sourceSchema).min(1).max(1
 const monitorQuerySchema = z.object({
   drain_started_at: z.string().datetime({ offset: true }).optional(),
 });
+/**
+ * The two numbers that bound how many BYTES a single board request can pull out of Postgres.
+ *
+ * They are named, exported and pinned by src/lib/egressBudget.test.ts because on 2026-08-04 this
+ * project exhausted its Neon data transfer allowance and every database-backed route began
+ * answering 500. Nothing failed until the database refused connections: raising a cap like these
+ * is a one-character edit with no visible cost in review, in tests, or on any dashboard the repo
+ * owns. Change either one and that test recomputes the worst case and tells you what it costs.
+ */
+export const MAX_PAGE_SIZE = 100;
+/** Characters of description sent per row on the board list. NOT the full column. */
+export const BOARD_PREVIEW_CHARS = 600;
+
 const listQuerySchema = z.object({
   q: z.string().trim().max(200).optional(),
   /* Title-only, and deliberately not the same thing as `q`. `q` matches the title OR the whole
@@ -90,7 +103,7 @@ const listQuerySchema = z.object({
   employment_type: z
     .enum(['Full-time', 'Part-time', 'Internship', 'Apprenticeship', 'Contract'])
     .optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
+  limit: z.coerce.number().int().min(1).max(MAX_PAGE_SIZE).default(50),
   offset: z.coerce.number().int().min(0).max(100_000).default(0),
 });
 const jobParamsSchema = z.object({ id: z.string().uuid() });
@@ -1474,7 +1487,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       salary_max: monitored_jobs.salary_max,
       salary_currency: monitored_jobs.salary_currency,
       salary_interval: monitored_jobs.salary_interval,
-      description: sql<string>`left(${monitored_jobs.description}, 600)`,
+      description: sql<string>`left(${monitored_jobs.description}, ${BOARD_PREVIEW_CHARS})`,
       apply_url: monitored_jobs.apply_url,
       posting_url: monitored_jobs.posting_url,
       remote: monitored_jobs.remote,
