@@ -86,6 +86,13 @@ export const parsedProfilePatchSchema = z
     school: z.string().trim().min(1).max(200).optional(),
     degree: z.string().trim().max(200).optional(),
     grad_date: z.string().trim().max(40).optional(),
+    /* Relevant coursework, as one line. PRINTS on the generated resume (the spec copies it from
+       here) and was the last resume-visible parse with no way to correct it: not on this schema,
+       not on the education patch, not on the settings form. A mis-read course list could only be
+       fixed by producing a new PDF, which is R-052's failure wearing a different field. Bounded
+       like objective rather than like a title: it is a list of course names, and a parse that runs
+       past this length is a section-boundary error, not a busy semester. */
+    coursework: z.string().trim().max(600).optional(),
     objective: z.string().trim().max(1200).optional(),
     skills: z.array(editableListItem).max(100).optional(),
     /* Spoken languages the resume printed. Editable here for the same reason skills is: the parser
@@ -208,7 +215,7 @@ export function applyParsedProfilePatch(
   patch: ParsedProfilePatch,
 ): Record<string, unknown> {
   const next: Record<string, unknown> = { ...current };
-  for (const key of ['full_name', 'phone', 'school', 'degree', 'grad_date', 'objective'] as const) {
+  for (const key of ['full_name', 'phone', 'school', 'degree', 'grad_date', 'objective', 'coursework'] as const) {
     if (patch[key] !== undefined) next[key] = patch[key];
   }
   /* Spoken languages are pulled back out of `skills` HERE as well as in the parser (ISSUE-020).

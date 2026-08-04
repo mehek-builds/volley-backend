@@ -238,17 +238,60 @@ export function deriveCandidateContext(
   };
 }
 
-function orgScore(generated: string, source: string): number {
-  const a = tokens(generated);
-  const b = tokens(source);
+/* Words that carry no identity: connectors and the legal or generic wrapper a name is dressed in.
+   Stripping them is what lets "Nike Inc." match "Nike" and "Bain & Company" match "Bain", and it
+   is also what finally separates "Company 1" from "Company 2" - once the generic head is gone,
+   all that is left is the digit, which is the only part that was ever doing any work. */
+const ORG_NOISE = new Set([
+  'of', 'the', 'and', 'for', 'at', 'a', 'an', 'de', 'to',
+  'inc', 'llc', 'ltd', 'limited', 'corp', 'corporation', 'co', 'company', 'group', 'holdings',
+  'plc', 'gmbh', 'ag', 'sa', 'nv', 'bv', 'pty', 'pte', 'pvt',
+]);
+
+/* Organisation names are tokenised for IDENTITY, which is a different job from tokens() above.
+   tokens() drops anything shorter than two characters because a stray "a" adds nothing to a
+   relevance score. In a company name the dropped character is routinely the only thing telling two
+   employers apart, so "Company 1" and "Company 2" both collapsed to {company} and scored a PERFECT
+   1.0 against each other. No threshold on that scale could separate them, which is why this exists
+   rather than a tuned constant. */
+function orgTokens(value: string): Set<string> {
+  return new Set((value.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter((part) => !ORG_NOISE.has(part)));
+}
+
+function orgNumbers(value: string): Set<string> {
+  return new Set(value.match(/\d+/g) ?? []);
+}
+
+function sameNumbers(a: Set<string>, b: Set<string>): boolean {
+  if (a.size === 0 || b.size === 0) return true; // one side is silent; the words decide.
+  if (a.size !== b.size) return false;
+  for (const value of a) if (!b.has(value)) return false;
+  return true;
+}
+
+export function orgScore(generated: string, source: string): number {
+  /* A DIGIT DISAGREEMENT IS DISQUALIFYING, before anything else gets a vote. Numbers in a company
+     name are almost never decoration - they are the discriminator ("Site 1", "17 Asset Management",
+     "Studio 54"). Two names whose numbers conflict are two different places however much of the
+     rest they share, and no amount of word overlap or acronym cleverness should be able to
+     out-argue that. */
+  if (!sameNumbers(orgNumbers(generated), orgNumbers(source))) return 0;
+
+  const a = orgTokens(generated);
+  const b = orgTokens(source);
   if (a.size === 0 || b.size === 0) return 0;
   let intersection = 0;
   for (const token of a) if (b.has(token)) intersection += 1;
+  /* Containment, not Jaccard, and deliberately: the model writes "Traeco" for a bank row reading
+     "Traeco - AI Agent Cost Infrastructure", and the shorter name being wholly inside the longer
+     one is the normal healthy case. Jaccard scores that pair 0.2 and would break every abbreviated
+     org on every resume. What containment cannot do alone is reject a HALF match, which is why the
+     caller's threshold is 0.8 rather than 0.5: "Bank of America" and "Bank of the West" share
+     exactly one of two identity words and must not be treated as one employer. */
   const overlap = intersection / Math.min(a.size, b.size);
-  const connectors = new Set(['of', 'the', 'and', 'for', 'at', 'a', 'an', 'de', 'to']);
   const initialism = (value: string) =>
     (value.toLowerCase().match(/[a-z0-9]+/g) ?? [])
-      .filter((part) => !connectors.has(part))
+      .filter((part) => !ORG_NOISE.has(part))
       .map((part) => part[0])
       .join('');
   const compactGenerated = generated.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -284,7 +327,11 @@ function matchingBankEntry(entry: ResumeSpec['experience'][number], bank: Experi
       const sharedYear = sourceYears.some((year) => generatedYears.has(year));
       return { source, organization, score: organization * 10 + title * 4 + Number(sharedYear) * 2 };
     })
-    .filter(({ organization }) => organization >= 0.5)
+    /* 0.8, not 0.5. Half a name is not a name: at 0.5 "Bank of America" matched "Bank of the
+       West", and every two-word company shared a threshold with its nearest unrelated neighbour.
+       Containment means a legitimately abbreviated org still scores 1.0, so raising this costs the
+       honest cases nothing and only rejects the half-matches. */
+    .filter(({ organization }) => organization >= 0.8)
     .sort((a, b) => b.score - a.score || b.source.org.length - a.source.org.length)[0]?.source;
 }
 

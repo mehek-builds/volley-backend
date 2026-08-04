@@ -1,10 +1,10 @@
-import { test } from 'node:test';
+import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { extractPdfText } from '../lib/pdfText';
 import { validatePdfLayout, validateResumeSpec } from './resumeValidate';
-import { applyResumePolicy, deriveCandidateContext, educationGpaLine, enforceExperienceBulletFloor, sameOrganization } from './resumePolicy';
+import { applyResumePolicy, deriveCandidateContext, educationGpaLine, enforceExperienceBulletFloor, orgScore, sameOrganization } from './resumePolicy';
 import { planResumeLayout, renderResumePdf } from './resumeRender';
 
 function bankEntry(
@@ -433,4 +433,62 @@ test('punctuation, spacing and case are noise, not a different employer', () => 
   assert.equal(sameOrganization("St. Jude's", 'St Judes'), true);
   assert.equal(sameOrganization('TRI COAST CAPITAL', 'Tri Coast Capital'), true);
   assert.equal(sameOrganization('', ''), false);
+});
+
+/* orgScore decides which bank row a generated entry belongs to, which is what carries the
+   student's own bullets, the entry type, and (behind a stricter gate) the printed city. It could
+   not tell "Company 1" from "Company 2": tokens() drops single characters, so both reduced to
+   {company} and scored a PERFECT 1.0. The threshold was 0.5, which separately let any two-word
+   company match its nearest unrelated neighbour. */
+describe('orgScore tells employers apart', () => {
+  const MATCH = 0.8; // the caller's threshold
+
+  test('a digit disagreement is disqualifying, whatever else the names share', () => {
+    assert.equal(orgScore('Company 1', 'Company 2'), 0);
+    assert.equal(orgScore('Site 1', 'Site 2'), 0);
+    assert.equal(orgScore('17 Asset Management', '18 Asset Management'), 0);
+    assert.equal(orgScore('Studio 54', 'Studio 60'), 0);
+  });
+
+  test('half a name is not a name', () => {
+    assert.ok(orgScore('Bank of America', 'Bank of the West') < MATCH);
+    assert.ok(orgScore('First National Bank', 'First Republic Bank') < MATCH);
+  });
+
+  test('an abbreviated organisation still matches its full name', () => {
+    // The common healthy case: the model writes the short form the resume prints.
+    assert.ok(orgScore('Traeco', 'Traeco - AI Agent Cost Infrastructure') >= MATCH);
+    assert.ok(orgScore('Einstein Bros. Bagels', 'Einstein Bros. Bagels (Mobile Ordering)') >= MATCH);
+    assert.ok(orgScore('USC Lava Lab', 'Lava Lab') >= MATCH);
+  });
+
+  test('legal and generic wrappers are not identity', () => {
+    assert.ok(orgScore('Nike Inc.', 'Nike') >= MATCH);
+    assert.ok(orgScore('Bain & Company', 'Bain') >= MATCH);
+    assert.ok(orgScore('Stripe, Inc.', 'Stripe') >= MATCH);
+  });
+
+  test('acronyms still resolve, which is why this is not just string equality', () => {
+    assert.ok(orgScore('MIT', 'Massachusetts Institute of Technology') >= MATCH);
+    assert.ok(orgScore('USC', 'University of Southern California') >= MATCH);
+  });
+
+  test('a shared number does not rescue an otherwise different name', () => {
+    assert.ok(orgScore('Studio 54 Records', 'Gallery 54 Partners') < MATCH);
+  });
+});
+
+/* The end-to-end consequence: a near-miss organisation must not hand its bullets to the wrong row.
+   Before this, "Company 2" matched the "Company 1" bank entry at a perfect score and inherited its
+   type and its bullet backfill. */
+test('a near-miss organisation no longer inherits another employer\'s entry', () => {
+  const spec = rawSpec();
+  const bullets = spec.experience[0].bullets;
+  spec.experience = [{ org: 'Company 2', title: 'Engineer', date_range: '2024', bullets }];
+  const other = [{ ...BANK[0], type: 'leadership', org: 'Company 1', title: 'Engineer',
+    date_range: '2024', location: 'Princeton, NJ', bullet_variants: bullets }] as typeof BANK;
+  const { spec: out } = applyResumePolicy(spec, { school: 'USC' }, other, 'engineering');
+  // No match, so it falls back to the default type rather than borrowing 'leadership'.
+  assert.equal(out.experience[0].type, 'job');
+  assert.equal(out.experience[0].location, '');
 });
