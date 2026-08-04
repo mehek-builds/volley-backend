@@ -87,12 +87,15 @@ ELIGIBILITY REQUIREMENTS are judged differently, and are marked as such:
 - "quote" must be the CANDIDATE'S GRADUATION DATE, copied verbatim from that block. Every eligibility requirement turns on when the candidate finishes, so the degree and the school cannot answer one and quoting either is rejected.
 - Read the requirement's direction exactly as written. "graduating in Fall 2027 or Spring 2028" is a window with two ends and a candidate outside EITHER end does not meet it. "not graduating before 2027" and "no later than June 2028" are open on one side. "2027" with no term means any point in that year.
 - A date that is not about graduating - a requisition number, a funding round, a cohort year - is not the candidate's graduation date and is not the requirement's date.
-- When the requirement states no eligibility condition you can check, set met to false and say so in "why"; do not invent one.`;
+- YEAR STANDING is an eligibility condition, and TODAY'S DATE is given so you can check it. "Rising senior", "final-year", "sophomore" and "penultimate year" describe where the candidate is in a four-year degree right now: count back from the graduation date. A candidate graduating in May 2028, judged in August 2026, is entering their third year, so they are a junior and NOT a rising senior. Do not answer "no condition is stated" for these; the condition is stated in years rather than dates, and you have both.
+- Resolve relative timing against today's date too: "next spring", "within the next twelve months", "by the end of the year".
+- When the requirement truly states no eligibility condition you can check, set met to false and say so in "why"; do not invent one.`;
 
 function buildUserMessage(
   bullets: string[],
   questions: CompetencyQuestion[],
   profile?: CandidateProfile,
+  today: string = isoDay(),
 ): string {
   const bulletBlock = bullets.map((b, i) => `${i + 1}. ${b}`).join('\n');
   const factLines = [
@@ -101,10 +104,17 @@ function buildUserMessage(
     profile?.gradDate ? `Graduation date: ${profile.gradDate}` : null,
   ].filter(Boolean);
   const factBlock = factLines.length ? factLines.join('\n') : '(none recorded)';
+  /* TODAY, because half the eligibility requirements are relative to it.
+     Without it the model could read a date but not a YEAR STANDING: "rising senior only" came back
+     "no graduation-date-based condition is stated to check", which is safe but wrong - the
+     condition is stated, just in years rather than dates, and resolving it needs to know where we
+     are now. Injected rather than left to the model's own sense of the date, which is whatever its
+     training cutoff was. */
+  const todayLine = `Today's date: ${today}`;
   const questionBlock = questions
     .map((q) => `- id ${q.id} [${q.kind ?? 'competency'}]: ${q.clause}`)
     .join('\n');
-  return `CANDIDATE FACTS\n${factBlock}\n\nCANDIDATE BULLETS\n${bulletBlock}\n\nREQUIREMENTS TO JUDGE\n${questionBlock}`;
+  return `${todayLine}\n\nCANDIDATE FACTS\n${factBlock}\n\nCANDIDATE BULLETS\n${bulletBlock}\n\nREQUIREMENTS TO JUDGE\n${questionBlock}`;
 }
 
 /** Strips fences and pulls the first JSON object, the same shape the other callers here handle. */
@@ -131,6 +141,13 @@ function normalizeQuote(s: string): string {
  * Substring rather than equality because a model asked for "one bullet verbatim" will sometimes
  * hand back the clause of it that did the work, which is still the student's own sentence.
  */
+/* The day, as the prompt sees it. Split out so a test can pin it: a prompt that carries the real
+   clock is a prompt whose output changes tomorrow, and an eligibility assertion built on that
+   would pass today and fail in a month for no reason anyone could find. */
+export function isoDay(now: Date = new Date()): string {
+  return now.toISOString().slice(0, 10);
+}
+
 /** The facts as citable strings, for the prompt. */
 export function profileFacts(profile?: CandidateProfile): string[] {
   return [profile?.degree, profile?.school, profile?.gradDate].filter((x): x is string => Boolean(x));
