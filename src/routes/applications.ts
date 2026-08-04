@@ -170,7 +170,7 @@ export async function preSendResumeVerificationIssues(
   const review = readApplicationReview(stored);
   const contact = stored._contact as StoredContact | undefined;
   if (!review?.jd_text || !contact?.full_name) {
-    return ['Application packet is missing the saved review or contact details. Regenerate it before sending.'];
+    return ['This application is missing the saved review or contact details. Regenerate it before sending.'];
   }
 
   const spec = editableResumeSpec(stored);
