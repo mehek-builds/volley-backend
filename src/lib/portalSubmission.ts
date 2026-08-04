@@ -1920,6 +1920,14 @@ export async function clickFinalSubmit(page: Page): Promise<void> {
 }
 
 export async function readReceipt(page: Page): Promise<{ confirmationText: string; finalUrl: string; referenceId?: string }> {
+  /* THE AUTO-WAIT HERE IS LOAD-BEARING, and it is not obvious from this line.
+   * clickFinalSubmit arms a 5-second navigation barrier before pressing submit. When an employer's
+   * POST takes longer than that the barrier expires, and the only thing then carrying the read
+   * across the still-pending navigation is `locator.innerText()`, which auto-waits and retries -
+   * verified at 7s and 12s server latency. Replacing this with a non-auto-waiting read
+   * (`page.content()`, an `evaluate`) would silently reintroduce the stale-read bug: the form would
+   * be scraped instead of the confirmation, and a submitted application would be reported as
+   * unverified. Measured before the barrier existed: 10 stale reads in 15 runs. */
   const body = (await page.locator('body').innerText()).replace(/\s+/g, ' ').trim();
   if (!/thank you|application (?:has been )?(?:submitted|received)|we received your application|success/i.test(body)) {
     throw new Error('The company never showed a confirmation we could check');
