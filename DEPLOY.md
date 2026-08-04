@@ -70,7 +70,22 @@ Set these for Production (and Preview if you want):
 | `LEMONSQUEEZY_CHECKOUT_URL` | reusable live product URL containing `/checkout/buy/` |
 | `LEMONSQUEEZY_VARIANT_ID` | numeric ID of the $49.99 monthly Pro variant |
 | `LEMONSQUEEZY_WEBHOOK_SECRET` | signing secret configured on the Lemon Squeezy webhook |
+| `UPSTASH_REDIS_REST_URL` | optional, turns on the ranking cache's shared tier; see below |
+| `UPSTASH_REDIS_REST_TOKEN` | optional, pairs with the URL above |
 | `NODE_ENV` | `production` |
+
+### The ranking cache's shared tier is OPTIONAL and ships OFF
+
+`UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` are not set by default, and until
+both are, `src/lib/rankingCache.ts` runs its L1 tier only: a process `Map` with a 60 second
+TTL, on serverless. That map is cold far more often than warm, and every cold miss re-reads
+scoring text for the whole ranking pool out of Neon.
+
+That is what exhausted Neon's 5 GB/month transfer allowance on 2026-08-04 and suspended the
+database, so **this is the largest single saving available and it is inert until configured.**
+Create a database at upstash.com (free tier: 256 MB, 500k commands/month), copy its REST URL
+and token into the Vercel project, and redeploy. Nothing else changes: unconfigured, the code
+path is a deliberate no-op, which is why it was safe to ship ahead of the database existing.
 
 The reviewed source list lives in `src/lib/jobSources.ts`; use `JOB_MONITOR_SOURCES_JSON` only for
 temporary additions that cannot wait for a code review. In GitHub, add `INTERNAL_CRON_SECRET` as an
