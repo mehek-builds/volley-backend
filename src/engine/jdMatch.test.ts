@@ -1546,3 +1546,136 @@ describe('a posting written with typographic apostrophes', () => {
     assert.match(core, /replace\(\/\[[‘’ʼ]+\]\/g, "'"\)/, 'headingCore must fold curly apostrophes to ASCII');
   });
 });
+
+/**
+ * A POSTING THAT ADDRESSES THE CANDIDATE IN ITS REQUIREMENTS HEADING.
+ *
+ * Separate defect from the curly-apostrophe one above, and larger. Verified independently of it:
+ * this block is noise:0 with the fold and without it.
+ *
+ * The `^about` rule that the cresta case widened reads the whole word "About" as a marketing
+ * signal, but "About" only tells you a blurb follows; the word AFTER it says whose blurb. When the
+ * subject is the employer - "About OpenAI", "About the Team" - the section is marketing and zero is
+ * right. When the subject is the reader - "About You", "About you:", "About the candidate" - the
+ * section is the stated requirements, and zeroing it is the same failure the widening was meant to
+ * fix, pointed the other way.
+ *
+ * Measured read-only against the prod board on 2026-08-04: 1,304 of 20,931 active postings (6.2%)
+ * head a section with a heading-shaped second-person "About you" line. All of them scored the block
+ * at weight 0.
+ *
+ * StockX "Software Development Engineer in Test" (job 6f39c23b-1202-4937-87c6-072a302553ea) is the
+ * shape, and the fixture below is its real section order: "What you'll do" (responsibilities),
+ * "About You" (the requirements), "Nice to have skills" (preferred), "About StockX" (marketing).
+ * The cost is not the dropped block. `Nice to have skills` DOES close the noise section, so nothing
+ * downstream is corrupted and the salvage pass never fires - the posting stays comfortably
+ * scorable, on the wrong text. Twelve terms came back and four of them were `understand brds`,
+ * `prds`, `qa` and `regression`, lifted from the responsibilities prose, while the requirements the
+ * employer actually wrote - 3+ years of Web and Mobile Automation Testing, JavaScript/TypeScript,
+ * Git, CI/CD - were worth nothing. A confidently wrong denominator, again.
+ */
+const SECOND_PERSON_JD = `
+Help empower our global customers to connect to culture through their passions.
+
+What you'll do
+
+Work collaboratively with product managers and engineers to deliver high-quality software.
+Create well-structured test cases following QA best practices.
+Understand BRDs and PRDs and translate them into regression coverage.
+Automate test cases for Web, iOS, and Android applications using WebdriverIO, Selenium, and Appium.
+Participate in sprint ceremonies including planning, grooming, and release testing.
+
+About You
+
+3+ years of experience in Web and Mobile Automation Testing.
+Strong experience with WebdriverIO, Selenium, Appium, and JavaScript/TypeScript.
+Experience with cloud execution platforms (LambdaTest, BrowserStack, SauceLabs).
+Familiarity with Git and CI/CD pipelines.
+Excellent communication and documentation skills.
+
+Nice to have skills
+
+Exposure to performance, load, or security testing.
+Test management tools (Jira, TestRail).
+
+About StockX
+
+StockX is proud to be a Detroit-based technology leader focused on the large and growing online
+market for sneakers, apparel, accessories, electronics, collectibles, and more. Launched in 2016,
+StockX employs 1,000 people across offices and verification centers around the world.
+`;
+
+describe('"About you" is the candidate, not the company', () => {
+  test('the second-person forms open a REQUIRED section', () => {
+    for (const heading of [
+      'About You',
+      'About you:',
+      'About You:',
+      'ABOUT YOU',
+      'About the candidate',
+      'About the ideal candidate:',
+    ]) {
+      const [, second] = segmentJd(`Responsibilities\n- Ship features\n${heading}\n- Experience with Python\n`);
+      assert.equal(second?.kind, 'required', `"${heading}" states requirements`);
+      assert.equal(second?.weight, 1);
+    }
+  });
+
+  test('the employer-subject forms are still the blurb they always were', () => {
+    // The regression this exclusion could cause. `you\b` and not `you`, so the possessive stays
+    // out: "About your role" is cresta's spelling of "About the Role", the employer describing the
+    // job, and it must keep scoring zero.
+    for (const heading of [
+      'About OpenAI',
+      'About PhonePe Limited:',
+      'About us',
+      'About the Team',
+      'About your role:',
+      'About the Company',
+    ]) {
+      const [, second] = segmentJd(`Responsibilities\n- Ship features\n${heading}\nWe are a company.\n`);
+      assert.equal(second?.kind, 'noise', `"${heading}" is a blurb about the employer`);
+    }
+  });
+
+  test('nothing carved out of the noise rule is left unrecognised', () => {
+    // The coupling that makes the fix safe. A form dropped from the noise pattern but not added to
+    // the required pattern is WORSE than noise: an unrecognised heading does not close the section
+    // above it, so the requirements would inherit the previous section's weight instead of getting
+    // their own. Every excluded spelling must land somewhere real.
+    for (const heading of ['About You', 'About yourself:', 'About the ideal candidate', 'About our ideal candidate']) {
+      const [, second] = segmentJd(`Responsibilities\n- Ship features\n${heading}\n- Experience with Python\n`);
+      assert.equal(second?.kind, 'required', `"${heading}" must classify, not fall through`);
+    }
+  });
+
+  test('the StockX posting scores its requirements, not its responsibilities prose', () => {
+    const sections = segmentJd(SECOND_PERSON_JD);
+    assert.deepEqual(
+      sections.map((s) => s.kind),
+      ['body', 'responsibilities', 'required', 'preferred', 'noise'],
+      'the "About You" block is the requirements; only "About StockX" is marketing',
+    );
+    const required = sections.find((s) => s.kind === 'required');
+    assert.ok(required && /Automation Testing/.test(required.text));
+
+    const terms = extractJdTerms(SECOND_PERSON_JD, {
+      company: 'StockX',
+      role: 'Software Development Engineer in Test',
+      location: null,
+    });
+    const displays = terms.map((t) => t.display.toLowerCase());
+
+    // The four the defect produced, named so a regression puts them back visibly.
+    for (const prose of ['understand brds', 'prds', 'qa', 'regression']) {
+      assert.ok(!displays.includes(prose), `"${prose}" is responsibilities prose, not a stated requirement`);
+    }
+    // And what the employer wrote under "About You". `ci cd` is deliberately not asserted: it
+    // survives on the full posting but not on this trimmed one, where twelve weight-1 terms fill
+    // EMPHASIS_LIMIT outright and the cap drops it. The fixture is shortened, so the assertions are
+    // the ones the shortening does not change.
+    for (const real of ['javascript', 'typescript', 'git']) {
+      assert.ok(displays.includes(real), `"${real}" is stated under "About You" and must be counted`);
+    }
+  });
+});

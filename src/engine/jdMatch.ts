@@ -142,11 +142,33 @@ const SECTION_WEIGHT: Record<SectionKind, number> = {
 // before "qualifications", or every preferred block scores as required.
 const HEADING_PATTERNS: Array<{ kind: SectionKind; re: RegExp }> = [
   // `^about\b` rather than the old `about (us|the company|our)`. A heading-shaped line opening with
-  // "About" is always a company or team blurb, and the enumerated form missed every posting that
+  // "About" is USUALLY a company or team blurb, and the enumerated form missed every posting that
   // names itself: "About OpenAI", "About PhonePe Limited:", "About the Team". OpenAI's "Counsel,
   // Litigation" was the case that found it, and the cost was not the blurb but everything AFTER it,
   // because an unrecognised heading does not close the section it interrupts. See NOISE_BLOCK.
-  { kind: 'noise', re: /^about\b|\b(who we are|our (story|mission|values|culture)|benefits|perks|what we offer|compensation|salary|pay range|equal opportunity|eeo|diversity|accommodation|privacy|how to apply|why join)\b/i },
+  //
+  // "USUALLY", NOT "ALWAYS", AND THE EXCEPTION IS SECOND PERSON. The widened rule reads the subject
+  // of the blurb off the word after "About", and when that word is the CANDIDATE rather than the
+  // employer the heading is introducing requirements, not marketing: "About You", "About you:",
+  // "About the candidate". Measured read-only against the prod board 2026-08-04, 1,304 of 20,931
+  // active postings (6.2%) head a section this way, and every one of them was scoring at weight 0.
+  //
+  // StockX's "Software Development Engineer in Test" (job 6f39c23b) is the shape: "What you'll do"
+  // opens responsibilities, "About You" opens the stated requirements, "Nice to have skills" opens
+  // preferred. Zeroing the middle block did not merely drop it, it left the denominator to fill
+  // from the responsibilities prose around it - `understand brds`, `prds`, `qa`, `regression` -
+  // while "3+ years Web and Mobile Automation Testing", `JavaScript/TypeScript`, `Git` and `CI-CD`,
+  // the things the employer actually asked for, sat at zero. See the fixture in jdMatch.test.ts.
+  //
+  // THE EXCLUSION LIST AND THE `required` ALTERNATIVE BELOW ARE ONE RULE WRITTEN TWICE, and they
+  // must be edited together. A form dropped from noise but not added to required does not fall back
+  // to prose: it becomes an UNRECOGNISED heading, which is strictly worse than noise, because it
+  // fails to close the section above it and the requirements inherit whatever weight that had.
+  //
+  // `you\b` and not `you`, so "About your role:" - cresta's spelling of "About the Role" - keeps
+  // its noise classification. The possessive is the employer describing the job; the bare pronoun
+  // is the employer describing the reader.
+  { kind: 'noise', re: /^about\b(?!\s+(you|yourself|the ideal|our ideal|the candidate)\b)|\b(who we are|our (story|mission|values|culture)|benefits|perks|what we offer|compensation|salary|pay range|equal opportunity|eeo|diversity|accommodation|privacy|how to apply|why join)\b/i },
   { kind: 'preferred', re: /\b(preferred|nice[- ]to[- ]have|bonus|plus(es)?|desired|good to have|additional qualifications)\b/i },
   // `what we('?re)? look(ing)? for` and `(your|the) impact`, not the tighter `what we're looking
   // for` / `your impact` they replaced. Databricks' "Product Management Intern (Summer 2027)"
@@ -156,7 +178,9 @@ const HEADING_PATTERNS: Array<{ kind: SectionKind; re: RegExp }> = [
   // `ai platform` and `streaming` - the sentence naming the TEAMS Databricks hires across - while
   // "first hand experience with SQL and/or Python" never reached weight 1. A near-miss on a
   // heading does not cost you the heading, it costs you every line under it.
-  { kind: 'required', re: /\b(requirements?|qualifications?|what you'?ll need|what we('?re)? look(ing)? for|must[- ]have|minimum|basic qualifications|skills?|you have|your background)\b/i },
+  // `about (you|...)` is the other half of the exclusion carved out of the noise rule above. It is
+  // reached only because noise declines these forms first, and it must stay in step with that list.
+  { kind: 'required', re: /\b(requirements?|qualifications?|what you'?ll need|what we('?re)? look(ing)? for|must[- ]have|minimum|basic qualifications|skills?|you have|your background|about (you|yourself|the ideal|our ideal|the candidate))\b/i },
   { kind: 'responsibilities', re: /\b(responsibilities|what you'?ll do|the role|(your|the) impact|day[- ]to[- ]day|in this role|duties)\b/i },
 ];
 
