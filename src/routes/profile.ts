@@ -27,14 +27,13 @@ import {
   deleteUploadedResumeThenClear,
 } from '../lib/resumeAccess';
 import {
+  applyImpactAnswers,
   assessImpactBullet,
   buildRecentExperienceReview,
-  composeImpactBullet,
-  type ImpactComponent,
+  type ImpactAnswerSet,
   type RecentExperienceEntry,
   type RecentExperienceReview,
 } from '../engine/recentExperience';
-import { startsWithStrongVerb } from '../engine/resumeValidate';
 
 // R-052. Bounded on purpose: these are the only parsed fields a student may correct by hand, and
 // the ceilings stop a paste of an entire resume landing in the school field. Every value is trimmed
@@ -1014,20 +1013,9 @@ export async function profileRoutes(fastify: FastifyInstance) {
 
         const existing = (Array.isArray(selected.bullet_variants) ? selected.bullet_variants : [])
           .filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
-        const composed = body.data.answers
-          .map((answers, index) => composeImpactBullet(index === 0 ? existing[0] ?? '' : '', answers as Partial<Record<ImpactComponent, string>>))
-          .filter((bullet) => bullet.length > 0);
-        for (const bullet of composed) {
-          if (!startsWithStrongVerb(bullet)) return { error: 'verb' as const };
-        }
-        const normalized = new Set(existing.map((bullet) => bullet.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()));
-        const additions = composed.filter((bullet) => {
-          const key = bullet.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-          if (!key || normalized.has(key)) return false;
-          normalized.add(key);
-          return true;
-        });
-        const bullets = [...existing, ...additions];
+        const applied = applyImpactAnswers(existing, body.data.answers as ImpactAnswerSet[]);
+        if ('error' in applied) return { error: applied.error };
+        const { additions, bullets } = applied;
         if (additions.length > 0) {
           await tx.update(experience_bank).set({ bullet_variants: bullets }).where(eq(experience_bank.id, selected.id));
         }
@@ -1053,6 +1041,20 @@ export async function profileRoutes(fastify: FastifyInstance) {
       if ('error' in result) {
         if (result.error === 'profile') return reply.status(404).send({ error: 'Profile not found - upload a resume first' });
         if (result.error === 'entry') return reply.status(404).send({ error: 'Experience does not belong to this upload' });
+        /* Two different refusals, because they are two different problems for the student to fix.
+           'unreadable' means the answer folded down to nothing this pipeline can read as a bullet:
+           the resume is built against an ASCII verb whitelist, so an answer with no Latin letters
+           has no opener to judge at all. Telling that student to pick a stronger verb sends them
+           to edit a word that is not the reason.
+
+           The message names BOTH exits, because this refusal also blocks "Continue with what you
+           found." A student who cannot rewrite the answer is otherwise held on the screen with no
+           stated way off it, and clearing the field is the way off it. */
+        if (result.error === 'unreadable') {
+          return reply.status(400).send({
+            error: 'Write this answer in English so it can go on your resume, or clear it to continue',
+          });
+        }
         return reply.status(400).send({ error: 'Each new bullet must start with a strong action verb' });
       }
       return reply.status(200).send(reviewPayload(result.entries, result.review));
