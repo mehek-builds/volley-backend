@@ -91,11 +91,19 @@ describe('the database connection verifies certificates by intent, not by accide
     );
   });
 
-  test('the fallback fails safe on a connection string URL cannot parse', () => {
-    // A multi-host string is handed back untouched, so the `ssl` option is the only thing left. It
-    // must be the verifying one: this is the single path where the fallback still decides.
+  test('the fallback fails safe wherever it still decides', () => {
+    // NOT on an unparseable string, which an earlier version of this test claimed: pg parses with
+    // `new URL` too, so a multi-host string throws inside pg before `ssl` is resolved at all.
+    // Handing the value back untouched keeps that error where it belongs; it does not hand the
+    // fallback a decision.
     const multiHost = 'postgresql://u:p@host1:5432,host2:5432/d';
     assert.equal(withVerifiedSslMode(multiHost), multiHost);
+    assert.throws(() => resolved(multiHost), /Invalid URL/, 'pg throws before the option is consulted');
+    // Where it DOES decide: uselibpqcompat with no mode declared.
+    assert.deepEqual(
+      resolved(withVerifiedSslMode('postgresql://u:p@h.neon.tech/d?uselibpqcompat=true')),
+      FALLBACK,
+    );
     assert.deepEqual(
       sslOptionForHost(false),
       { rejectUnauthorized: true },
@@ -124,14 +132,39 @@ describe('the database connection verifies certificates by intent, not by accide
     );
   });
 
-  test('an uppercase sslmode key is rewritten, not just detected', () => {
-    // The guard regex is case-insensitive and `searchParams` is not, so an uppercase key would
-    // otherwise pass the guard, change nothing, and still round-trip the string through URL.
-    assert.equal(
-      withVerifiedSslMode('postgresql://u:p@h.neon.tech/d?SSLMODE=require'),
-      'postgresql://u:p@h.neon.tech/d?SSLMODE=verify-full',
+  test('pg reads sslmode case-sensitively, so an uppercase key is not a declaration', () => {
+    // Verified against the installed pg: `?SSLMODE=verify-full` resolves to the ssl OPTION, not to
+    // `{}`, so pg never saw it. An earlier version treated the uppercase key as a declared mode,
+    // skipped adding a lowercase one, and rewrote a parameter pg ignores entirely - pinning the
+    // wrong half. What matters is that pg ends up seeing a mode.
+    assert.deepEqual(resolved('postgresql://u:p@h.neon.tech/d?SSLMODE=verify-full'), FALLBACK);
+    assert.deepEqual(
+      resolved(withVerifiedSslMode('postgresql://u:p@h.neon.tech/d?SSLMODE=require')),
+      {},
+      'a lowercase mode must be added, because the uppercase one is invisible to pg',
     );
   });
+
+  test('duplicate sslmode collapses to the value pg would have used, not the first one', () => {
+    // pg takes the LAST value. The first version rewrote the first key, and `searchParams.set`
+    // drops the duplicate, so `require&disable` silently became verify-full: a deliberate `disable`
+    // discarded and TLS turned on. Direction was safe; honouring configuration was not.
+    assert.equal(
+      withVerifiedSslMode('postgresql://u:p@h.neon.tech/d?sslmode=require&sslmode=disable'),
+      'postgresql://u:p@h.neon.tech/d?sslmode=disable',
+    );
+    assert.equal(resolved('postgresql://u:p@h.neon.tech/d?sslmode=require&sslmode=disable'), false);
+    assert.equal(
+      resolved(withVerifiedSslMode('postgresql://u:p@h.neon.tech/d?sslmode=require&sslmode=disable')),
+      false,
+      'pg must reach the same answer before and after the rewrite',
+    );
+  });
+
+  test('an empty sslmode value is no mode at all', () => {
+    assert.deepEqual(resolved(withVerifiedSslMode('postgresql://u:p@h.neon.tech/d?sslmode=')), {});
+  });
+
 
   test('a URL that declares no mode gains verify-full, and keeps every credential intact', () => {
     // THE HOLE THIS CLOSES. Without a declared mode the explicit `ssl` option applied, and it used

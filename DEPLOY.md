@@ -304,15 +304,22 @@ intent, and the environment cannot quietly override it downward. `sslmode=disabl
 honoured, because it means something and is a deliberate choice where it appears.
 
 The `ssl` option is `{ rejectUnauthorized: true }` (`sslOptionForHost`) and is mostly dead: the
-string beats it wherever it parses. It decides only for a connection string `new URL` cannot read (a
-multi-host string, or a password with an unencoded `/`), and there it fails **safe**. It used to
-fail open.
+string beats it wherever pg can read a mode out of it. It decides only in the corners — an `SSLMODE`
+written in the wrong case (pg's lookup is case-sensitive), or `uselibpqcompat` with no mode — and in
+each it fails **safe**. It used to fail open.
+
+It does **not** decide for a connection string `new URL` cannot read, which an earlier version of
+this section claimed: pg parses with `new URL` too, so a multi-host string throws inside pg before
+`ssl` is resolved at all.
+
+Duplicate `sslmode` parameters collapse to the value pg would have used (the last one), so
+`?sslmode=require&sslmode=disable` normalises to `disable` rather than silently discarding it.
 
 Production was verified against the live environment on 2026-08-04 before this shipped:
 `DATABASE_URL` carries `sslmode=require`, no `uselibpqcompat`, and `DATABASE_DIRECT_URL` is unset —
-so production sits on the first row and nothing about how it connects changed. The migration
-scripts in `scripts/` were updated to match; `check-schema-drift.mjs` in particular runs against the
-real database before every schema change, so it is the last place that should be the loose one.
+so production sits on the first row and nothing about how it connects changed. All five migration scripts in `scripts/` were updated to match, each guarded so a local Postgres
+with a self-signed certificate still connects; `check-schema-drift.mjs` in particular runs against
+the real database before every schema change, so it is the last place that should be the loose one.
 
 An earlier version of this section, and of the code, claimed the explicit `ssl` option won and
 therefore **deleted** `sslmode`. That was backwards and would have ended certificate verification on

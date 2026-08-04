@@ -81,7 +81,13 @@ async function main() {
   // Verification on, matching sslOptionForHost in src/db/index.ts. This one runs against the REAL
   // database before every schema change (DEPLOY.md), so it is the last place that should be the
   // loose one.
-  const client = new pg.Client({ connectionString, ssl: { rejectUnauthorized: true } });
+  const client = new pg.Client({
+    connectionString,
+    // Guarded like the other scripts and like src/db/index.ts: a LOCAL Postgres often has a
+    // self-signed certificate, and forcing verification on it turns a working dev setup into a
+    // connection error. `.env.example` points at localhost.
+    ssl: /localhost|127\.0\.0\.1/.test(connectionString) ? undefined : { rejectUnauthorized: true },
+  });
   await client.connect();
 
   const missing = [];

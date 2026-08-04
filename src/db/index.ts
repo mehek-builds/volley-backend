@@ -61,8 +61,15 @@ const ALIASED_SSL_MODES = new Set(['require', 'prefer', 'verify-ca']);
  * on purpose, and a database config that ignores what it was told is worse than one that is loose.
  *
  * THE `ssl` OPTION BELOW IS NOW `{ rejectUnauthorized: true }` AND IS STILL MOSTLY DEAD, which is
- * the point. The string wins wherever it parses, so the option only applies to a connection string
- * `new URL` cannot read - and on that path it now fails SAFE. It used to fail open.
+ * the point. The string wins wherever pg can read a mode out of it, so the option decides only in
+ * the corners - a `SSLMODE` in the wrong case, or `uselibpqcompat` with no mode - and in every one
+ * of them it now fails SAFE. It used to fail open.
+ *
+ * IT DOES NOT DECIDE FOR AN UNPARSEABLE STRING, which an earlier version of this comment claimed.
+ * pg parses with `new URL` as well, so a multi-host string or a password with an unencoded `/`
+ * throws inside pg's own ConnectionParameters before `ssl` is resolved at all. Handing the value
+ * back untouched keeps that error where it belongs instead of moving it to module load; it does not
+ * hand the fallback a decision.
  *
  * THE MISTAKE THAT HID THE ORIGINAL BUG was the test, not the code. It asserted on
  * `pool.options.ssl`, which is the object handed to the constructor returned by identity, so it
@@ -89,18 +96,31 @@ export function withVerifiedSslMode(value: string): string {
   // direction is safe and the claim "this changes nothing about how it connects" would stop being
   // true, which is worse: honour it, exactly as `sslmode=disable` is honoured below.
   if (/[?&]uselibpqcompat=(true|1|yes|on)\b/i.test(value)) return value;
-  let declared = false;
-  // Case-insensitive on BOTH halves: the guard matches `?SSLMODE=` while `searchParams` is
-  // case-sensitive, so an uppercase key would otherwise be found and left unchanged.
-  for (const key of [...url.searchParams.keys()]) {
-    if (key.toLowerCase() !== 'sslmode') continue;
-    declared = true;
-    const mode = (url.searchParams.get(key) ?? '').toLowerCase();
-    // Only the warned aliases are rewritten. `disable`, `allow` and `no-verify` mean something
-    // different, are a deliberate choice where they appear, and are left exactly as configured.
-    if (ALIASED_SSL_MODES.has(mode)) url.searchParams.set(key, 'verify-full');
+  // NORMALIZE TO WHAT pg ACTUALLY READS, which is not the same as what the URL appears to say.
+  // pg-connection-string looks the key up case-SENSITIVELY and takes the last value, so:
+  //
+  //   ?SSLMODE=require                  pg sees NO mode. Verified: it resolves to the `ssl` option,
+  //                                     not to {}. An earlier version of this function treated the
+  //                                     uppercase key as a declaration, skipped adding a lowercase
+  //                                     one, and rewrote a parameter pg ignores entirely.
+  //   ?sslmode=require&sslmode=disable  pg sees `disable`. The earlier version rewrote the FIRST
+  //                                     key, and `searchParams.set` drops the duplicate, so it
+  //                                     silently discarded `disable` and turned TLS on - exactly the
+  //                                     "deliberate choices are honoured" promise below, broken.
+  //   ?sslmode=                         pg sees an empty mode, which is no mode.
+  //
+  // So the effective value is read the way pg reads it, duplicates are collapsed to the single value
+  // pg would have used, and the result is one lowercase key. That changes the bytes without ever
+  // changing pg's interpretation.
+  const declared = (url.searchParams.getAll('sslmode').at(-1) ?? '').toLowerCase();
+  if (url.searchParams.getAll('sslmode').length > 1) {
+    url.searchParams.delete('sslmode');
+    url.searchParams.set('sslmode', declared);
   }
-  if (!declared) url.searchParams.set('sslmode', 'verify-full');
+  // Only the warned aliases are rewritten, and an undeclared mode becomes verify-full. `disable`,
+  // `allow` and `no-verify` mean something different, are a deliberate choice where they appear, and
+  // are left exactly as configured.
+  if (!declared || ALIASED_SSL_MODES.has(declared)) url.searchParams.set('sslmode', 'verify-full');
   return url.toString();
 }
 
