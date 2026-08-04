@@ -1,0 +1,22 @@
+{
+  // Typecheck-only config for `api/`, the Vercel serverless entrypoint.
+  //
+  // WHY A SECOND CONFIG RATHER THAN WIDENING tsconfig.json. That file sets `rootDir: ./src` and
+  // `outDir: ./dist`, and `npm run build` emits through it, so dist/ is laid out as dist/lib/...
+  // and build:smoke requires exactly that path. Adding `api/**/*` to its `include` would move
+  // rootDir up to the repo root, re-lay dist/ as dist/src/lib/..., and break both build:smoke and
+  // the deployed bundle. The entrypoint needs type checking, not emitting, so it gets a config
+  // that only checks.
+  //
+  // WHAT THIS CAUGHT. api/index.ts was in neither `tsc --noEmit` (include is src/**/*) nor
+  // `npm test` (glob was src/**/*.test.ts). The 22-line file that every production request enters
+  // through was the one file in the repo with no typecheck and no test, which is a fair part of
+  // why a handler that resolved before its response shipped and stayed shipped.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true
+  },
+  "include": ["api/**/*", "src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
