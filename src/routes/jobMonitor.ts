@@ -17,6 +17,7 @@ import { scoreJdMatch } from '../engine/jdMatch';
 import { resumeSpecText } from '../engine/resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { rankingCacheKey, readRankingShared, writeRankingShared } from '../lib/rankingCache';
+import { buildDescriptionDigest } from '../lib/descriptionDigest';
 import { applyBoardCacheHeaders } from '../lib/boardCacheHeaders';
 import { companyDomainFor } from '../lib/companyDomains';
 import { classificationCoverage, summarizeJobVariety } from '../lib/jobVariety';
@@ -1132,7 +1133,7 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
          un-reached source's jobs flipped to is_active = false by the sweep
          above. That failure empties the public board rather than staling it.
          Chunked so a single board the size of Databricks still fits well
-         inside Postgres's 65,535-parameter cap: 20 columns x 200 rows. */
+         inside Postgres's 65,535-parameter cap: 21 columns x 200 rows. */
       for (let index = 0; index < fresh.length; index += UPSERT_CHUNK) {
         const chunk = fresh.slice(index, index + UPSERT_CHUNK).map(({ pay, ...job }) => ({
           source_id: source.id,
@@ -1154,6 +1155,11 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
              edit this sentence into and out of a live posting, and a policy that changed on their
              page while ours still said the old thing is the one error this feature cannot afford. */
           sponsorship_status: readPostingSponsorship(job.description),
+          /* Built here, at the same moment and for the same reason as sponsorship_status: the
+             description is in hand, and this is the only point where computing over it is free.
+             Recomputed on every poll rather than kept from the first sighting, because employers
+             edit requirements into and out of a live posting. */
+          description_digest: buildDescriptionDigest(job.description),
           /* The portal's own country field first, the location string only when it published none.
              Reading the string first is what made "IN - Bengaluru" Indiana and "Amsterdam, NH" New
              Hampshire. */
@@ -1175,6 +1181,7 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
             last_seen_at: sql`excluded.last_seen_at`,
             is_active: sql`excluded.is_active`,
             sponsorship_status: sql`excluded.sponsorship_status`,
+            description_digest: sql`excluded.description_digest`,
             job_country: sql`excluded.job_country`,
             /* Overwritten on every poll, not merged. An employer that REMOVES a published range
                (or edits one into a shape we decline to guess a period for) must see it disappear
@@ -1593,7 +1600,13 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
               location: monitored_jobs.location,
               employment_type: monitored_jobs.employment_type,
               remote: monitored_jobs.remote,
-              scored_description: sql<string>`left(${monitored_jobs.description}, ${SCORING_CHARS})`,
+              /* The digest when the row has one, the old capped prefix when it does not.
+                 The fallback is not dead code and is not temporary in the sense of being removable
+                 on a date: it covers every row polled before description_digest existed, and it
+                 covers any future row whose digest came back empty. Both resolve themselves on the
+                 next poll of that source, and neither is worth a backfill that would spend the
+                 transfer this column exists to save. */
+              scored_description: sql<string>`coalesce(nullif(${monitored_jobs.description_digest}, ''), left(${monitored_jobs.description}, ${SCORING_CHARS}))`,
             })
             .from(monitored_jobs)
             .where(inArray(monitored_jobs.id, poolIds))
