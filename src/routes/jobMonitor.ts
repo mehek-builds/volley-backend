@@ -16,7 +16,7 @@ import { optionalAuth } from '../middleware/auth';
 import { scoreJdMatch } from '../engine/jdMatch';
 import { resumeSpecText } from '../engine/resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
-import { rankingCacheKey, readRanking, writeRanking } from '../lib/rankingCache';
+import { rankingCacheKey, readRankingShared, writeRankingShared } from '../lib/rankingCache';
 import { companyDomainFor } from '../lib/companyDomains';
 import { classificationCoverage, summarizeJobVariety } from '../lib/jobVariety';
 import {
@@ -1523,7 +1523,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
          back full of exactly the postings the filter exists to hide. */
       JSON.stringify([q ?? '', title ?? '', location ?? '', company ?? '', remote ?? '', sponsorOnly, jobTargeting]),
     );
-    let ranking = readRanking(cacheKey);
+    let ranking = await readRankingShared(cacheKey);
 
     if (!ranking) {
       /* TWO PHASES, and the cheap one comes first.
@@ -1579,7 +1579,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         PER_PAGE_COMPANY_CAP,
         RANKED_PAGE_WINDOW,
       );
-      ranking = writeRanking(cacheKey, {
+      ranking = await writeRankingShared(cacheKey, {
         ids: spread.map(({ row }) => row.id),
         scores: new Map(scored.map(({ row, score }) => [row.id, score])),
         poolExhausted,
