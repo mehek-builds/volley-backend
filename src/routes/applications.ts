@@ -35,6 +35,11 @@ import { submitRequestDisposition } from '../lib/submissionSafety';
 import { detectPortal } from '../lib/portalSubmission';
 import { dailySubmissionCap, withinDailyCap } from '../lib/submissionQueue';
 import { canStartExtensionSubmission, extensionOutcomePatch, isSafeExtensionReceiptUrl } from '../lib/extensionSubmission';
+import {
+  candidateEducationFromParsedProfile,
+  educationDriftResponse,
+  packetEducationDrift,
+} from '../lib/submissionEducationGuard';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
 const questionSchema = z.object({
@@ -173,6 +178,14 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         const consentRow = consent[0];
         const disposition = canStartExtensionSubmission(current, parsed.data.authorization, consentRow?.automatic_submission_enabled === true);
         if (disposition !== 'start') return { kind: disposition, row, current };
+        // The packet's PDF was frozen when it was built, so this is the last moment anything can
+        // notice that the education block it prints no longer matches the profile. Checked BEFORE
+        // the daily cap because drift is the actionable failure of the two: being told to fix a
+        // graduation date is useful, being told to come back tomorrow is not.
+        const profileRows = await tx.select({ parsed_json: profiles.parsed_json })
+          .from(profiles).where(eq(profiles.user_id, userId)).limit(1);
+        const educationIssues = packetEducationDrift(row.spec, profileRows[0]?.parsed_json);
+        if (educationIssues.length > 0) return { kind: 'education_drift' as const, issues: educationIssues };
         if (!withinDailyCap(countRows[0]?.total ?? 0, dailySubmissionCap())) return { kind: 'cap' as const };
         const now = new Date().toISOString();
         const claimId = randomUUID();
@@ -205,6 +218,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (result.kind === 'submitted') return reply.send({ application_id: result.row.id, already_submitted: true, review: result.current });
       if (result.kind === 'in_flight') return reply.status(409).send({ error: 'This application already has an active submission' });
       if (result.kind === 'reject') return reply.status(409).send({ error: 'This application cannot be submitted again from its current state' });
+      if (result.kind === 'education_drift') return reply.status(422).send(educationDriftResponse(result.issues));
       if (result.kind === 'cap') return reply.status(429).send({ error: 'Daily automatic submission safety limit reached' });
       if (result.kind === 'changed') return reply.status(409).send({ error: 'The application state changed before the extension could reserve it' });
       return reply.send({ application_id: result.row.id, claim_id: result.claimId, review: result.next });
@@ -293,17 +307,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         school_location?: string;
         recent_experience_review?: { selected_entry_id?: string | null; continue_with_found?: boolean };
       } | undefined;
-      const education = {
-        school: parsed?.school ?? '',
-        degree: parsed?.degree,
-        grad_date: parsed?.grad_date || (parsed?.grad_year ? String(parsed.grad_year) : undefined),
-        grad_year: parsed?.grad_year,
-        currently_enrolled: parsed?.currently_enrolled,
-        gpa: parsed?.gpa,
-        gpa_scale: parsed?.gpa_scale,
-        school_location: parsed?.school_location,
-        coursework: Array.isArray(parsed?.coursework) ? parsed.coursework : [],
-      };
+      // Shared with the send-time guards on submit-request and extension-start. The dashboard and
+      // the unattended routes have to read the profile the same way, or a packet this route just
+      // approved could be refused seconds later at submission.
+      const education = candidateEducationFromParsedProfile(parsed);
       const validation = validateResumeSpec(
         edited,
         review.jd_text,
@@ -439,6 +446,18 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       }
       if (disposition === 'reject') {
         return reply.status(409).send({ error: 'This application cannot start another submission run from its current state' });
+      }
+      // Guarded here as well as on extension-start, and not because this route is unattended today.
+      // The dashboard now refuses to send a drifted packet, but a frontend check is not an
+      // enforcement point: this audit exists because a client-side assumption turned out to be
+      // false, and submit-request accepts a bare list of answers from any authenticated caller. The
+      // review screen saves through PATCH /resume before it sends, and that route runs this exact
+      // comparison, so a correctly-saved packet reaches this line with nothing to report.
+      const submitProfileRows = await db.select({ parsed_json: profiles.parsed_json })
+        .from(profiles).where(eq(profiles.user_id, request.jwtPayload!.userId)).limit(1);
+      const submitEducationIssues = packetEducationDrift(stored, submitProfileRows[0]?.parsed_json);
+      if (submitEducationIssues.length > 0) {
+        return reply.status(422).send(educationDriftResponse(submitEducationIssues));
       }
       const sensitive = parsed.data.questions.find((question) => isRefusedQuestion(question.question));
       if (sensitive) {
