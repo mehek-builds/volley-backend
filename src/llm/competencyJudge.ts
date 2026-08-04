@@ -84,7 +84,7 @@ Rules:
 
 ELIGIBILITY REQUIREMENTS are judged differently, and are marked as such:
 - Judge them against the CANDIDATE FACTS block, never against the bullets.
-- "quote" must be the fact you relied on, copied verbatim from that block.
+- "quote" must be the CANDIDATE'S GRADUATION DATE, copied verbatim from that block. Every eligibility requirement turns on when the candidate finishes, so the degree and the school cannot answer one and quoting either is rejected.
 - Read the requirement's direction exactly as written. "graduating in Fall 2027 or Spring 2028" is a window with two ends and a candidate outside EITHER end does not meet it. "not graduating before 2027" and "no later than June 2028" are open on one side. "2027" with no term means any point in that year.
 - A date that is not about graduating - a requisition number, a funding round, a cohort year - is not the candidate's graduation date and is not the requirement's date.
 - When the requirement states no eligibility condition you can check, set met to false and say so in "why"; do not invent one.`;
@@ -131,9 +131,22 @@ function normalizeQuote(s: string): string {
  * Substring rather than equality because a model asked for "one bullet verbatim" will sometimes
  * hand back the clause of it that did the work, which is still the student's own sentence.
  */
-/** The facts as citable strings. An eligibility quote must be one of these. */
+/** The facts as citable strings, for the prompt. */
 export function profileFacts(profile?: CandidateProfile): string[] {
   return [profile?.degree, profile?.school, profile?.gradDate].filter((x): x is string => Boolean(x));
+}
+
+/* WHICH fact, not just A fact.
+ *
+ * Grounding against the whole fact set let "BS CS" and "USC" ground a verdict about a GRADUATION
+ * DATE: both are real facts, both passed exact equality, and neither says anything about when the
+ * student finishes. A model that could not find the date could satisfy the gate by quoting the
+ * degree, and the gate is the only thing standing between a guess and a number.
+ *
+ * Every clause routed here turns on WHEN (see statesTiming in engine/clauseMatch.ts), so the
+ * graduation date is the only fact that can answer one. */
+export function eligibilityFacts(profile?: CandidateProfile): string[] {
+  return profile?.gradDate ? [profile.gradDate] : [];
 }
 
 /* A FACT MUST BE QUOTED WHOLE, and that is stricter than the bullet gate, not looser.
@@ -206,7 +219,7 @@ export function validateVerdicts(
     const grounded =
       typeof v.quote === 'string' &&
       (q.kind === 'eligibility'
-        ? factIsGrounded(v.quote, profileFacts(profile))
+        ? factIsGrounded(v.quote, eligibilityFacts(profile))
         : quoteIsGrounded(v.quote, bullets));
     if (!grounded) {
       rejected.push({ id: v.id, reason: 'met without a grounded quote' });

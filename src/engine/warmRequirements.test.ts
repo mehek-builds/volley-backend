@@ -296,6 +296,23 @@ describe('a graduation requirement is asked, not parsed', () => {
     assert.notEqual(c.verdict, 'met');
   });
 
+  test('year standing and relative timing are timing too', () => {
+    /* ROUND SEVEN. These name no year and no graduation, so they escaped the first gate and were
+       decided locally as MET: the clause reached the degree branch, found no field to disagree
+       with, and passed. A sophomore matched a senior-only posting. */
+    for (const clause of [
+      "Bachelor's degree; rising senior only",
+      "Pursuing a bachelor's degree, final-year students only",
+      "Bachelor's degree, must be a current sophomore",
+      "Bachelor's degree, must graduate next spring",
+      "Bachelor's degree; graduating within the next twelve months",
+    ]) {
+      const c = matchClause(clause, 1, facts('May 2028'));
+      assert.equal(c.basis, 'graduation', clause);
+      assert.notEqual(c.verdict, 'met', `${clause}: must not pass on a field check alone`);
+    }
+  });
+
   test('pending is never scored as a miss', () => {
     // aggregate() counts unmet in the denominator. A clause still awaiting an answer must not be
     // charged to the student on the way past.

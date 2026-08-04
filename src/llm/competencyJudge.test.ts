@@ -188,6 +188,24 @@ describe('scorePosting keeps the deterministic half deterministic', () => {
     assert.equal(r.score, null, 'and no headline number is published on a partial answer');
   });
 
+  test('a requirement we hold no fact for publishes no number', async () => {
+    /* ROUND SEVEN, and the same failure as the outage path through a third door. With no
+       graduation date on file the clause is unscoreable, it leaves the denominator, and the
+       surviving clauses published 100 - on a posting whose graduation requirement nobody could
+       check, for exactly the students who have not finished their profile. */
+    const noGrad = { ...facts, gradDate: null };
+    const r = await scorePosting(jd, noGrad, undefined, segmentJd as never, async (_b, qs) => ({
+      verdicts: qs.map((q) => ({ id: q.id, met: true, quote: BULLETS[0] })),
+      rejected: [],
+    }));
+    assert.equal(r.score, null);
+    assert.equal(
+      r.clauses.find((c) => c.basis === 'graduation')?.verdict,
+      'unscoreable',
+      'and the clause says why rather than vanishing',
+    );
+  });
+
   test('responsibilities are not scored against the candidate', async () => {
     // "The impact you will have" describes the JOB. Scoring a student against what they will do is
     // how the regex prototype credited "ship features on the Databricks platform" to someone who
@@ -266,6 +284,22 @@ describe('an eligibility verdict grounds in the facts, not the bullets', () => {
     );
     assert.equal(invented.verdicts[0]?.met, false, 'May 2027 is the only date on file');
     assert.equal(invented.rejected.length, 1);
+  });
+
+  test('the degree cannot answer a question about a date', () => {
+    /* ROUND SEVEN. Grounding against the whole fact set let "BS CS" and "USC" ground a verdict
+       about WHEN the student finishes: both are real facts, both passed exact equality, and a
+       model that could not find the date could satisfy the gate by quoting the degree. */
+    for (const quote of [profile.degree!, profile.school!]) {
+      const r = validateVerdicts(
+        { verdicts: [{ id: 'c1', met: true, quote, why: 'seems right' }] },
+        q,
+        BULLETS,
+        profile,
+      );
+      assert.equal(r.verdicts[0]?.met, false, quote);
+      assert.equal(r.rejected.length, 1, quote);
+    }
   });
 
   test('a competency verdict still grounds in the bullets, not the facts', () => {

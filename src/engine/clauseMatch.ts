@@ -159,10 +159,24 @@ const ordinal = (p: GradPoint) => p.year * 2 + p.half;
  * answer lives and no bullet can carry it. See llm/competencyJudge.ts. */
 const GRADUATION_CUE = /\b(graduat|class of|degree conferred|conferral|completing|expected to complete|anticipated)/i;
 const YEAR = /\b(19|20)\d{2}\b/;
+/* YEAR STANDING IS TIMING, and it was escaping because it names no year and no graduation.
+   "Rising senior", "current sophomore" and "final-year students only" are eligibility windows
+   stated in the other unit, and every one of them was being decided locally as MET: the clause hit
+   DEGREE_CLAUSE, found no field to disagree with, and passed. A sophomore matched a senior-only
+   posting. */
+const YEAR_STANDING = /\b(freshman|sophomore|junior|senior|rising|penultimate|final[- ]year|first[- ]year|second[- ]year|third[- ]year|fourth[- ]year|underclass|upperclass)\b/i;
+/* Relative timing carries no digit either. "Must graduate next spring" and "within the next twelve
+   months" are windows; resolving them needs today's date and the student's, which is reading. */
+const RELATIVE_TIMING = /\b(next (spring|fall|autumn|summer|winter|year|term|semester)|this (spring|fall|autumn|summer|winter|year)|within the next|by the (start|end) of|before (the )?(start|end)|upcoming)\b/i;
 
 /** Does this degree clause turn on WHEN, not just WHAT. Those are the ones the judge must read. */
 export function statesTiming(clause: string): boolean {
-  return GRADUATION_CUE.test(clause) || YEAR.test(clause);
+  return (
+    GRADUATION_CUE.test(clause) ||
+    YEAR.test(clause) ||
+    YEAR_STANDING.test(clause) ||
+    RELATIVE_TIMING.test(clause)
+  );
 }
 
 const YEARS_CLAUSE = /(\d+)\s*\+?\s*(?:or more\s*)?years?\b/i;
@@ -288,6 +302,11 @@ export function matchClause(
        we decide and a date half we guess at. Splitting it was how "BS graduating 2027; MS
        graduating 2029" came back met for a 2028 graduate: both halves passed something. */
     if (statesTiming(text)) {
+      /* No graduation date on file. Unscoreable is right for the CLAUSE, but on its own it is not
+         enough: an unscoreable clause leaves the denominator, the remaining clauses publish a
+         number by themselves, and a student who has never entered a graduation date scored 100 on
+         a posting whose graduation requirement nobody could check. scorePosting treats this the
+         same as a question the judge never answered, and suppresses the headline. */
       if (!facts.gradDate) return { ...base, verdict: 'unscoreable', basis: 'graduation' };
       return { ...base, verdict: 'pending', basis: 'graduation' };
     }
@@ -367,6 +386,13 @@ export async function scorePosting(
 
   /* Both classes are asked in ONE call. They are the same request with different corpora, and
      splitting them would double the latency and the cost for no gain. */
+  /* An eligibility requirement the posting states and we hold no fact for. Counted with the
+     unanswered ones: both mean "this requirement was not checked", and neither may be rounded off
+     into a percentage that implies it was. */
+  const uncheckable = clauses.filter(
+    (c) => c.basis === 'graduation' && c.verdict === 'unscoreable',
+  ).length;
+
   const pending = clauses
     .map((c, i) => ({ c, i }))
     .filter(({ c }) => c.basis === 'competency' || (c.basis === 'graduation' && c.verdict === 'pending'));
@@ -435,7 +461,7 @@ export async function scorePosting(
      denominator left the deterministic survivors to publish a number on their own - 100, on a
      posting where nothing about the candidate was actually checked. A question we did not get an
      answer to suppresses the headline exactly like a question we could not ask. */
-  if (unanswered > 0) return { score: null, clauses, rejected };
+  if (unanswered > 0 || uncheckable > 0) return { score: null, clauses, rejected };
   return { score: aggregate(clauses), clauses, rejected };
 }
 
