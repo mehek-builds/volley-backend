@@ -279,38 +279,54 @@ vercel deploy --prod
 Worth reading before touching `DATABASE_URL` or the `ssl` option, because the precedence is the
 opposite of what the code looks like.
 
-`src/db/index.ts` passes **both** a `connectionString` and `ssl: { rejectUnauthorized: false }`. pg
-resolves those with `Object.assign({}, config, parse(config.connectionString))`
-(`connection-parameters.js:58`), so the **connection string wins** and the explicit option is a
-fallback, not an override. Resolved config as it reaches `tls.connect`:
+`src/db/index.ts` passes **both** a `connectionString` and an `ssl` option. pg resolves them with
+`Object.assign({}, config, parse(config.connectionString))` (`connection-parameters.js:58`), so the
+**connection string wins** and the `ssl` option is only a fallback.
 
-| `DATABASE_URL` | resolved `ssl` | certificate verified? |
+`withVerifiedSslMode` therefore makes the string say what we mean: it rewrites
+`require`/`prefer`/`verify-ca` to `verify-full` (which pg already treats them as, so nothing changes
+about how it connects), **and declares `sslmode=verify-full` when the URL declares nothing**.
+
+| `DATABASE_URL` | resolved `ssl` at `tls.connect` | certificate verified? |
 |---|---|---|
-| `?sslmode=require` | `{}` | **yes** (Node defaults `rejectUnauthorized` to true) |
-| `?sslmode=verify-full` | `{}` | **yes**, identical |
-| no `sslmode` | `{ rejectUnauthorized: false }` | **no** |
+| `?sslmode=require` | `{}` | **yes** |
+| `?sslmode=verify-full` | `{}` | **yes** |
+| no `sslmode` | `{}` | **yes** (was **no** before 2026-08-04) |
+| `?sslmode=disable` | `false` | no TLS, honoured as configured |
 
-So a Neon URL, which always carries `sslmode=require`, verifies the certificate today. Keep it that
-way: **removing `sslmode` from `DATABASE_URL` silently turns verification off**, because that is
-what makes the `rejectUnauthorized: false` fallback apply.
+`uselibpqcompat=true` is left alone entirely: under it `require` carries real libpq semantics, so
+rewriting it would silently tighten a connection someone deliberately loosened.
 
-`normalizeSslMode` rewrites `require`/`prefer`/`verify-ca` to `verify-full` before pg parses the
-URL. pg already treats them as aliases for `verify-full`, so the resolved config is byte-identical;
-the only difference is that pg stops writing a deprecation warning to stderr on every cold start
-(59 occurrences across 7 users, and the project's only runtime error group). This is the fix the
-warning itself recommends.
+**The row that changed is the third.** Verification used to be on only by accident of Neon putting
+`sslmode` in the URL. Dropping that one parameter from the environment would have silently turned
+certificate checking off, with no error, no log line and no failing test. The code now states the
+intent, and the environment cannot quietly override it downward. `sslmode=disable` is still
+honoured, because it means something and is a deliberate choice where it appears.
+
+The `ssl` option is `{ rejectUnauthorized: true }` (`sslOptionForHost`) and is mostly dead: the
+string beats it wherever pg can read a mode out of it. It decides only in the corners — an `SSLMODE`
+written in the wrong case (pg's lookup is case-sensitive), or `uselibpqcompat` with no mode — and in
+each it fails **safe**. It used to fail open.
+
+It does **not** decide for a connection string `new URL` cannot read, which an earlier version of
+this section claimed: pg parses with `new URL` too, so a multi-host string throws inside pg before
+`ssl` is resolved at all.
+
+Duplicate `sslmode` parameters collapse to the value pg would have used (the last one), so
+`?sslmode=require&sslmode=disable` normalises to `disable` rather than silently discarding it.
+
+Production was verified against the live environment on 2026-08-04 before this shipped:
+`DATABASE_URL` carries `sslmode=require`, no `uselibpqcompat`, and `DATABASE_DIRECT_URL` is unset —
+so production sits on the first row and nothing about how it connects changed. All five migration scripts in `scripts/` were updated to match, each guarded so a local Postgres
+with a self-signed certificate still connects; `check-schema-drift.mjs` in particular runs against
+the real database before every schema change, so it is the last place that should be the loose one.
 
 An earlier version of this section, and of the code, claimed the explicit `ssl` option won and
-therefore **deleted** `sslmode`. That was backwards, and it would have ended certificate
-verification on every production connection. `src/db/index.test.ts` now asserts on
-`ConnectionParameters` (what pg derives) rather than on `pool.options` (what you passed in), which
-is the difference between a test with teeth and a tautology.
-
-**The residual, stated rather than hidden:** the `ssl: { rejectUnauthorized: false }` fallback is
-dead for any URL carrying an `sslmode` and live for one without. Deleting it outright would drop
-TLS entirely on a URL with no `sslmode`, so it stays. Tightening that asymmetry means requiring
-`sslmode=verify-full` in the environment and removing the option, which cannot be tested from a
-laptop against the production database. Do it deliberately, against a Neon branch first.
+therefore **deleted** `sslmode`. That was backwards and would have ended certificate verification on
+every production connection. `src/db/index.test.ts` asserts on `ConnectionParameters` (what pg
+derives) rather than on `pool.options` (what you passed in), and reads the fallback from
+`sslOptionForHost` rather than redeclaring it — both are the difference between a test with teeth
+and a tautology.
 
 ## Point the extension at the deployed backend
 In `student-outreach-extension`, create `.env` with:

@@ -8,7 +8,14 @@ if (!connectionString) {
   process.exit(2);
 }
 
-const client = new pg.Client({ connectionString, ssl: { rejectUnauthorized: false } });
+// Verification on, matching sslOptionForHost in src/db/index.ts. See DEPLOY.md's TLS section.
+const client = new pg.Client({
+  connectionString,
+  // Guarded like the other scripts and like src/db/index.ts: a LOCAL Postgres often has a
+  // self-signed certificate, and forcing verification on it turns a working dev setup into a
+  // connection error. `.env.example` points at localhost.
+  ssl: /localhost|127\.0\.0\.1/.test(connectionString) ? undefined : { rejectUnauthorized: true },
+});
 try {
   await client.connect();
   await client.query('alter table targeting add column if not exists locations jsonb');

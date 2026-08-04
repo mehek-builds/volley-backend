@@ -36,7 +36,9 @@ const seed = process.argv.includes('--seed');
 const isLocal = /localhost|127\.0\.0\.1/.test(connectionString);
 const client = new pg.Client({
   connectionString,
-  ssl: isLocal ? undefined : { rejectUnauthorized: false },
+  // Verification on, matching sslOptionForHost in src/db/index.ts. See DEPLOY.md's TLS section:
+  // a certificate this cannot verify should fail loudly rather than connect quietly.
+  ssl: isLocal ? undefined : { rejectUnauthorized: true },
 });
 await client.connect();
 
