@@ -45,6 +45,8 @@ jobs:
   # pull_request whose every changed path matched the docs pattern, computed from the real diff, so
   # a code file smuggled into a docs PR still runs the full set.
   changes:
+    # Cheap and network-free, but a ceiling costs nothing and keeps the set complete.
+    timeout-minutes: 5
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.filter.outputs.code }}
@@ -91,6 +93,8 @@ jobs:
 
   test:
     if: github.event_name != 'schedule'
+  # A hung test would otherwise hold a runner for six hours.
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -135,6 +139,7 @@ jobs:
   schema-drift:
     needs: changes
     if: github.event_name != 'schedule' && needs.changes.outputs.code == 'true'
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -162,6 +167,9 @@ jobs:
   # only a measurement against the live board can. Same idea as schema-drift, different drift.
   logo-coverage:
     needs: changes
+  # scripts/check-logo-coverage.mjs scans the LIVE board over the network. Without a cap a wedged
+  # fetch runs to GitHub's 6-hour default.
+    timeout-minutes: 10
     # No schedule gate, unlike its neighbours: the hourly cron exists to catch logo drift that only
     # a live measurement can see, and `changes` resolves to true for a schedule event.
     if: needs.changes.outputs.code == 'true'
@@ -191,6 +199,10 @@ jobs:
   source-identity:
     needs: changes
     if: github.event_name != 'schedule' && needs.changes.outputs.code == 'true'
+  # scripts/verify-job-sources.mjs sets timeBudgetMs to MAX_SAFE_INTEGER, deliberately removing the
+  # production time budget, then fetches ~165 third-party ATS boards. This is the one job in the repo
+  # that can legitimately run long, so it is the one that most needs a ceiling.
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
