@@ -107,6 +107,30 @@ columns. It is safe to run more than once and old application versions ignore
 both columns, so the required order is migration first, API deploy second, web
 deploy last. Roll back application code without rolling back these columns.
 
+### `description_digest` — MIGRATION MUST RUN BEFORE THE NEXT API DEPLOY
+
+```bash
+npm run db:description-digest
+```
+
+**This one is not optional and the order is not symmetrical with the case above.**
+`GET /jobs` selects `monitored_jobs.description_digest` directly, so deploying the
+API against a database that does not have the column makes every ranked board
+request fail. An old application version ignores the column safely; a new one
+cannot tolerate its absence.
+
+So: **migration first, API deploy second.** The script uses
+`ADD COLUMN IF NOT EXISTS`, so it is safe to run repeatedly and safe to run
+against a database that already has it.
+
+The column is nullable and **deliberately not backfilled**. Backfilling would
+read every description out of Neon to compute a value the daily poll rewrites
+for free, spending the exact transfer allowance the column exists to save. The
+read path coalesces to the old capped prefix, so the board is correct from the
+moment the column lands, and it fills itself within one poll cycle. Expect
+`0 of N active postings have a digest` immediately after the migration; that is
+the correct output, not a failure.
+
 Password authentication uses these contracts:
 
 - `POST /auth/password/login` accepts `{ "email": "...", "password": "..." }`.
