@@ -17,6 +17,15 @@ export const resumeGenerateBodySchema = z.object({
   company: z.string().min(1).max(RESUME_REQUEST_LIMITS.company),
   role: z.string().trim().min(1).max(RESUME_REQUEST_LIMITS.role),
   jd_text: z.string().min(20).max(RESUME_REQUEST_LIMITS.jobDescription),
+  profile_education: z.object({
+    school: z.string().max(200).optional(),
+    degree: z.string().max(200).optional(),
+    grad_date: z.string().max(40).optional(),
+    grad_year: z.number().int().min(1900).max(2200).optional(),
+    currently_enrolled: z.boolean().optional(),
+    coursework: z.array(z.string().max(200)).max(30).optional(),
+    school_location: z.string().max(200).optional(),
+  }).optional(),
   // Which monitored_jobs row this application is against, when the student came from the jobs
   // list rather than pasting a link. It is what lets the jobs list say "Applied" on exactly the
   // posting they applied to: company+role alone cannot tell two reqs apart, so one Mountain View

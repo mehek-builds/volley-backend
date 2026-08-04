@@ -157,6 +157,36 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export function mergeEducationFallback(
+  primary: CandidateEducation,
+  fallback: unknown,
+): CandidateEducation {
+  const source = (fallback && typeof fallback === 'object' ? fallback : {}) as Record<string, unknown>;
+  const str = (value: unknown) => (typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined);
+  const gradYear = typeof source.grad_year === 'number' && source.grad_year > 0 ? source.grad_year : undefined;
+  const coursework = Array.isArray(source.coursework)
+    ? source.coursework.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+    : undefined;
+  return {
+    ...primary,
+    school: primary.school?.trim() || str(source.school) || '',
+    degree: primary.degree?.trim() || str(source.degree),
+    grad_date: primary.grad_date?.trim() || str(source.grad_date) || (gradYear ? String(gradYear) : undefined),
+    grad_year: primary.grad_year ?? gradYear,
+    currently_enrolled:
+      primary.currently_enrolled ?? (typeof source.currently_enrolled === 'boolean' ? source.currently_enrolled : undefined),
+    coursework: primary.coursework && primary.coursework.length > 0 ? primary.coursework : coursework,
+    school_location: primary.school_location?.trim() || str(source.school_location),
+  };
+}
+
+export function missingRequiredEducation(education: CandidateEducation): string[] {
+  const issues: string[] = [];
+  if (!education.school?.trim()) issues.push('education school is missing from the profile source');
+  if (!education.degree?.trim()) issues.push('education degree is missing from the profile source');
+  return issues;
+}
+
 // POST /autofill/event's body. Strip-mode on purpose (zod's default): unknown keys from newer
 // extension builds are dropped rather than rejected, so the two sides can version independently.
 // The flip side is that a field the extension sends but this schema does not name is dropped
@@ -278,15 +308,33 @@ export async function resumeRoutes(fastify: FastifyInstance) {
        into a near-copy of it, which is how the base and tailored documents came to disagree about
        the education block more than once - most recently on the GPA, which this path read from the
        parse while every other employer-facing surface read application_profile. */
-    const education: CandidateEducation = educationFrom(
-      parsed,
-      academicRecordRowFor(applicationRows[0], (err) =>
-        request.log.error(
-          { err, userId },
-          'application_profile could not be decrypted while generating a tailored resume. Printing no GPA rather than the resume parse, which is not the source of truth for it.',
+    const education: CandidateEducation = mergeEducationFallback(
+      mergeEducationFallback(
+        educationFrom(
+          parsed,
+          academicRecordRowFor(applicationRows[0], (err) =>
+            request.log.error(
+              { err, userId },
+              'application_profile could not be decrypted while generating a tailored resume. Printing no GPA rather than the resume parse, which is not the source of truth for it.',
+            ),
+          ),
         ),
+        baseSpec,
       ),
+      body.profile_education,
     );
+    const educationIssues = missingRequiredEducation(education);
+    if (educationIssues.length > 0) {
+      return reply.status(422).send(resumeQualityHoldResponseSchema.parse({
+        error: 'Your profile is missing education details, so Litos did not make this resume.',
+        code: 'resume_quality_hold',
+        quality: {
+          ready_to_attach: false,
+          issues: educationIssues,
+          warnings: [],
+        },
+      }));
+    }
     // The student's declared skills, the only authoritative source for the SKILLS line (R-015).
     // Filtered rather than cast: this is jsonb, so a hand-edited row can hold anything, and a
     // non-string in here would reach the model as junk and the validator as an unmatchable entry.

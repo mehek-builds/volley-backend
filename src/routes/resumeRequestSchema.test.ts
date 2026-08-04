@@ -31,6 +31,23 @@ describe('resume generation request limits', () => {
     assert.equal(parsed.application?.ats_name, 'Ashby');
   });
 
+  test('accepts profile education as a generation fallback from the dashboard profile response', () => {
+    const parsed = resumeGenerateBodySchema.parse({
+      ...validRequest,
+      profile_education: {
+        school: 'University of Southern California, Viterbi School of Engineering',
+        degree: 'Bachelor of Science in Computer Science',
+        grad_date: 'May 2028',
+        grad_year: 2028,
+        currently_enrolled: true,
+        coursework: ['Data Structures & Algorithms', 'Object-Oriented Programming'],
+        school_location: 'Los Angeles, CA',
+      },
+    });
+    assert.equal(parsed.profile_education?.school, 'University of Southern California, Viterbi School of Engineering');
+    assert.equal(parsed.profile_education?.grad_year, 2028);
+  });
+
   test('rejects oversized contact values before PDF measurement', () => {
     const result = resumeGenerateBodySchema.safeParse({
       ...validRequest,
