@@ -113,9 +113,11 @@ describe('a packet is tailored and scored against the WHOLE posting', () => {
      cut away before the JD ever arrived. */
 
   test('generate resolves the full description from job_id', () => {
-    assert.match(generate, /left\(\$\{monitored_jobs\.description\}, 60000\)/);
-    assert.match(generate, /jdText = row\.description;/);
-    assert.match(generate, /\.where\(eq\(monitored_jobs\.id, body\.job_id\)\)/);
+    // The resolution moved into the shared, scoped helper; generate now delegates rather than
+    // carrying its own copy of both the query and the predicate.
+    assert.match(generate, /const row = await postingRow\(body\.job_id\);/);
+    assert.match(generate, /jdText = resolveJdText\(jdText, row\?\.description\);/);
+    assert.match(requirements, /left\(\$\{monitored_jobs\.description\}, 60000\)/);
   });
 
   test('generate uses the resolved text everywhere, not the body field', () => {
@@ -137,7 +139,6 @@ describe('a packet is tailored and scored against the WHOLE posting', () => {
   test('a caller that holds more text than we do still wins', () => {
     // The extension and hand-typed links send a JD we have no row for. Overwriting those with a
     // shorter stored copy would be the same defect pointed the other way.
-    assert.match(generate, /row\.description\.length > jdText\.length/);
     // Both routes now go through resolveJdText, whose caller-wins branch is the same guarantee.
     assert.match(requirements, /if \(sent\.length >= 2_000\) return sent;/);
     assert.match(requirements, /return rowDescription\.length > sent\.length \? rowDescription : sent;/);
@@ -173,13 +174,53 @@ describe('the expensive path is opt-in and the two routes agree', () => {
   test('a row capped at the 60k ceiling never wins', () => {
     // It is truncated mid-word too, so it is no better than what the caller sent.
     assert.match(routes, /rowDescription\.length === 60_000/);
-    assert.match(generate, /row\?\.description\?\.length === 60_000/);
   });
 
   test('only a preview-shaped text is replaced', () => {
     // The poller overwrites description in place, so a re-polled posting that grew by one
     // character must not silently replace a full JD a caller genuinely holds.
     assert.match(routes, /sent\.length >= 2_000/);
-    assert.match(generate, /jdText\.length < 2_000/);
+  });
+});
+
+describe('the posting read is scoped, and the paid route is metered', () => {
+  const routes = readFileSync(path.join(__dirname, '..', 'routes', 'jdMatch.ts'), 'utf8');
+  const generate = readFileSync(path.join(__dirname, '..', 'routes', 'resume.ts'), 'utf8');
+
+  /* Retrospective review, 2026-08-04. postingRow began life returning one nullable location column,
+     and its comment said scoping was unnecessary because that "discloses nothing". It stopped being
+     true when it started returning the DESCRIPTION, which /jd-match/requirements hands back clause
+     by clause: any posting the board refuses to serve was readable by uuid alone. */
+
+  test('postingRow requires an enabled source and an allowed portal family', () => {
+    assert.match(routes, /eq\(career_page_sources\.enabled, true\)/);
+    assert.match(routes, /inArray\(career_page_sources\.ats_name, \[\.\.\.AUTONOMOUS_PORTAL_FAMILIES\]\)/);
+  });
+
+  test('it deliberately does NOT require is_active', () => {
+    /* The one place this differs from GET /jobs/:id, and it is load-bearing: a packet is often held
+       for a posting that has since closed, and refusing there would break the repair path for every
+       packet that stored the 600-character preview. Closure is a fact about the job; the source and
+       portal-family checks are the permission boundary. */
+    const helper = routes.slice(routes.indexOf('export async function postingRow'), routes.indexOf('export function resolveJdText'));
+    assert.doesNotMatch(helper, /is_active/);
+  });
+
+  test('generate reads the posting through that same helper, not its own query', () => {
+    // A second inline query is a second place to forget the scoping, and a second predicate that
+    // can drift from the one the review screen uses.
+    assert.match(generate, /const row = await postingRow\(body\.job_id\);/);
+    const handler = generate.slice(
+      generate.indexOf("fastify.post('/resume/generate'"),
+      generate.indexOf("fastify.get('/resume/download'"),
+    );
+    assert.doesNotMatch(handler, /\.from\(monitored_jobs\)/, 'no inline unscoped read may remain');
+  });
+
+  test('the requirement breakdown is rate limited and body bounded', () => {
+    // It shipped as the only model-backed route in the repo with neither, behind nothing but the
+    // 180 req/min IP limiter. Its own cache made the common path free, which is what hid it.
+    assert.match(routes, /'\/jd-match\/requirements', \{ preHandler: requireAuth, bodyLimit: 128 \* 1024 \}/);
+    assert.match(routes, /allowHourly\(userId, 'jdRequirements', LIMITS\.perHour\.jdRequirements\)/);
   });
 });
