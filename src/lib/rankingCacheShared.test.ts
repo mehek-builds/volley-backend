@@ -171,6 +171,70 @@ describe('when Upstash is configured', () => {
   });
 });
 
+/* THE BUG THIS BLOCK EXISTS FOR. Provisioning Upstash through the Vercel marketplace on
+   2026-08-04 injected KV_REST_API_URL and KV_REST_API_TOKEN, not the UPSTASH_REDIS_REST_* names
+   this file was written against. The integration was correct and connected; the code was reading
+   names that were never going to be set, so L2 would have stayed a silent no-op with a live
+   database behind it. */
+describe('the variable names Vercel actually injects', () => {
+  function clearAll() {
+    for (const k of [
+      'UPSTASH_REDIS_REST_URL',
+      'UPSTASH_REDIS_REST_TOKEN',
+      'KV_REST_API_URL',
+      'KV_REST_API_TOKEN',
+      'KV_REST_API_READ_ONLY_TOKEN',
+    ]) delete process.env[k];
+  }
+
+  test('KV_REST_API_* alone is a working configuration', () => {
+    clearAll();
+    process.env.KV_REST_API_URL = 'https://relieved-husky.upstash.io';
+    process.env.KV_REST_API_TOKEN = 'kv-token';
+    assert.strictEqual(sharedRankingConfigured(), true, 'the Vercel-injected pair must be accepted');
+    clearAll();
+  });
+
+  test('a read-only token is NOT accepted as the write credential', () => {
+    /* KV_REST_API_READ_ONLY_TOKEN is injected alongside the others and looks interchangeable.
+       This cache writes: accepting it would fail every SET while the config looked complete. */
+    clearAll();
+    process.env.KV_REST_API_URL = 'https://relieved-husky.upstash.io';
+    process.env.KV_REST_API_READ_ONLY_TOKEN = 'read-only-token';
+    assert.strictEqual(sharedRankingConfigured(), false);
+    clearAll();
+  });
+
+  test('an explicit UPSTASH_* pair wins over the integration pair', async () => {
+    clearAll();
+    process.env.KV_REST_API_URL = 'https://integration.upstash.io';
+    process.env.KV_REST_API_TOKEN = 'integration-token';
+    process.env.UPSTASH_REDIS_REST_URL = 'https://explicit.upstash.io';
+    process.env.UPSTASH_REDIS_REST_TOKEN = 'explicit-token';
+
+    const seen: string[] = [];
+    globalThis.fetch = (async (url: string, init: { headers: Record<string, string> }) => {
+      seen.push(url + '|' + init.headers.Authorization);
+      return { ok: true, json: async () => ({ result: null }) };
+    }) as unknown as typeof fetch;
+
+    await readRankingShared('k');
+    assert.ok(seen[0]?.startsWith('https://explicit.upstash.io'), `used ${seen[0]}`);
+    assert.ok(seen[0]?.includes('explicit-token'), 'and the matching token');
+    clearAll();
+  });
+
+  test('a URL and token are never mixed across the two namings', async () => {
+    /* Half of each pair set. Taking the URL from one and the token from the other would pair one
+       database with another's credential: authenticates against nothing, fails at runtime. */
+    clearAll();
+    process.env.UPSTASH_REDIS_REST_URL = 'https://explicit.upstash.io';
+    process.env.KV_REST_API_TOKEN = 'integration-token';
+    assert.strictEqual(sharedRankingConfigured(), false, 'half of each pair is not a configuration');
+    clearAll();
+  });
+});
+
 describe('freshness', () => {
   test('an L2 hit keeps its ORIGINAL age, so a hot key cannot outlive its own TTL', async () => {
     stubUpstash();
