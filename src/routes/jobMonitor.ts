@@ -3,6 +3,7 @@ import { and, desc, eq, ilike, inArray, isNotNull, isNull, lt, ne, notInArray, o
 import { z } from 'zod';
 import { db } from '../db/index';
 import { career_page_sources, monitored_jobs, profiles, sponsor_employers, targeting, users } from '../db/schema';
+import { decide, isBlocked } from '../engine/eligibility';
 import { normalizeEmployerName, readPostingSponsorship, sponsorOnlyBoardRequired, sponsorshipVerdict, type PostingSponsorship } from '../lib/sponsorship';
 import { resolveJobCountry } from '../lib/jobLocation';
 import { portalNameAgrees } from '../lib/sponsorIdentity';
@@ -906,6 +907,38 @@ async function baseResumeText(userId: string | undefined): Promise<string | null
   return text.length > 0 ? text : null;
 }
 
+/**
+ * The student's graduation date, from whichever record actually holds one.
+ *
+ * There is no grad_date COLUMN anywhere: it lives inside the resume JSON, which is why nothing
+ * before this could gate a board on it. base_resume_json is preferred because it is the record the
+ * student curates and it survives a re-upload; parsed_json is the fallback and is overwritten
+ * wholesale by every upload (see the note on targeting.primary_period).
+ *
+ * Null when there is nothing on file, and null must never gate: a student who has not finished
+ * their profile gets the whole board, not an empty one.
+ */
+async function studentGradDate(userId: string | undefined): Promise<string | null> {
+  if (!userId) return null;
+  const [profile] = await db
+    .select({ base_resume_json: profiles.base_resume_json, parsed_json: profiles.parsed_json })
+    .from(profiles)
+    .where(eq(profiles.user_id, userId))
+    .limit(1);
+  if (!profile) return null;
+  const base = profile.base_resume_json as { grad_date?: string | null; grad_year?: number | null } | null;
+  const parsed = profile.parsed_json as { grad_date?: string | null; grad_year?: number | null } | null;
+  for (const source of [base, parsed]) {
+    if (!source) continue;
+    if (typeof source.grad_date === 'string' && source.grad_date.trim()) return source.grad_date.trim();
+    /* grad_year is a real stored value - submissionEducationGuard builds grad_date from it - and a
+       bare year parses to December, which is the reading that cannot hide a spring internship the
+       student can actually do. */
+    if (typeof source.grad_year === 'number' && source.grad_year > 1900) return String(source.grad_year);
+  }
+  return null;
+}
+
 const UPSERT_CHUNK = 200;
 
 function requireOperator(request: FastifyRequest, reply: FastifyReply): boolean {
@@ -1649,7 +1682,60 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       });
     }
 
-    const pageIds = ranking.ids.slice(offset, offset + limit);
+    /* THE GRADUATION GATE, applied here and not one line earlier or later.
+     *
+     * Not inside the ranking build: that cache is keyed by filters and SHARED between accounts
+     * (readRankingShared), and eligibility depends on the student's own graduation date. Baking it
+     * in would serve one student's gate to everybody.
+     *
+     * Not after pagination either: dropping rows from an already-cut page returns short pages and
+     * a has_more that lies. The gate runs across the whole ranked id list, then the page is cut
+     * from what survives.
+     *
+     * TITLE AND TYPE ONLY, no description. Fetching bodies for the entire ranked list to read a
+     * term would spend the transfer that description_digest exists to save, and the term parser
+     * trusts titles over bodies anyway (a body says "founded in summer 2019"). A posting whose term
+     * appears only in its body resolves to `unknown` here, which never gates - the conservative
+     * direction, and the clause judge still reads the body when the student opens it. */
+    const gradDate = await studentGradDate(request.jwtPayload?.userId);
+    let hiddenByGraduation = 0;
+    let eligibleIds = ranking.ids;
+    if (gradDate) {
+      const gateRows = ranking.ids.length
+        ? await db
+            .select({
+              id: monitored_jobs.id,
+              title: monitored_jobs.title,
+              employment_type: monitored_jobs.employment_type,
+            })
+            .from(monitored_jobs)
+            .where(inArray(monitored_jobs.id, ranking.ids))
+        : [];
+      const blocked = new Set(
+        gateRows
+          .filter((row) => isBlocked(decide({ title: row.title, employment_type: row.employment_type }, gradDate)))
+          .map((row) => row.id),
+      );
+      if (blocked.size > 0) {
+        eligibleIds = ranking.ids.filter((id) => !blocked.has(id));
+        hiddenByGraduation = blocked.size;
+        /* LOGGED AND REPORTED, because the product hides these with nothing on screen to say so.
+           A student cannot tell a role they are ineligible for from a role that does not exist, so
+           a bad term parse is invisible from the UI by design. This line and the response field are
+           the only places it can be caught, which makes them load-bearing rather than telemetry. */
+        request.log.info(
+          {
+            userId: request.jwtPayload?.userId,
+            hiddenByGraduation,
+            gradDate,
+            pool: ranking.ids.length,
+          },
+          'graduation gate hid postings',
+        );
+      }
+    }
+
+    const pageIds = eligibleIds.slice(offset, offset + limit);
     /* Rows are read fresh every time, never served from the cache, so a posting edited or pulled
        since the ranking was computed is not resurrected by it. Only the ORDER is remembered. */
     const rows = pageIds.length
@@ -1694,9 +1780,12 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       total: await jobCount(),
       limit,
       offset,
-      has_more: ranking.ids.length > offset + limit,
+      has_more: eligibleIds.length > offset + limit,
       ranked: true,
-      ranked_pool: ranking.ids.length,
+      ranked_pool: eligibleIds.length,
+      /* How many the graduation gate removed. Not rendered anywhere by choice; it exists so the
+         gate is debuggable from a response when a student says a role they expected is missing. */
+      eligibility_hidden: hiddenByGraduation,
       sponsor_only: sponsorOnly,
       /* True when postings exist that were never ranked. Without this the client cannot tell the
          end of the ranking from the end of the board, and `has_more: false` at the pool boundary
