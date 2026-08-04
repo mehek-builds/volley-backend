@@ -132,68 +132,105 @@ const FIELD_SYNONYMS: Record<string, RegExp> = {
 
 const MONTHS = 'jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec';
 
-/** A point in academic time, comparable by ordering. Spring/H1 sorts before Fall/H2. */
+/** A point in academic time. Spring/H1 sorts before Fall/H2, so ordering is comparison. */
 type GradPoint = { year: number; half: 1 | 2 };
-
-const SEASONAL = new RegExp(`\\b(fall|autumn|winter|spring|summer)\\s+(20\\d\\d)\\b`, 'gi');
-const MONTHLY = new RegExp(`\\b(${MONTHS})[a-z]*\\s+(20\\d\\d)\\b`, 'gi');
-/* Numeric month-and-year, which a NAMED-month pattern cannot see. "2027-05", "05/2027" and
-   "5/2027" all mean May 2027, and reading them as a bare year let them span it: the same
-   May-2027 candidate the window excludes came back met purely by writing the date differently.
-   grad_date is free-typed and the resume parser preserves the most precise date printed. */
-const NUMERIC_YM = /\b(20\d\d)[-/.](0?[1-9]|1[0-2])\b/g;
-const NUMERIC_MY = /\b(0?[1-9]|1[0-2])[-/.](20\d\d)\b/g;
-/** A bare year only counts as a graduation date when the clause is actually about graduating. */
-const GRADUATION_CUE = /\b(graduat|class of|degree conferred|expected|completion)/i;
-
-function pointsIn(text: string, requireCue = true): { points: GradPoint[]; bare: boolean } {
-  const out: GradPoint[] = [];
-  for (const m of text.matchAll(SEASONAL)) {
-    const season = m[1].toLowerCase();
-    out.push({ year: Number(m[2]), half: season === 'spring' || season === 'summer' ? 1 : 2 });
-  }
-  for (const m of text.matchAll(MONTHLY)) {
-    const late = ['jul', 'aug', 'sep', 'oct', 'nov', 'dec'].includes(m[1].toLowerCase());
-    out.push({ year: Number(m[2]), half: late ? 2 : 1 });
-  }
-  for (const m of text.matchAll(NUMERIC_YM)) {
-    out.push({ year: Number(m[1]), half: Number(m[2]) >= 7 ? 2 : 1 });
-  }
-  for (const m of text.matchAll(NUMERIC_MY)) {
-    out.push({ year: Number(m[2]), half: Number(m[1]) >= 7 ? 2 : 1 });
-  }
-  if (out.length > 0) return { points: out, bare: false };
-  if (!requireCue || GRADUATION_CUE.test(text)) {
-    for (const m of text.matchAll(/\b(20\d\d)\b/g)) out.push({ year: Number(m[1]), half: 1 });
-    return { points: out, bare: true };
-  }
-  return { points: out, bare: false };
-}
+/** A closed span. A stated term is a span of one; a bare year is a span of two. */
+type GradSpan = { from: GradPoint; to: GradPoint };
 
 const ordinal = (p: GradPoint) => p.year * 2 + p.half;
+const overlaps = (a: GradSpan, b: GradSpan) =>
+  ordinal(a.to) >= ordinal(b.from) && ordinal(a.from) <= ordinal(b.to);
 
 /**
- * EVERY graduation point a clause names, as a closed range, not just the first one.
+ * Graduation dates in ONE pass: find the graduation context, read dates from THAT, then compare.
  *
- * "graduating in Fall 2027 or Spring 2028" is a WINDOW, and reading only the first match turned it
- * into a floor: `ownGrad.year > wantedGrad.year` then scored a May 2030 graduate as MEETING an
- * internship requirement they plainly miss. That is not hypothetical. It is the unexplained
- * "six of six met, score 100" on Databricks' PM intern posting on 2026-08-04, where the candidate
- * graduates May 2027 and is outside the window at the OTHER end. The bug hid because the clause
- * reported met and the reader had no reason to look at a passing row.
+ * REWRITTEN after the same defect survived three rounds of review in three costumes. A stray bare
+ * year invented a window; then a stray numeric date did; then a requisition number widened a real
+ * window until the candidate the clause exists to exclude came back met. Every one was the same
+ * structural fault: extraction and context-detection were separate passes that did not know about
+ * each other, so each new format I taught the extractor walked past the gate the previous format
+ * had been fixed behind.
  *
- * A single stated point stays a single point, so "graduating in 2026" is still exact rather than
- * silently becoming an open interval.
+ * They are one pass now. Dates are only ever read from the text FOLLOWING a graduation cue, so a
+ * date the clause never connected to graduating cannot reach the comparison whatever its format.
+ * Adding a format is safe by construction rather than by remembering to re-gate it.
  *
- * THE BARE-YEAR FALLBACK NOW NEEDS A CUE. It used to fire on any four-digit year in a degree
- * clause, so "Bachelor's degree; our 2019 Series B team" invented a graduation requirement and
- * scored a real candidate unmet against a window the employer never stated.
+ * BOTH SIDES ARE SPANS, which removes the other repeat offender. A bare year is a whole year on the
+ * employer's side as much as the student's: "graduating in 2026" has to admit a December 2026
+ * graduate, and pinning bare years to Spring at both endpoints failed them. Spans match when they
+ * OVERLAP, which is the real question - could this student have graduated when this posting wants -
+ * rather than whether one arbitrary point sits inside a range.
  */
-function parseGraduationWindow(text: string): { from: GradPoint; to: GradPoint } | null {
-  const { points } = pointsIn(text);
-  if (points.length === 0) return null;
-  const sorted = [...points].sort((a, b) => ordinal(a) - ordinal(b));
-  return { from: sorted[0], to: sorted[sorted.length - 1] };
+const GRADUATION_CUE = /\b(graduat|class of|degree conferred|completion|expected to finish)/i;
+const MONTH_NAMES = 'jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec';
+const LATE_MONTHS = new Set(['jul', 'aug', 'sep', 'oct', 'nov', 'dec']);
+const halfOfMonth = (n: number): 1 | 2 => (n >= 7 ? 2 : 1);
+
+/**
+ * The text a clause devotes to graduating: from the cue to the end of that sentence.
+ *
+ * Bounded deliberately. "Bachelor's degree; requisition 2026-03, graduating Fall 2027 or Spring
+ * 2028" must not admit the requisition number, and it is kept out because extraction never sees it.
+ */
+function graduationSpan(text: string): string | null {
+  const cue = GRADUATION_CUE.exec(text);
+  if (!cue) return null;
+  const rest = text.slice(cue.index);
+  const stop = rest.search(/[.;]/);
+  return stop === -1 ? rest : rest.slice(0, stop);
+}
+
+/** Every date in a piece of text, as spans. A bare year spans its whole year. */
+function datesIn(text: string): GradSpan[] {
+  const out: GradSpan[] = [];
+  const at = (year: number, half: 1 | 2): GradSpan => ({ from: { year, half }, to: { year, half } });
+
+  for (const m of text.matchAll(/\b(fall|autumn|winter|spring|summer)\s+(20\d\d)\b/gi)) {
+    const season = m[1].toLowerCase();
+    out.push(at(Number(m[2]), season === 'spring' || season === 'summer' ? 1 : 2));
+  }
+  for (const m of text.matchAll(new RegExp(`\\b(${MONTH_NAMES})[a-z]*\\s+(20\\d\\d)\\b`, 'gi'))) {
+    out.push(at(Number(m[2]), LATE_MONTHS.has(m[1].toLowerCase()) ? 2 : 1));
+  }
+  // YYYY-MM. The trailing guard stops "2027-05-12" reading as May.
+  for (const m of text.matchAll(/\b(20\d\d)[-/.](0?[1-9]|1[0-2])(?![-/.]?\d)/g)) {
+    out.push(at(Number(m[1]), halfOfMonth(Number(m[2]))));
+  }
+  // MM/YYYY, but never the tail of DD/MM/YYYY: "05/12/2027" is 12 May, not December.
+  for (const m of text.matchAll(/(?<!\d[-/.])\b(0?[1-9]|1[0-2])[-/.](20\d\d)\b/g)) {
+    out.push(at(Number(m[2]), halfOfMonth(Number(m[1]))));
+  }
+  if (out.length > 0) return out;
+  // Bare years, only when nothing more precise was said. A year is a YEAR, on either side.
+  for (const m of text.matchAll(/\b(20\d\d)\b/g)) {
+    out.push({ from: { year: Number(m[1]), half: 1 }, to: { year: Number(m[1]), half: 2 } });
+  }
+  return out;
+}
+
+/** What the posting asks for: the outer bounds of every date it states ABOUT GRADUATING. */
+export function graduationWindow(clause: string): GradSpan | null {
+  const span = graduationSpan(clause);
+  if (!span) return null;
+  const dates = datesIn(span);
+  if (dates.length === 0) return null;
+  return {
+    from: dates.reduce((a, b) => (ordinal(b.from) < ordinal(a.from) ? b : a)).from,
+    to: dates.reduce((a, b) => (ordinal(b.to) > ordinal(a.to) ? b : a)).to,
+  };
+}
+
+/**
+ * When the student graduates. The field IS a graduation date, so it needs no cue.
+ *
+ * The LATEST date wins. grad_date is free-typed and the resume parser preserves what was printed,
+ * so it often holds a study range: "Aug 2023 - Dec 2027" means graduating Dec 2027, and taking the
+ * first date scored that student against the year they STARTED.
+ */
+export function graduationOf(gradDate: string | null | undefined): GradSpan | null {
+  const dates = datesIn(gradDate ?? '');
+  if (dates.length === 0) return null;
+  return dates.reduce((a, b) => (ordinal(b.to) > ordinal(a.to) ? b : a));
 }
 
 const YEARS_CLAUSE = /(\d+)\s*\+?\s*(?:or more\s*)?years?\b/i;
@@ -318,42 +355,13 @@ export function matchClause(
     const fieldMet =
       fieldsAsked.length === 0 || fieldsAsked.some(([, re]) => re.test(degree) || re.test(school));
 
-    const wantedGrad = parseGraduationWindow(text);
-    // The candidate's own date is a POINT, so the first parse of it is the whole answer. Only the
-    // employer's clause can name a range.
-    /* NO CUE REQUIRED for the candidate's own date: the field IS the graduation date, so a bare
-       "2027" is a graduation year by definition. Running it through the employer-text gate meant
-       pointsIn returned nothing, ownGrad was null, and every window silently passed - which is
-       this module's headline bug surviving inside its own fix, for every profile whose grad_date
-       came from grad_year (see submissionEducationGuard). */
-    const own = pointsIn(facts.gradDate ?? '', false);
-    const ownGrad = own.points.length > 0 ? own.points[0] : null;
-    /* A BARE YEAR IS A YEAR, not the first half of one. "2027" with no term names a whole academic
-       year, and pinning it to Spring made a 2027 graduate miss a "Fall 2027 or Spring 2028" window
-       they plainly sit inside. Only the candidate's own field gets this: an employer writing a bare
-       year in a range already has the range read from both endpoints. */
-    /* SPANS ITS YEAR ONLY IF THE PARSE FELL THROUGH TO THE BARE-YEAR BRANCH.
-       This tested the STRING for letters, which read "2027-05", "05/2027" and "5/2027" as bare
-       years and re-admitted the exact May-2027 candidate the window exists to exclude. grad_date is
-       a free-typed field and the resume parser is told to preserve the most precise date printed,
-       so numeric formats reach here. The parse already knows whether it saw a month; ask it. */
-    const ownSpansYear = own.bare && own.points.length === 1;
-    /* INSIDE the stated window, at BOTH ends, with NO slack.
-       Graduating before it and graduating after it are the same kind of miss, and only the first
-       was caught. A season of slack was tried and removed: an employer writing "Fall 2027 or
-       Spring 2028" for a summer internship is screening out people who will have already
-       graduated, so admitting the term either side re-breaks the exact case this was written for.
-       A candidate finishing May 2027 is out of a Fall 2027 to Spring 2028 window, and saying so is
-       the useful answer. */
-    const gradMet = !wantedGrad || !ownGrad
-      ? true
-      : ownSpansYear
-        // Any term of the stated year landing inside the window is enough.
-        ? [1, 2].some((half) => {
-            const o = ordinal({ year: ownGrad.year, half: half as 1 | 2 });
-            return o >= ordinal(wantedGrad.from) && o <= ordinal(wantedGrad.to);
-          })
-        : ordinal(ownGrad) >= ordinal(wantedGrad.from) && ordinal(ownGrad) <= ordinal(wantedGrad.to);
+    const wantedGrad = graduationWindow(text);
+    const ownGrad = graduationOf(facts.gradDate);
+    /* Two spans MATCH WHEN THEY OVERLAP: could this student have graduated when this posting wants.
+       Not "is this point inside that range", which was the shape that kept failing - it forced a
+       bare year on either side to become one arbitrary half, and every fix for one side left the
+       other pinned. */
+    const gradMet = !wantedGrad || !ownGrad ? true : overlaps(ownGrad, wantedGrad);
 
     const met = fieldMet && gradMet;
     const why = [

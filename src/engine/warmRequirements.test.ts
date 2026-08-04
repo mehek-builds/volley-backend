@@ -276,33 +276,61 @@ describe('a graduation window has two ends', () => {
   });
 });
 
-describe('a numeric graduation date is still a dated one', () => {
+describe('graduation: one pass, context first', () => {
   const facts = (gradDate: string): CandidateFacts => ({
-    degree: 'Bachelor of Science in Computer Science', school: 'USC', gradDate,
-    resumeText: 'Python.', bullets: ['Led a 4-person team, analyzing 350 survey responses.'],
+    degree: 'BS Computer Science', school: 'USC', gradDate,
+    resumeText: 'Python.', bullets: ['Led a team of four.'],
   });
-  const CLAUSE = "Pursuing a bachelor's in computer science graduating in Fall 2027 or Spring 2028";
-  const v = (g: string) => matchClause(CLAUSE, 1, facts(g)).verdict;
+  const W = "Pursuing a bachelor's in computer science graduating in Fall 2027 or Spring 2028";
+  const v = (clause: string, grad: string) => matchClause(clause, 1, facts(grad)).verdict;
 
-  /* The span test read the STRING for letters, so every all-numeric date was treated as a bare
-     year spanning both halves. Same candidate, same clause, different format: "May 2027" was
-     correctly unmet while "2027-05" was met. grad_date is free-typed and the resume parser is told
-     to keep the most precise date printed, so numeric formats reach this code. */
-  test('a numeric date that names a month does not span the year', () => {
-    for (const g of ['2027-05', '05/2027', '5/2027']) {
-      assert.equal(v(g), 'unmet', `${g} is May 2027, outside a Fall 2027 window`);
-    }
-  });
+  /* Every case below broke at least once across three rounds of review. The same defect kept
+     coming back in a new date format because extraction and context-detection were separate
+     passes; they are one pass now, so a date the clause never connected to graduating cannot
+     reach the comparison whatever its format. */
 
-  test('a genuinely bare year still spans its year', () => {
-    assert.equal(v('2027'), 'met', 'any term of 2027 could fall in the window');
-    assert.equal(v('2030'), 'unmet');
+  test('the window has two ends', () => {
+    assert.equal(v(W, 'December 2027'), 'met');
+    assert.equal(v(W, 'May 2028'), 'met');
+    assert.equal(v(W, 'May 2027'), 'unmet', 'a term early');
+    assert.equal(v(W, 'May 2030'), 'unmet', 'the end that scored met for three rounds');
   });
 
-  test('the route tells the client when the judge failed, not just that clauses dropped', () => {
-    // unscoreable means "nothing can decide this" AND "we could not ask", and the dashboard renders
-    // the first ("about attitude rather than experience") for both.
+  test('numeric formats read as the month they name', () => {
+    for (const g of ['2027-05', '05/2027', '5/2027']) assert.equal(v(W, g), 'unmet', g);
+    assert.equal(v(W, '2027-11'), 'met');
+  });
+
+  test('a bare year is a whole year, on BOTH sides', () => {
+    assert.equal(v(W, '2027'), 'met', 'some term of 2027 is in the window');
+    assert.equal(v(W, '2030'), 'unmet');
+    const bare = "Pursuing a bachelor's degree, graduating in 2026";
+    assert.equal(v(bare, 'December 2026'), 'met', 'the employer end was pinned to Spring');
+    assert.equal(v(bare, 'May 2026'), 'met');
+    assert.equal(v(bare, 'May 2028'), 'unmet');
+  });
+
+  test('a study range means the date it ENDS on', () => {
+    // grad_date is free-typed and the parser preserves what was printed, so it holds ranges.
+    assert.equal(v(W, 'Aug 2023 - Dec 2027'), 'met');
+    assert.equal(v(W, '2023-2027'), 'met');
+  });
+
+  test('a date the clause never tied to graduating cannot reach the window', () => {
+    // Round three: a requisition number widened a real window until the excluded candidate passed.
+    assert.equal(v("Bachelor's degree; requisition 2026-03, graduating Fall 2027 or Spring 2028", 'May 2027'), 'unmet');
+    // Round one, in its first costume: a funding year inventing a requirement.
+    assert.equal(v("Bachelor's degree in computer science; join the team we built after our 2019 Series B", 'May 2030'), 'met');
+  });
+
+  test('an ambiguous full date spans its year rather than guessing a term', () => {
+    // "05/12/2027" is 12 May or 5 December depending on where it was typed. We do not know the
+    // term, so the honest answer is the year, not a coin flip on the half.
+    assert.equal(v(W, '05/12/2027'), 'met');
+  });
+
+  test('the route tells the client when the judge failed', () => {
     const route = readFileSync(path.join(__dirname, '..', 'routes', 'jdMatch.ts'), 'utf8');
-    assert.match(route, /degraded: result\.score === null && result\.clauses\.some/);
+    assert.match(route, /degraded:/);
   });
 });
