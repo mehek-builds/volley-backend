@@ -39,6 +39,10 @@ type Entry = [company: string, ats: JobSourceInput['ats_name'], token: string];
  * label was wrong: `latch` is LatchBio, `assembledhq` is Assembled, and science37 writes itself
  * "Science 37" with a space.
  *
+ * Four more were removed on 2026-08-04 after source identity CI found they no longer publish a
+ * usable board: Fireworks 404s on Ashby, while Fullstory, OpsLevel, and Vitesse PSP return empty
+ * boards. Removing them is how source reconciliation disables their rows without deleting history.
+ *
  * `npm run sources:verify` is what catches this now. It asks each board who it is - Greenhouse
  * publishes `company_name` on every posting - rather than the old check's "does the token return
  * postings?", which every wrong token also answers yes to. */
@@ -239,7 +243,6 @@ const BASE_ENTRIES: Entry[] = [
   ['Reflection AI', 'ashby', 'reflectionai'],
   ['Ashby', 'ashby', 'ashby'],
   ['Mercury', 'greenhouse', 'mercury'],
-  ['Fireworks', 'ashby', 'fireworksai'],
   ['Abridge', 'ashby', 'abridge'],
   ['Mixpanel', 'greenhouse', 'mixpanel'],
   ['attio', 'ashby', 'attio'],
@@ -303,11 +306,9 @@ const BASE_ENTRIES: Entry[] = [
   ['binalyze', 'ashby', 'binalyze'],
   ['Inngest', 'ashby', 'inngest'],
   ['Hightouch', 'ashby', 'hightouch'],
-  ['Opslevel', 'ashby', 'opslevel'],
   ['anomalo', 'ashby', 'anomalo'],
   ['orca', 'ashby', 'orca'],
   ['rutter', 'ashby', 'rutter'],
-  ['fullstory', 'ashby', 'fullstory'],
   // Added later on 2026-07-28, large-board round (14 boards, ~1,700 postings)
   ['stone', 'greenhouse', 'stone'],
   ['btgpactual', 'greenhouse', 'btgpactual'],
@@ -388,7 +389,6 @@ const PHASE_2_WORKABLE_ENTRIES: readonly Entry[] = [
   ['Huckberry', 'workable', 'huckberry'],
   ['Lifely', 'workable', 'lifely'],
   ['Mercari, Inc. (India)', 'workable', 'mercari-india'],
-  ['Vitesse PSP', 'workable', 'vitesse-psp'],
   ['Pinely', 'workable', 'pinely'],
   ['Town Web', 'workable', 'town-web'],
   ['Foundation', 'workable', 'foundation'],
