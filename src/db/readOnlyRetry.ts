@@ -35,6 +35,29 @@ export function isReadOnlyTransactionError(error: unknown): boolean {
   return (error as { code?: unknown }).code === READ_ONLY_SQLSTATE;
 }
 
+/**
+ * True when a `pool.query(...)` call must bypass the retry wrapper entirely.
+ *
+ * Two of pg's call shapes do not return an awaitable result, so there is nothing for a retry to
+ * hold on to, and wrapping either one changes what the caller receives:
+ *
+ *   - CALLBACK FORM, `query(text, values, cb)`. pg returns void and calls back instead.
+ *   - SUBMITTABLE, `query(new QueryStream(...))`. pg detects it by a `submit` method and hands the
+ *     OBJECT ITSELF back synchronously so the caller can stream rows off it. Promise-wrapping that
+ *     returns something with no `.on`, breaking the stream at the call site, far from the wrapper
+ *     that caused it.
+ *
+ * Neither shape needs a retry: the incident this all exists for was ordinary awaited writes. This
+ * is a predicate rather than an inline check so it can be tested without a live pool - the wrapper
+ * itself binds pg's method at module load and cannot be intercepted afterwards.
+ */
+export function isPassThroughQueryCall(args: readonly unknown[]): boolean {
+  if (args.length === 0) return false;
+  if (typeof args[args.length - 1] === 'function') return true;
+  const first = args[0] as { submit?: unknown } | null | undefined;
+  return typeof first === 'object' && first !== null && typeof first.submit === 'function';
+}
+
 export interface ReadOnlyRetryOptions {
   /** Total attempts including the first. */
   attempts?: number;

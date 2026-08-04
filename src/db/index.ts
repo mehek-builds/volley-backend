@@ -1,7 +1,7 @@
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { Client, Pool } from 'pg';
 import * as schema from './schema';
-import { withReadOnlyRetry } from './readOnlyRetry';
+import { isPassThroughQueryCall, withReadOnlyRetry } from './readOnlyRetry';
 
 const connectionString =
   process.env.DATABASE_URL || 'postgresql://postgres:password@localhost:5432/student_outreach';
@@ -100,13 +100,21 @@ const pool = new Pool({
  * routes that matter for the incident are single statements; `PUT /profile/recent-experience` is a
  * transaction and will still fail on a read-only backend, which is the known gap.
  *
- * The callback form of `query` is passed straight through. It is not promise-based, so there is no
- * result to await and nothing to retry; pg's own overloads still resolve because the wrapper keeps
- * the original signature. Nothing in this codebase uses it, but a dependency may.
+ * TWO CALL SHAPES ARE PASSED STRAIGHT THROUGH, because neither returns a promise this could await:
+ *
+ *   - The callback form, `query(text, values, cb)`. pg returns void and calls back instead.
+ *   - A Submittable, `query(new QueryStream(...))`. pg detects it by a `submit` method and returns
+ *     THE OBJECT ITSELF, synchronously, so the caller can stream rows off it. Wrapping that in a
+ *     promise would hand back something with no `.on`, breaking the stream at the call site rather
+ *     than here. Nothing in this repo streams today; the wrapper should not be the reason it never
+ *     can, and a silent break of a future pg-query-stream would be very hard to trace back here.
+ *
+ * Neither shape can carry a read-only retry, and neither needs one: the incident was ordinary
+ * awaited writes.
  */
 const poolQuery = pool.query.bind(pool);
 pool.query = ((...args: unknown[]) => {
-  if (typeof args[args.length - 1] === 'function') {
+  if (isPassThroughQueryCall(args)) {
     return (poolQuery as (...a: unknown[]) => unknown)(...args);
   }
   return withReadOnlyRetry(

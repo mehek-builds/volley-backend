@@ -2,9 +2,32 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   READ_ONLY_SQLSTATE,
+  isPassThroughQueryCall,
   isReadOnlyTransactionError,
   withReadOnlyRetry,
 } from './readOnlyRetry';
+
+test('the ordinary awaited query shapes go through the retry wrapper', () => {
+  assert.equal(isPassThroughQueryCall(['select 1']), false);
+  assert.equal(isPassThroughQueryCall(['update profiles set x = $1', [1]]), false);
+  assert.equal(isPassThroughQueryCall([{ text: 'select 1', values: [] }]), false,
+    'a config OBJECT without submit is still an awaited query');
+  assert.equal(isPassThroughQueryCall([]), false);
+});
+
+test('the callback form bypasses the wrapper', () => {
+  assert.equal(isPassThroughQueryCall(['select 1', () => {}]), true);
+  assert.equal(isPassThroughQueryCall(['select 1', [1], () => {}]), true);
+});
+
+/* pg returns a Submittable synchronously so the caller can stream rows off it. Promise-wrapping it
+   hands back an object with no .on and breaks the stream far from the wrapper that did it. */
+test('a Submittable bypasses the wrapper', () => {
+  assert.equal(isPassThroughQueryCall([{ submit: () => {} }]), true);
+  assert.equal(isPassThroughQueryCall([{ submit: 'not a function' }]), false);
+  assert.equal(isPassThroughQueryCall([null]), false, 'null must not throw on a property read');
+  assert.equal(isPassThroughQueryCall([undefined]), false);
+});
 
 /** A pg error carries the SQLSTATE on `code`, so that is what the guard reads. */
 function pgError(code: string, message = 'boom') {
