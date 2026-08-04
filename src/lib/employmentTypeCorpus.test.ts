@@ -22,7 +22,7 @@ test('the corpus covers both directions and does not quietly shrink', () => {
   /* Pinned so removing a case is a deliberate edit in a diff. Every entry was a real posting on
      the wrong side of the classifier in production, so a shrinking corpus means coverage was
      dropped rather than a rule improved. */
-  assert.equal(EMPLOYMENT_TYPE_CORPUS.length, 28);
+  assert.equal(EMPLOYMENT_TYPE_CORPUS.length, 32);
   const internships = EMPLOYMENT_TYPE_CORPUS.filter((c) => c.expected === 'Internship');
   const notInternships = EMPLOYMENT_TYPE_CORPUS.filter((c) => c.expected === undefined);
   assert.ok(internships.length >= 10, 'false negatives must stay represented');

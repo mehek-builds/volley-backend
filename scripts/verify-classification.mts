@@ -12,21 +12,46 @@
  * The second question is the one that matters, because it is not the classifier grading its own
  * homework: it re-derives the evidence separately and prints anything a human should read.
  */
-import 'dotenv/config';
-import { eq } from 'drizzle-orm';
-import { db } from '../src/db/index';
-import { career_page_sources, monitored_jobs } from '../src/db/schema';
-import { fetchSourceJobs, isIngestablePosting } from '../src/lib/jobMonitor';
+import { config } from 'dotenv';
+import { existsSync } from 'node:fs';
+
+/* .env.local FIRST, and refuse to run without it. `import 'dotenv/config'` reads .env, whose
+   DATABASE_URL is LOCALHOST - and a gate pointed at localhost is worse than no gate: every
+   posting is missing from the local table, so nothing can disagree, and it prints OK having
+   compared against nothing. The same trap is documented at the top of seed-job-sources.mts,
+   which is where this loader is copied from. */
+const args = process.argv.slice(2);
+const envFlag = args.indexOf('--env');
+const envFile = envFlag >= 0 ? args[envFlag + 1]! : '.env.local';
+if (!existsSync(envFile)) {
+  console.error(`No ${envFile}. Production credentials live in .env.local; .env is localhost.`);
+  process.exit(1);
+}
+config({ path: envFile });
+if (!process.env.DATABASE_URL) {
+  console.error(`${envFile} has no DATABASE_URL.`);
+  process.exit(1);
+}
+if (/@(localhost|127\.0\.0\.1)/.test(process.env.DATABASE_URL)) {
+  console.error('DATABASE_URL points at localhost. This gate is only meaningful against the '
+    + 'database the board is served from.');
+  process.exit(1);
+}
+
+const { eq } = await import('drizzle-orm');
+const { db } = await import('../src/db/index');
+const { career_page_sources, monitored_jobs } = await import('../src/db/schema');
+const { fetchSourceJobs, isIngestablePosting } = await import('../src/lib/jobMonitor');
 
 type Row = { company: string; title: string; computed?: string; description: string };
 
 /* Employers whose internships are classified from the DESCRIPTION rather than the title, each one
    hand-read. New names appearing here are the signal worth acting on: either the rule widened by
    accident, or a real employer started writing postings this way and should be checked and added. */
-const EXPECTED_DESCRIPTION_CLASSIFIED = new Set(['Jane Street', 'AQR', 'Mozilla', 'Palantir']);
+const EXPECTED_DESCRIPTION_CLASSIFIED = new Set(['Jane Street', 'AQR', 'Mozilla', 'Palantir', 'SpaceX']);
 
 const INTERN_TITLE =
-  /\b(intern|interns|internship|internships)\b|\bco-?op\b|\bestágios?\b|\bestagiári[oa]s?\b|\bstagiaires?\b|\bstagiair\b|\bpraktikums?\b|\bpraktikant(?:in)?\b|\bwerkstudent(?:in)?\b|\bbecari[oa]s?\b|\bpasantías?\b|\bprácticas\b|\btirocini[oa]\b/i;
+  /\b(intern|interns|internship|internships)\b|\bco-?op\b|\bsummer\s+(analyst|associate)s?\b|\bestágios?\b|\bestagiári[oa]s?\b|\bstagiaires?\b|\bstagiair\b|\bpraktikums?\b|\bpraktikant(?:in)?\b|\bwerkstudent(?:in)?\b|\bbecari[oa]s?\b|\bpasantías?\b|\bprácticas\b|\btirocini[oa]\b/i;
 
 /* WIDE ON PURPOSE, and much wider than the classifier. This is the recall net: anything it catches
    that the classifier did not is a candidate the pattern may be missing, printed for a human to
@@ -53,16 +78,18 @@ async function main() {
   const untypedWithSignal: Row[] = [];
   let checked = 0;
   let failed = 0;
+  const failures: string[] = [];
 
   for (const source of sources) {
     let jobs;
     try {
       jobs = await fetchSourceJobs(source);
-    } catch {
+    } catch (error) {
       failed += 1;
+      failures.push(`${source.company_name}: ${(error as Error)?.message ?? 'threw'}`);
       continue;
     }
-    if (!jobs) { failed += 1; continue; }
+    if (!jobs) { failed += 1; failures.push(`${source.company_name}: no payload`); continue; }
     for (const job of jobs.filter(isIngestablePosting)) {
       checked += 1;
       const row: Row = {
@@ -102,9 +129,8 @@ async function main() {
 
   console.log(`\n=== 3. UNTYPED but carrying some internship signal: ${untypedWithSignal.length} ===`);
   console.log('    (the recall net - candidates the pattern may be missing)');
-  const sample = untypedWithSignal.slice(0, 400);
   const counts = new Map<string, number>();
-  for (const r of sample) {
+  for (const r of untypedWithSignal) {
     const m = r.title.match(ANY_INTERN_SIGNAL);
     counts.set(m ? `TITLE:${m[0].toLowerCase()}` : 'body-only', (counts.get(m ? `TITLE:${m[0].toLowerCase()}` : 'body-only') ?? 0) + 1);
   }
@@ -119,14 +145,33 @@ async function main() {
      supports. The recall net is printed but never fails the run - a candidate the pattern misses
      is a thing to read, not a broken board. */
   const unexplained = typedNoEvidence.filter((r) => !EXPECTED_DESCRIPTION_CLASSIFIED.has(r.company));
-  const broken = disagree.length > 0 || unexplained.length > 0;
+  /* REACHABILITY IS PART OF THE GATE, or the gate passes hardest exactly when it is least
+     entitled to. With every board timing out, checked is 0, nothing can disagree, nothing is
+     unexplained, and the old version printed OK. A tenth of the catalog failing is already a
+     result nobody should call a pass. */
+  const tooManyFailed = failed > sources.length / 10;
+  const nothingChecked = checked === 0;
+  const broken = disagree.length > 0 || unexplained.length > 0 || tooManyFailed || nothingChecked;
+  if (failures.length) {
+    console.log(`\n!! ${failed} of ${sources.length} sources did not answer:`);
+    for (const f of failures.slice(0, 15)) console.log(`     ${f}`);
+    if (tooManyFailed) console.log('   more than a tenth of the catalog - the run is not a pass');
+  }
   if (unexplained.length) {
     console.log(`\n!! ${unexplained.length} postings typed Internship from an employer not on the `
       + 'reviewed list. Read each one, then add the employer here or fix the rule:');
     for (const r of unexplained.slice(0, 20)) console.log(`     ${r.title.slice(0, 60)} (${r.company})`);
   }
-  console.log(broken ? '\nFAILED' : '\nOK: every posting on the board classifies the way the code says it should.');
-  process.exit(broken ? 1 : 0);
+  console.log(broken
+    ? '\nFAILED'
+    : `\nOK: all ${checked} postings on the board classify the way the code says they should.`);
+  /* exitCode rather than process.exit: the report above is the whole product of this script, and
+     process.exit truncates buffered stdout when it is a pipe, which is exactly how it is read in
+     CI. Letting the loop drain also closes the pool. */
+  process.exitCode = broken ? 1 : 0;
 }
 
-main();
+main().catch((error) => {
+  console.error('verify:classification failed to run:', error);
+  process.exitCode = 1;
+});

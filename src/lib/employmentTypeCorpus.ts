@@ -247,4 +247,41 @@ export const EMPLOYMENT_TYPE_CORPUS: CorpusCase[] = [
     expected: undefined,
     note: 'The same word-boundary case, on a different prefix.',
   },
+  {
+    company: '(hypothetical, from review)',
+    title: 'Seasonal Summer Associate',
+    boardValue: 'Contract',
+    expected: 'Contract',
+    note: 'Why the Summer Analyst rule sits BELOW the employer field rather than in TITLE_TYPES. '
+      + 'In TITLE_TYPES it overrode a stated Contract and called this an internship.',
+  },
+  {
+    company: '(hypothetical, from review)',
+    title: 'Summer Associate, Retail',
+    boardValue: 'Part-time',
+    expected: 'Part-time',
+    note: 'The same. An employer who states anything at all is believed over a nine-posting '
+      + 'convention from a single firm.',
+  },
+  {
+    company: '(hypothetical, from review)',
+    title: 'Summer Analyst Program Manager',
+    expected: undefined,
+    note: 'A programme-owner title that happens to contain the convention. Vetoed.',
+  },
+  {
+    company: 'SpaceX',
+    title: 'Spring 2027 Graduate Engineer',
+    description:
+      'SPRING 2027 GRADUATE ENGINEER As a Graduate Engineer, you will be responsible for working '
+      + 'on creative solutions to real aerospace challenges. This is not an ordinary "internship" '
+      + '- you will be given as much responsibility as our full-time engineers. Students joining '
+      + 'SpaceX through our internship program will receive the opportunity to attend '
+      + 'presentations from company leaders.',
+    expected: 'Internship',
+    note: 'Surfaced by verify:classification the first time it ran clean, which is what that gate '
+      + 'is for. SpaceX calls its internship a Graduate Engineer role and the posting says it is '
+      + 'NOT an ordinary internship, yet it is one: the benefits paragraph names the programme '
+      + 'the reader would be joining through.',
+  },
 ];
