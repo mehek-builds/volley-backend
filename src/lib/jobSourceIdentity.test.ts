@@ -63,18 +63,18 @@ test('the three renamed sources carry the name their board uses', () => {
   assert.equal(byToken.get('science37'), 'Science 37', 'written with a space, which the prose check needs');
 });
 
-test('Phase 2 configures exactly 50 Workable employers with canonical careers URLs', () => {
+test('Phase 2 configures exactly 49 verified Workable employers with canonical careers URLs', () => {
   const sources = JOB_SOURCES.filter((candidate) => candidate.ats_name === 'workable');
-  assert.equal(sources.length, 50);
+  assert.equal(sources.length, 49);
   assert.ok(sources.some((source) => source.board_token === 'suade'));
   for (const source of sources) {
     assert.equal(source.career_url, `https://apply.workable.com/${source.board_token}/`);
   }
 });
 
-test('Phase 2 adds 50 diverse employers across Greenhouse, Lever, and Ashby', () => {
-  // 355 reviewed + 26 internship-density (2026-08-03) + 17 international (2026-08-04).
-  assert.equal(JOB_SOURCES.length, 398, 'the reviewed Phase 2 catalog must not silently shrink');
+test('Phase 2 keeps the verified employer catalog diverse across Greenhouse, Lever, Ashby, and Workable', () => {
+  // 398 reviewed sources, minus four dead or stale boards removed after CI source-identity review on 2026-08-04.
+  assert.equal(JOB_SOURCES.length, 394, 'the reviewed Phase 2 catalog must not silently shrink');
   const families = new Set(JOB_SOURCES.map((source) => source.ats_name));
   assert.deepEqual([...families].sort(), ['ashby', 'greenhouse', 'lever', 'workable']);
   /* A REVIEW TRIPWIRE, NOT A CAPACITY LIMIT, and the comment that used to be here was wrong.
