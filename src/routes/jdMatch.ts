@@ -328,7 +328,13 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
       },
     );
 
+    /* `degraded` exists because `unscoreable` means two different things downstream and only one
+       of them is true here. The dashboard renders unscoreable clauses as "about attitude rather
+       than experience", which is right for "you stay curious" and a lie about "communicate nuance
+       to partners" when the truth is that a rate limit stopped us asking. The client branches on
+       this rather than inferring from a null score. */
     return reply.status(200).send({
+      degraded: result.score === null && result.clauses.some((c) => c.verdict === 'unscoreable'),
       score: result.score,
       // Clauses the model could not be asked about are absent from the denominator, so a reader can
       // see the count they were scored on rather than inferring it.
@@ -345,7 +351,9 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
       from_cache: fromCache,
       // Non-empty means the model returned a verdict it could not ground in a real bullet and it
       // was thrown away. Surfaced rather than swallowed so a bad run is visible.
-      rejected: result.rejected,
+      // Flattened for the wire. The structure exists so the CACHE can filter on ids without
+      // parsing prose; a client only needs to be told something was discarded.
+      rejected: result.rejected.map((r) => (r.id ? `${r.id}: ${r.reason}` : r.reason)),
     });
   });
 

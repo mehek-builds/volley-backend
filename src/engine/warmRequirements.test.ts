@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { warmRequirementCache, WARM_TIMEOUT_MS } from './warmRequirements';
+import { matchClause } from './clauseMatch';
 import type { CandidateFacts } from './clauseMatch';
 
 const FACTS: CandidateFacts = {
@@ -222,5 +223,104 @@ describe('the posting read is scoped, and the paid route is metered', () => {
     // 180 req/min IP limiter. Its own cache made the common path free, which is what hid it.
     assert.match(routes, /'\/jd-match\/requirements', \{ preHandler: requireAuth, bodyLimit: 128 \* 1024 \}/);
     assert.match(routes, /allowHourly\(userId, 'jdRequirements', LIMITS\.perHour\.jdRequirements\)/);
+  });
+});
+
+describe('a graduation requirement is asked, not parsed', () => {
+  /* WHAT REPLACED WHAT, because the deleted tests here were good tests of a bad idea.
+   *
+   * They pinned twenty-one date phrasings against a regex window, and they passed. Round six then
+   * found seven more phrasings that the same regex got wrong, in the same way the five rounds
+   * before it had: a disqualifier checked on only one side, a cue reaching across a sentence, a
+   * comma chaining into an unrelated year, two requirements collapsed into one span, and "not
+   * graduating before 2027" read backwards. Each round the fixture grew and the leak moved.
+   *
+   * So these test the CONTRACT rather than the phrasing: a clause that turns on WHEN goes to the
+   * judge intact, a clause that does not is still decided here, and nothing about timing is
+   * decided locally ever again. Phrasing is the judge's problem, and it is tested against the
+   * judge, where a miss costs a prompt line instead of a regex round. */
+  const facts = (gradDate: string | null): CandidateFacts => ({
+    degree: 'Bachelor of Science in Computer Science',
+    school: 'University of Southern California',
+    gradDate,
+    resumeText: 'Python.',
+    bullets: ['Led a 4-person team, analyzing 350 survey responses.'],
+  });
+
+  test('a clause that states timing is deferred, not decided', () => {
+    for (const clause of [
+      "Pursuing a bachelor's in computer science graduating in Fall 2027 or Spring 2028",
+      "Pursuing a bachelor's degree, graduating in 2026",
+      "Bachelor's degree; December 2027 graduate preferred",
+      "Pursuing a bachelor's degree in computer science expected May 2027",
+      "Bachelor's degree, not graduating before 2027",
+      "BS graduating 2027; MS candidates graduating 2029",
+    ]) {
+      const c = matchClause(clause, 1, facts('May 2028'));
+      assert.equal(c.basis, 'graduation', clause);
+      assert.equal(c.verdict, 'pending', `${clause}: no local verdict may be reached`);
+    }
+  });
+
+  test('a degree clause with no timing is still settled here', () => {
+    // The judge is for reading dates. Asking it whether "computer science" is "Computer Science"
+    // would be slower, dearer and less reliable than the substring check that already works.
+    const c = matchClause("Bachelor's degree in computer science", 1, facts('May 2028'));
+    assert.equal(c.basis, 'degree');
+    assert.equal(c.verdict, 'met');
+    const miss = matchClause("Bachelor's degree in mechanical engineering", 1, facts('May 2028'));
+    assert.equal(miss.verdict, 'unmet');
+  });
+
+  test('a stray year still defers, because telling it apart IS the reading', () => {
+    /* "our 2019 Series B" is not a graduation requirement, and five regex rounds tried to
+       recognise that from the surrounding words. Deferring costs one question and is right; a
+       local guess was wrong in both directions across those rounds. */
+    const c = matchClause(
+      "Bachelor's degree in computer science; join the team we built after our 2019 Series B",
+      1,
+      facts('May 2030'),
+    );
+    assert.equal(c.verdict, 'pending');
+  });
+
+  test('no graduation date on file is unscoreable, never met', () => {
+    // The old code returned MET when either side was missing, so a student who had never entered a
+    // graduation date passed every window in the product.
+    const c = matchClause(
+      "Pursuing a bachelor's in computer science graduating in Fall 2027",
+      1,
+      facts(null),
+    );
+    assert.equal(c.verdict, 'unscoreable');
+    assert.notEqual(c.verdict, 'met');
+  });
+
+  test('year standing and relative timing are timing too', () => {
+    /* ROUND SEVEN. These name no year and no graduation, so they escaped the first gate and were
+       decided locally as MET: the clause reached the degree branch, found no field to disagree
+       with, and passed. A sophomore matched a senior-only posting. */
+    for (const clause of [
+      "Bachelor's degree; rising senior only",
+      "Pursuing a bachelor's degree, final-year students only",
+      "Bachelor's degree, must be a current sophomore",
+      "Bachelor's degree, must graduate next spring",
+      "Bachelor's degree; graduating within the next twelve months",
+    ]) {
+      const c = matchClause(clause, 1, facts('May 2028'));
+      assert.equal(c.basis, 'graduation', clause);
+      assert.notEqual(c.verdict, 'met', `${clause}: must not pass on a field check alone`);
+    }
+  });
+
+  test('pending is never scored as a miss', () => {
+    // aggregate() counts unmet in the denominator. A clause still awaiting an answer must not be
+    // charged to the student on the way past.
+    const pendingClause = matchClause(
+      "Pursuing a bachelor's in computer science graduating in Fall 2027",
+      1,
+      facts('May 2028'),
+    );
+    assert.equal(pendingClause.verdict, 'pending');
   });
 });

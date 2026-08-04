@@ -65,7 +65,7 @@ export interface CandidateFacts {
   monthsOfExperience?: number | null;
 }
 
-export type ClauseVerdict = 'met' | 'unmet' | 'unscoreable';
+export type ClauseVerdict = 'met' | 'unmet' | 'unscoreable' | 'pending';
 
 export interface RequirementClause {
   /** The employer's sentence, verbatim, trimmed of bullet decoration. */
@@ -132,21 +132,51 @@ const FIELD_SYNONYMS: Record<string, RegExp> = {
 
 const MONTHS = 'jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec';
 
-/** "Fall 2027", "Spring 2028", "December 2027", "2027" -> a comparable year+season. */
-function parseGraduation(text: string): { year: number; half: 1 | 2 } | null {
-  const seasonal = new RegExp(`\\b(fall|autumn|winter|spring|summer)\\s+(20\\d\\d)\\b`, 'i').exec(text);
-  if (seasonal) {
-    const season = seasonal[1].toLowerCase();
-    return { year: Number(seasonal[2]), half: season === 'fall' || season === 'autumn' || season === 'winter' ? 2 : 1 };
-  }
-  const monthly = new RegExp(`\\b(${MONTHS})[a-z]*\\s+(20\\d\\d)\\b`, 'i').exec(text);
-  if (monthly) {
-    const m = monthly[1].toLowerCase();
-    const late = ['jul', 'aug', 'sep', 'oct', 'nov', 'dec'].includes(m);
-    return { year: Number(monthly[2]), half: late ? 2 : 1 };
-  }
-  const bare = /\b(20\d\d)\b/.exec(text);
-  return bare ? { year: Number(bare[1]), half: 1 } : null;
+/** A point in academic time. Spring/H1 sorts before Fall/H2, so ordering is comparison. */
+type GradPoint = { year: number; half: 1 | 2 };
+/** A closed span. A stated term is a span of one; a bare year is a span of two. */
+type GradSpan = { from: GradPoint; to: GradPoint };
+
+const ordinal = (p: GradPoint) => p.year * 2 + p.half;
+/* GRADUATION IS JUDGED, NOT PARSED.
+ *
+ * Six review rounds killed five regex designs here, and the sixth found seven independent leaks in
+ * the fifth: a disqualifier only checked on one side of the date, a cue reaching across a sentence
+ * boundary, propagation chaining through commas into unrelated years, two separate requirements
+ * collapsing into one hull window, and no handling of polarity at all - "not graduating before
+ * 2027" read as a closed range and inverted.
+ *
+ * That is not a parser with bugs in it. A graduation requirement carries direction ("by", "no
+ * later than", "or later"), alternatives in one breath ("Fall 2027 or Spring 2028"), scope (which
+ * cue governs which of three years), and disqualifying context in both directions (a requisition
+ * number, a funding round, a cohort year). Deciding which number in a sentence is the graduation
+ * date, and which way the requirement points, is reading comprehension.
+ *
+ * So it goes to the judge, under the same contract every competency clause has: the model may
+ * select and reason, never invent, and a "met" verdict is discarded unless it quotes the fact it
+ * relied on verbatim. The difference is the corpus. A competency grounds in the resume BULLETS; an
+ * eligibility clause grounds in the student's structured FACTS, because that is the only place the
+ * answer lives and no bullet can carry it. See llm/competencyJudge.ts. */
+const GRADUATION_CUE = /\b(graduat|class of|degree conferred|conferral|completing|expected to complete|anticipated)/i;
+const YEAR = /\b(19|20)\d{2}\b/;
+/* YEAR STANDING IS TIMING, and it was escaping because it names no year and no graduation.
+   "Rising senior", "current sophomore" and "final-year students only" are eligibility windows
+   stated in the other unit, and every one of them was being decided locally as MET: the clause hit
+   DEGREE_CLAUSE, found no field to disagree with, and passed. A sophomore matched a senior-only
+   posting. */
+const YEAR_STANDING = /\b(freshman|sophomore|junior|senior|rising|penultimate|final[- ]year|first[- ]year|second[- ]year|third[- ]year|fourth[- ]year|underclass|upperclass)\b/i;
+/* Relative timing carries no digit either. "Must graduate next spring" and "within the next twelve
+   months" are windows; resolving them needs today's date and the student's, which is reading. */
+const RELATIVE_TIMING = /\b(next (spring|fall|autumn|summer|winter|year|term|semester)|this (spring|fall|autumn|summer|winter|year)|within the next|by the (start|end) of|before (the )?(start|end)|upcoming)\b/i;
+
+/** Does this degree clause turn on WHEN, not just WHAT. Those are the ones the judge must read. */
+export function statesTiming(clause: string): boolean {
+  return (
+    GRADUATION_CUE.test(clause) ||
+    YEAR.test(clause) ||
+    YEAR_STANDING.test(clause) ||
+    RELATIVE_TIMING.test(clause)
+  );
 }
 
 const YEARS_CLAUSE = /(\d+)\s*\+?\s*(?:or more\s*)?years?\b/i;
@@ -219,6 +249,7 @@ export const MIN_COMPETENCY_BULLETS = 2;
 
 /* ---------- the matcher ---------- */
 
+
 export function matchClause(
   text: string,
   weight: number,
@@ -261,32 +292,34 @@ export function matchClause(
     };
   }
 
-  // 2b. Degree level and field, and the graduation window when the clause states one.
+  // 2b. Degree level and field. Timing, when the clause states any, is deferred to the judge.
   if (DEGREE_CLAUSE.test(text)) {
     const degree = facts.degree ?? '';
     const school = facts.school ?? '';
     if (!degree && !school) return { ...base, verdict: 'unscoreable', basis: 'degree' };
 
+    /* A clause that says WHEN goes to the judge whole, rather than being split into a field half
+       we decide and a date half we guess at. Splitting it was how "BS graduating 2027; MS
+       graduating 2029" came back met for a 2028 graduate: both halves passed something. */
+    if (statesTiming(text)) {
+      /* No graduation date on file. Unscoreable is right for the CLAUSE, but on its own it is not
+         enough: an unscoreable clause leaves the denominator, the remaining clauses publish a
+         number by themselves, and a student who has never entered a graduation date scored 100 on
+         a posting whose graduation requirement nobody could check. scorePosting treats this the
+         same as a question the judge never answered, and suppresses the headline. */
+      if (!facts.gradDate) return { ...base, verdict: 'unscoreable', basis: 'graduation' };
+      return { ...base, verdict: 'pending', basis: 'graduation' };
+    }
+
     const fieldsAsked = Object.entries(FIELD_SYNONYMS).filter(([, re]) => re.test(text));
     const fieldMet =
       fieldsAsked.length === 0 || fieldsAsked.some(([, re]) => re.test(degree) || re.test(school));
-
-    const wantedGrad = parseGraduation(text);
-    const ownGrad = parseGraduation(facts.gradDate ?? '');
-    // A window ("Fall 2027 or Spring 2028") is stated as the EARLIEST acceptable point in practice,
-    // so graduating before it is a real miss and this says so rather than rounding in her favour.
-    const gradMet =
-      !wantedGrad || !ownGrad
-        ? true
-        : ownGrad.year > wantedGrad.year ||
-          (ownGrad.year === wantedGrad.year && ownGrad.half >= wantedGrad.half);
-
-    const met = fieldMet && gradMet;
-    const why = [
-      fieldsAsked.length ? (fieldMet ? `field matches (${degree})` : `field asked: ${fieldsAsked.map(([n]) => n).join('/')}`) : null,
-      wantedGrad && ownGrad ? (gradMet ? `graduates ${facts.gradDate}` : `graduates ${facts.gradDate}, before the window`) : null,
-    ].filter(Boolean).join('; ');
-    return { ...base, verdict: met ? 'met' : 'unmet', basis: wantedGrad ? 'graduation' : 'degree', evidence: why || undefined };
+    const why = fieldsAsked.length
+      ? fieldMet
+        ? `field matches (${degree})`
+        : `field asked: ${fieldsAsked.map(([n]) => n).join('/')}`
+      : '';
+    return { ...base, verdict: fieldMet ? 'met' : 'unmet', basis: 'degree', evidence: why || undefined };
   }
 
   // 3. Competencies, evidenced by what the resume shows the student DOING, in their own bullets.
@@ -312,13 +345,13 @@ export function matchClause(
 
 /* ---------- the two-phase scorer ---------- */
 
-import type { CompetencyQuestion, CompetencyVerdict } from '../llm/competencyJudge';
+import type { CandidateProfile, CompetencyQuestion, CompetencyRejection, CompetencyVerdict } from '../llm/competencyJudge';
 
 export interface ScoredPosting {
   score: number | null;
   clauses: RequirementClause[];
   /** Verdicts the judge returned ungrounded, so a bad run is visible rather than silently generous. */
-  rejected: string[];
+  rejected: CompetencyRejection[];
 }
 
 /** Sections that state what the CANDIDATE must have. `responsibilities` describes the job instead,
@@ -339,7 +372,11 @@ export async function scorePosting(
   facts: CandidateFacts,
   context: JdContext | undefined,
   segment: (jd: string) => Array<{ kind: string; weight: number; text: string }>,
-  judge: (bullets: string[], qs: CompetencyQuestion[]) => Promise<{ verdicts: CompetencyVerdict[]; rejected: string[] }>,
+  judge: (
+    bullets: string[],
+    qs: CompetencyQuestion[],
+    profile?: CandidateProfile,
+  ) => Promise<{ verdicts: CompetencyVerdict[]; rejected: CompetencyRejection[] }>,
 ): Promise<ScoredPosting> {
   const clauses: RequirementClause[] = [];
   for (const sec of segment(jdText)) {
@@ -347,16 +384,70 @@ export async function scorePosting(
     for (const text of splitClauses(sec.text)) clauses.push(matchClause(text, sec.weight, facts, context));
   }
 
-  const pending = clauses.map((c, i) => ({ c, i })).filter(({ c }) => c.basis === 'competency');
-  let rejected: string[] = [];
+  /* Both classes are asked in ONE call. They are the same request with different corpora, and
+     splitting them would double the latency and the cost for no gain. */
+  /* An eligibility requirement the posting states and we hold no fact for. Counted with the
+     unanswered ones: both mean "this requirement was not checked", and neither may be rounded off
+     into a percentage that implies it was. */
+  const uncheckable = clauses.filter(
+    (c) => c.basis === 'graduation' && c.verdict === 'unscoreable',
+  ).length;
+
+  const pending = clauses
+    .map((c, i) => ({ c, i }))
+    .filter(({ c }) => c.basis === 'competency' || (c.basis === 'graduation' && c.verdict === 'pending'));
+  let rejected: CompetencyRejection[] = [];
+  /* Clauses we sent and got nothing back for. Scoped to the whole function because it decides
+     whether a headline number may be published at the end, not just inside the judge branch. */
+  let unanswered = 0;
   if (pending.length > 0) {
-    const questions: CompetencyQuestion[] = pending.map(({ i }) => ({ id: `c${i}`, clause: clauses[i].text }));
-    const result = await judge(facts.bullets ?? [], questions);
+    const questions: CompetencyQuestion[] = pending.map(({ i }) => ({
+      id: `c${i}`,
+      clause: clauses[i].text,
+      kind: clauses[i].basis === 'graduation' ? 'eligibility' : 'competency',
+    }));
+    /* A judge failure leaves the deterministic verdicts EXACTLY where they were.
+     *
+     * This call was unguarded, and judgeCompetencies throws on any Anthropic error and on a
+     * response it cannot parse. The route awaited scorePosting with no try/catch, so a rate limit
+     * turned into a 500 and every locally-decided clause - Python on the resume, a graduation date
+     * inside the window - was thrown away with it. The header of this module promises the opposite
+     * in as many words: "a model outage, a rate limit or a bad response can never change whether
+     * Python is on a resume". It could, and it did. */
+    let result: { verdicts: CompetencyVerdict[]; rejected: CompetencyRejection[] };
+    try {
+      result = await judge(facts.bullets ?? [], questions, {
+        degree: facts.degree,
+        school: facts.school,
+        gradDate: facts.gradDate,
+      });
+    } catch (err) {
+      // The competency clauses stay UNSCOREABLE rather than unmet: we did not ask and got no
+      // answer, which is not the same as asking and being told no.
+      for (const { i } of pending) clauses[i] = { ...clauses[i], verdict: 'unscoreable' };
+      /* NO SCORE, not a recomputed one. Dropping every competency clause from the denominator
+         leaves only the deterministic ones, so a run where the model was never reached could
+         report a HIGHER number than a successful one - up to 100 when the survivors all pass. The
+         clause list is still returned, because "here is what we could check" is useful; a headline
+         percentage built on a question we never got to ask is not. */
+      return {
+        score: null,
+        clauses,
+        rejected: [{ reason: `judge unavailable: ${err instanceof Error ? err.message : 'unknown error'}` }],
+      };
+    }
     rejected = result.rejected;
     const byId = new Map(result.verdicts.map((v) => [v.id, v]));
     for (const { i } of pending) {
       const v = byId.get(`c${i}`);
-      if (!v) continue;
+      /* No answer, so it stays a question we never got an answer to. A clause left PENDING would
+         leak an internal state to the caller, and worse, aggregate() would have to guess what it
+         meant. Unscoreable is the honest reading and the one the outage path already uses. */
+      if (!v) {
+        clauses[i] = { ...clauses[i], verdict: 'unscoreable' };
+        unanswered++;
+        continue;
+      }
       clauses[i] = {
         ...clauses[i],
         verdict: v.met ? 'met' : 'unmet',
@@ -365,11 +456,26 @@ export async function scorePosting(
     }
   }
 
-  let got = 0, total = 0;
+  /* THE SAME RULE AS THE OUTAGE PATH, reached a different way. A judge that returns an EMPTY
+     verdict list has not thrown, so the catch above never runs, and dropping its clauses from the
+     denominator left the deterministic survivors to publish a number on their own - 100, on a
+     posting where nothing about the candidate was actually checked. A question we did not get an
+     answer to suppresses the headline exactly like a question we could not ask. */
+  if (unanswered > 0 || uncheckable > 0) return { score: null, clauses, rejected };
+  return { score: aggregate(clauses), clauses, rejected };
+}
+
+/** Weighted coverage over the clauses that could be decided. Unscoreable ones leave entirely. */
+function aggregate(clauses: RequirementClause[]): number | null {
+  let got = 0;
+  let total = 0;
   for (const c of clauses) {
-    if (c.verdict === 'unscoreable') continue;
+    /* PENDING counts as unscoreable, not as unmet. It only reaches here if a caller drove
+       matchClause directly without a judge; scoring it against the student would charge them for a
+       question nobody asked. */
+    if (c.verdict === 'unscoreable' || c.verdict === 'pending') continue;
     total += c.weight;
     if (c.verdict === 'met') got += c.weight;
   }
-  return { score: total > 0 ? Math.round((100 * got) / total) : null, clauses, rejected };
+  return total > 0 ? Math.round((100 * got) / total) : null;
 }
