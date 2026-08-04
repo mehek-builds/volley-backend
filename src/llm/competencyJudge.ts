@@ -106,7 +106,10 @@ export function quoteIsGrounded(quote: string, bullets: string[]): boolean {
      A six-word minimum applied to everything made any short bullet permanently uncitable:
      "Built Litos, a Chrome extension" is five words, so every verdict resting on it was downgraded
      to unmet no matter how right the model was. */
-  if (normalised.some((b) => b === q)) return true;
+  /* Three words under the exemption, or a two-word bullet ("Managed logistics.") would ground any
+     claim at all - a shorter citation than the four-word FRAGMENT the floor below rejects. Three
+     still admits "Built Litos, a Chrome extension", which is the case the exemption exists for. */
+  if (q.split(' ').filter(Boolean).length >= 3 && normalised.some((b) => b === q)) return true;
 
   /* SIX WORDS for a SUBSTRING, not twelve characters.
      A twelve-character floor accepted "led the team" or "and analysis" as a citation, which is the

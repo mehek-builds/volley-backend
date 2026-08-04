@@ -275,3 +275,34 @@ describe('a graduation window has two ends', () => {
     assert.equal(c.verdict, 'met');
   });
 });
+
+describe('a numeric graduation date is still a dated one', () => {
+  const facts = (gradDate: string): CandidateFacts => ({
+    degree: 'Bachelor of Science in Computer Science', school: 'USC', gradDate,
+    resumeText: 'Python.', bullets: ['Led a 4-person team, analyzing 350 survey responses.'],
+  });
+  const CLAUSE = "Pursuing a bachelor's in computer science graduating in Fall 2027 or Spring 2028";
+  const v = (g: string) => matchClause(CLAUSE, 1, facts(g)).verdict;
+
+  /* The span test read the STRING for letters, so every all-numeric date was treated as a bare
+     year spanning both halves. Same candidate, same clause, different format: "May 2027" was
+     correctly unmet while "2027-05" was met. grad_date is free-typed and the resume parser is told
+     to keep the most precise date printed, so numeric formats reach this code. */
+  test('a numeric date that names a month does not span the year', () => {
+    for (const g of ['2027-05', '05/2027', '5/2027']) {
+      assert.equal(v(g), 'unmet', `${g} is May 2027, outside a Fall 2027 window`);
+    }
+  });
+
+  test('a genuinely bare year still spans its year', () => {
+    assert.equal(v('2027'), 'met', 'any term of 2027 could fall in the window');
+    assert.equal(v('2030'), 'unmet');
+  });
+
+  test('the route tells the client when the judge failed, not just that clauses dropped', () => {
+    // unscoreable means "nothing can decide this" AND "we could not ask", and the dashboard renders
+    // the first ("about attitude rather than experience") for both.
+    const route = readFileSync(path.join(__dirname, '..', 'routes', 'jdMatch.ts'), 'utf8');
+    assert.match(route, /degraded: result\.score === null && result\.clauses\.some/);
+  });
+});

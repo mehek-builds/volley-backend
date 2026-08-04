@@ -137,10 +137,16 @@ type GradPoint = { year: number; half: 1 | 2 };
 
 const SEASONAL = new RegExp(`\\b(fall|autumn|winter|spring|summer)\\s+(20\\d\\d)\\b`, 'gi');
 const MONTHLY = new RegExp(`\\b(${MONTHS})[a-z]*\\s+(20\\d\\d)\\b`, 'gi');
+/* Numeric month-and-year, which a NAMED-month pattern cannot see. "2027-05", "05/2027" and
+   "5/2027" all mean May 2027, and reading them as a bare year let them span it: the same
+   May-2027 candidate the window excludes came back met purely by writing the date differently.
+   grad_date is free-typed and the resume parser preserves the most precise date printed. */
+const NUMERIC_YM = /\b(20\d\d)[-/.](0?[1-9]|1[0-2])\b/g;
+const NUMERIC_MY = /\b(0?[1-9]|1[0-2])[-/.](20\d\d)\b/g;
 /** A bare year only counts as a graduation date when the clause is actually about graduating. */
 const GRADUATION_CUE = /\b(graduat|class of|degree conferred|expected|completion)/i;
 
-function pointsIn(text: string, requireCue = true): GradPoint[] {
+function pointsIn(text: string, requireCue = true): { points: GradPoint[]; bare: boolean } {
   const out: GradPoint[] = [];
   for (const m of text.matchAll(SEASONAL)) {
     const season = m[1].toLowerCase();
@@ -150,10 +156,18 @@ function pointsIn(text: string, requireCue = true): GradPoint[] {
     const late = ['jul', 'aug', 'sep', 'oct', 'nov', 'dec'].includes(m[1].toLowerCase());
     out.push({ year: Number(m[2]), half: late ? 2 : 1 });
   }
-  if (out.length === 0 && (!requireCue || GRADUATION_CUE.test(text))) {
-    for (const m of text.matchAll(/\b(20\d\d)\b/g)) out.push({ year: Number(m[1]), half: 1 });
+  for (const m of text.matchAll(NUMERIC_YM)) {
+    out.push({ year: Number(m[1]), half: Number(m[2]) >= 7 ? 2 : 1 });
   }
-  return out;
+  for (const m of text.matchAll(NUMERIC_MY)) {
+    out.push({ year: Number(m[2]), half: Number(m[1]) >= 7 ? 2 : 1 });
+  }
+  if (out.length > 0) return { points: out, bare: false };
+  if (!requireCue || GRADUATION_CUE.test(text)) {
+    for (const m of text.matchAll(/\b(20\d\d)\b/g)) out.push({ year: Number(m[1]), half: 1 });
+    return { points: out, bare: true };
+  }
+  return { points: out, bare: false };
 }
 
 const ordinal = (p: GradPoint) => p.year * 2 + p.half;
@@ -176,7 +190,7 @@ const ordinal = (p: GradPoint) => p.year * 2 + p.half;
  * scored a real candidate unmet against a window the employer never stated.
  */
 function parseGraduationWindow(text: string): { from: GradPoint; to: GradPoint } | null {
-  const points = pointsIn(text);
+  const { points } = pointsIn(text);
   if (points.length === 0) return null;
   const sorted = [...points].sort((a, b) => ordinal(a) - ordinal(b));
   return { from: sorted[0], to: sorted[sorted.length - 1] };
@@ -312,13 +326,18 @@ export function matchClause(
        pointsIn returned nothing, ownGrad was null, and every window silently passed - which is
        this module's headline bug surviving inside its own fix, for every profile whose grad_date
        came from grad_year (see submissionEducationGuard). */
-    const ownPoints = pointsIn(facts.gradDate ?? '', false);
-    const ownGrad = ownPoints.length > 0 ? ownPoints[0] : null;
+    const own = pointsIn(facts.gradDate ?? '', false);
+    const ownGrad = own.points.length > 0 ? own.points[0] : null;
     /* A BARE YEAR IS A YEAR, not the first half of one. "2027" with no term names a whole academic
        year, and pinning it to Spring made a 2027 graduate miss a "Fall 2027 or Spring 2028" window
        they plainly sit inside. Only the candidate's own field gets this: an employer writing a bare
        year in a range already has the range read from both endpoints. */
-    const ownSpansYear = Boolean(ownGrad) && !/[a-z]/i.test(facts.gradDate ?? '');
+    /* SPANS ITS YEAR ONLY IF THE PARSE FELL THROUGH TO THE BARE-YEAR BRANCH.
+       This tested the STRING for letters, which read "2027-05", "05/2027" and "5/2027" as bare
+       years and re-admitted the exact May-2027 candidate the window exists to exclude. grad_date is
+       a free-typed field and the resume parser is told to preserve the most precise date printed,
+       so numeric formats reach here. The parse already knows whether it saw a month; ask it. */
+    const ownSpansYear = own.bare && own.points.length === 1;
     /* INSIDE the stated window, at BOTH ends, with NO slack.
        Graduating before it and graduating after it are the same kind of miss, and only the first
        was caught. A season of slack was tried and removed: an employer writing "Fall 2027 or
