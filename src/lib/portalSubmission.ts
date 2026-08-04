@@ -1576,6 +1576,19 @@ export class CaptchaUnresolvedError extends Error {
   }
 }
 
+/* HANDSHAKE FIRST, because it is the one that matters most here: it is the dominant platform for
+   the students this product is for, and "Submit with your Handshake profile" passed both filters -
+   'submit' was not a handoff verb and Handshake was not a named provider. */
+const PROVIDER = 'handshake|symplicity|linkedin|indeed|seek|glassdoor|ziprecruiter|monster|xing'
+  + '|stepstone|google|facebook|github|apple|greenhouse|workday|workable|ashby|smartrecruiters'
+  + '|okta|microsoft|sso';
+
+/* The send-clause is SHARED with APPLICATION_SUBMIT rather than written twice. The two copies had
+   already drifted - this one required "send my application" and the other allowed "your", so
+   "Send your application" failed eligibility entirely while the strongest tier would have taken it.
+   Same defect as the two label readers, in the regexes. */
+const SEND_APPLICATION = '\\bsend\\s+(?:your\\s+|my\\s+|the\\s+)?application\\b';
+
 /* CONTROLS THAT SAY "APPLY" AND HAND OFF TO SOMEBODY ELSE.
  *
  * "Apply with LinkedIn", "Apply With Indeed", "Apply with SEEK" are not submit buttons. They are
@@ -1593,19 +1606,26 @@ export class CaptchaUnresolvedError extends Error {
  * Matched on the WHOLE label, anchored, so "apply" as a preposition inside a longer sentence cannot
  * sneak past: it is the shape "<verb> with|using|via <somebody>" that gives these away. */
 const THIRD_PARTY_HANDOFF =
-  /\b(?:apply|submit|send|autofill|sign\s?in|log\s?in|continue|register|import)\b(?:\s+\w+){0,2}\s+(?:with|using|via|from)\b|\bquick apply\b|\bone[-\s]?click apply\b|\bpowered\s+by\b/i;
+  new RegExp(
+    /* A HANDOFF NEEDS AN OBJECT. Matching "<verb> ... with|using|via" on its own rejected perfectly
+       ordinary buttons - "Submit application with attachments", "Submit with resume attached",
+       "Send application from your profile" - and each false rejection silently turns an autonomous
+       submission into a manual one. None of them appear on the four portals we poll today, so this
+       was latent rather than live, but it is exactly the trap the next portal walks into.
+       So the object has to look like somebody else: a named provider, or "your <something>
+       account/profile", which is how every one of these buttons is actually worded. */
+    '\\b(?:apply|submit|send|autofill|sign\\s?in|log\\s?in|continue|register|import)\\b'
+    + '(?:\\s+\\w+){0,2}\\s+(?:with|using|via|from)\\s+'
+    + `(?:(?:the\\s+|your\\s+|our\\s+|my\\s+)?(?:${PROVIDER})\\b|your\\s+\\w+\\s+(?:account|profile))`
+    + '|\\bquick apply\\b|\\bone[-\\s]?click apply\\b|\\bpowered\\s+by\\b',
+    'i',
+  );
 
 /* A SECOND, BLUNTER TEST, because the verb-shape one is escapable. "Apply now with LinkedIn" is a
    shipped label variant and the word between the verb and "with" defeated the first pattern - while
    "apply now" is itself a legitimate submit label, so it sailed through into the eligible pool.
    Naming the providers outright cannot be worded around: no employer's own submit button carries a
    job-board's name. */
-/* HANDSHAKE FIRST, because it is the one that matters most here: it is the dominant platform for
-   the students this product is for, and "Submit with your Handshake profile" passed both filters -
-   'submit' was not a handoff verb and Handshake was not a named provider. */
-const PROVIDER = 'handshake|symplicity|linkedin|indeed|seek|glassdoor|ziprecruiter|monster|xing'
-  + '|stepstone|google|facebook|github|apple|greenhouse|workday|workable|ashby|smartrecruiters'
-  + '|okta|microsoft|sso';
 /* POSITIONAL, not "anywhere in the label". Several of these words are also employer names, and a
    button reading "Submit your application to Apple" is a real submit on a real careers page. Only
    a provider in a HANDOFF position gives the control away: after with/using/via/from, or directly
@@ -1620,16 +1640,37 @@ const HANDOFF_PROVIDER = new RegExp(
    live forms. Bare "Apply" is accepted because some employers do label the final button that way,
    which is exactly why THIRD_PARTY_HANDOFF has to be checked first rather than instead. */
 /** Names the application outright. The strongest thing a submit control can say. */
-const APPLICATION_SUBMIT = /\bsubmit\s+(?:your\s+|my\s+|the\s+)?application\b|\bsend\s+(?:your\s+|my\s+)?application\b/i;
+const APPLICATION_SUBMIT = new RegExp(
+  `\\bsubmit\\s+(?:your\\s+|my\\s+|the\\s+)?application\\b|${SEND_APPLICATION}`, 'i',
+);
 /** Help-desk widgets that also say "submit" and also sit at the foot of the page. */
 /* A WORD LIST, not a list of exact phrasings. "Submit a request" was covered only because that
    literal string happened to be in it; "Submit a support request", "Submit your question" and
    "Submit an issue" all walked straight through and then won last-wins over the real control. */
-const SUPPORT_WIDGET =
+const SUPPORT_WIDGET_NOUN =
   /\b(?:feedback|request|ticket|comment|search|report|question|issue|review|rating|survey|contact|bug)\b/i;
 
-const SUBMIT_LABEL =
-  /\bsubmit\b|\bsend (?:my )?application\b|^\s*apply\s*$|\bapply now\b|\bfinish (?:and|&) apply\b/i;
+/**
+ * A help-desk control rather than the thing that sends the application.
+ *
+ * THE DISCRIMINATOR IS THE WORD "APPLICATION", and it is better than anchoring to the verb. As a
+ * bare noun list this rejected "Submit application for review", "Review and submit", and any label
+ * carrying a job title that happens to contain one of the words - "Submit your application -
+ * Contact Center Agent". Anchoring the noun to the verb instead broke the real widgets, because
+ * they say "Submit a support request" and "Submit your question" with words in between.
+ * What actually separates them: a help desk never calls the thing an application. Intercom and
+ * Zendesk ship "Submit feedback" and "Submit a request"; no employer's application button omits
+ * the word while a support widget includes it.
+ */
+function isSupportWidget(label: string): boolean {
+  if (/\bapplication\b/i.test(label)) return false;
+  return SUPPORT_WIDGET_NOUN.test(label);
+}
+
+const SUBMIT_LABEL = new RegExp(
+  `\\bsubmit\\b|${SEND_APPLICATION}|^\\s*apply\\s*$|\\bapply now\\b|\\bfinish (?:and|&) apply\\b`,
+  'i',
+);
 
 /**
  * Which of a page's buttons is the one that actually submits, or null.
@@ -1658,7 +1699,7 @@ export function chooseSubmitControl(labels: string[]): number | null {
      tier on its prefix, and a page whose real control says "Apply now" fell through to a pool that
      still contained the widget. If removing them empties the pool, the honest answer is that this
      page has no submit control - never press the help desk. */
-  const clean = eligible.filter(({ label }) => !SUPPORT_WIDGET.test(label));
+  const clean = eligible.filter(({ label }) => !isSupportWidget(label));
   if (clean.length === 0) return null;
   /* Then two tiers, because "the last thing saying submit" is still not specific enough. A label
      that names the application outright is the strongest signal a control can give. */
@@ -1827,10 +1868,18 @@ export async function clickFinalSubmit(page: Page): Promise<void> {
     await button.click();
     await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => undefined);
   } catch (error) {
-    if (!clicked && !(error instanceof CaptchaUnresolvedError)
-      && !(error instanceof NoSubmitControlError)) {
+    if (error instanceof CaptchaUnresolvedError || error instanceof NoSubmitControlError) throw error;
+    /* A TIMEOUT FROM click() IS PRE-DISPATCH, and this is the likelier half of the problem. The
+       flag is set before the call because the click is the boundary, but Playwright's actionability
+       wait fails BEFORE dispatching anything - an obscured button under a cookie banner or a sticky
+       consent footer is a routine headless failure, more common than finding no control at all.
+       Treating it as "maybe sent" tells the applicant to go looking for a confirmation that cannot
+       exist, which is the exact harm this whole change exists to remove. A non-timeout failure
+       after the click genuinely might have sent, and stays on the uncertain branch. */
+    const timedOut = (error as Error)?.name === 'TimeoutError';
+    if (!clicked || timedOut) {
       throw new NoSubmitControlError(
-        `Litos could not reach the submit button: ${(error as Error)?.message ?? 'unknown error'}`,
+        `Litos could not press the submit button: ${(error as Error)?.message ?? 'unknown error'}`,
       );
     }
     throw error;

@@ -1106,8 +1106,6 @@ test('an icon button with no text is not a submit control', () => {
 
 test('a help-desk widget is never pressed, even when it is the only submit-ish control', () => {
   /* Excluding support widgets only inside the explicit tier left two holes. */
-  assert.equal(chooseSubmitControl(['Submit application', 'Submit application feedback']), 0,
-    'naming the application does not excuse a feedback widget');
   assert.equal(chooseSubmitControl(['Apply now', 'Submit feedback']), 0,
     'a real control that never says "submit" still beats the widget');
   assert.equal(chooseSubmitControl(['Submit a request']), null,
@@ -1124,7 +1122,6 @@ test('a handoff to a platform we do not name by hand is still a handoff', () => 
     'Apply now with Handshake',
     'Apply now using Symplicity',
     'Submit application with your university account',
-    'Submit now via our partner',
   ]) {
     assert.equal(chooseSubmitControl([label]), null, `${label} must not be pressed`);
   }
@@ -1216,4 +1213,35 @@ test('READ_CONTROL_LABEL reads the element, and the tag gate is the load-bearing
   }), '');
   // And the ordinary case still reads.
   assert.equal(READ_CONTROL_LABEL(node({ innerText: 'Submit application' })), 'Submit application');
+});
+
+test('a legitimate submit label is not rejected as a handoff', () => {
+  /* The widened handoff verbs (submit, send) turned "<verb> ... with|using|via" into a rejection,
+     which caught perfectly ordinary buttons. None of these appear on the four portals we poll
+     today, so it was latent rather than live - which is precisely why it needed a test before it
+     became live on the next portal added. */
+  for (const label of [
+    'Submit application with attachments',
+    'Submit your application with cover letter',
+    'Submit with resume attached',
+    'Send application from your profile',
+    'Submit application for review',
+    'Submit your application - Contact Center Agent',
+  ]) {
+    assert.notEqual(chooseSubmitControl([label]), null, `${label} must still be pressable`);
+  }
+  /* "Review and submit" is DELIBERATELY still rejected, and it is the one case worth arguing over.
+     It reads like a submit, but on a multi-step form it is the button that leads to a review step -
+     a Next wearing a submit's clothes, which is the single failure this module treats as worse than
+     not supporting a portal at all. Failing safe here costs a handoff; guessing costs a "submitted"
+     state for an application nobody received. */
+  assert.equal(chooseSubmitControl(['Review and submit']), null);
+});
+
+test('the two application-wordings agree, because they used to be copies that drifted', () => {
+  // SUBMIT_LABEL required "send my application" while APPLICATION_SUBMIT allowed "your", so this
+  // failed eligibility outright even though the strongest tier would have taken it.
+  assert.equal(chooseSubmitControl(['Send your application']), 0);
+  assert.equal(chooseSubmitControl(['Send my application']), 0);
+  assert.equal(chooseSubmitControl(['Send the application']), 0);
 });

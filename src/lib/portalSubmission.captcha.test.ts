@@ -552,3 +552,83 @@ test('a page offering only handoffs reports that nothing was sent', async () => 
   await assert.rejects(clickFinalSubmit(page), NoSubmitControlError);
   assert.deepEqual(pressed, [], 'nothing may be pressed');
 });
+
+test('a click that times out reports that nothing was sent', async () => {
+  /* THE LIKELIER HALF. Playwright's actionability wait fails BEFORE dispatching anything - an
+     obscured button under a cookie banner or a sticky consent footer is a routine headless
+     failure, more common than finding no control at all. Treating it as "maybe sent" is the exact
+     harm this branch exists to remove. */
+  const timeout = Object.assign(new Error('locator.click: Timeout 30000ms exceeded'),
+    { name: 'TimeoutError' });
+  const buttons = {
+    elementHandles: async () => [{
+      evaluate: async (fn: (node: unknown) => string) => fn({
+        innerText: 'Submit application', disabled: false, tagName: 'BUTTON', type: '', value: '',
+        title: '', getAttribute: () => null, getClientRects: () => ({ length: 1 }),
+        parentElement: null,
+        ownerDocument: {
+          defaultView: { getComputedStyle: () => ({ visibility: 'visible' }) },
+          getElementById: () => null,
+        },
+      }),
+      click: async () => { throw timeout; },
+      dispose: async () => undefined,
+    }],
+  };
+  const page = {
+    locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
+      ? buttons
+      : { count: async () => 0, nth: () => ({}) }),
+    waitForLoadState: async () => undefined,
+    waitForTimeout: async () => undefined,
+  } as unknown as Page;
+
+  await assert.rejects(clickFinalSubmit(page), NoSubmitControlError);
+});
+
+test('a pre-click failure is not reported as a submission that may have happened', async () => {
+  const page = {
+    locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
+      ? { elementHandles: async () => { throw new Error('Execution context was destroyed'); } }
+      : { count: async () => 0, nth: () => ({}) }),
+    waitForLoadState: async () => undefined,
+    waitForTimeout: async () => undefined,
+  } as unknown as Page;
+  await assert.rejects(clickFinalSubmit(page), NoSubmitControlError);
+});
+
+test('a control relabelled between choosing it and pressing it is not pressed', async () => {
+  /* The handle cannot drift to a different element, but the element itself can be relabelled by a
+     re-render - and the cost of being wrong is clicking a handoff on a real application. This
+     handle reads as the real submit when it is chosen and as a LinkedIn handoff a moment later. */
+  let reads = 0;
+  let clicked = false;
+  const node = (text: string) => ({
+    innerText: text, disabled: false, tagName: 'BUTTON', type: '', value: '', title: '',
+    getAttribute: () => null, getClientRects: () => ({ length: 1 }), parentElement: null,
+    ownerDocument: {
+      defaultView: { getComputedStyle: () => ({ visibility: 'visible' }) },
+      getElementById: () => null,
+    },
+  });
+  const buttons = {
+    elementHandles: async () => [{
+      evaluate: async (fn: (n: unknown) => string) => {
+        reads += 1;
+        return fn(node(reads === 1 ? 'Submit application' : 'Apply with LinkedIn'));
+      },
+      click: async () => { clicked = true; },
+      dispose: async () => undefined,
+    }],
+  };
+  const page = {
+    locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
+      ? buttons
+      : { count: async () => 0, nth: () => ({}) }),
+    waitForLoadState: async () => undefined,
+    waitForTimeout: async () => undefined,
+  } as unknown as Page;
+
+  await assert.rejects(clickFinalSubmit(page), NoSubmitControlError);
+  assert.equal(clicked, false, 'the relabelled control must not be pressed');
+});
