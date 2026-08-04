@@ -215,7 +215,18 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         .limit(1);
       // Only when the row actually has MORE than the caller sent. A posting we hold a shorter copy
       // of must not overwrite a full JD someone pasted in.
-      if (row?.description && row.description.length > jdText.length) jdText = row.description;
+      /* Only a PREVIEW is replaced, and a row that is itself capped never wins.
+       *
+       * Raw length was too blunt in two ways the review caught. `left(description, 60000)` returns
+       * exactly 60000 characters cut mid-word for any posting over that, which beats almost any
+       * caller text and reintroduces the very defect this fixes at a different boundary. And the
+       * poller overwrites description in place, so a re-polled posting that grew by one character
+       * would silently replace a full JD a caller genuinely holds. The preview is 600 characters;
+       * anything under a couple of thousand is preview-shaped and nothing else is. */
+      const capped = row?.description?.length === 60_000;
+      if (row?.description && !capped && jdText.length < 2_000 && row.description.length > jdText.length) {
+        jdText = row.description;
+      }
     }
 
     // Resume-gen + autofill is available on every tier (2026-07-02 decision): free gets
@@ -657,7 +668,21 @@ export async function resumeRoutes(fastify: FastifyInstance) {
      * screen. Bounded and non-fatal by construction: a slow or unavailable model leaves the cache
      * cold and the student pays for the judgement on open, which is exactly today's behaviour.
      * It can never fail a generation, and it writes nothing the review screen would not have. */
-    const warm = await warmRequirementCache(
+    /* ONLY ON A BACKGROUND BUILD, and this became load-bearing the moment the JD above stopped
+     * being 600 characters.
+     *
+     * warmRequirementCache returns instantly when a posting states no competency clause, and a
+     * 600-char preview never states one, so this call was a silent no-op for as long as packets
+     * carried the preview. Resolving the full posting turns it into a real Sonnet call, awaited on
+     * the response path, which would have put up to WARM_TIMEOUT_MS in front of a student who
+     * pressed Apply. The justification for awaiting it was always "nobody is waiting on this",
+     * which is true of the prewarm loop and false of an interactive generate.
+     *
+     * Default is NOT to warm, so the expensive path is opt-in rather than something a caller has
+     * to know to avoid. POST_GEN_RESERVE_MS budgets for the PDF render and the audit inserts, not
+     * for a model call. */
+    const warm = body.prewarm
+      ? await warmRequirementCache(
       jdText,
       {
         degree: storedSpec.degree,
@@ -675,9 +700,10 @@ export async function resumeRoutes(fastify: FastifyInstance) {
           .join(' '),
         bullets: storedSpec.experience.flatMap((entry) => entry.bullets ?? []),
       },
-      { company: jobContext.company, role: jobContext.role, job_id: jobContext.job_id ?? null },
-    );
-    if (warm.skipped) fastify.log.warn({ warm }, 'requirement cache not warmed');
+          { company: jobContext.company, role: jobContext.role, job_id: jobContext.job_id ?? null },
+        )
+      : { asked: 0, judged: 0, fromCache: 0, skipped: 'interactive generate, not warmed' };
+    if (warm.skipped && body.prewarm) fastify.log.warn({ warm }, 'requirement cache not warmed');
 
     return reply.status(200).send({
       ...responseTemplate,
