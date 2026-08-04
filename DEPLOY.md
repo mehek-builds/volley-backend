@@ -84,7 +84,18 @@ scoring text for the whole ranking pool out of Neon.
 That is what exhausted Neon's 5 GB/month transfer allowance on 2026-08-04 and suspended the
 database, so **this is the largest single saving available and it is inert until configured.**
 Create a database at upstash.com (free tier: 256 MB, 500k commands/month), copy its REST URL
-and token into the Vercel project, and redeploy. Nothing else changes: unconfigured, the code
+and token into the Vercel project, and redeploy.
+
+**Verify it actually took effect**, because env var changes on Vercel do not reach a
+running deployment until it is rebuilt, so the dashboard can show them set while the
+function still runs L1 only:
+
+```bash
+curl -s https://student-outreach-backend.vercel.app/health
+```
+
+`"ranking_cache": "shared"` means L1 plus Upstash. `"local"` means L1 only and the
+variables have not reached the running build. The field reports names, never values. Nothing else changes: unconfigured, the code
 path is a deliberate no-op, which is why it was safe to ship ahead of the database existing.
 
 The reviewed source list lives in `src/lib/jobSources.ts`; use `JOB_MONITOR_SOURCES_JSON` only for
