@@ -220,4 +220,19 @@ test('the education guard reads coursework the same way the resume generator doe
 
   assert.deepEqual(candidateEducationFromParsedProfile({ school: 'USC' }).coursework, []);
   assert.deepEqual(candidateEducationFromParsedProfile({ school: 'USC', coursework: 42 }).coursework, []);
+
+  /* Empty and whitespace-only inputs must land on [] rather than [''], because
+   * courseworkIsUngrounded treats an empty allowed set as "nothing to ground against" and returns
+   * TRUE - a blank stored value would raise a drift issue on a packet that says nothing about
+   * coursework at all. */
+  assert.deepEqual(candidateEducationFromParsedProfile({ school: 'USC', coursework: '' }).coursework, []);
+  assert.deepEqual(candidateEducationFromParsedProfile({ school: 'USC', coursework: '   ' }).coursework, []);
+  assert.deepEqual(candidateEducationFromParsedProfile({ school: 'USC', coursework: [] }).coursework, []);
+  assert.deepEqual(candidateEducationFromParsedProfile({ school: 'USC', coursework: null }).coursework, []);
+
+  // Untrimmed and case-duplicate entries, which the parser can write without normalising.
+  assert.deepEqual(
+    candidateEducationFromParsedProfile({ school: 'USC', coursework: ['  Math  ', 'Physics', 'math'] }).coursework,
+    ['Math', 'Physics'],
+  );
 });
