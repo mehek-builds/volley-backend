@@ -1,5 +1,6 @@
 import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
+import { isPortalSupported } from './portalSubmission';
 
 export type ApplicationReviewQuestion = {
   id: string;
@@ -80,6 +81,17 @@ export type ApplicationReviewState = {
   handoff_expires_at?: string;
   final_approved_at?: string;
   cover_letter_supported?: boolean;
+  /* Whether Litos can fill in this posting's application page AT ALL, derived from portal_url.
+   *
+   * Unlike cover_letter_supported, which can only be answered by looking at a live form mid-run,
+   * this one is knowable the moment the packet exists - and not knowing it was the bug. Packets on
+   * company-owned careers pages sat in the Tracker labelled "Ready" behind a live send button and
+   * only revealed themselves after a multi-minute run failed with "This portal is not supported
+   * yet". Honest at creation beats honest at minute three.
+   *
+   * Derived on read (see readApplicationReview) rather than only written at creation, so packets
+   * created before this existed answer correctly too, with no migration. */
+  portal_supported?: boolean;
   submission_claimed_at?: string;
   submission_claim_id?: string;
   filled_fields?: string[];
@@ -175,5 +187,50 @@ export function readApplicationReview(spec: unknown): ApplicationReviewState | n
   if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return null;
   const review = (spec as Record<string, unknown>)._review;
   if (!review || typeof review !== 'object' || Array.isArray(review)) return null;
-  return review as ApplicationReviewState;
+  const state = review as ApplicationReviewState;
+  // Derived here, at the one choke point every caller already goes through, so a packet stored
+  // before portal_supported existed still answers the question correctly and no backfill migration
+  // is needed. A stored value always wins: this only fills a gap, it never overrides a decision.
+  if (state.portal_supported === undefined && state.portal_url) {
+    return { ...state, portal_supported: isPortalSupported(state.portal_url) };
+  }
+  return state;
+}
+
+export type ApplicationReviewEdit = {
+  ats_name?: string;
+  portal_url?: string;
+  questions: ApplicationReviewQuestion[];
+  skipped_reasons: string[];
+};
+
+/**
+ * The third write path for portal_supported, and the one that can contradict itself.
+ *
+ * Creation writes the flag from the URL it was handed, and readApplicationReview derives it for
+ * packets stored before the field existed. An EDIT is different: the body carries a new portal_url
+ * and no portal_supported, so merging it over the stored review leaves the old verdict sitting next
+ * to the new URL, and then persists it. Persisting is what makes it permanent, because the
+ * derivation above only fills a gap: once the value is defined it is never recomputed, so re-saving
+ * the URL cannot repair it.
+ *
+ * Both directions are wrong, but they are not equally bad. Supported edited to unsupported shows a
+ * live send button on a packet that cannot be filled, and submit-request already refuses that in
+ * front of the run. Unsupported edited to a working Greenhouse URL is the trap: the dashboard gates
+ * the send button on this exact field, so a packet that would now submit fine is locked out with no
+ * self-serve way back. Re-derive from the URL that is actually being stored.
+ */
+export function applyApplicationReviewEdit(
+  current: ApplicationReviewState,
+  edit: ApplicationReviewEdit,
+): ApplicationReviewState {
+  return {
+    ...current,
+    ...edit,
+    // Only when the edit carries a URL. Deriving from an absent one would write false over a
+    // perfectly good stored true, which is the same lockout arriving by a different door.
+    ...(edit.portal_url === undefined ? {} : { portal_supported: isPortalSupported(edit.portal_url) }),
+    status: edit.questions.length > 0 ? 'questions_ready' : 'ready_to_submit',
+    updated_at: new Date().toISOString(),
+  };
 }

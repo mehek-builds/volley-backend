@@ -292,12 +292,54 @@ function omitCoverLetter(packet: SubmissionPacket): SubmissionPacket {
   return { ...packet, coverLetter: undefined, coverLetterName: undefined };
 }
 
-async function packetForCoverLetterCapability(row: ResumeRow, supported: boolean): Promise<SubmissionPacket> {
-  if (!supported) return omitCoverLetter(await buildPacket(row));
-  if (!storedCoverLetter(row)) await generateStoredCoverLetter(row, false, true);
+/**
+ * Build the packet, writing a cover letter first when the portal has somewhere to put one.
+ *
+ * A cover letter problem MUST NOT kill the run. This used to throw straight out of the middle of a
+ * prepare, which took the whole submission down: the dashboard was still showing "Litos is typing
+ * in your saved answers" while the run behind it was already dead, and the applicant had no error,
+ * no retry and no way to tell. Reproduced in prod on a Greenhouse posting on 2026-08-04, where a
+ * cover letter that had merely failed to PARSE aborted a submission that was otherwise fine.
+ *
+ * Degrading is safe here, and not just tolerable: the generated letter is written unapproved
+ * (approved=false), and buildPacket only ATTACHES a cover letter once approved_at is set. So a
+ * failure at this step costs the applicant nothing they were about to send - it only means the
+ * draft is not waiting for them on the approval screen. They can still write or retry one from the
+ * dashboard. Losing the whole submission to protect an artifact the packet would not have carried
+ * is strictly worse than continuing without it.
+ *
+ * The reason is returned rather than swallowed so the caller can put it in front of the applicant
+ * as an attention reason. A silent degrade would be its own version of this bug.
+ *
+ * That reason is a FIXED sentence, and the thrown message is logged instead of interpolated. The
+ * two failures this generator actually throws are "Cover letter truncated at max_tokens (1203
+ * chars) - raise the cap" and "Claude returned an invalid cover letter: {"body":"I'm writing to
+ * apply for the Software Eng..." - one an instruction to an operator, the other 200 characters of
+ * raw model output with a vendor name in front of it. Both were reaching a student's screen. They
+ * also describe one situation from the applicant's side, with one recovery, so there is nothing a
+ * second variant of the sentence could usefully say. Whoever has to fix the generator reads logs.
+ */
+async function packetForCoverLetterCapability(
+  row: ResumeRow,
+  supported: boolean,
+  fastify: FastifyInstance,
+): Promise<{ packet: SubmissionPacket; coverLetterIssue?: string }> {
+  if (!supported) return { packet: omitCoverLetter(await buildPacket(row)) };
+  if (!storedCoverLetter(row)) {
+    try {
+      await generateStoredCoverLetter(row, false, true);
+    } catch (error) {
+      // Raw message to the log, fixed sentence to the applicant. See the note above the function.
+      fastify.log.warn({ error, applicationId: row.id }, 'Cover letter generation failed, continuing without it');
+      return {
+        packet: omitCoverLetter(await buildPacket(row)),
+        coverLetterIssue: 'We could not write your cover letter for this one, so it is not attached. Everything else is filled in, and you can write or retry a cover letter from your dashboard.',
+      };
+    }
+  }
   const rows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, row.id)).limit(1);
   if (!rows[0]) throw new Error('This application went missing while we wrote the cover letter');
-  return buildPacket(rows[0]);
+  return { packet: await buildPacket(rows[0]) };
 }
 
 // R-055 fix: the dashboard flow used to send only whatever `review.questions` the client already
@@ -450,7 +492,8 @@ async function prepareManaged(
   const applicationUrl = portalApplicationUrl(portal, current.portal_url!);
   const discoveryResult = await runManagedBrowser(applicationUrl, buildManagedDiscoveryActions(portal, packet)).catch(() => null);
   const coverLetterSupported = managedResultHasCoverLetterUpload(discoveryResult, portal);
-  packet = await packetForCoverLetterCapability(row, coverLetterSupported);
+  const coverLetterOutcome = await packetForCoverLetterCapability(row, coverLetterSupported, fastify);
+  packet = coverLetterOutcome.packet;
   const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
   const resolutionCurrent = { ...current, questions: storedQuestions };
   const { questions: discoveredQuestions, attentionReasons: discoveryAttention } = await discoverAndResolveQuestions(
@@ -484,6 +527,9 @@ async function prepareManaged(
   const verificationHandoff = blockers.some((blocker) =>
     /verification code|security code|one[ -]?time code|passcode|\botp\b/i.test(blocker),
   );
+  // A missing cover letter is worth telling the applicant about, but it is not a blocker: the form
+  // is filled and sendable without it, so it must not flip the run out of the safe path.
+  const coverLetterAttention = coverLetterOutcome.coverLetterIssue ? [coverLetterOutcome.coverLetterIssue] : [];
   const safe = blockers.length === 0 && discoveryAttention.length === 0;
   const review = nextReview(current, {
     ...preparedReviewPatch(authorization, safe),
@@ -493,7 +539,7 @@ async function prepareManaged(
     verification: { status: verificationHandoff ? 'handoff' : 'not_needed' },
     questions: mergedQuestions,
     cover_letter_supported: coverLetterSupported,
-    attention_reason: [...blockers, ...discoveryAttention].join('\n') || undefined,
+    attention_reason: [...blockers, ...discoveryAttention, ...coverLetterAttention].join('\n') || undefined,
     // No stall write here, deliberately. CAPTCHA_BLOCKER is pushed in exactly one place -
     // fillPortal - and the managed path never calls it, so matching on that string here would be
     // dead code that reads like coverage. The managed path's real challenge signal is the probe in
@@ -585,7 +631,8 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       permissionGranted: verificationSettings?.enabled === true,
     });
     const coverLetterSupported = await hasCoverLetterUpload(page, portal);
-    const packet = await packetForCoverLetterCapability(row, coverLetterSupported);
+    const { packet, coverLetterIssue } = await packetForCoverLetterCapability(row, coverLetterSupported, fastify);
+    const coverLetterAttention = coverLetterIssue ? [coverLetterIssue] : [];
 
     // R-055: discover and resolve the posting's own custom questions before filling, so a
     // dashboard-only submission does not depend on the extension having run first.
@@ -636,10 +683,14 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       },
       questions: mergedQuestions,
       cover_letter_supported: coverLetterSupported,
-      // Already human on this path, but sanitized anyway so both providers are held to one
-      // guarantee and a future change to either cannot quietly reintroduce identifiers.
+      // Already human on this path, but the BLOCKERS are sanitized anyway so both providers are
+      // held to one guarantee and a future change to either cannot quietly reintroduce identifiers.
+      // The other two arrays do not go through the sanitizer and do not need to: they are written
+      // here, in this repo, in the product's own voice, and neither one interpolates provider or
+      // model text. Sending them through it would not have caught the cover-letter leak either,
+      // since that message was prose and prose passes straight through.
       attention_reason:
-        [...sanitizedBlockers, ...discoveryAttention].join('\n') || undefined,
+        [...sanitizedBlockers, ...discoveryAttention, ...coverLetterAttention].join('\n') || undefined,
       // The only path that OBSERVES a challenge on a board nobody had typed as gated, which makes it
       // the one that matters most. Without it the stall is written only for JazzHR and BambooHR,
       // families already known to gate, so the instrumentation could confirm what was already
