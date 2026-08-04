@@ -1,6 +1,7 @@
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { Client, Pool } from 'pg';
 import * as schema from './schema';
+import { withReadOnlyRetry } from './readOnlyRetry';
 
 const connectionString =
   process.env.DATABASE_URL || 'postgresql://postgres:password@localhost:5432/student_outreach';
@@ -83,6 +84,41 @@ const pool = new Pool({
   // to avoid exhausting the database's connection limit across many warm lambdas.
   max: process.env.VERCEL ? 1 : 10,
 });
+
+/* Retry a write the pooler sent to a read-only backend. See db/readOnlyRetry.ts for the incident
+ * and for why a 25006 specifically is safe to run again.
+ *
+ * Wrapping `pool.query` covers every statement drizzle issues OUTSIDE an explicit transaction,
+ * which is nearly all of them: the profile and resume writes that failed in the incident all go
+ * through this path.
+ *
+ * TRANSACTIONS ARE DELIBERATELY NOT COVERED, and this is the honest limit of the fix. `db.transaction`
+ * checks a client out of the pool and issues its statements on THAT client, so they never reach
+ * here. Retrying an individual statement inside a transaction the failure already aborted would
+ * only earn a 25P02, and retrying the whole callback would re-run whatever side effects it had
+ * performed before the write. Either is worse than the loud failure a transaction gets today. The
+ * routes that matter for the incident are single statements; `PUT /profile/recent-experience` is a
+ * transaction and will still fail on a read-only backend, which is the known gap.
+ *
+ * The callback form of `query` is passed straight through. It is not promise-based, so there is no
+ * result to await and nothing to retry; pg's own overloads still resolve because the wrapper keeps
+ * the original signature. Nothing in this codebase uses it, but a dependency may.
+ */
+const poolQuery = pool.query.bind(pool);
+pool.query = ((...args: unknown[]) => {
+  if (typeof args[args.length - 1] === 'function') {
+    return (poolQuery as (...a: unknown[]) => unknown)(...args);
+  }
+  return withReadOnlyRetry(
+    () => (poolQuery as (...a: unknown[]) => Promise<unknown>)(...args),
+    {
+      onRetry: (attempt) =>
+        console.warn(
+          `[db] write rejected by a read-only backend, retrying on a fresh connection (attempt ${attempt})`,
+        ),
+    },
+  );
+}) as typeof pool.query;
 
 export const db = drizzle(pool, { schema });
 export { pool };

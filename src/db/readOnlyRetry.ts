@@ -1,0 +1,75 @@
+/* Surviving a pooled connection that lands on a read-only backend.
+ *
+ * THE FAILURE THIS EXISTS FOR, observed in production on 2026-08-03. Writes through the pooled
+ * Neon endpoint began failing with `cannot execute UPDATE in a read-only transaction` while the
+ * direct (non-pooler) endpoint stayed writable the whole time, and while READS through the same
+ * pooled host kept working. Sampling `show default_transaction_read_only` over ten fresh
+ * connections to one hostname returned a MIX of on and off, so the pooler was spreading checkouts
+ * across a writable primary and a read-only backend and a given connection got whichever it got.
+ *
+ * That shape is the dangerous one. It is not an outage: reads succeed, the app looks healthy, and
+ * only writes fail, intermittently, as an unexplained 500. Saving a base resume took six attempts
+ * and five of them failed. A student would read that as "Litos is broken" and an operator would
+ * find nothing wrong, because the next connection they open by hand is writable.
+ *
+ * WHY A RETRY IS SAFE HERE, which is the whole argument for doing this rather than surfacing it.
+ * Postgres refuses a write on a read-only backend BEFORE the statement executes (the check that
+ * raises 25006 runs ahead of execution), so a 25006 is proof that nothing happened: no rows
+ * touched, no sequence advanced, no trigger fired. That makes the statement safe to run again in a
+ * way an ordinary failure is not. This retries ONLY 25006 for exactly that reason - a timeout or a
+ * connection drop is NOT retried here, because either could have committed.
+ *
+ * A retry gets a fresh checkout, which is the point: the pool hands out a different backend, so an
+ * attempt that failed on the replica can land on the primary. Three attempts is not a magic
+ * number, it is the point where a persistent read-only project (a Neon quota stop, where EVERY
+ * backend is read-only) stops looking like a transient one and should surface as an error rather
+ * than being retried into a long hang.
+ */
+
+/** Postgres SQLSTATE for `read_only_sql_transaction`. */
+export const READ_ONLY_SQLSTATE = '25006';
+
+/** True when a rejected write can be safely retried on a fresh connection. */
+export function isReadOnlyTransactionError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  return (error as { code?: unknown }).code === READ_ONLY_SQLSTATE;
+}
+
+export interface ReadOnlyRetryOptions {
+  /** Total attempts including the first. */
+  attempts?: number;
+  /** Pause between attempts. A different backend is assigned per checkout, so this is only here to
+   *  stop three attempts landing inside the same instant of a failover. */
+  delayMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  /** Called once per swallowed failure, for logs. */
+  onRetry?: (attempt: number) => void;
+}
+
+const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Run `operation`, retrying ONLY when the backend rejected it as read-only.
+ *
+ * Every other error propagates on the first throw, unchanged and un-delayed. The last attempt's
+ * error is rethrown as-is so a persistent read-only project still fails loudly, with the original
+ * Postgres error the operator needs, rather than being masked by a wrapper of ours.
+ */
+export async function withReadOnlyRetry<T>(
+  operation: () => Promise<T>,
+  options: ReadOnlyRetryOptions = {},
+): Promise<T> {
+  const attempts = Math.max(1, options.attempts ?? 3);
+  const delayMs = options.delayMs ?? 150;
+  const sleep = options.sleep ?? defaultSleep;
+
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!isReadOnlyTransactionError(error) || attempt >= attempts) throw error;
+      options.onRetry?.(attempt);
+      if (delayMs > 0) await sleep(delayMs);
+    }
+  }
+}
