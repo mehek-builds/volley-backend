@@ -1314,6 +1314,110 @@ describe('the requirement denominator excludes prose and branding, not requireme
   });
 });
 
+/**
+ * ISSUE-026. psiquantum's "Intern, Quantum Architecture", production row
+ * eb6f80b6-cd83-4e6f-a26e-58627af6f6ca, measured 2026-08-04 over the full 6164-char description.
+ *
+ * Its twelve extracted requirements were `C++, Computer Science, GitHub, Housing, HR, Math, Once,
+ * Physics, Police Check, Python, Rate, ZX`. Five of the twelve are not things a student can have on
+ * a resume, so they sat permanently in the denominator of `round(100 * got / total)` and depressed
+ * every score on this posting by roughly 40 points, under a tooltip telling the student these were
+ * "the N requirements Litos counted in this posting".
+ *
+ * The text below is the shape rather than the whole posting: the requirements block, then the
+ * heading-shaped line "The interview process", then the three paragraphs and the pay table that the
+ * unclosed section swallowed. All five junk terms and the real ones are reproduced from it.
+ */
+const PSIQUANTUM_JD = `Requirements
+Degree in Physics, Math or Computer Science or equivalent required.
+Knowledge of quantum information is required. Familiarity with graphical calculus (e.g, tensor networks, ZX calculus).
+Experience programming in Python, C++ or similar languages.
+Competent use of collaborative software development tools (e.g., GitHub) is desirable.
+
+The interview process
+
+Expect at least two interviews with the hiring team and HR. Once interviews are complete, we match students to relevant internship projects in our hiring teams.
+
+Successful candidates are required to complete background checks prior to commencing their internship. These include a National Police Check and verification of employment and education qualifications.
+
+Education level COMPLETED
+
+Hourly Rate
+
+Housing/Commuter Stipend
+
+Bachelor's Degree
+
+$31.00
+
+Variable based on permanent residency location
+`;
+
+const PSIQUANTUM_CONTEXT = {
+  company: 'psiquantum',
+  role: 'Intern, Quantum Architecture',
+  location: 'Brisbane, Queensland, Australia; Palo Alto, California, United States; Remote',
+};
+
+describe('the process-and-logistics footer is not a requirements block', () => {
+  test('none of the five measured junk terms reach the denominator', () => {
+    const keys = extractJdTerms(PSIQUANTUM_JD, PSIQUANTUM_CONTEXT).map((t) => t.term);
+    for (const junk of ['housing', 'hr', 'once', 'police check', 'rate']) {
+      assert.ok(!keys.includes(junk), `"${junk}" is not something a student can put on a resume`);
+    }
+    // The terms each junk term was standing next to in that table, pinned so a narrower fix that
+    // only caught the five measured spellings reads as the regression it would be.
+    for (const junk of ['commuter stipend', 'near completion', 'national police', 'police']) {
+      assert.ok(!keys.includes(junk), `"${junk}" is the same table`);
+    }
+  });
+
+  test('the requirements the posting actually stated all survive', () => {
+    const keys = extractJdTerms(PSIQUANTUM_JD, PSIQUANTUM_CONTEXT).map((t) => t.term);
+    for (const real of ['physics', 'math', 'computer science', 'zx', 'python', 'c++', 'github']) {
+      assert.ok(keys.includes(real), `"${real}" is a stated requirement and must stay in the denominator`);
+    }
+  });
+
+  test('a heading-shaped process line CLOSES the section above it', () => {
+    // The mechanism, asserted directly rather than only through its symptom. "The interview process"
+    // passes isHeadingLine and used to classify as nothing, and an unrecognised heading does not
+    // close the section it interrupts - so the pay table below it was REQUIRED at weight 1.
+    const kinds = segmentJd(PSIQUANTUM_JD).map((s) => s.kind);
+    assert.ok(kinds.includes('noise'), 'the footer is its own zero-weight section');
+    // "Hourly Rate" is itself one of the noise headings now, and a matched heading line is consumed
+    // rather than kept, so the text to look for is the table row under it.
+    const tail = segmentJd(PSIQUANTUM_JD).find((s) => s.text.includes('National Police Check'));
+    assert.equal(tail?.kind, 'noise');
+    assert.equal(tail?.weight, 0);
+  });
+
+  test('a sentence-initial capital is not a proper noun', () => {
+    // `Once` came in because tokenizeSection rebased `prevEnd` off the UNTRIMMED match, so the
+    // sentence-final period sat inside the previous token and the gap the positional test reads was
+    // a bare space. The sentence half of that rule never ran. Asserted on its own text, because on
+    // the posting above the footer fix would hide it.
+    const keys = extractJdTerms(
+      'Requirements\nWe use Python here. Once you are ready, you will ship. Kubernetes and Docker run our services.\n',
+    ).map((t) => t.term);
+    assert.ok(!keys.includes('once'), 'a capital after a full stop is grammar');
+    assert.ok(keys.includes('python'), 'a mid-sentence lexicon skill is unaffected');
+    // The cost of the fix, stated: a sentence-initial capital now needs a Title Case run OR the
+    // lexicon. `kubernetes` clears it on the lexicon, which is how most real cases clear it.
+    assert.ok(keys.includes('kubernetes'), 'a lexicon skill is admitted from any position');
+  });
+
+  test('the noise vocabulary cannot fire on a requirements sentence', () => {
+    // The safety claim at HEADING_PATTERNS: every pattern there is gated by isHeadingLine, so it
+    // needs a line under 60 chars and 7 words. Requirement prose about the same words is longer.
+    const keys = extractJdTerms(
+      'Requirements\nAbility to explain the interview process to candidates and run background check workflows in Workday\n- Experience with Python\n',
+    ).map((t) => t.term);
+    assert.ok(keys.includes('workday'), 'the requirement below the sentence still scores');
+    assert.ok(keys.includes('python'));
+  });
+});
+
 describe('scorability needs signal, not just a term count', () => {
   test('a posting of company, city and people names is not scorable', () => {
     // Cleared a floor of 6 and produced a confident 0% "Weak match" with Bob Smith, Jane Doe and
