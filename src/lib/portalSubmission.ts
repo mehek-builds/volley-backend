@@ -1576,12 +1576,16 @@ export class CaptchaUnresolvedError extends Error {
   }
 }
 
-/* HANDSHAKE FIRST, because it is the one that matters most here: it is the dominant platform for
-   the students this product is for, and "Submit with your Handshake profile" passed both filters -
-   'submit' was not a handoff verb and Handshake was not a named provider. */
+/* Named providers, used ONLY for the shape that carries no preposition - "Apply LinkedIn". The
+   general "<verb> ... with|using|via <object>" case is handled by THIRD_PARTY_HANDOFF, which does
+   not consult this list: a hard-coded roster of somebody-elses can only ever be incomplete, and
+   relying on it was how "Apply now with Wellfound" became pressable. */
 const PROVIDER = 'handshake|symplicity|linkedin|indeed|seek|glassdoor|ziprecruiter|monster|xing'
   + '|stepstone|google|facebook|github|apple|greenhouse|workday|workable|ashby|smartrecruiters'
   + '|okta|microsoft|sso';
+const HANDOFF_VERB_PROVIDER = new RegExp(
+  `\\b(?:apply|autofill|continue|import)\\s+(?:${PROVIDER})\\b`, 'i',
+);
 
 /* The send-clause is SHARED with APPLICATION_SUBMIT rather than written twice. The two copies had
    already drifted - this one required "send my application" and the other allowed "your", so
@@ -1607,38 +1611,30 @@ const SEND_APPLICATION = '\\bsend\\s+(?:your\\s+|my\\s+|the\\s+)?application\\b'
  * sneak past: it is the shape "<verb> with|using|via <somebody>" that gives these away. */
 const THIRD_PARTY_HANDOFF =
   new RegExp(
-    /* A HANDOFF NEEDS AN OBJECT. Matching "<verb> ... with|using|via" on its own rejected perfectly
-       ordinary buttons - "Submit application with attachments", "Submit with resume attached",
-       "Send application from your profile" - and each false rejection silently turns an autonomous
-       submission into a manual one. None of them appear on the four portals we poll today, so this
-       was latent rather than live, but it is exactly the trap the next portal walks into.
-       So the object has to look like somebody else: a named provider, or "your <something>
-       account/profile", which is how every one of these buttons is actually worded. */
+    /* BROAD ON THE OBJECT, NARROW ON THE EXCEPTION, and that direction is the whole lesson of this
+       branch. An earlier round required the object to be a NAMED provider, which stopped
+       "Submit application with attachments" being rejected - and re-opened the main hole, because
+       every board not on the list walked through: "Apply now with Wellfound", "Apply now with
+       Dice", "Apply now with our partner", "Apply now with Career Services". Worse, "Submit
+       application with our recruiting partner" reached the top tier and OUTRANKED a real submit.
+       A hard-coded list of somebody-elses can only ever be incomplete. A list of the things a
+       button legitimately carries - your own documents - is short and closed. So: any
+       "<verb> ... with|using|via|from <object>" is a handoff UNLESS the object is a document you
+       are attaching. Wrong guesses cost a handoff, never a phantom submission. */
     '\\b(?:apply|submit|send|autofill|sign\\s?in|log\\s?in|continue|register|import)\\b'
-    + '(?:\\s+\\w+){0,2}\\s+(?:with|using|via|from)\\s+'
-    + `(?:(?:the\\s+|your\\s+|our\\s+|my\\s+)?(?:${PROVIDER})\\b|your\\s+\\w+\\s+(?:account|profile))`
+    /* Four words of slack, not two: "Submit your saved candidate profile with Handshake" puts
+       four between the verb and the preposition, and two let it through. */
+    + '(?:\\s+\\w+){0,4}\\s+(?:with|using|via|from)\\s+'
+    + '(?!(?:the\\s+|your\\s+|my\\s+|a\\s+|an\\s+)?'
+    /* BARE possessive only - "your profile", never "your Handshake profile". The article-and-noun
+       form is your own saved details on this same site ("Send application from your profile"); an
+       intervening word is almost always somebody else's name, which is the handoff. */
+    + '(?:attachments?|resumes?|cvs?|cover\\s+letters?|documents?|files?|e-?signature'
+    + '|profiles?|accounts?|saved\\s+(?:details|information))\\b)'
     + '|\\bquick apply\\b|\\bone[-\\s]?click apply\\b|\\bpowered\\s+by\\b',
     'i',
   );
 
-/* A SECOND, BLUNTER TEST, because the verb-shape one is escapable. "Apply now with LinkedIn" is a
-   shipped label variant and the word between the verb and "with" defeated the first pattern - while
-   "apply now" is itself a legitimate submit label, so it sailed through into the eligible pool.
-   Naming the providers outright cannot be worded around: no employer's own submit button carries a
-   job-board's name. */
-/* POSITIONAL, not "anywhere in the label". Several of these words are also employer names, and a
-   button reading "Submit your application to Apple" is a real submit on a real careers page. Only
-   a provider in a HANDOFF position gives the control away: after with/using/via/from, or directly
-   after the verb ("Apply LinkedIn"). Getting this wrong costs an autonomous submission rather than
-   causing a wrong one, but it still costs it. */
-const HANDOFF_PROVIDER = new RegExp(
-  `\\b(?:with|using|via|from)\\s+(?:${PROVIDER})\\b|\\b(?:apply|autofill|continue|import)\\s+(?:${PROVIDER})\\b`,
-  'i',
-);
-
-/* What a real submit control says. "Submit" on its own is the common case; the rest were read off
-   live forms. Bare "Apply" is accepted because some employers do label the final button that way,
-   which is exactly why THIRD_PARTY_HANDOFF has to be checked first rather than instead. */
 /** Names the application outright. The strongest thing a submit control can say. */
 const APPLICATION_SUBMIT = new RegExp(
   `\\bsubmit\\s+(?:your\\s+|my\\s+|the\\s+)?application\\b|${SEND_APPLICATION}`, 'i',
@@ -1663,6 +1659,15 @@ const SUPPORT_WIDGET_NOUN =
  * the word while a support widget includes it.
  */
 function isSupportWidget(label: string): boolean {
+  /* "Submit application feedback" and "Submit application survey" ARE help desks, and blanket-
+     exempting anything containing "application" put them back in the top tier - where, on
+     last-wins, the feedback widget beat the real submit control. A widget noun sitting on the
+     application is the giveaway. */
+  if (/\bapplication\s+(?:feedback|survey|issue|question|review|experience)\b/i.test(label)) return true;
+  if (/\bfeedback\s+on\s+your\s+application\b/i.test(label)) return true;
+  /* Otherwise the word "application" clears it: a help desk never calls the thing an application,
+     and without this every job title carrying one of the nouns ("Submit your application -
+     Contact Center Agent") is falsely rejected. */
   if (/\bapplication\b/i.test(label)) return false;
   return SUPPORT_WIDGET_NOUN.test(label);
 }
@@ -1688,7 +1693,7 @@ export function chooseSubmitControl(labels: string[]): number | null {
     .map((label, index) => ({ label: label.replace(/\s+/g, ' ').trim(), index }))
     .filter(({ label }) => label
       && !THIRD_PARTY_HANDOFF.test(label)
-      && !HANDOFF_PROVIDER.test(label)
+      && !HANDOFF_VERB_PROVIDER.test(label)
       && SUBMIT_LABEL.test(label));
   if (eligible.length === 0) return null;
   /* SUPPORT WIDGETS ARE REMOVED FROM THE WHOLE POOL, not demoted within one tier.
@@ -1865,7 +1870,14 @@ export async function clickFinalSubmit(page: Page): Promise<void> {
       );
     }
     clicked = true;
-    await button.click();
+    /* noWaitAfter, and this is what makes the TimeoutError classification below TRUE rather than
+       merely plausible. By default elementHandle.click() awaits scheduled navigations AFTER
+       dispatching the event, inside the same deadline - and a submit button is precisely an action
+       that navigates. So a slow confirmation page produced a POST-dispatch TimeoutError, which the
+       classification then reported as "nothing was sent": the applicant re-applies and the employer
+       gets a duplicate. With the wait off, a timeout from click() can only be the actionability
+       wait, which is pre-dispatch. The navigation is still awaited immediately below. */
+    await button.click({ noWaitAfter: true });
     await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => undefined);
   } catch (error) {
     if (error instanceof CaptchaUnresolvedError || error instanceof NoSubmitControlError) throw error;

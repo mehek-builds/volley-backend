@@ -904,6 +904,47 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
   }
 }
 
+
+/**
+ * What a failed run tells the applicant, derived rather than written inline.
+ *
+ * EXTRACTED SO IT CAN BE TESTED. This is the user-visible half of the no-submit-control change and
+ * it had no behavioural coverage at all - the only thing watching this file was a test that greps
+ * it as a string, which cannot tell a correct branch from a deleted one. A review pass proved it by
+ * deleting each branch in turn and finding the suite still green.
+ *
+ * THE PRECEDENCE IS THE POINT, and it runs stop-reason first, uncertainty last. `uncertainAfterClaim`
+ * is true on every one of these paths, because the claim is taken at the top of the run - so any
+ * branch that does not outrank it inherits "the submission was attempted and we could not verify
+ * it", which sends someone hunting for a receipt that cannot exist.
+ */
+export function submissionFailureOutcome(input: {
+  captchaStop: 'before_fill' | 'at_submit' | null;
+  noSubmitControl: boolean;
+  uncertainAfterClaim: boolean;
+  externalGate: boolean;
+  currentAttentionReason: string | undefined;
+}): { status: ApplicationReviewState['status']; attentionReason: string | undefined } {
+  const { captchaStop, noSubmitControl, uncertainAfterClaim, externalGate } = input;
+  const status: ApplicationReviewState['status'] = captchaStop || noSubmitControl || uncertainAfterClaim
+    ? 'needs_attention'
+    : externalGate ? 'submit_requested' : 'failed';
+  const attentionReason = captchaStop === 'at_submit'
+    ? 'This company\u2019s application page asks you to prove you are human, and that check is still waiting. Litos filled everything in and stopped there, so nothing has been sent. Open it when you have a minute and finish the last step.'
+    : captchaStop === 'before_fill'
+      ? 'This company asks you to prove you are human before it will take an application, so Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.'
+      : noSubmitControl
+        /* CAUSE-NEUTRAL. NoSubmitControlError is thrown for a multi-step first page, a page that
+           renders nothing in a headless browser, a control relabelled mid-run, and a click that
+           timed out before dispatching - so naming any one cause would be false most of the time.
+           What is always true, and all that matters, is that nothing was sent. */
+        ? 'Litos could not find the button that sends this application, so nothing has been sent and there is no confirmation to look for. Open it when you have a minute and finish it off.'
+        : uncertainAfterClaim
+          ? 'The final submission was attempted, but Litos could not verify the employer confirmation. Check the portal or your email before trying again.'
+          : input.currentAttentionReason ?? undefined;
+  return { status, attentionReason };
+}
+
 async function fail(row: ResumeRow, error: unknown) {
   const latestRows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, row.id)).limit(1);
   const current = latestRows[0] ? readApplicationReview(latestRows[0].spec) : null;
@@ -930,6 +971,11 @@ async function fail(row: ResumeRow, error: unknown) {
      the routine outcome on a multi-step first page, not an edge case. */
   const noSubmitControl = error instanceof NoSubmitControlError;
 
+  const outcome = submissionFailureOutcome({
+    captchaStop, noSubmitControl, uncertainAfterClaim, externalGate,
+    currentAttentionReason: current.attention_reason,
+  });
+
   await writeReview(latestRows[0], nextReview(current, {
     ...(captchaError
       ? beginStall(current, {
@@ -939,26 +985,9 @@ async function fail(row: ResumeRow, error: unknown) {
         source: 'observed',
       })
       : {}),
-    status: captchaStop || noSubmitControl || uncertainAfterClaim
-      ? 'needs_attention'
-      : externalGate ? 'submit_requested' : 'failed',
+    status: outcome.status,
     submission_error: message,
-    attention_reason: captchaStop === 'at_submit'
-      ? 'This company’s application page asks you to prove you are human, and that check is still waiting. Litos filled everything in and stopped there, so nothing has been sent. Open it when you have a minute and finish the last step.'
-      : captchaStop === 'before_fill'
-        // Nothing was filled on this path: the probe stopped the run before it touched the form.
-        // Promising a filled form here would send someone to a blank page.
-        ? 'This company asks you to prove you are human before it will take an application, so Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.'
-        : noSubmitControl
-          /* CAUSE-NEUTRAL on purpose. NoSubmitControlError is thrown for at least three different
-             reasons - a multi-step first page, a page that renders nothing at all in a headless
-             browser, and a control that was relabelled between choosing it and pressing it - so
-             naming any one of them would be false two times in three. The part that is always
-             true, and the part that matters, is that nothing was sent. */
-          ? 'Litos could not find the button that sends this application, so nothing has been sent and there is no confirmation to look for. Open it when you have a minute and finish it off.'
-          : uncertainAfterClaim
-          ? 'The final submission was attempted, but Litos could not verify the employer confirmation. Check the portal or your email before trying again.'
-          : current.attention_reason,
+    attention_reason: outcome.attentionReason,
   }));
 }
 

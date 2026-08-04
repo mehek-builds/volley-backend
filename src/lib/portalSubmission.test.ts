@@ -1127,6 +1127,23 @@ test('a handoff to a platform we do not name by hand is still a handoff', () => 
   }
 });
 
+test('a handoff to a board we never named is still a handoff', () => {
+  /* THE REGRESSION THAT ROUND SIX CAUGHT. An earlier round required the handoff OBJECT to be a
+     provider from a hard-coded list, which let every board not on it through - all of these were
+     pressable. A roster of somebody-elses can only ever be incomplete; the closed set is the short
+     list of things a button legitimately carries, which is your own documents. */
+  for (const label of [
+    'Apply now with Wellfound',
+    'Apply now with Dice',
+    'Apply now with our partner',
+    'Apply now with Career Services',
+    'Apply now with single sign-on',
+    'Submit application with our recruiting partner',
+  ]) {
+    assert.equal(chooseSubmitControl([label]), null, `${label} must not be pressed`);
+  }
+});
+
 test('a provider named far from the verb is still a handoff', () => {
   /* Pins HANDOFF_PROVIDER specifically. Once "submit" became a handoff verb, every provider label
      in the other tests was caught by the verb-shape rule instead, so deleting HANDOFF_PROVIDER left
@@ -1244,4 +1261,23 @@ test('the two application-wordings agree, because they used to be copies that dr
   assert.equal(chooseSubmitControl(['Send your application']), 0);
   assert.equal(chooseSubmitControl(['Send my application']), 0);
   assert.equal(chooseSubmitControl(['Send the application']), 0);
+});
+
+test('a help desk scoped to the application is still a help desk', () => {
+  /* Exempting any label containing "application" put this back: the feedback widget reached the
+     top tier on its prefix and, on last-wins, beat the real submit control. */
+  assert.equal(chooseSubmitControl(['Submit application', 'Submit application feedback']), 0);
+  assert.equal(chooseSubmitControl(['Submit application', 'Submit application survey']), 0);
+  assert.equal(chooseSubmitControl(['Submit application feedback']), null);
+  assert.equal(chooseSubmitControl(['Submit feedback on your application']), null);
+  // And a job title carrying one of the widget nouns is still pressable.
+  assert.equal(chooseSubmitControl(['Submit your application - Contact Center Agent']), 0);
+});
+
+test('your own saved profile is not somebody else’s platform', () => {
+  // The bare possessive is your details on this site; an intervening name is the handoff.
+  assert.notEqual(chooseSubmitControl(['Send application from your profile']), null);
+  assert.notEqual(chooseSubmitControl(['Submit application with your saved details']), null);
+  assert.equal(chooseSubmitControl(['Submit with your Handshake profile']), null);
+  assert.equal(chooseSubmitControl(['Submit your saved candidate profile with Handshake']), null);
 });
