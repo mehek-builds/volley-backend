@@ -100,3 +100,44 @@ describe('the generate route treats warming as optional', () => {
     assert.doesNotMatch(route, /throw.*warmRequirementCache/);
   });
 });
+
+describe('a packet is tailored and scored against the WHOLE posting', () => {
+  const generate = readFileSync(path.join(__dirname, '..', 'routes', 'resume.ts'), 'utf8');
+  const requirements = readFileSync(path.join(__dirname, '..', 'routes', 'jdMatch.ts'), 'utf8');
+
+  /* Found 2026-08-04 on a real packet: spec._review.jd_text was exactly 600 characters, cut
+     mid-word. GET /jobs serves `left(description, 600)` and the dashboard forwarded that preview
+     to /resume/generate, so the RESUME ITSELF was written against six hundred characters of
+     company blurb, and the JD stored beside it was the same truncated text. The requirement
+     breakdown then scored zero clauses on it, correctly, because the requirements section had been
+     cut away before the JD ever arrived. */
+
+  test('generate resolves the full description from job_id', () => {
+    assert.match(generate, /left\(\$\{monitored_jobs\.description\}, 60000\)/);
+    assert.match(generate, /if \(row\?\.description && row\.description\.length > jdText\.length\) jdText = row\.description;/);
+  });
+
+  test('generate uses the resolved text everywhere, not the body field', () => {
+    // A single surviving body.jd_text would tailor against the preview while storing the full
+    // text, or the reverse, which is harder to notice than either being wrong on its own.
+    const handler = generate.slice(generate.indexOf("fastify.post('/resume/generate'"));
+    // Exactly one mention survives, the resolver's own seed. Counting rather than banning, because
+    // banning outright would fail on the correct code and invite someone to delete the resolver.
+    const uses = handler.match(/\bbody\.jd_text\b/g) ?? [];
+    assert.equal(uses.length, 1, `body.jd_text should only seed jdText, found ${uses.length}`);
+    assert.match(handler, /let jdText = body\.jd_text;/);
+  });
+
+  test('a caller that holds more text than we do still wins', () => {
+    // The extension and hand-typed links send a JD we have no row for. Overwriting those with a
+    // shorter stored copy would be the same defect pointed the other way.
+    assert.match(generate, /row\.description\.length > jdText\.length/);
+    assert.match(requirements, /posting\.description\.length > sent\.length/);
+  });
+
+  test('the breakdown repairs packets that already stored a preview', () => {
+    // Without this, every packet built before the fix stays unscoreable forever, because its
+    // stored jd_text is 600 characters and no migration rewrites it.
+    assert.match(requirements, /posting\?\.description && posting\.description\.length > sent\.length/);
+  });
+});

@@ -1,10 +1,10 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { eq, desc } from 'drizzle-orm';
+import { eq, desc, sql } from 'drizzle-orm';
 import { createHash, randomUUID } from 'node:crypto';
 import { put } from '@vercel/blob';
 import { db } from '../db/index';
-import { profiles, generated_resumes, autofill_events } from '../db/schema';
+import { profiles, generated_resumes, autofill_events, monitored_jobs } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { readExperienceBank } from '../db/experienceBank';
 import { allowHourly, claimCounterSlot, getCount, getEntitlements, LIMITS, monthPeriod, quotaExceededPayload, rateLimitedReply, releaseCounterSlot } from '../middleware/quota';
@@ -190,6 +190,34 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       return reply.status(400).send({ error: 'Invalid request body', detail });
     }
 
+    /* THE POSTING, IN FULL, and not the preview the caller almost certainly sent.
+     *
+     * GET /jobs serves `left(description, 600)`, a preview sized for a list row, and the dashboard
+     * hands that straight to this route as jd_text. So every packet built from the job list was
+     * tailored to six hundred characters of company blurb and then STORED that as the JD it was
+     * tailored against, which is worse than a wrong score: the resume itself was written for text
+     * the employer's requirements were not in.
+     *
+     * Found 2026-08-04 on a real packet: spec._review.jd_text was exactly 600 characters and cut
+     * mid-word, and the requirement breakdown built from it scored zero clauses because the
+     * requirements section had been truncated away before the JD ever arrived.
+     *
+     * Fixed HERE rather than in the client, because the extension and any hand-typed link reach
+     * this route too, and only the server can turn a job_id into the row. A caller with no job_id
+     * still supplies its own text and is unaffected.
+     */
+    let jdText = body.jd_text;
+    if (body.job_id) {
+      const [row] = await db
+        .select({ description: sql<string>`left(${monitored_jobs.description}, 60000)` })
+        .from(monitored_jobs)
+        .where(eq(monitored_jobs.id, body.job_id))
+        .limit(1);
+      // Only when the row actually has MORE than the caller sent. A posting we hold a shorter copy
+      // of must not overwrite a full JD someone pasted in.
+      if (row?.description && row.description.length > jdText.length) jdText = row.description;
+    }
+
     // Resume-gen + autofill is available on every tier (2026-07-02 decision): free gets
     // 20/month that resets like contacts/drafts (Apollo.io-style recurring credits, not a
     // one-time lifetime trial - keeps free students returning monthly). Pro/trial gets
@@ -288,7 +316,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
             if (budget < MIN_CALL_BUDGET_MS) break;
             try {
               const generated = await generateResumeSpec(
-                body.jd_text,
+                jdText,
                 body.company,
                 body.role,
                 bank,
@@ -303,7 +331,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
                 baseSpec,
                 priorityEntry,
               );
-              return applyResumePolicy(generated, education, bank, body.jd_text, { targetRole: body.role }).spec;
+              return applyResumePolicy(generated, education, bank, jdText, { targetRole: body.role }).spec;
             } catch (err) {
               lastErr = err;
               if (!isTransientOverload(err)) throw err;
@@ -350,7 +378,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         continue;
       }
 
-      const result = validateResumeSpec(spec, body.jd_text, bank, declaredSkills, education, body.role);
+      const result = validateResumeSpec(spec, jdText, bank, declaredSkills, education, body.role);
       const typographyIssues = findResumeTypographyIssues(spec, body.contact);
       specIssues = [...result.issues, ...typographyIssues];
       if (priorityEntry) specIssues.push(...baseResumeSelectionIssues(spec, [priorityEntry]));
@@ -405,7 +433,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     let visualWarnings: string[];
     let visualIssues: string[];
     try {
-      const rendered = await renderResumePdf(spec, body.contact, body.jd_text);
+      const rendered = await renderResumePdf(spec, body.contact, jdText);
       pdfBuffer = rendered.buffer;
       spec = rendered.spec;
       trimmedForFit = rendered.trimmed;
@@ -427,7 +455,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     // had NEVER run and its empty issues array read downstream as a clean pass.
     const finalSpecValidation = validateResumeSpec(
       spec,
-      body.jd_text,
+      jdText,
       bank,
       declaredSkills,
       education,
@@ -519,7 +547,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       },
     });
 
-    const jdHash = createHash('sha256').update(body.jd_text).digest('hex').slice(0, 16);
+    const jdHash = createHash('sha256').update(jdText).digest('hex').slice(0, 16);
     const requestedKey = `users/${userId}/resumes/${jdHash}-${Date.now()}.pdf`;
 
     const reservedCount = await claimCounterSlot(userId, period, 'resumes', ent.monthlyResumes);
@@ -570,7 +598,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     const now = new Date().toISOString();
 
     const applicationReview = {
-      jd_text: body.jd_text,
+      jd_text: jdText,
       role: body.role,
       ...(body.application ? {
         portal_url: body.application.portal_url,
@@ -630,7 +658,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
      * cold and the student pays for the judgement on open, which is exactly today's behaviour.
      * It can never fail a generation, and it writes nothing the review screen would not have. */
     const warm = await warmRequirementCache(
-      body.jd_text,
+      jdText,
       {
         degree: storedSpec.degree,
         school: storedSpec.school,

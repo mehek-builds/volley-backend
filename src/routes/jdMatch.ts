@@ -222,7 +222,20 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
     if (!spec) return reply.status(404).send({ error: 'No main resume yet' });
 
     const posting = await postingRow(parsed.data.job_context?.job_id);
-    const jdText = parsed.data.jd_text ?? posting?.description ?? '';
+    /* THE LONGER OF THE TWO, not simply the caller's.
+     *
+     * Every packet built before 2026-08-04 stored `left(description, 600)` in _review.jd_text,
+     * because the dashboard forwarded the list preview to /resume/generate. Those packets are on
+     * disk and their stored JD is truncated mid-word, so a review screen that trusted the caller's
+     * text scored ZERO clauses on them: the requirements section had been cut away before the JD
+     * was ever saved. Measured on a real packet, 600 characters ending "high-growth enterprise
+     * technology comp".
+     *
+     * Preferring the longer text repairs those packets without a migration, and still lets a caller
+     * who genuinely holds more than we do win, which is the case the caller-first rule existed for. */
+    const sent = parsed.data.jd_text ?? '';
+    const jdText =
+      posting?.description && posting.description.length > sent.length ? posting.description : sent;
     if (!jdText) {
       return reply
         .status(400)
