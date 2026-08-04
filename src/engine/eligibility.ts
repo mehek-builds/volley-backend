@@ -58,8 +58,20 @@ const SEASON_YEAR = new RegExp(
  */
 export function parseTerm(title: string, description?: string | null): Term | null {
   for (const source of [title, description ?? '']) {
-    const m = source.match(SEASON_YEAR);
-    if (!m) continue;
+    const all = [...source.matchAll(new RegExp(SEASON_YEAR, 'gi'))];
+    if (all.length === 0) continue;
+
+    /* TWO TERMS IN ONE TITLE IS NOT A TERM, it is a question.
+       Taking the first match is a coin flip on which one the posting is FOR:
+       "Intern (Fall 2026 cohort, Summer 2027 start)" is a Summer 2027 role that reads as Fall 2026.
+       Guessing wrong in one direction merely fails to block, which is survivable. Guessing wrong in
+       the other - picking a term that starts LATER than the real one - blocks a student who is
+       eligible, and this gate hides with nothing on screen to say so. Unknown is the only honest
+       answer when the title names two, and it never blocks. */
+    const distinct = new Set(all.map((m) => `${m[1].toLowerCase()} ${m[2]}`));
+    if (distinct.size > 1) continue;
+
+    const m = all[0];
     const season = m[1].toLowerCase();
     const year = Number(m[2]);
     const s = SEASONS[season];

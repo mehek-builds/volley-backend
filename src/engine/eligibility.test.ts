@@ -76,6 +76,20 @@ describe('reading the term', () => {
     assert.equal(decide(intern('Intern, Winter 2026'), 'January 2027').verdict, 'unknown');
   });
 
+  test('a title naming two terms yields no term at all', () => {
+    /* "Fall 2026 cohort, Summer 2027 start" is a Summer 2027 role. First-match-wins read it as
+       Fall 2026, and a first match that starts LATER than the real term blocks a student who is
+       eligible - the one direction a silent hard filter must never fail in. */
+    assert.equal(parseTerm('Intern (Fall 2026 cohort, Summer 2027 start)'), null);
+    assert.equal(parseTerm('Summer 2027 Internship - applications close Fall 2026'), null);
+    assert.ok(!isBlocked(decide(intern('Intern (Fall 2026 cohort, Summer 2027 start)'), 'December 2026')));
+  });
+
+  test('the same term repeated is still that term', () => {
+    // Only DISTINCT terms are ambiguous. A title that says it twice is not confused.
+    assert.equal(parseTerm('Summer 2027 Intern - Summer 2027 cohort')?.label, 'Summer 2027');
+  });
+
   test('no season, no term', () => {
     assert.equal(parseTerm('Software Engineer Intern 2027'), null, 'a bare year is not a term');
   });
