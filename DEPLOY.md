@@ -144,6 +144,78 @@ Click Deploy. Then verify:
 curl https://<your-app>.vercel.app/health      # -> {"status":"ok",...}
 ```
 
+## Shipping a change
+
+**Merging to `main` deploys production.** The Vercel project is connected to
+`mehek-builds/volley-backend` with `main` as the production branch, so a merged PR builds and
+promotes on its own. Nothing needs to be run by hand.
+
+That connection was missing between an unknown date and 2026-08-04: the project's `link` was
+`null`, so pushes to `main` deployed nothing and production silently sat on whatever commit was
+last pushed with `vercel deploy --prod`. PRs #151 and #153 both merged without shipping. If a merge
+ever stops deploying again, check the link first, because the symptom is silence rather than a
+failure:
+
+```bash
+vercel git connect          # from a checkout whose origin is the GitHub repo
+```
+
+**Always confirm what actually shipped.** `/health` returns the deployed commit, so compare it to
+the merge commit rather than assuming the deploy landed:
+
+```bash
+curl -s https://student-outreach-backend.vercel.app/health | jq -r .revision
+git rev-parse origin/main
+```
+
+To deploy by hand anyway (a rollback, or a hotfix that must not wait for review), use a throwaway
+clone so your own working tree, which is often on another branch with uncommitted work, is left
+alone. Copy `.vercel/project.json` into it, and **not** `.env.production.local`:
+
+```bash
+git clone https://github.com/mehek-builds/volley-backend.git /tmp/ship && cd /tmp/ship
+mkdir -p .vercel && cp <repo>/.vercel/project.json .vercel/
+vercel deploy --prod
+```
+
+## How the database TLS config actually resolves
+
+Worth reading before touching `DATABASE_URL` or the `ssl` option, because the precedence is the
+opposite of what the code looks like.
+
+`src/db/index.ts` passes **both** a `connectionString` and `ssl: { rejectUnauthorized: false }`. pg
+resolves those with `Object.assign({}, config, parse(config.connectionString))`
+(`connection-parameters.js:58`), so the **connection string wins** and the explicit option is a
+fallback, not an override. Resolved config as it reaches `tls.connect`:
+
+| `DATABASE_URL` | resolved `ssl` | certificate verified? |
+|---|---|---|
+| `?sslmode=require` | `{}` | **yes** (Node defaults `rejectUnauthorized` to true) |
+| `?sslmode=verify-full` | `{}` | **yes**, identical |
+| no `sslmode` | `{ rejectUnauthorized: false }` | **no** |
+
+So a Neon URL, which always carries `sslmode=require`, verifies the certificate today. Keep it that
+way: **removing `sslmode` from `DATABASE_URL` silently turns verification off**, because that is
+what makes the `rejectUnauthorized: false` fallback apply.
+
+`normalizeSslMode` rewrites `require`/`prefer`/`verify-ca` to `verify-full` before pg parses the
+URL. pg already treats them as aliases for `verify-full`, so the resolved config is byte-identical;
+the only difference is that pg stops writing a deprecation warning to stderr on every cold start
+(59 occurrences across 7 users, and the project's only runtime error group). This is the fix the
+warning itself recommends.
+
+An earlier version of this section, and of the code, claimed the explicit `ssl` option won and
+therefore **deleted** `sslmode`. That was backwards, and it would have ended certificate
+verification on every production connection. `src/db/index.test.ts` now asserts on
+`ConnectionParameters` (what pg derives) rather than on `pool.options` (what you passed in), which
+is the difference between a test with teeth and a tautology.
+
+**The residual, stated rather than hidden:** the `ssl: { rejectUnauthorized: false }` fallback is
+dead for any URL carrying an `sslmode` and live for one without. Deleting it outright would drop
+TLS entirely on a URL with no `sslmode`, so it stays. Tightening that asymmetry means requiring
+`sslmode=verify-full` in the environment and removing the option, which cannot be tested from a
+laptop against the production database. Do it deliberately, against a Neon branch first.
+
 ## Point the extension at the deployed backend
 In `student-outreach-extension`, create `.env` with:
 

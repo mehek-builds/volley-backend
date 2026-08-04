@@ -50,7 +50,7 @@
     "build": "tsc -p tsconfig.build.json",
     "build:smoke": "npm run build && node -e \"require('./dist/lib/emailVerification.js'); require('./dist/lib/composioApi.js')\"",
     "start": "node dist/index.js",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.api.json",
     "test": "node --import tsx --test 'src/**/*.test.ts'",
     "test:e2e": "tsx e2e/applied-badge.e2e.mts && tsx e2e/grouped-inventory.e2e.mts",
     "db:generate": "drizzle-kit generate",
