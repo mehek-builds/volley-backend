@@ -1869,15 +1869,24 @@ export async function clickFinalSubmit(page: Page): Promise<void> {
         `The submit button changed to "${finalLabel}" before it could be pressed`,
       );
     }
+    /* THE BARRIER IS ARMED BEFORE THE CLICK, and that ordering is the whole reason this exists.
+       noWaitAfter (below) is what makes "a TimeoutError from click() is pre-dispatch" true rather
+       than merely plausible - by default click() awaits scheduled navigations after dispatching,
+       inside the same deadline, so a slow confirmation page produced a POST-dispatch timeout that
+       got reported as "nothing was sent", and the applicant re-applied into a duplicate.
+       But turning that wait off ALSO removes the barrier Playwright had armed before dispatch, and
+       without it waitForLoadState resolves against the document we are still standing on: measured
+       on an ATS-shaped form, 10 of 15 runs then read the open form rather than the confirmation,
+       readReceipt threw, and a genuinely submitted application was reported as unverified. So the
+       navigation promise is created HERE, before anything is pressed, and awaited after.
+       Five seconds, not twenty: a portal that submits over XHR never navigates at all, and that
+       path should not pay a twenty-second wait for a navigation that is never coming. */
+    const navigation = page
+      .waitForNavigation({ waitUntil: 'networkidle', timeout: 5_000 })
+      .catch(() => undefined);
     clicked = true;
-    /* noWaitAfter, and this is what makes the TimeoutError classification below TRUE rather than
-       merely plausible. By default elementHandle.click() awaits scheduled navigations AFTER
-       dispatching the event, inside the same deadline - and a submit button is precisely an action
-       that navigates. So a slow confirmation page produced a POST-dispatch TimeoutError, which the
-       classification then reported as "nothing was sent": the applicant re-applies and the employer
-       gets a duplicate. With the wait off, a timeout from click() can only be the actionability
-       wait, which is pre-dispatch. The navigation is still awaited immediately below. */
     await button.click({ noWaitAfter: true });
+    await navigation;
     await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => undefined);
   } catch (error) {
     if (error instanceof CaptchaUnresolvedError || error instanceof NoSubmitControlError) throw error;
@@ -1888,10 +1897,16 @@ export async function clickFinalSubmit(page: Page): Promise<void> {
        Treating it as "maybe sent" tells the applicant to go looking for a confirmation that cannot
        exist, which is the exact harm this whole change exists to remove. A non-timeout failure
        after the click genuinely might have sent, and stays on the uncertain branch. */
-    const timedOut = (error as Error)?.name === 'TimeoutError';
-    if (!clicked || timedOut) {
+    /* A detached, invisible or disabled element throws a PLAIN Error, not a TimeoutError, and it is
+       just as provably pre-dispatch: Playwright reports "Element is not attached to the DOM" from
+       the actionability check, before any event is sent. That is the SPA-re-render case the retry
+       above exists for, and Ashby and Workable are both React. */
+    const message = (error as Error)?.message ?? '';
+    const preDispatch = (error as Error)?.name === 'TimeoutError'
+      || /not attached to the DOM|Element is not visible|Element is not enabled/i.test(message);
+    if (!clicked || preDispatch) {
       throw new NoSubmitControlError(
-        `Litos could not press the submit button: ${(error as Error)?.message ?? 'unknown error'}`,
+        `Litos could not press the submit button: ${message || 'unknown error'}`,
       );
     }
     throw error;

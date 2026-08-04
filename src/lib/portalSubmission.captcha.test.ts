@@ -232,6 +232,7 @@ test('the final click guard does not click while any widget is unresolved', asyn
       if (selector === SUBMIT_CANDIDATE_SELECTOR) return button;
       return challengeLocator;
     },
+    waitForNavigation: async () => undefined,
     waitForLoadState: async () => undefined,
     waitForTimeout: async () => undefined,
   } as unknown as Page;
@@ -247,6 +248,7 @@ test('the final click still happens on a page with no challenge', async () => {
     locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
       ? button
       : { count: async () => 0, nth: () => ({}) }),
+    waitForNavigation: async () => undefined,
     waitForLoadState: async () => undefined,
     waitForTimeout: async () => undefined,
   } as unknown as Page;
@@ -482,6 +484,7 @@ test('the submit guard carries the provider it saw while the page was open', asy
       };
     },
 
+    waitForNavigation: async () => undefined,
     waitForLoadState: async () => undefined,
     waitForTimeout: async () => undefined,
   } as unknown as Page;
@@ -527,6 +530,7 @@ test('the control that gets pressed is the one that was chosen, not an ordinal',
     locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
       ? buttons
       : { count: async () => 0, nth: () => ({}) }),
+    waitForNavigation: async () => undefined,
     waitForLoadState: async () => undefined,
     waitForTimeout: async () => undefined,
   } as unknown as Page;
@@ -543,6 +547,7 @@ test('a page offering only handoffs reports that nothing was sent', async () => 
     locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
       ? buttons
       : { count: async () => 0, nth: () => ({}) }),
+    waitForNavigation: async () => undefined,
     waitForLoadState: async () => undefined,
     waitForTimeout: async () => undefined,
   } as unknown as Page;
@@ -579,6 +584,7 @@ test('a click that times out reports that nothing was sent', async () => {
     locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
       ? buttons
       : { count: async () => 0, nth: () => ({}) }),
+    waitForNavigation: async () => undefined,
     waitForLoadState: async () => undefined,
     waitForTimeout: async () => undefined,
   } as unknown as Page;
@@ -591,6 +597,7 @@ test('a pre-click failure is not reported as a submission that may have happened
     locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
       ? { elementHandles: async () => { throw new Error('Execution context was destroyed'); } }
       : { count: async () => 0, nth: () => ({}) }),
+    waitForNavigation: async () => undefined,
     waitForLoadState: async () => undefined,
     waitForTimeout: async () => undefined,
   } as unknown as Page;
@@ -625,10 +632,79 @@ test('a control relabelled between choosing it and pressing it is not pressed', 
     locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
       ? buttons
       : { count: async () => 0, nth: () => ({}) }),
+    waitForNavigation: async () => undefined,
     waitForLoadState: async () => undefined,
     waitForTimeout: async () => undefined,
   } as unknown as Page;
 
   await assert.rejects(clickFinalSubmit(page), NoSubmitControlError);
   assert.equal(clicked, false, 'the relabelled control must not be pressed');
+});
+
+test('the navigation barrier is armed before the click, not after it', async () => {
+  /* THE PASS-SEVEN DEFECT. noWaitAfter removes the barrier Playwright arms before dispatch, so a
+     waitForNavigation created AFTER the click races the navigation it is meant to catch and
+     waitForLoadState resolves against the page we are still standing on - readReceipt then reads
+     the open form, throws, and a genuinely submitted application is reported as unverified.
+     Measured 10 of 15 stale reads before this fix. The order is the fix, so the order is the test. */
+  const order: string[] = [];
+  const buttons = {
+    elementHandles: async () => [{
+      evaluate: async (fn: (n: unknown) => string) => fn({
+        innerText: 'Submit application', disabled: false, tagName: 'BUTTON', type: '', value: '',
+        title: '', getAttribute: () => null, getClientRects: () => ({ length: 1 }),
+        parentElement: null,
+        ownerDocument: {
+          defaultView: { getComputedStyle: () => ({ visibility: 'visible' }) },
+          getElementById: () => null,
+        },
+      }),
+      click: async () => { order.push('click'); },
+      dispose: async () => undefined,
+    }],
+  };
+  const page = {
+    locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
+      ? buttons
+      : { count: async () => 0, nth: () => ({}) }),
+    waitForNavigation: async () => { order.push('waitForNavigation'); },
+    waitForLoadState: async () => { order.push('waitForLoadState'); },
+    waitForTimeout: async () => undefined,
+  } as unknown as Page;
+
+  await clickFinalSubmit(page);
+  assert.equal(order[0], 'waitForNavigation',
+    'the navigation promise must be created before the click is dispatched');
+  assert.deepEqual(order, ['waitForNavigation', 'click', 'waitForLoadState']);
+});
+
+test('a detached element is pre-dispatch too, and says nothing was sent', async () => {
+  /* Playwright throws a PLAIN Error for this, not a TimeoutError, so the name check alone let it
+     inherit "the submission was attempted... check your email". It is the SPA-re-render case. */
+  const detached = new Error('elementHandle.click: Element is not attached to the DOM');
+  const buttons = {
+    elementHandles: async () => [{
+      evaluate: async (fn: (n: unknown) => string) => fn({
+        innerText: 'Submit application', disabled: false, tagName: 'BUTTON', type: '', value: '',
+        title: '', getAttribute: () => null, getClientRects: () => ({ length: 1 }),
+        parentElement: null,
+        ownerDocument: {
+          defaultView: { getComputedStyle: () => ({ visibility: 'visible' }) },
+          getElementById: () => null,
+        },
+      }),
+      click: async () => { throw detached; },
+      dispose: async () => undefined,
+    }],
+  };
+  const page = {
+    locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
+      ? buttons
+      : { count: async () => 0, nth: () => ({}) }),
+    waitForNavigation: async () => undefined,
+    waitForLoadState: async () => undefined,
+    waitForTimeout: async () => undefined,
+  } as unknown as Page;
+
+  await assert.rejects(clickFinalSubmit(page), NoSubmitControlError);
 });
