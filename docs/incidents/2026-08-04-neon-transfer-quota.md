@@ -40,12 +40,18 @@ Taken from the live database on 2026-08-04, after recovery:
 
 | Fact | Value |
 | --- | --- |
-| `monitored_jobs` total size | 216 MB |
+| `monitored_jobs` total size on disk | 216 MB |
 | Live rows | 23,561 |
-| `description` column | **84 MB, 67.6% of all row bytes** |
-| Average description | 3,728 bytes |
-| Largest description | 10,183 bytes |
+| `description` column on disk | **84 MB, 67.6% of all row bytes** |
+| Average description, **characters** | **6,181** |
+| Average description, on-disk bytes | 3,728 (1.66x TOAST compression) |
+| Largest description | 18,198 characters |
 | Sequential tuples read (lifetime) | 444,057,781 |
+
+**Price transfer in characters, not on-disk bytes.** `pg_column_size` reports the compressed size
+Postgres stores; a query returns decompressed text, so the wire carries the character count. Reading
+the whole column once transfers about 145 MB, not the 84 MB it occupies. Quoting the on-disk figure
+understates transfer by 1.66x, and this note did exactly that in its first draft.
 
 **`description` is the transfer bill.** Any code path that reads that column for many rows is the
 thing that matters; everything else on the row is rounding error.

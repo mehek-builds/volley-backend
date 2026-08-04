@@ -90,12 +90,17 @@ describe('Neon data transfer budget', () => {
   });
 
   test('description is the bill, so its caps are the ones that matter', () => {
-    // Measured on the live table: 84 MB of description in a 216 MB table. Any path that reads this
-    // column for many rows is the egress bill, whatever else the query does.
+    // Measured on the live table: 84 MB of description in a 216 MB table on disk. Any path that
+    // reads this column for many rows is the egress bill, whatever else the query does. Note the
+    // wire cost is the CHARACTER count, 1.66x the compressed on-disk size.
     assert.ok(OBSERVED.descriptionShareOfRowBytes > 0.6);
+    assert.ok(
+      OBSERVED.avgDescriptionChars > OBSERVED.avgDescriptionOnDiskBytes,
+      'transfer is priced in characters, which must exceed the compressed on-disk size',
+    );
     // Reading the column uncapped for the scoring pool, rather than a bounded slice, is the shape
     // that has to stay impossible.
-    const uncapped = worstCaseRankedLoadBytes({ ...shape, scoringChars: OBSERVED.avgDescriptionBytes * 3 });
+    const uncapped = worstCaseRankedLoadBytes({ ...shape, scoringChars: OBSERVED.avgDescriptionChars * 2 });
     assert.ok(uncapped > MAX_COLD_LOAD_BYTES, 'an uncapped scoring read must not fit the budget');
   });
 

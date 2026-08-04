@@ -13,9 +13,12 @@
  * has the same shape, the same plan, the same tests, and the same response. The cost lands on an
  * invoice and then, once, as a total outage. Measured on the live table the day it happened:
  *
- *   monitored_jobs          216 MB total, 23,561 rows
- *   description column       84 MB, which is 67.6% of all row bytes
- *   average description    3,728 bytes, largest 10,183
+ *   monitored_jobs          216 MB on disk, 23,561 rows
+ *   description column       84 MB on disk, which is 67.6% of all row bytes
+ *   average description    6,181 CHARACTERS (3,728 bytes on disk, 1.66x compression)
+ *
+ * Read the whole column once and it transfers ~145 MB, not the 84 MB it occupies: TOAST compresses
+ * at rest, the wire carries decompressed text.
  *
  * So `description` IS the egress bill. Any code path that reads it for many rows is the thing to
  * watch, and the caps that bound those paths are one-character edits.
@@ -49,11 +52,22 @@ export const NEON_MONTHLY_TRANSFER = {
   scale: 500 * GB,
 } as const;
 
-/** Measured on the live table on 2026-08-04. Used to price a read of the description column. */
+/**
+ * Measured on the live table on 2026-08-04.
+ *
+ * CHARACTERS, NOT ON-DISK BYTES, and the difference is the whole point. `pg_column_size` reports the
+ * TOAST-compressed size Postgres stores (3,728 bytes average). A query returns the decompressed
+ * text, so what crosses the wire is the character count: 6,181 average, 1.66x larger. Pricing
+ * transfer off the on-disk figure understates it by that factor, which is exactly the mistake this
+ * file exists to stop people making.
+ */
 export const OBSERVED = {
   rows: 23_561,
-  avgDescriptionBytes: 3_728,
-  maxDescriptionBytes: 10_183,
+  /** What a read of the whole column actually transfers, per row. */
+  avgDescriptionChars: 6_181,
+  maxDescriptionChars: 18_198,
+  /** What Postgres stores per row after compression. NOT the transfer cost. */
+  avgDescriptionOnDiskBytes: 3_728,
   descriptionShareOfRowBytes: 0.676,
 } as const;
 
