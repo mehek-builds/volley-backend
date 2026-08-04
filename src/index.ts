@@ -167,6 +167,39 @@ export async function buildApp(options: BuildAppOptions = {}) {
       product: PRODUCT_NAME,
       api_version: API_VERSION,
       revision: process.env.VERCEL_GIT_COMMIT_SHA || process.env.GIT_SHA || null,
+      // WHAT ACTUALLY SHIPPED, when `revision` cannot say.
+      //
+      // DEPLOY.md tells you to confirm a deploy by comparing `revision` to the merge commit, and
+      // on 2026-08-04 that check returned null for a deployment that was READY, correct, and
+      // holding the production alias. Confirming what was actually live took three Vercel API
+      // calls. A verification step that returns null instead of failing loudly is the shape of
+      // check that gets trusted right up until it matters.
+      //
+      // WHAT WAS ACTUALLY OBSERVED, stated narrowly because the first version of this comment
+      // overstated it as "CLI deploys do not set VERCEL_GIT_COMMIT_SHA" and that is not what the
+      // evidence shows. Two deployments that afternoon, BOTH `source: cli`:
+      //
+      //   dpl_6iZqda…  ready 09:39:57  meta carried `githubCommitSha`
+      //   dpl_6f7kQzx  ready 09:44:37  meta carried `gitCommitSha`   <- this one served null
+      //
+      // The alias moved to the second before the first was ever polled, so the null belongs to the
+      // deployment whose git metadata arrived WITHOUT the GitHub link, and the first one's
+      // behaviour was never measured. Whether the deciding factor is the metadata shape, the
+      // absence of a linked repo at deploy time, or something else is NOT established here.
+      //
+      // Which is the argument for this field rather than against it: the condition that empties
+      // `revision` is not understood well enough to predict, so the runbook needs an identifier
+      // that does not depend on understanding it.
+      //
+      // VERCEL_DEPLOYMENT_ID is the primary because it is the id every Vercel surface keys on, so
+      // it resolves straight to a deployment and through it to a commit. VERCEL_URL is the fallback
+      // because it is the older variable and is set on every deployment that has ever existed; it
+      // carries the same identity in a hostname. Both are absent locally, where `null` is correct.
+      //
+      // NOT A REPLACEMENT FOR `revision`, which stays the first thing to read: a SHA is comparable
+      // to `git rev-parse origin/main` without leaving the terminal, and a build id is not. This is
+      // what makes the runbook work when the SHA is missing, not a reason to stop publishing it.
+      build: process.env.VERCEL_DEPLOYMENT_ID || process.env.VERCEL_URL || null,
       ts: new Date().toISOString(),
     });
   });

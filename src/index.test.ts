@@ -73,6 +73,71 @@ test('/health identifies the deployable service and revision contract', async ()
   assert.equal(body.product, 'Litos');
   assert.equal(body.api_version, '1');
   assert.ok(Object.hasOwn(body, 'revision'));
+  // `build` is what makes the DEPLOY.md check work on a CLI deploy, where VERCEL_GIT_COMMIT_SHA is
+  // not set and `revision` is null. The key must always be present for the runbook to rely on it.
+  assert.ok(Object.hasOwn(body, 'build'));
+});
+
+test('/health identifies the build even when no git SHA is exposed', async () => {
+  // The exact production shape this exists for: a `vercel deploy --prod` sets VERCEL_DEPLOYMENT_ID
+  // but not VERCEL_GIT_COMMIT_SHA, and on 2026-08-04 that made /health report `revision: null` for
+  // a deployment that was live and correct. Confirming what shipped took three Vercel API calls.
+  const saved = {
+    sha: process.env.VERCEL_GIT_COMMIT_SHA,
+    gitSha: process.env.GIT_SHA,
+    id: process.env.VERCEL_DEPLOYMENT_ID,
+    url: process.env.VERCEL_URL,
+  };
+  delete process.env.VERCEL_GIT_COMMIT_SHA;
+  delete process.env.GIT_SHA;
+  // VERCEL_URL is deleted too, or this passes for the wrong reason. It is unset on a dev box and
+  // in CI, so leaving it alone made `build` resolve to the same value through EITHER operand, and
+  // reversing the order in index.ts kept the whole suite green. The order is the one non-obvious
+  // decision in that line, so it is the one thing that has to be pinned.
+  delete process.env.VERCEL_URL;
+  process.env.VERCEL_DEPLOYMENT_ID = 'dpl_test123';
+  process.env.VERCEL_URL = 'litos-should-not-win-team.vercel.app';
+  try {
+    const { buildApp } = await import('./index');
+    const app = await buildApp();
+    const body = (await app.inject({ method: 'GET', url: '/health' })).json();
+    assert.equal(body.revision, null, 'this is the case where the SHA is genuinely unavailable');
+    assert.equal(
+      body.build,
+      'dpl_test123',
+      'the deployment id wins over VERCEL_URL: reversing the operands must fail here',
+    );
+    await app.close();
+  } finally {
+    for (const [k, v] of [
+      ['VERCEL_GIT_COMMIT_SHA', saved.sha],
+      ['GIT_SHA', saved.gitSha],
+      ['VERCEL_DEPLOYMENT_ID', saved.id],
+      ['VERCEL_URL', saved.url],
+    ] as Array<[string, string | undefined]>) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});
+
+test('the deployment URL carries the identity when only the older variable is set', async () => {
+  // VERCEL_URL predates VERCEL_DEPLOYMENT_ID and is set on every deployment, so it is the fallback
+  // rather than an equal: it holds the same identity in a hostname.
+  const saved = { id: process.env.VERCEL_DEPLOYMENT_ID, url: process.env.VERCEL_URL };
+  delete process.env.VERCEL_DEPLOYMENT_ID;
+  process.env.VERCEL_URL = 'litos-abc123-team.vercel.app';
+  try {
+    const { buildApp } = await import('./index');
+    const app = await buildApp();
+    assert.equal((await app.inject({ method: 'GET', url: '/health' })).json().build, 'litos-abc123-team.vercel.app');
+    await app.close();
+  } finally {
+    if (saved.id === undefined) delete process.env.VERCEL_DEPLOYMENT_ID;
+    else process.env.VERCEL_DEPLOYMENT_ID = saved.id;
+    if (saved.url === undefined) delete process.env.VERCEL_URL;
+    else process.env.VERCEL_URL = saved.url;
+  }
 });
 
 test('front-door limiter isolates clients and emits standard retry metadata', async () => {
