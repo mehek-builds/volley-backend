@@ -1877,7 +1877,13 @@ describe('one product spelled two ways is one requirement', () => {
     const bare = scoreJdMatch('Excel, Docker, Git and Linux.', jd).score;
     const vendor = scoreJdMatch('Microsoft Excel, Docker, Git and Linux.', jd).score;
     assert.equal(bare, vendor, 'the two spellings of one product cannot score differently');
-    assert.equal(bare, 100, 'covering the product once covers the requirement');
+    // "Nothing is left unmet", not "the score is 100". The claim this test exists to make is about
+    // the MERGE: that one spelling settles the requirement and leaves no residue on the gap list.
+    // The missing list states that directly. A score of 100 states it only indirectly, via whatever
+    // arithmetic currently turns coverage into a number, so it is the weaker way to write the same
+    // claim and it goes stale the moment that arithmetic is revisited.
+    assert.deepEqual(scoreJdMatch('Excel, Docker, Git and Linux.', jd).missing, [],
+      'covering the product once covers the requirement');
   });
 });
 
@@ -1989,9 +1995,13 @@ describe('the lexicon is honest about what it covers', () => {
       [],
       'a day of the week is a condition of the job, never a requirement to have met',
     );
-    assert.equal(
-      scoreJdMatch('Docker, Git, Linux and Kubernetes.', schedule).score,
-      100,
+    // Asserted as an empty gap list rather than as a score of 100, for the reason given at the
+    // vendor-spelling test above. The claim here is about DILUTION: that the schedule line does not
+    // survive extraction to become a requirement the student is charged for. An empty missing list
+    // says exactly that, and says it without depending on how coverage is turned into a number.
+    assert.deepEqual(
+      scoreJdMatch('Docker, Git, Linux and Kubernetes.', schedule).missing,
+      [],
       'a resume covering every real requirement is not diluted by the schedule line',
     );
   });
