@@ -30,6 +30,14 @@ export const resumeGenerateBodySchema = z.object({
   // key to lean on, and the only consumer treats it as an equality probe: an id that matches no
   // posting simply never matches a row, which is the same outcome as sending nothing.
   job_id: z.string().uuid().optional(),
+  /**
+   * True only when a background loop is building this packet ahead of the student reading it.
+   *
+   * Gates the requirement-cache warm, which is a model call. The prewarm loop can afford it because
+   * nobody is waiting; an interactive "Apply now" cannot. Default false, so the expensive path is
+   * opt-in rather than something a caller has to know to avoid.
+   */
+  prewarm: z.boolean().optional(),
   application: z.object({
     portal_url: z.string().url().max(4000),
     ats_name: z.string().min(1).max(100),

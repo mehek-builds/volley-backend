@@ -1,10 +1,10 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { eq, desc } from 'drizzle-orm';
+import { eq, desc, sql } from 'drizzle-orm';
 import { createHash, randomUUID } from 'node:crypto';
 import { put } from '@vercel/blob';
 import { db } from '../db/index';
-import { profiles, generated_resumes, autofill_events } from '../db/schema';
+import { profiles, generated_resumes, autofill_events, monitored_jobs } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { readExperienceBank } from '../db/experienceBank';
 import { allowHourly, claimCounterSlot, getCount, getEntitlements, LIMITS, monthPeriod, quotaExceededPayload, rateLimitedReply, releaseCounterSlot } from '../middleware/quota';
@@ -190,6 +190,45 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       return reply.status(400).send({ error: 'Invalid request body', detail });
     }
 
+    /* THE POSTING, IN FULL, and not the preview the caller almost certainly sent.
+     *
+     * GET /jobs serves `left(description, 600)`, a preview sized for a list row, and the dashboard
+     * hands that straight to this route as jd_text. So every packet built from the job list was
+     * tailored to six hundred characters of company blurb and then STORED that as the JD it was
+     * tailored against, which is worse than a wrong score: the resume itself was written for text
+     * the employer's requirements were not in.
+     *
+     * Found 2026-08-04 on a real packet: spec._review.jd_text was exactly 600 characters and cut
+     * mid-word, and the requirement breakdown built from it scored zero clauses because the
+     * requirements section had been truncated away before the JD ever arrived.
+     *
+     * Fixed HERE rather than in the client, because the extension and any hand-typed link reach
+     * this route too, and only the server can turn a job_id into the row. A caller with no job_id
+     * still supplies its own text and is unaffected.
+     */
+    let jdText = body.jd_text;
+    if (body.job_id) {
+      const [row] = await db
+        .select({ description: sql<string>`left(${monitored_jobs.description}, 60000)` })
+        .from(monitored_jobs)
+        .where(eq(monitored_jobs.id, body.job_id))
+        .limit(1);
+      // Only when the row actually has MORE than the caller sent. A posting we hold a shorter copy
+      // of must not overwrite a full JD someone pasted in.
+      /* Only a PREVIEW is replaced, and a row that is itself capped never wins.
+       *
+       * Raw length was too blunt in two ways the review caught. `left(description, 60000)` returns
+       * exactly 60000 characters cut mid-word for any posting over that, which beats almost any
+       * caller text and reintroduces the very defect this fixes at a different boundary. And the
+       * poller overwrites description in place, so a re-polled posting that grew by one character
+       * would silently replace a full JD a caller genuinely holds. The preview is 600 characters;
+       * anything under a couple of thousand is preview-shaped and nothing else is. */
+      const capped = row?.description?.length === 60_000;
+      if (row?.description && !capped && jdText.length < 2_000 && row.description.length > jdText.length) {
+        jdText = row.description;
+      }
+    }
+
     // Resume-gen + autofill is available on every tier (2026-07-02 decision): free gets
     // 20/month that resets like contacts/drafts (Apollo.io-style recurring credits, not a
     // one-time lifetime trial - keeps free students returning monthly). Pro/trial gets
@@ -288,7 +327,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
             if (budget < MIN_CALL_BUDGET_MS) break;
             try {
               const generated = await generateResumeSpec(
-                body.jd_text,
+                jdText,
                 body.company,
                 body.role,
                 bank,
@@ -303,7 +342,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
                 baseSpec,
                 priorityEntry,
               );
-              return applyResumePolicy(generated, education, bank, body.jd_text, { targetRole: body.role }).spec;
+              return applyResumePolicy(generated, education, bank, jdText, { targetRole: body.role }).spec;
             } catch (err) {
               lastErr = err;
               if (!isTransientOverload(err)) throw err;
@@ -350,7 +389,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         continue;
       }
 
-      const result = validateResumeSpec(spec, body.jd_text, bank, declaredSkills, education, body.role);
+      const result = validateResumeSpec(spec, jdText, bank, declaredSkills, education, body.role);
       const typographyIssues = findResumeTypographyIssues(spec, body.contact);
       specIssues = [...result.issues, ...typographyIssues];
       if (priorityEntry) specIssues.push(...baseResumeSelectionIssues(spec, [priorityEntry]));
@@ -405,7 +444,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     let visualWarnings: string[];
     let visualIssues: string[];
     try {
-      const rendered = await renderResumePdf(spec, body.contact, body.jd_text);
+      const rendered = await renderResumePdf(spec, body.contact, jdText);
       pdfBuffer = rendered.buffer;
       spec = rendered.spec;
       trimmedForFit = rendered.trimmed;
@@ -427,7 +466,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     // had NEVER run and its empty issues array read downstream as a clean pass.
     const finalSpecValidation = validateResumeSpec(
       spec,
-      body.jd_text,
+      jdText,
       bank,
       declaredSkills,
       education,
@@ -519,7 +558,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       },
     });
 
-    const jdHash = createHash('sha256').update(body.jd_text).digest('hex').slice(0, 16);
+    const jdHash = createHash('sha256').update(jdText).digest('hex').slice(0, 16);
     const requestedKey = `users/${userId}/resumes/${jdHash}-${Date.now()}.pdf`;
 
     const reservedCount = await claimCounterSlot(userId, period, 'resumes', ent.monthlyResumes);
@@ -570,7 +609,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     const now = new Date().toISOString();
 
     const applicationReview = {
-      jd_text: body.jd_text,
+      jd_text: jdText,
       role: body.role,
       ...(body.application ? {
         portal_url: body.application.portal_url,
@@ -629,8 +668,22 @@ export async function resumeRoutes(fastify: FastifyInstance) {
      * screen. Bounded and non-fatal by construction: a slow or unavailable model leaves the cache
      * cold and the student pays for the judgement on open, which is exactly today's behaviour.
      * It can never fail a generation, and it writes nothing the review screen would not have. */
-    const warm = await warmRequirementCache(
-      body.jd_text,
+    /* ONLY ON A BACKGROUND BUILD, and this became load-bearing the moment the JD above stopped
+     * being 600 characters.
+     *
+     * warmRequirementCache returns instantly when a posting states no competency clause, and a
+     * 600-char preview never states one, so this call was a silent no-op for as long as packets
+     * carried the preview. Resolving the full posting turns it into a real Sonnet call, awaited on
+     * the response path, which would have put up to WARM_TIMEOUT_MS in front of a student who
+     * pressed Apply. The justification for awaiting it was always "nobody is waiting on this",
+     * which is true of the prewarm loop and false of an interactive generate.
+     *
+     * Default is NOT to warm, so the expensive path is opt-in rather than something a caller has
+     * to know to avoid. POST_GEN_RESERVE_MS budgets for the PDF render and the audit inserts, not
+     * for a model call. */
+    const warm = body.prewarm
+      ? await warmRequirementCache(
+      jdText,
       {
         degree: storedSpec.degree,
         school: storedSpec.school,
@@ -647,9 +700,10 @@ export async function resumeRoutes(fastify: FastifyInstance) {
           .join(' '),
         bullets: storedSpec.experience.flatMap((entry) => entry.bullets ?? []),
       },
-      { company: jobContext.company, role: jobContext.role, job_id: jobContext.job_id ?? null },
-    );
-    if (warm.skipped) fastify.log.warn({ warm }, 'requirement cache not warmed');
+          { company: jobContext.company, role: jobContext.role, job_id: jobContext.job_id ?? null },
+        )
+      : { asked: 0, judged: 0, fromCache: 0, skipped: 'interactive generate, not warmed' };
+    if (warm.skipped && body.prewarm) fastify.log.warn({ warm }, 'requirement cache not warmed');
 
     return reply.status(200).send({
       ...responseTemplate,

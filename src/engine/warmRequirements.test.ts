@@ -96,7 +96,90 @@ describe('the generate route treats warming as optional', () => {
   });
 
   test('a failed warm is logged, not thrown', () => {
-    assert.match(route, /if \(warm\.skipped\) fastify\.log\.warn/);
+    assert.match(route, /if \(warm\.skipped && body\.prewarm\) fastify\.log\.warn/);
     assert.doesNotMatch(route, /throw.*warmRequirementCache/);
+  });
+});
+
+describe('a packet is tailored and scored against the WHOLE posting', () => {
+  const generate = readFileSync(path.join(__dirname, '..', 'routes', 'resume.ts'), 'utf8');
+  const requirements = readFileSync(path.join(__dirname, '..', 'routes', 'jdMatch.ts'), 'utf8');
+
+  /* Found 2026-08-04 on a real packet: spec._review.jd_text was exactly 600 characters, cut
+     mid-word. GET /jobs serves `left(description, 600)` and the dashboard forwarded that preview
+     to /resume/generate, so the RESUME ITSELF was written against six hundred characters of
+     company blurb, and the JD stored beside it was the same truncated text. The requirement
+     breakdown then scored zero clauses on it, correctly, because the requirements section had been
+     cut away before the JD ever arrived. */
+
+  test('generate resolves the full description from job_id', () => {
+    assert.match(generate, /left\(\$\{monitored_jobs\.description\}, 60000\)/);
+    assert.match(generate, /jdText = row\.description;/);
+    assert.match(generate, /\.where\(eq\(monitored_jobs\.id, body\.job_id\)\)/);
+  });
+
+  test('generate uses the resolved text everywhere, not the body field', () => {
+    // A single surviving body.jd_text would tailor against the preview while storing the full
+    // text, or the reverse, which is harder to notice than either being wrong on its own.
+    const handler = generate.slice(
+      generate.indexOf("fastify.post('/resume/generate'"),
+      // Bounded at the next route: slicing to EOF covered /resume/download and /resume/history too,
+      // so an unrelated future route reading body.jd_text would fail this with a misleading message.
+      generate.indexOf("fastify.get('/resume/download'"),
+    );
+    // Exactly one mention survives, the resolver's own seed. Counting rather than banning, because
+    // banning outright would fail on the correct code and invite someone to delete the resolver.
+    const uses = handler.match(/\bbody\.jd_text\b/g) ?? [];
+    assert.equal(uses.length, 1, `body.jd_text should only seed jdText, found ${uses.length}`);
+    assert.match(handler, /let jdText = body\.jd_text;/);
+  });
+
+  test('a caller that holds more text than we do still wins', () => {
+    // The extension and hand-typed links send a JD we have no row for. Overwriting those with a
+    // shorter stored copy would be the same defect pointed the other way.
+    assert.match(generate, /row\.description\.length > jdText\.length/);
+    // Both routes now go through resolveJdText, whose caller-wins branch is the same guarantee.
+    assert.match(requirements, /if \(sent\.length >= 2_000\) return sent;/);
+    assert.match(requirements, /return rowDescription\.length > sent\.length \? rowDescription : sent;/);
+  });
+
+  test('the breakdown repairs packets that already stored a preview', () => {
+    // Without this, every packet built before the fix stays unscoreable forever, because its
+    // stored jd_text is 600 characters and no migration rewrites it.
+    assert.match(requirements, /export function resolveJdText/);
+    assert.match(requirements, /const jdText = resolveJdText\(parsed\.data\.jd_text \?\? '', posting\?\.description\);/);
+  });
+});
+
+describe('the expensive path is opt-in and the two routes agree', () => {
+  const generate = readFileSync(path.join(__dirname, '..', 'routes', 'resume.ts'), 'utf8');
+  const routes = readFileSync(path.join(__dirname, '..', 'routes', 'jdMatch.ts'), 'utf8');
+
+  test('an interactive generate is never blocked on a model call', () => {
+    /* This was a silent no-op for as long as packets carried a 600-char preview: no competency
+       clause, so warmRequirementCache returned instantly. Resolving the full posting turned it
+       into a real Sonnet call awaited on the response path, which would have put up to 20 seconds
+       in front of a student who pressed Apply. */
+    assert.match(generate, /const warm = body\.prewarm/);
+    assert.match(generate, /interactive generate, not warmed/);
+  });
+
+  test('both routes resolve the JD through one helper', () => {
+    // They render on the same screen. Two resolutions is two numbers about one posting.
+    assert.equal((routes.match(/resolveJdText\(/g) ?? []).length, 3, 'the definition plus both call sites');
+    assert.doesNotMatch(routes, /body\.jd_text \?\? posting\?\.description \?\? '';/);
+  });
+
+  test('a row capped at the 60k ceiling never wins', () => {
+    // It is truncated mid-word too, so it is no better than what the caller sent.
+    assert.match(routes, /rowDescription\.length === 60_000/);
+    assert.match(generate, /row\?\.description\?\.length === 60_000/);
+  });
+
+  test('only a preview-shaped text is replaced', () => {
+    // The poller overwrites description in place, so a re-polled posting that grew by one
+    // character must not silently replace a full JD a caller genuinely holds.
+    assert.match(routes, /sent\.length >= 2_000/);
+    assert.match(generate, /jdText\.length < 2_000/);
   });
 });

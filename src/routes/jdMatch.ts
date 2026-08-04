@@ -192,6 +192,28 @@ async function postingRow(
   return row ? { location: row.location ?? null, description: row.description ?? null } : null;
 }
 
+/**
+ * Which text to score: the caller's, or the posting row's.
+ *
+ * ONE HELPER, used by both /jd-match and /jd-match/requirements, because they run on the SAME
+ * SCREEN. The headline percentage and the requirement breakdown scoring different texts is
+ * ISSUE-014 in miniature: two numbers about one posting with nothing on screen saying why they
+ * disagree. When this was written into only one of them, that is exactly what it produced.
+ *
+ * The caller normally wins, which is the rule the review screen needs: its packet holds the JD the
+ * resume was tailored against, and the live row may have been edited since. The exception is a
+ * PREVIEW. Packets built before 2026-08-04 stored `left(description, 600)`, truncated mid-word,
+ * because the dashboard forwarded the job list's preview to /resume/generate. Those are on disk and
+ * nothing rewrites them, so preferring the row when the caller's text is preview-shaped repairs
+ * them on read instead of leaving them permanently unscoreable.
+ */
+export function resolveJdText(sent: string, rowDescription: string | null | undefined): string {
+  // A row that is itself capped at the 60k ceiling is truncated mid-word too, so it is no better.
+  if (!rowDescription || rowDescription.length === 60_000) return sent;
+  if (sent.length >= 2_000) return sent;
+  return rowDescription.length > sent.length ? rowDescription : sent;
+}
+
 export async function jdMatchRoutes(fastify: FastifyInstance) {
   /**
    * The requirement-by-requirement breakdown, for the REVIEW SCREEN ONLY.
@@ -222,7 +244,18 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
     if (!spec) return reply.status(404).send({ error: 'No main resume yet' });
 
     const posting = await postingRow(parsed.data.job_context?.job_id);
-    const jdText = parsed.data.jd_text ?? posting?.description ?? '';
+    /* THE LONGER OF THE TWO, not simply the caller's.
+     *
+     * Every packet built before 2026-08-04 stored `left(description, 600)` in _review.jd_text,
+     * because the dashboard forwarded the list preview to /resume/generate. Those packets are on
+     * disk and their stored JD is truncated mid-word, so a review screen that trusted the caller's
+     * text scored ZERO clauses on them: the requirements section had been cut away before the JD
+     * was ever saved. Measured on a real packet, 600 characters ending "high-growth enterprise
+     * technology comp".
+     *
+     * Preferring the longer text repairs those packets without a migration, and still lets a caller
+     * who genuinely holds more than we do win, which is the case the caller-first rule existed for. */
+    const jdText = resolveJdText(parsed.data.jd_text ?? '', posting?.description);
     if (!jdText) {
       return reply
         .status(400)
@@ -304,7 +337,7 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
 
     /* The caller's text wins when it has one. See the jd_text note on bodySchema: the review screen
        holds the JD the packet was tailored against, which is the text its number has to be about. */
-    const jdText = body.jd_text ?? posting?.description ?? '';
+    const jdText = resolveJdText(body.jd_text ?? posting?.description ?? '', posting?.description);
     if (!jdText) {
       // Neither supplied nor resolvable. Distinguished from a thin posting on purpose: this is a
       // wiring fault, and answering it with the engine's "this posting did not list enough" would
