@@ -109,9 +109,20 @@ deploy last. Roll back application code without rolling back these columns.
 
 ### `description_digest` — MIGRATION MUST RUN BEFORE THE NEXT API DEPLOY
 
+**Pass `DATABASE_URL` explicitly. Do not run this bare.** Like every script in
+`scripts/`, this one does `import 'dotenv/config'`, which loads `.env` — and the
+`DATABASE_URL` in `.env` is a LOCAL Postgres. Run bare, it connects to localhost,
+reports `ready: column present`, and production is untouched. Production is the
+Neon URL in `.env.local`:
+
 ```bash
-npm run db:description-digest
+DATABASE_URL="<the DATABASE_URL from .env.local>" npm run db:description-digest
 ```
+
+The script prints the database and host it connected to before it changes
+anything, which is the check that catches this. Applied to production on
+2026-08-04: `connected to neondb`, then `0 of 22134 active postings have a
+digest`, which is the correct output (see the no-backfill note below).
 
 **This one is not optional and the order is not symmetrical with the case above.**
 `GET /jobs` selects `monitored_jobs.description_digest` directly, so deploying the
