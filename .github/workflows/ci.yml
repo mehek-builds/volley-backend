@@ -32,8 +32,15 @@ jobs:
         run: npm run build:smoke
       # `node --test` exits 0 when the glob matches nothing, so a moved/renamed test
       # would go green with zero tests run. Fail loudly if no test files exist (B2).
+      #
+      # BOTH ROOTS, because the same hole existed one directory over. `api/` is the Vercel
+      # entrypoint every production request enters through, and until 2026-08-04 it was in neither
+      # the test glob nor tsconfig.json's `include`, so it had no test and no typecheck at all.
+      # Checking only `src` here would let api/'s tests be deleted and CI stay green.
       - name: Ensure test files exist
-        run: test -n "$(find src -name '*.test.ts' -print -quit)"
+        run: |
+          test -n "$(find src -name '*.test.ts' -print -quit)"
+          test -n "$(find api -name '*.test.ts' -print -quit)"
       - name: Test
         run: npm test
 

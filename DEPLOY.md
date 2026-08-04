@@ -144,6 +144,55 @@ Click Deploy. Then verify:
 curl https://<your-app>.vercel.app/health      # -> {"status":"ok",...}
 ```
 
+## Shipping a change
+
+**Merging to `main` deploys production.** The Vercel project is connected to
+`mehek-builds/volley-backend` with `main` as the production branch, so a merged PR builds and
+promotes on its own. Nothing needs to be run by hand.
+
+That connection was missing between an unknown date and 2026-08-04: the project's `link` was
+`null`, so pushes to `main` deployed nothing and production silently sat on whatever commit was
+last pushed with `vercel deploy --prod`. PRs #151 and #153 both merged without shipping. If a merge
+ever stops deploying again, check the link first, because the symptom is silence rather than a
+failure:
+
+```bash
+vercel git connect          # from a checkout whose origin is the GitHub repo
+```
+
+**Always confirm what actually shipped.** `/health` returns the deployed commit, so compare it to
+the merge commit rather than assuming the deploy landed:
+
+```bash
+curl -s https://student-outreach-backend.vercel.app/health | jq -r .revision
+git rev-parse origin/main
+```
+
+To deploy by hand anyway (a rollback, or a hotfix that must not wait for review), use a throwaway
+clone so your own working tree, which is often on another branch with uncommitted work, is left
+alone. Copy `.vercel/project.json` into it, and **not** `.env.production.local`:
+
+```bash
+git clone https://github.com/mehek-builds/volley-backend.git /tmp/ship && cd /tmp/ship
+mkdir -p .vercel && cp <repo>/.vercel/project.json .vercel/
+vercel deploy --prod
+```
+
+## Known decision: the database connection does not verify certificates
+
+`src/db/index.ts` passes `ssl: { rejectUnauthorized: false }`, so TLS is used but the server
+certificate is **not** verified. This is long-standing and is called out here because it is easy to
+misread: the `sslmode=require` in the Neon URL suggests full verification, and the explicit option
+overrides it.
+
+`withoutSslMode` strips `sslmode` before pg parses the URL, which removes a noisy pg deprecation
+warning from the runtime logs. It changes no TLS behaviour, and `src/db/index.test.ts` pins that.
+It does **not** address the verification question.
+
+Turning verification on is a one-line change (drop the `ssl` option and set `sslmode=verify-full`
+in `DATABASE_URL`), but it cannot be tested from a laptop against the production database and a
+wrong guess takes the API's database down. Do it deliberately, against a Neon branch first.
+
 ## Point the extension at the deployed backend
 In `student-outreach-extension`, create `.env` with:
 
