@@ -104,13 +104,34 @@ describe('the failure classes this map has actually hit', () => {
     }
   });
 
-  test('companies whose common word belongs to someone else are left unmapped', () => {
-    // Each was checked by hand: fireworks.com is a fireworks retailer, oldmission.org is a church,
-    // pinecone.com is a for-sale page, honor.com is the handset maker. An initial is correct here.
-    for (const company of ['Old Mission', 'Pinecone', 'honor', 'Depot']) {
+  test('a company whose common word belongs to someone else never resolves to that word', () => {
+    // The point was never that these must be absent. It is that the obvious domain belongs to a
+    // DIFFERENT company, so resolving by name paints that company's logo on this employer's rows:
+    // fireworks.com is a fireworks retailer, oldmission.org is a church, pinecone.com is a for-sale
+    // page, honor.com is the handset maker, opal.com is Open Advisors, column.com serves no title.
+    // Absent is the safe default; a reviewed override is the only way out, and it must not land on
+    // the word itself. Each override below was established from the employer's own ATS board.
+    for (const [company, wrong] of [
+      ['Old Mission', 'oldmission.org'],
+      ['Pinecone', 'pinecone.com'],
+      ['honor', 'honor.com'],
+      ['opal', 'opal.com'],
+      ['Fireworks', 'fireworks.com'],
+    ] as const) {
+      assert.notStrictEqual(companyDomainFor(company), wrong, `${company} must never map to ${wrong}`);
+    }
+
+    assert.strictEqual(companyDomainFor('Old Mission'), 'oldmissioncapital.com');
+    assert.strictEqual(companyDomainFor('Pinecone'), 'pinecone.io');
+    assert.strictEqual(companyDomainFor('honor'), 'honorcare.com');
+    assert.strictEqual(companyDomainFor('opal'), 'opal.dev');
+    assert.strictEqual(companyDomainFor('Column'), 'column.com', 'og:site_name=Column is the proof');
+    assert.strictEqual(companyDomainFor('Fireworks'), 'fireworks.ai');
+
+    // No override was ever established for these two, so they stay absent and render an initial.
+    for (const company of ['Depot', 'Knock']) {
       assert.strictEqual(companyDomainFor(company), null, `${company} is not safely resolvable by name`);
     }
-    assert.strictEqual(companyDomainFor('Fireworks'), 'fireworks.ai', 'Fireworks has a reviewed override');
   });
 
   test('no entry is a country redirect of itself', () => {
