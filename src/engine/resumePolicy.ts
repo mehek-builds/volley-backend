@@ -100,6 +100,40 @@ export function academicsOfRecordForResume(
   return out;
 }
 
+/**
+ * `parsed_json.coursework` as the list every reader of it expects, from whatever is actually stored.
+ *
+ * THE CANONICAL SHAPE IS A LIST, and this is the one place that says so. llm/parse.ts emits
+ * `string[]`, lib/submissionEducationGuard.ts compares entry by entry, and
+ * engine/resumeValidate.ts courseworkIsUngrounded() walks the individual course titles to ground a
+ * rendered line against them - none of which a single joined string can serve. The resume's one
+ * line is produced by joining at the END of applyResumePolicy, not by storing it pre-joined.
+ *
+ * A stored string is accepted and split because the review screen edits this as one comma separated
+ * input and, before ISSUE-044, wrote that string straight through. Returns undefined rather than []
+ * for a missing field, because CandidateEducation distinguishes "no coursework on record" from "an
+ * empty list", and academicsOfRecordForResume spreads over this result.
+ *
+ * Commas only. Course titles carry "&" ("Financial Analysis & Valuation") and "and" ("Data
+ * Structures and Object-Oriented Design") inside a single title, so the comma is the only separator
+ * that is not also ordinary content: splitting on "and" would cut that second title in half.
+ */
+export function courseworkFromParsed(value: unknown): string[] | undefined {
+  const raw = typeof value === 'string'
+    ? value.split(',')
+    : Array.isArray(value)
+      ? value.filter((entry): entry is string => typeof entry === 'string')
+      : undefined;
+  if (raw === undefined) return undefined;
+  const courses: string[] = [];
+  for (const candidate of raw) {
+    const course = candidate.trim();
+    if (!course || courses.some((existing) => existing.toLowerCase() === course.toLowerCase())) continue;
+    courses.push(course);
+  }
+  return courses;
+}
+
 /* profiles.parsed_json (+ the academic record that outranks it) -> the education block.
  *
  * ONE function for both generation paths on purpose. /resume/base/stream and /resume/generate build
@@ -133,7 +167,17 @@ export function educationFrom(
     gpa: str(p.gpa),
     gpa_scale: str(p.gpa_scale),
     school_location: str(p.school_location),
-    coursework: Array.isArray(p.coursework) ? p.coursework.filter((c): c is string => typeof c === 'string') : undefined,
+    /* Both shapes, PERMANENTLY, not just until the backfill runs (ISSUE-044).
+     *
+     * This line used to be a bare Array.isArray gate, and a stored string therefore read as
+     * undefined and printed an empty "Relevant coursework" line on every generated resume - the
+     * silent half of the write/read disagreement that PATCH /profile/parsed opened. The write side
+     * is fixed and the corrupted rows are backfilled, so this tolerance has no rows to serve today.
+     * It stays anyway for two reasons: parsed_json is jsonb that a hand-edited row can put anything
+     * in, and the site and API deploy from SEPARATE repos on merge, so there is always a window
+     * where one side is new and the other is not. Reading is the cheap side of that window to be
+     * forgiving on; the strictness that matters is on the write. */
+    coursework: courseworkFromParsed(p.coursework),
     /* LAST, so it wins. See academicsOfRecordForResume. */
     ...academicsOfRecordForResume(applicationRow),
   };
