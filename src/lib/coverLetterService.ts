@@ -2,7 +2,7 @@ import { del, put } from '@vercel/blob';
 import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db/index';
 import { generated_resumes, profiles } from '../db/schema';
-import { readExperienceBank } from '../db/experienceBank';
+import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
 import { readApplicationReview } from './applicationReview';
 import { renderCoverLetterPdf } from './coverLetterPdf';
 import { generateCoverLetter, validateCoverLetter } from '../llm/coverLetter';
@@ -38,7 +38,7 @@ export function canGenerateCoverLetter(supported: boolean | undefined, capabilit
 
 async function candidateContext(row: ApplicationRow) {
   const [bank, profileRows] = await Promise.all([
-    readExperienceBank(row.user_id),
+    readExperienceBankOrSeedFromBaseResume(row.user_id),
     db.select().from(profiles).where(eq(profiles.user_id, row.user_id)).limit(1),
   ]);
   const stored = row.spec as StoredSpec;

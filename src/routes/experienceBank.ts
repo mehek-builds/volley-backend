@@ -4,7 +4,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '../db/index';
 import { experience_bank } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
-import { readExperienceBank } from '../db/experienceBank';
+import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
 
 const entrySchema = z.object({
   id: z.string().uuid().optional(), // present on update, absent on create
@@ -35,7 +35,7 @@ const putBodySchema = z.object({
 export async function experienceBankRoutes(fastify: FastifyInstance) {
   fastify.get('/profile/experience-bank', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
-    const rows = await readExperienceBank(userId);
+    const rows = await readExperienceBankOrSeedFromBaseResume(userId);
     return reply.status(200).send({ entries: rows });
   });
 
@@ -72,7 +72,7 @@ export async function experienceBankRoutes(fastify: FastifyInstance) {
       return reply.status(500).send({ error: 'Could not save your work history' });
     }
 
-    const rows = await readExperienceBank(userId);
+    const rows = await readExperienceBankOrSeedFromBaseResume(userId);
     return reply.status(200).send({ entries: rows });
   });
 }

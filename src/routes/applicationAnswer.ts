@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { eq } from 'drizzle-orm';
 import { db } from '../db/index';
 import { profiles } from '../db/schema';
-import { readExperienceBank } from '../db/experienceBank';
+import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
 import { requireAuth } from '../middleware/auth';
 import { draftApplicationAnswer } from '../llm/applicationAnswer';
 import { declaredSkillsList } from './profile';
@@ -30,7 +30,7 @@ export async function applicationAnswerRoutes(fastify: FastifyInstance) {
 
     // Ordered read, always: see readExperienceBank (R-022). The bank goes into a cached prompt
     // prefix, so an unstable order busts the cache as well as making drafts non-reproducible.
-    const bank = await readExperienceBank(userId);
+    const bank = await readExperienceBankOrSeedFromBaseResume(userId);
     if (bank.length === 0) {
       return reply.status(400).send({ error: 'Nothing saved about your work yet. Finish setting up first.' });
     }

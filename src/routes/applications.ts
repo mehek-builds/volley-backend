@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { db } from '../db/index';
 import { settleStall } from '../lib/applicationStall';
 import type { ApplicationReviewState } from '../lib/applicationReview';
-import { readExperienceBank } from '../db/experienceBank';
+import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
 import { generated_resumes, profiles, users, type ExperienceBankEntry } from '../db/schema';
 import {
   findPdfTextFidelityIssues,
@@ -176,7 +176,7 @@ export async function preSendResumeVerificationIssues(
   const spec = editableResumeSpec(stored);
   if (review.role) spec.target_role = resumeSafeTargetRole(review.role);
 
-  const bank = await readExperienceBank(userId);
+  const bank = await readExperienceBankOrSeedFromBaseResume(userId);
   const profileRows = await db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1);
   const parsed = profileRows[0]?.parsed_json as ParsedProfileForResume | undefined;
   const validation = validateResumeSpec(
@@ -266,6 +266,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           .from(profiles).where(eq(profiles.user_id, userId)).limit(1);
         const educationIssues = packetEducationDrift(row.spec, profileRows[0]?.parsed_json);
         if (educationIssues.length > 0) return { kind: 'education_drift' as const, issues: educationIssues };
+        const sensitive = current.questions.find((question) => isRefusedQuestion(question.question));
+        if (sensitive) return { kind: 'sensitive_question' as const, question: sensitive.question };
         if (!withinDailyCap(countRows[0]?.total ?? 0, dailySubmissionCap())) return { kind: 'cap' as const };
         const now = new Date().toISOString();
         const claimId = randomUUID();
@@ -299,6 +301,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (result.kind === 'in_flight') return reply.status(409).send({ error: 'This application already has an active submission' });
       if (result.kind === 'reject') return reply.status(409).send({ error: 'This application cannot be submitted again from its current state' });
       if (result.kind === 'education_drift') return reply.status(422).send(educationDriftResponse(result.issues));
+      if (result.kind === 'sensitive_question') {
+        return reply.status(422).send({ error: `Sensitive question requires your attention: ${result.question.slice(0, 120)}` });
+      }
       if (result.kind === 'cap') return reply.status(429).send({ error: 'Daily automatic submission safety limit reached' });
       if (result.kind === 'changed') return reply.status(409).send({ error: 'The application state changed before the extension could reserve it' });
       return reply.send({ application_id: result.row.id, claim_id: result.claimId, review: result.next });
@@ -373,7 +378,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       }
 
       const userId = request.jwtPayload!.userId;
-      const bank = await readExperienceBank(userId);
+      const bank = await readExperienceBankOrSeedFromBaseResume(userId);
       const profileRows = await db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1);
       const parsed = profileRows[0]?.parsed_json as {
         school?: string;
@@ -694,6 +699,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       approvalIssues.push(...finalApprovalFieldIssues(current, current.cover_letter_supported === true && Boolean(coverLetter)));
       if (current.questions.some((question) => question.required && !question.answer.trim())) {
         approvalIssues.push('A required application answer is still blank.');
+      }
+      const sensitive = current.questions.find((question) => isRefusedQuestion(question.question));
+      if (sensitive) {
+        approvalIssues.push(`Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}`);
       }
       approvalIssues.push(...await preSendResumeVerificationIssues(request.jwtPayload!.userId, stored));
       if (approvalIssues.length > 0) {
