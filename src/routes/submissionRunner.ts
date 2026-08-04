@@ -310,19 +310,30 @@ function omitCoverLetter(packet: SubmissionPacket): SubmissionPacket {
  *
  * The reason is returned rather than swallowed so the caller can put it in front of the applicant
  * as an attention reason. A silent degrade would be its own version of this bug.
+ *
+ * That reason is a FIXED sentence, and the thrown message is logged instead of interpolated. The
+ * two failures this generator actually throws are "Cover letter truncated at max_tokens (1203
+ * chars) - raise the cap" and "Claude returned an invalid cover letter: {"body":"I'm writing to
+ * apply for the Software Eng..." - one an instruction to an operator, the other 200 characters of
+ * raw model output with a vendor name in front of it. Both were reaching a student's screen. They
+ * also describe one situation from the applicant's side, with one recovery, so there is nothing a
+ * second variant of the sentence could usefully say. Whoever has to fix the generator reads logs.
  */
 async function packetForCoverLetterCapability(
   row: ResumeRow,
   supported: boolean,
+  fastify: FastifyInstance,
 ): Promise<{ packet: SubmissionPacket; coverLetterIssue?: string }> {
   if (!supported) return { packet: omitCoverLetter(await buildPacket(row)) };
   if (!storedCoverLetter(row)) {
     try {
       await generateStoredCoverLetter(row, false, true);
     } catch (error) {
+      // Raw message to the log, fixed sentence to the applicant. See the note above the function.
+      fastify.log.warn({ error, applicationId: row.id }, 'Cover letter generation failed, continuing without it');
       return {
         packet: omitCoverLetter(await buildPacket(row)),
-        coverLetterIssue: `We could not write your cover letter for this one, so it is not attached. Everything else is filled in. Message: ${error instanceof Error ? error.message : 'unknown error'}`,
+        coverLetterIssue: 'We could not write your cover letter for this one, so it is not attached. Everything else is filled in, and you can write or retry a cover letter from your dashboard.',
       };
     }
   }
@@ -481,7 +492,7 @@ async function prepareManaged(
   const applicationUrl = portalApplicationUrl(portal, current.portal_url!);
   const discoveryResult = await runManagedBrowser(applicationUrl, buildManagedDiscoveryActions(portal, packet)).catch(() => null);
   const coverLetterSupported = managedResultHasCoverLetterUpload(discoveryResult, portal);
-  const coverLetterOutcome = await packetForCoverLetterCapability(row, coverLetterSupported);
+  const coverLetterOutcome = await packetForCoverLetterCapability(row, coverLetterSupported, fastify);
   packet = coverLetterOutcome.packet;
   const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
   const resolutionCurrent = { ...current, questions: storedQuestions };
@@ -620,7 +631,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       permissionGranted: verificationSettings?.enabled === true,
     });
     const coverLetterSupported = await hasCoverLetterUpload(page, portal);
-    const { packet, coverLetterIssue } = await packetForCoverLetterCapability(row, coverLetterSupported);
+    const { packet, coverLetterIssue } = await packetForCoverLetterCapability(row, coverLetterSupported, fastify);
     const coverLetterAttention = coverLetterIssue ? [coverLetterIssue] : [];
 
     // R-055: discover and resolve the posting's own custom questions before filling, so a
@@ -672,8 +683,12 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       },
       questions: mergedQuestions,
       cover_letter_supported: coverLetterSupported,
-      // Already human on this path, but sanitized anyway so both providers are held to one
-      // guarantee and a future change to either cannot quietly reintroduce identifiers.
+      // Already human on this path, but the BLOCKERS are sanitized anyway so both providers are
+      // held to one guarantee and a future change to either cannot quietly reintroduce identifiers.
+      // The other two arrays do not go through the sanitizer and do not need to: they are written
+      // here, in this repo, in the product's own voice, and neither one interpolates provider or
+      // model text. Sending them through it would not have caught the cover-letter leak either,
+      // since that message was prose and prose passes straight through.
       attention_reason:
         [...sanitizedBlockers, ...discoveryAttention, ...coverLetterAttention].join('\n') || undefined,
       // The only path that OBSERVES a challenge on a board nobody had typed as gated, which makes it

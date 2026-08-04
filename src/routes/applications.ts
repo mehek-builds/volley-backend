@@ -17,6 +17,7 @@ import {
 import { validatePdfLayout, validateResumeSpec } from '../engine/resumeValidate';
 import { resumeSafeTargetRole } from '../engine/resumePolicy';
 import {
+  applyApplicationReviewEdit,
   deriveEditedTerms,
   readApplicationReview,
   type ApplicationReviewQuestion,
@@ -400,12 +401,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (submitRequestDisposition(current.status) !== 'start') {
         return reply.status(409).send({ error: 'This application can no longer be edited from its current submission state' });
       }
-      const next = {
-        ...current,
-        ...parsed.data,
-        status: parsed.data.questions.length > 0 ? 'questions_ready' : 'ready_to_submit',
-        updated_at: new Date().toISOString(),
-      };
+      // Not a spread here: an edit that changes portal_url has to re-derive portal_supported with
+      // it, or the review persists a new URL next to the old verdict. See applyApplicationReviewEdit.
+      const next = applyApplicationReviewEdit(current, parsed.data);
       const claimed = await db.update(generated_resumes)
         .set({ spec: reviewSpec(next) })
         .where(and(
