@@ -594,6 +594,56 @@ export function segmentJd(jdText: string): JdSection[] {
  * sized to clear MIN_SIGNAL_TERMS on a typical posting in each, not to be complete: no clinical
  * credentials (RN, NP, BLS), no teaching certifications, no newsroom systems.
  *
+ * `legal` AND `law` WERE THE TWO ENTRIES THE FIRST PASS MISSED, added 2026-08-04 after re-measuring.
+ * ---------------------------------------------------------------------------------------------
+ * The first pass took the law resume from 0 hard-signal matches to some, which is what the ledger
+ * recorded, but it never admitted the two central nouns of the discipline. Before this change
+ * `legal` reached 61 of 2500 live denominators and `law` 8, each with signal on EXACTLY ZERO of
+ * them, because both were reachable only through the proper-noun rule. On the original frozen 400
+ * the law resume covered `legal` on all 10 postings that carried it and earned nothing for any.
+ *
+ * THE OBVIOUS OBJECTION IS REAL AND WAS TESTED RATHER THAN ARGUED. Read in isolation both words
+ * look like the prose this list rejects: `legal` reaches 61 of 2500 denominators and most of those
+ * sentences are cross-functional department rosters ("Sales, Finance, Legal, and Product"), and 6
+ * of the 8 `law` hits are degree-field enumerations ("degree in Law, Business Administration,
+ * Finance, Compliance, or a related field"). By the reading test above, both should have been
+ * rejected. The measurement says otherwise, and the measurement wins:
+ *
+ *   UW law resume, 2500 postings      on-field mean   off-field mean   separation
+ *   before                                  7.2             3.0            4.2
+ *   after `legal` + `law`                  13.2             4.1            9.2
+ *
+ * Off-field does rise, which is the department-roster cost being paid honestly. On-field rises five
+ * times faster, so SEPARATION more than doubles, and that is the metric that decides this file. The
+ * user-visible effect is the ranking: p@10 went 40% to 60% and p@20 25% to 40%, and the top of her
+ * board became `IP Counsel`, `Employment Counsel` and `Lead Counsel, Commercial` instead of three
+ * Customer Success Architect reqs. The degree-field hits are not even noise: an employer who says a
+ * law degree qualifies is stating a real match.
+ *
+ * BOTH WORDS DO WIDEN THE DENOMINATOR, and that is the cost to check rather than the objection to
+ * wave off. Admitting them to this list moves `legal` from 61 denominators to 216 and `law` from 8
+ * to 139, because inLexicon reaches sections the proper-noun rule never did. The reason that is
+ * paid for and not the ISSUE-023 mistake repeated is that the added slots are EARNED: the law
+ * resume covers `legal` on 216 of 216 and `law` on 139 of 139. A term that arrives in the
+ * denominator and is then matched every single time is the opposite of the proper-noun rule's 3.6%.
+ *
+ * THE COST TO THE OTHER TWO RESUMES WAS MEASURED, NOT ASSUMED, since a wider denominator can evict
+ * someone else's requirement under EMPHASIS_LIMIT. On the same 2500-posting run USC CS separation
+ * is 9.5 before and after and MIT econ 2.7 before and after, unmoved to the decimal.
+ *
+ * Note also that the company and the role are stripped from every section (selfReferenceTokens), so
+ * a posting titled "Legal Intern" never carries `legal` as a term at all. The on-field gain below
+ * is therefore made entirely by postings whose BODY says legal, never by their title, which means
+ * it is not an artifact of the title-based on-field labelling used to measure it.
+ *
+ * `counsel` WAS MEASURED IN THE SAME PASS AND REJECTED. It reaches 2 of 2500 denominators, both the
+ * same posting, and adding it moved separation 4.2 to 4.0 - slightly WORSE, since it buys no
+ * on-field credit and still competes for a reserved slot. `attorney`, `statutory`, `clerkship`,
+ * `pro bono`, `affidavit`, `pleading`, `jurisdiction`, `legal research` and `civil rights` were
+ * also measured: every one of them reaches ZERO denominators across 2500 live postings. The
+ * practice vocabulary of law is not what this board is written in, so adding it would be dead
+ * weight that makes the list overstate its own coverage. Do not add them back on intuition.
+ *
  * COMPLETING THAT PASS WAS ATTEMPTED, MEASURED, AND DEFERRED (2026-08-04). ISSUE-033 IS STILL OPEN.
  * ---------------------------------------------------------------------------------------------
  * An extension to 341 entries, covering finance, law, health, education, HR, operations and media,
@@ -707,7 +757,7 @@ html css sass tailwind bootstrap graphql rest grpc websocket oauth saml
 git linux unix bash powershell agile scrum kanban devops mlops
 accounting auditing bookkeeping valuation modeling forecasting budgeting reconciliation
 econometrics statistics regression segmentation attribution
-litigation compliance regulatory governance contract paralegal deposition
+legal law litigation compliance regulatory governance contract paralegal deposition
 subpoena arbitration mediation trademark copyright patent licensing antitrust gdpr ccpa
 redlining docketing westlaw lexisnexis clio ediscovery relativity
 legislation legislative advocacy lobbying rulemaking testimony casework constituent redistricting
