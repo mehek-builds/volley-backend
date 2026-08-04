@@ -73,15 +73,27 @@ test('Phase 2 configures exactly 50 Workable employers with canonical careers UR
 });
 
 test('Phase 2 adds 50 diverse employers across Greenhouse, Lever, and Ashby', () => {
-  // 355 reviewed employers + the 26 internship-density boards added 2026-08-03.
+  // 355 reviewed + 26 internship-density (2026-08-03) + 17 international (2026-08-04).
   assert.equal(JOB_SOURCES.length, 398, 'the reviewed Phase 2 catalog must not silently shrink');
   const families = new Set(JOB_SOURCES.map((source) => source.ats_name));
   assert.deepEqual([...families].sort(), ['ashby', 'greenhouse', 'lever', 'workable']);
-  /* TWO sources of headroom left, and this is now the binding constraint on sourcing. The next
-     round CANNOT be added without the follow-up segment: past 400 the poller leaves the tail of
-     the catalog unpolled, and an unpolled source looks exactly like an employer with no jobs. */
-  assert.ok(JOB_SOURCES.length <= POLL_SEGMENT_SIZE, 'today\'s catalog fits one bounded segment');
-  assert.equal(POLL_SEGMENT_SIZE, 400, 'source 401 must begin a follow-up segment');
+  /* A REVIEW TRIPWIRE, NOT A CAPACITY LIMIT, and the comment that used to be here was wrong.
+   *
+   * It claimed that past 400 "the poller leaves the tail of the catalog unpolled". It does not.
+   * The follow-up segment already exists and is already tested: the poll selects only sources not
+   * yet seen in this drain (drainEligible, oldest-first, limit POLL_SOURCE_LIMIT), reports
+   * polling_complete: false while any remain, and .github/workflows/job-monitor.yml re-calls the
+   * endpoint up to five times with the same drain_started_at. The real ceiling is five passes of
+   * 400, and the test named "source 401 completes on the second pass of the same drain run"
+   * covers exactly this.
+   *
+   * The assertion is kept anyway, deliberately: crossing 400 means the daily cron starts needing
+   * a second pass to finish, which changes its runtime and its failure modes, and that is worth
+   * one deliberate edit rather than discovering it from a slow morning. When a sourcing round
+   * genuinely needs source 401, raise the number here and confirm the workflow still completes
+   * inside its five passes - do not treat this as a reason not to add sources. */
+  assert.ok(JOB_SOURCES.length <= POLL_SEGMENT_SIZE, 'crossing 400 makes the cron a two-pass drain');
+  assert.equal(POLL_SEGMENT_SIZE, 400, 'one segment; the drain carries whatever does not fit');
 });
 
 test('no two sources claim the same board, and none is blank', () => {
