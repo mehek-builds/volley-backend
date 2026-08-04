@@ -345,7 +345,9 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
       from_cache: fromCache,
       // Non-empty means the model returned a verdict it could not ground in a real bullet and it
       // was thrown away. Surfaced rather than swallowed so a bad run is visible.
-      rejected: result.rejected,
+      // Flattened for the wire. The structure exists so the CACHE can filter on ids without
+      // parsing prose; a client only needs to be told something was discarded.
+      rejected: result.rejected.map((r) => (r.id ? `${r.id}: ${r.reason}` : r.reason)),
     });
   });
 

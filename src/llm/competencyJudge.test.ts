@@ -31,12 +31,12 @@ describe('a met verdict must quote a real bullet', () => {
   test('a contiguous run of a bullet is grounded', () => {
     // Asked for one bullet verbatim, a model will sometimes return the clause of it that did the
     // work. That is still the student's own sentence, so it counts.
-    assert.equal(quoteIsGrounded('analyzing 350 survey responses', BULLETS), true);
+    assert.equal(quoteIsGrounded('analyzing 350 survey responses & conducting 30 user interviews', BULLETS), true);
   });
 
   test('punctuation and case are not what is being verified', () => {
     assert.equal(quoteIsGrounded('LED A 4-PERSON TEAM, ANALYZING 350 SURVEY RESPONSES', BULLETS), true);
-    assert.equal(quoteIsGrounded('Produced a 50 page proposal', BULLETS), true);
+    assert.equal(quoteIsGrounded('Produced a 50 page proposal detailing actionable recommendations', BULLETS), true);
   });
 
   test('a plausible sentence the student never wrote is NOT grounded', () => {
@@ -47,6 +47,8 @@ describe('a met verdict must quote a real bullet', () => {
   test('a fragment too short to identify a bullet is not grounded', () => {
     assert.equal(quoteIsGrounded('analyzed', BULLETS), false);
     assert.equal(quoteIsGrounded('', BULLETS), false);
+    // Six words, not twelve characters: a common phrase is an echo, not a citation.
+    assert.equal(quoteIsGrounded('led a 4-person team', BULLETS), false);
   });
 });
 
@@ -58,7 +60,9 @@ describe('validateVerdicts refuses to trust what it cannot check', () => {
       BULLETS,
     );
     assert.equal(verdicts.find((v) => v.id === 'c0')!.met, false);
-    assert.equal(rejected.length, 1);
+    // c0 for the ungrounded claim, c1 because the model never answered it. Both are rejections now,
+    // which is what keeps an unanswered question out of a cache that never expires.
+    assert.deepEqual(rejected.map((r) => r.id).sort(), ['c0', 'c1']);
   });
 
   test('met with an invented quote is downgraded and reported', () => {
@@ -68,7 +72,7 @@ describe('validateVerdicts refuses to trust what it cannot check', () => {
       BULLETS,
     );
     assert.equal(verdicts.find((v) => v.id === 'c0')!.met, false);
-    assert.match(rejected[0], /grounded quote/);
+    assert.match(rejected[0].reason, /grounded quote/);
   });
 
   test('met with a real quote is accepted', () => {
@@ -78,7 +82,8 @@ describe('validateVerdicts refuses to trust what it cannot check', () => {
       BULLETS,
     );
     assert.equal(verdicts.find((v) => v.id === 'c0')!.met, true);
-    assert.deepEqual(rejected, []);
+    // c1 was never answered, so it is rejected and therefore never cached.
+    assert.deepEqual(rejected.map((r) => r.id), ['c1']);
   });
 
   test('a question the model skipped is unmet, never absent', () => {
@@ -102,7 +107,7 @@ describe('validateVerdicts refuses to trust what it cannot check', () => {
       BULLETS,
     );
     assert.ok(!verdicts.some((v) => v.id === 'c99'));
-    assert.match(rejected[0], /unknown id/);
+    assert.match(rejected[0].reason, /unknown id/);
   });
 });
 
@@ -151,7 +156,7 @@ describe('scorePosting keeps the deterministic half deterministic', () => {
   test('a judge that fails does not change a term or structured verdict', async () => {
     const r = await scorePosting(jd, facts, undefined, segmentJd as never, async () => ({
       verdicts: [],
-      rejected: ['model unavailable'],
+      rejected: [{ reason: 'model unavailable' }],
     }));
     const byBasis = Object.fromEntries(r.clauses.map((c) => [c.basis, c.verdict]));
     assert.equal(byBasis.terms, 'met');

@@ -38,6 +38,12 @@ export interface CompetencyQuestion {
   clause: string;
 }
 
+export interface CompetencyRejection {
+  /** The question this concerns, when it concerns one. Absent for whole-response failures. */
+  id?: string;
+  reason: string;
+}
+
 export interface CompetencyVerdict {
   id: string;
   met: boolean;
@@ -93,7 +99,11 @@ function normalizeQuote(s: string): string {
  */
 export function quoteIsGrounded(quote: string, bullets: string[]): boolean {
   const q = normalizeQuote(quote);
-  if (q.length < 12) return false;
+  /* SIX WORDS, not twelve characters.
+     A twelve-character floor accepted "led the team" or "and analysis" as a citation, which is the
+     model echoing a common phrase rather than pointing at a sentence. The gate is the single rule
+     the whole design rests on: if a fragment can ground a verdict, the verdict is not grounded. */
+  if (q.split(' ').filter(Boolean).length < 6) return false;
   return bullets.some((b) => {
     const nb = normalizeQuote(b);
     return nb === q || nb.includes(q);
@@ -104,17 +114,17 @@ export function validateVerdicts(
   raw: unknown,
   questions: CompetencyQuestion[],
   bullets: string[],
-): { verdicts: CompetencyVerdict[]; rejected: string[] } {
+): { verdicts: CompetencyVerdict[]; rejected: CompetencyRejection[] } {
   const byId = new Map(questions.map((q) => [q.id, q]));
   const out: CompetencyVerdict[] = [];
-  const rejected: string[] = [];
+  const rejected: CompetencyRejection[] = [];
   const list = (raw as { verdicts?: unknown[] })?.verdicts;
-  if (!Array.isArray(list)) return { verdicts: [], rejected: ['response had no verdicts array'] };
+  if (!Array.isArray(list)) return { verdicts: [], rejected: [{ reason: 'response had no verdicts array' }] };
 
   for (const item of list) {
     const v = item as Partial<CompetencyVerdict>;
     if (typeof v?.id !== 'string' || !byId.has(v.id)) {
-      rejected.push(`unknown id ${String(v?.id)}`);
+      rejected.push({ reason: `unknown id ${String(v?.id)}` });
       continue;
     }
     if (v.met !== true) {
@@ -125,7 +135,7 @@ export function validateVerdicts(
     // rejection is reported so a run that starts hallucinating is visible rather than silently
     // generous. This is the one rule that makes an LLM verdict safe to put a number on.
     if (typeof v.quote !== 'string' || !quoteIsGrounded(v.quote, bullets)) {
-      rejected.push(`${v.id}: met without a grounded quote`);
+      rejected.push({ id: v.id, reason: 'met without a grounded quote' });
       out.push({ id: v.id, met: false, why: 'no bullet on the resume supports this' });
       continue;
     }
@@ -133,8 +143,15 @@ export function validateVerdicts(
   }
   // A question the model skipped is unmet, not absent: a missing answer must not quietly shrink the
   // denominator, which is the padding failure preferStatedRequirements exists to prevent.
+  /* A question the model skipped is unmet for THIS response, so the denominator does not quietly
+     shrink by exactly the requirements that were hardest to judge. It is also reported as rejected,
+     which is what keeps it OUT of the cache: writing "not judged" to a store that never expires
+     would freeze those clauses at unmet for every student who ever has the same bullets. */
   for (const q of questions) {
-    if (!out.some((v) => v.id === q.id)) out.push({ id: q.id, met: false, why: 'not judged' });
+    if (!out.some((v) => v.id === q.id)) {
+      out.push({ id: q.id, met: false, why: 'not judged' });
+      rejected.push({ id: q.id, reason: 'no verdict returned' });
+    }
   }
   return { verdicts: out, rejected };
 }
@@ -142,7 +159,7 @@ export function validateVerdicts(
 export async function judgeCompetencies(
   bullets: string[],
   questions: CompetencyQuestion[],
-): Promise<{ verdicts: CompetencyVerdict[]; rejected: string[] }> {
+): Promise<{ verdicts: CompetencyVerdict[]; rejected: CompetencyRejection[] }> {
   if (questions.length === 0 || bullets.length === 0) {
     return { verdicts: questions.map((q) => ({ id: q.id, met: false, why: 'no resume bullets to judge against' })), rejected: [] };
   }
@@ -151,10 +168,34 @@ export async function judgeCompetencies(
   // between one request and two hundred.
   const response = await client.messages.create({
     model: 'claude-sonnet-5',
-    max_tokens: 2000,
+    // Scales with the batch instead of a flat ceiling a long posting silently overruns. Each
+    // verdict carries an id, a verbatim bullet quote and a sentence, so ~150 tokens apiece.
+    max_tokens: Math.min(8_000, 600 + questions.length * 200),
     system: COMPETENCY_SYSTEM_PROMPT,
     messages: [{ role: 'user', content: buildUserMessage(bullets, questions) }],
   });
+  /* A truncated response is a REJECTION, not an exception.
+   *
+   * max_tokens is fixed while the clause count is not, so a posting stating fifteen requirements
+   * can exhaust the budget mid-JSON; parseJson then takes lastIndexOf('}') of an incomplete object
+   * and throws. Before the JD truncation was fixed this was unreachable, because the route only
+   * ever saw 600-character previews that state no clauses at all. Now it is reachable on exactly
+   * the postings with the most requirements, which are the ones worth reading. */
+  if (response.stop_reason === 'max_tokens') {
+    return {
+      verdicts: questions.map((q) => ({ id: q.id, met: false, why: 'not judged' })),
+      rejected: [{ reason: 'response hit the token ceiling before it finished' }],
+    };
+  }
   const text = response.content.map((c) => (c.type === 'text' ? c.text : '')).join('');
-  return validateVerdicts(parseJson(text), questions, bullets);
+  let parsed: unknown;
+  try {
+    parsed = parseJson(text);
+  } catch (err) {
+    return {
+      verdicts: questions.map((q) => ({ id: q.id, met: false, why: 'not judged' })),
+      rejected: [{ reason: `unparseable response: ${err instanceof Error ? err.message : 'unknown'}` }],
+    };
+  }
+  return validateVerdicts(parsed, questions, bullets);
 }

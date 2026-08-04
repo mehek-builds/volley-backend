@@ -132,21 +132,54 @@ const FIELD_SYNONYMS: Record<string, RegExp> = {
 
 const MONTHS = 'jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec';
 
-/** "Fall 2027", "Spring 2028", "December 2027", "2027" -> a comparable year+season. */
-function parseGraduation(text: string): { year: number; half: 1 | 2 } | null {
-  const seasonal = new RegExp(`\\b(fall|autumn|winter|spring|summer)\\s+(20\\d\\d)\\b`, 'i').exec(text);
-  if (seasonal) {
-    const season = seasonal[1].toLowerCase();
-    return { year: Number(seasonal[2]), half: season === 'fall' || season === 'autumn' || season === 'winter' ? 2 : 1 };
+/** A point in academic time, comparable by ordering. Spring/H1 sorts before Fall/H2. */
+type GradPoint = { year: number; half: 1 | 2 };
+
+const SEASONAL = new RegExp(`\\b(fall|autumn|winter|spring|summer)\\s+(20\\d\\d)\\b`, 'gi');
+const MONTHLY = new RegExp(`\\b(${MONTHS})[a-z]*\\s+(20\\d\\d)\\b`, 'gi');
+/** A bare year only counts as a graduation date when the clause is actually about graduating. */
+const GRADUATION_CUE = /\b(graduat|class of|degree conferred|expected|completion)/i;
+
+function pointsIn(text: string): GradPoint[] {
+  const out: GradPoint[] = [];
+  for (const m of text.matchAll(SEASONAL)) {
+    const season = m[1].toLowerCase();
+    out.push({ year: Number(m[2]), half: season === 'spring' || season === 'summer' ? 1 : 2 });
   }
-  const monthly = new RegExp(`\\b(${MONTHS})[a-z]*\\s+(20\\d\\d)\\b`, 'i').exec(text);
-  if (monthly) {
-    const m = monthly[1].toLowerCase();
-    const late = ['jul', 'aug', 'sep', 'oct', 'nov', 'dec'].includes(m);
-    return { year: Number(monthly[2]), half: late ? 2 : 1 };
+  for (const m of text.matchAll(MONTHLY)) {
+    const late = ['jul', 'aug', 'sep', 'oct', 'nov', 'dec'].includes(m[1].toLowerCase());
+    out.push({ year: Number(m[2]), half: late ? 2 : 1 });
   }
-  const bare = /\b(20\d\d)\b/.exec(text);
-  return bare ? { year: Number(bare[1]), half: 1 } : null;
+  if (out.length === 0 && GRADUATION_CUE.test(text)) {
+    for (const m of text.matchAll(/\b(20\d\d)\b/g)) out.push({ year: Number(m[1]), half: 1 });
+  }
+  return out;
+}
+
+const ordinal = (p: GradPoint) => p.year * 2 + p.half;
+
+/**
+ * EVERY graduation point a clause names, as a closed range, not just the first one.
+ *
+ * "graduating in Fall 2027 or Spring 2028" is a WINDOW, and reading only the first match turned it
+ * into a floor: `ownGrad.year > wantedGrad.year` then scored a May 2030 graduate as MEETING an
+ * internship requirement they plainly miss. That is not hypothetical. It is the unexplained
+ * "six of six met, score 100" on Databricks' PM intern posting on 2026-08-04, where the candidate
+ * graduates May 2027 and is outside the window at the OTHER end. The bug hid because the clause
+ * reported met and the reader had no reason to look at a passing row.
+ *
+ * A single stated point stays a single point, so "graduating in 2026" is still exact rather than
+ * silently becoming an open interval.
+ *
+ * THE BARE-YEAR FALLBACK NOW NEEDS A CUE. It used to fire on any four-digit year in a degree
+ * clause, so "Bachelor's degree; our 2019 Series B team" invented a graduation requirement and
+ * scored a real candidate unmet against a window the employer never stated.
+ */
+function parseGraduationWindow(text: string): { from: GradPoint; to: GradPoint } | null {
+  const points = pointsIn(text);
+  if (points.length === 0) return null;
+  const sorted = [...points].sort((a, b) => ordinal(a) - ordinal(b));
+  return { from: sorted[0], to: sorted[sorted.length - 1] };
 }
 
 const YEARS_CLAUSE = /(\d+)\s*\+?\s*(?:or more\s*)?years?\b/i;
@@ -271,20 +304,31 @@ export function matchClause(
     const fieldMet =
       fieldsAsked.length === 0 || fieldsAsked.some(([, re]) => re.test(degree) || re.test(school));
 
-    const wantedGrad = parseGraduation(text);
-    const ownGrad = parseGraduation(facts.gradDate ?? '');
-    // A window ("Fall 2027 or Spring 2028") is stated as the EARLIEST acceptable point in practice,
-    // so graduating before it is a real miss and this says so rather than rounding in her favour.
+    const wantedGrad = parseGraduationWindow(text);
+    // The candidate's own date is a POINT, so the first parse of it is the whole answer. Only the
+    // employer's clause can name a range.
+    const ownPoints = pointsIn(facts.gradDate ?? '');
+    const ownGrad = ownPoints.length > 0 ? ownPoints[0] : null;
+    /* INSIDE the stated window, at BOTH ends, with NO slack.
+       Graduating before it and graduating after it are the same kind of miss, and only the first
+       was caught. A season of slack was tried and removed: an employer writing "Fall 2027 or
+       Spring 2028" for a summer internship is screening out people who will have already
+       graduated, so admitting the term either side re-breaks the exact case this was written for.
+       A candidate finishing May 2027 is out of a Fall 2027 to Spring 2028 window, and saying so is
+       the useful answer. */
     const gradMet =
       !wantedGrad || !ownGrad
         ? true
-        : ownGrad.year > wantedGrad.year ||
-          (ownGrad.year === wantedGrad.year && ownGrad.half >= wantedGrad.half);
+        : ordinal(ownGrad) >= ordinal(wantedGrad.from) && ordinal(ownGrad) <= ordinal(wantedGrad.to);
 
     const met = fieldMet && gradMet;
     const why = [
       fieldsAsked.length ? (fieldMet ? `field matches (${degree})` : `field asked: ${fieldsAsked.map(([n]) => n).join('/')}`) : null,
-      wantedGrad && ownGrad ? (gradMet ? `graduates ${facts.gradDate}` : `graduates ${facts.gradDate}, before the window`) : null,
+      wantedGrad && ownGrad
+        ? gradMet
+          ? `graduates ${facts.gradDate}`
+          : `graduates ${facts.gradDate}, outside the window this posting states`
+        : null,
     ].filter(Boolean).join('; ');
     return { ...base, verdict: met ? 'met' : 'unmet', basis: wantedGrad ? 'graduation' : 'degree', evidence: why || undefined };
   }
@@ -312,13 +356,13 @@ export function matchClause(
 
 /* ---------- the two-phase scorer ---------- */
 
-import type { CompetencyQuestion, CompetencyVerdict } from '../llm/competencyJudge';
+import type { CompetencyQuestion, CompetencyRejection, CompetencyVerdict } from '../llm/competencyJudge';
 
 export interface ScoredPosting {
   score: number | null;
   clauses: RequirementClause[];
   /** Verdicts the judge returned ungrounded, so a bad run is visible rather than silently generous. */
-  rejected: string[];
+  rejected: CompetencyRejection[];
 }
 
 /** Sections that state what the CANDIDATE must have. `responsibilities` describes the job instead,
@@ -339,7 +383,7 @@ export async function scorePosting(
   facts: CandidateFacts,
   context: JdContext | undefined,
   segment: (jd: string) => Array<{ kind: string; weight: number; text: string }>,
-  judge: (bullets: string[], qs: CompetencyQuestion[]) => Promise<{ verdicts: CompetencyVerdict[]; rejected: string[] }>,
+  judge: (bullets: string[], qs: CompetencyQuestion[]) => Promise<{ verdicts: CompetencyVerdict[]; rejected: CompetencyRejection[] }>,
 ): Promise<ScoredPosting> {
   const clauses: RequirementClause[] = [];
   for (const sec of segment(jdText)) {
@@ -348,10 +392,30 @@ export async function scorePosting(
   }
 
   const pending = clauses.map((c, i) => ({ c, i })).filter(({ c }) => c.basis === 'competency');
-  let rejected: string[] = [];
+  let rejected: CompetencyRejection[] = [];
   if (pending.length > 0) {
     const questions: CompetencyQuestion[] = pending.map(({ i }) => ({ id: `c${i}`, clause: clauses[i].text }));
-    const result = await judge(facts.bullets ?? [], questions);
+    /* A judge failure leaves the deterministic verdicts EXACTLY where they were.
+     *
+     * This call was unguarded, and judgeCompetencies throws on any Anthropic error and on a
+     * response it cannot parse. The route awaited scorePosting with no try/catch, so a rate limit
+     * turned into a 500 and every locally-decided clause - Python on the resume, a graduation date
+     * inside the window - was thrown away with it. The header of this module promises the opposite
+     * in as many words: "a model outage, a rate limit or a bad response can never change whether
+     * Python is on a resume". It could, and it did. */
+    let result: { verdicts: CompetencyVerdict[]; rejected: CompetencyRejection[] };
+    try {
+      result = await judge(facts.bullets ?? [], questions);
+    } catch (err) {
+      // The competency clauses stay UNSCOREABLE rather than unmet: we did not ask and got no
+      // answer, which is not the same as asking and being told no.
+      for (const { i } of pending) clauses[i] = { ...clauses[i], verdict: 'unscoreable' };
+      return {
+        score: aggregate(clauses),
+        clauses,
+        rejected: [{ reason: `judge unavailable: ${err instanceof Error ? err.message : 'unknown error'}` }],
+      };
+    }
     rejected = result.rejected;
     const byId = new Map(result.verdicts.map((v) => [v.id, v]));
     for (const { i } of pending) {
@@ -365,11 +429,17 @@ export async function scorePosting(
     }
   }
 
-  let got = 0, total = 0;
+  return { score: aggregate(clauses), clauses, rejected };
+}
+
+/** Weighted coverage over the clauses that could be decided. Unscoreable ones leave entirely. */
+function aggregate(clauses: RequirementClause[]): number | null {
+  let got = 0;
+  let total = 0;
   for (const c of clauses) {
     if (c.verdict === 'unscoreable') continue;
     total += c.weight;
     if (c.verdict === 'met') got += c.weight;
   }
-  return { score: total > 0 ? Math.round((100 * got) / total) : null, clauses, rejected };
+  return total > 0 ? Math.round((100 * got) / total) : null;
 }

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { warmRequirementCache, WARM_TIMEOUT_MS } from './warmRequirements';
+import { matchClause } from './clauseMatch';
 import type { CandidateFacts } from './clauseMatch';
 
 const FACTS: CandidateFacts = {
@@ -222,5 +223,55 @@ describe('the posting read is scoped, and the paid route is metered', () => {
     // 180 req/min IP limiter. Its own cache made the common path free, which is what hid it.
     assert.match(routes, /'\/jd-match\/requirements', \{ preHandler: requireAuth, bodyLimit: 128 \* 1024 \}/);
     assert.match(routes, /allowHourly\(userId, 'jdRequirements', LIMITS\.perHour\.jdRequirements\)/);
+  });
+});
+
+describe('a graduation window has two ends', () => {
+  const facts = (gradDate: string): CandidateFacts => ({
+    degree: 'Bachelor of Science in Computer Science',
+    school: 'University of Southern California',
+    gradDate,
+    resumeText: 'Python.',
+    bullets: ['Led a 4-person team, analyzing 350 survey responses.'],
+  });
+  const CLAUSE = "Pursuing a bachelor's in computer science graduating in Fall 2027 or Spring 2028";
+  const verdict = (gradDate: string) => matchClause(CLAUSE, 1, facts(gradDate)).verdict;
+
+  /* THE BUG THIS CLOSES, and it is the one that hid in plain sight. parseGraduation read only the
+     FIRST date in the clause, so "Fall 2027 or Spring 2028" became a floor and the comparison was
+     `ownGrad.year > wantedGrad.year`. A 2030 graduate therefore scored MET on an internship they
+     plainly miss. It surfaced as an unexplained "six of six met, score 100" on Databricks' PM
+     intern posting on 2026-08-04: a passing row is one nobody looks twice at. */
+
+  test('inside the window is met, at both ends', () => {
+    assert.equal(verdict('December 2027'), 'met', 'Fall 2027, the opening end');
+    assert.equal(verdict('May 2028'), 'met', 'Spring 2028, the closing end');
+  });
+
+  test('AFTER the window is unmet, which is the case that scored met', () => {
+    assert.equal(verdict('May 2030'), 'unmet');
+    assert.equal(verdict('December 2028'), 'unmet', 'one term past the close');
+  });
+
+  test('before the window is unmet, and stays unmet', () => {
+    // The only end that ever worked. A season of slack was tried here and removed: it re-admitted
+    // exactly this candidate, who will have graduated before the internship starts.
+    assert.equal(verdict('May 2027'), 'unmet');
+  });
+
+  test('a single stated date stays a point, not an open interval', () => {
+    // Needs a degree keyword to reach the degree branch at all; the window logic lives there.
+    const one = "Pursuing a bachelor's degree, graduating in 2026";
+    assert.equal(matchClause(one, 1, facts('May 2026')).verdict, 'met');
+    assert.equal(matchClause(one, 1, facts('May 2028')).verdict, 'unmet');
+  });
+
+  test('a stray year in a degree clause is not a graduation requirement', () => {
+    // "Bachelor's degree; our 2019 Series B team" used to invent a window from any four-digit year
+    // and score a real candidate unmet against something the employer never said.
+    const stray = "Bachelor's degree in computer science; join the team we built after our 2019 Series B";
+    const c = matchClause(stray, 1, facts('May 2030'));
+    assert.equal(c.basis, 'degree', 'no window was stated, so this is a degree clause');
+    assert.equal(c.verdict, 'met');
   });
 });
