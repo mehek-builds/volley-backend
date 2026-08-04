@@ -1600,12 +1600,25 @@ const THIRD_PARTY_HANDOFF =
    "apply now" is itself a legitimate submit label, so it sailed through into the eligible pool.
    Naming the providers outright cannot be worded around: no employer's own submit button carries a
    job-board's name. */
-const HANDOFF_PROVIDER =
-  /\b(?:linkedin|indeed|seek|glassdoor|ziprecruiter|monster|xing|stepstone|google|facebook|github|apple|greenhouse|workday)\b/i;
+const PROVIDER = 'linkedin|indeed|seek|glassdoor|ziprecruiter|monster|xing|stepstone|google|facebook|github|apple|greenhouse|workday';
+/* POSITIONAL, not "anywhere in the label". Several of these words are also employer names, and a
+   button reading "Submit your application to Apple" is a real submit on a real careers page. Only
+   a provider in a HANDOFF position gives the control away: after with/using/via/from, or directly
+   after the verb ("Apply LinkedIn"). Getting this wrong costs an autonomous submission rather than
+   causing a wrong one, but it still costs it. */
+const HANDOFF_PROVIDER = new RegExp(
+  `\\b(?:with|using|via|from)\\s+(?:${PROVIDER})\\b|\\b(?:apply|autofill|continue|import)\\s+(?:${PROVIDER})\\b`,
+  'i',
+);
 
 /* What a real submit control says. "Submit" on its own is the common case; the rest were read off
    live forms. Bare "Apply" is accepted because some employers do label the final button that way,
    which is exactly why THIRD_PARTY_HANDOFF has to be checked first rather than instead. */
+/** Names the application outright. The strongest thing a submit control can say. */
+const APPLICATION_SUBMIT = /\bsubmit\s+(?:your\s+|my\s+|the\s+)?application\b|\bsend\s+(?:your\s+|my\s+)?application\b/i;
+/** Help-desk widgets that also say "submit" and also sit at the foot of the page. */
+const SUPPORT_WIDGET = /\bfeedback\b|\ba request\b|\bticket\b|\bcomment\b|\bsearch\b|\breport\b/i;
+
 const SUBMIT_LABEL =
   /\bsubmit\b|\bsend (?:my )?application\b|^\s*apply\s*$|\bapply now\b|\bfinish (?:and|&) apply\b/i;
 
@@ -1628,13 +1641,21 @@ export function chooseSubmitControl(labels: string[]): number | null {
       && !HANDOFF_PROVIDER.test(label)
       && SUBMIT_LABEL.test(label));
   if (eligible.length === 0) return null;
-  const explicit = eligible.filter(({ label }) => /\bsubmit\b/i.test(label));
-  const pool = explicit.length > 0 ? explicit : eligible;
+  /* THREE TIERS, because "the last thing saying submit" is not specific enough on a real careers
+     page. Support widgets (Intercom, Zendesk) render "Submit feedback" and "Submit a request" as
+     [role=button] at the FOOT of the page, so they sort after the real control and last-wins hands
+     them the click - which submits nothing, fails readReceipt, and tells the applicant to go check
+     her email. Naming the application explicitly is the strongest signal available. */
+  const application = eligible.filter(({ label }) => APPLICATION_SUBMIT.test(label));
+  const explicit = eligible.filter(({ label }) => /\bsubmit\b/i.test(label)
+    && !SUPPORT_WIDGET.test(label));
+  const pool = application.length > 0 ? application : explicit.length > 0 ? explicit : eligible;
   return pool[pool.length - 1]!.index;
 }
 
 /** Every control that could conceivably be a submit button. Exported so a test can match it. */
-export const SUBMIT_CANDIDATE_SELECTOR = 'button, input[type=submit], [role=button]';
+export const SUBMIT_CANDIDATE_SELECTOR =
+  'button, input[type=submit], input[type=button], input[type=image], [role=button]';
 
 /**
  * No control on this page submits the application.
@@ -1656,6 +1677,45 @@ export class NoSubmitControlError extends Error {
   }
 }
 
+/* ONE READER, USED BY BOTH PASSES.
+ *
+ * It was two, and the second was a strict subset of the first: selection read title and
+ * aria-labelledby and the UA default, the pre-click re-check read only innerText/value/aria-label.
+ * So an <input type=submit> with no value - the exact control the fallbacks were added for -
+ * selected fine and then re-read as the empty string, and a page with one perfectly good submit
+ * button threw "the submit button changed to ''" and sent nothing. Two copies of a rule is one
+ * copy too many when disagreeing between them means no application is ever submitted.
+ *
+ * Serialised into the page, so it is written against a hand-rolled shape rather than the DOM lib:
+ * those types are not in scope for the server build.
+ */
+const READ_CONTROL_LABEL = (node: unknown) => {
+  const el = node as unknown as {
+    innerText?: string; value?: string; title?: string; disabled?: boolean; type?: string;
+    getAttribute(name: string): string | null; getClientRects(): { length: number };
+  };
+  /* A control the accessibility tree would not offer is not a submit button. getByRole did this
+     filtering for us; a raw CSS selector does not, and innerText falls back to textContent on a
+     hidden node, so a display:none mobile duplicate reads as a perfectly good "Submit
+     application" - which the last-wins rule would then prefer over the real one. */
+  if (el.disabled === true) return '';
+  if (el.getAttribute('aria-hidden') === 'true') return '';
+  if (el.getClientRects().length === 0) return '';
+  const labelledBy = el.getAttribute('aria-labelledby');
+  const referenced = labelledBy
+    ? (node as unknown as { ownerDocument: { getElementById(id: string): { innerText?: string } | null } })
+      .ownerDocument.getElementById(labelledBy.split(/\s+/)[0]!)?.innerText ?? ''
+    : '';
+  /* An <input type=submit> with no value attribute renders the UA default "Submit" and reports
+     value === '', so without this a real submit reads as unlabelled and gets skipped. */
+  const uaDefault = el.type === 'submit' && !el.value ? 'Submit' : '';
+  return (el.innerText || el.value || el.getAttribute('aria-label') || el.title || referenced
+    || uaDefault || '').trim();
+};
+
+/** How long to give a submit control that is disabled until client-side validation settles. */
+const SUBMIT_ENABLE_WAIT_MS = 3_000;
+
 export async function clickFinalSubmit(page: Page): Promise<void> {
   /* ELEMENT HANDLES, NOT nth(). An index is only meaningful against the DOM that produced it, and
      the captcha probe below sits between the two: it can spend the better part of fifteen seconds
@@ -1664,70 +1724,62 @@ export async function clickFinalSubmit(page: Page): Promise<void> {
      constraint, so a shift would land the click on whatever control now holds that position -
      which on these boards is "Apply with LinkedIn" at index 0. A handle references ONE node and
      throws if it detaches, which is the failure we want. */
-  const handles = await page.locator(SUBMIT_CANDIDATE_SELECTOR).elementHandles();
-  /* Typed loosely on purpose: this closure is serialised into the page, where the DOM lib types
-     are not in scope for the server build.
-     A control the accessibility tree would not offer is not a submit button. getByRole used to do
-     this filtering for us; a raw CSS selector does not, and `innerText` falls back to textContent
-     on a hidden node, so a display:none mobile duplicate reads as a perfectly good "Submit
-     application" - and chooseSubmitControl's last-wins rule would pick it over the real one. */
-  const labels = await Promise.all(handles.map((handle) => handle.evaluate((node) => {
-    const el = node as unknown as {
-      innerText?: string; value?: string; title?: string; disabled?: boolean; type?: string;
-      getAttribute(name: string): string | null; getClientRects(): { length: number };
-    };
-    if (el.disabled === true) return '';
-    if (el.getAttribute('aria-hidden') === 'true') return '';
-    if (el.getClientRects().length === 0) return '';
-    const labelledBy = el.getAttribute('aria-labelledby');
-    const referenced = labelledBy
-      ? (node as unknown as { ownerDocument: { getElementById(id: string): { innerText?: string } | null } })
-        .ownerDocument.getElementById(labelledBy.split(/\s+/)[0]!)?.innerText ?? ''
-      : '';
-    /* An <input type=submit> with no value attribute renders the UA default "Submit" and reports
-       value === '', so without this it reads as unlabelled and a real submit gets skipped. */
-    const uaDefault = el.type === 'submit' && !el.value ? 'Submit' : '';
-    return (el.innerText || el.value || el.getAttribute('aria-label') || el.title || referenced
-      || uaDefault || '').trim();
-  })));
-  const chosen = chooseSubmitControl(labels);
+  let handles = await page.locator(SUBMIT_CANDIDATE_SELECTOR).elementHandles();
+  let labels = await Promise.all(handles.map((handle) => handle.evaluate(READ_CONTROL_LABEL)));
+  let chosen = chooseSubmitControl(labels);
+
+  /* ONE RETRY, and it is not defensive padding. Plenty of ATS forms render the final button
+     DISABLED until async client-side validation settles after the fill, and the disabled filter
+     above reads once, synchronously. The old getByRole().click() waited out that window through
+     Playwright's actionability check; reading labels does not, so without this a form that used to
+     submit itself quietly becomes a manual handoff. */
   if (chosen === null) {
-    await Promise.all(handles.map((handle) => handle.dispose()));
-    /* A page whose only apply-ish controls are third-party handoffs is a page this run cannot
-       finish, and saying so - as a type fail() can recognise - is the honest answer. */
-    throw new NoSubmitControlError();
+    await page.waitForTimeout(SUBMIT_ENABLE_WAIT_MS);
+    await Promise.all(handles.map((handle) => handle.dispose().catch(() => undefined)));
+    handles = await page.locator(SUBMIT_CANDIDATE_SELECTOR).elementHandles();
+    labels = await Promise.all(handles.map((handle) => handle.evaluate(READ_CONTROL_LABEL)));
+    chosen = chooseSubmitControl(labels);
   }
-  const button = handles[chosen]!;
-  // Defence in depth, and it covers a case the call-site gate cannot. portalCanAutoSubmit() stops
-  // the families KNOWN to be gated (JazzHR, BambooHR) before this function is ever reached. It
-  // knows nothing about a Greenhouse or Lever board whose employer switched a challenge on last
-  // week. Pressing submit under an unsolved challenge does not just fail: it submits the applicant
-  // as bot traffic, and the posting can discard the application with no error shown to anyone.
-  //
-  // NOTE: this guard only covers the direct-Playwright path. The managed-Stratus path in
-  // submissionRunner never builds a Page, so it never reaches here. See the CAPTCHA note there.
-  if (await hasUnresolvedCaptcha(page)) {
-    // Identified HERE, while the Page is still open. By the time the error reaches fail() the
-    // browser is closed and the provider is unrecoverable, so it rides along on the error.
-    throw new CaptchaUnresolvedError('at_submit', await detectCaptchaProvider(page));
+
+  try {
+    if (chosen === null) {
+      /* A page whose only apply-ish controls are third-party handoffs, or which renders no controls
+         at all, is a page this run cannot finish - and saying so as a type fail() recognises is the
+         honest answer. */
+      throw new NoSubmitControlError();
+    }
+    const button = handles[chosen]!;
+    // Defence in depth, and it covers a case the call-site gate cannot. portalCanAutoSubmit() stops
+    // the families KNOWN to be gated (JazzHR, BambooHR) before this function is ever reached. It
+    // knows nothing about a Greenhouse or Lever board whose employer switched a challenge on last
+    // week. Pressing submit under an unsolved challenge does not just fail: it submits the applicant
+    // as bot traffic, and the posting can discard the application with no error shown to anyone.
+    //
+    // NOTE: this guard only covers the direct-Playwright path. The managed-Stratus path in
+    // submissionRunner never builds a Page, so it never reaches here. See the CAPTCHA note there.
+    if (await hasUnresolvedCaptcha(page)) {
+      // Identified HERE, while the Page is still open. By the time the error reaches fail() the
+      // browser is closed and the provider is unrecoverable, so it rides along on the error.
+      throw new CaptchaUnresolvedError('at_submit', await detectCaptchaProvider(page));
+    }
+    /* Read the label again, off the same node, immediately before pressing it. The handle cannot
+       drift to a different element, but the element itself can be relabelled by a re-render, and
+       the cost of being wrong here is clicking a handoff on a real application. */
+    const finalLabel = await button.evaluate(READ_CONTROL_LABEL);
+    if (chooseSubmitControl([finalLabel]) === null) {
+      throw new NoSubmitControlError(
+        `The submit button changed to "${finalLabel}" before it could be pressed`,
+      );
+    }
+    await button.click();
+    await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => undefined);
+  } finally {
+    /* EVERY path, including the two throws above and a click that times out. Disposal was on three
+       of six exits before; the browser is closed by the caller either way, so this is hygiene
+       rather than a live leak, but "hygiene that happens to be covered elsewhere" is how a leak
+       gets in later. */
+    await Promise.all(handles.map((handle) => handle.dispose().catch(() => undefined)));
   }
-  /* Read the label again, off the same node, immediately before pressing it. The handle cannot
-     drift to a different element, but the element itself can be relabelled by a re-render, and the
-     cost of being wrong here is clicking a handoff on a real application. */
-  const finalLabel = await button.evaluate((node) => {
-    const el = node as unknown as { innerText?: string; value?: string;
-      getAttribute(name: string): string | null };
-    return (el.innerText || el.value || el.getAttribute('aria-label') || '').trim();
-  });
-  if (chooseSubmitControl([finalLabel]) === null) {
-    await Promise.all(handles.map((handle) => handle.dispose()));
-    throw new NoSubmitControlError(
-      `The submit button changed to "${finalLabel}" before it could be pressed`,
-    );
-  }
-  await button.click();
-  await Promise.all(handles.map((handle) => handle.dispose()));
-  await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => undefined);
 }
 
 export async function readReceipt(page: Page): Promise<{ confirmationText: string; finalUrl: string; referenceId?: string }> {

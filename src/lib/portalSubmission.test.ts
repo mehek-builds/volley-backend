@@ -1048,3 +1048,25 @@ test('a provider name in the label is a handoff however the sentence is arranged
   assert.equal(chooseSubmitControl(['Apply now']), 0);
   assert.equal(chooseSubmitControl(['Submit your application']), 0);
 });
+
+test('an employer named after a job board still has a submit button', () => {
+  /* HANDOFF_PROVIDER used to match a provider word ANYWHERE in the label, which rejected these.
+     Several of those words are also employer names, and failing here costs a real submission. */
+  assert.equal(chooseSubmitControl(['Submit your application to Apple']), 0);
+  assert.equal(chooseSubmitControl(['Submit application to Google']), 0);
+  assert.equal(chooseSubmitControl(['Submit application - Monster Beverage']), 0);
+  // A provider in an actual handoff position is still rejected.
+  assert.equal(chooseSubmitControl(['Apply with LinkedIn']), null);
+  assert.equal(chooseSubmitControl(['Continue with Google']), null);
+  assert.equal(chooseSubmitControl(['Quick Apply with MyGreenhouse']), null);
+});
+
+test('a support widget that says submit does not win over the application', () => {
+  /* Intercom and Zendesk render these as [role=button] at the FOOT of the page, so they sort after
+     the real control and the last-wins rule would hand them the click - which submits nothing and
+     then tells the applicant to go check her email. Both labels are live on careers pages. */
+  assert.equal(chooseSubmitControl(['Submit application', 'Submit feedback']), 0);
+  assert.equal(chooseSubmitControl(['Submit application', 'Submit a request']), 0);
+  assert.equal(chooseSubmitControl(['Submit', 'Submit your application']), 1,
+    'naming the application beats a bare submit wherever it sits');
+});

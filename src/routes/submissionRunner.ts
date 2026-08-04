@@ -950,7 +950,12 @@ async function fail(row: ResumeRow, error: unknown) {
         // Promising a filled form here would send someone to a blank page.
         ? 'This company asks you to prove you are human before it will take an application, so Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.'
         : noSubmitControl
-          ? 'This company’s application has more than one page, so the last step is still waiting. Litos filled in what it could and stopped there, and nothing has been sent - there is no confirmation to look for. Open it when you have a minute and finish it off.'
+          /* CAUSE-NEUTRAL on purpose. NoSubmitControlError is thrown for at least three different
+             reasons - a multi-step first page, a page that renders nothing at all in a headless
+             browser, and a control that was relabelled between choosing it and pressing it - so
+             naming any one of them would be false two times in three. The part that is always
+             true, and the part that matters, is that nothing was sent. */
+          ? 'Litos could not find the button that sends this application, so nothing has been sent and there is no confirmation to look for. Open it when you have a minute and finish it off.'
           : uncertainAfterClaim
           ? 'The final submission was attempted, but Litos could not verify the employer confirmation. Check the portal or your email before trying again.'
           : current.attention_reason,

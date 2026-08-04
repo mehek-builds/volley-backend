@@ -222,6 +222,7 @@ test('the final click guard does not click while any widget is unresolved', asyn
       return challengeLocator;
     },
     waitForLoadState: async () => undefined,
+    waitForTimeout: async () => undefined,
   } as unknown as Page;
 
   await assert.rejects(clickFinalSubmit(page), CaptchaUnresolvedError);
@@ -236,6 +237,7 @@ test('the final click still happens on a page with no challenge', async () => {
       ? button
       : { count: async () => 0, nth: () => ({}) }),
     waitForLoadState: async () => undefined,
+    waitForTimeout: async () => undefined,
   } as unknown as Page;
 
   await clickFinalSubmit(page);
@@ -470,6 +472,7 @@ test('the submit guard carries the provider it saw while the page was open', asy
     },
 
     waitForLoadState: async () => undefined,
+    waitForTimeout: async () => undefined,
   } as unknown as Page;
 
   await assert.rejects(clickFinalSubmit(page), (error: unknown) => {
@@ -514,6 +517,7 @@ test('the control that gets pressed is the one that was chosen, not an ordinal',
       ? buttons
       : { count: async () => 0, nth: () => ({}) }),
     waitForLoadState: async () => undefined,
+    waitForTimeout: async () => undefined,
   } as unknown as Page;
 
   await clickFinalSubmit(page);
@@ -529,6 +533,7 @@ test('a page offering only handoffs reports that nothing was sent', async () => 
       ? buttons
       : { count: async () => 0, nth: () => ({}) }),
     waitForLoadState: async () => undefined,
+    waitForTimeout: async () => undefined,
   } as unknown as Page;
 
   /* NoSubmitControlError, not a plain Error: fail() reads the type to decide whether to tell the
