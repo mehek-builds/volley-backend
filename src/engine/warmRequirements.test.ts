@@ -276,7 +276,7 @@ describe('a graduation window has two ends', () => {
   });
 });
 
-describe('graduation: one pass, context first', () => {
+describe('graduation: a date qualifies on its own evidence', () => {
   const facts = (gradDate: string): CandidateFacts => ({
     degree: 'BS Computer Science', school: 'USC', gradDate,
     resumeText: 'Python.', bullets: ['Led a team of four.'],
@@ -284,53 +284,79 @@ describe('graduation: one pass, context first', () => {
   const W = "Pursuing a bachelor's in computer science graduating in Fall 2027 or Spring 2028";
   const v = (clause: string, grad: string) => matchClause(clause, 1, facts(grad)).verdict;
 
-  /* Every case below broke at least once across three rounds of review. The same defect kept
-     coming back in a new date format because extraction and context-detection were separate
-     passes; they are one pass now, so a date the clause never connected to graduating cannot
-     reach the comparison whatever its format. */
+  /* FIVE ATTEMPTS. The first four all picked a REGION of text and took every date in it, and every
+     definition of the region leaked: no region, then cue-gated bare years, then cue-to-sentence-end,
+     then the same measured from the other side. "requisition 2026-03" and "graduating Fall 2027"
+     share a sentence and no boundary separates them, so attribution is per DATE now. Every case
+     below broke at least one of those four. */
 
   test('the window has two ends', () => {
     assert.equal(v(W, 'December 2027'), 'met');
     assert.equal(v(W, 'May 2028'), 'met');
     assert.equal(v(W, 'May 2027'), 'unmet', 'a term early');
-    assert.equal(v(W, 'May 2030'), 'unmet', 'the end that scored met for three rounds');
+    assert.equal(v(W, 'May 2030'), 'unmet', 'the end that read met for three rounds');
   });
 
-  test('numeric formats read as the month they name', () => {
+  test('numeric and bare formats read as what they name', () => {
     for (const g of ['2027-05', '05/2027', '5/2027']) assert.equal(v(W, g), 'unmet', g);
     assert.equal(v(W, '2027-11'), 'met');
+    assert.equal(v(W, '2027'), 'met', 'a bare year is a whole year');
+    assert.equal(v(W, '2030'), 'unmet');
   });
 
-  test('a bare year is a whole year, on BOTH sides', () => {
-    assert.equal(v(W, '2027'), 'met', 'some term of 2027 is in the window');
-    assert.equal(v(W, '2030'), 'unmet');
+  test("an employer's bare year is a whole year too", () => {
     const bare = "Pursuing a bachelor's degree, graduating in 2026";
-    assert.equal(v(bare, 'December 2026'), 'met', 'the employer end was pinned to Spring');
+    assert.equal(v(bare, 'December 2026'), 'met', 'this end was pinned to Spring');
     assert.equal(v(bare, 'May 2026'), 'met');
     assert.equal(v(bare, 'May 2028'), 'unmet');
   });
 
-  test('a study range means the date it ENDS on', () => {
-    // grad_date is free-typed and the parser preserves what was printed, so it holds ranges.
+  test('a study range means the date it ENDS on, bare or not', () => {
     assert.equal(v(W, 'Aug 2023 - Dec 2027'), 'met');
     assert.equal(v(W, '2023-2027'), 'met');
+    // Round four: the bare 2027 was dropped whenever a precise date shared the field, so this
+    // scored the student against the year they STARTED.
+    assert.equal(v(W, 'Aug 2023 - 2027'), 'met');
   });
 
-  test('a date the clause never tied to graduating cannot reach the window', () => {
-    // Round three: a requisition number widened a real window until the excluded candidate passed.
+  test('a disqualified date cannot enter, on either side of the cue', () => {
     assert.equal(v("Bachelor's degree; requisition 2026-03, graduating Fall 2027 or Spring 2028", 'May 2027'), 'unmet');
-    // Round one, in its first costume: a funding year inventing a requirement.
+    // Round four: the round-three test only put the requisition BEFORE the cue, which is the one
+    // position a cue-to-sentence-end slice happens to protect.
+    assert.equal(v("Pursuing a bachelor's degree in computer science, graduating Fall 2027 or Spring 2028, requisition 2026-03", 'May 2027'), 'unmet');
     assert.equal(v("Bachelor's degree in computer science; join the team we built after our 2019 Series B", 'May 2030'), 'met');
   });
 
+  test('a cue AFTER the date qualifies it, not just before', () => {
+    // Round four, and a regression the rewrite introduced: slicing from the cue index threw away
+    // everything to its left, so a window stated first was invisible and everyone matched.
+    assert.equal(v("Pursuing a bachelor's in computer science with a Fall 2027 or Spring 2028 graduation date", 'May 2030'), 'unmet');
+    assert.equal(v("Pursuing a bachelor's degree; December 2027 graduate preferred", 'May 2030'), 'unmet');
+  });
+
+  test('"expected" is a graduation cue', () => {
+    // Dropped from the cue list by the rewrite, which made every candidate match this phrasing.
+    assert.equal(v("Pursuing a bachelor's degree in computer science expected May 2027", 'May 2030'), 'unmet');
+  });
+
+  test('a connective carries the cue across a chain of dates', () => {
+    assert.equal(v("Pursuing a bachelor's degree, graduating in December 2027 or 2028", 'May 2028'), 'met');
+    /* LONGER THAN THE PROXIMITY WINDOW, which is what makes this test about propagation at all.
+       The first version used a two-date chain that fitted inside NEIGHBOURHOOD, so it passed with
+       propagation deleted and proved nothing. Here "Spring 2029" is well past 44 characters from
+       the cue and can only qualify by inheriting across the connectives. */
+    const chain = "Pursuing a bachelor's degree, graduating in Fall 2027, Spring 2028, Fall 2028 or Spring 2029";
+    assert.equal(v(chain, 'May 2029'), 'met', 'the far end of the chain is still the requirement');
+    assert.equal(v(chain, 'May 2030'), 'unmet', 'and the chain still has an end');
+  });
+
   test('an ambiguous full date spans its year rather than guessing a term', () => {
-    // "05/12/2027" is 12 May or 5 December depending on where it was typed. We do not know the
-    // term, so the honest answer is the year, not a coin flip on the half.
     assert.equal(v(W, '05/12/2027'), 'met');
   });
 
   test('the route tells the client when the judge failed', () => {
     const route = readFileSync(path.join(__dirname, '..', 'routes', 'jdMatch.ts'), 'utf8');
-    assert.match(route, /degraded:/);
+    // The specific expression, not just the word: /degraded:/ passed on the comment beside it.
+    assert.match(route, /degraded: result\.score === null && result\.clauses\.some/);
   });
 });

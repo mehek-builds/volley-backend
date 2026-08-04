@@ -161,58 +161,114 @@ const overlaps = (a: GradSpan, b: GradSpan) =>
  * OVERLAP, which is the real question - could this student have graduated when this posting wants -
  * rather than whether one arbitrary point sits inside a range.
  */
-const GRADUATION_CUE = /\b(graduat|class of|degree conferred|completion|expected to finish)/i;
+/**
+ * A date qualifies as a graduation date on ITS OWN evidence, not by sitting in a blessed region.
+ *
+ * FIFTH ATTEMPT, and the first four all failed the same way because they shared a primitive: pick
+ * a region of text, take every date inside it. Every version of "the region" leaked.
+ *
+ *   1. no region at all      -> a stray bare year invented a window
+ *   2. cue-gated bare years  -> a stray NUMERIC date invented one
+ *   3. cue to sentence end   -> a requisition number AFTER the cue widened a real window
+ *   4. (same, re-measured)   -> a window stated BEFORE the cue was invisible entirely
+ *
+ * Regions cannot work, because "requisition 2026-03" and "graduating Fall 2027" live in the same
+ * sentence and no boundary separates them. So attribution is per date now: each one is qualified or
+ * rejected by what sits immediately around IT, and a window is the span of the qualified ones.
+ *
+ * Three rules, in order:
+ *   DISQUALIFY  a date introduced by a non-graduation noun ("requisition 2026-03", "Series B in
+ *               03/2019"). This beats everything else, so a stray date inside a graduation sentence
+ *               still cannot enter.
+ *   QUALIFY     a date with a graduation cue nearby on EITHER side, which is what makes
+ *               "graduating Fall 2027" and "Fall 2027 graduation date" behave the same.
+ *   PROPAGATE   across connectives: "Fall 2027 or Spring 2028" states one requirement, and only the
+ *               first half of it sits next to the cue.
+ */
+const GRADUATION_CUE = /\b(graduat|class of|degree conferred|conferral|completion|completing|expected|anticipated)/i;
+/** Nouns that introduce a date which is emphatically not a graduation date. */
+const NOT_A_GRADUATION = /\b(requisition|req|job\s*id|posting|series|round|founded|established|since|incorporated|revenue|arr)\b[^.;]{0,20}$/i;
+/** Text that joins two dates into one stated requirement. */
+const DATE_CONNECTIVE = /^[\s]*([,-]|or|and|to|through|until|[-–—/])[\s]*$/i;
+
 const MONTH_NAMES = 'jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec';
 const LATE_MONTHS = new Set(['jul', 'aug', 'sep', 'oct', 'nov', 'dec']);
 const halfOfMonth = (n: number): 1 | 2 => (n >= 7 ? 2 : 1);
 
-/**
- * The text a clause devotes to graduating: from the cue to the end of that sentence.
- *
- * Bounded deliberately. "Bachelor's degree; requisition 2026-03, graduating Fall 2027 or Spring
- * 2028" must not admit the requisition number, and it is kept out because extraction never sees it.
- */
-function graduationSpan(text: string): string | null {
-  const cue = GRADUATION_CUE.exec(text);
-  if (!cue) return null;
-  const rest = text.slice(cue.index);
-  const stop = rest.search(/[.;]/);
-  return stop === -1 ? rest : rest.slice(0, stop);
-}
+/** A date found in text, with where it sat, so its neighbourhood can be inspected. */
+type FoundDate = { span: GradSpan; start: number; end: number; precise: boolean };
 
-/** Every date in a piece of text, as spans. A bare year spans its whole year. */
-function datesIn(text: string): GradSpan[] {
-  const out: GradSpan[] = [];
+/** Every date in the text, precise ones and bare years, each with its position. */
+function findDates(text: string): FoundDate[] {
+  const found: FoundDate[] = [];
   const at = (year: number, half: 1 | 2): GradSpan => ({ from: { year, half }, to: { year, half } });
+  const push = (m: RegExpMatchArray, span: GradSpan, precise: boolean) =>
+    found.push({ span, start: m.index ?? 0, end: (m.index ?? 0) + m[0].length, precise });
 
   for (const m of text.matchAll(/\b(fall|autumn|winter|spring|summer)\s+(20\d\d)\b/gi)) {
-    const season = m[1].toLowerCase();
-    out.push(at(Number(m[2]), season === 'spring' || season === 'summer' ? 1 : 2));
+    const s = m[1].toLowerCase();
+    push(m, at(Number(m[2]), s === 'spring' || s === 'summer' ? 1 : 2), true);
   }
   for (const m of text.matchAll(new RegExp(`\\b(${MONTH_NAMES})[a-z]*\\s+(20\\d\\d)\\b`, 'gi'))) {
-    out.push(at(Number(m[2]), LATE_MONTHS.has(m[1].toLowerCase()) ? 2 : 1));
+    push(m, at(Number(m[2]), LATE_MONTHS.has(m[1].toLowerCase()) ? 2 : 1), true);
   }
-  // YYYY-MM. The trailing guard stops "2027-05-12" reading as May.
   for (const m of text.matchAll(/\b(20\d\d)[-/.](0?[1-9]|1[0-2])(?![-/.]?\d)/g)) {
-    out.push(at(Number(m[1]), halfOfMonth(Number(m[2]))));
+    push(m, at(Number(m[1]), halfOfMonth(Number(m[2]))), true);
   }
-  // MM/YYYY, but never the tail of DD/MM/YYYY: "05/12/2027" is 12 May, not December.
   for (const m of text.matchAll(/(?<!\d[-/.])\b(0?[1-9]|1[0-2])[-/.](20\d\d)\b/g)) {
-    out.push(at(Number(m[2]), halfOfMonth(Number(m[1]))));
+    push(m, at(Number(m[2]), halfOfMonth(Number(m[1]))), true);
   }
-  if (out.length > 0) return out;
-  // Bare years, only when nothing more precise was said. A year is a YEAR, on either side.
+  /* Bare years PER TOKEN, not as an all-or-nothing fallback. Skipping them whenever any precise
+     date existed made "Aug 2023 - 2027" resolve to 2023: the bare 2027 was dropped and the student
+     was scored against the year they started, which is the bug the last commit claimed to fix. */
   for (const m of text.matchAll(/\b(20\d\d)\b/g)) {
-    out.push({ from: { year: Number(m[1]), half: 1 }, to: { year: Number(m[1]), half: 2 } });
+    const start = m.index ?? 0;
+    const covered = found.some((d) => d.precise && start >= d.start && start < d.end);
+    if (covered) continue;
+    push(m, { from: { year: Number(m[1]), half: 1 }, to: { year: Number(m[1]), half: 2 } }, false);
   }
-  return out;
+  return found.sort((a, b) => a.start - b.start);
 }
 
-/** What the posting asks for: the outer bounds of every date it states ABOUT GRADUATING. */
+/** How much text either side of a date counts as "next to" it. */
+const NEIGHBOURHOOD = 44;
+
+function qualifiedDates(text: string): GradSpan[] {
+  const dates = findDates(text);
+  if (dates.length === 0) return [];
+
+  const verdicts = dates.map((d) => {
+    const before = text.slice(Math.max(0, d.start - NEIGHBOURHOOD), d.start);
+    const after = text.slice(d.end, d.end + NEIGHBOURHOOD);
+    // Disqualification wins: a stray date inside a graduation sentence still does not count.
+    if (NOT_A_GRADUATION.test(before)) return false;
+    return GRADUATION_CUE.test(before) || GRADUATION_CUE.test(after);
+  });
+
+  /* "Fall 2027 or Spring 2028" is ONE requirement and only its first half touches the cue, so a
+     qualified date lends its status across a connective. Run both directions until settled, because
+     the cue can sit at either end of the chain. */
+  for (let pass = 0; pass < dates.length; pass++) {
+    let changed = false;
+    for (let i = 0; i < dates.length - 1; i++) {
+      const gap = text.slice(dates[i].end, dates[i + 1].start);
+      if (!DATE_CONNECTIVE.test(gap)) continue;
+      const joinedOk = verdicts[i] || verdicts[i + 1];
+      // A disqualified neighbour does not inherit: "graduating 2027, requisition 2026-03" must not
+      // pull the requisition in just because a comma joins them.
+      const left = text.slice(Math.max(0, dates[i].start - NEIGHBOURHOOD), dates[i].start);
+      const right = text.slice(Math.max(0, dates[i + 1].start - NEIGHBOURHOOD), dates[i + 1].start);
+      if (joinedOk && !verdicts[i] && !NOT_A_GRADUATION.test(left)) { verdicts[i] = true; changed = true; }
+      if (joinedOk && !verdicts[i + 1] && !NOT_A_GRADUATION.test(right)) { verdicts[i + 1] = true; changed = true; }
+    }
+    if (!changed) break;
+  }
+  return dates.filter((_, i) => verdicts[i]).map((d) => d.span);
+}
+
+/** What the posting asks for: the outer bounds of the dates it states ABOUT GRADUATING. */
 export function graduationWindow(clause: string): GradSpan | null {
-  const span = graduationSpan(clause);
-  if (!span) return null;
-  const dates = datesIn(span);
+  const dates = qualifiedDates(clause);
   if (dates.length === 0) return null;
   return {
     from: dates.reduce((a, b) => (ordinal(b.from) < ordinal(a.from) ? b : a)).from,
@@ -228,9 +284,11 @@ export function graduationWindow(clause: string): GradSpan | null {
  * first date scored that student against the year they STARTED.
  */
 export function graduationOf(gradDate: string | null | undefined): GradSpan | null {
-  const dates = datesIn(gradDate ?? '');
+  const dates = findDates(gradDate ?? '');
   if (dates.length === 0) return null;
-  return dates.reduce((a, b) => (ordinal(b.to) > ordinal(a.to) ? b : a));
+  // No cue needed: the field IS the graduation date. The LATEST wins, because a study range
+  // ("Aug 2023 - Dec 2027") means start-of-study to graduation.
+  return dates.reduce((a, b) => (ordinal(b.span.to) > ordinal(a.span.to) ? b : a)).span;
 }
 
 const YEARS_CLAUSE = /(\d+)\s*\+?\s*(?:or more\s*)?years?\b/i;
