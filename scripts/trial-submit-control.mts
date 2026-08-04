@@ -9,7 +9,8 @@
  * It never clicks. Nothing is submitted, nothing is filled, no employer sees anything.
  */
 import { chromium } from 'playwright-core';
-import { chooseSubmitControl, SUBMIT_CANDIDATE_SELECTOR } from '../src/lib/portalSubmission';
+import { chooseSubmitControl, READ_CONTROL_LABEL, SUBMIT_CANDIDATE_SELECTOR }
+  from '../src/lib/portalSubmission';
 
 /* Live application forms, one per portal family. Greenhouse and Lever are AUTONOMOUS in production,
    which is why they lead: a regression here would press the wrong control on a real application
@@ -24,25 +25,9 @@ const PAGES: [portal: string, url: string][] = [
   ['smartrecruiters', 'https://jobs.smartrecruiters.com/Visa/744000133907678-sr-manager?oga=true'],
 ];
 
-/* The SAME extraction the shipped closure performs, kept in one string so the trial cannot drift
-   from the code it is meant to exercise. */
-const READ_LABEL = (node: unknown) => {
-  const el = node as unknown as {
-    innerText?: string; value?: string; title?: string; disabled?: boolean; type?: string;
-    getAttribute(name: string): string | null; getClientRects(): { length: number };
-  };
-  if (el.disabled === true) return '';
-  if (el.getAttribute('aria-hidden') === 'true') return '';
-  if (el.getClientRects().length === 0) return '';
-  const labelledBy = el.getAttribute('aria-labelledby');
-  const referenced = labelledBy
-    ? (node as unknown as { ownerDocument: { getElementById(id: string): { innerText?: string } | null } })
-      .ownerDocument.getElementById(labelledBy.split(/\s+/)[0]!)?.innerText ?? ''
-    : '';
-  const uaDefault = el.type === 'submit' && !el.value ? 'Submit' : '';
-  return (el.innerText || el.value || el.getAttribute('aria-label') || el.title || referenced
-    || uaDefault || '').trim();
-};
+/* The label reader is IMPORTED, not copied. It was copied, with a comment claiming that kept the
+   trial from drifting - which is the same two-readers-that-disagree mistake this branch already had
+   to fix once, reintroduced inside the harness that exists to prove they agree. */
 
 async function main() {
   const browser = await chromium.launch();
@@ -53,7 +38,7 @@ async function main() {
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 });
       await page.waitForTimeout(5000);
       const handles = await page.locator(SUBMIT_CANDIDATE_SELECTOR).elementHandles();
-      const labels = await Promise.all(handles.map((h) => h.evaluate(READ_LABEL)));
+      const labels = await Promise.all(handles.map((h) => h.evaluate(READ_CONTROL_LABEL)));
       const chosen = chooseSubmitControl(labels);
       const visible = labels.filter(Boolean);
       console.log(`\n=== ${portal}  ${page.url().slice(0, 78)}`);
@@ -63,8 +48,12 @@ async function main() {
         console.log('    DECISION: no submit control -> NoSubmitControlError (nothing is pressed)');
       } else {
         console.log(`    DECISION: would press ${JSON.stringify(labels[chosen])} (index ${chosen})`);
-        if (/linkedin|indeed|seek|google|facebook/i.test(labels[chosen]!)) {
-          console.log('    !!! THAT IS A THIRD-PARTY HANDOFF - the bug is not fixed');
+        /* Widened past provider names: choosing a help-desk widget or a text-free icon button
+           reading "Submit" is the same class of failure - a click that sends nothing and then tells
+           the applicant to go looking for a confirmation. */
+        const bad = /linkedin|indeed|seek|google|facebook|feedback|a request|ticket/i;
+        if (bad.test(labels[chosen]!) || !labels[chosen]!.trim()) {
+          console.log('    !!! THAT CONTROL DOES NOT SUBMIT THE APPLICATION - the bug is not fixed');
           pressedAHandoff = true;
         }
       }

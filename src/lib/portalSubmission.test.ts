@@ -1070,3 +1070,46 @@ test('a support widget that says submit does not win over the application', () =
   assert.equal(chooseSubmitControl(['Submit', 'Submit your application']), 1,
     'naming the application beats a bare submit wherever it sits');
 });
+
+/* A local copy of SUBMIT_LABEL's shape, so the test can assert its own premise: that each label
+   below really does reach the handoff filter rather than being rejected earlier. */
+const SUBMIT_LABEL_FOR_TEST =
+  /\bsubmit\b|\bsend (?:my )?application\b|^\s*apply\s*$|\bapply now\b|\bfinish (?:and|&) apply\b/i;
+
+test('the handoff filters are load-bearing, not decoration', () => {
+  /* THE PREVIOUS HANDOFF TESTS WERE TAUTOLOGICAL, which a review pass proved empirically: delete
+     both THIRD_PARTY_HANDOFF and HANDOFF_PROVIDER from chooseSubmitControl and 69 of 70 tests still
+     passed, because every label tested also failed SUBMIT_LABEL and so was rejected anyway.
+     Every label below MATCHES SUBMIT_LABEL. The handoff filters are the only thing standing between
+     them and a click, so deleting either regex has to fail this test. */
+  for (const label of [
+    'Submit application with LinkedIn',
+    'Submit your application via SEEK',
+    'Apply now using Indeed',
+    'Apply now with LinkedIn',
+    'Finish and apply with Greenhouse',
+    'Submit application using Google',
+  ]) {
+    assert.match(label, SUBMIT_LABEL_FOR_TEST, `${label} must reach the handoff filter to test it`);
+    assert.equal(chooseSubmitControl([label]), null, `${label} must not be pressed`);
+  }
+});
+
+test('an icon button with no text is not a submit control', () => {
+  /* HTMLButtonElement.type defaults to "submit" and its value to "", so keying the UA-default
+     fallback off `type` alone made every text-free icon button read as "Submit" - chat launchers,
+     scroll-to-top, cookie close - all of which sit at the FOOT of the page where last-wins looks. */
+  assert.equal(chooseSubmitControl(['']), null);
+  assert.equal(chooseSubmitControl(['Submit application', '']), 0);
+});
+
+test('a help-desk widget is never pressed, even when it is the only submit-ish control', () => {
+  /* Excluding support widgets only inside the explicit tier left two holes. */
+  assert.equal(chooseSubmitControl(['Submit application', 'Submit application feedback']), 0,
+    'naming the application does not excuse a feedback widget');
+  assert.equal(chooseSubmitControl(['Apply now', 'Submit feedback']), 0,
+    'a real control that never says "submit" still beats the widget');
+  assert.equal(chooseSubmitControl(['Submit a request']), null,
+    'a page whose only submit-ish control is a help desk has no submit control');
+  assert.equal(chooseSubmitControl(['Submit feedback']), null);
+});
