@@ -34,6 +34,21 @@ jobs:
       # would go green with zero tests run. Fail loudly if no test files exist (B2).
       - name: Ensure test files exist
         run: test -n "$(find src -name '*.test.ts' -print -quit)"
+      # `api/` holds ONLY request handlers. Vercel builds every file under it into its own
+      # deployed serverless function, so a test or helper left there becomes a publicly routable
+      # endpoint: `vercel build` on 2026-08-04 emitted `functions/api/index.test.func` from a
+      # test file that had been placed there. Entrypoint logic lives in src/ and is tested there;
+      # this keeps the directory from silently growing endpoints again.
+      # Matches ANY file, not just tests: a plain `api/helpers.ts` becomes a deployed public
+      # endpoint just as readily as a test file does. index.ts is the only handler this app has.
+      - name: api/ contains only request handlers
+        run: |
+          UNEXPECTED=$(find api -type f ! -name 'index.ts')
+          if [ -n "$UNEXPECTED" ]; then
+            echo "::error title=Unexpected file in api/::Vercel builds every file under api/ into its own deployed function. Move non-handler code to src/. Found:"
+            echo "$UNEXPECTED"
+            exit 1
+          fi
       - name: Test
         run: npm test
 
