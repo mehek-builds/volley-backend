@@ -17,6 +17,7 @@ import { scoreJdMatch } from '../engine/jdMatch';
 import { resumeSpecText } from '../engine/resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { rankingCacheKey, readRankingShared, writeRankingShared } from '../lib/rankingCache';
+import { applyBoardCacheHeaders } from '../lib/boardCacheHeaders';
 import { companyDomainFor } from '../lib/companyDomains';
 import { classificationCoverage, summarizeJobVariety } from '../lib/jobVariety';
 import {
@@ -1790,7 +1791,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
 
     const countRow = counted.rows[0];
 
-    return reply.send({
+    return applyBoardCacheHeaders(request, reply).send({
       jobs: rows.slice(0, limit).map(({ offers_any, refuses_any, employer_sponsors, ...row }) => ({
         ...row,
         sponsorship_evidence: refuses_any
@@ -1874,7 +1875,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       .orderBy(sql`count(*) desc`)
       .limit(400);
 
-    return reply.send({
+    return applyBoardCacheHeaders(request, reply).send({
       companies: companies.map((r) => r.v).filter(Boolean),
       locations: rankCities(locationRows, TOP),
       /* `titles` is gone on purpose. It returned the board's most common RAW
