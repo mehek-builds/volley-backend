@@ -322,7 +322,11 @@ const TYPE_SYNONYMS: [RegExp, string][] = [
      filter - the employer had answered and the board was not listening.
      ANCHORED, NOT A PREFIX. `^full[-\s]?time` on its own would also swallow "Full Time
      Contractor", which is a contract and has to keep falling through to the Contract rule below. */
-  [/^full[-\s]?time$|^full[-\s]?time employee$|^permanent$|^fulltime$/i, 'Full-time'],
+  /* "Permanent, Full-time" is Ninja Van's wording, found the day international sources landed and
+     6 postings wide. Employers keep inventing new spellings of the same fact, which is why the
+     verify:classification gate reports pass-through values rather than hiding them.
+     STILL ANCHORED. "Full Time Contractor" has to keep falling through to Contract below. */
+  [/^full[-\s]?time$|^full[-\s]?time employee$|^permanent,?\s*full[-\s]?time$|^permanent$|^fulltime$/i, 'Full-time'],
   [/^part[-\s]?time$|^parttime$/i, 'Part-time'],
   [/^intern(ship)?$|^co-?op$|^scholarship$/i, 'Internship'],
   /* Split out of Internship 2026-08-04. Lever emits this for Match Group's four "Apprenticeship -

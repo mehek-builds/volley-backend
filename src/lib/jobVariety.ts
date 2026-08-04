@@ -60,6 +60,8 @@ const FINANCIAL = new Set([
      likely to grow again. */
   'optiver', 'worldquant', 'schonfeld', 'squarepoint capital', 'transmarket group',
   'gsa capital', 'vatic labs', 'engineers gate', 'dv trading', 'jump crypto', 'airwallex',
+  // The international round, 2026-08-04. Fintech and banking outside the US.
+  'inter', 'solaris', 'raisin', 'mollie', 'ledger', 'vtex',
 ]);
 
 const HEALTH = new Set([
@@ -67,7 +69,7 @@ const HEALTH = new Set([
   'freenome', 'ginkgo', 'honor', 'komodohealth', 'modernhealth', 'natera', 'omadahealth',
   'onemedical', 'openevidence', 'papa', 'parsleyhealth', 'recursion', 'science 37',
   'suki', 'talkspace', 'tebra', 'truveta', 'veracyte', 'zocdoc',
-  'twist bioscience',
+  'twist bioscience', 'alan', 'wellhub',
 ]);
 
 const AEROSPACE_MOBILITY = new Set([
@@ -78,6 +80,8 @@ const AEROSPACE_MOBILITY = new Set([
      seventh industry for two sources would be a taxonomy change, not a classification. */
   'astranis', 'figure', 'hermeus', 'shield ai', 'vannevar labs', 'skydio', 'motional',
   'formlabs', 'protolabs',
+  // The international round, 2026-08-04: mobility and logistics outside the US.
+  'cabify', 'ninja van', 'despegar',
 ]);
 
 const CONSUMER = new Set([
@@ -88,6 +92,8 @@ const CONSUMER = new Set([
 const MEDIA_GAMING = new Set([
   'discord', 'epic games', 'lottie', 'riot games', 'roblox', 'roku', 'scopely', 'spotify',
   'suno', 'take-two', 'twitch',
+  // The international round, 2026-08-04.
+  'wildlife studios', 'sorare', 'musixmatch', 'trivago',
 ]);
 
 const EDUCATION = new Set(['elicit', 'khan academy']);
@@ -118,6 +124,8 @@ const TECHNOLOGY = new Set([
   'mozilla', 'recorded future', 'gong', 'wiz', 'opengov', 'code for america',
   // Infra, security and AI from the 2026-08-03 internship-density round.
   'zscaler', 'etched', 'snowflake', 'cohere', 'together ai',
+  // The international round, 2026-08-04.
+  'celonis', 'enpal',
 ]);
 
 export function classifyEmployerIndustry(company: string): EmployerIndustry {
