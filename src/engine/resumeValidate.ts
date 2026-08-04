@@ -706,6 +706,55 @@ export function resumeSpecText(spec: ResumeSpec): string {
   ].join(' ');
 }
 
+/**
+ * The one place the education-position issue is worded, so callers can recognise it without
+ * matching a string that lives somewhere else.
+ *
+ * Position is the one member of this set that is not a claim about the student. It is DERIVED from
+ * the calendar: deriveCandidateContext does year arithmetic against RECENT_GRADUATE_YEARS, so a
+ * May 2023 graduate renders education at the top through 2025 and after experience from 1 January
+ * 2026. The flip lands at midnight on New Year of grad_year+3, which means a packet built on 31
+ * December and sent on 2 January is stale after two days, and since nothing expires packets, the
+ * exposure only widens. That packet's education did not change and telling its owner it did would
+ * be a false statement from the guard, which is the same class of defect this guard exists to
+ * prevent. Hence a separate code and separate copy: see educationDriftResponse.
+ */
+export const EDUCATION_POSITION_ISSUE_PREFIX = 'education must render';
+
+/** True when an issue from educationDriftIssues is the calendar-derived layout one. */
+export function isEducationLayoutIssue(issue: string): boolean {
+  return issue.startsWith(EDUCATION_POSITION_ISSUE_PREFIX);
+}
+
+/**
+ * The one implementation of "does this resume's education block still agree with the profile".
+ *
+ * Extracted from validateResumeSpec so the send-time guards on the unattended submission routes can
+ * apply the SAME rule rather than a second copy of it. A packet freezes its rendered PDF at build
+ * time, so nothing re-derives education when it is finally submitted; a second, drifting copy of
+ * this comparison would be its own defect, and the whole point of the guard is that a packet that
+ * PATCH /applications/:id/resume would still accept is a packet that can be sent unattended.
+ *
+ * DELIBERATELY NOT COMPARED: gpa, gpa_scale and major. GET /profile overrides those from
+ * application_profile while a packet's GPA comes from parsed_json, and the two stores are allowed to
+ * disagree from a packet's birth. Comparing them would refuse packets that never drifted.
+ */
+export function educationDriftIssues(spec: ResumeSpec, education: CandidateEducation): string[] {
+  const issues: string[] = [];
+  const exact = (value: string | undefined) => value?.trim() ?? '';
+  if (spec.school !== exact(education.school)) issues.push('education school differs from uploaded resume');
+  if (spec.degree !== exact(education.degree)) issues.push('education degree differs from uploaded resume');
+  if (spec.grad_date !== exact(education.grad_date)) issues.push('education graduation date differs from uploaded resume');
+  if (courseworkIsUngrounded(spec.coursework, education.coursework)) {
+    issues.push('coursework contains a course not listed on the uploaded resume');
+  }
+  const expectedPosition = deriveCandidateContext(education).education_position;
+  if (spec.education_position !== expectedPosition) {
+    issues.push(`${EDUCATION_POSITION_ISSUE_PREFIX} ${expectedPosition === 'top' ? 'at the top for a currently enrolled student' : 'after experience for this candidate'}`);
+  }
+  return issues;
+}
+
 export function validateResumeSpec(
   spec: ResumeSpec,
   jdText: string,
@@ -735,19 +784,7 @@ export function validateResumeSpec(
     );
   }
 
-  if (education) {
-    const exact = (value: string | undefined) => value?.trim() ?? '';
-    if (spec.school !== exact(education.school)) issues.push('education school differs from uploaded resume');
-    if (spec.degree !== exact(education.degree)) issues.push('education degree differs from uploaded resume');
-    if (spec.grad_date !== exact(education.grad_date)) issues.push('education graduation date differs from uploaded resume');
-    if (courseworkIsUngrounded(spec.coursework, education.coursework)) {
-      issues.push('coursework contains a course not listed on the uploaded resume');
-    }
-    const expectedPosition = deriveCandidateContext(education).education_position;
-    if (spec.education_position !== expectedPosition) {
-      issues.push(`education must render ${expectedPosition === 'top' ? 'at the top for a currently enrolled student' : 'after experience for this candidate'}`);
-    }
-  }
+  if (education) issues.push(...educationDriftIssues(spec, education));
 
   const kw = jdKeywords(jdText);
 
