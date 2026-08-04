@@ -1576,9 +1576,72 @@ export class CaptchaUnresolvedError extends Error {
   }
 }
 
+/* CONTROLS THAT SAY "APPLY" AND HAND OFF TO SOMEBODY ELSE.
+ *
+ * "Apply with LinkedIn", "Apply With Indeed", "Apply with SEEK" are not submit buttons. They are
+ * OAuth handoffs that leave the employer's form and open a third party's consent screen, and every
+ * one of them matches the word "apply".
+ *
+ * THIS IS LIVE ON PORTALS THAT ARE AUTONOMOUS TODAY, not a SmartRecruiters curiosity: Greenhouse
+ * and Lever both render "Apply with LinkedIn", and SmartRecruiters' first step carries two of them
+ * before the applicant has typed anything. The old selector matched all of them and took `.last()`,
+ * so which control got pressed depended on DOM order - it happened to work because the real submit
+ * usually sits at the bottom of the form. That is a coin flip, not a guarantee, and the losing side
+ * sends the applicant's browser to a third-party sign-in while Litos reports a submitted
+ * application the employer never received.
+ *
+ * Matched on the WHOLE label, anchored, so "apply" as a preposition inside a longer sentence cannot
+ * sneak past: it is the shape "<verb> with|using|via <somebody>" that gives these away. */
+const THIRD_PARTY_HANDOFF =
+  /\b(?:apply|autofill|sign\s?in|log\s?in|continue|register|import)\s+(?:with|using|via|from)\b|\bquick apply\b|\bone[-\s]?click apply\b/i;
+
+/* What a real submit control says. "Submit" on its own is the common case; the rest were read off
+   live forms. Bare "Apply" is accepted because some employers do label the final button that way,
+   which is exactly why THIRD_PARTY_HANDOFF has to be checked first rather than instead. */
+const SUBMIT_LABEL =
+  /\bsubmit\b|\bsend (?:my )?application\b|^\s*apply\s*$|\bapply now\b|\bfinish (?:and|&) apply\b/i;
+
+/**
+ * Which of a page's buttons is the one that actually submits, or null.
+ *
+ * A pure function over the visible labels, so the rule that decides whether to press a button on a
+ * real person's job application is testable without standing up a browser. Returns an INDEX rather
+ * than a label because two buttons can read the same and only the position tells them apart.
+ *
+ * Order matters and is the whole design: reject the handoffs FIRST, then prefer the most explicit
+ * remaining label. An explicit "Submit application" always beats a bare "Apply", and the LAST such
+ * control wins because a form's real submit sits at its foot.
+ */
+export function chooseSubmitControl(labels: string[]): number | null {
+  const eligible = labels
+    .map((label, index) => ({ label: label.replace(/\s+/g, ' ').trim(), index }))
+    .filter(({ label }) => label && !THIRD_PARTY_HANDOFF.test(label) && SUBMIT_LABEL.test(label));
+  if (eligible.length === 0) return null;
+  const explicit = eligible.filter(({ label }) => /\bsubmit\b/i.test(label));
+  const pool = explicit.length > 0 ? explicit : eligible;
+  return pool[pool.length - 1]!.index;
+}
+
+/** Every control that could conceivably be a submit button. Exported so a test can match it. */
+export const SUBMIT_CANDIDATE_SELECTOR = 'button, input[type=submit], [role=button]';
+
 export async function clickFinalSubmit(page: Page): Promise<void> {
-  const button = page.getByRole('button', { name: /submit application|submit|apply/i }).last();
-  if ((await button.count()) === 0) throw new Error('We could not find the Submit button');
+  const candidates = page.locator(SUBMIT_CANDIDATE_SELECTOR);
+  /* Typed loosely on purpose: this closure is serialised into the page, where the DOM lib types
+     are not in scope for the server build. */
+  const labels = await candidates.evaluateAll((nodes) => nodes.map((node) => {
+    const el = node as unknown as {
+      innerText?: string; value?: string; getAttribute(name: string): string | null;
+    };
+    return (el.innerText || el.value || el.getAttribute('aria-label') || '').trim();
+  }));
+  const chosen = chooseSubmitControl(labels);
+  if (chosen === null) {
+    /* Deliberately the same failure as "no button at all". A page whose only apply-ish controls are
+       third-party handoffs is a page this run cannot finish, and saying so is the honest answer. */
+    throw new Error('We could not find the Submit button');
+  }
+  const button = candidates.nth(chosen);
   // Defence in depth, and it covers a case the call-site gate cannot. portalCanAutoSubmit() stops
   // the families KNOWN to be gated (JazzHR, BambooHR) before this function is ever reached. It
   // knows nothing about a Greenhouse or Lever board whose employer switched a challenge on last

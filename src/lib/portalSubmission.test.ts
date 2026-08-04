@@ -16,6 +16,7 @@ import {
   portalCanAutoSubmit,
   portalHandoffReason,
   readManagedReceipt,
+  chooseSubmitControl,
 } from './portalSubmission';
 import { POLLABLE_JOB_BOARDS } from './jobMonitor';
 
@@ -972,4 +973,59 @@ test('no portal claims it can take a cover-letter file it has no input for', () 
   }
   // Rippling genuinely has one, read off the live form alongside the resume input.
   assert.equal(coverLetterUploadSelector('rippling'), 'input[type="file"][data-testid="input-cover_letter"]');
+});
+
+test('a third-party handoff is never mistaken for the submit button', () => {
+  /* EVERY LABEL BELOW IS REAL, and the first two were read off SmartRecruiters' live first step on
+     2026-08-04, before the applicant has typed anything. Greenhouse and Lever render the LinkedIn
+     one and both are autonomous today, so this was a live risk rather than a hypothetical. */
+  for (const label of [
+    'Apply With Indeed',
+    'Apply with SEEK',
+    'Apply with LinkedIn',
+    'Apply using LinkedIn',
+    'Autofill with Greenhouse',
+    'Sign in with Google',
+    'Continue with LinkedIn',
+    'Quick Apply',
+    'One-click apply',
+  ]) {
+    assert.equal(chooseSubmitControl([label]), null, `${label} must not be pressed`);
+  }
+});
+
+test('the real submit control is still found, and preferred over a bare Apply', () => {
+  assert.equal(chooseSubmitControl(['Submit application']), 0);
+  assert.equal(chooseSubmitControl(['Submit']), 0);
+  assert.equal(chooseSubmitControl(['Apply']), 0);
+  assert.equal(chooseSubmitControl(['Apply now']), 0);
+  assert.equal(chooseSubmitControl(['Send my application']), 0);
+
+  // A page carrying both: the explicit submit wins wherever it sits.
+  assert.equal(chooseSubmitControl(['Apply with LinkedIn', 'Submit application']), 1);
+  assert.equal(chooseSubmitControl(['Submit application', 'Apply with Indeed']), 0);
+  assert.equal(chooseSubmitControl(['Apply', 'Submit application']), 1, 'explicit beats bare apply');
+  // The form's real submit sits at its foot, so the last eligible control wins among equals.
+  assert.equal(chooseSubmitControl(['Submit', 'Submit application']), 1);
+});
+
+test('a step that only offers Next is not submittable, which is the multi-step guarantee', () => {
+  /* SmartRecruiters' first step, verbatim from the live DOM on 2026-08-04. There is no submit
+     control here at all, and the only primary button says Next. A run that pressed anything on this
+     page would either hand off to Indeed or advance a step while reporting a submission. */
+  const smartRecruitersStepOne = [
+    'Apply With Indeed', 'Apply with SEEK', 'Add', 'Add', 'Next', 'Cookies Settings',
+  ];
+  assert.equal(chooseSubmitControl(smartRecruitersStepOne), null);
+  // Next and Continue are never submit controls anywhere.
+  assert.equal(chooseSubmitControl(['Next']), null);
+  assert.equal(chooseSubmitControl(['Continue']), null);
+  assert.equal(chooseSubmitControl(['Next Step']), null, "Paylocity's #btn-submit reads Next Step");
+});
+
+test('labels that merely contain the word apply are not submit controls', () => {
+  assert.equal(chooseSubmitControl(['Why do you want to apply?']), null);
+  assert.equal(chooseSubmitControl(['Learn how to apply']), null);
+  assert.equal(chooseSubmitControl([]), null);
+  assert.equal(chooseSubmitControl(['', '   ']), null);
 });

@@ -16,6 +16,7 @@ import {
   hasUnresolvedCaptcha,
   managedResultRequiresCaptchaAttention,
   CaptchaUnresolvedError,
+  SUBMIT_CANDIDATE_SELECTOR,
 } from './portalSubmission';
 
 // ---- snapshot logic ----
@@ -173,6 +174,20 @@ test('a visibility probe that throws counts as a challenge, not as a clear page'
   );
 });
 
+
+/* clickFinalSubmit now reads every button's LABEL and chooses among them (see chooseSubmitControl),
+   rather than trusting a name regex and taking .last(). These mocks therefore have to answer
+   evaluateAll with the labels a real page would show. One genuine submit control is what each of
+   these tests means by "the button". */
+function submitButtonLocator(onClick: () => void) {
+  return {
+    evaluateAll: async () => ['Submit application'],
+    nth: () => ({ count: async () => 1, click: async () => { onClick(); } }),
+    count: async () => 1,
+    click: async () => { onClick(); },
+  };
+}
+
 // ---- the final click guard ----
 
 test('the final click guard does not click while any widget is unresolved', async () => {
@@ -188,10 +203,13 @@ test('the final click guard does not click while any widget is unresolved', asyn
       evaluate: async (fn: (el: unknown, arg: string) => boolean, arg: string) => fn(stubElement({}), arg),
     }),
   };
-  const button = { count: async () => 1, click: async () => { clickCount += 1; } };
+  const button = submitButtonLocator(() => { clickCount += 1; });
   const page = {
-    locator: (selector: string) => (selector === CAPTCHA_RESPONSE_SELECTOR ? responseLocator : challengeLocator),
-    getByRole: () => ({ last: () => button }),
+    locator: (selector: string) => {
+      if (selector === CAPTCHA_RESPONSE_SELECTOR) return responseLocator;
+      if (selector === SUBMIT_CANDIDATE_SELECTOR) return button;
+      return challengeLocator;
+    },
     waitForLoadState: async () => undefined,
   } as unknown as Page;
 
@@ -201,10 +219,11 @@ test('the final click guard does not click while any widget is unresolved', asyn
 
 test('the final click still happens on a page with no challenge', async () => {
   let clickCount = 0;
-  const button = { count: async () => 1, click: async () => { clickCount += 1; } };
+  const button = submitButtonLocator(() => { clickCount += 1; });
   const page = {
-    locator: () => ({ count: async () => 0, nth: () => ({}) }),
-    getByRole: () => ({ last: () => button }),
+    locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
+      ? button
+      : { count: async () => 0, nth: () => ({}) }),
     waitForLoadState: async () => undefined,
   } as unknown as Page;
 
@@ -424,6 +443,7 @@ test('the known-gated families carry their measured provider, others stay unknow
 test('the submit guard carries the provider it saw while the page was open', async () => {
   const page = {
     locator: (selector: string) => {
+      if (selector === SUBMIT_CANDIDATE_SELECTOR) return submitButtonLocator(() => undefined);
       if (selector === CAPTCHA_RESPONSE_SELECTOR) {
         return { count: async () => 1, nth: () => ({ inputValue: async () => '' }) };
       }
@@ -437,7 +457,7 @@ test('the submit guard carries the provider it saw while the page was open', asy
         }),
       };
     },
-    getByRole: () => ({ last: () => ({ count: async () => 1, click: async () => undefined }) }),
+
     waitForLoadState: async () => undefined,
   } as unknown as Page;
 
