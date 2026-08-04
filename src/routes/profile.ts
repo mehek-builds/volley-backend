@@ -430,14 +430,33 @@ async function applicationRowForProfile(
     .from(application_profile)
     .where(eq(application_profile.user_id, userId))
     .limit(1);
+  return academicRecordRowFor(row, (err) =>
+    fastify.log.error(
+      { err, userId },
+      'application_profile could not be decrypted while serving the resume profile. Serving the academic record as blank rather than falling back to the resume parse, which is not the source of truth for it.',
+    ),
+  );
+}
+
+/* The same read, for callers that already hold the row.
+ *
+ * EXPORTED so the two resume-generation routes resolve the academic record through this exact
+ * decrypt-and-degrade rule rather than each writing their own try/catch. There were three plausible
+ * behaviours on a decrypt failure - throw, blank, fall back to the parse - and only one of them is
+ * right; a second copy of the choice is a second chance to make it differently.
+ *
+ * Takes the row rather than a userId because /resume/base/stream already selects
+ * application_profile for the ATS gate's contact lines, and a second query for a column it is
+ * holding would be a round trip bought with nothing. */
+export function academicRecordRowFor(
+  row: typeof application_profile.$inferSelect | undefined,
+  onDecryptError: (err: unknown) => void,
+): Record<string, unknown> | undefined {
   if (!row) return undefined;
   try {
     return decryptRow(row) as Record<string, unknown>;
   } catch (err) {
-    fastify.log.error(
-      { err, userId },
-      'application_profile could not be decrypted while serving the resume profile. Serving the academic record as blank rather than falling back to the resume parse, which is not the source of truth for it.',
-    );
+    onDecryptError(err);
     return {};
   }
 }

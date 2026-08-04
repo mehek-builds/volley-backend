@@ -4,7 +4,7 @@ import { eq, desc } from 'drizzle-orm';
 import { createHash, randomUUID } from 'node:crypto';
 import { put } from '@vercel/blob';
 import { db } from '../db/index';
-import { profiles, generated_resumes, autofill_events } from '../db/schema';
+import { profiles, generated_resumes, autofill_events, application_profile } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { readExperienceBank } from '../db/experienceBank';
 import { allowHourly, claimCounterSlot, getCount, getEntitlements, LIMITS, monthPeriod, quotaExceededPayload, rateLimitedReply, releaseCounterSlot } from '../middleware/quota';
@@ -27,7 +27,8 @@ import {
 } from './resumeResponseSchema';
 import { extractPdfText } from '../lib/pdfText';
 import { PRODUCT_NAME } from '../lib/product';
-import { applyResumePolicy, enforceExperienceBulletFloor, type CandidateEducation } from '../engine/resumePolicy';
+import { applyResumePolicy, educationFrom, enforceExperienceBulletFloor, type CandidateEducation } from '../engine/resumePolicy';
+import { academicRecordRowFor } from './profile';
 import { warmRequirementCache } from '../engine/warmRequirements';
 import { baseResumeSelectionIssues } from '../llm/baseResume';
 import { deriveEditedTerms } from '../lib/applicationReview';
@@ -210,9 +211,13 @@ export async function resumeRoutes(fastify: FastifyInstance) {
 
     // These reads are independent. Starting them together removes one database round trip from
     // every generation while preserving readExperienceBank's load-bearing row ordering (R-022).
-    const [bank, profileRows] = await Promise.all([
+    /* application_profile joins the pair because it, not the parse, is the source of truth for the
+       GPA the rendered PDF prints (see educationFrom). Read in the same batch rather than after the
+       bank check, so the authoritative academic record costs no wall clock on the happy path. */
+    const [bank, profileRows, applicationRows] = await Promise.all([
       readExperienceBank(userId),
       db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1),
+      db.select().from(application_profile).where(eq(application_profile.user_id, userId)).limit(1),
     ]);
     if (bank.length === 0) {
       return reply.status(400).send({ error: 'Nothing saved about your work yet. Finish setting up first.' });
@@ -239,19 +244,19 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       school_location?: string;
       full_name?: string;
     } | undefined;
-    const education: CandidateEducation = {
-      school: parsed?.school ?? '',
-      degree: parsed?.degree,
-      grad_date: parsed?.grad_date || (parsed?.grad_year ? String(parsed.grad_year) : undefined),
-      grad_year: parsed?.grad_year,
-      currently_enrolled: parsed?.currently_enrolled,
-      gpa: parsed?.gpa,
-      gpa_scale: parsed?.gpa_scale,
-      school_location: parsed?.school_location,
-      coursework: Array.isArray(parsed?.coursework)
-        ? parsed.coursework.filter((course): course is string => typeof course === 'string')
-        : [],
-    };
+    /* The SAME builder /resume/base/stream uses. This was an inline object literal that had drifted
+       into a near-copy of it, which is how the base and tailored documents came to disagree about
+       the education block more than once - most recently on the GPA, which this path read from the
+       parse while every other employer-facing surface read application_profile. */
+    const education: CandidateEducation = educationFrom(
+      parsed,
+      academicRecordRowFor(applicationRows[0], (err) =>
+        request.log.error(
+          { err, userId },
+          'application_profile could not be decrypted while generating a tailored resume. Printing no GPA rather than the resume parse, which is not the source of truth for it.',
+        ),
+      ),
+    );
     // The student's declared skills, the only authoritative source for the SKILLS line (R-015).
     // Filtered rather than cast: this is jsonb, so a hand-edited row can hold anything, and a
     // non-string in here would reach the model as junk and the validator as an unmatchable entry.

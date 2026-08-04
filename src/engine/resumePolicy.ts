@@ -9,12 +9,29 @@ export interface CandidateEducation {
   grad_year?: number;
   currently_enrolled?: boolean;
   coursework?: string[];
-  /* Read from parsed_json, which is what the student's OWN resume printed, and never from
-     application_profile. That column holds the same number encrypted, and a decrypt failure there
-     is a deliberate hard error (see decryptRow) - correct for a route serving the profile, wrong
-     for resume generation, where it would turn a key problem into "no student can generate a
-     resume". The parse is also the origin for almost everyone: academicSeedFrom copies parsed ->
-     application_profile, not the reverse. */
+  /* application_profile FIRST, parsed_json only as the seed behind it. Populate these with
+     educationFrom rather than by hand, so the precedence cannot be forgotten at a call site.
+     (This comment previously said the opposite - "never from application_profile" - and the
+     reasoning it gave was wrong on both halves. Recorded here because the claim was cited as
+     evidence by later work.)
+
+     WHY THIS WAY ROUND. application_profile is what the student typed, or what /profile/harvest
+     watched her type into a real employer form: a first-hand claim by the person it is about.
+     parsed_json is an LLM's reading of a PDF, seeded into the blanks of that row by
+     academicSeedFrom and never allowed to overwrite it. Every other employer-facing surface
+     already resolves the two that way - GET /profile (academicsOfRecord), the extension's grades
+     adapter, the managed submission runner - and on 2026-08-03 the parse said "3.8" where
+     application_profile said "3.89". Reading the parse here made the rendered PDF the ONLY
+     surface still printing the truncated number, and the PDF is the copy an employer keeps.
+
+     The old comment's decrypt argument does not hold either: nothing forces this path through
+     decryptRow's throw. applicationRowForProfile already catches it and yields a blank academic
+     record, which suppresses the number instead of failing the generation OR falling back to the
+     parse - see the note there for why blank beats a contradicting grade.
+
+     Seeding direction is not precedence. academicSeedFrom does copy parsed -> application_profile
+     for most students, which is exactly why the two usually agree; it says nothing about which
+     copy to believe on the day they disagree. */
   gpa?: string;
   gpa_scale?: string;
   school_location?: string;
@@ -38,6 +55,83 @@ export function educationGpaLine(education: Pick<CandidateEducation, 'gpa' | 'gp
   if (!GPA_VALUE.test(value)) return '';
   const scale = education.gpa_scale?.trim() ?? '';
   return GPA_VALUE.test(scale) ? `${value}/${scale}` : value;
+}
+
+/* The academic fields the RENDERED resume can state. gpa reaches the page through
+ * educationGpaLine; gpa_scale reaches it as that line's denominator.
+ *
+ * major is deliberately absent, and this is not an oversight to be tidied later: ResumeSpec has no
+ * major field and resumeRender draws none, so the education block prints school, degree, grad date,
+ * GPA and coursework only. profile.ts overrides all THREE academic fields because GET /profile and
+ * autofill do serve a major. Add it here the day the render does, and not before - a field carried
+ * into a spec nothing prints is just another thing to keep in sync. */
+export const RESUME_ACADEMIC_FIELDS = ['gpa', 'gpa_scale'] as const;
+
+/* The academic record as the product will state it, or undefined when there is no record at all.
+ *
+ * Mirrors academicsOfRecord in routes/profile.ts, minus major (see above), and mirrors it including
+ * the part that looks like a bug: a row that EXISTS but holds a blank gpa resolves to '', not to the
+ * parse's number.
+ *
+ * THE BLANK CASE IS THE WHOLE POINT. Blank on application_profile means "not on record", and the
+ * value autofill types into an employer's GPA box is nothing. Printing the parse's number there
+ * would put a grade on the PDF that the same application's typed fields deny and that the student's
+ * own dashboard does not show her - which is the exact contradiction this fix exists to remove,
+ * just pointed the other way. Per-field fallback would have been the softer change and is the wrong
+ * one: the alternative to a first-hand blank is silence, not an LLM's guess.
+ *
+ * No row at all is a different situation and returns undefined, leaving the parse in place. There is
+ * no second value to contradict, the parse is the only copy anyone has, and a student who has not
+ * reached the application-profile step yet is not making a claim we can override. */
+export function academicsOfRecordForResume(
+  applicationRow: Record<string, unknown> | undefined,
+): Pick<CandidateEducation, 'gpa' | 'gpa_scale'> | undefined {
+  if (!applicationRow) return undefined;
+  const out: Pick<CandidateEducation, 'gpa' | 'gpa_scale'> = {};
+  for (const field of RESUME_ACADEMIC_FIELDS) {
+    const value = applicationRow[field];
+    out[field] = typeof value === 'string' && value.trim().length > 0 ? value.trim() : '';
+  }
+  return out;
+}
+
+/* profiles.parsed_json (+ the academic record that outranks it) -> the education block.
+ *
+ * ONE function for both generation paths on purpose. /resume/base/stream and /resume/generate build
+ * the same education block from the same two rows, and they used to build it with two separate
+ * pieces of code: the base path through this function, the tailored path inline. Every field one
+ * side learned about and the other did not was a difference between the base resume the student
+ * approves on /start and the tailored resume that goes to the employer - which is how the GPA came
+ * to be read from the wrong column on both paths and fixable on only one.
+ *
+ * Shape-guarded throughout: parsed_json is jsonb and a hand-edited row can hold anything. */
+export function educationFrom(
+  parsed: unknown,
+  applicationRow?: Record<string, unknown>,
+): CandidateEducation {
+  const p = (parsed ?? {}) as Record<string, unknown>;
+  const str = (v: unknown) => (typeof v === 'string' ? v : undefined);
+  const gradYear = typeof p.grad_year === 'number' && p.grad_year > 0 ? p.grad_year : undefined;
+  return {
+    school: str(p.school) ?? '',
+    degree: str(p.degree),
+    /* Falsy rather than nullish, which is the tailored path's rule and now both paths': a stored
+       grad_date of '' is a missing date, and treating it as a present one printed an empty right
+       column beside the degree on a profile that knows the year perfectly well. */
+    grad_date: str(p.grad_date) || (gradYear ? String(gradYear) : undefined),
+    grad_year: gradYear,
+    currently_enrolled: typeof p.currently_enrolled === 'boolean' ? p.currently_enrolled : undefined,
+    /* The base resume is built by the same applyResumePolicy pass the tailored path runs, and it is
+       the document the student approves on /start. Omitting these here would have shown them a base
+       resume with no GPA and then a tailored one with it, which reads as the product changing their
+       education between screens. */
+    gpa: str(p.gpa),
+    gpa_scale: str(p.gpa_scale),
+    school_location: str(p.school_location),
+    coursework: Array.isArray(p.coursework) ? p.coursework.filter((c): c is string => typeof c === 'string') : undefined,
+    /* LAST, so it wins. See academicsOfRecordForResume. */
+    ...academicsOfRecordForResume(applicationRow),
+  };
 }
 
 export interface CandidateContext {
