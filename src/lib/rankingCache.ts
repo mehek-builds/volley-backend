@@ -44,9 +44,11 @@
  * until the billing period rolls over. That is the bug this tier exists to stop recurring.
  *
  * So L1 stays exactly as it was (a process map, the fast path on a warm instance) and L2 is an
- * optional Upstash Redis behind `UPSTASH_REDIS_REST_URL`/`UPSTASH_REDIS_REST_TOKEN`, shared by
- * every instance and surviving cold starts. Unconfigured, this file behaves precisely as it did
- * before: L1 only. L2 is never load-bearing for correctness, only for cost.
+ * optional Upstash Redis, shared by every instance and surviving cold starts. It is enabled by
+ * either of two environment-variable pairs, `UPSTASH_REDIS_REST_*` or the `KV_REST_API_*` names
+ * Vercel's marketplace integration actually injects (see SHARED_ENV_PAIRS below). Unconfigured,
+ * this file behaves precisely as it did before: L1 only. L2 is never load-bearing for correctness,
+ * only for cost.
  *
  * Spoken to over Upstash's REST API with plain `fetch` rather than through `@upstash/redis`. The
  * SDK is a wrapper over these same two calls, and a dependency that ships into a serverless bundle
@@ -186,11 +188,42 @@ type SharedConfig = { url: string; token: string };
  * Read at call time rather than at module load, because tests set and unset these between cases
  * and a module-level capture would freeze whichever value happened to be present at import.
  */
+/**
+ * The variable pairs that can carry Upstash REST credentials, in priority order.
+ *
+ * TWO NAMINGS, because the ones this file was written against are NOT the ones Vercel actually
+ * injects. Provisioning Upstash through the Vercel marketplace on 2026-08-04 created the database
+ * and connected it, and the project came back with `KV_REST_API_URL` and `KV_REST_API_TOKEN` (the
+ * Vercel KV naming Upstash kept for compatibility). Nothing was wrong with the integration; the
+ * code was simply reading names that were never going to be set, so L2 would have stayed a silent
+ * no-op with a live, paid-for, correctly connected database sitting behind it. `/health` reporting
+ * `ranking_cache` is what turned that into a visible five-second finding instead of a mystery.
+ *
+ * RESOLVED AS A PAIR, NEVER FIELD BY FIELD. Taking the URL from whichever variable is set and the
+ * token from whichever variable is set can pair one database's URL with another's token, which
+ * authenticates against nothing and fails at runtime rather than at startup. Each entry below is
+ * all-or-nothing.
+ *
+ * `UPSTASH_*` is first so an explicitly set pair overrides the integration's, which is what you
+ * want when pointing a deployment at a different Redis by hand.
+ *
+ * `KV_REST_API_READ_ONLY_TOKEN` is deliberately NOT accepted. It is injected alongside the others
+ * and looks interchangeable; it is not. This cache writes, so a read-only token would let every
+ * read miss and every write fail while the configuration looked complete.
+ */
+const SHARED_ENV_PAIRS: ReadonlyArray<{ url: string; token: string }> = [
+  { url: 'UPSTASH_REDIS_REST_URL', token: 'UPSTASH_REDIS_REST_TOKEN' },
+  { url: 'KV_REST_API_URL', token: 'KV_REST_API_TOKEN' },
+];
+
 function sharedConfig(): SharedConfig | null {
-  const url = process.env.UPSTASH_REDIS_REST_URL?.trim();
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN?.trim();
-  if (!url || !token) return null;
-  return { url: url.replace(/\/+$/, ''), token };
+  for (const pair of SHARED_ENV_PAIRS) {
+    const url = process.env[pair.url]?.trim();
+    const token = process.env[pair.token]?.trim();
+    if (!url || !token) continue;
+    return { url: url.replace(/\/+$/, ''), token };
+  }
+  return null;
 }
 
 export function sharedRankingConfigured(): boolean {
