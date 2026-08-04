@@ -204,10 +204,12 @@ git rev-parse origin/main
 ```
 
 `revision` is the git SHA and is the one to read: it compares to `git rev-parse origin/main` without
-leaving the terminal. **It is `null` on a `vercel deploy --prod`**, because `VERCEL_GIT_COMMIT_SHA`
-is populated for Git-integration deploys and not for CLI ones. That is not a failed deploy, and it
-caught us on 2026-08-04: the deployment was live and correct while `/health` said `null`, and
-confirming what shipped took three Vercel API calls.
+leaving the terminal. **It is sometimes `null` on a hand deploy**, and that is not a failed deploy.
+It caught us on 2026-08-04: the deployment was live, correct and serving the production alias while
+`/health` said `null`, and confirming what shipped took three Vercel API calls. The condition is not
+fully pinned down — of two `vercel deploy --prod` deployments that afternoon, the one whose Vercel
+metadata carried `gitCommitSha` served `null` and the one carrying `githubCommitSha` was never
+polled before the alias moved on.
 
 `build` is what to use then. It is the deployment id (or the deployment hostname on older builds)
 and is always present, so an empty `revision` never leaves you with nothing:

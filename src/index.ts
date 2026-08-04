@@ -170,12 +170,26 @@ export async function buildApp(options: BuildAppOptions = {}) {
       // WHAT ACTUALLY SHIPPED, when `revision` cannot say.
       //
       // DEPLOY.md tells you to confirm a deploy by comparing `revision` to the merge commit, and
-      // that check silently returns null on a `vercel deploy --prod`: VERCEL_GIT_COMMIT_SHA is
-      // populated for Git-integration deploys and not for CLI ones, even though the CLI does send
-      // the SHA as deployment metadata. Measured 2026-08-04, on the deploy of d38ddaf: the
-      // deployment was READY and correct, `/health` said `revision: null`, and confirming what was
-      // live took three Vercel API calls. A verification step that returns null instead of failing
-      // loudly is the shape of check that gets trusted right up until it matters.
+      // on 2026-08-04 that check returned null for a deployment that was READY, correct, and
+      // holding the production alias. Confirming what was actually live took three Vercel API
+      // calls. A verification step that returns null instead of failing loudly is the shape of
+      // check that gets trusted right up until it matters.
+      //
+      // WHAT WAS ACTUALLY OBSERVED, stated narrowly because the first version of this comment
+      // overstated it as "CLI deploys do not set VERCEL_GIT_COMMIT_SHA" and that is not what the
+      // evidence shows. Two deployments that afternoon, BOTH `source: cli`:
+      //
+      //   dpl_6iZqda…  ready 09:39:57  meta carried `githubCommitSha`
+      //   dpl_6f7kQzx  ready 09:44:37  meta carried `gitCommitSha`   <- this one served null
+      //
+      // The alias moved to the second before the first was ever polled, so the null belongs to the
+      // deployment whose git metadata arrived WITHOUT the GitHub link, and the first one's
+      // behaviour was never measured. Whether the deciding factor is the metadata shape, the
+      // absence of a linked repo at deploy time, or something else is NOT established here.
+      //
+      // Which is the argument for this field rather than against it: the condition that empties
+      // `revision` is not understood well enough to predict, so the runbook needs an identifier
+      // that does not depend on understanding it.
       //
       // VERCEL_DEPLOYMENT_ID is the primary because it is the id every Vercel surface keys on, so
       // it resolves straight to a deployment and through it to a commit. VERCEL_URL is the fallback

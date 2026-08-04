@@ -90,13 +90,23 @@ test('/health identifies the build even when no git SHA is exposed', async () =>
   };
   delete process.env.VERCEL_GIT_COMMIT_SHA;
   delete process.env.GIT_SHA;
+  // VERCEL_URL is deleted too, or this passes for the wrong reason. It is unset on a dev box and
+  // in CI, so leaving it alone made `build` resolve to the same value through EITHER operand, and
+  // reversing the order in index.ts kept the whole suite green. The order is the one non-obvious
+  // decision in that line, so it is the one thing that has to be pinned.
+  delete process.env.VERCEL_URL;
   process.env.VERCEL_DEPLOYMENT_ID = 'dpl_test123';
+  process.env.VERCEL_URL = 'litos-should-not-win-team.vercel.app';
   try {
     const { buildApp } = await import('./index');
     const app = await buildApp();
     const body = (await app.inject({ method: 'GET', url: '/health' })).json();
     assert.equal(body.revision, null, 'this is the case where the SHA is genuinely unavailable');
-    assert.equal(body.build, 'dpl_test123', 'and the build id is what identifies the deploy instead');
+    assert.equal(
+      body.build,
+      'dpl_test123',
+      'the deployment id wins over VERCEL_URL: reversing the operands must fail here',
+    );
     await app.close();
   } finally {
     for (const [k, v] of [
