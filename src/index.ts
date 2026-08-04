@@ -3,6 +3,9 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
 
+import { sql } from 'drizzle-orm';
+import { db } from './db';
+import { healthStatusCode, probeDatabase } from './lib/healthProbe';
 import { authRoutes } from './routes/auth';
 import { profileRoutes } from './routes/profile';
 import { resolveRoutes } from './routes/resolve';
@@ -162,9 +165,33 @@ export async function buildApp(options: BuildAppOptions = {}) {
   fastify.addHook('onRequest', createRateLimitHook(options.rateLimit ?? defaultRateLimitConfig(), options.now));
 
   // Health check
-  fastify.get('/health', async (_request, reply) => {
-    return reply.status(200).send({
-      status: 'ok',
+  fastify.get('/health', async (request, reply) => {
+    /* THE DATABASE, because a health check that cannot fail is not a health check.
+     *
+     * On 2026-08-04 Neon refused every connection ("exceeded the data transfer quota") and the
+     * public board was down for ~75 minutes. This endpoint answered 200 throughout, because it read
+     * environment variables and a clock and touched nothing else. Any monitor pointed here saw a
+     * healthy service; the first real signal was a CI job failing on an unrelated pull request.
+     *
+     * `select 1` is deliberate: the incident being detected was a TRANSFER exhaustion, so a probe
+     * that moved real bytes would spend the resource it exists to watch. It never throws and always
+     * times out, so a degraded database cannot take this endpoint down with it. */
+    const database = await probeDatabase(() => db.execute(sql`select 1`));
+    if (database.status !== 'ok') {
+      // The category is what the response carries; the driver's message can name hosts and roles,
+      // so the detail goes to the log and the endpoint stays safe to expose.
+      request.log.error({ reason: database.reason, ms: database.ms }, 'health: database unreachable');
+    }
+
+    return reply.status(healthStatusCode(database)).send({
+      /* 'degraded', not 'error': the service is up and answering, and is correctly reporting that a
+         dependency it cannot work without is unavailable. Every identity field below is still
+         present on a 503, because DEPLOY.md reads `revision` from this response to confirm what
+         shipped, and that has to keep working during an incident. */
+      status: database.status === 'ok' ? 'ok' : 'degraded',
+      database: database.status,
+      ...(database.status === 'ok' ? {} : { database_reason: database.reason }),
+      database_ms: database.ms,
       service: 'litos-api',
       product: PRODUCT_NAME,
       api_version: API_VERSION,
