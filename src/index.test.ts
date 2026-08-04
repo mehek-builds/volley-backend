@@ -81,6 +81,7 @@ test('front-door limiter isolates clients and emits standard retry metadata', as
   const limitedApp = await buildApp({
     rateLimit: {
       general: policy,
+      board: { name: 'board', limit: 2, windowMs: 60_000 },
       authStart: { name: 'auth_start', limit: 1, windowMs: 60_000 },
       authVerify: { name: 'auth_verify', limit: 1, windowMs: 60_000 },
       download: { name: 'resume_download', limit: 1, windowMs: 60_000 },

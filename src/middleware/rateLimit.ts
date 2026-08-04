@@ -11,6 +11,7 @@ export interface RateLimitPolicy {
 
 export interface RateLimitConfig {
   general: RateLimitPolicy;
+  board: RateLimitPolicy;
   authStart: RateLimitPolicy;
   authVerify: RateLimitPolicy;
   download: RateLimitPolicy;
@@ -41,6 +42,31 @@ export function defaultRateLimitConfig(): RateLimitConfig {
     general: {
       name: 'general',
       limit: positiveInteger(process.env.RATE_LIMIT_GENERAL_PER_MINUTE, 180),
+      windowMs: MINUTE_MS,
+    },
+    /* THE BOARD READS PAY IN NEON TRANSFER, WHICH IS A METERED RESOURCE.
+     *
+     * /jobs, /jobs/grouped and /jobs/facets each run real queries against the
+     * posting table, and Neon's free tier suspends the compute for the rest of
+     * the billing period when the monthly allowance runs out. Under `general`
+     * these sat at 180/minute, which is 10,800 an hour from a single client and
+     * far more than any person browsing a job board.
+     *
+     * 90 rather than something tighter because THIS IS KEYED BY IP AND STUDENTS
+     * SHARE IPs. A university NAT puts a whole campus behind one address, and
+     * this product's users are students, so a limit tuned to one human is a
+     * limit that locks out a lecture hall. 90 is a 2x tightening on a crawler
+     * while leaving room for a dozen people browsing from the same address.
+     *
+     * WHAT THIS DOES NOT DO, stated so the guarantee is not overread: the store
+     * is per-process and this runs on serverless, so the real ceiling is 90 per
+     * minute per instance, not per deployment. It bounds a single ill-behaved
+     * client, which is what it is for. The CDN headers on the public routes and
+     * the robots rules on the website are the layers that carry the rest.
+     */
+    board: {
+      name: 'board',
+      limit: positiveInteger(process.env.RATE_LIMIT_BOARD_PER_MINUTE, 90),
       windowMs: MINUTE_MS,
     },
     authStart: {
@@ -164,6 +190,9 @@ export function policyForRequest(method: string, path: string, config: RateLimit
     return config.authVerify;
   }
   if (path === '/resume/download') return config.download;
+  /* Prefix match, not equality: /jobs/:id is a board read too, and an exact list
+     would quietly leave every future /jobs/* route under `general`. */
+  if (path === '/jobs' || path.startsWith('/jobs/')) return config.board;
   return config.general;
 }
 
