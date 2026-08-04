@@ -78,6 +78,60 @@ test('/health identifies the deployable service and revision contract', async ()
   assert.ok(Object.hasOwn(body, 'build'));
 });
 
+/* The whole reason /health carries this field: L2 is enabled purely by two environment variables,
+   and with them unset rankingCache.ts is a correct, silent no-op that re-reads the ranking pool out
+   of Neon on every cold start. That read exhausted Neon's transfer allowance on 2026-08-04. Whether
+   the vars actually took effect has to be answerable from outside the process. */
+test('/health reports which ranking-cache tiers are running', async () => {
+  const saved = {
+    url: process.env.UPSTASH_REDIS_REST_URL,
+    token: process.env.UPSTASH_REDIS_REST_TOKEN,
+  };
+  try {
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    {
+      const { buildApp } = await import('./index');
+      const app = await buildApp();
+      const body = (await app.inject({ method: 'GET', url: '/health' })).json();
+      assert.equal(body.ranking_cache, 'local', 'unset vars means L1 only, and it must say so');
+      await app.close();
+    }
+
+    process.env.UPSTASH_REDIS_REST_URL = 'https://example.upstash.io';
+    process.env.UPSTASH_REDIS_REST_TOKEN = 'test-token-value';
+    {
+      const { buildApp } = await import('./index');
+      const app = await buildApp();
+      const res = await app.inject({ method: 'GET', url: '/health' });
+      const body = res.json();
+      assert.equal(body.ranking_cache, 'shared', 'both vars set means the L2 tier is live');
+
+      /* /health is UNAUTHENTICATED. It publishes whether a capability is on, never its
+         credentials, so the token must not reach the payload by any route. */
+      const raw = res.body;
+      assert.ok(!raw.includes('test-token-value'), 'the Upstash token must never appear in /health');
+      assert.ok(!raw.includes('example.upstash.io'), 'nor the Upstash URL');
+    }
+
+    /* One var alone is not a working configuration, and reporting 'shared' for it would send
+       someone hunting for a Redis problem that is really a missing variable. */
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    {
+      const { buildApp } = await import('./index');
+      const app = await buildApp();
+      const body = (await app.inject({ method: 'GET', url: '/health' })).json();
+      assert.equal(body.ranking_cache, 'local', 'a half-configured pair is not shared');
+      await app.close();
+    }
+  } finally {
+    if (saved.url === undefined) delete process.env.UPSTASH_REDIS_REST_URL;
+    else process.env.UPSTASH_REDIS_REST_URL = saved.url;
+    if (saved.token === undefined) delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    else process.env.UPSTASH_REDIS_REST_TOKEN = saved.token;
+  }
+});
+
 test('/health identifies the build even when no git SHA is exposed', async () => {
   // The exact production shape this exists for: a `vercel deploy --prod` sets VERCEL_DEPLOYMENT_ID
   // but not VERCEL_GIT_COMMIT_SHA, and on 2026-08-04 that made /health report `revision: null` for

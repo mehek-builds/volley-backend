@@ -35,6 +35,7 @@ import { coverLetterRoutes } from './routes/coverLetter';
 import { emailConnectionRoutes } from './routes/emailConnections';
 import { API_VERSION, PRODUCT_NAME, PRODUCT_LINKS } from './lib/product';
 import { createRateLimitHook, defaultRateLimitConfig, type RateLimitConfig } from './middleware/rateLimit';
+import { sharedRankingConfigured } from './lib/rankingCache';
 import { dashboardBootstrapRoutes } from './routes/dashboardBootstrap';
 
 export interface BuildAppOptions {
@@ -200,6 +201,27 @@ export async function buildApp(options: BuildAppOptions = {}) {
       // to `git rev-parse origin/main` without leaving the terminal, and a build id is not. This is
       // what makes the runbook work when the SHA is missing, not a reason to stop publishing it.
       build: process.env.VERCEL_DEPLOYMENT_ID || process.env.VERCEL_URL || null,
+      /* WHICH RANKING-CACHE TIERS ARE ACTUALLY RUNNING.
+       *
+       * 'shared' means L1 plus the Upstash L2; 'local' means L1 only, a process Map with a 60
+       * second TTL that dies with the instance.
+       *
+       * This exists because the difference is INVISIBLE FROM OUTSIDE and expensive. L2 is enabled
+       * purely by two environment variables, and with them unset rankingCache.ts is a deliberate
+       * no-op: correct, silent, and re-reading the whole ranking pool out of Neon on every cold
+       * start. That read is what exhausted Neon's monthly transfer allowance on 2026-08-04 and
+       * suspended the database, so "did the env vars actually take effect" is a question worth
+       * being able to answer with one curl rather than by inference.
+       *
+       * It is also the question you have to re-ask after every deploy, because env var changes on
+       * Vercel do not reach a running deployment until it is rebuilt. A config change that looks
+       * applied in the dashboard and is not live in the function is exactly the gap this closes.
+       *
+       * NAMES ONLY, NEVER VALUES. sharedRankingConfigured() returns a boolean; the URL and token
+       * never appear here. A health endpoint is unauthenticated, and the point is to publish
+       * whether a capability is on, not what its credentials are.
+       */
+      ranking_cache: sharedRankingConfigured() ? 'shared' : 'local',
       ts: new Date().toISOString(),
     });
   });
