@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test, { describe } from 'node:test';
 import ConnectionParameters from 'pg/lib/connection-parameters';
-import { dedicatedDatabaseUrl, normalizeSslMode } from './index';
+import { parse as parseConnectionString } from 'pg-connection-string';
+import { dedicatedDatabaseUrl, sslOptionForHost, withVerifiedSslMode } from './index';
 
 test('derives a direct Neon endpoint for connection-bound advisory locks', () => {
   const url = dedicatedDatabaseUrl({
@@ -35,18 +36,21 @@ test('prefers an explicit direct database URL and rejects unknown poolers', () =
  * so it is the fact pinned here: `pg` is a caret range (^8.11.0), and if a minor bump reverses that
  * ordering these tests fail instead of production quietly changing how it verifies certificates.
  */
-describe('sslmode is normalized, and TLS behaviour is unchanged by it', () => {
-  const OVERRIDE = { rejectUnauthorized: false } as const;
+describe('the database connection verifies certificates by intent, not by accident', () => {
+  /** The `ssl` option src/db/index.ts actually passes for a hosted database. Read from the source,
+   *  not redeclared here: a constant the test owns would let the real one be flipped back to
+   *  `false` with every assertion still green. */
+  const FALLBACK = sslOptionForHost(false);
+  /** What the OLD fallback was, kept so the regression can be stated as an assertion. */
+  const OLD_FALLBACK = { rejectUnauthorized: false } as const;
   /** The resolved ssl config as pg computes it, given our exact constructor arguments. */
-  const resolved = (connectionString: string) =>
-    new (ConnectionParameters as unknown as new (c: unknown) => { ssl: unknown })({
-      connectionString,
-      ssl: OVERRIDE,
-    }).ssl;
+  const resolve = (connectionString: string, ssl: unknown) =>
+    new (ConnectionParameters as unknown as new (c: unknown) => { ssl: unknown })({ connectionString, ssl }).ssl;
+  const resolved = (connectionString: string) => resolve(connectionString, FALLBACK);
 
   test('the connection string overrides the explicit ssl option, not the other way round', () => {
     // The load-bearing precedence fact. If this ever flips, everything below is reasoning about a
-    // library that no longer behaves that way.
+    // library that no longer behaves that way, and the `ssl` option silently becomes the decider.
     assert.deepEqual(
       resolved('postgresql://u:p@h.neon.tech/d?sslmode=require'),
       {},
@@ -54,48 +58,68 @@ describe('sslmode is normalized, and TLS behaviour is unchanged by it', () => {
     );
     assert.deepEqual(
       resolved('postgresql://u:p@h.neon.tech/d'),
-      OVERRIDE,
+      FALLBACK,
       'with no sslmode the explicit option is what applies',
     );
   });
 
-  test('rewriting require to verify-full leaves the resolved config byte-identical', () => {
-    // The safety argument for the whole change, stated as an assertion. `{}` means no
-    // rejectUnauthorized key, so Node's default of true applies: the certificate IS verified.
-    const before = resolved('postgresql://u:p@h.neon.tech/d?sslmode=require');
-    const after = resolved(normalizeSslMode('postgresql://u:p@h.neon.tech/d?sslmode=require'));
-    assert.deepEqual(after, before);
-    assert.deepEqual(after, {});
+  test('every path the app can take resolves to a verified connection', () => {
+    // `{}` carries no rejectUnauthorized key, so Node's default of true applies: verified.
+    for (const raw of [
+      'postgresql://u:p@h.neon.tech/d?sslmode=require',
+      'postgresql://u:p@h.neon.tech/d?sslmode=verify-full',
+      'postgresql://u:p@h.neon.tech/d?sslmode=prefer&application_name=litos',
+      'postgresql://u:p@h.neon.tech/d',
+    ]) {
+      assert.deepEqual(resolved(withVerifiedSslMode(raw)), {}, `${raw} must verify`);
+    }
   });
 
-  test('DELETING sslmode would have disabled certificate verification', () => {
-    // The regression this suite exists for, pinned as the negative. This is what the first version
-    // of normalizeSslMode did, and what the first version of this test could not see.
-    const deleted = resolved('postgresql://u:p@h.neon.tech/d');
-    assert.deepEqual(deleted, OVERRIDE);
-    assert.notDeepEqual(
-      deleted,
-      resolved('postgresql://u:p@h.neon.tech/d?sslmode=require'),
-      'if these ever match, dropping sslmode is safe and this test should be revisited',
+  test('a URL with no sslmode used to skip verification, and that is what changed', () => {
+    // THE HOLE. Verification was on only because Neon puts `sslmode` in the URL; drop that one
+    // parameter and the old fallback applied, turning certificate checking off with no error, no
+    // log line and no failing test. Both halves are asserted so neither can drift alone.
+    assert.deepEqual(
+      resolve('postgresql://u:p@h.neon.tech/d', OLD_FALLBACK),
+      OLD_FALLBACK,
+      'the old fallback did apply on this path, which is why it mattered',
     );
+    assert.deepEqual(
+      resolved(withVerifiedSslMode('postgresql://u:p@h.neon.tech/d')),
+      {},
+      'the string now declares a mode, so the fallback never decides',
+    );
+  });
+
+  test('the fallback fails safe on a connection string URL cannot parse', () => {
+    // A multi-host string is handed back untouched, so the `ssl` option is the only thing left. It
+    // must be the verifying one: this is the single path where the fallback still decides.
+    const multiHost = 'postgresql://u:p@host1:5432,host2:5432/d';
+    assert.equal(withVerifiedSslMode(multiHost), multiHost);
+    assert.deepEqual(
+      sslOptionForHost(false),
+      { rejectUnauthorized: true },
+      'the fallback decides on this path alone, so it must not fail open',
+    );
+    assert.equal(sslOptionForHost(true), undefined, 'a local Postgres needs no TLS at all');
   });
 
   test('only the warned aliases are rewritten, and other parameters are untouched', () => {
     assert.equal(
-      normalizeSslMode('postgresql://u:p@h.neon.tech/d?sslmode=require'),
+      withVerifiedSslMode('postgresql://u:p@h.neon.tech/d?sslmode=require'),
       'postgresql://u:p@h.neon.tech/d?sslmode=verify-full',
     );
     assert.equal(
-      normalizeSslMode('postgresql://u:p@h.neon.tech/d?sslmode=prefer&application_name=litos'),
+      withVerifiedSslMode('postgresql://u:p@h.neon.tech/d?sslmode=prefer&application_name=litos'),
       'postgresql://u:p@h.neon.tech/d?sslmode=verify-full&application_name=litos',
     );
     // `disable` and `no-verify` mean something the alias set does not, so they stand.
     assert.equal(
-      normalizeSslMode('postgresql://u:p@h.neon.tech/d?sslmode=disable'),
+      withVerifiedSslMode('postgresql://u:p@h.neon.tech/d?sslmode=disable'),
       'postgresql://u:p@h.neon.tech/d?sslmode=disable',
     );
     assert.equal(
-      normalizeSslMode('postgresql://u:p@h.neon.tech/d?sslmode=verify-full'),
+      withVerifiedSslMode('postgresql://u:p@h.neon.tech/d?sslmode=verify-full'),
       'postgresql://u:p@h.neon.tech/d?sslmode=verify-full',
     );
   });
@@ -104,28 +128,49 @@ describe('sslmode is normalized, and TLS behaviour is unchanged by it', () => {
     // The guard regex is case-insensitive and `searchParams` is not, so an uppercase key would
     // otherwise pass the guard, change nothing, and still round-trip the string through URL.
     assert.equal(
-      normalizeSslMode('postgresql://u:p@h.neon.tech/d?SSLMODE=require'),
+      withVerifiedSslMode('postgresql://u:p@h.neon.tech/d?SSLMODE=require'),
       'postgresql://u:p@h.neon.tech/d?SSLMODE=verify-full',
     );
   });
 
-  test('a string with no sslmode is returned byte-identical, not round-tripped through URL', () => {
-    // `new URL(x).toString()` normalises: it appends a trailing slash to a bare host and re-encodes
-    // reserved characters, and a Postgres password is exactly where reserved characters live. The
-    // early return is what keeps this function from rewriting a string it has no reason to touch.
+  test('a URL that declares no mode gains verify-full, and keeps every credential intact', () => {
+    // THE HOLE THIS CLOSES. Without a declared mode the explicit `ssl` option applied, and it used
+    // to be `{rejectUnauthorized:false}`: certificate checking was off. Verification was on only
+    // because Neon happens to put `sslmode` in the URL, so dropping that one parameter from the
+    // environment would have turned it off silently - no error, no log line, no failing test.
+    assert.equal(
+      withVerifiedSslMode('postgresql://u:p@host.neon.tech/litos'),
+      'postgresql://u:p@host.neon.tech/litos?sslmode=verify-full',
+    );
+    // `new URL().toString()` re-encodes, and a Postgres password is exactly where reserved
+    // characters live, so the round trip is checked through pg's own parser rather than by eye.
     for (const raw of [
-      'postgresql://u:p@host.neon.tech/litos',
       'postgresql://user:pa%2Fss@host.neon.tech/litos',
-      'postgresql://postgres:password@localhost:5432/student_outreach',
+      'postgresql://u:p%40ss@host.neon.tech/litos?options=-c%20search_path%3Dfoo',
+      'postgresql://u:p@[::1]:5432/litos',
     ]) {
-      assert.equal(normalizeSslMode(raw), raw);
+      const before = parseConnectionString(raw);
+      const after = parseConnectionString(withVerifiedSslMode(raw));
+      for (const field of ['user', 'password', 'host', 'port', 'database'] as const) {
+        assert.equal(String(after[field]), String(before[field]), `${field} must survive the rewrite`);
+      }
     }
+  });
+
+  test('sslmode=disable is honoured, not overridden', () => {
+    // It means something and it is a deliberate choice where it appears. A database config that
+    // ignores what it was told is worse than one that is loose.
+    assert.equal(
+      withVerifiedSslMode('postgresql://u:p@h.neon.tech/d?sslmode=disable'),
+      'postgresql://u:p@h.neon.tech/d?sslmode=disable',
+    );
+    assert.equal(resolved('postgresql://u:p@h.neon.tech/d?sslmode=disable'), false);
   });
 
   test('an unparseable connection string is handed back rather than throwing at module load', () => {
     // This runs inside the top-level `new Pool`, and `new Pool` does not parse eagerly. Throwing
     // here turns "one route 500s at first query" into "nothing boots, including /health".
     const multiHost = 'postgresql://u:p@host1:5432,host2:5432/d?sslmode=require';
-    assert.equal(normalizeSslMode(multiHost), multiHost);
+    assert.equal(withVerifiedSslMode(multiHost), multiHost);
   });
 });
