@@ -165,3 +165,102 @@ export function composeImpactBullet(
   const result = outcome ? `, ${outcome}` : '';
   return `${base}${scope}${result}`.replace(/\s+/g, ' ').replace(/[.]*$/, '.');
 }
+
+/**
+ * The identity of a bullet for dedupe purposes: lowercased, with every run of non-alphanumerics
+ * folded to a single space and the ends trimmed. Character for character the expression that used
+ * to sit inline in the PUT handler, extracted rather than rewritten, so nothing about which
+ * bullets count as the same bullet has changed.
+ *
+ * Two properties carry weight and are pinned by tests in both directions. Case and punctuation
+ * must NOT distinguish bullets, or a re-typed bullet enters the bank twice over a comma. Word
+ * boundaries MUST distinguish them: the runs collapse to a space rather than to nothing, so
+ * "Led a review" and "Leda review" stay different bullets.
+ *
+ * Exported only so those properties can be tested directly. Nothing outside this module calls it.
+ */
+export function bulletKey(bullet: string): string {
+  return bullet.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+export type ImpactAnswerSet = Partial<Record<ImpactComponent, string>>;
+
+export type ImpactAnswerResult =
+  | { error: 'verb'; bullet: string }
+  | { error: 'unreadable'; bullet: string }
+  | { additions: string[]; bullets: string[] };
+
+/**
+ * What the /start impact step's answers do to an entry's bullet bank: compose, drop what the bank
+ * already holds, then decide about what is left.
+ *
+ * THE ORDER IS THE POINT, and it is the opposite of the one this used to run inline in the PUT
+ * handler. There the strong-verb gate ran over every composed bullet before the dedupe, which
+ * meant it could reject a bullet the student never wrote. `composeImpactBullet` returns
+ * `current.trim()` when all four fields of an answer set are empty, and index 0 is composed
+ * against the entry's existing first bullet, so a blank set at index 0 composes to that bullet
+ * verbatim. That text came out of the resume parse and is under no obligation to open with a
+ * whitelisted verb: a student whose first bullet reads "Responsible for ..." got a 400 for leaving
+ * the first fieldset empty and filling a later one. "responsible" is not in STRONG_VERBS, which is
+ * what makes that case real rather than theoretical.
+ *
+ * Recognising echoes first makes the gate mean what its error message says. An echo of a bank
+ * bullet is not an addition, so it is dropped and never judged. Anything that survives is by
+ * construction absent from the bank, so it is new, and every new bullet is still judged - the
+ * rules are not relaxed, only pointed at the right bullets.
+ *
+ * An echo is matched on the key OR on the exact TRIMMED text. The exact-text arm exists for
+ * bullets whose key is empty (see below): for those the key carries no identity at all, and
+ * without this arm a bank whose first bullet is written in a non-Latin script would hit the very
+ * bug this function was written to fix. Both sides of that comparison are trimmed, because the
+ * route filters `existing` on `value.trim().length > 0` without ever trimming the value, so a
+ * bullet carrying stray padding out of the parse or a JSONB round-trip is a real bank state.
+ * Trimming only the composed side reinstates the same bug for that bank.
+ *
+ * THREE OUTCOMES FOR A NEW BULLET, and they are three different facts about it:
+ *   - empty key, meaning not one letter or digit survives the fold. `firstWordOf` matches
+ *     `[a-zA-Z]+`, so such a bullet can never satisfy `startsWithStrongVerb` and can never be
+ *     accepted by any path. It is 'unreadable': the student wrote something, and this pipeline
+ *     cannot read it as a resume bullet. It is REJECTED and reported as its own error rather than
+ *     dropped, because dropping it loses text the student typed with no signal at all.
+ *   - a readable opener that is not a strong verb: 'verb', the long-standing rule.
+ *   - otherwise accepted.
+ *
+ * WHAT 'unreadable' ACTUALLY KEYS ON IS SCRIPT, NOT LANGUAGE, and the difference matters because
+ * it is the limit of this change. The trigger is "no Latin letters and no digits survive the
+ * fold", so it catches an answer typed in Chinese, Arabic or Devanagari. It does NOT catch an
+ * answer in a Latin-script language: "Dirigi el equipo" keys fine, reaches the verb rule, and
+ * comes back with the old misleading "must start with a strong action verb". That gap is
+ * deliberately untouched here. Closing it properly means deciding what language this product
+ * writes resumes in and what it does with an answer in another one, which is a product question,
+ * not a dedupe detail. STRONG_VERBS is an ASCII English whitelist embedded in both generation
+ * prompts, so the answer is bigger than this function.
+ *
+ * ONE PLACE THE "never lose typed text in silence" PRINCIPLE IS NOT APPLIED: an answer that folds
+ * to the same key as a bank bullet is dropped as an echo even though the student typed it, and a
+ * fold-away answer at index 0 such as `{ metric_or_scope: '管理' }` composes to exactly the bank
+ * bullet and takes that path. It is left alone on purpose. Making echoes speak up is a change to
+ * the dedupe's meaning for every student, not a fix to this bug.
+ *
+ * Positions are preserved on the way in, never compacted: a blank at index 0 must stay a blank at
+ * index 0, or an answer the student wrote about their second bullet composes onto their first.
+ */
+export function applyImpactAnswers(existing: string[], answers: ImpactAnswerSet[]): ImpactAnswerResult {
+  const composed = answers
+    .map((answer, index) => composeImpactBullet(index === 0 ? existing[0] ?? '' : '', answer))
+    .filter((bullet) => bullet.length > 0);
+  const bankKeys = new Set(existing.map(bulletKey).filter(Boolean));
+  const bankText = new Set(existing.map((bullet) => bullet.trim()));
+  const seen = new Set(bankKeys);
+  const additions: string[] = [];
+  for (const bullet of composed) {
+    const key = bulletKey(bullet);
+    if (bankText.has(bullet.trim())) continue;
+    if (!key) return { error: 'unreadable', bullet };
+    if (seen.has(key)) continue;
+    if (!startsWithStrongVerb(bullet)) return { error: 'verb', bullet };
+    seen.add(key);
+    additions.push(bullet);
+  }
+  return { additions, bullets: [...existing, ...additions] };
+}
