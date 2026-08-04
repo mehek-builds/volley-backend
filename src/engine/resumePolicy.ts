@@ -9,12 +9,29 @@ export interface CandidateEducation {
   grad_year?: number;
   currently_enrolled?: boolean;
   coursework?: string[];
-  /* Read from parsed_json, which is what the student's OWN resume printed, and never from
-     application_profile. That column holds the same number encrypted, and a decrypt failure there
-     is a deliberate hard error (see decryptRow) - correct for a route serving the profile, wrong
-     for resume generation, where it would turn a key problem into "no student can generate a
-     resume". The parse is also the origin for almost everyone: academicSeedFrom copies parsed ->
-     application_profile, not the reverse. */
+  /* application_profile FIRST, parsed_json only as the seed behind it. Populate these with
+     educationFrom rather than by hand, so the precedence cannot be forgotten at a call site.
+     (This comment previously said the opposite - "never from application_profile" - and the
+     reasoning it gave was wrong on both halves. Recorded here because the claim was cited as
+     evidence by later work.)
+
+     WHY THIS WAY ROUND. application_profile is what the student typed, or what /profile/harvest
+     watched her type into a real employer form: a first-hand claim by the person it is about.
+     parsed_json is an LLM's reading of a PDF, seeded into the blanks of that row by
+     academicSeedFrom and never allowed to overwrite it. Every other employer-facing surface
+     already resolves the two that way - GET /profile (academicsOfRecord), the extension's grades
+     adapter, the managed submission runner - and on 2026-08-03 the parse said "3.8" where
+     application_profile said "3.89". Reading the parse here made the rendered PDF the ONLY
+     surface still printing the truncated number, and the PDF is the copy an employer keeps.
+
+     The old comment's decrypt argument does not hold either: nothing forces this path through
+     decryptRow's throw. applicationRowForProfile already catches it and yields a blank academic
+     record, which suppresses the number instead of failing the generation OR falling back to the
+     parse - see the note there for why blank beats a contradicting grade.
+
+     Seeding direction is not precedence. academicSeedFrom does copy parsed -> application_profile
+     for most students, which is exactly why the two usually agree; it says nothing about which
+     copy to believe on the day they disagree. */
   gpa?: string;
   gpa_scale?: string;
   school_location?: string;
@@ -38,6 +55,83 @@ export function educationGpaLine(education: Pick<CandidateEducation, 'gpa' | 'gp
   if (!GPA_VALUE.test(value)) return '';
   const scale = education.gpa_scale?.trim() ?? '';
   return GPA_VALUE.test(scale) ? `${value}/${scale}` : value;
+}
+
+/* The academic fields the RENDERED resume can state. gpa reaches the page through
+ * educationGpaLine; gpa_scale reaches it as that line's denominator.
+ *
+ * major is deliberately absent, and this is not an oversight to be tidied later: ResumeSpec has no
+ * major field and resumeRender draws none, so the education block prints school, degree, grad date,
+ * GPA and coursework only. profile.ts overrides all THREE academic fields because GET /profile and
+ * autofill do serve a major. Add it here the day the render does, and not before - a field carried
+ * into a spec nothing prints is just another thing to keep in sync. */
+export const RESUME_ACADEMIC_FIELDS = ['gpa', 'gpa_scale'] as const;
+
+/* The academic record as the product will state it, or undefined when there is no record at all.
+ *
+ * Mirrors academicsOfRecord in routes/profile.ts, minus major (see above), and mirrors it including
+ * the part that looks like a bug: a row that EXISTS but holds a blank gpa resolves to '', not to the
+ * parse's number.
+ *
+ * THE BLANK CASE IS THE WHOLE POINT. Blank on application_profile means "not on record", and the
+ * value autofill types into an employer's GPA box is nothing. Printing the parse's number there
+ * would put a grade on the PDF that the same application's typed fields deny and that the student's
+ * own dashboard does not show her - which is the exact contradiction this fix exists to remove,
+ * just pointed the other way. Per-field fallback would have been the softer change and is the wrong
+ * one: the alternative to a first-hand blank is silence, not an LLM's guess.
+ *
+ * No row at all is a different situation and returns undefined, leaving the parse in place. There is
+ * no second value to contradict, the parse is the only copy anyone has, and a student who has not
+ * reached the application-profile step yet is not making a claim we can override. */
+export function academicsOfRecordForResume(
+  applicationRow: Record<string, unknown> | undefined,
+): Pick<CandidateEducation, 'gpa' | 'gpa_scale'> | undefined {
+  if (!applicationRow) return undefined;
+  const out: Pick<CandidateEducation, 'gpa' | 'gpa_scale'> = {};
+  for (const field of RESUME_ACADEMIC_FIELDS) {
+    const value = applicationRow[field];
+    out[field] = typeof value === 'string' && value.trim().length > 0 ? value.trim() : '';
+  }
+  return out;
+}
+
+/* profiles.parsed_json (+ the academic record that outranks it) -> the education block.
+ *
+ * ONE function for both generation paths on purpose. /resume/base/stream and /resume/generate build
+ * the same education block from the same two rows, and they used to build it with two separate
+ * pieces of code: the base path through this function, the tailored path inline. Every field one
+ * side learned about and the other did not was a difference between the base resume the student
+ * approves on /start and the tailored resume that goes to the employer - which is how the GPA came
+ * to be read from the wrong column on both paths and fixable on only one.
+ *
+ * Shape-guarded throughout: parsed_json is jsonb and a hand-edited row can hold anything. */
+export function educationFrom(
+  parsed: unknown,
+  applicationRow?: Record<string, unknown>,
+): CandidateEducation {
+  const p = (parsed ?? {}) as Record<string, unknown>;
+  const str = (v: unknown) => (typeof v === 'string' ? v : undefined);
+  const gradYear = typeof p.grad_year === 'number' && p.grad_year > 0 ? p.grad_year : undefined;
+  return {
+    school: str(p.school) ?? '',
+    degree: str(p.degree),
+    /* Falsy rather than nullish, which is the tailored path's rule and now both paths': a stored
+       grad_date of '' is a missing date, and treating it as a present one printed an empty right
+       column beside the degree on a profile that knows the year perfectly well. */
+    grad_date: str(p.grad_date) || (gradYear ? String(gradYear) : undefined),
+    grad_year: gradYear,
+    currently_enrolled: typeof p.currently_enrolled === 'boolean' ? p.currently_enrolled : undefined,
+    /* The base resume is built by the same applyResumePolicy pass the tailored path runs, and it is
+       the document the student approves on /start. Omitting these here would have shown them a base
+       resume with no GPA and then a tailored one with it, which reads as the product changing their
+       education between screens. */
+    gpa: str(p.gpa),
+    gpa_scale: str(p.gpa_scale),
+    school_location: str(p.school_location),
+    coursework: Array.isArray(p.coursework) ? p.coursework.filter((c): c is string => typeof c === 'string') : undefined,
+    /* LAST, so it wins. See academicsOfRecordForResume. */
+    ...academicsOfRecordForResume(applicationRow),
+  };
 }
 
 export interface CandidateContext {
@@ -144,6 +238,11 @@ export function deriveCandidateContext(
   };
 }
 
+/* The bar for "this is the same employer", defined once. Two call sites depend on it - which bank
+   row an entry inherits, and whether that row's city is printed - and a second hard-coded copy is a
+   drift waiting to happen. */
+export const SAME_EMPLOYER_SCORE = 0.8;
+
 /* Words that carry no identity: connectors and the legal or generic wrapper a name is dressed in.
    Stripping them is what lets "Nike Inc." match "Nike" and "Bain & Company" match "Bain", and it
    is also what finally separates "Company 1" from "Company 2" - once the generic head is gone,
@@ -161,7 +260,13 @@ const ORG_NOISE = new Set([
    1.0 against each other. No threshold on that scale could separate them, which is why this exists
    rather than a tuned constant. */
 function orgTokens(value: string): Set<string> {
-  return new Set((value.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter((part) => !ORG_NOISE.has(part)));
+  /* Apostrophes are removed rather than treated as a break, so "St. Jude's" and "St Judes" are the
+     same two tokens. Splitting on them instead leaves a stray "s" that counts as a whole identity
+     word, which drags an otherwise perfect match down to 0.5 and below the bar. */
+  return new Set(
+    (value.toLowerCase().replace(/['\u2019]/g, '').match(/[a-z0-9]+/g) ?? [])
+      .filter((part) => !ORG_NOISE.has(part)),
+  );
 }
 
 function orgNumbers(value: string): Set<string> {
@@ -207,16 +312,6 @@ export function orgScore(generated: string, source: string): number {
   return acronymMatch ? Math.max(overlap, 1) : overlap;
 }
 
-/* Is this the SAME employer, not merely a close one. Punctuation, spacing and case are noise ("St.
-   Jude's" vs "St Judes"); everything else has to agree, including the digits and initials orgScore
-   discards. Used only to gate a printed location, where a near-miss is a false factual claim rather
-   than a slightly worse bullet. */
-export function sameOrganization(a: string, b: string): boolean {
-  const compact = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '');
-  const left = compact(a);
-  return left.length > 0 && left === compact(b);
-}
-
 function matchingBankEntry(entry: ResumeSpec['experience'][number], bank: ExperienceBankEntry[]) {
   const generatedTitle = tokens(entry.title ?? '');
   const generatedYears = new Set((entry.date_range ?? '').match(/\b(?:19|20)\d{2}\b/g) ?? []);
@@ -237,7 +332,7 @@ function matchingBankEntry(entry: ResumeSpec['experience'][number], bank: Experi
        West", and every two-word company shared a threshold with its nearest unrelated neighbour.
        Containment means a legitimately abbreviated org still scores 1.0, so raising this costs the
        honest cases nothing and only rejects the half-matches. */
-    .filter(({ organization }) => organization >= 0.8)
+    .filter(({ organization }) => organization >= SAME_EMPLOYER_SCORE)
     .sort((a, b) => b.score - a.score || b.source.org.length - a.source.org.length)[0]?.source;
 }
 
@@ -316,23 +411,15 @@ export function applyResumePolicy(
            source of a fact about where the student worked. It selects and phrases evidence, it does
            not author the record.
 
-           HELD TO A HIGHER BAR THAN THE REST OF THE MATCH, deliberately. matchingBankEntry accepts
-           an organisation overlap of 0.5, which is right for pulling bullets - half a name plus a
-           title and a shared year is ample evidence it is the same job. It is not ample evidence
-           about a CITY. "Company 1" and "Company 2" score exactly 0.5 against each other, as would
-           "Bank of America" and "Bank of the West", and the cost of that near-miss is different in
-           kind here: a wrong bullet is the student's own text on the wrong row, while a wrong city
-           is a false statement about where they worked, printed in the one column an employer scans
-           to check it. Below the bar the line simply prints no place, which is what the resume
-           looked like yesterday and is never wrong.
-
-           THE BAR IS IDENTITY, not a high score, and orgScore is the reason. tokens() drops
-           single characters, so "Company 1" and "Company 2" both reduce to {company} and score a
-           PERFECT 1.0 against each other - no threshold on that scale can separate them. The same
-           holds for "Site 1"/"Site 2" and any pair differing only by a number or initial. Matching
-           on the normalised name itself is the only test that actually answers "is this the same
-           employer", which is the question a printed city depends on. */
-        location: sameOrganization(entry.org, source?.org ?? '') ? source?.location ?? '' : '',
+           NO SEPARATE GATE ANY MORE, and that is the point of the change rather than a relaxation
+           of the rule. This used to demand exact name equality, because orgScore could not be
+           trusted with a factual claim - it scored "Company 1" against "Company 2" at a perfect
+           1.0. Now that identity matching is real, matchingBankEntry has ALREADY refused anything
+           below SAME_EMPLOYER_SCORE, so a `source` in hand is one that cleared the same bar this
+           check would re-apply. Exact equality was costing the honest case instead: the model
+           writes "Traeco" for a row reading "Traeco - AI Agent Cost Infrastructure", and the city
+           silently vanished from a resume for a spelling difference. */
+        location: source?.location ?? '',
         bullets,
       };
     })
