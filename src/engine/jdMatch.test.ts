@@ -1649,6 +1649,33 @@ describe('"About you" is the candidate, not the company', () => {
     }
   });
 
+  test('the whitespace between "About" and "You" can be any whitespace', () => {
+    // Found in review, on the first version of this fix, which spelled the forms out twice: the
+    // noise lookahead was written `\s+` and the required alternative with a literal space. So the
+    // exclusion fired on all of these and the claim fired on none, dropping every one of them into
+    // the unrecognised gap the test above exists to prevent. Zero postings on the 2026-08-04 board
+    // spell it this way, which is exactly how it would have shipped unnoticed. The non-breaking
+    // space is the one that matters: it is what a rich-text editor emits, and it is the same shape
+    // as the U+2019 defect headingCore already carries a comment about.
+    for (const [label, gap] of [['two spaces', '  '], ['tab', '\t'], ['non-breaking space', ' ']] as const) {
+      const [, second] = segmentJd(
+        `Responsibilities\n- Ship features\nAbout${gap}You\n- Experience with Python\n`,
+      );
+      assert.equal(second?.kind, 'required', `"About<${label}>You" must classify as required`);
+    }
+    // And the multiword forms, where the inner space is the one that drifted.
+    const [, multi] = segmentJd('Responsibilities\n- Ship features\nAbout the  candidate\n- Python\n');
+    assert.equal(multi?.kind, 'required', '"About the  candidate" must classify as required');
+  });
+
+  test('an employer whose name starts with "you" is still the employer', () => {
+    // The cost of a looser `you`. These are real company spellings, and each one must stay noise.
+    for (const heading of ['About Youth Programs', 'About Yousign', 'About Younited Credit']) {
+      const [, second] = segmentJd(`Responsibilities\n- Ship features\n${heading}\nWe are a company.\n`);
+      assert.equal(second?.kind, 'noise', `"${heading}" names the employer`);
+    }
+  });
+
   test('the StockX posting scores its requirements, not its responsibilities prose', () => {
     const sections = segmentJd(SECOND_PERSON_JD);
     assert.deepEqual(

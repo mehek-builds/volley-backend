@@ -138,6 +138,27 @@ const SECTION_WEIGHT: Record<SectionKind, number> = {
   noise: 0,
 };
 
+/**
+ * The subject of an "About ..." heading when that subject is the CANDIDATE rather than the employer.
+ *
+ * ONE STRING, INTERPOLATED INTO TWO PATTERNS, and that is the entire point of it existing. The noise
+ * rule below excludes these forms and the `required` rule claims them, and a form that appears in
+ * one list but not the other does NOT fall back to prose: it becomes an UNRECOGNISED heading, which
+ * is strictly worse than either, because it fails to close the section above it and the requirements
+ * inherit whatever weight that section had. Two hand-maintained copies drift; one constant cannot.
+ *
+ * The first version of this fix WAS two copies, and they drifted within the same commit. The noise
+ * lookahead was written `\s+` and the required alternative was written with a literal space, so
+ * "About You" classified but "About  You" (two spaces), "About\tYou" and "About You" - the
+ * non-breaking space a scraped ATS page emits - matched neither and landed in exactly the
+ * unrecognised gap described above. Zero live postings on the 2026-08-04 board spelled it that way,
+ * so nothing was measurably broken, but that is the same latent shape as the U+2019 defect in
+ * headingCore, which also looked impossible until a posting arrived spelling it that way.
+ *
+ * `\s+` everywhere, therefore, including INSIDE the multiword forms.
+ */
+const SECOND_PERSON_SUBJECT = String.raw`(you|yourself|the\s+ideal|our\s+ideal|the\s+candidate)`;
+
 // Heading matchers, longest-intent first. Order matters: "preferred qualifications" must be tested
 // before "qualifications", or every preferred block scores as required.
 const HEADING_PATTERNS: Array<{ kind: SectionKind; re: RegExp }> = [
@@ -160,15 +181,15 @@ const HEADING_PATTERNS: Array<{ kind: SectionKind; re: RegExp }> = [
   // while "3+ years Web and Mobile Automation Testing", `JavaScript/TypeScript`, `Git` and `CI-CD`,
   // the things the employer actually asked for, sat at zero. See the fixture in jdMatch.test.ts.
   //
-  // THE EXCLUSION LIST AND THE `required` ALTERNATIVE BELOW ARE ONE RULE WRITTEN TWICE, and they
-  // must be edited together. A form dropped from noise but not added to required does not fall back
-  // to prose: it becomes an UNRECOGNISED heading, which is strictly worse than noise, because it
-  // fails to close the section above it and the requirements inherit whatever weight that had.
+  // THE EXCLUSION HERE AND THE `required` ALTERNATIVE BELOW ARE ONE RULE, which is why both read
+  // SECOND_PERSON_SUBJECT instead of spelling the forms out twice. See the note on that constant
+  // for what a drift between the two costs.
   //
   // `you\b` and not `you`, so "About your role:" - cresta's spelling of "About the Role" - keeps
   // its noise classification. The possessive is the employer describing the job; the bare pronoun
-  // is the employer describing the reader.
-  { kind: 'noise', re: /^about\b(?!\s+(you|yourself|the ideal|our ideal|the candidate)\b)|\b(who we are|our (story|mission|values|culture)|benefits|perks|what we offer|compensation|salary|pay range|equal opportunity|eeo|diversity|accommodation|privacy|how to apply|why join)\b/i },
+  // is the employer describing the reader. The same `\b` keeps every employer whose name starts
+  // with those letters out: "About Youth Programs", "About Yousign", all still noise.
+  { kind: 'noise', re: new RegExp(String.raw`^about\b(?!\s+${SECOND_PERSON_SUBJECT}\b)|\b(who we are|our (story|mission|values|culture)|benefits|perks|what we offer|compensation|salary|pay range|equal opportunity|eeo|diversity|accommodation|privacy|how to apply|why join)\b`, 'i') },
   { kind: 'preferred', re: /\b(preferred|nice[- ]to[- ]have|bonus|plus(es)?|desired|good to have|additional qualifications)\b/i },
   // `what we('?re)? look(ing)? for` and `(your|the) impact`, not the tighter `what we're looking
   // for` / `your impact` they replaced. Databricks' "Product Management Intern (Summer 2027)"
@@ -178,9 +199,10 @@ const HEADING_PATTERNS: Array<{ kind: SectionKind; re: RegExp }> = [
   // `ai platform` and `streaming` - the sentence naming the TEAMS Databricks hires across - while
   // "first hand experience with SQL and/or Python" never reached weight 1. A near-miss on a
   // heading does not cost you the heading, it costs you every line under it.
-  // `about (you|...)` is the other half of the exclusion carved out of the noise rule above. It is
-  // reached only because noise declines these forms first, and it must stay in step with that list.
-  { kind: 'required', re: /\b(requirements?|qualifications?|what you'?ll need|what we('?re)? look(ing)? for|must[- ]have|minimum|basic qualifications|skills?|you have|your background|about (you|yourself|the ideal|our ideal|the candidate))\b/i },
+  // `about SECOND_PERSON_SUBJECT` is the other half of the exclusion carved out of the noise rule
+  // above, reading the same constant so the two cannot drift. It is reached only because noise
+  // declines these forms first.
+  { kind: 'required', re: new RegExp(String.raw`\b(requirements?|qualifications?|what you'?ll need|what we('?re)? look(ing)? for|must[- ]have|minimum|basic qualifications|skills?|you have|your background|about\s+${SECOND_PERSON_SUBJECT})\b`, 'i') },
   { kind: 'responsibilities', re: /\b(responsibilities|what you'?ll do|the role|(your|the) impact|day[- ]to[- ]day|in this role|duties)\b/i },
 ];
 
