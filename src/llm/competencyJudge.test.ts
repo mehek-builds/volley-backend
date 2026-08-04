@@ -1,5 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { quoteIsGrounded, validateVerdicts, COMPETENCY_SYSTEM_PROMPT } from './competencyJudge';
 import { scorePosting, type CandidateFacts } from '../engine/clauseMatch';
 import { segmentJd } from '../engine/jdMatch';
@@ -173,5 +175,86 @@ describe('scorePosting keeps the deterministic half deterministic', () => {
       rejected: [],
     }));
     assert.ok(!r.clauses.some((c) => /Ship features/.test(c.text)));
+  });
+});
+
+describe('a response we could not read is never a verdict', () => {
+  /* Review of the first attempt at this. It returned met:false for every question with an ID-LESS
+     rejection, and both halves were wrong: confident unmets for questions nobody answered, and a
+     rejection carrying no id, so competencyCache's `r.id` write filter filtered nothing and one
+     truncated response was cached forever. Throwing is correct because scorePosting catches and
+     marks the clauses unscoreable, and nothing reaches the cache because the write happens after. */
+
+  test('a whole bullet grounds a verdict however short it is', () => {
+    const short = ['Built Litos, a Chrome extension'];
+    assert.equal(quoteIsGrounded('Built Litos, a Chrome extension', short), true);
+    // ...but a five-word FRAGMENT of a longer bullet still does not.
+    assert.equal(quoteIsGrounded('Built Litos, a Chrome', short), false);
+  });
+
+  test('the six-word floor still rejects an echoed phrase', () => {
+    assert.equal(quoteIsGrounded('led a 4-person team', BULLETS), false);
+  });
+});
+
+describe('a bare-year graduation date is still a graduation date', () => {
+  test('pointsIn reads the candidate field without a cue word', async () => {
+    const { matchClause } = await import('../engine/clauseMatch');
+    const facts = (gradDate: string) => ({
+      degree: 'Bachelor of Science in Computer Science',
+      school: 'USC',
+      gradDate,
+      resumeText: 'Python.',
+      bullets: ['Led a 4-person team, analyzing 350 survey responses.'],
+    });
+    const clause = "Pursuing a bachelor's in computer science graduating in Fall 2027 or Spring 2028";
+    /* submissionEducationGuard builds grad_date from grad_year, so "2027" is a real stored value.
+       Running it through the employer-text cue gate returned no points, ownGrad was null, and every
+       window silently passed: the headline bug surviving inside its own fix. */
+    assert.equal(matchClause(clause, 1, facts('2030')).verdict, 'unmet');
+    assert.equal(matchClause(clause, 1, facts('2027')).verdict, 'met');
+  });
+});
+
+describe('a judge that fails publishes no score at all', () => {
+  const facts = {
+    degree: 'Bachelor of Science in Computer Science',
+    school: 'USC',
+    gradDate: 'May 2027',
+    resumeText: 'Python. Led a 4-person team, analyzing 350 survey responses.',
+    bullets: ['Led a 4-person team, analyzing 350 survey responses.'],
+  };
+  const jd = `What we look for:
+- You have some first hand experience with SQL and/or Python
+- You can communicate nuance to partners in written and verbal form
+`;
+
+  test('a thrown judge leaves the deterministic clauses and returns score null', async () => {
+    /* Dropping the competency clauses from the denominator leaves only the ones that passed
+       locally, so a run where the model was never reached could report a HIGHER number than a
+       successful one, up to 100. The clause list is still worth returning; the headline percentage
+       is not, because it would be built on a question nobody got to ask. */
+    const { scorePosting } = await import('../engine/clauseMatch');
+    const { segmentJd } = await import('../engine/jdMatch');
+    const r = await scorePosting(jd, facts, undefined, segmentJd as never, async () => {
+      throw new Error('overloaded');
+    });
+    assert.equal(r.score, null, 'no score when the judge never answered');
+    assert.ok(r.clauses.some((c) => c.basis === 'terms' && c.verdict === 'met'), 'Python still counts');
+    assert.ok(r.clauses.some((c) => c.basis === 'competency' && c.verdict === 'unscoreable'));
+    assert.match(r.rejected[0].reason, /judge unavailable/);
+  });
+
+  test('truncation throws rather than returning verdicts nobody gave', () => {
+    /* Returning met:false here was the reintroduced bug: confident unmets for unanswered questions,
+       carried on an id-less rejection that the cache write filter could not filter, so one
+       truncated response was stored in a cache that never expires. */
+    const src = readFileSync(path.join(__dirname, 'competencyJudge.ts'), 'utf8');
+    assert.ok(src.includes("throw new Error('response hit the token ceiling before it finished')"));
+    assert.match(src, /throw new Error\(`unparseable response/);
+    /* Not asserting the ABSENCE of a met:false map: the legitimate "no bullets to judge against"
+       early return is exactly that shape, and a broad ban flagged it. The mutation that matters -
+       turning the throw back into fabricated verdicts - is caught behaviourally by the
+       thrown-judge test above, which is the stronger check anyway. */
   });
 });

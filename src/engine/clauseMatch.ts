@@ -140,7 +140,7 @@ const MONTHLY = new RegExp(`\\b(${MONTHS})[a-z]*\\s+(20\\d\\d)\\b`, 'gi');
 /** A bare year only counts as a graduation date when the clause is actually about graduating. */
 const GRADUATION_CUE = /\b(graduat|class of|degree conferred|expected|completion)/i;
 
-function pointsIn(text: string): GradPoint[] {
+function pointsIn(text: string, requireCue = true): GradPoint[] {
   const out: GradPoint[] = [];
   for (const m of text.matchAll(SEASONAL)) {
     const season = m[1].toLowerCase();
@@ -150,7 +150,7 @@ function pointsIn(text: string): GradPoint[] {
     const late = ['jul', 'aug', 'sep', 'oct', 'nov', 'dec'].includes(m[1].toLowerCase());
     out.push({ year: Number(m[2]), half: late ? 2 : 1 });
   }
-  if (out.length === 0 && GRADUATION_CUE.test(text)) {
+  if (out.length === 0 && (!requireCue || GRADUATION_CUE.test(text))) {
     for (const m of text.matchAll(/\b(20\d\d)\b/g)) out.push({ year: Number(m[1]), half: 1 });
   }
   return out;
@@ -307,8 +307,18 @@ export function matchClause(
     const wantedGrad = parseGraduationWindow(text);
     // The candidate's own date is a POINT, so the first parse of it is the whole answer. Only the
     // employer's clause can name a range.
-    const ownPoints = pointsIn(facts.gradDate ?? '');
+    /* NO CUE REQUIRED for the candidate's own date: the field IS the graduation date, so a bare
+       "2027" is a graduation year by definition. Running it through the employer-text gate meant
+       pointsIn returned nothing, ownGrad was null, and every window silently passed - which is
+       this module's headline bug surviving inside its own fix, for every profile whose grad_date
+       came from grad_year (see submissionEducationGuard). */
+    const ownPoints = pointsIn(facts.gradDate ?? '', false);
     const ownGrad = ownPoints.length > 0 ? ownPoints[0] : null;
+    /* A BARE YEAR IS A YEAR, not the first half of one. "2027" with no term names a whole academic
+       year, and pinning it to Spring made a 2027 graduate miss a "Fall 2027 or Spring 2028" window
+       they plainly sit inside. Only the candidate's own field gets this: an employer writing a bare
+       year in a range already has the range read from both endpoints. */
+    const ownSpansYear = Boolean(ownGrad) && !/[a-z]/i.test(facts.gradDate ?? '');
     /* INSIDE the stated window, at BOTH ends, with NO slack.
        Graduating before it and graduating after it are the same kind of miss, and only the first
        was caught. A season of slack was tried and removed: an employer writing "Fall 2027 or
@@ -316,9 +326,14 @@ export function matchClause(
        graduated, so admitting the term either side re-breaks the exact case this was written for.
        A candidate finishing May 2027 is out of a Fall 2027 to Spring 2028 window, and saying so is
        the useful answer. */
-    const gradMet =
-      !wantedGrad || !ownGrad
-        ? true
+    const gradMet = !wantedGrad || !ownGrad
+      ? true
+      : ownSpansYear
+        // Any term of the stated year landing inside the window is enough.
+        ? [1, 2].some((half) => {
+            const o = ordinal({ year: ownGrad.year, half: half as 1 | 2 });
+            return o >= ordinal(wantedGrad.from) && o <= ordinal(wantedGrad.to);
+          })
         : ordinal(ownGrad) >= ordinal(wantedGrad.from) && ordinal(ownGrad) <= ordinal(wantedGrad.to);
 
     const met = fieldMet && gradMet;
@@ -410,8 +425,13 @@ export async function scorePosting(
       // The competency clauses stay UNSCOREABLE rather than unmet: we did not ask and got no
       // answer, which is not the same as asking and being told no.
       for (const { i } of pending) clauses[i] = { ...clauses[i], verdict: 'unscoreable' };
+      /* NO SCORE, not a recomputed one. Dropping every competency clause from the denominator
+         leaves only the deterministic ones, so a run where the model was never reached could
+         report a HIGHER number than a successful one - up to 100 when the survivors all pass. The
+         clause list is still returned, because "here is what we could check" is useful; a headline
+         percentage built on a question we never got to ask is not. */
       return {
-        score: aggregate(clauses),
+        score: null,
         clauses,
         rejected: [{ reason: `judge unavailable: ${err instanceof Error ? err.message : 'unknown error'}` }],
       };

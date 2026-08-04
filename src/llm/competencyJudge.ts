@@ -99,15 +99,21 @@ function normalizeQuote(s: string): string {
  */
 export function quoteIsGrounded(quote: string, bullets: string[]): boolean {
   const q = normalizeQuote(quote);
-  /* SIX WORDS, not twelve characters.
+  if (!q) return false;
+  const normalised = bullets.map((b) => normalizeQuote(b));
+
+  /* A WHOLE BULLET IS ALWAYS GROUNDED, whatever its length. The floor below is for substrings.
+     A six-word minimum applied to everything made any short bullet permanently uncitable:
+     "Built Litos, a Chrome extension" is five words, so every verdict resting on it was downgraded
+     to unmet no matter how right the model was. */
+  if (normalised.some((b) => b === q)) return true;
+
+  /* SIX WORDS for a SUBSTRING, not twelve characters.
      A twelve-character floor accepted "led the team" or "and analysis" as a citation, which is the
      model echoing a common phrase rather than pointing at a sentence. The gate is the single rule
      the whole design rests on: if a fragment can ground a verdict, the verdict is not grounded. */
   if (q.split(' ').filter(Boolean).length < 6) return false;
-  return bullets.some((b) => {
-    const nb = normalizeQuote(b);
-    return nb === q || nb.includes(q);
-  });
+  return normalised.some((b) => b.includes(q));
 }
 
 export function validateVerdicts(
@@ -174,28 +180,28 @@ export async function judgeCompetencies(
     system: COMPETENCY_SYSTEM_PROMPT,
     messages: [{ role: 'user', content: buildUserMessage(bullets, questions) }],
   });
-  /* A truncated response is a REJECTION, not an exception.
+  /* A truncated or unparseable response THROWS, and that is deliberate after a review.
    *
-   * max_tokens is fixed while the clause count is not, so a posting stating fifteen requirements
-   * can exhaust the budget mid-JSON; parseJson then takes lastIndexOf('}') of an incomplete object
-   * and throws. Before the JD truncation was fixed this was unreachable, because the route only
-   * ever saw 600-character previews that state no clauses at all. Now it is reachable on exactly
-   * the postings with the most requirements, which are the ones worth reading. */
+   * The first version of this returned met:false for every question with an id-less rejection, and
+   * both halves of that were wrong. The verdicts were confident UNMETS for questions nobody
+   * answered, which scorePosting keeps in the denominator; and because competencyCache filters the
+   * write on `r.id`, an id-less rejection filtered nothing, so one truncated response was written
+   * to a store that never expires and froze those clauses at unmet for every student with the same
+   * bullets. That is exactly the failure validateVerdicts was changed to prevent, reintroduced two
+   * functions below it.
+   *
+   * Throwing is now the correct answer because scorePosting HAS a catch: it marks the competency
+   * clauses `unscoreable` and returns the rejection, which is the honest state - we asked and got
+   * no usable answer. Nothing reaches the cache, because the write happens after this returns. */
   if (response.stop_reason === 'max_tokens') {
-    return {
-      verdicts: questions.map((q) => ({ id: q.id, met: false, why: 'not judged' })),
-      rejected: [{ reason: 'response hit the token ceiling before it finished' }],
-    };
+    throw new Error('response hit the token ceiling before it finished');
   }
   const text = response.content.map((c) => (c.type === 'text' ? c.text : '')).join('');
   let parsed: unknown;
   try {
     parsed = parseJson(text);
   } catch (err) {
-    return {
-      verdicts: questions.map((q) => ({ id: q.id, met: false, why: 'not judged' })),
-      rejected: [{ reason: `unparseable response: ${err instanceof Error ? err.message : 'unknown'}` }],
-    };
+    throw new Error(`unparseable response: ${err instanceof Error ? err.message : 'unknown'}`);
   }
   return validateVerdicts(parsed, questions, bullets);
 }
