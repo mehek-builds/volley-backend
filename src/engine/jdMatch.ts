@@ -146,7 +146,63 @@ const HEADING_PATTERNS: Array<{ kind: SectionKind; re: RegExp }> = [
   // names itself: "About OpenAI", "About PhonePe Limited:", "About the Team". OpenAI's "Counsel,
   // Litigation" was the case that found it, and the cost was not the blurb but everything AFTER it,
   // because an unrecognised heading does not close the section it interrupts. See NOISE_BLOCK.
-  { kind: 'noise', re: /^about\b|\b(who we are|our (story|mission|values|culture)|benefits|perks|what we offer|compensation|salary|pay range|equal opportunity|eeo|diversity|accommodation|privacy|how to apply|why join)\b/i },
+  // THE PROCESS-AND-LOGISTICS FOOTER, added 2026-08-04 for ISSUE-026. Same failure the `^about\b`
+  // note above describes, one section later: psiquantum's "Intern, Quantum Architecture" ends its
+  // requirements bullets and then writes the heading-shaped line "The interview process". That line
+  // passes isHeadingLine and matched NOTHING here, so it did not CLOSE the required section, and
+  // everything below it - the interview paragraph, the background-check paragraph, the hourly-rate
+  // table and the EEO block - was read as REQUIRED at weight 1. Its twelve extracted requirements
+  // were `C++, Computer Science, GitHub, Housing, HR, Math, Once, Physics, Police Check, Python,
+  // Rate, ZX`: five of twelve unmatchable by any resume. The uncapped set was fifteen terms, seven
+  // of them from this footer, so the junk did not merely sit in the denominator - it filled the cap
+  // and evicted `FBQC`, the one term the responsibilities block names twice. Every score on this
+  // posting was depressed by ~40 points of noise the dashboard tooltip called "requirements".
+  //
+  // AFTER all three ISSUE-026 changes the posting extracts eight terms, every one of them stated:
+  // `C++, Computer Science, FBQC, GitHub, Math, Physics, Python, ZX`. Against the SWE base resume in
+  // jdMatch.test.ts the score moves 17 -> 26 and the missing list stops naming Housing, HR, Once,
+  // Police Check and Rate at a student. The BOARD-WIDE score barely moves (mean 4.9 -> 5.1 over 400
+  // postings) and that is expected rather than disappointing: EMPHASIS_LIMIT refills the vacancy, so
+  // removing junk mostly changes WHICH twelve, not how many. What it buys is that the twelve, and
+  // the gap list built from them, are things a student can actually act on.
+  //
+  // `hourly rate|pay rate|stipend` are here as well as the process words because the pay table is
+  // the part that survives when a posting has no process heading: "Hourly Rate" and
+  // "Housing/Commuter Stipend" are each their own heading-shaped line in that table. `compensation`
+  // and `salary` were already here and do not reach either spelling.
+  //
+  // SAFE FOR THE SAME REASON THE REST OF THIS LIST IS, and NOT for the reason NOISE_BLOCK is: every
+  // pattern here is gated by isHeadingLine, so it can only fire on a line under 60 characters and 7
+  // words that is not a bullet. "Ability to explain the interview process to candidates" is 9 words
+  // and never reaches this test. NOISE_BLOCK has the wider 16-word budget and is where an addition
+  // needs the measurement its comment demands; this list does not.
+  //
+  // MEASURED ANYWAY, 2026-08-04, over 400 live postings pulled full-text from the production board.
+  // The four new patterns fire on 27 heading lines across that corpus and every one of them is a
+  // benefits or hiring-process line: "Annual Benefits Stipend: $8,453", "Monthly wellness stipend",
+  // "Commuter stipend", "INTERVIEW PROCESS", "Use of AI in Our Hiring Process", "WHAT DOES THE
+  // HIRING PROCESS LOOK LIKE?". Zero requirement lines. They change the extracted set on 4 of the
+  // 400, which is the honest size of this fix: it is narrow, and it is the layer that fixes the
+  // posting it was written for. The other two ISSUE-026 changes measure 138 of 400 and 8 of 400.
+  //
+  // THE TWO CASES WORTH READING, because they look like losses and are not. These patterns are the
+  // ONLY one of the three ISSUE-026 changes that drops anything touching SKILL_LEXICON, and both
+  // drops are the same shape:
+  //
+  //   Block, "Regulatory Examination Manager" and "Lending Regulatory Counsel", drop `ai` (plus
+  //   `afterpay` and `cash app`) from the footer under "Use of AI in Our Hiring Process" - "We may
+  //   use automated AI tools to evaluate job applications". That is Block telling applicants how it
+  //   screens them, not a requirement to know AI.
+  //
+  //   Monzo, "Lead Machine Learning Scientist", drops the bigram `ml modelling`, which reads like a
+  //   requirement until you find it: "The interview process: ... 60 minute ML Modelling interview".
+  //   It is the name of an interview STAGE. `ml`, `mlops`, `llms`, `rag`, `python` and `sql` all
+  //   survive from the requirements block above it.
+  //
+  // A lexicon hit inside a hiring-process disclosure is still a hiring-process disclosure. This is
+  // the only section-based route by which a lexicon skill leaves the denominator at all, and on
+  // this corpus it has not once removed a stated requirement.
+  { kind: 'noise', re: /^about\b|\b(who we are|our (story|mission|values|culture)|benefits|perks|what we offer|compensation|salary|pay range|hourly rate|pay rate|stipend|equal opportunity|eeo|diversity|accommodation|privacy|how to apply|why join|interview process|hiring process|selection process|background check)\b/i },
   { kind: 'preferred', re: /\b(preferred|nice[- ]to[- ]have|bonus|plus(es)?|desired|good to have|additional qualifications)\b/i },
   // `what we('?re)? look(ing)? for` and `(your|the) impact`, not the tighter `what we're looking
   // for` / `your impact` they replaced. Databricks' "Product Management Intern (Summer 2027)"
@@ -509,6 +565,48 @@ copywriting analytics automation visualization prototyping wireframing benchmark
  * board: it keeps `compliance`, `data protection`, `regulatory` and `security`, while `gdpr` and
  * `ccpa` do not survive into its final twelve at all. Both tests are in jdMatch.test.ts: one pins
  * the footer out of the denominator, the other pins that a real privacy role stays scorable. */
+
+/* THE BENEFIT-AND-LOGISTICS BLOCK (`stipend` through `screening`), added 2026-08-04 for ISSUE-026.
+ * This is the SECOND line of defence on the psiquantum footer described at HEADING_PATTERNS, and it
+ * is worth being exact about which line actually does the work, because the two are not equivalent:
+ *
+ *   heading fix only   8 terms, all 8 genuine requirements
+ *   this list only    10 terms, still carrying `HR` and `Near`
+ *   both              8 terms, all 8 genuine requirements
+ *
+ * So the heading fix carries this posting on its own and this list changes nothing on it. It is
+ * here for the shape the heading fix cannot see: the same pay table written as bullets, or as one
+ * run-on line, or under a heading nobody thought to enumerate. `housing`, `commuter` and `stipend`
+ * are the terms that posting actually produced; the rest of the row is the same vocabulary at the
+ * same specificity, which is the standard the `privacy` note above sets.
+ *
+ * Over 400 live postings pulled full-text from the production board on 2026-08-04 it changes the
+ * extracted set on 8 of them, so its value is almost entirely insurance rather than measured yield.
+ * That is stated because it is the kind of list that grows on intuition, and the number to beat
+ * before adding to it is 8 in 400.
+ *
+ * `completion` AND `completed` WERE IN THIS LIST AND WERE REMOVED, and the reason is a general
+ * caution about stop-lists rather than a fact about those two words. The pay table's degree column
+ * reads "PhD: Near Completion", which extracts as the bigram `near completion`. Denying `completion`
+ * does not delete that requirement, it UNMASKS `Near` as a unigram - a strictly worse term, since it
+ * is a preposition rather than an identifiable piece of boilerplate. That is measured, not reasoned:
+ * the vocab-only run above shows `Near` in the ten. A deny-list entry that breaks a junk bigram into
+ * junk parts has moved the problem, so any addition here needs checking against what the SURVIVING
+ * unigrams would be, not just against the term it targets.
+ *
+ * `rate` IS THE ARGUABLE ENTRY and it is taken deliberately. It costs the bigram `conversion rate`
+ * on marketing postings, which is a real thing to have done. It is kept because "Hourly Rate",
+ * "Rate", "Pay Rate" is the head of the compensation table on every posting that has one, `hourly`
+ * was already denied here for exactly that reason, and `conversion` survives on its own as the term
+ * a marketing resume is actually matched on.
+ *
+ * `hr` IS NOT HERE, though `HR` was one of the five junk terms on the psiquantum posting. It came in
+ * through the ACRONYM rule out of "at least two interviews with the hiring team and HR", which is
+ * the interview paragraph and is now noise. HR work is a real discipline this file already serves
+ * (`recruiting`, `payroll` are in SKILL_LEXICON), so denying the acronym would delete a stated
+ * requirement from every HR posting to fix one sentence in a physics one. Same trade
+ * NON_REQUIREMENT_ACRONYMS refuses for `mba` and `phd`. */
+
 /* THE MONTH NAMES ARE HERE BECAUSE A DATE IS NOT A REQUIREMENT, and they were expensive. Measured
  * 2026-08-04 over 400 live postings, in the FINAL capped denominator, they were the single largest
  * block of junk left: a start date or an application deadline occupying a slot on a substantial
@@ -583,7 +681,10 @@ monday tuesday wednesday thursday friday saturday sunday
 whether expect actual additionally president stem gpa opt person excels
 federal municipal county province
 department departments
-learn transparency hourly`
+learn transparency hourly
+stipend stipends housing commuter relocation lodging shuttle parking wage wages rate rates
+allowance allowances reimbursement reimbursements
+police background check checks screening`
     .split(/\s+/)
     .filter(Boolean),
 );
@@ -950,6 +1051,32 @@ interface SectionToken {
  *    ("You will use Python daily. Kubernetes helps" produced the requirements "python daily" and
  *    "daily kubernetes"). The gap test is only meaningful once the token stops at the word.
  *
+ *    THAT FIX REACHED THE BIGRAM PASS AND NOT THE `positional` FLAG, because the two read different
+ *    ends of the token. Bigrams use the trimmed `a.end`, so they were fixed. `positional` reads
+ *    `text.slice(prevEnd, start)`, and prevEnd was rebased from `m[0].length`, the UNTRIMMED match -
+ *    so the sentence-final period was inside the previous token's span and the gap handed to the
+ *    `[.!?:;]` test was a bare space. No word after a full stop was ever positional, which is to say
+ *    the sentence half of this rule never ran at all. `Once` in "...what your goals are. Once
+ *    interviews are complete" was admitted as a proper noun on the psiquantum posting (ISSUE-026)
+ *    for that reason, and every other sentence-initial capital on the board with it. Rebasing off
+ *    the trimmed length is the whole fix; the suite was green before and after it.
+ *
+ *    IT IS ALSO THE LARGEST OF THE THREE ISSUE-026 CHANGES BY A WIDE MARGIN. Measured 2026-08-04
+ *    over 400 live postings pulled full-text from the production board: this line alone changes the
+ *    extracted set on 138 of them and drops 265 terms, against 4 postings for the heading fix and 8
+ *    for the BOILERPLATE additions. What it drops is the opening blurb, one sentence at a time:
+ *    identify(8), today(5), develop(5), maintain(4), conduct(4), millions(3), establish(3),
+ *    since(3), oversee(3), together(3), therefore(3), monitor(3), define(3). Not one of the 265 is
+ *    a lexicon skill.
+ *
+ *    THE COST IS NOT OBSERVED ON THIS CORPUS BUT IT IS REAL, and it is the one isSpecific already
+ *    names: a single-word product name written at a sentence start and followed by lowercase prose
+ *    now needs the lexicon to survive, because the Title Case run is what separates a name from a
+ *    verb and it is not there. "You will use Python daily. Redux is our state layer" loses `Redux`.
+ *    Nothing of that shape shows up in the 265, so the bound here is "not measured to cost
+ *    anything", not "cannot". It is the same trade isSpecific describes for line-initial capitals,
+ *    applied to the position it was always meant to cover rather than to a new one.
+ *
  *  - SLASH-JOINED PAIRS ARE SPLIT. "Docker/Kubernetes", "React/Redux" and "HTML/CSS" are two
  *    requirements written compactly. Left whole they normalize to "docker kubernetes", which no
  *    resume can match, AND the subsumption pass then deletes the two real terms it was built from:
@@ -1058,7 +1185,7 @@ function tokenizeSection(text: string): SectionToken[] {
       });
       offset = pieceStart + piece.length;
     }
-    prevEnd = start + m[0].length;
+    prevEnd = start + m[0].length - trail.length;
   }
 
   for (let i = 0; i < out.length - 1; i++) {
