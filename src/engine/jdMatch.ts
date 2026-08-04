@@ -251,7 +251,50 @@ const HEADING_PATTERNS: Array<{ kind: SectionKind; re: RegExp }> = [
   // A lexicon hit inside a hiring-process disclosure is still a hiring-process disclosure. This is
   // the only section-based route by which a lexicon skill leaves the denominator at all, and on
   // this corpus it has not once removed a stated requirement.
-  { kind: 'noise', re: new RegExp(String.raw`^about\b(?!\s+${SECOND_PERSON_SUBJECT}\b)|\b(who we are|our (story|mission|values|culture)|benefits|perks|what we offer|compensation|salary|pay range|hourly rate|pay rate|stipend|equal opportunity|eeo|diversity|accommodation|privacy|how to apply|why join|interview process|hiring process|selection process|background check)\b`, 'i') },
+  //
+  // THE PAY-AND-REWARDS FOOTER, 2026-08-04, third pass over this same rule. The "About You" fix
+  // above left a residue it named but did not close: a requirements block that runs to the end of a
+  // posting with nothing to close it keeps the pay and EEO footer at weight 1. Measured board-wide
+  // rather than on the one subset, that residue is not small. Footer text sits inside a REQUIRED
+  // section on 5,839 of 22,138 active postings (26.4%), and the reason is the reason it always is
+  // here: a heading-shaped line that matches nothing does not close the section it interrupts.
+  //
+  // FOUR ADDITIONS, each one counted over the 205,581 heading-shaped lines on the board before it
+  // was added, because this list has no shape guard beyond isHeadingLine and a word that reads as
+  // boilerplate to a human can still be the noun of somebody's job:
+  //
+  //   total rewards           406 lines, 5 spellings. "Our Total Rewards Philosophy" (272), "Total
+  //                           Rewards" (52), "Our Spread* of Total Rewards" (19). One of the five is
+  //                           a JOB TITLE, "Internship - Total Rewards (Compensation & Benefits)",
+  //                           and it is the known cost: that posting zeroes its own title line.
+  //   pay transparency        672 lines, 8 spellings, every one a pay-disclosure banner. `pay range`
+  //                           and `salary` were already here and reach none of them.
+  //   what we('?ll)? offer    the contraction only. `what we offer` was already here and missed
+  //                           "What we'll offer" (119 lines) for the same reason the curly
+  //                           apostrophe defect existed: the regex is typed, the posting is not.
+  //   employment verification  70 lines, 5 spellings, all hiring-process. `background check` from
+  //                           ISSUE-026 reaches "Criminal background screening" but not this.
+  //
+  // `^disclosures:?$` IS ANCHORED, AND THAT IS THE WHOLE POINT. Bare `disclosures?` fires on 202
+  // lines, and four of its ten spellings are real work: "Prepare tax related disclosures for
+  // financial statements", "Manage subprocessor tracking and disclosures", "Experience negotiating
+  // non-disclosure agreements", "Data leakage and sensitive information disclosure". A tax
+  // accountant's requirement line is not a footer. The anchored form reaches only the 59 lines that
+  // are the bare word standing alone as a banner.
+  //
+  // TWO CANDIDATES MEASURED AND REJECTED, recorded so they are not re-proposed on the intuition
+  // that put them here:
+  //
+  //   bare `disclosures?`     see above. Rejected on four real requirement lines.
+  //   LinkedIn tracking tags  `#LI-Hybrid` and its 328 cousins are the single biggest unrecognised
+  //                           heading on the board: 3,705 lines, and headingCore strips the `#` so
+  //                           they arrive here looking like headings. Zeroing them is tempting and
+  //                           WRONG AS WRITTEN: only 635 of the 3,705 sit in the last 5% of their
+  //                           posting, while 1,867 sit before the 80% mark, so a rule that closes
+  //                           the section at the tag would zero real content on a third of them.
+  //                           They are harmless where they are (matching nothing, they close
+  //                           nothing) and they need a rule about their SHAPE, not this list.
+  { kind: 'noise', re: new RegExp(String.raw`^about\b(?!\s+${SECOND_PERSON_SUBJECT}\b)|^disclosures:?$|\b(who we are|our (story|mission|values|culture)|benefits|perks|what we('?ll)? offer|compensation|salary|pay range|hourly rate|pay rate|stipend|total rewards|pay transparency|equal opportunity|eeo|diversity|accommodation|privacy|how to apply|why join|interview process|hiring process|selection process|background check|employment verification)\b`, 'i') },
   { kind: 'preferred', re: /\b(preferred|nice[- ]to[- ]have|bonus|plus(es)?|desired|good to have|additional qualifications)\b/i },
   // `what we('?re)? look(ing)? for` and `(your|the) impact`, not the tighter `what we're looking
   // for` / `your impact` they replaced. Databricks' "Product Management Intern (Summer 2027)"

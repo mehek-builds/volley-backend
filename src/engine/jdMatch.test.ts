@@ -2062,3 +2062,122 @@ describe('the lexicon is honest about what it covers', () => {
     }
   });
 });
+
+/**
+ * THE PAY-AND-REWARDS FOOTER, the residue the "About You" fix named and did not close.
+ *
+ * That fix stopped a second-person heading from zeroing the requirements under it, and said in its
+ * own PR that a requirements block running to the end of a posting with nothing to close it keeps
+ * the pay and EEO footer at weight 1. Measured board-wide rather than on that one subset, footer
+ * text sits inside a REQUIRED section on 5,839 of 22,138 active postings (26.4%).
+ *
+ * Toast's "Field Sales Account Executive" is the fixture below and it is the funniest instance of a
+ * serious bug: the company writes its benefits section as bread puns under the heading "Our Spread*
+ * of Total Rewards", and `Toasters`, `Tofu`, `Baked` and `Recipe` were being counted as things the
+ * employer required of a candidate. Board-wide the four additions drop `Zone Philosophy` (162),
+ * `Baked` (144), `Recipe` (132), `Toasters` (48), `Washington Minimum` (47) and the greenhouse mail
+ * domain (40) out of denominators.
+ *
+ * Every assertion here is on the INTENT (footer text scores zero, requirement text does not) rather
+ * than on the vocabulary that implements it, because the vocabulary is expected to keep growing.
+ *
+ * THE FIXTURE IS DELIBERATELY RICH ON THE REQUIREMENTS SIDE, and a thinner one does not test what
+ * it looks like it tests. The first draft listed three requirement lines, which left fewer than
+ * MIN_SCORABLE_TERMS once the footer was zeroed, so the salvage pass in extractJdTerms re-read the
+ * noise as body prose and handed `Tofu` straight back. That is the salvage pass working as
+ * designed. It also means a footer fix can only be observed on a posting that stays scorable
+ * WITHOUT the footer, which every real posting of this shape is.
+ */
+const TOTAL_REWARDS_JD = `
+About You
+
+5+ years of closing experience in SaaS sales
+Proficiency with Salesforce, Outreach and Gong
+Experience running a full sales cycle from prospecting to close
+Comfort building forecasts in Excel and reporting through Tableau
+Familiarity with SQL for self-serve pipeline analysis
+Experience with HubSpot or a comparable CRM
+
+Our Spread* of Total Rewards
+
+Toasters get a competitive base salary and uncapped commission.
+We are proud of our Recipe for benefits: medical, dental and vision from day one.
+Baked into the offer is equity, plus a Tofu Tuesday lunch stipend.
+
+Pay Transparency
+
+The base salary range for this role is $90,000 to $120,000.
+Washington Minimum Wage Act disclosures apply to this posting.
+`;
+
+describe('the pay and rewards footer is not a requirement', () => {
+  test('a rewards heading CLOSES the requirements block above it', () => {
+    const sections = segmentJd(TOTAL_REWARDS_JD);
+    const required = sections.find((s) => s.kind === 'required');
+    assert.ok(required, '"About You" still opens the requirements');
+    assert.match(required.text, /closing experience/);
+    assert.ok(
+      !/Toasters|Tofu/.test(required.text),
+      'the benefits puns must not sit inside the requirements block',
+    );
+    for (const s of sections) {
+      if (/Toasters|Washington Minimum/.test(s.text)) assert.equal(s.weight, 0, 'footer text scores zero');
+    }
+  });
+
+  test('the denominator is the sales requirements, not the bread puns', () => {
+    const displays = extractJdTerms(TOTAL_REWARDS_JD, {
+      company: 'Toast',
+      role: 'Field Sales Account Executive',
+      location: null,
+    }).map((t) => t.display);
+    for (const pun of ['Toasters', 'Tofu', 'Baked', 'Recipe', 'Washington Minimum']) {
+      assert.ok(!displays.includes(pun), `"${pun}" is a benefits pun, not a requirement`);
+    }
+    for (const real of ['Salesforce', 'Outreach']) {
+      assert.ok(displays.includes(real), `"${real}" is stated under "About You" and must be counted`);
+    }
+  });
+
+  test('each added heading closes a section on its own', () => {
+    for (const heading of [
+      'Total Rewards',
+      'Our Total Rewards Philosophy',
+      'Pay Transparency',
+      'Pay Transparency Disclosure',
+      "What we'll offer",
+      'Prior employment verification check',
+      'Disclosures:',
+    ]) {
+      const [, second] = segmentJd(`Requirements\n- Python and Docker\n${heading}\nWe pay well and verify offers.\n`);
+      assert.equal(second?.kind, 'noise', `"${heading}" opens a footer, not a requirements block`);
+    }
+  });
+
+  test('the words that are somebody’s actual job are not footer', () => {
+    // Measured rejections, pinned so they are not re-proposed. Bare `disclosures?` fires on 202
+    // heading lines board-wide and four of its ten spellings are real work; only the anchored bare
+    // banner is safe. These are the lines that must keep scoring.
+    for (const real of [
+      'Prepare tax related disclosures for financial statements',
+      'Manage subprocessor tracking and disclosures',
+      'Experience negotiating non-disclosure agreements',
+    ]) {
+      const [first] = segmentJd(`Requirements\n${real}\n- Experience with Python\n`);
+      assert.equal(first?.kind, 'required', `"${real}" is a requirement line, not a disclosures banner`);
+      assert.match(first.text, /Python/, 'and it must not have closed the block either');
+    }
+  });
+
+  test('a LinkedIn tracking tag still closes nothing', () => {
+    // The other measured rejection. `#LI-Hybrid` and its 328 cousins are the biggest unrecognised
+    // heading on the board (3,705 lines, and headingCore strips the `#` so they arrive looking like
+    // headings), but only 635 sit in the last 5% of their posting while 1,867 sit before the 80%
+    // mark. A rule that closed the section at the tag would zero real content on a third of them.
+    // Harmless where they are, so this pins that they stay harmless rather than becoming noise.
+    const sections = segmentJd('Requirements\n- Experience with Python\n#LI-Hybrid\n- Experience with Kubernetes\n');
+    const keys = sections.flatMap((s) => (s.kind === 'required' ? [s.text] : []));
+    assert.equal(keys.length, 1, 'the tag must not split the requirements into two blocks');
+    assert.match(keys[0], /Kubernetes/, 'the requirement below the tag is still required');
+  });
+});
