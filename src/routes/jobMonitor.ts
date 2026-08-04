@@ -636,10 +636,15 @@ export const RANKING_POOL = 150;
  * distribution trades a cost problem for a silent ranking-quality one. 6k is a 3.3x cut that keeps
  * a wide margin over any posting inspected by hand.
  *
- * This cap is a stopgap and should stay one. Reading a prefix of raw employer HTML-derived text is
- * a crude way to find requirements at any length. `description_digest` is the real fix: it is built
- * once at poll time, and once every row has one this cap only governs the fallback path for rows
- * polled before the column existed. Lower this further only against a measurement, not a guess.
+ * This cap is a stopgap and should stay one. Reading a PREFIX of raw employer HTML-derived text is
+ * a crude way to find requirements at any length: it reads too much, and it reads the wrong part,
+ * and those two pull against each other so no value of this constant is right.
+ *
+ * The real fix is a `description_digest` column built once at poll time, which is a separate change
+ * held back because it needs a migration the suspended database cannot accept yet. When it lands,
+ * this cap stops governing the normal path and only covers rows polled before the column existed.
+ * Until then this is the only bound on the scoring read, so lower it further only against a
+ * measurement, never a guess.
  */
 export const SCORING_CHARS = 6_000;
 
