@@ -67,8 +67,25 @@ test('/v1/meta publishes the cacheable Litos client contract', async () => {
 test('/health identifies the deployable service and revision contract', async () => {
   const app = await getApp();
   const res = await app.inject({ method: 'GET', url: '/health' });
-  assert.equal(res.statusCode, 200);
+  /* 200 or 503, and the identity contract holds on BOTH. /health probes the database now, so it
+     answers 503 when it cannot reach one, which a unit test cannot. That is the point rather than an
+     inconvenience: DEPLOY.md reads `revision` from this response to confirm what shipped, and the
+     moment you most need that is an incident, when the status will be 503. Asserting 200 here would
+     pin the opposite of the property the runbook depends on. */
+  assert.ok([200, 503].includes(res.statusCode), `unexpected status ${res.statusCode}`);
   const body = res.json();
+
+  // The database contract, which is why this endpoint stopped being a liveness ping. Before
+  // 2026-08-04 it touched nothing and answered 200 through a 75-minute outage in which every other
+  // route returned 500.
+  assert.ok(['ok', 'unreachable'].includes(body.database), `unexpected database ${body.database}`);
+  assert.equal(res.statusCode, body.database === 'ok' ? 200 : 503, 'status code must follow the probe');
+  assert.equal(body.status, body.database === 'ok' ? 'ok' : 'degraded');
+  if (body.database !== 'ok') {
+    // Coarse on purpose: /health is public, so the driver's message never reaches it.
+    assert.ok(['timeout', 'quota', 'refused', 'error'].includes(body.database_reason));
+  }
+
   assert.equal(body.service, 'litos-api');
   assert.equal(body.product, 'Litos');
   assert.equal(body.api_version, '1');
@@ -300,7 +317,11 @@ test('front-door limiter isolates clients and emits standard retry metadata', as
     assert.equal(blocked.json().code, 'rate_limited');
 
     assert.equal((await request('203.0.113.11')).statusCode, 404);
-    assert.equal((await limitedApp.inject({ method: 'GET', url: '/health' })).statusCode, 200);
+    /* /health is EXEMPT from the limiter, which is what this asserts. Deliberately not `=== 200`:
+       /health probes the database, and with no DATABASE_URL configured in a unit test it correctly
+       answers 503. Pinning 200 here would be pinning "the test environment has a database", which
+       is not what this test is about, and it would fail for a reason unrelated to rate limiting. */
+    assert.notEqual((await limitedApp.inject({ method: 'GET', url: '/health' })).statusCode, 429);
   } finally {
     await limitedApp.close();
   }

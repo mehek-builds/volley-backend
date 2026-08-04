@@ -116,8 +116,12 @@ Stated plainly, because a partial guard that reads as total is worse than none.
 - **No alert on actual consumption.** These guards bound what the code *can* read per request. They
   cannot see traffic volume, a crawler, or a runaway cron. Nothing in this repo watches the Neon
   usage figure itself, and there is no Neon API key available to it.
-- **`/health` still reports 200 with a dead database**, so it remains a misleading uptime signal. A
-  probe that touches Postgres would have named this incident in seconds.
+- ~~**`/health` still reports 200 with a dead database.**~~ FIXED. It now runs `select 1` and answers
+  503 with `database_reason` of `quota`, `refused`, `timeout` or `error`. The probe never throws and
+  always times out, so a degraded database cannot take the endpoint down with it. The timeout is
+  5,000 ms, not the 2,000 ms first written: production measurement showed a Neon compute waking from
+  its 5-minute autosuspend answers in 1,647 ms, and the tighter bound would have reported a healthy
+  database as unreachable whenever it happened to be asleep. See src/lib/healthProbe.ts.
 - **The daily poll and purge are unbudgeted.** They write and delete far more than the board serves,
   and no test prices them.
 

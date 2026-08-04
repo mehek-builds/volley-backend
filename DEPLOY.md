@@ -218,8 +218,14 @@ Do **not** set `PORT`/`HOST` (serverless ignores them).
 Click Deploy. Then verify:
 
 ```bash
-curl https://<your-app>.vercel.app/health      # -> {"status":"ok",...}
+curl -i https://<your-app>.vercel.app/health   # -> 200 {"status":"ok","database":"ok",...}
 ```
+
+`/health` queries the database (`select 1`) and answers **503 with `"status":"degraded"`** when it
+cannot reach it. That is deliberate: before 2026-08-04 this endpoint touched nothing, so it answered
+200 through a 75-minute outage in which every other route returned 500. `database_reason` narrows it
+immediately: `quota` means the Neon transfer allowance is spent, `refused` a dead or unreachable
+compute, `timeout` a saturated one. See docs/incidents/2026-08-04-neon-transfer-quota.md.
 
 ## Shipping a change
 
@@ -238,7 +244,9 @@ vercel git connect          # from a checkout whose origin is the GitHub repo
 ```
 
 **Always confirm what actually shipped.** `/health` returns the deployed commit, so compare it to
-the merge commit rather than assuming the deploy landed:
+the merge commit rather than assuming the deploy landed. Every identity field is present on a 503 as
+well as a 200, so this still works while the database is down, which is exactly when you are most
+likely to be deploying:
 
 ```bash
 curl -s https://student-outreach-backend.vercel.app/health | jq -r '.revision, .build'
