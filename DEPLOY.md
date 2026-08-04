@@ -70,7 +70,49 @@ Set these for Production (and Preview if you want):
 | `LEMONSQUEEZY_CHECKOUT_URL` | reusable live product URL containing `/checkout/buy/` |
 | `LEMONSQUEEZY_VARIANT_ID` | numeric ID of the $49.99 monthly Pro variant |
 | `LEMONSQUEEZY_WEBHOOK_SECRET` | signing secret configured on the Lemon Squeezy webhook |
+| `UPSTASH_REDIS_REST_URL` | optional, turns on the ranking cache's shared tier; see below |
+| `UPSTASH_REDIS_REST_TOKEN` | optional, pairs with the URL above |
 | `NODE_ENV` | `production` |
+
+### The ranking cache's shared tier is OPTIONAL and ships OFF
+
+`UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` are not set by default, and until
+both are, `src/lib/rankingCache.ts` runs its L1 tier only: a process `Map` with a 60 second
+TTL, on serverless. That map is cold far more often than warm, and every cold miss re-reads
+scoring text for the whole ranking pool out of Neon.
+
+That is what exhausted Neon's 5 GB/month transfer allowance on 2026-08-04 and suspended the
+database, so **this is the largest single saving available and it is inert until configured.**
+Provision it through the Vercel marketplace rather than copying a token by hand. This
+creates the database, connects it, and injects the credentials in one step:
+
+```bash
+vercel integration add upstash/upstash-kv --plan free -m primaryRegion=iad1 \
+  -m autoUpgrade=false -m eviction=true -e production \
+  -n litos-ranking-cache --no-env-pull
+```
+
+`autoUpgrade=false` is deliberate and must not be dropped: it defaults to TRUE, which moves
+the resource onto Pay As You Go ($0.2 per 100K commands) on hitting free limits.
+`--no-env-pull` is also deliberate: env pull writes a local env file and can clobber the
+`.env.local` holding the Neon production URL. `iad1` matches where the functions execute and
+where Neon lives. `-e production` only, so preview deployments do not share cached rankings
+with production while running different ranking code.
+
+The integration injects `KV_REST_API_URL` and `KV_REST_API_TOKEN`, NOT the
+`UPSTASH_REDIS_REST_*` names. The code accepts either pair, so nothing needs renaming.
+
+**Verify it actually took effect**, because env var changes on Vercel do not reach a
+running deployment until it is rebuilt, so the dashboard can show them set while the
+function still runs L1 only:
+
+```bash
+curl -s https://student-outreach-backend.vercel.app/health
+```
+
+`"ranking_cache": "shared"` means L1 plus Upstash. `"local"` means L1 only and the
+variables have not reached the running build. The field reports names, never values. Nothing else changes: unconfigured, the code
+path is a deliberate no-op, which is why it was safe to ship ahead of the database existing.
 
 The reviewed source list lives in `src/lib/jobSources.ts`; use `JOB_MONITOR_SOURCES_JSON` only for
 temporary additions that cannot wait for a code review. In GitHub, add `INTERNAL_CRON_SECRET` as an
@@ -106,6 +148,41 @@ The migration adds nullable `password_hash` and non-null `session_version`
 columns. It is safe to run more than once and old application versions ignore
 both columns, so the required order is migration first, API deploy second, web
 deploy last. Roll back application code without rolling back these columns.
+
+### `description_digest` — MIGRATION MUST RUN BEFORE THE NEXT API DEPLOY
+
+**Pass `DATABASE_URL` explicitly. Do not run this bare.** Like every script in
+`scripts/`, this one does `import 'dotenv/config'`, which loads `.env` — and the
+`DATABASE_URL` in `.env` is a LOCAL Postgres. Run bare, it connects to localhost,
+reports `ready: column present`, and production is untouched. Production is the
+Neon URL in `.env.local`:
+
+```bash
+DATABASE_URL="<the DATABASE_URL from .env.local>" npm run db:description-digest
+```
+
+The script prints the database and host it connected to before it changes
+anything, which is the check that catches this. Applied to production on
+2026-08-04: `connected to neondb`, then `0 of 22134 active postings have a
+digest`, which is the correct output (see the no-backfill note below).
+
+**This one is not optional and the order is not symmetrical with the case above.**
+`GET /jobs` selects `monitored_jobs.description_digest` directly, so deploying the
+API against a database that does not have the column makes every ranked board
+request fail. An old application version ignores the column safely; a new one
+cannot tolerate its absence.
+
+So: **migration first, API deploy second.** The script uses
+`ADD COLUMN IF NOT EXISTS`, so it is safe to run repeatedly and safe to run
+against a database that already has it.
+
+The column is nullable and **deliberately not backfilled**. Backfilling would
+read every description out of Neon to compute a value the daily poll rewrites
+for free, spending the exact transfer allowance the column exists to save. The
+read path coalesces to the old capped prefix, so the board is correct from the
+moment the column lands, and it fills itself within one poll cycle. Expect
+`0 of N active postings have a digest` immediately after the migration; that is
+the correct output, not a failure.
 
 Password authentication uses these contracts:
 
@@ -164,9 +241,28 @@ vercel git connect          # from a checkout whose origin is the GitHub repo
 the merge commit rather than assuming the deploy landed:
 
 ```bash
-curl -s https://student-outreach-backend.vercel.app/health | jq -r .revision
+curl -s https://student-outreach-backend.vercel.app/health | jq -r '.revision, .build'
 git rev-parse origin/main
 ```
+
+`revision` is the git SHA and is the one to read: it compares to `git rev-parse origin/main` without
+leaving the terminal. **It is sometimes `null` on a hand deploy**, and that is not a failed deploy.
+It caught us on 2026-08-04: the deployment was live, correct and serving the production alias while
+`/health` said `null`, and confirming what shipped took three Vercel API calls. The condition is not
+fully pinned down — of two `vercel deploy --prod` deployments that afternoon, the one whose Vercel
+metadata carried `gitCommitSha` served `null` and the one carrying `githubCommitSha` was never
+polled before the alias moved on.
+
+`build` is what to use then. It is the deployment id (or the deployment hostname on older builds)
+and is always present, so an empty `revision` never leaves you with nothing:
+
+```bash
+BUILD=$(curl -s https://student-outreach-backend.vercel.app/health | jq -r .build)
+vercel inspect "$BUILD"        # resolves to the deployment, and through it to the commit
+```
+
+Both being `null` means the API is not running on Vercel at all, which is the one case that really
+is a problem.
 
 To deploy by hand anyway (a rollback, or a hotfix that must not wait for review), use a throwaway
 clone so your own working tree, which is often on another branch with uncommitted work, is left

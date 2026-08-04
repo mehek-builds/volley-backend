@@ -666,6 +666,24 @@ export const monitored_jobs = pgTable('monitored_jobs', {
   department: text('department'),
   employment_type: text('employment_type'),
   description: text('description').notNull(),
+  /* The ~2 KB slice of `description` that ranking actually scores, built at poll time by
+   * lib/descriptionDigest.ts.
+   *
+   * Stored rather than derived per request, like sponsorship_status and job_country above, but for
+   * a different reason than either of those. Those two exist because a filter has to be a SQL
+   * predicate. This one exists because of BYTES: ranking reads scoring text for every pooled row on
+   * every cache miss, and reading a multi-kilobyte prefix of this column was the largest single
+   * reader of transfer out of Neon in the backend. It exhausted the free tier's monthly allowance
+   * and suspended the compute. Computing the digest at poll time moves that cost to the write side,
+   * which is ingress, which is not billed.
+   *
+   * NULLABLE ON PURPOSE, and the null is not a defect. Rows polled before this column existed have
+   * no digest, and there is deliberately no backfill: a backfill would have to read all 22k
+   * descriptions out of Neon, spending exactly the transfer this column exists to save, to populate
+   * a value the daily poll rewrites for free anyway. The read path coalesces to the old capped
+   * prefix, so the board is correct throughout, and the column fills itself within one poll cycle.
+   */
+  description_digest: text('description_digest'),
   apply_url: text('apply_url').notNull(),
   posting_url: text('posting_url').notNull(),
   remote: boolean('remote').default(false).notNull(),

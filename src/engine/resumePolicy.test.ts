@@ -505,3 +505,45 @@ test('a near-miss organisation no longer inherits another employer\'s entry', ()
   assert.equal(out.experience[0].type, 'job');
   assert.equal(out.experience[0].location, '');
 });
+
+/* Two defects found reviewing the shipped matcher against its own edge cases. Both were mine and
+   both failed silently, which is the only reason they survived three rounds of prod verification. */
+describe('orgScore: a name made only of generic words', () => {
+  test('an organisation still matches itself when every word is a noise word', () => {
+    // "The Company", "Holdings", "The Group" reduced to an empty token set and scored 0.00 against
+    // themselves - never matching their own bank row, so bullets, type and city all vanished.
+    for (const name of ['The Company', 'Holdings', 'The Group', 'Company']) {
+      assert.ok(orgScore(name, name) >= SAME_EMPLOYER_SCORE, `${name} must match itself`);
+    }
+  });
+
+  test('the fallback does not make two different generic names equal', () => {
+    assert.ok(orgScore('The Company', 'The Group') < SAME_EMPLOYER_SCORE);
+    assert.ok(orgScore('Holdings', 'Company') < SAME_EMPLOYER_SCORE);
+  });
+
+  test('noise stripping still applies whenever a real word survives it', () => {
+    assert.ok(orgScore('Nike Inc.', 'Nike') >= SAME_EMPLOYER_SCORE);
+    assert.ok(orgScore('Bain & Company', 'Bain') >= SAME_EMPLOYER_SCORE);
+  });
+});
+
+describe('educationGpaLine: scales that are not out of four', () => {
+  test('a percentage-style denominator survives', () => {
+    // "85/100" printed as "GPA: 85", which reads as an 85 on a 4.0-style scale: a materially
+    // better claim than the resume made. The /100 and percentage systems are standard in India
+    // and the UAE.
+    assert.equal(educationGpaLine({ gpa: '85', gpa_scale: '100' }), '85/100');
+    assert.equal(educationGpaLine({ gpa: '75.5', gpa_scale: '100' }), '75.5/100');
+  });
+
+  test('the ordinary scales are unchanged', () => {
+    assert.equal(educationGpaLine({ gpa: '3.89', gpa_scale: '4.0' }), '3.89/4.0');
+    assert.equal(educationGpaLine({ gpa: '9.2', gpa_scale: '10' }), '9.2/10');
+  });
+
+  test('a year is still not a grade', () => {
+    assert.equal(educationGpaLine({ gpa: '2024' }), '');
+    assert.equal(educationGpaLine({ gpa: '3.8', gpa_scale: '2024' }), '3.8');
+  });
+});

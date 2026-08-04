@@ -35,6 +35,7 @@ import { coverLetterRoutes } from './routes/coverLetter';
 import { emailConnectionRoutes } from './routes/emailConnections';
 import { API_VERSION, PRODUCT_NAME, PRODUCT_LINKS } from './lib/product';
 import { createRateLimitHook, defaultRateLimitConfig, type RateLimitConfig } from './middleware/rateLimit';
+import { sharedRankingConfigured } from './lib/rankingCache';
 import { dashboardBootstrapRoutes } from './routes/dashboardBootstrap';
 
 export interface BuildAppOptions {
@@ -167,6 +168,60 @@ export async function buildApp(options: BuildAppOptions = {}) {
       product: PRODUCT_NAME,
       api_version: API_VERSION,
       revision: process.env.VERCEL_GIT_COMMIT_SHA || process.env.GIT_SHA || null,
+      // WHAT ACTUALLY SHIPPED, when `revision` cannot say.
+      //
+      // DEPLOY.md tells you to confirm a deploy by comparing `revision` to the merge commit, and
+      // on 2026-08-04 that check returned null for a deployment that was READY, correct, and
+      // holding the production alias. Confirming what was actually live took three Vercel API
+      // calls. A verification step that returns null instead of failing loudly is the shape of
+      // check that gets trusted right up until it matters.
+      //
+      // WHAT WAS ACTUALLY OBSERVED, stated narrowly because the first version of this comment
+      // overstated it as "CLI deploys do not set VERCEL_GIT_COMMIT_SHA" and that is not what the
+      // evidence shows. Two deployments that afternoon, BOTH `source: cli`:
+      //
+      //   dpl_6iZqda…  ready 09:39:57  meta carried `githubCommitSha`
+      //   dpl_6f7kQzx  ready 09:44:37  meta carried `gitCommitSha`   <- this one served null
+      //
+      // The alias moved to the second before the first was ever polled, so the null belongs to the
+      // deployment whose git metadata arrived WITHOUT the GitHub link, and the first one's
+      // behaviour was never measured. Whether the deciding factor is the metadata shape, the
+      // absence of a linked repo at deploy time, or something else is NOT established here.
+      //
+      // Which is the argument for this field rather than against it: the condition that empties
+      // `revision` is not understood well enough to predict, so the runbook needs an identifier
+      // that does not depend on understanding it.
+      //
+      // VERCEL_DEPLOYMENT_ID is the primary because it is the id every Vercel surface keys on, so
+      // it resolves straight to a deployment and through it to a commit. VERCEL_URL is the fallback
+      // because it is the older variable and is set on every deployment that has ever existed; it
+      // carries the same identity in a hostname. Both are absent locally, where `null` is correct.
+      //
+      // NOT A REPLACEMENT FOR `revision`, which stays the first thing to read: a SHA is comparable
+      // to `git rev-parse origin/main` without leaving the terminal, and a build id is not. This is
+      // what makes the runbook work when the SHA is missing, not a reason to stop publishing it.
+      build: process.env.VERCEL_DEPLOYMENT_ID || process.env.VERCEL_URL || null,
+      /* WHICH RANKING-CACHE TIERS ARE ACTUALLY RUNNING.
+       *
+       * 'shared' means L1 plus the Upstash L2; 'local' means L1 only, a process Map with a 60
+       * second TTL that dies with the instance.
+       *
+       * This exists because the difference is INVISIBLE FROM OUTSIDE and expensive. L2 is enabled
+       * purely by two environment variables, and with them unset rankingCache.ts is a deliberate
+       * no-op: correct, silent, and re-reading the whole ranking pool out of Neon on every cold
+       * start. That read is what exhausted Neon's monthly transfer allowance on 2026-08-04 and
+       * suspended the database, so "did the env vars actually take effect" is a question worth
+       * being able to answer with one curl rather than by inference.
+       *
+       * It is also the question you have to re-ask after every deploy, because env var changes on
+       * Vercel do not reach a running deployment until it is rebuilt. A config change that looks
+       * applied in the dashboard and is not live in the function is exactly the gap this closes.
+       *
+       * NAMES ONLY, NEVER VALUES. sharedRankingConfigured() returns a boolean; the URL and token
+       * never appear here. A health endpoint is unauthenticated, and the point is to publish
+       * whether a capability is on, not what its credentials are.
+       */
+      ranking_cache: sharedRankingConfigured() ? 'shared' : 'local',
       ts: new Date().toISOString(),
     });
   });

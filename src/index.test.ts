@@ -73,6 +73,125 @@ test('/health identifies the deployable service and revision contract', async ()
   assert.equal(body.product, 'Litos');
   assert.equal(body.api_version, '1');
   assert.ok(Object.hasOwn(body, 'revision'));
+  // `build` is what makes the DEPLOY.md check work on a CLI deploy, where VERCEL_GIT_COMMIT_SHA is
+  // not set and `revision` is null. The key must always be present for the runbook to rely on it.
+  assert.ok(Object.hasOwn(body, 'build'));
+});
+
+/* The whole reason /health carries this field: L2 is enabled purely by two environment variables,
+   and with them unset rankingCache.ts is a correct, silent no-op that re-reads the ranking pool out
+   of Neon on every cold start. That read exhausted Neon's transfer allowance on 2026-08-04. Whether
+   the vars actually took effect has to be answerable from outside the process. */
+test('/health reports which ranking-cache tiers are running', async () => {
+  const saved = {
+    url: process.env.UPSTASH_REDIS_REST_URL,
+    token: process.env.UPSTASH_REDIS_REST_TOKEN,
+  };
+  try {
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    {
+      const { buildApp } = await import('./index');
+      const app = await buildApp();
+      const body = (await app.inject({ method: 'GET', url: '/health' })).json();
+      assert.equal(body.ranking_cache, 'local', 'unset vars means L1 only, and it must say so');
+      await app.close();
+    }
+
+    process.env.UPSTASH_REDIS_REST_URL = 'https://example.upstash.io';
+    process.env.UPSTASH_REDIS_REST_TOKEN = 'test-token-value';
+    {
+      const { buildApp } = await import('./index');
+      const app = await buildApp();
+      const res = await app.inject({ method: 'GET', url: '/health' });
+      const body = res.json();
+      assert.equal(body.ranking_cache, 'shared', 'both vars set means the L2 tier is live');
+
+      /* /health is UNAUTHENTICATED. It publishes whether a capability is on, never its
+         credentials, so the token must not reach the payload by any route. */
+      const raw = res.body;
+      assert.ok(!raw.includes('test-token-value'), 'the Upstash token must never appear in /health');
+      assert.ok(!raw.includes('example.upstash.io'), 'nor the Upstash URL');
+    }
+
+    /* One var alone is not a working configuration, and reporting 'shared' for it would send
+       someone hunting for a Redis problem that is really a missing variable. */
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    {
+      const { buildApp } = await import('./index');
+      const app = await buildApp();
+      const body = (await app.inject({ method: 'GET', url: '/health' })).json();
+      assert.equal(body.ranking_cache, 'local', 'a half-configured pair is not shared');
+      await app.close();
+    }
+  } finally {
+    if (saved.url === undefined) delete process.env.UPSTASH_REDIS_REST_URL;
+    else process.env.UPSTASH_REDIS_REST_URL = saved.url;
+    if (saved.token === undefined) delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    else process.env.UPSTASH_REDIS_REST_TOKEN = saved.token;
+  }
+});
+
+test('/health identifies the build even when no git SHA is exposed', async () => {
+  // The exact production shape this exists for: a `vercel deploy --prod` sets VERCEL_DEPLOYMENT_ID
+  // but not VERCEL_GIT_COMMIT_SHA, and on 2026-08-04 that made /health report `revision: null` for
+  // a deployment that was live and correct. Confirming what shipped took three Vercel API calls.
+  const saved = {
+    sha: process.env.VERCEL_GIT_COMMIT_SHA,
+    gitSha: process.env.GIT_SHA,
+    id: process.env.VERCEL_DEPLOYMENT_ID,
+    url: process.env.VERCEL_URL,
+  };
+  delete process.env.VERCEL_GIT_COMMIT_SHA;
+  delete process.env.GIT_SHA;
+  // VERCEL_URL is deleted too, or this passes for the wrong reason. It is unset on a dev box and
+  // in CI, so leaving it alone made `build` resolve to the same value through EITHER operand, and
+  // reversing the order in index.ts kept the whole suite green. The order is the one non-obvious
+  // decision in that line, so it is the one thing that has to be pinned.
+  delete process.env.VERCEL_URL;
+  process.env.VERCEL_DEPLOYMENT_ID = 'dpl_test123';
+  process.env.VERCEL_URL = 'litos-should-not-win-team.vercel.app';
+  try {
+    const { buildApp } = await import('./index');
+    const app = await buildApp();
+    const body = (await app.inject({ method: 'GET', url: '/health' })).json();
+    assert.equal(body.revision, null, 'this is the case where the SHA is genuinely unavailable');
+    assert.equal(
+      body.build,
+      'dpl_test123',
+      'the deployment id wins over VERCEL_URL: reversing the operands must fail here',
+    );
+    await app.close();
+  } finally {
+    for (const [k, v] of [
+      ['VERCEL_GIT_COMMIT_SHA', saved.sha],
+      ['GIT_SHA', saved.gitSha],
+      ['VERCEL_DEPLOYMENT_ID', saved.id],
+      ['VERCEL_URL', saved.url],
+    ] as Array<[string, string | undefined]>) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});
+
+test('the deployment URL carries the identity when only the older variable is set', async () => {
+  // VERCEL_URL predates VERCEL_DEPLOYMENT_ID and is set on every deployment, so it is the fallback
+  // rather than an equal: it holds the same identity in a hostname.
+  const saved = { id: process.env.VERCEL_DEPLOYMENT_ID, url: process.env.VERCEL_URL };
+  delete process.env.VERCEL_DEPLOYMENT_ID;
+  process.env.VERCEL_URL = 'litos-abc123-team.vercel.app';
+  try {
+    const { buildApp } = await import('./index');
+    const app = await buildApp();
+    assert.equal((await app.inject({ method: 'GET', url: '/health' })).json().build, 'litos-abc123-team.vercel.app');
+    await app.close();
+  } finally {
+    if (saved.id === undefined) delete process.env.VERCEL_DEPLOYMENT_ID;
+    else process.env.VERCEL_DEPLOYMENT_ID = saved.id;
+    if (saved.url === undefined) delete process.env.VERCEL_URL;
+    else process.env.VERCEL_URL = saved.url;
+  }
 });
 
 test('front-door limiter isolates clients and emits standard retry metadata', async () => {
@@ -81,6 +200,7 @@ test('front-door limiter isolates clients and emits standard retry metadata', as
   const limitedApp = await buildApp({
     rateLimit: {
       general: policy,
+      board: { name: 'board', limit: 2, windowMs: 60_000 },
       authStart: { name: 'auth_start', limit: 1, windowMs: 60_000 },
       authVerify: { name: 'auth_verify', limit: 1, windowMs: 60_000 },
       download: { name: 'resume_download', limit: 1, windowMs: 60_000 },

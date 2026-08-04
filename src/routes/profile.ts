@@ -12,6 +12,7 @@ import {
   splitSpokenLanguages,
   ParsedProfile,
 } from '../llm/parse';
+import { courseworkFromParsed } from '../engine/resumePolicy';
 import { extractPdfText } from '../lib/pdfText';
 import { MultipartFile } from '@fastify/multipart';
 import { z } from 'zod';
@@ -26,14 +27,13 @@ import {
   deleteUploadedResumeThenClear,
 } from '../lib/resumeAccess';
 import {
+  applyImpactAnswers,
   assessImpactBullet,
   buildRecentExperienceReview,
-  composeImpactBullet,
-  type ImpactComponent,
+  type ImpactAnswerSet,
   type RecentExperienceEntry,
   type RecentExperienceReview,
 } from '../engine/recentExperience';
-import { startsWithStrongVerb } from '../engine/resumeValidate';
 
 // R-052. Bounded on purpose: these are the only parsed fields a student may correct by hand, and
 // the ceilings stop a paste of an entire resume landing in the school field. Every value is trimmed
@@ -91,8 +91,27 @@ export const parsedProfilePatchSchema = z
        not on the education patch, not on the settings form. A mis-read course list could only be
        fixed by producing a new PDF, which is R-052's failure wearing a different field. Bounded
        like objective rather than like a title: it is a list of course names, and a parse that runs
-       past this length is a section-boundary error, not a busy semester. */
-    coursework: z.string().trim().max(600).optional(),
+       past this length is a section-boundary error, not a busy semester.
+
+       ACCEPTED AS ONE LINE, STORED AS A LIST (ISSUE-044). The review screen edits this as a single
+       comma separated input, so the wire shape is a string; every reader of parsed_json.coursework
+       expects `string[]` - llm/parse.ts emits one, engine/resumePolicy.ts educationFrom() gates on
+       Array.isArray, lib/submissionEducationGuard.ts compares entry by entry, and
+       engine/resumeValidate.ts courseworkIsUngrounded() needs the individual course titles to
+       ground the rendered line against. Writing the raw string through turned the array into a
+       string, educationFrom() then read undefined, and the generated resume printed an EMPTY
+       coursework line while the dashboard still displayed the text the student had typed. A 200,
+       no error, and the loss only visible in a PDF.
+
+       So the split happens HERE, at the boundary, rather than at any one reader: the transform is
+       the single place the wire shape becomes the stored shape. An array is accepted too, because
+       this schema is also what the screen sends BACK after the server has written parsed_json (see
+       the MAX_EDITABLE_LANGUAGES note above) and a client that round-trips the stored list must not
+       400 on our own data. */
+    coursework: z
+      .union([z.string().trim().max(600), z.array(editableListItem).max(40)])
+      .transform(courseworkList)
+      .optional(),
     objective: z.string().trim().max(1200).optional(),
     skills: z.array(editableListItem).max(100).optional(),
     /* Spoken languages the resume printed. Editable here for the same reason skills is: the parser
@@ -186,6 +205,13 @@ export function normalizeEditableList(values: string[]): string[] {
   return normalized;
 }
 
+/* The stored shape of `parsed_json.coursework`, from either wire shape. Defined in the engine
+ * beside its reader so the write path and the read path cannot drift apart again (ISSUE-044);
+ * re-exported here because the patch schema is the boundary that applies it. */
+export function courseworkList(value: unknown): string[] {
+  return courseworkFromParsed(value) ?? [];
+}
+
 /**
  * The value the DECLARED `profiles.skills` column takes for a given patch.
  *
@@ -215,7 +241,11 @@ export function applyParsedProfilePatch(
   patch: ParsedProfilePatch,
 ): Record<string, unknown> {
   const next: Record<string, unknown> = { ...current };
-  for (const key of ['full_name', 'phone', 'school', 'degree', 'grad_date', 'objective', 'coursework'] as const) {
+  /* coursework is NOT in this loop. It is the one field on this schema whose wire shape is not its
+   * stored shape - the transform above has already turned the screen's one line into a list - and
+   * copying it through a loop named for plain strings is how it got stored as a string (ISSUE-044).
+   * It is assigned below, with the other list-shaped fields, where it belongs. */
+  for (const key of ['full_name', 'phone', 'school', 'degree', 'grad_date', 'objective'] as const) {
     if (patch[key] !== undefined) next[key] = patch[key];
   }
   /* Spoken languages are pulled back out of `skills` HERE as well as in the parser (ISSUE-020).
@@ -255,6 +285,7 @@ export function applyParsedProfilePatch(
      * survives is always the student's own statement and never the reclassifier's guess. */
     next.languages = mergeLanguages(next.languages, sorted.languages).slice(0, MAX_EDITABLE_LANGUAGES);
   }
+  if (patch.coursework !== undefined) next.coursework = patch.coursework;
   if (patch.target_roles !== undefined) next.target_roles = normalizeEditableList(patch.target_roles);
 
   if (patch.grad_date !== undefined) {
@@ -982,20 +1013,9 @@ export async function profileRoutes(fastify: FastifyInstance) {
 
         const existing = (Array.isArray(selected.bullet_variants) ? selected.bullet_variants : [])
           .filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
-        const composed = body.data.answers
-          .map((answers, index) => composeImpactBullet(index === 0 ? existing[0] ?? '' : '', answers as Partial<Record<ImpactComponent, string>>))
-          .filter((bullet) => bullet.length > 0);
-        for (const bullet of composed) {
-          if (!startsWithStrongVerb(bullet)) return { error: 'verb' as const };
-        }
-        const normalized = new Set(existing.map((bullet) => bullet.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()));
-        const additions = composed.filter((bullet) => {
-          const key = bullet.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-          if (!key || normalized.has(key)) return false;
-          normalized.add(key);
-          return true;
-        });
-        const bullets = [...existing, ...additions];
+        const applied = applyImpactAnswers(existing, body.data.answers as ImpactAnswerSet[]);
+        if ('error' in applied) return { error: applied.error };
+        const { additions, bullets } = applied;
         if (additions.length > 0) {
           await tx.update(experience_bank).set({ bullet_variants: bullets }).where(eq(experience_bank.id, selected.id));
         }
@@ -1021,6 +1041,20 @@ export async function profileRoutes(fastify: FastifyInstance) {
       if ('error' in result) {
         if (result.error === 'profile') return reply.status(404).send({ error: 'Profile not found - upload a resume first' });
         if (result.error === 'entry') return reply.status(404).send({ error: 'Experience does not belong to this upload' });
+        /* Two different refusals, because they are two different problems for the student to fix.
+           'unreadable' means the answer folded down to nothing this pipeline can read as a bullet:
+           the resume is built against an ASCII verb whitelist, so an answer with no Latin letters
+           has no opener to judge at all. Telling that student to pick a stronger verb sends them
+           to edit a word that is not the reason.
+
+           The message names BOTH exits, because this refusal also blocks "Continue with what you
+           found." A student who cannot rewrite the answer is otherwise held on the screen with no
+           stated way off it, and clearing the field is the way off it. */
+        if (result.error === 'unreadable') {
+          return reply.status(400).send({
+            error: 'Write this answer in English so it can go on your resume, or clear it to continue',
+          });
+        }
         return reply.status(400).send({ error: 'Each new bullet must start with a strong action verb' });
       }
       return reply.status(200).send(reviewPayload(result.entries, result.review));

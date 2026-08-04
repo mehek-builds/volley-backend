@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert';
-import { pickDiversePool, rankByFit, RANKING_POOL, SCORING_CHARS, type RankableJob, scatterRanked } from './jobMonitor';
+import { pickDiversePool, PER_COMPANY_CAP, rankByFit, RANKING_POOL, SCORING_CHARS, type RankableJob, scatterRanked } from './jobMonitor';
 import { normalizeTargeting } from '../lib/jobPreferences';
 
 /* A posting with enough real requirements for jdMatch to agree to score it. The requirements block
@@ -249,6 +249,45 @@ describe('the ranking budget the comment claims', () => {
     );
     assert.ok(buried.length < SCORING_CHARS, 'a realistic posting fits inside the cap');
     assert.notStrictEqual(rankByFit([job({ scored_description: buried })], RESUME)[0]!.score, null);
+  });
+
+  /* The fixture above is a few hundred characters, so it kept passing at every value SCORING_CHARS
+     has ever held and proved nothing about the cap. When the cap was cut from 20k to 6k for the
+     Neon transfer bill, that made it the wrong test to be relying on. This one uses a preamble long
+     enough that the cut would actually show. */
+  test('requirements still survive the cap behind a long employer preamble', () => {
+    const preamble = 'We are a mission-driven team building the future of work. '.repeat(60);
+    assert.ok(preamble.length > 3_000, `preamble was only ${preamble.length} chars, too short to test`);
+
+    const late = [
+      'About us',
+      preamble,
+      'Requirements',
+      '- TypeScript and React and PostgreSQL',
+      '- Kubernetes, Terraform, Kafka, Go and gRPC',
+    ].join('\n');
+
+    /* The route applies the cap in SQL, so the scorer only ever sees the prefix. Slicing here is
+       what the query does, and is the only way this test can observe the cap at all. */
+    const capped = late.slice(0, SCORING_CHARS);
+    assert.ok(capped.includes('Kubernetes'), 'the cap must not cut off the requirements section');
+    assert.notStrictEqual(rankByFit([job({ scored_description: capped })], RESUME)[0]!.score, null);
+  });
+});
+
+/* RANKING_POOL and PER_COMPANY_CAP are two halves of one decision and nothing tied them together.
+   The pool was halved to 150 on 2026-08-04 to cut bytes off Neon; had PER_COMPANY_CAP been left at
+   6, employer spread would have silently dropped from ~50 companies to ~25, which is most of the
+   way back to the all-Datadog board pickDiversePool exists to prevent. No existing test failed on
+   that, so this one does. */
+describe('the pool and the per-company cap stay in proportion', () => {
+  test('the cap still admits roughly fifty employers', () => {
+    const employers = RANKING_POOL / PER_COMPANY_CAP;
+    assert.ok(
+      employers >= 40 && employers <= 60,
+      `a pool of ${RANKING_POOL} at ${PER_COMPANY_CAP} per employer spreads across ` +
+        `${employers} companies. The invariant is ~50; change both constants together.`,
+    );
   });
 });
 

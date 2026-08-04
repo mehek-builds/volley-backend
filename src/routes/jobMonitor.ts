@@ -16,7 +16,9 @@ import { optionalAuth } from '../middleware/auth';
 import { scoreJdMatch } from '../engine/jdMatch';
 import { resumeSpecText } from '../engine/resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
-import { rankingCacheKey, readRanking, writeRanking } from '../lib/rankingCache';
+import { rankingCacheKey, readRankingShared, writeRankingShared } from '../lib/rankingCache';
+import { buildDescriptionDigest } from '../lib/descriptionDigest';
+import { applyBoardCacheHeaders } from '../lib/boardCacheHeaders';
 import { companyDomainFor } from '../lib/companyDomains';
 import { classificationCoverage, summarizeJobVariety } from '../lib/jobVariety';
 import {
@@ -61,6 +63,19 @@ const sourcesBodySchema = z.object({ sources: z.array(sourceSchema).min(1).max(1
 const monitorQuerySchema = z.object({
   drain_started_at: z.string().datetime({ offset: true }).optional(),
 });
+/**
+ * The two numbers that bound how many BYTES a single board request can pull out of Postgres.
+ *
+ * They are named, exported and pinned by src/lib/egressBudget.test.ts because on 2026-08-04 this
+ * project exhausted its Neon data transfer allowance and every database-backed route began
+ * answering 500. Nothing failed until the database refused connections: raising a cap like these
+ * is a one-character edit with no visible cost in review, in tests, or on any dashboard the repo
+ * owns. Change either one and that test recomputes the worst case and tells you what it costs.
+ */
+export const MAX_PAGE_SIZE = 100;
+/** Characters of description sent per row on the board list. NOT the full column. */
+export const BOARD_PREVIEW_CHARS = 600;
+
 const listQuerySchema = z.object({
   q: z.string().trim().max(200).optional(),
   /* Title-only, and deliberately not the same thing as `q`. `q` matches the title OR the whole
@@ -88,7 +103,7 @@ const listQuerySchema = z.object({
   employment_type: z
     .enum(['Full-time', 'Part-time', 'Internship', 'Apprenticeship', 'Contract'])
     .optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
+  limit: z.coerce.number().int().min(1).max(MAX_PAGE_SIZE).default(50),
   offset: z.coerce.number().int().min(0).max(100_000).default(0),
 });
 const jobParamsSchema = z.object({ id: z.string().uuid() });
@@ -597,8 +612,18 @@ export function pollingQueueStatus(remainingSources: number) {
  * RANKING_POOL matching postings, the next-newest is not considered for ranking however well it
  * fits. Filters are how a student narrows the pool, and the list has to SAY it stopped ranking
  * rather than quietly reporting no more results.
+ *
+ * 300 TO 150 (2026-08-04), AND THE BUDGET IS NO LONGER EVENT-LOOP TIME. Everything above was
+ * reasoned about CPU, which the cache made affordable. The binding constraint turned out to be a
+ * different one: this number also multiplies the phase 2 query, which reads capped description text
+ * for every pooled row, and that read exhausted Neon's 5 GB/month free-tier transfer and suspended
+ * the compute. Bytes off Neon, not milliseconds on the event loop, is what 150 is buying back.
+ *
+ * 150 still comfortably exceeds what anyone pages through: RANKED_PAGE_WINDOW is 24, so this is six
+ * full pages of ranked results. `pool_exhausted` already exists to tell the truth at the boundary,
+ * so the honest failure mode of a smaller pool was built long before it was needed.
  */
-export const RANKING_POOL = 300;
+export const RANKING_POOL = 150;
 
 /**
  * How much of a posting gets scored.
@@ -612,8 +637,28 @@ export const RANKING_POOL = 300;
  * 20k characters is well past where a posting states its requirements (the whole reason this
  * scores the full column instead of the 600-char preview) and it bounds both the transfer and the
  * scoring pass. POST /jd-match already caps its input at 60k for the same reason.
+ *
+ * 20k TO 6k (2026-08-04). "Well past" was the problem. The cap was set to a number that could not
+ * plausibly cut anything off, which meant it was not really bounding the transfer at all: at
+ * RANKING_POOL rows this query was the single largest reader of bytes out of Neon in the whole
+ * backend, and it exhausted the free tier's monthly transfer allowance and suspended the compute.
+ *
+ * WHY 6k AND NOT LOWER. Requirements sit after a preamble, and how long that preamble runs is the
+ * employer's choice, not something this codebase controls. 4k was considered and rejected: the
+ * database was suspended when this was written, so there was no way to measure where requirements
+ * actually begin across the real corpus, and picking a boundary that tight on an unmeasured
+ * distribution trades a cost problem for a silent ranking-quality one. 6k is a 3.3x cut that keeps
+ * a wide margin over any posting inspected by hand.
+ *
+ * This cap is a stopgap and should stay one. Reading a PREFIX of raw employer HTML-derived text is
+ * a crude way to find requirements at any length: it reads too much, and it reads the wrong part,
+ * and those two pull against each other so no value of this constant is right.
+ *
+ * `description_digest`, added in this change, is the real fix: built once at poll time, so this cap
+ * no longer governs the normal path and only covers the fallback for rows polled before the column
+ * existed. Lower it further only against a measurement, never a guess.
  */
-export const SCORING_CHARS = 20_000;
+export const SCORING_CHARS = 6_000;
 
 /**
  * How many candidate rows are read before the pool is chosen from them.
@@ -636,11 +681,17 @@ const CANDIDATE_SCAN = 3_000;
  * for the best-fitting job in a 7,115-posting board was being shown the best-fitting job at one
  * company. No unit test could have caught it; it only shows up against real data.
  *
- * 6 is RANKING_POOL / 50, so the pool spreads across roughly fifty employers before the cap starts
+ * 3 is RANKING_POOL / 50, so the pool spreads across roughly fifty employers before the cap starts
  * binding, while still letting a genuinely large employer contribute a handful of roles. A student
  * who wants more from one company can search for it, which is what the company filter is for.
+ *
+ * IT IS A RATIO, NOT A CONSTANT, which is why it moved from 6 to 3 when RANKING_POOL halved
+ * (2026-08-04). Fifty employers is the property worth holding; 6 was only ever the number that
+ * produced it at a pool of 300. Leaving it at 6 while halving the pool would have quietly cut the
+ * spread to twenty-five employers, which is most of the way back to the Datadog board this cap was
+ * written to prevent, and no test above would have failed.
  */
-const PER_COMPANY_CAP = 6;
+export const PER_COMPANY_CAP = 3;
 
 /* Two or three, Mehek's rule, and three is the generous end of it. Measured against a 24-row page:
    three of anything is noticeable, four reads as a takeover. RANKED_PAGE_WINDOW is the page size the
@@ -1093,7 +1144,7 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
          un-reached source's jobs flipped to is_active = false by the sweep
          above. That failure empties the public board rather than staling it.
          Chunked so a single board the size of Databricks still fits well
-         inside Postgres's 65,535-parameter cap: 20 columns x 200 rows. */
+         inside Postgres's 65,535-parameter cap: 21 columns x 200 rows. */
       for (let index = 0; index < fresh.length; index += UPSERT_CHUNK) {
         const chunk = fresh.slice(index, index + UPSERT_CHUNK).map(({ pay, ...job }) => ({
           source_id: source.id,
@@ -1115,6 +1166,11 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
              edit this sentence into and out of a live posting, and a policy that changed on their
              page while ours still said the old thing is the one error this feature cannot afford. */
           sponsorship_status: readPostingSponsorship(job.description),
+          /* Built here, at the same moment and for the same reason as sponsorship_status: the
+             description is in hand, and this is the only point where computing over it is free.
+             Recomputed on every poll rather than kept from the first sighting, because employers
+             edit requirements into and out of a live posting. */
+          description_digest: buildDescriptionDigest(job.description),
           /* The portal's own country field first, the location string only when it published none.
              Reading the string first is what made "IN - Bengaluru" Indiana and "Amsterdam, NH" New
              Hampshire. */
@@ -1136,6 +1192,7 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
             last_seen_at: sql`excluded.last_seen_at`,
             is_active: sql`excluded.is_active`,
             sponsorship_status: sql`excluded.sponsorship_status`,
+            description_digest: sql`excluded.description_digest`,
             job_country: sql`excluded.job_country`,
             /* Overwritten on every poll, not merged. An employer that REMOVES a published range
                (or edits one into a shape we decline to guess a period for) must see it disappear
@@ -1430,7 +1487,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       salary_max: monitored_jobs.salary_max,
       salary_currency: monitored_jobs.salary_currency,
       salary_interval: monitored_jobs.salary_interval,
-      description: sql<string>`left(${monitored_jobs.description}, 600)`,
+      description: sql<string>`left(${monitored_jobs.description}, ${BOARD_PREVIEW_CHARS})`,
       apply_url: monitored_jobs.apply_url,
       posting_url: monitored_jobs.posting_url,
       remote: monitored_jobs.remote,
@@ -1523,7 +1580,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
          back full of exactly the postings the filter exists to hide. */
       JSON.stringify([q ?? '', title ?? '', location ?? '', company ?? '', remote ?? '', sponsorOnly, jobTargeting]),
     );
-    let ranking = readRanking(cacheKey);
+    let ranking = await readRankingShared(cacheKey);
 
     if (!ranking) {
       /* TWO PHASES, and the cheap one comes first.
@@ -1554,7 +1611,13 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
               location: monitored_jobs.location,
               employment_type: monitored_jobs.employment_type,
               remote: monitored_jobs.remote,
-              scored_description: sql<string>`left(${monitored_jobs.description}, ${SCORING_CHARS})`,
+              /* The digest when the row has one, the old capped prefix when it does not.
+                 The fallback is not dead code and is not temporary in the sense of being removable
+                 on a date: it covers every row polled before description_digest existed, and it
+                 covers any future row whose digest came back empty. Both resolve themselves on the
+                 next poll of that source, and neither is worth a backfill that would spend the
+                 transfer this column exists to save. */
+              scored_description: sql<string>`coalesce(nullif(${monitored_jobs.description_digest}, ''), left(${monitored_jobs.description}, ${SCORING_CHARS}))`,
             })
             .from(monitored_jobs)
             .where(inArray(monitored_jobs.id, poolIds))
@@ -1579,7 +1642,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         PER_PAGE_COMPANY_CAP,
         RANKED_PAGE_WINDOW,
       );
-      ranking = writeRanking(cacheKey, {
+      ranking = await writeRankingShared(cacheKey, {
         ids: spread.map(({ row }) => row.id),
         scores: new Map(scored.map(({ row, score }) => [row.id, score])),
         poolExhausted,
@@ -1757,7 +1820,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
 
     const countRow = counted.rows[0];
 
-    return reply.send({
+    return applyBoardCacheHeaders(request, reply).send({
       jobs: rows.slice(0, limit).map(({ offers_any, refuses_any, employer_sponsors, ...row }) => ({
         ...row,
         sponsorship_evidence: refuses_any
@@ -1802,6 +1865,17 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       employment_type: z
         .enum(['Full-time', 'Part-time', 'Internship', 'Apprenticeship', 'Contract'])
         .optional(),
+      /* Adds company_counts: EVERY company with its live row count, for measuring the board rather
+         than for filling a dropdown. Off by default, so the response the website reads is unchanged.
+
+         This exists because the only way to measure per-company coverage used to be paging the
+         whole board through GET /jobs, which returns full rows including 600 characters of
+         description each. That is ~17 MB per pass for two columns' worth of information, and on
+         2026-08-04 the project exhausted its Neon data transfer quota, which took every
+         database-backed route down with it (see scripts/check-logo-coverage.mjs). One grouped
+         count is ~15 KB and is also a single consistent snapshot, so the reading cannot be skewed
+         by the poller writing underneath a paged scan. */
+      counts: z.enum(['true', 'false']).optional(),
     }).safeParse(request.query).data;
     const sponsorOnly = (await accountRequiresSponsor(request.jwtPayload?.userId))
       || facetQuery?.sponsor_only === 'true';
@@ -1824,6 +1898,19 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       .orderBy(sql`count(*) desc`)
       .limit(TOP);
 
+    /* Deliberately a SECOND query rather than dropping the limit above and slicing in JS. The
+       dropdown path runs on every board visit and the measurement path runs from CI, so the common
+       case keeps reading exactly 50 rows and only a caller that asks pays for the full grouping. */
+    const companyCounts = facetQuery?.counts === 'true'
+      ? await db
+        .select({ v: monitored_jobs.company_name, n: sql<number>`count(*)::int` })
+        .from(monitored_jobs)
+        .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+        .where(where)
+        .groupBy(monitored_jobs.company_name)
+        .orderBy(sql`count(*) desc`)
+      : null;
+
     /* Cities, not location strings.
        An employer's `location` is whatever they typed: often a list ("Boston;
        New York City; Pennsylvania"), often carrying a country ("San Mateo, CA,
@@ -1841,9 +1928,20 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       .orderBy(sql`count(*) desc`)
       .limit(400);
 
-    return reply.send({
+    return applyBoardCacheHeaders(request, reply).send({
       companies: companies.map((r) => r.v).filter(Boolean),
       locations: rankCities(locationRows, TOP),
+      /* Only present when asked for, so the default response stays byte-identical for the website.
+         `rows` is what the board actually holds per employer, which is what a coverage figure has
+         to be weighted by: one employer with 300 postings matters 300 times more than one with a
+         single posting. */
+      ...(companyCounts
+        ? {
+          company_counts: companyCounts
+            .filter((r) => r.v)
+            .map((r) => ({ company_name: r.v, rows: r.n })),
+        }
+        : {}),
       /* `titles` is gone on purpose. It returned the board's most common RAW
          posting titles — "Senior Product Manager - Network Path" — which is not
          what a person types into a field labelled Job title. The board now

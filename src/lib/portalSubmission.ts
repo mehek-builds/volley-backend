@@ -1036,6 +1036,30 @@ export function detectPortal(rawUrl: string): SupportedPortal {
   throw new Error('Litos cannot fill in this company\u2019s application page yet. It works on Greenhouse, Lever, Ashby, SmartRecruiters, Workable, JazzHR, Paylocity, Rippling, BreezyHR and BambooHR.');
 }
 
+/**
+ * Can Litos fill in this page at all? Answerable the moment we have the URL.
+ *
+ * detectPortal THROWS on an unrecognised page, which is correct for the runner but useless
+ * everywhere else: a throw cannot be asked a question, so nothing upstream of the run ever asked.
+ * The result was that a packet on a company-owned careers page (jumptrading.com, optiver.com,
+ * nuro.ai) sat in the Tracker labelled "Ready" behind a live send button, and the applicant only
+ * discovered Litos could not submit it after a multi-minute run failed. Nine of ten failures on the
+ * owner's account on 2026-08-04 were exactly this.
+ *
+ * The portal is knowable from apply_url at CREATION time. This is the non-throwing form of that
+ * same question so the Tracker can be honest before anyone clicks. A malformed URL is unsupported
+ * rather than an exception, because a caller asking "can we?" wants an answer, not a crash.
+ */
+export function isPortalSupported(rawUrl: string | undefined): boolean {
+  if (!rawUrl) return false;
+  try {
+    detectPortal(rawUrl);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): string {
   if (portal !== 'ashby') return rawUrl;
   const url = new URL(rawUrl);

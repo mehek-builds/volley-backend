@@ -63,7 +63,7 @@
  *     if this model ever regresses to the ~2 points the old one managed.
  */
 
-import { label as placeLabel, parsePlace, splitLocations } from '../lib/cities';
+import { label as placeLabel, parsePlace, splitLocations, US_STATES } from '../lib/cities';
 
 /**
  * What the caller already knows about the posting, and therefore must not be asked to have on a
@@ -251,7 +251,59 @@ const HEADING_PATTERNS: Array<{ kind: SectionKind; re: RegExp }> = [
   // A lexicon hit inside a hiring-process disclosure is still a hiring-process disclosure. This is
   // the only section-based route by which a lexicon skill leaves the denominator at all, and on
   // this corpus it has not once removed a stated requirement.
-  { kind: 'noise', re: new RegExp(String.raw`^about\b(?!\s+${SECOND_PERSON_SUBJECT}\b)|\b(who we are|our (story|mission|values|culture)|benefits|perks|what we offer|compensation|salary|pay range|hourly rate|pay rate|stipend|equal opportunity|eeo|diversity|accommodation|privacy|how to apply|why join|interview process|hiring process|selection process|background check)\b`, 'i') },
+  //
+  // THE PAY-AND-REWARDS FOOTER, 2026-08-04, third pass over this same rule. The "About You" fix
+  // above left a residue it named but did not close: a requirements block that runs to the end of a
+  // posting with nothing to close it keeps the pay and EEO footer at weight 1. Measured board-wide
+  // rather than on the one subset, that residue is not small. Footer text sits inside a REQUIRED
+  // section on 5,839 of 22,138 active postings (26.4%), and the reason is the reason it always is
+  // here: a heading-shaped line that matches nothing does not close the section it interrupts.
+  //
+  // FOUR ADDITIONS, each one counted over the 205,581 heading-shaped lines on the board before it
+  // was added, because this list has no shape guard beyond isHeadingLine and a word that reads as
+  // boilerplate to a human can still be the noun of somebody's job:
+  //
+  //   total rewards           406 lines, 5 spellings. "Our Total Rewards Philosophy" (272), "Total
+  //                           Rewards" (52), "Our Spread* of Total Rewards" (19). One of the five is
+  //                           a JOB TITLE, "Internship - Total Rewards (Compensation & Benefits)",
+  //                           and it is the known cost: that posting zeroes its own title line.
+  //   pay transparency        672 lines, 8 spellings, every one a pay-disclosure banner. `pay range`
+  //                           and `salary` were already here and reach none of them.
+  //   what we('?ll)? offer    the contraction only. `what we offer` was already here and missed
+  //                           "What we'll offer" (119 lines) for the same reason the curly
+  //                           apostrophe defect existed: the regex is typed, the posting is not.
+  //   employment verification  70 lines, 5 spellings, all hiring-process. `background check` from
+  //                           ISSUE-026 reaches "Criminal background screening" but not this.
+  //
+  // `^disclosures:?$` IS ANCHORED, AND THAT IS THE WHOLE POINT. Bare `disclosures?` fires on 202
+  // lines, and four of its ten spellings are real work: "Prepare tax related disclosures for
+  // financial statements", "Manage subprocessor tracking and disclosures", "Experience negotiating
+  // non-disclosure agreements", "Data leakage and sensitive information disclosure". A tax
+  // accountant's requirement line is not a footer. The anchored form reaches only the 59 lines that
+  // are the bare word standing alone as a banner.
+  //
+  // THIS RAISES REFUSALS, 1,583 to 1,606 over the 22,138 active postings, and the 24 that flip are
+  // the point rather than a cost. Samsara's "Account Executive, Commercial - Mexico" scored on eight
+  // terms before this, of which `Tofu`, `us-greenhouse-mail.io`, `mail3.guide.co` and `Commitment`
+  // were four: take the footer away and what is left is under the floor, so the posting refuses
+  // instead of printing a number built on a rewards paragraph and a mail domain. That is the trade
+  // MIN_SCORABLE_TERMS exists to make. It is recorded here because it is user-visible - a student
+  // sees "not scorable" on 24 more postings - and because a later change that moves this number
+  // should have to notice it moved.
+  //
+  // TWO CANDIDATES MEASURED AND REJECTED, recorded so they are not re-proposed on the intuition
+  // that put them here:
+  //
+  //   bare `disclosures?`     see above. Rejected on four real requirement lines.
+  //   LinkedIn tracking tags  `#LI-Hybrid` and its 328 cousins are the single biggest unrecognised
+  //                           heading on the board: 3,705 lines, and headingCore strips the `#` so
+  //                           they arrive here looking like headings. Zeroing them is tempting and
+  //                           WRONG AS WRITTEN: only 635 of the 3,705 sit in the last 5% of their
+  //                           posting, while 1,867 sit before the 80% mark, so a rule that closes
+  //                           the section at the tag would zero real content on a third of them.
+  //                           They are harmless where they are (matching nothing, they close
+  //                           nothing) and they need a rule about their SHAPE, not this list.
+  { kind: 'noise', re: new RegExp(String.raw`^about\b(?!\s+${SECOND_PERSON_SUBJECT}\b)|^disclosures:?$|\b(who we are|our (story|mission|values|culture)|benefits|perks|what we('?ll)? offer|compensation|salary|pay range|hourly rate|pay rate|stipend|total rewards|pay transparency|equal opportunity|eeo|diversity|accommodation|privacy|how to apply|why join|interview process|hiring process|selection process|background check|employment verification)\b`, 'i') },
   { kind: 'preferred', re: /\b(preferred|nice[- ]to[- ]have|bonus|plus(es)?|desired|good to have|additional qualifications)\b/i },
   // `what we('?re)? look(ing)? for` and `(your|the) impact`, not the tighter `what we're looking
   // for` / `your impact` they replaced. Databricks' "Product Management Intern (Summer 2027)"
@@ -322,9 +374,87 @@ function isHeadingLine(line: string): boolean {
   return t.endsWith(':') || /^[A-Z][^.!?]*$/.test(t) || t === t.toUpperCase();
 }
 
+/**
+ * A heading that names WORK ABOUT the footer vocabulary, rather than the footer itself.
+ *
+ * The noise list above is matched as a substring, which is what lets it catch "Perks and Benefits"
+ * as readily as "Benefits" and is why it reaches footer text inside a required section on 26.4% of
+ * the board. The cost of a substring match is that it cannot tell a footer from a requirements
+ * sub-heading that happens to contain the same words, and on that shape it does not merely add a
+ * nuisance term - it DELETES the requirements underneath. Measured against the shipped matcher:
+ *
+ *   Requirements block, then a sub-heading, then "Administer Greenhouse and Workday"
+ *   for a student who has NEITHER tool:
+ *
+ *     "Interview Process Design"            score 100, missing list EMPTY
+ *     "Total Rewards Analysis"              score 100, missing list EMPTY
+ *     "Employment Verification Workflows"   score 100, missing list EMPTY
+ *     "Own the interview process"           score 100, missing list EMPTY
+ *
+ * A student told they are a perfect match, with nothing to act on, for a job naming two tools they
+ * do not have. PLACE_SAFE_KINDS records why this direction is the worse one: a requirement the
+ * student LACKS vanishing from the denominator inflates the score and vanishes from the list they
+ * are supposed to act on.
+ *
+ * THIS GUARD ONLY EVER SUBTRACTS FROM THE NOISE CLASS, and that is deliberate. Narrowing the
+ * vocabulary or anchoring the match would have cut the 26.4% coverage the substring form earns;
+ * an earlier attempt at this fix did exactly that and was rejected in review. Nothing here can make
+ * a heading noisy that was not already, so the footer coverage is untouched by construction.
+ *
+ * TWO SIGNALS, both enumerations rather than shape guesses, in the same spirit as
+ * POSITIONAL_OPENERS:
+ *
+ *   - The heading OPENS with an action verb. "Own the interview process", "Conducting Background
+ *     Checks", "Analyze Pay Rates". A footer heading names a thing; a requirements line asks you to
+ *     do one. `hiring`, `interviewing` and `recruiting` are deliberately ABSENT, because they are
+ *     the footer vocabulary itself: "Hiring Process" must stay noise.
+ *   - The heading CLOSES with a work noun. "Interview Process Design", "Background Check
+ *     Operations", "Pay Rate Administration". `process`, `benefits` and `rewards` are deliberately
+ *     absent for the same reason - they are how the footer headings themselves end.
+ */
+const SUBHEADING_VERBS = new Set(
+  `own owning manage managing run running conduct conducting analyze analyzing analyse analysing
+administer administering model modeling modelling redesign redesigning design designing build
+building improve improving automate automating audit auditing oversee overseeing coordinate
+coordinating execute executing lead leading drive driving deliver delivering maintain maintaining
+monitor monitoring review reviewing evaluate evaluating handle handling perform performing`
+    .split(/\s+/)
+    .filter(Boolean),
+);
+
+const SUBHEADING_WORK_NOUNS = new Set(
+  `design operations operation administration workflow workflows analysis analytics management
+automation strategy engineering reporting tooling`
+    .split(/\s+/)
+    .filter(Boolean),
+);
+
+function looksLikeStatedSubHeading(heading: string): boolean {
+  const words = heading
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!words.length) return false;
+  return SUBHEADING_VERBS.has(words[0]) || SUBHEADING_WORK_NOUNS.has(words[words.length - 1]);
+}
+
 function classifyHeading(line: string): SectionKind | undefined {
   const t = headingCore(line);
-  for (const { kind, re } of HEADING_PATTERNS) if (re.test(t)) return kind;
+  for (const { kind, re } of HEADING_PATTERNS) {
+    if (!re.test(t)) continue;
+    // A footer heading names the footer. A requirements sub-heading names work about it, and
+    // zeroing that block deletes the requirements under it. Fall through to the remaining patterns
+    // rather than returning, so a line that is genuinely a requirements heading can still say so.
+    // The `^about` branch is EXEMPT. A heading-shaped line opening with "About" is a company or
+    // team blurb by construction, as that pattern's own note says, so the verb/work-noun heuristic
+    // has no work to do there and gets it wrong: "About AQR Capital Management" ends in
+    // `management`, a genuine work noun, and the guard was zeroing nothing while un-zeroing a real
+    // company blurb. Found on the live board, not constructed.
+    if (kind === 'noise' && !/^about\b/i.test(t) && looksLikeStatedSubHeading(t)) continue;
+    return kind;
+  }
   return undefined;
 }
 
@@ -384,13 +514,153 @@ function isNoiseBlockOpener(line: string): boolean {
   if (/^[-*•·]/.test(t)) return false;
   if (/\.$/.test(t)) return false;
   if (t.split(/\s+/).length > 16) return false;
+  // Same substring hazard as the noise heading list, and the same guard. This matcher has the
+  // WIDER 16-word budget, so it is the more exposed of the two: "Benefits Administration" is a real
+  // requirements sub-heading on an HR-operations posting, and zeroing it deletes everything under
+  // it. See looksLikeStatedSubHeading, and the caution this comment block already carries about
+  // additions needing to be checked against real requirement prose rather than reasoned about.
+  if (looksLikeStatedSubHeading(t)) return false;
   return NOISE_BLOCK.test(t);
 }
+
+/**
+ * A heading the employer wrote INLINE, as a label on the front of the paragraph it introduces.
+ *
+ * THE THIRD SPELLING OF THE SAME DEFECT, and the one the two existing matchers are shaped so they
+ * can never reach. isHeadingLine caps a heading at 60 characters and 7 words; isNoiseBlockOpener
+ * widens that to 120 characters and 16 words and additionally refuses any line ending in a full
+ * stop. A footer heading written as `Label: <the whole paragraph>` is one line carrying both, so it
+ * is too long for the first and both too long AND too punctuated for the second.
+ *
+ * Gemini's "Software Engineering Intern (Fall 2026)" (job 10c37ef7, live 2026-08-04) is the shape,
+ * and it is worth stating exactly what it cost because the cost is not the paragraph:
+ *
+ *   Qualifications:
+ *   <six real requirement bullets>
+ *   Pay Rate: The hourly pay rate for this role is $50/hour in the State of New York, the State
+ *   of California and the State of Washington. When determining a candidate's compensation...
+ *
+ * That line is 316 characters, so nothing closed the `Qualifications` block, and EVERYTHING below
+ * it - the pay paragraph, the hybrid-work paragraph and the whole EEO paragraph - was read as
+ * REQUIRED at weight 1. Its twelve extracted requirements were `API, Associate, California,
+ * Computer Science, Law, NY, policy, rest, State, Washington, York, York City`. Nine of the twelve
+ * are the pay table, the office address and "Equal Opportunity is the Law". The student was shown
+ * `Associate, Law, policy, State, Washington, York, NY, York City` as "things your resume does not
+ * mention", which is the gap-to-bullet input, so the product was one click from offering to write
+ * a resume bullet about the State of Washington.
+ *
+ * This is the same failure class as the cresta apostrophe defect and the psiquantum interview-
+ * process footer: an unrecognised heading does not merely fail to classify itself, it fails to
+ * CLOSE the section above it. Both of those were fixed by widening what counts as a heading LINE.
+ * This one cannot be, because the heading is not a line.
+ *
+ * WHY THE LABEL AND NOT THE PARAGRAPH. The rest of the line goes into the new section rather than
+ * being discarded, because the paragraph genuinely belongs to the label: the pay sentence is what
+ * "Pay Rate:" introduces. Discarding it would be a different and less defensible rule.
+ *
+ * THE GUARDS, and why each is the conservative choice:
+ *
+ *   - BULLETS ARE EXCLUDED ENTIRELY. `- Benefits: describe the benefits of our platform` is a real
+ *     requirements bullet on a sales posting and this rule would zero it and everything under it.
+ *     NOISE_BLOCK's comment already warns that the shape guards will not catch a footer word used
+ *     in requirement prose; a bullet is the one shape where that is common, so it is refused
+ *     outright rather than reasoned about.
+ *   - THE LABEL IS HELD TO isHeadingLine's OWN BUDGET, 40 characters and 6 words, not to the wider
+ *     one. A long run of words before a colon is a sentence with a colon in it, not a label.
+ *   - CLASSIFICATION GOES THROUGH classifyHeading, so this adds NO vocabulary of its own and
+ *     inherits looksLikeStatedSubHeading. "Interview Process Design: own the calendar" is spared
+ *     here for exactly the reason it is spared there.
+ *
+ * IT IS NOT NOISE-ONLY, deliberately. `Requirements: 5+ years of Python` and `Skills: SQL, Excel`
+ * are the same shape doing the opposite job, and a rule that only ever zeroed would find the
+ * footers and miss the requirements blocks written the same way.
+ *
+ * THE LABEL SCOPES TO ITS OWN LINE. See the call site in segmentJd for the measurement that forced
+ * that, which is the one regression this change introduced and then removed.
+ */
+function inlineLabel(line: string): { kind: SectionKind; rest: string } | undefined {
+  const t = headingCore(line);
+  if (!t || /^[-*•·]/.test(t)) return undefined;
+  const at = t.indexOf(':');
+  if (at < 1) return undefined;
+  const label = t.slice(0, at).trim();
+  if (!label || label.length > 40) return undefined;
+  if (label.split(/\s+/).length > 6) return undefined;
+  const kind = classifyHeading(label);
+  if (!kind) return undefined;
+  return { kind, rest: t.slice(at + 1) };
+}
+
+/**
+ * EEO and legal boilerplate written as PROSE, with no heading of any kind in front of it.
+ *
+ * The last route by which the footer reaches a scored section. inlineLabel above closes the
+ * Gemini posting at its `Pay Rate:` label and the EEO paragraph below it is then already inside a
+ * noise section, so on that posting this rule changes nothing. It is here for the postings that
+ * have no pay line at all, where a requirements block runs straight into
+ *
+ *   At <company>, we are committed to equal employment opportunity regardless of race, color,
+ *   ancestry, religion, sex, national origin, sexual orientation, age, citizenship...
+ *
+ * with nothing between them. That paragraph is 300+ characters and ends in a full stop, so it
+ * defeats isHeadingLine, isNoiseBlockOpener and inlineLabel alike, and everything it contains is
+ * read at the weight of the block above it.
+ *
+ * THIS MATCHER HAS NO SHAPE GUARD AT ALL, which makes it the most exposed rule in this file, and
+ * the vocabulary is chosen accordingly. NOISE_BLOCK's comment states the honest bound on the
+ * existing lists: "it is safe for the vocabulary it currently lists, and ANY addition needs to be
+ * checked against real requirement prose rather than reasoned about, because the shape guards will
+ * not stop it." Here there are no shape guards to fall back on, so every entry is a WHOLE CLAUSE
+ * that a requirement cannot contain, never a footer word:
+ *
+ *   `equal opportunity is the law`                 a poster title, verbatim
+ *   `(without regard to|regardless of) race`       the anti-discrimination clause itself
+ *   `equal (employment )?opportunity employer`     the self-description, not the subject
+ *   `all qualified applicants will receive`        the standard consideration sentence
+ *   `protected veteran status`
+ *   `e-verify`
+ *
+ * BARE `equal employment opportunity` IS DELIBERATELY ABSENT and is the entry this rule most
+ * obviously wants. NOISE_BLOCK's own comment names the counterexample: "Knowledge of EEO and
+ * affirmative action reporting requirements" is a real requirement on an HR-compliance posting,
+ * and an unguarded rule matching the bare phrase would read it as a footer and silently truncate
+ * every requirement below it. `reasonable accommodation` is absent for the same reason - "provide
+ * reasonable accommodations" is a real HR duty - and both are already carried by NOISE_BLOCK in
+ * the heading-shaped form, where the shape is doing the work this rule cannot.
+ *
+ * MEASURED, as that comment demands, over 500 live postings: it fires on 214 lines across 189
+ * postings, and every one is an EEO or work-authorization footer paragraph. It changes the
+ * extracted set on 27 of the 500 - the postings where that footer was previously being scored.
+ */
+const FOOTER_PROSE =
+  /\b(equal opportunity is the law|(without regard to|regardless of) race|equal (employment )?opportunity (employer|workplace)|all qualified applicants will receive|protected veteran status|e-verify)\b/i;
 
 export interface JdSection {
   kind: SectionKind;
   weight: number;
   text: string;
+  /**
+   * This section was zeroed by FOOTER_PROSE, and the salvage pass in extractJdTerms must leave it
+   * zeroed.
+   *
+   * THE SALVAGE PASS EXISTS BECAUSE A NOISE HEADING IS A GUESS ABOUT EXTENT. It runs until the next
+   * recognised heading, so a posting that opens with a "Compensation" or "Pay range" banner - first
+   * on the page by law in the pay-transparency states - can put its whole body inside a zero-weight
+   * section. Re-reading noise as body when zeroing leaves the posting unscorable is the right trade
+   * there, because the thing we were uncertain about was how much the heading swallowed.
+   *
+   * FOOTER_PROSE IS NOT THAT KIND OF GUESS. It does not match a heading and then claim everything
+   * after it; it matches a clause that IS the boilerplate - "Equal Opportunity is the Law",
+   * "regardless of race" - inside the line it opens. There is no over-reach to walk back, so
+   * salvaging it only ever puts the EEO paragraph back into a denominator it was correctly removed
+   * from. On Gemini's intern posting (job 10c37ef7) that is precisely what happened: the section
+   * fixes took `Law` out at weight 1 and the salvage pass handed it straight back at 0.4, still on
+   * the list of "things your resume does not mention".
+   *
+   * The pay-transparency banner the salvage pass was written for is untouched, because that banner
+   * is opened by a heading or an inline label and never by this rule.
+   */
+  footer?: boolean;
 }
 
 /**
@@ -416,6 +686,61 @@ export function segmentJd(jdText: string): JdSection[] {
     if (isNoiseBlockOpener(line)) {
       if (current.text.trim()) sections.push(current);
       current = { kind: 'noise', weight: SECTION_WEIGHT.noise, text: '' };
+      continue;
+    }
+    // Third, so a line that is a heading in its own right never reaches the label rule. What is
+    // left by here is a line too long or too punctuated to be a heading, which is the only place
+    // an inline `Label: <paragraph>` can hide.
+    const inline = inlineLabel(line);
+    if (inline) {
+      // HOW FAR THE LABEL REACHES DEPENDS ON WHAT IT IS, and getting this wrong in EITHER direction
+      // was measured over 500 live postings before it was settled.
+      //
+      // A FOOTER LABEL IS TERMINAL, so it opens a running section exactly like every other noise
+      // rule in this loop. `Pay Rate:` is not a label on one sentence, it is the point where the
+      // employer stopped describing the job: on the Gemini posting the pay paragraph, the
+      // hybrid-work paragraph and the EEO paragraph follow it in that order and nothing about any
+      // of them is a requirement. Scoping it to its own line puts the two paragraphs under it back
+      // inside `Qualifications` at weight 1, which is the bug.
+      //
+      // A SCORED LABEL IS LOCAL, and scopes to its own line with the enclosing section resuming
+      // underneath. THE FIRST VERSION OF THIS RULE MADE THESE TERMINAL TOO AND IT WAS A REGRESSION,
+      // caught by the corpus pass rather than by the suite. Scale AI's "SWE Fellow - Human Frontier
+      // Collective" writes its requirements as `Skills: ...deep expertise in one or more of the
+      // following programming languages...`, a correct `required` classification, and then
+      // continues with `Professional Mindset:`, `Flexible Schedule:`, `Competitive Pay:`,
+      // `Interview:` and `Join the Collective:`. Running to the next heading put all of those at
+      // weight 1, so the perks and the hiring process outranked the work: the posting lost
+      // `benchmark`, `propensitybench`, `scipredict` and `publications`, gained `competitive`,
+      // `interview` and `mindset`, and the score fell 33 -> 25 against a real base resume.
+      //
+      // The asymmetry is not a fudge, it is the same asymmetry NOISE_BLOCK already documents: a
+      // false positive in the noise class is cheap, because the salvage pass re-reads noise as body
+      // when zeroing leaves the posting unscorable, while a false positive in a SCORED class
+      // silently promotes whatever follows it. So the class that can over-reach safely is allowed
+      // to, and the class that cannot, is not.
+      const terminal = inline.kind === 'noise';
+      const resume = { kind: current.kind, weight: current.weight, footer: current.footer };
+      if (current.text.trim()) sections.push(current);
+      if (terminal) {
+        current = { kind: 'noise', weight: SECTION_WEIGHT.noise, text: inline.rest + '\n' };
+        continue;
+      }
+      if (inline.rest.trim()) {
+        sections.push({
+          kind: inline.kind,
+          weight: SECTION_WEIGHT[inline.kind],
+          text: inline.rest + '\n',
+        });
+      }
+      current = { ...resume, text: '' };
+      continue;
+    }
+    // Last. A footer paragraph carries no heading at all, so this is the only rule that can see it,
+    // and it is checked after every rule that has a shape guard to offer.
+    if (FOOTER_PROSE.test(line)) {
+      if (current.text.trim()) sections.push(current);
+      current = { kind: 'noise', weight: SECTION_WEIGHT.noise, text: line + '\n', footer: true };
       continue;
     }
     current.text += line + '\n';
@@ -457,6 +782,56 @@ export function segmentJd(jdText: string): JdSection[] {
  * against and found empty for. Health (7), education (5), HR (4) and media (6) are a first pass
  * sized to clear MIN_SIGNAL_TERMS on a typical posting in each, not to be complete: no clinical
  * credentials (RN, NP, BLS), no teaching certifications, no newsroom systems.
+ *
+ * `legal` AND `law` WERE THE TWO ENTRIES THE FIRST PASS MISSED, added 2026-08-04 after re-measuring.
+ * ---------------------------------------------------------------------------------------------
+ * The first pass took the law resume from 0 hard-signal matches to some, which is what the ledger
+ * recorded, but it never admitted the two central nouns of the discipline. Before this change
+ * `legal` reached 61 of 2500 live denominators and `law` 8, each with signal on EXACTLY ZERO of
+ * them, because both were reachable only through the proper-noun rule. On the original frozen 400
+ * the law resume covered `legal` on all 10 postings that carried it and earned nothing for any.
+ *
+ * THE OBVIOUS OBJECTION IS REAL AND WAS TESTED RATHER THAN ARGUED. Read in isolation both words
+ * look like the prose this list rejects: `legal` reaches 61 of 2500 denominators and most of those
+ * sentences are cross-functional department rosters ("Sales, Finance, Legal, and Product"), and 6
+ * of the 8 `law` hits are degree-field enumerations ("degree in Law, Business Administration,
+ * Finance, Compliance, or a related field"). By the reading test above, both should have been
+ * rejected. The measurement says otherwise, and the measurement wins:
+ *
+ *   UW law resume, 2500 postings      on-field mean   off-field mean   separation
+ *   before                                  7.2             3.0            4.2
+ *   after `legal` + `law`                  13.2             4.1            9.2
+ *
+ * Off-field does rise, which is the department-roster cost being paid honestly. On-field rises five
+ * times faster, so SEPARATION more than doubles, and that is the metric that decides this file. The
+ * user-visible effect is the ranking: p@10 went 40% to 60% and p@20 25% to 40%, and the top of her
+ * board became `IP Counsel`, `Employment Counsel` and `Lead Counsel, Commercial` instead of three
+ * Customer Success Architect reqs. The degree-field hits are not even noise: an employer who says a
+ * law degree qualifies is stating a real match.
+ *
+ * BOTH WORDS DO WIDEN THE DENOMINATOR, and that is the cost to check rather than the objection to
+ * wave off. Admitting them to this list moves `legal` from 61 denominators to 216 and `law` from 8
+ * to 139, because inLexicon reaches sections the proper-noun rule never did. The reason that is
+ * paid for and not the ISSUE-023 mistake repeated is that the added slots are EARNED: the law
+ * resume covers `legal` on 216 of 216 and `law` on 139 of 139. A term that arrives in the
+ * denominator and is then matched every single time is the opposite of the proper-noun rule's 3.6%.
+ *
+ * THE COST TO THE OTHER TWO RESUMES WAS MEASURED, NOT ASSUMED, since a wider denominator can evict
+ * someone else's requirement under EMPHASIS_LIMIT. On the same 2500-posting run USC CS separation
+ * is 9.5 before and after and MIT econ 2.7 before and after, unmoved to the decimal.
+ *
+ * Note also that the company and the role are stripped from every section (selfReferenceTokens), so
+ * a posting titled "Legal Intern" never carries `legal` as a term at all. The on-field gain below
+ * is therefore made entirely by postings whose BODY says legal, never by their title, which means
+ * it is not an artifact of the title-based on-field labelling used to measure it.
+ *
+ * `counsel` WAS MEASURED IN THE SAME PASS AND REJECTED. It reaches 2 of 2500 denominators, both the
+ * same posting, and adding it moved separation 4.2 to 4.0 - slightly WORSE, since it buys no
+ * on-field credit and still competes for a reserved slot. `attorney`, `statutory`, `clerkship`,
+ * `pro bono`, `affidavit`, `pleading`, `jurisdiction`, `legal research` and `civil rights` were
+ * also measured: every one of them reaches ZERO denominators across 2500 live postings. The
+ * practice vocabulary of law is not what this board is written in, so adding it would be dead
+ * weight that makes the list overstate its own coverage. Do not add them back on intuition.
  *
  * COMPLETING THAT PASS WAS ATTEMPTED, MEASURED, AND DEFERRED (2026-08-04). ISSUE-033 IS STILL OPEN.
  * ---------------------------------------------------------------------------------------------
@@ -571,7 +946,7 @@ html css sass tailwind bootstrap graphql rest grpc websocket oauth saml
 git linux unix bash powershell agile scrum kanban devops mlops
 accounting auditing bookkeeping valuation modeling forecasting budgeting reconciliation
 econometrics statistics regression segmentation attribution
-litigation compliance regulatory governance contract paralegal deposition
+legal law litigation compliance regulatory governance contract paralegal deposition
 subpoena arbitration mediation trademark copyright patent licensing antitrust gdpr ccpa
 redlining docketing westlaw lexisnexis clio ediscovery relativity
 legislation legislative advocacy lobbying rulemaking testimony casework constituent redistricting
@@ -618,46 +993,31 @@ copywriting analytics automation visualization prototyping wireframing benchmark
  * `ccpa` do not survive into its final twelve at all. Both tests are in jdMatch.test.ts: one pins
  * the footer out of the denominator, the other pins that a real privacy role stays scorable. */
 
-/* THE BENEFIT-AND-LOGISTICS BLOCK (`stipend` through `screening`), added 2026-08-04 for ISSUE-026.
- * This is the SECOND line of defence on the psiquantum footer described at HEADING_PATTERNS, and it
- * is worth being exact about which line actually does the work, because the two are not equivalent:
+/* THE BENEFIT-AND-LOGISTICS ROW THAT USED TO BE HERE WAS REMOVED, and this note is what remains of
+ * it, because the reasoning that added it is the reasoning most likely to add it back.
  *
- *   heading fix only   8 terms, all 8 genuine requirements
- *   this list only    10 terms, still carrying `HR` and `Near`
- *   both              8 terms, all 8 genuine requirements
+ * ISSUE-026 added `stipend housing commuter relocation lodging shuttle parking wage rate allowance
+ * reimbursement police background check screening` as a second line of defence on a pay table. It
+ * was measured at the time as changing 8 of 400 postings, and shipped as "insurance". Retrospective
+ * review found the insurance cost more than the risk:
  *
- * So the heading fix carries this posting on its own and this list changes nothing on it. It is
- * here for the shape the heading fix cannot see: the same pay table written as bullets, or as one
- * run-on line, or under a heading nobody thought to enumerate. `housing`, `commuter` and `stipend`
- * are the terms that posting actually produced; the rest of the row is the same vocabulary at the
- * same specificity, which is the standard the `privacy` note above sets.
+ *   "Run Sanctions Screening reviews"      loses `sanctions screening`, and INVENTS `run sanctions`
+ *   "Process Wage Garnishment orders"      loses `wage garnishment`, leaves `garnishment`, `process`
+ *   "a public Housing Authority program"   loses `housing authority`, UNMASKS bare `authority`
+ *   "Draft Police Accountability rules"    loses `police accountability`, UNMASKS `draft`
+ *   "the Rate Limiting Service"            loses `rate limiting`
  *
- * Over 400 live postings pulled full-text from the production board on 2026-08-04 it changes the
- * extracted set on 8 of them, so its value is almost entirely insurance rather than measured yield.
- * That is stated because it is the kind of list that grows on intuition, and the number to beat
- * before adding to it is 8 in 400.
+ * `payroll`, `aml`, `kyc`, `sanctions`, `zoning` and `eeoc` are all SKILL_LEXICON entries, so these
+ * are the disciplines the lexicon pass exists to serve rather than hypotheticals. Every one is the
+ * failure the `completion`/`Near` note above already describes: a deny-list entry that breaks a junk
+ * bigram into junk parts has moved the problem, not fixed it. Removing the row was measured to leave
+ * the psiquantum posting this all started from unchanged, because the heading fix carries it alone.
  *
- * `completion` AND `completed` WERE IN THIS LIST AND WERE REMOVED, and the reason is a general
- * caution about stop-lists rather than a fact about those two words. The pay table's degree column
- * reads "PhD: Near Completion", which extracts as the bigram `near completion`. Denying `completion`
- * does not delete that requirement, it UNMASKS `Near` as a unigram - a strictly worse term, since it
- * is a preposition rather than an identifiable piece of boilerplate. That is measured, not reasoned:
- * the vocab-only run above shows `Near` in the ten. A deny-list entry that breaks a junk bigram into
- * junk parts has moved the problem, so any addition here needs checking against what the SURVIVING
- * unigrams would be, not just against the term it targets.
- *
- * `rate` IS THE ARGUABLE ENTRY and it is taken deliberately. It costs the bigram `conversion rate`
- * on marketing postings, which is a real thing to have done. It is kept because "Hourly Rate",
- * "Rate", "Pay Rate" is the head of the compensation table on every posting that has one, `hourly`
- * was already denied here for exactly that reason, and `conversion` survives on its own as the term
- * a marketing resume is actually matched on.
- *
- * `hr` IS NOT HERE, though `HR` was one of the five junk terms on the psiquantum posting. It came in
- * through the ACRONYM rule out of "at least two interviews with the hiring team and HR", which is
- * the interview paragraph and is now noise. HR work is a real discipline this file already serves
- * (`recruiting`, `payroll` are in SKILL_LEXICON), so denying the acronym would delete a stated
- * requirement from every HR posting to fix one sentence in a physics one. Same trade
- * NON_REQUIREMENT_ACRONYMS refuses for `mba` and `phd`. */
+ * THE COLLISION TEST DOES NOT PROTECT AGAINST THIS and should not be cited as though it does. It
+ * intersects SKILL_LEXICON with BOILERPLATE, and none of `rate`, `wage`, `housing`, `police` or
+ * `screening` is a lexicon entry, so it passed vacuously on every one of them. What catches this
+ * class is asking what the SURVIVING unigrams are, which is a question only a real posting answers.
+ */
 
 /* THE MONTH NAMES ARE HERE BECAUSE A DATE IS NOT A REQUIREMENT, and they were expensive. Measured
  * 2026-08-04 over 400 live postings, in the FINAL capped denominator, they were the single largest
@@ -700,7 +1060,24 @@ copywriting analytics automation visualization prototyping wireframing benchmark
  * not a thing to have done.
  *
  * Rarer than the months and more concentrated: where a month costs one slot on many postings, a
- * weekday costs several slots on a few, and on those few it is a large share of the score. */
+ * weekday costs several slots on a few, and on those few it is a large share of the score.
+ *
+ * `associate` JOINS THE DEGREE ROW, and it is the one term on the Gemini posting (job 10c37ef7)
+ * that no section rule could have reached, because it is inside a genuine Qualifications bullet:
+ * "Currently pursuing a degree in Computer Science, Computer Engineering, or a related field
+ * (Bachelor's, Associate's, or Master's)". `bachelor`, `bachelors`, `master` and `masters` were
+ * already here and `associate` simply was not, so the one degree in that list of three survived
+ * and was shown to a student as a requirement their resume "does not mention".
+ *
+ * It is the same argument NON_REQUIREMENT_ACRONYMS makes for `bs` and `ba`: the degree IS a
+ * requirement and it is not an EARNABLE one, because a resume writes "Associate of Science" or the
+ * school and the year rather than the bare word. A requirement no resume can match is denominator
+ * weight that only ever subtracts.
+ *
+ * THE COST IS THE JOB-TITLE SENSE, and it is real but not ours to keep: "Associate Product
+ * Manager" and "Sales Associate" are titles, and `position`, `role`, `roles`, `job` and `jobs` are
+ * already in this list for exactly that reason. Measured over 500 live postings, `associate`
+ * reaches the final capped denominator on 9 of them and not one is a skill. */
 const BOILERPLATE = new Set(
   `passionate passion obsess obsessed driven motivated enthusiastic energetic dynamic exciting
 opportunity opportunities candidate candidates applicant applicants position role roles job jobs
@@ -718,6 +1095,7 @@ privacy notice
 equal employment discrimination veteran disability gender race religion sexual orientation
 remote hybrid onsite office location locations travel percent full time part
 degree bachelor bachelors master masters phd university college school graduate undergraduate
+associate
 work working works help helps helping support supporting supports ensure ensuring provide providing
 new next high level levels across within using various multiple related relevant similar other
 plus bonus nice have having make making take taking build building
@@ -734,9 +1112,7 @@ whether expect actual additionally president stem gpa opt person excels
 federal municipal county province
 department departments
 learn transparency hourly
-stipend stipends housing commuter relocation lodging shuttle parking wage wages rate rates
-allowance allowances reimbursement reimbursements
-police background check checks screening`
+`
     .split(/\s+/)
     .filter(Boolean),
 );
@@ -865,7 +1241,7 @@ scaling write writing test testing deploy deploying monitor monitoring analyze a
 reporting present presenting coordinate coordinating execute executing implement implementing
 comfortable familiar proficient fluent skilled versed competent capable
 strong deep advanced basic solid prior proven demonstrated extensive significant substantial
-hands exposure ability willingness eagerness passion desire interest curiosity
+hands exposure ability willing willingness eager eagerness passion desire interest curious curiosity
 excellent outstanding exceptional thorough working practical relevant
 bachelor bachelors master masters degree currently pursuing enrolled rising
 must should able eager self highly well very`
@@ -1196,6 +1572,66 @@ const VENDOR_SPELLINGS = new Set([
  *  because normalizeTerm turns "CI/CD" into "ci cd" and the lexicon carries ci and cd separately. */
 const SLASH_FORMS = new Set(['ci cd', 'a b', 'r d']);
 
+
+/**
+ * The spans of a section that are an ADDRESS, found from the shape of the text rather than from
+ * the location field.
+ *
+ * WHY THIS EXISTS ALONGSIDE locationTokens, WHICH ALREADY REMOVES PLACES. That exclusion is driven
+ * by the posting's own location column and is deliberately confined to `body` sections, for the
+ * reason PLACE_SAFE_KINDS sets out at length: a location field of "Mobile, AL" must not be allowed
+ * to delete a Requirements bullet reading "Mobile development experience", and a posting in Java,
+ * Indonesia must not delete `Java`. That argument is correct and this rule does not weaken it.
+ *
+ * It is also not enough, because an address is not only written in the location column. Gemini's
+ * intern posting (job 10c37ef7) writes "in person 3 days a week at our New York City, NY office"
+ * inside the block opened by "The Role:", which is `responsibilities`, so PLACE_SAFE_KINDS declines
+ * to touch it and `NY` and `York City` take two of the twelve denominator slots. `NY` is a two
+ * letter capital run, so it is ACRONYM, so it is HARD SIGNAL, so it is eligible for the reserved
+ * slots in capToEmphasis ahead of a real skill. EMPHASIS_LIMIT lists exactly this under PLACE
+ * ACRONYMS as a known residual; this is the rule for it.
+ *
+ * THE DISCRIMINATOR IS THE OCCURRENCE, NOT THE WORD, and that is what makes it safe where a wider
+ * PLACE_SAFE_KINDS would not be. A span is dropped where the text is WRITTEN as an address:
+ *
+ *   <Title Case run>, <state code or state name>     "New York City, NY", "Bellevue, Washington"
+ *   State of <Title Case run>                        "the State of Washington"
+ *
+ * So on a posting in Mobile, Alabama, the string "Mobile, AL" is a span and its tokens go, while
+ * "Mobile development experience" three lines up is not a span and is extracted exactly as before.
+ * The word is not banned; the address is. That is strictly better than the location-field rule,
+ * which can only decide per-word and therefore has to be confined to prose to stay honest.
+ *
+ * A LEXICON SKILL INSIDE A SPAN IS STILL KEPT, the same guard locationTokens and companyBrandTokens
+ * both use and for the same reason: "Java, Indonesia" and "Oracle, Arizona" are the shape, and
+ * deleting a real requirement to remove a nuisance is the trade PLACE_SAFE_KINDS exists to refuse.
+ *
+ * US-ONLY, and stated as a limit rather than hidden. The state table is the one cities.ts already
+ * carries, so "Bengaluru, Karnataka" and "London, UK" are not covered. They are a smaller problem
+ * than they look, because a non-US address usually appears in the location field too and most
+ * postings carrying one have no stated sections for PLACE_SAFE_KINDS to be confined out of.
+ */
+const STATE_CODES = US_STATES.map(([code]) => code).join('|');
+const STATE_NAMES = US_STATES.map(([, name]) => name).join('|');
+const ADDRESS_SPAN = new RegExp(
+  String.raw`\b[A-Z][a-zA-Z]*(?:[ ][A-Z][a-zA-Z]*){0,3},[ ]*(?:${STATE_CODES}|${STATE_NAMES})\b` +
+    String.raw`|\bStates?[ ]of[ ][A-Z][a-zA-Z]*(?:[ ][A-Z][a-zA-Z]*){0,2}`,
+  'g',
+);
+
+function addressSpans(text: string): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  for (const m of text.matchAll(ADDRESS_SPAN)) {
+    const start = m.index ?? 0;
+    out.push([start, start + m[0].length]);
+  }
+  return out;
+}
+
+function inAddress(spans: Array<[number, number]>, start: number, end: number): boolean {
+  return spans.some(([a, b]) => start >= a && end <= b);
+}
+
 function tokenizeSection(text: string): SectionToken[] {
   const raw = [...text.matchAll(/[A-Za-z][A-Za-z0-9+#./_-]*/g)];
   const out: SectionToken[] = [];
@@ -1418,10 +1854,40 @@ export function extractJdTerms(jdText: string, context?: JdContext): JdTerm[] {
   // then told the posting "does not list enough specific requirements" about a posting full of
   // them. When zeroing the noise leaves us unable to score, re-read those sections as ordinary
   // body prose rather than throwing the posting away.
+  //
+  // ONLY WHEN THE NOISE IS WHERE THE DOCUMENT ACTUALLY IS, added 2026-08-04. The sentence above
+  // describes a posting whose BODY ended up inside a zero-weight section, and every word of the
+  // justification depends on that. The gate in front of it did not: it fired whenever the scored
+  // sections yielded fewer than MIN_SCORABLE_TERMS, which is also true of a posting that has real
+  // headings, a correctly-zeroed footer, and simply does not state four concrete requirements.
+  //
+  // On those postings salvage is not rescuing a swallowed body, it is PADDING. Gemini's intern
+  // posting (job 10c37ef7) states three: its Qualifications block is "Passionate about
+  // blockchain", "Self-motivated and proactive", "Strong communication skills". After the section
+  // fixes above it extracted `computer science`, `api` and `rest`, one short of the floor, and
+  // salvage made up the difference out of the company blurb - `Cameron` and `Tyler Winklevoss`,
+  // the founders' names, presented to a student as requirements their resume does not mention.
+  // MIN_SIGNAL_TERMS names that exact shape ("Bob Smith", "Jane Doe") as the thing the floor
+  // exists to prevent, and preferStatedRequirements names padding as the thing that made the
+  // denominator dishonest in the first place.
+  //
+  // Comparing the two character totals is the smallest test that separates the two cases. The
+  // pay-transparency banner puts most of the posting inside noise, so noise wins and it still
+  // salvages. A posting with a normal footer has most of its text in scored sections, so it does
+  // not, and it refuses instead - which is what MIN_SCORABLE_TERMS is for and what the module
+  // header means by "IT REFUSES TO SCORE RATHER THAN GUESS".
+  //
+  // Footer sections are excluded from the noise side of the comparison as well as from the
+  // re-reading, so a long EEO block cannot be what tips a posting into salvaging.
+  const sections = segmentJd(jdText);
+  const salvageable = sections.filter((s) => s.kind === 'noise' && !s.footer);
+  const chars = (list: JdSection[]) => list.reduce((n, s) => n + s.text.length, 0);
+  if (chars(salvageable) <= chars(sections.filter((s) => s.weight > 0))) return capToEmphasis(terms);
+
   const salvaged = strip(
     extractFrom(
-      segmentJd(jdText).map((section) =>
-        section.kind === 'noise'
+      sections.map((section) =>
+        section.kind === 'noise' && !section.footer
           ? { ...section, kind: 'body' as SectionKind, weight: SECTION_WEIGHT.body }
           : section,
       ),
@@ -1709,9 +2175,17 @@ function extractFrom(sections: JdSection[], alsoLowercased?: Set<string>): JdTer
     if (section.weight === 0) continue;
 
     const tokens = tokenizeSection(section.text);
+    // Computed once per section rather than per token: the scan is linear and the spans are
+    // reused by both the unigram and the bigram pass below.
+    const spans = addressSpans(section.text);
+    // A token written inside an address is that address, not a requirement. A lexicon skill is
+    // spared for the "Java, Indonesia" case: see addressSpans.
+    const isAddress = (tok: SectionToken) =>
+      inAddress(spans, tok.start, tok.end) && !inLexicon(normalizeTerm(tok.text));
 
     // Unigrams. Match on the original casing so isSpecific can see proper nouns.
     for (const tok of tokens) {
+      if (isAddress(tok)) continue;
       if (!isSpecific(tok.text, tok.positional, tok.nextIsCapitalized, alsoLowercased)) continue;
       const term = normalizeTerm(tok.text);
       const existing = byTerm.get(term);
@@ -1746,6 +2220,7 @@ function extractFrom(sections: JdSection[], alsoLowercased?: Set<string>): JdTer
       const b = tokens[i + 1];
       const gap = section.text.slice(a.end, b.start);
       if (!/^ +$/.test(gap)) continue;
+      if (isAddress(a) || isAddress(b)) continue;
       if (
         !isSpecific(a.text, a.positional, a.nextIsCapitalized, alsoLowercased) ||
         !isSpecific(b.text, b.positional, b.nextIsCapitalized, alsoLowercased)
@@ -1822,7 +2297,74 @@ function extractFrom(sections: JdSection[], alsoLowercased?: Set<string>): JdTer
     }
   }
 
+  // ONE REQUIREMENT SPELLED SINGULAR AND PLURAL IS ONE REQUIREMENT, not two slots.
+  //
+  // byTerm is keyed on the normalized string, and normalizeTerm does not singularise, so a posting
+  // that writes both spellings gets two entries. Everything downstream then treats them as two
+  // requirements: two of the twelve EMPHASIS_LIMIT slots, charged twice against the same resume,
+  // and named twice on the gap list.
+  //
+  // `API` AND `APIs` ARE THE CASE THIS WAS FOUND FOR, and the reason they survived is worth
+  // stating because it is not the obvious one. inLexicon already tolerates the plural through its
+  // bare `-s` strip, so BOTH spellings are correctly admitted as the lexicon skill `api` - they
+  // just arrive under different keys. singular() cannot fold them either, because it deliberately
+  // leaves `-is` alone so that `analysis` and `basis` survive, and `apis` ends in `-is`. So the
+  // one function that would have merged them is the one function that is required not to.
+  //
+  // THE FOLD KEY IS singular() PLUS THE LEXICON, in that order, and the lexicon half is what makes
+  // it safe. Stripping a bare `-s` from anything ending in `-is` would fold `analysis` into
+  // `analysi`; stripping it only when the result IS a curated skill uses the lexicon as the
+  // evidence that the `-s` was a plural rather than part of the word. This is the same test
+  // inLexicon already makes to admit the term, applied to its identity instead of its membership.
+  //
+  // NOTHING IS INVENTED. The survivor is always one of the two spellings the posting actually
+  // wrote, never a third string synthesised from them, so the module header's first rule holds.
+  // No `alternatives` are recorded and none are needed: resumeCovers already matches a term
+  // against a resume that pluralises it and against one that does not, in both directions, so
+  // whichever spelling survives matches exactly what the pair matched between them.
+  const bySingular = new Map<string, string>();
+  for (const [term, entry] of [...byTerm.entries()]) {
+    const key = foldKey(term);
+    const seen = bySingular.get(key);
+    if (seen === undefined) {
+      bySingular.set(key, term);
+      continue;
+    }
+    const other = byTerm.get(seen);
+    if (!other) continue;
+    // Prefer the spelling that is already the folded form, so `api` represents `api`/`APIs` and a
+    // pair with no singular member keeps whichever was seen first. Deterministic either way.
+    const [keep, drop] = term === key ? [entry, other] : [other, entry];
+    if (drop.weight > keep.weight) {
+      keep.weight = drop.weight;
+      keep.kind = drop.kind;
+    }
+    keep.mentions = (keep.mentions ?? 1) + (drop.mentions ?? 1);
+    keep.signal = keep.signal || drop.signal;
+    keep.order = Math.min(keep.order ?? 0, drop.order ?? 0);
+    byTerm.delete(drop.term);
+    bySingular.set(key, keep.term);
+  }
+
   return [...byTerm.values()].sort((x, y) => y.weight - x.weight || x.term.localeCompare(y.term));
+}
+
+/**
+ * The identity of a term once singular and plural spellings are folded together. See the fold pass
+ * at the foot of extractFrom for why singular() alone cannot do this.
+ */
+function foldKey(term: string): string {
+  return term
+    .split(' ')
+    .map((word) => {
+      const s = singular(word);
+      if (s !== word) return s;
+      if (word.length > 3 && word.endsWith('s') && SKILL_LEXICON.has(word.slice(0, -1))) {
+        return word.slice(0, -1);
+      }
+      return word;
+    })
+    .join(' ');
 }
 
 /**

@@ -114,9 +114,13 @@ const TOO_GENERIC = new Set(['depot', 'fireworks', 'honor', 'oldmission', 'pinec
  *   Quadrature       quadraturecapital.com now redirects to quadrature.ai
  *   Skylight         skylightframe.com now redirects to myskylight.com
  *
- * Pure Storage is deliberately ABSENT. Its board still asserts purestorage.com, but that domain
- * 301s to everpuredata.com ("The Data Platform | Everpure"), so the company reads as mid-rebrand
- * and a row labelled Pure Storage would render an Everpure logo. Unproven beats confusing.
+ * Pure Storage was held back at first and is now IN, because the question turned out to be
+ * decidable rather than a matter of taste. Its board asserts purestorage.com, but that domain 301s
+ * to everpuredata.com ("The Data Platform | Everpure"), so the worry was that a row labelled Pure
+ * Storage would render some other brand's logo. What actually renders is the only thing that
+ * matters, and it was never checked: the favicon service returns the same orange hexagon for both
+ * hosts, which is the mark Pure Storage is recognised by. The rebrand kept the mark, so the row
+ * shows the right logo either way. Verify what the reader sees, not what the redirect says.
  *
  * Two more were verified and then REJECTED, because each one breaks a guard in
  * companyDomains.test.ts that is worth more than the rows it would win:
@@ -198,6 +202,7 @@ const CURATED_DOMAINS = new Map([
   ['pinecone', 'pinecone.io'],
   ['poolside', 'poolside.ai'],
   ['prefect', 'prefect.io'],
+  ['purestorage', 'purestorage.com'],
   ['quadrature', 'quadrature.ai'],
   ['quberesearchtechnologies', 'qube-rt.com'],
   ['quintoandar', 'quintoandar.com.br'],
@@ -357,7 +362,7 @@ async function resolveCompany(name) {
  * an upsert mid-scan prepends and shifts every later offset: the old loop here re-read rows it
  * already had and stopped short of the end, silently dropping whichever companies got displaced
  * past the last offset. It never failed, it just quietly returned a short list, which is the worst
- * shape for THIS script — a company missing from the scan is a company missing from the map, and
+ * shape for THIS script: a company missing from the scan is a company missing from the map, and
  * the map is the thing being regenerated to close that exact gap. check-logo-coverage.mjs hit the
  * same race loudly (it asserted an exact row count) and that is what boardScan.ts was written for.
  */

@@ -48,7 +48,12 @@ export interface CandidateEducation {
  * Shape-guarded rather than trusted: parsed_json is jsonb and a hand-edited row can hold anything,
  * and "GPA: first class honours" printed in the education block would be a claim we never read off
  * the page. */
-const GPA_VALUE = /^\d{1,2}(?:\.\d{1,3})?$/;
+/* Up to THREE digits, because a two-digit cap silently deleted the denominator on every
+   percentage-style record. "85/100" printed as "GPA: 85", which reads as an 85 on a 4.0-style
+   scale - a materially different and much better claim than the page made. The /100 and
+   percentage systems are standard across India and the UAE, so this was not an exotic edge case
+   for this product's users. Four digits stays out: that is a year, not a grade. */
+const GPA_VALUE = /^\d{1,3}(?:\.\d{1,3})?$/;
 
 export function educationGpaLine(education: Pick<CandidateEducation, 'gpa' | 'gpa_scale'>): string {
   const value = education.gpa?.trim() ?? '';
@@ -95,6 +100,40 @@ export function academicsOfRecordForResume(
   return out;
 }
 
+/**
+ * `parsed_json.coursework` as the list every reader of it expects, from whatever is actually stored.
+ *
+ * THE CANONICAL SHAPE IS A LIST, and this is the one place that says so. llm/parse.ts emits
+ * `string[]`, lib/submissionEducationGuard.ts compares entry by entry, and
+ * engine/resumeValidate.ts courseworkIsUngrounded() walks the individual course titles to ground a
+ * rendered line against them - none of which a single joined string can serve. The resume's one
+ * line is produced by joining at the END of applyResumePolicy, not by storing it pre-joined.
+ *
+ * A stored string is accepted and split because the review screen edits this as one comma separated
+ * input and, before ISSUE-044, wrote that string straight through. Returns undefined rather than []
+ * for a missing field, because CandidateEducation distinguishes "no coursework on record" from "an
+ * empty list", and academicsOfRecordForResume spreads over this result.
+ *
+ * Commas only. Course titles carry "&" ("Financial Analysis & Valuation") and "and" ("Data
+ * Structures and Object-Oriented Design") inside a single title, so the comma is the only separator
+ * that is not also ordinary content: splitting on "and" would cut that second title in half.
+ */
+export function courseworkFromParsed(value: unknown): string[] | undefined {
+  const raw = typeof value === 'string'
+    ? value.split(',')
+    : Array.isArray(value)
+      ? value.filter((entry): entry is string => typeof entry === 'string')
+      : undefined;
+  if (raw === undefined) return undefined;
+  const courses: string[] = [];
+  for (const candidate of raw) {
+    const course = candidate.trim();
+    if (!course || courses.some((existing) => existing.toLowerCase() === course.toLowerCase())) continue;
+    courses.push(course);
+  }
+  return courses;
+}
+
 /* profiles.parsed_json (+ the academic record that outranks it) -> the education block.
  *
  * ONE function for both generation paths on purpose. /resume/base/stream and /resume/generate build
@@ -128,7 +167,17 @@ export function educationFrom(
     gpa: str(p.gpa),
     gpa_scale: str(p.gpa_scale),
     school_location: str(p.school_location),
-    coursework: Array.isArray(p.coursework) ? p.coursework.filter((c): c is string => typeof c === 'string') : undefined,
+    /* Both shapes, PERMANENTLY, not just until the backfill runs (ISSUE-044).
+     *
+     * This line used to be a bare Array.isArray gate, and a stored string therefore read as
+     * undefined and printed an empty "Relevant coursework" line on every generated resume - the
+     * silent half of the write/read disagreement that PATCH /profile/parsed opened. The write side
+     * is fixed and the corrupted rows are backfilled, so this tolerance has no rows to serve today.
+     * It stays anyway for two reasons: parsed_json is jsonb that a hand-edited row can put anything
+     * in, and the site and API deploy from SEPARATE repos on merge, so there is always a window
+     * where one side is new and the other is not. Reading is the cheap side of that window to be
+     * forgiving on; the strictness that matters is on the write. */
+    coursework: courseworkFromParsed(p.coursework),
     /* LAST, so it wins. See academicsOfRecordForResume. */
     ...academicsOfRecordForResume(applicationRow),
   };
@@ -259,14 +308,23 @@ const ORG_NOISE = new Set([
    employers apart, so "Company 1" and "Company 2" both collapsed to {company} and scored a PERFECT
    1.0 against each other. No threshold on that scale could separate them, which is why this exists
    rather than a tuned constant. */
-function orgTokens(value: string): Set<string> {
+function orgWords(value: string): string[] {
   /* Apostrophes are removed rather than treated as a break, so "St. Jude's" and "St Judes" are the
      same two tokens. Splitting on them instead leaves a stray "s" that counts as a whole identity
      word, which drags an otherwise perfect match down to 0.5 and below the bar. */
-  return new Set(
-    (value.toLowerCase().replace(/['\u2019]/g, '').match(/[a-z0-9]+/g) ?? [])
-      .filter((part) => !ORG_NOISE.has(part)),
-  );
+  return value.toLowerCase().replace(/['\u2019]/g, '').match(/[a-z0-9]+/g) ?? [];
+}
+
+/* STRIPPING NOISE MUST NOT STRIP THE WHOLE NAME. A company called "The Company", "Holdings" or
+   "The Group" is made entirely of the words this list discards, so it reduced to an empty set and
+   scored 0.00 against ITSELF - never matching its own bank row, and silently losing that row's
+   bullets, its entry type and its city. Every one of those failures is invisible: the resume simply
+   comes out thinner.
+   When the filter would empty a name, the unfiltered words are the name. */
+function orgTokens(value: string): Set<string> {
+  const words = orgWords(value);
+  const meaningful = words.filter((part) => !ORG_NOISE.has(part));
+  return new Set(meaningful.length > 0 ? meaningful : words);
 }
 
 function orgNumbers(value: string): Set<string> {
@@ -300,11 +358,7 @@ export function orgScore(generated: string, source: string): number {
      caller's threshold is 0.8 rather than 0.5: "Bank of America" and "Bank of the West" share
      exactly one of two identity words and must not be treated as one employer. */
   const overlap = intersection / Math.min(a.size, b.size);
-  const initialism = (value: string) =>
-    (value.toLowerCase().match(/[a-z0-9]+/g) ?? [])
-      .filter((part) => !ORG_NOISE.has(part))
-      .map((part) => part[0])
-      .join('');
+  const initialism = (value: string) => [...orgTokens(value)].map((part) => part[0]).join('');
   const compactGenerated = generated.toLowerCase().replace(/[^a-z0-9]/g, '');
   const compactSource = source.toLowerCase().replace(/[^a-z0-9]/g, '');
   const acronymMatch =
