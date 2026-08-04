@@ -169,6 +169,18 @@ test('a cover letter failure degrades the run instead of aborting it', () => {
   assert.equal(attentionLines.length, 2, 'both the managed and direct paths must surface the reason');
 });
 
+test('preview evidence blocks broken pages and incomplete form fills before final approval', () => {
+  const runner = routeSource('submissionRunner.ts');
+  assert.match(runner, /function previewContentBlockers\(text: string \| undefined\): string\[\]/);
+  assert.match(runner, /can\(\?:not\|\u0027t\)/);
+  assert.match(runner, /function filledFieldBlockers\(fields: readonly string\[\] \| undefined, packet: SubmissionPacket\): string\[\]/);
+  assert.match(runner, /The filled form did not record an email field/);
+  assert.match(runner, /The filled form did not record a resume upload/);
+  assert.match(runner, /The filled form did not record the applicant name fields/);
+  assert.match(runner, /The filled form did not record the cover letter attachment/);
+  assert.match(runner, /preparationEvidenceBlockers\(\{ text: pageText, filledFields: result\.filledFields \}, packet\)/);
+});
+
 test('the applicant is told what happened, not what the model said', () => {
   const runner = routeSource('submissionRunner.ts');
   const issue = runner.match(/coverLetterIssue: (.*)$/m)?.[1] ?? '';

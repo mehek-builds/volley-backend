@@ -294,6 +294,45 @@ function omitCoverLetter(packet: SubmissionPacket): SubmissionPacket {
   return { ...packet, coverLetter: undefined, coverLetterName: undefined };
 }
 
+function normalizedFilledFields(fields: readonly string[] | undefined): Set<string> {
+  return new Set((fields ?? []).map((field) => field.toLowerCase().replace(/[^a-z0-9]/g, '')));
+}
+
+function filledFieldBlockers(fields: readonly string[] | undefined, packet: SubmissionPacket): string[] {
+  const normalized = normalizedFilledFields(fields);
+  const has = (needle: string) => [...normalized].some((field) => field.includes(needle));
+  const issues: string[] = [];
+  if (!has('email')) issues.push('The filled form did not record an email field.');
+  if (!has('resume')) issues.push('The filled form did not record a resume upload.');
+  if (!has('name') && !(has('firstname') && has('lastname'))) {
+    issues.push('The filled form did not record the applicant name fields.');
+  }
+  if (packet.coverLetter && !has('cover')) {
+    issues.push('The filled form did not record the cover letter attachment.');
+  }
+  return issues;
+}
+
+function previewContentBlockers(text: string | undefined): string[] {
+  const normalized = (text ?? '').toLowerCase();
+  if (!normalized.trim()) return ['The filled form preview did not include readable page text.'];
+  if (
+    /sorry,?\s+but\s+we\s+can(?:not|'t)\s+find\s+that\s+page/.test(normalized)
+    || /\b(?:404|page not found|not found|access denied)\b/.test(normalized)
+    || /\b(?:sign in|log in|login required)\b/.test(normalized)
+  ) {
+    return ['The filled form preview looks like an error, login, or missing page instead of a completed application form.'];
+  }
+  return [];
+}
+
+function preparationEvidenceBlockers(result: { text?: string; filledFields?: string[] }, packet: SubmissionPacket): string[] {
+  return [
+    ...previewContentBlockers(result.text),
+    ...filledFieldBlockers(result.filledFields, packet),
+  ];
+}
+
 /**
  * Build the packet, writing a cover letter first when the portal has somewhere to put one.
  *
@@ -532,7 +571,8 @@ async function prepareManaged(
   // A missing cover letter is worth telling the applicant about, but it is not a blocker: the form
   // is filled and sendable without it, so it must not flip the run out of the safe path.
   const coverLetterAttention = coverLetterOutcome.coverLetterIssue ? [coverLetterOutcome.coverLetterIssue] : [];
-  const safe = blockers.length === 0 && discoveryAttention.length === 0;
+  const evidenceBlockers = preparationEvidenceBlockers(result, packet);
+  const safe = blockers.length === 0 && discoveryAttention.length === 0 && evidenceBlockers.length === 0;
   const review = nextReview(current, {
     ...preparedReviewPatch(authorization, safe),
     submission_run_id: runId,
@@ -541,7 +581,7 @@ async function prepareManaged(
     verification: { status: verificationHandoff ? 'handoff' : 'not_needed' },
     questions: mergedQuestions,
     cover_letter_supported: coverLetterSupported,
-    attention_reason: [...blockers, ...discoveryAttention, ...coverLetterAttention].join('\n') || undefined,
+    attention_reason: [...blockers, ...discoveryAttention, ...evidenceBlockers, ...coverLetterAttention].join('\n') || undefined,
     // No stall write here, deliberately. CAPTCHA_BLOCKER is pushed in exactly one place -
     // fillPortal - and the managed path never calls it, so matching on that string here would be
     // dead code that reads like coverage. The managed path's real challenge signal is the probe in
@@ -704,8 +744,10 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       addRandomSuffix: true,
     });
     const sanitizedBlockers = sanitizeProviderBlockers(result.blockers);
+    const pageText = await page.locator('body').innerText({ timeout: 1_000 }).catch(() => '');
+    const evidenceBlockers = preparationEvidenceBlockers({ text: pageText, filledFields: result.filledFields }, packet);
     const safe = directPreparationIsSafe({
-      blockerCount: sanitizedBlockers.length,
+      blockerCount: sanitizedBlockers.length + evidenceBlockers.length,
       attentionCount: discoveryAttention.length,
       verificationStatus: verification.status,
     });
@@ -730,7 +772,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       // model text. Sending them through it would not have caught the cover-letter leak either,
       // since that message was prose and prose passes straight through.
       attention_reason:
-        [...sanitizedBlockers, ...discoveryAttention, ...coverLetterAttention].join('\n') || undefined,
+        [...sanitizedBlockers, ...discoveryAttention, ...evidenceBlockers, ...coverLetterAttention].join('\n') || undefined,
       // The only path that OBSERVES a challenge on a board nobody had typed as gated, which makes it
       // the one that matters most. Without it the stall is written only for JazzHR and BambooHR,
       // families already known to gate, so the instrumentation could confirm what was already
@@ -782,14 +824,16 @@ async function prepareControlled(
     const packet = await buildPacket(row, true);
     const result = await fillPortal(page, 'controlled_test', packet);
     const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
-    const safe = result.blockers.length === 0;
+    const pageText = await page.locator('body').innerText({ timeout: 1_000 }).catch(() => '');
+    const evidenceBlockers = preparationEvidenceBlockers({ text: pageText, filledFields: result.filledFields }, packet);
+    const safe = result.blockers.length === 0 && evidenceBlockers.length === 0;
     const review = nextReview(current, {
       ...preparedReviewPatch(authorization, safe),
       submission_run_id: runId,
       filled_fields: result.filledFields,
       preview_screenshot_url: `data:image/png;base64,${screenshot.toString('base64')}`,
       verification: { status: 'not_needed' },
-      attention_reason: result.blockers.join('\n') || undefined,
+      attention_reason: [...result.blockers, ...evidenceBlockers].join('\n') || undefined,
       handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
       submission_error: undefined,
     });

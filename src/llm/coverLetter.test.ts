@@ -135,4 +135,3 @@ test('cover-letter validation blocks fabricated candidate metrics', () => {
   const result = validateCoverLetter(body, 'Acme', 'Software Engineer', source);
   assert.ok(result.issues.some((item) => item.includes('82%')));
 });
-
