@@ -278,6 +278,9 @@ about how it connects), **and declares `sslmode=verify-full` when the URL declar
 | no `sslmode` | `{}` | **yes** (was **no** before 2026-08-04) |
 | `?sslmode=disable` | `false` | no TLS, honoured as configured |
 
+`uselibpqcompat=true` is left alone entirely: under it `require` carries real libpq semantics, so
+rewriting it would silently tighten a connection someone deliberately loosened.
+
 **The row that changed is the third.** Verification used to be on only by accident of Neon putting
 `sslmode` in the URL. Dropping that one parameter from the environment would have silently turned
 certificate checking off, with no error, no log line and no failing test. The code now states the
@@ -288,6 +291,12 @@ The `ssl` option is `{ rejectUnauthorized: true }` (`sslOptionForHost`) and is m
 string beats it wherever it parses. It decides only for a connection string `new URL` cannot read (a
 multi-host string, or a password with an unencoded `/`), and there it fails **safe**. It used to
 fail open.
+
+Production was verified against the live environment on 2026-08-04 before this shipped:
+`DATABASE_URL` carries `sslmode=require`, no `uselibpqcompat`, and `DATABASE_DIRECT_URL` is unset —
+so production sits on the first row and nothing about how it connects changed. The migration
+scripts in `scripts/` were updated to match; `check-schema-drift.mjs` in particular runs against the
+real database before every schema change, so it is the last place that should be the loose one.
 
 An earlier version of this section, and of the code, claimed the explicit `ssl` option won and
 therefore **deleted** `sslmode`. That was backwards and would have ended certificate verification on

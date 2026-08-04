@@ -18,6 +18,10 @@ const ALIASED_SSL_MODES = new Set(['require', 'prefer', 'verify-ca']);
  *
  * TWO THINGS THIS DOES, and they were separate fixes a few hours apart.
  *
+ * `uselibpqcompat=true` is left entirely alone, and `sslmode=disable` is honoured. Both are
+ * deliberate choices where they appear, and a database config that ignores what it was told is
+ * worse than one that is loose.
+ *
  * FIRST, IT REWRITES THE ALIASES. DEPLOY.md tells you to use a Neon pooled URL and those carry
  * `?sslmode=require`, so on every cold start pg-connection-string wrote a multi-line SECURITY
  * WARNING to stderr saying `require` is an alias for `verify-full` today and adopts weaker libpq
@@ -45,7 +49,9 @@ const ALIASED_SSL_MODES = new Set(['require', 'prefer', 'verify-ca']);
  *   no sslmode               {rejectUnauthorized:false}   NOT  {}                     verified
  *   ?sslmode=disable         false                  no TLS    false                  no TLS
  *
- * Production was already on the first row, so this changes nothing about how it connects today.
+ * Production was already on the first row - confirmed by reading the live environment on
+ * 2026-08-04, `DATABASE_URL` carries `sslmode=require`, no `uselibpqcompat`, and
+ * `DATABASE_DIRECT_URL` is unset - so this changes nothing about how it connects today.
  * What it removes is the third row: verification was on by ACCIDENT of Neon putting `sslmode` in
  * the URL, and dropping that one parameter from the environment would have silently turned
  * certificate checking off with no error, no log line, and no test failing. Now the code states the
@@ -77,6 +83,12 @@ export function withVerifiedSslMode(value: string): string {
     // applies on that path, and it now fails SAFE rather than open.
     return value;
   }
+  // `uselibpqcompat=true` is the one place the alias rewrite is NOT neutral. Under it pg gives
+  // `require` real libpq semantics - `{rejectUnauthorized:false}` - while `verify-full` still means
+  // verify, so rewriting would silently TIGHTEN a connection someone deliberately loosened. The
+  // direction is safe and the claim "this changes nothing about how it connects" would stop being
+  // true, which is worse: honour it, exactly as `sslmode=disable` is honoured below.
+  if (/[?&]uselibpqcompat=(true|1|yes|on)\b/i.test(value)) return value;
   let declared = false;
   // Case-insensitive on BOTH halves: the guard matches `?SSLMODE=` while `searchParams` is
   // case-sensitive, so an uppercase key would otherwise be found and left unchanged.

@@ -8,7 +8,8 @@ if (!connectionString) {
   process.exit(2);
 }
 
-const client = new pg.Client({ connectionString, ssl: { rejectUnauthorized: false } });
+// Verification on, matching sslOptionForHost in src/db/index.ts. See DEPLOY.md's TLS section.
+const client = new pg.Client({ connectionString, ssl: { rejectUnauthorized: true } });
 try {
   await client.connect();
   await client.query('alter table targeting add column if not exists locations jsonb');

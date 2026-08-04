@@ -78,7 +78,10 @@ async function main() {
     process.exit(2);
   }
 
-  const client = new pg.Client({ connectionString, ssl: { rejectUnauthorized: false } });
+  // Verification on, matching sslOptionForHost in src/db/index.ts. This one runs against the REAL
+  // database before every schema change (DEPLOY.md), so it is the last place that should be the
+  // loose one.
+  const client = new pg.Client({ connectionString, ssl: { rejectUnauthorized: true } });
   await client.connect();
 
   const missing = [];

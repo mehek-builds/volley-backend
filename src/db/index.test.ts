@@ -151,10 +151,25 @@ describe('the database connection verifies certificates by intent, not by accide
     ]) {
       const before = parseConnectionString(raw);
       const after = parseConnectionString(withVerifiedSslMode(raw));
-      for (const field of ['user', 'password', 'host', 'port', 'database'] as const) {
+      // `options` is in this list because it is the field the rewrite actually perturbs:
+      // URLSearchParams.toString() emits `+` for a space, so `-c%20search_path` becomes
+      // `-c+search_path`. It survives only because pg reads the query through searchParams, which
+      // decodes `+` back. The earlier version of this test fed an `options` string through and then
+      // did not compare it, so the one hazard it was reaching for was the one it did not check.
+      for (const field of ['user', 'password', 'host', 'port', 'database', 'options'] as const) {
         assert.equal(String(after[field]), String(before[field]), `${field} must survive the rewrite`);
       }
     }
+  });
+
+  test('uselibpqcompat is honoured, because under it the rewrite would not be neutral', () => {
+    // Under uselibpqcompat, `require` means what libpq means and resolves to
+    // {rejectUnauthorized:false}, while `verify-full` still verifies. Rewriting would tighten a
+    // connection someone deliberately loosened, and would falsify the "changes nothing" claim the
+    // whole change rests on.
+    const raw = 'postgresql://u:p@h.neon.tech/d?uselibpqcompat=true&sslmode=require';
+    assert.equal(withVerifiedSslMode(raw), raw);
+    assert.deepEqual(resolved(raw), { rejectUnauthorized: false }, 'and the caller gets what they asked for');
   });
 
   test('sslmode=disable is honoured, not overridden', () => {
