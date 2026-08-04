@@ -1852,6 +1852,17 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       employment_type: z
         .enum(['Full-time', 'Part-time', 'Internship', 'Apprenticeship', 'Contract'])
         .optional(),
+      /* Adds company_counts: EVERY company with its live row count, for measuring the board rather
+         than for filling a dropdown. Off by default, so the response the website reads is unchanged.
+
+         This exists because the only way to measure per-company coverage used to be paging the
+         whole board through GET /jobs, which returns full rows including 600 characters of
+         description each. That is ~17 MB per pass for two columns' worth of information, and on
+         2026-08-04 the project exhausted its Neon data transfer quota, which took every
+         database-backed route down with it (see scripts/check-logo-coverage.mjs). One grouped
+         count is ~15 KB and is also a single consistent snapshot, so the reading cannot be skewed
+         by the poller writing underneath a paged scan. */
+      counts: z.enum(['true', 'false']).optional(),
     }).safeParse(request.query).data;
     const sponsorOnly = (await accountRequiresSponsor(request.jwtPayload?.userId))
       || facetQuery?.sponsor_only === 'true';
@@ -1874,6 +1885,19 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       .orderBy(sql`count(*) desc`)
       .limit(TOP);
 
+    /* Deliberately a SECOND query rather than dropping the limit above and slicing in JS. The
+       dropdown path runs on every board visit and the measurement path runs from CI, so the common
+       case keeps reading exactly 50 rows and only a caller that asks pays for the full grouping. */
+    const companyCounts = facetQuery?.counts === 'true'
+      ? await db
+        .select({ v: monitored_jobs.company_name, n: sql<number>`count(*)::int` })
+        .from(monitored_jobs)
+        .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+        .where(where)
+        .groupBy(monitored_jobs.company_name)
+        .orderBy(sql`count(*) desc`)
+      : null;
+
     /* Cities, not location strings.
        An employer's `location` is whatever they typed: often a list ("Boston;
        New York City; Pennsylvania"), often carrying a country ("San Mateo, CA,
@@ -1894,6 +1918,17 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     return applyBoardCacheHeaders(request, reply).send({
       companies: companies.map((r) => r.v).filter(Boolean),
       locations: rankCities(locationRows, TOP),
+      /* Only present when asked for, so the default response stays byte-identical for the website.
+         `rows` is what the board actually holds per employer, which is what a coverage figure has
+         to be weighted by: one employer with 300 postings matters 300 times more than one with a
+         single posting. */
+      ...(companyCounts
+        ? {
+          company_counts: companyCounts
+            .filter((r) => r.v)
+            .map((r) => ({ company_name: r.v, rows: r.n })),
+        }
+        : {}),
       /* `titles` is gone on purpose. It returned the board's most common RAW
          posting titles — "Senior Product Manager - Network Path" — which is not
          what a person types into a field labelled Job title. The board now
