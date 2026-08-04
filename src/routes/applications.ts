@@ -32,7 +32,7 @@ import { declaredSkillsList } from './profile';
 import { processSubmissionApplication } from './submissionRunner';
 import { isRefusedQuestion } from '../lib/questionDiscovery';
 import { submitRequestDisposition } from '../lib/submissionSafety';
-import { detectPortal } from '../lib/portalSubmission';
+import { detectPortal, isPortalSupported } from '../lib/portalSubmission';
 import { dailySubmissionCap, withinDailyCap } from '../lib/submissionQueue';
 import { canStartExtensionSubmission, extensionOutcomePatch, isSafeExtensionReceiptUrl } from '../lib/extensionSubmission';
 import {
@@ -462,6 +462,18 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const sensitive = parsed.data.questions.find((question) => isRefusedQuestion(question.question));
       if (sensitive) {
         return reply.status(422).send({ error: `Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}` });
+      }
+      // Refused here, before anything is claimed or a browser is booked, because the answer has
+      // been available since the packet was created. Without this the run started, drove a managed
+      // browser for minutes, and only then failed on detectPortal's throw - which is how nine of
+      // one account's ten failures came to be multi-minute waits for a verdict we already had. A
+      // client that respects portal_supported never reaches this line; it exists because a
+      // client-side check is not an enforcement point.
+      if (current.portal_url && !isPortalSupported(current.portal_url)) {
+        return reply.status(422).send({
+          error: 'Litos cannot fill in this company’s application page yet. Your tailored resume is ready to download, so you can apply on their site.',
+          code: 'PORTAL_NOT_SUPPORTED',
+        });
       }
       const controlledTest = process.env.LITOS_ENABLE_TEST_PORTAL === 'true'
         && current.portal_url
