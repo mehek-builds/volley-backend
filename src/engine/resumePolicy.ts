@@ -144,6 +144,11 @@ export function deriveCandidateContext(
   };
 }
 
+/* The bar for "this is the same employer", defined once. Two call sites depend on it - which bank
+   row an entry inherits, and whether that row's city is printed - and a second hard-coded copy is a
+   drift waiting to happen. */
+export const SAME_EMPLOYER_SCORE = 0.8;
+
 /* Words that carry no identity: connectors and the legal or generic wrapper a name is dressed in.
    Stripping them is what lets "Nike Inc." match "Nike" and "Bain & Company" match "Bain", and it
    is also what finally separates "Company 1" from "Company 2" - once the generic head is gone,
@@ -161,7 +166,13 @@ const ORG_NOISE = new Set([
    1.0 against each other. No threshold on that scale could separate them, which is why this exists
    rather than a tuned constant. */
 function orgTokens(value: string): Set<string> {
-  return new Set((value.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter((part) => !ORG_NOISE.has(part)));
+  /* Apostrophes are removed rather than treated as a break, so "St. Jude's" and "St Judes" are the
+     same two tokens. Splitting on them instead leaves a stray "s" that counts as a whole identity
+     word, which drags an otherwise perfect match down to 0.5 and below the bar. */
+  return new Set(
+    (value.toLowerCase().replace(/['\u2019]/g, '').match(/[a-z0-9]+/g) ?? [])
+      .filter((part) => !ORG_NOISE.has(part)),
+  );
 }
 
 function orgNumbers(value: string): Set<string> {
@@ -207,16 +218,6 @@ export function orgScore(generated: string, source: string): number {
   return acronymMatch ? Math.max(overlap, 1) : overlap;
 }
 
-/* Is this the SAME employer, not merely a close one. Punctuation, spacing and case are noise ("St.
-   Jude's" vs "St Judes"); everything else has to agree, including the digits and initials orgScore
-   discards. Used only to gate a printed location, where a near-miss is a false factual claim rather
-   than a slightly worse bullet. */
-export function sameOrganization(a: string, b: string): boolean {
-  const compact = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '');
-  const left = compact(a);
-  return left.length > 0 && left === compact(b);
-}
-
 function matchingBankEntry(entry: ResumeSpec['experience'][number], bank: ExperienceBankEntry[]) {
   const generatedTitle = tokens(entry.title ?? '');
   const generatedYears = new Set((entry.date_range ?? '').match(/\b(?:19|20)\d{2}\b/g) ?? []);
@@ -237,7 +238,7 @@ function matchingBankEntry(entry: ResumeSpec['experience'][number], bank: Experi
        West", and every two-word company shared a threshold with its nearest unrelated neighbour.
        Containment means a legitimately abbreviated org still scores 1.0, so raising this costs the
        honest cases nothing and only rejects the half-matches. */
-    .filter(({ organization }) => organization >= 0.8)
+    .filter(({ organization }) => organization >= SAME_EMPLOYER_SCORE)
     .sort((a, b) => b.score - a.score || b.source.org.length - a.source.org.length)[0]?.source;
 }
 
@@ -316,23 +317,15 @@ export function applyResumePolicy(
            source of a fact about where the student worked. It selects and phrases evidence, it does
            not author the record.
 
-           HELD TO A HIGHER BAR THAN THE REST OF THE MATCH, deliberately. matchingBankEntry accepts
-           an organisation overlap of 0.5, which is right for pulling bullets - half a name plus a
-           title and a shared year is ample evidence it is the same job. It is not ample evidence
-           about a CITY. "Company 1" and "Company 2" score exactly 0.5 against each other, as would
-           "Bank of America" and "Bank of the West", and the cost of that near-miss is different in
-           kind here: a wrong bullet is the student's own text on the wrong row, while a wrong city
-           is a false statement about where they worked, printed in the one column an employer scans
-           to check it. Below the bar the line simply prints no place, which is what the resume
-           looked like yesterday and is never wrong.
-
-           THE BAR IS IDENTITY, not a high score, and orgScore is the reason. tokens() drops
-           single characters, so "Company 1" and "Company 2" both reduce to {company} and score a
-           PERFECT 1.0 against each other - no threshold on that scale can separate them. The same
-           holds for "Site 1"/"Site 2" and any pair differing only by a number or initial. Matching
-           on the normalised name itself is the only test that actually answers "is this the same
-           employer", which is the question a printed city depends on. */
-        location: sameOrganization(entry.org, source?.org ?? '') ? source?.location ?? '' : '',
+           NO SEPARATE GATE ANY MORE, and that is the point of the change rather than a relaxation
+           of the rule. This used to demand exact name equality, because orgScore could not be
+           trusted with a factual claim - it scored "Company 1" against "Company 2" at a perfect
+           1.0. Now that identity matching is real, matchingBankEntry has ALREADY refused anything
+           below SAME_EMPLOYER_SCORE, so a `source` in hand is one that cleared the same bar this
+           check would re-apply. Exact equality was costing the honest case instead: the model
+           writes "Traeco" for a row reading "Traeco - AI Agent Cost Infrastructure", and the city
+           silently vanished from a resume for a spelling difference. */
+        location: source?.location ?? '',
         bullets,
       };
     })

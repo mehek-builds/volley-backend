@@ -4,7 +4,7 @@ import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { extractPdfText } from '../lib/pdfText';
 import { validatePdfLayout, validateResumeSpec } from './resumeValidate';
-import { applyResumePolicy, deriveCandidateContext, educationGpaLine, enforceExperienceBulletFloor, orgScore, sameOrganization } from './resumePolicy';
+import { applyResumePolicy, deriveCandidateContext, educationGpaLine, enforceExperienceBulletFloor, orgScore, SAME_EMPLOYER_SCORE } from './resumePolicy';
 import { planResumeLayout, renderResumePdf } from './resumeRender';
 
 function bankEntry(
@@ -421,18 +421,31 @@ test('a bank row with no location prints none, rather than inheriting a neighbou
   assert.equal(out.experience[0].location, '');
 });
 
-/* The specific near-miss that motivated identity matching. orgScore cannot see the difference:
-   tokens() drops single characters, so both names reduce to {company} and score a perfect 1.0. */
+/* These pairs used to be guarded by a separate exact-name check on the location field. That check
+   is gone: matchingBankEntry now refuses anything below SAME_EMPLOYER_SCORE, so the same pairs are
+   rejected one step earlier and by one rule instead of two. The assertions move to orgScore rather
+   than disappearing, because the pairs are the point, not the function that answered for them. */
 test('organisations differing only by a number are not the same employer', () => {
-  assert.equal(sameOrganization('Company 1', 'Company 2'), false);
-  assert.equal(sameOrganization('Site 1', 'Site 2'), false);
-  assert.equal(sameOrganization('Bank of America', 'Bank of the West'), false);
+  assert.ok(orgScore('Company 1', 'Company 2') < SAME_EMPLOYER_SCORE);
+  assert.ok(orgScore('Site 1', 'Site 2') < SAME_EMPLOYER_SCORE);
+  assert.ok(orgScore('Bank of America', 'Bank of the West') < SAME_EMPLOYER_SCORE);
 });
 
 test('punctuation, spacing and case are noise, not a different employer', () => {
-  assert.equal(sameOrganization("St. Jude's", 'St Judes'), true);
-  assert.equal(sameOrganization('TRI COAST CAPITAL', 'Tri Coast Capital'), true);
-  assert.equal(sameOrganization('', ''), false);
+  assert.ok(orgScore("St. Jude's", 'St Judes') >= SAME_EMPLOYER_SCORE);
+  assert.ok(orgScore('TRI COAST CAPITAL', 'Tri Coast Capital') >= SAME_EMPLOYER_SCORE);
+  assert.equal(orgScore('', ''), 0);
+});
+
+/* The honest case the old exact gate was quietly costing: an abbreviated organisation kept its
+   bullets and its type but lost its city, for a spelling difference. */
+test('an abbreviated organisation keeps its location', () => {
+  const spec = rawSpec();
+  spec.experience = [{ ...spec.experience[0], org: 'Traeco', title: 'AI Engineer', date_range: '2026', bullets: spec.experience[0].bullets }];
+  const bank = [{ ...BANK[0], org: 'Traeco - AI Agent Cost Infrastructure', title: 'AI Engineer',
+    date_range: '2026', location: 'Los Angeles, CA', bullet_variants: spec.experience[0].bullets }] as typeof BANK;
+  const { spec: out } = applyResumePolicy(spec, { school: 'USC' }, bank, 'engineering');
+  assert.equal(out.experience[0].location, 'Los Angeles, CA');
 });
 
 /* orgScore decides which bank row a generated entry belongs to, which is what carries the
