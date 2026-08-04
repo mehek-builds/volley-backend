@@ -597,8 +597,18 @@ export function pollingQueueStatus(remainingSources: number) {
  * RANKING_POOL matching postings, the next-newest is not considered for ranking however well it
  * fits. Filters are how a student narrows the pool, and the list has to SAY it stopped ranking
  * rather than quietly reporting no more results.
+ *
+ * 300 TO 150 (2026-08-04), AND THE BUDGET IS NO LONGER EVENT-LOOP TIME. Everything above was
+ * reasoned about CPU, which the cache made affordable. The binding constraint turned out to be a
+ * different one: this number also multiplies the phase 2 query, which reads capped description text
+ * for every pooled row, and that read exhausted Neon's 5 GB/month free-tier transfer and suspended
+ * the compute. Bytes off Neon, not milliseconds on the event loop, is what 150 is buying back.
+ *
+ * 150 still comfortably exceeds what anyone pages through: RANKED_PAGE_WINDOW is 24, so this is six
+ * full pages of ranked results. `pool_exhausted` already exists to tell the truth at the boundary,
+ * so the honest failure mode of a smaller pool was built long before it was needed.
  */
-export const RANKING_POOL = 300;
+export const RANKING_POOL = 150;
 
 /**
  * How much of a posting gets scored.
@@ -612,8 +622,25 @@ export const RANKING_POOL = 300;
  * 20k characters is well past where a posting states its requirements (the whole reason this
  * scores the full column instead of the 600-char preview) and it bounds both the transfer and the
  * scoring pass. POST /jd-match already caps its input at 60k for the same reason.
+ *
+ * 20k TO 6k (2026-08-04). "Well past" was the problem. The cap was set to a number that could not
+ * plausibly cut anything off, which meant it was not really bounding the transfer at all: at
+ * RANKING_POOL rows this query was the single largest reader of bytes out of Neon in the whole
+ * backend, and it exhausted the free tier's monthly transfer allowance and suspended the compute.
+ *
+ * WHY 6k AND NOT LOWER. Requirements sit after a preamble, and how long that preamble runs is the
+ * employer's choice, not something this codebase controls. 4k was considered and rejected: the
+ * database was suspended when this was written, so there was no way to measure where requirements
+ * actually begin across the real corpus, and picking a boundary that tight on an unmeasured
+ * distribution trades a cost problem for a silent ranking-quality one. 6k is a 3.3x cut that keeps
+ * a wide margin over any posting inspected by hand.
+ *
+ * This cap is a stopgap and should stay one. Reading a prefix of raw employer HTML-derived text is
+ * a crude way to find requirements at any length. `description_digest` is the real fix: it is built
+ * once at poll time, and once every row has one this cap only governs the fallback path for rows
+ * polled before the column existed. Lower this further only against a measurement, not a guess.
  */
-export const SCORING_CHARS = 20_000;
+export const SCORING_CHARS = 6_000;
 
 /**
  * How many candidate rows are read before the pool is chosen from them.
@@ -636,11 +663,17 @@ const CANDIDATE_SCAN = 3_000;
  * for the best-fitting job in a 7,115-posting board was being shown the best-fitting job at one
  * company. No unit test could have caught it; it only shows up against real data.
  *
- * 6 is RANKING_POOL / 50, so the pool spreads across roughly fifty employers before the cap starts
+ * 3 is RANKING_POOL / 50, so the pool spreads across roughly fifty employers before the cap starts
  * binding, while still letting a genuinely large employer contribute a handful of roles. A student
  * who wants more from one company can search for it, which is what the company filter is for.
+ *
+ * IT IS A RATIO, NOT A CONSTANT, which is why it moved from 6 to 3 when RANKING_POOL halved
+ * (2026-08-04). Fifty employers is the property worth holding; 6 was only ever the number that
+ * produced it at a pool of 300. Leaving it at 6 while halving the pool would have quietly cut the
+ * spread to twenty-five employers, which is most of the way back to the Datadog board this cap was
+ * written to prevent, and no test above would have failed.
  */
-const PER_COMPANY_CAP = 6;
+export const PER_COMPANY_CAP = 3;
 
 /* Two or three, Mehek's rule, and three is the generous end of it. Measured against a 24-row page:
    three of anything is noticeable, four reads as a takeover. RANKED_PAGE_WINDOW is the page size the
