@@ -190,8 +190,19 @@ function submitButtonLocator(onClick: (label: string) => void, labels = ['Submit
     evaluate: async (fn: (node: unknown) => string) => fn({
       innerText: label,
       disabled: false,
-      getAttribute: (name: string) => (name === 'aria-hidden' ? null : null),
+      tagName: 'BUTTON',
+      type: '',
+      value: '',
+      title: '',
+      getAttribute: () => null,
       getClientRects: () => ({ length: 1 }),
+      /* READ_CONTROL_LABEL walks ancestors for aria-hidden and asks the view for computed
+         visibility, so a node shape without these throws before it ever reads the label. */
+      parentElement: null,
+      ownerDocument: {
+        defaultView: { getComputedStyle: () => ({ visibility: 'visible' }) },
+        getElementById: () => null,
+      },
     }),
     click: async () => { onClick(label); },
     dispose: async () => undefined,

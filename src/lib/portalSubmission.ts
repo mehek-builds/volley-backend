@@ -1593,14 +1593,19 @@ export class CaptchaUnresolvedError extends Error {
  * Matched on the WHOLE label, anchored, so "apply" as a preposition inside a longer sentence cannot
  * sneak past: it is the shape "<verb> with|using|via <somebody>" that gives these away. */
 const THIRD_PARTY_HANDOFF =
-  /\b(?:apply|autofill|sign\s?in|log\s?in|continue|register|import)\b(?:\s+\w+){0,2}\s+(?:with|using|via|from)\b|\bquick apply\b|\bone[-\s]?click apply\b/i;
+  /\b(?:apply|submit|send|autofill|sign\s?in|log\s?in|continue|register|import)\b(?:\s+\w+){0,2}\s+(?:with|using|via|from)\b|\bquick apply\b|\bone[-\s]?click apply\b|\bpowered\s+by\b/i;
 
 /* A SECOND, BLUNTER TEST, because the verb-shape one is escapable. "Apply now with LinkedIn" is a
    shipped label variant and the word between the verb and "with" defeated the first pattern - while
    "apply now" is itself a legitimate submit label, so it sailed through into the eligible pool.
    Naming the providers outright cannot be worded around: no employer's own submit button carries a
    job-board's name. */
-const PROVIDER = 'linkedin|indeed|seek|glassdoor|ziprecruiter|monster|xing|stepstone|google|facebook|github|apple|greenhouse|workday';
+/* HANDSHAKE FIRST, because it is the one that matters most here: it is the dominant platform for
+   the students this product is for, and "Submit with your Handshake profile" passed both filters -
+   'submit' was not a handoff verb and Handshake was not a named provider. */
+const PROVIDER = 'handshake|symplicity|linkedin|indeed|seek|glassdoor|ziprecruiter|monster|xing'
+  + '|stepstone|google|facebook|github|apple|greenhouse|workday|workable|ashby|smartrecruiters'
+  + '|okta|microsoft|sso';
 /* POSITIONAL, not "anywhere in the label". Several of these words are also employer names, and a
    button reading "Submit your application to Apple" is a real submit on a real careers page. Only
    a provider in a HANDOFF position gives the control away: after with/using/via/from, or directly
@@ -1617,7 +1622,11 @@ const HANDOFF_PROVIDER = new RegExp(
 /** Names the application outright. The strongest thing a submit control can say. */
 const APPLICATION_SUBMIT = /\bsubmit\s+(?:your\s+|my\s+|the\s+)?application\b|\bsend\s+(?:your\s+|my\s+)?application\b/i;
 /** Help-desk widgets that also say "submit" and also sit at the foot of the page. */
-const SUPPORT_WIDGET = /\bfeedback\b|\ba request\b|\bticket\b|\bcomment\b|\bsearch\b|\breport\b/i;
+/* A WORD LIST, not a list of exact phrasings. "Submit a request" was covered only because that
+   literal string happened to be in it; "Submit a support request", "Submit your question" and
+   "Submit an issue" all walked straight through and then won last-wins over the real control. */
+const SUPPORT_WIDGET =
+  /\b(?:feedback|request|ticket|comment|search|report|question|issue|review|rating|survey|contact|bug)\b/i;
 
 const SUBMIT_LABEL =
   /\bsubmit\b|\bsend (?:my )?application\b|^\s*apply\s*$|\bapply now\b|\bfinish (?:and|&) apply\b/i;
@@ -1655,7 +1664,12 @@ export function chooseSubmitControl(labels: string[]): number | null {
      that names the application outright is the strongest signal a control can give. */
   const application = clean.filter(({ label }) => APPLICATION_SUBMIT.test(label));
   const explicit = clean.filter(({ label }) => /\bsubmit\b/i.test(label));
-  const pool = application.length > 0 ? application : explicit.length > 0 ? explicit : clean;
+  /* And a third rung below those: "Apply now" is a primary control, a bare "Apply" is as often a
+     sticky footer or a card link. Without this, last-wins prefers whichever happens to sit lower. */
+  const applyNow = clean.filter(({ label }) => /\bapply now\b/i.test(label));
+  const pool = application.length > 0 ? application
+    : explicit.length > 0 ? explicit
+      : applyNow.length > 0 ? applyNow : clean;
   return pool[pool.length - 1]!.index;
 }
 
@@ -1711,6 +1725,18 @@ export const READ_CONTROL_LABEL = (node: unknown) => {
   if (el.getAttribute('aria-disabled') === 'true') return '';
   if (el.getAttribute('aria-hidden') === 'true') return '';
   if (el.getClientRects().length === 0) return '';
+  /* getClientRects() is non-empty for visibility:hidden, and aria-hidden hides a whole SUBTREE.
+     getByRole excluded both; a raw selector plus a self-only check does not, so a responsive
+     duplicate hidden either way still reads as a perfectly good "Submit application". */
+  const view = (node as unknown as { ownerDocument: { defaultView: {
+    getComputedStyle(e: unknown): { visibility: string } } } }).ownerDocument.defaultView;
+  if (view.getComputedStyle(node).visibility === 'hidden') return '';
+  let parent = (node as unknown as { parentElement: unknown }).parentElement as {
+    getAttribute(name: string): string | null; parentElement: unknown } | null;
+  while (parent) {
+    if (parent.getAttribute('aria-hidden') === 'true') return '';
+    parent = parent.parentElement as typeof parent;
+  }
   const labelledBy = el.getAttribute('aria-labelledby');
   const referenced = labelledBy
     ? (node as unknown as { ownerDocument: { getElementById(id: string): { innerText?: string } | null } })
@@ -1739,6 +1765,13 @@ export async function clickFinalSubmit(page: Page): Promise<void> {
      which on these boards is "Apply with LinkedIn" at index 0. A handle references ONE node and
      throws if it detaches, which is the failure we want. */
   let handles: Awaited<ReturnType<ReturnType<Page['locator']>['elementHandles']>> = [];
+  /* Flipped immediately before the click, and read in the catch below. Everything up to that point
+     is inspection: reading labels, probing for a challenge. If any of it throws - an SPA re-render
+     destroying the execution context mid-read is the likely one, and it is the same re-render the
+     retry exists to ride out - then no click happened, and a plain Error would reach fail() as
+     neither captcha nor no-control and take the uncertainAfterClaim branch: "the final submission
+     was attempted... check the portal or your email", for a run that never pressed anything. */
+  let clicked = false;
   try {
     handles = await page.locator(SUBMIT_CANDIDATE_SELECTOR).elementHandles();
     let labels = await Promise.all(handles.map((handle) => handle.evaluate(READ_CONTROL_LABEL)));
@@ -1790,8 +1823,17 @@ export async function clickFinalSubmit(page: Page): Promise<void> {
         `The submit button changed to "${finalLabel}" before it could be pressed`,
       );
     }
+    clicked = true;
     await button.click();
     await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => undefined);
+  } catch (error) {
+    if (!clicked && !(error instanceof CaptchaUnresolvedError)
+      && !(error instanceof NoSubmitControlError)) {
+      throw new NoSubmitControlError(
+        `Litos could not reach the submit button: ${(error as Error)?.message ?? 'unknown error'}`,
+      );
+    }
+    throw error;
   } finally {
     /* EVERY path, including the two throws above and a click that times out. Disposal was on three
        of six exits before; the browser is closed by the caller either way, so this is hygiene

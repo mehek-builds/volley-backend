@@ -17,6 +17,7 @@ import {
   portalHandoffReason,
   readManagedReceipt,
   chooseSubmitControl,
+  READ_CONTROL_LABEL,
 } from './portalSubmission';
 import { POLLABLE_JOB_BOARDS } from './jobMonitor';
 
@@ -1112,4 +1113,107 @@ test('a help-desk widget is never pressed, even when it is the only submit-ish c
   assert.equal(chooseSubmitControl(['Submit a request']), null,
     'a page whose only submit-ish control is a help desk has no submit control');
   assert.equal(chooseSubmitControl(['Submit feedback']), null);
+});
+
+test('a handoff to a platform we do not name by hand is still a handoff', () => {
+  /* Pins THIRD_PARTY_HANDOFF specifically. The previous load-bearing test named a provider in every
+     label, so deleting THIRD_PARTY_HANDOFF alone left the suite green and only HANDOFF_PROVIDER was
+     actually covered. No label here names a listed provider, so the verb-shape rule is the only
+     thing that can reject them. */
+  for (const label of [
+    'Apply now with Handshake',
+    'Apply now using Symplicity',
+    'Submit application with your university account',
+    'Submit now via our partner',
+  ]) {
+    assert.equal(chooseSubmitControl([label]), null, `${label} must not be pressed`);
+  }
+});
+
+test('a provider named far from the verb is still a handoff', () => {
+  /* Pins HANDOFF_PROVIDER specifically. Once "submit" became a handoff verb, every provider label
+     in the other tests was caught by the verb-shape rule instead, so deleting HANDOFF_PROVIDER left
+     the suite green. These put enough words between the verb and the preposition that only the
+     provider list can reject them. */
+  for (const label of [
+    'Submit your saved candidate profile with Handshake',
+    'Submit the completed application form with LinkedIn',
+  ]) {
+    assert.equal(chooseSubmitControl([label]), null, `${label} must not be pressed`);
+  }
+  // And a branding tail, which names no verb at all.
+  assert.equal(chooseSubmitControl(['Apply now - powered by Handshake']), null);
+});
+
+test('the student platforms are named, because those are the ones our users meet', () => {
+  /* "Submit with your Handshake profile" passed BOTH filters: submit was not a handoff verb and
+     Handshake was not a named provider. Handshake is the dominant platform for the students this
+     product is for, so that was the worst possible gap to leave. */
+  for (const label of [
+    'Submit with your Handshake profile',
+    'Submit application via Workable',
+    'Submit application with SSO',
+    'Apply with Symplicity',
+  ]) {
+    assert.equal(chooseSubmitControl([label]), null, `${label} must not be pressed`);
+  }
+});
+
+test('help-desk wording is matched by word, not by exact phrase', () => {
+  for (const widget of [
+    'Submit a support request', 'Submit your question', 'Submit an issue',
+    'Submit review', 'Submit rating', 'Submit a bug report',
+  ]) {
+    assert.equal(chooseSubmitControl(['Apply now', widget]), 0, `${widget} must not win`);
+    assert.equal(chooseSubmitControl([widget]), null, `${widget} alone is not a submit control`);
+  }
+});
+
+test('a primary "Apply now" outranks a bare footer "Apply"', () => {
+  assert.equal(chooseSubmitControl(['Apply now', 'Apply']), 0);
+  assert.equal(chooseSubmitControl(['Apply', 'Apply now']), 1);
+});
+
+test('READ_CONTROL_LABEL reads the element, and the tag gate is the load-bearing part', () => {
+  /* Tested DIRECTLY, because every previous test sat downstream of the reader and would have
+     passed unchanged if it regressed to calling every bare <button> "Submit". */
+  const node = (over: Record<string, unknown>) => ({
+    innerText: '', value: '', title: '', disabled: false, type: '', tagName: 'BUTTON',
+    getAttribute: (name: string) => (over[name] as string | undefined) ?? null,
+    getClientRects: () => ({ length: 1 }),
+    parentElement: null,
+    ownerDocument: {
+      defaultView: { getComputedStyle: () => ({ visibility: 'visible' }) },
+      getElementById: () => null,
+    },
+    ...over,
+  });
+
+  // THE headline fix: HTMLButtonElement.type defaults to 'submit' and value to ''.
+  assert.equal(READ_CONTROL_LABEL(node({ tagName: 'BUTTON', type: 'submit' })), '',
+    'a text-free icon button is not labelled "Submit"');
+  // The case the UA default exists for.
+  assert.equal(READ_CONTROL_LABEL(node({ tagName: 'INPUT', type: 'submit' })), 'Submit');
+  // input[type=image] takes its accessible name from alt.
+  assert.equal(READ_CONTROL_LABEL(node({ tagName: 'INPUT', type: 'image', alt: 'Submit application' })),
+    'Submit application');
+  // aria-disabled is the only disabled a [role=button] div can express.
+  assert.equal(READ_CONTROL_LABEL(node({
+    tagName: 'DIV', innerText: 'Submit application', 'aria-disabled': 'true',
+  })), '');
+  // visibility:hidden keeps its client rects, so it needs its own check.
+  assert.equal(READ_CONTROL_LABEL({
+    ...node({ tagName: 'BUTTON', innerText: 'Submit application' }),
+    ownerDocument: {
+      defaultView: { getComputedStyle: () => ({ visibility: 'hidden' }) },
+      getElementById: () => null,
+    },
+  }), '');
+  // aria-hidden hides a whole subtree, not just the node carrying it.
+  assert.equal(READ_CONTROL_LABEL({
+    ...node({ tagName: 'BUTTON', innerText: 'Submit application' }),
+    parentElement: { getAttribute: (n: string) => (n === 'aria-hidden' ? 'true' : null), parentElement: null },
+  }), '');
+  // And the ordinary case still reads.
+  assert.equal(READ_CONTROL_LABEL(node({ innerText: 'Submit application' })), 'Submit application');
 });
