@@ -189,7 +189,69 @@ const HEADING_PATTERNS: Array<{ kind: SectionKind; re: RegExp }> = [
   // its noise classification. The possessive is the employer describing the job; the bare pronoun
   // is the employer describing the reader. The same `\b` keeps every employer whose name starts
   // with those letters out: "About Youth Programs", "About Yousign", all still noise.
-  { kind: 'noise', re: new RegExp(String.raw`^about\b(?!\s+${SECOND_PERSON_SUBJECT}\b)|\b(who we are|our (story|mission|values|culture)|benefits|perks|what we offer|compensation|salary|pay range|equal opportunity|eeo|diversity|accommodation|privacy|how to apply|why join)\b`, 'i') },
+  //
+  // TWO SEPARATE DEFECTS LIVE IN THIS ONE PATTERN and were found a day apart, so the notes below
+  // are kept whole rather than blended: the second-person exception above (who the blurb is ABOUT)
+  // and the process-and-logistics footer below (what closes a section). They meet only here, in the
+  // merged vocabulary, and they do not interact: "About the interview process" still opens noise,
+  // because the lookahead declines only the four candidate-subject forms.
+  // THE PROCESS-AND-LOGISTICS FOOTER, added 2026-08-04 for ISSUE-026. Same failure the `^about\b`
+  // note above describes, one section later: psiquantum's "Intern, Quantum Architecture" ends its
+  // requirements bullets and then writes the heading-shaped line "The interview process". That line
+  // passes isHeadingLine and matched NOTHING here, so it did not CLOSE the required section, and
+  // everything below it - the interview paragraph, the background-check paragraph, the hourly-rate
+  // table and the EEO block - was read as REQUIRED at weight 1. Its twelve extracted requirements
+  // were `C++, Computer Science, GitHub, Housing, HR, Math, Once, Physics, Police Check, Python,
+  // Rate, ZX`: five of twelve unmatchable by any resume. The uncapped set was fifteen terms, seven
+  // of them from this footer, so the junk did not merely sit in the denominator - it filled the cap
+  // and evicted `FBQC`, the one term the responsibilities block names twice. Every score on this
+  // posting was depressed by ~40 points of noise the dashboard tooltip called "requirements".
+  //
+  // AFTER all three ISSUE-026 changes the posting extracts eight terms, every one of them stated:
+  // `C++, Computer Science, FBQC, GitHub, Math, Physics, Python, ZX`. Against the SWE base resume in
+  // jdMatch.test.ts the score moves 17 -> 26 and the missing list stops naming Housing, HR, Once,
+  // Police Check and Rate at a student. The BOARD-WIDE score barely moves (mean 4.9 -> 5.1 over 400
+  // postings) and that is expected rather than disappointing: EMPHASIS_LIMIT refills the vacancy, so
+  // removing junk mostly changes WHICH twelve, not how many. What it buys is that the twelve, and
+  // the gap list built from them, are things a student can actually act on.
+  //
+  // `hourly rate|pay rate|stipend` are here as well as the process words because the pay table is
+  // the part that survives when a posting has no process heading: "Hourly Rate" and
+  // "Housing/Commuter Stipend" are each their own heading-shaped line in that table. `compensation`
+  // and `salary` were already here and do not reach either spelling.
+  //
+  // SAFE FOR THE SAME REASON THE REST OF THIS LIST IS, and NOT for the reason NOISE_BLOCK is: every
+  // pattern here is gated by isHeadingLine, so it can only fire on a line under 60 characters and 7
+  // words that is not a bullet. "Ability to explain the interview process to candidates" is 9 words
+  // and never reaches this test. NOISE_BLOCK has the wider 16-word budget and is where an addition
+  // needs the measurement its comment demands; this list does not.
+  //
+  // MEASURED ANYWAY, 2026-08-04, over 400 live postings pulled full-text from the production board.
+  // The four new patterns fire on 27 heading lines across that corpus and every one of them is a
+  // benefits or hiring-process line: "Annual Benefits Stipend: $8,453", "Monthly wellness stipend",
+  // "Commuter stipend", "INTERVIEW PROCESS", "Use of AI in Our Hiring Process", "WHAT DOES THE
+  // HIRING PROCESS LOOK LIKE?". Zero requirement lines. They change the extracted set on 4 of the
+  // 400, which is the honest size of this fix: it is narrow, and it is the layer that fixes the
+  // posting it was written for. The other two ISSUE-026 changes measure 138 of 400 and 8 of 400.
+  //
+  // THE TWO CASES WORTH READING, because they look like losses and are not. These patterns are the
+  // ONLY one of the three ISSUE-026 changes that drops anything touching SKILL_LEXICON, and both
+  // drops are the same shape:
+  //
+  //   Block, "Regulatory Examination Manager" and "Lending Regulatory Counsel", drop `ai` (plus
+  //   `afterpay` and `cash app`) from the footer under "Use of AI in Our Hiring Process" - "We may
+  //   use automated AI tools to evaluate job applications". That is Block telling applicants how it
+  //   screens them, not a requirement to know AI.
+  //
+  //   Monzo, "Lead Machine Learning Scientist", drops the bigram `ml modelling`, which reads like a
+  //   requirement until you find it: "The interview process: ... 60 minute ML Modelling interview".
+  //   It is the name of an interview STAGE. `ml`, `mlops`, `llms`, `rag`, `python` and `sql` all
+  //   survive from the requirements block above it.
+  //
+  // A lexicon hit inside a hiring-process disclosure is still a hiring-process disclosure. This is
+  // the only section-based route by which a lexicon skill leaves the denominator at all, and on
+  // this corpus it has not once removed a stated requirement.
+  { kind: 'noise', re: new RegExp(String.raw`^about\b(?!\s+${SECOND_PERSON_SUBJECT}\b)|\b(who we are|our (story|mission|values|culture)|benefits|perks|what we offer|compensation|salary|pay range|hourly rate|pay rate|stipend|equal opportunity|eeo|diversity|accommodation|privacy|how to apply|why join|interview process|hiring process|selection process|background check)\b`, 'i') },
   { kind: 'preferred', re: /\b(preferred|nice[- ]to[- ]have|bonus|plus(es)?|desired|good to have|additional qualifications)\b/i },
   // `what we('?re)? look(ing)? for` and `(your|the) impact`, not the tighter `what we're looking
   // for` / `your impact` they replaced. Databricks' "Product Management Intern (Summer 2027)"
@@ -394,8 +456,46 @@ export function segmentJd(jdText: string): JdSection[] {
  * Law, policy and compliance are the deepest because that is the resume this list was measured
  * against and found empty for. Health (7), education (5), HR (4) and media (6) are a first pass
  * sized to clear MIN_SIGNAL_TERMS on a typical posting in each, not to be complete: no clinical
- * credentials (RN, NP, BLS), no teaching certifications, no newsroom systems. Adding those is
- * ordinary maintenance and needs no argument, only the same measurement.
+ * credentials (RN, NP, BLS), no teaching certifications, no newsroom systems.
+ *
+ * COMPLETING THAT PASS WAS ATTEMPTED, MEASURED, AND DEFERRED (2026-08-04). ISSUE-033 IS STILL OPEN.
+ * ---------------------------------------------------------------------------------------------
+ * An extension to 341 entries, covering finance, law, health, education, HR, operations and media,
+ * was built and measured against 400 live postings and the three real base resumes. It was NOT
+ * shipped, and the reason is a property of the DENOMINATOR rather than of the entries:
+ *
+ *   EMPHASIS_LIMIT caps the denominator at 12 and most postings sit at the cap, so admitting a new
+ *   term does not add a slot, it EVICTS one. On `Marqeta / Corporate-Opex Finance Manager` four new
+ *   finance entries took slots and pushed `modeling` out, and a resume listing "Excel financial
+ *   modeling" lost the credit: that posting fell from rank 1 to rank 180 for the finance resume.
+ *
+ * A bigger lexicon is therefore not free and not monotonic. It needs to be staged per discipline and
+ * measured per resume against the cap, which is a separate piece of work from writing the entries.
+ *
+ * WHAT WAS LEARNED IS KEPT HERE EVEN THOUGH THE ENTRIES WERE NOT, because the measurement cost more
+ * than the list did. Every candidate was searched for in the SCORED sections of that corpus and the
+ * surrounding sentences were READ; a candidate that occurs and reads as prose was rejected however
+ * obviously it belongs to the discipline. That test rejected more than it admitted:
+ *
+ *   stakeholder   "align stakeholders", "business stakeholders" - generic corporate prose
+ *   quality       "high standards of quality", "quality and reliability" - an adjective
+ *   equity        "competitive equity grants", "eligible for equity" - COMPENSATION
+ *   mentorship    "Mentorship: you'll build a relationship with a mentor" - a PERK
+ *   portfolio     "a portfolio of fulfillment integrations" - never the finance sense
+ *   assessment    "Video Assessment Challenge", "security assessments" - the hiring process
+ *   motion        "motion systems", "motor starters" - machinery, never a legal motion
+ *   ordinance     every hit was the "fair chance ordinances" line in the EEO footer
+ *
+ * AND FOUR NAME COLLISIONS THAT NO AMOUNT OF DOMAIN REASONING WOULD HAVE CAUGHT, which are the most
+ * valuable thing the exercise produced:
+ *
+ *   epic          Epic the EHR vendor to a health resume; Epic Games on this board
+ *   cpt           Curricular Practical Training, not Current Procedural Terminology
+ *   cna           CVE Numbering Authority, not Certified Nursing Assistant
+ *   greenhouse    the ATS RUNNING THE APPLICATION, in the hiring-process footer
+ *
+ * A term can be perfectly unambiguous inside its discipline and mean something else entirely on a
+ * job board. Read the corpus; do not reason from the discipline.
  *
  * TWO ENTRIES OVERLAP THE NOISE VOCABULARY ON PURPOSE, and this is the known cost. `contract` and
  * `policy` are hard signal here, which makes them eligible for the reserved slots in capToEmphasis,
@@ -414,9 +514,33 @@ export function segmentJd(jdText: string): JdSection[] {
  * neither survives into its final twelve. The practice vocabulary around the role is what keeps it
  * scorable. The instruments are worth carrying anyway, but they are not the argument.
  *
- * PLURALS. inLexicon strips a trailing `s` for tokens over three characters, so the SINGULAR is the
- * entry that covers both and a plural-only entry covers only the plural. `sanctions` is deliberately
- * plural-only, because "sanction" alone is a common verb.
+ * PLURALS. inLexicon strips a trailing `s` for tokens over three characters, so THE ENTRY SHOULD
+ * ALWAYS BE THE SINGULAR and it then covers both spellings. `sanctions` is deliberately plural-only,
+ * because "sanction" alone is a common verb. `appropriations` used to be a silent second exception
+ * and is now stored as `appropriation`.
+ *
+ * THE RULE IS STATED HERE AND ENFORCED NOWHERE, which is worth knowing before trusting it. An
+ * earlier draft claimed the rule was "inferable from the data"; it is not. Many entries end in `-s`
+ * without being plurals at all - `kubernetes`, `pandas`, `redis`, `analytics`, `statistics`,
+ * `devops`, `saas` - so `sanctions` is visually indistinguishable from that group. A reader cannot
+ * recover the convention by looking, and no test checks it. Follow it because it is written down.
+ *
+ * `sas` AND `sass` ARE NOT A SINGULAR/PLURAL PAIR and neither is redundant. They are two unrelated
+ * products, the statistics package and the CSS preprocessor, that happen to differ by an s. A review
+ * read them as a redundant pair; deleting either would lose a real skill.
+ *
+ * NO ENTRY HERE MAY ALSO BE IN BOILERPLATE OR GENERIC_STOPWORDS, because isDenied is consulted
+ * BEFORE inLexicon in isSpecific, so a colliding entry is DEAD - it can never be admitted and the
+ * list overstates its own coverage. Two were dead and had been since they were written: `next`
+ * (BOILERPLATE carries it for "next level") and `recruiting` (for "we are recruiting"), which means
+ * the HR line did not in fact cover the word recruiting. Both are removed rather than rescued: the
+ * prose senses are frequent and BOILERPLATE is the load-bearing side. `next` is replaced by
+ * `nextjs`, which is what normalizeTerm makes of "Next.js" and does not collide.
+ *
+ * jdMatch.test.ts asserts the collision set stays empty for the exact spelling AND for the entry's
+ * singular, since isDenied tests singular(token) too. It does NOT assert the reverse: a deny-list
+ * plural over a lexicon singular is not a collision, because isDenied singularises the token and
+ * never the list. `excels`/`excel` is that case on purpose.
  *
  * ENTRIES REMOVED AFTER MEASUREMENT, recorded so nobody adds them back on the same intuition that
  * put them here. Each was a real discipline term with a commoner prose sense that dominated on this
@@ -435,7 +559,7 @@ export function segmentJd(jdText: string): JdSection[] {
  */
 const SKILL_LEXICON = new Set(
   `python java javascript typescript golang rust ruby scala kotlin swift php perl haskell matlab
-react angular vue svelte next nuxt node deno express django flask rails spring laravel fastapi
+react angular vue svelte nextjs nuxt node deno express django flask rails spring laravel fastapi
 sql nosql postgres postgresql mysql sqlite mongodb redis dynamodb snowflake bigquery redshift
 aws azure gcp kubernetes docker terraform ansible jenkins circleci github gitlab bitbucket
 pandas numpy scipy pytorch tensorflow keras sklearn huggingface langchain spark hadoop kafka airflow
@@ -451,11 +575,11 @@ litigation compliance regulatory governance contract paralegal deposition
 subpoena arbitration mediation trademark copyright patent licensing antitrust gdpr ccpa
 redlining docketing westlaw lexisnexis clio ediscovery relativity
 legislation legislative advocacy lobbying rulemaking testimony casework constituent redistricting
-policy zoning procurement grantmaking appropriations
+policy zoning procurement grantmaking appropriation
 aml kyc sanctions fincen finra sec hipaa ferpa osha eeoc nlrb sox pci
 epidemiology biostatistics phlebotomy triage pharmacology immunology histology
 pedagogy iep literacy tutoring
-recruiting payroll ergonomics
+payroll ergonomics
 inventory dispatch warehousing kaizen sigma lean
 journalism proofreading transcription translation interpreting
 seo sem ppc crm cms erp roi kpi saas b2b b2c ux ui qa etl elt ci cd api sdk llm nlp ml ai
@@ -493,6 +617,90 @@ copywriting analytics automation visualization prototyping wireframing benchmark
  * board: it keeps `compliance`, `data protection`, `regulatory` and `security`, while `gdpr` and
  * `ccpa` do not survive into its final twelve at all. Both tests are in jdMatch.test.ts: one pins
  * the footer out of the denominator, the other pins that a real privacy role stays scorable. */
+
+/* THE BENEFIT-AND-LOGISTICS BLOCK (`stipend` through `screening`), added 2026-08-04 for ISSUE-026.
+ * This is the SECOND line of defence on the psiquantum footer described at HEADING_PATTERNS, and it
+ * is worth being exact about which line actually does the work, because the two are not equivalent:
+ *
+ *   heading fix only   8 terms, all 8 genuine requirements
+ *   this list only    10 terms, still carrying `HR` and `Near`
+ *   both              8 terms, all 8 genuine requirements
+ *
+ * So the heading fix carries this posting on its own and this list changes nothing on it. It is
+ * here for the shape the heading fix cannot see: the same pay table written as bullets, or as one
+ * run-on line, or under a heading nobody thought to enumerate. `housing`, `commuter` and `stipend`
+ * are the terms that posting actually produced; the rest of the row is the same vocabulary at the
+ * same specificity, which is the standard the `privacy` note above sets.
+ *
+ * Over 400 live postings pulled full-text from the production board on 2026-08-04 it changes the
+ * extracted set on 8 of them, so its value is almost entirely insurance rather than measured yield.
+ * That is stated because it is the kind of list that grows on intuition, and the number to beat
+ * before adding to it is 8 in 400.
+ *
+ * `completion` AND `completed` WERE IN THIS LIST AND WERE REMOVED, and the reason is a general
+ * caution about stop-lists rather than a fact about those two words. The pay table's degree column
+ * reads "PhD: Near Completion", which extracts as the bigram `near completion`. Denying `completion`
+ * does not delete that requirement, it UNMASKS `Near` as a unigram - a strictly worse term, since it
+ * is a preposition rather than an identifiable piece of boilerplate. That is measured, not reasoned:
+ * the vocab-only run above shows `Near` in the ten. A deny-list entry that breaks a junk bigram into
+ * junk parts has moved the problem, so any addition here needs checking against what the SURVIVING
+ * unigrams would be, not just against the term it targets.
+ *
+ * `rate` IS THE ARGUABLE ENTRY and it is taken deliberately. It costs the bigram `conversion rate`
+ * on marketing postings, which is a real thing to have done. It is kept because "Hourly Rate",
+ * "Rate", "Pay Rate" is the head of the compensation table on every posting that has one, `hourly`
+ * was already denied here for exactly that reason, and `conversion` survives on its own as the term
+ * a marketing resume is actually matched on.
+ *
+ * `hr` IS NOT HERE, though `HR` was one of the five junk terms on the psiquantum posting. It came in
+ * through the ACRONYM rule out of "at least two interviews with the hiring team and HR", which is
+ * the interview paragraph and is now noise. HR work is a real discipline this file already serves
+ * (`recruiting`, `payroll` are in SKILL_LEXICON), so denying the acronym would delete a stated
+ * requirement from every HR posting to fix one sentence in a physics one. Same trade
+ * NON_REQUIREMENT_ACRONYMS refuses for `mba` and `phd`. */
+
+/* THE MONTH NAMES ARE HERE BECAUSE A DATE IS NOT A REQUIREMENT, and they were expensive. Measured
+ * 2026-08-04 over 400 live postings, in the FINAL capped denominator, they were the single largest
+ * block of junk left: a start date or an application deadline occupying a slot on a substantial
+ * share of the board. They arrive as proper nouns, which is the loose path, and they are not merely
+ * dead weight: a student resume dates every entry, so "June 2025" on a resume MATCHED `june` in a
+ * trading firm's denominator and paid the student a twelfth of a score for having graduated in the
+ * right month. stripAcademicTerms removes a season followed by a year from the RESUME for exactly
+ * this reason; this is the same bug on the JD side. `may` is not listed because GENERIC_STOPWORDS
+ * already carries it as the modal verb.
+ *
+ * `whether`, `actual`, `additionally` and `expect` are the prose connectives left after the same
+ * census, and `stem`, `gpa`, `opt` and `president` are the degree, work-authorization and job-title
+ * vocabulary that belongs with the rest of the admin words above. `mba` and `phd` are deliberately
+ * still absent, for the reason NON_REQUIREMENT_ACRONYMS gives.
+ *
+ * `person` is here for "US person" and "in-person", which are conditions of the job rather than
+ * things to have done.
+ *
+ * `excels` IS THE VERB, and it is here because inLexicon strips a trailing s: "excels at turning
+ * ambiguity into execution" was admitted as the spreadsheet and matched against a resume listing
+ * Excel. The product is never written in the plural, so denying the plural costs nothing and the
+ * singular `excel` is untouched. Blocking it here rather than in the lexicon is deliberate -
+ * isDenied is checked BEFORE inLexicon, which is the only order in which a deny-list entry can
+ * outrank the -s strip that admitted it.
+ *
+ * THE WEEKDAYS ARE HERE TOO, and the story of how they nearly were not is the reason to distrust a
+ * frequency list. An earlier version of this comment claimed they "reach the final denominator on
+ * ZERO of the 400 postings" and cited that as a reason to leave them out. That was FALSE, and it
+ * was not a mis-measurement so much as a non-measurement: the check was a grep over a TRUNCATED
+ * top-N term-frequency table, and a term appearing five times sits below the cutoff, so absence
+ * from the list was read as absence from the board.
+ *
+ * Measured properly, per posting rather than by rank: 17 denominator slots across 5 of 400
+ * postings, and 15 of those 17 are `required` at weight 1 - the TOP tier, not the prose tail.
+ * Roblox's "Law Enforcement Liaison, Mississippi" spends five of its twelve required slots on
+ * monday through friday.
+ * SpaceX's "Piping Technician (Starlink)" and cresta's "Sales Development Manager" are the same
+ * shape: an on-site schedule line inside a requirements block, which is a condition of the job and
+ * not a thing to have done.
+ *
+ * Rarer than the months and more concentrated: where a month costs one slot on many postings, a
+ * weekday costs several slots on a few, and on those few it is a large share of the score. */
 const BOILERPLATE = new Set(
   `passionate passion obsess obsessed driven motivated enthusiastic energetic dynamic exciting
 opportunity opportunities candidate candidates applicant applicants position role roles job jobs
@@ -520,9 +728,15 @@ asylee refugee citizen citizenship resident residency immigration sponsorship vi
 authorization authorized protected affirmative accommodation accommodations
 fortune award recognized ranked ranking workplace workplaces
 english fluent bilingual
+january february march april june july august september october november december
+monday tuesday wednesday thursday friday saturday sunday
+whether expect actual additionally president stem gpa opt person excels
 federal municipal county province
 department departments
-learn transparency hourly`
+learn transparency hourly
+stipend stipends housing commuter relocation lodging shuttle parking wage wages rate rates
+allowance allowances reimbursement reimbursements
+police background check checks screening`
     .split(/\s+/)
     .filter(Boolean),
 );
@@ -684,6 +898,21 @@ export interface JdTerm {
    * WITHIN a weight tier, where it reads as "the employer raised this earlier".
    */
   order?: number;
+  /**
+   * EVERY spelling of this one requirement, including this term's own. Covering any member covers
+   * the requirement, which is what resumeSatisfies implements and what the scorer, gapEvidence and
+   * interviewPrep all read.
+   *
+   * ONE WRITER TODAY: the VENDOR_SPELLINGS merge in extractFrom, which folds a vendor's own
+   * spelling of a product into the bare product ("Microsoft Excel" and "Excel"). That IS a
+   * judgement this file makes rather than one the employer stated, and the argument for making it
+   * by enumeration rather than by rule is at VENDOR_SPELLINGS.
+   *
+   * IT DOES NOT BREACH THE MODULE HEADER'S FIRST RULE. Every member is still matched literally
+   * against the resume; there is no hypernym or synonym step. What the field records is that two
+   * strings name one product, never that a broader term satisfies a narrower one.
+   */
+  alternatives?: string[];
 }
 
 /** Normalize spelling variants that are the SAME term: node.js/nodejs/node js, ci-cd/ci/cd. */
@@ -874,6 +1103,32 @@ interface SectionToken {
  *    ("You will use Python daily. Kubernetes helps" produced the requirements "python daily" and
  *    "daily kubernetes"). The gap test is only meaningful once the token stops at the word.
  *
+ *    THAT FIX REACHED THE BIGRAM PASS AND NOT THE `positional` FLAG, because the two read different
+ *    ends of the token. Bigrams use the trimmed `a.end`, so they were fixed. `positional` reads
+ *    `text.slice(prevEnd, start)`, and prevEnd was rebased from `m[0].length`, the UNTRIMMED match -
+ *    so the sentence-final period was inside the previous token's span and the gap handed to the
+ *    `[.!?:;]` test was a bare space. No word after a full stop was ever positional, which is to say
+ *    the sentence half of this rule never ran at all. `Once` in "...what your goals are. Once
+ *    interviews are complete" was admitted as a proper noun on the psiquantum posting (ISSUE-026)
+ *    for that reason, and every other sentence-initial capital on the board with it. Rebasing off
+ *    the trimmed length is the whole fix; the suite was green before and after it.
+ *
+ *    IT IS ALSO THE LARGEST OF THE THREE ISSUE-026 CHANGES BY A WIDE MARGIN. Measured 2026-08-04
+ *    over 400 live postings pulled full-text from the production board: this line alone changes the
+ *    extracted set on 138 of them and drops 265 terms, against 4 postings for the heading fix and 8
+ *    for the BOILERPLATE additions. What it drops is the opening blurb, one sentence at a time:
+ *    identify(8), today(5), develop(5), maintain(4), conduct(4), millions(3), establish(3),
+ *    since(3), oversee(3), together(3), therefore(3), monitor(3), define(3). Not one of the 265 is
+ *    a lexicon skill.
+ *
+ *    THE COST IS NOT OBSERVED ON THIS CORPUS BUT IT IS REAL, and it is the one isSpecific already
+ *    names: a single-word product name written at a sentence start and followed by lowercase prose
+ *    now needs the lexicon to survive, because the Title Case run is what separates a name from a
+ *    verb and it is not there. "You will use Python daily. Redux is our state layer" loses `Redux`.
+ *    Nothing of that shape shows up in the 265, so the bound here is "not measured to cost
+ *    anything", not "cannot". It is the same trade isSpecific describes for line-initial capitals,
+ *    applied to the position it was always meant to cover rather than to a new one.
+ *
  *  - SLASH-JOINED PAIRS ARE SPLIT. "Docker/Kubernetes", "React/Redux" and "HTML/CSS" are two
  *    requirements written compactly. Left whole they normalize to "docker kubernetes", which no
  *    resume can match, AND the subsumption pass then deletes the two real terms it was built from:
@@ -885,6 +1140,58 @@ interface SectionToken {
  *    single-line posting, exactly the HTML-stripped paste the 60k cap was sized for, spent ~594ms
  *    of synchronous event-loop time in this function.
  */
+/**
+ * Phrases that are the VENDOR'S OWN SPELLING of a lexicon skill, and therefore the same requirement.
+ *
+ * The third residual named at EMPHASIS_LIMIT: a posting that writes "Microsoft Excel" also writes
+ * "Excel", the subsumption pass below spares a lexicon part on purpose, and the one requirement took
+ * two of twelve slots - credited once and charged once against the same resume.
+ *
+ * AN ENUMERATION, BECAUSE EVERY GENERAL RULE TRIED HERE LAUNDERS A NARROWER REQUIREMENT INTO A
+ * BROADER ONE, which is the one thing the module header forbids outright. The general form - merge
+ * any phrase into whichever of its words is a lexicon skill - was implemented and measured over 400
+ * live postings before being rejected. It produced 89 distinct merges, and the majority were not
+ * spellings at all but narrowings:
+ *
+ *   merchant compliance -> compliance     hr compliance -> compliance
+ *   cost accounting -> accounting          financial accounting -> accounting
+ *   stanford ai -> ai                      vertex ai -> ai
+ *   github actions -> github               salesforce flows -> salesforce
+ *   itar policies -> policy                regulatory affairs -> regulatory
+ *
+ * Under that rule a resume saying "compliance" was credited for "merchant compliance". Narrowing
+ * the vendor half to an enumerated vendor list does not save it either: "Google Analytics" is a
+ * vendor plus a lexicon skill and is emphatically NOT the same requirement as analytics.
+ *
+ * There is no property of the two words that separates "Microsoft Excel" from "Google Analytics" -
+ * only knowledge of which pairs name one product. So the pairs are named, exactly as SLASH_FORMS
+ * names the slash forms that are one skill.
+ *
+ * A PAIR ONLY FIRES IF ONE OF ITS WORDS IS IN SKILL_LEXICON, because the merge sits inside the
+ * branch that spares a lexicon part. `microsoft powerpoint` was listed here and was DEAD for that
+ * reason - `powerpoint` is not in the lexicon - so the phrase kept its own slot and no alternative
+ * was ever written. That is the same defect this file removes `next` and `recruiting` for a few
+ * hundred lines above, reintroduced by the fix for it. It is dropped rather than rescued: adding
+ * `powerpoint` to the lexicon is a lexicon change, and lexicon changes belong with the deferred
+ * work at SKILL_LEXICON, where they can be measured against the cap.
+ *
+ * So: adding a pair needs BOTH that one of its words is a lexicon entry, and that the pair
+ * genuinely names one product rather than narrowing it. A test asserts the first mechanically. The
+ * second is a judgement and cannot be.
+ */
+const VENDOR_SPELLINGS = new Set([
+  'microsoft excel',
+  'microsoft azure',
+  'apache spark',
+  'apache airflow',
+  'apache kafka',
+  'apache hadoop',
+  'adobe photoshop',
+  'adobe illustrator',
+  'adobe indesign',
+  'google bigquery',
+]);
+
 /** Slash forms that are ONE skill, not two. Checked against the normalized (space-joined) key,
  *  because normalizeTerm turns "CI/CD" into "ci cd" and the lexicon carries ci and cd separately. */
 const SLASH_FORMS = new Set(['ci cd', 'a b', 'r d']);
@@ -930,7 +1237,7 @@ function tokenizeSection(text: string): SectionToken[] {
       });
       offset = pieceStart + piece.length;
     }
-    prevEnd = start + m[0].length;
+    prevEnd = start + m[0].length - trail.length;
   }
 
   for (let i = 0; i < out.length - 1; i++) {
@@ -1295,8 +1602,22 @@ function isScorable(terms: JdTerm[]): boolean {
  *     is extracted as four terms. It used to consume 4 of ~30 slots and now consumes 4 of 12, so a
  *     React student is charged three times for a requirement they meet. This is the largest single
  *     source of understatement left in the model and it needs "one of X, Y, Z" parsing.
- *   - SUBSUMPTION. `excel` and `microsoft excel` both survive, because the subsumption pass spares
- *     a part that is a lexicon skill in its own right. One requirement, 2 of 12 slots.
+ *
+ *     ATTEMPTED AND WITHDRAWN 2026-08-04, recorded so the next attempt starts further along. The
+ *     parsing itself worked: comma runs ending in `or`, and explicit `and/or` pairs, grouped
+ *     correctly, and a bare two-item "X or Y" was refused because prose `or` is too common to act
+ *     on. Two things sank it. It needed a guard against collapsing a posting under
+ *     MIN_SCORABLE_TERMS, since removing terms can turn a score into a refusal. And measured per
+ *     resume, it moved the finance resume's top-of-board precision DOWN: grouping shrinks the
+ *     denominator, and a smaller denominator inflates postings where the student matches few but
+ *     generic terms, so off-field rows with 6-term denominators outranked on-field rows with 12.
+ *     Fixing OR-alternatives means fixing that denominator-size sensitivity first.
+ *   - SUBSUMPTION. FIXED for the vendor-spelling case, 2026-08-04: `excel` and `microsoft excel`
+ *     used to both survive, because the subsumption pass spares a part that is a lexicon skill in
+ *     its own right. They are now merged into one slot carrying both spellings. See
+ *     VENDOR_SPELLINGS, including why the general form of that merge was measured and rejected.
+ *     The residual that REMAINS is the general one: `analytics` and `google analytics` are still
+ *     two slots, and deliberately so, because they are two different requirements.
  *   - PLACE ACRONYMS. `ca` and `wa` are ACRONYM, therefore hard signal, therefore eligible for the
  *     reserved slots, and PLACE_SAFE_KINDS deliberately declines to remove a place name from a
  *     stated section. Reserved slots are filled in weight-then-mentions order, which no longer
@@ -1460,14 +1781,37 @@ function extractFrom(sections: JdSection[], alsoLowercased?: Set<string>): JdTer
   // triple-counts one requirement and lets a resume that says neither look two-thirds covered by
   // accident.
   //
-  // But a part that is a lexicon skill in its own right survives: in "Salesforce administration",
+  // A part that is a lexicon skill in its own right is NOT deleted: in "Salesforce administration",
   // "Salesforce" is a real, separately-matchable requirement and deleting it would lose the very
   // term the student most needs credit for. Only the part that means nothing alone is dropped.
+  //
+  // BUT SPARING IT MEANS KEEPING BOTH, which is the residual VENDOR_SPELLINGS exists for. Where the
+  // phrase is the vendor's own spelling of that same skill, the two are merged into one requirement
+  // carrying both spellings, so the slot is spent once and either spelling matches. The standalone
+  // lexicon term is the representative because it is what a resume actually writes - "Excel", not
+  // "Microsoft Excel" - and resumeCovers needs the phrase's two words adjacent. The merged entry
+  // takes the HIGHER of the two weights, so the case the guard below protects (a weight-1 standalone
+  // beside a weight-0.7 phrase) is preserved by construction rather than by declining to act.
   for (const [term, entry] of [...byTerm.entries()]) {
     if (!term.includes(' ')) continue;
     for (const part of term.split(' ')) {
       const existing = byTerm.get(part);
-      if (!existing || inLexicon(part)) continue;
+      if (!existing) continue;
+      if (inLexicon(part)) {
+        if (!VENDOR_SPELLINGS.has(term)) continue;
+        if (!byTerm.has(term)) break; // already merged away through its other part
+        if (entry.weight > existing.weight) {
+          existing.weight = entry.weight;
+          existing.kind = entry.kind;
+        }
+        existing.mentions = (existing.mentions ?? 1) + (entry.mentions ?? 1);
+        existing.signal = existing.signal || entry.signal;
+        existing.alternatives = [
+          ...new Set([...(existing.alternatives ?? [existing.term]), ...(entry.alternatives ?? [term])]),
+        ];
+        byTerm.delete(term);
+        break;
+      }
       // A part that was admitted in its own right at a HIGHER weight is a separate, more important
       // requirement that merely happens to also appear inside a phrase. Deleting it lost the term
       // entirely: a JD requiring "Databricks" under Requirements and mentioning "Databricks Delta"
@@ -1518,6 +1862,33 @@ function resumeHaystack(resumeText: string): string {
     lastResumeInput = resumeText;
   }
   return lastResumeHaystack;
+}
+
+/**
+ * Does the resume satisfy this requirement, including where one product has two spellings?
+ *
+ * A term with `alternatives` stands for one requirement written several ways, so ANY member
+ * satisfies it.
+ *
+ * IT IS CURRENTLY EQUIVALENT TO resumeCovers(term.term), AND THAT IS WORTH SAYING OUT LOUD rather
+ * than leaving for someone to discover. The only writer of `alternatives` today is the
+ * VENDOR_SPELLINGS merge, which always keeps the BARE PRODUCT as the representative and folds the
+ * vendor-qualified phrase into it. Every alternative therefore CONTAINS its representative as a
+ * whole word ("microsoft excel" contains "excel"), so a resume matching any alternative already
+ * matches the representative. A test pins that containment invariant.
+ *
+ * SO WHY KEEP IT. Because the invariant is a property of one enumerated list, not of the field, and
+ * the moment any writer produces an alternative that is NOT a superstring of the representative the
+ * equivalence breaks silently. Grouping a disjunction the employer wrote ("React, Angular, Vue or
+ * Scala" represented by `react`) is exactly that case, it was attempted, and it is recorded as a
+ * live residual at EMPHASIS_LIMIT. When it lands, every holder of a JdTerm must call THIS rather
+ * than resumeCovers - including gapEvidence.ts and interviewPrep.ts, which both claim in comments
+ * to use "the same matcher the score uses" and would both quietly stop doing so. They are left on
+ * resumeCovers today because today it is the same function.
+ */
+function resumeSatisfies(resumeText: string, term: JdTerm): boolean {
+  if (term.alternatives) return term.alternatives.some((t) => resumeCovers(resumeText, t));
+  return resumeCovers(resumeText, term.term);
 }
 
 export function resumeCovers(resumeText: string, term: string): boolean {
@@ -1583,7 +1954,7 @@ export function scoreJdMatch(
   for (const t of terms) {
     total += t.weight;
     if (t.kind === 'required') requiredTotal += 1;
-    if (resumeCovers(resumeText, t.term)) {
+    if (resumeSatisfies(resumeText, t)) {
       got += t.weight;
       if (t.kind === 'required') requiredGot += 1;
       matched.push(t);

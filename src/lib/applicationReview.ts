@@ -71,6 +71,11 @@ export type ApplicationReviewState = {
     /* Set when the application stops waiting on a human. Presence means "this stall is over", and
      * resolved_at minus stalled_at is the time-to-resolution the instrumentation needs. */
     resolved_at?: string;
+    /* When the applicant was emailed about this one. Written back after a successful send, and the
+     * reason the nudge is not a daily letter: without it every open stall re-qualifies on every
+     * run, so someone who saw the check and decided not to finish that application would hear about
+     * it again every day forever. */
+    nudged_at?: string;
   };
   handoff_expires_at?: string;
   final_approved_at?: string;

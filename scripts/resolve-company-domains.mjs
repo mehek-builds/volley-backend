@@ -14,8 +14,10 @@
  * file. Run it when the board grows, read the diff, commit it. The output is reviewable data rather
  * than a runtime dependency on anything.
  *
- *   node scripts/resolve-company-domains.mjs            # rewrite the map
- *   node scripts/resolve-company-domains.mjs --dry-run  # print what would change
+ *   npm run logo:resolve                       # rewrite the map
+ *   npm run logo:resolve -- --dry-run          # print what would change
+ *
+ * Runs under tsx because it shares the live-board reader with check-logo-coverage.mjs.
  *
  * WHY IT IS THIS PARANOID
  * -----------------------
@@ -43,6 +45,7 @@
 
 import { writeFileSync, readFileSync } from 'node:fs';
 import { resolve4, resolve6 } from 'node:dns/promises';
+import { scanBoard } from '../src/lib/boardScan.ts';
 
 const API = process.env.JOBS_API ?? 'https://student-outreach-backend.vercel.app';
 const OUT = new URL('../src/lib/companyDomains.ts', import.meta.url).pathname;
@@ -257,28 +260,40 @@ async function resolveCompany(name) {
   return null;
 }
 
+/**
+ * Every company on the live board.
+ *
+ * Reads through lib/boardScan.ts rather than paging offsets directly. The board is newest-first, so
+ * an upsert mid-scan prepends and shifts every later offset: the old loop here re-read rows it
+ * already had and stopped short of the end, silently dropping whichever companies got displaced
+ * past the last offset. It never failed, it just quietly returned a short list, which is the worst
+ * shape for THIS script — a company missing from the scan is a company missing from the map, and
+ * the map is the thing being regenerated to close that exact gap. check-logo-coverage.mjs hit the
+ * same race loudly (it asserted an exact row count) and that is what boardScan.ts was written for.
+ */
 async function boardCompanies() {
-  const names = new Set();
-  async function readPage(offset) {
-    const res = await fetch(`${API}/jobs?limit=${PAGE_SIZE}&offset=${offset}`);
+  async function readPage(offset, limit = PAGE_SIZE) {
+    const res = await fetch(`${API}/jobs?limit=${limit}&offset=${offset}`);
     if (!res.ok) throw new Error(`GET /jobs answered ${res.status} at offset ${offset}`);
     const body = await res.json();
     if (!Array.isArray(body.jobs)) throw new Error(`GET /jobs returned invalid jobs at offset ${offset}`);
-    return body;
+    const total = Number(body.total);
+    if (!Number.isSafeInteger(total) || total < body.jobs.length) {
+      throw new Error('GET /jobs did not return a valid total');
+    }
+    if (total > MAX_ROWS) throw new Error(`job board has ${total} rows, above the ${MAX_ROWS}-row limit`);
+    return { jobs: body.jobs, total };
   }
 
-  const first = await readPage(0);
-  const total = Number(first.total);
-  if (!Number.isSafeInteger(total) || total < first.jobs.length) throw new Error('GET /jobs did not return a valid total');
-  if (total > MAX_ROWS) throw new Error(`job board has ${total} rows, above the ${MAX_ROWS}-row limit`);
-  for (const job of first.jobs) names.add(job.company_name);
+  const { rows } = await scanBoard({
+    readPage,
+    idOf: (row) => row.id,
+    pageSize: PAGE_SIZE,
+    pageConcurrency: PAGE_CONCURRENCY,
+    onRetry: (reason) => console.error(`Retrying the board scan: ${reason}.`),
+  });
 
-  const offsets = [];
-  for (let offset = PAGE_SIZE; offset < total; offset += PAGE_SIZE) offsets.push(offset);
-  for (let i = 0; i < offsets.length; i += PAGE_CONCURRENCY) {
-    const pages = await Promise.all(offsets.slice(i, i + PAGE_CONCURRENCY).map(readPage));
-    for (const page of pages) for (const job of page.jobs) names.add(job.company_name);
-  }
+  const names = new Set(rows.map((row) => row.company_name).filter(Boolean));
   return [...names].sort((a, b) => a.localeCompare(b));
 }
 
