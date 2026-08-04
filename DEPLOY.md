@@ -199,9 +199,26 @@ vercel git connect          # from a checkout whose origin is the GitHub repo
 the merge commit rather than assuming the deploy landed:
 
 ```bash
-curl -s https://student-outreach-backend.vercel.app/health | jq -r .revision
+curl -s https://student-outreach-backend.vercel.app/health | jq -r '.revision, .build'
 git rev-parse origin/main
 ```
+
+`revision` is the git SHA and is the one to read: it compares to `git rev-parse origin/main` without
+leaving the terminal. **It is `null` on a `vercel deploy --prod`**, because `VERCEL_GIT_COMMIT_SHA`
+is populated for Git-integration deploys and not for CLI ones. That is not a failed deploy, and it
+caught us on 2026-08-04: the deployment was live and correct while `/health` said `null`, and
+confirming what shipped took three Vercel API calls.
+
+`build` is what to use then. It is the deployment id (or the deployment hostname on older builds)
+and is always present, so an empty `revision` never leaves you with nothing:
+
+```bash
+BUILD=$(curl -s https://student-outreach-backend.vercel.app/health | jq -r .build)
+vercel inspect "$BUILD"        # resolves to the deployment, and through it to the commit
+```
+
+Both being `null` means the API is not running on Vercel at all, which is the one case that really
+is a problem.
 
 To deploy by hand anyway (a rollback, or a hotfix that must not wait for review), use a throwaway
 clone so your own working tree, which is often on another branch with uncommitted work, is left
