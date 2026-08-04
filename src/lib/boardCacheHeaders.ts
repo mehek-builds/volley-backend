@@ -59,6 +59,34 @@ export const BOARD_SHARED_MAX_AGE_S = 900;
 export const BOARD_STALE_WHILE_REVALIDATE_S = 86_400;
 
 /**
+ * Add a field to `Vary` WITHOUT discarding what is already there.
+ *
+ * `reply.header('Vary', ...)` REPLACES, and something else already sets this header: `@fastify/cors`
+ * is registered with a dynamic `origin` function, so it emits `Vary: Origin` on every response.
+ * Overwriting that while ALSO marking the response `public` is the dangerous combination, and it is
+ * the exact bug this function exists to prevent: a shared cache would then key the entry without
+ * Origin, and could hand a response carrying one origin's `Access-Control-Allow-Origin` to a request
+ * from a different allowed origin. Verified against a real Fastify instance, not assumed.
+ *
+ * Case-insensitive on the field names, because `Vary` tokens are, and a duplicate differing only in
+ * case would still be a duplicate to a human reading the header.
+ */
+function addVary(reply: FastifyReply, field: string): void {
+  const existing = reply.getHeader('Vary');
+  const tokens = String(existing ?? '')
+    .split(',')
+    .map((token) => token.trim())
+    .filter(Boolean);
+
+  /* `Vary: *` means "never reuse this entry for any other request". Adding a field to it would be
+     a weakening, so it is left exactly as found. */
+  if (tokens.some((token) => token === '*')) return;
+  if (tokens.some((token) => token.toLowerCase() === field.toLowerCase())) return;
+
+  reply.header('Vary', [...tokens, field].join(', '));
+}
+
+/**
  * Apply the right cache policy for this request and return the reply for chaining.
  *
  * Anonymous is decided by `request.jwtPayload`, which `optionalAuth` sets only on a VALID token.
@@ -71,7 +99,7 @@ export function applyBoardCacheHeaders(request: FastifyRequest, reply: FastifyRe
      satisfy a later authenticated request for the same URL from that entry, and the `private` on
      the authenticated branch would never get a chance to prevent it, because the authenticated
      request would not reach the origin at all. */
-  reply.header('Vary', 'Authorization');
+  addVary(reply, 'Authorization');
 
   if (request.jwtPayload) {
     /* Per-account, so it must never enter a shared cache. `private` still permits the browser's own

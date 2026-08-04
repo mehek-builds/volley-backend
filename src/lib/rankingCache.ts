@@ -127,8 +127,16 @@ export function readRanking(key: string, now: number = Date.now()): RankedList |
   return entry;
 }
 
-export function writeRanking(key: string, value: Omit<RankedList, 'createdAt'>, now: number = Date.now()): RankedList {
-  const entry: RankedList = { ...value, createdAt: now };
+/**
+ * Insert into L1 and enforce the size bound.
+ *
+ * Its own function because there are now TWO ways an entry enters L1 — a fresh ranking from
+ * writeRanking, and an L2 hit promoted by readRankingShared — and the second one originally called
+ * `cache.set` directly. That skipped the eviction below, so on a warm instance serving many
+ * distinct keys out of L2 the map grew without any bound at all. RANKING_CACHE_MAX is not a
+ * suggestion: this runs in a serverless process whose memory is shared with resume generation.
+ */
+function insertIntoL1(key: string, entry: RankedList): void {
   // Re-inserting moves the key to the end of the iteration order, so the eviction below stays
   // oldest-first rather than evicting a key that was just refreshed.
   cache.delete(key);
@@ -138,6 +146,11 @@ export function writeRanking(key: string, value: Omit<RankedList, 'createdAt'>, 
     if (oldest.done) break;
     cache.delete(oldest.value);
   }
+}
+
+export function writeRanking(key: string, value: Omit<RankedList, 'createdAt'>, now: number = Date.now()): RankedList {
+  const entry: RankedList = { ...value, createdAt: now };
+  insertIntoL1(key, entry);
   return entry;
 }
 
@@ -247,7 +260,10 @@ export async function readRankingShared(key: string, now: number = Date.now()): 
       poolExhausted: Boolean(parsed.poolExhausted),
       createdAt: parsed.createdAt,
     };
-    cache.set(key, entry);
+    /* Through the same bounded insert as a fresh write. A bare cache.set here would skip
+       RANKING_CACHE_MAX entirely, and this is the path that runs on every cold-ish request, so it
+       is the one most able to grow the map without limit. */
+    insertIntoL1(key, entry);
     return entry;
   } catch {
     return null;

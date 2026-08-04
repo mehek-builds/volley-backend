@@ -16,13 +16,22 @@ import {
   applyBoardCacheHeaders,
 } from './boardCacheHeaders';
 
-/** The two header fields the CDN actually reads back, captured off a fake reply. */
-function run(jwtPayload: unknown) {
-  const headers: Record<string, string> = {};
+/**
+ * The header fields the CDN actually reads back, captured off a fake reply.
+ *
+ * `preset` seeds headers another plugin already set. It exists because the first version of this
+ * fake had NO getHeader at all, which made an overwrite indistinguishable from an append and let a
+ * real bug through: @fastify/cors sets `Vary: Origin`, and `reply.header('Vary', ...)` replaced it.
+ */
+function run(jwtPayload: unknown, preset: Record<string, string> = {}) {
+  const headers: Record<string, string> = { ...preset };
   const reply = {
     header(name: string, value: string) {
       headers[name] = value;
       return reply;
+    },
+    getHeader(name: string) {
+      return headers[name];
     },
   };
   const returned = applyBoardCacheHeaders(
@@ -31,6 +40,13 @@ function run(jwtPayload: unknown) {
   );
   return { headers, returned, reply };
 }
+
+/** Vary as a set of lowercase tokens, which is how a cache reads it. */
+const varyTokens = (headers: Record<string, string>) =>
+  String(headers['Vary'] ?? '')
+    .split(',')
+    .map((t) => t.trim().toLowerCase())
+    .filter(Boolean);
 
 const anonymous = () => run(undefined);
 const signedIn = () => run({ userId: 'u1' });
@@ -84,6 +100,35 @@ describe('Vary keeps the two apart', () => {
 
   test('is sent on the authenticated response too', () => {
     assert.strictEqual(signedIn().headers['Vary'], 'Authorization');
+  });
+
+  /* THE BUG THIS BLOCK EXISTS FOR. @fastify/cors is registered with a dynamic `origin` function, so
+     it sets `Vary: Origin` on every response. reply.header REPLACES, so setting Vary here dropped
+     it. Combined with marking the response `public`, a shared cache would key the entry WITHOUT
+     Origin and could serve one origin's Access-Control-Allow-Origin to a different allowed origin. */
+  test('does not discard a Vary another plugin already set', () => {
+    const { headers } = run(undefined, { Vary: 'Origin' });
+    const tokens = varyTokens(headers);
+    assert.ok(tokens.includes('origin'), `CORS Vary was dropped, header is "${headers['Vary']}"`);
+    assert.ok(tokens.includes('authorization'), 'and ours must still be there');
+  });
+
+  test('preserves an existing Vary on the authenticated branch too', () => {
+    const tokens = varyTokens(run({ userId: 'u1' }, { Vary: 'Origin' }).headers);
+    assert.deepStrictEqual(tokens.sort(), ['authorization', 'origin']);
+  });
+
+  test('does not duplicate a field that is already listed, in any case', () => {
+    for (const preset of ['Authorization', 'authorization', 'Origin, Authorization']) {
+      const tokens = varyTokens(run(undefined, { Vary: preset }).headers);
+      const authCount = tokens.filter((t) => t === 'authorization').length;
+      assert.strictEqual(authCount, 1, `"${preset}" produced "${tokens.join(', ')}"`);
+    }
+  });
+
+  test('leaves Vary: * alone, because adding a field to it would weaken it', () => {
+    // `*` already means "never reuse this entry for another request".
+    assert.strictEqual(run(undefined, { Vary: '*' }).headers['Vary'], '*');
   });
 });
 

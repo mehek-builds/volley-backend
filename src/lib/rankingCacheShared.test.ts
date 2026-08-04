@@ -13,9 +13,11 @@
 import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
 import {
+  RANKING_CACHE_MAX,
   RANKING_CACHE_TTL_MS,
   RANKING_SHARED_TTL_MS,
   clearRankingCache,
+  rankingCacheSize,
   readRankingShared,
   sharedRankingConfigured,
   writeRankingShared,
@@ -208,6 +210,59 @@ describe('freshness', () => {
     assert.ok(
       sent.some((command) => command[0] === 'GET'),
       'an expired L1 entry must fall through rather than being served',
+    );
+  });
+});
+
+describe('promoting an L2 hit respects the L1 size bound', () => {
+  /* THE BUG THIS BLOCK EXISTS FOR. readRankingShared promoted L2 hits with a bare cache.set, which
+     skipped the RANKING_CACHE_MAX eviction that writeRanking enforces. On a warm instance serving
+     many distinct keys out of L2 the map grew without any bound, in a serverless process whose
+     memory is shared with resume generation. */
+  test('L1 never exceeds RANKING_CACHE_MAX no matter how many L2 hits are promoted', async () => {
+    stubUpstash();
+
+    /* One Upstash entry per key. The stub holds a single slot, so each key is written then read
+       back on a cleared L1, which is exactly the cold-instance promotion path. */
+    for (let i = 0; i < RANKING_CACHE_MAX + 50; i++) {
+      const key = `key-${i}`;
+      stored = null;
+      await writeRankingShared(key, list([`job-${i}`]));
+      const held = stored;
+      clearRankingCache(); // a fresh instance
+      stored = held;
+      const found = await readRankingShared(key);
+      assert.ok(found, `key-${i} should have come back from L2`);
+      // Re-seed L1 the way a real sequence of requests would, without clearing between them.
+      if (i % 10 === 0) {
+        assert.ok(
+          rankingCacheSize() <= RANKING_CACHE_MAX,
+          `L1 held ${rankingCacheSize()} entries, over the ${RANKING_CACHE_MAX} bound`,
+        );
+      }
+    }
+  });
+
+  test('promotions accumulate in L1 but stay bounded', async () => {
+    stubUpstash();
+    const payloads: string[] = [];
+    for (let i = 0; i < RANKING_CACHE_MAX + 50; i++) {
+      stored = null;
+      await writeRankingShared(`k-${i}`, list([`j-${i}`]));
+      payloads.push(stored!);
+    }
+    clearRankingCache();
+    assert.strictEqual(rankingCacheSize(), 0);
+
+    // Now promote every one of them into a single warm instance, back to back.
+    for (let i = 0; i < payloads.length; i++) {
+      stored = payloads[i]!;
+      await readRankingShared(`k-${i}`);
+    }
+    assert.ok(
+      rankingCacheSize() <= RANKING_CACHE_MAX,
+      `L1 grew to ${rankingCacheSize()} entries from L2 promotions alone, ` +
+        `over the ${RANKING_CACHE_MAX} bound`,
     );
   });
 });
