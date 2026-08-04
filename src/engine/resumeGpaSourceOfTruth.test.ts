@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { describe, test } from 'node:test';
 import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
@@ -113,7 +115,7 @@ describe('the GPA a resume prints comes from application_profile', () => {
     assert.equal(educationGpaLine(education), '8.9/10.0');
   });
 
-  test('a stated grade with no stated scale prints bare, and does not borrow the parse s', () => {
+  test('a stated grade with no stated scale prints bare, not on the scale the parse read', () => {
     const education = educationFrom(TRUNCATED_PARSE, { gpa: '3.89', gpa_scale: '' });
     assert.equal(educationGpaLine(education), '3.89');
   });
@@ -176,11 +178,10 @@ describe('one builder serves both generation paths', () => {
     assert.equal(fromRoute, educationFrom);
   });
 
-  test('neither generation route builds a CandidateEducation by hand', async () => {
-    const { readFile } = await import('node:fs/promises');
-    for (const route of ['../routes/resume.ts', '../routes/baseResume.ts']) {
+  test('neither generation route builds a CandidateEducation by hand', () => {
+    for (const route of ['resume.ts', 'baseResume.ts']) {
       const source = stripComments(
-        await readFile(new URL(route, import.meta.url), 'utf8'),
+        readFileSync(path.join(__dirname, '..', 'routes', route), 'utf8'),
       );
       assert.match(source, /educationFrom\(/, `${route} must build its education block with educationFrom`);
       assert.doesNotMatch(
@@ -221,9 +222,9 @@ describe('the resume academic record matches the one every other surface serves'
   /* major is NOT here on purpose: ResumeSpec has no major field and resumeRender draws none, so
      there is nothing on the page for it to be right or wrong about. This pins the reason rather
      than the omission, so adding a major to the render forces this test to be revisited. */
-  test('major is excluded because the render has no place to print it', async () => {
+  test('major is excluded because the render has no place to print it', () => {
     const specSource = stripComments(
-      await (await import('node:fs/promises')).readFile(new URL('../llm/resumeSpec.ts', import.meta.url), 'utf8'),
+      readFileSync(path.join(__dirname, '..', 'llm', 'resumeSpec.ts'), 'utf8'),
     );
     assert.doesNotMatch(specSource, /\bmajor\b/);
     assert.deepEqual([...RESUME_ACADEMIC_FIELDS], ['gpa', 'gpa_scale']);
