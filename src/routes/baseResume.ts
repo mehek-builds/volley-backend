@@ -12,10 +12,12 @@ import {
 } from '../llm/baseResume';
 import {
   applyResumePolicy,
+  educationFrom,
   enforceExperienceBulletFloor,
   normalizeDashesForPrint,
   type CandidateEducation,
 } from '../engine/resumePolicy';
+import { academicRecordRowFor } from './profile';
 import {
   findPdfSafeMarginIssues,
   findPdfTextFidelityIssues,
@@ -214,26 +216,11 @@ export function metricGapsIn(
   return gaps.sort((a, b) => b.bullet.length - a.bullet.length).slice(0, limit);
 }
 
-export function educationFrom(parsed: unknown): CandidateEducation {
-  const p = (parsed ?? {}) as Record<string, unknown>;
-  const str = (v: unknown) => (typeof v === 'string' ? v : undefined);
-  return {
-    school: str(p.school) ?? '',
-    degree: str(p.degree),
-    grad_date: str(p.grad_date) ?? (typeof p.grad_year === 'number' && p.grad_year > 0 ? String(p.grad_year) : undefined),
-    grad_year: typeof p.grad_year === 'number' ? p.grad_year : undefined,
-    currently_enrolled: typeof p.currently_enrolled === 'boolean' ? p.currently_enrolled : undefined,
-    /* The base resume is built by the same applyResumePolicy pass the tailored path runs, and it is
-       the document the student approves on /start. Omitting these here would have shown them a base
-       resume with no GPA and then a tailored one with it, which reads as the product changing their
-       education between screens. Every field this function forgets is a difference between the two
-       documents, which is precisely why it exists at all. */
-    gpa: str(p.gpa),
-    gpa_scale: str(p.gpa_scale),
-    school_location: str(p.school_location),
-    coursework: Array.isArray(p.coursework) ? p.coursework.filter((c): c is string => typeof c === 'string') : undefined,
-  };
-}
+/* MOVED to engine/resumePolicy.ts, beside CandidateEducation and the academic precedence it now
+ * applies, so the tailored path can call the same function instead of keeping its own inline copy.
+ * Re-exported rather than relocated silently: this is the import path every existing caller and
+ * test already uses, and a route module is not where a rule shared by two routes belongs. */
+export { educationFrom } from '../engine/resumePolicy';
 
 /* A hand-edited spec, made safe to store.
  *
@@ -309,7 +296,18 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       reply.raw.write(`data: ${JSON.stringify(frame)}\n\n`);
     };
 
-    const education = educationFrom(profile.parsed_json);
+    /* appProfile, not just the parse. The GPA that reaches this PDF has to be the one the student
+       stated and the one autofill types, and the base resume is the document she approves before
+       any of them go out. */
+    const education = educationFrom(
+      profile.parsed_json,
+      academicRecordRowFor(appProfile, (err) =>
+        request.log.error(
+          { err, userId },
+          'application_profile could not be decrypted while building the main resume. Printing no GPA rather than the resume parse, which is not the source of truth for it.',
+        ),
+      ),
+    );
     const declaredSkills = skillsSourceFor(profile.skills, profile.parsed_json);
     const targetText = targetRoleText(target, profile.parsed_json);
     const recentReview = (profile.parsed_json as {

@@ -75,33 +75,87 @@ const TLDS = ['com', 'ai', 'io', 'app', 'co', 'so', 'org', 'net', 'dev', 'tv'];
  *
  * They render an initial unless CURATED_DOMAINS below records a separately verified exception.
  * Adding one back means proving it, not guessing it.
+ *
+ * Five of them now have one, established on 2026-08-04 from the employer's own ATS board rather
+ * than from the name: honor (honorcare.com), Old Mission (oldmissioncapital.com) and Pinecone
+ * (pinecone.io) confirm what the notes above already suspected, and the two open questions are
+ * answered. The Opal that posts here is Opal Security at opal.dev. column.com still serves no
+ * <title>, but it now serves og:site_name=Column, which is the verification this note lacked.
+ * They stay listed here because the name alone is still undecidable; only the curated entry saves
+ * them, so removing one from CURATED_DOMAINS correctly drops them back to an initial.
  */
 const TOO_GENERIC = new Set(['depot', 'fireworks', 'honor', 'oldmission', 'pinecone', 'knock', 'opal', 'column']);
 
 /**
  * Official domains that the strict resolver cannot prove automatically because the company uses a
  * non-obvious hostname, redirects to a differently named brand, or blocks automated requests.
- * Each homepage was reviewed against the employer name on 2026-08-02. Keys use the same
- * punctuation-insensitive normalization as the runtime lookup, so board spelling changes do not
- * create aliases or duplicate domains.
+ * Keys use the same punctuation-insensitive normalization as the runtime lookup, so board spelling
+ * changes do not create aliases or duplicate domains.
+ *
+ * NOTHING HERE IS RE-VERIFIED AT RUNTIME. A curated entry skips the validation queue entirely and
+ * overrides TOO_GENERIC, so each one is a standing human assertion and has to be earned.
+ *
+ * The 2026-08-02 set was reviewed by hand. The 2026-08-04 set came from a sweep of every unmapped
+ * company on the board, accepted only on the same three standards the header describes: a backlink
+ * from the employer's OWN ATS board to the domain, a homepage whose <title> or og:site_name names
+ * the company, or DNS plus a real favicon where the site refuses automated requests. Most needed
+ * two of the three.
+ *
+ * That sweep is also why several entries look nothing like their company name. The guessable
+ * candidate was WRONG for these, and the ATS slug is what exposed it:
+ *
+ *   Lucid            lucid.com is Lucid Software (Lucidchart); the employer posts as `lucidmotors`
+ *   Mozilla          mozilla.com redirects to firefox.com, so the logo would have been Firefox's
+ *   Shield AI        shieldai.com is unrelated, and shieldai.io is parked for sale
+ *   Engineers Gate   trades as eglp.com, which no name-based candidate would ever reach
+ *   Squarepoint      squarepoint-capital.com is hyphenated
+ *   Epirus           epirusinc.com, because epirus.com is someone else
+ *   Ginkgo           ginkgobioworks.com now redirects to ginkgo.bio
+ *   Quadrature       quadraturecapital.com now redirects to quadrature.ai
+ *   Skylight         skylightframe.com now redirects to myskylight.com
+ *
+ * Pure Storage is deliberately ABSENT. Its board still asserts purestorage.com, but that domain
+ * 301s to everpuredata.com ("The Data Platform | Everpure"), so the company reads as mid-rebrand
+ * and a row labelled Pure Storage would render an Everpure logo. Unproven beats confusing.
+ *
+ * Two more were verified and then REJECTED, because each one breaks a guard in
+ * companyDomains.test.ts that is worth more than the rows it would win:
+ *
+ *   Ashby   ashbyhq.com is provably theirs, but the map forbids any ATS host as a value. Ashby is
+ *           both an employer here and the vendor behind jobs.ashbyhq.com, and the test cannot tell
+ *           a correct self-reference from the bug it exists to catch, where a board host paints one
+ *           ATS logo across every row from that board. 7 rows.
+ *   groww   groww.in is genuinely their domain, not a redirect, but the map forbids country TLDs
+ *           because this resolver runs from Dubai, where airbnb.com answers as airbnb.ae and
+ *           bitgo.com as bitgo.ae. A real .in and a geo-accident are indistinguishable there. 1 row.
+ *
+ * Both render an initial instead. Weakening either guard to win 8 rows is a bad trade.
  */
 const CURATED_DOMAINS = new Map([
   ['abnormalai', 'abnormal.ai'],
   ['accessbank', 'accessbankplc.com'],
   ['affirm', 'affirm.com'],
   ['airtable', 'airtable.com'],
+  ['akuna', 'akunacapital.com'],
+  ['amwell', 'amwell.com'],
   ['andurilindustries', 'anduril.com'],
   ['anydesk', 'anydesk.com'],
   ['astronomer', 'astronomer.io'],
   ['axios', 'axios.com'],
+  ['blacksmith', 'blacksmith.sh'],
   ['block', 'block.xyz'],
   ['box', 'box.com'],
   ['braintrust', 'usebraintrust.com'],
-  ['codeforamerica', 'codeforamerica.org'],
-  ['commonapp', 'commonapp.org'],
   ['carta', 'carta.com'],
+  ['checkly', 'checklyhq.com'],
   ['chime', 'chime.com'],
+  ['cockroachlabs', 'cockroachlabs.com'],
+  ['codat', 'codat.io'],
+  ['codeforamerica', 'codeforamerica.org'],
   ['coinbase', 'coinbase.com'],
+  ['column', 'column.com'],
+  ['commonapp', 'commonapp.org'],
+  ['crunchyroll', 'crunchyroll.com'],
   ['databricks', 'databricks.com'],
   ['dataiku', 'dataiku.com'],
   ['decagon', 'decagon.ai'],
@@ -109,39 +163,75 @@ const CURATED_DOMAINS = new Map([
   ['drw', 'drw.com'],
   ['elastic', 'elastic.co'],
   ['elevenlabs', 'elevenlabs.io'],
+  ['engineersgate', 'eglp.com'],
   ['epicgames', 'epicgames.com'],
+  ['epirus', 'epirusinc.com'],
+  ['fanduel', 'fanduel.com'],
   ['fastly', 'fastly.com'],
-  ['flexport', 'flexport.com'],
   ['fireworks', 'fireworks.ai'],
-  ['givedirectly', 'givedirectly.org'],
+  ['flexport', 'flexport.com'],
+  ['gamma', 'gamma.app'],
+  ['getyourguide', 'getyourguide.com'],
+  ['ginkgo', 'ginkgo.bio'],
   ['gitlab', 'gitlab.com'],
+  ['givedirectly', 'givedirectly.org'],
+  ['gsacapital', 'gsacapital.com'],
   ['gusto', 'gusto.com'],
   ['hellofresh', 'hellofresh.com'],
+  ['helpscout', 'helpscout.com'],
+  ['honor', 'honorcare.com'],
+  ['incident', 'incident.io'],
+  ['instabase', 'instabase.com'],
   ['justworks', 'justworks.com'],
+  ['llamaindex', 'llamaindex.ai'],
+  ['lucid', 'lucidmotors.com'],
   ['matchgroup', 'mtch.com'],
+  ['merge', 'merge.dev'],
+  ['mozilla', 'mozilla.org'],
   ['n26', 'n26.com'],
   ['nuro', 'nuro.com'],
+  ['oldmission', 'oldmissioncapital.com'],
+  ['opal', 'opal.dev'],
   ['openai', 'openai.com'],
   ['oscarhealth', 'hioscar.com'],
   ['perplexity', 'perplexity.ai'],
-  ['quintoandar', 'quintoandar.com.br'],
+  ['pinecone', 'pinecone.io'],
+  ['poolside', 'poolside.ai'],
+  ['prefect', 'prefect.io'],
+  ['quadrature', 'quadrature.ai'],
   ['quberesearchtechnologies', 'qube-rt.com'],
+  ['quintoandar', 'quintoandar.com.br'],
   ['ramp', 'ramp.com'],
+  ['reflectionai', 'reflection.ai'],
   ['rocketlab', 'rocketlabcorp.com'],
+  ['rondoenergy', 'rondo.com'],
   ['salesloft', 'salesloft.com'],
   ['seatgeek', 'seatgeek.com'],
+  ['shieldai', 'shield.ai'],
   ['sierra', 'sierra.ai'],
   ['sigma', 'sigmacomputing.com'],
+  ['singlestore', 'singlestore.com'],
+  ['skylight', 'myskylight.com'],
+  ['socket', 'socket.dev'],
   ['sofi', 'sofi.com'],
   ['spotify', 'spotify.com'],
+  ['squarepointcapital', 'squarepoint-capital.com'],
+  ['stockx', 'stockx.com'],
+  ['taketwo', 'take2games.com'],
+  ['tala', 'tala.co'],
   ['thenewyorktimes', 'nytco.com'],
   ['toast', 'toasttab.com'],
+  ['togetherai', 'together.ai'],
   ['tripadvisor', 'tripadvisor.com'],
   ['udemy', 'udemy.com'],
+  ['unstructured', 'unstructured.io'],
+  ['validio', 'validio.io'],
+  ['vannevarlabs', 'vannevarlabs.com'],
   ['vardaspaceindustries', 'varda.com'],
   ['voxmediagroup', 'voxmedia.com'],
   ['wiz', 'wiz.io'],
   ['zocdoc', 'zocdoc.com'],
+  ['zscaler', 'zscaler.com'],
 ]);
 
 /** A parked or for-sale domain is not a company, however much its page repeats the name. */
