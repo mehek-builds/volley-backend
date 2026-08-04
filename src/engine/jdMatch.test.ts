@@ -1488,7 +1488,12 @@ describe('route registration', () => {
     // The caller's text WINS when present. The review screen holds the JD its packet was tailored
     // against, and the live row may have been edited since; scoring the row there would put a
     // number next to a resume that was written for different text.
-    assert.match(routeFile, /const jdText = body\.jd_text \?\? posting\?\.description \?\? '';/);
+    // Both /jd-match and /jd-match/requirements now go through ONE resolver, because they render on
+    // the same screen and two resolutions is two numbers about one posting. The invariant is
+    // unchanged: the caller's text wins unless it is the 600-char list preview.
+    assert.match(routeFile, /export function resolveJdText/);
+    assert.match(routeFile, /const jdText = resolveJdText\(body\.jd_text \?\? posting\?\.description \?\? '', posting\?\.description\);/);
+    assert.match(routeFile, /const jdText = resolveJdText\(parsed\.data\.jd_text \?\? '', posting\?\.description\);/);
     // Neither supplied nor resolvable is a WIRING fault, and must not borrow the engine's
     // "this posting did not list enough requirements" copy, which is a claim about the job.
     assert.match(routeFile, /jd_text is required unless job_context\.job_id names a posting we hold/);
