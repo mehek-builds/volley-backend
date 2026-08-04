@@ -83,8 +83,24 @@ scoring text for the whole ranking pool out of Neon.
 
 That is what exhausted Neon's 5 GB/month transfer allowance on 2026-08-04 and suspended the
 database, so **this is the largest single saving available and it is inert until configured.**
-Create a database at upstash.com (free tier: 256 MB, 500k commands/month), copy its REST URL
-and token into the Vercel project, and redeploy.
+Provision it through the Vercel marketplace rather than copying a token by hand. This
+creates the database, connects it, and injects the credentials in one step:
+
+```bash
+vercel integration add upstash/upstash-kv --plan free -m primaryRegion=iad1 \
+  -m autoUpgrade=false -m eviction=true -e production \
+  -n litos-ranking-cache --no-env-pull
+```
+
+`autoUpgrade=false` is deliberate and must not be dropped: it defaults to TRUE, which moves
+the resource onto Pay As You Go ($0.2 per 100K commands) on hitting free limits.
+`--no-env-pull` is also deliberate: env pull writes a local env file and can clobber the
+`.env.local` holding the Neon production URL. `iad1` matches where the functions execute and
+where Neon lives. `-e production` only, so preview deployments do not share cached rankings
+with production while running different ranking code.
+
+The integration injects `KV_REST_API_URL` and `KV_REST_API_TOKEN`, NOT the
+`UPSTASH_REDIS_REST_*` names. The code accepts either pair, so nothing needs renaming.
 
 **Verify it actually took effect**, because env var changes on Vercel do not reach a
 running deployment until it is rebuilt, so the dashboard can show them set while the
