@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { eq, desc, sql } from 'drizzle-orm';
+import { eq, desc } from 'drizzle-orm';
 import { createHash, randomUUID } from 'node:crypto';
 import { put } from '@vercel/blob';
 import { db } from '../db/index';
@@ -30,6 +30,7 @@ import { PRODUCT_NAME } from '../lib/product';
 import { applyResumePolicy, educationFrom, enforceExperienceBulletFloor, type CandidateEducation } from '../engine/resumePolicy';
 import { academicRecordRowFor } from './profile';
 import { warmRequirementCache } from '../engine/warmRequirements';
+import { postingRow, resolveJdText } from './jdMatch';
 import { baseResumeSelectionIssues } from '../llm/baseResume';
 import { deriveEditedTerms } from '../lib/applicationReview';
 
@@ -209,25 +210,14 @@ export async function resumeRoutes(fastify: FastifyInstance) {
      */
     let jdText = body.jd_text;
     if (body.job_id) {
-      const [row] = await db
-        .select({ description: sql<string>`left(${monitored_jobs.description}, 60000)` })
-        .from(monitored_jobs)
-        .where(eq(monitored_jobs.id, body.job_id))
-        .limit(1);
-      // Only when the row actually has MORE than the caller sent. A posting we hold a shorter copy
-      // of must not overwrite a full JD someone pasted in.
-      /* Only a PREVIEW is replaced, and a row that is itself capped never wins.
+      /* Through the SAME scoped helper the review screen uses, not a second inline query.
        *
-       * Raw length was too blunt in two ways the review caught. `left(description, 60000)` returns
-       * exactly 60000 characters cut mid-word for any posting over that, which beats almost any
-       * caller text and reintroduces the very defect this fixes at a different boundary. And the
-       * poller overwrites description in place, so a re-polled posting that grew by one character
-       * would silently replace a full JD a caller genuinely holds. The preview is 600 characters;
-       * anything under a couple of thousand is preview-shaped and nothing else is. */
-      const capped = row?.description?.length === 60_000;
-      if (row?.description && !capped && jdText.length < 2_000 && row.description.length > jdText.length) {
-        jdText = row.description;
-      }
+       * This read was inline and unscoped, so an arbitrary uuid returned up to 60k characters of
+       * any posting the board refuses to serve, echoed straight back in the response's stored spec.
+       * Sharing the helper also keeps the JD a packet is generated against identical to the JD its
+       * review screen scores, which two copies of the same predicate would not guarantee. */
+      const row = await postingRow(body.job_id);
+      jdText = resolveJdText(jdText, row?.description);
     }
 
     // Resume-gen + autofill is available on every tier (2026-07-02 decision): free gets
