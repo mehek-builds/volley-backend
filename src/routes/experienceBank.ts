@@ -12,6 +12,16 @@ const entrySchema = z.object({
   org: z.string().min(1),
   title: z.string().optional(),
   date_range: z.string().optional(),
+  /* THIS ROUTE DELETES THE WHOLE BANK AND REWRITES IT, so any field missing from this schema is
+     not merely un-settable, it is ERASED on every save. location was absent here while being
+     written by the two other bank writers, so a single trip through the work-history editor
+     silently wiped every city the parser had read. Measured on a live account: 17 rows, all
+     recreated in one batch, all locations gone.
+
+     The rule for anyone adding a bank field: there are THREE writers, and it has to be in all of
+     them. bankEntriesFrom (insert on upload), planBankReconciliation (enrich existing rows), and
+     this. Two out of three is a field that looks like it works and quietly disappears. */
+  location: z.string().optional(),
   bullet_variants: z.array(z.string()).min(1),
   tags: z.array(z.string()).optional(),
 });
@@ -50,6 +60,7 @@ export async function experienceBankRoutes(fastify: FastifyInstance) {
               org: e.org,
               title: e.title ?? null,
               date_range: e.date_range ?? null,
+              location: e.location ?? null,
               bullet_variants: e.bullet_variants,
               tags: e.tags ?? [],
             })),
