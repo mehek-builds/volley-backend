@@ -252,6 +252,11 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
   fastify.post('/jd-match/requirements', { preHandler: requireAuth, bodyLimit: 128 * 1024 }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
 
+    const parsed = requirementsSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.issues[0]?.message ?? 'Invalid request body' });
+    }
+
     /* METERED AND BOUNDED, like every other model-backed route here.
      *
      * This shipped with neither, which made it the only paid endpoint in the repo behind nothing
@@ -260,15 +265,16 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
      * one character guarantees a miss and a fresh Sonnet call. That is an unmetered spend endpoint,
      * and the fact that its own cache made the common path free is exactly what hid it.
      *
-     * The hourly ceiling is generous rather than tight: a student reading through a day's packets
-     * opens a lot of them, and the cache means most of those cost nothing. It exists to stop a
-     * loop, not to ration ordinary use. */
+     * IT METERS REQUESTS, NOT MODEL CALLS, and the ceiling is set for that. A cache hit costs
+     * nothing and still spends a unit, because the limit has to be decided before the work rather
+     * than after it. An earlier version of this comment claimed cached reads were free of the
+     * quota; they are not, and pretending otherwise would set the ceiling by the wrong arithmetic.
+     * It runs after the body parse so a malformed request cannot burn a unit.
+     *
+     * Generous rather than tight: a student reading through a day's packets opens a lot of them.
+     * This exists to stop a loop, not to ration ordinary use. */
     if (!(await allowHourly(userId, 'jdRequirements', LIMITS.perHour.jdRequirements))) {
       return rateLimitedReply(reply);
-    }
-    const parsed = requirementsSchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.status(400).send({ error: parsed.error.issues[0]?.message ?? 'Invalid request body' });
     }
 
     const [profile] = await db.select().from(profiles).where(eq(profiles.user_id, userId));
