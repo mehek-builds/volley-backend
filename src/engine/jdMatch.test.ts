@@ -2191,3 +2191,156 @@ describe('the pay and rewards footer is not a requirement', () => {
     assert.match(keys[0], /Kubernetes/, 'the requirement below the tag is still required');
   });
 });
+
+/*
+ * THE DENOMINATOR: WHAT THE SCORE IS DIVIDED BY.
+ *
+ * scoreJdMatch computes `Math.round((100 * got) / total)`, where `total` is the summed WEIGHT of
+ * every extracted term and `got` is the summed weight of the ones the resume covered. This block
+ * is the only place that arithmetic is pinned by name.
+ *
+ * WHY IT EXISTS. Until this was written the denominator had no test of its own. It was guarded
+ * accidentally, by two tests that asserted `score === 100` while being named for the vendor-spelling
+ * MERGE and for schedule-line DILUTION. Perturbing the denominator failed those two and nothing
+ * else, which sent the reader to the lexicon to debug an arithmetic change. Both have since been
+ * rewritten to assert an empty `missing` list, which is the claim they were always making, and the
+ * coverage they were carrying by accident is re-established here where its name says what it is.
+ *
+ * WHAT IT PINS, and deliberately not more: that the denominator is the WHOLE weight of what the
+ * posting asked for. Not the matched weight, not the term COUNT, and not a figure adjusted by how
+ * much the employer happened to write. It says nothing about what the weights should BE. Those are
+ * SECTION_WEIGHT's business and are asserted as fixture guards below, so that a reviewed change to
+ * a weight fails a guard that names the weight rather than silently moving an expected score.
+ */
+describe('the score is the matched weight over the whole weight the posting asked for', () => {
+  /* Mirrors SECTION_WEIGHT in jdMatch.ts, which is not exported. Every expected score below is
+     DERIVED from these rather than written as a literal, and the fixture guards assert the
+     extracted terms really carry them. So reweighting a section fails a guard that says which
+     weight moved, and the expected scores then follow automatically once these are updated. */
+  const REQUIRED_W = 1;
+  const PREFERRED_W = 0.6;
+
+  const REQUIRED_SIX = ['Python', 'Docker', 'Kubernetes', 'Terraform', 'Kafka', 'Airflow'];
+  const PREFERRED_SIX = ['React', 'TypeScript', 'PostgreSQL', 'GraphQL', 'Redis', 'Ansible'];
+
+  /* Six stated requirements, nothing else. Every term lands in the Requirements section, so the
+     denominator is six terms at REQUIRED_W. */
+  const SHORT_JD = `Requirements:\n${REQUIRED_SIX.map((s) => `- Experience with ${s}`).join('\n')}\n`;
+
+  /* The same six, plus six under a preferred heading: twelve terms at two different weights. The
+     second weight tier is the point of this fixture. A denominator that counted terms instead of
+     summing their weights is indistinguishable from a correct one on SHORT_JD, where every weight
+     is 1, and is caught here. */
+  const LONG_JD =
+    `Requirements:\n${REQUIRED_SIX.map((s) => `- Experience with ${s}`).join('\n')}\n\n` +
+    `Nice to have:\n${PREFERRED_SIX.map((s) => `- Exposure to ${s}`).join('\n')}\n`;
+
+  const resume = (list: string[]) => `Engineer. Shipped production work using ${list.join(', ')}.`;
+
+  /** Summed weight of a term list, which is what `total` and `got` are inside scoreJdMatch. */
+  const weightOf = (terms: Array<{ weight: number }>) => terms.reduce((s, t) => s + t.weight, 0);
+
+  test('a short posting is scored over its own full weight, not a padded one', () => {
+    // Two of six stated requirements met. Every term is `required`, so:
+    //   denominator = 6 x 1   = 6
+    //   numerator   = 2 x 1   = 2
+    //   score       = round(100 x 2 / 6) = round(33.33) = 33
+    const r = scoreJdMatch(resume(['Python', 'Docker']), SHORT_JD);
+
+    // Fixture guards first: without these the arithmetic assertion goes vacuous the moment
+    // extraction shifts, and would report a denominator defect for a lexicon change.
+    assert.equal(r.term_count, 6, `fixture broken: SHORT_JD yielded ${r.term_count} terms, not 6`);
+    assert.equal(r.matched.length, 2, 'fixture broken: exactly two requirements must be met');
+    assert.ok(
+      r.matched.concat(r.missing).every((t) => t.weight === REQUIRED_W),
+      `fixture broken: SHORT_JD must be all required-weight terms, got ${JSON.stringify(
+        r.matched.concat(r.missing).map((t) => [t.term, t.weight]),
+      )}`,
+    );
+
+    const expected = Math.round((100 * (2 * REQUIRED_W)) / (6 * REQUIRED_W));
+    // MUTANT THIS CATCHES: scaling the denominator up on postings that state few requirements,
+    // which is what the rejected EVIDENCE_TARGET change did. It reads 20 here instead of 33.
+    assert.equal(
+      r.score,
+      expected,
+      `two of six stated requirements met scored ${r.score}, but the posting's own weight is ` +
+        `${weightOf(r.matched.concat(r.missing))} and ${weightOf(r.matched)} of it was covered, ` +
+        `which is ${expected}. The score is being divided by something other than what the ` +
+        `posting asked for.`,
+    );
+  });
+
+  test('a long posting is scored over summed weight, not a count of its terms', () => {
+    // Twelve terms across two weight tiers. Three of the six required met, two of the six
+    // preferred:
+    //   denominator = (6 x 1) + (6 x 0.6) = 9.6
+    //   numerator   = (3 x 1) + (2 x 0.6) = 4.2
+    //   score       = round(100 x 4.2 / 9.6) = round(43.75) = 44
+    // Counting terms instead of summing weights gives 12 and 4.2, which is 35.
+    const r = scoreJdMatch(
+      resume(['Python', 'Docker', 'Kubernetes', 'React', 'TypeScript']),
+      LONG_JD,
+    );
+
+    assert.equal(r.term_count, 12, `fixture broken: LONG_JD yielded ${r.term_count} terms, not 12`);
+    const all = r.matched.concat(r.missing);
+    assert.equal(
+      all.filter((t) => t.weight === REQUIRED_W).length,
+      6,
+      'fixture broken: LONG_JD must carry six required-weight terms',
+    );
+    assert.equal(
+      all.filter((t) => t.weight === PREFERRED_W).length,
+      6,
+      `fixture broken: LONG_JD must carry six terms at the preferred weight ${PREFERRED_W}`,
+    );
+    assert.equal(r.matched.filter((t) => t.weight === REQUIRED_W).length, 3, 'fixture broken');
+    assert.equal(r.matched.filter((t) => t.weight === PREFERRED_W).length, 2, 'fixture broken');
+
+    const expected = Math.round(
+      (100 * (3 * REQUIRED_W + 2 * PREFERRED_W)) / (6 * REQUIRED_W + 6 * PREFERRED_W),
+    );
+    // MUTANT THIS CATCHES: dividing by terms.length. A preferred requirement would then cost the
+    // student as much as a required one, and the weights would stop meaning anything.
+    assert.equal(
+      r.score,
+      expected,
+      `a resume covering three required and two preferred requirements scored ${r.score}, but ` +
+        `${weightOf(r.matched)} of the posting's ${weightOf(all)} total weight was covered, ` +
+        `which is ${expected}. A preferred requirement is being priced like a required one.`,
+    );
+  });
+
+  test('every unmet requirement stays in the denominator, on its own weight', () => {
+    // The structural statement of the same rule, over both fixtures and both extremes of coverage.
+    // Independent of any particular weight, so it survives reweighting untouched.
+    //
+    // MUTANT THIS CATCHES: dropping unmet terms from the denominator, which scores every resume
+    // against only what it already covered and reads 100 everywhere.
+    for (const [jd, cv] of [
+      [SHORT_JD, resume(['Python', 'Docker'])],
+      [SHORT_JD, resume(REQUIRED_SIX)],
+      [SHORT_JD, 'Paralegal. Nothing here overlaps this posting at all.'],
+      [LONG_JD, resume(['Python', 'Docker', 'Kubernetes', 'React', 'TypeScript'])],
+      [LONG_JD, resume(PREFERRED_SIX)],
+    ] as const) {
+      const r = scoreJdMatch(cv, jd);
+      assert.ok(r.score !== null, 'fixture broken: these postings must all be scorable');
+      const covered = weightOf(r.matched);
+      const asked = weightOf(r.matched.concat(r.missing));
+      assert.equal(
+        r.score,
+        Math.round((100 * covered) / asked),
+        `covering ${covered} of ${asked} weight scored ${r.score}. The unmet requirements are ` +
+          `not being charged for at full weight.`,
+      );
+      // The denominator is the whole posting, so it cannot shrink to the covered part.
+      assert.equal(
+        asked,
+        weightOf(r.matched) + weightOf(r.missing),
+        'the denominator must be every extracted term, met or not',
+      );
+    }
+  });
+});
