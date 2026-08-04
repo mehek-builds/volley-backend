@@ -855,6 +855,64 @@ We use Python and Docker and SQL and React and AWS and Git and Kafka and Redis a
     }
   });
 
+  test('the two central nouns of the law discipline are hard signal', () => {
+    // PINS THE `legal` AND `law` ENTRIES. The first ISSUE-033 pass added litigation, compliance,
+    // regulatory and the rest but not these two, and the miss survived because the test above only
+    // asserts a COUNT of hard-signal terms: a law posting clears MIN_SIGNAL_TERMS on compliance and
+    // regulatory alone, so nothing ever noticed that the words `legal` and `law` earned nothing.
+    //
+    // Re-measured 2026-08-04 over 2500 live postings. Before these entries `legal` reached 61
+    // denominators and `law` 8, with signal on zero of them, and the UW law resume's own-field to
+    // off-field separation was 4.2. After, it is 9.2, and her p@10 went 40% to 60%. USC CS and MIT
+    // econ separation are unchanged to the decimal, so nothing was evicted from anyone else.
+    //
+    // MUTANT THIS CATCHES: deleting either word from SKILL_LEXICON. Both are ordinary English and
+    // read like the corporate prose this list rejects, so a future tidy-up is likely to try. On the
+    // baseline this test fails twice over: `law` extracts without signal, and `legal` does not
+    // reach the denominator at all.
+    const jd = `Requirements
+- Partner with Legal and Compliance on vendor agreements and escalations
+- Support the legal team on contract review and regulatory filings
+- Bachelor's degree in Law, Business Administration or a related field
+`;
+    const terms = extractJdTerms(jd);
+    for (const word of ['legal', 'law']) {
+      const hit = terms.find((t) => t.term === word);
+      assert.ok(hit, `"${word}" must reach the denominator of a posting that names it`);
+      assert.equal(hit.signal, true, `"${word}" is a requirement a law resume earns, not prose`);
+    }
+  });
+
+  test('the law vocabulary this board does not contain stays out', () => {
+    // THE OTHER HALF OF THE SAME MEASUREMENT, recorded as a test because the entries it rejects are
+    // the ones domain reasoning most wants to add. Searched across 2500 live postings:
+    //
+    //   counsel     2 denominators, both the SAME posting. Adding it moved the law resume's
+    //               separation 4.2 to 4.0, slightly WORSE: it buys no on-field credit and still
+    //               competes for a reserved hard-signal slot in capToEmphasis.
+    //   the rest    ZERO denominators each. Not rare, absent. This board is written in the language
+    //               of compliance and policy work, not of legal practice.
+    //
+    // An entry that can never be extracted is not harmless: it makes the list overstate its own
+    // coverage, which is the exact defect ISSUE-033 was opened for.
+    //
+    // MUTANT THIS CATCHES: adding any of them back on the intuition that law needs law words.
+    const src = readFileSync(path.join(__dirname, 'jdMatch.ts'), 'utf8');
+    const lexicon = new Set(
+      new RegExp('const SKILL_LEXICON = new Set\\(\\s*`([^`]*)`').exec(src)![1].split(/\s+/).filter(Boolean),
+    );
+    for (const rejected of [
+      'counsel', 'attorney', 'statutory', 'clerkship', 'affidavit',
+      'pleading', 'jurisdiction', 'plaintiff', 'defendant',
+    ]) {
+      assert.ok(
+        !lexicon.has(rejected),
+        `"${rejected}" was measured against 2500 live postings and reaches no denominator. See the ` +
+          `rejection note above SKILL_LEXICON before adding it.`,
+      );
+    }
+  });
+
   test('the applicant-privacy footer stays out of the denominator', () => {
     // PINS THE `privacy` / `notice` BOILERPLATE ENTRIES. Removing both from that list passed 90 of
     // 90 tests before this existed, so anyone tidying it would have silently put the footer back
