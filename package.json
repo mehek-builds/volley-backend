@@ -78,6 +78,7 @@
     "logo:resolve": "node --import tsx scripts/resolve-company-domains.mjs",
     "db:job-pay": "node scripts/apply-job-pay-schema.mjs",
     "db:employment-type-index": "node scripts/apply-employment-type-index.mjs",
-    "verify:classification": "tsx scripts/verify-classification.mts"
+    "verify:classification": "tsx scripts/verify-classification.mts",
+    "trial:submit-control": "tsx scripts/trial-submit-control.mts"
   }
 }
