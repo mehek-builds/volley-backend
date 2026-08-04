@@ -251,35 +251,59 @@ const HEADING_PATTERNS: Array<{ kind: SectionKind; re: RegExp }> = [
   // A lexicon hit inside a hiring-process disclosure is still a hiring-process disclosure. This is
   // the only section-based route by which a lexicon skill leaves the denominator at all, and on
   // this corpus it has not once removed a stated requirement.
-  { kind: 'noise', re: new RegExp(String.raw`^about\b(?!\s+${SECOND_PERSON_SUBJECT}\b)|\b(who we are|our (story|mission|values|culture)|benefits|perks|what we offer|compensation|salary|pay range|equal opportunity|eeo|diversity|accommodation|privacy|how to apply|why join)\b`, 'i') },
-  // THE PROCESS-AND-PAY FOOTER IS MATCHED AT THE END OF THE HEADING, NOT ANYWHERE IN IT.
   //
-  // These four were originally alternates in the substring list above. Retrospective review of
-  // ISSUE-026 found the substring form truncates real requirements blocks, because a heading is
-  // only boilerplate when the phrase is what the heading IS, not something it mentions:
+  // THE PAY-AND-REWARDS FOOTER, 2026-08-04, third pass over this same rule. The "About You" fix
+  // above left a residue it named but did not close: a requirements block that runs to the end of a
+  // posting with nothing to close it keeps the pay and EEO footer at weight 1. Measured board-wide
+  // rather than on the one subset, that residue is not small. Footer text sits inside a REQUIRED
+  // section on 5,839 of 22,138 active postings (26.4%), and the reason is the reason it always is
+  // here: a heading-shaped line that matches nothing does not close the section it interrupts.
   //
-  //   "The interview process"          section header   -> noise, correct
-  //   "Interview Process Design"       requirements sub-heading, on a recruiter posting
-  //   "Background Check Operations"    ditto, on a trust-and-safety posting
-  //   "Pay Rate Administration:"       ditto, on a comp-analyst posting
-  //   "Own the interview process end to end"   a responsibilities bullet written without a marker
+  // FOUR ADDITIONS, each one counted over the 205,581 heading-shaped lines on the board before it
+  // was added, because this list has no shape guard beyond isHeadingLine and a word that reads as
+  // boilerplate to a human can still be the noun of somebody's job:
   //
-  // Under the substring form all five were noise at weight 0. Measured on a recruiter posting whose
-  // requirements block carries an "Interview Process Design" sub-heading, that zeroed the block and
-  // took `greenhouse`, `ashby`, `lever` and `workday` - the entire requirement - to an unscorable
-  // refusal for a resume that listed all four. That is the failure PLACE_SAFE_KINDS exists to
-  // refuse: deleting a requirement is worse than keeping a nuisance.
+  //   total rewards           406 lines, 5 spellings. "Our Total Rewards Philosophy" (272), "Total
+  //                           Rewards" (52), "Our Spread* of Total Rewards" (19). One of the five is
+  //                           a JOB TITLE, "Internship - Total Rewards (Compensation & Benefits)",
+  //                           and it is the known cost: that posting zeroes its own title line.
+  //   pay transparency        672 lines, 8 spellings, every one a pay-disclosure banner. `pay range`
+  //                           and `salary` were already here and reach none of them.
+  //   what we('?ll)? offer    the contraction only. `what we offer` was already here and missed
+  //                           "What we'll offer" (119 lines) for the same reason the curly
+  //                           apostrophe defect existed: the regex is typed, the posting is not.
+  //   employment verification  70 lines, 5 spellings, all hiring-process. `background check` from
+  //                           ISSUE-026 reaches "Criminal background screening" but not this.
   //
-  // Ending the heading with the phrase is the discriminator, and it is a property of headings
-  // rather than another list: a section header naming the process STOPS there ("The interview
-  // process", "Use of AI in Our Hiring Process", "Housing/Commuter Stipend", "Hourly Rate"), while
-  // a requirements sub-heading continues into the thing being required.
+  // `^disclosures:?$` IS ANCHORED, AND THAT IS THE WHOLE POINT. Bare `disclosures?` fires on 202
+  // lines, and four of its ten spellings are real work: "Prepare tax related disclosures for
+  // financial statements", "Manage subprocessor tracking and disclosures", "Experience negotiating
+  // non-disclosure agreements", "Data leakage and sensitive information disclosure". A tax
+  // accountant's requirement line is not a footer. The anchored form reaches only the 59 lines that
+  // are the bare word standing alone as a banner.
   //
-  // THE COST, measured on the same 400-posting corpus: two of the 27 headings the substring form
-  // caught no longer match, "WHAT DOES THE HIRING PROCESS LOOK LIKE?" and one like it, because the
-  // sentence continues past the phrase. Those footers stay in the denominator. A nuisance term on
-  // two postings is the right price for not deleting a stated requirement on any.
-  { kind: 'noise', re: /^(the|our|your)?\s*(interview|hiring|selection|recruitment)\s+process(es)?[\s:.]*$/i },
+  // THIS RAISES REFUSALS, 1,583 to 1,606 over the 22,138 active postings, and the 24 that flip are
+  // the point rather than a cost. Samsara's "Account Executive, Commercial - Mexico" scored on eight
+  // terms before this, of which `Tofu`, `us-greenhouse-mail.io`, `mail3.guide.co` and `Commitment`
+  // were four: take the footer away and what is left is under the floor, so the posting refuses
+  // instead of printing a number built on a rewards paragraph and a mail domain. That is the trade
+  // MIN_SCORABLE_TERMS exists to make. It is recorded here because it is user-visible - a student
+  // sees "not scorable" on 24 more postings - and because a later change that moves this number
+  // should have to notice it moved.
+  //
+  // TWO CANDIDATES MEASURED AND REJECTED, recorded so they are not re-proposed on the intuition
+  // that put them here:
+  //
+  //   bare `disclosures?`     see above. Rejected on four real requirement lines.
+  //   LinkedIn tracking tags  `#LI-Hybrid` and its 328 cousins are the single biggest unrecognised
+  //                           heading on the board: 3,705 lines, and headingCore strips the `#` so
+  //                           they arrive here looking like headings. Zeroing them is tempting and
+  //                           WRONG AS WRITTEN: only 635 of the 3,705 sit in the last 5% of their
+  //                           posting, while 1,867 sit before the 80% mark, so a rule that closes
+  //                           the section at the tag would zero real content on a third of them.
+  //                           They are harmless where they are (matching nothing, they close
+  //                           nothing) and they need a rule about their SHAPE, not this list.
+  { kind: 'noise', re: new RegExp(String.raw`^about\b(?!\s+${SECOND_PERSON_SUBJECT}\b)|^disclosures:?$|\b(who we are|our (story|mission|values|culture)|benefits|perks|what we('?ll)? offer|compensation|salary|pay range|hourly rate|pay rate|stipend|total rewards|pay transparency|equal opportunity|eeo|diversity|accommodation|privacy|how to apply|why join|interview process|hiring process|selection process|background check|employment verification)\b`, 'i') },
   { kind: 'preferred', re: /\b(preferred|nice[- ]to[- ]have|bonus|plus(es)?|desired|good to have|additional qualifications)\b/i },
   // `what we('?re)? look(ing)? for` and `(your|the) impact`, not the tighter `what we're looking
   // for` / `your impact` they replaced. Databricks' "Product Management Intern (Summer 2027)"
@@ -350,9 +374,87 @@ function isHeadingLine(line: string): boolean {
   return t.endsWith(':') || /^[A-Z][^.!?]*$/.test(t) || t === t.toUpperCase();
 }
 
+/**
+ * A heading that names WORK ABOUT the footer vocabulary, rather than the footer itself.
+ *
+ * The noise list above is matched as a substring, which is what lets it catch "Perks and Benefits"
+ * as readily as "Benefits" and is why it reaches footer text inside a required section on 26.4% of
+ * the board. The cost of a substring match is that it cannot tell a footer from a requirements
+ * sub-heading that happens to contain the same words, and on that shape it does not merely add a
+ * nuisance term - it DELETES the requirements underneath. Measured against the shipped matcher:
+ *
+ *   Requirements block, then a sub-heading, then "Administer Greenhouse and Workday"
+ *   for a student who has NEITHER tool:
+ *
+ *     "Interview Process Design"            score 100, missing list EMPTY
+ *     "Total Rewards Analysis"              score 100, missing list EMPTY
+ *     "Employment Verification Workflows"   score 100, missing list EMPTY
+ *     "Own the interview process"           score 100, missing list EMPTY
+ *
+ * A student told they are a perfect match, with nothing to act on, for a job naming two tools they
+ * do not have. PLACE_SAFE_KINDS records why this direction is the worse one: a requirement the
+ * student LACKS vanishing from the denominator inflates the score and vanishes from the list they
+ * are supposed to act on.
+ *
+ * THIS GUARD ONLY EVER SUBTRACTS FROM THE NOISE CLASS, and that is deliberate. Narrowing the
+ * vocabulary or anchoring the match would have cut the 26.4% coverage the substring form earns;
+ * an earlier attempt at this fix did exactly that and was rejected in review. Nothing here can make
+ * a heading noisy that was not already, so the footer coverage is untouched by construction.
+ *
+ * TWO SIGNALS, both enumerations rather than shape guesses, in the same spirit as
+ * POSITIONAL_OPENERS:
+ *
+ *   - The heading OPENS with an action verb. "Own the interview process", "Conducting Background
+ *     Checks", "Analyze Pay Rates". A footer heading names a thing; a requirements line asks you to
+ *     do one. `hiring`, `interviewing` and `recruiting` are deliberately ABSENT, because they are
+ *     the footer vocabulary itself: "Hiring Process" must stay noise.
+ *   - The heading CLOSES with a work noun. "Interview Process Design", "Background Check
+ *     Operations", "Pay Rate Administration". `process`, `benefits` and `rewards` are deliberately
+ *     absent for the same reason - they are how the footer headings themselves end.
+ */
+const SUBHEADING_VERBS = new Set(
+  `own owning manage managing run running conduct conducting analyze analyzing analyse analysing
+administer administering model modeling modelling redesign redesigning design designing build
+building improve improving automate automating audit auditing oversee overseeing coordinate
+coordinating execute executing lead leading drive driving deliver delivering maintain maintaining
+monitor monitoring review reviewing evaluate evaluating handle handling perform performing`
+    .split(/\s+/)
+    .filter(Boolean),
+);
+
+const SUBHEADING_WORK_NOUNS = new Set(
+  `design operations operation administration workflow workflows analysis analytics management
+automation strategy engineering reporting tooling`
+    .split(/\s+/)
+    .filter(Boolean),
+);
+
+function looksLikeStatedSubHeading(heading: string): boolean {
+  const words = heading
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!words.length) return false;
+  return SUBHEADING_VERBS.has(words[0]) || SUBHEADING_WORK_NOUNS.has(words[words.length - 1]);
+}
+
 function classifyHeading(line: string): SectionKind | undefined {
   const t = headingCore(line);
-  for (const { kind, re } of HEADING_PATTERNS) if (re.test(t)) return kind;
+  for (const { kind, re } of HEADING_PATTERNS) {
+    if (!re.test(t)) continue;
+    // A footer heading names the footer. A requirements sub-heading names work about it, and
+    // zeroing that block deletes the requirements under it. Fall through to the remaining patterns
+    // rather than returning, so a line that is genuinely a requirements heading can still say so.
+    // The `^about` branch is EXEMPT. A heading-shaped line opening with "About" is a company or
+    // team blurb by construction, as that pattern's own note says, so the verb/work-noun heuristic
+    // has no work to do there and gets it wrong: "About AQR Capital Management" ends in
+    // `management`, a genuine work noun, and the guard was zeroing nothing while un-zeroing a real
+    // company blurb. Found on the live board, not constructed.
+    if (kind === 'noise' && !/^about\b/i.test(t) && looksLikeStatedSubHeading(t)) continue;
+    return kind;
+  }
   return undefined;
 }
 
@@ -412,6 +514,12 @@ function isNoiseBlockOpener(line: string): boolean {
   if (/^[-*•·]/.test(t)) return false;
   if (/\.$/.test(t)) return false;
   if (t.split(/\s+/).length > 16) return false;
+  // Same substring hazard as the noise heading list, and the same guard. This matcher has the
+  // WIDER 16-word budget, so it is the more exposed of the two: "Benefits Administration" is a real
+  // requirements sub-heading on an HR-operations posting, and zeroing it deletes everything under
+  // it. See looksLikeStatedSubHeading, and the caution this comment block already carries about
+  // additions needing to be checked against real requirement prose rather than reasoned about.
+  if (looksLikeStatedSubHeading(t)) return false;
   return NOISE_BLOCK.test(t);
 }
 
