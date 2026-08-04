@@ -51,13 +51,96 @@ export function validateCoverLetter(
   return { issues, warnings, word_count, body: cleaned };
 }
 
+/**
+ * Re-encode control characters that are already inside a JSON string literal.
+ *
+ * This is the whole reason a healthy model kept producing an "invalid" cover letter. The prompt
+ * asks for a 3-or-4 PARAGRAPH letter returned inside a JSON string, so every single response has to
+ * encode paragraph breaks somehow. Claude escapes them as \n most of the time and emits a RAW
+ * newline the rest of the time. JSON.parse rejects a raw control character inside a string literal
+ * ("Bad control character in string literal"), so a complete, well-formed, perfectly usable letter
+ * was discarded as garbage. Measured 2 failures in 8 calls against a real Gemini SEI posting on
+ * 2026-08-04, which is why it read as a flaky portal rather than a parser bug.
+ *
+ * The stored submission_error is truncated to 200 characters, so the operator only ever saw a JSON
+ * prefix that cut off mid-word and looked like a token-limit truncation. It was not: stop_reason
+ * was end_turn on every observed failure. The generateCoverLetter max_tokens guard below covers the
+ * truncation case separately, so the two are never confused again.
+ *
+ * This invents nothing. It only re-encodes characters that are already inside a string literal, so
+ * a response that is genuinely malformed still fails.
+ */
+export function escapeRawControlCharacters(json: string): string {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+  for (const char of json) {
+    if (escaped) {
+      out += char;
+      escaped = false;
+      continue;
+    }
+    if (char === '\\') {
+      out += char;
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      out += char;
+      continue;
+    }
+    if (inString && char < ' ') {
+      out += char === '\n' ? '\\n'
+        : char === '\r' ? '\\r'
+          : char === '\t' ? '\\t'
+            : `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`;
+      continue;
+    }
+    out += char;
+  }
+  return out;
+}
+
+/**
+ * Pull the letter body out of whatever Claude actually returned.
+ *
+ * Deliberately tolerant of the three shapes observed live - a bare object, a ```json fence, and an
+ * object whose string values carry raw newlines - and deliberately intolerant of anything else. A
+ * truncated or genuinely broken response still throws, because silently accepting half a cover
+ * letter would put half a cover letter in front of an employer.
+ */
+export function parseCoverLetterBody(text: string): string {
+  const unfenced = text.replace(/^\s*```(?:json)?\s*/m, '').replace(/```\s*$/m, '');
+  const first = unfenced.indexOf('{');
+  const last = unfenced.lastIndexOf('}');
+  const candidate = first >= 0 && last > first ? unfenced.slice(first, last + 1) : unfenced;
+  for (const attempt of [candidate, escapeRawControlCharacters(candidate)]) {
+    try {
+      const parsed = JSON.parse(attempt) as { body?: unknown };
+      if (typeof parsed.body === 'string' && parsed.body.trim()) return parsed.body;
+    } catch {
+      // Fall through to the repaired form, then to the honest failure below.
+    }
+  }
+  throw new Error(`Claude returned an invalid cover letter: ${text.slice(0, 200)}`);
+}
+
 export async function generateCoverLetter(
   input: { company: string; role: string; jd_text: string; candidate_source: string },
   feedback: string[] = [],
 ): Promise<string> {
   const response = await client.messages.create({
     model: 'claude-sonnet-5',
-    max_tokens: 2048,
+    // max_tokens is a SHARED budget for thinking AND the emitted JSON, not just the JSON. Adaptive
+    // thinking is on by default on this model and its depth varies per posting: measured on a real
+    // Gemini SEI call, output_tokens ranged from 654 (no thinking block at all) to 1188 (thinking
+    // ran) for the SAME prompt. At the old 2048 that left as little as ~850 tokens of headroom on a
+    // long posting, and the failure mode is the nasty one the sibling generators already document:
+    // the JSON truncates mid-string and the letter is lost. 8192 clears the largest observed
+    // response by roughly 7x. Output is billed on what is generated, so the higher ceiling costs
+    // nothing on a normal call.
+    max_tokens: 8192,
     system: [{ type: 'text', text: COVER_LETTER_SYSTEM_PROMPT }],
     messages: [{
       role: 'user',
@@ -66,15 +149,11 @@ export async function generateCoverLetter(
   });
   const block = response.content.find((item) => item.type === 'text');
   const text = block?.type === 'text' ? block.text : '';
-  const first = text.indexOf('{');
-  const last = text.lastIndexOf('}');
-  const candidate = first >= 0 && last > first ? text.slice(first, last + 1) : text;
-  try {
-    const parsed = JSON.parse(candidate) as { body?: unknown };
-    if (typeof parsed.body !== 'string' || !parsed.body.trim()) throw new Error('body missing');
-    return parsed.body;
-  } catch {
-    throw new Error(`Claude returned an invalid cover letter: ${text.slice(0, 200)}`);
+  // Named separately from the parse failure on purpose. Both used to surface as "invalid cover
+  // letter", which is how a raw-newline bug spent its life being read as a token-limit problem.
+  if (response.stop_reason === 'max_tokens') {
+    throw new Error(`Cover letter truncated at max_tokens (${text.length} chars) - raise the cap`);
   }
+  return parseCoverLetterBody(text);
 }
 

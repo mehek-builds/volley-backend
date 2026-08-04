@@ -177,6 +177,45 @@ test('submit-request carries the same guard and does not merely warn', () => {
   );
 });
 
+test('submit-request revalidates resume content and PDF layout before the browser runner', () => {
+  const handler = slice(routes, "'/applications/:id/submit-request'", "'/applications/:id/submission'");
+  assert.match(handler, /preSendResumeVerificationIssues\(request\.jwtPayload!\.userId, stored\)/);
+  assert.match(handler, /PRE_SEND_VERIFICATION_FAILED/);
+  assert.ok(
+    handler.indexOf('preSendResumeVerificationIssues') < handler.indexOf('processSubmissionApplication'),
+    'pre-send verification must run before the submission is handed to the runner',
+  );
+});
+
+test('final approval revalidates the full packet before it clicks submit', () => {
+  const handler = slice(routes, "'/applications/:id/submission/approve'", "'/applications/:id/status'");
+  assert.match(handler, /current\.preview_screenshot_url/);
+  assert.match(handler, /current\.filled_fields/);
+  assert.match(handler, /current\.cover_letter_supported === true && !storedCoverLetter\(row\)/);
+  assert.match(handler, /current\.questions\.some\(\(question\) => question\.required && !question\.answer\.trim\(\)\)/);
+  assert.match(handler, /preSendResumeVerificationIssues\(request\.jwtPayload!\.userId, stored\)/);
+  assert.match(handler, /FINAL_APPROVAL_VERIFICATION_FAILED/);
+  assert.ok(
+    handler.indexOf('preSendResumeVerificationIssues') < handler.indexOf('processSubmissionApplication'),
+    'final approval verification must run before the browser clicks submit',
+  );
+  assert.ok(
+    handler.indexOf('current.preview_screenshot_url') < handler.indexOf('processSubmissionApplication'),
+    'a missing filled-form preview must block final submission',
+  );
+});
+
+test('submit-request returns the cover letter it generated for final approval', () => {
+  const handler = slice(routes, "'/applications/:id/submit-request'", "'/applications/:id/submission'");
+  assert.match(handler, /const processed = await processSubmissionApplication\(row\.id, fastify\)/);
+  assert.match(handler, /const responseRow = refreshed \?\? row/);
+  assert.match(handler, /cover_letter: storedCoverLetter\(responseRow\)/);
+  assert.ok(
+    handler.indexOf('processSubmissionApplication') < handler.indexOf('cover_letter: storedCoverLetter(responseRow)'),
+    'the response must read the cover letter after preparation has generated it',
+  );
+});
+
 test('the education comparison has exactly one implementation', () => {
   const rule = 'education graduation date differs from uploaded resume';
   assert.ok(!routes.includes(rule), 'applications.ts must not carry its own copy of the education rule');

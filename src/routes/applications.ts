@@ -32,7 +32,7 @@ import { declaredSkillsList } from './profile';
 import { processSubmissionApplication } from './submissionRunner';
 import { isRefusedQuestion } from '../lib/questionDiscovery';
 import { submitRequestDisposition } from '../lib/submissionSafety';
-import { detectPortal } from '../lib/portalSubmission';
+import { detectPortal, isPortalSupported } from '../lib/portalSubmission';
 import { dailySubmissionCap, withinDailyCap } from '../lib/submissionQueue';
 import { canStartExtensionSubmission, extensionOutcomePatch, isSafeExtensionReceiptUrl } from '../lib/extensionSubmission';
 import {
@@ -74,6 +74,26 @@ const extensionOutcomeBodySchema = z.object({
 });
 
 type StoredSpec = Record<string, unknown>;
+type StoredContact = {
+  full_name?: string;
+  email?: string;
+  phone?: string;
+  linkedin_url?: string;
+  github_url?: string;
+  portfolio_url?: string;
+};
+type ParsedProfileForResume = {
+  school?: string;
+  degree?: string;
+  grad_date?: string;
+  grad_year?: number;
+  currently_enrolled?: boolean;
+  coursework?: string[];
+  gpa?: string;
+  gpa_scale?: string;
+  school_location?: string;
+  recent_experience_review?: { selected_entry_id?: string | null; continue_with_found?: boolean };
+};
 
 // Every _review write in this file goes through settleStall, including the six that predate stalls
 // and know nothing about them. Enforcing it HERE rather than at each call site is the whole point:
@@ -140,6 +160,46 @@ export function allowedSparseEntriesForApplicationEdit(
   if (review?.continue_with_found !== true || typeof review.selected_entry_id !== 'string') return [];
   const selected = bank.find((entry) => entry.id === review.selected_entry_id);
   return selected ? [selected] : [];
+}
+
+export async function preSendResumeVerificationIssues(
+  userId: string,
+  stored: StoredSpec,
+): Promise<string[]> {
+  const review = readApplicationReview(stored);
+  const contact = stored._contact as StoredContact | undefined;
+  if (!review?.jd_text || !contact?.full_name) {
+    return ['Application packet is missing the saved review or contact details. Regenerate it before sending.'];
+  }
+
+  const spec = editableResumeSpec(stored);
+  if (review.role) spec.target_role = resumeSafeTargetRole(review.role);
+
+  const bank = await readExperienceBank(userId);
+  const profileRows = await db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1);
+  const parsed = profileRows[0]?.parsed_json as ParsedProfileForResume | undefined;
+  const validation = validateResumeSpec(
+    spec,
+    review.jd_text,
+    bank,
+    declaredSkillsList(profileRows[0]?.skills),
+    candidateEducationFromParsedProfile(parsed),
+    review.role,
+    {
+      allowedSingleBulletEntries: allowedSparseEntriesForApplicationEdit(parsed, bank),
+    },
+  );
+  if (validation.issues.length > 0) return validation.issues;
+
+  const rendered = await renderResumePdf(spec, { ...contact, full_name: contact.full_name }, review.jd_text);
+  const visual = validateResumeVisualLayout(rendered.layout);
+  const parsedPdf = await extractPdfText(rendered.buffer);
+  return [
+    ...visual.issues,
+    ...validatePdfLayout(parsedPdf.text, parsedPdf.numpages).issues,
+    ...findPdfSafeMarginIssues(parsedPdf.pages, rendered.layout),
+    ...findPdfTextFidelityIssues(parsedPdf.text, rendered.spec, { ...contact, full_name: contact.full_name }),
+  ];
 }
 
 export async function applicationRoutes(fastify: FastifyInstance) {
@@ -439,10 +499,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
       const disposition = submitRequestDisposition(current.status, Boolean(current.submission_claimed_at));
       if (disposition === 'submitted') {
-        return reply.status(200).send({ application_id: row.id, review: current });
+        return reply.status(200).send({ application_id: row.id, review: current, cover_letter: storedCoverLetter(row) });
       }
       if (disposition === 'in_flight') {
-        return reply.status(202).send({ application_id: row.id, review: current });
+        return reply.status(202).send({ application_id: row.id, review: current, cover_letter: storedCoverLetter(row) });
       }
       if (disposition === 'reject') {
         return reply.status(409).send({ error: 'This application cannot start another submission run from its current state' });
@@ -459,9 +519,29 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (submitEducationIssues.length > 0) {
         return reply.status(422).send(educationDriftResponse(submitEducationIssues));
       }
+      const preSendIssues = await preSendResumeVerificationIssues(request.jwtPayload!.userId, stored);
+      if (preSendIssues.length > 0) {
+        return reply.status(422).send({
+          error: 'Verify the resume before sending. The current packet is not ready for submission.',
+          code: 'PRE_SEND_VERIFICATION_FAILED',
+          issues: preSendIssues,
+        });
+      }
       const sensitive = parsed.data.questions.find((question) => isRefusedQuestion(question.question));
       if (sensitive) {
         return reply.status(422).send({ error: `Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}` });
+      }
+      // Refused here, before anything is claimed or a browser is booked, because the answer has
+      // been available since the packet was created. Without this the run started, drove a managed
+      // browser for minutes, and only then failed on detectPortal's throw - which is how nine of
+      // one account's ten failures came to be multi-minute waits for a verdict we already had. A
+      // client that respects portal_supported never reaches this line; it exists because a
+      // client-side check is not an enforcement point.
+      if (current.portal_url && !isPortalSupported(current.portal_url)) {
+        return reply.status(422).send({
+          error: 'Litos cannot fill in this company’s application page yet. Your tailored resume is ready to download, so you can apply on their site.',
+          code: 'PORTAL_NOT_SUPPORTED',
+        });
       }
       const controlledTest = process.env.LITOS_ENABLE_TEST_PORTAL === 'true'
         && current.portal_url
@@ -495,7 +575,16 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         return reply.status(202).send({ application_id: row.id, review: review ?? current });
       }
       const processed = await processSubmissionApplication(row.id, fastify);
-      return reply.status(202).send({ application_id: row.id, review: processed ?? next });
+      const [refreshed] = await db.select().from(generated_resumes).where(and(
+        eq(generated_resumes.id, row.id),
+        eq(generated_resumes.user_id, request.jwtPayload!.userId),
+      )).limit(1);
+      const responseRow = refreshed ?? row;
+      return reply.status(202).send({
+        application_id: row.id,
+        review: readApplicationReview(responseRow.spec) ?? processed ?? next,
+        cover_letter: storedCoverLetter(responseRow),
+      });
     },
   );
 
@@ -553,7 +642,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         const review = readApplicationReview(refreshed.spec);
         return reply.status(202).send({ application_id: row.id, review: review ?? current });
       }
-      return reply.send({ application_id: row.id, review: next });
+      return reply.send({ application_id: row.id, review: next, cover_letter: storedCoverLetter(row) });
     },
   );
 
@@ -570,6 +659,30 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       }
       if (current.handoff_expires_at && Date.parse(current.handoff_expires_at) < Date.now()) {
         return reply.status(409).send({ error: 'That took too long and timed out. Start the application again.' });
+      }
+      const approvalIssues: string[] = [];
+      if (current.portal_url && !isPortalSupported(current.portal_url)) {
+        approvalIssues.push('Litos cannot fill in this company’s application page yet.');
+      }
+      if (!current.preview_screenshot_url?.trim()) {
+        approvalIssues.push('The filled form preview is missing.');
+      }
+      if ((current.filled_fields ?? []).length === 0) {
+        approvalIssues.push('No filled application fields were recorded.');
+      }
+      if (current.cover_letter_supported === true && !storedCoverLetter(row)) {
+        approvalIssues.push('The cover letter must be reviewed before sending.');
+      }
+      if (current.questions.some((question) => question.required && !question.answer.trim())) {
+        approvalIssues.push('A required application answer is still blank.');
+      }
+      approvalIssues.push(...await preSendResumeVerificationIssues(request.jwtPayload!.userId, stored));
+      if (approvalIssues.length > 0) {
+        return reply.status(422).send({
+          error: 'Verify the complete application before sending. The current packet is not ready for final approval.',
+          code: 'FINAL_APPROVAL_VERIFICATION_FAILED',
+          issues: approvalIssues,
+        });
       }
       const now = new Date().toISOString();
       const next = {
@@ -598,7 +711,16 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         return reply.status(202).send({ application_id: row.id, review: review ?? current });
       }
       const processed = await processSubmissionApplication(row.id, fastify);
-      return reply.status(202).send({ application_id: row.id, review: processed ?? next });
+      const [refreshed] = await db.select().from(generated_resumes).where(and(
+        eq(generated_resumes.id, row.id),
+        eq(generated_resumes.user_id, request.jwtPayload!.userId),
+      )).limit(1);
+      const responseRow = refreshed ?? row;
+      return reply.status(202).send({
+        application_id: row.id,
+        review: readApplicationReview(responseRow.spec) ?? processed ?? next,
+        cover_letter: storedCoverLetter(responseRow),
+      });
     },
   );
 

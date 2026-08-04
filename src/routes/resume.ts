@@ -32,6 +32,7 @@ import { academicRecordRowFor } from './profile';
 import { warmRequirementCache } from '../engine/warmRequirements';
 import { baseResumeSelectionIssues } from '../llm/baseResume';
 import { deriveEditedTerms } from '../lib/applicationReview';
+import { isPortalSupported } from '../lib/portalSubmission';
 
 const MAX_SPEC_ATTEMPTS = 2; // 1 initial pass + 1 feedback-driven retry, per PRD-v2 Section 6.4's
 // "automated quality gate" - bounded so a stubborn JD can't loop the endpoint indefinitely.
@@ -619,6 +620,11 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       ...(body.application ? {
         portal_url: body.application.portal_url,
         ats_name: body.application.ats_name,
+        // Answered here, at creation, because it is answerable here: the portal is a pure function
+        // of the URL we were just handed. Deciding it lazily inside the submission run is what let
+        // the Tracker call an unsubmittable packet "Ready" and hand the applicant a send button
+        // that could only ever fail, minutes later.
+        portal_supported: isPortalSupported(body.application.portal_url),
       } : {}),
       status: body.application ? 'ready_to_submit' as const : 'resume_ready' as const,
       edited_terms: deriveEditedTerms(spec, bank),
