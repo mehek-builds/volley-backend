@@ -31,6 +31,7 @@ import {
   validatePdfLayout,
   pruneUngroundedContent,
   weakVerbBullets,
+  overlongBullets,
 } from '../engine/resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { openSseResponse, trackSseConnection } from '../lib/sseResponse';
@@ -51,10 +52,10 @@ import { openSseResponse, trackSseConnection } from '../lib/sseResponse';
  */
 
 const REQUEST_DEADLINE_MS = 120_000; // vercel.json allows 300s; this is the model-call bound.
-/* The point past which another verb pass cannot finish inside the function's 300s. One more model
+/* The point past which another repair pass cannot finish inside the function's 300s. One more model
  * call can take REQUEST_DEADLINE_MS, and the render plus PDF parse plus checks after it need room
  * of their own, so the loop stops well before the ceiling rather than at it. */
-const VERB_PASS_BUDGET_MS = 140_000;
+const REPAIR_PASS_BUDGET_MS = 140_000;
 
 /* A short menu of approved verbs, handed to the model when a rewrite pass fails.
  *
@@ -365,19 +366,27 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
        * Bounded at three passes. Two is not enough (measured), and past three the bank's own wording
        * is the problem, at which point the honest move is to show the student what we produced and
        * let them fix it in the editor rather than loop burning model calls forever.
+       *
+       * LENGTH IS REPAIRED HERE TOO, for the same reason the verb is. The generation prompt asks for
+       * "under 235 characters" in prose and this loop used to ignore the answer, so a bullet four
+       * characters over walked through all three passes and died at the ATS gate below, which fails
+       * closed: nothing was stored, and the student's only remaining move was to re-roll the model
+       * and hope. Trimming is the one repair the model is reliably good at, and it is strictly
+       * cheaper to ask for it here than to throw the whole build away.
        */
-      const MAX_VERB_PASSES = 3;
-      for (let pass = 1; pass <= MAX_VERB_PASSES; pass += 1) {
+      const MAX_REPAIR_PASSES = 3;
+      for (let pass = 1; pass <= MAX_REPAIR_PASSES; pass += 1) {
         const weak = weakVerbBullets(rawSpec);
+        const overlong = overlongBullets(rawSpec);
         const missingPriorities = baseResumeSelectionIssues(rawSpec, priorityEntries);
-        if (weak.length === 0 && missingPriorities.length === 0) break;
+        if (weak.length === 0 && overlong.length === 0 && missingPriorities.length === 0) break;
         /* REQUEST_DEADLINE_MS bounds one model call, not the request. Three retries plus the first
          * pass is 480s of model time against vercel.json's maxDuration of 300, and blowing that
          * kills the function mid-stream: the client gets a truncated SSE with neither a done nor an
          * error frame, and the finally never runs. So the loop stops when there is no longer room
          * for another call plus the render and check that have to follow it. */
-        if (Date.now() - buildStartedAt > VERB_PASS_BUDGET_MS) {
-          fastify.log.warn({ userId, pass }, 'out of time for another verb pass; shipping with warnings');
+        if (Date.now() - buildStartedAt > REPAIR_PASS_BUDGET_MS) {
+          fastify.log.warn({ userId, pass }, 'out of time for another repair pass; shipping with warnings');
           break;
         }
         send({ event: 'stage', stage: 'polishing' });
@@ -405,6 +414,23 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
             : '',
           weak.length > 0 && pass > 1
             ? 'A previous attempt at this failed. Do not reuse the opener you used last time for these bullets.'
+            : '',
+          /* Naming the bullet AND the overage. "Shorten your bullets" is the instruction the prompt
+           * already gives and the model already believes it followed, so the feedback that changes
+           * the outcome is the count it got wrong and the exact text to cut. The WHOLE bullet goes
+           * back, not an excerpt: the model is being asked to rewrite it, and it cannot trim what it
+           * cannot see. */
+          overlong.length > 0
+            ? `These bullets are too long and will not fit the page: ${overlong
+              .map((b) => `${b.org} at ${b.length} characters (${b.length - BULLET_MAX_CHARS} over the ${BULLET_MAX_CHARS} limit): "${b.bullet}"`)
+              .join('; ')}.`
+            : '',
+          /* Cut words, not facts. The grounding pass below independently rejects anything invented,
+           * but a dropped number is not invention and would survive it, so the constraint has to be
+           * stated here: trimming a bullet must never be a route to losing the metric that earns it
+           * its place. */
+          overlong.length > 0
+            ? `Rewrite each one to under ${BULLET_MAX_CHARS} characters. Cut filler words and redundant phrasing, and keep every number, tool and outcome exactly as it is. Do not drop a metric to make room.`
             : '',
         ].filter(Boolean));
       }
