@@ -29,6 +29,31 @@ describe('companyDomainFor', () => {
     assert.strictEqual(companyDomainFor('Scale AI'), 'scale.com', 'not scaleai.co');
   });
 
+  test('the entries the 2026-08-04 curation sweep caught are right here', () => {
+    // Same failure class as the test above, found before it shipped rather than after. Every one of
+    // these was about to be added as the obvious <name>.com until the employer's own ATS board said
+    // otherwise, and every one of them would have rendered a DIFFERENT company's logo. Lucid is the
+    // reason this test exists: lucid.com is Lucid Software, the maker of Lucidchart, while the
+    // employer posting several hundred rows here files under the slug `lucidmotors`. Nothing else in
+    // the repo would notice that swap, because both domains resolve and both serve a real favicon.
+    for (const [company, right, wrong] of [
+      ['Lucid', 'lucidmotors.com', 'lucid.com'],
+      ['Mozilla', 'mozilla.org', 'mozilla.com'],
+      ['Shield AI', 'shield.ai', 'shieldai.com'],
+      ['Engineers Gate', 'eglp.com', 'engineersgate.com'],
+      ['Epirus', 'epirusinc.com', 'epirus.com'],
+      ['Squarepoint Capital', 'squarepoint-capital.com', 'squarepointcapital.com'],
+      ['Ginkgo', 'ginkgo.bio', 'ginkgo.com'],
+      ['Quadrature', 'quadrature.ai', 'quadraturecapital.com'],
+      ['Skylight', 'myskylight.com', 'skylightframe.com'],
+      ['Take-Two', 'take2games.com', 'taketwo.com'],
+      ['Akuna', 'akunacapital.com', 'akuna.com'],
+    ] as const) {
+      assert.strictEqual(companyDomainFor(company), right, `${company} must map to ${right}`);
+      assert.notStrictEqual(companyDomainFor(company), wrong, `${company} must never map to ${wrong}`);
+    }
+  });
+
   test('employers whose domain is not simply their name are correct', () => {
     assert.strictEqual(companyDomainFor('Datadog'), 'datadoghq.com');
     assert.strictEqual(companyDomainFor('Notion'), 'notion.so');
