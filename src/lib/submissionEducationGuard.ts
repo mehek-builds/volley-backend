@@ -1,4 +1,4 @@
-import type { CandidateEducation } from '../engine/resumePolicy';
+import { courseworkFromParsed, type CandidateEducation } from '../engine/resumePolicy';
 import { educationDriftIssues, isEducationLayoutIssue } from '../engine/resumeValidate';
 import { normalizeSpec } from '../llm/resumeSpec';
 
@@ -54,7 +54,16 @@ export function candidateEducationFromParsedProfile(parsed: unknown): CandidateE
     gpa: p.gpa,
     gpa_scale: p.gpa_scale,
     school_location: p.school_location,
-    coursework: Array.isArray(p.coursework) ? p.coursework : [],
+    /* Through the shared reader, not a bare Array.isArray (ISSUE-044).
+     *
+     * This guard exists to agree with the dashboard about what the profile SAYS, and the dashboard
+     * reads this field through courseworkFromParsed. A gate that resolved a stored string to []
+     * where educationFrom resolves it to the course list is exactly the disagreement the doc
+     * comment above warns about, pointed at coursework instead of grad_date: the packet would be
+     * held for drift against a profile the dashboard reads as unchanged. Nothing stores a string
+     * today, and that is the point at which a lone shape gate stops being load-bearing and starts
+     * being a trap for the next person. */
+    coursework: courseworkFromParsed(p.coursework) ?? [],
   };
 }
 
