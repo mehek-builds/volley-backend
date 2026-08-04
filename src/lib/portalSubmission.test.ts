@@ -1029,3 +1029,22 @@ test('labels that merely contain the word apply are not submit controls', () => 
   assert.equal(chooseSubmitControl([]), null);
   assert.equal(chooseSubmitControl(['', '   ']), null);
 });
+
+test('a provider name in the label is a handoff however the sentence is arranged', () => {
+  /* The verb-shape test is escapable: a word between the verb and "with" defeats it, and
+     "Apply now" is itself a legitimate submit label, so these sailed through into the eligible
+     pool. Naming the providers cannot be worded around - no employer's own submit button carries
+     a job board's name. */
+  for (const label of [
+    'Apply now with LinkedIn',
+    'Apply Now with Indeed',
+    'Submit with LinkedIn',
+    'Submit your application via Indeed',
+    'Apply through SEEK',
+  ]) {
+    assert.equal(chooseSubmitControl([label]), null, `${label} must not be pressed`);
+  }
+  // And the genuine ones are untouched by the provider backstop.
+  assert.equal(chooseSubmitControl(['Apply now']), 0);
+  assert.equal(chooseSubmitControl(['Submit your application']), 0);
+});

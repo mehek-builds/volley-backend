@@ -1593,7 +1593,15 @@ export class CaptchaUnresolvedError extends Error {
  * Matched on the WHOLE label, anchored, so "apply" as a preposition inside a longer sentence cannot
  * sneak past: it is the shape "<verb> with|using|via <somebody>" that gives these away. */
 const THIRD_PARTY_HANDOFF =
-  /\b(?:apply|autofill|sign\s?in|log\s?in|continue|register|import)\s+(?:with|using|via|from)\b|\bquick apply\b|\bone[-\s]?click apply\b/i;
+  /\b(?:apply|autofill|sign\s?in|log\s?in|continue|register|import)\b(?:\s+\w+){0,2}\s+(?:with|using|via|from)\b|\bquick apply\b|\bone[-\s]?click apply\b/i;
+
+/* A SECOND, BLUNTER TEST, because the verb-shape one is escapable. "Apply now with LinkedIn" is a
+   shipped label variant and the word between the verb and "with" defeated the first pattern - while
+   "apply now" is itself a legitimate submit label, so it sailed through into the eligible pool.
+   Naming the providers outright cannot be worded around: no employer's own submit button carries a
+   job-board's name. */
+const HANDOFF_PROVIDER =
+  /\b(?:linkedin|indeed|seek|glassdoor|ziprecruiter|monster|xing|stepstone|google|facebook|github|apple|greenhouse|workday)\b/i;
 
 /* What a real submit control says. "Submit" on its own is the common case; the rest were read off
    live forms. Bare "Apply" is accepted because some employers do label the final button that way,
@@ -1615,7 +1623,10 @@ const SUBMIT_LABEL =
 export function chooseSubmitControl(labels: string[]): number | null {
   const eligible = labels
     .map((label, index) => ({ label: label.replace(/\s+/g, ' ').trim(), index }))
-    .filter(({ label }) => label && !THIRD_PARTY_HANDOFF.test(label) && SUBMIT_LABEL.test(label));
+    .filter(({ label }) => label
+      && !THIRD_PARTY_HANDOFF.test(label)
+      && !HANDOFF_PROVIDER.test(label)
+      && SUBMIT_LABEL.test(label));
   if (eligible.length === 0) return null;
   const explicit = eligible.filter(({ label }) => /\bsubmit\b/i.test(label));
   const pool = explicit.length > 0 ? explicit : eligible;
@@ -1625,23 +1636,68 @@ export function chooseSubmitControl(labels: string[]): number | null {
 /** Every control that could conceivably be a submit button. Exported so a test can match it. */
 export const SUBMIT_CANDIDATE_SELECTOR = 'button, input[type=submit], [role=button]';
 
+/**
+ * No control on this page submits the application.
+ *
+ * ITS OWN TYPE FOR THE SAME REASON CaptchaUnresolvedError HAS ONE. A plain Error falls through
+ * fail()'s `uncertainAfterClaim` branch, which tells the applicant "the final submission was
+ * attempted, but Litos could not verify the employer confirmation - check the portal or your
+ * email". When this throws, the click PROVABLY did not happen, so there is no receipt to look for
+ * and that sentence sends her hunting for one that cannot exist.
+ *
+ * It matters more now than it used to. This used to fire only when a page had no buttons at all;
+ * with the handoff filter it is the ROUTINE outcome on every multi-step first page and every page
+ * whose only apply-ish controls belong to LinkedIn or Indeed.
+ */
+export class NoSubmitControlError extends Error {
+  constructor(message = 'We could not find the Submit button') {
+    super(message);
+    this.name = 'NoSubmitControlError';
+  }
+}
+
 export async function clickFinalSubmit(page: Page): Promise<void> {
-  const candidates = page.locator(SUBMIT_CANDIDATE_SELECTOR);
+  /* ELEMENT HANDLES, NOT nth(). An index is only meaningful against the DOM that produced it, and
+     the captcha probe below sits between the two: it can spend the better part of fifteen seconds
+     in live round trips, and any re-render, lazy-loaded chat widget or dismissed banner in that
+     window shifts every ordinal. `locator.nth(i)` re-queries at click time and carries no label
+     constraint, so a shift would land the click on whatever control now holds that position -
+     which on these boards is "Apply with LinkedIn" at index 0. A handle references ONE node and
+     throws if it detaches, which is the failure we want. */
+  const handles = await page.locator(SUBMIT_CANDIDATE_SELECTOR).elementHandles();
   /* Typed loosely on purpose: this closure is serialised into the page, where the DOM lib types
-     are not in scope for the server build. */
-  const labels = await candidates.evaluateAll((nodes) => nodes.map((node) => {
+     are not in scope for the server build.
+     A control the accessibility tree would not offer is not a submit button. getByRole used to do
+     this filtering for us; a raw CSS selector does not, and `innerText` falls back to textContent
+     on a hidden node, so a display:none mobile duplicate reads as a perfectly good "Submit
+     application" - and chooseSubmitControl's last-wins rule would pick it over the real one. */
+  const labels = await Promise.all(handles.map((handle) => handle.evaluate((node) => {
     const el = node as unknown as {
-      innerText?: string; value?: string; getAttribute(name: string): string | null;
+      innerText?: string; value?: string; title?: string; disabled?: boolean; type?: string;
+      getAttribute(name: string): string | null; getClientRects(): { length: number };
     };
-    return (el.innerText || el.value || el.getAttribute('aria-label') || '').trim();
-  }));
+    if (el.disabled === true) return '';
+    if (el.getAttribute('aria-hidden') === 'true') return '';
+    if (el.getClientRects().length === 0) return '';
+    const labelledBy = el.getAttribute('aria-labelledby');
+    const referenced = labelledBy
+      ? (node as unknown as { ownerDocument: { getElementById(id: string): { innerText?: string } | null } })
+        .ownerDocument.getElementById(labelledBy.split(/\s+/)[0]!)?.innerText ?? ''
+      : '';
+    /* An <input type=submit> with no value attribute renders the UA default "Submit" and reports
+       value === '', so without this it reads as unlabelled and a real submit gets skipped. */
+    const uaDefault = el.type === 'submit' && !el.value ? 'Submit' : '';
+    return (el.innerText || el.value || el.getAttribute('aria-label') || el.title || referenced
+      || uaDefault || '').trim();
+  })));
   const chosen = chooseSubmitControl(labels);
   if (chosen === null) {
-    /* Deliberately the same failure as "no button at all". A page whose only apply-ish controls are
-       third-party handoffs is a page this run cannot finish, and saying so is the honest answer. */
-    throw new Error('We could not find the Submit button');
+    await Promise.all(handles.map((handle) => handle.dispose()));
+    /* A page whose only apply-ish controls are third-party handoffs is a page this run cannot
+       finish, and saying so - as a type fail() can recognise - is the honest answer. */
+    throw new NoSubmitControlError();
   }
-  const button = candidates.nth(chosen);
+  const button = handles[chosen]!;
   // Defence in depth, and it covers a case the call-site gate cannot. portalCanAutoSubmit() stops
   // the families KNOWN to be gated (JazzHR, BambooHR) before this function is ever reached. It
   // knows nothing about a Greenhouse or Lever board whose employer switched a challenge on last
@@ -1655,7 +1711,22 @@ export async function clickFinalSubmit(page: Page): Promise<void> {
     // browser is closed and the provider is unrecoverable, so it rides along on the error.
     throw new CaptchaUnresolvedError('at_submit', await detectCaptchaProvider(page));
   }
+  /* Read the label again, off the same node, immediately before pressing it. The handle cannot
+     drift to a different element, but the element itself can be relabelled by a re-render, and the
+     cost of being wrong here is clicking a handoff on a real application. */
+  const finalLabel = await button.evaluate((node) => {
+    const el = node as unknown as { innerText?: string; value?: string;
+      getAttribute(name: string): string | null };
+    return (el.innerText || el.value || el.getAttribute('aria-label') || '').trim();
+  });
+  if (chooseSubmitControl([finalLabel]) === null) {
+    await Promise.all(handles.map((handle) => handle.dispose()));
+    throw new NoSubmitControlError(
+      `The submit button changed to "${finalLabel}" before it could be pressed`,
+    );
+  }
   await button.click();
+  await Promise.all(handles.map((handle) => handle.dispose()));
   await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => undefined);
 }
 

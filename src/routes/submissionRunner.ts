@@ -40,6 +40,7 @@ import {
   readReceipt,
   type SubmissionPacket,
   type SupportedPortal,
+  NoSubmitControlError,
 } from '../lib/portalSubmission';
 import { applyReviewPatch, beginStall } from '../lib/applicationStall';
 import { sanitizeProviderBlockers } from '../lib/fieldLabel';
@@ -923,6 +924,11 @@ async function fail(row: ResumeRow, error: unknown) {
   // one drifts the moment a field is added to the other.
   const captchaError = error instanceof CaptchaUnresolvedError ? error : null;
   const captchaStop = captchaError?.stage ?? null;
+  /* Same precedence, same reason as the captcha branch above. When clickFinalSubmit finds no
+     submit control the click PROVABLY did not happen, so uncertainAfterClaim's "check the portal
+     or your email" is the one thing that must not be said: there is no receipt to find. This is
+     the routine outcome on a multi-step first page, not an edge case. */
+  const noSubmitControl = error instanceof NoSubmitControlError;
 
   await writeReview(latestRows[0], nextReview(current, {
     ...(captchaError
@@ -933,7 +939,9 @@ async function fail(row: ResumeRow, error: unknown) {
         source: 'observed',
       })
       : {}),
-    status: captchaStop || uncertainAfterClaim ? 'needs_attention' : externalGate ? 'submit_requested' : 'failed',
+    status: captchaStop || noSubmitControl || uncertainAfterClaim
+      ? 'needs_attention'
+      : externalGate ? 'submit_requested' : 'failed',
     submission_error: message,
     attention_reason: captchaStop === 'at_submit'
       ? 'This company’s application page asks you to prove you are human, and that check is still waiting. Litos filled everything in and stopped there, so nothing has been sent. Open it when you have a minute and finish the last step.'
@@ -941,7 +949,9 @@ async function fail(row: ResumeRow, error: unknown) {
         // Nothing was filled on this path: the probe stopped the run before it touched the form.
         // Promising a filled form here would send someone to a blank page.
         ? 'This company asks you to prove you are human before it will take an application, so Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.'
-        : uncertainAfterClaim
+        : noSubmitControl
+          ? 'This company’s application has more than one page, so the last step is still waiting. Litos filled in what it could and stopped there, and nothing has been sent - there is no confirmation to look for. Open it when you have a minute and finish it off.'
+          : uncertainAfterClaim
           ? 'The final submission was attempted, but Litos could not verify the employer confirmation. Check the portal or your email before trying again.'
           : current.attention_reason,
   }));

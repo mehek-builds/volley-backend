@@ -17,6 +17,7 @@ import {
   managedResultRequiresCaptchaAttention,
   CaptchaUnresolvedError,
   SUBMIT_CANDIDATE_SELECTOR,
+  NoSubmitControlError,
 } from './portalSubmission';
 
 // ---- snapshot logic ----
@@ -179,13 +180,23 @@ test('a visibility probe that throws counts as a challenge, not as a clear page'
    rather than trusting a name regex and taking .last(). These mocks therefore have to answer
    evaluateAll with the labels a real page would show. One genuine submit control is what each of
    these tests means by "the button". */
-function submitButtonLocator(onClick: () => void) {
-  return {
-    evaluateAll: async () => ['Submit application'],
-    nth: () => ({ count: async () => 1, click: async () => { onClick(); } }),
-    count: async () => 1,
-    click: async () => { onClick(); },
-  };
+function submitButtonLocator(onClick: (label: string) => void, labels = ['Submit application']) {
+  /* Models elementHandles(), which is what clickFinalSubmit now uses. Each handle knows its OWN
+     label and clicking it reports that label - so a test can assert WHICH control was pressed, not
+     merely that something was. The previous mock returned one clickable stub for every ordinal,
+     which meant index drift, the riskiest property of this change, could not be expressed as a
+     failing test at all. */
+  const handles = labels.map((label) => ({
+    evaluate: async (fn: (node: unknown) => string) => fn({
+      innerText: label,
+      disabled: false,
+      getAttribute: (name: string) => (name === 'aria-hidden' ? null : null),
+      getClientRects: () => ({ length: 1 }),
+    }),
+    click: async () => { onClick(label); },
+    dispose: async () => undefined,
+  }));
+  return { elementHandles: async () => handles };
 }
 
 // ---- the final click guard ----
@@ -489,4 +500,39 @@ test('a marker probe that throws does not misreport a different provider', async
     })),
     'hcaptcha',
   );
+});
+
+test('the control that gets pressed is the one that was chosen, not an ordinal', async () => {
+  /* THE PROPERTY THE OLD MOCK COULD NOT EXPRESS. The page offers a handoff first and the real
+     submit second, which is the live Greenhouse and SmartRecruiters ordering. If clickFinalSubmit
+     ever went back to clicking by index against a re-queried locator, this is what would catch it. */
+  const pressed: string[] = [];
+  const buttons = submitButtonLocator((label) => pressed.push(label),
+    ['Apply with LinkedIn', 'Submit application']);
+  const page = {
+    locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
+      ? buttons
+      : { count: async () => 0, nth: () => ({}) }),
+    waitForLoadState: async () => undefined,
+  } as unknown as Page;
+
+  await clickFinalSubmit(page);
+  assert.deepEqual(pressed, ['Submit application']);
+});
+
+test('a page offering only handoffs reports that nothing was sent', async () => {
+  const pressed: string[] = [];
+  const buttons = submitButtonLocator((label) => pressed.push(label),
+    ['Apply With Indeed', 'Apply with SEEK', 'Next']);
+  const page = {
+    locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
+      ? buttons
+      : { count: async () => 0, nth: () => ({}) }),
+    waitForLoadState: async () => undefined,
+  } as unknown as Page;
+
+  /* NoSubmitControlError, not a plain Error: fail() reads the type to decide whether to tell the
+     applicant to go looking for a confirmation email. Here there cannot be one. */
+  await assert.rejects(clickFinalSubmit(page), NoSubmitControlError);
+  assert.deepEqual(pressed, [], 'nothing may be pressed');
 });
