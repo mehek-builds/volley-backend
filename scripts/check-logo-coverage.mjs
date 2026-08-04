@@ -43,7 +43,7 @@
  */
 
 import { companyDomainFor } from '../src/lib/companyDomains.ts';
-import { logoCoverageFloor } from '../src/lib/logoCoverage.ts';
+import { logoCoverageFloor, tallyCoverage } from '../src/lib/logoCoverage.ts';
 import { scanBoard } from '../src/lib/boardScan.ts';
 import { createHash } from 'node:crypto';
 
@@ -107,23 +107,61 @@ async function workingLogoDomains(domains) {
   return working;
 }
 
-let rows;
-let lowest;
-let highest;
+/**
+ * Per-company row counts for the live board, as cheaply as the API allows.
+ *
+ * ONE GROUPED QUERY, NOT A FULL SCAN. Coverage only needs company_name and a row count, but the
+ * only way to get them used to be paging every row through GET /jobs, which returns full rows
+ * including 600 characters of description each: ~17 MB per pass to read two columns' worth of
+ * information. On 2026-08-04 this project exhausted its Neon DATA TRANSFER quota and every
+ * database-backed route started answering 500, taking the public board down. This scan was not the
+ * whole cause, it is roughly 3% of a monthly budget per ten runs, but a check that spends 17 MB to
+ * learn 15 KB of facts is the wrong shape regardless, and it is the one caller we control.
+ *
+ * A grouped count is also a single consistent snapshot, so unlike a paged scan it cannot be skewed
+ * by the poller writing underneath it. That is the race lib/boardScan.ts exists to survive, and the
+ * cheap path sidesteps it entirely.
+ *
+ * Falls back to the full scan when the API does not offer company_counts yet, so this keeps working
+ * against a deployment that predates the endpoint.
+ */
+async function companyRowCounts() {
+  const res = await fetch(`${API}/jobs/facets?counts=true`);
+  if (res.ok) {
+    const body = await res.json();
+    if (Array.isArray(body.company_counts) && body.company_counts.length > 0) {
+      return { counts: body.company_counts, source: 'grouped count' };
+    }
+  }
+  /* Older deployment. Page the whole board and group it here, which costs what it always cost. */
+  const { rows } = await readBoard();
+  const byCompany = new Map();
+  for (const row of rows) {
+    if (!row.company_name) continue;
+    byCompany.set(row.company_name, (byCompany.get(row.company_name) ?? 0) + 1);
+  }
+  return {
+    counts: [...byCompany].map(([company_name, count]) => ({ company_name, rows: count })),
+    source: 'full board scan (API has no company_counts yet)',
+  };
+}
+
+let counts;
+let source;
 try {
-  ({ rows, lowest, highest } = await readBoard());
+  ({ counts, source } = await companyRowCounts());
 } catch (error) {
   console.error(`FAILED: could not verify the complete live board (${error.message}).`);
   console.error('Coverage cannot be guaranteed when the measurement is incomplete.');
   process.exit(1);
 }
 
-if (rows.length === 0) {
+const companies = counts.map((c) => c.company_name).filter(Boolean);
+if (companies.length === 0) {
   console.error('FAILED: the live board returned no jobs, so coverage cannot be verified.');
   process.exit(1);
 }
 
-const companies = [...new Set(rows.map((row) => row.company_name).filter(Boolean))];
 const unmapped = companies.filter((name) => !companyDomainFor(name));
 const mappedDomains = [...new Set(companies.map(companyDomainFor).filter(Boolean))];
 let logoDomains;
@@ -134,16 +172,14 @@ try {
   process.exit(1);
 }
 const brokenLogoDomains = mappedDomains.filter((domain) => !logoDomains.has(domain));
-const rowsWithLogo = rows.filter((row) => {
-  const domain = companyDomainFor(row.company_name);
-  return domain !== null && logoDomains.has(domain);
-}).length;
-const coverage = rowsWithLogo / rows.length;
 
-console.log(`Checked ${rows.length} distinct live rows across ${companies.length} companies.`);
-if (highest !== lowest) {
-  console.log(`The board moved from ${lowest} to ${highest} rows mid-scan; coverage is measured over what was read.`);
-}
+const tally = tallyCoverage(counts, (name) => {
+  const domain = companyDomainFor(name);
+  return domain !== null && logoDomains.has(domain);
+});
+const { totalRows, rowsWithLogo, coverage } = tally;
+
+console.log(`Checked ${totalRows} live rows across ${companies.length} companies, via ${source}.`);
 console.log(`Rows that would show a logo: ${rowsWithLogo} (${(coverage * 100).toFixed(0)}%).`);
 console.log(`Companies with no verified domain: ${unmapped.length}.`);
 console.log(`Mapped domains with no favicon response: ${brokenLogoDomains.length}.`);

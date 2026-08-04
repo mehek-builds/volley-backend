@@ -16,6 +16,8 @@ import {
   hasUnresolvedCaptcha,
   managedResultRequiresCaptchaAttention,
   CaptchaUnresolvedError,
+  SUBMIT_CANDIDATE_SELECTOR,
+  NoSubmitControlError,
 } from './portalSubmission';
 
 // ---- snapshot logic ----
@@ -173,6 +175,41 @@ test('a visibility probe that throws counts as a challenge, not as a clear page'
   );
 });
 
+
+/* clickFinalSubmit now reads every button's LABEL and chooses among them (see chooseSubmitControl),
+   rather than trusting a name regex and taking .last(). These mocks therefore have to answer
+   evaluateAll with the labels a real page would show. One genuine submit control is what each of
+   these tests means by "the button". */
+function submitButtonLocator(onClick: (label: string) => void, labels = ['Submit application']) {
+  /* Models elementHandles(), which is what clickFinalSubmit now uses. Each handle knows its OWN
+     label and clicking it reports that label - so a test can assert WHICH control was pressed, not
+     merely that something was. The previous mock returned one clickable stub for every ordinal,
+     which meant index drift, the riskiest property of this change, could not be expressed as a
+     failing test at all. */
+  const handles = labels.map((label) => ({
+    evaluate: async (fn: (node: unknown) => string) => fn({
+      innerText: label,
+      disabled: false,
+      tagName: 'BUTTON',
+      type: '',
+      value: '',
+      title: '',
+      getAttribute: () => null,
+      getClientRects: () => ({ length: 1 }),
+      /* READ_CONTROL_LABEL walks ancestors for aria-hidden and asks the view for computed
+         visibility, so a node shape without these throws before it ever reads the label. */
+      parentElement: null,
+      ownerDocument: {
+        defaultView: { getComputedStyle: () => ({ visibility: 'visible' }) },
+        getElementById: () => null,
+      },
+    }),
+    click: async () => { onClick(label); },
+    dispose: async () => undefined,
+  }));
+  return { elementHandles: async () => handles };
+}
+
 // ---- the final click guard ----
 
 test('the final click guard does not click while any widget is unresolved', async () => {
@@ -188,11 +225,16 @@ test('the final click guard does not click while any widget is unresolved', asyn
       evaluate: async (fn: (el: unknown, arg: string) => boolean, arg: string) => fn(stubElement({}), arg),
     }),
   };
-  const button = { count: async () => 1, click: async () => { clickCount += 1; } };
+  const button = submitButtonLocator(() => { clickCount += 1; });
   const page = {
-    locator: (selector: string) => (selector === CAPTCHA_RESPONSE_SELECTOR ? responseLocator : challengeLocator),
-    getByRole: () => ({ last: () => button }),
+    locator: (selector: string) => {
+      if (selector === CAPTCHA_RESPONSE_SELECTOR) return responseLocator;
+      if (selector === SUBMIT_CANDIDATE_SELECTOR) return button;
+      return challengeLocator;
+    },
+    waitForNavigation: async () => undefined,
     waitForLoadState: async () => undefined,
+    waitForTimeout: async () => undefined,
   } as unknown as Page;
 
   await assert.rejects(clickFinalSubmit(page), CaptchaUnresolvedError);
@@ -201,11 +243,14 @@ test('the final click guard does not click while any widget is unresolved', asyn
 
 test('the final click still happens on a page with no challenge', async () => {
   let clickCount = 0;
-  const button = { count: async () => 1, click: async () => { clickCount += 1; } };
+  const button = submitButtonLocator(() => { clickCount += 1; });
   const page = {
-    locator: () => ({ count: async () => 0, nth: () => ({}) }),
-    getByRole: () => ({ last: () => button }),
+    locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
+      ? button
+      : { count: async () => 0, nth: () => ({}) }),
+    waitForNavigation: async () => undefined,
     waitForLoadState: async () => undefined,
+    waitForTimeout: async () => undefined,
   } as unknown as Page;
 
   await clickFinalSubmit(page);
@@ -424,6 +469,7 @@ test('the known-gated families carry their measured provider, others stay unknow
 test('the submit guard carries the provider it saw while the page was open', async () => {
   const page = {
     locator: (selector: string) => {
+      if (selector === SUBMIT_CANDIDATE_SELECTOR) return submitButtonLocator(() => undefined);
       if (selector === CAPTCHA_RESPONSE_SELECTOR) {
         return { count: async () => 1, nth: () => ({ inputValue: async () => '' }) };
       }
@@ -437,8 +483,10 @@ test('the submit guard carries the provider it saw while the page was open', asy
         }),
       };
     },
-    getByRole: () => ({ last: () => ({ count: async () => 1, click: async () => undefined }) }),
+
+    waitForNavigation: async () => undefined,
     waitForLoadState: async () => undefined,
+    waitForTimeout: async () => undefined,
   } as unknown as Page;
 
   await assert.rejects(clickFinalSubmit(page), (error: unknown) => {
@@ -469,4 +517,194 @@ test('a marker probe that throws does not misreport a different provider', async
     })),
     'hcaptcha',
   );
+});
+
+test('the control that gets pressed is the one that was chosen, not an ordinal', async () => {
+  /* THE PROPERTY THE OLD MOCK COULD NOT EXPRESS. The page offers a handoff first and the real
+     submit second, which is the live Greenhouse and SmartRecruiters ordering. If clickFinalSubmit
+     ever went back to clicking by index against a re-queried locator, this is what would catch it. */
+  const pressed: string[] = [];
+  const buttons = submitButtonLocator((label) => pressed.push(label),
+    ['Apply with LinkedIn', 'Submit application']);
+  const page = {
+    locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
+      ? buttons
+      : { count: async () => 0, nth: () => ({}) }),
+    waitForNavigation: async () => undefined,
+    waitForLoadState: async () => undefined,
+    waitForTimeout: async () => undefined,
+  } as unknown as Page;
+
+  await clickFinalSubmit(page);
+  assert.deepEqual(pressed, ['Submit application']);
+});
+
+test('a page offering only handoffs reports that nothing was sent', async () => {
+  const pressed: string[] = [];
+  const buttons = submitButtonLocator((label) => pressed.push(label),
+    ['Apply With Indeed', 'Apply with SEEK', 'Next']);
+  const page = {
+    locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
+      ? buttons
+      : { count: async () => 0, nth: () => ({}) }),
+    waitForNavigation: async () => undefined,
+    waitForLoadState: async () => undefined,
+    waitForTimeout: async () => undefined,
+  } as unknown as Page;
+
+  /* NoSubmitControlError, not a plain Error: fail() reads the type to decide whether to tell the
+     applicant to go looking for a confirmation email. Here there cannot be one. */
+  await assert.rejects(clickFinalSubmit(page), NoSubmitControlError);
+  assert.deepEqual(pressed, [], 'nothing may be pressed');
+});
+
+test('a click that times out reports that nothing was sent', async () => {
+  /* THE LIKELIER HALF. Playwright's actionability wait fails BEFORE dispatching anything - an
+     obscured button under a cookie banner or a sticky consent footer is a routine headless
+     failure, more common than finding no control at all. Treating it as "maybe sent" is the exact
+     harm this branch exists to remove. */
+  const timeout = Object.assign(new Error('locator.click: Timeout 30000ms exceeded'),
+    { name: 'TimeoutError' });
+  const buttons = {
+    elementHandles: async () => [{
+      evaluate: async (fn: (node: unknown) => string) => fn({
+        innerText: 'Submit application', disabled: false, tagName: 'BUTTON', type: '', value: '',
+        title: '', getAttribute: () => null, getClientRects: () => ({ length: 1 }),
+        parentElement: null,
+        ownerDocument: {
+          defaultView: { getComputedStyle: () => ({ visibility: 'visible' }) },
+          getElementById: () => null,
+        },
+      }),
+      click: async () => { throw timeout; },
+      dispose: async () => undefined,
+    }],
+  };
+  const page = {
+    locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
+      ? buttons
+      : { count: async () => 0, nth: () => ({}) }),
+    waitForNavigation: async () => undefined,
+    waitForLoadState: async () => undefined,
+    waitForTimeout: async () => undefined,
+  } as unknown as Page;
+
+  await assert.rejects(clickFinalSubmit(page), NoSubmitControlError);
+});
+
+test('a pre-click failure is not reported as a submission that may have happened', async () => {
+  const page = {
+    locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
+      ? { elementHandles: async () => { throw new Error('Execution context was destroyed'); } }
+      : { count: async () => 0, nth: () => ({}) }),
+    waitForNavigation: async () => undefined,
+    waitForLoadState: async () => undefined,
+    waitForTimeout: async () => undefined,
+  } as unknown as Page;
+  await assert.rejects(clickFinalSubmit(page), NoSubmitControlError);
+});
+
+test('a control relabelled between choosing it and pressing it is not pressed', async () => {
+  /* The handle cannot drift to a different element, but the element itself can be relabelled by a
+     re-render - and the cost of being wrong is clicking a handoff on a real application. This
+     handle reads as the real submit when it is chosen and as a LinkedIn handoff a moment later. */
+  let reads = 0;
+  let clicked = false;
+  const node = (text: string) => ({
+    innerText: text, disabled: false, tagName: 'BUTTON', type: '', value: '', title: '',
+    getAttribute: () => null, getClientRects: () => ({ length: 1 }), parentElement: null,
+    ownerDocument: {
+      defaultView: { getComputedStyle: () => ({ visibility: 'visible' }) },
+      getElementById: () => null,
+    },
+  });
+  const buttons = {
+    elementHandles: async () => [{
+      evaluate: async (fn: (n: unknown) => string) => {
+        reads += 1;
+        return fn(node(reads === 1 ? 'Submit application' : 'Apply with LinkedIn'));
+      },
+      click: async () => { clicked = true; },
+      dispose: async () => undefined,
+    }],
+  };
+  const page = {
+    locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
+      ? buttons
+      : { count: async () => 0, nth: () => ({}) }),
+    waitForNavigation: async () => undefined,
+    waitForLoadState: async () => undefined,
+    waitForTimeout: async () => undefined,
+  } as unknown as Page;
+
+  await assert.rejects(clickFinalSubmit(page), NoSubmitControlError);
+  assert.equal(clicked, false, 'the relabelled control must not be pressed');
+});
+
+test('the navigation barrier is armed before the click, not after it', async () => {
+  /* THE PASS-SEVEN DEFECT. noWaitAfter removes the barrier Playwright arms before dispatch, so a
+     waitForNavigation created AFTER the click races the navigation it is meant to catch and
+     waitForLoadState resolves against the page we are still standing on - readReceipt then reads
+     the open form, throws, and a genuinely submitted application is reported as unverified.
+     Measured 10 of 15 stale reads before this fix. The order is the fix, so the order is the test. */
+  const order: string[] = [];
+  const buttons = {
+    elementHandles: async () => [{
+      evaluate: async (fn: (n: unknown) => string) => fn({
+        innerText: 'Submit application', disabled: false, tagName: 'BUTTON', type: '', value: '',
+        title: '', getAttribute: () => null, getClientRects: () => ({ length: 1 }),
+        parentElement: null,
+        ownerDocument: {
+          defaultView: { getComputedStyle: () => ({ visibility: 'visible' }) },
+          getElementById: () => null,
+        },
+      }),
+      click: async () => { order.push('click'); },
+      dispose: async () => undefined,
+    }],
+  };
+  const page = {
+    locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
+      ? buttons
+      : { count: async () => 0, nth: () => ({}) }),
+    waitForNavigation: async () => { order.push('waitForNavigation'); },
+    waitForLoadState: async () => { order.push('waitForLoadState'); },
+    waitForTimeout: async () => undefined,
+  } as unknown as Page;
+
+  await clickFinalSubmit(page);
+  assert.equal(order[0], 'waitForNavigation',
+    'the navigation promise must be created before the click is dispatched');
+  assert.deepEqual(order, ['waitForNavigation', 'click', 'waitForLoadState']);
+});
+
+test('a detached element is pre-dispatch too, and says nothing was sent', async () => {
+  /* Playwright throws a PLAIN Error for this, not a TimeoutError, so the name check alone let it
+     inherit "the submission was attempted... check your email". It is the SPA-re-render case. */
+  const detached = new Error('elementHandle.click: Element is not attached to the DOM');
+  const buttons = {
+    elementHandles: async () => [{
+      evaluate: async (fn: (n: unknown) => string) => fn({
+        innerText: 'Submit application', disabled: false, tagName: 'BUTTON', type: '', value: '',
+        title: '', getAttribute: () => null, getClientRects: () => ({ length: 1 }),
+        parentElement: null,
+        ownerDocument: {
+          defaultView: { getComputedStyle: () => ({ visibility: 'visible' }) },
+          getElementById: () => null,
+        },
+      }),
+      click: async () => { throw detached; },
+      dispose: async () => undefined,
+    }],
+  };
+  const page = {
+    locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
+      ? buttons
+      : { count: async () => 0, nth: () => ({}) }),
+    waitForNavigation: async () => undefined,
+    waitForLoadState: async () => undefined,
+    waitForTimeout: async () => undefined,
+  } as unknown as Page;
+
+  await assert.rejects(clickFinalSubmit(page), NoSubmitControlError);
 });

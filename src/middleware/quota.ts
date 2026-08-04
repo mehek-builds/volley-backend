@@ -33,6 +33,10 @@ export const LIMITS = {
     // Keep a small retry margin above that batch while preserving the per-user abuse ceiling.
     resume: parseInt(process.env.RATE_RESUME_PER_HOUR || '40', 10),
     jobExtract: parseInt(process.env.RATE_JOB_EXTRACT_PER_HOUR || '15', 10),
+    /* The requirement breakdown, which is a Sonnet call on a cache miss. Generous because a
+       student reading a day's packets opens many and the cache makes most of them free; this is
+       here to stop a loop, not to ration ordinary use. */
+    jdRequirements: parseInt(process.env.RATE_JD_REQUIREMENTS_PER_HOUR || '60', 10),
     requestCode: parseInt(process.env.RATE_CODE_PER_HOUR || '5', 10),
     session: parseInt(process.env.RATE_SESSION_PER_HOUR || '10', 10),
     requestCodePerIp: parseInt(process.env.RATE_CODE_IP_PER_HOUR || '50', 10),

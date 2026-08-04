@@ -1,0 +1,155 @@
+/**
+ * The digest is a heuristic, so these tests pin the PROPERTIES it has to hold rather than exact
+ * output. Asserting on exact slices would make every future tweak to the patterns a test rewrite,
+ * and the thing that actually matters is narrow: the requirements survive, the preamble does not,
+ * the result fits the budget, and nothing throws inside a poll.
+ */
+import { test, describe } from 'node:test';
+import assert from 'node:assert';
+import { DIGEST_CHARS, buildDescriptionDigest } from './descriptionDigest';
+
+/* Long enough that a DIGEST_CHARS prefix cannot reach past it, which is the precondition every
+   test below depends on. Asserted rather than assumed: the parenthesised repeat here was originally
+   written without the parentheses, which bound .repeat to the last literal only and left a 1342
+   character preamble that fit inside the budget, so four tests failed for a reason that had nothing
+   to do with the code under test. */
+const PREAMBLE =
+  'About Acme. We are a mission-driven team building the future of work. Founded in 2015, we have ' +
+  ('grown to 400 people across nine offices. Our values are curiosity, ownership and craft. ' +
+    'We believe work should be meaningful. ').repeat(20);
+
+const REQUIREMENTS = [
+  'Requirements',
+  '- 3+ years of TypeScript and React in production',
+  '- Strong PostgreSQL schema design',
+  '- Experience with Kubernetes and Terraform',
+  '- Familiarity with Kafka and gRPC',
+].join('\n');
+
+const EEO =
+  'Equal Opportunity Employer\nAcme is an equal opportunity employer. All qualified applicants ' +
+  'will receive consideration without regard to race, colour, religion, sex, or national origin. ';
+
+test('precondition: the preamble fixture is longer than the digest budget', () => {
+  assert.ok(
+    PREAMBLE.length > DIGEST_CHARS,
+    `preamble is ${PREAMBLE.length} chars, which fits inside the ${DIGEST_CHARS} budget. ` +
+      'Every "the preamble is dropped" test below is vacuous unless this holds.',
+  );
+});
+
+describe('the requirements block is what survives', () => {
+  test('a buried requirements section is kept and the preamble ahead of it is dropped', () => {
+    const digest = buildDescriptionDigest(`${PREAMBLE}\n${REQUIREMENTS}`);
+
+    assert.ok(digest.includes('Kubernetes'), 'the requirement terms are the whole point');
+    assert.ok(digest.includes('PostgreSQL'));
+    assert.ok(!digest.includes('Founded in 2015'), 'the company blurb must not survive');
+  });
+
+  test('this is the case a prefix cut gets WRONG, which is why the column exists', () => {
+    const full = `${PREAMBLE}\n${REQUIREMENTS}`;
+    /* The old behaviour, for contrast: a prefix of the same budget as the digest. */
+    const prefix = full.slice(0, DIGEST_CHARS);
+    assert.ok(!prefix.includes('Kubernetes'), 'precondition: a prefix this size misses the block');
+
+    const digest = buildDescriptionDigest(full);
+    assert.ok(digest.includes('Kubernetes'), 'the digest must find what the prefix missed');
+  });
+
+  test('the earliest section wins, not the first pattern in the list', () => {
+    const doc = [
+      PREAMBLE,
+      'Responsibilities',
+      '- Ship the billing service',
+      'Minimum qualifications',
+      '- Go and gRPC',
+    ].join('\n');
+
+    const digest = buildDescriptionDigest(doc);
+    assert.ok(digest.includes('Ship the billing service'), 'must start at Responsibilities');
+    assert.ok(digest.includes('Go and gRPC'), 'and still reach the later section');
+  });
+
+  test('a posting that opens on its role section is not re-sliced', () => {
+    const doc = `The role\n${'- Build things with TypeScript and React. '.repeat(120)}`;
+    const digest = buildDescriptionDigest(doc);
+    assert.ok(digest.startsWith('The role'), 'a heading in the first 200 chars is not a preamble');
+  });
+});
+
+describe('trailing boilerplate', () => {
+  test('an EEO statement after the requirements is cut', () => {
+    const digest = buildDescriptionDigest(`${PREAMBLE}\n${REQUIREMENTS}\n${EEO}`);
+    assert.ok(digest.includes('Kubernetes'), 'requirements survive');
+    assert.ok(!digest.includes('without regard to race'), 'EEO boilerplate does not');
+  });
+
+  test('a posting that is MOSTLY boilerplate still yields a usable digest', () => {
+    /* The guard against over-trimming: if cutting the trailing section would leave a stub, the
+       untrimmed body is preferred. A digest of "" scores as unscorable, which is a worse answer
+       than a digest carrying some boilerplate. */
+    const doc = `${PREAMBLE}\nRequirements\n- TypeScript\n${EEO.repeat(10)}`;
+    const digest = buildDescriptionDigest(doc);
+    assert.ok(digest.length > 0, 'never empty when there was material to keep');
+    assert.ok(digest.includes('TypeScript'));
+  });
+});
+
+describe('the budget', () => {
+  test('never exceeds DIGEST_CHARS', () => {
+    for (const doc of [PREAMBLE, `${PREAMBLE}\n${REQUIREMENTS}`, 'x'.repeat(50_000)]) {
+      assert.ok(
+        buildDescriptionDigest(doc).length <= DIGEST_CHARS,
+        `digest was ${buildDescriptionDigest(doc).length}, over the ${DIGEST_CHARS} budget`,
+      );
+    }
+  });
+
+  test('is a real cut against a realistic posting', () => {
+    const full = `${PREAMBLE}\n${REQUIREMENTS}\n${EEO}`;
+    const digest = buildDescriptionDigest(full);
+    assert.ok(
+      digest.length < full.length / 2,
+      `digest was ${digest.length} of ${full.length} chars, not a saving worth a column`,
+    );
+  });
+
+  test('a short posting is kept whole rather than sliced', () => {
+    const short = 'Frontend Engineer\nRequirements\n- TypeScript, React, PostgreSQL';
+    assert.strictEqual(buildDescriptionDigest(short), short);
+  });
+
+  test('whitespace an HTML conversion leaves behind is collapsed', () => {
+    const messy = 'Title   \n\n\n\n   Requirements   \n\n\n   - TypeScript   ';
+    const digest = buildDescriptionDigest(messy);
+    assert.ok(!digest.includes('\n\n\n'), 'blank-line runs are pure overhead in this column');
+    assert.ok(!digest.includes('   '), 'so are space runs');
+  });
+});
+
+describe('it never throws inside a poll', () => {
+  /* This runs inside a 200-row upsert chunk. A throw here takes down a whole board's poll over one
+     malformed posting, so every one of these has to return a string rather than raise. */
+  test('handles empty, null and undefined', () => {
+    assert.strictEqual(buildDescriptionDigest(''), '');
+    assert.strictEqual(buildDescriptionDigest(null), '');
+    assert.strictEqual(buildDescriptionDigest(undefined), '');
+  });
+
+  test('handles whitespace-only and control-character input', () => {
+    assert.strictEqual(buildDescriptionDigest('   \n\n\t  '), '');
+    assert.strictEqual(typeof buildDescriptionDigest('\u0000\u0001\u0002'), 'string');
+  });
+
+  test('handles text with no recognisable structure at all', () => {
+    const soup = 'lorem ipsum dolor sit amet '.repeat(300);
+    const digest = buildDescriptionDigest(soup);
+    assert.ok(digest.length > 0 && digest.length <= DIGEST_CHARS);
+  });
+
+  test('handles a posting that is one enormous unbroken line', () => {
+    const oneLine = `Acme is hiring. ${'We value craft. '.repeat(500)}Requirements: TypeScript.`;
+    assert.ok(buildDescriptionDigest(oneLine).length <= DIGEST_CHARS);
+  });
+});

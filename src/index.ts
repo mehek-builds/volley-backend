@@ -3,6 +3,9 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
 
+import { sql } from 'drizzle-orm';
+import { db } from './db';
+import { healthStatusCode, probeDatabase } from './lib/healthProbe';
 import { authRoutes } from './routes/auth';
 import { profileRoutes } from './routes/profile';
 import { resolveRoutes } from './routes/resolve';
@@ -35,6 +38,8 @@ import { coverLetterRoutes } from './routes/coverLetter';
 import { emailConnectionRoutes } from './routes/emailConnections';
 import { API_VERSION, PRODUCT_NAME, PRODUCT_LINKS } from './lib/product';
 import { createRateLimitHook, defaultRateLimitConfig, type RateLimitConfig } from './middleware/rateLimit';
+import { sharedRankingConfigured } from './lib/rankingCache';
+import { resolveBuild, resolveRevision } from './lib/buildInfo';
 import { dashboardBootstrapRoutes } from './routes/dashboardBootstrap';
 
 export interface BuildAppOptions {
@@ -160,13 +165,70 @@ export async function buildApp(options: BuildAppOptions = {}) {
   fastify.addHook('onRequest', createRateLimitHook(options.rateLimit ?? defaultRateLimitConfig(), options.now));
 
   // Health check
-  fastify.get('/health', async (_request, reply) => {
-    return reply.status(200).send({
-      status: 'ok',
+  fastify.get('/health', async (request, reply) => {
+    /* THE DATABASE, because a health check that cannot fail is not a health check.
+     *
+     * On 2026-08-04 Neon refused every connection ("exceeded the data transfer quota") and the
+     * public board was down for ~75 minutes. This endpoint answered 200 throughout, because it read
+     * environment variables and a clock and touched nothing else. Any monitor pointed here saw a
+     * healthy service; the first real signal was a CI job failing on an unrelated pull request.
+     *
+     * `select 1` is deliberate: the incident being detected was a TRANSFER exhaustion, so a probe
+     * that moved real bytes would spend the resource it exists to watch. It never throws and always
+     * times out, so a degraded database cannot take this endpoint down with it. */
+    const database = await probeDatabase(() => db.execute(sql`select 1`));
+    if (database.status !== 'ok') {
+      // The category is what the response carries; the driver's message can name hosts and roles,
+      // so the detail goes to the log and the endpoint stays safe to expose.
+      request.log.error({ reason: database.reason, ms: database.ms }, 'health: database unreachable');
+    }
+
+    return reply.status(healthStatusCode(database)).send({
+      /* 'degraded', not 'error': the service is up and answering, and is correctly reporting that a
+         dependency it cannot work without is unavailable. Every identity field below is still
+         present on a 503, because DEPLOY.md reads `revision` from this response to confirm what
+         shipped, and that has to keep working during an incident. */
+      status: database.status === 'ok' ? 'ok' : 'degraded',
+      database: database.status,
+      ...(database.status === 'ok' ? {} : { database_reason: database.reason }),
+      database_ms: database.ms,
       service: 'litos-api',
       product: PRODUCT_NAME,
       api_version: API_VERSION,
-      revision: process.env.VERCEL_GIT_COMMIT_SHA || process.env.GIT_SHA || null,
+      // WHICH COMMIT IS SERVING, and WHICH MECHANISM ANSWERED. The comment that used to sit here
+      // said the cause of a null `revision` was "NOT established"; it is now established and the
+      // measurement lives with the resolver in lib/buildInfo.ts. Short version: the `VERCEL_GIT_*`
+      // variables come from the GitHub integration's metadata, so a `vercel --prod` deploy from a
+      // laptop leaves them unset and needs `GIT_SHA` passed in, which scripts/deploy-prod.sh does.
+      //
+      // `revision_source` is the field that makes a null actionable rather than merely
+      // disappointing: 'none' means a bare `vercel --prod` and points you at `build`.
+      ...resolveRevision(),
+      // The deployment identity, which is available even when no SHA was supplied at all. A SHA is
+      // comparable to `git rev-parse origin/main` without leaving the terminal and this is not, so
+      // read the SHA first; this is what still identifies the deployment when there is no SHA.
+      build: resolveBuild(),
+      /* WHICH RANKING-CACHE TIERS ARE ACTUALLY RUNNING.
+       *
+       * 'shared' means L1 plus the Upstash L2; 'local' means L1 only, a process Map with a 60
+       * second TTL that dies with the instance.
+       *
+       * This exists because the difference is INVISIBLE FROM OUTSIDE and expensive. L2 is enabled
+       * purely by two environment variables, and with them unset rankingCache.ts is a deliberate
+       * no-op: correct, silent, and re-reading the whole ranking pool out of Neon on every cold
+       * start. That read is what exhausted Neon's monthly transfer allowance on 2026-08-04 and
+       * suspended the database, so "did the env vars actually take effect" is a question worth
+       * being able to answer with one curl rather than by inference.
+       *
+       * It is also the question you have to re-ask after every deploy, because env var changes on
+       * Vercel do not reach a running deployment until it is rebuilt. A config change that looks
+       * applied in the dashboard and is not live in the function is exactly the gap this closes.
+       *
+       * NAMES ONLY, NEVER VALUES. sharedRankingConfigured() returns a boolean; the URL and token
+       * never appear here. A health endpoint is unauthenticated, and the point is to publish
+       * whether a capability is on, not what its credentials are.
+       */
+      ranking_cache: sharedRankingConfigured() ? 'shared' : 'local',
       ts: new Date().toISOString(),
     });
   });

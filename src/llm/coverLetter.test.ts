@@ -1,6 +1,70 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
-import { escapeRawControlCharacters, parseCoverLetterBody, validateCoverLetter } from './coverLetter';
+import test, { mock } from 'node:test';
+import Anthropic from '@anthropic-ai/sdk';
+import { escapeRawControlCharacters, generateCoverLetter, parseCoverLetterBody, validateCoverLetter } from './coverLetter';
+
+// generateCoverLetter builds its own module-private Anthropic client, so there is no seam to inject
+// a fake through. `create` lives on the shared Messages prototype rather than on the instance, so
+// patching it there reaches the client the module already built, whatever order the modules loaded
+// in. This is the only way to assert on the REQUEST, and the request is half of what is under test.
+const messagesPrototype = Object.getPrototypeOf(new Anthropic({ apiKey: 'test-key' }).messages) as {
+  create: (...args: unknown[]) => unknown;
+};
+
+const COVER_LETTER_INPUT = {
+  company: 'Gemini',
+  role: 'Software Engineering Intern (Fall 2026)',
+  jd_text: 'Build and ship backend services. Fall 2026 internship.',
+  candidate_source: 'Mehek built a Chrome extension that fills in job applications.',
+};
+
+function stubClaude(response: { content: unknown[]; stop_reason: string }) {
+  const calls: Record<string, unknown>[] = [];
+  mock.method(messagesPrototype, 'create', async (body: Record<string, unknown>) => {
+    calls.push(body);
+    return response;
+  });
+  return calls;
+}
+
+// Both of these pin the ONE fix in this change with no other test standing behind it. Deleting the
+// max_tokens raise and the stop_reason guard left all seven cover letter tests green, which makes it
+// the fix most likely to be quietly reverted by a future edit that "tidies up" the request.
+test('the cover letter request asks for 8192 tokens, not the old 2048', async (t) => {
+  t.after(() => mock.restoreAll());
+  const calls = stubClaude({
+    content: [{ type: 'text', text: '{"body":"Paragraph one.\\n\\nParagraph two."}' }],
+    stop_reason: 'end_turn',
+  });
+
+  assert.equal(await generateCoverLetter(COVER_LETTER_INPUT), 'Paragraph one.\n\nParagraph two.');
+  assert.equal(calls.length, 1);
+  // 2048 was a SHARED budget for adaptive thinking plus the emitted JSON on claude-sonnet-5, which
+  // left as little as ~850 tokens of letter on a long posting. Anything at or below the old ceiling
+  // reopens the truncation window, so this asserts the exact value rather than a lower bound.
+  assert.equal(calls[0].max_tokens, 8192);
+});
+
+test('a response cut off at max_tokens raises the truncation error, not the parse error', async (t) => {
+  t.after(() => mock.restoreAll());
+  // A real truncation: valid JSON prefix, no closing quote or brace. Without the stop_reason guard
+  // this falls through to parseCoverLetterBody and comes back as "Claude returned an invalid cover
+  // letter", which is exactly the confusion that let a raw-newline bug spend its life being read as
+  // a token-limit problem. The two failures have to stay separately named.
+  stubClaude({
+    content: [{ type: 'text', text: '{"body":"I am writing to apply for the Software Engineering In' }],
+    stop_reason: 'max_tokens',
+  });
+
+  await assert.rejects(
+    () => generateCoverLetter(COVER_LETTER_INPUT),
+    (error: Error) => {
+      assert.match(error.message, /truncated at max_tokens/);
+      assert.doesNotMatch(error.message, /invalid cover letter/);
+      return true;
+    },
+  );
+});
 
 // The exact failure that took a real Greenhouse submission down on 2026-08-04.
 //
@@ -71,4 +135,3 @@ test('cover-letter validation blocks fabricated candidate metrics', () => {
   const result = validateCoverLetter(body, 'Acme', 'Software Engineer', source);
   assert.ok(result.issues.some((item) => item.includes('82%')));
 });
-

@@ -196,6 +196,28 @@ refined structured`
 export const BULLET_MAX_CHARS = 235; // beyond this, a ~2-line bullet wraps to a 3rd line
 export const BULLET_MIN_WORDS = 8;
 export const BULLET_MAX_WORDS = 30;
+
+/**
+ * Bullets that will fail the length gate, with how far over they are, for prompt feedback.
+ *
+ * Same walk as weakVerbBullets and the same walk validateResumeSpec does, so the repair loop and
+ * the gate can never disagree about which bullets are too long. Length was the one hard rule the
+ * generation prompt asked for politely and nothing ever corrected: an over-long bullet survived
+ * every retry untouched and then failed the ATS gate, which fails closed, so nothing was saved and
+ * the student's only move was to re-roll the model. Measured 2026-08-04 on a real build: 239 chars
+ * against a 235 cap, four characters from being savable.
+ */
+export function overlongBullets(spec: ResumeSpec): Array<{ org: string; bullet: string; length: number }> {
+  const out: Array<{ org: string; bullet: string; length: number }> = [];
+  for (const entry of spec.experience ?? []) {
+    for (const bullet of entry.bullets ?? []) {
+      if (typeof bullet === 'string' && bullet.length > BULLET_MAX_CHARS) {
+        out.push({ org: entry.org, bullet, length: bullet.length });
+      }
+    }
+  }
+  return out;
+}
 const MIN_KEYWORD_COVERAGE = 18; // % of JD terms that must appear (ATS safety floor)
 const METRIC_RE = /(\$|%|\d|\b0\.\d+\b|\b\d+x\b)/i;
 

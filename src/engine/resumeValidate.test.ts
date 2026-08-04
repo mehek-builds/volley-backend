@@ -5,6 +5,8 @@ import {
   findUngroundedSkills,
   pruneUngroundedContent,
   validateResumeSpec,
+  overlongBullets,
+  BULLET_MAX_CHARS,
 } from './resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import type { ExperienceBankEntry } from '../db/schema';
@@ -658,4 +660,67 @@ test('R-022: an acronym still matches when it is the ONLY evidence available', (
   const uniOnly = [acronymCompetitionBank[1]];
   const s = spec([{ org: 'MIT', title: 'Student', date_range: '2024', bullets: ['Studied things.'] }]);
   assert.deepEqual(findGroundingViolations(s, uniOnly).filter((v) => v.kind === 'org'), []);
+});
+
+/* THE BULLET LENGTH REPAIR PASS.
+ *
+ * overlongBullets exists so the base-resume build can FIX a too-long bullet instead of failing the
+ * ATS gate on it. These tests hold it to the one property that matters: it must flag exactly what
+ * validateResumeSpec would reject, no more and no less. If the two ever disagree, the repair loop
+ * either spins on a bullet the gate is happy with or hands the gate a bullet it never repaired. */
+
+const LONG_BULLET_239 =
+  'Designed automated monitoring system detecting partnership failures before escalation: defined 8 leading indicators from historical dropout patterns, built threshold-based alerting across 96 pairs, recovering 9 of 14 at-risk relationships.';
+
+test('the bullet that failed a real build on 2026-08-04 is flagged, with its overage', () => {
+  assert.equal(LONG_BULLET_239.length, 239, 'the fixture must stay the bullet that actually failed');
+  const found = overlongBullets(
+    spec([{ org: 'Cinematica Labs', title: 'Intern', date_range: '2025', bullets: [LONG_BULLET_239] }]),
+  );
+  assert.equal(found.length, 1);
+  assert.equal(found[0].org, 'Cinematica Labs');
+  assert.equal(found[0].length, 239);
+  assert.equal(found[0].bullet, LONG_BULLET_239, 'the whole bullet goes back, so the model can trim it');
+});
+
+test('the boundary is exactly BULLET_MAX_CHARS: 235 is legal, 236 is not', () => {
+  const at = 'Built '.padEnd(BULLET_MAX_CHARS, 'x');
+  const over = 'Built '.padEnd(BULLET_MAX_CHARS + 1, 'x');
+  assert.equal(at.length, BULLET_MAX_CHARS);
+  assert.deepEqual(overlongBullets(spec([{ org: 'Acme', title: 'E', date_range: '2024', bullets: [at] }])), []);
+  assert.equal(
+    overlongBullets(spec([{ org: 'Acme', title: 'E', date_range: '2024', bullets: [over] }]))[0].length,
+    BULLET_MAX_CHARS + 1,
+  );
+});
+
+test('it flags every offender across entries, not just the first', () => {
+  const found = overlongBullets(
+    spec([
+      { org: 'Acme', title: 'E', date_range: '2024', bullets: ['Built a short one.', LONG_BULLET_239] },
+      { org: 'Globex', title: 'E', date_range: '2023', bullets: [LONG_BULLET_239] },
+    ]),
+  );
+  assert.deepEqual(found.map((b) => b.org), ['Acme', 'Globex']);
+});
+
+test('it agrees with the gate: anything it clears raises no length issue in validateResumeSpec', () => {
+  // The repair loop breaks when this returns empty, so an under-strict helper would ship a spec
+  // straight into a gate failure the loop had already declared clean.
+  const trimmed = `${LONG_BULLET_239.slice(0, 200).trim()}.`;
+  const s = spec([{ org: 'Acme', title: 'Engineer', date_range: '2024', bullets: [trimmed] }]);
+  assert.deepEqual(overlongBullets(s), []);
+  const lengthIssues = validateResumeSpec(s, '', BANK, [], undefined).issues.filter((i) => i.includes('exceeds'));
+  assert.deepEqual(lengthIssues, []);
+});
+
+test('it agrees with the gate the other way: what it flags, the gate rejects', () => {
+  const s = spec([{ org: 'Acme', title: 'Engineer', date_range: '2024', bullets: [LONG_BULLET_239] }]);
+  assert.equal(overlongBullets(s).length, 1);
+  const lengthIssues = validateResumeSpec(s, '', BANK, [], undefined).issues.filter((i) => i.includes('exceeds'));
+  assert.equal(lengthIssues.length, 1, `expected the gate to reject it, got: ${lengthIssues.join('; ')}`);
+});
+
+test('a spec with no experience does not throw', () => {
+  assert.deepEqual(overlongBullets({ ...spec([]), experience: undefined } as unknown as ResumeSpec), []);
 });

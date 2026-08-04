@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { decide, isBlocked } from '../engine/eligibility';
 import { put } from '@vercel/blob';
 import { chromium, type Page } from 'playwright-core';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -40,6 +41,7 @@ import {
   readReceipt,
   type SubmissionPacket,
   type SupportedPortal,
+  NoSubmitControlError,
 } from '../lib/portalSubmission';
 import { applyReviewPatch, beginStall } from '../lib/applicationStall';
 import { sanitizeProviderBlockers } from '../lib/fieldLabel';
@@ -292,6 +294,45 @@ function omitCoverLetter(packet: SubmissionPacket): SubmissionPacket {
   return { ...packet, coverLetter: undefined, coverLetterName: undefined };
 }
 
+function normalizedFilledFields(fields: readonly string[] | undefined): Set<string> {
+  return new Set((fields ?? []).map((field) => field.toLowerCase().replace(/[^a-z0-9]/g, '')));
+}
+
+function filledFieldBlockers(fields: readonly string[] | undefined, packet: SubmissionPacket): string[] {
+  const normalized = normalizedFilledFields(fields);
+  const has = (needle: string) => [...normalized].some((field) => field.includes(needle));
+  const issues: string[] = [];
+  if (!has('email')) issues.push('The filled form did not record an email field.');
+  if (!has('resume')) issues.push('The filled form did not record a resume upload.');
+  if (!has('name') && !(has('firstname') && has('lastname'))) {
+    issues.push('The filled form did not record the applicant name fields.');
+  }
+  if (packet.coverLetter && !has('cover')) {
+    issues.push('The filled form did not record the cover letter attachment.');
+  }
+  return issues;
+}
+
+function previewContentBlockers(text: string | undefined): string[] {
+  const normalized = (text ?? '').toLowerCase();
+  if (!normalized.trim()) return ['The filled form preview did not include readable page text.'];
+  if (
+    /sorry,?\s+but\s+we\s+can(?:not|'t)\s+find\s+that\s+page/.test(normalized)
+    || /\b(?:404|page not found|not found|access denied)\b/.test(normalized)
+    || /\b(?:sign in|log in|login required)\b/.test(normalized)
+  ) {
+    return ['The filled form preview looks like an error, login, or missing page instead of a completed application form.'];
+  }
+  return [];
+}
+
+function preparationEvidenceBlockers(result: { text?: string; filledFields?: string[] }, packet: SubmissionPacket): string[] {
+  return [
+    ...previewContentBlockers(result.text),
+    ...filledFieldBlockers(result.filledFields, packet),
+  ];
+}
+
 /**
  * Build the packet, writing a cover letter first when the portal has somewhere to put one.
  *
@@ -310,19 +351,30 @@ function omitCoverLetter(packet: SubmissionPacket): SubmissionPacket {
  *
  * The reason is returned rather than swallowed so the caller can put it in front of the applicant
  * as an attention reason. A silent degrade would be its own version of this bug.
+ *
+ * That reason is a FIXED sentence, and the thrown message is logged instead of interpolated. The
+ * two failures this generator actually throws are "Cover letter truncated at max_tokens (1203
+ * chars) - raise the cap" and "Claude returned an invalid cover letter: {"body":"I'm writing to
+ * apply for the Software Eng..." - one an instruction to an operator, the other 200 characters of
+ * raw model output with a vendor name in front of it. Both were reaching a student's screen. They
+ * also describe one situation from the applicant's side, with one recovery, so there is nothing a
+ * second variant of the sentence could usefully say. Whoever has to fix the generator reads logs.
  */
 async function packetForCoverLetterCapability(
   row: ResumeRow,
   supported: boolean,
+  fastify: FastifyInstance,
 ): Promise<{ packet: SubmissionPacket; coverLetterIssue?: string }> {
   if (!supported) return { packet: omitCoverLetter(await buildPacket(row)) };
   if (!storedCoverLetter(row)) {
     try {
       await generateStoredCoverLetter(row, false, true);
     } catch (error) {
+      // Raw message to the log, fixed sentence to the applicant. See the note above the function.
+      fastify.log.warn({ error, applicationId: row.id }, 'Cover letter generation failed, continuing without it');
       return {
         packet: omitCoverLetter(await buildPacket(row)),
-        coverLetterIssue: `We could not write your cover letter for this one, so it is not attached. Everything else is filled in. Message: ${error instanceof Error ? error.message : 'unknown error'}`,
+        coverLetterIssue: 'We could not write your cover letter for this one, so it is not attached. Everything else is filled in, and you can write or retry a cover letter from your dashboard.',
       };
     }
   }
@@ -481,7 +533,7 @@ async function prepareManaged(
   const applicationUrl = portalApplicationUrl(portal, current.portal_url!);
   const discoveryResult = await runManagedBrowser(applicationUrl, buildManagedDiscoveryActions(portal, packet)).catch(() => null);
   const coverLetterSupported = managedResultHasCoverLetterUpload(discoveryResult, portal);
-  const coverLetterOutcome = await packetForCoverLetterCapability(row, coverLetterSupported);
+  const coverLetterOutcome = await packetForCoverLetterCapability(row, coverLetterSupported, fastify);
   packet = coverLetterOutcome.packet;
   const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
   const resolutionCurrent = { ...current, questions: storedQuestions };
@@ -519,7 +571,8 @@ async function prepareManaged(
   // A missing cover letter is worth telling the applicant about, but it is not a blocker: the form
   // is filled and sendable without it, so it must not flip the run out of the safe path.
   const coverLetterAttention = coverLetterOutcome.coverLetterIssue ? [coverLetterOutcome.coverLetterIssue] : [];
-  const safe = blockers.length === 0 && discoveryAttention.length === 0;
+  const evidenceBlockers = preparationEvidenceBlockers(result, packet);
+  const safe = blockers.length === 0 && discoveryAttention.length === 0 && evidenceBlockers.length === 0;
   const review = nextReview(current, {
     ...preparedReviewPatch(authorization, safe),
     submission_run_id: runId,
@@ -528,7 +581,7 @@ async function prepareManaged(
     verification: { status: verificationHandoff ? 'handoff' : 'not_needed' },
     questions: mergedQuestions,
     cover_letter_supported: coverLetterSupported,
-    attention_reason: [...blockers, ...discoveryAttention, ...coverLetterAttention].join('\n') || undefined,
+    attention_reason: [...blockers, ...discoveryAttention, ...evidenceBlockers, ...coverLetterAttention].join('\n') || undefined,
     // No stall write here, deliberately. CAPTCHA_BLOCKER is pushed in exactly one place -
     // fillPortal - and the managed path never calls it, so matching on that string here would be
     // dead code that reads like coverage. The managed path's real challenge signal is the probe in
@@ -546,6 +599,44 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
   if (!current?.portal_url) throw new Error('We do not have a link to the company application page');
   const portal = detectPortal(current.portal_url);
   const runId = current.submission_run_id ?? randomUUID();
+
+  /* THE GRADUATION BLOCK, and it stops the unattended run before anything is spent or sent.
+   *
+   * Only on the UNATTENDED path. A student who clicks Prepare on a role has looked at it and
+   * chosen it, and this gate is arithmetic over a parsed title - it is not entitled to overrule a
+   * person about their own application. Autopilot has made no such choice, so it gets the strict
+   * reading: an application auto-sent to an internship the student cannot legally hold spends a
+   * real application slot and a real employer relationship on their behalf, and they never
+   * decided to.
+   *
+   * Placed above prepareControlled and above the account-walled stop for the same reason those
+   * sit where they do: a gate that only covers the submit path is not a gate, because prepare
+   * runs first, independently, and costs billed browser calls of its own. */
+  if (unattended) {
+    /* StoredSpec is Record<string, unknown> - the packet spec is not typed at this layer - so the
+       two fields are read defensively. A spec missing either one yields `unknown` from decide(),
+       which never blocks, and that is the right default for a record we cannot read. */
+    const role = typeof (stored.job_context as { role?: unknown } | undefined)?.role === 'string'
+      ? ((stored.job_context as { role?: string }).role as string)
+      : '';
+    const gradDate = typeof stored.grad_date === 'string' ? stored.grad_date : null;
+    const gate = decide({ title: role, employment_type: null }, gradDate);
+    if (isBlocked(gate)) {
+      fastify.log.warn(
+        { userId: row.user_id, resumeId: row.id, role, reason: gate.reason },
+        'autopilot blocked: graduation',
+      );
+      await writeReview(row, nextReview(current, {
+        status: 'needs_attention',
+        submission_run_id: runId,
+        /* Named plainly, because this one is worth reading. The student is being told a fact about
+           themselves and this role, not that something went wrong. */
+        attention_reason: `Not sent: this role ${gate.reason}. Autopilot does not apply to roles you are not eligible for.`,
+      }));
+      return;
+    }
+  }
+
   const authorization = await standingAuthorization(row.user_id);
   assertControlledPortalEnabled(portal);
   if (shouldUseLocalControlledBrowser(portal)) {
@@ -620,7 +711,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       permissionGranted: verificationSettings?.enabled === true,
     });
     const coverLetterSupported = await hasCoverLetterUpload(page, portal);
-    const { packet, coverLetterIssue } = await packetForCoverLetterCapability(row, coverLetterSupported);
+    const { packet, coverLetterIssue } = await packetForCoverLetterCapability(row, coverLetterSupported, fastify);
     const coverLetterAttention = coverLetterIssue ? [coverLetterIssue] : [];
 
     // R-055: discover and resolve the posting's own custom questions before filling, so a
@@ -653,8 +744,10 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       addRandomSuffix: true,
     });
     const sanitizedBlockers = sanitizeProviderBlockers(result.blockers);
+    const pageText = await page.locator('body').innerText({ timeout: 1_000 }).catch(() => '');
+    const evidenceBlockers = preparationEvidenceBlockers({ text: pageText, filledFields: result.filledFields }, packet);
     const safe = directPreparationIsSafe({
-      blockerCount: sanitizedBlockers.length,
+      blockerCount: sanitizedBlockers.length + evidenceBlockers.length,
       attentionCount: discoveryAttention.length,
       verificationStatus: verification.status,
     });
@@ -672,10 +765,14 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       },
       questions: mergedQuestions,
       cover_letter_supported: coverLetterSupported,
-      // Already human on this path, but sanitized anyway so both providers are held to one
-      // guarantee and a future change to either cannot quietly reintroduce identifiers.
+      // Already human on this path, but the BLOCKERS are sanitized anyway so both providers are
+      // held to one guarantee and a future change to either cannot quietly reintroduce identifiers.
+      // The other two arrays do not go through the sanitizer and do not need to: they are written
+      // here, in this repo, in the product's own voice, and neither one interpolates provider or
+      // model text. Sending them through it would not have caught the cover-letter leak either,
+      // since that message was prose and prose passes straight through.
       attention_reason:
-        [...sanitizedBlockers, ...discoveryAttention, ...coverLetterAttention].join('\n') || undefined,
+        [...sanitizedBlockers, ...discoveryAttention, ...evidenceBlockers, ...coverLetterAttention].join('\n') || undefined,
       // The only path that OBSERVES a challenge on a board nobody had typed as gated, which makes it
       // the one that matters most. Without it the stall is written only for JazzHR and BambooHR,
       // families already known to gate, so the instrumentation could confirm what was already
@@ -727,14 +824,16 @@ async function prepareControlled(
     const packet = await buildPacket(row, true);
     const result = await fillPortal(page, 'controlled_test', packet);
     const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
-    const safe = result.blockers.length === 0;
+    const pageText = await page.locator('body').innerText({ timeout: 1_000 }).catch(() => '');
+    const evidenceBlockers = preparationEvidenceBlockers({ text: pageText, filledFields: result.filledFields }, packet);
+    const safe = result.blockers.length === 0 && evidenceBlockers.length === 0;
     const review = nextReview(current, {
       ...preparedReviewPatch(authorization, safe),
       submission_run_id: runId,
       filled_fields: result.filledFields,
       preview_screenshot_url: `data:image/png;base64,${screenshot.toString('base64')}`,
       verification: { status: 'not_needed' },
-      attention_reason: result.blockers.join('\n') || undefined,
+      attention_reason: [...result.blockers, ...evidenceBlockers].join('\n') || undefined,
       handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
       submission_error: undefined,
     });
@@ -939,6 +1038,47 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
   }
 }
 
+
+/**
+ * What a failed run tells the applicant, derived rather than written inline.
+ *
+ * EXTRACTED SO IT CAN BE TESTED. This is the user-visible half of the no-submit-control change and
+ * it had no behavioural coverage at all - the only thing watching this file was a test that greps
+ * it as a string, which cannot tell a correct branch from a deleted one. A review pass proved it by
+ * deleting each branch in turn and finding the suite still green.
+ *
+ * THE PRECEDENCE IS THE POINT, and it runs stop-reason first, uncertainty last. `uncertainAfterClaim`
+ * is true on every one of these paths, because the claim is taken at the top of the run - so any
+ * branch that does not outrank it inherits "the submission was attempted and we could not verify
+ * it", which sends someone hunting for a receipt that cannot exist.
+ */
+export function submissionFailureOutcome(input: {
+  captchaStop: 'before_fill' | 'at_submit' | null;
+  noSubmitControl: boolean;
+  uncertainAfterClaim: boolean;
+  externalGate: boolean;
+  currentAttentionReason: string | undefined;
+}): { status: ApplicationReviewState['status']; attentionReason: string | undefined } {
+  const { captchaStop, noSubmitControl, uncertainAfterClaim, externalGate } = input;
+  const status: ApplicationReviewState['status'] = captchaStop || noSubmitControl || uncertainAfterClaim
+    ? 'needs_attention'
+    : externalGate ? 'submit_requested' : 'failed';
+  const attentionReason = captchaStop === 'at_submit'
+    ? 'This company\u2019s application page asks you to prove you are human, and that check is still waiting. Litos filled everything in and stopped there, so nothing has been sent. Open it when you have a minute and finish the last step.'
+    : captchaStop === 'before_fill'
+      ? 'This company asks you to prove you are human before it will take an application, so Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.'
+      : noSubmitControl
+        /* CAUSE-NEUTRAL. NoSubmitControlError is thrown for a multi-step first page, a page that
+           renders nothing in a headless browser, a control relabelled mid-run, and a click that
+           timed out before dispatching - so naming any one cause would be false most of the time.
+           What is always true, and all that matters, is that nothing was sent. */
+        ? 'Litos could not find the button that sends this application, so nothing has been sent and there is no confirmation to look for. Open it when you have a minute and finish it off.'
+        : uncertainAfterClaim
+          ? 'The final submission was attempted, but Litos could not verify the employer confirmation. Check the portal or your email before trying again.'
+          : input.currentAttentionReason ?? undefined;
+  return { status, attentionReason };
+}
+
 async function fail(row: ResumeRow, error: unknown) {
   const latestRows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, row.id)).limit(1);
   const current = latestRows[0] ? readApplicationReview(latestRows[0].spec) : null;
@@ -959,6 +1099,16 @@ async function fail(row: ResumeRow, error: unknown) {
   // one drifts the moment a field is added to the other.
   const captchaError = error instanceof CaptchaUnresolvedError ? error : null;
   const captchaStop = captchaError?.stage ?? null;
+  /* Same precedence, same reason as the captcha branch above. When clickFinalSubmit finds no
+     submit control the click PROVABLY did not happen, so uncertainAfterClaim's "check the portal
+     or your email" is the one thing that must not be said: there is no receipt to find. This is
+     the routine outcome on a multi-step first page, not an edge case. */
+  const noSubmitControl = error instanceof NoSubmitControlError;
+
+  const outcome = submissionFailureOutcome({
+    captchaStop, noSubmitControl, uncertainAfterClaim, externalGate,
+    currentAttentionReason: current.attention_reason,
+  });
 
   await writeReview(latestRows[0], nextReview(current, {
     ...(captchaError
@@ -969,17 +1119,9 @@ async function fail(row: ResumeRow, error: unknown) {
         source: 'observed',
       })
       : {}),
-    status: captchaStop || uncertainAfterClaim ? 'needs_attention' : externalGate ? 'submit_requested' : 'failed',
+    status: outcome.status,
     submission_error: message,
-    attention_reason: captchaStop === 'at_submit'
-      ? 'This company’s application page asks you to prove you are human, and that check is still waiting. Litos filled everything in and stopped there, so nothing has been sent. Open it when you have a minute and finish the last step.'
-      : captchaStop === 'before_fill'
-        // Nothing was filled on this path: the probe stopped the run before it touched the form.
-        // Promising a filled form here would send someone to a blank page.
-        ? 'This company asks you to prove you are human before it will take an application, so Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.'
-        : uncertainAfterClaim
-          ? 'The final submission was attempted, but Litos could not verify the employer confirmation. Check the portal or your email before trying again.'
-          : current.attention_reason,
+    attention_reason: outcome.attentionReason,
   }));
 }
 

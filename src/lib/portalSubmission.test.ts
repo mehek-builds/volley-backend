@@ -16,6 +16,8 @@ import {
   portalCanAutoSubmit,
   portalHandoffReason,
   readManagedReceipt,
+  chooseSubmitControl,
+  READ_CONTROL_LABEL,
 } from './portalSubmission';
 import { POLLABLE_JOB_BOARDS } from './jobMonitor';
 
@@ -972,4 +974,310 @@ test('no portal claims it can take a cover-letter file it has no input for', () 
   }
   // Rippling genuinely has one, read off the live form alongside the resume input.
   assert.equal(coverLetterUploadSelector('rippling'), 'input[type="file"][data-testid="input-cover_letter"]');
+});
+
+test('a third-party handoff is never mistaken for the submit button', () => {
+  /* EVERY LABEL BELOW IS REAL, and the first two were read off SmartRecruiters' live first step on
+     2026-08-04, before the applicant has typed anything. Greenhouse and Lever render the LinkedIn
+     one and both are autonomous today, so this was a live risk rather than a hypothetical. */
+  for (const label of [
+    'Apply With Indeed',
+    'Apply with SEEK',
+    'Apply with LinkedIn',
+    'Apply using LinkedIn',
+    'Autofill with Greenhouse',
+    'Sign in with Google',
+    'Continue with LinkedIn',
+    'Quick Apply',
+    'One-click apply',
+  ]) {
+    assert.equal(chooseSubmitControl([label]), null, `${label} must not be pressed`);
+  }
+});
+
+test('the real submit control is still found, and preferred over a bare Apply', () => {
+  assert.equal(chooseSubmitControl(['Submit application']), 0);
+  assert.equal(chooseSubmitControl(['Submit']), 0);
+  assert.equal(chooseSubmitControl(['Apply']), 0);
+  assert.equal(chooseSubmitControl(['Apply now']), 0);
+  assert.equal(chooseSubmitControl(['Send my application']), 0);
+
+  // A page carrying both: the explicit submit wins wherever it sits.
+  assert.equal(chooseSubmitControl(['Apply with LinkedIn', 'Submit application']), 1);
+  assert.equal(chooseSubmitControl(['Submit application', 'Apply with Indeed']), 0);
+  assert.equal(chooseSubmitControl(['Apply', 'Submit application']), 1, 'explicit beats bare apply');
+  // The form's real submit sits at its foot, so the last eligible control wins among equals.
+  assert.equal(chooseSubmitControl(['Submit', 'Submit application']), 1);
+});
+
+test('a step that only offers Next is not submittable, which is the multi-step guarantee', () => {
+  /* SmartRecruiters' first step, verbatim from the live DOM on 2026-08-04. There is no submit
+     control here at all, and the only primary button says Next. A run that pressed anything on this
+     page would either hand off to Indeed or advance a step while reporting a submission. */
+  const smartRecruitersStepOne = [
+    'Apply With Indeed', 'Apply with SEEK', 'Add', 'Add', 'Next', 'Cookies Settings',
+  ];
+  assert.equal(chooseSubmitControl(smartRecruitersStepOne), null);
+  // Next and Continue are never submit controls anywhere.
+  assert.equal(chooseSubmitControl(['Next']), null);
+  assert.equal(chooseSubmitControl(['Continue']), null);
+  assert.equal(chooseSubmitControl(['Next Step']), null, "Paylocity's #btn-submit reads Next Step");
+});
+
+test('labels that merely contain the word apply are not submit controls', () => {
+  assert.equal(chooseSubmitControl(['Why do you want to apply?']), null);
+  assert.equal(chooseSubmitControl(['Learn how to apply']), null);
+  assert.equal(chooseSubmitControl([]), null);
+  assert.equal(chooseSubmitControl(['', '   ']), null);
+});
+
+test('a provider name in the label is a handoff however the sentence is arranged', () => {
+  /* The verb-shape test is escapable: a word between the verb and "with" defeats it, and
+     "Apply now" is itself a legitimate submit label, so these sailed through into the eligible
+     pool. Naming the providers cannot be worded around - no employer's own submit button carries
+     a job board's name. */
+  for (const label of [
+    'Apply now with LinkedIn',
+    'Apply Now with Indeed',
+    'Submit with LinkedIn',
+    'Submit your application via Indeed',
+    'Apply through SEEK',
+  ]) {
+    assert.equal(chooseSubmitControl([label]), null, `${label} must not be pressed`);
+  }
+  // And the genuine ones are untouched by the provider backstop.
+  assert.equal(chooseSubmitControl(['Apply now']), 0);
+  assert.equal(chooseSubmitControl(['Submit your application']), 0);
+});
+
+test('an employer named after a job board still has a submit button', () => {
+  /* HANDOFF_PROVIDER used to match a provider word ANYWHERE in the label, which rejected these.
+     Several of those words are also employer names, and failing here costs a real submission. */
+  assert.equal(chooseSubmitControl(['Submit your application to Apple']), 0);
+  assert.equal(chooseSubmitControl(['Submit application to Google']), 0);
+  assert.equal(chooseSubmitControl(['Submit application - Monster Beverage']), 0);
+  // A provider in an actual handoff position is still rejected.
+  assert.equal(chooseSubmitControl(['Apply with LinkedIn']), null);
+  assert.equal(chooseSubmitControl(['Continue with Google']), null);
+  assert.equal(chooseSubmitControl(['Quick Apply with MyGreenhouse']), null);
+});
+
+test('a support widget that says submit does not win over the application', () => {
+  /* Intercom and Zendesk render these as [role=button] at the FOOT of the page, so they sort after
+     the real control and the last-wins rule would hand them the click - which submits nothing and
+     then tells the applicant to go check her email. Both labels are live on careers pages. */
+  assert.equal(chooseSubmitControl(['Submit application', 'Submit feedback']), 0);
+  assert.equal(chooseSubmitControl(['Submit application', 'Submit a request']), 0);
+  assert.equal(chooseSubmitControl(['Submit', 'Submit your application']), 1,
+    'naming the application beats a bare submit wherever it sits');
+});
+
+/* A local copy of SUBMIT_LABEL's shape, so the test can assert its own premise: that each label
+   below really does reach the handoff filter rather than being rejected earlier. */
+const SUBMIT_LABEL_FOR_TEST =
+  /\bsubmit\b|\bsend (?:my )?application\b|^\s*apply\s*$|\bapply now\b|\bfinish (?:and|&) apply\b/i;
+
+test('the handoff filters are load-bearing, not decoration', () => {
+  /* THE PREVIOUS HANDOFF TESTS WERE TAUTOLOGICAL, which a review pass proved empirically: delete
+     both THIRD_PARTY_HANDOFF and HANDOFF_PROVIDER from chooseSubmitControl and 69 of 70 tests still
+     passed, because every label tested also failed SUBMIT_LABEL and so was rejected anyway.
+     Every label below MATCHES SUBMIT_LABEL. The handoff filters are the only thing standing between
+     them and a click, so deleting either regex has to fail this test. */
+  for (const label of [
+    'Submit application with LinkedIn',
+    'Submit your application via SEEK',
+    'Apply now using Indeed',
+    'Apply now with LinkedIn',
+    'Finish and apply with Greenhouse',
+    'Submit application using Google',
+  ]) {
+    assert.match(label, SUBMIT_LABEL_FOR_TEST, `${label} must reach the handoff filter to test it`);
+    assert.equal(chooseSubmitControl([label]), null, `${label} must not be pressed`);
+  }
+});
+
+test('an icon button with no text is not a submit control', () => {
+  /* HTMLButtonElement.type defaults to "submit" and its value to "", so keying the UA-default
+     fallback off `type` alone made every text-free icon button read as "Submit" - chat launchers,
+     scroll-to-top, cookie close - all of which sit at the FOOT of the page where last-wins looks. */
+  assert.equal(chooseSubmitControl(['']), null);
+  assert.equal(chooseSubmitControl(['Submit application', '']), 0);
+});
+
+test('a help-desk widget is never pressed, even when it is the only submit-ish control', () => {
+  /* Excluding support widgets only inside the explicit tier left two holes. */
+  assert.equal(chooseSubmitControl(['Apply now', 'Submit feedback']), 0,
+    'a real control that never says "submit" still beats the widget');
+  assert.equal(chooseSubmitControl(['Submit a request']), null,
+    'a page whose only submit-ish control is a help desk has no submit control');
+  assert.equal(chooseSubmitControl(['Submit feedback']), null);
+});
+
+test('a handoff to a platform we do not name by hand is still a handoff', () => {
+  /* Pins THIRD_PARTY_HANDOFF specifically. The previous load-bearing test named a provider in every
+     label, so deleting THIRD_PARTY_HANDOFF alone left the suite green and only HANDOFF_PROVIDER was
+     actually covered. No label here names a listed provider, so the verb-shape rule is the only
+     thing that can reject them. */
+  for (const label of [
+    'Apply now with Handshake',
+    'Apply now using Symplicity',
+    'Submit application with your university account',
+  ]) {
+    assert.equal(chooseSubmitControl([label]), null, `${label} must not be pressed`);
+  }
+});
+
+test('a handoff to a board we never named is still a handoff', () => {
+  /* THE REGRESSION THAT ROUND SIX CAUGHT. An earlier round required the handoff OBJECT to be a
+     provider from a hard-coded list, which let every board not on it through - all of these were
+     pressable. A roster of somebody-elses can only ever be incomplete; the closed set is the short
+     list of things a button legitimately carries, which is your own documents. */
+  for (const label of [
+    'Apply now with Wellfound',
+    'Apply now with Dice',
+    'Apply now with our partner',
+    'Apply now with Career Services',
+    'Apply now with single sign-on',
+    'Submit application with our recruiting partner',
+  ]) {
+    assert.equal(chooseSubmitControl([label]), null, `${label} must not be pressed`);
+  }
+});
+
+test('a provider named far from the verb is still a handoff', () => {
+  /* Pins HANDOFF_PROVIDER specifically. Once "submit" became a handoff verb, every provider label
+     in the other tests was caught by the verb-shape rule instead, so deleting HANDOFF_PROVIDER left
+     the suite green. These put enough words between the verb and the preposition that only the
+     provider list can reject them. */
+  for (const label of [
+    'Submit your saved candidate profile with Handshake',
+    'Submit the completed application form with LinkedIn',
+  ]) {
+    assert.equal(chooseSubmitControl([label]), null, `${label} must not be pressed`);
+  }
+  // And a branding tail, which names no verb at all.
+  assert.equal(chooseSubmitControl(['Apply now - powered by Handshake']), null);
+});
+
+test('the student platforms are named, because those are the ones our users meet', () => {
+  /* "Submit with your Handshake profile" passed BOTH filters: submit was not a handoff verb and
+     Handshake was not a named provider. Handshake is the dominant platform for the students this
+     product is for, so that was the worst possible gap to leave. */
+  for (const label of [
+    'Submit with your Handshake profile',
+    'Submit application via Workable',
+    'Submit application with SSO',
+    'Apply with Symplicity',
+  ]) {
+    assert.equal(chooseSubmitControl([label]), null, `${label} must not be pressed`);
+  }
+});
+
+test('help-desk wording is matched by word, not by exact phrase', () => {
+  for (const widget of [
+    'Submit a support request', 'Submit your question', 'Submit an issue',
+    'Submit review', 'Submit rating', 'Submit a bug report',
+  ]) {
+    assert.equal(chooseSubmitControl(['Apply now', widget]), 0, `${widget} must not win`);
+    assert.equal(chooseSubmitControl([widget]), null, `${widget} alone is not a submit control`);
+  }
+});
+
+test('a primary "Apply now" outranks a bare footer "Apply"', () => {
+  assert.equal(chooseSubmitControl(['Apply now', 'Apply']), 0);
+  assert.equal(chooseSubmitControl(['Apply', 'Apply now']), 1);
+});
+
+test('READ_CONTROL_LABEL reads the element, and the tag gate is the load-bearing part', () => {
+  /* Tested DIRECTLY, because every previous test sat downstream of the reader and would have
+     passed unchanged if it regressed to calling every bare <button> "Submit". */
+  const node = (over: Record<string, unknown>) => ({
+    innerText: '', value: '', title: '', disabled: false, type: '', tagName: 'BUTTON',
+    getAttribute: (name: string) => (over[name] as string | undefined) ?? null,
+    getClientRects: () => ({ length: 1 }),
+    parentElement: null,
+    ownerDocument: {
+      defaultView: { getComputedStyle: () => ({ visibility: 'visible' }) },
+      getElementById: () => null,
+    },
+    ...over,
+  });
+
+  // THE headline fix: HTMLButtonElement.type defaults to 'submit' and value to ''.
+  assert.equal(READ_CONTROL_LABEL(node({ tagName: 'BUTTON', type: 'submit' })), '',
+    'a text-free icon button is not labelled "Submit"');
+  // The case the UA default exists for.
+  assert.equal(READ_CONTROL_LABEL(node({ tagName: 'INPUT', type: 'submit' })), 'Submit');
+  // input[type=image] takes its accessible name from alt.
+  assert.equal(READ_CONTROL_LABEL(node({ tagName: 'INPUT', type: 'image', alt: 'Submit application' })),
+    'Submit application');
+  // aria-disabled is the only disabled a [role=button] div can express.
+  assert.equal(READ_CONTROL_LABEL(node({
+    tagName: 'DIV', innerText: 'Submit application', 'aria-disabled': 'true',
+  })), '');
+  // visibility:hidden keeps its client rects, so it needs its own check.
+  assert.equal(READ_CONTROL_LABEL({
+    ...node({ tagName: 'BUTTON', innerText: 'Submit application' }),
+    ownerDocument: {
+      defaultView: { getComputedStyle: () => ({ visibility: 'hidden' }) },
+      getElementById: () => null,
+    },
+  }), '');
+  // aria-hidden hides a whole subtree, not just the node carrying it.
+  assert.equal(READ_CONTROL_LABEL({
+    ...node({ tagName: 'BUTTON', innerText: 'Submit application' }),
+    parentElement: { getAttribute: (n: string) => (n === 'aria-hidden' ? 'true' : null), parentElement: null },
+  }), '');
+  // And the ordinary case still reads.
+  assert.equal(READ_CONTROL_LABEL(node({ innerText: 'Submit application' })), 'Submit application');
+});
+
+test('a legitimate submit label is not rejected as a handoff', () => {
+  /* The widened handoff verbs (submit, send) turned "<verb> ... with|using|via" into a rejection,
+     which caught perfectly ordinary buttons. None of these appear on the four portals we poll
+     today, so it was latent rather than live - which is precisely why it needed a test before it
+     became live on the next portal added. */
+  for (const label of [
+    'Submit application with attachments',
+    'Submit your application with cover letter',
+    'Submit with resume attached',
+    'Send application from your profile',
+    'Submit application for review',
+    'Submit your application - Contact Center Agent',
+  ]) {
+    assert.notEqual(chooseSubmitControl([label]), null, `${label} must still be pressable`);
+  }
+  /* "Review and submit" is DELIBERATELY still rejected, and it is the one case worth arguing over.
+     It reads like a submit, but on a multi-step form it is the button that leads to a review step -
+     a Next wearing a submit's clothes, which is the single failure this module treats as worse than
+     not supporting a portal at all. Failing safe here costs a handoff; guessing costs a "submitted"
+     state for an application nobody received. */
+  assert.equal(chooseSubmitControl(['Review and submit']), null);
+});
+
+test('the two application-wordings agree, because they used to be copies that drifted', () => {
+  // SUBMIT_LABEL required "send my application" while APPLICATION_SUBMIT allowed "your", so this
+  // failed eligibility outright even though the strongest tier would have taken it.
+  assert.equal(chooseSubmitControl(['Send your application']), 0);
+  assert.equal(chooseSubmitControl(['Send my application']), 0);
+  assert.equal(chooseSubmitControl(['Send the application']), 0);
+});
+
+test('a help desk scoped to the application is still a help desk', () => {
+  /* Exempting any label containing "application" put this back: the feedback widget reached the
+     top tier on its prefix and, on last-wins, beat the real submit control. */
+  assert.equal(chooseSubmitControl(['Submit application', 'Submit application feedback']), 0);
+  assert.equal(chooseSubmitControl(['Submit application', 'Submit application survey']), 0);
+  assert.equal(chooseSubmitControl(['Submit application feedback']), null);
+  assert.equal(chooseSubmitControl(['Submit feedback on your application']), null);
+  // And a job title carrying one of the widget nouns is still pressable.
+  assert.equal(chooseSubmitControl(['Submit your application - Contact Center Agent']), 0);
+});
+
+test('your own saved profile is not somebody else’s platform', () => {
+  // The bare possessive is your details on this site; an intervening name is the handoff.
+  assert.notEqual(chooseSubmitControl(['Send application from your profile']), null);
+  assert.notEqual(chooseSubmitControl(['Submit application with your saved details']), null);
+  assert.equal(chooseSubmitControl(['Submit with your Handshake profile']), null);
+  assert.equal(chooseSubmitControl(['Submit your saved candidate profile with Handshake']), null);
 });

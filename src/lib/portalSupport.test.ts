@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
-import { readApplicationReview } from './applicationReview';
+import {
+  applyApplicationReviewEdit,
+  readApplicationReview,
+  type ApplicationReviewState,
+} from './applicationReview';
 import { isPortalSupported } from './portalSubmission';
 
 // __dirname rather than import.meta.url: tsconfig.api.json compiles this tree as CommonJS, where
@@ -72,6 +76,65 @@ test('a review with no portal_url is left alone', () => {
 });
 
 /**
+ * The review EDIT path, which is the third place portal_supported is written and the only one that
+ * can contradict itself. Creation and the read-time derivation were covered from the first day of
+ * this fix; this one was not, which is exactly why it was possible to ship a merge that carried the
+ * old verdict onto a new URL.
+ */
+const reviewAt = (portalUrl: string, portalSupported: boolean): ApplicationReviewState => ({
+  jd_text: 'jd',
+  status: 'ready_to_submit',
+  edited_terms: [],
+  questions: [],
+  skipped_reasons: [],
+  updated_at: '2026-08-01T00:00:00.000Z',
+  portal_url: portalUrl,
+  portal_supported: portalSupported,
+});
+
+test('editing a supported packet onto an unsupported URL drops the verdict with it', () => {
+  const edited = applyApplicationReviewEdit(reviewAt('https://boards.greenhouse.io/acme/jobs/1', true), {
+    ats_name: 'Company site',
+    portal_url: 'https://www.optiver.com/careers/1',
+    questions: [],
+    skipped_reasons: [],
+  });
+  assert.equal(edited.portal_url, 'https://www.optiver.com/careers/1');
+  assert.equal(edited.portal_supported, false);
+});
+
+test('editing an unsupported packet onto a real board unlocks it again', () => {
+  // The direction that traps people. The dashboard gates the send button on portal_supported, and
+  // the read-time derivation never revisits a value that is already defined, so if the edit does not
+  // re-derive here the applicant is locked out of a packet that would submit fine, permanently, and
+  // saving the URL a second time changes nothing.
+  const edited = applyApplicationReviewEdit(reviewAt('https://www.optiver.com/careers/1', false), {
+    ats_name: 'Greenhouse',
+    portal_url: 'https://boards.greenhouse.io/acme/jobs/1',
+    questions: [],
+    skipped_reasons: [],
+  });
+  assert.equal(edited.portal_supported, true);
+});
+
+test('an edit that carries no URL leaves the stored verdict alone', () => {
+  // Deriving from an absent URL would write false over a good true, which is the same lockout
+  // arriving by a different door. The route's schema requires portal_url, so this is the guard
+  // holding the door shut if that ever relaxes.
+  const edited = applyApplicationReviewEdit(reviewAt('https://boards.greenhouse.io/acme/jobs/1', true), {
+    questions: [],
+    skipped_reasons: [],
+  });
+  assert.equal(edited.portal_supported, true);
+  assert.equal(edited.portal_url, 'https://boards.greenhouse.io/acme/jobs/1');
+});
+
+test('the review route edits through the helper rather than a bare spread', () => {
+  const applicationsRoute = routeSource('applications.ts');
+  assert.match(applicationsRoute, /const next = applyApplicationReviewEdit\(current, parsed\.data\)/);
+});
+
+/**
  * Wiring, asserted separately from behaviour.
  *
  * A correct predicate that nothing calls is the failure mode this repo has shipped before: the
@@ -104,4 +167,29 @@ test('a cover letter failure degrades the run instead of aborting it', () => {
   // And the reason reaches the applicant on both provider paths rather than being swallowed.
   const attentionLines = runner.match(/attention_reason:[\s\S]{0,160}?coverLetterAttention/g) ?? [];
   assert.equal(attentionLines.length, 2, 'both the managed and direct paths must surface the reason');
+});
+
+test('preview evidence blocks broken pages and incomplete form fills before final approval', () => {
+  const runner = routeSource('submissionRunner.ts');
+  assert.match(runner, /function previewContentBlockers\(text: string \| undefined\): string\[\]/);
+  assert.match(runner, /can\(\?:not\|\u0027t\)/);
+  assert.match(runner, /function filledFieldBlockers\(fields: readonly string\[\] \| undefined, packet: SubmissionPacket\): string\[\]/);
+  assert.match(runner, /The filled form did not record an email field/);
+  assert.match(runner, /The filled form did not record a resume upload/);
+  assert.match(runner, /The filled form did not record the applicant name fields/);
+  assert.match(runner, /The filled form did not record the cover letter attachment/);
+  assert.match(runner, /preparationEvidenceBlockers\(\{ text: pageText, filledFields: result\.filledFields \}, packet\)/);
+});
+
+test('the applicant is told what happened, not what the model said', () => {
+  const runner = routeSource('submissionRunner.ts');
+  const issue = runner.match(/coverLetterIssue: (.*)$/m)?.[1] ?? '';
+  // What reached applicants: "raise the cap", and 200 characters of raw model JSON with a vendor
+  // name on it. A cover letter failure is one situation with one recovery, so the sentence is
+  // fixed - no interpolation of any kind, which is the only version of this that cannot regress.
+  assert.ok(issue.length > 0, 'the degrade must still say something');
+  assert.ok(!issue.includes('${'), 'the applicant-facing sentence must not interpolate anything');
+  assert.ok(!/error\.message/.test(issue), 'the raw error must not reach the applicant');
+  // And the detail is not thrown away: whoever fixes the generator reads it in the logs.
+  assert.match(runner, /fastify\.log\.warn\(\{ error, applicationId: row\.id \}[\s\S]{0,120}Cover letter generation failed/);
 });

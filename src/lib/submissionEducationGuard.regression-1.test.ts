@@ -191,7 +191,9 @@ test('final approval revalidates the full packet before it clicks submit', () =>
   const handler = slice(routes, "'/applications/:id/submission/approve'", "'/applications/:id/status'");
   assert.match(handler, /current\.preview_screenshot_url/);
   assert.match(handler, /current\.filled_fields/);
-  assert.match(handler, /current\.cover_letter_supported === true && !storedCoverLetter\(row\)/);
+  assert.match(handler, /finalApprovalFieldIssues\(current, current\.cover_letter_supported === true && Boolean\(coverLetter\)\)/);
+  assert.match(handler, /const coverLetter = storedCoverLetter\(row\)/);
+  assert.match(handler, /current\.cover_letter_supported === true && !coverLetter/);
   assert.match(handler, /current\.questions\.some\(\(question\) => question\.required && !question\.answer\.trim\(\)\)/);
   assert.match(handler, /preSendResumeVerificationIssues\(request\.jwtPayload!\.userId, stored\)/);
   assert.match(handler, /FINAL_APPROVAL_VERIFICATION_FAILED/);
@@ -231,4 +233,47 @@ test('the education comparison has exactly one implementation', () => {
 
 test('the dashboard save and the send-time guard read the profile through the same mapping', () => {
   assert.match(routes, /const education = candidateEducationFromParsedProfile\(parsed\)/);
+});
+
+/* ISSUE-044. This guard decides whether a stored packet still matches the profile, so it has to read
+ * parsed_json.coursework exactly the way the dashboard's educationFrom reads it. It used to gate on
+ * Array.isArray alone, which resolves a stored string to [] where educationFrom resolves it to the
+ * course list: the packet would be held for drift against a profile the dashboard shows as
+ * unchanged. Nothing stores a string now, which is precisely when a lone shape gate stops being
+ * load-bearing and starts being a trap. */
+test('the education guard reads coursework the same way the resume generator does', () => {
+  const courses = ['Data Structures and Object-Oriented Design', 'Financial Analysis & Valuation'];
+
+  assert.deepEqual(candidateEducationFromParsedProfile({ school: 'USC', coursework: courses }).coursework, courses);
+
+  // The pre-backfill shape, and what an older client beside a newer API could still write.
+  assert.deepEqual(
+    candidateEducationFromParsedProfile({ school: 'USC', coursework: courses.join(', ') }).coursework,
+    courses,
+    'a stored string must resolve to the same list the dashboard reads, not to []',
+  );
+
+  // A title containing "and" or "&" stays one course, or the drift comparison reports a false diff.
+  assert.deepEqual(
+    candidateEducationFromParsedProfile({ school: 'USC', coursework: 'Data Structures and Object-Oriented Design' }).coursework,
+    ['Data Structures and Object-Oriented Design'],
+  );
+
+  assert.deepEqual(candidateEducationFromParsedProfile({ school: 'USC' }).coursework, []);
+  assert.deepEqual(candidateEducationFromParsedProfile({ school: 'USC', coursework: 42 }).coursework, []);
+
+  /* Empty and whitespace-only inputs must land on [] rather than [''], because
+   * courseworkIsUngrounded treats an empty allowed set as "nothing to ground against" and returns
+   * TRUE - a blank stored value would raise a drift issue on a packet that says nothing about
+   * coursework at all. */
+  assert.deepEqual(candidateEducationFromParsedProfile({ school: 'USC', coursework: '' }).coursework, []);
+  assert.deepEqual(candidateEducationFromParsedProfile({ school: 'USC', coursework: '   ' }).coursework, []);
+  assert.deepEqual(candidateEducationFromParsedProfile({ school: 'USC', coursework: [] }).coursework, []);
+  assert.deepEqual(candidateEducationFromParsedProfile({ school: 'USC', coursework: null }).coursework, []);
+
+  // Untrimmed and case-duplicate entries, which the parser can write without normalising.
+  assert.deepEqual(
+    candidateEducationFromParsedProfile({ school: 'USC', coursework: ['  Math  ', 'Physics', 'math'] }).coursework,
+    ['Math', 'Physics'],
+  );
 });

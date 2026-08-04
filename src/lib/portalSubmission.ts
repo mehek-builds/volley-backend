@@ -1600,27 +1600,358 @@ export class CaptchaUnresolvedError extends Error {
   }
 }
 
-export async function clickFinalSubmit(page: Page): Promise<void> {
-  const button = page.getByRole('button', { name: /submit application|submit|apply/i }).last();
-  if ((await button.count()) === 0) throw new Error('We could not find the Submit button');
-  // Defence in depth, and it covers a case the call-site gate cannot. portalCanAutoSubmit() stops
-  // the families KNOWN to be gated (JazzHR, BambooHR) before this function is ever reached. It
-  // knows nothing about a Greenhouse or Lever board whose employer switched a challenge on last
-  // week. Pressing submit under an unsolved challenge does not just fail: it submits the applicant
-  // as bot traffic, and the posting can discard the application with no error shown to anyone.
-  //
-  // NOTE: this guard only covers the direct-Playwright path. The managed-Stratus path in
-  // submissionRunner never builds a Page, so it never reaches here. See the CAPTCHA note there.
-  if (await hasUnresolvedCaptcha(page)) {
-    // Identified HERE, while the Page is still open. By the time the error reaches fail() the
-    // browser is closed and the provider is unrecoverable, so it rides along on the error.
-    throw new CaptchaUnresolvedError('at_submit', await detectCaptchaProvider(page));
+/* Named providers, used ONLY for the shape that carries no preposition - "Apply LinkedIn". The
+   general "<verb> ... with|using|via <object>" case is handled by THIRD_PARTY_HANDOFF, which does
+   not consult this list: a hard-coded roster of somebody-elses can only ever be incomplete, and
+   relying on it was how "Apply now with Wellfound" became pressable. */
+const PROVIDER = 'handshake|symplicity|linkedin|indeed|seek|glassdoor|ziprecruiter|monster|xing'
+  + '|stepstone|google|facebook|github|apple|greenhouse|workday|workable|ashby|smartrecruiters'
+  + '|okta|microsoft|sso';
+const HANDOFF_VERB_PROVIDER = new RegExp(
+  `\\b(?:apply|autofill|continue|import)\\s+(?:${PROVIDER})\\b`, 'i',
+);
+
+/* The send-clause is SHARED with APPLICATION_SUBMIT rather than written twice. The two copies had
+   already drifted - this one required "send my application" and the other allowed "your", so
+   "Send your application" failed eligibility entirely while the strongest tier would have taken it.
+   Same defect as the two label readers, in the regexes. */
+const SEND_APPLICATION = '\\bsend\\s+(?:your\\s+|my\\s+|the\\s+)?application\\b';
+
+/* CONTROLS THAT SAY "APPLY" AND HAND OFF TO SOMEBODY ELSE.
+ *
+ * "Apply with LinkedIn", "Apply With Indeed", "Apply with SEEK" are not submit buttons. They are
+ * OAuth handoffs that leave the employer's form and open a third party's consent screen, and every
+ * one of them matches the word "apply".
+ *
+ * THIS IS LIVE ON PORTALS THAT ARE AUTONOMOUS TODAY, not a SmartRecruiters curiosity: Greenhouse
+ * and Lever both render "Apply with LinkedIn", and SmartRecruiters' first step carries two of them
+ * before the applicant has typed anything. The old selector matched all of them and took `.last()`,
+ * so which control got pressed depended on DOM order - it happened to work because the real submit
+ * usually sits at the bottom of the form. That is a coin flip, not a guarantee, and the losing side
+ * sends the applicant's browser to a third-party sign-in while Litos reports a submitted
+ * application the employer never received.
+ *
+ * Matched on the WHOLE label, anchored, so "apply" as a preposition inside a longer sentence cannot
+ * sneak past: it is the shape "<verb> with|using|via <somebody>" that gives these away. */
+const THIRD_PARTY_HANDOFF =
+  new RegExp(
+    /* BROAD ON THE OBJECT, NARROW ON THE EXCEPTION, and that direction is the whole lesson of this
+       branch. An earlier round required the object to be a NAMED provider, which stopped
+       "Submit application with attachments" being rejected - and re-opened the main hole, because
+       every board not on the list walked through: "Apply now with Wellfound", "Apply now with
+       Dice", "Apply now with our partner", "Apply now with Career Services". Worse, "Submit
+       application with our recruiting partner" reached the top tier and OUTRANKED a real submit.
+       A hard-coded list of somebody-elses can only ever be incomplete. A list of the things a
+       button legitimately carries - your own documents - is short and closed. So: any
+       "<verb> ... with|using|via|from <object>" is a handoff UNLESS the object is a document you
+       are attaching. Wrong guesses cost a handoff, never a phantom submission. */
+    '\\b(?:apply|submit|send|autofill|sign\\s?in|log\\s?in|continue|register|import)\\b'
+    /* Four words of slack, not two: "Submit your saved candidate profile with Handshake" puts
+       four between the verb and the preposition, and two let it through. */
+    + '(?:\\s+\\w+){0,4}\\s+(?:with|using|via|from)\\s+'
+    + '(?!(?:the\\s+|your\\s+|my\\s+|a\\s+|an\\s+)?'
+    /* BARE possessive only - "your profile", never "your Handshake profile". The article-and-noun
+       form is your own saved details on this same site ("Send application from your profile"); an
+       intervening word is almost always somebody else's name, which is the handoff. */
+    + '(?:attachments?|resumes?|cvs?|cover\\s+letters?|documents?|files?|e-?signature'
+    + '|profiles?|accounts?|saved\\s+(?:details|information))\\b)'
+    + '|\\bquick apply\\b|\\bone[-\\s]?click apply\\b|\\bpowered\\s+by\\b',
+    'i',
+  );
+
+/** Names the application outright. The strongest thing a submit control can say. */
+const APPLICATION_SUBMIT = new RegExp(
+  `\\bsubmit\\s+(?:your\\s+|my\\s+|the\\s+)?application\\b|${SEND_APPLICATION}`, 'i',
+);
+/** Help-desk widgets that also say "submit" and also sit at the foot of the page. */
+/* A WORD LIST, not a list of exact phrasings. "Submit a request" was covered only because that
+   literal string happened to be in it; "Submit a support request", "Submit your question" and
+   "Submit an issue" all walked straight through and then won last-wins over the real control. */
+const SUPPORT_WIDGET_NOUN =
+  /\b(?:feedback|request|ticket|comment|search|report|question|issue|review|rating|survey|contact|bug)\b/i;
+
+/**
+ * A help-desk control rather than the thing that sends the application.
+ *
+ * THE DISCRIMINATOR IS THE WORD "APPLICATION", and it is better than anchoring to the verb. As a
+ * bare noun list this rejected "Submit application for review", "Review and submit", and any label
+ * carrying a job title that happens to contain one of the words - "Submit your application -
+ * Contact Center Agent". Anchoring the noun to the verb instead broke the real widgets, because
+ * they say "Submit a support request" and "Submit your question" with words in between.
+ * What actually separates them: a help desk never calls the thing an application. Intercom and
+ * Zendesk ship "Submit feedback" and "Submit a request"; no employer's application button omits
+ * the word while a support widget includes it.
+ */
+function isSupportWidget(label: string): boolean {
+  /* "Submit application feedback" and "Submit application survey" ARE help desks, and blanket-
+     exempting anything containing "application" put them back in the top tier - where, on
+     last-wins, the feedback widget beat the real submit control. A widget noun sitting on the
+     application is the giveaway. */
+  if (/\bapplication\s+(?:feedback|survey|issue|question|review|experience)\b/i.test(label)) return true;
+  if (/\bfeedback\s+on\s+your\s+application\b/i.test(label)) return true;
+  /* Otherwise the word "application" clears it: a help desk never calls the thing an application,
+     and without this every job title carrying one of the nouns ("Submit your application -
+     Contact Center Agent") is falsely rejected. */
+  if (/\bapplication\b/i.test(label)) return false;
+  return SUPPORT_WIDGET_NOUN.test(label);
+}
+
+const SUBMIT_LABEL = new RegExp(
+  `\\bsubmit\\b|${SEND_APPLICATION}|^\\s*apply\\s*$|\\bapply now\\b|\\bfinish (?:and|&) apply\\b`,
+  'i',
+);
+
+/**
+ * Which of a page's buttons is the one that actually submits, or null.
+ *
+ * A pure function over the visible labels, so the rule that decides whether to press a button on a
+ * real person's job application is testable without standing up a browser. Returns an INDEX rather
+ * than a label because two buttons can read the same and only the position tells them apart.
+ *
+ * Order matters and is the whole design: reject the handoffs FIRST, then prefer the most explicit
+ * remaining label. An explicit "Submit application" always beats a bare "Apply", and the LAST such
+ * control wins because a form's real submit sits at its foot.
+ */
+export function chooseSubmitControl(labels: string[]): number | null {
+  const eligible = labels
+    .map((label, index) => ({ label: label.replace(/\s+/g, ' ').trim(), index }))
+    .filter(({ label }) => label
+      && !THIRD_PARTY_HANDOFF.test(label)
+      && !HANDOFF_VERB_PROVIDER.test(label)
+      && SUBMIT_LABEL.test(label));
+  if (eligible.length === 0) return null;
+  /* SUPPORT WIDGETS ARE REMOVED FROM THE WHOLE POOL, not demoted within one tier.
+     Intercom and Zendesk render "Submit feedback" and "Submit a request" as [role=button] at the
+     FOOT of a careers page, so they sort after the real control and last-wins hands them the click,
+     which submits nothing and then tells the applicant to check her email. Excluding them only
+     inside the explicit tier left two holes: "Submit application feedback" reached the strongest
+     tier on its prefix, and a page whose real control says "Apply now" fell through to a pool that
+     still contained the widget. If removing them empties the pool, the honest answer is that this
+     page has no submit control - never press the help desk. */
+  const clean = eligible.filter(({ label }) => !isSupportWidget(label));
+  if (clean.length === 0) return null;
+  /* Then two tiers, because "the last thing saying submit" is still not specific enough. A label
+     that names the application outright is the strongest signal a control can give. */
+  const application = clean.filter(({ label }) => APPLICATION_SUBMIT.test(label));
+  const explicit = clean.filter(({ label }) => /\bsubmit\b/i.test(label));
+  /* And a third rung below those: "Apply now" is a primary control, a bare "Apply" is as often a
+     sticky footer or a card link. Without this, last-wins prefers whichever happens to sit lower. */
+  const applyNow = clean.filter(({ label }) => /\bapply now\b/i.test(label));
+  const pool = application.length > 0 ? application
+    : explicit.length > 0 ? explicit
+      : applyNow.length > 0 ? applyNow : clean;
+  return pool[pool.length - 1]!.index;
+}
+
+/** Every control that could conceivably be a submit button. Exported so a test can match it. */
+export const SUBMIT_CANDIDATE_SELECTOR =
+  'button, input[type=submit], input[type=button], input[type=image], [role=button]';
+
+/**
+ * No control on this page submits the application.
+ *
+ * ITS OWN TYPE FOR THE SAME REASON CaptchaUnresolvedError HAS ONE. A plain Error falls through
+ * fail()'s `uncertainAfterClaim` branch, which tells the applicant "the final submission was
+ * attempted, but Litos could not verify the employer confirmation - check the portal or your
+ * email". When this throws, the click PROVABLY did not happen, so there is no receipt to look for
+ * and that sentence sends her hunting for one that cannot exist.
+ *
+ * It matters more now than it used to. This used to fire only when a page had no buttons at all;
+ * with the handoff filter it is the ROUTINE outcome on every multi-step first page and every page
+ * whose only apply-ish controls belong to LinkedIn or Indeed.
+ */
+export class NoSubmitControlError extends Error {
+  constructor(message = 'We could not find the Submit button') {
+    super(message);
+    this.name = 'NoSubmitControlError';
   }
-  await button.click();
-  await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => undefined);
+}
+
+/* ONE READER, USED BY BOTH PASSES.
+ *
+ * It was two, and the second was a strict subset of the first: selection read title and
+ * aria-labelledby and the UA default, the pre-click re-check read only innerText/value/aria-label.
+ * So an <input type=submit> with no value - the exact control the fallbacks were added for -
+ * selected fine and then re-read as the empty string, and a page with one perfectly good submit
+ * button threw "the submit button changed to ''" and sent nothing. Two copies of a rule is one
+ * copy too many when disagreeing between them means no application is ever submitted.
+ *
+ * Serialised into the page, so it is written against a hand-rolled shape rather than the DOM lib:
+ * those types are not in scope for the server build.
+ */
+export const READ_CONTROL_LABEL = (node: unknown) => {
+  const el = node as unknown as {
+    innerText?: string; value?: string; title?: string; disabled?: boolean; type?: string;
+    tagName?: string;
+    getAttribute(name: string): string | null; getClientRects(): { length: number };
+  };
+  /* A control the accessibility tree would not offer is not a submit button. getByRole did this
+     filtering for us; a raw CSS selector does not, and innerText falls back to textContent on a
+     hidden node, so a display:none mobile duplicate reads as a perfectly good "Submit
+     application" - which the last-wins rule would then prefer over the real one. */
+  if (el.disabled === true) return '';
+  /* `disabled` is meaningless on a [role=button] div, which is how several ATSs render their
+     controls, so the ARIA form has to be honoured too. */
+  if (el.getAttribute('aria-disabled') === 'true') return '';
+  if (el.getAttribute('aria-hidden') === 'true') return '';
+  if (el.getClientRects().length === 0) return '';
+  /* getClientRects() is non-empty for visibility:hidden, and aria-hidden hides a whole SUBTREE.
+     getByRole excluded both; a raw selector plus a self-only check does not, so a responsive
+     duplicate hidden either way still reads as a perfectly good "Submit application". */
+  const view = (node as unknown as { ownerDocument: { defaultView: {
+    getComputedStyle(e: unknown): { visibility: string } } } }).ownerDocument.defaultView;
+  if (view.getComputedStyle(node).visibility === 'hidden') return '';
+  let parent = (node as unknown as { parentElement: unknown }).parentElement as {
+    getAttribute(name: string): string | null; parentElement: unknown } | null;
+  while (parent) {
+    if (parent.getAttribute('aria-hidden') === 'true') return '';
+    parent = parent.parentElement as typeof parent;
+  }
+  const labelledBy = el.getAttribute('aria-labelledby');
+  const referenced = labelledBy
+    ? (node as unknown as { ownerDocument: { getElementById(id: string): { innerText?: string } | null } })
+      .ownerDocument.getElementById(labelledBy.split(/\s+/)[0]!)?.innerText ?? ''
+    : '';
+  /* An <input type=submit> with no value attribute renders the UA default "Submit" and reports
+     value === '', so without this a real submit reads as unlabelled and gets skipped.
+     GATED ON THE TAG, NOT THE TYPE, and that distinction is the whole thing: HTMLButtonElement.type
+     ALSO defaults to "submit" and its value defaults to "", so keying off type alone made every
+     text-free icon button - a chat launcher, a scroll-to-top, a cookie close - read as "Submit".
+     Those sit at the foot of the page, which is exactly where last-wins looks. */
+  const uaDefault = el.tagName === 'INPUT' && el.type === 'submit' && !el.value ? 'Submit' : '';
+  return (el.innerText || el.value || el.getAttribute('aria-label') || el.title || referenced
+    || el.getAttribute('alt') || uaDefault || '').trim();
+};
+
+/** How long to give a submit control that is disabled until client-side validation settles. */
+const SUBMIT_ENABLE_WAIT_MS = 3_000;
+
+export async function clickFinalSubmit(page: Page): Promise<void> {
+  /* ELEMENT HANDLES, NOT nth(). An index is only meaningful against the DOM that produced it, and
+     the captcha probe below sits between the two: it can spend the better part of fifteen seconds
+     in live round trips, and any re-render, lazy-loaded chat widget or dismissed banner in that
+     window shifts every ordinal. `locator.nth(i)` re-queries at click time and carries no label
+     constraint, so a shift would land the click on whatever control now holds that position -
+     which on these boards is "Apply with LinkedIn" at index 0. A handle references ONE node and
+     throws if it detaches, which is the failure we want. */
+  let handles: Awaited<ReturnType<ReturnType<Page['locator']>['elementHandles']>> = [];
+  /* Flipped immediately before the click, and read in the catch below. Everything up to that point
+     is inspection: reading labels, probing for a challenge. If any of it throws - an SPA re-render
+     destroying the execution context mid-read is the likely one, and it is the same re-render the
+     retry exists to ride out - then no click happened, and a plain Error would reach fail() as
+     neither captcha nor no-control and take the uncertainAfterClaim branch: "the final submission
+     was attempted... check the portal or your email", for a run that never pressed anything. */
+  let clicked = false;
+  try {
+    handles = await page.locator(SUBMIT_CANDIDATE_SELECTOR).elementHandles();
+    let labels = await Promise.all(handles.map((handle) => handle.evaluate(READ_CONTROL_LABEL)));
+    let chosen = chooseSubmitControl(labels);
+
+    /* ONE RETRY, and it is not defensive padding. Plenty of ATS forms render the final button
+       DISABLED until async client-side validation settles after the fill, and the disabled filter
+       reads once, synchronously. The old getByRole().click() waited out that window through
+       Playwright's actionability check; reading labels does not, so without this a form that used
+       to submit itself quietly becomes a manual handoff.
+       INSIDE the try, so the handles it acquires are reachable by the finally even if the wait or
+       the second read throws - which is likeliest during exactly the re-render this rides out. */
+    if (chosen === null) {
+      await page.waitForTimeout(SUBMIT_ENABLE_WAIT_MS);
+      await Promise.all(handles.map((handle) => handle.dispose().catch(() => undefined)));
+      handles = await page.locator(SUBMIT_CANDIDATE_SELECTOR).elementHandles();
+      labels = await Promise.all(handles.map((handle) => handle.evaluate(READ_CONTROL_LABEL)));
+      chosen = chooseSubmitControl(labels);
+    }
+
+    /* THE CAPTCHA PROBE COMES FIRST, before the no-control throw, and the order is the point. A
+       challenge routinely suppresses the form entirely, so the page has no submit control BECAUSE
+       of the challenge. Reporting "we could not find the button" there hides the one thing the
+       applicant can act on, and discards the provider while the page is still open. This mirrors
+       fail()'s own precedence, where captchaStop outranks noSubmitControl. */
+    if (await hasUnresolvedCaptcha(page)) {
+      throw new CaptchaUnresolvedError('at_submit', await detectCaptchaProvider(page));
+    }
+    if (chosen === null) {
+      /* A page whose only apply-ish controls are third-party handoffs, or which renders no controls
+         at all, is a page this run cannot finish - and saying so as a type fail() recognises is the
+         honest answer. */
+      throw new NoSubmitControlError();
+    }
+    /* Defence in depth, and it covers a case the call-site gate cannot. portalCanAutoSubmit() stops
+       the families KNOWN to be gated (JazzHR, BambooHR) before this function is ever reached. It
+       knows nothing about a Greenhouse or Lever board whose employer switched a challenge on last
+       week. Pressing submit under an unsolved challenge does not just fail: it submits the
+       applicant as bot traffic, and the posting can discard it with no error shown to anyone.
+       NOTE: this guard only covers the direct-Playwright path. The managed-Stratus path in
+       submissionRunner never builds a Page, so it never reaches here. */
+    const button = handles[chosen]!;
+    /* Read the label again, off the same node, immediately before pressing it. The handle cannot
+       drift to a different element, but the element itself can be relabelled by a re-render, and
+       the cost of being wrong here is clicking a handoff on a real application. */
+    const finalLabel = await button.evaluate(READ_CONTROL_LABEL);
+    if (chooseSubmitControl([finalLabel]) === null) {
+      throw new NoSubmitControlError(
+        `The submit button changed to "${finalLabel}" before it could be pressed`,
+      );
+    }
+    /* THE BARRIER IS ARMED BEFORE THE CLICK, and that ordering is the whole reason this exists.
+       noWaitAfter (below) is what makes "a TimeoutError from click() is pre-dispatch" true rather
+       than merely plausible - by default click() awaits scheduled navigations after dispatching,
+       inside the same deadline, so a slow confirmation page produced a POST-dispatch timeout that
+       got reported as "nothing was sent", and the applicant re-applied into a duplicate.
+       But turning that wait off ALSO removes the barrier Playwright had armed before dispatch, and
+       without it waitForLoadState resolves against the document we are still standing on: measured
+       on an ATS-shaped form, 10 of 15 runs then read the open form rather than the confirmation,
+       readReceipt threw, and a genuinely submitted application was reported as unverified. So the
+       navigation promise is created HERE, before anything is pressed, and awaited after.
+       Five seconds, not twenty: a portal that submits over XHR never navigates at all, and that
+       path should not pay a twenty-second wait for a navigation that is never coming. */
+    const navigation = page
+      .waitForNavigation({ waitUntil: 'networkidle', timeout: 5_000 })
+      .catch(() => undefined);
+    clicked = true;
+    await button.click({ noWaitAfter: true });
+    await navigation;
+    await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => undefined);
+  } catch (error) {
+    if (error instanceof CaptchaUnresolvedError || error instanceof NoSubmitControlError) throw error;
+    /* A TIMEOUT FROM click() IS PRE-DISPATCH, and this is the likelier half of the problem. The
+       flag is set before the call because the click is the boundary, but Playwright's actionability
+       wait fails BEFORE dispatching anything - an obscured button under a cookie banner or a sticky
+       consent footer is a routine headless failure, more common than finding no control at all.
+       Treating it as "maybe sent" tells the applicant to go looking for a confirmation that cannot
+       exist, which is the exact harm this whole change exists to remove. A non-timeout failure
+       after the click genuinely might have sent, and stays on the uncertain branch. */
+    /* A detached, invisible or disabled element throws a PLAIN Error, not a TimeoutError, and it is
+       just as provably pre-dispatch: Playwright reports "Element is not attached to the DOM" from
+       the actionability check, before any event is sent. That is the SPA-re-render case the retry
+       above exists for, and Ashby and Workable are both React. */
+    const message = (error as Error)?.message ?? '';
+    const preDispatch = (error as Error)?.name === 'TimeoutError'
+      || /not attached to the DOM|Element is not visible|Element is not enabled/i.test(message);
+    if (!clicked || preDispatch) {
+      throw new NoSubmitControlError(
+        `Litos could not press the submit button: ${message || 'unknown error'}`,
+      );
+    }
+    throw error;
+  } finally {
+    /* EVERY path, including the two throws above and a click that times out. Disposal was on three
+       of six exits before; the browser is closed by the caller either way, so this is hygiene
+       rather than a live leak, but "hygiene that happens to be covered elsewhere" is how a leak
+       gets in later. */
+    await Promise.all(handles.map((handle) => handle.dispose().catch(() => undefined)));
+  }
 }
 
 export async function readReceipt(page: Page): Promise<{ confirmationText: string; finalUrl: string; referenceId?: string }> {
+  /* THE AUTO-WAIT HERE IS LOAD-BEARING, and it is not obvious from this line.
+   * clickFinalSubmit arms a 5-second navigation barrier before pressing submit. When an employer's
+   * POST takes longer than that the barrier expires, and the only thing then carrying the read
+   * across the still-pending navigation is `locator.innerText()`, which auto-waits and retries -
+   * verified at 7s and 12s server latency. Replacing this with a non-auto-waiting read
+   * (`page.content()`, an `evaluate`) would silently reintroduce the stale-read bug: the form would
+   * be scraped instead of the confirmation, and a submitted application would be reported as
+   * unverified. Measured before the barrier existed: 10 stale reads in 15 runs. */
   const body = (await page.locator('body').innerText()).replace(/\s+/g, ' ').trim();
   if (!/thank you|application (?:has been )?(?:submitted|received)|we received your application|success/i.test(body)) {
     throw new Error('The company never showed a confirmation we could check');

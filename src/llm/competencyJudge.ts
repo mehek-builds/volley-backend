@@ -36,6 +36,27 @@ export interface CompetencyQuestion {
   id: string;
   /** The employer's requirement, verbatim. */
   clause: string;
+  /**
+   * What kind of evidence answers it.
+   *
+   * `competency` is judged against the resume BULLETS: did this person do this thing.
+   * `eligibility` is judged against the candidate's structured FACTS - degree, school, graduation
+   * date - because that is where the answer lives, and a bullet cannot ground it.
+   */
+  kind?: 'competency' | 'eligibility';
+}
+
+/** The candidate as facts rather than prose. Only these ground an eligibility verdict. */
+export interface CandidateProfile {
+  degree?: string | null;
+  school?: string | null;
+  gradDate?: string | null;
+}
+
+export interface CompetencyRejection {
+  /** The question this concerns, when it concerns one. Absent for whole-response failures. */
+  id?: string;
+  reason: string;
 }
 
 export interface CompetencyVerdict {
@@ -59,12 +80,41 @@ Rules:
 - Being adjacent is not evidence. "Led a team" does not evidence "mentored engineers". "Wrote a report" does not evidence "presented to executives".
 - The job description is never evidence about the candidate.
 - "why" is one short sentence a student would understand, naming what is present or what is missing.
-- Never use an em dash or en dash. Use commas, colons, hyphens, or periods.`;
+- Never use an em dash or en dash. Use commas, colons, hyphens, or periods.
 
-function buildUserMessage(bullets: string[], questions: CompetencyQuestion[]): string {
+ELIGIBILITY REQUIREMENTS are judged differently, and are marked as such:
+- Judge them against the CANDIDATE FACTS block, never against the bullets.
+- "quote" must be the CANDIDATE'S GRADUATION DATE, copied verbatim from that block. Every eligibility requirement turns on when the candidate finishes, so the degree and the school cannot answer one and quoting either is rejected.
+- Read the requirement's direction exactly as written. "graduating in Fall 2027 or Spring 2028" is a window with two ends and a candidate outside EITHER end does not meet it. "not graduating before 2027" and "no later than June 2028" are open on one side. "2027" with no term means any point in that year.
+- A date that is not about graduating - a requisition number, a funding round, a cohort year - is not the candidate's graduation date and is not the requirement's date.
+- YEAR STANDING is an eligibility condition, and TODAY'S DATE is given so you can check it. "Rising senior", "final-year", "sophomore" and "penultimate year" describe where the candidate is in a four-year degree right now: count back from the graduation date. A candidate graduating in May 2028, judged in August 2026, is entering their third year, so they are a junior and NOT a rising senior. Do not answer "no condition is stated" for these; the condition is stated in years rather than dates, and you have both.
+- Resolve relative timing against today's date too: "next spring", "within the next twelve months", "by the end of the year".
+- When the requirement truly states no eligibility condition you can check, set met to false and say so in "why"; do not invent one.`;
+
+function buildUserMessage(
+  bullets: string[],
+  questions: CompetencyQuestion[],
+  profile?: CandidateProfile,
+  today: string = isoDay(),
+): string {
   const bulletBlock = bullets.map((b, i) => `${i + 1}. ${b}`).join('\n');
-  const questionBlock = questions.map((q) => `- id ${q.id}: ${q.clause}`).join('\n');
-  return `CANDIDATE BULLETS\n${bulletBlock}\n\nREQUIREMENTS TO JUDGE\n${questionBlock}`;
+  const factLines = [
+    profile?.degree ? `Degree: ${profile.degree}` : null,
+    profile?.school ? `School: ${profile.school}` : null,
+    profile?.gradDate ? `Graduation date: ${profile.gradDate}` : null,
+  ].filter(Boolean);
+  const factBlock = factLines.length ? factLines.join('\n') : '(none recorded)';
+  /* TODAY, because half the eligibility requirements are relative to it.
+     Without it the model could read a date but not a YEAR STANDING: "rising senior only" came back
+     "no graduation-date-based condition is stated to check", which is safe but wrong - the
+     condition is stated, just in years rather than dates, and resolving it needs to know where we
+     are now. Injected rather than left to the model's own sense of the date, which is whatever its
+     training cutoff was. */
+  const todayLine = `Today's date: ${today}`;
+  const questionBlock = questions
+    .map((q) => `- id ${q.id} [${q.kind ?? 'competency'}]: ${q.clause}`)
+    .join('\n');
+  return `${todayLine}\n\nCANDIDATE FACTS\n${factBlock}\n\nCANDIDATE BULLETS\n${bulletBlock}\n\nREQUIREMENTS TO JUDGE\n${questionBlock}`;
 }
 
 /** Strips fences and pulls the first JSON object, the same shape the other callers here handle. */
@@ -91,30 +141,85 @@ function normalizeQuote(s: string): string {
  * Substring rather than equality because a model asked for "one bullet verbatim" will sometimes
  * hand back the clause of it that did the work, which is still the student's own sentence.
  */
+/* The day, as the prompt sees it. Split out so a test can pin it: a prompt that carries the real
+   clock is a prompt whose output changes tomorrow, and an eligibility assertion built on that
+   would pass today and fail in a month for no reason anyone could find. */
+export function isoDay(now: Date = new Date()): string {
+  return now.toISOString().slice(0, 10);
+}
+
+/** The facts as citable strings, for the prompt. */
+export function profileFacts(profile?: CandidateProfile): string[] {
+  return [profile?.degree, profile?.school, profile?.gradDate].filter((x): x is string => Boolean(x));
+}
+
+/* WHICH fact, not just A fact.
+ *
+ * Grounding against the whole fact set let "BS CS" and "USC" ground a verdict about a GRADUATION
+ * DATE: both are real facts, both passed exact equality, and neither says anything about when the
+ * student finishes. A model that could not find the date could satisfy the gate by quoting the
+ * degree, and the gate is the only thing standing between a guess and a number.
+ *
+ * Every clause routed here turns on WHEN (see statesTiming in engine/clauseMatch.ts), so the
+ * graduation date is the only fact that can answer one. */
+export function eligibilityFacts(profile?: CandidateProfile): string[] {
+  return profile?.gradDate ? [profile.gradDate] : [];
+}
+
+/* A FACT MUST BE QUOTED WHOLE, and that is stricter than the bullet gate, not looser.
+ *
+ * Facts are short by nature: "May 2027" is two words and "USC" is one, so the six-word substring
+ * floor below would reject every honest citation while the three-word whole-value exemption would
+ * still let "Bachelor of Science" through as evidence about a DATE. Neither rule fits, because
+ * both are calibrated for prose.
+ *
+ * The rule that fits a small closed set is exact equality against a member of it. No fragment
+ * grounds anything, "December 2027" cannot be passed off when May 2027 is what is on file, and
+ * quoting the degree to answer a graduation question fails on the clause's own terms. */
+export function factIsGrounded(quote: string, facts: string[]): boolean {
+  const q = normalizeQuote(quote);
+  if (!q) return false;
+  return facts.map((f) => normalizeQuote(f)).some((f) => f === q);
+}
+
 export function quoteIsGrounded(quote: string, bullets: string[]): boolean {
   const q = normalizeQuote(quote);
-  if (q.length < 12) return false;
-  return bullets.some((b) => {
-    const nb = normalizeQuote(b);
-    return nb === q || nb.includes(q);
-  });
+  if (!q) return false;
+  const normalised = bullets.map((b) => normalizeQuote(b));
+
+  /* A WHOLE BULLET IS ALWAYS GROUNDED, whatever its length. The floor below is for substrings.
+     A six-word minimum applied to everything made any short bullet permanently uncitable:
+     "Built Litos, a Chrome extension" is five words, so every verdict resting on it was downgraded
+     to unmet no matter how right the model was. */
+  /* Three words under the exemption, or a two-word bullet ("Managed logistics.") would ground any
+     claim at all - a shorter citation than the four-word FRAGMENT the floor below rejects. Three
+     still admits "Built Litos, a Chrome extension", which is the case the exemption exists for. */
+  if (q.split(' ').filter(Boolean).length >= 3 && normalised.some((b) => b === q)) return true;
+
+  /* SIX WORDS for a SUBSTRING, not twelve characters.
+     A twelve-character floor accepted "led the team" or "and analysis" as a citation, which is the
+     model echoing a common phrase rather than pointing at a sentence. The gate is the single rule
+     the whole design rests on: if a fragment can ground a verdict, the verdict is not grounded. */
+  if (q.split(' ').filter(Boolean).length < 6) return false;
+  return normalised.some((b) => b.includes(q));
 }
 
 export function validateVerdicts(
   raw: unknown,
   questions: CompetencyQuestion[],
   bullets: string[],
-): { verdicts: CompetencyVerdict[]; rejected: string[] } {
+  profile?: CandidateProfile,
+): { verdicts: CompetencyVerdict[]; rejected: CompetencyRejection[] } {
   const byId = new Map(questions.map((q) => [q.id, q]));
   const out: CompetencyVerdict[] = [];
-  const rejected: string[] = [];
+  const rejected: CompetencyRejection[] = [];
   const list = (raw as { verdicts?: unknown[] })?.verdicts;
-  if (!Array.isArray(list)) return { verdicts: [], rejected: ['response had no verdicts array'] };
+  if (!Array.isArray(list)) return { verdicts: [], rejected: [{ reason: 'response had no verdicts array' }] };
 
   for (const item of list) {
     const v = item as Partial<CompetencyVerdict>;
     if (typeof v?.id !== 'string' || !byId.has(v.id)) {
-      rejected.push(`unknown id ${String(v?.id)}`);
+      rejected.push({ reason: `unknown id ${String(v?.id)}` });
       continue;
     }
     if (v.met !== true) {
@@ -124,17 +229,42 @@ export function validateVerdicts(
     // THE GATE. A `met` with no grounded quote is downgraded to unmet rather than trusted, and the
     // rejection is reported so a run that starts hallucinating is visible rather than silently
     // generous. This is the one rule that makes an LLM verdict safe to put a number on.
-    if (typeof v.quote !== 'string' || !quoteIsGrounded(v.quote, bullets)) {
-      rejected.push(`${v.id}: met without a grounded quote`);
-      out.push({ id: v.id, met: false, why: 'no bullet on the resume supports this' });
+    /* An eligibility verdict grounds in the FACTS, not the bullets. Same rule, different corpus:
+       the model may select and judge, never invent, so "met" still has to point at something the
+       student actually told us. */
+    const q = byId.get(v.id)!;
+    const grounded =
+      typeof v.quote === 'string' &&
+      (q.kind === 'eligibility'
+        ? factIsGrounded(v.quote, eligibilityFacts(profile))
+        : quoteIsGrounded(v.quote, bullets));
+    if (!grounded) {
+      rejected.push({ id: v.id, reason: 'met without a grounded quote' });
+      /* Name the corpus that failed it. "No bullet on the resume supports this" is simply untrue
+         of a graduation clause, where no bullet ever could, and it is the line a student reads. */
+      out.push({
+        id: v.id,
+        met: false,
+        why:
+          q.kind === 'eligibility'
+            ? 'nothing in your profile establishes this'
+            : 'no bullet on the resume supports this',
+      });
       continue;
     }
     out.push({ id: v.id, met: true, quote: v.quote, why: typeof v.why === 'string' ? v.why : undefined });
   }
   // A question the model skipped is unmet, not absent: a missing answer must not quietly shrink the
   // denominator, which is the padding failure preferStatedRequirements exists to prevent.
+  /* A question the model skipped is unmet for THIS response, so the denominator does not quietly
+     shrink by exactly the requirements that were hardest to judge. It is also reported as rejected,
+     which is what keeps it OUT of the cache: writing "not judged" to a store that never expires
+     would freeze those clauses at unmet for every student who ever has the same bullets. */
   for (const q of questions) {
-    if (!out.some((v) => v.id === q.id)) out.push({ id: q.id, met: false, why: 'not judged' });
+    if (!out.some((v) => v.id === q.id)) {
+      out.push({ id: q.id, met: false, why: 'not judged' });
+      rejected.push({ id: q.id, reason: 'no verdict returned' });
+    }
   }
   return { verdicts: out, rejected };
 }
@@ -142,8 +272,11 @@ export function validateVerdicts(
 export async function judgeCompetencies(
   bullets: string[],
   questions: CompetencyQuestion[],
-): Promise<{ verdicts: CompetencyVerdict[]; rejected: string[] }> {
-  if (questions.length === 0 || bullets.length === 0) {
+  profile?: CandidateProfile,
+): Promise<{ verdicts: CompetencyVerdict[]; rejected: CompetencyRejection[] }> {
+  // Eligibility needs facts, not bullets, so a profile with no bullets can still be judged.
+  const answerable = bullets.length > 0 || profileFacts(profile).length > 0;
+  if (questions.length === 0 || !answerable) {
     return { verdicts: questions.map((q) => ({ id: q.id, met: false, why: 'no resume bullets to judge against' })), rejected: [] };
   }
   // ONE call per posting-resume pair, not one per clause. A posting states five to thirteen of
@@ -151,10 +284,34 @@ export async function judgeCompetencies(
   // between one request and two hundred.
   const response = await client.messages.create({
     model: 'claude-sonnet-5',
-    max_tokens: 2000,
+    // Scales with the batch instead of a flat ceiling a long posting silently overruns. Each
+    // verdict carries an id, a verbatim bullet quote and a sentence, so ~150 tokens apiece.
+    max_tokens: Math.min(8_000, 600 + questions.length * 200),
     system: COMPETENCY_SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: buildUserMessage(bullets, questions) }],
+    messages: [{ role: 'user', content: buildUserMessage(bullets, questions, profile) }],
   });
+  /* A truncated or unparseable response THROWS, and that is deliberate after a review.
+   *
+   * The first version of this returned met:false for every question with an id-less rejection, and
+   * both halves of that were wrong. The verdicts were confident UNMETS for questions nobody
+   * answered, which scorePosting keeps in the denominator; and because competencyCache filters the
+   * write on `r.id`, an id-less rejection filtered nothing, so one truncated response was written
+   * to a store that never expires and froze those clauses at unmet for every student with the same
+   * bullets. That is exactly the failure validateVerdicts was changed to prevent, reintroduced two
+   * functions below it.
+   *
+   * Throwing is now the correct answer because scorePosting HAS a catch: it marks the competency
+   * clauses `unscoreable` and returns the rejection, which is the honest state - we asked and got
+   * no usable answer. Nothing reaches the cache, because the write happens after this returns. */
+  if (response.stop_reason === 'max_tokens') {
+    throw new Error('response hit the token ceiling before it finished');
+  }
   const text = response.content.map((c) => (c.type === 'text' ? c.text : '')).join('');
-  return validateVerdicts(parseJson(text), questions, bullets);
+  let parsed: unknown;
+  try {
+    parsed = parseJson(text);
+  } catch (err) {
+    throw new Error(`unparseable response: ${err instanceof Error ? err.message : 'unknown'}`);
+  }
+  return validateVerdicts(parsed, questions, bullets, profile);
 }

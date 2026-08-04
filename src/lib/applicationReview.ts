@@ -196,3 +196,41 @@ export function readApplicationReview(spec: unknown): ApplicationReviewState | n
   }
   return state;
 }
+
+export type ApplicationReviewEdit = {
+  ats_name?: string;
+  portal_url?: string;
+  questions: ApplicationReviewQuestion[];
+  skipped_reasons: string[];
+};
+
+/**
+ * The third write path for portal_supported, and the one that can contradict itself.
+ *
+ * Creation writes the flag from the URL it was handed, and readApplicationReview derives it for
+ * packets stored before the field existed. An EDIT is different: the body carries a new portal_url
+ * and no portal_supported, so merging it over the stored review leaves the old verdict sitting next
+ * to the new URL, and then persists it. Persisting is what makes it permanent, because the
+ * derivation above only fills a gap: once the value is defined it is never recomputed, so re-saving
+ * the URL cannot repair it.
+ *
+ * Both directions are wrong, but they are not equally bad. Supported edited to unsupported shows a
+ * live send button on a packet that cannot be filled, and submit-request already refuses that in
+ * front of the run. Unsupported edited to a working Greenhouse URL is the trap: the dashboard gates
+ * the send button on this exact field, so a packet that would now submit fine is locked out with no
+ * self-serve way back. Re-derive from the URL that is actually being stored.
+ */
+export function applyApplicationReviewEdit(
+  current: ApplicationReviewState,
+  edit: ApplicationReviewEdit,
+): ApplicationReviewState {
+  return {
+    ...current,
+    ...edit,
+    // Only when the edit carries a URL. Deriving from an absent one would write false over a
+    // perfectly good stored true, which is the same lockout arriving by a different door.
+    ...(edit.portal_url === undefined ? {} : { portal_supported: isPortalSupported(edit.portal_url) }),
+    status: edit.questions.length > 0 ? 'questions_ready' : 'ready_to_submit',
+    updated_at: new Date().toISOString(),
+  };
+}

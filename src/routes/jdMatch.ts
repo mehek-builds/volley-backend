@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { eq, and, desc, sql } from 'drizzle-orm';
+import { eq, and, desc, sql, inArray } from 'drizzle-orm';
 import { db } from '../db/index';
 import { profiles } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
@@ -14,7 +14,9 @@ import { buildFunnel } from '../engine/funnel';
 import { deriveStage, isStage, STAGES, BOARD_LIMIT } from '../engine/pipeline';
 import { buildInterviewPrep } from '../engine/interviewPrep';
 import { extractJdTerms } from '../engine/jdMatch';
-import { generated_resumes, autofill_events, monitored_jobs } from '../db/schema';
+import { generated_resumes, autofill_events, monitored_jobs, career_page_sources } from '../db/schema';
+import { AUTONOMOUS_PORTAL_FAMILIES } from '../lib/portalSubmission';
+import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
 import { readExperienceBank } from '../db/experienceBank';
 import type { ResumeSpec } from '../llm/resumeSpec';
 
@@ -171,11 +173,20 @@ const requirementsSchema = z.object({
  * up. Those score exactly as they did before, with the geography still in, which is the honest
  * outcome rather than a guess at where the employer sits.
  *
- * Not scoped to the caller, and it does not need to be: `monitored_jobs` is the public board that
- * GET /jobs already serves unauthenticated, and one nullable location column of a row the student
- * is holding an application for discloses nothing they were not already shown.
+ * SCOPED LIKE GET /jobs/:id, and it was not always. This helper began as a location lookup, and
+ * the comment here used to say scoping was unnecessary because "one nullable location column
+ * discloses nothing". That stopped being true the moment it started returning the DESCRIPTION:
+ * /jd-match/requirements hands the text back clause by clause, so an unscoped read let any caller
+ * pull the full posting of anything the board deliberately refuses to serve - a disabled source, a
+ * demoted ATS family - by uuid alone. Found in retrospective review 2026-08-04.
+ *
+ * `is_active` is deliberately NOT required, and that is the one place this differs from
+ * GET /jobs/:id. A packet is often held for a posting that has since closed, and its review screen
+ * must still score: refusing there would break the repair path for every packet that stored the
+ * 600-character preview. Closure is a fact about the job, not a permission boundary; the source
+ * and portal-family checks are the permission boundary and both are enforced.
  */
-async function postingRow(
+export async function postingRow(
   jobId: string | null | undefined,
 ): Promise<{ location: string | null; description: string | null } | null> {
   if (!jobId) return null;
@@ -187,7 +198,14 @@ async function postingRow(
       description: sql<string>`left(${monitored_jobs.description}, 60000)`,
     })
     .from(monitored_jobs)
-    .where(eq(monitored_jobs.id, jobId))
+    .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+    .where(
+      and(
+        eq(monitored_jobs.id, jobId),
+        eq(career_page_sources.enabled, true),
+        inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
+      ),
+    )
     .limit(1);
   return row ? { location: row.location ?? null, description: row.description ?? null } : null;
 }
@@ -231,11 +249,32 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
    * one direction. This returns every stated clause with a verdict and, when met, the student's own
    * bullet as the reason.
    */
-  fastify.post('/jd-match/requirements', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+  fastify.post('/jd-match/requirements', { preHandler: requireAuth, bodyLimit: 128 * 1024 }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
+
     const parsed = requirementsSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.issues[0]?.message ?? 'Invalid request body' });
+    }
+
+    /* METERED AND BOUNDED, like every other model-backed route here.
+     *
+     * This shipped with neither, which made it the only paid endpoint in the repo behind nothing
+     * but the 180 req/min IP limiter. The spec bounds allow twenty entries of thirty bullets, and
+     * every bullet is inlined into the prompt; because the cache is keyed on the bullets, changing
+     * one character guarantees a miss and a fresh Sonnet call. That is an unmetered spend endpoint,
+     * and the fact that its own cache made the common path free is exactly what hid it.
+     *
+     * IT METERS REQUESTS, NOT MODEL CALLS, and the ceiling is set for that. A cache hit costs
+     * nothing and still spends a unit, because the limit has to be decided before the work rather
+     * than after it. An earlier version of this comment claimed cached reads were free of the
+     * quota; they are not, and pretending otherwise would set the ceiling by the wrong arithmetic.
+     * It runs after the body parse so a malformed request cannot burn a unit.
+     *
+     * Generous rather than tight: a student reading through a day's packets opens a lot of them.
+     * This exists to stop a loop, not to ration ordinary use. */
+    if (!(await allowHourly(userId, 'jdRequirements', LIMITS.perHour.jdRequirements))) {
+      return rateLimitedReply(reply);
     }
 
     const [profile] = await db.select().from(profiles).where(eq(profiles.user_id, userId));
@@ -281,15 +320,27 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
         location: parsed.data.job_context?.location ?? posting?.location ?? null,
       },
       segmentJd,
-      async (b, qs) => {
-        const r = await judgeCompetenciesCached(b, qs);
+      /* THE PROFILE IS THE THIRD ARGUMENT, and dropping it is silent.
+         This callback was typed (b, qs), so scorePosting's profile went nowhere: eligibility
+         questions reached the model with an empty CANDIDATE FACTS block, every "met" failed the
+         grounding gate for citing a date that was not there, and a student graduating May 2028
+         scored 0 against a posting asking for Spring 2028 - told "nothing in your profile
+         establishes this" about a date sitting in their own packet. */
+      async (b, qs, profile) => {
+        const r = await judgeCompetenciesCached(b, qs, profile);
         judged = r.judged;
         fromCache = r.fromCache;
         return { verdicts: r.verdicts, rejected: r.rejected };
       },
     );
 
+    /* `degraded` exists because `unscoreable` means two different things downstream and only one
+       of them is true here. The dashboard renders unscoreable clauses as "about attitude rather
+       than experience", which is right for "you stay curious" and a lie about "communicate nuance
+       to partners" when the truth is that a rate limit stopped us asking. The client branches on
+       this rather than inferring from a null score. */
     return reply.status(200).send({
+      degraded: result.score === null && result.clauses.some((c) => c.verdict === 'unscoreable'),
       score: result.score,
       // Clauses the model could not be asked about are absent from the denominator, so a reader can
       // see the count they were scored on rather than inferring it.
@@ -306,7 +357,9 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
       from_cache: fromCache,
       // Non-empty means the model returned a verdict it could not ground in a real bullet and it
       // was thrown away. Surfaced rather than swallowed so a bad run is visible.
-      rejected: result.rejected,
+      // Flattened for the wire. The structure exists so the CACHE can filter on ids without
+      // parsing prose; a client only needs to be told something was discarded.
+      rejected: result.rejected.map((r) => (r.id ? `${r.id}: ${r.reason}` : r.reason)),
     });
   });
 

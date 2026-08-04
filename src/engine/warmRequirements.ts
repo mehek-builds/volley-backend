@@ -1,6 +1,7 @@
 import { segmentJd } from './jdMatch';
 import { splitClauses, matchClause, type CandidateFacts } from './clauseMatch';
 import { judgeCompetenciesCached } from '../llm/competencyCache';
+import type { CompetencyQuestion } from '../llm/competencyJudge';
 
 /**
  * Fill the competency cache for a posting BEFORE anyone opens its review screen.
@@ -32,6 +33,35 @@ export interface WarmResult {
   skipped?: string;
 }
 
+/* The questions a warm pass would ask, split out so they can be tested without a database.
+   warmRequirementCache reaches Postgres on its very next line, so every assertion about WHICH
+   clauses get warmed had to mock the world or go unwritten - and went unwritten, which is how
+   graduation clauses sat outside the warm set. */
+export function warmQuestions(
+  jdText: string,
+  facts: CandidateFacts,
+  context: { company?: string; role?: string; job_id?: string | null } | undefined,
+): CompetencyQuestion[] {
+  const questions: CompetencyQuestion[] = [];
+  for (const section of segmentJd(jdText)) {
+    if (section.kind !== 'required' && section.kind !== 'preferred') continue;
+    for (const text of splitClauses(section.text)) {
+      const clause = matchClause(text, section.weight, facts, context);
+      /* GRADUATION IS WARMED TOO. It is a model call on the same batch, so leaving it out meant
+         the review screen still paid for one round trip after a "warm" packet build, on exactly
+         the clause the student most wants an answer to. The kind must ride along: warmed without
+         it, the answer is judged against the bullets, rejected as ungrounded, and the cache is
+         poisoned with an unmet for a requirement that was never really asked. */
+      if (clause.basis === 'competency') {
+        questions.push({ id: `w${questions.length}`, clause: text, kind: 'competency' });
+      } else if (clause.basis === 'graduation' && clause.verdict === 'pending') {
+        questions.push({ id: `w${questions.length}`, clause: text, kind: 'eligibility' });
+      }
+    }
+  }
+  return questions;
+}
+
 export async function warmRequirementCache(
   jdText: string | null | undefined,
   facts: CandidateFacts,
@@ -43,20 +73,18 @@ export async function warmRequirementCache(
 
   // The same deterministic pass the review screen runs, so the clauses warmed are exactly the
   // clauses it will ask about. Anything decidable locally never reaches the model here either.
-  const questions: Array<{ id: string; clause: string }> = [];
-  for (const section of segmentJd(jdText)) {
-    if (section.kind !== 'required' && section.kind !== 'preferred') continue;
-    for (const text of splitClauses(section.text)) {
-      const clause = matchClause(text, section.weight, facts, context);
-      if (clause.basis === 'competency') questions.push({ id: `w${questions.length}`, clause: text });
-    }
-  }
+  const questions = warmQuestions(jdText, facts, context);
+
   if (questions.length === 0) return { asked: 0, judged: 0, fromCache: 0 };
 
   let timer: NodeJS.Timeout | undefined;
   try {
     const result = await Promise.race([
-      judgeCompetenciesCached(bullets, questions),
+      judgeCompetenciesCached(bullets, questions, {
+        degree: facts.degree,
+        school: facts.school,
+        gradDate: facts.gradDate,
+      }),
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error('warm timed out')), timeoutMs);
       }),

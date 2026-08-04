@@ -67,12 +67,222 @@ test('/v1/meta publishes the cacheable Litos client contract', async () => {
 test('/health identifies the deployable service and revision contract', async () => {
   const app = await getApp();
   const res = await app.inject({ method: 'GET', url: '/health' });
-  assert.equal(res.statusCode, 200);
+  /* 200 or 503, and the identity contract holds on BOTH. /health probes the database now, so it
+     answers 503 when it cannot reach one, which a unit test cannot. That is the point rather than an
+     inconvenience: DEPLOY.md reads `revision` from this response to confirm what shipped, and the
+     moment you most need that is an incident, when the status will be 503. Asserting 200 here would
+     pin the opposite of the property the runbook depends on. */
+  assert.ok([200, 503].includes(res.statusCode), `unexpected status ${res.statusCode}`);
   const body = res.json();
+
+  // The database contract, which is why this endpoint stopped being a liveness ping. Before
+  // 2026-08-04 it touched nothing and answered 200 through a 75-minute outage in which every other
+  // route returned 500.
+  assert.ok(['ok', 'unreachable'].includes(body.database), `unexpected database ${body.database}`);
+  assert.equal(res.statusCode, body.database === 'ok' ? 200 : 503, 'status code must follow the probe');
+  assert.equal(body.status, body.database === 'ok' ? 'ok' : 'degraded');
+  if (body.database !== 'ok') {
+    // Coarse on purpose: /health is public, so the driver's message never reaches it.
+    assert.ok(['timeout', 'quota', 'refused', 'error'].includes(body.database_reason));
+  }
+
   assert.equal(body.service, 'litos-api');
   assert.equal(body.product, 'Litos');
   assert.equal(body.api_version, '1');
   assert.ok(Object.hasOwn(body, 'revision'));
+  // `build` is what makes the DEPLOY.md check work on a CLI deploy, where VERCEL_GIT_COMMIT_SHA is
+  // not set and `revision` is null. The key must always be present for the runbook to rely on it.
+  assert.ok(Object.hasOwn(body, 'build'));
+  // `revision_source` is what makes a null revision DIAGNOSABLE. DEPLOY.md's table keys off these
+  // three values, so the set is part of the contract and not an implementation detail.
+  assert.ok(Object.hasOwn(body, 'revision_source'));
+  assert.ok(
+    ['vercel-git', 'git-sha', 'none'].includes(body.revision_source),
+    `unexpected revision_source ${JSON.stringify(body.revision_source)}`,
+  );
+  // The two fields cannot disagree: a source of 'none' with a SHA, or a SHA with no source, would
+  // each send a reader of the runbook down the wrong path.
+  assert.equal(
+    body.revision === null,
+    body.revision_source === 'none',
+    'revision and revision_source must agree about whether the commit is known',
+  );
+});
+
+/* The whole reason /health carries this field: L2 is enabled purely by two environment variables,
+   and with them unset rankingCache.ts is a correct, silent no-op that re-reads the ranking pool out
+   of Neon on every cold start. That read exhausted Neon's transfer allowance on 2026-08-04. Whether
+   the vars actually took effect has to be answerable from outside the process. */
+test('/health reports which ranking-cache tiers are running', async () => {
+  const saved = {
+    url: process.env.UPSTASH_REDIS_REST_URL,
+    token: process.env.UPSTASH_REDIS_REST_TOKEN,
+  };
+  try {
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    {
+      const { buildApp } = await import('./index');
+      const app = await buildApp();
+      const body = (await app.inject({ method: 'GET', url: '/health' })).json();
+      assert.equal(body.ranking_cache, 'local', 'unset vars means L1 only, and it must say so');
+      await app.close();
+    }
+
+    process.env.UPSTASH_REDIS_REST_URL = 'https://example.upstash.io';
+    process.env.UPSTASH_REDIS_REST_TOKEN = 'test-token-value';
+    {
+      const { buildApp } = await import('./index');
+      const app = await buildApp();
+      const res = await app.inject({ method: 'GET', url: '/health' });
+      const body = res.json();
+      assert.equal(body.ranking_cache, 'shared', 'both vars set means the L2 tier is live');
+
+      /* /health is UNAUTHENTICATED. It publishes whether a capability is on, never its
+         credentials, so the token must not reach the payload by any route. */
+      const raw = res.body;
+      assert.ok(!raw.includes('test-token-value'), 'the Upstash token must never appear in /health');
+      assert.ok(!raw.includes('example.upstash.io'), 'nor the Upstash URL');
+    }
+
+    /* One var alone is not a working configuration, and reporting 'shared' for it would send
+       someone hunting for a Redis problem that is really a missing variable. */
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    {
+      const { buildApp } = await import('./index');
+      const app = await buildApp();
+      const body = (await app.inject({ method: 'GET', url: '/health' })).json();
+      assert.equal(body.ranking_cache, 'local', 'a half-configured pair is not shared');
+      await app.close();
+    }
+  } finally {
+    if (saved.url === undefined) delete process.env.UPSTASH_REDIS_REST_URL;
+    else process.env.UPSTASH_REDIS_REST_URL = saved.url;
+    if (saved.token === undefined) delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    else process.env.UPSTASH_REDIS_REST_TOKEN = saved.token;
+  }
+});
+
+test('/health identifies the build even when no git SHA is exposed', async () => {
+  // The exact production shape this exists for: a bare `vercel --prod` sets VERCEL_DEPLOYMENT_ID
+  // but not VERCEL_GIT_COMMIT_SHA, and on 2026-08-04 that made /health report `revision: null` for
+  // a deployment that was live and correct. Confirming what shipped took a Vercel API call and two
+  // git commands.
+  //
+  // WHY THAT HAPPENS IS NOW ESTABLISHED, and is no longer described here as unexplained: Vercel
+  // fills VERCEL_GIT_* from the GitHub integration's metadata, so a CLI deploy leaves them unset.
+  // `npm run deploy:prod` passes GIT_SHA instead, which is the case pinned in the test below.
+  const saved = {
+    sha: process.env.VERCEL_GIT_COMMIT_SHA,
+    gitSha: process.env.GIT_SHA,
+    id: process.env.VERCEL_DEPLOYMENT_ID,
+    url: process.env.VERCEL_URL,
+  };
+  delete process.env.VERCEL_GIT_COMMIT_SHA;
+  delete process.env.GIT_SHA;
+  // VERCEL_URL is deleted too, or this passes for the wrong reason. It is unset on a dev box and
+  // in CI, so leaving it alone made `build` resolve to the same value through EITHER operand, and
+  // reversing the order in index.ts kept the whole suite green. The order is the one non-obvious
+  // decision in that line, so it is the one thing that has to be pinned.
+  delete process.env.VERCEL_URL;
+  process.env.VERCEL_DEPLOYMENT_ID = 'dpl_test123';
+  process.env.VERCEL_URL = 'litos-should-not-win-team.vercel.app';
+  try {
+    const { buildApp } = await import('./index');
+    const app = await buildApp();
+    const body = (await app.inject({ method: 'GET', url: '/health' })).json();
+    assert.equal(body.revision, null, 'this is the case where the SHA is genuinely unavailable');
+    assert.equal(
+      body.revision_source,
+      'none',
+      'a null revision must say WHY, or the reader cannot tell it from a broken field',
+    );
+    assert.equal(
+      body.build,
+      'dpl_test123',
+      'the deployment id wins over VERCEL_URL: reversing the operands must fail here',
+    );
+    await app.close();
+  } finally {
+    for (const [k, v] of [
+      ['VERCEL_GIT_COMMIT_SHA', saved.sha],
+      ['GIT_SHA', saved.gitSha],
+      ['VERCEL_DEPLOYMENT_ID', saved.id],
+      ['VERCEL_URL', saved.url],
+    ] as Array<[string, string | undefined]>) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});
+
+test('a CLI deploy that passed GIT_SHA is as identifiable as a GitHub one', async () => {
+  /* THE CASE THE FIX ADDS, end to end through the real app rather than through the resolver alone.
+   *
+   * `npm run deploy:prod` passes `-e GIT_SHA=$(git rev-parse HEAD)` precisely so a hand deploy
+   * answers the DEPLOY.md question. Before that, `revision` was null on every CLI deploy and the
+   * GIT_SHA fallback in the handler had never once fired, because nothing set the variable.
+   *
+   * The two branches are pinned together here because it is the DIFFERENCE that the runbook reads:
+   * the same null-revision deployment must report 'none', and the same deployment with a SHA passed
+   * in must report 'git-sha'. Asserting only one of them would let the source field freeze at a
+   * constant and still pass. */
+  const saved = { sha: process.env.VERCEL_GIT_COMMIT_SHA, gitSha: process.env.GIT_SHA };
+  delete process.env.VERCEL_GIT_COMMIT_SHA;
+  process.env.GIT_SHA = 'cf071b61ce6f6b48850b5564bad3d6e0d4cf86a0';
+  try {
+    const { buildApp } = await import('./index');
+    const app = await buildApp();
+    const body = (await app.inject({ method: 'GET', url: '/health' })).json();
+    assert.equal(body.revision, 'cf071b61ce6f6b48850b5564bad3d6e0d4cf86a0');
+    assert.equal(body.revision_source, 'git-sha', 'a hand deploy is distinguishable from an automatic one');
+    await app.close();
+  } finally {
+    if (saved.sha === undefined) delete process.env.VERCEL_GIT_COMMIT_SHA;
+    else process.env.VERCEL_GIT_COMMIT_SHA = saved.sha;
+    if (saved.gitSha === undefined) delete process.env.GIT_SHA;
+    else process.env.GIT_SHA = saved.gitSha;
+  }
+});
+
+test('the GitHub integration outranks a stale GIT_SHA', async () => {
+  // GIT_SHA is written by a shell script from whatever checkout it ran in. The platform's own value
+  // cannot have gone stale, so where both exist the platform wins and says so.
+  const saved = { sha: process.env.VERCEL_GIT_COMMIT_SHA, gitSha: process.env.GIT_SHA };
+  process.env.VERCEL_GIT_COMMIT_SHA = 'from-the-integration';
+  process.env.GIT_SHA = 'stale-from-a-laptop';
+  try {
+    const { buildApp } = await import('./index');
+    const app = await buildApp();
+    const body = (await app.inject({ method: 'GET', url: '/health' })).json();
+    assert.equal(body.revision, 'from-the-integration');
+    assert.equal(body.revision_source, 'vercel-git');
+    await app.close();
+  } finally {
+    if (saved.sha === undefined) delete process.env.VERCEL_GIT_COMMIT_SHA;
+    else process.env.VERCEL_GIT_COMMIT_SHA = saved.sha;
+    if (saved.gitSha === undefined) delete process.env.GIT_SHA;
+    else process.env.GIT_SHA = saved.gitSha;
+  }
+});
+
+test('the deployment URL carries the identity when only the older variable is set', async () => {
+  // VERCEL_URL predates VERCEL_DEPLOYMENT_ID and is set on every deployment, so it is the fallback
+  // rather than an equal: it holds the same identity in a hostname.
+  const saved = { id: process.env.VERCEL_DEPLOYMENT_ID, url: process.env.VERCEL_URL };
+  delete process.env.VERCEL_DEPLOYMENT_ID;
+  process.env.VERCEL_URL = 'litos-abc123-team.vercel.app';
+  try {
+    const { buildApp } = await import('./index');
+    const app = await buildApp();
+    assert.equal((await app.inject({ method: 'GET', url: '/health' })).json().build, 'litos-abc123-team.vercel.app');
+    await app.close();
+  } finally {
+    if (saved.id === undefined) delete process.env.VERCEL_DEPLOYMENT_ID;
+    else process.env.VERCEL_DEPLOYMENT_ID = saved.id;
+    if (saved.url === undefined) delete process.env.VERCEL_URL;
+    else process.env.VERCEL_URL = saved.url;
+  }
 });
 
 test('front-door limiter isolates clients and emits standard retry metadata', async () => {
@@ -81,6 +291,7 @@ test('front-door limiter isolates clients and emits standard retry metadata', as
   const limitedApp = await buildApp({
     rateLimit: {
       general: policy,
+      board: { name: 'board', limit: 2, windowMs: 60_000 },
       authStart: { name: 'auth_start', limit: 1, windowMs: 60_000 },
       authVerify: { name: 'auth_verify', limit: 1, windowMs: 60_000 },
       download: { name: 'resume_download', limit: 1, windowMs: 60_000 },
@@ -106,7 +317,11 @@ test('front-door limiter isolates clients and emits standard retry metadata', as
     assert.equal(blocked.json().code, 'rate_limited');
 
     assert.equal((await request('203.0.113.11')).statusCode, 404);
-    assert.equal((await limitedApp.inject({ method: 'GET', url: '/health' })).statusCode, 200);
+    /* /health is EXEMPT from the limiter, which is what this asserts. Deliberately not `=== 200`:
+       /health probes the database, and with no DATABASE_URL configured in a unit test it correctly
+       answers 503. Pinning 200 here would be pinning "the test environment has a database", which
+       is not what this test is about, and it would fail for a reason unrelated to rate limiting. */
+    assert.notEqual((await limitedApp.inject({ method: 'GET', url: '/health' })).statusCode, 429);
   } finally {
     await limitedApp.close();
   }

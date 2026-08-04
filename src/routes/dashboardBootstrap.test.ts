@@ -25,6 +25,7 @@ async function bootstrapTestApp(
   if (generalLimit !== undefined) {
     const rateLimit: RateLimitConfig = {
       general: { name: 'general', limit: generalLimit, windowMs: 60_000 },
+      board: { name: 'board', limit: 90, windowMs: 60_000 },
       authStart: { name: 'auth_start', limit: 20, windowMs: 60_000 },
       authVerify: { name: 'auth_verify', limit: 40, windowMs: 60_000 },
       download: { name: 'resume_download', limit: 60, windowMs: 60_000 },
@@ -205,14 +206,26 @@ describe('dashboard bootstrap projection', () => {
       assert.equal(response.statusCode, 200);
       assert.equal(response.json().me.email, 'me@example.com');
       assert.equal(response.json().jobs.jobs[0].id, 'job-1');
+      /* `targeting` used to appear at the head of this list and no longer does, which is a real
+         behaviour change and not a fixture adjustment.
+         The bootstrap fans out through fastify.inject preserving the caller's IP, so each inner
+         read is metered individually. /jobs was charged to `general` alongside the seven profile
+         reads, so with only 2 general slots the board consumed one of them. It now draws on the
+         separate `board` policy (added for Neon transfer, see middleware/rateLimit.ts), which
+         leaves that slot for the next resource in priority order. One MORE critical resource
+         survives a capacity crunch than before, which is the direction this test wants. */
       assert.deepEqual(response.json().warnings, [
-        'targeting',
         'profile',
         'resume_history',
         'application_profile',
         'outreach',
         'onboarding',
       ]);
+      assert.equal(
+        response.json().targeting != null,
+        true,
+        'targeting must now survive, because the board no longer competes for general capacity',
+      );
     } finally {
       await app.close();
     }

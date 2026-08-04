@@ -70,6 +70,13 @@ describe('companyDomainFor', () => {
     assert.strictEqual(companyDomainFor('Rocket Lab'), 'rocketlabcorp.com');
     assert.strictEqual(companyDomainFor('Sigma'), 'sigmacomputing.com');
     assert.strictEqual(companyDomainFor('Toast'), 'toasttab.com');
+
+    // Pure Storage looks deletable and is not. purestorage.com 301s to everpuredata.com, so anyone
+    // reading the redirect alone concludes the entry points at another brand and drops it. What the
+    // reader actually sees is the deciding fact: the favicon service returns the same orange hexagon
+    // for both hosts, because the rebrand kept the mark. Pinned so that check has to be redone, not
+    // re-litigated from the redirect.
+    assert.strictEqual(companyDomainFor('Pure Storage'), 'purestorage.com');
   });
 });
 
