@@ -52,7 +52,9 @@ const addCountry = (canonical: string, ...spellings: string[]) => {
   for (const s of spellings) COUNTRIES.add(s.toLowerCase());
 };
 
-const US_STATES: [string, string][] = [
+/** Exported for jdMatch's address-shape guard, which needs the code and the name to recognise
+ *  "New York City, NY" and "the State of Washington" as addresses rather than as requirements. */
+export const US_STATES: [string, string][] = [
   ['AL','Alabama'],['AK','Alaska'],['AZ','Arizona'],['AR','Arkansas'],['CA','California'],
   ['CO','Colorado'],['CT','Connecticut'],['DE','Delaware'],['FL','Florida'],['GA','Georgia'],
   ['HI','Hawaii'],['ID','Idaho'],['IL','Illinois'],['IN','Indiana'],['IA','Iowa'],

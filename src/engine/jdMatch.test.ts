@@ -1203,17 +1203,41 @@ describe('a posting does not ask for its own address', () => {
     }
   });
 
-  test('without a location nothing geographic is excluded', () => {
-    // A SHORT posting, so the cap does not bind and the only thing that can remove `bellevue` is
-    // the location exclusion. Asserted against JD would have passed for the wrong reason: that
-    // fixture states more than EMPHASIS_LIMIT terms and `bellevue` is body prose, so emphasis alone
-    // drops it whether or not any exclusion fired.
-    const short =
+  /**
+   * A capitalized word is not guessed to be a place. An ADDRESS is read as one.
+   *
+   * THIS TEST USED TO ASSERT THAT `bellevue` SURVIVED "in Bellevue, WA" with no location field,
+   * under the heading "without a location nothing geographic is excluded". That was a true
+   * statement about the old design and it was pinning the design's LIMIT rather than its safety
+   * property: the location column was the only mechanism, so an address written in the prose of a
+   * posting whose column said something else was simply not reachable. addressSpans reaches it now,
+   * from the shape of the text, and Gemini's "at our New York City, NY office" is why it has to -
+   * that address sits inside a `responsibilities` block, where PLACE_SAFE_KINDS correctly declines
+   * to let the location column act at all.
+   *
+   * The safety property the old assertion was standing in for is the SECOND half below, and it is
+   * unchanged: a bare capitalized word with no state beside it is still not a place, because
+   * nothing in the text says it is. That is the line between reading a shape and guessing.
+   */
+  test('an address is excluded by its shape; a bare capital is still not guessed to be a place', () => {
+    // A SHORT posting, so the cap cannot be what removes anything. Asserted against JD would pass
+    // for the wrong reason: that fixture states more than EMPHASIS_LIMIT terms and `bellevue` is
+    // body prose, so emphasis alone drops it whether or not any exclusion fired.
+    const withState =
       'This is a 12 week paid summer internship in Bellevue, WA. You will use Python, SQL, ' +
       'Docker, React and Git, and prototype early ideas with customers.';
-    const keys = extractJdTerms(short, { company: CONTEXT.company, role: CONTEXT.role }).map((t) => t.term);
-    assert.ok(keys.length < EMPHASIS_LIMIT, 'the cap must not be what removes it');
-    assert.ok(keys.includes('bellevue'), 'the exclusion is driven by the job row, not guessed from prose');
+    const stated = extractJdTerms(withState, { company: CONTEXT.company, role: CONTEXT.role });
+    assert.ok(stated.length < EMPHASIS_LIMIT, 'the cap must not be what removes it');
+    const keys = stated.map((t) => t.term);
+    assert.ok(!keys.includes('bellevue'), '"Bellevue, WA" is written as an address');
+    assert.ok(!keys.includes('wa'), 'the state code goes with it');
+    assert.ok(keys.includes('python') && keys.includes('docker'), 'the real requirements survive');
+
+    // The same word, with nothing beside it saying it is a place. No location field, no address
+    // shape, so no evidence: it stays, exactly as it did before addressSpans existed.
+    const bare = withState.replace('Bellevue, WA', 'Bellevue');
+    const bareKeys = extractJdTerms(bare, { company: CONTEXT.company, role: CONTEXT.role }).map((t) => t.term);
+    assert.ok(bareKeys.includes('bellevue'), 'a lone capital is not guessed to be geography');
   });
 
   /**
@@ -1278,20 +1302,32 @@ describe('a posting does not ask for its own address', () => {
     }
   });
 
-  test('the score rises once the geography leaves the denominator', () => {
-    // Not a claim about the absolute number. Only that removing terms no resume should carry
-    // cannot make the same resume look worse against the same posting.
+  test('no office reaches the score or the gap list, with or without the location field', () => {
+    // This used to assert a STRICT rise from supplying the location field, which was the only
+    // mechanism that could remove the offices. It is now an equality on this fixture and that is
+    // the fix working rather than the test weakening: every office here is written "San Francisco,
+    // CA" / "Bellevue, WA", so addressSpans removes them from the shape of the text and there is
+    // nothing left for the location field to take away. The property that actually matters is
+    // asserted directly below on BOTH paths - no office in the denominator, none on the missing
+    // list that gap-to-bullet reads - which is what the score movement was standing in for.
     const resume = 'Product management intern. Built dashboards with Python and SQL. ETL pipelines.';
     const withPlaces = scoreJdMatch(resume, JD, { company: CONTEXT.company, role: CONTEXT.role });
     const withoutPlaces = scoreJdMatch(resume, JD, CONTEXT);
     assert.ok(
-      (withoutPlaces.score ?? 0) > (withPlaces.score ?? 0),
-      `expected the geography-free score to be higher, got ${withoutPlaces.score} vs ${withPlaces.score}`,
+      (withoutPlaces.score ?? 0) >= (withPlaces.score ?? 0),
+      `the location field may never lower the score, got ${withoutPlaces.score} vs ${withPlaces.score}`,
     );
-    assert.ok(
-      withoutPlaces.missing.every((t) => !['Bellevue', 'Mountain View', 'San Francisco'].includes(t.display)),
-      'no office may reach the missing list that gap-to-bullet reads',
-    );
+    for (const result of [withPlaces, withoutPlaces]) {
+      assert.ok(
+        result.missing.every((t) => !['Bellevue', 'Mountain View', 'San Francisco'].includes(t.display)),
+        'no office may reach the missing list that gap-to-bullet reads',
+      );
+      const keys = [...result.matched, ...result.missing].map((t) => t.term);
+      assert.ok(
+        !keys.includes('bellevue') && !keys.includes('ca') && !keys.includes('wa'),
+        'no office may sit in the denominator either',
+      );
+    }
   });
 });
 
@@ -2533,5 +2569,271 @@ describe('the score is the matched weight over the whole weight the posting aske
         'the denominator must be every extracted term, met or not',
       );
     }
+  });
+});
+
+/**
+ * ISSUE-027. The EEO paragraph, the pay table and the office address, all scored at weight 1.
+ *
+ * REPRODUCED LIVE IN PRODUCTION 2026-08-04, after the `^about` heading fix (ISSUE-026 and the
+ * SECOND_PERSON_SUBJECT lookahead) had already shipped. Gemini, "Software Engineering Intern
+ * (Fall 2026)", Greenhouse, job 10c37ef7-a4e7-48e5-8bd3-82df849ba46d. The review packet rendered
+ *
+ *     Missing key requirements
+ *     4 of 12 requirements we counted
+ *     score 31
+ *     asked for, not on your resume (8)
+ *
+ * and the eight, verbatim from the live accessibility tree, were
+ *
+ *     Associate, Law, policy, State, Washington, York, NY, York City
+ *
+ * Not one is a requirement. They are "Equal Opportunity is the Law", the pay sentence naming three
+ * states, "our New York City, NY office", the in-office policy sentence, and the one degree in
+ * "(Bachelor's, Associate's, or Master's)".
+ *
+ * THE CAUSE IS THE ONE THIS FILE KEEPS FINDING, one section further along: an unrecognised heading
+ * does not close the section above it. `Qualifications:` opens a `required` block and the next
+ * heading-shaped thing in the document is `#LI-GR1`, so the pay paragraph, the hybrid-work
+ * paragraph and the whole EEO paragraph were read as REQUIRED at weight 1. What is different here,
+ * and why neither shipped fix reached it, is that the heading IS there - the employer wrote
+ * `Pay Rate:` - as a LABEL on the front of a 316-character paragraph. isHeadingLine caps a heading
+ * at 60 characters and isNoiseBlockOpener at 120 and refuses a terminal full stop, so a label
+ * carrying its own paragraph is invisible to both. See inlineLabel.
+ *
+ * The fixture is the posting's description column verbatim, exactly as monitored_jobs stores it.
+ */
+const GEMINI_JD = `About the Company 
+
+Gemini is a global crypto and Web3 platform founded by Cameron and Tyler Winklevoss in 2014, offering a wide range of simple, reliable, and secure crypto products and services to individuals and institutions in over 70 countries. Our mission is to unlock the next era of financial, creative, and personal freedom by providing trusted access to the decentralized future. We envision a world where crypto reshapes the global financial system, internet, and money to create greater choice, independence, and opportunity for all — bridging traditional finance with the emerging cryptoeconomy in a way that is more open, fair, and secure. As a publicly traded company, Gemini is poised to accelerate this vision with greater scale, reach, and impact. 
+
+The Department: Engineering 
+
+Gemini is regulated and licensed like a bank, but it’s run like a tech startup, and engineering is the core of the company. There’s a wide range of tough problems to solve at Gemini – from properly securing hundreds of millions of dollars worth of customer funds, to developing innovative new blockchain products, to finding new techniques to combat fraud, to shaving microseconds off our API response times, and everything in between.
+
+All of Gemini’s engineers are able to work across the software platform, not just on their own specialization or subteam. We value a thoughtful, collaborative software development process, coupled with a pragmatic approach to problem solving and delivering software.
+
+The Role: Software Engineering Intern 
+
+As a member of our software engineering team, you’ll architect and solve complex problems that will directly influence the direction of the digital asset space. There’s a wide range of problems to solve at Gemini – from properly securing millions of dollars worth of customer funds, to developing innovative new blockchain products, to shaving microseconds off our API response times. We have a strong culture of code reviews, and a focus on security, with the end goal of writing and shipping high-quality code by getting things right the first time. We want to continue building the best product we can as we scale and grow our business. If you get excited about solving technical challenges that directly impact our customers, clients, and the rest of the Gemini team, we’d love to hear from you. There are opportunities for frontend and/or backend work depending on your interests and strengths.
+
+This will be a 16-week fall internship program required to be in person 3 days a week at our New York City, NY office. 
+
+Responsibilities: 
+
+Drive the development of new products and features on the Gemini platform, taking ownership of meaningful projects within small, fast-moving teams. 
+Collaborate closely with senior engineers who will challenge you to raise the bar on design, testing, and scalability while providing mentorship and guidance. 
+Contribute technical ideas and solutions during planning and design discussions, influencing the direction of key initiatives. 
+Review and critique code with a focus on correctness, performance, and security - while learning best practices from experienced engineers. 
+Enhance the reliability, performance, and maintainability of Gemini’s systems through thoughtful refactoring and continuous improvement projects. 
+Take part in supporting production systems by helping diagnose and resolve alerts or bugs, gaining hands-on experience with real-world operations at scale. 
+
+Qualifications: 
+
+Currently pursuing a degree in Computer Science, Computer Engineering, or a related field (Bachelor’s, Associate’s, or Master’s). 
+Passionate about blockchain, digital assets, and the Web3 industry - a genuine drive to make an impact in this space is essential. 
+Solid understanding of core software engineering and coding concepts, with curiosity to go deeper and learn quickly. 
+Self-motivated and proactive - you take initiative, ask smart questions, and push projects forward without waiting to be told what to do. 
+Strong communication skills: able to clearly articulate ideas, provide updates, and collaborate effectively in a team setting. 
+Open to feedback and committed to growth - willing to challenge yourself, learn from experience, and raise the bar with every project. 
+
+Pay Rate: The hourly pay rate for this role is $50/hour in the State of New York, the State of California and the State of Washington. When determining a candidate’s compensation, we consider a number of factors including skillset, experience, job scope, and current market data.
+
+In the United States, we offer a hybrid work approach at our hub offices, balancing the benefits of in-person collaboration with the flexibility of remote work. Expectations may vary by location and role, so candidates are encouraged to connect with their recruiter to learn more about the specific policy for the role. Employees who do not live near one of our hubs are part of our remote workforce. All employees, however, are required to onboard in-person at one of our office locations. 
+
+At Gemini, we strive to build diverse teams that reflect the people we want to empower through our products, and we are committed to equal employment opportunity regardless of race, color, ancestry, religion, sex, national origin, sexual orientation, age, citizenship, marital status, disability, gender identity, or Veteran status. Equal Opportunity is the Law, and Gemini is proud to be an equal opportunity workplace. If you have a specific need that requires accommodation, please let a member of the People Team know. 
+
+#LI-GR1`;
+
+const GEMINI_CONTEXT = {
+  company: 'Gemini',
+  role: 'Software Engineering Intern (Fall 2026)',
+  // Exactly as the row stores it. Note it says "New York, New York" while the BODY writes
+  // "New York City, NY", which is why the address guard has to read the text and not only this.
+  location: 'New York, New York',
+};
+
+describe('ISSUE-027: EEO, pay and address text is not a requirement', () => {
+  /** The eight the live packet showed a student, verbatim from the accessibility tree. */
+  const REPORTED = ['associate', 'law', 'policy', 'state', 'states', 'washington', 'york', 'ny', 'york city'];
+
+  test('not one of the reported terms survives extraction', () => {
+    const keys = extractJdTerms(GEMINI_JD, GEMINI_CONTEXT).map((t) => t.term);
+    for (const junk of REPORTED) {
+      assert.ok(!keys.includes(junk), `"${junk}" came from the EEO, pay or address text, not from the job`);
+    }
+  });
+
+  test('the terms that ARE stated survive', () => {
+    // What this posting actually names: a Computer Science / Computer Engineering degree, and API
+    // work in the role description. Its Qualifications block is otherwise soft - "Passionate about
+    // blockchain", "Self-motivated and proactive", "Strong communication skills" - which is the
+    // whole reason it ends up under the floor below.
+    const keys = extractJdTerms(GEMINI_JD, GEMINI_CONTEXT).map((t) => t.term);
+    assert.ok(keys.includes('computer science'), 'the degree field is stated under Qualifications');
+    assert.ok(keys.includes('api'), 'the role description names API response times twice');
+  });
+
+  test('the pay paragraph, the hybrid paragraph and the EEO paragraph all score zero', () => {
+    const sections = segmentJd(GEMINI_JD);
+    const weightOf = (needle: string) => sections.find((s) => s.text.includes(needle))?.weight;
+    assert.equal(weightOf('$50/hour'), 0, 'the pay table is not a requirement');
+    assert.equal(weightOf('hybrid work approach'), 0, 'the in-office policy is not a requirement');
+    assert.equal(weightOf('Equal Opportunity is the Law'), 0, 'the EEO paragraph is not a requirement');
+  });
+
+  test('the Qualifications block still ends at the pay label, not at the end of the document', () => {
+    // The regression this whole issue is: `required` must not run past "Pay Rate:".
+    const required = segmentJd(GEMINI_JD).filter((s) => s.kind === 'required');
+    assert.ok(required.length > 0, 'Qualifications is still recognised');
+    for (const s of required) {
+      assert.ok(!s.text.includes('Equal Opportunity'), 'the EEO paragraph is not inside Qualifications');
+      assert.ok(!s.text.includes('$50/hour'), 'the pay table is not inside Qualifications');
+    }
+  });
+
+  test('the posting refuses to score rather than padding the denominator', () => {
+    // THE USER-VISIBLE OUTCOME, and it is a refusal rather than a better number. Three stated terms
+    // is under MIN_SCORABLE_TERMS, and the honest answer for a posting whose qualifications are
+    // "passionate", "self-motivated" and "strong communication skills" is that there is not enough
+    // here to score against - not a 31 built from the State of Washington.
+    //
+    // Before this change the salvage pass would have made the difference up out of the company
+    // blurb, offering `Cameron` and `Tyler Winklevoss` as requirements. See the character-share
+    // gate in extractJdTerms.
+    const resume =
+      'USC Computer Science student. Built REST APIs in Python and TypeScript. React front ends. ' +
+      'Postgres and Docker. Summer 2025 software engineering internship.';
+    const result = scoreJdMatch(resume, GEMINI_JD, GEMINI_CONTEXT);
+    assert.equal(result.scorable, false, 'the posting does not state enough to score against');
+    assert.equal(result.score, null);
+    assert.deepEqual(result.missing, [], 'nothing is offered to gap-to-bullet');
+  });
+
+  test('no founder name reaches the denominator through the salvage pass', () => {
+    const keys = extractJdTerms(GEMINI_JD, GEMINI_CONTEXT).map((t) => t.term);
+    for (const name of ['cameron', 'tyler winklevoss', 'winklevoss']) {
+      assert.ok(!keys.includes(name), `"${name}" is a founder, not a requirement`);
+    }
+  });
+});
+
+describe('ISSUE-027: an inline label closes the section it interrupts', () => {
+  test('a footer label is terminal, like every other noise rule', () => {
+    // `Pay Rate:` is not a label on one sentence. It is the point where the employer stopped
+    // describing the job, and on the posting this issue came from the pay, hybrid-work and EEO
+    // paragraphs follow it in that order. So it opens a running noise section exactly as a
+    // heading-shaped `Pay Rate` line already did.
+    const jd =
+      'Requirements:\n' +
+      '- 5+ years of Python and Kubernetes\n' +
+      'Pay Rate: The hourly pay rate for this role is $50/hour in the State of New York. ' +
+      'When determining compensation we consider a number of factors including skillset.\n' +
+      'We are proud to be an equal opportunity employer.\n';
+    const keys = extractJdTerms(jd, { company: 'Acme', role: 'Engineer' }).map((t) => t.term);
+    assert.ok(!keys.includes('state') && !keys.includes('york'), 'the pay sentence is zeroed');
+    assert.ok(keys.includes('python') && keys.includes('kubernetes'), 'the stated block is untouched');
+  });
+
+  test('a SCORED label is local and never demotes or promotes what follows it', () => {
+    // The other half, and the one the corpus pass forced. A `Skills:` label is a claim about its
+    // own sentence; the lines under it are its siblings, not its children. Scale AI's fellowship
+    // postings follow exactly this shape with `Professional Mindset:`, `Competitive Pay:` and
+    // `Interview:` underneath, and treating the label as terminal put all of those at weight 1.
+    const jd =
+      'Who Should Apply\n' +
+      'Skills: Advanced proficiency in SQL, Tableau and Looker is expected.\n' +
+      'Professional Mindset: Detail-oriented thinker with a passion for Kubernetes.\n';
+    const terms = extractJdTerms(jd, { company: 'Acme', role: 'Analyst' });
+    for (const skill of ['sql', 'tableau', 'looker']) {
+      const found = terms.find((t) => t.term === skill);
+      assert.ok(found, `"${skill}" is stated under an inline Skills label`);
+      assert.equal(found?.weight, 1, 'and carries the weight the employer gave it');
+    }
+    // `Professional Mindset:` classifies as nothing, so its line stays at whatever weight the
+    // enclosing section had. What it must NOT do is inherit the weight-1 of the Skills label above.
+    const kubernetes = terms.find((t) => t.term === 'kubernetes');
+    assert.ok(kubernetes, 'the line below the label is still read');
+    assert.ok(kubernetes!.weight < 1, 'but it did not inherit the Skills label weight');
+  });
+
+  test('a bulleted line is never read as an inline label', () => {
+    // The one shape where a footer word in requirement prose is common. Refused outright rather
+    // than reasoned about: see inlineLabel.
+    const jd =
+      'Requirements:\n' +
+      '- Benefits: explain the benefits of our platform to prospective customers using Salesforce\n' +
+      '- 3 years of Python\n';
+    const keys = extractJdTerms(jd, { company: 'Acme', role: 'AE' }).map((t) => t.term);
+    assert.ok(keys.includes('salesforce'), 'a bullet is content, never a heading');
+    assert.ok(keys.includes('python'));
+  });
+});
+
+describe('ISSUE-027: one requirement spelled two ways is one denominator slot', () => {
+  test('API and APIs are folded, and the survivor keeps the combined emphasis', () => {
+    const jd =
+      'Requirements:\n' +
+      '- Design REST APIs for our platform\n' +
+      '- Maintain the public API and its versioning\n' +
+      '- 3 years of Python\n';
+    const terms = extractJdTerms(jd, { company: 'Acme', role: 'Engineer' });
+    const apiish = terms.filter((t) => t.term === 'api' || t.term === 'apis');
+    assert.equal(apiish.length, 1, `"API" and "APIs" are one requirement, got ${apiish.map((t) => t.term).join(', ')}`);
+    assert.equal(apiish[0].mentions, 2, 'both spellings count toward how often the employer said it');
+  });
+
+  test('the fold does not damage a word that merely ends in -is or -ss', () => {
+    // singular() leaves -is and -ss alone on purpose (analysis, basis, compliance-ss cases), and
+    // the lexicon half of foldKey must not undo that.
+    const jd =
+      'Requirements:\n' +
+      '- Statistical analysis and regression modeling in Python\n' +
+      '- Experience with Kubernetes and Redis\n';
+    const keys = extractJdTerms(jd, { company: 'Acme', role: 'Analyst' }).map((t) => t.term);
+    assert.ok(keys.includes('kubernetes'), 'kubernetes is not a plural of kubernete');
+    assert.ok(keys.includes('redis'), 'redis is not a plural of redi');
+  });
+
+  test('a resume matches whichever spelling survived the fold', () => {
+    const jd = 'Requirements:\n- Design REST APIs\n- Maintain the public API\n- 3 years of Python\n';
+    const terms = extractJdTerms(jd, { company: 'Acme', role: 'Engineer' });
+    const api = terms.find((t) => t.term === 'api' || t.term === 'apis')!;
+    assert.ok(resumeCovers('Built REST APIs in Python', api.term), 'the plural resume matches');
+    assert.ok(resumeCovers('Built a public API in Python', api.term), 'the singular resume matches');
+  });
+});
+
+describe('ISSUE-027: an address is not a requirement, wherever it is written', () => {
+  test('a city and state code inside a responsibilities block are both dropped', () => {
+    // The Gemini shape: "The Role:" opens responsibilities, and PLACE_SAFE_KINDS deliberately
+    // declines to let the location column delete anything from a stated section. Only the shape of
+    // the text can reach this one.
+    const jd =
+      'The Role:\n' +
+      'You will be in person 3 days a week at our New York City, NY office building React apps.\n' +
+      'Requirements:\n- 3 years of Python\n';
+    const keys = extractJdTerms(jd, { company: 'Acme', role: 'Engineer', location: 'New York, New York' }).map((t) => t.term);
+    for (const place of ['ny', 'york', 'york city', 'new york city']) {
+      assert.ok(!keys.includes(place), `"${place}" is the office address`);
+    }
+    assert.ok(keys.includes('react') && keys.includes('python'), 'the real requirements survive');
+  });
+
+  test('"the State of X" is an address in any section', () => {
+    const jd = 'Requirements:\n- The role is available in the State of Washington and the State of California\n- 3 years of Python\n';
+    const keys = extractJdTerms(jd, { company: 'Acme', role: 'Engineer' }).map((t) => t.term);
+    for (const place of ['state', 'washington', 'california']) {
+      assert.ok(!keys.includes(place), `"${place}" is an address`);
+    }
+  });
+
+  test('a lexicon skill written in address position is still kept', () => {
+    // "Java, Indonesia" and "Oracle, Arizona" are the shape. Deleting a real requirement to remove
+    // a nuisance is the trade PLACE_SAFE_KINDS exists to refuse, and this rule keeps that refusal.
+    const jd = 'Requirements:\n- Strong Java, Docker and React experience\n- Offices in Java, Indonesia and Oracle, Arizona\n';
+    const keys = extractJdTerms(jd, { company: 'Acme', role: 'Engineer' }).map((t) => t.term);
+    assert.ok(keys.includes('java'), 'Java the language outranks Java the island');
+    assert.ok(keys.includes('oracle'), 'Oracle the database outranks Oracle, Arizona');
   });
 });
