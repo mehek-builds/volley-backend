@@ -48,7 +48,12 @@ export interface CandidateEducation {
  * Shape-guarded rather than trusted: parsed_json is jsonb and a hand-edited row can hold anything,
  * and "GPA: first class honours" printed in the education block would be a claim we never read off
  * the page. */
-const GPA_VALUE = /^\d{1,2}(?:\.\d{1,3})?$/;
+/* Up to THREE digits, because a two-digit cap silently deleted the denominator on every
+   percentage-style record. "85/100" printed as "GPA: 85", which reads as an 85 on a 4.0-style
+   scale - a materially different and much better claim than the page made. The /100 and
+   percentage systems are standard across India and the UAE, so this was not an exotic edge case
+   for this product's users. Four digits stays out: that is a year, not a grade. */
+const GPA_VALUE = /^\d{1,3}(?:\.\d{1,3})?$/;
 
 export function educationGpaLine(education: Pick<CandidateEducation, 'gpa' | 'gpa_scale'>): string {
   const value = education.gpa?.trim() ?? '';
@@ -259,14 +264,23 @@ const ORG_NOISE = new Set([
    employers apart, so "Company 1" and "Company 2" both collapsed to {company} and scored a PERFECT
    1.0 against each other. No threshold on that scale could separate them, which is why this exists
    rather than a tuned constant. */
-function orgTokens(value: string): Set<string> {
+function orgWords(value: string): string[] {
   /* Apostrophes are removed rather than treated as a break, so "St. Jude's" and "St Judes" are the
      same two tokens. Splitting on them instead leaves a stray "s" that counts as a whole identity
      word, which drags an otherwise perfect match down to 0.5 and below the bar. */
-  return new Set(
-    (value.toLowerCase().replace(/['\u2019]/g, '').match(/[a-z0-9]+/g) ?? [])
-      .filter((part) => !ORG_NOISE.has(part)),
-  );
+  return value.toLowerCase().replace(/['\u2019]/g, '').match(/[a-z0-9]+/g) ?? [];
+}
+
+/* STRIPPING NOISE MUST NOT STRIP THE WHOLE NAME. A company called "The Company", "Holdings" or
+   "The Group" is made entirely of the words this list discards, so it reduced to an empty set and
+   scored 0.00 against ITSELF - never matching its own bank row, and silently losing that row's
+   bullets, its entry type and its city. Every one of those failures is invisible: the resume simply
+   comes out thinner.
+   When the filter would empty a name, the unfiltered words are the name. */
+function orgTokens(value: string): Set<string> {
+  const words = orgWords(value);
+  const meaningful = words.filter((part) => !ORG_NOISE.has(part));
+  return new Set(meaningful.length > 0 ? meaningful : words);
 }
 
 function orgNumbers(value: string): Set<string> {
@@ -300,11 +314,7 @@ export function orgScore(generated: string, source: string): number {
      caller's threshold is 0.8 rather than 0.5: "Bank of America" and "Bank of the West" share
      exactly one of two identity words and must not be treated as one employer. */
   const overlap = intersection / Math.min(a.size, b.size);
-  const initialism = (value: string) =>
-    (value.toLowerCase().match(/[a-z0-9]+/g) ?? [])
-      .filter((part) => !ORG_NOISE.has(part))
-      .map((part) => part[0])
-      .join('');
+  const initialism = (value: string) => [...orgTokens(value)].map((part) => part[0]).join('');
   const compactGenerated = generated.toLowerCase().replace(/[^a-z0-9]/g, '');
   const compactSource = source.toLowerCase().replace(/[^a-z0-9]/g, '');
   const acronymMatch =
