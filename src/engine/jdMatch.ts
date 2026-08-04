@@ -282,6 +282,15 @@ const HEADING_PATTERNS: Array<{ kind: SectionKind; re: RegExp }> = [
   // accountant's requirement line is not a footer. The anchored form reaches only the 59 lines that
   // are the bare word standing alone as a banner.
   //
+  // THIS RAISES REFUSALS, 1,583 to 1,606 over the 22,138 active postings, and the 24 that flip are
+  // the point rather than a cost. Samsara's "Account Executive, Commercial - Mexico" scored on eight
+  // terms before this, of which `Tofu`, `us-greenhouse-mail.io`, `mail3.guide.co` and `Commitment`
+  // were four: take the footer away and what is left is under the floor, so the posting refuses
+  // instead of printing a number built on a rewards paragraph and a mail domain. That is the trade
+  // MIN_SCORABLE_TERMS exists to make. It is recorded here because it is user-visible - a student
+  // sees "not scorable" on 24 more postings - and because a later change that moves this number
+  // should have to notice it moved.
+  //
   // TWO CANDIDATES MEASURED AND REJECTED, recorded so they are not re-proposed on the intuition
   // that put them here:
   //
