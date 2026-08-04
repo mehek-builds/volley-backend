@@ -2783,6 +2783,23 @@ describe('ISSUE-027: one requirement spelled two ways is one denominator slot', 
     assert.equal(apiish[0].mentions, 2, 'both spellings count toward how often the employer said it');
   });
 
+  test('a three-letter skill folds with its plural too', () => {
+    /* FOUND BY DRIVING A REAL POSTING THROUGH THE RUNNING API, not by reading the code. Okta's
+     * "Staff Software Engineer" names both `UI` and `UIs`, and the packet listed them as two
+     * separate missing requirements: `ui` is three characters, so `uis` failed the `length > 3`
+     * guard the first version of foldKey inherited from inLexicon, and the two never met. That
+     * guard is protecting a speculative lookup there and nothing here. */
+    const jd =
+      'Requirements:\n' +
+      '- Build accessible UIs for our customers\n' +
+      '- Own the UI component library\n' +
+      '- 3 years of Python\n';
+    const terms = extractJdTerms(jd, { company: 'Acme', role: 'Engineer' });
+    const uiish = terms.filter((t) => t.term === 'ui' || t.term === 'uis');
+    assert.equal(uiish.length, 1, `"UI" and "UIs" are one requirement, got ${uiish.map((t) => t.term).join(', ')}`);
+    assert.equal(uiish[0].mentions, 2, 'both spellings count toward emphasis');
+  });
+
   test('the fold does not damage a word that merely ends in -is or -ss', () => {
     // singular() leaves -is and -ss alone on purpose (analysis, basis, compliance-ss cases), and
     // the lexicon half of foldKey must not undo that.

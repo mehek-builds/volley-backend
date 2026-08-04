@@ -2359,7 +2359,23 @@ function foldKey(term: string): string {
     .map((word) => {
       const s = singular(word);
       if (s !== word) return s;
-      if (word.length > 3 && word.endsWith('s') && SKILL_LEXICON.has(word.slice(0, -1))) {
+      // `> 2`, NOT the `> 3` inLexicon uses, and the difference is a real defect rather than a
+      // tidy-up. That guard was copied from inLexicon, where it is protecting a DIFFERENT test:
+      // there the stripped form is looked up speculatively, so a short word must not be chopped on
+      // the chance it lands on an entry. Here the strip only survives if the result IS a lexicon
+      // entry, which is the evidence, so length is doing no safety work and is only excluding
+      // three-letter plurals.
+      //
+      // `UIs` IS THE ONE IT EXCLUDED, found by driving a real posting through the running API
+      // rather than by reading this code. Okta's "Staff Software Engineer" names both spellings and
+      // its packet listed `UI` and `UIs` as two separate missing requirements, which is precisely
+      // the duplicate this fold exists to remove. `ui` is three characters, so `uis` failed
+      // `length > 3` and the two never met.
+      //
+      // Two is the floor because `word.slice(0, -1)` must leave something to look up: at length 2
+      // the candidate is a single character, and the only single-character lexicon entries are `r`
+      // and `c`, which isSpecific admits solely as standalone capitals and never as a plural.
+      if (word.length > 2 && word.endsWith('s') && SKILL_LEXICON.has(word.slice(0, -1))) {
         return word.slice(0, -1);
       }
       return word;
