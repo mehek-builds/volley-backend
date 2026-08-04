@@ -2,8 +2,9 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { warmRequirementCache, WARM_TIMEOUT_MS } from './warmRequirements';
+import { warmRequirementCache, warmQuestions, WARM_TIMEOUT_MS } from './warmRequirements';
 import { matchClause } from './clauseMatch';
+import { cacheKey } from '../llm/competencyCache';
 import type { CandidateFacts } from './clauseMatch';
 
 const FACTS: CandidateFacts = {
@@ -223,6 +224,82 @@ describe('the posting read is scoped, and the paid route is metered', () => {
     // 180 req/min IP limiter. Its own cache made the common path free, which is what hid it.
     assert.match(routes, /'\/jd-match\/requirements', \{ preHandler: requireAuth, bodyLimit: 128 \* 1024 \}/);
     assert.match(routes, /allowHourly\(userId, 'jdRequirements', LIMITS\.perHour\.jdRequirements\)/);
+  });
+});
+
+describe('the warm pass covers the graduation clause too', () => {
+  const facts = {
+    degree: 'Bachelor of Science in Computer Science',
+    school: 'University of Southern California',
+    gradDate: 'May 2028',
+    resumeText: 'Python.',
+    bullets: ['Led a 4-person team, analyzing 350 survey responses.'],
+  };
+  const jd = `Requirements:
+- Pursuing a bachelor's degree graduating in Spring 2028
+- Ability to articulate complex systems to non-technical partners
+- Experience with Python
+`;
+
+  test('graduation rides the warm batch, tagged as eligibility', () => {
+    /* Left out, the review screen still paid for a model round trip after a "warm" packet build,
+       on exactly the clause the student most wants answered. */
+    const qs = warmQuestions(jd, facts, undefined);
+    const grad = qs.find((q) => /graduating/.test(q.clause));
+    assert.ok(grad, 'the graduation clause is warmed at all');
+    assert.equal(grad!.kind, 'eligibility');
+  });
+
+  test('the competency clause is still warmed, and still a competency', () => {
+    const qs = warmQuestions(jd, facts, undefined);
+    assert.equal(qs.find((q) => /articulate/.test(q.clause))?.kind, 'competency');
+  });
+
+  test('a term clause is never warmed, because it never reaches the model', () => {
+    const qs = warmQuestions(jd, facts, undefined);
+    assert.ok(!qs.some((q) => /Experience with Python/.test(q.clause)));
+  });
+
+  test('no graduation date on file warms no eligibility question', () => {
+    // It is unscoreable rather than pending, so there is nothing to ask and nothing to pay for.
+    const qs = warmQuestions(jd, { ...facts, gradDate: null }, undefined);
+    assert.ok(!qs.some((q) => q.kind === 'eligibility'));
+  });
+});
+
+describe('an eligibility answer is cached under everything it depends on', () => {
+  test('the graduation date is in the key', () => {
+    const a = cacheKey('graduating Spring 2028', ['b'], { gradDate: 'May 2028', today: '2026-08-04' });
+    const b = cacheKey('graduating Spring 2028', ['b'], { gradDate: 'May 2027', today: '2026-08-04' });
+    // Nothing expires here, so a student who corrects their graduation date would otherwise keep
+    // the verdict computed from the wrong one forever.
+    assert.notEqual(a, b);
+  });
+
+  test('today is in the key', () => {
+    const a = cacheKey('rising senior only', ['b'], { gradDate: 'May 2028', today: '2026-08-04' });
+    const b = cacheKey('rising senior only', ['b'], { gradDate: 'May 2028', today: '2027-08-04' });
+    assert.notEqual(a, b, '"not yet a senior" must not outlive the year it was true');
+  });
+
+  test('an eligibility key can never collide with a competency key', () => {
+    const elig = cacheKey('same text', ['b'], { gradDate: null, today: '2026-08-04' });
+    assert.notEqual(elig, cacheKey('same text', ['b']));
+    assert.ok(elig.startsWith('e:'));
+  });
+
+  test('two students with no bullets do not share an eligibility answer', () => {
+    // The collision that made this urgent: bullets are the only per-student part of the old key.
+    assert.notEqual(
+      cacheKey('graduating 2027', [], { gradDate: 'May 2027', today: '2026-08-04' }),
+      cacheKey('graduating 2027', [], { gradDate: 'May 2030', today: '2026-08-04' }),
+    );
+  });
+
+  test('the competency key is untouched', () => {
+    // Whether a bullet shows Python does not depend on the date, and rekeying those would throw
+    // away every warm answer in the table for nothing.
+    assert.equal(cacheKey('shows python', ['b']), cacheKey('shows python', ['b']));
   });
 });
 

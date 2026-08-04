@@ -313,6 +313,54 @@ describe('an eligibility verdict grounds in the facts, not the bullets', () => {
   });
 });
 
+describe('the route hands the judge the facts it needs', () => {
+  /* THE BUG THIS CLOSES, and it shipped to production. The route's judge callback was typed
+     (b, qs), so scorePosting's third argument went nowhere. Eligibility questions reached the model
+     with an empty facts block, every "met" failed the grounding gate for citing a date that was
+     not there, and a May 2028 graduate scored 0 against a Spring 2028 posting. Asserted on the
+     SOURCE of the route because the failure is the callback's arity, which no unit of the engine
+     can see: scorePosting passes the profile correctly either way. */
+  const route = readFileSync(path.join(__dirname, '../routes/jdMatch.ts'), 'utf8');
+  const facts: CandidateFacts = {
+    degree: 'Bachelor of Science in Computer Science',
+    school: 'University of Southern California',
+    gradDate: 'May 2027',
+    resumeText: BULLETS.join(' '),
+    bullets: BULLETS,
+  };
+
+  test('the judge callback accepts and forwards the profile', () => {
+    assert.match(route, /async \(b, qs, profile\) => \{/, 'the callback must take the third argument');
+    assert.match(route, /judgeCompetenciesCached\(b, qs, profile\)/, 'and pass it on');
+  });
+
+  test('scorePosting really does pass a third argument', async () => {
+    // Pins the other half: if scorePosting ever stops sending it, the route's forwarding is moot.
+    let arity: number | null = null;
+    const jd = "Requirements:\n- Pursuing a bachelor's degree graduating in Spring 2028\n";
+    await scorePosting(jd, facts, undefined, segmentJd as never, async (_b, qs, profile) => {
+      arity = profile?.gradDate ? 3 : 2;
+      return { verdicts: qs.map((q) => ({ id: q.id, met: false })), rejected: [] };
+    });
+    assert.equal(arity, 3, 'the profile arrives at the callback');
+  });
+
+  test('a correct answer survives the round trip the route actually makes', async () => {
+    /* End to end through the route's own callback shape: model answers with the real graduation
+       date, grounding gate accepts it, clause is met. Before the fix this was unmet with
+       "nothing in your profile establishes this". */
+    const jd = "Requirements:\n- Pursuing a bachelor's degree graduating in Spring 2028\n";
+    const r = await scorePosting(jd, facts, undefined, segmentJd as never, async (b, qs, profile) => {
+      const raw = { verdicts: qs.map((q) => ({ id: q.id, met: true, quote: 'May 2027', why: 'in window' })) };
+      const out = validateVerdicts(raw, qs, b, profile);
+      return { verdicts: out.verdicts, rejected: out.rejected };
+    });
+    const grad = r.clauses.find((c) => c.basis === 'graduation');
+    assert.equal(grad?.verdict, 'met');
+    assert.equal(r.rejected.length, 0, 'and nothing was rejected for want of a fact');
+  });
+});
+
 describe('the prompt states the direction rules the regex never had', () => {
   /* Round six found "not graduating before 2027" read as a closed range and inverted, and
      "Fall 2027 or Spring 2028" treated as a floor. Both are direction, and both are now written
@@ -321,6 +369,13 @@ describe('the prompt states the direction rules the regex never had', () => {
     assert.match(COMPETENCY_SYSTEM_PROMPT, /not graduating before/i);
     assert.match(COMPETENCY_SYSTEM_PROMPT, /no later than/i);
     assert.match(COMPETENCY_SYSTEM_PROMPT, /requisition number, a funding round, a cohort year/i);
+  });
+
+  test('year standing is answerable, not waved off as unstated', () => {
+    // It came back "no graduation-date-based condition is stated to check", which is safe but
+    // wrong: the condition IS stated, in years rather than dates. Today's date makes it checkable.
+    assert.match(COMPETENCY_SYSTEM_PROMPT, /YEAR STANDING is an eligibility condition/);
+    assert.match(COMPETENCY_SYSTEM_PROMPT, /count back from the graduation date/i);
   });
 
   test('it forbids inventing a condition the posting never stated', () => {

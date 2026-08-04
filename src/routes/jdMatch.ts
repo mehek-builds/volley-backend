@@ -320,8 +320,14 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
         location: parsed.data.job_context?.location ?? posting?.location ?? null,
       },
       segmentJd,
-      async (b, qs) => {
-        const r = await judgeCompetenciesCached(b, qs);
+      /* THE PROFILE IS THE THIRD ARGUMENT, and dropping it is silent.
+         This callback was typed (b, qs), so scorePosting's profile went nowhere: eligibility
+         questions reached the model with an empty CANDIDATE FACTS block, every "met" failed the
+         grounding gate for citing a date that was not there, and a student graduating May 2028
+         scored 0 against a posting asking for Spring 2028 - told "nothing in your profile
+         establishes this" about a date sitting in their own packet. */
+      async (b, qs, profile) => {
+        const r = await judgeCompetenciesCached(b, qs, profile);
         judged = r.judged;
         fromCache = r.fromCache;
         return { verdicts: r.verdicts, rejected: r.rejected };
