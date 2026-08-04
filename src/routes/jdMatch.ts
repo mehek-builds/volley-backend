@@ -17,7 +17,7 @@ import { extractJdTerms } from '../engine/jdMatch';
 import { generated_resumes, autofill_events, monitored_jobs, career_page_sources } from '../db/schema';
 import { AUTONOMOUS_PORTAL_FAMILIES } from '../lib/portalSubmission';
 import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
-import { readExperienceBank } from '../db/experienceBank';
+import { readExperienceBank, readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
 import type { ResumeSpec } from '../llm/resumeSpec';
 
 /**
@@ -442,7 +442,7 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
     }
 
     const [bank, storedResume] = await Promise.all([
-      readExperienceBank(userId),
+      readExperienceBankOrSeedFromBaseResume(userId),
       body.resume_text === undefined
         ? db
             .select()

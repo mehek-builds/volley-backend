@@ -1,6 +1,23 @@
 import { eq } from 'drizzle-orm';
 import { db } from './index';
-import { experience_bank, type ExperienceBankEntry } from './schema';
+import { experience_bank, profiles, type ExperienceBankEntry, type NewExperienceBankEntry } from './schema';
+import type { ResumeSpec } from '../llm/resumeSpec';
+
+export function bankEntriesFromResumeSpec(spec: ResumeSpec, userId: string): NewExperienceBankEntry[] {
+  return (spec.experience ?? [])
+    .filter((entry) => entry.org?.trim())
+    .map((entry) => ({
+      user_id: userId,
+      type: entry.type ?? 'job',
+      org: entry.org.trim(),
+      title: entry.title?.trim() || null,
+      date_range: entry.date_range?.trim() || null,
+      location: entry.location?.trim() || null,
+      bullet_variants: (entry.bullets ?? []).map((bullet) => bullet.trim()).filter(Boolean),
+      tags: [],
+    }))
+    .filter((entry) => (entry.bullet_variants as string[]).length > 0);
+}
 
 // The one way to read a student's experience bank.
 //
@@ -26,4 +43,23 @@ export function readExperienceBank(userId: string): Promise<ExperienceBankEntry[
     .from(experience_bank)
     .where(eq(experience_bank.user_id, userId))
     .orderBy(experience_bank.created_at, experience_bank.id);
+}
+
+export async function readExperienceBankOrSeedFromBaseResume(userId: string): Promise<ExperienceBankEntry[]> {
+  const existing = await readExperienceBank(userId);
+  if (existing.length > 0) return existing;
+
+  const [profile] = await db
+    .select({ base_resume_json: profiles.base_resume_json })
+    .from(profiles)
+    .where(eq(profiles.user_id, userId))
+    .limit(1);
+  const spec = profile?.base_resume_json as ResumeSpec | null | undefined;
+  if (!spec) return existing;
+
+  const entries = bankEntriesFromResumeSpec(spec, userId);
+  if (entries.length === 0) return existing;
+
+  await db.insert(experience_bank).values(entries);
+  return readExperienceBank(userId);
 }

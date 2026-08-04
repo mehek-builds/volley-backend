@@ -6,7 +6,7 @@ import { put } from '@vercel/blob';
 import { db } from '../db/index';
 import { profiles, generated_resumes, autofill_events, application_profile, monitored_jobs } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
-import { readExperienceBank } from '../db/experienceBank';
+import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
 import { allowHourly, claimCounterSlot, getCount, getEntitlements, LIMITS, monthPeriod, quotaExceededPayload, rateLimitedReply, releaseCounterSlot } from '../middleware/quota';
 import { generateResumeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import {
@@ -245,7 +245,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
        GPA the rendered PDF prints (see educationFrom). Read in the same batch rather than after the
        bank check, so the authoritative academic record costs no wall clock on the happy path. */
     const [bank, profileRows, applicationRows] = await Promise.all([
-      readExperienceBank(userId),
+      readExperienceBankOrSeedFromBaseResume(userId),
       db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1),
       db.select().from(application_profile).where(eq(application_profile.user_id, userId)).limit(1),
     ]);

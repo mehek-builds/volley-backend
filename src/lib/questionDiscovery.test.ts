@@ -33,7 +33,7 @@ test('never answers work-authorization or sponsorship questions', () => {
 });
 
 test('never answers EEO / demographic questions', () => {
-  const labels = ['what is your gender?', 'are you hispanic or latino?', 'veteran status'];
+  const labels = ['what is your gender?', 'are you hispanic or latino?', 'veteran status', 'are you a person of transgender experience?'];
   for (const label of labels) {
     assert.equal(isRefusedQuestion(label), true, label);
     assert.equal(classifyField(label), null, label);
