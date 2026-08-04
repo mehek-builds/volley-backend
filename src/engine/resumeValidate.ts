@@ -707,6 +707,26 @@ export function resumeSpecText(spec: ResumeSpec): string {
 }
 
 /**
+ * The one place the education-position issue is worded, so callers can recognise it without
+ * matching a string that lives somewhere else.
+ *
+ * Position is the one member of this set that is not a claim about the student. It is DERIVED from
+ * the calendar: deriveCandidateContext does year arithmetic against RECENT_GRADUATE_YEARS, so a
+ * May 2023 graduate renders education at the top through 2025 and after experience from 1 January
+ * 2026. The flip lands at midnight on New Year of grad_year+3, which means a packet built on 31
+ * December and sent on 2 January is stale after two days, and since nothing expires packets, the
+ * exposure only widens. That packet's education did not change and telling its owner it did would
+ * be a false statement from the guard, which is the same class of defect this guard exists to
+ * prevent. Hence a separate code and separate copy: see educationDriftResponse.
+ */
+export const EDUCATION_POSITION_ISSUE_PREFIX = 'education must render';
+
+/** True when an issue from educationDriftIssues is the calendar-derived layout one. */
+export function isEducationLayoutIssue(issue: string): boolean {
+  return issue.startsWith(EDUCATION_POSITION_ISSUE_PREFIX);
+}
+
+/**
  * The one implementation of "does this resume's education block still agree with the profile".
  *
  * Extracted from validateResumeSpec so the send-time guards on the unattended submission routes can
@@ -730,7 +750,7 @@ export function educationDriftIssues(spec: ResumeSpec, education: CandidateEduca
   }
   const expectedPosition = deriveCandidateContext(education).education_position;
   if (spec.education_position !== expectedPosition) {
-    issues.push(`education must render ${expectedPosition === 'top' ? 'at the top for a currently enrolled student' : 'after experience for this candidate'}`);
+    issues.push(`${EDUCATION_POSITION_ISSUE_PREFIX} ${expectedPosition === 'top' ? 'at the top for a currently enrolled student' : 'after experience for this candidate'}`);
   }
   return issues;
 }

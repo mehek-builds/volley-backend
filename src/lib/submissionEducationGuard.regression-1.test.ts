@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { candidateEducationFromParsedProfile, packetEducationDrift } from './submissionEducationGuard';
+import { isEducationLayoutIssue } from '../engine/resumeValidate';
+import {
+  EDUCATION_DRIFT_CODE,
+  EDUCATION_LAYOUT_STALE_CODE,
+  candidateEducationFromParsedProfile,
+  educationDriftResponse,
+  packetEducationDrift,
+} from './submissionEducationGuard';
 
 /* A packet freezes its rendered PDF at build time. These tests hold the line that an unattended
    send re-checks the education block against the profile as it reads NOW, and that it refuses in a
@@ -59,6 +66,60 @@ test('a GPA that differs between the stores is not treated as drift', () => {
   assert.deepEqual(packetEducationDrift({ ...packet, gpa: '3.2' }, profile), []);
 });
 
+/* The calendar-boundary case. education_position is derived from year arithmetic, so a graduate
+   exactly three calendar years back flips from "top" to "after_experience" at midnight on 1 January.
+   A packet built on 31 December and sent on 2 January is stale after two days, with nothing about
+   the student changed. It must still be refused, because a send guard laxer than the save guard is
+   the other failure mode, but it must not be told a falsehood about why. */
+const threeYearsBack = String(new Date().getFullYear() - 3);
+const graduatedProfile = {
+  school: 'Example University',
+  degree: 'BS Computer Science',
+  grad_date: threeYearsBack,
+  grad_year: Number(threeYearsBack),
+  currently_enrolled: false,
+  coursework: ['Algorithms', 'Databases'],
+};
+const graduatedPacket = { ...packet, grad_date: threeYearsBack, education_position: 'top' };
+
+test('a packet stale only by the education-position calendar flip is still refused', () => {
+  const issues = packetEducationDrift(graduatedPacket, graduatedProfile);
+  assert.deepEqual(issues.filter((issue) => !isEducationLayoutIssue(issue)), [],
+    'nothing about this student changed, so nothing but layout may be reported');
+  assert.equal(issues.length, 1, 'the layout flip must still block an unattended send');
+});
+
+test('a layout-only refusal does not tell the student their details changed', () => {
+  const response = educationDriftResponse(packetEducationDrift(graduatedPacket, graduatedProfile));
+  assert.equal(response.code, EDUCATION_LAYOUT_STALE_CODE);
+  assert.ok(!/details changed/.test(response.error), `copy must be true: ${response.error}`);
+  assert.match(response.error, /save the resume/, 'the instruction must still be the one that fixes it');
+});
+
+test('a real education change keeps the drift code even when layout is stale too', () => {
+  const alsoRenamed = { ...graduatedProfile, school: 'Other University' };
+  const response = educationDriftResponse(packetEducationDrift(graduatedPacket, alsoRenamed));
+  assert.equal(response.code, EDUCATION_DRIFT_CODE);
+  assert.match(response.error, /education details changed/);
+  assert.ok(response.issues.length >= 2);
+});
+
+test('a genuine field change is never reported as a layout staleness', () => {
+  const response = educationDriftResponse(packetEducationDrift(packet, { ...profile, grad_date: '2026', grad_year: 2026 }));
+  assert.equal(response.code, EDUCATION_DRIFT_CODE);
+});
+
+test('the position issue wording lives at exactly one construction site', () => {
+  const validate = strippedSource('src/engine/resumeValidate.ts');
+  assert.match(validate, /export const EDUCATION_POSITION_ISSUE_PREFIX = 'education must render';/);
+  assert.equal(
+    validate.split("'education must render").length - 1,
+    1,
+    'the prefix must be declared once and referenced, never restated',
+  );
+  assert.match(validate, /issues\.push\(`\$\{EDUCATION_POSITION_ISSUE_PREFIX\}/);
+});
+
 test('the profile mapping resolves a missing grad_date from grad_year, as the dashboard does', () => {
   const education = candidateEducationFromParsedProfile({ school: 'Example University', grad_year: 2027 });
   assert.equal(education.grad_date, '2027');
@@ -92,6 +153,13 @@ test('extension-start refuses a drifted packet before it reserves the submission
   assert.ok(
     handler.indexOf('packetEducationDrift') < handler.indexOf('tx.update(generated_resumes)'),
     'the drift check must run before the claim is written',
+  );
+  /* Pinned because it is the argument, not an accident of layout: a drifted packet must not burn a
+     day's submission quota, and "your graduation date changed" is actionable where "come back
+     tomorrow" is not. Without this line a refactor can reorder the two and CI stays green. */
+  assert.ok(
+    handler.indexOf('packetEducationDrift') < handler.indexOf('withinDailyCap'),
+    'the drift check must run before the daily cap, so a drifted packet reports drift rather than the cap',
   );
   assert.match(handler, /result\.kind === 'education_drift'\) return reply\.status\(422\)\.send\(educationDriftResponse/);
 });

@@ -1,5 +1,5 @@
 import type { CandidateEducation } from '../engine/resumePolicy';
-import { educationDriftIssues } from '../engine/resumeValidate';
+import { educationDriftIssues, isEducationLayoutIssue } from '../engine/resumeValidate';
 import { normalizeSpec } from '../llm/resumeSpec';
 
 /**
@@ -67,12 +67,34 @@ export function packetEducationDrift(storedSpec: unknown, parsedProfile: unknown
 }
 
 export const EDUCATION_DRIFT_CODE = 'EDUCATION_DRIFT';
+export const EDUCATION_LAYOUT_STALE_CODE = 'EDUCATION_LAYOUT_STALE';
 
 /**
  * A refusal a client can act on without guessing. A silent refusal, or a bare 409, would be worse
  * than the bug it prevents: the student would see a submission that never happened and no reason.
+ *
+ * TWO CODES, because the set of issues has two causes and only one of them is the student's.
+ *
+ * School, degree, graduation date and coursework are claims about the student, and a mismatch there
+ * means the profile really did change under a packet that had already frozen its PDF. Position is
+ * not a claim at all: deriveCandidateContext derives it from the calendar, and it flips at midnight
+ * on 1 January of grad_year+3 for anyone exactly three calendar years out. Nothing about that
+ * student changed, so "your education details changed" would be false, and a guard that tells a
+ * student their details changed when they did not is the same class of defect as the stale packet
+ * it refuses. The instruction is identical in both cases (re-save re-derives and re-renders); only
+ * the explanation differs, and the explanation has to be true.
+ *
+ * Position stays IN the comparison. Dropping it would make the send guard laxer than the save
+ * guard, which is the other way to get this wrong.
  */
 export function educationDriftResponse(issues: string[]) {
+  if (issues.length > 0 && issues.every(isEducationLayoutIssue)) {
+    return {
+      error: 'This application was prepared a while ago and its layout is now out of date. Open the application, save the resume, and submit again.',
+      code: EDUCATION_LAYOUT_STALE_CODE,
+      issues,
+    };
+  }
   return {
     error: 'Your education details changed after this application was prepared. Open the application, review the resume and save it, then submit again.',
     code: EDUCATION_DRIFT_CODE,
