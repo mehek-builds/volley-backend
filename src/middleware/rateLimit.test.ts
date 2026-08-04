@@ -11,6 +11,7 @@ const POLICY: RateLimitPolicy = { name: 'test', limit: 2, windowMs: 1_000 };
 
 const CONFIG: RateLimitConfig = {
   general: { name: 'general', limit: 180, windowMs: 60_000 },
+  board: { name: 'board', limit: 90, windowMs: 60_000 },
   authStart: { name: 'auth_start', limit: 20, windowMs: 900_000 },
   authVerify: { name: 'auth_verify', limit: 40, windowMs: 900_000 },
   download: { name: 'resume_download', limit: 60, windowMs: 60_000 },
@@ -117,4 +118,42 @@ test('route policy protects auth and download routes without charging probes or 
   assert.equal(policyForRequest('PUT', '/auth/password', CONFIG)?.name, 'auth_verify');
   assert.equal(policyForRequest('GET', '/resume/download', CONFIG)?.name, 'resume_download');
   assert.equal(policyForRequest('GET', '/profile', CONFIG)?.name, 'general');
+});
+
+/* The board routes are the ones that spend Neon transfer, which is the resource that ran out and
+   suspended the database on 2026-08-04. Under `general` they sat at 180/minute per IP. */
+test('every board read is metered under the board policy, not the general one', () => {
+  for (const path of ['/jobs', '/jobs/grouped', '/jobs/facets', '/jobs/some-uuid']) {
+    assert.equal(policyForRequest('GET', path, CONFIG)?.name, 'board', path);
+  }
+});
+
+test('the board limit is tighter than the general one, which is the entire point', () => {
+  const board = policyForRequest('GET', '/jobs', CONFIG)!;
+  const general = policyForRequest('GET', '/profile', CONFIG)!;
+  assert.ok(
+    board.limit < general.limit,
+    `board allows ${board.limit}/window and general allows ${general.limit}. A board policy that ` +
+      'is not tighter than general is dead configuration.',
+  );
+});
+
+/* Keyed by IP, and this product's users are students, so a university NAT puts a whole campus
+   behind one address. A limit tuned to a single human locks out a lecture hall. */
+test('the board limit leaves room for many people behind one shared address', () => {
+  const board = policyForRequest('GET', '/jobs', CONFIG)!;
+  assert.ok(
+    board.limit >= 60,
+    `${board.limit}/minute is too tight for a shared campus IP, which is the common case here`,
+  );
+});
+
+/* A route added under /jobs later must inherit the board policy rather than silently falling back
+   to general, which is why the match is a prefix and not a list of exact paths. */
+test('a future /jobs route inherits the board policy without being listed', () => {
+  assert.equal(policyForRequest('GET', '/jobs/anything/new', CONFIG)?.name, 'board');
+});
+
+test('a path that merely starts with the same letters is not a board route', () => {
+  assert.equal(policyForRequest('GET', '/jobsearch', CONFIG)?.name, 'general');
 });
