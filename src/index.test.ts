@@ -76,6 +76,20 @@ test('/health identifies the deployable service and revision contract', async ()
   // `build` is what makes the DEPLOY.md check work on a CLI deploy, where VERCEL_GIT_COMMIT_SHA is
   // not set and `revision` is null. The key must always be present for the runbook to rely on it.
   assert.ok(Object.hasOwn(body, 'build'));
+  // `revision_source` is what makes a null revision DIAGNOSABLE. DEPLOY.md's table keys off these
+  // three values, so the set is part of the contract and not an implementation detail.
+  assert.ok(Object.hasOwn(body, 'revision_source'));
+  assert.ok(
+    ['vercel-git', 'git-sha', 'none'].includes(body.revision_source),
+    `unexpected revision_source ${JSON.stringify(body.revision_source)}`,
+  );
+  // The two fields cannot disagree: a source of 'none' with a SHA, or a SHA with no source, would
+  // each send a reader of the runbook down the wrong path.
+  assert.equal(
+    body.revision === null,
+    body.revision_source === 'none',
+    'revision and revision_source must agree about whether the commit is known',
+  );
 });
 
 /* The whole reason /health carries this field: L2 is enabled purely by two environment variables,
@@ -133,9 +147,14 @@ test('/health reports which ranking-cache tiers are running', async () => {
 });
 
 test('/health identifies the build even when no git SHA is exposed', async () => {
-  // The exact production shape this exists for: a `vercel deploy --prod` sets VERCEL_DEPLOYMENT_ID
+  // The exact production shape this exists for: a bare `vercel --prod` sets VERCEL_DEPLOYMENT_ID
   // but not VERCEL_GIT_COMMIT_SHA, and on 2026-08-04 that made /health report `revision: null` for
-  // a deployment that was live and correct. Confirming what shipped took three Vercel API calls.
+  // a deployment that was live and correct. Confirming what shipped took a Vercel API call and two
+  // git commands.
+  //
+  // WHY THAT HAPPENS IS NOW ESTABLISHED, and is no longer described here as unexplained: Vercel
+  // fills VERCEL_GIT_* from the GitHub integration's metadata, so a CLI deploy leaves them unset.
+  // `npm run deploy:prod` passes GIT_SHA instead, which is the case pinned in the test below.
   const saved = {
     sha: process.env.VERCEL_GIT_COMMIT_SHA,
     gitSha: process.env.GIT_SHA,
@@ -157,6 +176,11 @@ test('/health identifies the build even when no git SHA is exposed', async () =>
     const body = (await app.inject({ method: 'GET', url: '/health' })).json();
     assert.equal(body.revision, null, 'this is the case where the SHA is genuinely unavailable');
     assert.equal(
+      body.revision_source,
+      'none',
+      'a null revision must say WHY, or the reader cannot tell it from a broken field',
+    );
+    assert.equal(
       body.build,
       'dpl_test123',
       'the deployment id wins over VERCEL_URL: reversing the operands must fail here',
@@ -172,6 +196,56 @@ test('/health identifies the build even when no git SHA is exposed', async () =>
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
+  }
+});
+
+test('a CLI deploy that passed GIT_SHA is as identifiable as a GitHub one', async () => {
+  /* THE CASE THE FIX ADDS, end to end through the real app rather than through the resolver alone.
+   *
+   * `npm run deploy:prod` passes `-e GIT_SHA=$(git rev-parse HEAD)` precisely so a hand deploy
+   * answers the DEPLOY.md question. Before that, `revision` was null on every CLI deploy and the
+   * GIT_SHA fallback in the handler had never once fired, because nothing set the variable.
+   *
+   * The two branches are pinned together here because it is the DIFFERENCE that the runbook reads:
+   * the same null-revision deployment must report 'none', and the same deployment with a SHA passed
+   * in must report 'git-sha'. Asserting only one of them would let the source field freeze at a
+   * constant and still pass. */
+  const saved = { sha: process.env.VERCEL_GIT_COMMIT_SHA, gitSha: process.env.GIT_SHA };
+  delete process.env.VERCEL_GIT_COMMIT_SHA;
+  process.env.GIT_SHA = 'cf071b61ce6f6b48850b5564bad3d6e0d4cf86a0';
+  try {
+    const { buildApp } = await import('./index');
+    const app = await buildApp();
+    const body = (await app.inject({ method: 'GET', url: '/health' })).json();
+    assert.equal(body.revision, 'cf071b61ce6f6b48850b5564bad3d6e0d4cf86a0');
+    assert.equal(body.revision_source, 'git-sha', 'a hand deploy is distinguishable from an automatic one');
+    await app.close();
+  } finally {
+    if (saved.sha === undefined) delete process.env.VERCEL_GIT_COMMIT_SHA;
+    else process.env.VERCEL_GIT_COMMIT_SHA = saved.sha;
+    if (saved.gitSha === undefined) delete process.env.GIT_SHA;
+    else process.env.GIT_SHA = saved.gitSha;
+  }
+});
+
+test('the GitHub integration outranks a stale GIT_SHA', async () => {
+  // GIT_SHA is written by a shell script from whatever checkout it ran in. The platform's own value
+  // cannot have gone stale, so where both exist the platform wins and says so.
+  const saved = { sha: process.env.VERCEL_GIT_COMMIT_SHA, gitSha: process.env.GIT_SHA };
+  process.env.VERCEL_GIT_COMMIT_SHA = 'from-the-integration';
+  process.env.GIT_SHA = 'stale-from-a-laptop';
+  try {
+    const { buildApp } = await import('./index');
+    const app = await buildApp();
+    const body = (await app.inject({ method: 'GET', url: '/health' })).json();
+    assert.equal(body.revision, 'from-the-integration');
+    assert.equal(body.revision_source, 'vercel-git');
+    await app.close();
+  } finally {
+    if (saved.sha === undefined) delete process.env.VERCEL_GIT_COMMIT_SHA;
+    else process.env.VERCEL_GIT_COMMIT_SHA = saved.sha;
+    if (saved.gitSha === undefined) delete process.env.GIT_SHA;
+    else process.env.GIT_SHA = saved.gitSha;
   }
 });
 

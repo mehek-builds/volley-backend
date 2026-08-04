@@ -246,32 +246,53 @@ git rev-parse origin/main
 ```
 
 `revision` is the git SHA and is the one to read: it compares to `git rev-parse origin/main` without
-leaving the terminal. **It is sometimes `null` on a hand deploy**, and that is not a failed deploy.
-It caught us on 2026-08-04: the deployment was live, correct and serving the production alias while
-`/health` said `null`, and confirming what shipped took three Vercel API calls. The condition is not
-fully pinned down — of two `vercel deploy --prod` deployments that afternoon, the one whose Vercel
-metadata carried `gitCommitSha` served `null` and the one carrying `githubCommitSha` was never
-polled before the alias moved on.
+leaving the terminal. `revision_source` tells you which mechanism supplied it, which is what makes a
+missing SHA diagnosable instead of merely disappointing:
 
-`build` is what to use then. It is the deployment id (or the deployment hostname on older builds)
-and is always present, so an empty `revision` never leaves you with nothing:
+| `revision_source` | what it means |
+|---|---|
+| `vercel-git` | The GitHub integration deployed it. The normal path. |
+| `git-sha` | A CLI deploy that went through `npm run deploy:prod`. |
+| `none` | A bare `vercel --prod`. The SHA is genuinely unknown; use `build`. |
+
+**Why a hand deploy used to report `null`.** Measured 2026-08-04 across the last 12 production
+deployments: Vercel fills the `VERCEL_GIT_*` variables from the **GitHub integration's** metadata,
+whose keys carry a `github` prefix. A `vercel --prod` from a laptop attaches its own git metadata
+under a shorter `git` prefix read from the local checkout, and that shape is not projected into the
+environment. 11 of the 12 were `source: git` and reported a revision; the 1 `source: cli` did not.
+This is no longer a mystery and `npm run deploy:prod` closes it by passing the SHA explicitly.
+
+`build` is the deployment id and is always present, so an empty `revision` never leaves you with
+nothing:
 
 ```bash
 BUILD=$(curl -s https://student-outreach-backend.vercel.app/health | jq -r .build)
 vercel inspect "$BUILD"        # resolves to the deployment, and through it to the commit
 ```
 
-Both being `null` means the API is not running on Vercel at all, which is the one case that really
-is a problem.
+`build` being `null` too means the API is not running on Vercel at all, which is the one case that
+really is a problem.
 
-To deploy by hand anyway (a rollback, or a hotfix that must not wait for review), use a throwaway
-clone so your own working tree, which is often on another branch with uncommitted work, is left
-alone. Copy `.vercel/project.json` into it, and **not** `.env.production.local`:
+### Deploying by hand
+
+Use the script. It ships the working tree, so it refuses a dirty one, refuses a tree that is not a
+descendant of `origin/main`, and passes the SHA so `/health` can identify it:
 
 ```bash
-git clone https://github.com/mehek-builds/volley-backend.git /tmp/ship && cd /tmp/ship
-mkdir -p .vercel && cp <repo>/.vercel/project.json .vercel/
-vercel deploy --prod
+npm run deploy:prod
+```
+
+**The ancestor guard is the important one.** A CLI deploy ships your tree, not a branch, and these
+checkouts are worked by several agents at once. Deploying from a checkout that is behind `main`
+silently reverts whatever landed in between, and nothing in the Vercel UI would show it: the
+deployment is green, Ready and holding the alias. On 2026-08-04 a CLI deploy replaced a GitHub
+deployment of the same commit 18 seconds after it, which was harmless only because the trees
+happened to match.
+
+For a deliberate rollback to an older commit, that guard is exactly what you want to skip:
+
+```bash
+FORCE=1 npm run deploy:prod
 ```
 
 ## How the database TLS config actually resolves
