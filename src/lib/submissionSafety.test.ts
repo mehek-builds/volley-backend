@@ -4,12 +4,13 @@ import { directPreparationIsSafe, resumeEditDisposition, submitRequestDispositio
 
 test('a submitted or active application cannot begin another submission run', () => {
   assert.equal(submitRequestDisposition('submitted'), 'submitted');
-  assert.equal(submitRequestDisposition('submit_requested'), 'in_flight');
+  assert.equal(submitRequestDisposition('submit_requested', true), 'in_flight');
   assert.equal(submitRequestDisposition('preparing'), 'in_flight');
   assert.equal(submitRequestDisposition('submitting'), 'in_flight');
 });
 
 test('pre-submit attention can retry, but a post-click uncertainty cannot risk a duplicate application', () => {
+  assert.equal(submitRequestDisposition('submit_requested', false), 'start');
   assert.equal(submitRequestDisposition('ready_to_submit'), 'start');
   assert.equal(submitRequestDisposition('failed'), 'start');
   assert.equal(submitRequestDisposition('needs_attention', false), 'start');

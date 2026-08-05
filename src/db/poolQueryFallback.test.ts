@@ -18,6 +18,13 @@ test('an ordinary awaited pooled query falls back once to the direct endpoint af
   const directCalls: unknown[][] = [];
   let connectCalls = 0;
   let endCalls = 0;
+  const directResult = {
+    command: 'UPDATE',
+    fields: [{ name: 'ok' }],
+    oid: 0,
+    rowCount: 1,
+    rows: [{ ok: true }],
+  };
 
   class FakePool {
     query(...args: unknown[]) {
@@ -31,6 +38,7 @@ test('an ordinary awaited pooled query falls back once to the direct endpoint af
 
     async connect() {
       connectCalls += 1;
+      (this as { connected?: boolean }).connected = true;
     }
 
     query(...args: unknown[]) {
@@ -38,7 +46,7 @@ test('an ordinary awaited pooled query falls back once to the direct endpoint af
       directCalls.push(args);
       const callback = args[args.length - 1];
       assert.equal(typeof callback, 'function', 'direct fallback should wrap pg callback results itself');
-      (callback as (error: Error | null, result: unknown) => void)(null, { rowCount: 1, rows: [{ ok: true }] });
+      (callback as (error: Error | null, result: unknown) => void)(null, directResult);
       return undefined;
     }
 
@@ -69,7 +77,8 @@ test('an ordinary awaited pooled query falls back once to the direct endpoint af
 
     const result = await pool.query('update users set email_verified = $1 where id = $2', [true, 'user-1']);
 
-    assert.deepEqual(result, { rowCount: 1, rows: [{ ok: true }] });
+    assert.strictEqual(result, directResult,
+      'the direct fallback must return pg QueryResult as-is so Drizzle can read result.rows');
     assert.equal(pooledCalls.length, 3, 'the pooled endpoint gets the configured retry budget first');
     assert.equal(directCalls.length, 1, 'the direct endpoint is used once after pooled retries exhaust');
     assert.deepEqual(directCalls[0], [

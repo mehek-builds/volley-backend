@@ -5,6 +5,7 @@ export function submitRequestDisposition(
   submissionWasClaimed = false,
 ): 'start' | 'in_flight' | 'submitted' | 'reject' {
   if (status === 'submitted') return 'submitted';
+  if (status === 'submit_requested' && !submissionWasClaimed) return 'start';
   if (['submit_requested', 'preparing', 'filling', 'submitting'].includes(status)) return 'in_flight';
   // needs_attention covers two materially different states. Before the final click it is safe to
   // rerun preparation after the user supplies a missing answer or a selector fix ships. After the
