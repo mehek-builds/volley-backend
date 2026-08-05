@@ -19,6 +19,7 @@ import { resumeSafeTargetRole } from '../engine/resumePolicy';
 import {
   applyApplicationReviewEdit,
   deriveEditedTerms,
+  normalizeApplicationReviewQuestions,
   readApplicationReview,
   type ApplicationReviewQuestion,
 } from '../lib/applicationReview';
@@ -363,7 +364,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           .from(profiles).where(eq(profiles.user_id, userId)).limit(1);
         const educationIssues = packetEducationDrift(row.spec, profileRows[0]?.parsed_json);
         if (educationIssues.length > 0) return { kind: 'education_drift' as const, issues: educationIssues };
-        const sensitive = current.questions.find((question) => questionRequiresHumanAttention(question));
+        const currentQuestions = normalizeApplicationReviewQuestions(current.questions);
+        const sensitive = currentQuestions.find((question) => questionRequiresHumanAttention(question));
         if (sensitive) return { kind: 'sensitive_question' as const, question: sensitive.question };
         if (!withinDailyCap(countRows[0]?.total ?? 0, dailySubmissionCap())) return { kind: 'cap' as const };
         const now = new Date().toISOString();
@@ -617,7 +619,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (!row) return;
       const parsed = submitBodySchema.safeParse(request.body);
       if (!parsed.success) return reply.status(400).send({ error: 'Invalid answers', detail: parsed.error.issues });
-      if (parsed.data.questions.some((question) => question.required && !question.answer.trim())) {
+      const submittedQuestions = normalizeApplicationReviewQuestions(parsed.data.questions as ApplicationReviewQuestion[]);
+      if (submittedQuestions.some((question) => question.required && !question.answer.trim())) {
         return reply.status(422).send({ error: 'Answer every required question before submitting.' });
       }
       const stored = row.spec as StoredSpec;
@@ -654,7 +657,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           issues: preSendIssues,
         });
       }
-      const sensitive = parsed.data.questions.find((question) => questionRequiresHumanAttention(question));
+      const sensitive = submittedQuestions.find((question) => questionRequiresHumanAttention(question));
       if (sensitive) {
         return reply.status(422).send({ error: `Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}` });
       }
@@ -664,7 +667,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       // portal_supported check is helpful UI, not an enforcement point.
       if (current.portal_url && !isPortalSupported(current.portal_url)) {
         const authorizedAt = new Date().toISOString();
-        const base = freshSubmitRequestReview(current, parsed.data.questions as ApplicationReviewQuestion[]);
+        const base = freshSubmitRequestReview(current, submittedQuestions);
         const pending: ApplicationReviewState = {
           ...base,
           status: 'submitting',
@@ -767,7 +770,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           code: 'PORTAL_RUNNER_NOT_CONFIGURED',
         });
       }
-      const next = freshSubmitRequestReview(current, parsed.data.questions as ApplicationReviewQuestion[]);
+      const next = freshSubmitRequestReview(current, submittedQuestions);
       const claimed = await db.update(generated_resumes)
         .set({ spec: reviewSpec(next) })
         .where(and(
@@ -883,10 +886,11 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         approvalIssues.push('The cover letter must be reviewed before sending.');
       }
       approvalIssues.push(...finalApprovalFieldIssues(current, current.cover_letter_supported === true && Boolean(coverLetter)));
-      if (current.questions.some((question) => question.required && !question.answer.trim())) {
+      const currentQuestions = normalizeApplicationReviewQuestions(current.questions);
+      if (currentQuestions.some((question) => question.required && !question.answer.trim())) {
         approvalIssues.push('A required application answer is still blank.');
       }
-      const sensitive = current.questions.find((question) => questionRequiresHumanAttention(question));
+      const sensitive = currentQuestions.find((question) => questionRequiresHumanAttention(question));
       if (sensitive) {
         approvalIssues.push(`Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}`);
       }

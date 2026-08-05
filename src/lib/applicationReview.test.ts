@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
-import { deriveEditedTerms, readApplicationReview } from './applicationReview';
+import { deriveEditedTerms, normalizeApplicationReviewQuestions, readApplicationReview } from './applicationReview';
 
 const bank: ExperienceBankEntry[] = [
   {
@@ -54,5 +54,29 @@ describe('application review metadata', () => {
       updated_at: '2026-07-21T00:00:00.000Z',
     };
     assert.deepEqual(readApplicationReview({ ...spec, _review: review }), review);
+  });
+
+  test('normalizes duplicate portal questions by label before submission guards run', () => {
+    assert.deepEqual(
+      normalizeApplicationReviewQuestions([
+        { id: 'blank-gender', question: 'gender', answer: '', kind: 'required', required: true },
+        { id: 'answered-gender', question: 'Gender', answer: 'Decline to self-identify', kind: 'required', required: false },
+      ]),
+      [
+        { id: 'blank-gender', question: 'gender', answer: 'Decline to self-identify', kind: 'required', required: true },
+      ],
+    );
+  });
+
+  test('normalization keeps non-empty local answers when a later duplicate is blank', () => {
+    assert.deepEqual(
+      normalizeApplicationReviewQuestions([
+        { id: 'answered-work-auth', question: 'Are you legally authorized to work in the country in which you are applying?', answer: 'Yes', kind: 'required', required: true },
+        { id: 'blank-work-auth', question: 'are you legally authorized to work in the country in which you are applying?', answer: '', kind: 'required', required: true },
+      ]),
+      [
+        { id: 'answered-work-auth', question: 'Are you legally authorized to work in the country in which you are applying?', answer: 'Yes', kind: 'required', required: true },
+      ],
+    );
   });
 });

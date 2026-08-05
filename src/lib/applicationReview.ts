@@ -10,6 +10,39 @@ export type ApplicationReviewQuestion = {
   required: boolean;
 };
 
+export function normalizeApplicationReviewQuestions(
+  questions: readonly ApplicationReviewQuestion[],
+): ApplicationReviewQuestion[] {
+  const normalized: ApplicationReviewQuestion[] = [];
+  const indexByQuestion = new Map<string, number>();
+  for (const question of questions) {
+    const key = questionKey(question.question);
+    if (!key) {
+      normalized.push(question);
+      continue;
+    }
+    const existingIndex = indexByQuestion.get(key);
+    if (existingIndex === undefined) {
+      indexByQuestion.set(key, normalized.length);
+      normalized.push(question);
+      continue;
+    }
+    const existing = normalized[existingIndex];
+    if ((question.required && !existing.required) || (!existing.answer.trim() && question.answer.trim())) {
+      normalized[existingIndex] = {
+        ...existing,
+        required: existing.required || question.required,
+        answer: existing.answer.trim() ? existing.answer : question.answer,
+      };
+    }
+  }
+  return normalized;
+}
+
+function questionKey(question: string): string {
+  return question.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
 export type ApplicationReviewState = {
   jd_text: string;
   role?: string;
