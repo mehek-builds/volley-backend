@@ -533,6 +533,16 @@ test('Ashby fixed profile fields never reappear as editable custom questions', (
 test('review question labels are never empty or longer than the managed runner limit', () => {
   assert.equal(normalizeReviewQuestionLabel('required field'), '');
   assert.equal(normalizeReviewQuestionLabel('56f41b98-0250-4e12-a2d1-aa038a33af27'), '');
+  assert.equal(
+    normalizeReviewQuestionLabel('how did you hear about this job?* how did you hear about this job?'),
+    'how did you hear about this job',
+  );
+  assert.equal(
+    normalizeReviewQuestionLabel(
+      'briefly describe your experience with ads review/ads trust and safety* briefly describe your experience with ads review/ads trust and safety',
+    ),
+    'briefly describe your experience with ads review/ads trust and safety',
+  );
 
   const longLabel = `Why Samsara? ${'Tell us more about your systems work '.repeat(30)}`;
   const normalized = normalizeReviewQuestionLabel(longLabel);
