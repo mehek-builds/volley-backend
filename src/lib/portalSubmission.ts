@@ -482,7 +482,11 @@ function greenhouseDegreeAliases(degree: string | undefined): string[] {
   else if (/\bhigh school/i.test(lower)) level = 'High School';
   const asciiLevel = level?.replace(/[’]/g, "'");
   const curlyLevel = level?.replace(/[']/g, '’');
-  return uniqueDefined([level, asciiLevel, curlyLevel]);
+  const bachelorScience = /\bbachelor\b/i.test(lower) && /science|b\.?s\.?/i.test(lower)
+    ? 'Bachelor of Science (B.S.)'
+    : undefined;
+  const bachelorSciencePlain = bachelorScience ? 'Bachelor of Science' : undefined;
+  return uniqueDefined([level, asciiLevel, curlyLevel, bachelorScience, bachelorSciencePlain]);
 }
 
 function greenhouseDisciplineAliases(packet: SubmissionPacket): string[] {
@@ -684,6 +688,124 @@ function selectValuesForAnswer(answer: string): string[] {
     values.push('N/A', 'Not applicable');
   }
   return [...new Set(values)];
+}
+
+function parsedGpa(value: string): number | null {
+  const match = value.match(/\b([0-4](?:\.\d+)?)\b/);
+  if (!match) return null;
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function greenhouseGpaBucket(value: string): string | undefined {
+  const gpa = parsedGpa(value);
+  if (gpa === null) return undefined;
+  if (gpa >= 3.6) return '3.6 or above (out of 4.0)';
+  if (gpa >= 3.4) return '3.4 - 3.5 (out of 4.0)';
+  if (gpa >= 3.1) return '3.1 - 3.3 (out of 4.0)';
+  if (gpa >= 2.8) return '2.8 - 3.0 (out of 4.0)';
+  if (gpa >= 2.5) return '2.5 - 2.7 (out of 4.0)';
+  return '2.4 or below';
+}
+
+function greenhouseGraduationBucket(value: string): string | undefined {
+  const year = Number(value.match(/\b(20\d{2})\b/)?.[1]);
+  if (!Number.isFinite(year)) return undefined;
+  if (year < 2027) return 'Earlier than Fall 2027';
+  if (year === 2027) {
+    if (/\b(?:jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|spring|summer)\b/i.test(value)) {
+      return 'Earlier than Fall 2027';
+    }
+    return 'Fall 2027';
+  }
+  if (year === 2028 && /\b(?:jan|january|feb|february|mar|march|apr|april|may|spring)\b/i.test(value)) {
+    return 'Spring 2028';
+  }
+  return 'Later than Summer 2028';
+}
+
+function abbreviatedUsLocation(value: string): string | undefined {
+  const stateMap: Record<string, string> = { california: 'CA', washington: 'WA' };
+  const match = value.match(/^\s*([^,]+),\s*([^,]+?)(?:,\s*(?:United States|USA|US|U\.S\.))?\s*$/i);
+  if (!match) return undefined;
+  const city = match[1]?.trim();
+  const state = match[2]?.trim();
+  if (!city || !state) return undefined;
+  const abbreviation = /^[A-Z]{2}$/i.test(state) ? state.toUpperCase() : stateMap[state.toLowerCase()];
+  return abbreviation ? `${city}, ${abbreviation}` : undefined;
+}
+
+function greenhouseComboboxValuesForQuestion(question: string, answer: string): string[] {
+  const normalizedQuestion = question.toLowerCase();
+  const values = selectValuesForAnswer(answer);
+  if (/\bwhat\s+is\s+your\s+gpa\b|\bgpa\b/.test(normalizedQuestion)) {
+    values.unshift(greenhouseGpaBucket(answer) ?? '');
+  }
+  if (/\bgraduat(?:ion|e)\s+date\b|\bwhat\s+is\s+your\s+graduation\s+date\b/.test(normalizedQuestion)) {
+    values.unshift(greenhouseGraduationBucket(answer) ?? '');
+  }
+  if (/\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\blocation\b[^?]{0,120}\b(?:single|top|preferred|preference|most interested)\b/.test(normalizedQuestion)) {
+    values.unshift(abbreviatedUsLocation(answer) ?? '');
+  }
+  return uniqueDefined(values);
+}
+
+function isGreenhouseReactSelectQuestion(question: string): boolean {
+  return /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bwhat\s+is\s+your\s+gpa\b|\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b|legally\s+authorized\s+to\s+work|sponsorship\s+for\s+employment\s+visa/i.test(question);
+}
+
+function pushGreenhouseQuestionComboboxActions(
+  actions: ManagedBrowserAction[],
+  selector: string,
+  questionText: string,
+  answer: string,
+  labelPrefix: string,
+) {
+  if (!isGreenhouseReactSelectQuestion(questionText)) return;
+  for (const [index, value] of greenhouseComboboxValuesForQuestion(questionText, answer).entries()) {
+    managedComboboxFill(actions, selector, value, `${labelPrefix}_combo:${index}:${questionText.slice(0, 80)}`);
+  }
+}
+
+function greenhouseCheckboxOptionSelectors(questionText: string, answer: string): string[] {
+  const normalizedQuestion = questionText.toLowerCase();
+  const normalizedAnswer = answer.toLowerCase();
+  if (
+    /sanctions\s+and\s+export\s+controls|cuba,\s*iran,\s*north\s+korea/.test(normalizedQuestion)
+    && /none\s+of\s+the\s+above/.test(normalizedAnswer)
+  ) {
+    return [
+      'input[name="question_35110536002[]"][value="221056618002"]',
+      'fieldset[id="question_35110536002[]"] label:has-text("None of the above")',
+    ];
+  }
+  if (
+    /prior\s+question\s+other\s+than\s+[“"]?none\s+of\s+the\s+above|if\s+you\s+selected\s+a\s+response\s+to\s+the\s+prior\s+question/.test(normalizedQuestion)
+    && /not\s+applicable|none\s+of\s+the\s+above/.test(normalizedAnswer)
+  ) {
+    return [
+      'input[name="question_35114221002[]"][value="221073825002"]',
+      'fieldset[id="question_35114221002[]"] label:has-text("Not applicable")',
+    ];
+  }
+  return [];
+}
+
+function pushGreenhouseCheckboxOptionActions(
+  actions: ManagedBrowserAction[],
+  questionText: string,
+  answer: string,
+  labelPrefix: string,
+) {
+  for (const [index, selector] of greenhouseCheckboxOptionSelectors(questionText, answer).entries()) {
+    actions.push({
+      type: 'click',
+      selector,
+      label: `${labelPrefix}_checkbox:${index}:${questionText.slice(0, 80)}`,
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
+  }
 }
 
 function questionFillShouldPressEnter(questionText: string): boolean {
@@ -1307,9 +1429,16 @@ export function buildManagedPortalActions(
           timeout: MANAGED_FILL_TIMEOUT_MS,
         });
       }
+      if (portalFamily(portal) === 'greenhouse') {
+        pushGreenhouseQuestionComboboxActions(actions, portalSelector, questionText, item.answer, 'question');
+        pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');
+      }
       continue;
     }
     pushScopedQuestionChoiceActions(actions, questionText, item.answer, 'question');
+    if (portalFamily(portal) === 'greenhouse') {
+      pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');
+    }
   }
   if (portalFamily(portal) === 'greenhouse') {
     pushGreenhouseKnownQuestionAliases(actions, packet);

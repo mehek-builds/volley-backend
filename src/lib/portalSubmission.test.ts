@@ -786,6 +786,74 @@ test('Greenhouse fills academic fields from the submission packet', () => {
   assert.ok(actions.some((action) => action.type === 'press' && action.selector === '#discipline--0' && action.label?.startsWith('education_discipline_combo')));
 });
 
+test('Greenhouse replays Databricks choice questions through React-select buckets', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question: "Please choose the single location that you're the most interested in, and we will discuss more with you as you move through the process.",
+        answer: 'San Francisco, California',
+        portalSelector: 'input[id="question_32707214002"]',
+      },
+      {
+        question: 'What is your graduation date?',
+        answer: 'May 2027',
+        portalSelector: 'input[id="question_24505242002"]',
+      },
+      {
+        question: 'What is your GPA?',
+        answer: '3.89',
+        portalSelector: 'input[id="question_32698502002"]',
+      },
+      {
+        question: 'Do you currently or have you previously worked for Databricks in the past?',
+        answer: "I have not worked for Databricks before, and I don't currently work there.",
+        portalSelector: 'input[id="question_30149518002"]',
+      },
+    ],
+  });
+
+  const comboActions = actions.filter((action) => action.label?.startsWith('question_combo:'));
+  assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector === 'input[id="question_32707214002"]' && action.value === 'San Francisco, CA'));
+  assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector === 'input[id="question_24505242002"]' && action.value === 'Earlier than Fall 2027'));
+  assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector === 'input[id="question_32698502002"]' && action.value === '3.6 or above (out of 4.0)'));
+  assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector === 'input[id="question_30149518002"]' && action.value === 'No'));
+  assert.ok(actions.some((action) => action.type === 'press' && action.selector === 'input[id="question_32707214002"]' && action.label?.startsWith('question_combo')));
+  assert.ok(actions.some((action) => action.type === 'press' && action.selector === 'input[id="question_24505242002"]' && action.label?.startsWith('question_combo')));
+  assert.ok(actions.some((action) => action.type === 'press' && action.selector === 'input[id="question_32698502002"]' && action.label?.startsWith('question_combo')));
+  assert.ok(actions.some((action) => action.type === 'press' && action.selector === 'input[id="question_30149518002"]' && action.label?.startsWith('question_combo')));
+});
+
+test('Greenhouse replays Databricks export-control checkbox answers by exact option', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question: 'Please confirm whether any of the below applies to you. Select all that apply. Note: This information will only be used to ensure compliance with U.S. sanctions and export controls.',
+        answer: 'None of the above',
+        portalSelector: 'input[id="question_35110536002[]_221056618002"]',
+      },
+      {
+        question: 'If you selected a response to the prior question other than none of the above, please confirm whether any of the following also applies to you. Select all that apply.',
+        answer: 'Not applicable (i.e., I selected none of the above for the prior question)',
+        portalSelector: 'input[id="question_35114221002[]_221073825002"]',
+      },
+    ],
+  });
+
+  const checkboxClicks = actions.filter((action) => action.label?.startsWith('question_checkbox:'));
+  assert.ok(checkboxClicks.some((action) => action.type === 'click' && action.selector === 'input[name="question_35110536002[]"][value="221056618002"]'));
+  assert.ok(checkboxClicks.some((action) => action.type === 'click' && action.selector === 'input[name="question_35114221002[]"][value="221073825002"]'));
+  assert.ok(checkboxClicks.every((action) => action.optional === true));
+  assert.ok(checkboxClicks.every((action) => (action.timeout ?? Infinity) < 30_000));
+});
+
 test('Greenhouse school aliases do not strip comma-separated campus names generically', () => {
   const actions = buildManagedPortalActions('greenhouse', {
     fullName: 'Taylor Example',
