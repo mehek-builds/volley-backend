@@ -202,7 +202,7 @@ test('managed controlled-portal actions include reviewed fields, resume upload, 
   }, true);
   assert.deepEqual(
     actions.filter((action) => action.type !== 'select').map((action) => action.type),
-    ['fill', 'fillByLabelText', 'fill', 'fill', 'upload', 'fillByLabelText', 'fillByLabelText', 'click'],
+    ['fill', 'fillByLabelText', 'fill', 'fill', 'upload', 'fillByLabelText', 'click', 'fillByLabelText', 'click'],
   );
   assert.ok(actions.some((action) => action.type === 'select' && action.label?.startsWith('question_select:')));
   assert.equal(actions.find((action) => action.type === 'upload')?.file?.base64, 'cGRm');
@@ -567,6 +567,7 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
       'upload',
       'fillByLabelText',
       'fillByLabelText',
+      'click',
       'fillByLabelText',
     ],
   );
@@ -792,7 +793,7 @@ test('choice controls are not auto-clicked by matching answer text', () => {
     resumeName: 'resume.pdf',
     questions: [{ question: 'Do you consent to the terms?', answer: 'Yes' }],
   });
-  const clicks = actions.filter((action) => action.type === 'click');
+  const clicks = actions.filter((action) => action.type === 'click' && action.label !== 'greenhouse_demographic_data_consent_checkbox');
   assert.equal(clicks.length, 0, 'no click action may be synthesized from an answer string');
 });
 
@@ -804,6 +805,11 @@ test('Greenhouse managed actions include approved demographic data consent', () 
     resumeName: 'resume.pdf',
     questions: [],
   });
+  const checkboxClick = actions.find((action) => action.label === 'greenhouse_demographic_data_consent_checkbox');
+  assert.equal(checkboxClick?.type, 'click');
+  assert.ok(checkboxClick?.selector?.includes('demographic_data_consent'));
+  assert.ok((checkboxClick?.selector?.length ?? Infinity) <= 500);
+  assert.equal(checkboxClick?.optional, true);
   assert.deepEqual(
     actions.find((action) => action.label === 'greenhouse_demographic_data_consent'),
     {
@@ -1395,7 +1401,7 @@ test('Greenhouse managed actions retry known yes-no work and onsite choices by e
     'Stratus rejects selector strings longer than 500 characters',
   );
   assert.equal(selectActions.some((action) => action.selector?.includes('Do you consent to the terms?')), false);
-  assert.equal(actions.filter((action) => action.type === 'click').length, 0);
+  assert.equal(actions.filter((action) => action.type === 'click' && action.label !== 'greenhouse_demographic_data_consent_checkbox').length, 0);
 });
 
 test('managed reviewed questions replay stored answers into label-scoped choice controls', () => {
