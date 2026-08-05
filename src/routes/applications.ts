@@ -7,7 +7,7 @@ import { db } from '../db/index';
 import { settleStall } from '../lib/applicationStall';
 import type { ApplicationReviewState } from '../lib/applicationReview';
 import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
-import { career_page_sources, generated_resumes, monitored_jobs, profiles, users, type ExperienceBankEntry } from '../db/schema';
+import { application_profile, career_page_sources, generated_resumes, monitored_jobs, profiles, users, type ExperienceBankEntry } from '../db/schema';
 import {
   findPdfTextFidelityIssues,
   findPdfSafeMarginIssues,
@@ -31,7 +31,7 @@ import { normalizeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import { requireAuth } from '../middleware/auth';
 import { declaredSkillsList } from './profile';
 import { buildPacket, processSubmissionApplication } from './submissionRunner';
-import { questionRequiresHumanAttention } from '../lib/questionDiscovery';
+import { questionRequiresHumanAttention, refreshKnownQuestionAnswers } from '../lib/questionDiscovery';
 import { resumeEditDisposition, submitRequestDisposition } from '../lib/submissionSafety';
 import { canonicalSupportedPortalUrl, detectPortal, isPortalSupported } from '../lib/portalSubmission';
 import { dailySubmissionCap, withinDailyCap } from '../lib/submissionQueue';
@@ -617,9 +617,6 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (!row) return;
       const parsed = submitBodySchema.safeParse(request.body);
       if (!parsed.success) return reply.status(400).send({ error: 'Invalid answers', detail: parsed.error.issues });
-      if (parsed.data.questions.some((question) => question.required && !question.answer.trim())) {
-        return reply.status(422).send({ error: 'Answer every required question before submitting.' });
-      }
       const stored = row.spec as StoredSpec;
       let current = readApplicationReview(stored);
       if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
@@ -640,8 +637,30 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       // false, and submit-request accepts a bare list of answers from any authenticated caller. The
       // review screen saves through PATCH /resume before it sends, and that route runs this exact
       // comparison, so a correctly-saved packet reaches this line with nothing to report.
-      const submitProfileRows = await db.select({ parsed_json: profiles.parsed_json })
-        .from(profiles).where(eq(profiles.user_id, request.jwtPayload!.userId)).limit(1);
+      const [submitProfileRows, submitApplicationProfileRows] = await Promise.all([
+        db.select({ parsed_json: profiles.parsed_json })
+          .from(profiles).where(eq(profiles.user_id, request.jwtPayload!.userId)).limit(1),
+        db.select({
+          work_authorized: application_profile.work_authorized,
+          needs_sponsorship: application_profile.needs_sponsorship,
+          eeo_prefs: application_profile.eeo_prefs,
+        }).from(application_profile).where(eq(application_profile.user_id, request.jwtPayload!.userId)).limit(1),
+      ]);
+      const profileAnswers = submitApplicationProfileRows[0];
+      const submittedQuestions = refreshKnownQuestionAnswers(
+        parsed.data.questions as ApplicationReviewQuestion[],
+        {
+          work_authorized: profileAnswers?.work_authorized ?? undefined,
+          needs_sponsorship: profileAnswers?.needs_sponsorship ?? undefined,
+          eeo_prefs: profileAnswers?.eeo_prefs && typeof profileAnswers.eeo_prefs === 'object'
+            ? profileAnswers.eeo_prefs as Record<string, string>
+            : null,
+        },
+        typeof stored.jd_text === 'string' ? stored.jd_text : undefined,
+      );
+      if (submittedQuestions.some((question) => question.required && !question.answer.trim())) {
+        return reply.status(422).send({ error: 'Answer every required question before submitting.' });
+      }
       const submitEducationIssues = packetEducationDrift(stored, submitProfileRows[0]?.parsed_json);
       if (submitEducationIssues.length > 0) {
         return reply.status(422).send(educationDriftResponse(submitEducationIssues));
@@ -654,7 +673,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           issues: preSendIssues,
         });
       }
-      const sensitive = parsed.data.questions.find((question) => questionRequiresHumanAttention(question));
+      const sensitive = submittedQuestions.find((question) => questionRequiresHumanAttention(question));
       if (sensitive) {
         return reply.status(422).send({ error: `Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}` });
       }
@@ -664,7 +683,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       // portal_supported check is helpful UI, not an enforcement point.
       if (current.portal_url && !isPortalSupported(current.portal_url)) {
         const authorizedAt = new Date().toISOString();
-        const base = freshSubmitRequestReview(current, parsed.data.questions as ApplicationReviewQuestion[]);
+        const base = freshSubmitRequestReview(current, submittedQuestions);
         const pending: ApplicationReviewState = {
           ...base,
           status: 'submitting',
@@ -767,7 +786,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           code: 'PORTAL_RUNNER_NOT_CONFIGURED',
         });
       }
-      const next = freshSubmitRequestReview(current, parsed.data.questions as ApplicationReviewQuestion[]);
+      const next = freshSubmitRequestReview(current, submittedQuestions);
       const claimed = await db.update(generated_resumes)
         .set({ spec: reviewSpec(next) })
         .where(and(
