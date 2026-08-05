@@ -1365,6 +1365,62 @@ describe('a posting does not ask for its own address', () => {
       );
     }
   });
+
+  test('Postman-style benefits and office-policy prose does not inherit About You requirement weight', () => {
+    const jd = [
+      'Who Are We?',
+      'Postman is headquartered in San Francisco and has offices in Boston, New York, Austin, Tokyo, London, and Bangalore.',
+      'The Opportunity',
+      'We are seeking an AI Engineer Intern to work alongside our AI team on large-scale AI and Agentic systems.',
+      'What You Will Do',
+      'Build and validate AI models using PyTorch or JAX. Support AIOps practices and model optimization work.',
+      'About You',
+      'Currently pursuing a BS/MS/PhD in Computer Science, Data Science, or a related field.',
+      'Some hands-on experience with ML systems. Solid Python/Rust fundamentals.',
+      'Exposure to at least one AI/ML framework such as PyTorch or JAX and basic data tooling including Pandas and SQL.',
+      'What Else?',
+      'At Postman we value in person collaboration. We are in office five days a week for all roles based out of our hubs in San Francisco Bay Area, Boston, Austin, New York City, Tokyo and London.',
+      'For roles based in Bangalore, employees currently work in the office three days a week.',
+      'Our Values',
+      'We value transparency and honest communication.',
+    ].join('\n');
+    const keys = extractJdTerms(jd, { company: 'Postman', role: 'AI Engineer, Intern' }).map((t) => t.term);
+    for (const place of ['san francisco', 'tokyo', 'london', 'bangalore']) {
+      assert.ok(!keys.includes(place), `"${place}" is office policy prose, not a resume requirement`);
+    }
+    for (const real of ['computer science', 'ml', 'rust', 'pytorch', 'jax', 'pandas', 'sql']) {
+      assert.ok(keys.includes(real), `"${real}" is a real requirement`);
+    }
+  });
+
+  test('office-location prose inside a requirements section is local noise only', () => {
+    const jd = [
+      'Qualifications',
+      'Experience with Python, LLM APIs, Kubernetes, PyTorch and SQL.',
+      'This role can be based in San Francisco, Tokyo, London, or Bangalore.',
+      'This position is based in Austin or New York.',
+      'Experience with Docker and CI/CD pipelines.',
+    ].join('\n');
+    const result = scoreJdMatch('Python SQL Docker Kubernetes', jd);
+    const keys = [...result.matched, ...result.missing].map((t) => t.term);
+    for (const place of ['san francisco', 'tokyo', 'london', 'bangalore', 'austin', 'new york']) {
+      assert.ok(!keys.includes(place), `"${place}" is a location line, not a requirement`);
+    }
+    for (const real of ['python', 'kubernetes', 'pytorch', 'sql', 'docker', 'ci cd']) {
+      assert.ok(keys.includes(real), `"${real}" survives around the logistics line`);
+    }
+  });
+
+  test('onsite and relocation requirements are not treated as office-policy prose', () => {
+    const sections = segmentJd([
+      'Requirements',
+      'Must be willing to work onsite with Python and SQL teams.',
+      'Able to relocate for the role if needed.',
+    ].join('\n'));
+    const requiredText = sections.filter((s) => s.kind === 'required').map((s) => s.text).join('\n');
+    assert.match(requiredText, /work onsite/);
+    assert.match(requiredText, /relocate/);
+  });
 });
 
 /**
@@ -1760,6 +1816,13 @@ describe('route registration', () => {
     // Neither supplied nor resolvable is a WIRING fault, and must not borrow the engine's
     // "this posting did not list enough requirements" copy, which is a claim about the job.
     assert.match(routeFile, /jd_text is required unless job_context\.job_id names a posting we hold/);
+  });
+
+  test('POST /resume/generate stores posting location in the generated application context', () => {
+    const routeFile = readFileSync(path.join(__dirname, '..', 'routes', 'resume.ts'), 'utf8');
+    assert.match(routeFile, /let postingLocation: string \| null = null/);
+    assert.match(routeFile, /postingLocation = row\?\.location \?\? null/);
+    assert.match(routeFile, /\.\.\.\(postingLocation \? \{ location: postingLocation \} : \{\}\)/);
   });
 });
 
