@@ -519,12 +519,23 @@ export async function discoverAndResolveQuestions(
     const reviewLabel = normalizeReviewQuestionLabel(field.label);
     if (!label || !reviewLabel || normalizeStoredPortalQuestions([{ question: label, answer: '' }], portal).length === 0) continue;
     const existing = existingByLabel.get(reviewLabel.toLowerCase());
+    const known = resolveKnownAnswer(label, field.inputType, ap, questionContext);
     if (existing) {
-      if (existing.answer.trim()) questions.push({ ...existing, question: reviewLabel, portal_selector: portalSelectorForField(field) });
+      if (known && 'value' in known) {
+        questions.push({
+          ...existing,
+          question: reviewLabel,
+          answer: known.value,
+          kind: 'required',
+          required: false,
+          portal_selector: portalSelectorForField(field),
+        });
+      } else if (existing.answer.trim()) {
+        questions.push({ ...existing, question: reviewLabel, portal_selector: portalSelectorForField(field) });
+      }
       continue; // already answered by the client or a prior run
     }
 
-    const known = resolveKnownAnswer(label, field.inputType, ap, questionContext);
     if (known && 'value' in known) {
       questions.push({
         id: randomUUID(),

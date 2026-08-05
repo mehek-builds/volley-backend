@@ -29,6 +29,10 @@ test('answers work authorization and sponsorship only from explicit stored conse
     { value: 'Yes' },
   );
   assert.deepEqual(
+    resolveKnownAnswer('Are you currently eligible to legally work in the United States?', 'text', { work_authorized: true }, undefined),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
     resolveKnownAnswer(
       'are you legally authorized to work in the country where the job is located?',
       'text',
