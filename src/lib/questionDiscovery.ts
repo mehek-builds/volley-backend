@@ -99,6 +99,23 @@ export function isRefusedQuestion(label: string): boolean {
   return NEVER_FILL_PATTERNS.some((re) => re.test(l)) || WORK_ELIGIBILITY_QUESTION.test(l) || EEO_QUESTION.test(l);
 }
 
+function comparableAnswer(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+export function sensitiveQuestionRequiresAttention(
+  label: string,
+  answer: string,
+  inputType: string,
+  ap: ApplicationProfileLike,
+  jdText: string | undefined,
+): boolean {
+  if (!isRefusedQuestion(label)) return false;
+  if (!WORK_ELIGIBILITY_QUESTION.test(label)) return true;
+  const known = resolveKnownAnswer(label, inputType, ap, jdText);
+  return !(known && 'value' in known && comparableAnswer(known.value) === comparableAnswer(answer));
+}
+
 export function questionRequiresHumanAttention(question: { question: string; answer?: string }): boolean {
   const label = question.question ?? '';
   const answer = question.answer?.trim() ?? '';

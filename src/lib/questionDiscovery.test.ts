@@ -13,6 +13,7 @@ import {
   questionRequiresHumanAttention,
   REVIEW_QUESTION_TEXT_MAX_LENGTH,
   resolveKnownAnswer,
+  sensitiveQuestionRequiresAttention,
   WORK_ELIGIBILITY_QUESTION,
 } from './questionDiscovery';
 
@@ -126,6 +127,71 @@ test('send-time sensitive guard allows stored work and EEO answers while blockin
 test('never answers SSN or driver license fields', () => {
   assert.equal(isRefusedQuestion('social security number'), true);
   assert.equal(isRefusedQuestion("driver's license number"), true);
+});
+
+test('sensitive gates allow only exact stored work eligibility answers', () => {
+  assert.equal(
+    sensitiveQuestionRequiresAttention(
+      'are you legally authorized to work in the United States?',
+      'Yes',
+      'text',
+      { work_authorized: true },
+      undefined,
+    ),
+    false,
+  );
+  assert.equal(
+    sensitiveQuestionRequiresAttention(
+      'will you now or in the future require sponsorship for employment visa status?',
+      'Yes',
+      'text',
+      { needs_sponsorship: true },
+      undefined,
+    ),
+    false,
+  );
+  assert.equal(
+    sensitiveQuestionRequiresAttention(
+      'are you legally authorized to work in the United States?',
+      'No',
+      'text',
+      { work_authorized: true },
+      undefined,
+    ),
+    true,
+  );
+  assert.equal(
+    sensitiveQuestionRequiresAttention(
+      'are you legally authorized to work in the United States?',
+      'Yes',
+      'text',
+      {},
+      undefined,
+    ),
+    true,
+  );
+  assert.equal(
+    sensitiveQuestionRequiresAttention(
+      'are you legally authorized to work in Canada?',
+      'Yes',
+      'text',
+      { work_authorized: true },
+      undefined,
+    ),
+    true,
+  );
+  assert.equal(
+    sensitiveQuestionRequiresAttention(
+      'are you authorized to work in the US without sponsorship?',
+      'Yes',
+      'text',
+      { work_authorized: true, needs_sponsorship: true },
+      undefined,
+    ),
+    true,
+  );
+  assert.equal(sensitiveQuestionRequiresAttention('social security number', '123-45-6789', 'text', {}, undefined), true);
+  assert.equal(sensitiveQuestionRequiresAttention('what is your gender?', 'Female', 'text', {}, undefined), true);
 });
 
 test('citizenship is answered but never substituted for residence', () => {
