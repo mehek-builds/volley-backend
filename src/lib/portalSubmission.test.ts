@@ -1014,6 +1014,8 @@ test('Greenhouse replays Faire option-style choices through React-select buckets
     fullName: 'Mehek Mandal',
     email: 'mehekmandal05@gmail.com',
     phone: '+971501234567',
+    city: 'Dubai',
+    country: 'United Arab Emirates',
     school: 'University of Southern California, Viterbi School of Engineering',
     degree: 'Bachelor of Science in Computer Science',
     graduationDate: 'May 2028',
@@ -1102,6 +1104,76 @@ test('Greenhouse demographic aliases keep race fallback for unrelated category q
     action.label?.startsWith('greenhouse_demographic_combo:')
     && action.value === 'White'));
   assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+});
+
+test('Greenhouse trims low-priority fallbacks before exceeding the managed action budget', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    phone: '+971501234567',
+    city: 'Dubai',
+    country: 'United Arab Emirates',
+    school: 'University of Southern California, Viterbi School of Engineering',
+    degree: 'Bachelor of Science in Computer Science',
+    major: 'Computer Science',
+    graduationDate: 'May 2028',
+    graduationMonth: 'May',
+    graduationYear: '2028',
+    gpa: '3.89',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    coverLetter: Buffer.from('cover'),
+    coverLetterName: 'cover-letter.pdf',
+    referralSourceDefault: 'Company website',
+    eeoPrefs: {
+      gender: 'Female',
+      transgender_status: 'Decline to self-identify',
+      sexual_orientation: 'Heterosexual',
+      disability_status: 'Decline to self-identify',
+      veteran_status: 'Decline to self-identify',
+      race: 'White',
+    },
+    questions: [
+      { question: 'Which team opening are you most interested in?', answer: 'Search & Recommendation' },
+      { question: 'How familiar are you with Faire?', answer: 'Somewhat familiar' },
+      { question: 'Are you currently eligible to legally work in the United States?', answer: 'Yes' },
+      { question: 'Will you now or in the future require immigration support or sponsorship?', answer: 'Yes' },
+      { question: 'Are you able to work onsite in our San Francisco office 5 days a week?', answer: 'Yes' },
+      { question: 'Which product category are you most interested in?', answer: 'Search' },
+      { question: 'Which opening are you most interested in?', answer: 'Data Science' },
+      { question: 'Which location are you most interested in?', answer: 'San Francisco, California' },
+      { question: 'What is your graduation date?', answer: 'May 2028' },
+      { question: 'What is your GPA?', answer: '3.89' },
+    ],
+  }, true);
+
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+  assert.equal(actions.at(-1)?.type, 'click');
+  assert.ok(actions.some((action) => action.label === 'phone_country'));
+  assert.ok(actions.some((action) => action.label === 'location'));
+  assert.ok(actions.some((action) => action.label?.startsWith('question_combo_label:') && action.label.includes('team opening')));
+  assert.equal(actions.some((action) => action.label?.includes('sexual orientation')), false);
+  assert.ok(actions.some((action) => action.label?.startsWith('greenhouse_referral_combo_label:') && action.label.includes('Faire')));
+  assert.ok(actions.some((action) => action.type === 'upload' && action.label === 'resume'));
+  assert.ok(actions.some((action) => action.type === 'upload' && action.label === 'cover_letter'));
+});
+
+test('Greenhouse skips submit when preserved answers alone exceed the managed action budget', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    phone: '+971501234567',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: Array.from({ length: 140 }, (_, index) => ({
+      question: `Describe project ${index + 1}`,
+      answer: `Project ${index + 1} answer`,
+    })),
+  }, true);
+
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+  assert.notEqual(actions.at(-1)?.selector, 'button[type="submit"], input[type="submit"]');
+  assert.ok(actions.some((action) => action.type === 'upload' && action.label === 'resume'));
 });
 
 test('Greenhouse replays Jump academic and referral choices without consent', () => {
