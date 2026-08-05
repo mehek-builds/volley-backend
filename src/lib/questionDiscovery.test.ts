@@ -156,24 +156,24 @@ test('answers EEO / demographic questions with stored preferences or decline', (
   );
 });
 
-test('answers candidate privacy and demographic consent attestations from standing approval', () => {
-  assert.deepEqual(
+test('leaves candidate privacy and demographic consent attestations for human attention', () => {
+  assert.equal(
     resolveKnownAnswer(
       'By selecting "I agree," I understand that the information I have provided as part of this job application will be processed in accordance with the Candidate Privacy Policy.',
       'text',
       {},
       undefined,
     ),
-    { value: 'I agree' },
+    null,
   );
-  assert.deepEqual(
+  assert.equal(
     resolveKnownAnswer(
       'By checking this box, I consent to Reddit collecting, storing, and processing my responses to the demographic data survey above.',
       'text',
       {},
       undefined,
     ),
-    { value: 'Yes' },
+    null,
   );
 });
 
@@ -282,6 +282,13 @@ test('send-time refresh replaces stale EEO prose with stored profile answers', (
 test('never answers SSN or driver license fields', () => {
   assert.equal(isRefusedQuestion('social security number'), true);
   assert.equal(isRefusedQuestion("driver's license number"), true);
+});
+
+test('never answers CAPTCHA or recording consent fields', () => {
+  assert.equal(isRefusedQuestion('Please complete the CAPTCHA'), true);
+  assert.equal(resolveKnownAnswer('Please complete the CAPTCHA', 'checkbox', {}, undefined), null);
+  assert.equal(isRefusedQuestion('Do you consent to this interview being recorded?'), true);
+  assert.equal(resolveKnownAnswer('Do you consent to this interview being recorded?', 'checkbox', {}, undefined), null);
 });
 
 test('sensitive gates allow only exact stored work eligibility answers', () => {
@@ -475,7 +482,7 @@ test('required internship form fields resolve from profile-backed defaults inste
   );
   assert.deepEqual(
     resolveKnownAnswer('Please review and acknowledge Cloudflare\'s Candidate Privacy Policy (cloudflare.com/candidate-privacy-notice/).', 'checkbox', profile, undefined),
-    { value: 'Yes' },
+    null,
   );
   assert.deepEqual(
     resolveKnownAnswer('Do you consider yourself a member of the LGBTQIA+ community?', 'select', profile, undefined),
@@ -578,18 +585,78 @@ test('mixed enrollment and graduation-date prompts still skip past graduation ev
   assert.ok(resolved && 'skipReason' in resolved);
 });
 
-test('a bare salary figure only fills when the posting currency matches the stored one (R-031)', () => {
-  const ap = { desired_salary: '80000', desired_salary_currency: 'USD' };
-  const usd = resolveKnownAnswer('expected salary (USD)', 'text', ap, undefined);
-  assert.ok(usd && 'value' in usd);
-  const eur = resolveKnownAnswer('expected salary (EUR)', 'text', ap, undefined);
-  assert.ok(eur && 'skipReason' in eur, 'a currency mismatch must flag, never convert');
+test('live-audit education variants resolve from stored education profile facts', () => {
+  const now = new Date();
+  const academicStartYear = now.getUTCMonth() >= 7 ? now.getUTCFullYear() : now.getUTCFullYear() - 1;
+  const gradYear = academicStartYear + 2;
+  const expectedStudyYear = 'Third year';
+  const profile = {
+    school: 'University of Southern California',
+    degree: 'Bachelor of Science in Computer Science & Business Administration, Finance Emphasis',
+    grad_date: `May ${gradYear}`,
+    grad_year: gradYear,
+    currently_enrolled: true,
+    gpa: '3.89/4.0',
+  };
+
+  assert.deepEqual(resolveKnownAnswer('Please re-confirm the university you currently attend', 'select', profile, undefined), {
+    value: 'University of Southern California',
+  });
+  assert.deepEqual(resolveKnownAnswer('Undergrad Discipline(s)', 'select', profile, undefined), {
+    value: 'Computer Science and Business Administration',
+  });
+  assert.deepEqual(resolveKnownAnswer('What is your latest field of study?', 'select', profile, undefined), {
+    value: 'Computer Science and Business Administration',
+  });
+  assert.deepEqual(resolveKnownAnswer('Which course are you currently enrolled in?', 'select', profile, undefined), {
+    value: 'Computer Science and Business Administration',
+  });
+  assert.deepEqual(resolveKnownAnswer('Please confirm your current degree graduation time frame.', 'select', profile, undefined), {
+    value: `May ${gradYear}`,
+  });
+  assert.deepEqual(resolveKnownAnswer('Expected Graduation semester', 'select', profile, undefined), {
+    value: `Spring ${gradYear}`,
+  });
+  assert.deepEqual(resolveKnownAnswer('What is the current year of your studies?', 'select', profile, undefined), {
+    value: expectedStudyYear,
+  });
+  assert.deepEqual(resolveKnownAnswer('What is your current academic performance rating?', 'select', profile, undefined), {
+    value: '3.89/4.0',
+  });
 });
 
-test('a stated range in the label fills its median regardless of stored value', () => {
+test('study year stays blank when graduation evidence cannot support it', () => {
+  assert.equal(
+    resolveKnownAnswer('What is the current year of your studies?', 'select', { grad_date: 'May 2024', grad_year: 2024 }, undefined),
+    null,
+  );
+  assert.equal(
+    resolveKnownAnswer(
+      'What is the current year of your studies?',
+      'select',
+      {
+        degree: 'Master of Science in Computer Science',
+        grad_date: 'May 2099',
+        grad_year: 2099,
+        currently_enrolled: true,
+      },
+      undefined,
+    ),
+    null,
+  );
+});
+
+test('salary questions are left for human attention', () => {
+  const ap = { desired_salary: '80000', desired_salary_currency: 'USD' };
+  const usd = resolveKnownAnswer('expected salary (USD)', 'text', ap, undefined);
+  assert.ok(usd && 'skipReason' in usd);
+  const eur = resolveKnownAnswer('expected salary (EUR)', 'text', ap, undefined);
+  assert.ok(eur && 'skipReason' in eur);
+});
+
+test('salary questions stay blank even when the label states a range', () => {
   const resolved = resolveKnownAnswer('desired salary (e.g. USD 90,000 - 110,000)', 'text', {}, undefined);
-  assert.ok(resolved && 'value' in resolved);
-  assert.match((resolved as { value: string }).value, /100,000/);
+  assert.ok(resolved && 'skipReason' in resolved);
 });
 
 test('eeoAnswer is exact-match-only, never a near-miss (R-018)', () => {

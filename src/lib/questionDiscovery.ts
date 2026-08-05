@@ -48,7 +48,13 @@ export type ApplicationProfileLike = StoredSalaryProfile & {
   referral_source_default?: string;
 };
 
-const NEVER_FILL_PATTERNS = [/social security/i, /\bssn\b/i, /driver'?s?\s*licen[sc]e/i];
+const NEVER_FILL_PATTERNS = [
+  /social security/i,
+  /\bssn\b/i,
+  /driver'?s?\s*licen[sc]e/i,
+  /\bcaptcha\b|recaptcha|hcaptcha|human verification/i,
+  /\brecord(?:ing|ed)?\s+consent\b|\bconsent\b[^?]{0,80}\b(?:record|recording|recorded)\b|\b(?:record|recording|recorded)\b[^?]{0,80}\bconsent\b/i,
+];
 
 // See WORK_ELIGIBILITY_QUESTION in the extension's generic.ts: work authorization and sponsorship
 // used to be globally refused after a false legal declaration shipped once (R-004). They are now
@@ -71,8 +77,6 @@ export const EEO_QUESTION =
   /transgender|\bgender\b|what is your sex\b|race|racial|ethnicit|ethnic\b|hispanic|latino|veteran|military|disab|sexual orientation|lgbtq|lgbtqia|communities|which categories describe you|identify with|current age|what is your age|age range|how old are you|\bage group\b/i;
 const LEGAL_CONSENT_QUESTION =
   /candidate privacy policy|candidate-privacy-notice|privacy notice|review and acknowledge|information (?:i|you) have provided.*process|by selecting ["']?i agree|demographic data survey|collecting,\s*storing,\s*and processing/i;
-const LEGAL_ATTESTATION_QUESTION =
-  /certif(?:y|ication)|true\s+and\s+(?:complete|accurate)|terms\s+and\s+conditions|background\s+check|criminal|conviction|arbitration/i;
 
 export function workEligibilitySkipReason(label: string): string {
   return `work-eligibility question left for you: "${label.slice(0, 60)}"`;
@@ -178,12 +182,14 @@ function locationPreferenceAnswer(label: string, jdText: string | undefined): { 
 export const REFERRAL_QUESTION = /how did you hear|referral source|hear about (this|us|the)|source of/i;
 export const START_DATE_QUESTION = /availab|start(ing)?\s+date|date.*you.*start|when can you start|earliest.*start/i;
 export const GRADUATION_DATE_QUESTION =
-  /\b(?:expected\s+)?graduat(?:ion|e)\s+(?:date|year)\b|\b(?:date|year)\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b|\bexpected\s+grad(?:uation)?\b|\bclass\s+of\b/i;
+  /\b(?:expected\s+)?graduat(?:ion|e)\s+(?:date|year|semester|term|time\s*frame|timeframe|window)\b|\b(?:date|year|semester|term|time\s*frame|timeframe|window)\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b|\bexpected\s+grad(?:uation)?\b|\bclass\s+of\b/i;
 const GRADUATION_MONTH_QUESTION = /\bgraduat(?:ion|e)\s+month\b|\bmonth\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b/i;
 const GRADUATION_YEAR_QUESTION = /\bgraduat(?:ion|e)\s+year\b|\byear\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b|\bclass\s+year\b/i;
 const MIXED_ENROLLMENT_GRADUATION_QUESTION = /\bcurrently\s+enrolled\b|\bdegree\s+program\b/i;
 const CURRENT_ENROLLMENT_QUESTION =
   /\bcurrently\s+enrolled\b|\bcurrent\s+student\b|\benrolled\s+in\s+(?:a\s+)?(?:degree\s+)?program\b|\breturn(?:ing)?\s+to\s+(?:a\s+)?(?:degree\s+)?program\b|\breturn(?:ing)?\s+to\s+(?:school|college|university)\b/i;
+const MAJOR_QUESTION =
+  /\bmajor\b|field of study|course of study|degree subject|\bdiscipline\b|\bcourse\b[^?]{0,80}\benrolled\b|\benrolled\b[^?]{0,80}\bcourse\b/i;
 const LANGUAGE_QUESTION =
   /\bspoken\s+languages?\b|\blanguages?\s+(?:do\s+you\s+|are\s+you\s+)?(?:speak|know|fluent|proficient)|\b(?:speak|fluent|proficient)\b[^?]{0,40}\blanguages?\b|\b(?:speak|fluent|proficient)\b[^?]{0,40}\b(?:english|hindi|arabic|spanish|french|german|portuguese|mandarin|chinese|cantonese|tamil|punjabi|urdu)\b/i;
 const TERM_QUESTION =
@@ -210,7 +216,7 @@ export type ProfileKey =
   | 'phone' | 'address_city' | 'address_state' | 'address_country'
   | 'linkedin_url' | 'github_url' | 'portfolio_url' | 'citizenship' | 'date_of_birth'
   | 'availability_date' | 'availability_term' | 'school' | 'degree' | 'graduation_date' | 'desired_salary'
-  | 'graduation_month' | 'graduation_year' | 'current_enrollment' | 'gpa' | 'gpa_scale' | 'major'
+  | 'graduation_month' | 'graduation_year' | 'current_enrollment' | 'study_year' | 'gpa' | 'gpa_scale' | 'major'
   | 'languages' | 'onsite_commitment' | 'referral_source_default';
 
 // Ported verbatim from generic.ts's classifyField (see that file for the full rationale on
@@ -233,10 +239,12 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
   if (STORED_ONSITE_COMMITMENT_QUESTION.test(l) && (ONSITE_DAY_COUNT_QUESTION.test(l) || !/relocat/i.test(l))) {
     return 'onsite_commitment';
   }
-  if (CURRENT_ENROLLMENT_QUESTION.test(l) && !GRADUATION_DATE_QUESTION.test(l)) return 'current_enrollment';
+  if (/\bcurrent\s+year\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\byear\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\bacademic\s+year\b/i.test(l)) return 'study_year';
   if (GRADUATION_MONTH_QUESTION.test(l)) return 'graduation_month';
   if (GRADUATION_YEAR_QUESTION.test(l)) return 'graduation_year';
   if (GRADUATION_DATE_QUESTION.test(l)) return 'graduation_date';
+  if (MAJOR_QUESTION.test(l)) return 'major';
+  if (CURRENT_ENROLLMENT_QUESTION.test(l) && !GRADUATION_DATE_QUESTION.test(l)) return 'current_enrollment';
   if (START_DATE_QUESTION.test(l)) return 'availability_date';
   if (LOCATION_PREFERENCE_QUESTION.test(l)) return null;
 
@@ -244,12 +252,12 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
   if (/github/i.test(l)) return 'github_url';
   if (/portfolio|personal\s*(web)?site|\bwebsite\b/i.test(l)) return 'portfolio_url';
 
-  if (/\bgpa\b|grade average|grade point/i.test(l)) return 'gpa';
+  if (/\bgpa\b|grade average|grade point|academic performance/i.test(l)) return 'gpa';
   if (/gpa scale|out of.*(4\.0|100)|grading scale/i.test(l)) return 'gpa_scale';
   if (LANGUAGE_QUESTION.test(l)) return 'languages';
   if (/\bdegree\b(?!\s+(?:program|subject))|education level|level of education/i.test(l)) return 'degree';
   if (/\b(school|university|college|institution)\b/i.test(l)) return 'school';
-  if (/\bmajor\b|field of study|course of study|degree subject/i.test(l)) return 'major';
+  if (MAJOR_QUESTION.test(l)) return 'major';
 
   if (/phone|mobile/i.test(l)) return 'phone';
   if (
@@ -386,10 +394,49 @@ function graduationYearAnswer(gradDate: string | undefined, gradYear: number | u
   return graduationDateAnswer(gradDate, gradYear, 'date')?.match(/^(\d{4})-/)?.[1] ?? null;
 }
 
+function graduationSemesterAnswer(gradDate: string | undefined, gradYear: number | undefined): string | null {
+  const iso = graduationDateAnswer(gradDate, gradYear, 'date');
+  const match = iso?.match(/^(\d{4})-(\d{2})-/);
+  if (!match) return null;
+  const month = Number(match[2]);
+  if (!Number.isFinite(month)) return null;
+  const semester = month <= 5 ? 'Spring' : month <= 8 ? 'Summer' : 'Fall';
+  return `${semester} ${match[1]}`;
+}
+
 function currentEnrollmentAnswer(ap: ApplicationProfileLike): { value: string } | { skipReason: string } | null {
   if (ap.currently_enrolled === true || graduationEvidenceIsFuture(ap.grad_date, ap.grad_year)) return { value: 'Yes' };
   if (ap.currently_enrolled === false) return { value: 'No' };
   return { skipReason: 'current enrollment question left for you' };
+}
+
+function studyYearAnswer(ap: ApplicationProfileLike): string | null {
+  if (!/\b(?:bachelor|b\.?s\.?|b\.?a\.?)\b/i.test(ap.degree ?? '')) return null;
+  const gradYear = ap.grad_year && ap.grad_year > 0 ? ap.grad_year : Number(graduationYearAnswer(ap.grad_date, ap.grad_year));
+  if (!gradYear || !enrollmentConfirmedForGraduationDate(ap)) return null;
+  const now = new Date();
+  const academicStartYear = now.getUTCMonth() >= 7 ? now.getUTCFullYear() : now.getUTCFullYear() - 1;
+  const yearsUntilGraduation = gradYear - academicStartYear;
+  const undergradYear = 4 - yearsUntilGraduation + 1;
+  if (undergradYear <= 0 || undergradYear > 4) return null;
+  return ['First year', 'Second year', 'Third year', 'Fourth year'][undergradYear - 1] ?? null;
+}
+
+function majorAnswer(ap: ApplicationProfileLike): string | null {
+  const major = ap.major?.trim();
+  if (major) return major;
+  const degree = ap.degree?.trim();
+  if (!degree) return null;
+  const cleaned = degree
+    .replace(/\b(?:b\.?s\.?|b\.?a\.?|m\.?s\.?|m\.?a\.?|m\.?b\.?a\.?)\b/gi, ' ')
+    .replace(/\b(?:bachelor|bachelor's|bachelors|master|master's|masters|doctor|doctorate|ph\.?d)\s+(?:of\s+)?(?:science|arts|business\s+administration)?\s+(?:degree\s+)?(?:in\s+)?/gi, ' ')
+    .replace(/\b(?:degree\s+in|with\s+a\s+degree\s+in|in)\b/gi, ' ')
+    .replace(/(?:,\s*)?[^,;&()]{0,40}\b(?:emphasis|concentration|minor)\b.*$/i, '')
+    .replace(/[(),]/g, ' ')
+    .replace(/\s*&\s*/g, ' and ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned || degree;
 }
 
 function advancedDegreeEnrollmentAnswer(ap: ApplicationProfileLike): { value: string } | null {
@@ -704,8 +751,7 @@ export function resolveKnownAnswer(
   }
 
   if (LEGAL_CONSENT_QUESTION.test(label)) {
-    if (LEGAL_ATTESTATION_QUESTION.test(label)) return null;
-    return { value: /i agree/i.test(label) ? 'I agree' : 'Yes' };
+    return null;
   }
 
   if (isRefusedQuestion(label)) {
@@ -736,11 +782,11 @@ export function resolveKnownAnswer(
     case 'referral_source_default':
       return ap.referral_source_default ? { value: ap.referral_source_default } : { value: 'Company website' };
     case 'desired_salary': {
-      const salary = resolveSalary(
+      resolveSalary(
         { label, field: inputType === 'number' ? 'numeric' : 'freetext', jdText },
         storedSalaryOf(ap),
       );
-      return salary.action === 'fill' ? { value: salary.value } : { skipReason: salary.reason };
+      return { skipReason: `salary question left for you: "${label.slice(0, 60)}"` };
     }
     case 'date_of_birth':
       return ap.date_of_birth ? { value: ap.date_of_birth } : null;
@@ -752,6 +798,10 @@ export function resolveKnownAnswer(
       return { value: 'Yes' };
     case 'current_enrollment':
       return currentEnrollmentAnswer(ap);
+    case 'study_year': {
+      const value = studyYearAnswer(ap);
+      return value ? { value } : null;
+    }
     case 'school':
       return ap.school ? { value: ap.school } : null;
     case 'degree':
@@ -762,6 +812,10 @@ export function resolveKnownAnswer(
     case 'graduation_date': {
       if (MIXED_ENROLLMENT_GRADUATION_QUESTION.test(label) && !enrollmentConfirmedForGraduationDate(ap)) {
         return { skipReason: `enrollment/graduation date question left for you: "${label.slice(0, 60)}"` };
+      }
+      if (/\bgraduat(?:ion|e)\s+(?:semester|term)\b|\b(?:expected\s+)?graduat(?:ion|e)\s+semester\b/i.test(label)) {
+        const value = graduationSemesterAnswer(ap.grad_date, ap.grad_year);
+        return value ? { value } : null;
       }
       const value = graduationDateAnswer(ap.grad_date, ap.grad_year, inputType);
       return value ? { value } : null;
@@ -779,7 +833,10 @@ export function resolveKnownAnswer(
     case 'gpa_scale':
       return ap.gpa_scale ? { value: ap.gpa_scale } : null;
     case 'major':
-      return ap.major ? { value: ap.major } : null;
+      {
+        const value = majorAnswer(ap);
+        return value ? { value } : null;
+      }
     case 'languages':
       return languageAnswer(label, ap);
     default:
