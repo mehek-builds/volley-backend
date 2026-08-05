@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readMostRecentRole, shouldUseLocalControlledBrowser, submissionGraduationDateParts } from './submissionRunner';
+import {
+  applicationContextForQuestionResolution,
+  readMostRecentRole,
+  shouldUseLocalControlledBrowser,
+  submissionGraduationDateParts,
+} from './submissionRunner';
 
 // readMostRecentRole runs inside buildPacket, which every prepare and every submit goes through -
 // on EVERY portal, not just the one that needs work history. So its failure mode is not "Paylocity
@@ -60,6 +65,39 @@ test('submission graduation parts use the end of an education range', () => {
     month: 'May',
     year: '2029',
   });
+});
+
+test('question resolution context includes stored job locations', () => {
+  const context = applicationContextForQuestionResolution(
+    {
+      job_context: {
+        location: 'Mountain View, CA',
+        locations: ['San Francisco, CA', 'New York, NY'],
+      },
+    } as never,
+    {
+      jd_text: 'Build data infrastructure.',
+    } as never,
+  );
+  assert.match(context, /Build data infrastructure/);
+  assert.match(context, /Mountain View, CA/);
+  assert.match(context, /San Francisco, CA/);
+});
+
+test('question resolution context excludes mixed-country job locations', () => {
+  const context = applicationContextForQuestionResolution(
+    {
+      job_context: {
+        locations: ['Mountain View, CA', 'Toronto, Canada'],
+      },
+    } as never,
+    {
+      jd_text: 'Build data infrastructure.',
+    } as never,
+  );
+  assert.match(context, /Build data infrastructure/);
+  assert.doesNotMatch(context, /Mountain View, CA/);
+  assert.doesNotMatch(context, /Toronto/);
 });
 
 test('the controlled QA portal uses the managed browser in production', () => {

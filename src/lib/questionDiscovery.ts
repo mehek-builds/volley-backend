@@ -64,7 +64,7 @@ const NON_US_WORK_SCOPE =
   /\b(canada|canadian|united kingdom|uk|britain|british|england|european union|eu|australia|australian|india|indian|united arab emirates|uae|dubai|singapore|germany|france|ireland|netherlands|japan|korea|china)\b/i;
 const JOB_LOCATION_SCOPE = /country\s+(?:where|in which)\s+the\s+job\s+is\s+located|country\s+where\s+the\s+role\s+is\s+located|where\s+the\s+job\s+is\s+located/i;
 const JD_US_SCOPE =
-  /\b(united states|u\.s\.|usa|remote\s*\(us\)|san francisco|san mateo|california|new york|austin|texas|washington|seattle|boston|massachusetts|chicago|illinois)\b/i;
+  /\b(united states|u\.s\.|usa|remote\s*\(us\)|san francisco|san mateo|mountain view|california|new york|austin|texas|washington|seattle|boston|massachusetts|chicago|illinois)\b/i;
 
 export const EEO_QUESTION =
   /transgender|\bgender\b|what is your sex\b|race|ethnicit|hispanic|latino|veteran|military|disab|sexual orientation|communities|identify with|current age|what is your age|age range|how old are you|\bage group\b/i;
