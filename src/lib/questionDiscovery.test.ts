@@ -8,7 +8,9 @@ import {
   isOpenEndedQuestion,
   isRefusedQuestion,
   normalizeDiscoveredLabel,
+  normalizeReviewQuestionLabel,
   normalizeStoredPortalQuestions,
+  REVIEW_QUESTION_TEXT_MAX_LENGTH,
   resolveKnownAnswer,
   WORK_ELIGIBILITY_QUESTION,
 } from './questionDiscovery';
@@ -235,4 +237,36 @@ test('Ashby fixed profile fields never reappear as editable custom questions', (
   assert.deepEqual(normalized, [
     { id: 'essay', question: 'what excites you about deepgram?', answer: 'Reviewed answer' },
   ]);
+});
+
+test('review question labels are never empty or longer than the managed runner limit', () => {
+  assert.equal(normalizeReviewQuestionLabel('required field'), '');
+  assert.equal(normalizeReviewQuestionLabel('56f41b98-0250-4e12-a2d1-aa038a33af27'), '');
+
+  const longLabel = `Why Samsara? ${'Tell us more about your systems work '.repeat(30)}`;
+  const normalized = normalizeReviewQuestionLabel(longLabel);
+  assert.ok(normalized.length > 0);
+  assert.ok(normalized.length <= REVIEW_QUESTION_TEXT_MAX_LENGTH);
+  assert.equal(longLabel.toLowerCase().startsWith(normalized.toLowerCase()), true);
+});
+
+test('stored portal questions drop malformed labels and cap long discovered text', () => {
+  const longLabel = `What makes you excited about this internship? ${'Please be specific '.repeat(35)}`;
+  const normalized = normalizeStoredPortalQuestions([
+    { id: 'blank', question: ' ', answer: 'ignored' },
+    { id: 'uuid', question: '56f41b98-0250-4e12-a2d1-aa038a33af27', answer: 'ignored' },
+    { id: 'long', question: longLabel, answer: 'I like customer-facing infrastructure.' },
+  ], 'greenhouse');
+
+  assert.equal(normalized.length, 1);
+  assert.equal(normalized[0].id, 'long');
+  assert.ok(normalized[0].question.length <= REVIEW_QUESTION_TEXT_MAX_LENGTH);
+  assert.equal(longLabel.toLowerCase().startsWith(normalized[0].question.toLowerCase()), true);
+});
+
+test('long discovered labels can be capped for storage without hiding refusal checks', () => {
+  const longSensitive = `${'Please read this context carefully. '.repeat(20)}Will you now or in the future require sponsorship?`;
+
+  assert.equal(normalizeReviewQuestionLabel(longSensitive).length <= REVIEW_QUESTION_TEXT_MAX_LENGTH, true);
+  assert.equal(isRefusedQuestion(longSensitive), true);
 });

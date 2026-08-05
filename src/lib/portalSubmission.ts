@@ -1,6 +1,7 @@
 import type { Page } from 'playwright-core';
 import type { ManagedBrowserAction, ManagedBrowserResult } from './browserbase';
 import { describeRequiredBlocker, describeUnlabelledBlockers, humanFieldLabel } from './fieldLabel';
+import { normalizeReviewQuestionLabel } from './questionDiscovery';
 import type { Locator } from 'playwright-core';
 
 // Portal field ids legitimately contain CSS-syntax characters (Greenhouse uses UUIDs, others use
@@ -886,11 +887,13 @@ export function buildManagedPortalActions(
   // correctly. Sending none of them is what makes the run survive to a usable handoff.
   for (const item of canFillReviewedQuestions('managed') ? packet.questions : []) {
     if (!item.answer.trim()) continue;
+    const questionText = normalizeReviewQuestionLabel(item.question);
+    if (!questionText) continue;
     actions.push({
       type: 'fillByLabelText',
-      text: item.question,
+      text: questionText,
       value: item.answer,
-      label: `question:${item.question.slice(0, 80)}`,
+      label: `question:${questionText.slice(0, 80)}`,
       optional: true,
       timeout: MANAGED_FILL_TIMEOUT_MS,
     });
@@ -950,11 +953,13 @@ function pushPaylocityTraversal(actions: ManagedBrowserAction[], packet: Submiss
     // about never matching a short answer like "Yes" against an arbitrary label).
     for (const item of canFillReviewedQuestions('managed') ? packet.questions : []) {
       if (!item.answer.trim()) continue;
+      const questionText = normalizeReviewQuestionLabel(item.question);
+      if (!questionText) continue;
       actions.push({
         type: 'fillByLabelText',
-        text: item.question,
+        text: questionText,
         value: item.answer,
-        label: `question:${item.question.slice(0, 80)}`,
+        label: `question:${questionText.slice(0, 80)}`,
         optional: true,
         timeout: MANAGED_FILL_TIMEOUT_MS,
       });
@@ -1200,19 +1205,21 @@ async function uploadFirst(
 async function fillReviewedQuestions(page: Page, packet: SubmissionPacket, out: string[]) {
   for (const item of packet.questions) {
     if (!item.answer.trim()) continue;
-    const label = page.getByText(item.question, { exact: false }).first();
+    const questionText = normalizeReviewQuestionLabel(item.question);
+    if (!questionText) continue;
+    const label = page.getByText(questionText, { exact: false }).first();
     if ((await label.count()) === 0) continue;
     const container = label.locator('xpath=ancestor::*[self::div or self::fieldset][1]');
     const input = container.locator('textarea, input:not([type=file]):not([type=hidden])').first();
     if ((await input.count()) > 0 && (await input.isVisible().catch(() => false))) {
       await input.fill(item.answer);
-      out.push(`question:${item.question.slice(0, 80)}`);
+      out.push(`question:${questionText.slice(0, 80)}`);
       continue;
     }
     const select = container.locator('select').first();
     if ((await select.count()) > 0) {
       await select.selectOption({ label: item.answer }).catch(() => select.selectOption(item.answer));
-      out.push(`question:${item.question.slice(0, 80)}`);
+      out.push(`question:${questionText.slice(0, 80)}`);
     }
   }
 }
