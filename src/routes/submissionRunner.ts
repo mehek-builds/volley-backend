@@ -80,6 +80,7 @@ import {
   withinDailyCap,
 } from '../lib/submissionQueue';
 import { coverLetterFileNameForRole, resumeFileNameForRole } from '../lib/resumeFileName';
+import { tryAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
 
 export type ResumeRow = typeof generated_resumes.$inferSelect;
 type StoredSpec = Record<string, unknown>;
@@ -339,6 +340,7 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
       answer: item.answer,
       portalSelector: item.portal_selector,
       portalInputType: item.portal_input_type,
+      atsApiField: item.ats_api_field,
     })),
   };
 }
@@ -1100,6 +1102,34 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
   if (shouldUseLocalControlledBrowser(claimedPortal)) {
     await submitControlled(row, claimedReview, fastify);
     return;
+  }
+  {
+    const builtPacket = await buildPacket(row);
+    const packet = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
+    const atsResult = await tryAtsSubmissionChannel(claimedReview.portal_url, packet);
+    if (atsResult.kind === 'submitted') {
+      const capturedAt = new Date().toISOString();
+      await writeReview(row, nextReview(claimedReview, {
+        status: 'submitted',
+        submitted_at: capturedAt,
+        submission_error: undefined,
+        receipt: {
+          confirmation_text: atsResult.confirmationText,
+          final_url: atsResult.finalUrl,
+          captured_at: capturedAt,
+          reference_id: atsResult.referenceId,
+          source: 'ats_api',
+        },
+      }));
+      fastify.log.info({ applicationId: row.id, provider: atsResult.provider }, 'Application submission accepted by ATS API');
+      return;
+    }
+    if (atsResult.assessment.status === 'unavailable') {
+      fastify.log.info(
+        { applicationId: row.id, provider: atsResult.assessment.provider, reason: atsResult.assessment.reason },
+        'ATS API submission channel unavailable, continuing with browser submission',
+      );
+    }
   }
   // Portals that cannot be submitted in one run stop HERE, before either provider path.
   //
