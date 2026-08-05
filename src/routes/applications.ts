@@ -31,7 +31,7 @@ import { normalizeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import { requireAuth } from '../middleware/auth';
 import { declaredSkillsList } from './profile';
 import { buildPacket, processSubmissionApplication } from './submissionRunner';
-import { questionRequiresHumanAttention, refreshKnownQuestionAnswers } from '../lib/questionDiscovery';
+import { refreshKnownQuestionAnswers, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { resumeEditDisposition, submitRequestDisposition } from '../lib/submissionSafety';
 import { canonicalSupportedPortalUrl, detectPortal, isPortalSupported } from '../lib/portalSubmission';
 import { dailySubmissionCap, withinDailyCap } from '../lib/submissionQueue';
@@ -319,6 +319,37 @@ function finalApprovalFieldIssues(review: ApplicationReviewState, coverLetterReq
   return issues;
 }
 
+function booleanOrUndefined(value: boolean | null | undefined): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+async function loadSensitiveQuestionProfile(userId: string): Promise<ApplicationProfileLike> {
+  const [row] = await db
+    .select({
+      work_authorized: application_profile.work_authorized,
+      needs_sponsorship: application_profile.needs_sponsorship,
+      eeo_prefs: application_profile.eeo_prefs,
+    })
+    .from(application_profile)
+    .where(eq(application_profile.user_id, userId))
+    .limit(1);
+  return {
+    work_authorized: booleanOrUndefined(row?.work_authorized),
+    needs_sponsorship: booleanOrUndefined(row?.needs_sponsorship),
+    eeo_prefs: row?.eeo_prefs && typeof row.eeo_prefs === 'object'
+      ? row.eeo_prefs as Record<string, string>
+      : null,
+  };
+}
+
+function sensitiveQuestionFor(
+  questions: readonly ApplicationReviewQuestion[],
+  profile: ApplicationProfileLike,
+  jdText: string | undefined,
+): ApplicationReviewQuestion | undefined {
+  return questions.find((question) => sensitiveQuestionRequiresAttention(question.question, question.answer, 'text', profile, jdText));
+}
+
 export async function applicationRoutes(fastify: FastifyInstance) {
   fastify.post(
     '/applications/:id/submission/extension-start',
@@ -363,7 +394,18 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           .from(profiles).where(eq(profiles.user_id, userId)).limit(1);
         const educationIssues = packetEducationDrift(row.spec, profileRows[0]?.parsed_json);
         if (educationIssues.length > 0) return { kind: 'education_drift' as const, issues: educationIssues };
-        const sensitive = current.questions.find((question) => questionRequiresHumanAttention(question));
+        const [sensitiveProfileRow] = await tx
+          .select({
+            work_authorized: application_profile.work_authorized,
+            needs_sponsorship: application_profile.needs_sponsorship,
+          })
+          .from(application_profile)
+          .where(eq(application_profile.user_id, userId))
+          .limit(1);
+        const sensitive = sensitiveQuestionFor(current.questions, {
+          work_authorized: booleanOrUndefined(sensitiveProfileRow?.work_authorized),
+          needs_sponsorship: booleanOrUndefined(sensitiveProfileRow?.needs_sponsorship),
+        }, current.jd_text);
         if (sensitive) return { kind: 'sensitive_question' as const, question: sensitive.question };
         if (!withinDailyCap(countRows[0]?.total ?? 0, dailySubmissionCap())) return { kind: 'cap' as const };
         const now = new Date().toISOString();
@@ -637,25 +679,14 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       // false, and submit-request accepts a bare list of answers from any authenticated caller. The
       // review screen saves through PATCH /resume before it sends, and that route runs this exact
       // comparison, so a correctly-saved packet reaches this line with nothing to report.
-      const [submitProfileRows, submitApplicationProfileRows] = await Promise.all([
+      const [submitProfileRows, sensitiveProfile] = await Promise.all([
         db.select({ parsed_json: profiles.parsed_json })
           .from(profiles).where(eq(profiles.user_id, request.jwtPayload!.userId)).limit(1),
-        db.select({
-          work_authorized: application_profile.work_authorized,
-          needs_sponsorship: application_profile.needs_sponsorship,
-          eeo_prefs: application_profile.eeo_prefs,
-        }).from(application_profile).where(eq(application_profile.user_id, request.jwtPayload!.userId)).limit(1),
+        loadSensitiveQuestionProfile(request.jwtPayload!.userId),
       ]);
-      const profileAnswers = submitApplicationProfileRows[0];
       const submittedQuestions = refreshKnownQuestionAnswers(
         parsed.data.questions as ApplicationReviewQuestion[],
-        {
-          work_authorized: profileAnswers?.work_authorized ?? undefined,
-          needs_sponsorship: profileAnswers?.needs_sponsorship ?? undefined,
-          eeo_prefs: profileAnswers?.eeo_prefs && typeof profileAnswers.eeo_prefs === 'object'
-            ? profileAnswers.eeo_prefs as Record<string, string>
-            : null,
-        },
+        sensitiveProfile,
         typeof stored.jd_text === 'string' ? stored.jd_text : undefined,
       );
       if (submittedQuestions.some((question) => question.required && !question.answer.trim())) {
@@ -673,7 +704,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           issues: preSendIssues,
         });
       }
-      const sensitive = submittedQuestions.find((question) => questionRequiresHumanAttention(question));
+      const sensitive = sensitiveQuestionFor(submittedQuestions, sensitiveProfile, current.jd_text);
       if (sensitive) {
         return reply.status(422).send({ error: `Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}` });
       }
@@ -905,7 +936,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (current.questions.some((question) => question.required && !question.answer.trim())) {
         approvalIssues.push('A required application answer is still blank.');
       }
-      const sensitive = current.questions.find((question) => questionRequiresHumanAttention(question));
+      const sensitiveProfile = await loadSensitiveQuestionProfile(request.jwtPayload!.userId);
+      const sensitive = sensitiveQuestionFor(current.questions, sensitiveProfile, current.jd_text);
       if (sensitive) {
         approvalIssues.push(`Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}`);
       }

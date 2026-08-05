@@ -32,6 +32,7 @@ export type ManagedBrowserResult = {
   screenshot?: string | null;
   filledFields?: string[];
   blockers?: string[];
+  skipped?: string[];
   discovered?: ManagedDiscoveredQuestion[];
   extracted?: Array<{ selector: string; value: string | null }>;
 };

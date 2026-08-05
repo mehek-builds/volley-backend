@@ -81,7 +81,7 @@ import {
 } from '../lib/submissionQueue';
 import { coverLetterFileNameForRole, resumeFileNameForRole } from '../lib/resumeFileName';
 
-type ResumeRow = typeof generated_resumes.$inferSelect;
+export type ResumeRow = typeof generated_resumes.$inferSelect;
 type StoredSpec = Record<string, unknown>;
 
 type StandingAuthorization = {
@@ -469,7 +469,7 @@ export function applicationContextForQuestionResolution(row: ResumeRow, current:
 // result (buildManagedDiscoveryActions / stratus-browser-cloud PR #7) - this function has no
 // browser dependency of its own, so both callers share one resolution path and can never drift on
 // what counts as an answerable question.
-async function discoverAndResolveQuestions(
+export async function discoverAndResolveQuestions(
   discovered: DiscoveredQuestion[],
   row: ResumeRow,
   current: ApplicationReviewState,

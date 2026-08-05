@@ -182,12 +182,12 @@ test('extension-start refuses a drifted packet before it reserves the submission
 
 test('extension-start refuses sensitive questions before it reserves the submission', () => {
   const handler = slice(routes, "'/applications/:id/submission/extension-start'", "'/applications/:id/submission/extension-outcome'");
-  assert.match(handler, /current\.questions\.find\(\(question\) => questionRequiresHumanAttention\(question\)\)/);
+  assert.match(handler, /sensitiveQuestionFor\(current\.questions/);
   assert.match(handler, /kind: 'sensitive_question'/);
   assert.match(handler, /result\.kind === 'sensitive_question'/);
   assert.match(handler, /Sensitive question requires your attention/);
   assert.ok(
-    handler.indexOf('questionRequiresHumanAttention') < handler.indexOf('tx.update(generated_resumes)'),
+    handler.indexOf('sensitiveQuestionFor') < handler.indexOf('tx.update(generated_resumes)'),
     'a sensitive question must block before the submission claim is written',
   );
 });
@@ -223,7 +223,7 @@ test('final approval revalidates the full packet before it clicks submit', () =>
   assert.match(handler, /const coverLetter = storedCoverLetter\(row\)/);
   assert.match(handler, /current\.cover_letter_supported === true && !coverLetter/);
   assert.match(handler, /current\.questions\.some\(\(question\) => question\.required && !question\.answer\.trim\(\)\)/);
-  assert.match(handler, /current\.questions\.find\(\(question\) => questionRequiresHumanAttention\(question\)\)/);
+  assert.match(handler, /sensitiveQuestionFor\(current\.questions/);
   assert.match(handler, /Sensitive question requires your attention/);
   assert.match(handler, /preSendResumeVerificationIssues\(request\.jwtPayload!\.userId, stored\)/);
   assert.match(handler, /FINAL_APPROVAL_VERIFICATION_FAILED/);
