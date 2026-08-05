@@ -1106,6 +1106,14 @@ export function buildManagedPortalActions(
   }
   if (portalFamily(portal) === 'greenhouse') {
     pushGreenhouseKnownQuestionAliases(actions, packet);
+    actions.push({
+      type: 'fillByLabelText',
+      text: 'By checking this box, I consent',
+      value: 'Yes',
+      label: 'greenhouse_demographic_data_consent',
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
   }
   // Choice controls are filled only by the runner's scoped question-container logic. That keeps
   // short answers such as "Yes" from matching an unrelated acknowledgement elsewhere on the page.

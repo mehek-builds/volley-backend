@@ -144,6 +144,27 @@ test('answers EEO / demographic questions with stored preferences or decline', (
   );
 });
 
+test('answers candidate privacy and demographic consent attestations from standing approval', () => {
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'By selecting "I agree," I understand that the information I have provided as part of this job application will be processed in accordance with the Candidate Privacy Policy.',
+      'text',
+      {},
+      undefined,
+    ),
+    { value: 'I agree' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'By checking this box, I consent to Reddit collecting, storing, and processing my responses to the demographic data survey above.',
+      'text',
+      {},
+      undefined,
+    ),
+    { value: 'Yes' },
+  );
+});
+
 test('send-time sensitive guard allows stored work and EEO answers while blocking identity numbers', () => {
   assert.equal(
     questionRequiresHumanAttention({ question: 'are you legally authorized to work in the United States?', answer: 'Yes' }),

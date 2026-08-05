@@ -201,7 +201,7 @@ test('managed controlled-portal actions include reviewed fields, resume upload, 
     questions: [{ question: 'Why this role?', answer: 'I enjoy systems work.' }],
   }, true);
   assert.deepEqual(actions.map((action) => action.type), [
-    'fill', 'fillByLabelText', 'fill', 'fill', 'upload', 'fillByLabelText', 'click',
+    'fill', 'fillByLabelText', 'fill', 'fill', 'upload', 'fillByLabelText', 'fillByLabelText', 'click',
   ]);
   assert.equal(actions.find((action) => action.type === 'upload')?.file?.base64, 'cGRm');
 });
@@ -521,10 +521,20 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
     assert.equal(action.optional, true, `"${action.text}" must not be able to abort the run`);
   }
   // first_name, last_name, email (phone and location are omitted from this fixture), resume, then
-  // the two questions.
-  assert.deepEqual(actions.map((a) => a.type), [
-    'fill', 'fillByLabelText', 'fill', 'fill', 'upload', 'fillByLabelText', 'fillByLabelText',
-  ]);
+  // the two questions and explicit Greenhouse consent helper.
+  assert.deepEqual(
+    actions.map((a) => a.type),
+    [
+      'fill',
+      'fillByLabelText',
+      'fill',
+      'fill',
+      'upload',
+      'fillByLabelText',
+      'fillByLabelText',
+      'fillByLabelText',
+    ],
+  );
 });
 
 test('managed Greenhouse question fills prefer rediscovered selectors over label text', () => {
@@ -659,7 +669,12 @@ test('Greenhouse fills academic fields from the submission packet', () => {
     resumeName: 'resume.pdf',
     questions: [],
   });
-  const byLabel = actions.filter((action) => action.type === 'fillByLabelText' && !action.label?.startsWith('first_name'));
+  const byLabel = actions.filter(
+    (action) =>
+      action.type === 'fillByLabelText'
+      && !action.label?.startsWith('first_name')
+      && action.label !== 'greenhouse_demographic_data_consent',
+  );
   assert.deepEqual(
     byLabel.map((action) => [action.text, action.value, action.label]),
     [
@@ -723,6 +738,27 @@ test('choice controls are not auto-clicked by matching answer text', () => {
   });
   const clicks = actions.filter((action) => action.type === 'click');
   assert.equal(clicks.length, 0, 'no click action may be synthesized from an answer string');
+});
+
+test('Greenhouse managed actions include approved demographic data consent', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  assert.deepEqual(
+    actions.find((action) => action.label === 'greenhouse_demographic_data_consent'),
+    {
+      type: 'fillByLabelText',
+      text: 'By checking this box, I consent',
+      value: 'Yes',
+      label: 'greenhouse_demographic_data_consent',
+      optional: true,
+      timeout: 10000,
+    },
+  );
 });
 
 test('question wording alone cannot predict a control type', () => {
