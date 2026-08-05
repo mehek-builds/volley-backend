@@ -335,6 +335,68 @@ test('existing reviewed choice answers do not keep direct selectors on retry', a
   assert.equal(result.questions[0]?.portal_selector, undefined);
 });
 
+test('rediscovered profile-backed questions replace stale drafted retry answers', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'This internship is based in Austin, Texas.',
+    role: 'Marketing Programs and Analytics Intern',
+    portal_url: 'https://example.greenhouse.io/jobs/123',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [
+      {
+        id: 'degree-existing',
+        question: 'If you are enrolled in university, what degree are you currently pursuing?',
+        answer: "I'm pursuing a degree at USC.",
+        kind: 'essay',
+        required: false,
+        portal_selector: '[data-litos-discovered-1]',
+      },
+      {
+        id: 'gender-existing',
+        question: 'How do you currently describe your gender identity? * 4000408002',
+        answer: 'I prefer to focus on my qualifications.',
+        kind: 'essay',
+        required: false,
+        portal_selector: '[data-litos-discovered-2]',
+      },
+    ],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+
+  const result = await discoverAndResolveQuestions(
+    [
+      {
+        label: 'If you are enrolled in university, what degree are you currently pursuing?',
+        selector: '[data-litos-discovered-1]',
+        inputType: 'combobox',
+        maxLength: null,
+      },
+      {
+        label: 'How do you currently describe your gender identity? * 4000408002',
+        selector: '[data-litos-discovered-2]',
+        inputType: 'select',
+        maxLength: null,
+      },
+    ],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { degree: 'Bachelor of Science in Computer Science', eeo_prefs: { gender: 'Female' } },
+    true,
+    'greenhouse',
+  );
+
+  assert.deepEqual(result.attentionReasons, []);
+  assert.deepEqual(
+    result.questions.map((question) => ({ id: question.id, answer: question.answer, kind: question.kind })),
+    [
+      { id: 'degree-existing', answer: 'Bachelor\'s Degree', kind: 'required' },
+      { id: 'gender-existing', answer: 'Female', kind: 'required' },
+    ],
+  );
+});
+
 // ─── The prepare-time gate for account-walled portals ─────────────────────────
 //
 // This is a SOURCE-LEVEL test, which is unusual here and deliberate. prepare() is not exported and
