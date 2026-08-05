@@ -33,7 +33,7 @@ import { warmRequirementCache } from '../engine/warmRequirements';
 import { postingRow, resolveJdText } from './jdMatch';
 import { baseResumeSelectionIssues } from '../llm/baseResume';
 import { deriveEditedTerms, readApplicationReview, type ApplicationReviewState } from '../lib/applicationReview';
-import { detectPortal, isPortalSupported } from '../lib/portalSubmission';
+import { canonicalSupportedPortalUrl, detectPortal, isPortalSupported } from '../lib/portalSubmission';
 import { contentDispositionFileName, resumeFileNameForRole } from '../lib/resumeFileName';
 import { monitoredDescriptionHash, monitoredJdAgrees } from '../lib/monitoredPortalRepair';
 
@@ -949,6 +949,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       .select({
         id: monitored_jobs.id,
         apply_url: monitored_jobs.apply_url,
+        ats_name: career_page_sources.ats_name,
         company_name: monitored_jobs.company_name,
         title: monitored_jobs.title,
         description: sql<string>`left(${monitored_jobs.description}, 60000)`,
@@ -961,7 +962,8 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       ));
     const monitoredJobs = new Map(
       monitoredRows
-        .filter((job) => isPortalSupported(job.apply_url))
+        .map((job) => ({ ...job, apply_url: canonicalSupportedPortalUrl(job.apply_url, job.ats_name) }))
+        .filter((job): job is typeof job & { apply_url: string } => Boolean(job.apply_url))
         .map((job) => [job.id, {
           applyUrl: job.apply_url,
           company: job.company_name,
