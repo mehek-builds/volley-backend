@@ -46,6 +46,36 @@ export function normalizeApplicationReviewQuestions(
   return normalized;
 }
 
+export function mergeSubmittedApplicationReviewQuestions(
+  stored: readonly ApplicationReviewQuestion[],
+  submitted: readonly ApplicationReviewQuestion[],
+): ApplicationReviewQuestion[] {
+  const submittedByQuestion = new Map<string, ApplicationReviewQuestion>();
+  for (const question of submitted) {
+    const key = questionKey(question.question);
+    if (key) submittedByQuestion.set(key, question);
+  }
+  const merged = stored.map((question) => {
+    const submittedQuestion = submittedByQuestion.get(questionKey(question.question));
+    if (!submittedQuestion) return question;
+    return {
+      ...question,
+      answer: submittedQuestion.answer,
+      kind: submittedQuestion.kind,
+      required: question.required || submittedQuestion.required,
+      question: submittedQuestion.question.trim() ? submittedQuestion.question : question.question,
+      portal_selector: preferredPortalSelector(question.portal_selector, submittedQuestion.portal_selector),
+    };
+  });
+  const storedKeys = new Set(stored.map((question) => questionKey(question.question)).filter(Boolean));
+  for (const question of submitted) {
+    const key = questionKey(question.question);
+    if (!key || storedKeys.has(key)) continue;
+    merged.push(question);
+  }
+  return normalizeApplicationReviewQuestions(merged);
+}
+
 function questionKey(question: string): string {
   return question.toLowerCase().replace(/\s+/g, ' ').trim();
 }

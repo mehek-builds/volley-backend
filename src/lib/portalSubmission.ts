@@ -894,7 +894,7 @@ function greenhouseKnownQuestionAliases(question: string, answer: string): strin
   if (!['yes', 'no'].includes(normalizedAnswer)) return [];
   if (
     /\b(?:eligible|authorized|authorised|legally\s+work|work\s+authorization|work\s+authorisation)\b/.test(normalizedQuestion)
-    && /\b(?:u\.?s\.?a?|united\s+states)\b/.test(normalizedQuestion)
+    && (/\b(?:u\.?s\.?a?|united\s+states)\b/.test(normalizedQuestion) || /\bcountry\s+where\s+the\s+job\s+is\s+located\b/.test(normalizedQuestion))
     && !/\bwithout\s+sponsorship\b/.test(normalizedQuestion)
   ) {
     return [
@@ -902,6 +902,7 @@ function greenhouseKnownQuestionAliases(question: string, answer: string): strin
       'Are you currently eligible to legally work in the U.S.?',
       'Are you legally authorized to work in the United States?',
       'Are you authorized to work in the United States?',
+      'Are you legally authorized to work in the country where the job is located?',
     ];
   }
   if (
