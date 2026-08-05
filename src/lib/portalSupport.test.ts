@@ -150,7 +150,7 @@ test('portal support is written at packet creation and unsupported portals use e
   // monitored-job packets whose review URL is stale or company-owned.
   assert.match(resumeRoute, /function repairedHistorySpec/);
   assert.match(resumeRoute, /monitored_jobs\.apply_url/);
-  assert.match(resumeRoute, /historyJdHash\(job\.description\)/);
+  assert.match(resumeRoute, /monitoredDescriptionHash\(job\.description\)/);
   assert.match(resumeRoute, /spec: repairedHistorySpec\(row, monitoredJobs\)/);
 
   const applicationsRoute = routeSource('applications.ts');
@@ -158,7 +158,7 @@ test('portal support is written at packet creation and unsupported portals use e
   // packet unsupported, submit-request must first repair from the canonical monitored job apply_url.
   assert.match(applicationsRoute, /async function repairReviewPortalFromMonitoredJob/);
   assert.match(applicationsRoute, /monitored_jobs\.apply_url/);
-  assert.match(applicationsRoute, /jdHash\(job\.description\) !== expectedJdHash/);
+  assert.match(applicationsRoute, /monitoredJdAgrees\(expectedJdHash, current\.jd_text, job\.description\)/);
   assert.match(applicationsRoute, /current = await repairReviewPortalFromMonitoredJob\(row, current\)/);
   assert.match(applicationsRoute, /sendUnsupportedPortalApplicationEmail/);
   assert.match(applicationsRoute, /!isPortalSupported\(current\.portal_url\)[\s\S]{0,1800}sendUnsupportedPortalApplicationEmail/);

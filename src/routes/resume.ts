@@ -35,6 +35,7 @@ import { baseResumeSelectionIssues } from '../llm/baseResume';
 import { deriveEditedTerms, readApplicationReview, type ApplicationReviewState } from '../lib/applicationReview';
 import { AUTONOMOUS_PORTAL_FAMILIES, detectPortal, isPortalSupported } from '../lib/portalSubmission';
 import { contentDispositionFileName, resumeFileNameForRole } from '../lib/resumeFileName';
+import { monitoredDescriptionHash, monitoredJdAgrees } from '../lib/monitoredPortalRepair';
 
 const MAX_SPEC_ATTEMPTS = 2; // 1 initial pass + 1 feedback-driven retry, per PRD-v2 Section 6.4's
 // "automated quality gate" - bounded so a stubborn JD can't loop the endpoint indefinitely.
@@ -84,22 +85,18 @@ function normalizedJobIdentity(value: string | null): string {
   return (value ?? '').trim().toLowerCase();
 }
 
-function historyJdHash(text: string): string {
-  return createHash('sha256').update(text).digest('hex').slice(0, 16);
-}
-
 function repairedHistorySpec(
   row: typeof generated_resumes.$inferSelect,
-  monitoredJobs: ReadonlyMap<string, { applyUrl: string; company: string; role: string; jdHash: string }>,
+  monitoredJobs: ReadonlyMap<string, { applyUrl: string; company: string; role: string; description: string; jdHash: string }>,
 ): unknown {
   const jobId = generatedResumeJobId(row);
   const job = jobId ? monitoredJobs.get(jobId) : undefined;
   if (!job) return row.spec;
-  if (normalizedJobIdentity(job.company) !== normalizedJobIdentity(generatedResumeContextText(row, 'company'))) return row.spec;
-  if (normalizedJobIdentity(job.role) !== normalizedJobIdentity(generatedResumeContextText(row, 'role'))) return row.spec;
-  if (job.jdHash !== generatedResumeContextText(row, 'jd_hash')) return row.spec;
   const review = readApplicationReview(row.spec);
   if (!review || (review.portal_url && isPortalSupported(review.portal_url))) return row.spec;
+  if (normalizedJobIdentity(job.company) !== normalizedJobIdentity(generatedResumeContextText(row, 'company'))) return row.spec;
+  if (normalizedJobIdentity(job.role) !== normalizedJobIdentity(generatedResumeContextText(row, 'role'))) return row.spec;
+  if (!monitoredJdAgrees(generatedResumeContextText(row, 'jd_hash'), review.jd_text, job.description, job.jdHash)) return row.spec;
   const spec = row.spec;
   if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return row.spec;
   const repaired: ApplicationReviewState = {
@@ -970,7 +967,8 @@ export async function resumeRoutes(fastify: FastifyInstance) {
           applyUrl: job.apply_url,
           company: job.company_name,
           role: job.title,
-          jdHash: historyJdHash(job.description),
+          description: job.description,
+          jdHash: monitoredDescriptionHash(job.description),
         }] as const),
     );
     const base = apiBaseFor(request);
