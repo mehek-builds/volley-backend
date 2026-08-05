@@ -389,6 +389,7 @@ function degreeAnswer(label: string, inputType: string | undefined, degree: stri
   const trimmed = degree?.trim();
   if (!trimmed) return null;
   const needsLevel = /most recent degree|highest degree|degree (?:you )?(?:obtained|earned)|education level|level of education/i.test(label)
+    || /\bdegree--\d+\b/i.test(label)
     || /select|radio|combobox/i.test(inputType ?? '');
   if (!needsLevel) return trimmed;
   if (/\bph\.?d\b|doctor of philosophy|doctorate/i.test(trimmed)) return 'Doctor of Philosophy (Ph.D.)';
