@@ -383,6 +383,13 @@ function directFillPage(selectors: string[]) {
       press: async (key: string) => {
         if (present) values.set(`${selector}::press`, key);
       },
+      selectOption: async (option: string | { label?: string }) => {
+        if (!present) return [];
+        const value = typeof option === 'string' ? option : option.label;
+        if (!value) return [];
+        values.set(selector, value);
+        return [value];
+      },
       getAttribute: async () => null,
       inputValue: async () => values.get(selector) ?? '',
       locator: () => makeLocator(`${selector} child`, 0),
@@ -456,6 +463,32 @@ test('direct Greenhouse fill confirms phone country and city comboboxes', async 
   assert.equal(values.get('#phone'), '+971 50 123 4567');
   assert.equal(values.get('#candidate-location'), 'Dubai, United Arab Emirates');
   assert.equal(values.get('#candidate-location::press'), 'Enter');
+});
+
+test('direct Greenhouse fill selects saved demographic choices', async () => {
+  const genderSelector = '.field:has(label:has-text("What gender identity do you most closely identify with?")) select';
+  const orientationSelector = '.field:has(label:has-text("What sexual orientation do you most closely identify with?")) select';
+  const raceSelector = '.field:has(label:has-text("Please select up to 2 ethnicities that you most closely identify with.")) select';
+  const { page, values } = directFillPage([
+    genderSelector,
+    orientationSelector,
+    raceSelector,
+  ]);
+  await fillPortal(page, 'greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    eeoPrefs: {
+      gender: 'Female',
+      sexual_orientation: 'Heterosexual',
+      race: 'White',
+    },
+    questions: [],
+  });
+  assert.equal(values.get(genderSelector), 'Female');
+  assert.equal(values.get(orientationSelector), 'Heterosexual');
+  assert.equal(values.get(raceSelector), 'White');
 });
 
 test('managed receipt requires confirmation language and captures the reference', () => {
@@ -778,6 +811,41 @@ test('Greenhouse managed actions include approved demographic data consent', () 
       optional: true,
       timeout: 10000,
     },
+  );
+});
+
+test('Greenhouse managed actions include explicitly saved demographic choices', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    eeoPrefs: {
+      gender: 'Female',
+      transgender_status: 'Decline to self-identify',
+      sexual_orientation: 'Heterosexual',
+      disability_status: 'Decline to self-identify',
+      veteran_status: 'Decline to self-identify',
+      race: 'White',
+    },
+    questions: [],
+  });
+  assert.deepEqual(
+    actions
+      .filter((action) => action.label?.startsWith('greenhouse_demographic:'))
+      .map((action) => [action.text, action.value]),
+    [
+      ['What gender identity do you most closely identify with?', 'Female'],
+      ['What is your gender?', 'Female'],
+      ['Are you a person of transgender experience?', 'Decline to self-identify'],
+      ['What sexual orientation do you most closely identify with?', 'Heterosexual'],
+      ['Do you live with a disability (as outlined by the ADA)?', 'Decline to self-identify'],
+      ['Disability status', 'Decline to self-identify'],
+      ['Are you a veteran/have you served in the military?', 'Decline to self-identify'],
+      ['Veteran status', 'Decline to self-identify'],
+      ['Please select up to 2 ethnicities that you most closely identify with.', 'White'],
+      ['Please select your racial/ethnic background', 'White'],
+    ],
   );
 });
 

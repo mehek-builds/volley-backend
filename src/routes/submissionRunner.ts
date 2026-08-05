@@ -246,6 +246,17 @@ export function submissionGraduationDateParts(
   return { month: month ? month[0].toUpperCase() + month.slice(1).toLowerCase() : undefined, year };
 }
 
+export function sanitizeEeoPrefs(value: unknown): Record<string, string> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const cleaned: Record<string, string> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (typeof raw !== 'string') continue;
+    const trimmed = raw.trim();
+    if (trimmed) cleaned[key] = trimmed;
+  }
+  return Object.keys(cleaned).length > 0 ? cleaned : null;
+}
+
 export async function buildPacket(row: ResumeRow, controlledTest = false): Promise<SubmissionPacket> {
   const stored = row.spec as StoredSpec;
   const contact = (stored._contact ?? {}) as Record<string, unknown>;
@@ -320,6 +331,7 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     coverLetterName: coverLetter
       ? coverLetterFileNameForRole(fullName, roleTitle)
       : undefined,
+    eeoPrefs: sanitizeEeoPrefs(app.eeo_prefs),
     mostRecentRole: readMostRecentRole(parsed),
     questions: review.questions.map((item) => ({
       question: item.question,
@@ -631,9 +643,7 @@ async function loadApplicationProfileLike(userId: string): Promise<ApplicationPr
     gpa: str('gpa'),
     gpa_scale: str('gpa_scale'),
     major: str('major'),
-    eeo_prefs: app.eeo_prefs && typeof app.eeo_prefs === 'object'
-      ? app.eeo_prefs as Record<string, string>
-      : undefined,
+    eeo_prefs: sanitizeEeoPrefs(app.eeo_prefs) ?? undefined,
     referral_source_default: str('referral_source_default'),
   };
 }

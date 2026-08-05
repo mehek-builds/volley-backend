@@ -252,6 +252,7 @@ export type SubmissionPacket = {
   resumeName: string;
   coverLetter?: Buffer;
   coverLetterName?: string;
+  eeoPrefs?: Record<string, string> | null;
   // The single most recent role from the parsed resume, for portals that ask for work history as
   // structured fields rather than accepting the resume file alone (Paylocity's step one). Only one
   // entry, deliberately: portals render additional rows behind an "Add" button, and creating rows
@@ -649,6 +650,71 @@ function pushGreenhouseKnownQuestionAliases(actions: ManagedBrowserAction[], pac
           item.answer.trim().toLowerCase() === 'yes' ? '1' : '0',
           `greenhouse_known_select_value:${index}:${alias.slice(0, 80)}`,
         );
+      }
+    }
+  }
+}
+
+const GREENHOUSE_DEMOGRAPHIC_ALIASES: Array<{ key: string; aliases: string[] }> = [
+  {
+    key: 'gender',
+    aliases: [
+      'What gender identity do you most closely identify with?',
+      'What is your gender?',
+    ],
+  },
+  {
+    key: 'transgender_status',
+    aliases: [
+      'Are you a person of transgender experience?',
+    ],
+  },
+  {
+    key: 'sexual_orientation',
+    aliases: [
+      'What sexual orientation do you most closely identify with?',
+    ],
+  },
+  {
+    key: 'disability_status',
+    aliases: [
+      'Do you live with a disability (as outlined by the ADA)?',
+      'Disability status',
+    ],
+  },
+  {
+    key: 'veteran_status',
+    aliases: [
+      'Are you a veteran/have you served in the military?',
+      'Veteran status',
+    ],
+  },
+  {
+    key: 'race',
+    aliases: [
+      'Please select up to 2 ethnicities that you most closely identify with.',
+      'Please select your racial/ethnic background',
+    ],
+  },
+];
+
+function pushGreenhouseDemographicAliases(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
+  const prefs = packet.eeoPrefs;
+  if (!prefs) return;
+  for (const item of GREENHOUSE_DEMOGRAPHIC_ALIASES) {
+    const value = prefs[item.key]?.trim();
+    if (!value) continue;
+    for (const alias of item.aliases) {
+      actions.push({
+        type: 'fillByLabelText',
+        text: alias,
+        value,
+        label: `greenhouse_demographic:${alias.slice(0, 80)}`,
+        optional: true,
+        timeout: MANAGED_FILL_TIMEOUT_MS,
+      });
+      for (const [index, selectSelector] of greenhouseQuestionSelectSelectors(alias).entries()) {
+        managedSelect(actions, selectSelector, value, `greenhouse_demographic_select:${index}:${alias.slice(0, 80)}`);
       }
     }
   }
@@ -1107,6 +1173,7 @@ export function buildManagedPortalActions(
   }
   if (portalFamily(portal) === 'greenhouse') {
     pushGreenhouseKnownQuestionAliases(actions, packet);
+    pushGreenhouseDemographicAliases(actions, packet);
     actions.push({
       type: 'fillByLabelText',
       text: 'By checking this box, I consent',
@@ -1409,6 +1476,37 @@ async function fillComboboxFirst(page: Page, selectors: string[], value: string 
   }
 }
 
+async function selectFirst(page: Page, selectors: string[], value: string | undefined, label: string, out: string[]) {
+  if (!value) return;
+  for (const selector of selectors) {
+    const field = page.locator(selector).first();
+    if ((await field.count()) === 0 || !(await field.isVisible().catch(() => false))) continue;
+    const selected = await field.selectOption({ label: value }).catch(() => field.selectOption(value).catch(() => null));
+    if (selected && selected.length > 0) {
+      out.push(label);
+      return;
+    }
+  }
+}
+
+async function fillGreenhouseDemographicAliases(page: Page, packet: SubmissionPacket, out: string[]) {
+  const prefs = packet.eeoPrefs;
+  if (!prefs) return;
+  for (const item of GREENHOUSE_DEMOGRAPHIC_ALIASES) {
+    const value = prefs[item.key]?.trim();
+    if (!value) continue;
+    for (const alias of item.aliases) {
+      await selectFirst(
+        page,
+        greenhouseQuestionSelectSelectors(alias),
+        value,
+        `greenhouse_demographic:${alias.slice(0, 80)}`,
+        out,
+      );
+    }
+  }
+}
+
 async function uploadFirst(
   page: Page,
   selectors: string[],
@@ -1485,6 +1583,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillComboboxFirst(page, ['#candidate-location', 'input[autocomplete="address-level2"]'], greenhouseLocationSearch(packet), 'location', filledFields);
     await uploadFirst(page, ['#resume', 'input[type="file"][name="job_application[resume]"]'], packet.resume, packet.resumeName, 'resume', filledFields);
     await uploadFirst(page, ['input#cover_letter[type="file"]', 'input[type="file"][name*="cover_letter" i]'], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await fillGreenhouseDemographicAliases(page, packet, filledFields);
   } else if (family === 'lever') {
     await fillFirst(page, ['input[name="name"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="email"]'], packet.email, 'email', filledFields);
