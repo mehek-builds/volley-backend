@@ -303,7 +303,7 @@ const HEADING_PATTERNS: Array<{ kind: SectionKind; re: RegExp }> = [
   //                           the section at the tag would zero real content on a third of them.
   //                           They are harmless where they are (matching nothing, they close
   //                           nothing) and they need a rule about their SHAPE, not this list.
-  { kind: 'noise', re: new RegExp(String.raw`^about\b(?!\s+${SECOND_PERSON_SUBJECT}\b)|^disclosures:?$|\b(who we are|our (story|mission|values|culture)|benefits|perks|what we('?ll)? offer|compensation|salary|pay range|hourly rate|pay rate|stipend|total rewards|pay transparency|equal opportunity|eeo|diversity|accommodation|privacy|how to apply|why join|interview process|hiring process|selection process|background check|employment verification)\b`, 'i') },
+  { kind: 'noise', re: new RegExp(String.raw`^about\b(?!\s+${SECOND_PERSON_SUBJECT}\b)|^disclosures:?$|\b(who (we are|are we)|our (story|mission|values|culture)|benefits|perks|what else|what we('?ll)? offer|compensation|salary|pay range|hourly rate|pay rate|stipend|total rewards|pay transparency|equal opportunity|eeo|diversity|accommodation|privacy|how to apply|why join|interview process|hiring process|selection process|background check|employment verification)\b`, 'i') },
   { kind: 'preferred', re: /\b(preferred|nice[- ]to[- ]have|bonus|plus(es)?|desired|good to have|additional qualifications)\b/i },
   // `what we('?re)? look(ing)? for` and `(your|the) impact`, not the tighter `what we're looking
   // for` / `your impact` they replaced. Databricks' "Product Management Intern (Summer 2027)"
@@ -506,7 +506,7 @@ function classifyHeading(line: string): SectionKind | undefined {
  * about, because the shape guards will not stop it. See the guard test in jdMatch.test.ts.
  */
 const NOISE_BLOCK =
-  /\b(benefits|perks|equal opportunity|equal employment|eeo|e-verify|affirmative action|reasonable accommodation|fair chance|applicant privacy|privacy policy)\b/i;
+  /\b(who (we are|are we)|what else|benefits|perks|equal opportunity|equal employment|eeo|e-verify|affirmative action|reasonable accommodation|fair chance|applicant privacy|privacy policy)\b/i;
 
 function isNoiseBlockOpener(line: string): boolean {
   const t = headingCore(line);
@@ -635,6 +635,17 @@ function inlineLabel(line: string): { kind: SectionKind; rest: string } | undefi
 const FOOTER_PROSE =
   /\b(equal opportunity is the law|(without regard to|regardless of) race|equal (employment )?opportunity (employer|workplace)|all qualified applicants will receive|protected veteran status|e-verify)\b/i;
 
+const LOGISTICS_PROSE =
+  /\b(headquartered in|has offices in|office locations?|hub offices?|based out of (our|the) (hubs|offices)|(roles?|jobs?|positions?) ((can be|is|are) )?based (out of|in)|in office [0-9]|we (are|work|value)[^.]{0,80}in office|hybrid work approach|remote workforce)\b/i;
+
+function isLogisticsProseLine(line: string): boolean {
+  const t = headingCore(line);
+  if (!t) return false;
+  if (/^[-*•·]/.test(t)) return false;
+  if (/\b(must|required|able|willing|authorized|authorization|relocat(e|ion)|commut(e|ing))\b/i.test(t)) return false;
+  return LOGISTICS_PROSE.test(t);
+}
+
 export interface JdSection {
   kind: SectionKind;
   weight: number;
@@ -741,6 +752,13 @@ export function segmentJd(jdText: string): JdSection[] {
     if (FOOTER_PROSE.test(line)) {
       if (current.text.trim()) sections.push(current);
       current = { kind: 'noise', weight: SECTION_WEIGHT.noise, text: line + '\n', footer: true };
+      continue;
+    }
+    if (isLogisticsProseLine(line)) {
+      const resume = { kind: current.kind, weight: current.weight, footer: current.footer };
+      if (current.text.trim()) sections.push(current);
+      sections.push({ kind: 'noise', weight: SECTION_WEIGHT.noise, text: line + '\n' });
+      current = { ...resume, text: '' };
       continue;
     }
     current.text += line + '\n';

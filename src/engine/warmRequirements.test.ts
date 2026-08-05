@@ -68,6 +68,19 @@ describe('it warms exactly what the review screen will ask for', () => {
     assert.match(src, /section\.kind !== 'required' && section\.kind !== 'preferred'/);
   });
 
+  test('office logistics inside requirements are not warmed as requirements', () => {
+    const jd = [
+      'Requirements',
+      'Ability to communicate nuance to partners in written and verbal form.',
+      'This role can be based in San Francisco, Tokyo, London, or Bangalore.',
+      'Experience leading cross-functional reviews with product and engineering teams.',
+    ].join('\n');
+    const questions = warmQuestions(jd, FACTS, undefined);
+    assert.ok(questions.some((q) => /communicate nuance/.test(q.clause)));
+    assert.ok(questions.some((q) => /cross-functional reviews/.test(q.clause)));
+    assert.ok(!questions.some((q) => /San Francisco|Tokyo|London|Bangalore/i.test(q.clause)));
+  });
+
   test('the bound RACES the judgement, it does not wait for both', () => {
     // Promise.all here would be silently catastrophic and passes every behavioural test: the
     // timeout promise only ever REJECTS, so `all` would wait for it on the success path too and

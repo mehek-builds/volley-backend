@@ -254,6 +254,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
      * still supplies its own text and is unaffected.
      */
     let jdText = body.jd_text;
+    let postingLocation: string | null = null;
     if (body.job_id) {
       /* Through the SAME scoped helper the review screen uses, not a second inline query.
        *
@@ -262,6 +263,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
        * Sharing the helper also keeps the JD a packet is generated against identical to the JD its
        * review screen scores, which two copies of the same predicate would not guarantee. */
       const row = await postingRow(body.job_id);
+      postingLocation = row?.location ?? null;
       jdText = resolveJdText(jdText, row?.description);
     }
 
@@ -680,6 +682,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       company: body.company,
       role: body.role,
       jd_hash: jdHash,
+      ...(postingLocation ? { location: postingLocation } : {}),
       ...(body.job_id ? { job_id: body.job_id } : {}),
     };
     const now = new Date().toISOString();
