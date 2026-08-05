@@ -1594,17 +1594,7 @@ test('Greenhouse managed actions retry known yes-no work and onsite choices by e
   assert.equal(aliasActions.some((action) => action.text === 'Do you consent to the terms?'), false);
 
   const selectActions = actions.filter((action) => action.label?.startsWith('greenhouse_known_select'));
-  assert.equal(selectActions.length, aliasActions.length * 2);
-  assert.ok(selectActions.every((action) => action.type === 'select'));
-  assert.ok(selectActions.every((action) => action.optional === true));
-  assert.ok(selectActions.some((action) => action.value === 'Yes'));
-  assert.ok(selectActions.some((action) => action.value === '1'));
-  assert.ok(selectActions.some((action) => action.selector?.includes('.field:has(label:has-text("Are you currently eligible to legally work in the United States?")) select')));
-  assert.ok(
-    selectActions.every((action) => (action.selector?.length ?? Infinity) <= 500),
-    'Stratus rejects selector strings longer than 500 characters',
-  );
-  assert.equal(selectActions.some((action) => action.selector?.includes('Do you consent to the terms?')), false);
+  assert.equal(selectActions.length, 0);
   assert.equal(actions.filter((action) => action.type === 'click' && action.label !== 'greenhouse_demographic_data_consent_checkbox').length, 0);
 });
 
@@ -1669,7 +1659,7 @@ test('Greenhouse managed actions stay inside the Stratus action budget on Reddit
   }, true);
 
   assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
-  assert.ok(actions.some((action) => action.label?.startsWith('greenhouse_known_select:')));
+  assert.equal(actions.some((action) => action.label?.startsWith('greenhouse_known_select:')), false);
   assert.ok(actions.some((action) => action.label?.startsWith('greenhouse_demographic_select:')));
   assert.ok(
     actions.every((action) => !action.selector || action.selector.length <= 500),
