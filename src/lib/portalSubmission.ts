@@ -731,6 +731,19 @@ function questionSelectSelectors(label: string): string[] {
   ];
 }
 
+function questionTextInputSelectors(label: string): string[] {
+  const text = cssString(label);
+  return [
+    `label:has-text("${text}") ~ textarea`,
+    `label:has-text("${text}") + textarea`,
+    `label:has-text("${text}") ~ div textarea`,
+    `label:has-text("${text}") + div textarea`,
+    `div:has(> label:has-text("${text}")) textarea`,
+    `div:has(> label:has-text("${text}")) input[type="text"]`,
+    `fieldset:has(legend:has-text("${text}")) textarea`,
+  ];
+}
+
 function selectValuesForAnswer(answer: string): string[] {
   const trimmed = answer.trim();
   if (!trimmed) return [];
@@ -943,6 +956,17 @@ function pushScopedQuestionChoiceActions(
       managedSelect(actions, selector, value, `${labelPrefix}_select:${index}:${questionText.slice(0, 80)}`);
       index += 1;
     }
+  }
+}
+
+function pushAshbyQuestionTextFallbackActions(
+  actions: ManagedBrowserAction[],
+  questionText: string,
+  answer: string,
+  labelPrefix: string,
+) {
+  for (const [index, selector] of questionTextInputSelectors(questionText).slice(0, 3).entries()) {
+    managedFill(actions, selector, answer, `${labelPrefix}_text:${index}:${questionText.slice(0, 80)}`);
   }
 }
 
@@ -1556,6 +1580,9 @@ export function buildManagedPortalActions(
       pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');
     } else {
       pushScopedQuestionChoiceActions(actions, questionText, item.answer, 'question');
+      if (portalFamily(portal) === 'ashby') {
+        pushAshbyQuestionTextFallbackActions(actions, questionText, item.answer, 'question');
+      }
     }
   }
   if (portalFamily(portal) === 'greenhouse') {
