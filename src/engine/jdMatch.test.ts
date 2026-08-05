@@ -346,6 +346,44 @@ Reasonable Accommodations are available on request.
     assert.ok(!terms.includes('security'), 'the posting also writes "security"');
     assert.ok(terms.includes('redux') && terms.includes('datadog'), 'a name is never written lowercase');
   });
+
+  test('Skydio-style logistics and legal copy do not lower the match score', () => {
+    const jd = `About the Role
+As a Hardware Product Management Intern, you will work closely with customers and hardware and embedded software engineering teams to shape current and next-generation drone platforms. The product serves public safety, national security, law enforcement, energy utilities, and first responders.
+
+Location
+This position is based onsite five days a week at our HQ in San Mateo, CA.
+
+Examples of how you'll make an impact:
+- Drive definition on existing and next-generation hardware products.
+- Engage with customers, prospects, and internal stakeholders to understand core business problems.
+- Develop and publish product requirement documents for vehicle hardware, controllers, cameras, sensors, and embedded software.
+- Partner with designers and engineering leaders spanning hardware, firmware, computer vision, AI, and machine learning.
+
+What would make you a strong fit:
+- Clear and effective communicator in technical and storytelling contexts.
+- Exceptional critical thinker who loves to learn.
+- Strong spatial and mechanical reasoning ability.
+- High ownership and high agency in fast-paced work environments.
+
+Compensation
+The hourly range for Undergrad is $30 to $40.
+
+Equal Opportunity is the Law
+Skydio is an equal opportunity employer.`;
+    const terms = extractJdTerms(jd, {
+      company: 'Skydio',
+      role: 'Product Management Intern',
+      location: 'San Mateo, CA',
+    }).map((t) => t.term);
+
+    for (const junk of ['hq', 'law', 'law enforcement', 'undergrad', 'hourly', 'san mateo']) {
+      assert.ok(!terms.includes(junk), `"${junk}" is context or boilerplate, not a role requirement`);
+    }
+    for (const real of ['hardware', 'embedded', 'firmware', 'ai']) {
+      assert.ok(terms.includes(real), `"${real}" is a stated role requirement`);
+    }
+  });
 });
 
 describe('extractJdTerms', () => {
@@ -705,20 +743,16 @@ Requirements
     assert.notEqual(scored.score, null);
   });
 
-  test('the shrink stops rather than pushing a posting into refusal', () => {
-    // Both halves of the keepsScorable guard were unpinned: replacing either with `true` left the
-    // suite green, because the only fallback test used a posting whose stated set was EMPTY, which
-    // passes under either mutation. These two cover the real case, where the employer stated
-    // something but not enough to stand on its own.
+  test('stated sections gate body padding', () => {
+    // These two cover the line between a genuinely underspecified posting and one whose stated
+    // requirement sections are concrete enough that surrounding prose should not be pulled back in.
 
     // (a) a stated set too small to stand alone. Three stated terms, ALL hard signal, so the
     // signal half of the guard passes. Prose sits ABOVE the heading, because a heading closes the
     // section before it and a blank line does not.
     //
-    // This pins the OUTCOME, not the count half of isScorable. Mutating that half to `true` does
-    // not fail this test and cannot: the salvage pass in extractJdTerms re-extracts without
-    // preferStatedRequirements and its larger result wins, so the prose returns by another route.
-    // See the note beside isScorable. What this test guarantees is the behaviour a student sees.
+    // This pins the fallback behavior a student sees: a three-term stated section still uses body
+    // prose because the stated denominator would be too small to score honestly.
     const tooFewStated = `We are a team that loves Datadog and Splunk and Grafana and Sentry and Snowplow every day.
 
 What we look for:
@@ -734,8 +768,8 @@ What we look for:
       'body prose is retained when the stated set alone is too small to score',
     );
 
-    // (b) the SIGNAL half, isolated. Enough stated terms to clear the count, but only proper-noun
-    // ones, so the posting would refuse if the prose were dropped.
+    // (b) Enough stated terms still need enough signal. If the stated section is too low-signal,
+    // body fallback is allowed so the user sees a score instead of a refusal.
     const tooLittleSignal = `We are a team that loves Python and Docker and Kubernetes and Terraform and Postgres.
 
 What we look for:
@@ -748,8 +782,10 @@ What we look for:
     const keysB = extractJdTerms(tooLittleSignal).map((t) => t.term);
     assert.ok(
       keysB.includes('python') && keysB.includes('docker'),
-      'body prose is retained when the stated set carries too little hard signal',
+      'body prose is retained when the stated section is too low-signal to score',
     );
+    const scoredB = scoreJdMatch('Python and Docker and Kubernetes and Terraform and Postgres.', tooLittleSignal);
+    assert.equal(scoredB.scorable, true, 'low-signal stated sections still fall back to a user-visible score');
   });
 
   test('prose still carries the whole denominator when nothing was stated', () => {

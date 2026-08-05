@@ -112,6 +112,33 @@ function approvedReviewSpec(review: unknown, approvedAt: string) {
   return sql`jsonb_set(${reviewSpec(review)}, '{_cover_letter,approved_at}', ${JSON.stringify(approvedAt)}::jsonb, true)`;
 }
 
+function freshSubmitRequestReview(
+  current: ApplicationReviewState,
+  questions: ApplicationReviewQuestion[],
+): ApplicationReviewState {
+  return {
+    ...current,
+    questions,
+    status: 'submit_requested',
+    updated_at: new Date().toISOString(),
+    submission_run_id: randomUUID(),
+    attention_reason: undefined,
+    handoff_expires_at: undefined,
+    browser_context_id: undefined,
+    browser_session_id: undefined,
+    submission_claimed_at: undefined,
+    submission_claim_id: undefined,
+    submission_authorization: undefined,
+    final_approved_at: undefined,
+    filled_fields: undefined,
+    preview_screenshot_url: undefined,
+    submission_error: undefined,
+    verification: undefined,
+    receipt: undefined,
+    stall: undefined,
+  };
+}
+
 async function ownedResume(request: FastifyRequest, reply: FastifyReply) {
   const parsed = paramsSchema.safeParse(request.params);
   if (!parsed.success) {
@@ -574,15 +601,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           code: 'PORTAL_RUNNER_NOT_CONFIGURED',
         });
       }
-      const next = {
-        ...current,
-        questions: parsed.data.questions as ApplicationReviewQuestion[],
-        status: 'submit_requested' as const,
-        updated_at: new Date().toISOString(),
-        attention_reason: undefined,
-        handoff_expires_at: undefined,
-        browser_session_id: undefined,
-      };
+      const next = freshSubmitRequestReview(current, parsed.data.questions as ApplicationReviewQuestion[]);
       const claimed = await db.update(generated_resumes)
         .set({ spec: reviewSpec(next) })
         .where(and(

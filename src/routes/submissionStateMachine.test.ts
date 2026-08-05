@@ -28,3 +28,31 @@ test('submit-request state transition is conditional so a replay cannot reset su
   assert.match(route, /spec}->'_review'->>'status' = 'needs_attention'/);
   assert.match(route, /active or completed submission cannot be replaced by a delayed failure update/);
 });
+
+test('submit-request starts a fresh run instead of carrying stale run artifacts', async () => {
+  const route = await readFile('src/routes/applications.ts', 'utf8');
+  const start = route.indexOf('function freshSubmitRequestReview(');
+  assert.ok(start >= 0, 'submit-request normalization helper is missing');
+  const end = route.indexOf('\nasync function ownedResume', start);
+  assert.ok(end > start, 'could not bound freshSubmitRequestReview');
+  const helper = route.slice(start, end);
+
+  assert.match(helper, /submission_run_id:\s*randomUUID\(\)/);
+  for (const field of [
+    'preview_screenshot_url',
+    'filled_fields',
+    'receipt',
+    'browser_context_id',
+    'browser_session_id',
+    'submission_claimed_at',
+    'submission_claim_id',
+    'submission_authorization',
+    'final_approved_at',
+    'verification',
+    'stall',
+  ]) {
+    assert.match(helper, new RegExp(`${field}:\\s*undefined`), `${field} must be cleared`);
+  }
+  assert.match(helper, /updated_at:\s*new Date\(\)\.toISOString\(\)/);
+  assert.match(route, /const next = freshSubmitRequestReview\(current, parsed\.data\.questions as ApplicationReviewQuestion\[\]\)/);
+});
