@@ -89,15 +89,21 @@ test('graduation-related prose is not filled with a graduation date', () => {
 
 test('mixed enrollment and graduation-date prompts require confirmed current enrollment', () => {
   const label = 'Are you currently enrolled in a degree program? If so, expected graduation date';
-  const unknown = resolveKnownAnswer(label, 'date', { grad_date: 'May 2028', grad_year: 2028 }, undefined);
+  const unknown = resolveKnownAnswer(label, 'date', { grad_date: 'May 2099', grad_year: 2099 }, undefined);
   const falseEnrollment = resolveKnownAnswer(
     label,
     'date',
-    { grad_date: 'May 2028', grad_year: 2028, currently_enrolled: false },
+    { grad_date: 'May 2099', grad_year: 2099, currently_enrolled: false },
     undefined,
   );
-  assert.ok(unknown && 'skipReason' in unknown);
+  assert.deepEqual(unknown, { value: '2099-05-01' });
   assert.ok(falseEnrollment && 'skipReason' in falseEnrollment);
+});
+
+test('mixed enrollment and graduation-date prompts still skip past graduation evidence', () => {
+  const label = 'Are you currently enrolled in a degree program? If so, expected graduation date';
+  const resolved = resolveKnownAnswer(label, 'date', { grad_date: 'May 2024', grad_year: 2024 }, undefined);
+  assert.ok(resolved && 'skipReason' in resolved);
 });
 
 test('a bare salary figure only fills when the posting currency matches the stored one (R-031)', () => {

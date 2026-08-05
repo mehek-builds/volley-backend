@@ -209,6 +209,20 @@ export function graduationDateAnswer(
   return `${year}-${month}-01`;
 }
 
+function graduationEvidenceIsFuture(gradDate: string | undefined, gradYear: number | undefined): boolean {
+  const answer = graduationDateAnswer(gradDate, gradYear, 'date');
+  if (!answer) return false;
+  const time = Date.parse(answer);
+  if (!Number.isFinite(time)) return false;
+  return time >= Date.now();
+}
+
+function enrollmentConfirmedForGraduationDate(ap: ApplicationProfileLike): boolean {
+  if (ap.currently_enrolled === true) return true;
+  if (ap.currently_enrolled === false) return false;
+  return graduationEvidenceIsFuture(ap.grad_date, ap.grad_year);
+}
+
 export type DiscoveredQuestion = {
   label: string;
   selector: string;
@@ -419,7 +433,7 @@ export function resolveKnownAnswer(
     case 'availability_date':
       return ap.availability_date ? { value: ap.availability_date } : null;
     case 'graduation_date': {
-      if (MIXED_ENROLLMENT_GRADUATION_QUESTION.test(label) && ap.currently_enrolled !== true) {
+      if (MIXED_ENROLLMENT_GRADUATION_QUESTION.test(label) && !enrollmentConfirmedForGraduationDate(ap)) {
         return { skipReason: `enrollment/graduation date question left for you: "${label.slice(0, 60)}"` };
       }
       const value = graduationDateAnswer(ap.grad_date, ap.grad_year, inputType);
