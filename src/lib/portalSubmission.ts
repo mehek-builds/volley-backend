@@ -716,6 +716,7 @@ const GREENHOUSE_DEMOGRAPHIC_DATA_CONSENT_CHECKBOX_SELECTOR =
 const GREENHOUSE_ALIAS_SELECT_SELECTOR_LIMIT = 1;
 const QUESTION_SELECT_SELECTOR_LIMIT = 1;
 const QUESTION_COMBOBOX_SELECTOR_LIMIT = 1;
+const ASHBY_QUESTION_TEXT_SELECTOR_LIMIT = 9;
 const CONFIRM_AFTER_FILL_FIELDS = new Set(['school', 'degree']);
 
 function questionSelectSelectors(label: string): string[] {
@@ -731,6 +732,7 @@ function questionSelectSelectors(label: string): string[] {
 
 function questionTextInputSelectors(label: string): string[] {
   const text = cssString(label);
+  const xpathText = xpathLiteral(label);
   return [
     `label:has-text("${text}") ~ textarea`,
     `label:has-text("${text}") + textarea`,
@@ -739,7 +741,16 @@ function questionTextInputSelectors(label: string): string[] {
     `div:has(> label:has-text("${text}")) textarea`,
     `div:has(> label:has-text("${text}")) input[type="text"]`,
     `fieldset:has(legend:has-text("${text}")) textarea`,
+    `xpath=(//label[contains(normalize-space(.), ${xpathText})]/parent::*[not(self::form) and .//textarea]//textarea)[1]`,
+    `xpath=(//label[contains(normalize-space(.), ${xpathText})]/parent::*/parent::*[not(self::form) and .//textarea]//textarea)[1]`,
+    `xpath=(//label[contains(normalize-space(.), ${xpathText})]/parent::*/parent::*/parent::*[not(self::form) and .//textarea]//textarea)[1]`,
   ];
+}
+
+function xpathLiteral(value: string): string {
+  if (!value.includes("'")) return `'${value}'`;
+  if (!value.includes('"')) return `"${value}"`;
+  return `concat(${value.split("'").map((part) => `'${part}'`).join(`, "'", `)})`;
 }
 
 function selectValuesForAnswer(answer: string): string[] {
@@ -967,7 +978,7 @@ function pushAshbyQuestionTextFallbackActions(
   answer: string,
   labelPrefix: string,
 ) {
-  for (const [index, selector] of questionTextInputSelectors(questionText).slice(0, 3).entries()) {
+  for (const [index, selector] of questionTextInputSelectors(questionText).slice(0, ASHBY_QUESTION_TEXT_SELECTOR_LIMIT).entries()) {
     managedFill(actions, selector, answer, `${labelPrefix}_text:${index}:${questionText.slice(0, 80)}`);
   }
 }
