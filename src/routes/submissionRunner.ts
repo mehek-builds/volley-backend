@@ -511,8 +511,13 @@ export async function discoverAndResolveQuestions(
     // keep the fallback
   }
   const questionContext = applicationContextForQuestionResolution(row, current);
+  const managedGreenhouseEducationCombobox = (field: DiscoveredQuestion): boolean =>
+    portal === 'greenhouse'
+    && /\b(?:school|degree|discipline)--\d+\b/i.test(normalizeDiscoveredLabel(field.label));
   const portalSelectorForField = (field: DiscoveredQuestion): string | undefined =>
-    /^(?:text|email|tel|url|number|date|textarea)?$/i.test(field.inputType) ? field.selector : undefined;
+    !managedGreenhouseEducationCombobox(field) && /^(?:text|email|tel|url|number|date|textarea)?$/i.test(field.inputType)
+      ? field.selector
+      : undefined;
 
   for (const field of discovered) {
     const label = normalizeDiscoveredLabel(field.label);

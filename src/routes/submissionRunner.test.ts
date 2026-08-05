@@ -291,6 +291,44 @@ test('combobox discoveries resolve stored academic facts without direct text sel
   );
 });
 
+test('managed Greenhouse education combobox labels are not replayed as text fields', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'This internship asks for an education history.',
+    role: 'Software Engineering Intern',
+    portal_url: 'https://example.greenhouse.io/jobs/123',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+
+  const result = await discoverAndResolveQuestions(
+    [
+      {
+        label: 'degree* degree--0',
+        selector: '[data-litos-discovered-6]',
+        inputType: 'text',
+        maxLength: null,
+      },
+    ],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { degree: 'Bachelor of Science in Computer Science' },
+    true,
+    'greenhouse',
+  );
+
+  assert.deepEqual(result.questions.map((question) => ({
+    question: question.question,
+    answer: question.answer,
+    portal_selector: question.portal_selector,
+  })), [
+    { question: 'degree* degree--0', answer: 'Bachelor\'s Degree', portal_selector: undefined },
+  ]);
+});
+
 test('existing reviewed choice answers do not keep direct selectors on retry', async () => {
   const current: ApplicationReviewState = {
     jd_text: 'This internship is based in San Francisco, California.',
