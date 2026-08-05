@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import type { Page } from 'playwright-core';
 import {
   AUTONOMOUS_PORTAL_FAMILIES,
   buildManagedDiscoveryActions,
@@ -7,6 +8,7 @@ import {
   canFillReviewedQuestions,
   coverLetterUploadSelector,
   detectPortal,
+  fillPortal,
   isAccountWalledFamily,
   isAutonomousPortalFamily,
   isChoiceQuestion,
@@ -279,6 +281,97 @@ test('phone fills recognize safe semantic phone controls without matching prose 
     assert.match(selector, /Phone/);
     assert.doesNotMatch(selector, /input\[type="text"\](?:,|$)/);
   }
+});
+
+test('Rippling phone widget receives only the national number', () => {
+  const packet = {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    phone: '+971 567417451',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  };
+  const value = buildManagedPortalActions('rippling', packet)
+    .find((action) => action.type === 'fill' && action.label === 'phone')?.value;
+  assert.equal(value, '567417451');
+});
+
+test('single phone-input portals keep the saved international phone value', () => {
+  const packet = {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    phone: '+971 567417451',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  };
+  for (const portal of ['greenhouse', 'ashby', 'smartrecruiters', 'lever'] as const) {
+    const value = buildManagedPortalActions(portal, packet)
+      .find((action) => action.type === 'fill' && action.label === 'phone')?.value;
+    assert.equal(value, '+971 567417451', portal);
+  }
+});
+
+function directFillPage(selectors: string[]) {
+  const values = new Map<string, string>();
+  const makeLocator = (selector: string, index?: number): any => {
+    const present = selectors.includes(selector);
+    return {
+      first: () => makeLocator(selector, 0),
+      nth: (nextIndex: number) => makeLocator(selector, nextIndex),
+      count: async () => (present ? 1 : 0),
+      isVisible: async () => present,
+      fill: async (value: string) => {
+        if (present) values.set(selector, value);
+      },
+      getAttribute: async () => null,
+      inputValue: async () => values.get(selector) ?? '',
+      locator: () => makeLocator(`${selector} child`, 0),
+      evaluate: async () => false,
+      waitFor: async () => undefined,
+      click: async () => undefined,
+    };
+  };
+  const page = {
+    values,
+    page: {
+      locator: (selector: string) => makeLocator(selector),
+      getByText: () => makeLocator('missing text'),
+    } as unknown as Page,
+  };
+  return page;
+}
+
+test('direct Rippling fill writes only the national phone number', async () => {
+  const { page, values } = directFillPage([
+    '[data-testid="input-first_name"]',
+    '[data-testid="input-last_name"]',
+    '[data-testid="input-email"]',
+    '[data-testid="input-phone_number"]',
+  ]);
+  await fillPortal(page, 'rippling', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    phone: '+971 567417451',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  assert.equal(values.get('[data-testid="input-phone_number"]'), '567417451');
+});
+
+test('direct single phone-input fill keeps the saved international phone value', async () => {
+  const { page, values } = directFillPage(['input[name="name"]', 'input[name="email"]', 'input[name="phone"]']);
+  await fillPortal(page, 'lever', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    phone: '+971 567417451',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  assert.equal(values.get('input[name="phone"]'), '+971 567417451');
 });
 
 test('managed receipt requires confirmation language and captures the reference', () => {

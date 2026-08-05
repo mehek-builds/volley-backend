@@ -264,6 +264,63 @@ export type FillResult = {
   blockers: string[];
 };
 
+const KNOWN_DIAL_CODES = [
+  '1',
+  '7',
+  '20',
+  '27',
+  '30',
+  '31',
+  '32',
+  '33',
+  '34',
+  '36',
+  '39',
+  '40',
+  '41',
+  '43',
+  '44',
+  '45',
+  '46',
+  '47',
+  '48',
+  '49',
+  '52',
+  '54',
+  '55',
+  '61',
+  '64',
+  '65',
+  '81',
+  '82',
+  '86',
+  '90',
+  '91',
+  '92',
+  '971',
+] as const;
+
+function nationalPhoneForCountryCodeField(phone: string | undefined): string | undefined {
+  if (!phone) return phone;
+  const trimmed = phone.trim();
+  if (!trimmed.startsWith('+')) return phone;
+  const digits = trimmed.replace(/\D/g, '');
+  const dialCode = KNOWN_DIAL_CODES
+    .filter((code) => digits.startsWith(code))
+    .sort((a, b) => b.length - a.length)[0];
+  if (!dialCode) return phone;
+  const national = digits.slice(dialCode.length);
+  return national || phone;
+}
+
+function phoneForPortalField(portal: SupportedPortal, phone: string | undefined): string | undefined {
+  const family = portalFamily(portal);
+  if (family === 'rippling') {
+    return nationalPhoneForCountryCodeField(phone);
+  }
+  return phone;
+}
+
 function receiptReference(body: string): string | undefined {
   return body.match(/(?:confirmation|reference)(?:\s*(?:id|number))?\s*[:#]\s*([A-Z0-9-]{5,})/i)?.[1]
     ?? body.match(/application\s*(?:id|number|#)\s*[:#]?\s*([A-Z0-9-]{5,})/i)?.[1];
@@ -636,7 +693,7 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedFill(actions, '#first_name, input[name="job_application[first_name]"]', parts[0], 'first_name');
     managedFill(actions, '#last_name, input[name="job_application[last_name]"]', parts.slice(1).join(' '), 'last_name');
     managedFill(actions, '#email, input[name="job_application[email]"]', packet.email, 'email');
-    managedFill(actions, GREENHOUSE_PHONE_SELECTOR, packet.phone, 'phone');
+    managedFill(actions, GREENHOUSE_PHONE_SELECTOR, phoneForPortalField(portal, packet.phone), 'phone');
     managedFill(actions, '#candidate-location, input[autocomplete="address-level2"]', packet.city, 'location');
     managedUpload(actions, '#resume, input[type="file"][name="job_application[resume]"]', 'resume', packet.resume, packet.resumeName);
     managedUpload(actions, 'input#cover_letter[type="file"], input[type="file"][name*="cover_letter" i]', 'cover_letter', packet.coverLetter, packet.coverLetterName);
@@ -669,7 +726,7 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_LAST_NAME_SELECTOR : SMARTRECRUITERS_LAST_NAME_SELECTOR, parts.slice(1).join(' '), 'last_name');
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_EMAIL_SELECTOR : SMARTRECRUITERS_EMAIL_SELECTOR, packet.email, 'email');
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR : SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR, packet.email, 'confirm_email');
-    managedFill(actions, SMARTRECRUITERS_PHONE_SELECTOR, packet.phone, 'phone');
+    managedFill(actions, SMARTRECRUITERS_PHONE_SELECTOR, phoneForPortalField(portal, packet.phone), 'phone');
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR : SMARTRECRUITERS_LINKEDIN_SELECTOR, packet.linkedinUrl, 'linkedin');
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR : SMARTRECRUITERS_WEBSITE_SELECTOR, packet.portfolioUrl ?? packet.githubUrl, 'portfolio');
     managedUpload(actions, SMARTRECRUITERS_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
@@ -733,7 +790,7 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedFill(actions, '[data-testid="input-first_name"]', parts[0], 'first_name');
     managedFill(actions, '[data-testid="input-last_name"]', parts.slice(1).join(' '), 'last_name');
     managedFill(actions, '[data-testid="input-email"]', packet.email, 'email');
-    managedFill(actions, '[data-testid="input-phone_number"]', packet.phone, 'phone');
+    managedFill(actions, '[data-testid="input-phone_number"]', phoneForPortalField(portal, packet.phone), 'phone');
     managedUpload(actions, RIPPLING_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
     managedUpload(actions, RIPPLING_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
     // input-current_company is left alone on purpose. The packet's mostRecentRole may be a past role
@@ -777,7 +834,7 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
   } else {
     managedFill(actions, 'input[name="_systemfield_name"]', packet.fullName, 'name', false);
     managedFill(actions, 'input[name="_systemfield_email"]', packet.email, 'email', false);
-    managedFill(actions, ASHBY_PHONE_SELECTOR, packet.phone, 'phone');
+    managedFill(actions, ASHBY_PHONE_SELECTOR, phoneForPortalField(portal, packet.phone), 'phone');
     managedFill(actions, 'input[name="_systemfield_location"]', packet.city, 'location');
     // LinkedIn/GitHub/portfolio, previously missing entirely from this branch: the packet carries
     // them (confirmed live on a real account via GET /profile/application) and the Lever branch
@@ -1157,7 +1214,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['#first_name', 'input[name="job_application[first_name]"]'], parts[0], 'first_name', filledFields);
     await fillFirst(page, ['#last_name', 'input[name="job_application[last_name]"]'], parts.slice(1).join(' '), 'last_name', filledFields);
     await fillFirst(page, ['#email', 'input[name="job_application[email]"]'], packet.email, 'email', filledFields);
-    await fillFirst(page, GREENHOUSE_PHONE_SELECTOR.split(', '), packet.phone, 'phone', filledFields);
+    await fillFirst(page, GREENHOUSE_PHONE_SELECTOR.split(', '), phoneForPortalField(portal, packet.phone), 'phone', filledFields);
     await fillFirst(page, ['#candidate-location', 'input[autocomplete="address-level2"]'], packet.city, 'location', filledFields);
     await uploadFirst(page, ['#resume', 'input[type="file"][name="job_application[resume]"]'], packet.resume, packet.resumeName, 'resume', filledFields);
     await uploadFirst(page, ['input#cover_letter[type="file"]', 'input[type="file"][name*="cover_letter" i]'], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
@@ -1177,7 +1234,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_LAST_NAME_SELECTOR : SMARTRECRUITERS_LAST_NAME_SELECTOR], parts.slice(1).join(' '), 'last_name', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_EMAIL_SELECTOR : SMARTRECRUITERS_EMAIL_SELECTOR], packet.email, 'email', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR : SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR], packet.email, 'confirm_email', filledFields);
-    await fillFirst(page, [SMARTRECRUITERS_PHONE_SELECTOR], packet.phone, 'phone', filledFields);
+    await fillFirst(page, [SMARTRECRUITERS_PHONE_SELECTOR], phoneForPortalField(portal, packet.phone), 'phone', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR : SMARTRECRUITERS_LINKEDIN_SELECTOR], packet.linkedinUrl, 'linkedin', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR : SMARTRECRUITERS_WEBSITE_SELECTOR], packet.portfolioUrl ?? packet.githubUrl, 'portfolio', filledFields);
     await uploadFirst(page, [SMARTRECRUITERS_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
@@ -1214,7 +1271,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['[data-testid="input-first_name"]'], parts[0], 'first_name', filledFields);
     await fillFirst(page, ['[data-testid="input-last_name"]'], parts.slice(1).join(' '), 'last_name', filledFields);
     await fillFirst(page, ['[data-testid="input-email"]'], packet.email, 'email', filledFields);
-    await fillFirst(page, ['[data-testid="input-phone_number"]'], packet.phone, 'phone', filledFields);
+    await fillFirst(page, ['[data-testid="input-phone_number"]'], phoneForPortalField(portal, packet.phone), 'phone', filledFields);
     await uploadFirst(page, [RIPPLING_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
     await uploadFirst(page, [RIPPLING_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
   } else if (family === 'breezy') {
@@ -1248,7 +1305,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
   } else {
     await fillFirst(page, ['input[name="_systemfield_name"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="_systemfield_email"]'], packet.email, 'email', filledFields);
-    await fillFirst(page, ASHBY_PHONE_SELECTOR.split(', '), packet.phone, 'phone', filledFields);
+    await fillFirst(page, ASHBY_PHONE_SELECTOR.split(', '), phoneForPortalField(portal, packet.phone), 'phone', filledFields);
     await fillFirst(page, ['input[name="_systemfield_location"]'], packet.city, 'location', filledFields);
     // See ASHBY_*_SELECTOR: these were missing from the direct path too, so a real Ashby run
     // reported LinkedIn as an empty required field even though the packet had it.
