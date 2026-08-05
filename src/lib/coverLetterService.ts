@@ -7,6 +7,7 @@ import { readApplicationReview } from './applicationReview';
 import { renderCoverLetterPdf } from './coverLetterPdf';
 import { generateCoverLetter, validateCoverLetter } from '../llm/coverLetter';
 import { resolveBlobUrl } from './resumeAccess';
+import { coverLetterFileNameForRole } from './resumeFileName';
 
 export type ApplicationRow = typeof generated_resumes.$inferSelect;
 type StoredSpec = Record<string, unknown>;
@@ -75,7 +76,7 @@ async function persistCoverLetter(
     generated_at: generatedAt,
     approved_at: approved ? generatedAt : undefined,
     object_key: blob.pathname,
-    file_name: `${contact.full_name.replace(/\s+/g, '_')}_${job.company.replace(/\s+/g, '_')}_Cover_Letter.pdf`,
+    file_name: coverLetterFileNameForRole(contact.full_name, job.role),
   };
   const previous = storedCoverLetter(row);
   let updated: Array<{ id: string }>;

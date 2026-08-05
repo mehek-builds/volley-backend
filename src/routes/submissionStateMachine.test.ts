@@ -62,3 +62,9 @@ test('submission packet attaches the role-specific resume filename', async () =>
   assert.match(runner, /resumeName:\s*resumeFileNameForRole\(fullName,\s*\(row\.job_context as \{ role\?: unknown \} \| null\)\?\.role\)/);
   assert.doesNotMatch(runner, /resumeName:\s*`litos-\$\{row\.id\}\.pdf`/);
 });
+
+test('submission packet attaches the role-specific cover letter filename', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  assert.match(runner, /coverLetterName:\s*coverLetter\s*\?\s*coverLetterFileNameForRole\(fullName,\s*\(row\.job_context as \{ role\?: unknown \} \| null\)\?\.role\)/);
+  assert.doesNotMatch(runner, /coverLetterName:\s*coverLetter\s*\?\s*String\(coverLetterMeta\.file_name/);
+});
