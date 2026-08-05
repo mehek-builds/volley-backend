@@ -436,6 +436,18 @@ function managedComboboxFill(
   actions.push({ type: 'press', selector, value: 'Enter', label: `${label}_select`, optional, timeout });
 }
 
+function managedSelect(
+  actions: ManagedBrowserAction[],
+  selector: string,
+  value: string | undefined,
+  label: string,
+  optional = true,
+  timeout = MANAGED_FILL_TIMEOUT_MS,
+) {
+  if (!value) return;
+  actions.push({ type: 'select', selector, value, label, optional, timeout });
+}
+
 // The resume upload is always optional + bounded. On a real ATS form the file input is present and
 // setInputFiles returns immediately; on a branded-redirect form that lacks the selector (Jump
 // Trading) an unbounded, non-optional upload waited the full 30s on setInputFiles and failed the
@@ -513,6 +525,8 @@ const ASHBY_PORTFOLIO_SELECTOR =
 // number to be entered into an unrelated text answer.
 const SEMANTIC_PHONE_SELECTOR =
   'input[type="tel" i], input[autocomplete*="tel" i], input[aria-label="Phone" i], input[aria-label="Phone number" i], input[placeholder="Phone" i], input[placeholder="Phone number" i]';
+const GREENHOUSE_FIRST_NAME_SELECTOR =
+  '#first_name, input[name="job_application[first_name]"], input[autocomplete="given-name" i], input[aria-label="First Name" i], input[placeholder="First Name" i]';
 const GREENHOUSE_PHONE_SELECTOR =
   `#phone, input[name="job_application[phone]"], ${SEMANTIC_PHONE_SELECTOR}`;
 const ASHBY_PHONE_SELECTOR =
@@ -548,6 +562,90 @@ const CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR = '[id="linkedin-input"]';
 const CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR = '[id="website-input"]';
 const ASHBY_RESUME_SELECTOR = 'input#_systemfield_resume[type="file"], input[type="file"][name="_systemfield_resume"], input[type="file"][name*="resume" i]';
 const ASHBY_COVER_LETTER_SELECTOR = 'input#cover_letter[type="file"], input[type="file"][id*="cover" i], input[type="file"][name*="cover" i], input[type="file"][aria-label*="cover" i]';
+
+function cssString(value: string): string {
+  return value.replace(/["\\]/g, '\\$&');
+}
+
+function greenhouseQuestionSelectSelector(label: string): string {
+  const text = cssString(label);
+  return [
+    `.field:has(label:has-text("${text}")) select`,
+    `div:has(> label:has-text("${text}")) select`,
+    `fieldset:has(legend:has-text("${text}")) select`,
+    `label:has-text("${text}") ~ select`,
+    `label:has-text("${text}") + select`,
+  ].join(', ');
+}
+
+function greenhouseKnownQuestionAliases(question: string, answer: string): string[] {
+  const normalizedQuestion = question.toLowerCase();
+  const normalizedAnswer = answer.trim().toLowerCase();
+  if (!['yes', 'no'].includes(normalizedAnswer)) return [];
+  if (
+    /\b(?:eligible|authorized|authorised|legally\s+work|work\s+authorization|work\s+authorisation)\b/.test(normalizedQuestion)
+    && /\b(?:u\.?s\.?a?|united\s+states)\b/.test(normalizedQuestion)
+    && !/\bwithout\s+sponsorship\b/.test(normalizedQuestion)
+  ) {
+    return [
+      'Are you currently eligible to legally work in the United States?',
+      'Are you currently eligible to legally work in the U.S.?',
+      'Are you legally authorized to work in the United States?',
+      'Are you authorized to work in the United States?',
+    ];
+  }
+  if (
+    /\b(?:future|now)\b/.test(normalizedQuestion)
+    && /\b(?:immigration|visa|sponsorship|sponsor)\b/.test(normalizedQuestion)
+    && !/\bwithout\s+sponsorship\b/.test(normalizedQuestion)
+  ) {
+    return [
+      'Will you now or in the future require immigration support or sponsorship?',
+      'Will you now or in the future require immigration support or sponsorship from Postman?',
+      'Will you now or in the future require sponsorship for employment visa status?',
+      'Do you now or in the future require visa sponsorship?',
+    ];
+  }
+  if (
+    /\b(?:onsite|on[\s-]?site|in[\s-]?office|office|hybrid)\b/.test(normalizedQuestion)
+    && /\b(?:five|5)\s+days?\b/.test(normalizedQuestion)
+  ) {
+    return [
+      'Are you able to work onsite five days a week?',
+      'Are you able to work on-site five days a week?',
+      'Are you able to work onsite in our San Francisco office 5 days a week?',
+      'Are you able to work onsite in our San Francisco office five days a week?',
+    ];
+  }
+  return [];
+}
+
+function pushGreenhouseKnownQuestionAliases(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
+  const seen = new Set<string>();
+  for (const item of packet.questions) {
+    for (const alias of greenhouseKnownQuestionAliases(item.question, item.answer)) {
+      const key = `${alias}\n${item.answer.trim()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      actions.push({
+        type: 'fillByLabelText',
+        text: alias,
+        value: item.answer.trim(),
+        label: `greenhouse_known_question:${alias.slice(0, 80)}`,
+        optional: true,
+        timeout: MANAGED_FILL_TIMEOUT_MS,
+      });
+      const selectSelector = greenhouseQuestionSelectSelector(alias);
+      managedSelect(actions, selectSelector, item.answer.trim(), `greenhouse_known_select:${alias.slice(0, 80)}`);
+      managedSelect(
+        actions,
+        selectSelector,
+        item.answer.trim().toLowerCase() === 'yes' ? '1' : '0',
+        `greenhouse_known_select_value:${alias.slice(0, 80)}`,
+      );
+    }
+  }
+}
 
 // ─── Workable (apply.workable.com) ────────────────────────────────────────────
 // Read off a live Suade posting, 2026-07-28 (apply.workable.com/suade/j/9C43981D17/apply). Plain
@@ -779,7 +877,8 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     // aborted the whole run. Optional means a missed core field degrades to a required-field blocker
     // card. The resume upload is optional + bounded for the same reason (managedUpload): the live
     // Jump Trading retry proved the run now clears name/email and stops at the resume file input.
-    managedFill(actions, '#first_name, input[name="job_application[first_name]"]', parts[0], 'first_name');
+    managedFill(actions, GREENHOUSE_FIRST_NAME_SELECTOR, parts[0], 'first_name');
+    managedFillByLabel(actions, 'First Name', parts[0], 'first_name_label');
     managedFill(actions, '#last_name, input[name="job_application[last_name]"]', parts.slice(1).join(' '), 'last_name');
     managedFill(actions, '#email, input[name="job_application[email]"]', packet.email, 'email');
     managedComboboxFill(actions, '#country', countryForPhoneField(packet.phone, packet.country), 'phone_country');
@@ -995,6 +1094,7 @@ export function buildManagedPortalActions(
     });
   }
   if (portalFamily(portal) === 'greenhouse') {
+    pushGreenhouseKnownQuestionAliases(actions, packet);
     actions.push({
       type: 'fillByLabelText',
       text: 'By checking this box, I consent',
@@ -1351,7 +1451,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
   }
   if (family === 'greenhouse') {
     const parts = packet.fullName.trim().split(/\s+/);
-    await fillFirst(page, ['#first_name', 'input[name="job_application[first_name]"]'], parts[0], 'first_name', filledFields);
+    await fillFirst(page, GREENHOUSE_FIRST_NAME_SELECTOR.split(', '), parts[0], 'first_name', filledFields);
     await fillFirst(page, ['#last_name', 'input[name="job_application[last_name]"]'], parts.slice(1).join(' '), 'last_name', filledFields);
     await fillFirst(page, ['#email', 'input[name="job_application[email]"]'], packet.email, 'email', filledFields);
     await fillComboboxFirst(page, ['#country'], countryForPhoneField(packet.phone, packet.country), 'phone_country', filledFields);

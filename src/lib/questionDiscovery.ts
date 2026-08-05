@@ -67,7 +67,7 @@ const JD_US_SCOPE =
   /\b(united states|u\.s\.|usa|remote\s*\(us\)|san francisco|san mateo|mountain view|california|new york|austin|texas|washington|seattle|boston|massachusetts|chicago|illinois)\b/i;
 
 export const EEO_QUESTION =
-  /transgender|\bgender\b|what is your sex\b|race|ethnicit|hispanic|latino|veteran|military|disab|sexual orientation|communities|identify with|current age|what is your age|age range|how old are you|\bage group\b/i;
+  /transgender|\bgender\b|what is your sex\b|race|racial|ethnicit|ethnic\b|hispanic|latino|veteran|military|disab|sexual orientation|communities|identify with|current age|what is your age|age range|how old are you|\bage group\b/i;
 const LEGAL_CONSENT_QUESTION =
   /candidate privacy policy|information (?:i|you) have provided.*process|by selecting ["']?i agree|demographic data survey|collecting,\s*storing,\s*and processing/i;
 
@@ -235,9 +235,10 @@ export function eeoAnswer(pref: string | undefined): string {
 function eeoPreferenceForLabel(label: string, prefs: Record<string, string> | null | undefined): string | undefined {
   if (!prefs) return undefined;
   const l = label.toLowerCase();
-  if (/gender|sex\b|transgender/.test(l)) return prefs.gender ?? prefs.sex;
+  if (/transgender/.test(l)) return prefs.transgender_status ?? prefs.transgender;
+  if (/gender|sex\b/.test(l)) return prefs.gender ?? prefs.sex;
   if (/hispanic|latino/.test(l)) return prefs.hispanic_ethnicity ?? prefs.hispanic ?? prefs.ethnicity;
-  if (/race|ethnicit/.test(l)) return prefs.race ?? prefs.ethnicity;
+  if (/race|racial|ethnicit|ethnic\b/.test(l)) return prefs.race ?? prefs.ethnicity;
   if (/veteran|military/.test(l)) return prefs.veteran_status ?? prefs.veteran;
   if (/disab/.test(l)) return prefs.disability_status ?? prefs.disability;
   if (/sexual orientation/.test(l)) return prefs.sexual_orientation;

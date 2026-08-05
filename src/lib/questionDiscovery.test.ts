@@ -118,7 +118,13 @@ test('answers work authorization and sponsorship only from explicit stored conse
 });
 
 test('answers EEO / demographic questions with stored preferences or decline', () => {
-  const labels = ['what is your gender?', 'are you hispanic or latino?', 'veteran status', 'are you a person of transgender experience?'];
+  const labels = [
+    'what is your gender?',
+    'are you hispanic or latino?',
+    'veteran status',
+    'are you a person of transgender experience?',
+    'please select your racial/ethnic background',
+  ];
   for (const label of labels) {
     assert.equal(isRefusedQuestion(label), true, label);
     assert.equal(classifyField(label), null, label);
@@ -127,6 +133,14 @@ test('answers EEO / demographic questions with stored preferences or decline', (
   assert.deepEqual(
     resolveKnownAnswer('what is your gender?', 'text', { eeo_prefs: { gender: 'Female' } }, undefined),
     { value: 'Female' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('are you a person of transgender experience?', 'text', { eeo_prefs: { gender: 'Female' } }, undefined),
+    { value: 'Decline to self-identify' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('please select your racial/ethnic background', 'text', { eeo_prefs: { gender: 'Female' } }, undefined),
+    { value: 'Decline to self-identify' },
   );
 });
 
