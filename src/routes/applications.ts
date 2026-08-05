@@ -19,6 +19,7 @@ import { resumeSafeTargetRole } from '../engine/resumePolicy';
 import {
   applyApplicationReviewEdit,
   deriveEditedTerms,
+  normalizeApplicationReviewQuestions,
   readApplicationReview,
   type ApplicationReviewQuestion,
 } from '../lib/applicationReview';
@@ -347,7 +348,8 @@ function sensitiveQuestionFor(
   profile: ApplicationProfileLike,
   jdText: string | undefined,
 ): ApplicationReviewQuestion | undefined {
-  return questions.find((question) => sensitiveQuestionRequiresAttention(question.question, question.answer, 'text', profile, jdText));
+  return normalizeApplicationReviewQuestions(questions)
+    .find((question) => sensitiveQuestionRequiresAttention(question.question, question.answer, 'text', profile, jdText));
 }
 
 export async function applicationRoutes(fastify: FastifyInstance) {
@@ -689,7 +691,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         sensitiveProfile,
         typeof stored.jd_text === 'string' ? stored.jd_text : undefined,
       );
-      if (submittedQuestions.some((question) => question.required && !question.answer.trim())) {
+      const normalizedSubmittedQuestions = normalizeApplicationReviewQuestions(submittedQuestions);
+      if (normalizedSubmittedQuestions.some((question) => question.required && !question.answer.trim())) {
         return reply.status(422).send({ error: 'Answer every required question before submitting.' });
       }
       const submitEducationIssues = packetEducationDrift(stored, submitProfileRows[0]?.parsed_json);
@@ -704,7 +707,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           issues: preSendIssues,
         });
       }
-      const sensitive = sensitiveQuestionFor(submittedQuestions, sensitiveProfile, current.jd_text);
+      const sensitive = sensitiveQuestionFor(normalizedSubmittedQuestions, sensitiveProfile, current.jd_text);
       if (sensitive) {
         return reply.status(422).send({ error: `Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}` });
       }
@@ -714,7 +717,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       // portal_supported check is helpful UI, not an enforcement point.
       if (current.portal_url && !isPortalSupported(current.portal_url)) {
         const authorizedAt = new Date().toISOString();
-        const base = freshSubmitRequestReview(current, submittedQuestions);
+        const base = freshSubmitRequestReview(current, normalizedSubmittedQuestions);
         const pending: ApplicationReviewState = {
           ...base,
           status: 'submitting',
@@ -817,7 +820,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           code: 'PORTAL_RUNNER_NOT_CONFIGURED',
         });
       }
-      const next = freshSubmitRequestReview(current, submittedQuestions);
+      const next = freshSubmitRequestReview(current, normalizedSubmittedQuestions);
       const claimed = await db.update(generated_resumes)
         .set({ spec: reviewSpec(next) })
         .where(and(
@@ -933,11 +936,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         approvalIssues.push('The cover letter must be reviewed before sending.');
       }
       approvalIssues.push(...finalApprovalFieldIssues(current, current.cover_letter_supported === true && Boolean(coverLetter)));
-      if (current.questions.some((question) => question.required && !question.answer.trim())) {
+      const currentQuestions = normalizeApplicationReviewQuestions(current.questions);
+      if (currentQuestions.some((question) => question.required && !question.answer.trim())) {
         approvalIssues.push('A required application answer is still blank.');
       }
       const sensitiveProfile = await loadSensitiveQuestionProfile(request.jwtPayload!.userId);
-      const sensitive = sensitiveQuestionFor(current.questions, sensitiveProfile, current.jd_text);
+      const sensitive = sensitiveQuestionFor(currentQuestions, sensitiveProfile, current.jd_text);
       if (sensitive) {
         approvalIssues.push(`Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}`);
       }
