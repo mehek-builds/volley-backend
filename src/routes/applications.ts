@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { put } from '@vercel/blob';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, eq, inArray, sql } from 'drizzle-orm';
@@ -42,6 +42,7 @@ import {
   packetEducationDrift,
 } from '../lib/submissionEducationGuard';
 import { resumeFileNameForRole } from '../lib/resumeFileName';
+import { monitoredJdAgrees } from '../lib/monitoredPortalRepair';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
 const questionSchema = z.object({
@@ -159,10 +160,6 @@ function normalizedIdentity(value: string | null): string {
   return (value ?? '').trim().toLowerCase();
 }
 
-function jdHash(text: string): string {
-  return createHash('sha256').update(text).digest('hex').slice(0, 16);
-}
-
 async function repairReviewPortalFromMonitoredJob(
   row: typeof generated_resumes.$inferSelect,
   current: ApplicationReviewState,
@@ -191,7 +188,7 @@ async function repairReviewPortalFromMonitoredJob(
   if (!job || !isPortalSupported(job.apply_url)) return current;
   if (normalizedIdentity(job.company_name) !== normalizedIdentity(expectedCompany)) return current;
   if (normalizedIdentity(job.title) !== normalizedIdentity(expectedRole)) return current;
-  if (jdHash(job.description) !== expectedJdHash) return current;
+  if (!monitoredJdAgrees(expectedJdHash, current.jd_text, job.description)) return current;
   return {
     ...current,
     portal_url: job.apply_url,
