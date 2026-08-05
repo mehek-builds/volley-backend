@@ -177,6 +177,20 @@ const pool = new Pool({
  * awaited writes.
  */
 const poolQuery = pool.query.bind(pool);
+function dedicatedQuery(client: Client, args: unknown[]): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const callback = (error: Error | null, result: unknown) => {
+      if (error) reject(error);
+      else resolve(result);
+    };
+    if (args.length === 1) {
+      client.query(args[0] as never, callback);
+    } else {
+      client.query(args[0] as never, args[1] as never, callback);
+    }
+  });
+}
+
 pool.query = ((...args: unknown[]) => {
   if (isPassThroughQueryCall(args)) {
     return (poolQuery as (...a: unknown[]) => unknown)(...args);
@@ -192,7 +206,7 @@ pool.query = ((...args: unknown[]) => {
         console.warn('[db] pooled endpoint stayed read-only; retrying once on the direct database endpoint');
         const client = await connectDedicatedDatabaseClient();
         try {
-          return await (client.query.bind(client) as (...a: unknown[]) => Promise<unknown>)(...args);
+          return await dedicatedQuery(client, args);
         } finally {
           await client.end().catch(() => undefined);
         }

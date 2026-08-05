@@ -36,7 +36,10 @@ test('an ordinary awaited pooled query falls back once to the direct endpoint af
     query(...args: unknown[]) {
       assert.equal(this instanceof FakeClient, true, 'direct fallback must preserve pg Client.query this binding');
       directCalls.push(args);
-      return Promise.resolve({ rowCount: 1, rows: [{ ok: true }] });
+      const callback = args[args.length - 1];
+      assert.equal(typeof callback, 'function', 'direct fallback should wrap pg callback results itself');
+      (callback as (error: Error | null, result: unknown) => void)(null, { rowCount: 1, rows: [{ ok: true }] });
+      return undefined;
     }
 
     async end() {
@@ -72,7 +75,9 @@ test('an ordinary awaited pooled query falls back once to the direct endpoint af
     assert.deepEqual(directCalls[0], [
       'update users set email_verified = $1 where id = $2',
       [true, 'user-1'],
+      directCalls[0]![2],
     ]);
+    assert.equal(typeof directCalls[0]![2], 'function');
     assert.equal(connectCalls, 1);
     assert.equal(endCalls, 1, 'the one-off direct client is closed after the fallback query');
   } finally {
@@ -104,10 +109,13 @@ test('the direct fallback preserves drizzle config-object query results', async 
 
     async connect() {}
 
-    query(config: unknown) {
+    query(config: unknown, values: unknown, callback: unknown) {
       assert.equal(this instanceof FakeClient, true, 'config-object fallback must call the bound client query');
-      assert.deepEqual(config, { text: 'update generated_resumes set spec = $1 where id = $2 returning id', values: ['{}', 'resume-1'] });
-      return Promise.resolve({ rowCount: 1, rows: [{ id: 'resume-1' }] });
+      assert.deepEqual(config, { text: 'update generated_resumes set spec = $1 where id = $2 returning id' });
+      assert.deepEqual(values, ['{}', 'resume-1']);
+      assert.equal(typeof callback, 'function', 'config-object fallback should receive the callback in the pg slot');
+      (callback as (error: Error | null, result: unknown) => void)(null, { rowCount: 1, rows: [{ id: 'resume-1' }] });
+      return undefined;
     }
 
     async end() {}
@@ -133,10 +141,10 @@ test('the direct fallback preserves drizzle config-object query results', async 
     delete require.cache[resolved];
     const { pool } = require('./index') as typeof import('./index');
 
-    const result = await pool.query({
-      text: 'update generated_resumes set spec = $1 where id = $2 returning id',
-      values: ['{}', 'resume-1'],
-    });
+    const result = await pool.query(
+      { text: 'update generated_resumes set spec = $1 where id = $2 returning id' },
+      ['{}', 'resume-1'],
+    );
 
     assert.deepEqual(result, { rowCount: 1, rows: [{ id: 'resume-1' }] });
   } finally {
