@@ -485,8 +485,8 @@ function greenhouseSchoolAliases(school: string | undefined): string[] {
     ? 'University of Southern California'
     : undefined;
   return uniqueDefined([
-    trimmed,
     uscAlias,
+    trimmed,
   ]);
 }
 
@@ -518,14 +518,6 @@ function pushGreenhouseEducationComboboxActions(actions: ManagedBrowserAction[],
   const schoolAliases = greenhouseSchoolAliases(packet.school);
   for (const [index, value] of schoolAliases.entries()) {
     managedGreenhouseReactSelectFill(actions, 'school--0', value, `education_school_combo:${index}`);
-  }
-  for (const [index, value] of schoolAliases.slice(0, 1).entries()) {
-    managedComboboxFill(
-      actions,
-      '.select__container:has(> label:has-text("School")) input[role="combobox"]',
-      value,
-      `education_school_combo_label:${index}`,
-    );
   }
   const degreeAliases = greenhouseDegreeAliases(packet.degree);
   for (const [index, value] of degreeAliases.entries()) {
@@ -1278,7 +1270,6 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedComboboxFill(actions, '#country', countryForPhoneField(packet.phone, packet.country), 'phone_country');
     managedFill(actions, GREENHOUSE_PHONE_SELECTOR, phoneForPortalField(portal, packet.phone), 'phone');
     managedComboboxFill(actions, '#candidate-location, input[autocomplete="address-level2"]', greenhouseLocationSearch(packet), 'location');
-    managedFillByLabel(actions, 'School', packet.school, 'education_school');
     pushGreenhouseEducationComboboxActions(actions, packet);
     managedFillByLabel(actions, 'What is your graduation date?', packet.graduationDate, 'graduation_date');
     managedFillByLabel(actions, 'End date month', packet.graduationMonth, 'education_end_month');
