@@ -2,6 +2,7 @@ import { FastifyReply } from 'fastify';
 import { sql, and, eq } from 'drizzle-orm';
 import { db } from '../db/index';
 import { usage_counters, users } from '../db/schema';
+import { withReadOnlyRetry } from '../db/readOnlyRetry';
 import { PRODUCT_NAME } from '../lib/product';
 import { lemonSqueezyCheckoutReadyUrl } from '../lib/lemonSqueezy';
 
@@ -59,48 +60,93 @@ export function hourPeriod(d = new Date()): string {
   return d.toISOString().slice(0, 13); // YYYY-MM-DDTHH
 }
 
+function counterLockKey(key: string, period: string, kind: string): string {
+  return `${key}\x1f${period}\x1f${kind}`;
+}
+
+type CounterTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+function counterWhere(key: string, period: string, kind: string) {
+  return and(eq(usage_counters.key, key), eq(usage_counters.period, period), eq(usage_counters.kind, kind));
+}
+
+async function counterTransaction<T>(operation: (tx: CounterTx) => Promise<T>): Promise<T> {
+  return withReadOnlyRetry(
+    () => db.transaction(operation),
+    {
+      onRetry: (attempt) =>
+        console.warn(
+          `[quota] transaction rejected by a read-only backend, retrying on a fresh connection (attempt ${attempt})`,
+        ),
+    },
+  );
+}
+
+async function lockCounterRow(
+  tx: CounterTx,
+  key: string,
+  period: string,
+  kind: string,
+): Promise<void> {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${counterLockKey(key, period, kind)}, 0::bigint))`);
+}
+
+async function readCounterTotal(tx: CounterTx, key: string, period: string, kind: string): Promise<number> {
+  const rows = await tx
+    .select({ count: usage_counters.count })
+    .from(usage_counters)
+    .where(counterWhere(key, period, kind));
+  return rows.reduce((total, row) => total + row.count, 0);
+}
+
+async function replaceCounterRows(tx: CounterTx, key: string, period: string, kind: string, count: number): Promise<number> {
+  const normalizedCount = Math.max(0, count);
+  await tx.delete(usage_counters).where(counterWhere(key, period, kind));
+  if (normalizedCount === 0) return 0;
+  const inserted = await tx
+    .insert(usage_counters)
+    .values({ key, period, kind, count: normalizedCount })
+    .returning({ count: usage_counters.count });
+  return inserted[0]?.count ?? normalizedCount;
+}
+
 // Atomic upsert-increment; returns the post-increment count.
 export async function bumpCounter(key: string, period: string, kind: string, by = 1): Promise<number> {
-  const rows = await db
-    .insert(usage_counters)
-    .values({ key, period, kind, count: by })
-    .onConflictDoUpdate({
-      target: [usage_counters.key, usage_counters.period, usage_counters.kind],
-      set: { count: sql`${usage_counters.count} + ${by}` },
-    })
-    .returning({ count: usage_counters.count });
-  return rows[0]?.count ?? by;
+  return counterTransaction(async (tx) => {
+    await lockCounterRow(tx, key, period, kind);
+    const nextCount = await readCounterTotal(tx, key, period, kind) + by;
+    return replaceCounterRows(tx, key, period, kind, nextCount);
+  });
 }
 
 // Atomically reserves one or more units without ever crossing the supplied cap.
 // A null result means another request consumed the final slot first.
 export async function claimCounterSlot(key: string, period: string, kind: string, limit: number, by = 1): Promise<number | null> {
-  const rows = await db
-    .insert(usage_counters)
-    .values({ key, period, kind, count: by })
-    .onConflictDoUpdate({
-      target: [usage_counters.key, usage_counters.period, usage_counters.kind],
-      set: { count: sql`${usage_counters.count} + ${by}` },
-      setWhere: sql`${usage_counters.count} + ${by} <= ${limit}`,
-    })
-    .returning({ count: usage_counters.count });
-  return rows[0]?.count ?? null;
+  return counterTransaction(async (tx) => {
+    await lockCounterRow(tx, key, period, kind);
+    const currentCount = await readCounterTotal(tx, key, period, kind);
+    if (currentCount + by > limit) {
+      await replaceCounterRows(tx, key, period, kind, currentCount);
+      return null;
+    }
+    return replaceCounterRows(tx, key, period, kind, currentCount + by);
+  });
 }
 
 export async function releaseCounterSlot(key: string, period: string, kind: string, by = 1): Promise<void> {
-  await db
-    .update(usage_counters)
-    .set({ count: sql`greatest(${usage_counters.count} - ${by}, 0)` })
-    .where(and(eq(usage_counters.key, key), eq(usage_counters.period, period), eq(usage_counters.kind, kind)));
+  await counterTransaction(async (tx) => {
+    await lockCounterRow(tx, key, period, kind);
+    const nextCount = await readCounterTotal(tx, key, period, kind) - by;
+    await replaceCounterRows(tx, key, period, kind, nextCount);
+  });
 }
 
 export async function getCount(key: string, period: string, kind: string): Promise<number> {
   const rows = await db
-    .select({ count: usage_counters.count })
+    .select({ count: sql<number>`coalesce(sum(${usage_counters.count}), 0)` })
     .from(usage_counters)
-    .where(and(eq(usage_counters.key, key), eq(usage_counters.period, period), eq(usage_counters.kind, kind)))
-    .limit(1);
-  return rows[0]?.count ?? 0;
+    .where(counterWhere(key, period, kind));
+  return Number(rows[0]?.count ?? 0);
 }
 
 // Rolling-hour rate limit. Increments and returns true when the call is allowed.
