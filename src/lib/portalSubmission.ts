@@ -1120,7 +1120,10 @@ export function isPortalSupported(rawUrl: string | undefined): boolean {
 export function canonicalSupportedPortalUrl(rawUrl: string | undefined, atsName?: string | null): string | undefined {
   if (!rawUrl) return undefined;
   if (isPortalSupported(rawUrl)) return rawUrl;
-  if ((atsName ?? '').trim().toLowerCase() !== 'greenhouse') return undefined;
+  // Some company-hosted Greenhouse wrappers keep only gh_jid in the URL and are stored with a
+  // generic ats_name on older packets. The query parameter is Greenhouse's own convention, so the
+  // URL is stronger evidence than that stale label.
+  void atsName;
   try {
     const url = new URL(rawUrl);
     if (url.protocol !== 'https:') return undefined;

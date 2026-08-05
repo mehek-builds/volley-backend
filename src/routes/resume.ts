@@ -89,11 +89,23 @@ function repairedHistorySpec(
   row: typeof generated_resumes.$inferSelect,
   monitoredJobs: ReadonlyMap<string, { applyUrl: string; company: string; role: string; description: string; jdHash: string }>,
 ): unknown {
+  const review = readApplicationReview(row.spec);
+  if (!review || (review.portal_url && isPortalSupported(review.portal_url))) return row.spec;
+  const currentCanonicalUrl = canonicalSupportedPortalUrl(review.portal_url, review.ats_name);
+  if (currentCanonicalUrl) {
+    const spec = row.spec;
+    if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return row.spec;
+    const repaired: ApplicationReviewState = {
+      ...review,
+      portal_url: currentCanonicalUrl,
+      ats_name: detectPortal(currentCanonicalUrl),
+      portal_supported: true,
+    };
+    return { ...(spec as Record<string, unknown>), _review: repaired };
+  }
   const jobId = generatedResumeJobId(row);
   const job = jobId ? monitoredJobs.get(jobId) : undefined;
   if (!job) return row.spec;
-  const review = readApplicationReview(row.spec);
-  if (!review || (review.portal_url && isPortalSupported(review.portal_url))) return row.spec;
   if (normalizedJobIdentity(job.company) !== normalizedJobIdentity(generatedResumeContextText(row, 'company'))) return row.spec;
   if (normalizedJobIdentity(job.role) !== normalizedJobIdentity(generatedResumeContextText(row, 'role'))) return row.spec;
   if (!monitoredJdAgrees(generatedResumeContextText(row, 'jd_hash'), review.jd_text, job.description, job.jdHash)) return row.spec;

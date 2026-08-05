@@ -166,6 +166,15 @@ async function repairReviewPortalFromMonitoredJob(
   current: ApplicationReviewState,
 ): Promise<ApplicationReviewState> {
   if (current.portal_url && isPortalSupported(current.portal_url)) return current;
+  const currentCanonicalUrl = canonicalSupportedPortalUrl(current.portal_url, current.ats_name);
+  if (currentCanonicalUrl) {
+    return {
+      ...current,
+      portal_url: currentCanonicalUrl,
+      ats_name: detectPortal(currentCanonicalUrl),
+      portal_supported: true,
+    };
+  }
   const jobId = jobContextJobId(row);
   if (!jobId) return current;
   const expectedCompany = jobContextText(row, 'company');
