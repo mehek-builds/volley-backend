@@ -227,6 +227,17 @@ test('Ashby discovery labels drop placeholder text and provider UUIDs before ans
   );
 });
 
+test('Greenhouse labels drop question handles and duplicate visible labels before answer mapping', () => {
+  assert.equal(
+    normalizeDiscoveredLabel('linkedin profile linkedin profile question_12447419007'),
+    'linkedin profile',
+  );
+  assert.equal(
+    normalizeDiscoveredLabel('how did you hear about us?* question_37536799002'),
+    'how did you hear about us?',
+  );
+});
+
 test('Ashby fixed profile fields never reappear as editable custom questions', () => {
   const normalized = normalizeStoredPortalQuestions([
     { id: 'phone', question: 'phone 1-415-555-1234... 9c344ee4-aecc-4162-a897-8e1e99b3025a', answer: '+971 50 123 4567' },

@@ -264,7 +264,17 @@ export type DiscoveredQuestion = {
 export const REVIEW_QUESTION_TEXT_MAX_LENGTH = 500;
 
 const INLINE_UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
+const GREENHOUSE_QUESTION_HANDLE_RE = /\bquestion_\d+\b/gi;
 const TRAILING_ANSWER_PLACEHOLDER_RE = /\s+(?:type|enter|write)\s+(?:your\s+)?(?:answer\s+)?here(?:\.{3}|…)?\s*$/i;
+
+function collapseRepeatedLabel(value: string): string {
+  const words = value.trim().split(/\s+/).filter(Boolean);
+  if (words.length < 2 || words.length % 2 !== 0) return value;
+  const half = words.length / 2;
+  const left = words.slice(0, half).join(' ').toLowerCase();
+  const right = words.slice(half).join(' ').toLowerCase();
+  return left === right ? words.slice(0, half).join(' ') : value;
+}
 
 /**
  * Managed Ashby discovery may concatenate visible label text, placeholder text, name, and id into
@@ -272,9 +282,13 @@ const TRAILING_ANSWER_PLACEHOLDER_RE = /\s+(?:type|enter|write)\s+(?:your\s+)?(?
  * leaving the employer's full question intact for both display and label-based filling.
  */
 export function normalizeDiscoveredLabel(raw: string): string {
-  const withoutHandles = raw.replace(INLINE_UUID_RE, ' ').replace(/\s+/g, ' ').trim();
+  const withoutHandles = raw
+    .replace(INLINE_UUID_RE, ' ')
+    .replace(GREENHOUSE_QUESTION_HANDLE_RE, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
   const withoutPlaceholder = withoutHandles.replace(TRAILING_ANSWER_PLACEHOLDER_RE, '').trim();
-  const label = tidyLabel(withoutPlaceholder);
+  const label = tidyLabel(collapseRepeatedLabel(withoutPlaceholder));
   return label && !isOpaqueIdentifier(label) ? label : '';
 }
 
