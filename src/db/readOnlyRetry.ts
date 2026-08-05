@@ -31,8 +31,16 @@ export const READ_ONLY_SQLSTATE = '25006';
 
 /** True when a rejected write can be safely retried on a fresh connection. */
 export function isReadOnlyTransactionError(error: unknown): boolean {
-  if (!error || typeof error !== 'object') return false;
-  return (error as { code?: unknown }).code === READ_ONLY_SQLSTATE;
+  let current = error;
+  const seen = new Set<unknown>();
+
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    if ((current as { code?: unknown }).code === READ_ONLY_SQLSTATE) return true;
+    seen.add(current);
+    current = (current as { cause?: unknown }).cause;
+  }
+
+  return false;
 }
 
 /**

@@ -47,6 +47,15 @@ test('25006 is recognised and nothing else is', () => {
   assert.equal(isReadOnlyTransactionError('25006'), false, 'a bare string is not a pg error');
 });
 
+test('25006 is recognised through wrapped query errors', () => {
+  const postgresError = pgError(READ_ONLY_SQLSTATE, 'cannot execute DELETE in a read-only transaction');
+  const drizzleError = Object.assign(new Error('Failed query: delete from "usage_counters"'), {
+    cause: postgresError,
+  });
+
+  assert.equal(isReadOnlyTransactionError(drizzleError), true);
+});
+
 test('a write that fails read-only once succeeds on the retry', async () => {
   let calls = 0;
   const result = await withReadOnlyRetry(async () => {
