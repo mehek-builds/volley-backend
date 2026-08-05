@@ -994,6 +994,16 @@ export function buildManagedPortalActions(
       timeout: MANAGED_FILL_TIMEOUT_MS,
     });
   }
+  if (portalFamily(portal) === 'greenhouse') {
+    actions.push({
+      type: 'fillByLabelText',
+      text: 'By checking this box, I consent',
+      value: 'Yes',
+      label: 'greenhouse_demographic_data_consent',
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
+  }
   // Choice controls are filled only by the runner's scoped question-container logic. That keeps
   // short answers such as "Yes" from matching an unrelated acknowledgement elsewhere on the page.
   // portalCanAutoSubmit is the second gate, and it is deliberately NOT the caller's job. A caller

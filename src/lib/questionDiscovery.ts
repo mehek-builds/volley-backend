@@ -68,6 +68,8 @@ const JD_US_SCOPE =
 
 export const EEO_QUESTION =
   /transgender|\bgender\b|what is your sex\b|race|ethnicit|hispanic|latino|veteran|military|disab|sexual orientation|communities|identify with|current age|what is your age|age range|how old are you|\bage group\b/i;
+const LEGAL_CONSENT_QUESTION =
+  /candidate privacy policy|information (?:i|you) have provided.*process|by selecting ["']?i agree|demographic data survey|collecting,\s*storing,\s*and processing/i;
 
 export function workEligibilitySkipReason(label: string): string {
   return `work-eligibility question left for you: "${label.slice(0, 60)}"`;
@@ -522,6 +524,10 @@ export function resolveKnownAnswer(
 
   if (EEO_QUESTION.test(label)) {
     return { value: eeoAnswer(eeoPreferenceForLabel(label, ap.eeo_prefs)) };
+  }
+
+  if (LEGAL_CONSENT_QUESTION.test(label)) {
+    return { value: /i agree/i.test(label) ? 'I agree' : 'Yes' };
   }
 
   if (isRefusedQuestion(label)) {

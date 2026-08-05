@@ -200,7 +200,7 @@ test('managed controlled-portal actions include reviewed fields, resume upload, 
     questions: [{ question: 'Why this role?', answer: 'I enjoy systems work.' }],
   }, true);
   assert.deepEqual(actions.map((action) => action.type), [
-    'fill', 'fill', 'fill', 'upload', 'fillByLabelText', 'click',
+    'fill', 'fill', 'fill', 'upload', 'fillByLabelText', 'fillByLabelText', 'click',
   ]);
   assert.equal(actions.find((action) => action.type === 'upload')?.file?.base64, 'cGRm');
 });
@@ -514,16 +514,21 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
   // Both questions are sent now that the runner dispatches on control type (stratus PR #6), and
   // both stay optional so a control it still cannot handle degrades to a blocker rather than
   // taking the whole run down and discarding the fields already filled.
-  const questionActions = actions.filter((action) => action.type === 'fillByLabelText');
+  const questionActions = actions.filter((action) => action.type === 'fillByLabelText' && action.label?.startsWith('question:'));
   assert.equal(questionActions.length, 2);
   for (const action of questionActions) {
     assert.equal(action.optional, true, `"${action.text}" must not be able to abort the run`);
   }
   // first_name, last_name, email (phone and location are omitted from this fixture), resume, then
   // the two questions.
-  assert.deepEqual(actions.map((a) => a.type), [
+  assert.deepEqual(
+    actions
+      .filter((action) => action.label !== 'greenhouse_demographic_data_consent')
+      .map((a) => a.type),
+    [
     'fill', 'fill', 'fill', 'upload', 'fillByLabelText', 'fillByLabelText',
-  ]);
+    ],
+  );
 });
 
 test('managed question actions skip empty labels and cap long discovered text', () => {
@@ -539,7 +544,7 @@ test('managed question actions skip empty labels and cap long discovered text', 
       { question: longLabel, answer: 'I built a reliable workflow system.' },
     ],
   });
-  const questionActions = actions.filter((action) => action.type === 'fillByLabelText');
+  const questionActions = actions.filter((action) => action.type === 'fillByLabelText' && action.label?.startsWith('question:'));
   assert.equal(questionActions.length, 1);
   const [questionAction] = questionActions;
   assert.ok(questionAction);
@@ -637,7 +642,7 @@ test('Greenhouse fills academic fields from the submission packet', () => {
     resumeName: 'resume.pdf',
     questions: [],
   });
-  const byLabel = actions.filter((action) => action.type === 'fillByLabelText');
+  const byLabel = actions.filter((action) => action.type === 'fillByLabelText' && action.label !== 'greenhouse_demographic_data_consent');
   assert.deepEqual(
     byLabel.map((action) => [action.text, action.value, action.label]),
     [
@@ -701,6 +706,27 @@ test('choice controls are not auto-clicked by matching answer text', () => {
   });
   const clicks = actions.filter((action) => action.type === 'click');
   assert.equal(clicks.length, 0, 'no click action may be synthesized from an answer string');
+});
+
+test('Greenhouse managed actions include approved demographic data consent', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  assert.deepEqual(
+    actions.find((action) => action.label === 'greenhouse_demographic_data_consent'),
+    {
+      type: 'fillByLabelText',
+      text: 'By checking this box, I consent',
+      value: 'Yes',
+      label: 'greenhouse_demographic_data_consent',
+      optional: true,
+      timeout: 10000,
+    },
+  );
 });
 
 test('question wording alone cannot predict a control type', () => {
