@@ -51,10 +51,11 @@ test('a managed discovery run detects custom questions and cover-letter attachme
     optional: true,
     timeout: 10_000,
   });
-  assert.equal(actions.some((a) => a.type === 'fillByLabelText'), false);
+  assert.equal(actions.some((a) => a.type === 'fillByLabelText' && a.label?.startsWith('question:')), false);
   assert.equal(actions.some((a) => a.type === 'click'), false);
   const fillSelectors = actions.filter((a) => a.type === 'fill').map((a) => a.selector);
   assert.ok(fillSelectors.some((s) => s?.includes('first_name')));
+  assert.equal(actions.some((a) => a.type === 'fillByLabelText' && a.label === 'first_name_label'), true);
 });
 
 test('managed cover-letter detection requires an actual file input extraction', () => {
@@ -200,7 +201,7 @@ test('managed controlled-portal actions include reviewed fields, resume upload, 
     questions: [{ question: 'Why this role?', answer: 'I enjoy systems work.' }],
   }, true);
   assert.deepEqual(actions.map((action) => action.type), [
-    'fill', 'fill', 'fill', 'upload', 'fillByLabelText', 'click',
+    'fill', 'fillByLabelText', 'fill', 'fill', 'upload', 'fillByLabelText', 'click',
   ]);
   assert.equal(actions.find((action) => action.type === 'upload')?.file?.base64, 'cGRm');
 });
@@ -514,7 +515,7 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
   // Both questions are sent now that the runner dispatches on control type (stratus PR #6), and
   // both stay optional so a control it still cannot handle degrades to a blocker rather than
   // taking the whole run down and discarding the fields already filled.
-  const questionActions = actions.filter((action) => action.type === 'fillByLabelText');
+  const questionActions = actions.filter((action) => action.type === 'fillByLabelText' && action.label?.startsWith('question:'));
   assert.equal(questionActions.length, 2);
   for (const action of questionActions) {
     assert.equal(action.optional, true, `"${action.text}" must not be able to abort the run`);
@@ -522,7 +523,7 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
   // first_name, last_name, email (phone and location are omitted from this fixture), resume, then
   // the two questions.
   assert.deepEqual(actions.map((a) => a.type), [
-    'fill', 'fill', 'fill', 'upload', 'fillByLabelText', 'fillByLabelText',
+    'fill', 'fillByLabelText', 'fill', 'fill', 'upload', 'fillByLabelText', 'fillByLabelText',
   ]);
 });
 
@@ -539,7 +540,7 @@ test('managed question actions skip empty labels and cap long discovered text', 
       { question: longLabel, answer: 'I built a reliable workflow system.' },
     ],
   });
-  const questionActions = actions.filter((action) => action.type === 'fillByLabelText');
+  const questionActions = actions.filter((action) => action.type === 'fillByLabelText' && action.label?.startsWith('question:'));
   assert.equal(questionActions.length, 1);
   const [questionAction] = questionActions;
   assert.ok(questionAction);
@@ -637,7 +638,7 @@ test('Greenhouse fills academic fields from the submission packet', () => {
     resumeName: 'resume.pdf',
     questions: [],
   });
-  const byLabel = actions.filter((action) => action.type === 'fillByLabelText');
+  const byLabel = actions.filter((action) => action.type === 'fillByLabelText' && !action.label?.startsWith('first_name'));
   assert.deepEqual(
     byLabel.map((action) => [action.text, action.value, action.label]),
     [
@@ -1179,6 +1180,65 @@ test('the 2026-07-29 host rules reject every login, marketing and unrelated-prod
     detectPortal('https://recruiting.ultipro.com/she1011sphs/JobBoard/62d52737-46c1-4699-83e3-3a1747e3b981'),
     'ultipro',
   );
+});
+
+test('Greenhouse fixed actions include semantic and label fallbacks for first name', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  const firstNameFill = actions.find((action) => action.label === 'first_name');
+  assert.equal(firstNameFill?.type, 'fill');
+  assert.match(firstNameFill?.selector ?? '', /autocomplete="given-name"/);
+  assert.match(firstNameFill?.selector ?? '', /aria-label="First Name"/);
+
+  const firstNameByLabel = actions.find((action) => action.label === 'first_name_label');
+  assert.deepEqual(
+    {
+      type: firstNameByLabel?.type,
+      text: firstNameByLabel?.text,
+      value: firstNameByLabel?.value,
+      optional: firstNameByLabel?.optional,
+    },
+    { type: 'fillByLabelText', text: 'First Name', value: 'Taylor', optional: true },
+  );
+});
+
+test('Greenhouse managed actions retry known yes-no work and onsite choices by exact portal labels', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      { question: 'Are you currently eligible to legally work in the US?', answer: 'Yes' },
+      { question: 'Will you now or in the future require immigration support/sponsorship?', answer: 'Yes' },
+      { question: 'Are you able to work onsite in our San Francisco office 5 days a week?', answer: 'Yes' },
+      { question: 'Do you consent to the terms?', answer: 'Yes' },
+    ],
+  });
+  const aliasActions = actions.filter((action) => action.label?.startsWith('greenhouse_known_question:'));
+  assert.ok(aliasActions.length >= 8);
+  assert.ok(aliasActions.every((action) => action.type === 'fillByLabelText'));
+  assert.ok(aliasActions.every((action) => action.value === 'Yes'));
+  assert.ok(aliasActions.every((action) => action.optional === true));
+  assert.ok(aliasActions.some((action) => action.text === 'Are you currently eligible to legally work in the United States?'));
+  assert.ok(aliasActions.some((action) => action.text === 'Will you now or in the future require immigration support or sponsorship from Postman?'));
+  assert.ok(aliasActions.some((action) => action.text === 'Are you able to work onsite in our San Francisco office 5 days a week?'));
+  assert.equal(aliasActions.some((action) => action.text === 'Do you consent to the terms?'), false);
+
+  const selectActions = actions.filter((action) => action.label?.startsWith('greenhouse_known_select'));
+  assert.ok(selectActions.length >= aliasActions.length * 2);
+  assert.ok(selectActions.every((action) => action.type === 'select'));
+  assert.ok(selectActions.every((action) => action.optional === true));
+  assert.ok(selectActions.some((action) => action.value === 'Yes'));
+  assert.ok(selectActions.some((action) => action.value === '1'));
+  assert.ok(selectActions.some((action) => action.selector?.includes('.field:has(label:has-text("Are you currently eligible to legally work in the United States?")) select')));
+  assert.equal(selectActions.some((action) => action.selector?.includes('Do you consent to the terms?')), false);
+  assert.equal(actions.filter((action) => action.type === 'click').length, 0);
 });
 
 test('the QA harness routes to the three new controlled adapters, by query param and by path', () => {
