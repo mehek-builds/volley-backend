@@ -6,7 +6,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db/index';
 import { application_profile, generated_resumes, profiles, users } from '../db/schema';
-import { readApplicationReview, type ApplicationReviewState } from '../lib/applicationReview';
+import { normalizeApplicationReviewQuestions, readApplicationReview, type ApplicationReviewState } from '../lib/applicationReview';
 import {
   connectToSession,
   createBrowserContext,
@@ -321,7 +321,11 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
       ? coverLetterFileNameForRole(fullName, roleTitle)
       : undefined,
     mostRecentRole: readMostRecentRole(parsed),
-    questions: review.questions.map((item) => ({ question: item.question, answer: item.answer })),
+    questions: review.questions.map((item) => ({
+      question: item.question,
+      answer: item.answer,
+      portalSelector: item.portal_selector,
+    })),
   };
 }
 
@@ -477,7 +481,9 @@ export async function discoverAndResolveQuestions(
   automaticSubmissionEnabled: boolean,
   portal: SupportedPortal,
 ): Promise<{ questions: ApplicationReviewQuestion[]; attentionReasons: string[] }> {
-  const existingLabels = new Set(current.questions.map((q) => normalizeDiscoveredLabel(q.question).toLowerCase()));
+  const existingByLabel = new Map(
+    current.questions.map((q) => [normalizeReviewQuestionLabel(q.question).toLowerCase(), q] as const),
+  );
   const questions: ApplicationReviewQuestion[] = [];
   const attentionReasons: string[] = [];
 
@@ -497,11 +503,15 @@ export async function discoverAndResolveQuestions(
     const label = normalizeDiscoveredLabel(field.label);
     const reviewLabel = normalizeReviewQuestionLabel(field.label);
     if (!label || !reviewLabel || normalizeStoredPortalQuestions([{ question: label, answer: '' }], portal).length === 0) continue;
-    if (existingLabels.has(reviewLabel.toLowerCase())) continue; // already answered by the client or a prior run
+    const existing = existingByLabel.get(reviewLabel.toLowerCase());
+    if (existing) {
+      if (existing.answer.trim()) questions.push({ ...existing, question: reviewLabel, portal_selector: field.selector });
+      continue; // already answered by the client or a prior run
+    }
 
     const known = resolveKnownAnswer(label, field.inputType, ap, questionContext);
     if (known && 'value' in known) {
-      questions.push({ id: randomUUID(), question: reviewLabel, answer: known.value, kind: 'required', required: false });
+      questions.push({ id: randomUUID(), question: reviewLabel, answer: known.value, kind: 'required', required: false, portal_selector: field.selector });
       continue;
     }
     if (known && 'skipReason' in known) {
@@ -545,7 +555,7 @@ export async function discoverAndResolveQuestions(
         attentionReasons.push(`open-ended question left for you (could not draft a confident answer): "${label.slice(0, 60)}"`);
         continue;
       }
-      questions.push({ id: randomUUID(), question: reviewLabel, answer: fitted, kind: 'essay', required: false });
+      questions.push({ id: randomUUID(), question: reviewLabel, answer: fitted, kind: 'essay', required: false, portal_selector: field.selector });
       if (warnings.length > 0) {
         attentionReasons.push(`drafted answer needs your review: ${warnings.join('; ').slice(0, 300)}`);
       }
@@ -681,8 +691,12 @@ async function prepareManaged(
     authorization.enabled,
     portal,
   );
-  const mergedQuestions = [...storedQuestions, ...discoveredQuestions];
-  packet.questions = mergedQuestions.map((q) => ({ question: q.question, answer: q.answer }));
+  const mergedQuestions = normalizeApplicationReviewQuestions([...storedQuestions, ...discoveredQuestions]);
+  packet.questions = mergedQuestions.map((q) => ({
+    question: q.question,
+    answer: q.answer,
+    portalSelector: q.portal_selector,
+  }));
 
   const result = await runManagedBrowser(applicationUrl, buildManagedPortalActions(portal, packet));
   if (!result.screenshot) throw new Error('Stratus managed browser did not return a preview screenshot');
@@ -857,8 +871,12 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     const resolutionCurrent = { ...current, questions: storedQuestions };
     const { questions: discoveredQuestions, attentionReasons: discoveryAttention } =
       await discoverAndResolveQuestions(discovered, row, resolutionCurrent, await loadApplicationProfileLike(row.user_id), authorization.enabled, portal);
-    const mergedQuestions = [...storedQuestions, ...discoveredQuestions];
-    packet.questions = mergedQuestions.map((q) => ({ question: q.question, answer: q.answer }));
+    const mergedQuestions = normalizeApplicationReviewQuestions([...storedQuestions, ...discoveredQuestions]);
+    packet.questions = mergedQuestions.map((q) => ({
+      question: q.question,
+      answer: q.answer,
+      portalSelector: q.portal_selector,
+    }));
 
     let result = await fillPortal(page, portal, packet);
     const postFillVerification = await completeEmailVerificationIfPresent({

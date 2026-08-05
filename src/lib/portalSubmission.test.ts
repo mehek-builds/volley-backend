@@ -526,6 +526,27 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
   ]);
 });
 
+test('managed Greenhouse question fills prefer rediscovered selectors over label text', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question: 'Please indicate your overall GPA.',
+        answer: '3.89',
+        portalSelector: 'textarea[name="job_application[answers_attributes][0][text_value]"]',
+      },
+    ],
+  });
+  const questionAction = actions.find((action) => action.label === 'question:Please indicate your overall GPA.');
+  assert.equal(questionAction?.type, 'fill');
+  assert.equal(questionAction?.selector, 'textarea[name="job_application[answers_attributes][0][text_value]"]');
+  assert.equal(questionAction?.value, '3.89');
+  assert.equal(actions.some((action) => action.type === 'fillByLabelText' && action.text === 'Please indicate your overall GPA.'), false);
+});
+
 test('managed question actions skip empty labels and cap long discovered text', () => {
   const longLabel = `Why Samsara? ${'Describe a systems project you are proud of '.repeat(30)}`;
   const actions = buildManagedPortalActions('greenhouse', {

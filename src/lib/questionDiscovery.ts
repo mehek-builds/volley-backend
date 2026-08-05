@@ -437,6 +437,16 @@ const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
   function clean(s) {
     return (s == null ? '' : s).replace(/[​‌‍﻿ ]/g, ' ').replace(/\s+/g, ' ').trim();
   }
+  function quoteAttr(s) {
+    return String(s).replace(/["\\]/g, '\\$&');
+  }
+  function stableSelector(el, marker) {
+    var tag = el.tagName ? el.tagName.toLowerCase() : '';
+    if (el.id) return tag + '[id="' + quoteAttr(el.id) + '"]';
+    var name = el.getAttribute('name');
+    if (name) return tag + '[name="' + quoteAttr(name) + '"]';
+    return '[' + marker + ']';
+  }
   function isVisible(el) {
     var rect = el.getBoundingClientRect();
     if (rect.width === 0 && rect.height === 0) return false;
@@ -496,7 +506,7 @@ const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
     el.setAttribute(marker, '1');
     out.push({
       label: label,
-      selector: '[' + marker + ']',
+      selector: stableSelector(el, marker),
       inputType: el.tagName === 'TEXTAREA' ? 'textarea' : (el.type || 'text'),
       maxLength: el.maxLength > 0 ? el.maxLength : null,
     });

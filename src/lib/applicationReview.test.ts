@@ -79,4 +79,63 @@ describe('application review metadata', () => {
       ],
     );
   });
+
+  test('normalization attaches a fresh portal selector to an existing answered question', () => {
+    assert.deepEqual(
+      normalizeApplicationReviewQuestions([
+        { id: 'answered-gpa', question: 'Please indicate your overall GPA.', answer: '3.89', kind: 'required', required: true },
+        {
+          id: 'rediscovered-gpa',
+          question: 'please indicate your overall gpa.',
+          answer: '3.89',
+          kind: 'required',
+          required: false,
+          portal_selector: 'textarea[name="job_application[answers_attributes][0][text_value]"]',
+        },
+      ]),
+      [
+        {
+          id: 'answered-gpa',
+          question: 'Please indicate your overall GPA.',
+          answer: '3.89',
+          kind: 'required',
+          required: true,
+          portal_selector: 'textarea[name="job_application[answers_attributes][0][text_value]"]',
+        },
+      ],
+    );
+  });
+
+  test('normalization replaces a stale discovered marker with a durable portal selector', () => {
+    assert.deepEqual(
+      normalizeApplicationReviewQuestions([
+        {
+          id: 'answered-gpa',
+          question: 'Please indicate your overall GPA.',
+          answer: '3.89',
+          kind: 'required',
+          required: true,
+          portal_selector: '[data-litos-discovered-1]',
+        },
+        {
+          id: 'rediscovered-gpa',
+          question: 'please indicate your overall gpa.',
+          answer: '3.89',
+          kind: 'required',
+          required: true,
+          portal_selector: 'textarea[name="job_application[answers_attributes][0][text_value]"]',
+        },
+      ]),
+      [
+        {
+          id: 'answered-gpa',
+          question: 'Please indicate your overall GPA.',
+          answer: '3.89',
+          kind: 'required',
+          required: true,
+          portal_selector: 'textarea[name="job_application[answers_attributes][0][text_value]"]',
+        },
+      ],
+    );
+  });
 });
