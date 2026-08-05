@@ -261,6 +261,8 @@ export type DiscoveredQuestion = {
   maxLength: number | null;
 };
 
+export const REVIEW_QUESTION_TEXT_MAX_LENGTH = 500;
+
 const INLINE_UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
 const TRAILING_ANSWER_PLACEHOLDER_RE = /\s+(?:type|enter|write)\s+(?:your\s+)?(?:answer\s+)?here(?:\.{3}|…)?\s*$/i;
 
@@ -274,6 +276,18 @@ export function normalizeDiscoveredLabel(raw: string): string {
   const withoutPlaceholder = withoutHandles.replace(TRAILING_ANSWER_PLACEHOLDER_RE, '').trim();
   const label = tidyLabel(withoutPlaceholder);
   return label && !isOpaqueIdentifier(label) ? label : '';
+}
+
+function truncateReviewQuestionLabel(label: string): string {
+  if (label.length <= REVIEW_QUESTION_TEXT_MAX_LENGTH) return label;
+  const clipped = label.slice(0, REVIEW_QUESTION_TEXT_MAX_LENGTH);
+  const wholeWords = clipped.replace(/\s+\S*$/u, '').replace(/[.,;:!?]+$/u, '').trim();
+  return wholeWords || clipped.trim();
+}
+
+export function normalizeReviewQuestionLabel(raw: string): string {
+  const label = normalizeDiscoveredLabel(raw);
+  return label ? truncateReviewQuestionLabel(label) : '';
 }
 
 function isFixedPortalProfileField(portal: SupportedPortal, label: string): boolean {
@@ -318,8 +332,10 @@ export function normalizeStoredPortalQuestions<T extends { question: string; ans
   for (const question of questions) {
     const label = normalizeDiscoveredLabel(question.question);
     if (!label || isFixedPortalProfileField(portal, label)) continue;
-    const key = label.toLowerCase();
-    const next = { ...question, question: label };
+    const reviewLabel = normalizeReviewQuestionLabel(label);
+    if (!reviewLabel) continue;
+    const key = reviewLabel.toLowerCase();
+    const next = { ...question, question: reviewLabel };
     const existingIndex = indexByLabel.get(key);
     if (existingIndex === undefined) {
       indexByLabel.set(key, normalized.length);

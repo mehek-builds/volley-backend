@@ -443,6 +443,45 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
   ]);
 });
 
+test('managed question actions skip empty labels and cap long discovered text', () => {
+  const longLabel = `Why Samsara? ${'Describe a systems project you are proud of '.repeat(30)}`;
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      { question: 'required field', answer: 'ignored' },
+      { question: '56f41b98-0250-4e12-a2d1-aa038a33af27', answer: 'ignored' },
+      { question: longLabel, answer: 'I built a reliable workflow system.' },
+    ],
+  });
+  const questionActions = actions.filter((action) => action.type === 'fillByLabelText');
+  assert.equal(questionActions.length, 1);
+  const [questionAction] = questionActions;
+  assert.ok(questionAction);
+  assert.ok((questionAction.text ?? '').length <= 500);
+  assert.equal(longLabel.toLowerCase().startsWith((questionAction.text ?? '').toLowerCase()), true);
+});
+
+test('managed paylocity traversal also sends provider-safe reviewed question text', () => {
+  const longLabel = `Why this program? ${'Share one relevant implementation detail '.repeat(30)}`;
+  const actions = buildManagedPortalActions('paylocity', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [{ question: longLabel, answer: 'I like applied engineering work.' }],
+  }, true);
+  const questionActions = actions.filter((action) => action.type === 'fillByLabelText');
+  assert.ok(questionActions.length > 1);
+  for (const action of questionActions) {
+    const text = action.text ?? '';
+    assert.ok(text.length <= 500);
+    assert.equal(longLabel.toLowerCase().startsWith(text.toLowerCase()), true);
+  }
+});
+
 test('the Ashby branch fills LinkedIn, GitHub, and portfolio from the packet', () => {
   // Live regression, 2026-07-24: a real Ashby run reported "'LinkedIn Profile' is required and is
   // still empty" even though the account's profile had linkedin_url set, because this branch had no

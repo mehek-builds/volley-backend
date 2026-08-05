@@ -58,6 +58,7 @@ import {
   isOpenEndedQuestion,
   isRefusedQuestion,
   normalizeDiscoveredLabel,
+  normalizeReviewQuestionLabel,
   normalizeStoredPortalQuestions,
   resolveKnownAnswer,
   fitToBudget,
@@ -422,12 +423,13 @@ async function discoverAndResolveQuestions(
 
   for (const field of discovered) {
     const label = normalizeDiscoveredLabel(field.label);
-    if (!label || normalizeStoredPortalQuestions([{ question: label, answer: '' }], portal).length === 0) continue;
-    if (existingLabels.has(label.toLowerCase())) continue; // already answered by the client or a prior run
+    const reviewLabel = normalizeReviewQuestionLabel(field.label);
+    if (!label || !reviewLabel || normalizeStoredPortalQuestions([{ question: label, answer: '' }], portal).length === 0) continue;
+    if (existingLabels.has(reviewLabel.toLowerCase())) continue; // already answered by the client or a prior run
 
     const known = resolveKnownAnswer(label, field.inputType, ap, current.jd_text);
     if (known && 'value' in known) {
-      questions.push({ id: randomUUID(), question: label, answer: known.value, kind: 'required', required: false });
+      questions.push({ id: randomUUID(), question: reviewLabel, answer: known.value, kind: 'required', required: false });
       continue;
     }
     if (known && 'skipReason' in known) {
@@ -471,7 +473,7 @@ async function discoverAndResolveQuestions(
         attentionReasons.push(`open-ended question left for you (could not draft a confident answer): "${label.slice(0, 60)}"`);
         continue;
       }
-      questions.push({ id: randomUUID(), question: label, answer: fitted, kind: 'essay', required: false });
+      questions.push({ id: randomUUID(), question: reviewLabel, answer: fitted, kind: 'essay', required: false });
       if (warnings.length > 0) {
         attentionReasons.push(`drafted answer needs your review: ${warnings.join('; ').slice(0, 300)}`);
       }
