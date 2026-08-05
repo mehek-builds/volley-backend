@@ -152,6 +152,7 @@ test('portal support is written at packet creation and unsupported portals use e
   assert.match(resumeRoute, /monitored_jobs\.apply_url/);
   assert.match(resumeRoute, /monitoredDescriptionHash\(job\.description\)/);
   assert.match(resumeRoute, /spec: repairedHistorySpec\(row, monitoredJobs\)/);
+  assert.doesNotMatch(resumeRoute, /inArray\(career_page_sources\.ats_name,[\s\S]{0,80}AUTONOMOUS_PORTAL_FAMILIES/);
 
   const applicationsRoute = routeSource('applications.ts');
   // Packets created from monitored jobs can outlive a bad or stale review URL. Before declaring the
@@ -160,6 +161,8 @@ test('portal support is written at packet creation and unsupported portals use e
   assert.match(applicationsRoute, /monitored_jobs\.apply_url/);
   assert.match(applicationsRoute, /monitoredJdAgrees\(expectedJdHash, current\.jd_text, job\.description\)/);
   assert.match(applicationsRoute, /current = await repairReviewPortalFromMonitoredJob\(row, current\)/);
+  assert.match(applicationsRoute, /review = await repairReviewPortalFromMonitoredJob\(row, review\)/);
+  assert.doesNotMatch(applicationsRoute, /inArray\(career_page_sources\.ats_name,[\s\S]{0,80}AUTONOMOUS_PORTAL_FAMILIES/);
   assert.match(applicationsRoute, /sendUnsupportedPortalApplicationEmail/);
   assert.match(applicationsRoute, /!isPortalSupported\(current\.portal_url\)[\s\S]{0,1800}sendUnsupportedPortalApplicationEmail/);
   assert.doesNotMatch(applicationsRoute, /PORTAL_NOT_SUPPORTED/);
