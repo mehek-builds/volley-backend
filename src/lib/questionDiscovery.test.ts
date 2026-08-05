@@ -543,6 +543,14 @@ test('review question labels are never empty or longer than the managed runner l
     ),
     'briefly describe your experience with ads review/ads trust and safety',
   );
+  assert.equal(
+    normalizeReviewQuestionLabel('what gender identity do you most closely identify with? * 430'),
+    'what gender identity do you most closely identify with?',
+  );
+  assert.equal(
+    normalizeReviewQuestionLabel('are you a person of transgender experience? * 431'),
+    'are you a person of transgender experience?',
+  );
 
   const longLabel = `Why Samsara? ${'Tell us more about your systems work '.repeat(30)}`;
   const normalized = normalizeReviewQuestionLabel(longLabel);

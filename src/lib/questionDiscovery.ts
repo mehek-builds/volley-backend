@@ -332,6 +332,7 @@ export const REVIEW_QUESTION_TEXT_MAX_LENGTH = 500;
 
 const INLINE_UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
 const GREENHOUSE_QUESTION_HANDLE_RE = /\bquestion_\d+\b/gi;
+const GREENHOUSE_TRAILING_NUMERIC_HANDLE_RE = /\s*\*?\s+\d{2,5}\s*$/u;
 const TRAILING_ANSWER_PLACEHOLDER_RE = /\s+(?:type|enter|write)\s+(?:your\s+)?(?:answer\s+)?here(?:\.{3}|…)?\s*$/i;
 
 function collapseRepeatedLabel(value: string): string {
@@ -353,6 +354,7 @@ export function normalizeDiscoveredLabel(raw: string): string {
   const withoutHandles = raw
     .replace(INLINE_UUID_RE, ' ')
     .replace(GREENHOUSE_QUESTION_HANDLE_RE, ' ')
+    .replace(GREENHOUSE_TRAILING_NUMERIC_HANDLE_RE, ' ')
     .replace(/\s+/g, ' ')
     .trim();
   const withoutPlaceholder = withoutHandles.replace(TRAILING_ANSWER_PLACEHOLDER_RE, '').trim();
