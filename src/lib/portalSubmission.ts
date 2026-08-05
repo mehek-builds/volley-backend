@@ -264,7 +264,7 @@ export type SubmissionPacket = {
     startDate?: string;
     endDate?: string;
   };
-  questions: Array<{ question: string; answer: string }>;
+  questions: Array<{ question: string; answer: string; portalSelector?: string }>;
 };
 
 export type FillResult = {
@@ -421,6 +421,12 @@ function managedFillByLabel(
 ) {
   if (!value) return;
   actions.push({ type: 'fillByLabelText', text, value, label, optional, timeout });
+}
+
+function durablePortalSelector(selector: string | undefined): string | undefined {
+  const trimmed = selector?.trim();
+  if (!trimmed || trimmed.startsWith('[data-litos-discovered-')) return undefined;
+  return trimmed;
 }
 
 function managedComboboxFill(
@@ -1084,6 +1090,11 @@ export function buildManagedPortalActions(
     if (!item.answer.trim()) continue;
     const questionText = normalizeReviewQuestionLabel(item.question);
     if (!questionText) continue;
+    const portalSelector = durablePortalSelector(item.portalSelector);
+    if (portalSelector) {
+      managedFill(actions, portalSelector, item.answer, `question:${questionText.slice(0, 80)}`);
+      continue;
+    }
     actions.push({
       type: 'fillByLabelText',
       text: questionText,
@@ -1149,6 +1160,11 @@ function pushPaylocityTraversal(actions: ManagedBrowserAction[], packet: Submiss
       if (!item.answer.trim()) continue;
       const questionText = normalizeReviewQuestionLabel(item.question);
       if (!questionText) continue;
+      const portalSelector = durablePortalSelector(item.portalSelector);
+      if (portalSelector) {
+        managedFill(actions, portalSelector, item.answer, `question:${questionText.slice(0, 80)}`);
+        continue;
+      }
       actions.push({
         type: 'fillByLabelText',
         text: questionText,
@@ -1414,6 +1430,15 @@ async function fillReviewedQuestions(page: Page, packet: SubmissionPacket, out: 
     if (!item.answer.trim()) continue;
     const questionText = normalizeReviewQuestionLabel(item.question);
     if (!questionText) continue;
+    const portalSelector = durablePortalSelector(item.portalSelector);
+    if (portalSelector) {
+      const field = page.locator(portalSelector).first();
+      if ((await field.count()) > 0 && (await field.isVisible().catch(() => false))) {
+        await field.fill(item.answer);
+        out.push(`question:${questionText.slice(0, 80)}`);
+        continue;
+      }
+    }
     const label = page.getByText(questionText, { exact: false }).first();
     if ((await label.count()) === 0) continue;
     const container = label.locator('xpath=ancestor::*[self::div or self::fieldset][1]');

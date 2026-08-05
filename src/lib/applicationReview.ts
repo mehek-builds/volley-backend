@@ -8,6 +8,7 @@ export type ApplicationReviewQuestion = {
   answer: string;
   kind: 'essay' | 'required';
   required: boolean;
+  portal_selector?: string;
 };
 
 export function normalizeApplicationReviewQuestions(
@@ -28,12 +29,18 @@ export function normalizeApplicationReviewQuestions(
       continue;
     }
     const existing = normalized[existingIndex];
+    const portalSelector = preferredPortalSelector(existing.portal_selector, question.portal_selector);
     if ((question.required && !existing.required) || (!existing.answer.trim() && question.answer.trim())) {
-      normalized[existingIndex] = {
+      const next = {
         ...existing,
         required: existing.required || question.required,
         answer: existing.answer.trim() ? existing.answer : question.answer,
       };
+      normalized[existingIndex] = portalSelector
+        ? { ...next, portal_selector: portalSelector }
+        : next;
+    } else if (portalSelector && portalSelector !== existing.portal_selector) {
+      normalized[existingIndex] = { ...existing, portal_selector: portalSelector };
     }
   }
   return normalized;
@@ -41,6 +48,17 @@ export function normalizeApplicationReviewQuestions(
 
 function questionKey(question: string): string {
   return question.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function isTemporaryPortalSelector(selector: string | undefined): boolean {
+  return selector?.trim().startsWith('[data-litos-discovered-') === true;
+}
+
+function preferredPortalSelector(existing: string | undefined, next: string | undefined): string | undefined {
+  if (!next) return existing;
+  if (!existing || isTemporaryPortalSelector(existing)) return next;
+  if (!isTemporaryPortalSelector(next)) return next;
+  return existing;
 }
 
 export type ApplicationReviewState = {
