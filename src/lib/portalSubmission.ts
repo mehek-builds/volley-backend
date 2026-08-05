@@ -1011,13 +1011,9 @@ function pushGreenhouseReferralSourceAliases(actions: ManagedBrowserAction[], pa
     'How did you hear about Faire?',
     'How did you hear about Faire',
     'Referral source',
-    'Source',
   ];
   for (const alias of aliases) {
     pushGreenhouseQuestionComboboxLabelActions(actions, alias, value, 'greenhouse_referral');
-    for (const [index, selectSelector] of greenhouseQuestionSelectSelectors(alias).slice(0, GREENHOUSE_ALIAS_SELECT_SELECTOR_LIMIT).entries()) {
-      managedSelect(actions, selectSelector, value, `greenhouse_referral_select:${index}:${alias.slice(0, 80)}`);
-    }
   }
 }
 
@@ -1227,12 +1223,27 @@ const GREENHOUSE_DEMOGRAPHIC_ALIASES: Array<{ key: string; aliases: string[] }> 
   },
 ];
 
+function packetHasGreenhouseReviewedDemographicAnswer(packet: SubmissionPacket, key: string): boolean {
+  const patterns: Record<string, RegExp> = {
+    gender: /\bgender(?:\s+identity)?\b/i,
+    transgender_status: /transgender/i,
+    sexual_orientation: /sexual\s+orientation/i,
+    disability_status: /\bdisab/i,
+    veteran_status: /\bveteran\b|\bmilitary\b/i,
+    race: /\brace\b|\bethnicit|which\s+categor(?:y|ies)\b[^?]{0,120}(?:describe|identify)|hispanic|latino/i,
+  };
+  const pattern = patterns[key];
+  if (!pattern) return false;
+  return packet.questions.some((item) => item.answer.trim() && pattern.test(normalizeReviewQuestionLabel(item.question)));
+}
+
 function pushGreenhouseDemographicAliases(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
   const prefs = packet.eeoPrefs;
   if (!prefs) return;
   for (const item of GREENHOUSE_DEMOGRAPHIC_ALIASES) {
     const value = prefs[item.key]?.trim();
     if (!value) continue;
+    if (packetHasGreenhouseReviewedDemographicAnswer(packet, item.key)) continue;
     for (const alias of item.aliases) {
       actions.push({
         type: 'fillByLabelText',
@@ -1720,9 +1731,10 @@ export function buildManagedPortalActions(
     }
     if (portalFamily(portal) === 'greenhouse') {
       if (isGreenhouseEducationComboboxQuestion(questionText)) continue;
-      pushScopedQuestionChoiceActions(actions, questionText, item.answer, 'question', {
-        includeSelectFallbacks: !isGreenhouseReactSelectQuestion(questionText),
-      });
+      const isReactSelectQuestion = isGreenhouseReactSelectQuestion(questionText);
+      if (!isReactSelectQuestion) {
+        pushScopedQuestionChoiceActions(actions, questionText, item.answer, 'question');
+      }
       pushGreenhouseQuestionComboboxLabelActions(actions, questionText, item.answer, 'question');
       pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');
     } else {
