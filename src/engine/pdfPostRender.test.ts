@@ -77,6 +77,21 @@ describe('R-017: the post-render check actually runs', () => {
     assert.deepEqual(validatePdfLayout(text, numpages).issues, []);
   });
 
+  test('contact links print short and duplicate links print once', async () => {
+    const { buffer } = await renderResumePdf(spec(), {
+      ...CONTACT,
+      linkedin_url: 'https://www.linkedin.com/in/mehek',
+      github_url: 'https://github.com/mehek-builds/',
+      portfolio_url: 'github.com/mehek-builds',
+    });
+    const { text } = await extractPdfText(pooledCopy(buffer));
+
+    assert.ok(text.includes('linkedin.com/in/mehek'));
+    assert.ok(text.includes('github.com/mehek-builds'));
+    assert.ok(!text.includes('https://'));
+    assert.equal(text.match(/github\.com\/mehek-builds/g)?.length, 1);
+  });
+
   test('the defensive extraction path remains correct even when the raw parser also accepts the pooled buffer', async () => {
     const { buffer } = await renderResumePdf(spec(), CONTACT);
     const shifted = pooledCopy(buffer);
