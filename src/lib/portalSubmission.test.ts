@@ -722,6 +722,7 @@ test('Greenhouse fills academic fields from the submission packet', () => {
     graduationMonth: 'May',
     graduationYear: '2028',
     gpa: '3.89',
+    major: 'Computer Science',
     resume: Buffer.from('pdf'),
     resumeName: 'resume.pdf',
     questions: [],
@@ -745,6 +746,30 @@ test('Greenhouse fills academic fields from the submission packet', () => {
   );
   assert.ok(byLabel.every((action) => action.optional === true));
   assert.ok(byLabel.every((action) => (action.timeout ?? Infinity) < 30_000));
+  const comboFills = actions.filter((action) => action.type === 'fill' && action.label?.startsWith('education_'));
+  assert.ok(comboFills.some((action) => action.selector === '#school--0' && action.value === 'University of Southern California'));
+  assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s Degree'));
+  assert.ok(comboFills.some((action) => action.selector === '#discipline--0' && action.value === 'Computer Science'));
+  assert.ok(actions.some((action) => action.type === 'press' && action.selector === '#school--0' && action.label?.startsWith('education_school_combo')));
+  assert.ok(actions.some((action) => action.type === 'press' && action.selector === '#degree--0' && action.label?.startsWith('education_degree_combo')));
+  assert.ok(actions.some((action) => action.type === 'press' && action.selector === '#discipline--0' && action.label?.startsWith('education_discipline_combo')));
+});
+
+test('Greenhouse school aliases do not strip comma-separated campus names generically', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    school: 'University of California, Berkeley',
+    degree: 'Bachelor of Science in Computer Science',
+    major: 'Computer Science',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  const schoolValues = actions
+    .filter((action) => action.type === 'fill' && action.selector === '#school--0')
+    .map((action) => action.value);
+  assert.deepEqual(schoolValues, ['University of California, Berkeley']);
 });
 
 test('no managed action can burn the 30s default — every fill, upload, and question is bounded', () => {

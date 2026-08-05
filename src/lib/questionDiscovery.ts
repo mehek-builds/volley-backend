@@ -373,6 +373,20 @@ function currentEnrollmentAnswer(ap: ApplicationProfileLike): { value: string } 
   return { skipReason: 'current enrollment question left for you' };
 }
 
+function degreeAnswer(label: string, inputType: string | undefined, degree: string | undefined): string | null {
+  const trimmed = degree?.trim();
+  if (!trimmed) return null;
+  const needsLevel = /most recent degree|highest degree|degree (?:you )?(?:obtained|earned)|education level|level of education/i.test(label)
+    || /select|radio/i.test(inputType ?? '');
+  if (!needsLevel) return trimmed;
+  if (/\bph\.?d\b|doctor of philosophy|doctorate/i.test(trimmed)) return 'Doctor of Philosophy (Ph.D.)';
+  if (/\bmaster|m\.?s\.?|m\.?a\.?\b|mba|m\.?b\.?a\.?/i.test(trimmed)) return 'Master\'s Degree';
+  if (/\bbachelor|b\.?s\.?|b\.?a\.?\b/i.test(trimmed)) return 'Bachelor\'s Degree';
+  if (/\bassociate/i.test(trimmed)) return 'Associate\'s Degree';
+  if (/\bhigh school/i.test(trimmed)) return 'High School';
+  return trimmed;
+}
+
 const SPOKEN_LANGUAGE_ALIASES: Record<string, string> = {
   english: 'English',
   hindi: 'Hindi',
@@ -679,7 +693,10 @@ export function resolveKnownAnswer(
     case 'school':
       return ap.school ? { value: ap.school } : null;
     case 'degree':
-      return ap.degree ? { value: ap.degree } : null;
+      {
+        const value = degreeAnswer(label, inputType, ap.degree);
+        return value ? { value } : null;
+      }
     case 'graduation_date': {
       if (MIXED_ENROLLMENT_GRADUATION_QUESTION.test(label) && !enrollmentConfirmedForGraduationDate(ap)) {
         return { skipReason: `enrollment/graduation date question left for you: "${label.slice(0, 60)}"` };
