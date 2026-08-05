@@ -215,6 +215,8 @@ test('portal support is written at packet creation and unsupported portals use e
   assert.match(applicationsRoute, /monitoredJdAgrees\(expectedJdHash, current\.jd_text, job\.description\)/);
   assert.match(applicationsRoute, /current = await repairReviewPortalFromMonitoredJob\(row, current\)/);
   assert.match(applicationsRoute, /review = await repairReviewPortalFromMonitoredJob\(row, review\)/);
+  assert.match(applicationsRoute, /\/applications\/:id\/submission\/channels/);
+  assert.match(applicationsRoute, /assessAtsSubmissionChannel\(review\.portal_url\)/);
   assert.doesNotMatch(applicationsRoute, /inArray\(career_page_sources\.ats_name,[\s\S]{0,80}AUTONOMOUS_PORTAL_FAMILIES/);
   assert.match(applicationsRoute, /sendUnsupportedPortalApplicationEmail/);
   assert.match(applicationsRoute, /!isPortalSupported\(current\.portal_url\)[\s\S]{0,1800}sendUnsupportedPortalApplicationEmail/);

@@ -10,6 +10,7 @@ export type ApplicationReviewQuestion = {
   required: boolean;
   portal_selector?: string;
   portal_input_type?: string;
+  ats_api_field?: string;
 };
 
 export function normalizeApplicationReviewQuestions(
@@ -32,6 +33,7 @@ export function normalizeApplicationReviewQuestions(
     const existing = normalized[existingIndex];
     const portalSelector = preferredPortalSelector(existing.portal_selector, question.portal_selector);
     const portalInputType = question.portal_input_type ?? existing.portal_input_type;
+    const atsApiField = question.ats_api_field ?? existing.ats_api_field;
     if ((question.required && !existing.required) || (!existing.answer.trim() && question.answer.trim())) {
       const next = {
         ...existing,
@@ -42,12 +44,18 @@ export function normalizeApplicationReviewQuestions(
         ...next,
         ...(portalSelector ? { portal_selector: portalSelector } : {}),
         ...(portalInputType ? { portal_input_type: portalInputType } : {}),
+        ...(atsApiField ? { ats_api_field: atsApiField } : {}),
       };
-    } else if ((portalSelector && portalSelector !== existing.portal_selector) || (portalInputType && portalInputType !== existing.portal_input_type)) {
+    } else if (
+      (portalSelector && portalSelector !== existing.portal_selector)
+      || (portalInputType && portalInputType !== existing.portal_input_type)
+      || (atsApiField && atsApiField !== existing.ats_api_field)
+    ) {
       normalized[existingIndex] = {
         ...existing,
         ...(portalSelector ? { portal_selector: portalSelector } : {}),
         ...(portalInputType ? { portal_input_type: portalInputType } : {}),
+        ...(atsApiField ? { ats_api_field: atsApiField } : {}),
       };
     }
   }
@@ -66,15 +74,18 @@ export function mergeSubmittedApplicationReviewQuestions(
   const merged = stored.map((question) => {
     const submittedQuestion = submittedByQuestion.get(questionKey(question.question));
     if (!submittedQuestion) return question;
+    const portalSelector = preferredPortalSelector(question.portal_selector, submittedQuestion.portal_selector);
     const portalInputType = submittedQuestion.portal_input_type ?? question.portal_input_type;
+    const atsApiField = question.ats_api_field;
     return {
       ...question,
       answer: submittedQuestion.answer,
       kind: submittedQuestion.kind,
       required: question.required || submittedQuestion.required,
       question: submittedQuestion.question.trim() ? submittedQuestion.question : question.question,
-      portal_selector: preferredPortalSelector(question.portal_selector, submittedQuestion.portal_selector),
+      ...(portalSelector ? { portal_selector: portalSelector } : {}),
       ...(portalInputType ? { portal_input_type: portalInputType } : {}),
+      ...(atsApiField ? { ats_api_field: atsApiField } : {}),
     };
   });
   const storedKeys = new Set(stored.map((question) => questionKey(question.question)).filter(Boolean));
@@ -204,7 +215,7 @@ export type ApplicationReviewState = {
     screenshot_url?: string;
     captured_at: string;
     reference_id?: string;
-    source?: 'managed_browser' | 'chrome_extension' | 'email_fallback';
+    source?: 'managed_browser' | 'chrome_extension' | 'email_fallback' | 'ats_api';
   };
 };
 

@@ -266,7 +266,13 @@ export type SubmissionPacket = {
     startDate?: string;
     endDate?: string;
   };
-  questions: Array<{ question: string; answer: string; portalSelector?: string; portalInputType?: string }>;
+  questions: Array<{
+    question: string;
+    answer: string;
+    portalSelector?: string;
+    portalInputType?: string;
+    atsApiField?: string;
+  }>;
 };
 
 export type FillResult = {

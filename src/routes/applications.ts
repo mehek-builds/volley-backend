@@ -46,6 +46,7 @@ import {
 import { resumeFileNameForRole } from '../lib/resumeFileName';
 import { sendUnsupportedPortalApplicationEmail } from '../lib/unsupportedPortalEmailFallback';
 import { monitoredJdAgrees } from '../lib/monitoredPortalRepair';
+import { assessAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
 const questionSchema = z.object({
@@ -54,6 +55,8 @@ const questionSchema = z.object({
   answer: z.string().max(20_000),
   kind: z.enum(['essay', 'required']),
   required: z.boolean(),
+  portal_selector: z.string().max(2000).optional(),
+  portal_input_type: z.string().max(100).optional(),
 });
 const reviewBodySchema = z.object({
   ats_name: z.string().min(1).max(100),
@@ -845,6 +848,25 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         application_id: row.id,
         review: readApplicationReview(responseRow.spec) ?? processed ?? next,
         cover_letter: storedCoverLetter(responseRow),
+      });
+    },
+  );
+
+  fastify.get(
+    '/applications/:id/submission/channels',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      let review = readApplicationReview(row.spec);
+      if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
+      review = await repairReviewPortalFromMonitoredJob(row, review);
+      const assessment = assessAtsSubmissionChannel(review.portal_url);
+      return reply.send({
+        application_id: row.id,
+        review_status: review.status,
+        portal_url: review.portal_url,
+        channels: assessment ? [assessment] : [],
       });
     },
   );

@@ -111,6 +111,38 @@ describe('application review metadata', () => {
     );
   });
 
+  test('normalization preserves durable ATS API field mappings on duplicate questions', () => {
+    assert.deepEqual(
+      normalizeApplicationReviewQuestions([
+        {
+          id: 'answered-work-auth',
+          question: 'Are you legally authorized to work in the United States?',
+          answer: 'Yes',
+          kind: 'required',
+          required: true,
+        },
+        {
+          id: 'rediscovered-work-auth',
+          question: 'are you legally authorized to work in the united states?',
+          answer: 'Yes',
+          kind: 'required',
+          required: true,
+          ats_api_field: 'job_application[answers_attributes][0][boolean_value]',
+        },
+      ]),
+      [
+        {
+          id: 'answered-work-auth',
+          question: 'Are you legally authorized to work in the United States?',
+          answer: 'Yes',
+          kind: 'required',
+          required: true,
+          ats_api_field: 'job_application[answers_attributes][0][boolean_value]',
+        },
+      ],
+    );
+  });
+
   test('normalization replaces a stale discovered marker with a durable portal selector', () => {
     assert.deepEqual(
       normalizeApplicationReviewQuestions([
@@ -175,6 +207,77 @@ describe('application review metadata', () => {
           kind: 'essay',
           required: false,
           portal_selector: 'textarea[name="candidate[answers][123]"]',
+        },
+      ],
+    );
+  });
+
+  test('submit-request answer updates keep stored ATS API field mappings', () => {
+    assert.deepEqual(
+      mergeSubmittedApplicationReviewQuestions(
+        [
+          {
+            id: 'stored-work-auth',
+            question: 'Are you legally authorized to work in the United States?',
+            answer: 'Yes',
+            kind: 'required',
+            required: true,
+            ats_api_field: 'job_application[answers_attributes][0][boolean_value]',
+          },
+        ],
+        [
+          {
+            id: 'stored-work-auth',
+            question: 'Are you legally authorized to work in the United States?',
+            answer: 'No',
+            kind: 'required',
+            required: true,
+          },
+        ],
+      ),
+      [
+        {
+          id: 'stored-work-auth',
+          question: 'Are you legally authorized to work in the United States?',
+          answer: 'No',
+          kind: 'required',
+          required: true,
+          ats_api_field: 'job_application[answers_attributes][0][boolean_value]',
+        },
+      ],
+    );
+  });
+
+  test('submit-request answer updates cannot inject ATS API field mappings', () => {
+    assert.deepEqual(
+      mergeSubmittedApplicationReviewQuestions(
+        [
+          {
+            id: 'stored-work-auth',
+            question: 'Are you legally authorized to work in the United States?',
+            answer: 'Yes',
+            kind: 'required',
+            required: true,
+          },
+        ],
+        [
+          {
+            id: 'stored-work-auth',
+            question: 'Are you legally authorized to work in the United States?',
+            answer: 'Yes',
+            kind: 'required',
+            required: true,
+            ats_api_field: 'job_application[answers_attributes][0][boolean_value]',
+          },
+        ],
+      ),
+      [
+        {
+          id: 'stored-work-auth',
+          question: 'Are you legally authorized to work in the United States?',
+          answer: 'Yes',
+          kind: 'required',
+          required: true,
         },
       ],
     );

@@ -59,6 +59,20 @@ test('submit-request starts a fresh run instead of carrying stale run artifacts'
   assert.match(route, /const next = freshSubmitRequestReview\(current, normalizedSubmittedQuestions\)/);
 });
 
+test('ATS API channel runs after final claim and before browser submission', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  assert.match(runner, /import \{ tryAtsSubmissionChannel \} from '\.\.\/lib\/atsSubmissionChannels'/);
+  const claimIndex = runner.indexOf('const claimedRow = await claimSubmission(row)');
+  const atsIndex = runner.indexOf('const atsResult = await tryAtsSubmissionChannel');
+  const browserGateIndex = runner.indexOf('portalCanAutoSubmit(portal)', atsIndex);
+  const managedIndex = runner.indexOf('if (isManagedStratusProvider())', atsIndex);
+  assert.ok(claimIndex > 0, 'submit must atomically claim the final submission before any send path');
+  assert.ok(atsIndex > claimIndex, 'ATS API submission must run only after the final claim');
+  assert.ok(browserGateIndex > atsIndex, 'ATS API submission must run before browser-only portal gates');
+  assert.ok(managedIndex > atsIndex, 'ATS API submission must run before managed browser submission');
+  assert.match(runner.slice(atsIndex, browserGateIndex), /source: 'ats_api'/);
+});
+
 test('submission packet attaches the role-specific resume filename', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
   assert.match(runner, /const roleTitle = \(row\.job_context as \{ role\?: unknown \} \| null\)\?\.role/);
