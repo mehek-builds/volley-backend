@@ -2567,12 +2567,48 @@ describe('the pay and rewards footer is not a requirement', () => {
       'Our Total Rewards Philosophy',
       'Pay Transparency',
       'Pay Transparency Disclosure',
+      'WHY US?',
+      'WHAT WE PAY',
+      'APPLY',
       "What we'll offer",
       'Prior employment verification check',
       'Disclosures:',
     ]) {
       const [, second] = segmentJd(`Requirements\n- Python and Docker\n${heading}\nWe pay well and verify offers.\n`);
       assert.equal(second?.kind, 'noise', `"${heading}" opens a footer, not a requirements block`);
+    }
+  });
+
+  test('Checkly-style benefit and timezone lines do not become resume requirements', () => {
+    const displays = extractJdTerms(
+      `
+WHAT YOU SHOULD HAVE
+
+ - Strong technical skills that allow you to read, write and debug code (Javascript/Node.js preferred).
+ - 5+ years experience in a Solutions Engineering, Sales Engineering, a Customer Solutions or a Forward Deployed Engineer role.
+ - Experience working in dev-tools SaaS companies. Observability, monitoring, or testing background is preferred, but not required.
+ - Ability to use AI tools to accelerate customer-facing work: researching prospect environments, generating tailored demo code, building proof-of-concept repos etc.
+ - Located in Europe, UTC+1 and UTC+2 time zones.
+
+WHY US?
+
+ - Transparent salary (more info below)
+ - Stock options
+ - 27 days of paid vacation
+ - Paid sick leave & up to 14 weeks of paid parental leave
+
+WHAT WE PAY
+
+Fair, competitive, and transparent pay is very important for us.
+`,
+      { company: 'Checkly', role: 'Senior Sales Engineer', location: 'Europe' },
+    ).map((t) => t.term);
+
+    for (const junk of ['pay', 'utc+1', 'utc+2', 'notion', 'vacation', 'salary']) {
+      assert.ok(!displays.includes(junk), `"${junk}" is logistics or benefits copy, not resume evidence`);
+    }
+    for (const real of ['javascript', 'nodejs', 'saas', 'ai']) {
+      assert.ok(displays.includes(real), `"${real}" is stated candidate-fit signal and must survive`);
     }
   });
 

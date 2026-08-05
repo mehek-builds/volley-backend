@@ -303,7 +303,7 @@ const HEADING_PATTERNS: Array<{ kind: SectionKind; re: RegExp }> = [
   //                           the section at the tag would zero real content on a third of them.
   //                           They are harmless where they are (matching nothing, they close
   //                           nothing) and they need a rule about their SHAPE, not this list.
-  { kind: 'noise', re: new RegExp(String.raw`^about\b(?!\s+${SECOND_PERSON_SUBJECT}\b)|^disclosures:?$|\b(who (we are|are we)|our (story|mission|values|culture)|benefits|perks|what else|what we('?ll)? offer|compensation|salary|pay range|hourly rate|pay rate|stipend|total rewards|pay transparency|equal opportunity|eeo|diversity|accommodation|privacy|how to apply|why join|interview process|hiring process|selection process|background check|employment verification)\b`, 'i') },
+  { kind: 'noise', re: new RegExp(String.raw`^about\b(?!\s+${SECOND_PERSON_SUBJECT}\b)|^disclosures:?$|^apply\??$|\b(who (we are|are we)|our (story|mission|values|culture)|benefits|perks|what else|what we('?ll)? offer|what we pay|compensation|salary|pay range|hourly rate|pay rate|stipend|total rewards|pay transparency|equal opportunity|eeo|diversity|accommodation|privacy|how to apply|why (join|us)|interview process|hiring process|selection process|background check|employment verification)\b`, 'i') },
   { kind: 'preferred', re: /\b(preferred|nice[- ]to[- ]have|bonus|plus(es)?|desired|good to have|additional qualifications)\b/i },
   // `what we('?re)? look(ing)? for` and `(your|the) impact`, not the tighter `what we're looking
   // for` / `your impact` they replaced. Databricks' "Product Management Intern (Summer 2027)"
@@ -653,6 +653,21 @@ function isLogisticsProseLine(line: string): boolean {
   if (/^[-*•·]/.test(t)) return false;
   if (/\b(must|required|able|willing|authorized|authorization|relocat(e|ion)|commut(e|ing))\b/i.test(t)) return false;
   return LOGISTICS_PROSE.test(t);
+}
+
+const NON_RESUME_REQUIREMENT_LINE =
+  /\b(located in|resid(e|ing) in|based in|time ?zones?|utc[+-]?\d|transparent salary|paid vacation|paid sick leave|parental leave|stock options|employment (&|and) contractor options|salary calculator|commission split|base salary|ote)\b/i;
+
+function isNonResumeRequirementLine(line: string): boolean {
+  const t = headingCore(line);
+  if (!t) return false;
+  if (
+    /\b(experience|skills?|proficiency|fluency|knowledge|background|ability|track record|familiarity)\b/i.test(t) &&
+    !/\b(located in|resid(e|ing) in|time ?zones?|utc[+-]?\d)\b/i.test(t)
+  ) {
+    return false;
+  }
+  return NON_RESUME_REQUIREMENT_LINE.test(t);
 }
 
 export interface JdSection {
@@ -2235,10 +2250,14 @@ function extractFrom(sections: JdSection[], alsoLowercased?: Set<string>): JdTer
   for (const section of sections) {
     if (section.weight === 0) continue;
 
-    const tokens = tokenizeSection(section.text);
+    const sectionText = section.text
+      .split(/\r?\n/)
+      .filter((line) => !isNonResumeRequirementLine(line))
+      .join('\n');
+    const tokens = tokenizeSection(sectionText);
     // Computed once per section rather than per token: the scan is linear and the spans are
     // reused by both the unigram and the bigram pass below.
-    const spans = addressSpans(section.text);
+    const spans = addressSpans(sectionText);
     // A token written inside an address is that address, not a requirement. A lexicon skill is
     // spared for the "Java, Indonesia" case: see addressSpans.
     const isAddress = (tok: SectionToken) =>
@@ -2279,7 +2298,7 @@ function extractFrom(sections: JdSection[], alsoLowercased?: Set<string>): JdTer
     for (let i = 0; i < tokens.length - 1; i++) {
       const a = tokens[i];
       const b = tokens[i + 1];
-      const gap = section.text.slice(a.end, b.start);
+      const gap = sectionText.slice(a.end, b.start);
       if (!/^ +$/.test(gap)) continue;
       if (isAddress(a) || isAddress(b)) continue;
       if (
