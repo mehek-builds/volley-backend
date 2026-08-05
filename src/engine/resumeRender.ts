@@ -90,7 +90,16 @@ const RESUME_FONT_PATHS = {
 } as const;
 
 function contactLine(contact: ContactHeader): string {
+  const seen = new Set<string>();
+  const clean = (value: string | undefined) => {
+    const shown = value?.trim().replace(/^https?:\/\/(www\.)?/i, '').replace(/\/+$/, '') ?? '';
+    const key = shown.toLowerCase();
+    if (!shown || seen.has(key)) return '';
+    seen.add(key);
+    return shown;
+  };
   return [contact.email, contact.phone, contact.linkedin_url, contact.github_url, contact.portfolio_url]
+    .map(clean)
     .filter(Boolean)
     .join(' | ');
 }
@@ -124,11 +133,7 @@ export function findPdfTextFidelityIssues(
   const renderedWithoutWhitespace = rendered.replace(/\s+/g, '');
   const expected: Array<{ label: string; value: string | undefined }> = [
     { label: 'header name', value: contact.full_name },
-    { label: 'contact email', value: contact.email },
-    { label: 'contact phone', value: contact.phone },
-    { label: 'LinkedIn URL', value: contact.linkedin_url },
-    { label: 'GitHub URL', value: contact.github_url },
-    { label: 'portfolio URL', value: contact.portfolio_url },
+    { label: 'contact line', value: contactLine(contact) },
     { label: 'education school', value: spec.school },
     { label: 'education degree', value: spec.degree },
     { label: 'graduation date', value: spec.grad_date },
