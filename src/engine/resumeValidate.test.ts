@@ -4,6 +4,7 @@ import {
   findGroundingViolations,
   findUngroundedSkills,
   pruneUngroundedContent,
+  pruneUngroundedSkills,
   validateResumeSpec,
   overlongBullets,
   BULLET_MAX_CHARS,
@@ -468,6 +469,21 @@ test('R-015: prune strips an off-list skill as a last resort, and keeps the decl
   const { spec: cleaned, removed } = pruneUngroundedContent(s, BANK, ['Python']);
   assert.deepEqual(cleaned.skills, ['Python']);
   assert.ok(removed.some((r) => r.includes('BigQuery') && r.includes('Looker')));
+});
+
+test('pruneUngroundedSkills removes only generated off-list skills and keeps editable experience intact', () => {
+  const s = spec([{
+    org: 'Northwind Labs',
+    title: 'Engineer',
+    date_range: '2025',
+    bullets: ['Built an internal analytics dashboard used by the growth team'],
+  }]);
+  s.skills = ['Python', 'BigQuery'];
+
+  const { spec: cleaned, removed } = pruneUngroundedSkills(s, BANK, ['Python']);
+  assert.deepEqual(cleaned.experience, s.experience);
+  assert.deepEqual(cleaned.skills, ['Python']);
+  assert.ok(removed.some((r) => r.includes('BigQuery')));
 });
 
 test('R-015: prune leaves skills alone in soft mode', () => {

@@ -588,6 +588,31 @@ export function pruneUngroundedContent(
   return { spec: { ...spec, experience, skills }, removed };
 }
 
+export function pruneUngroundedSkills(
+  spec: ResumeSpec,
+  bank: ExperienceBankEntry[],
+  declaredSkills?: string[] | null,
+): { spec: ResumeSpec; removed: string[] } {
+  if (!declaredSkills?.length) return { spec, removed: [] };
+
+  const ungrounded = new Set(findUngroundedSkills(spec.skills, bank, declaredSkills));
+  if (ungrounded.size === 0) return { spec, removed: [] };
+
+  const skills = spec.skills.filter((skill) => !ungrounded.has(skill));
+  const next: ResumeSpec = { ...spec, skills };
+  if (spec.skill_source) {
+    const skill_source = Object.fromEntries(
+      Object.entries(spec.skill_source).filter(([skill, source]) => !ungrounded.has(skill) && !ungrounded.has(source)),
+    );
+    next.skill_source = Object.keys(skill_source).length > 0 ? skill_source : undefined;
+  }
+
+  return {
+    spec: next,
+    removed: [`dropped ungrounded skills: ${[...ungrounded].join(', ')}`],
+  };
+}
+
 // Skills the spec lists that the student cannot be said to have. Two modes, and which one applies
 // depends entirely on whether the student ever told us their skills (profiles.skills, R-015).
 //

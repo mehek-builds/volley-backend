@@ -149,6 +149,19 @@ test('the review route edits through the helper rather than a bare spread', () =
   assert.match(applicationsRoute, /const next = applyApplicationReviewEdit\(current, parsed\.data\)/);
 });
 
+test('dashboard resume edits prune generated off-list skills before validation', () => {
+  const applicationsRoute = routeSource('applications.ts');
+  assert.match(applicationsRoute, /import \{[^}]*pruneUngroundedSkills[^}]*validateResumeSpec[^}]*\} from '\.\.\/engine\/resumeValidate'/);
+  assert.match(applicationsRoute, /const declaredSkills = declaredSkillsList\(profileRows\[0\]\?\.skills\)/);
+  assert.match(applicationsRoute, /const grounded = pruneUngroundedSkills\(edited, bank, declaredSkills\)/);
+  assert.match(applicationsRoute, /edited = grounded\.spec/);
+  assert.match(applicationsRoute, /groundingRemoved: grounded\.removed/);
+
+  const pruneIndex = applicationsRoute.indexOf('pruneUngroundedSkills(edited, bank, declaredSkills)');
+  const validateIndex = applicationsRoute.indexOf('validateResumeSpec(', pruneIndex);
+  assert.ok(pruneIndex > 0 && validateIndex > pruneIndex, 'dashboard save must sanitize uneditable skills before validation');
+});
+
 /**
  * Wiring, asserted separately from behaviour.
  *
