@@ -1117,6 +1117,21 @@ export function isPortalSupported(rawUrl: string | undefined): boolean {
   }
 }
 
+export function canonicalSupportedPortalUrl(rawUrl: string | undefined, atsName?: string | null): string | undefined {
+  if (!rawUrl) return undefined;
+  if (isPortalSupported(rawUrl)) return rawUrl;
+  if ((atsName ?? '').trim().toLowerCase() !== 'greenhouse') return undefined;
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== 'https:') return undefined;
+    const greenhouseJobId = url.searchParams.get('gh_jid')?.trim();
+    if (!greenhouseJobId || !/^\d{3,20}$/.test(greenhouseJobId)) return undefined;
+    return `https://boards.greenhouse.io/embed/job_app?token=${greenhouseJobId}`;
+  } catch {
+    return undefined;
+  }
+}
+
 export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): string {
   if (portal !== 'ashby') return rawUrl;
   const url = new URL(rawUrl);

@@ -7,7 +7,7 @@ import {
   readApplicationReview,
   type ApplicationReviewState,
 } from './applicationReview';
-import { isPortalSupported } from './portalSubmission';
+import { canonicalSupportedPortalUrl, isPortalSupported } from './portalSubmission';
 
 // __dirname rather than import.meta.url: tsconfig.api.json compiles this tree as CommonJS, where
 // import.meta is a hard error. Matches serverlessRespond.test.ts and the other source-reading tests.
@@ -37,6 +37,21 @@ test('company-owned careers pages are unsupported, and say so before anything ru
   ]) {
     assert.equal(isPortalSupported(url), false, url);
   }
+});
+
+test('greenhouse wrapper links canonicalize to a supported application URL', () => {
+  const canonical = canonicalSupportedPortalUrl(
+    'https://databricks.com/company/careers/open-positions/job?gh_jid=6883068002',
+    'greenhouse',
+  );
+  assert.equal(canonical, 'https://boards.greenhouse.io/embed/job_app?token=6883068002');
+  assert.equal(isPortalSupported(canonical), true);
+});
+
+test('greenhouse wrapper canonicalization refuses non-greenhouse sources and unsafe ids', () => {
+  assert.equal(canonicalSupportedPortalUrl('https://databricks.com/company/careers/open-positions/job?gh_jid=6883068002', 'lever'), undefined);
+  assert.equal(canonicalSupportedPortalUrl('https://databricks.com/company/careers/open-positions/job?gh_jid=abc', 'greenhouse'), undefined);
+  assert.equal(canonicalSupportedPortalUrl('http://databricks.com/company/careers/open-positions/job?gh_jid=6883068002', 'greenhouse'), undefined);
 });
 
 test('a question about a missing or malformed URL gets an answer, not an exception', () => {
@@ -150,6 +165,7 @@ test('portal support is written at packet creation and unsupported portals use e
   // monitored-job packets whose review URL is stale or company-owned.
   assert.match(resumeRoute, /function repairedHistorySpec/);
   assert.match(resumeRoute, /monitored_jobs\.apply_url/);
+  assert.match(resumeRoute, /canonicalSupportedPortalUrl\(job\.apply_url, job\.ats_name\)/);
   assert.match(resumeRoute, /monitoredDescriptionHash\(job\.description\)/);
   assert.match(resumeRoute, /spec: repairedHistorySpec\(row, monitoredJobs\)/);
   assert.doesNotMatch(resumeRoute, /inArray\(career_page_sources\.ats_name,[\s\S]{0,80}AUTONOMOUS_PORTAL_FAMILIES/);
@@ -159,6 +175,7 @@ test('portal support is written at packet creation and unsupported portals use e
   // packet unsupported, submit-request must first repair from the canonical monitored job apply_url.
   assert.match(applicationsRoute, /async function repairReviewPortalFromMonitoredJob/);
   assert.match(applicationsRoute, /monitored_jobs\.apply_url/);
+  assert.match(applicationsRoute, /canonicalSupportedPortalUrl\(job\.apply_url, job\.ats_name\)/);
   assert.match(applicationsRoute, /monitoredJdAgrees\(expectedJdHash, current\.jd_text, job\.description\)/);
   assert.match(applicationsRoute, /current = await repairReviewPortalFromMonitoredJob\(row, current\)/);
   assert.match(applicationsRoute, /review = await repairReviewPortalFromMonitoredJob\(row, review\)/);

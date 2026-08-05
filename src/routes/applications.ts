@@ -33,7 +33,7 @@ import { declaredSkillsList } from './profile';
 import { buildPacket, processSubmissionApplication } from './submissionRunner';
 import { isRefusedQuestion } from '../lib/questionDiscovery';
 import { resumeEditDisposition, submitRequestDisposition } from '../lib/submissionSafety';
-import { detectPortal, isPortalSupported } from '../lib/portalSubmission';
+import { canonicalSupportedPortalUrl, detectPortal, isPortalSupported } from '../lib/portalSubmission';
 import { dailySubmissionCap, withinDailyCap } from '../lib/submissionQueue';
 import { canStartExtensionSubmission, extensionOutcomePatch, isSafeExtensionReceiptUrl } from '../lib/extensionSubmission';
 import {
@@ -174,6 +174,7 @@ async function repairReviewPortalFromMonitoredJob(
   if (!expectedCompany || !expectedRole || !expectedJdHash) return current;
   const [job] = await db.select({
     apply_url: monitored_jobs.apply_url,
+    ats_name: career_page_sources.ats_name,
     company_name: monitored_jobs.company_name,
     title: monitored_jobs.title,
     description: sql<string>`left(${monitored_jobs.description}, 60000)`,
@@ -185,14 +186,16 @@ async function repairReviewPortalFromMonitoredJob(
       eq(career_page_sources.enabled, true),
     ))
     .limit(1);
-  if (!job || !isPortalSupported(job.apply_url)) return current;
+  if (!job) return current;
+  const applyUrl = canonicalSupportedPortalUrl(job.apply_url, job.ats_name);
+  if (!applyUrl) return current;
   if (normalizedIdentity(job.company_name) !== normalizedIdentity(expectedCompany)) return current;
   if (normalizedIdentity(job.title) !== normalizedIdentity(expectedRole)) return current;
   if (!monitoredJdAgrees(expectedJdHash, current.jd_text, job.description)) return current;
   return {
     ...current,
-    portal_url: job.apply_url,
-    ats_name: detectPortal(job.apply_url),
+    portal_url: applyUrl,
+    ats_name: detectPortal(applyUrl),
     portal_supported: true,
   };
 }
