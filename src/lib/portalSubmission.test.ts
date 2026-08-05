@@ -940,8 +940,12 @@ test('Greenhouse fills academic fields from the submission packet', () => {
     byLabel.map((action) => [action.text, action.value, action.label]),
     [
       ['What is your graduation date?', 'May 2028', 'graduation_date'],
+      ['Graduation Date', 'May 2028', 'graduation_date_label'],
+      ['Expected Graduation Date', 'May 2028', 'graduation_date_expected'],
       ['End date month', 'May', 'education_end_month'],
       ['End date year', '2028', 'education_end_year'],
+      ['Graduation Month', 'May', 'education_graduation_month'],
+      ['Graduation Year', '2028', 'education_graduation_year'],
       ['GPA', '3.89', 'gpa'],
       ['What is your GPA?', '3.89', 'gpa_question'],
     ],
@@ -966,18 +970,17 @@ test('Greenhouse fills academic fields from the submission packet', () => {
   assert.ok(schoolOpenIndex >= 0);
   assert.ok(schoolFillIndex > schoolOpenIndex);
   assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s Degree'));
-  assert.equal(comboFills.filter((action) => action.selector === '#degree--0').length, 1);
+  assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor of Science'));
+  assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor of Science in Computer Science'));
+  assert.equal(comboFills.filter((action) => action.selector === '#degree--0').length, 3);
   assert.equal(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s'), false);
   assert.equal(comboFills.some((action) => action.selector?.includes('label:has-text("Degree")')), false);
-  assert.equal(
-    comboFills.some((action) =>
-      action.selector === '#degree--0' && action.value === 'Bachelor of Science in Computer Science'),
-    false,
-  );
   assert.ok(comboFills.some((action) => action.selector === '#discipline--0' && action.value === 'Computer Science'));
+  assert.ok(comboFills.some((action) => action.label?.startsWith('education_graduation_date_combo:') && action.value === 'May 2028'));
   assert.ok(actions.some((action) => action.type === 'click' && action.selector === '#react-select-school--0-option-0' && action.label?.startsWith('education_school_combo')));
   assert.ok(actions.some((action) => action.type === 'click' && action.selector === '#react-select-degree--0-option-0' && action.label?.startsWith('education_degree_combo')));
   assert.ok(actions.some((action) => action.type === 'click' && action.selector === '#react-select-discipline--0-option-0' && action.label?.startsWith('education_discipline_combo')));
+  assert.ok(comboFills.some((action) => action.label?.startsWith('education_graduation_date_combo:') && action.value === 'Spring 2028'));
 });
 
 test('Greenhouse fixed education combobox questions are not replayed as reviewed text', () => {
@@ -1004,6 +1007,82 @@ test('Greenhouse fixed education combobox questions are not replayed as reviewed
   assert.ok(actions.some((action) => action.label?.startsWith('education_school_combo:')));
   assert.ok(actions.some((action) => action.label?.startsWith('education_degree_combo:')));
   assert.ok(actions.some((action) => action.label?.startsWith('education_discipline_combo:')));
+});
+
+test('Greenhouse replays Faire option-style choices through React-select buckets', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    referralSourceDefault: 'Company website',
+    questions: [
+      { question: 'Which team opening are you most interested in?', answer: 'Search & Recommendation' },
+      { question: 'Do you identify as LGBTQIA+?', answer: 'No' },
+      { question: 'Which category best describes you?', answer: 'White' },
+      { question: 'Gender Identity', answer: 'Female' },
+      { question: 'Veteran Status', answer: 'Decline to self-identify' },
+      { question: 'Faire Candidate Privacy Policy acknowledgment', answer: 'Yes' },
+    ],
+  });
+
+  const comboFills = actions.filter((action) =>
+    action.type === 'fill'
+    && action.label?.startsWith('question_combo_label:'));
+  for (const value of [
+    'Search & Recommendation',
+    'No',
+    'White',
+    'Female',
+    'Decline to self-identify',
+  ]) {
+    assert.ok(comboFills.some((action) => action.value === value), value);
+  }
+  assert.ok(actions.some((action) =>
+    action.label?.startsWith('greenhouse_referral_combo_label:')
+    && action.value === 'Company website'));
+  assert.equal(comboFills.some((action) => action.label?.includes('Candidate Privacy Policy')), false);
+  assert.equal(actions.some((action) => action.text === 'Faire Candidate Privacy Policy acknowledgment'), false);
+  assert.ok(comboFills.every((action) => (action.selector?.length ?? Infinity) <= 500));
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+});
+
+test('Greenhouse replays Jump academic and referral choices without consent', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    phone: '+971501234567',
+    school: 'University of Southern California, Viterbi School of Engineering',
+    degree: 'Bachelor of Science in Computer Science',
+    graduationDate: 'May 2028',
+    graduationMonth: 'May',
+    graduationYear: '2028',
+    referralSourceDefault: 'Company website',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      { question: 'Do you currently have any offers from other firms or deadlines we should be aware of?', answer: 'No' },
+      { question: 'If you said yes above, please tell us about your offers and deadlines.', answer: 'N/A' },
+      { question: 'Will you require sponsorship for work authorization in the future?', answer: 'Yes' },
+      { question: 'Review our Notice at Collection to learn how we will process your personal data.', answer: 'I agree' },
+    ],
+  });
+
+  const comboFills = actions.filter((action) => action.type === 'fill');
+  assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s Degree'), 'degree level');
+  assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor of Science'), 'degree bachelor science');
+  assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor of Science in Computer Science'), 'degree full');
+  assert.ok(comboFills.some((action) => action.label?.startsWith('education_graduation_date_combo:') && action.value === 'May 2028'), 'raw graduation date');
+  assert.ok(comboFills.some((action) => action.label?.startsWith('education_graduation_date_combo:') && action.value === 'Spring 2028'), 'graduation bucket');
+  assert.ok(actions.some((action) =>
+    action.label?.startsWith('greenhouse_referral_combo_label:')
+    && action.value === 'Company website'), 'referral combo');
+  assert.ok(actions.some((action) =>
+    action.label?.startsWith('question_combo_label:')
+    && action.value === 'Yes'), 'sponsorship combo');
+  assert.equal(actions.some((action) => action.text === 'Review our Notice at Collection to learn how we will process your personal data.'), false, 'privacy text skipped');
+  assert.ok(actions.every((action) => !action.selector || action.selector.length <= 500), 'selector length');
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
 });
 
 test('Greenhouse replays Databricks choice questions through React-select buckets', () => {

@@ -327,6 +327,7 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     graduationYear: graduationParts.year,
     gpa: typeof app.gpa === 'string' ? app.gpa : undefined,
     major: typeof app.major === 'string' ? app.major : undefined,
+    referralSourceDefault: typeof app.referral_source_default === 'string' ? app.referral_source_default : undefined,
     resume,
     resumeName: resumeFileNameForRole(fullName, roleTitle),
     coverLetter,

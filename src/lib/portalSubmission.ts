@@ -249,6 +249,7 @@ export type SubmissionPacket = {
   graduationYear?: string;
   gpa?: string;
   major?: string;
+  referralSourceDefault?: string;
   resume: Buffer;
   resumeName: string;
   coverLetter?: Buffer;
@@ -536,7 +537,10 @@ function greenhouseDegreeAliases(degree: string | undefined): string[] {
   else if (/\bbachelor|b\.?s\.?|b\.?a\.?\b/i.test(lower)) level = 'Bachelor\'s Degree';
   else if (/\bassociate/i.test(lower)) level = 'Associate\'s Degree';
   else if (/\bhigh school/i.test(lower)) level = 'High School';
-  return uniqueDefined([level]);
+  const bachelorScience = level === 'Bachelor\'s Degree' && /\b(?:science|b\.?s\.?)\b/i.test(lower)
+    ? 'Bachelor of Science'
+    : undefined;
+  return uniqueDefined([level, bachelorScience, trimmed]);
 }
 
 function greenhouseDisciplineAliases(packet: SubmissionPacket): string[] {
@@ -561,6 +565,29 @@ function pushGreenhouseEducationComboboxActions(actions: ManagedBrowserAction[],
   }
   for (const [index, value] of greenhouseDisciplineAliases(packet).entries()) {
     managedGreenhouseReactSelectFill(actions, 'discipline--0', value, `education_discipline_combo:${index}`);
+  }
+}
+
+function pushGreenhouseGraduationDateComboboxActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
+  const values = uniqueDefined([
+    packet.graduationDate,
+    packet.graduationDate ? greenhouseGraduationBucket(packet.graduationDate) : undefined,
+  ]).slice(0, 2);
+  const labels = ['Graduation Date', 'Expected Graduation Date'];
+  let index = 0;
+  for (const label of labels) {
+    for (const value of values) {
+      for (const selector of greenhouseQuestionComboboxSelectors(label).slice(0, QUESTION_COMBOBOX_SELECTOR_LIMIT)) {
+        managedGreenhouseScopedReactSelectFill(
+          actions,
+          selector,
+          GREENHOUSE_VISIBLE_REACT_SELECT_OPTION_SELECTOR,
+          value,
+          `education_graduation_date_combo:${index}:${label}`,
+        );
+        index += 1;
+      }
+    }
   }
 }
 
@@ -908,7 +935,7 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string): 
 }
 
 function isGreenhouseReactSelectQuestion(question: string): boolean {
-  return /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bwhat\s+is\s+your\s+gpa\b|\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b|legally\s+authorized\s+to\s+work|sponsorship\s+for\s+employment\s+visa/i.test(question);
+  return /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bgraduat(?:ion|e)\s+date\b|\bwhat\s+is\s+your\s+gpa\b|\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b|legally\s+authorized\s+to\s+work|(?:require|need)\s+sponsorship|sponsorship\s+for\s+(?:employment\s+visa|work\s+authorization)|\bhow\s+did\s+you\s+hear\b|referral\s+source|source\s+of\b|\bteam\s+opening\b|\bopening\b[^?]{0,80}\binterested\b|\bLGBTQIA?\+?\b|sexual\s+orientation|\bgender(?:\s+identity)?\b|\bveteran\b|\bmilitary\b|\brace\b|\bethnicit|\bcategory\b/i.test(question);
 }
 
 function isGreenhouseEducationComboboxQuestion(question: string): boolean {
@@ -953,6 +980,43 @@ function pushGreenhouseQuestionComboboxLabelActions(
         `${labelPrefix}_combo_label:${index}:${questionText.slice(0, 80)}`,
       );
       index += 1;
+    }
+  }
+}
+
+function pushGreenhouseDemographicComboboxLabelActions(
+  actions: ManagedBrowserAction[],
+  label: string,
+  value: string,
+) {
+  for (const [index, selector] of greenhouseQuestionComboboxSelectors(label).slice(0, QUESTION_COMBOBOX_SELECTOR_LIMIT).entries()) {
+    managedGreenhouseScopedReactSelectFill(
+      actions,
+      selector,
+      GREENHOUSE_VISIBLE_REACT_SELECT_OPTION_SELECTOR,
+      value,
+      `greenhouse_demographic_combo:${index}:${label.slice(0, 80)}`,
+    );
+  }
+}
+
+function pushGreenhouseReferralSourceAliases(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
+  const value = packet.referralSourceDefault?.trim();
+  if (!value) return;
+  const aliases = [
+    'How did you hear about this job?',
+    'How did you hear about this job',
+    'How did you hear about us?',
+    'How did you hear about us',
+    'How did you hear about Faire?',
+    'How did you hear about Faire',
+    'Referral source',
+    'Source',
+  ];
+  for (const alias of aliases) {
+    pushGreenhouseQuestionComboboxLabelActions(actions, alias, value, 'greenhouse_referral');
+    for (const [index, selectSelector] of greenhouseQuestionSelectSelectors(alias).slice(0, GREENHOUSE_ALIAS_SELECT_SELECTOR_LIMIT).entries()) {
+      managedSelect(actions, selectSelector, value, `greenhouse_referral_select:${index}:${alias.slice(0, 80)}`);
     }
   }
 }
@@ -1181,6 +1245,7 @@ function pushGreenhouseDemographicAliases(actions: ManagedBrowserAction[], packe
       for (const [index, selectSelector] of greenhouseQuestionSelectSelectors(alias).slice(0, GREENHOUSE_ALIAS_SELECT_SELECTOR_LIMIT).entries()) {
         managedSelect(actions, selectSelector, value, `greenhouse_demographic_select:${index}:${alias.slice(0, 80)}`);
       }
+      pushGreenhouseDemographicComboboxLabelActions(actions, alias, value);
     }
   }
 }
@@ -1424,8 +1489,13 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedComboboxFill(actions, '#candidate-location, input[autocomplete="address-level2"]', greenhouseLocationSearch(packet), 'location');
     pushGreenhouseEducationComboboxActions(actions, packet);
     managedFillByLabel(actions, 'What is your graduation date?', packet.graduationDate, 'graduation_date');
+    managedFillByLabel(actions, 'Graduation Date', packet.graduationDate, 'graduation_date_label');
+    managedFillByLabel(actions, 'Expected Graduation Date', packet.graduationDate, 'graduation_date_expected');
     managedFillByLabel(actions, 'End date month', packet.graduationMonth, 'education_end_month');
     managedFillByLabel(actions, 'End date year', packet.graduationYear, 'education_end_year');
+    managedFillByLabel(actions, 'Graduation Month', packet.graduationMonth, 'education_graduation_month');
+    managedFillByLabel(actions, 'Graduation Year', packet.graduationYear, 'education_graduation_year');
+    pushGreenhouseGraduationDateComboboxActions(actions, packet);
     managedFillByLabel(actions, 'GPA', packet.gpa, 'gpa');
     managedFillByLabel(actions, 'What is your GPA?', packet.gpa, 'gpa_question');
     managedUpload(actions, '#resume, input[type="file"][name="job_application[resume]"]', 'resume', packet.resume, packet.resumeName);
@@ -1664,6 +1734,7 @@ export function buildManagedPortalActions(
   }
   if (portalFamily(portal) === 'greenhouse') {
     pushGreenhouseKnownQuestionAliases(actions, packet);
+    pushGreenhouseReferralSourceAliases(actions, packet);
     pushGreenhouseDemographicAliases(actions, packet);
   }
   // Choice controls are filled only by the runner's scoped question-container logic. That keeps
