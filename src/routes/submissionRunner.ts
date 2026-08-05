@@ -77,7 +77,7 @@ import {
   submissionBatchSize,
   withinDailyCap,
 } from '../lib/submissionQueue';
-import { resumeFileNameForRole } from '../lib/resumeFileName';
+import { coverLetterFileNameForRole, resumeFileNameForRole } from '../lib/resumeFileName';
 
 type ResumeRow = typeof generated_resumes.$inferSelect;
 type StoredSpec = Record<string, unknown>;
@@ -258,7 +258,7 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     resumeName: resumeFileNameForRole(fullName, (row.job_context as { role?: unknown } | null)?.role),
     coverLetter,
     coverLetterName: coverLetter
-      ? String(coverLetterMeta.file_name ?? `litos-${row.id}-cover-letter.pdf`)
+      ? coverLetterFileNameForRole(fullName, (row.job_context as { role?: unknown } | null)?.role)
       : undefined,
     mostRecentRole: readMostRecentRole(parsed),
     questions: review.questions.map((item) => ({ question: item.question, answer: item.answer })),
