@@ -781,7 +781,7 @@ test('Greenhouse fills academic fields from the submission packet', () => {
   assert.ok(comboFills.some((action) => action.selector === '#school--0' && action.value === 'University of Southern California'));
   assert.equal(comboFills[0]?.selector, '#school--0');
   assert.equal(comboFills[0]?.value, 'University of Southern California');
-  assert.equal(comboFills.some((action) => action.selector?.includes('label:has-text("School")')), false);
+  assert.ok(comboFills.some((action) => action.selector?.includes('label:has-text("School")')));
   assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s Degree'));
   assert.equal(comboFills.filter((action) => action.selector === '#degree--0').length, 1);
   assert.equal(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s'), false);
@@ -793,6 +793,7 @@ test('Greenhouse fills academic fields from the submission packet', () => {
   );
   assert.ok(comboFills.some((action) => action.selector === '#discipline--0' && action.value === 'Computer Science'));
   assert.ok(actions.some((action) => action.type === 'click' && action.selector === '#react-select-school--0-option-0' && action.label?.startsWith('education_school_combo')));
+  assert.ok(actions.some((action) => action.type === 'click' && action.selector === '[id^="react-select-"][id$="-option-0"]:visible' && action.label?.startsWith('education_school_combo_label')));
   assert.ok(actions.some((action) => action.type === 'click' && action.selector === '#react-select-degree--0-option-0' && action.label?.startsWith('education_degree_combo')));
   assert.ok(actions.some((action) => action.type === 'click' && action.selector === '#react-select-discipline--0-option-0' && action.label?.startsWith('education_discipline_combo')));
 });
@@ -832,6 +833,7 @@ test('Greenhouse replays Databricks choice questions through React-select bucket
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector === 'input[id="question_24505242002"]' && action.value === 'Earlier than Fall 2027'));
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector === 'input[id="question_32698502002"]' && action.value === '3.6 or above (out of 4.0)'));
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector === 'input[id="question_30149518002"]' && action.value === 'No'));
+  assert.ok(comboActions.some((action) => action.type === 'click' && action.selector === '[id^="react-select-"][id$="-option-0"]:visible'));
   assert.ok(actions.some((action) => action.type === 'press' && action.selector === 'input[id="question_32707214002"]' && action.label?.startsWith('question_combo')));
   assert.ok(actions.some((action) => action.type === 'press' && action.selector === 'input[id="question_24505242002"]' && action.label?.startsWith('question_combo')));
   assert.ok(actions.some((action) => action.type === 'press' && action.selector === 'input[id="question_32698502002"]' && action.label?.startsWith('question_combo')));
@@ -869,9 +871,47 @@ test('Greenhouse replays Databricks React-select buckets without portal selector
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text("What is your graduation date?")') && action.value === 'Earlier than Fall 2027'));
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text("What is your GPA?")') && action.value === '3.6 or above (out of 4.0)'));
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text("Do you currently or have you previously worked for Databricks') && action.value === 'No'));
+  assert.equal(comboActions.filter((action) => action.type === 'click' && action.selector === '[id^="react-select-"][id$="-option-0"]:visible').length, 4);
+  for (const action of comboActions.filter((candidate) => candidate.type === 'fill')) {
+    const index = actions.indexOf(action);
+    assert.equal(actions[index + 1]?.type, 'click');
+    assert.equal(actions[index + 1]?.selector, '[id^="react-select-"][id$="-option-0"]:visible');
+    assert.equal(actions[index + 2]?.type, 'press');
+    assert.equal(actions[index + 2]?.selector, action.selector);
+  }
   assert.ok(actions.some((action) => action.type === 'press' && action.label?.startsWith('question_combo_label:') && action.value === 'Enter'));
   assert.ok(actions.every((action) => (action.selector?.length ?? 0) <= 500));
   assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+});
+
+test('Greenhouse work authorization React-select respects negative reviewed answers', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question: 'Are you legally authorized to work in the country in which you are applying?',
+        answer: 'No',
+      },
+    ],
+  });
+
+  const comboFills = actions.filter((action) =>
+    action.type === 'fill'
+    && action.label?.startsWith('question_combo_label:')
+    && action.label?.includes('Are you legally authorized'));
+  assert.equal(comboFills.length, 1);
+  assert.equal(comboFills[0]?.value, 'No');
+  assert.equal(
+    actions.some((action) =>
+      action.type === 'fill'
+      && action.label?.startsWith('question_combo_label:')
+      && action.label?.includes('Are you legally authorized')
+      && action.value === 'Yes'),
+    false,
+  );
 });
 
 test('Greenhouse Databricks academic and reviewed question packet stays inside the action budget', () => {
@@ -928,6 +968,11 @@ test('Greenhouse Databricks academic and reviewed question packet stays inside t
   assert.ok(actions.some((action) => action.label?.startsWith('education_degree_combo:')));
   assert.equal(actions.some((action) => action.label?.startsWith('education_degree_combo_label:')), false);
   assert.ok(actions.some((action) => action.label?.startsWith('question_combo_label:')));
+  assert.ok(actions.some((action) =>
+    action.type === 'fill'
+    && action.label?.startsWith('question_combo_label:')
+    && action.label?.includes('Are you legally authorized')
+    && action.value === 'Yes'));
   assert.ok(actions.some((action) => action.label?.startsWith('question_checkbox:')));
   assert.equal(
     actions.some((action) =>
@@ -1626,7 +1671,14 @@ test('Greenhouse managed actions retry known yes-no work and onsite choices by e
 
   const selectActions = actions.filter((action) => action.label?.startsWith('greenhouse_known_select'));
   assert.equal(selectActions.length, 0);
-  assert.equal(actions.filter((action) => action.type === 'click' && action.label !== 'greenhouse_demographic_data_consent_checkbox').length, 0);
+  assert.equal(
+    actions.filter((action) =>
+      action.type === 'click'
+      && action.label !== 'greenhouse_demographic_data_consent_checkbox'
+      && !action.label?.startsWith('education_school_combo_label')
+      && !action.label?.startsWith('question_combo_label:')).length,
+    0,
+  );
 });
 
 test('managed reviewed questions replay stored answers into label-scoped choice controls', () => {
