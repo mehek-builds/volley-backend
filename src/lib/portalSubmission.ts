@@ -1,7 +1,7 @@
 import type { Page } from 'playwright-core';
 import type { ManagedBrowserAction, ManagedBrowserResult } from './browserbase';
 import { describeRequiredBlocker, describeUnlabelledBlockers, humanFieldLabel } from './fieldLabel';
-import { normalizeReviewQuestionLabel } from './questionDiscovery';
+import { classifyField, normalizeReviewQuestionLabel } from './questionDiscovery';
 import type { Locator } from 'playwright-core';
 
 // Portal field ids legitimately contain CSS-syntax characters (Greenhouse uses UUIDs, others use
@@ -652,6 +652,7 @@ const GREENHOUSE_DEMOGRAPHIC_DATA_CONSENT_CHECKBOX_SELECTOR =
   'input[type="checkbox"][name="gdpr_demographic_data_consent_given"], input[type="checkbox"][id^="gdpr_demographic_data_consent_given"], label:has-text("By checking this box, I consent") input[type="checkbox"]';
 const GREENHOUSE_ALIAS_SELECT_SELECTOR_LIMIT = 1;
 const QUESTION_SELECT_SELECTOR_LIMIT = 1;
+const CONFIRM_AFTER_FILL_FIELDS = new Set(['school', 'degree']);
 
 function questionSelectSelectors(label: string): string[] {
   const text = cssString(label);
@@ -670,7 +671,22 @@ function selectValuesForAnswer(answer: string): string[] {
   const lower = trimmed.toLowerCase();
   if (lower === 'yes') return ['Yes', 'yes', '1', 'true'];
   if (lower === 'no') return ['No', 'no', '0', 'false'];
-  return [trimmed];
+  const values = [trimmed];
+  if (/\b(?:have\s+not|haven't|never)\s+(?:worked|been employed)\b/.test(lower)) {
+    values.push('No', 'No, I have not', 'I have not worked there before');
+  }
+  if (/\bnone\s+of\s+the\s+above\b/.test(lower)) {
+    values.push('None of the above', 'None');
+  }
+  if (/^(?:n\/?a|not applicable)$/i.test(trimmed)) {
+    values.push('N/A', 'Not applicable');
+  }
+  return [...new Set(values)];
+}
+
+function questionFillShouldPressEnter(questionText: string): boolean {
+  const key = classifyField(questionText);
+  return key ? CONFIRM_AFTER_FILL_FIELDS.has(key) : false;
 }
 
 function pushScopedQuestionChoiceActions(
@@ -1081,6 +1097,7 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedFillByLabel(actions, 'End date month', packet.graduationMonth, 'education_end_month');
     managedFillByLabel(actions, 'End date year', packet.graduationYear, 'education_end_year');
     managedFillByLabel(actions, 'GPA', packet.gpa, 'gpa');
+    managedFillByLabel(actions, 'What is your GPA?', packet.gpa, 'gpa_question');
     managedUpload(actions, '#resume, input[type="file"][name="job_application[resume]"]', 'resume', packet.resume, packet.resumeName);
     managedUpload(actions, 'input#cover_letter[type="file"], input[type="file"][name*="cover_letter" i]', 'cover_letter', packet.coverLetter, packet.coverLetterName);
   } else if (family === 'lever') {
@@ -1278,6 +1295,16 @@ export function buildManagedPortalActions(
     const portalSelector = durablePortalSelector(item.portalSelector);
     if (portalSelector) {
       managedFill(actions, portalSelector, item.answer, `question:${questionText.slice(0, 80)}`);
+      if (portalFamily(portal) === 'greenhouse' && questionFillShouldPressEnter(questionText)) {
+        actions.push({
+          type: 'press',
+          selector: portalSelector,
+          value: 'Enter',
+          label: `question_confirm:${questionText.slice(0, 80)}`,
+          optional: true,
+          timeout: MANAGED_FILL_TIMEOUT_MS,
+        });
+      }
       continue;
     }
     pushScopedQuestionChoiceActions(actions, questionText, item.answer, 'question');

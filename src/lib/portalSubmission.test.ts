@@ -595,6 +595,30 @@ test('managed Greenhouse question fills prefer rediscovered selectors over label
   assert.equal(actions.some((action) => action.type === 'fillByLabelText' && action.text === 'Please indicate your overall GPA.'), false);
 });
 
+test('managed Greenhouse academic questions confirm rediscovered autocomplete selectors', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question: 'School',
+        answer: 'University of Southern California',
+        portalSelector: 'input[name="job_application[educations_attributes][0][school_name_id]"]',
+      },
+      {
+        question: 'Degree',
+        answer: 'Bachelor of Science in Computer Science',
+        portalSelector: 'input[name="job_application[educations_attributes][0][degree_id]"]',
+      },
+    ],
+  });
+
+  assert.ok(actions.some((action) => action.type === 'press' && action.label === 'question_confirm:School' && action.value === 'Enter'));
+  assert.ok(actions.some((action) => action.type === 'press' && action.label === 'question_confirm:Degree' && action.value === 'Enter'));
+});
+
 test('managed question fills fall back to label text when a discovered selector exceeds the provider limit', () => {
   const actions = buildManagedPortalActions('greenhouse', {
     fullName: 'Taylor Example',
@@ -742,6 +766,7 @@ test('Greenhouse fills academic fields from the submission packet', () => {
       ['End date month', 'May', 'education_end_month'],
       ['End date year', '2028', 'education_end_year'],
       ['GPA', '3.89', 'gpa'],
+      ['What is your GPA?', '3.89', 'gpa_question'],
     ],
   );
   assert.ok(byLabel.every((action) => action.optional === true));

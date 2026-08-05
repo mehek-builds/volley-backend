@@ -158,9 +158,21 @@ const LOCATION_COMMITMENT_VOCAB = /\boffice\b|in[\s-]?office|on[\s-]?site|\bonsi
 const STORED_ONSITE_COMMITMENT_QUESTION =
   /\b(?:able|willing|available|prepared|can|could|would)\b[^?]{0,80}\b(?:office|in[\s-]?office|on[\s-]?site|onsite|hybrid)\b|\b(?:office|in[\s-]?office|on[\s-]?site|onsite|hybrid)\b[^?]{0,80}\b(?:able|willing|available|prepared|can|could|would)\b/i;
 const ONSITE_DAY_COUNT_QUESTION = /\b(?:three|four|five|3|4|5)\s+days?\b/i;
+const LOCATION_PREFERENCE_QUESTION =
+  /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\blocation\b[^?]{0,120}\b(?:single|top|preferred|preference|most interested)\b/i;
+const SAFE_US_LOCATION_LINE =
+  /^(?:remote(?:,\s*)?(?:us|u\.s\.|usa|united states)?|[A-Z][A-Za-z .'-]+,\s*(?:[A-Z]{2}|Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New Hampshire|New Jersey|New Mexico|New York|North Carolina|North Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode Island|South Carolina|South Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West Virginia|Wisconsin|Wyoming)(?:,\s*(?:United States|USA|US|U\.S\.))?)$/i;
 
 export function isLocationCommitmentQuestion(label: string): boolean {
   return LOCATION_COMMITMENT_STEM.test(label) && LOCATION_COMMITMENT_VOCAB.test(label);
+}
+
+function locationPreferenceAnswer(label: string, jdText: string | undefined): { value: string } | null {
+  if (!LOCATION_PREFERENCE_QUESTION.test(label)) return null;
+  for (const line of (jdText ?? '').split(/\n+/).map((value) => value.trim()).filter(Boolean).reverse()) {
+    if (line.length <= 120 && SAFE_US_LOCATION_LINE.test(line)) return { value: line };
+  }
+  return null;
 }
 
 export const REFERRAL_QUESTION = /how did you hear|referral source|hear about (this|us|the)|source of/i;
@@ -634,6 +646,9 @@ export function resolveKnownAnswer(
   ap: ApplicationProfileLike,
   jdText: string | undefined,
 ): { value: string } | { skipReason: string } | null {
+  const preferredLocation = locationPreferenceAnswer(label, jdText);
+  if (preferredLocation) return preferredLocation;
+
   const workEligibility = workEligibilityAnswer(label, ap, jdText);
   if (workEligibility) return workEligibility;
 
