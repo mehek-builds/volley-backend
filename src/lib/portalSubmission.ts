@@ -746,20 +746,35 @@ function greenhouseKnownQuestionAliases(question: string, answer: string): strin
     /\b(?:onsite|on[\s-]?site|in[\s-]?office|office|hybrid)\b/.test(normalizedQuestion)
     && /\b(?:three|four|five|3|4|5)\s+days?\b/.test(normalizedQuestion)
   ) {
-    return [
-      'Are you able to work onsite three days a week?',
-      'Are you able to work on-site three days a week?',
-      'Are you able to work onsite four days a week?',
-      'Are you able to work on-site four days a week?',
-      'Are you able to work onsite five days a week?',
-      'Are you able to work on-site five days a week?',
-      'Are you able to work onsite in our San Francisco office 3 days a week?',
-      'Are you able to work onsite in our San Francisco office three days a week?',
-      'Are you able to work onsite in our San Francisco office 4 days a week?',
-      'Are you able to work onsite in our San Francisco office four days a week?',
-      'Are you able to work onsite in our San Francisco office 5 days a week?',
-      'Are you able to work onsite in our San Francisco office five days a week?',
-    ];
+    const requiredDay = normalizedQuestion.match(/\brequires?\s+(?:\w+\s+){0,4}(three|four|five|3|4|5)\s+days?\b/)?.[1];
+    const firstDay = normalizedQuestion.match(/\b(three|four|five|3|4|5)\s+days?\b/)?.[1];
+    const day = requiredDay ?? firstDay;
+    const aliases: string[] = [];
+    if (day === 'three' || day === '3') {
+      aliases.push(
+        'Are you able to work onsite three days a week?',
+        'Are you able to work on-site three days a week?',
+        'Are you able to work onsite in our San Francisco office 3 days a week?',
+        'Are you able to work onsite in our San Francisco office three days a week?',
+      );
+    }
+    if (day === 'four' || day === '4') {
+      aliases.push(
+        'Are you able to work onsite four days a week?',
+        'Are you able to work on-site four days a week?',
+        'Are you able to work onsite in our San Francisco office 4 days a week?',
+        'Are you able to work onsite in our San Francisco office four days a week?',
+      );
+    }
+    if (day === 'five' || day === '5') {
+      aliases.push(
+        'Are you able to work onsite five days a week?',
+        'Are you able to work on-site five days a week?',
+        'Are you able to work onsite in our San Francisco office 5 days a week?',
+        'Are you able to work onsite in our San Francisco office five days a week?',
+      );
+    }
+    return aliases;
   }
   return [];
 }

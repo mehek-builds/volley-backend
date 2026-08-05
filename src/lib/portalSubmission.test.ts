@@ -1437,6 +1437,7 @@ test('Greenhouse managed actions retry known yes-no work and onsite choices by e
   assert.ok(aliasActions.some((action) => action.text === 'Are you currently eligible to legally work in the United States?'));
   assert.ok(aliasActions.some((action) => action.text === 'Will you now or in the future require immigration support or sponsorship from Postman?'));
   assert.ok(aliasActions.some((action) => action.text === 'Are you able to work onsite in our San Francisco office 5 days a week?'));
+  assert.equal(aliasActions.some((action) => action.text === 'Are you able to work onsite four days a week?'), false);
   assert.equal(aliasActions.some((action) => action.text === 'Do you consent to the terms?'), false);
 
   const selectActions = actions.filter((action) => action.label?.startsWith('greenhouse_known_select'));
@@ -1521,6 +1522,44 @@ test('Greenhouse managed actions stay inside the Stratus action budget on Reddit
     actions.every((action) => !action.selector || action.selector.length <= 500),
     'Stratus rejects selector strings longer than 500 characters',
   );
+});
+
+test('Greenhouse managed actions stay inside the Stratus action budget on Nuro-style onsite packets', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    phone: '+971501234567',
+    city: 'Dubai, United Arab Emirates',
+    country: 'United Arab Emirates',
+    linkedinUrl: 'https://www.linkedin.com/in/mehekmandal/',
+    portfolioUrl: 'https://github.com/mehek-builds',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'Mehek_Mandal_Software_Engineer_AI_Platform_Intern_Resume.pdf',
+    coverLetter: Buffer.from('cover-pdf'),
+    coverLetterName: 'Mehek_Mandal_Software_Engineer_AI_Platform_Intern_Cover_Letter.pdf',
+    questions: [
+      { question: 'LinkedIn Profile', answer: 'https://www.linkedin.com/in/mehekmandal/' },
+      { question: 'Website', answer: 'https://github.com/mehek-builds' },
+      { question: 'Are you authorized to work in the country in which you are applying?', answer: 'Yes' },
+      {
+        question: 'Do you now, or will you in the future, require sponsorship for employment in the country which you are applying?',
+        answer: 'Yes',
+      },
+      {
+        question:
+          'This position is hybrid and requires 4 days a week in office, including Thursdays in our Mountain View, CA headquarters and the remaining 3 days in either Mountain View or our San Francisco, CA office. Are you able to meet this requirement?',
+        answer: 'Yes',
+      },
+    ],
+  }, true);
+
+  const onsiteAliases = actions.filter((action) =>
+    action.label?.startsWith('greenhouse_known_question:')
+    && /onsite|on-site/i.test(action.text ?? ''),
+  );
+  assert.equal(onsiteAliases.length, 4);
+  assert.ok(onsiteAliases.every((action) => /four|4/.test(action.text ?? '')));
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
 });
 
 test('the QA harness routes to the three new controlled adapters, by query param and by path', () => {
