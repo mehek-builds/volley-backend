@@ -2,7 +2,12 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
-import { deriveEditedTerms, normalizeApplicationReviewQuestions, readApplicationReview } from './applicationReview';
+import {
+  deriveEditedTerms,
+  mergeSubmittedApplicationReviewQuestions,
+  normalizeApplicationReviewQuestions,
+  readApplicationReview,
+} from './applicationReview';
 
 const bank: ExperienceBankEntry[] = [
   {
@@ -134,6 +139,42 @@ describe('application review metadata', () => {
           kind: 'required',
           required: true,
           portal_selector: 'textarea[name="job_application[answers_attributes][0][text_value]"]',
+        },
+      ],
+    );
+  });
+
+  test('submit-request answer updates keep stored portal selectors', () => {
+    assert.deepEqual(
+      mergeSubmittedApplicationReviewQuestions(
+        [
+          {
+            id: 'stored-project',
+            question: "Tell us about something you've built that you're proud of. What was hard about it?",
+            answer: 'Old answer',
+            kind: 'essay',
+            required: false,
+            portal_selector: 'textarea[name="candidate[answers][123]"]',
+          },
+        ],
+        [
+          {
+            id: 'stored-project',
+            question: "Tell us about something you've built that you're proud of. What was hard about it?",
+            answer: 'New reviewed answer',
+            kind: 'essay',
+            required: false,
+          },
+        ],
+      ),
+      [
+        {
+          id: 'stored-project',
+          question: "Tell us about something you've built that you're proud of. What was hard about it?",
+          answer: 'New reviewed answer',
+          kind: 'essay',
+          required: false,
+          portal_selector: 'textarea[name="candidate[answers][123]"]',
         },
       ],
     );

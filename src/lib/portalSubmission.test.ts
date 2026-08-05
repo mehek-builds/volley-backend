@@ -760,7 +760,6 @@ test('Greenhouse fills academic fields from the submission packet', () => {
   assert.deepEqual(
     byLabel.map((action) => [action.text, action.value, action.label]),
     [
-      ['School', 'University of Southern California', 'education_school'],
       ['What is your graduation date?', 'May 2028', 'graduation_date'],
       ['End date month', 'May', 'education_end_month'],
       ['End date year', '2028', 'education_end_year'],
@@ -774,9 +773,15 @@ test('Greenhouse fills academic fields from the submission packet', () => {
     actions.some((action) => action.type === 'fillByLabelText' && action.text === 'Degree'),
     false,
   );
+  assert.equal(
+    actions.some((action) => action.type === 'fillByLabelText' && action.text === 'School'),
+    false,
+  );
   const comboFills = actions.filter((action) => action.type === 'fill' && action.label?.startsWith('education_'));
   assert.ok(comboFills.some((action) => action.selector === '#school--0' && action.value === 'University of Southern California'));
-  assert.ok(comboFills.some((action) => action.selector?.includes('label:has-text("School")') && action.value === 'University of Southern California'));
+  assert.equal(comboFills[0]?.selector, '#school--0');
+  assert.equal(comboFills[0]?.value, 'University of Southern California');
+  assert.ok(comboFills.some((action) => action.selector?.includes('label:has-text("School")')));
   assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s Degree'));
   assert.equal(comboFills.filter((action) => action.selector === '#degree--0').length, 1);
   assert.equal(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s'), false);
@@ -1641,6 +1646,7 @@ test('Greenhouse managed actions retry known yes-no work and onsite choices by e
     resumeName: 'resume.pdf',
     questions: [
       { question: 'Are you currently eligible to legally work in the US?', answer: 'Yes' },
+      { question: 'Are you legally authorized to work in the country where the job is located?', answer: 'Yes' },
       { question: 'Will you now or in the future require immigration support/sponsorship?', answer: 'Yes' },
       { question: 'Are you able to work onsite in our San Francisco office 5 days a week?', answer: 'Yes' },
       {
@@ -1657,6 +1663,7 @@ test('Greenhouse managed actions retry known yes-no work and onsite choices by e
   assert.ok(aliasActions.every((action) => action.value === 'Yes'));
   assert.ok(aliasActions.every((action) => action.optional === true));
   assert.ok(aliasActions.some((action) => action.text === 'Are you currently eligible to legally work in the United States?'));
+  assert.ok(aliasActions.some((action) => action.text === 'Are you legally authorized to work in the country where the job is located?'));
   assert.ok(aliasActions.some((action) => action.text === 'Will you now or in the future require immigration support or sponsorship from Postman?'));
   assert.ok(aliasActions.some((action) => action.text === 'Are you able to work onsite in our San Francisco office 5 days a week?'));
   assert.equal(aliasActions.some((action) => action.text === 'Are you able to work onsite four days a week?'), false);
@@ -1664,7 +1671,14 @@ test('Greenhouse managed actions retry known yes-no work and onsite choices by e
 
   const selectActions = actions.filter((action) => action.label?.startsWith('greenhouse_known_select'));
   assert.equal(selectActions.length, 0);
-  assert.equal(actions.filter((action) => action.type === 'click' && action.label !== 'greenhouse_demographic_data_consent_checkbox').length, 0);
+  assert.equal(
+    actions.filter((action) =>
+      action.type === 'click'
+      && action.label !== 'greenhouse_demographic_data_consent_checkbox'
+      && !action.label?.startsWith('education_school_combo_label')
+      && !action.label?.startsWith('question_combo_label:')).length,
+    0,
+  );
 });
 
 test('managed reviewed questions replay stored answers into label-scoped choice controls', () => {
