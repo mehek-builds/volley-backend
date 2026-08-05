@@ -238,6 +238,7 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
   if (GRADUATION_YEAR_QUESTION.test(l)) return 'graduation_year';
   if (GRADUATION_DATE_QUESTION.test(l)) return 'graduation_date';
   if (START_DATE_QUESTION.test(l)) return 'availability_date';
+  if (LOCATION_PREFERENCE_QUESTION.test(l)) return null;
 
   if (/linkedin/i.test(l)) return 'linkedin_url';
   if (/github/i.test(l)) return 'github_url';

@@ -266,7 +266,7 @@ export type SubmissionPacket = {
     startDate?: string;
     endDate?: string;
   };
-  questions: Array<{ question: string; answer: string; portalSelector?: string }>;
+  questions: Array<{ question: string; answer: string; portalSelector?: string; portalInputType?: string }>;
 };
 
 export type FillResult = {
@@ -806,6 +806,11 @@ function abbreviatedUsLocation(value: string): string | undefined {
   return abbreviation ? `${city}, ${abbreviation}` : undefined;
 }
 
+function cityOnlyLocation(value: string): string | undefined {
+  const match = value.match(/^\s*([^,]+),\s*[^,]+(?:,\s*(?:United States|USA|US|U\.S\.))?\s*$/i);
+  return match?.[1]?.trim() || undefined;
+}
+
 function greenhouseComboboxValuesForQuestion(question: string, answer: string): string[] {
   const normalizedQuestion = question.toLowerCase();
   const normalizedAnswer = answer.trim().toLowerCase();
@@ -817,7 +822,7 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string): 
     values.unshift(greenhouseGraduationBucket(answer) ?? '');
   }
   if (/\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\blocation\b[^?]{0,120}\b(?:single|top|preferred|preference|most interested)\b/.test(normalizedQuestion)) {
-    values.unshift(abbreviatedUsLocation(answer) ?? '');
+    values.unshift(abbreviatedUsLocation(answer) ?? '', cityOnlyLocation(answer) ?? '');
   }
   if (/\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b/.test(normalizedQuestion)
     && /\b(?:have\s+not|haven't|never)\s+(?:worked|been employed)\b/.test(answer.toLowerCase())) {
@@ -1557,6 +1562,12 @@ export function buildManagedPortalActions(
     if (!questionText) continue;
     const portalSelector = durablePortalSelector(item.portalSelector);
     if (portalSelector) {
+      if (/^(?:checkbox|radio)$/i.test(item.portalInputType ?? '')) {
+        if (portalFamily(portal) === 'greenhouse') {
+          pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');
+        }
+        continue;
+      }
       managedFill(actions, portalSelector, item.answer, `question:${questionText.slice(0, 80)}`);
       if (portalFamily(portal) === 'greenhouse' && questionFillShouldPressEnter(questionText)) {
         actions.push({
@@ -1949,12 +1960,25 @@ async function uploadFirst(
   }
 }
 
-async function fillReviewedQuestions(page: Page, packet: SubmissionPacket, out: string[]) {
+async function fillReviewedQuestions(page: Page, portal: SupportedPortal, packet: SubmissionPacket, out: string[]) {
   for (const item of packet.questions) {
     if (!item.answer.trim()) continue;
     const questionText = normalizeReviewQuestionLabel(item.question);
     if (!questionText) continue;
     const portalSelector = durablePortalSelector(item.portalSelector);
+    if (/^(?:checkbox|radio)$/i.test(item.portalInputType ?? '')) {
+      if (portalFamily(portal) === 'greenhouse') {
+        for (const selector of greenhouseCheckboxOptionSelectors(questionText, item.answer)) {
+          const field = page.locator(selector).first();
+          if ((await field.count()) > 0 && (await field.isVisible().catch(() => false))) {
+            await field.check();
+            out.push(`question_checkbox:${questionText.slice(0, 80)}`);
+            break;
+          }
+        }
+      }
+      continue;
+    }
     if (portalSelector) {
       const field = page.locator(portalSelector).first();
       if ((await field.count()) > 0 && (await field.isVisible().catch(() => false))) {
@@ -2105,7 +2129,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await uploadFirst(page, ASHBY_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields);
     await uploadFirst(page, ASHBY_COVER_LETTER_SELECTOR.split(', '), packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
   }
-  await fillReviewedQuestions(page, packet, filledFields);
+  await fillReviewedQuestions(page, portal, packet, filledFields);
 
   const blockers: string[] = [];
   // String kept verbatim: it is already surfaced to applicants and matched downstream.
