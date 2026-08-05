@@ -46,7 +46,20 @@ test('answers work authorization and sponsorship only from explicit stored conse
     { value: 'Yes' },
   );
   assert.deepEqual(
+    resolveKnownAnswer('Are you currently eligible to work in the United States of America?', 'text', { work_authorized: true }, undefined),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
     resolveKnownAnswer('will you now or in the future require sponsorship for employment visa status?', 'text', { needs_sponsorship: true }, undefined),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Do you now or in the future require visa sponsorship/work authorization to continue working in the United States?',
+      'text',
+      { work_authorized: true, needs_sponsorship: true },
+      undefined,
+    ),
     { value: 'Yes' },
   );
   assert.deepEqual(
@@ -86,6 +99,14 @@ test('answers work authorization and sponsorship only from explicit stored conse
   );
   assert.ok(nonUsSponsorship && 'skipReason' in nonUsSponsorship);
 
+  const nonUsSponsorshipWorkAuth = resolveKnownAnswer(
+    'Do you now or in the future require visa sponsorship/work authorization to continue working in Canada?',
+    'text',
+    { work_authorized: true, needs_sponsorship: true },
+    undefined,
+  );
+  assert.ok(nonUsSponsorshipWorkAuth && 'skipReason' in nonUsSponsorshipWorkAuth);
+
   const mixed = resolveKnownAnswer(
     'are you authorized to work in the US without sponsorship?',
     'text',
@@ -114,6 +135,14 @@ test('send-time sensitive guard allows stored work and EEO answers while blockin
     false,
   );
   assert.equal(
+    questionRequiresHumanAttention({ question: 'Are you currently eligible to work in the United States of America?', answer: 'Yes' }),
+    false,
+  );
+  assert.equal(
+    questionRequiresHumanAttention({ question: 'Do you now or in the future require visa sponsorship/work authorization to continue working in the United States?', answer: 'Yes' }),
+    false,
+  );
+  assert.equal(
     questionRequiresHumanAttention({ question: 'will you require sponsorship for work authorization?', answer: '' }),
     true,
   );
@@ -122,6 +151,63 @@ test('send-time sensitive guard allows stored work and EEO answers while blockin
     false,
   );
   assert.equal(questionRequiresHumanAttention({ question: 'social security number', answer: '123' }), true);
+});
+
+test('profile-aware submit gate accepts exact stored work answers only', () => {
+  assert.equal(
+    sensitiveQuestionRequiresAttention(
+      'Are you currently eligible to work in the United States of America?',
+      'Yes',
+      'text',
+      { work_authorized: true },
+      undefined,
+    ),
+    false,
+  );
+  assert.equal(
+    sensitiveQuestionRequiresAttention(
+      'Do you now or in the future require visa sponsorship/work authorization to continue working in the United States?',
+      'Yes',
+      'text',
+      { work_authorized: true, needs_sponsorship: true },
+      undefined,
+    ),
+    false,
+  );
+  assert.equal(
+    sensitiveQuestionRequiresAttention(
+      'Do you now or in the future require visa sponsorship/work authorization to continue working in the United States?',
+      'No',
+      'text',
+      { work_authorized: true, needs_sponsorship: true },
+      undefined,
+    ),
+    true,
+  );
+  assert.equal(
+    sensitiveQuestionRequiresAttention(
+      'are you authorized to work in the US without sponsorship?',
+      'Yes',
+      'text',
+      { work_authorized: true, needs_sponsorship: true },
+      undefined,
+    ),
+    true,
+  );
+  assert.equal(
+    sensitiveQuestionRequiresAttention(
+      'Do you now or in the future require visa sponsorship/work authorization to continue working in Canada?',
+      'Yes',
+      'text',
+      { work_authorized: true, needs_sponsorship: true },
+      undefined,
+    ),
+    true,
+  );
+  assert.equal(
+    sensitiveQuestionRequiresAttention('social security number', '123', 'text', { work_authorized: true }, undefined),
+    true,
+  );
 });
 
 test('never answers SSN or driver license fields', () => {
