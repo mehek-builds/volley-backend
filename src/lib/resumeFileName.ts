@@ -16,7 +16,13 @@ function firstLastNamePart(fullName: unknown): string {
 export function resumeFileNameForRole(fullName: unknown, role: unknown): string {
   const namePart = firstLastNamePart(fullName) || 'Candidate';
   const rolePart = filePart(role) || 'Role';
-  return `${namePart}_${rolePart}_Resume.pdf`;
+  return `${namePart}_${rolePart}_resume.pdf`;
+}
+
+export function coverLetterFileNameForRole(fullName: unknown, role: unknown): string {
+  const namePart = firstLastNamePart(fullName) || 'Candidate';
+  const rolePart = filePart(role) || 'Role';
+  return `${namePart}_${rolePart}_cover_letter.pdf`;
 }
 
 export function contentDispositionFileName(fileName: unknown): string {

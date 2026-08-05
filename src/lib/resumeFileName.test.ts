@@ -1,19 +1,27 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { contentDispositionFileName, resumeFileNameForRole } from './resumeFileName';
+import { contentDispositionFileName, coverLetterFileNameForRole, resumeFileNameForRole } from './resumeFileName';
 
-test('resume filename uses first name, last name, role and Resume suffix', () => {
+test('resume and cover letter filenames use first name, last name, role and required suffixes', () => {
   assert.equal(
     resumeFileNameForRole('Mehek Mandal', 'Hardware Product Management Intern'),
-    'Mehek_Mandal_Hardware_Product_Management_Intern_Resume.pdf',
+    'Mehek_Mandal_Hardware_Product_Management_Intern_resume.pdf',
+  );
+  assert.equal(
+    coverLetterFileNameForRole('Mehek Mandal', 'Hardware Product Management Intern'),
+    'Mehek_Mandal_Hardware_Product_Management_Intern_cover_letter.pdf',
   );
 });
 
-test('resume filename ignores middle names and sanitizes role punctuation', () => {
+test('resume and cover letter filenames ignore middle names and sanitize role punctuation', () => {
   assert.equal(
-    resumeFileNameForRole('Mehek K Mandal', 'AI/ML Engineer, Intern'),
-    'Mehek_Mandal_AI_ML_Engineer_Intern_Resume.pdf',
+    resumeFileNameForRole('Mehek K Mandal', '  AI/ML Engineer, Intern  - New Grad '),
+    'Mehek_Mandal_AI_ML_Engineer_Intern_New_Grad_resume.pdf',
+  );
+  assert.equal(
+    coverLetterFileNameForRole('Mehek K Mandal', '  AI/ML Engineer, Intern  - New Grad '),
+    'Mehek_Mandal_AI_ML_Engineer_Intern_New_Grad_cover_letter.pdf',
   );
 });
 
