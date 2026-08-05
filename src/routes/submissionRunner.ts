@@ -304,6 +304,7 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     email,
     phone: typeof app.phone === 'string' ? app.phone : undefined,
     city: typeof app.address_city === 'string' ? app.address_city : undefined,
+    country: typeof app.address_country === 'string' ? app.address_country : undefined,
     linkedinUrl: typeof app.linkedin_url === 'string' ? app.linkedin_url : undefined,
     githubUrl: typeof app.github_url === 'string' ? app.github_url : undefined,
     portfolioUrl: typeof app.portfolio_url === 'string' ? app.portfolio_url : undefined,

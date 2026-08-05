@@ -313,6 +313,60 @@ test('single phone-input portals keep the saved international phone value', () =
   }
 });
 
+test('Greenhouse managed fill selects phone country and city comboboxes', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    phone: '+971 50 123 4567',
+    city: 'Dubai',
+    country: 'United Arab Emirates',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  const phoneCountryIndex = actions.findIndex((action) => action.label === 'phone_country');
+  assert.ok(phoneCountryIndex >= 0);
+  assert.deepEqual(actions.slice(phoneCountryIndex, phoneCountryIndex + 2), [
+    {
+      type: 'fill',
+      selector: '#country',
+      value: 'United Arab Emirates',
+      label: 'phone_country',
+      optional: true,
+      timeout: 10_000,
+    },
+    {
+      type: 'press',
+      selector: '#country',
+      value: 'Enter',
+      label: 'phone_country_select',
+      optional: true,
+      timeout: 10_000,
+    },
+  ]);
+
+  const locationIndex = actions.findIndex((action) => action.label === 'location');
+  assert.ok(locationIndex >= 0);
+  assert.deepEqual(actions.slice(locationIndex, locationIndex + 2), [
+    {
+      type: 'fill',
+      selector: '#candidate-location, input[autocomplete="address-level2"]',
+      value: 'Dubai, United Arab Emirates',
+      label: 'location',
+      optional: true,
+      timeout: 10_000,
+    },
+    {
+      type: 'press',
+      selector: '#candidate-location, input[autocomplete="address-level2"]',
+      value: 'Enter',
+      label: 'location_select',
+      optional: true,
+      timeout: 10_000,
+    },
+  ]);
+});
+
 function directFillPage(selectors: string[]) {
   const values = new Map<string, string>();
   const makeLocator = (selector: string, index?: number): any => {
@@ -324,6 +378,9 @@ function directFillPage(selectors: string[]) {
       isVisible: async () => present,
       fill: async (value: string) => {
         if (present) values.set(selector, value);
+      },
+      press: async (key: string) => {
+        if (present) values.set(`${selector}::press`, key);
       },
       getAttribute: async () => null,
       inputValue: async () => values.get(selector) ?? '',
@@ -372,6 +429,32 @@ test('direct single phone-input fill keeps the saved international phone value',
     questions: [],
   });
   assert.equal(values.get('input[name="phone"]'), '+971 567417451');
+});
+
+test('direct Greenhouse fill confirms phone country and city comboboxes', async () => {
+  const { page, values } = directFillPage([
+    '#first_name',
+    '#last_name',
+    '#email',
+    '#country',
+    '#phone',
+    '#candidate-location',
+  ]);
+  await fillPortal(page, 'greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    phone: '+971 50 123 4567',
+    city: 'Dubai',
+    country: 'United Arab Emirates',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  assert.equal(values.get('#country'), 'United Arab Emirates');
+  assert.equal(values.get('#country::press'), 'Enter');
+  assert.equal(values.get('#phone'), '+971 50 123 4567');
+  assert.equal(values.get('#candidate-location'), 'Dubai, United Arab Emirates');
+  assert.equal(values.get('#candidate-location::press'), 'Enter');
 });
 
 test('managed receipt requires confirmation language and captures the reference', () => {
