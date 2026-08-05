@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { CandidateEducation } from '../engine/resumePolicy';
-import { mergeEducationFallback, missingRequiredEducation } from './resume';
+import { mergeEducationFallback, missingRenderedEducation, missingRequiredEducation } from './resume';
 
 test('tailored resume education falls back only when the parsed profile field is blank', () => {
   const primary: CandidateEducation = {
@@ -58,5 +58,33 @@ test('blank education is held before a resume can be stored with an empty educat
       'education school is missing from the profile source',
       'education degree is missing from the profile source',
     ],
+  );
+});
+
+test('fallback accepts nested education records from older stored resume shapes', () => {
+  const recovered = mergeEducationFallback(
+    { school: '', degree: undefined, grad_date: undefined },
+    {
+      education: {
+        school: 'University of Southern California, Viterbi School of Engineering',
+        degree: 'Bachelor of Science in Computer Science',
+        grad_date: 'May 2028',
+      },
+    },
+  );
+
+  assert.equal(recovered.school, 'University of Southern California, Viterbi School of Engineering');
+  assert.equal(recovered.degree, 'Bachelor of Science in Computer Science');
+  assert.equal(recovered.grad_date, 'May 2028');
+});
+
+test('blank rendered education is held before the preview can be saved', () => {
+  assert.deepEqual(
+    missingRenderedEducation({ school: '', degree: 'Bachelor of Science in Computer Science' }),
+    ['resume education school is blank in the generated preview'],
+  );
+  assert.deepEqual(
+    missingRenderedEducation({ school: 'University of Southern California', degree: '' }),
+    ['resume education degree is blank in the generated preview'],
   );
 });

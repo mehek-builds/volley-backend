@@ -161,7 +161,13 @@ export function mergeEducationFallback(
   primary: CandidateEducation,
   fallback: unknown,
 ): CandidateEducation {
-  const source = (fallback && typeof fallback === 'object' ? fallback : {}) as Record<string, unknown>;
+  const sourceRoot = (fallback && typeof fallback === 'object' ? fallback : {}) as Record<string, unknown>;
+  const nested = (sourceRoot.education && typeof sourceRoot.education === 'object'
+    ? sourceRoot.education
+    : sourceRoot.academic && typeof sourceRoot.academic === 'object'
+      ? sourceRoot.academic
+      : {}) as Record<string, unknown>;
+  const source = { ...nested, ...sourceRoot };
   const str = (value: unknown) => (typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined);
   const gradYear = typeof source.grad_year === 'number' && source.grad_year > 0 ? source.grad_year : undefined;
   const coursework = Array.isArray(source.coursework)
@@ -184,6 +190,13 @@ export function missingRequiredEducation(education: CandidateEducation): string[
   const issues: string[] = [];
   if (!education.school?.trim()) issues.push('education school is missing from the profile source');
   if (!education.degree?.trim()) issues.push('education degree is missing from the profile source');
+  return issues;
+}
+
+export function missingRenderedEducation(spec: Pick<ResumeSpec, 'school' | 'degree'>): string[] {
+  const issues: string[] = [];
+  if (!spec.school?.trim()) issues.push('resume education school is blank in the generated preview');
+  if (!spec.degree?.trim()) issues.push('resume education degree is blank in the generated preview');
   return issues;
 }
 
@@ -479,6 +492,23 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       priorityEntryId: priorityEntry?.id,
       allowSparsePriority: recentReview?.continue_with_found === true,
     });
+    const renderedEducationIssues = missingRenderedEducation(spec);
+    if (renderedEducationIssues.length > 0) {
+      fastify.log.error(
+        { userId, company: body.company, issues: renderedEducationIssues },
+        'resume blocked before rendering because the generated preview education is blank',
+      );
+      return reply.status(422).send(resumeQualityHoldResponseSchema.parse({
+        error: 'This resume is missing education details, so Litos did not attach it.',
+        code: 'resume_quality_hold',
+        quality: {
+          ready_to_attach: false,
+          issues: renderedEducationIssues,
+          warnings: specWarnings,
+          omissions: groundingRemoved,
+        },
+      }));
+    }
 
     let pdfBuffer: Buffer;
     let trimmedForFit: boolean;
