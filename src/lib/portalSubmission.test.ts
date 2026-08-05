@@ -558,6 +558,26 @@ test('managed Greenhouse question fills prefer rediscovered selectors over label
   assert.equal(actions.some((action) => action.type === 'fillByLabelText' && action.text === 'Please indicate your overall GPA.'), false);
 });
 
+test('managed question fills fall back to label text when a discovered selector exceeds the provider limit', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question: 'Please indicate your overall GPA.',
+        answer: '3.89',
+        portalSelector: `textarea[name="${'x'.repeat(501)}"]`,
+      },
+    ],
+  });
+  const questionAction = actions.find((action) => action.label === 'question:Please indicate your overall GPA.');
+  assert.equal(questionAction?.type, 'fillByLabelText');
+  assert.equal(questionAction?.text, 'Please indicate your overall GPA.');
+  assert.equal(questionAction?.value, '3.89');
+});
+
 test('managed question actions skip empty labels and cap long discovered text', () => {
   const longLabel = `Why Samsara? ${'Describe a systems project you are proud of '.repeat(30)}`;
   const actions = buildManagedPortalActions('greenhouse', {
