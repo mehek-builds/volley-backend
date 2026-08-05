@@ -316,8 +316,8 @@ const HEADING_PATTERNS: Array<{ kind: SectionKind; re: RegExp }> = [
   // `about SECOND_PERSON_SUBJECT` is the other half of the exclusion carved out of the noise rule
   // above, reading the same constant so the two cannot drift. It is reached only because noise
   // declines these forms first.
-  { kind: 'required', re: new RegExp(String.raw`\b(requirements?|qualifications?|what you'?ll need|what we('?re)? look(ing)? for|must[- ]have|minimum|basic qualifications|skills?|you have|your background|about\s+${SECOND_PERSON_SUBJECT})\b`, 'i') },
-  { kind: 'responsibilities', re: /\b(responsibilities|what you'?ll do|the role|(your|the) impact|day[- ]to[- ]day|in this role|duties)\b/i },
+  { kind: 'required', re: new RegExp(String.raw`\b(requirements?|qualifications?|what you'?ll need|what we('?re)? look(ing)? for|what would make you a strong fit|must[- ]have|minimum|basic qualifications|skills?|you have|your background|about\s+${SECOND_PERSON_SUBJECT})\b`, 'i') },
+  { kind: 'responsibilities', re: /\b(responsibilities|what you'?ll do|the role|(your|the) impact|make an impact|day[- ]to[- ]day|in this role|duties)\b/i },
 ];
 
 /**
@@ -944,6 +944,7 @@ salesforce hubspot marketo zendesk jira confluence asana notion slack workday ne
 sap oracle peoplesoft bloomberg factset capitaliq pitchbook
 html css sass tailwind bootstrap graphql rest grpc websocket oauth saml
 git linux unix bash powershell agile scrum kanban devops mlops
+hardware firmware embedded
 accounting auditing bookkeeping valuation modeling forecasting budgeting reconciliation
 econometrics statistics regression segmentation attribution
 legal law litigation compliance regulatory governance contract paralegal deposition
@@ -1094,7 +1095,7 @@ benefits vacation holiday holidays insurance dental vision medical retirement sa
 privacy notice
 equal employment discrimination veteran disability gender race religion sexual orientation
 remote hybrid onsite office location locations travel percent full time part
-degree bachelor bachelors master masters phd university college school graduate undergraduate
+degree bachelor bachelors master masters phd university college school graduate undergraduate undergrad
 associate
 work working works help helps helping support supporting supports ensure ensuring provide providing
 new next high level levels across within using various multiple related relevant similar other
@@ -1174,7 +1175,7 @@ const NON_REQUIREMENT_ACRONYMS = new Set(
   `usd cad eur gbp aud inr chf jpy sgd aed
 pto ote rsu esop hsa fsa hra cobra fmla pfl ltd std
 ms bs ba bsc msc beng meng
-eeo ada faq tbd asap eod eta`
+eeo ada faq tbd asap eod eta hq`
     .split(/\s+/)
     .filter(Boolean),
 );
@@ -1922,13 +1923,11 @@ const STATED_KINDS = new Set<SectionKind>(['required', 'preferred', 'responsibil
  */
 function preferStatedRequirements(list: JdTerm[]): JdTerm[] {
   const stated = list.filter((t) => STATED_KINDS.has(t.kind));
-  // Never trade a score for a refusal. Dropping prose is an improvement to a number that still
-  // gets shown; dropping it so hard that the posting stops being scorable just moves a student
-  // from "here is what you match" to "we could not work this out", which is worse than the padded
-  // number it replaced. Same principle as "the cap never turns a scorable posting into an
-  // unscorable one", and measured over 600 live postings it is the difference between 16.7% of
-  // resume/posting pairs refusing to score and 13.5%.
-  return isScorable(stated) ? stated : list;
+  if (isScorable(stated)) return stated;
+  // If a stated section is present but too thin or too low-signal to score, keep the body fallback.
+  // Once the stated sections are scorable on their own, do not pull terms back from compensation,
+  // location, legal, or narrative prose just to pad the denominator.
+  return list;
 }
 
 /**
