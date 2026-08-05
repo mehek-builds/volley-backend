@@ -76,7 +76,7 @@ const JD_US_SCOPE =
 export const EEO_QUESTION =
   /transgender|\bgender\b|what is your sex\b|race|racial|ethnicit|ethnic\b|hispanic|latino|veteran|military|disab|sexual orientation|lgbtq|lgbtqia|communities|which categories describe you|identify with|current age|what is your age|age range|how old are you|\bage group\b/i;
 const LEGAL_CONSENT_QUESTION =
-  /candidate privacy policy|candidate-privacy-notice|privacy notice|review and acknowledge|information (?:i|you) have provided.*process|by selecting ["']?i agree|demographic data survey|collecting,\s*storing,\s*and processing/i;
+  /candidate privacy policy|candidate-privacy-notice|privacy notice|notice at collection|review and acknowledge|information (?:i|you) have provided.*process|by selecting ["']?i agree|demographic data survey|collecting,\s*storing,\s*and processing/i;
 
 export function isLegalConsentQuestion(label: string): boolean {
   return LEGAL_CONSENT_QUESTION.test(label);
