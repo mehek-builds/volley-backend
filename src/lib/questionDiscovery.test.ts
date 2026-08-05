@@ -108,6 +108,14 @@ test('answers work authorization and sponsorship only from explicit stored conse
   );
   assert.ok(nonUsSponsorshipWorkAuth && 'skipReason' in nonUsSponsorshipWorkAuth);
 
+  const nonUsEmployerCountry = resolveKnownAnswer(
+    'are you legally authorized to work for Formlabs in Hungary?',
+    'text',
+    { work_authorized: true },
+    undefined,
+  );
+  assert.ok(nonUsEmployerCountry && 'skipReason' in nonUsEmployerCountry);
+
   const mixed = resolveKnownAnswer(
     'are you authorized to work in the US without sponsorship?',
     'text',
