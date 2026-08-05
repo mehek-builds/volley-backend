@@ -74,3 +74,94 @@ test('claimCounterSlot respects the limit without relying on on conflict', async
   assert.equal(second, 2);
   assert.equal(third, null);
 });
+
+test('getCount conservatively sums duplicate logical counters on a legacy table', async () => {
+  await pglite.query(`
+    insert into usage_counters ("key", period, kind, count)
+    values
+      ('dupe-user', '2026-08', 'resumes', 3),
+      ('dupe-user', '2026-08', 'resumes', 4),
+      ('dupe-user', '2026-08', 'drafts', 8)
+  `);
+
+  assert.equal(await quota.getCount('dupe-user', '2026-08', 'resumes'), 7);
+});
+
+test('bumpCounter normalizes existing duplicate rows before incrementing', async () => {
+  await pglite.query(`
+    insert into usage_counters ("key", period, kind, count)
+    values
+      ('dupe-bump', '2026-08-05T15', 'rate:request-code', 2),
+      ('dupe-bump', '2026-08-05T15', 'rate:request-code', 5)
+  `);
+
+  const bumped = await quota.bumpCounter('dupe-bump', '2026-08-05T15', 'rate:request-code');
+
+  assert.equal(bumped, 8);
+
+  const { rows } = await pglite.query(
+    `select "key", period, kind, count
+       from usage_counters
+      where "key" = 'dupe-bump'
+        and period = '2026-08-05T15'
+        and kind = 'rate:request-code'`,
+  );
+  assert.deepEqual(rows, [{
+    key: 'dupe-bump',
+    period: '2026-08-05T15',
+    kind: 'rate:request-code',
+    count: 8,
+  }]);
+});
+
+test('claimCounterSlot refuses duplicate rows that are already over the limit and normalizes them', async () => {
+  await pglite.query(`
+    insert into usage_counters ("key", period, kind, count)
+    values
+      ('dupe-claim', '2026-08', 'resumes', 1),
+      ('dupe-claim', '2026-08', 'resumes', 2)
+  `);
+
+  const claimed = await quota.claimCounterSlot('dupe-claim', '2026-08', 'resumes', 3);
+
+  assert.equal(claimed, null);
+
+  const { rows } = await pglite.query(
+    `select "key", period, kind, count
+       from usage_counters
+      where "key" = 'dupe-claim'
+        and period = '2026-08'
+        and kind = 'resumes'`,
+  );
+  assert.deepEqual(rows, [{
+    key: 'dupe-claim',
+    period: '2026-08',
+    kind: 'resumes',
+    count: 3,
+  }]);
+});
+
+test('releaseCounterSlot normalizes duplicate rows while refunding', async () => {
+  await pglite.query(`
+    insert into usage_counters ("key", period, kind, count)
+    values
+      ('dupe-release', '2026-08', 'resumes', 4),
+      ('dupe-release', '2026-08', 'resumes', 3)
+  `);
+
+  await quota.releaseCounterSlot('dupe-release', '2026-08', 'resumes', 2);
+
+  const { rows } = await pglite.query(
+    `select "key", period, kind, count
+       from usage_counters
+      where "key" = 'dupe-release'
+        and period = '2026-08'
+        and kind = 'resumes'`,
+  );
+  assert.deepEqual(rows, [{
+    key: 'dupe-release',
+    period: '2026-08',
+    kind: 'resumes',
+    count: 5,
+  }]);
+});
