@@ -35,6 +35,15 @@ test('answers work authorization and sponsorship only from explicit stored conse
     { value: 'Yes' },
   );
   assert.deepEqual(
+    resolveKnownAnswer(
+      'Are you legally authorized to work in the country in which you are applying?',
+      'text',
+      { work_authorized: true },
+      'Mountain View, CA',
+    ),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
     resolveKnownAnswer('will you now or in the future require sponsorship for employment visa status?', 'text', { needs_sponsorship: true }, undefined),
     { value: 'Yes' },
   );

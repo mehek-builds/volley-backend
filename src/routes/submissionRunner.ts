@@ -68,6 +68,7 @@ import {
   type DiscoveredQuestion,
 } from '../lib/questionDiscovery';
 import type { ApplicationReviewQuestion } from '../lib/applicationReview';
+import { jobCountry } from '../lib/jobLocation';
 import { generateStoredCoverLetter, storedCoverLetter } from '../lib/coverLetterService';
 import { mayClickFinalSubmit, preparedSubmissionStatus } from '../lib/submissionAuthorization';
 import { directPreparationIsSafe } from '../lib/submissionSafety';
@@ -442,6 +443,19 @@ async function packetForCoverLetterCapability(
   return { packet: await buildPacket(rows[0]) };
 }
 
+export function applicationContextForQuestionResolution(row: ResumeRow, current: ApplicationReviewState): string {
+  const context = (row.job_context && typeof row.job_context === 'object' ? row.job_context : {}) as Record<string, unknown>;
+  const locationValues = [
+    typeof context.location === 'string' ? context.location : '',
+    ...(Array.isArray(context.locations) ? context.locations.filter((value): value is string => typeof value === 'string') : []),
+  ].map((value) => value.trim()).filter(Boolean);
+  const classifiedLocations = [...new Set(locationValues)].map((value) => ({ value, country: jobCountry(value) }));
+  const safeLocations = classifiedLocations.length > 0 && classifiedLocations.every((item) => item.country === 'us')
+    ? classifiedLocations.map((item) => item.value).join('\n')
+    : '';
+  return [current.jd_text, safeLocations].filter((value) => value.trim()).join('\n');
+}
+
 // R-055 fix: the dashboard flow used to send only whatever `review.questions` the client already
 // supplied (empty on a fresh dashboard-only run), so a real posting's custom questions - GPA,
 // sponsorship, GitHub, essays - were never attempted. This resolves a raw discovered-question list
@@ -476,6 +490,7 @@ async function discoverAndResolveQuestions(
   } catch {
     // keep the fallback
   }
+  const questionContext = applicationContextForQuestionResolution(row, current);
 
   for (const field of discovered) {
     const label = normalizeDiscoveredLabel(field.label);
@@ -483,7 +498,7 @@ async function discoverAndResolveQuestions(
     if (!label || !reviewLabel || normalizeStoredPortalQuestions([{ question: label, answer: '' }], portal).length === 0) continue;
     if (existingLabels.has(reviewLabel.toLowerCase())) continue; // already answered by the client or a prior run
 
-    const known = resolveKnownAnswer(label, field.inputType, ap, current.jd_text);
+    const known = resolveKnownAnswer(label, field.inputType, ap, questionContext);
     if (known && 'value' in known) {
       questions.push({ id: randomUUID(), question: reviewLabel, answer: known.value, kind: 'required', required: false });
       continue;
