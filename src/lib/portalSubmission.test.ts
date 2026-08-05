@@ -783,6 +783,43 @@ test('Ashby nested-label textarea fallback stays scoped to its question containe
   assert.equal(xpaths.every((selector) => selector.includes('[not(self::form)')), true);
 });
 
+test('Ashby long reviewed questions retry the visible prompt stem inside the same fallback budget', () => {
+  const question = 'What is the most impressive thing you’ve personally built or automated with AI? Describe exactly what you did, how it worked, and why it mattered.';
+  const actions = buildManagedPortalActions('ashby', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question,
+        answer: 'I built a fast evaluation harness for AI agents.',
+      },
+    ],
+  });
+
+  const fallbacks = actions.filter((action) => action.label?.startsWith('question_text:'));
+  assert.equal(fallbacks.length, 9);
+  assert.ok(fallbacks.some((action) =>
+    action.type === 'fill'
+    && action.selector?.includes('What is the most impressive thing you’ve personally built or automated with AI?')
+    && !action.selector.includes('Describe exactly what you did')));
+  assert.ok(fallbacks.some((action) =>
+    action.type === 'fill'
+    && action.selector?.startsWith('xpath=')
+    && action.selector.includes('What is the most impressive thing you’ve personally built or automated with AI?')));
+  assert.ok(fallbacks.some((action) =>
+    action.type === 'fill'
+    && action.selector?.includes('What is the most impressive thing you’ve personally built or automated with AI?')
+    && action.selector.includes('/parent::*/parent::*[not(self::form)')));
+  assert.ok(fallbacks.some((action) =>
+    action.type === 'fill'
+    && action.selector?.includes('What is the most impressive thing you’ve personally built or automated with AI?')
+    && action.selector.includes('/parent::*/parent::*/parent::*[not(self::form)')));
+  assert.equal(fallbacks.some((action) => action.type === 'fill' && action.selector?.includes('following::')), false);
+  assert.ok(fallbacks.every((action) => action.value === 'I built a fast evaluation harness for AI agents.'));
+});
+
 test('Ashby reviewed essay packet stays inside the Stratus action budget', () => {
   const questions = Array.from({ length: 10 }, (_, index) => ({
     question: `Essay prompt ${index + 1}`,
