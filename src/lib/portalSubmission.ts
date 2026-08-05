@@ -585,6 +585,8 @@ function greenhouseQuestionSelectSelectors(label: string): string[] {
   ];
 }
 
+const GREENHOUSE_DEMOGRAPHIC_DATA_CONSENT_CHECKBOX_SELECTOR =
+  'input[type="checkbox"][name*="demographic_data_consent"], input[type="checkbox"][id*="demographic_data_consent"], label:has-text("By checking this box, I consent") input[type="checkbox"]';
 const GREENHOUSE_ALIAS_SELECT_SELECTOR_LIMIT = 1;
 const QUESTION_SELECT_SELECTOR_LIMIT = 1;
 
@@ -1219,6 +1221,13 @@ export function buildManagedPortalActions(
   if (portalFamily(portal) === 'greenhouse') {
     pushGreenhouseKnownQuestionAliases(actions, packet);
     pushGreenhouseDemographicAliases(actions, packet);
+    actions.push({
+      type: 'click',
+      selector: GREENHOUSE_DEMOGRAPHIC_DATA_CONSENT_CHECKBOX_SELECTOR,
+      label: 'greenhouse_demographic_data_consent_checkbox',
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
     actions.push({
       type: 'fillByLabelText',
       text: 'By checking this box, I consent',
