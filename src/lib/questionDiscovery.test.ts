@@ -454,6 +454,36 @@ test('job location preference questions use the safe posting locations context',
   assert.deepEqual(resolveKnownAnswer('What is your current location?', 'text', { address_city: 'Dubai' }, context), { value: 'Dubai' });
 });
 
+test('Databricks export-control checkbox questions are not inferred from profile geography', () => {
+  assert.equal(
+    resolveKnownAnswer(
+      'Please confirm whether any of the below applies to you. Select all that apply. Note: This information will only be used to ensure compliance with U.S. sanctions and export controls.',
+      'checkbox',
+      { address_country: 'United Arab Emirates', citizenship: 'Indian' },
+      undefined,
+    ),
+    null,
+  );
+  assert.equal(
+    resolveKnownAnswer(
+      'If you selected a response to the prior question other than none of the above, please confirm whether any of the following also applies to you. Select all that apply.',
+      'checkbox',
+      { address_country: 'United Arab Emirates', citizenship: 'Indian' },
+      undefined,
+    ),
+    null,
+  );
+  assert.equal(
+    resolveKnownAnswer(
+      'Please confirm whether any of the below applies to you. Select all that apply. Note: This information will only be used to ensure compliance with U.S. sanctions and export controls.',
+      'checkbox',
+      {},
+      undefined,
+    ),
+    null,
+  );
+});
+
 test('graduation date inputs use the graduation end of an education range', () => {
   assert.equal(graduationDateAnswer('August 2024 - May 2028', 2028, 'date'), '2028-05-01');
   assert.equal(graduationDateAnswer('August 2024 - 2028-05-15', 2028, 'date'), '2028-05-01');
