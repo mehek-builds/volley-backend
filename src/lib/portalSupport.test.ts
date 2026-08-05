@@ -48,8 +48,8 @@ test('greenhouse wrapper links canonicalize to a supported application URL', () 
   assert.equal(isPortalSupported(canonical), true);
 });
 
-test('greenhouse wrapper canonicalization refuses non-greenhouse sources and unsafe ids', () => {
-  assert.equal(canonicalSupportedPortalUrl('https://databricks.com/company/careers/open-positions/job?gh_jid=6883068002', 'lever'), undefined);
+test('greenhouse wrapper canonicalization trusts the gh_jid URL convention and refuses unsafe ids', () => {
+  assert.equal(canonicalSupportedPortalUrl('https://databricks.com/company/careers/open-positions/job?gh_jid=6883068002', 'lever'), 'https://boards.greenhouse.io/embed/job_app?token=6883068002');
   assert.equal(canonicalSupportedPortalUrl('https://databricks.com/company/careers/open-positions/job?gh_jid=abc', 'greenhouse'), undefined);
   assert.equal(canonicalSupportedPortalUrl('http://databricks.com/company/careers/open-positions/job?gh_jid=6883068002', 'greenhouse'), undefined);
 });
@@ -164,6 +164,7 @@ test('portal support is written at packet creation and unsupported portals use e
   // And repaired on history reads so the dashboard does not keep hiding the send path for old
   // monitored-job packets whose review URL is stale or company-owned.
   assert.match(resumeRoute, /function repairedHistorySpec/);
+  assert.match(resumeRoute, /canonicalSupportedPortalUrl\(review\.portal_url, review\.ats_name\)/);
   assert.match(resumeRoute, /monitored_jobs\.apply_url/);
   assert.match(resumeRoute, /canonicalSupportedPortalUrl\(job\.apply_url, job\.ats_name\)/);
   assert.match(resumeRoute, /monitoredDescriptionHash\(job\.description\)/);
@@ -174,6 +175,7 @@ test('portal support is written at packet creation and unsupported portals use e
   // Packets created from monitored jobs can outlive a bad or stale review URL. Before declaring the
   // packet unsupported, submit-request must first repair from the canonical monitored job apply_url.
   assert.match(applicationsRoute, /async function repairReviewPortalFromMonitoredJob/);
+  assert.match(applicationsRoute, /canonicalSupportedPortalUrl\(current\.portal_url, current\.ats_name\)/);
   assert.match(applicationsRoute, /monitored_jobs\.apply_url/);
   assert.match(applicationsRoute, /canonicalSupportedPortalUrl\(job\.apply_url, job\.ats_name\)/);
   assert.match(applicationsRoute, /monitoredJdAgrees\(expectedJdHash, current\.jd_text, job\.description\)/);
