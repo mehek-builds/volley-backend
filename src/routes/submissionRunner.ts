@@ -213,6 +213,38 @@ async function holdRevokedSubmission(row: ResumeRow, review: ApplicationReviewSt
   }));
 }
 
+const SUBMISSION_GRAD_MONTH_NAMES: Record<string, string> = {
+  '01': 'January',
+  '02': 'February',
+  '03': 'March',
+  '04': 'April',
+  '05': 'May',
+  '06': 'June',
+  '07': 'July',
+  '08': 'August',
+  '09': 'September',
+  '10': 'October',
+  '11': 'November',
+  '12': 'December',
+};
+
+export function submissionGraduationDateParts(
+  gradDate: string | undefined,
+  gradYear: number | undefined,
+): { month?: string; year?: string } {
+  const text = gradDate?.trim();
+  if (!text && !gradYear) return {};
+  const isoMatches = [...(text?.matchAll(/\b((?:19|20)\d{2})-(\d{2})(?:-\d{2})?\b/g) ?? [])];
+  const iso = isoMatches.find((match) => match[1] === String(gradYear ?? '')) ?? isoMatches.at(-1);
+  if (iso) return { year: iso[1], month: SUBMISSION_GRAD_MONTH_NAMES[iso[2]] };
+  const years = text?.match(/\b(?:19|20)\d{2}\b/g) ?? [];
+  const year = String(gradYear ?? years.at(-1) ?? '').trim() || undefined;
+  const monthYearMatches = [...(text?.matchAll(/\b(january|february|march|april|may|june|july|august|september|october|november|december)\b[^0-9]{0,20}\b((?:19|20)\d{2})\b/gi) ?? [])];
+  const monthYear = monthYearMatches.find((match) => match[2] === year) ?? monthYearMatches.at(-1);
+  const month = monthYear?.[1] ?? text?.match(/\b(january|february|march|april|may|june|july|august|september|october|november|december)\b/i)?.[1];
+  return { month: month ? month[0].toUpperCase() + month.slice(1).toLowerCase() : undefined, year };
+}
+
 export async function buildPacket(row: ResumeRow, controlledTest = false): Promise<SubmissionPacket> {
   const stored = row.spec as StoredSpec;
   const contact = (stored._contact ?? {}) as Record<string, unknown>;
@@ -248,6 +280,24 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
   const email = String(contact.email ?? userRow[0]?.email ?? '').trim();
   if (!fullName || !email) throw new Error('Full name and email are required before submission');
   const roleTitle = (row.job_context as { role?: unknown } | null)?.role;
+  const base = (profileRow[0]?.base_resume_json && typeof profileRow[0].base_resume_json === 'object'
+    ? profileRow[0].base_resume_json
+    : {}) as Record<string, unknown>;
+  const academicStr = (key: string): string | undefined => {
+    const baseValue = base[key];
+    if (typeof baseValue === 'string' && baseValue.trim()) return baseValue.trim();
+    const parsedValue = parsed[key];
+    return typeof parsedValue === 'string' && parsedValue.trim() ? parsedValue.trim() : undefined;
+  };
+  const academicNum = (key: string): number | undefined => {
+    const baseValue = base[key];
+    if (typeof baseValue === 'number' && baseValue > 0) return baseValue;
+    const parsedValue = parsed[key];
+    return typeof parsedValue === 'number' && parsedValue > 0 ? parsedValue : undefined;
+  };
+  const graduationDate = academicStr('grad_date');
+  const graduationYear = academicNum('grad_year');
+  const graduationParts = submissionGraduationDateParts(graduationDate, graduationYear);
   return {
     fullName,
     email,
@@ -256,6 +306,12 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     linkedinUrl: typeof app.linkedin_url === 'string' ? app.linkedin_url : undefined,
     githubUrl: typeof app.github_url === 'string' ? app.github_url : undefined,
     portfolioUrl: typeof app.portfolio_url === 'string' ? app.portfolio_url : undefined,
+    school: academicStr('school'),
+    degree: academicStr('degree'),
+    graduationDate,
+    graduationMonth: graduationParts.month,
+    graduationYear: graduationParts.year,
+    gpa: typeof app.gpa === 'string' ? app.gpa : undefined,
     resume,
     resumeName: resumeFileNameForRole(fullName, roleTitle),
     coverLetter,
@@ -535,6 +591,8 @@ async function loadApplicationProfileLike(userId: string): Promise<ApplicationPr
     date_of_birth: str('date_of_birth'),
     availability_date: str('availability_date'),
     availability_term: str('availability_term'),
+    school: academicStr('school'),
+    degree: academicStr('degree'),
     grad_date: academicStr('grad_date'),
     grad_year: academicNum('grad_year'),
     currently_enrolled: academicBoolean('currently_enrolled'),

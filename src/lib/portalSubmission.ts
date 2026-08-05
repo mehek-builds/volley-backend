@@ -241,6 +241,12 @@ export type SubmissionPacket = {
   linkedinUrl?: string;
   githubUrl?: string;
   portfolioUrl?: string;
+  school?: string;
+  degree?: string;
+  graduationDate?: string;
+  graduationMonth?: string;
+  graduationYear?: string;
+  gpa?: string;
   resume: Buffer;
   resumeName: string;
   coverLetter?: Buffer;
@@ -346,6 +352,18 @@ function managedFill(
 ) {
   if (!value) return;
   actions.push({ type: 'fill', selector, value, label, optional, timeout });
+}
+
+function managedFillByLabel(
+  actions: ManagedBrowserAction[],
+  text: string,
+  value: string | undefined,
+  label: string,
+  optional = true,
+  timeout = MANAGED_FILL_TIMEOUT_MS,
+) {
+  if (!value) return;
+  actions.push({ type: 'fillByLabelText', text, value, label, optional, timeout });
 }
 
 // The resume upload is always optional + bounded. On a real ATS form the file input is present and
@@ -696,6 +714,12 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedFill(actions, '#email, input[name="job_application[email]"]', packet.email, 'email');
     managedFill(actions, GREENHOUSE_PHONE_SELECTOR, phoneForPortalField(portal, packet.phone), 'phone');
     managedFill(actions, '#candidate-location, input[autocomplete="address-level2"]', packet.city, 'location');
+    managedFillByLabel(actions, 'School', packet.school, 'education_school');
+    managedFillByLabel(actions, 'Degree', packet.degree, 'education_degree');
+    managedFillByLabel(actions, 'What is your graduation date?', packet.graduationDate, 'graduation_date');
+    managedFillByLabel(actions, 'End date month', packet.graduationMonth, 'education_end_month');
+    managedFillByLabel(actions, 'End date year', packet.graduationYear, 'education_end_year');
+    managedFillByLabel(actions, 'GPA', packet.gpa, 'gpa');
     managedUpload(actions, '#resume, input[type="file"][name="job_application[resume]"]', 'resume', packet.resume, packet.resumeName);
     managedUpload(actions, 'input#cover_letter[type="file"], input[type="file"][name*="cover_letter" i]', 'cover_letter', packet.coverLetter, packet.coverLetterName);
   } else if (family === 'lever') {
