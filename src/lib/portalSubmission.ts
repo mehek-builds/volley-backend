@@ -748,6 +748,7 @@ const GREENHOUSE_ALIAS_SELECT_SELECTOR_LIMIT = 1;
 const QUESTION_SELECT_SELECTOR_LIMIT = 1;
 const QUESTION_COMBOBOX_SELECTOR_LIMIT = 1;
 const ASHBY_QUESTION_TEXT_SELECTOR_LIMIT = 9;
+const MANAGED_ACTION_LIMIT = 120;
 const CONFIRM_AFTER_FILL_FIELDS = new Set(['school', 'degree']);
 
 function questionSelectSelectors(label: string): string[] {
@@ -1261,6 +1262,56 @@ function pushGreenhouseDemographicAliases(actions: ManagedBrowserAction[], packe
   }
 }
 
+function managedActionLabelBase(action: ManagedBrowserAction): string | undefined {
+  return action.label?.replace(/_(?:open|option|select)$/, '');
+}
+
+const GREENHOUSE_LOW_PRIORITY_ACTION_GROUPS = [
+  /^greenhouse_demographic/,
+  /^greenhouse_referral_combo_label:(?!.*How did you hear about Faire)/,
+  /^education_discipline_combo:/,
+  /^education_graduation_date_combo:/,
+  /^(?:graduation_date|graduation_date_label|graduation_date_expected|education_end_month|education_end_year|education_graduation_month|education_graduation_year|gpa_question)$/,
+  /^first_name_label$/,
+  /^education_degree_combo:2$/,
+  /^education_degree_combo:1$/,
+] as const;
+
+function trimGreenhouseManagedActionsToBudget(actions: ManagedBrowserAction[], limit: number) {
+  for (const pattern of GREENHOUSE_LOW_PRIORITY_ACTION_GROUPS) {
+    while (actions.length > limit) {
+      let removableBase: string | undefined;
+      for (let index = actions.length - 1; index >= 0; index -= 1) {
+        const base = managedActionLabelBase(actions[index]!);
+        if (!base || !pattern.test(base)) continue;
+        removableBase = base;
+        break;
+      }
+      if (!removableBase) break;
+      const before = actions.length;
+      for (let index = actions.length - 1; index >= 0; index -= 1) {
+        if (managedActionLabelBase(actions[index]!) === removableBase) actions.splice(index, 1);
+      }
+      if (actions.length === before) break;
+    }
+    if (actions.length <= limit) return;
+  }
+}
+
+function truncateManagedActionsToBudget(actions: ManagedBrowserAction[], limit: number) {
+  while (actions.length > limit) {
+    const base = managedActionLabelBase(actions.at(-1)!);
+    if (!base) {
+      actions.pop();
+      continue;
+    }
+    for (let index = actions.length - 1; index >= 0; index -= 1) {
+      if (managedActionLabelBase(actions[index]!) !== base) break;
+      actions.pop();
+    }
+  }
+}
+
 // ─── Workable (apply.workable.com) ────────────────────────────────────────────
 // Read off a live Suade posting, 2026-07-28 (apply.workable.com/suade/j/9C43981D17/apply). Plain
 // HTML, single step, stable `name` attributes - the simplest of the three added that day.
@@ -1767,7 +1818,18 @@ export function buildManagedPortalActions(
   // was shown an empty attestation page as the evidence of what she was approving.
   if (submit && portalFamily(portal) === 'paylocity') pushPaylocityTraversal(actions, packet);
 
-  if (submit && portalCanAutoSubmit(portal)) {
+  const canAppendSubmit = submit && portalCanAutoSubmit(portal);
+  let skipSubmitForManagedActionBudget = false;
+  if (portalFamily(portal) === 'greenhouse') {
+    const actionLimit = canAppendSubmit ? MANAGED_ACTION_LIMIT - 1 : MANAGED_ACTION_LIMIT;
+    trimGreenhouseManagedActionsToBudget(actions, actionLimit);
+    if (actions.length > actionLimit) {
+      skipSubmitForManagedActionBudget = canAppendSubmit;
+      truncateManagedActionsToBudget(actions, MANAGED_ACTION_LIMIT);
+    }
+  }
+
+  if (canAppendSubmit && !skipSubmitForManagedActionBudget) {
     actions.push({ type: 'click', selector: 'button[type="submit"], input[type="submit"]' });
   }
   return actions;
