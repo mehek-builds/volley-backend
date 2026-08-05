@@ -4,6 +4,7 @@ import {
   applicationContextForQuestionResolution,
   discoverAndResolveQuestions,
   readMostRecentRole,
+  sanitizeEeoPrefs,
   shouldUseLocalControlledBrowser,
   submissionGraduationDateParts,
   workEligibilityFromSponsorshipAnswer,
@@ -123,6 +124,20 @@ test('onboarding sponsorship answers keep non-US-authorized cases explicit', () 
   assert.deepEqual(workEligibilityFromSponsorshipAnswer('needs_now'), {
     needsSponsorship: true,
   });
+});
+
+test('malformed EEO preferences are dropped before packet building can trim them', () => {
+  assert.deepEqual(sanitizeEeoPrefs({
+    gender: ' Female ',
+    race: true,
+    veteran_status: '',
+    sexual_orientation: 'Heterosexual',
+  }), {
+    gender: 'Female',
+    sexual_orientation: 'Heterosexual',
+  });
+  assert.equal(sanitizeEeoPrefs({ gender: true }), null);
+  assert.equal(sanitizeEeoPrefs(['Female']), null);
 });
 
 test('the controlled QA portal uses the managed browser in production', () => {
