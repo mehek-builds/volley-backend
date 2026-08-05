@@ -5,6 +5,7 @@ import {
   readMostRecentRole,
   shouldUseLocalControlledBrowser,
   submissionGraduationDateParts,
+  workEligibilityFromSponsorshipAnswer,
 } from './submissionRunner';
 
 // readMostRecentRole runs inside buildPacket, which every prepare and every submit goes through -
@@ -98,6 +99,27 @@ test('question resolution context excludes mixed-country job locations', () => {
   assert.match(context, /Build data infrastructure/);
   assert.doesNotMatch(context, /Mountain View, CA/);
   assert.doesNotMatch(context, /Toronto/);
+});
+
+test('future sponsorship onboarding answer supplies work eligibility for US applications', () => {
+  assert.deepEqual(workEligibilityFromSponsorshipAnswer('needs_future'), {
+    workAuthorized: true,
+    needsSponsorship: true,
+  });
+});
+
+test('onboarding sponsorship answers keep non-US-authorized cases explicit', () => {
+  assert.deepEqual(workEligibilityFromSponsorshipAnswer('not_authorized'), {
+    workAuthorized: false,
+    needsSponsorship: true,
+  });
+  assert.deepEqual(workEligibilityFromSponsorshipAnswer('no'), {
+    workAuthorized: true,
+    needsSponsorship: false,
+  });
+  assert.deepEqual(workEligibilityFromSponsorshipAnswer('needs_now'), {
+    needsSponsorship: true,
+  });
 });
 
 test('the controlled QA portal uses the managed browser in production', () => {
