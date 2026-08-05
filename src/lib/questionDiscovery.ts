@@ -78,8 +78,16 @@ export const EEO_QUESTION =
 const LEGAL_CONSENT_QUESTION =
   /candidate privacy policy|candidate-privacy-notice|privacy notice|review and acknowledge|information (?:i|you) have provided.*process|by selecting ["']?i agree|demographic data survey|collecting,\s*storing,\s*and processing/i;
 
+export function isLegalConsentQuestion(label: string): boolean {
+  return LEGAL_CONSENT_QUESTION.test(label);
+}
+
 export function workEligibilitySkipReason(label: string): string {
   return `work-eligibility question left for you: "${label.slice(0, 60)}"`;
+}
+
+export function legalConsentSkipReason(label: string): string {
+  return `consent question left for you: "${label.slice(0, 60)}"`;
 }
 
 function workEligibilityAnswer(
@@ -750,8 +758,8 @@ export function resolveKnownAnswer(
     return { value: eeoAnswer(eeoPreferenceForLabel(label, ap.eeo_prefs)) };
   }
 
-  if (LEGAL_CONSENT_QUESTION.test(label)) {
-    return null;
+  if (isLegalConsentQuestion(label)) {
+    return { skipReason: legalConsentSkipReason(label) };
   }
 
   if (isRefusedQuestion(label)) {

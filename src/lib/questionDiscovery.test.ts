@@ -156,25 +156,24 @@ test('answers EEO / demographic questions with stored preferences or decline', (
   );
 });
 
-test('leaves candidate privacy and demographic consent attestations for human attention', () => {
-  assert.equal(
-    resolveKnownAnswer(
-      'By selecting "I agree," I understand that the information I have provided as part of this job application will be processed in accordance with the Candidate Privacy Policy.',
-      'text',
-      {},
-      undefined,
-    ),
-    null,
+test('surfaces candidate privacy and demographic consent attestations for human attention', () => {
+  const privacy = resolveKnownAnswer(
+    'By selecting "I agree," I understand that the information I have provided as part of this job application will be processed in accordance with the Candidate Privacy Policy.',
+    'text',
+    {},
+    undefined,
   );
-  assert.equal(
-    resolveKnownAnswer(
-      'By checking this box, I consent to Reddit collecting, storing, and processing my responses to the demographic data survey above.',
-      'text',
-      {},
-      undefined,
-    ),
-    null,
+  assert.ok(privacy && 'skipReason' in privacy);
+  assert.match(privacy.skipReason, /consent question left for you/);
+
+  const demographicConsent = resolveKnownAnswer(
+    'By checking this box, I consent to Reddit collecting, storing, and processing my responses to the demographic data survey above.',
+    'text',
+    {},
+    undefined,
   );
+  assert.ok(demographicConsent && 'skipReason' in demographicConsent);
+  assert.match(demographicConsent.skipReason, /consent question left for you/);
 });
 
 test('send-time sensitive guard allows stored work and EEO answers while blocking identity numbers', () => {
@@ -480,10 +479,14 @@ test('required internship form fields resolve from profile-backed defaults inste
     resolveKnownAnswer('Are you currently enrolled in a Masters or PhD program for a technical field?', 'select', profile, undefined),
     { value: 'No' },
   );
-  assert.deepEqual(
-    resolveKnownAnswer('Please review and acknowledge Cloudflare\'s Candidate Privacy Policy (cloudflare.com/candidate-privacy-notice/).', 'checkbox', profile, undefined),
-    null,
+  const privacy = resolveKnownAnswer(
+    'Please review and acknowledge Cloudflare\'s Candidate Privacy Policy (cloudflare.com/candidate-privacy-notice/).',
+    'checkbox',
+    profile,
+    undefined,
   );
+  assert.ok(privacy && 'skipReason' in privacy);
+  assert.match(privacy.skipReason, /consent question left for you/);
   assert.deepEqual(
     resolveKnownAnswer('Do you consider yourself a member of the LGBTQIA+ community?', 'select', profile, undefined),
     { value: 'Decline to self-identify' },

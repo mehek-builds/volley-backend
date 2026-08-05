@@ -527,7 +527,9 @@ export async function discoverAndResolveQuestions(
     const existing = existingByLabel.get(reviewLabel.toLowerCase());
     const known = resolveKnownAnswer(label, field.inputType, ap, questionContext);
     if (existing) {
-      if (known && 'value' in known) {
+      if (known && 'skipReason' in known) {
+        attentionReasons.push(known.skipReason);
+      } else if (known && 'value' in known) {
         questions.push({
           ...existing,
           question: reviewLabel,

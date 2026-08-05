@@ -1,7 +1,7 @@
 import type { Page } from 'playwright-core';
 import type { ManagedBrowserAction, ManagedBrowserResult } from './browserbase';
 import { describeRequiredBlocker, describeUnlabelledBlockers, humanFieldLabel } from './fieldLabel';
-import { classifyField, normalizeReviewQuestionLabel } from './questionDiscovery';
+import { classifyField, isLegalConsentQuestion, normalizeReviewQuestionLabel } from './questionDiscovery';
 import type { Locator } from 'playwright-core';
 
 // Portal field ids legitimately contain CSS-syntax characters (Greenhouse uses UUIDs, others use
@@ -711,8 +711,6 @@ function greenhouseQuestionComboboxSelectors(label: string): string[] {
 
 const GREENHOUSE_VISIBLE_REACT_SELECT_OPTION_SELECTOR = '[id^="react-select-"][id$="-option-0"]:visible';
 
-const GREENHOUSE_DEMOGRAPHIC_DATA_CONSENT_CHECKBOX_SELECTOR =
-  'input[type="checkbox"][name="gdpr_demographic_data_consent_given"], input[type="checkbox"][id^="gdpr_demographic_data_consent_given"], label:has-text("By checking this box, I consent") input[type="checkbox"]';
 const GREENHOUSE_ALIAS_SELECT_SELECTOR_LIMIT = 1;
 const QUESTION_SELECT_SELECTOR_LIMIT = 1;
 const QUESTION_COMBOBOX_SELECTOR_LIMIT = 1;
@@ -1618,6 +1616,7 @@ export function buildManagedPortalActions(
     if (!item.answer.trim()) continue;
     const questionText = normalizeReviewQuestionLabel(item.question);
     if (!questionText) continue;
+    if (isLegalConsentQuestion(questionText)) continue;
     const portalSelector = durablePortalSelector(item.portalSelector);
     if (portalSelector) {
       if (/^(?:checkbox|radio)$/i.test(item.portalInputType ?? '')) {
@@ -1660,21 +1659,6 @@ export function buildManagedPortalActions(
   if (portalFamily(portal) === 'greenhouse') {
     pushGreenhouseKnownQuestionAliases(actions, packet);
     pushGreenhouseDemographicAliases(actions, packet);
-    actions.push({
-      type: 'click',
-      selector: GREENHOUSE_DEMOGRAPHIC_DATA_CONSENT_CHECKBOX_SELECTOR,
-      label: 'greenhouse_demographic_data_consent_checkbox',
-      optional: true,
-      timeout: MANAGED_FILL_TIMEOUT_MS,
-    });
-    actions.push({
-      type: 'fillByLabelText',
-      text: 'By checking this box, I consent',
-      value: 'Yes',
-      label: 'greenhouse_demographic_data_consent',
-      optional: true,
-      timeout: MANAGED_FILL_TIMEOUT_MS,
-    });
   }
   // Choice controls are filled only by the runner's scoped question-container logic. That keeps
   // short answers such as "Yes" from matching an unrelated acknowledgement elsewhere on the page.
@@ -1729,6 +1713,7 @@ function pushPaylocityTraversal(actions: ManagedBrowserAction[], packet: Submiss
       if (!item.answer.trim()) continue;
       const questionText = normalizeReviewQuestionLabel(item.question);
       if (!questionText) continue;
+      if (isLegalConsentQuestion(questionText)) continue;
       const portalSelector = durablePortalSelector(item.portalSelector);
       if (portalSelector) {
         managedFill(actions, portalSelector, item.answer, `question:${questionText.slice(0, 80)}`);
@@ -2023,6 +2008,7 @@ async function fillReviewedQuestions(page: Page, portal: SupportedPortal, packet
     if (!item.answer.trim()) continue;
     const questionText = normalizeReviewQuestionLabel(item.question);
     if (!questionText) continue;
+    if (isLegalConsentQuestion(questionText)) continue;
     const portalSelector = durablePortalSelector(item.portalSelector);
     if (/^(?:checkbox|radio)$/i.test(item.portalInputType ?? '')) {
       if (portalFamily(portal) === 'greenhouse') {
