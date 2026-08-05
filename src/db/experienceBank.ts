@@ -19,6 +19,29 @@ export function bankEntriesFromResumeSpec(spec: ResumeSpec, userId: string): New
     .filter((entry) => (entry.bullet_variants as string[]).length > 0);
 }
 
+type ExistingBankIdentity = Pick<ExperienceBankEntry, 'type' | 'org' | 'title'>;
+
+function normalizedBankIdentity(value: string | null | undefined): string {
+  return (value ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+export function missingBankEntriesFromResumeSpec(
+  spec: ResumeSpec,
+  userId: string,
+  existing: ExistingBankIdentity[],
+): NewExperienceBankEntry[] {
+  return bankEntriesFromResumeSpec(spec, userId).filter((candidate) => {
+    const candidateOrg = normalizedBankIdentity(candidate.org);
+    const candidateTitle = normalizedBankIdentity(candidate.title);
+    return !existing.some((entry) => {
+      if (entry.type !== candidate.type) return false;
+      if (normalizedBankIdentity(entry.org) !== candidateOrg) return false;
+      const entryTitle = normalizedBankIdentity(entry.title);
+      return !candidateTitle || !entryTitle || candidateTitle === entryTitle;
+    });
+  });
+}
+
 // The one way to read a student's experience bank.
 //
 // It exists so the ORDER BY cannot be forgotten (R-022). Postgres promises no row order without
@@ -47,7 +70,6 @@ export function readExperienceBank(userId: string): Promise<ExperienceBankEntry[
 
 export async function readExperienceBankOrSeedFromBaseResume(userId: string): Promise<ExperienceBankEntry[]> {
   const existing = await readExperienceBank(userId);
-  if (existing.length > 0) return existing;
 
   const [profile] = await db
     .select({ base_resume_json: profiles.base_resume_json })
@@ -57,7 +79,7 @@ export async function readExperienceBankOrSeedFromBaseResume(userId: string): Pr
   const spec = profile?.base_resume_json as ResumeSpec | null | undefined;
   if (!spec) return existing;
 
-  const entries = bankEntriesFromResumeSpec(spec, userId);
+  const entries = missingBankEntriesFromResumeSpec(spec, userId, existing);
   if (entries.length === 0) return existing;
 
   await db.insert(experience_bank).values(entries);

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { bankEntriesFromResumeSpec } from './experienceBank';
+import { bankEntriesFromResumeSpec, missingBankEntriesFromResumeSpec } from './experienceBank';
 import type { ResumeSpec } from '../llm/resumeSpec';
 
 const userId = '00000000-0000-4000-8000-000000000001';
@@ -57,6 +57,41 @@ test('empty resume entries do not create ungrounded bank rows', () => {
   };
 
   assert.deepEqual(bankEntriesFromResumeSpec(spec, userId), []);
+});
+
+test('base resume rescue fills missing entries in a partial experience bank', () => {
+  const spec: ResumeSpec = {
+    school: '',
+    degree: '',
+    grad_date: '',
+    coursework: '',
+    education_position: 'top',
+    experience: [
+      {
+        type: 'job',
+        org: 'Tonee',
+        title: 'AI Engineer',
+        date_range: '2025 - Present',
+        bullets: ['Built a mobile inference feature.'],
+      },
+      {
+        type: 'job',
+        org: 'Cinematica Labs',
+        title: 'Program Management Intern',
+        date_range: 'June 2025 - August 2025',
+        bullets: ['Built mentor-founder monitoring.'],
+      },
+    ],
+    skills: [],
+  };
+
+  const missing = missingBankEntriesFromResumeSpec(spec, userId, [{
+    type: 'job',
+    org: 'Tonee',
+    title: 'AI Engineer',
+  }]);
+
+  assert.deepEqual(missing.map((entry) => entry.org), ['Cinematica Labs']);
 });
 
 test('resume, answer, cover letter, gap evidence, and profile-bank reads use the approved-resume rescue path', () => {
