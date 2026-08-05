@@ -53,11 +53,13 @@ const NEVER_FILL_PATTERNS = [/social security/i, /\bssn\b/i, /driver'?s?\s*licen
 // used to be globally refused after a false legal declaration shipped once (R-004). They are now
 // answered only from explicit stored booleans, with ambiguous mixed wording still left to the user.
 export const WORK_ELIGIBILITY_QUESTION =
-  /authori[sz](?:ed|ation)\s+to\s+work|legally\s+authori[sz]ed|right\s+to\s+work|work\s+authori[sz]|(?:requir\w*|need\w*|visa|immigration|without|employment)\s+(?:\w+\s+){0,3}sponsor|sponsor\w*\s+(?:\w+\s+){0,3}(?:requir\w*|need\w*)/i;
+  /(?:eligible|eligibility)\s+to\s+work|authori[sz](?:ed|ation)\s+to\s+work|legally\s+authori[sz]ed|right\s+to\s+work|work\s+authori[sz]|(?:requir\w*|need\w*|visa|immigration|without|employment)\s+(?:\w+\s+){0,3}sponsor|sponsor\w*\s+(?:\w+\s+){0,3}(?:requir\w*|need\w*)/i;
 const WORK_AUTHORIZATION_QUESTION =
-  /authori[sz](?:ed|ation)\s+to\s+work|legally\s+authori[sz]ed|right\s+to\s+work|work\s+authori[sz]/i;
+  /(?:eligible|eligibility)\s+to\s+work|authori[sz](?:ed|ation)\s+to\s+work|legally\s+authori[sz]ed|right\s+to\s+work|work\s+authori[sz]/i;
 const SPONSORSHIP_QUESTION =
   /(?:requir\w*|need\w*|visa|immigration|without|employment)\s+(?:\w+\s+){0,3}sponsor|sponsor\w*\s+(?:\w+\s+){0,3}(?:requir\w*|need\w*)/i;
+const SPONSORSHIP_WORK_AUTHORIZATION_SUPPORT_QUESTION =
+  /\b(?:do|will|would|can|could)?\s*(?:you\s+)?(?:now\s+or\s+in\s+the\s+future\s+)?(?:requir\w*|need\w*)\b[^?]{0,80}\b(?:sponsor\w*|visa)\b[^?]{0,50}\bwork\s+authori[sz]ation\b/i;
 const NON_US_WORK_SCOPE =
   /\b(canada|canadian|united kingdom|uk|britain|british|england|european union|eu|australia|australian|india|indian|united arab emirates|uae|dubai|singapore|germany|france|ireland|netherlands|japan|korea|china)\b/i;
 const JOB_LOCATION_SCOPE = /country\s+(?:where|in which)\s+the\s+job\s+is\s+located|country\s+where\s+the\s+role\s+is\s+located|where\s+the\s+job\s+is\s+located/i;
@@ -78,6 +80,15 @@ function workEligibilityAnswer(
 ): { value: string } | { skipReason: string } | null {
   const asksAuthorization = WORK_AUTHORIZATION_QUESTION.test(label);
   const asksSponsorship = SPONSORSHIP_QUESTION.test(label);
+  if (asksAuthorization && asksSponsorship && SPONSORSHIP_WORK_AUTHORIZATION_SUPPORT_QUESTION.test(label)) {
+    if ((NON_US_WORK_SCOPE.test(label) || (JOB_LOCATION_SCOPE.test(label) && !JD_US_SCOPE.test(jdText ?? '')))) {
+      return { skipReason: workEligibilitySkipReason(label) };
+    }
+    if (typeof ap.needs_sponsorship === 'boolean') {
+      return { value: ap.needs_sponsorship ? 'Yes' : 'No' };
+    }
+    return { skipReason: workEligibilitySkipReason(label) };
+  }
   if (!asksAuthorization && !asksSponsorship) return null;
   if (asksAuthorization && asksSponsorship) return { skipReason: workEligibilitySkipReason(label) };
   if ((asksAuthorization || asksSponsorship) && (NON_US_WORK_SCOPE.test(label) || (JOB_LOCATION_SCOPE.test(label) && !JD_US_SCOPE.test(jdText ?? '')))) {
