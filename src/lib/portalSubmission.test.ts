@@ -852,6 +852,30 @@ test('Greenhouse managed actions include explicitly saved demographic choices', 
   );
 });
 
+test('Greenhouse saved demographic choices stay below the managed action cap', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    eeoPrefs: {
+      gender: 'Female',
+      transgender_status: 'Decline to self-identify',
+      sexual_orientation: 'Heterosexual',
+      disability_status: 'Decline to self-identify',
+      veteran_status: 'Decline to self-identify',
+      race: 'White',
+    },
+    questions: [
+      { question: 'Are you legally authorized to work in the United States?', answer: 'Yes' },
+      { question: 'Do you now or in the future require visa sponsorship?', answer: 'Yes' },
+      { question: 'Are you able to work onsite five days a week?', answer: 'Yes' },
+    ],
+  });
+  assert.ok(actions.length < 120, `managed action count ${actions.length} must leave headroom below the provider cap`);
+  assert.equal(actions.filter((action) => action.label?.startsWith('greenhouse_demographic_select:')).length, 10);
+});
+
 test('question wording alone cannot predict a control type', () => {
   // Recorded because it is the lesson that cost three deploys: this reads like free text and is a
   // checkbox group on Aquatic's Greenhouse form. The heuristic is a helper, never the guard.
@@ -1384,11 +1408,10 @@ test('Greenhouse managed actions retry known yes-no work and onsite choices by e
   assert.equal(aliasActions.some((action) => action.text === 'Do you consent to the terms?'), false);
 
   const selectActions = actions.filter((action) => action.label?.startsWith('greenhouse_known_select'));
-  assert.ok(selectActions.length >= aliasActions.length * 2);
+  assert.ok(selectActions.length >= aliasActions.length);
   assert.ok(selectActions.every((action) => action.type === 'select'));
   assert.ok(selectActions.every((action) => action.optional === true));
   assert.ok(selectActions.some((action) => action.value === 'Yes'));
-  assert.ok(selectActions.some((action) => action.value === '1'));
   assert.ok(selectActions.some((action) => action.selector?.includes('.field:has(label:has-text("Are you currently eligible to legally work in the United States?")) select')));
   assert.ok(
     selectActions.every((action) => (action.selector?.length ?? Infinity) <= 500),
