@@ -384,6 +384,15 @@ test('a location-commitment question is never answered from a stored city (R-039
   assert.equal(resolveKnownAnswer('are you willing to relocate to San Francisco?', 'text', { address_city: 'Dubai' }, undefined), null);
 });
 
+test('a preferred-location choice is not drafted as prose', () => {
+  const label = "Please choose the single location that you're the most interested in, and we will discuss more with you as you move through the process.";
+  assert.equal(classifyField(label), null);
+  assert.equal(isOpenEndedQuestion(label), false);
+  const resolved = resolveKnownAnswer(label, 'text', { address_city: 'Los Angeles' }, 'Locations to be discussed with your recruiter.');
+  assert.ok(resolved && 'skipReason' in resolved);
+  assert.match(resolved.skipReason, /location choice left for you/);
+});
+
 test('duration beats start date on an ambiguous "availab" label (R-014)', () => {
   assert.equal(classifyField('length or term/length of availability'), 'availability_term');
   assert.equal(classifyField('when can you start?'), 'availability_date');

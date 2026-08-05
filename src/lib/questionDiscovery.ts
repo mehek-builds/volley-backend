@@ -160,6 +160,8 @@ const STORED_ONSITE_COMMITMENT_QUESTION =
 const ONSITE_DAY_COUNT_QUESTION = /\b(?:three|four|five|3|4|5)\s+days?\b/i;
 const LOCATION_PREFERENCE_QUESTION =
   /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\blocation\b[^?]{0,120}\b(?:single|top|preferred|preference|most interested)\b/i;
+const LOCATION_CHOICE_QUESTION =
+  /\b(?:choose|select|pick)\b[^?]{0,120}\b(?:single|top|preferred|preference|most interested|location|office)\b|\b(?:single|top|most interested)\b[^?]{0,120}\blocation\b|\blocation\b[^?]{0,120}\b(?:single|top|most interested)\b/i;
 const SAFE_US_LOCATION_LINE =
   /^(?:remote(?:,\s*)?(?:us|u\.s\.|usa|united states)?|[A-Z][A-Za-z .'-]+,\s*(?:[A-Z]{2}|Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New Hampshire|New Jersey|New Mexico|New York|North Carolina|North Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode Island|South Carolina|South Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West Virginia|Wisconsin|Wyoming)(?:,\s*(?:United States|USA|US|U\.S\.))?)$/i;
 
@@ -173,6 +175,10 @@ function locationPreferenceAnswer(label: string, jdText: string | undefined): { 
     if (line.length <= 120 && SAFE_US_LOCATION_LINE.test(line)) return { value: line };
   }
   return null;
+}
+
+export function isLocationChoiceQuestion(label: string): boolean {
+  return LOCATION_CHOICE_QUESTION.test(label);
 }
 
 export const REFERRAL_QUESTION = /how did you hear|referral source|hear about (this|us|the)|source of/i;
@@ -222,9 +228,10 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
   if (type === 'tel') return 'phone';
 
   const locationCommitment = isLocationCommitmentQuestion(l);
+  const locationChoice = isLocationChoiceQuestion(l);
 
   if (CITIZENSHIP_QUESTION.test(l)) return 'citizenship';
-  if (!locationCommitment && RESIDENCE_QUESTION.test(l)) return 'address_country';
+  if (!locationCommitment && !locationChoice && RESIDENCE_QUESTION.test(l)) return 'address_country';
 
   if (REFERRAL_QUESTION.test(l)) return 'referral_source_default';
   if (SALARY_QUESTION.test(l)) return 'desired_salary';
@@ -254,11 +261,13 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
   if (/phone|mobile/i.test(l)) return 'phone';
   if (
     !locationCommitment &&
+    !locationChoice &&
     /\b(state|province|prefecture)\b(?!\s+(?:your|the|you|it|why|how|what|when|where))|state\s*\/\s*province/i.test(l)
   )
     return 'address_state';
   if (
     !locationCommitment &&
+    !locationChoice &&
     /\b(city|town)\b|\blocation\b|where are you (currently )?(located|living|based)|current location|where do you live/i.test(l)
   )
     return 'address_city';
@@ -289,6 +298,7 @@ function eeoPreferenceForLabel(label: string, prefs: Record<string, string> | nu
 export function isOpenEndedQuestion(label: string): boolean {
   const l = (label ?? '').trim().toLowerCase();
   if (!l) return false;
+  if (isLocationChoiceQuestion(l)) return false;
   if (
     /\b(why\b|describ\w+|explain\w*|tell (?:us|me)\b|share\b|elaborat\w+|discuss\b|sentences?\b|paragraphs?\b|in your own words|what interest\w*|what excit\w*|what motivat\w*|what makes\b|how (?:did|do|would|have) you|brief note\b|note on\b|you (?:most )?enjoy\b)/.test(l)
   )
@@ -683,6 +693,9 @@ export function resolveKnownAnswer(
 ): { value: string } | { skipReason: string } | null {
   const preferredLocation = locationPreferenceAnswer(label, jdText);
   if (preferredLocation) return preferredLocation;
+  if (isLocationChoiceQuestion(label)) {
+    return { skipReason: `location choice left for you: "${label.slice(0, 60)}"` };
+  }
 
   const locationStatus = locationStatusAnswer(label, ap);
   if (locationStatus) return locationStatus;
