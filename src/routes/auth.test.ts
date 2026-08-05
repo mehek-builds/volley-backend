@@ -9,6 +9,7 @@ import {
   isRecentVerification,
   sendVerificationEmail,
   verificationFailure,
+  withVerifyCodeTransactionRetry,
 } from './auth';
 import { createHash } from 'node:crypto';
 
@@ -243,6 +244,62 @@ describe('verification code edge cases', () => {
       ),
       { status: 400, error: 'Incorrect code.', incrementAttempts: true },
     );
+  });
+
+  test('retries the accepted-code transaction when Neon hands out a read-only backend', async () => {
+    let calls = 0;
+    const retries: number[] = [];
+    const result = await withVerifyCodeTransactionRetry(async () => {
+      calls += 1;
+      if (calls === 1) {
+        throw Object.assign(new Error('cannot execute DELETE in a read-only transaction'), { code: '25006' });
+      }
+      return 'session';
+    }, (attempt) => retries.push(attempt));
+
+    assert.equal(result, 'session');
+    assert.equal(calls, 2);
+    assert.deepEqual(retries, [1]);
+  });
+
+  test('falls back after accepted-code transaction read-only retries exhaust', async () => {
+    let pooledCalls = 0;
+    let directCalls = 0;
+    const retries: number[] = [];
+
+    const result = await withVerifyCodeTransactionRetry(
+      async () => {
+        pooledCalls += 1;
+        throw Object.assign(new Error('cannot execute DELETE in a read-only transaction'), { code: '25006' });
+      },
+      (attempt) => retries.push(attempt),
+      async () => {
+        directCalls += 1;
+        return 'direct-session';
+      },
+    );
+
+    assert.equal(result, 'direct-session');
+    assert.equal(pooledCalls, 3);
+    assert.equal(directCalls, 1);
+    assert.deepEqual(retries, [1, 2]);
+  });
+
+  test('does not retry accepted-code transaction failures other than SQLSTATE 25006', async () => {
+    let calls = 0;
+    await assert.rejects(
+      withVerifyCodeTransactionRetry(async () => {
+        calls += 1;
+        throw Object.assign(new Error('current transaction is aborted'), { code: '25P02' });
+      }, () => {
+        throw new Error('onRetry should not run for non-read-only transaction failures');
+      }),
+      (error: unknown) => {
+        assert.equal((error as { code?: string }).code, '25P02');
+        return true;
+      },
+    );
+    assert.equal(calls, 1);
   });
 });
 

@@ -101,6 +101,26 @@ test('a persistently read-only database gives up and rethrows the original error
   assert.equal(calls, 3, 'three attempts, then stop');
 });
 
+test('a persistently read-only pooled write can fall back to a direct operation', async () => {
+  let calls = 0;
+  let fallbackCalls = 0;
+  const result = await withReadOnlyRetry(async () => {
+    calls += 1;
+    throw pgError(READ_ONLY_SQLSTATE, 'cannot execute INSERT in a read-only transaction');
+  }, {
+    attempts: 3,
+    sleep: noSleep,
+    onExhausted: async () => {
+      fallbackCalls += 1;
+      return 'direct-write';
+    },
+  });
+
+  assert.equal(result, 'direct-write');
+  assert.equal(calls, 3);
+  assert.equal(fallbackCalls, 1);
+});
+
 test('attempts are configurable and always run at least once', async () => {
   let calls = 0;
   await assert.rejects(withReadOnlyRetry(async () => {
