@@ -102,8 +102,8 @@ test('application email uses applicant reply-to and attaches packet PDFs', async
     assert.doesNotMatch(email.html ?? '', /application packet/);
     assert.equal(email.attachments?.length, 2);
     assert.deepEqual(email.attachments?.map((item) => item.filename), [
-      'Taylor_Applicant_Hardware_Product_Management_Intern_resume.pdf',
-      'Taylor_Applicant_Hardware_Product_Management_Intern_cover_letter.pdf',
+      'Taylor_Applicant_Hardware_Product_Management_Intern_Resume.pdf',
+      'Taylor_Applicant_Hardware_Product_Management_Intern_Cover_Letter.pdf',
     ]);
     assert.equal(email.attachments?.[0]?.content, Buffer.from('%PDF resume').toString('base64'));
     assert.equal(email.attachments?.[0]?.content_type, 'application/pdf');
