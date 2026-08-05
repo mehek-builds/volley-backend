@@ -168,6 +168,8 @@ test('resume generation atomically reserves the final monthly slot and refunds s
 
   assert.match(quotaSource, /pg_advisory_xact_lock\(hashtextextended/);
   assert.match(quotaSource, /withReadOnlyRetry\(\s*\(\) => db\.transaction\(operation\)/);
+  assert.match(quotaSource, /onExhausted: \(\) =>\s*withDedicatedDatabase/);
+  assert.match(quotaSource, /directDb\.transaction\(operation\)/);
   assert.match(quotaSource, /readCounterTotal\(tx, key, period, kind\)/);
   assert.match(quotaSource, /replaceCounterRows\(tx, key, period, kind, currentCount\)/);
   assert.doesNotMatch(quotaSource, /onConflictDoUpdate/);
