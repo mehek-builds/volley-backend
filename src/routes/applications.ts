@@ -32,7 +32,7 @@ import { requireAuth } from '../middleware/auth';
 import { declaredSkillsList } from './profile';
 import { processSubmissionApplication } from './submissionRunner';
 import { isRefusedQuestion } from '../lib/questionDiscovery';
-import { submitRequestDisposition } from '../lib/submissionSafety';
+import { resumeEditDisposition, submitRequestDisposition } from '../lib/submissionSafety';
 import { detectPortal, isPortalSupported } from '../lib/portalSubmission';
 import { dailySubmissionCap, withinDailyCap } from '../lib/submissionQueue';
 import { canStartExtensionSubmission, extensionOutcomePatch, isSafeExtensionReceiptUrl } from '../lib/extensionSubmission';
@@ -370,7 +370,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (!review?.jd_text || !contact?.full_name) {
         return reply.status(409).send({ error: 'This older resume cannot be edited in the dashboard. Generate it again first.' });
       }
-      if (submitRequestDisposition(review.status) !== 'start') {
+      if (resumeEditDisposition(review.status, Boolean(review.submission_claimed_at)) !== 'start') {
         return reply.status(409).send({ error: 'This resume cannot be edited while its application is active or complete' });
       }
       if (review.role) {
