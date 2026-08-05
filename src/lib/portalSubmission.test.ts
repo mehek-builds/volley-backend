@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { DOMParser } from '@xmldom/xmldom';
 import type { Page } from 'playwright-core';
 import {
   AUTONOMOUS_PORTAL_FAMILIES,
@@ -737,9 +738,87 @@ test('Ashby reviewed essay questions retry nearby textareas when labels are not 
   ));
   const fallbacks = actions.filter((action) => action.label?.startsWith('question_text:'));
   assert.ok(fallbacks.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text')));
+  assert.ok(fallbacks.some((action) => action.type === 'fill' && action.selector?.includes('/parent::*/parent::*[not(self::form)')));
+  assert.ok(fallbacks.some((action) => action.type === 'fill' && action.selector?.startsWith('xpath=')));
+  assert.equal(fallbacks.length, 9);
+  assert.equal(fallbacks.some((action) => action.type === 'fill' && action.selector?.includes('following::')), false);
+  assert.equal(fallbacks.some((action) => action.type === 'fill' && action.selector?.includes('ancestor::')), false);
   assert.ok(fallbacks.every((action) => action.value === 'I built a fast evaluation harness for AI agents.'));
   assert.ok(fallbacks.every((action) => action.optional === true));
 });
+
+test('Ashby nested-label textarea fallback stays scoped to its question container', () => {
+  const markup = `
+    <form>
+      <div class="question">
+        <div><label>First essay prompt</label></div>
+        <div><textarea id="first"></textarea></div>
+      </div>
+      <div class="question">
+        <div><label>Second essay prompt</label></div>
+        <div><textarea id="second"></textarea></div>
+      </div>
+    </form>
+  `;
+
+  assert.equal(nearestNonFormTextareaId(markup, 'First essay prompt'), 'first');
+  assert.equal(nearestNonFormTextareaId(markup, 'Second essay prompt'), 'second');
+
+  const actions = buildManagedPortalActions('ashby', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      { question: 'First essay prompt', answer: 'First answer' },
+      { question: 'Second essay prompt', answer: 'Second answer' },
+    ],
+  });
+  const xpaths = actions
+    .filter((action) => action.type === 'fill' && action.label?.startsWith('question_text:') && action.selector?.startsWith('xpath='))
+    .map((action) => action.selector ?? '');
+  assert.ok(xpaths.some((selector) => selector.includes('First essay prompt') && selector.includes('/parent::*/parent::*[not(self::form)')));
+  assert.ok(xpaths.some((selector) => selector.includes('Second essay prompt') && selector.includes('/parent::*/parent::*[not(self::form)')));
+  assert.equal(xpaths.some((selector) => selector.includes('following::') || selector.includes('ancestor::')), false);
+  assert.equal(xpaths.every((selector) => selector.includes('[not(self::form)')), true);
+});
+
+test('Ashby reviewed essay packet stays inside the Stratus action budget', () => {
+  const questions = Array.from({ length: 10 }, (_, index) => ({
+    question: `Essay prompt ${index + 1}`,
+    answer: `Answer ${index + 1}`,
+  }));
+  const actions = buildManagedPortalActions('ashby', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    phone: '+971501234567',
+    linkedinUrl: 'https://www.linkedin.com/in/mehekmandal/',
+    githubUrl: 'https://github.com/mehek-builds',
+    portfolioUrl: 'https://github.com/mehek-builds',
+    resume: Buffer.from('pdf'),
+    resumeName: 'Mehek_Mandal_Engineering_Intern_Resume.pdf',
+    questions,
+  }, true);
+
+  assert.ok(actions.every((action) => (action.selector?.length ?? 0) <= 500));
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+});
+
+function nearestNonFormTextareaId(markup: string, labelText: string): string | undefined {
+  const doc = new DOMParser().parseFromString(markup, 'text/html');
+  const labels = Array.from(doc.getElementsByTagName('label'));
+  const label = labels.find((candidate) => candidate.textContent?.replace(/\s+/g, ' ').trim() === labelText);
+  let node = label?.parentNode as any;
+  while (node && String(node.nodeName).toLowerCase() !== 'form') {
+    const textareas = typeof node.getElementsByTagName === 'function'
+      ? Array.from(node.getElementsByTagName('textarea') as ArrayLike<any>)
+      : [];
+    const id = textareas[0]?.getAttribute?.('id');
+    if (id) return id;
+    node = node.parentNode;
+  }
+  return undefined;
+}
 
 test('Greenhouse core identity fields degrade gracefully instead of a 30s hard timeout', () => {
   // Live regression, 2026-07-24: Jump Trading serves its Greenhouse posting through a branded
