@@ -143,17 +143,31 @@ test('the review route edits through the helper rather than a bare spread', () =
  */
 test('portal support is written at packet creation and enforced before a run starts', () => {
   const resumeRoute = routeSource('resume.ts');
-  assert.match(resumeRoute, /import \{ isPortalSupported \} from '\.\.\/lib\/portalSubmission'/);
+  assert.match(resumeRoute, /import \{[^}]*isPortalSupported[^}]*\} from '\.\.\/lib\/portalSubmission'/);
   // Set on the review at creation, from the URL the caller just handed us.
   assert.match(resumeRoute, /portal_supported: isPortalSupported\(body\.application\.portal_url\)/);
+  // And repaired on history reads so the dashboard does not keep hiding the send path for old
+  // monitored-job packets whose review URL is stale or company-owned.
+  assert.match(resumeRoute, /function repairedHistorySpec/);
+  assert.match(resumeRoute, /monitored_jobs\.apply_url/);
+  assert.match(resumeRoute, /historyJdHash\(job\.description\)/);
+  assert.match(resumeRoute, /spec: repairedHistorySpec\(row, monitoredJobs\)/);
 
   const applicationsRoute = routeSource('applications.ts');
+  // Packets created from monitored jobs can outlive a bad or stale review URL. Before declaring the
+  // packet unsupported, submit-request must first repair from the canonical monitored job apply_url.
+  assert.match(applicationsRoute, /async function repairReviewPortalFromMonitoredJob/);
+  assert.match(applicationsRoute, /monitored_jobs\.apply_url/);
+  assert.match(applicationsRoute, /jdHash\(job\.description\) !== expectedJdHash/);
+  assert.match(applicationsRoute, /current = await repairReviewPortalFromMonitoredJob\(row, current\)/);
   // Refused up front. A client-side check is not an enforcement point, so submit-request has to
   // answer this itself rather than trusting the dashboard to have hidden the button.
   assert.match(applicationsRoute, /!isPortalSupported\(current\.portal_url\)[\s\S]{0,400}PORTAL_NOT_SUPPORTED/);
   // Refused BEFORE the run is kicked off, not after. Bounded span so a match cannot skip the file.
+  const repairIndex = applicationsRoute.indexOf('repairReviewPortalFromMonitoredJob(row, current)');
   const guardIndex = applicationsRoute.indexOf('PORTAL_NOT_SUPPORTED');
   const runIndex = applicationsRoute.indexOf('processSubmissionApplication(row.id, fastify)');
+  assert.ok(repairIndex > 0 && guardIndex > repairIndex, 'the monitored-job URL repair must precede the portal guard');
   assert.ok(guardIndex > 0 && runIndex > guardIndex, 'the portal guard must precede the submission run');
 });
 
