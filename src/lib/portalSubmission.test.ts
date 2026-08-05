@@ -1294,6 +1294,7 @@ test('Greenhouse managed actions retry known yes-no work and onsite choices by e
   assert.ok(selectActions.some((action) => action.value === 'Yes'));
   assert.ok(selectActions.some((action) => action.value === '1'));
   assert.ok(selectActions.some((action) => action.selector?.includes('.field:has(label:has-text("Are you currently eligible to legally work in the United States?")) select')));
+  assert.equal(selectActions.every((action) => (action.selector?.length ?? 0) <= 500), true);
   assert.equal(selectActions.some((action) => action.selector?.includes('Do you consent to the terms?')), false);
   assert.equal(actions.filter((action) => action.type === 'click').length, 0);
 });
