@@ -43,6 +43,7 @@ export type ApplicationProfileLike = StoredSalaryProfile & {
   gpa?: string;
   gpa_scale?: string;
   major?: string;
+  languages?: string[] | null;
   eeo_prefs?: Record<string, string> | null;
   referral_source_default?: string;
 };
@@ -70,6 +71,8 @@ export const EEO_QUESTION =
   /transgender|\bgender\b|what is your sex\b|race|racial|ethnicit|ethnic\b|hispanic|latino|veteran|military|disab|sexual orientation|communities|identify with|current age|what is your age|age range|how old are you|\bage group\b/i;
 const LEGAL_CONSENT_QUESTION =
   /candidate privacy policy|information (?:i|you) have provided.*process|by selecting ["']?i agree|demographic data survey|collecting,\s*storing,\s*and processing/i;
+const LEGAL_ATTESTATION_QUESTION =
+  /certif(?:y|ication)|true\s+and\s+(?:complete|accurate)|terms\s+and\s+conditions|background\s+check|criminal|conviction|arbitration/i;
 
 export function workEligibilitySkipReason(label: string): string {
   return `work-eligibility question left for you: "${label.slice(0, 60)}"`;
@@ -152,6 +155,9 @@ const RESIDENCE_QUESTION =
   /country of residence|which country|country you.{0,20}(based|resid|work from|located)|where are you based|based in which country|current country|country.{0,20}(residing|residence)|\bcountry\b/i;
 const LOCATION_COMMITMENT_STEM = /\b(?:are|can|could|do|did|will|would|should|may|might|have)\s+you\b/i;
 const LOCATION_COMMITMENT_VOCAB = /\boffice\b|in[\s-]?office|on[\s-]?site|\bonsite\b|\bhybrid\b|relocat|commut/i;
+const STORED_ONSITE_COMMITMENT_QUESTION =
+  /\b(?:able|willing|available|prepared|can|could|would)\b[^?]{0,80}\b(?:office|in[\s-]?office|on[\s-]?site|onsite|hybrid)\b|\b(?:office|in[\s-]?office|on[\s-]?site|onsite|hybrid)\b[^?]{0,80}\b(?:able|willing|available|prepared|can|could|would)\b/i;
+const ONSITE_DAY_COUNT_QUESTION = /\b(?:three|four|five|3|4|5)\s+days?\b/i;
 
 export function isLocationCommitmentQuestion(label: string): boolean {
   return LOCATION_COMMITMENT_STEM.test(label) && LOCATION_COMMITMENT_VOCAB.test(label);
@@ -161,7 +167,13 @@ export const REFERRAL_QUESTION = /how did you hear|referral source|hear about (t
 export const START_DATE_QUESTION = /availab|start(ing)?\s+date|date.*you.*start|when can you start|earliest.*start/i;
 export const GRADUATION_DATE_QUESTION =
   /\b(?:expected\s+)?graduat(?:ion|e)\s+(?:date|year)\b|\b(?:date|year)\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b|\bexpected\s+grad(?:uation)?\b|\bclass\s+of\b/i;
+const GRADUATION_MONTH_QUESTION = /\bgraduat(?:ion|e)\s+month\b|\bmonth\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b/i;
+const GRADUATION_YEAR_QUESTION = /\bgraduat(?:ion|e)\s+year\b|\byear\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b|\bclass\s+year\b/i;
 const MIXED_ENROLLMENT_GRADUATION_QUESTION = /\bcurrently\s+enrolled\b|\bdegree\s+program\b/i;
+const CURRENT_ENROLLMENT_QUESTION =
+  /\bcurrently\s+enrolled\b|\bcurrent\s+student\b|\benrolled\s+in\s+(?:a\s+)?(?:degree\s+)?program\b|\breturn(?:ing)?\s+to\s+(?:a\s+)?(?:degree\s+)?program\b|\breturn(?:ing)?\s+to\s+(?:school|college|university)\b/i;
+const LANGUAGE_QUESTION =
+  /\bspoken\s+languages?\b|\blanguages?\s+(?:do\s+you\s+|are\s+you\s+)?(?:speak|know|fluent|proficient)|\b(?:speak|fluent|proficient)\b[^?]{0,40}\blanguages?\b|\b(?:speak|fluent|proficient)\b[^?]{0,40}\b(?:english|hindi|arabic|spanish|french|german|portuguese|mandarin|chinese|cantonese|tamil|punjabi|urdu)\b/i;
 const TERM_QUESTION =
   /(length|duration|term)\b.*\bavailab|availab.*\b(length|duration|term)\b|how long.*(available|intern|stay|commit)|(weeks|months).*\b(available|internship|commit)|\bterm\s*\/?\s*length/i;
 const SALARY_QUESTION = /salary|compensat|desired pay|expected pay|pay expectation/i;
@@ -180,7 +192,8 @@ export type ProfileKey =
   | 'phone' | 'address_city' | 'address_state' | 'address_country'
   | 'linkedin_url' | 'github_url' | 'portfolio_url' | 'citizenship' | 'date_of_birth'
   | 'availability_date' | 'availability_term' | 'school' | 'degree' | 'graduation_date' | 'desired_salary'
-  | 'gpa' | 'gpa_scale' | 'major' | 'referral_source_default';
+  | 'graduation_month' | 'graduation_year' | 'current_enrollment' | 'gpa' | 'gpa_scale' | 'major'
+  | 'languages' | 'onsite_commitment' | 'referral_source_default';
 
 // Ported verbatim from generic.ts's classifyField (see that file for the full rationale on
 // ordering - refusals first, citizenship before residence, term before start date, state before
@@ -199,6 +212,12 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
   if (SALARY_QUESTION.test(l)) return 'desired_salary';
   if (DOB_QUESTION.test(l)) return 'date_of_birth';
   if (TERM_QUESTION.test(l)) return 'availability_term';
+  if (STORED_ONSITE_COMMITMENT_QUESTION.test(l) && (ONSITE_DAY_COUNT_QUESTION.test(l) || !/relocat/i.test(l))) {
+    return 'onsite_commitment';
+  }
+  if (CURRENT_ENROLLMENT_QUESTION.test(l) && !GRADUATION_DATE_QUESTION.test(l)) return 'current_enrollment';
+  if (GRADUATION_MONTH_QUESTION.test(l)) return 'graduation_month';
+  if (GRADUATION_YEAR_QUESTION.test(l)) return 'graduation_year';
   if (GRADUATION_DATE_QUESTION.test(l)) return 'graduation_date';
   if (START_DATE_QUESTION.test(l)) return 'availability_date';
 
@@ -208,8 +227,9 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
 
   if (/\bgpa\b|grade average|grade point/i.test(l)) return 'gpa';
   if (/gpa scale|out of.*(4\.0|100)|grading scale/i.test(l)) return 'gpa_scale';
-  if (/\b(school|university|college|institution)\b/i.test(l)) return 'school';
+  if (LANGUAGE_QUESTION.test(l)) return 'languages';
   if (/\bdegree\b(?!\s+(?:program|subject))|education level|level of education/i.test(l)) return 'degree';
+  if (/\b(school|university|college|institution)\b/i.test(l)) return 'school';
   if (/\bmajor\b|field of study|course of study|degree subject/i.test(l)) return 'major';
 
   if (/phone|mobile/i.test(l)) return 'phone';
@@ -284,6 +304,20 @@ const MONTH_TO_NUMBER: Record<string, string> = {
   nov: '11', november: '11',
   dec: '12', december: '12',
 };
+const NUMBER_TO_MONTH: Record<string, string> = {
+  '01': 'January',
+  '02': 'February',
+  '03': 'March',
+  '04': 'April',
+  '05': 'May',
+  '06': 'June',
+  '07': 'July',
+  '08': 'August',
+  '09': 'September',
+  '10': 'October',
+  '11': 'November',
+  '12': 'December',
+};
 
 export function graduationDateAnswer(
   gradDate: string | undefined,
@@ -319,6 +353,57 @@ function enrollmentConfirmedForGraduationDate(ap: ApplicationProfileLike): boole
   if (ap.currently_enrolled === true) return true;
   if (ap.currently_enrolled === false) return false;
   return graduationEvidenceIsFuture(ap.grad_date, ap.grad_year);
+}
+
+function graduationMonthAnswer(gradDate: string | undefined, gradYear: number | undefined): string | null {
+  const iso = graduationDateAnswer(gradDate, gradYear, 'date');
+  const month = iso?.match(/^\d{4}-(\d{2})-/)?.[1];
+  if (!month) return null;
+  return NUMBER_TO_MONTH[month] ?? null;
+}
+
+function graduationYearAnswer(gradDate: string | undefined, gradYear: number | undefined): string | null {
+  if (gradYear && gradYear > 0) return String(gradYear);
+  return graduationDateAnswer(gradDate, gradYear, 'date')?.match(/^(\d{4})-/)?.[1] ?? null;
+}
+
+function currentEnrollmentAnswer(ap: ApplicationProfileLike): { value: string } | { skipReason: string } | null {
+  if (ap.currently_enrolled === true || graduationEvidenceIsFuture(ap.grad_date, ap.grad_year)) return { value: 'Yes' };
+  if (ap.currently_enrolled === false) return { value: 'No' };
+  return { skipReason: 'current enrollment question left for you' };
+}
+
+const SPOKEN_LANGUAGE_ALIASES: Record<string, string> = {
+  english: 'English',
+  hindi: 'Hindi',
+  arabic: 'Arabic',
+  spanish: 'Spanish',
+  french: 'French',
+  german: 'German',
+  portuguese: 'Portuguese',
+  mandarin: 'Mandarin',
+  chinese: 'Chinese',
+  cantonese: 'Cantonese',
+  tamil: 'Tamil',
+  punjabi: 'Punjabi',
+  urdu: 'Urdu',
+};
+
+function normalizedStoredLanguages(ap: ApplicationProfileLike): string[] {
+  return (Array.isArray(ap.languages) ? ap.languages : [])
+    .map((language) => language.trim())
+    .filter(Boolean);
+}
+
+function languageAnswer(label: string, ap: ApplicationProfileLike): { value: string } | null {
+  const stored = normalizedStoredLanguages(ap);
+  if (stored.length === 0) return null;
+  const specific = Object.entries(SPOKEN_LANGUAGE_ALIASES).find(([token]) =>
+    new RegExp(`\\b${token}\\b`, 'i').test(label));
+  if (specific) {
+    return { value: stored.some((language) => language.toLowerCase() === specific[1].toLowerCase()) ? 'Yes' : 'No' };
+  }
+  return { value: stored.join(', ') };
 }
 
 export type DiscoveredQuestion = {
@@ -437,8 +522,10 @@ export function normalizeStoredPortalQuestions<T extends { question: string; ans
 // pull in project-wide. Playwright evaluates a string in the live page exactly like a function -
 // the real browser DOM Playwright is driving has the same APIs the extension's own
 // candidateInputs()/questionLabel() rely on, so this is a straight port of that discovery logic,
-// not new logic. Deliberately excludes select/radio/checkbox (see module header). Keep this in
-// sync with the extension source by hand, the same as any other ported function in this file.
+// with one backend-specific addition: selects, radios, and checkboxes are discovered for stored
+// answer resolution, then filled later by label-scoped actions rather than direct selector typing.
+// Keep this in sync with the extension source by hand, the same as any other ported function in
+// this file.
 const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
   function clean(s) {
     return (s == null ? '' : s).replace(/[​‌‍﻿ ]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -494,7 +581,7 @@ const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
   var els = Array.prototype.slice
     .call(
       document.querySelectorAll(
-        'input[type="text"], input[type="email"], input[type="tel"], input[type="url"], input[type="number"], input[type="date"], input:not([type]), textarea',
+        'input[type="text"], input[type="email"], input[type="tel"], input[type="url"], input[type="number"], input[type="date"], input:not([type]), textarea, select, input[type="radio"], input[type="checkbox"]',
       ),
     )
     .filter(function (el) {
@@ -513,7 +600,7 @@ const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
     out.push({
       label: label,
       selector: stableSelector(el, marker),
-      inputType: el.tagName === 'TEXTAREA' ? 'textarea' : (el.type || 'text'),
+      inputType: el.tagName === 'TEXTAREA' ? 'textarea' : (el.tagName === 'SELECT' ? 'select' : (el.type || 'text')),
       maxLength: el.maxLength > 0 ? el.maxLength : null,
     });
   }
@@ -541,6 +628,7 @@ export function resolveKnownAnswer(
   }
 
   if (LEGAL_CONSENT_QUESTION.test(label)) {
+    if (LEGAL_ATTESTATION_QUESTION.test(label)) return null;
     return { value: /i agree/i.test(label) ? 'I agree' : 'Yes' };
   }
 
@@ -584,6 +672,10 @@ export function resolveKnownAnswer(
       return ap.availability_term ? { value: ap.availability_term } : null;
     case 'availability_date':
       return ap.availability_date ? { value: ap.availability_date } : null;
+    case 'onsite_commitment':
+      return { value: 'Yes' };
+    case 'current_enrollment':
+      return currentEnrollmentAnswer(ap);
     case 'school':
       return ap.school ? { value: ap.school } : null;
     case 'degree':
@@ -595,12 +687,22 @@ export function resolveKnownAnswer(
       const value = graduationDateAnswer(ap.grad_date, ap.grad_year, inputType);
       return value ? { value } : null;
     }
+    case 'graduation_month': {
+      const value = graduationMonthAnswer(ap.grad_date, ap.grad_year);
+      return value ? { value } : null;
+    }
+    case 'graduation_year': {
+      const value = graduationYearAnswer(ap.grad_date, ap.grad_year);
+      return value ? { value } : null;
+    }
     case 'gpa':
       return ap.gpa ? { value: ap.gpa } : null;
     case 'gpa_scale':
       return ap.gpa_scale ? { value: ap.gpa_scale } : null;
     case 'major':
       return ap.major ? { value: ap.major } : null;
+    case 'languages':
+      return languageAnswer(label, ap);
     default:
       return null;
   }

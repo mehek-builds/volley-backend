@@ -200,9 +200,11 @@ test('managed controlled-portal actions include reviewed fields, resume upload, 
     resumeName: 'resume.pdf',
     questions: [{ question: 'Why this role?', answer: 'I enjoy systems work.' }],
   }, true);
-  assert.deepEqual(actions.map((action) => action.type), [
-    'fill', 'fillByLabelText', 'fill', 'fill', 'upload', 'fillByLabelText', 'fillByLabelText', 'click',
-  ]);
+  assert.deepEqual(
+    actions.filter((action) => action.type !== 'select').map((action) => action.type),
+    ['fill', 'fillByLabelText', 'fill', 'fill', 'upload', 'fillByLabelText', 'fillByLabelText', 'click'],
+  );
+  assert.ok(actions.some((action) => action.type === 'select' && action.label?.startsWith('question_select:')));
   assert.equal(actions.find((action) => action.type === 'upload')?.file?.base64, 'cGRm');
 });
 
@@ -556,7 +558,7 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
   // first_name, last_name, email (phone and location are omitted from this fixture), resume, then
   // the two questions and explicit Greenhouse consent helper.
   assert.deepEqual(
-    actions.map((a) => a.type),
+    actions.filter((a) => a.type !== 'select').map((a) => a.type),
     [
       'fill',
       'fillByLabelText',
@@ -568,6 +570,7 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
       'fillByLabelText',
     ],
   );
+  assert.ok(actions.some((a) => a.type === 'select' && a.label?.startsWith('question_select:')));
 });
 
 test('managed Greenhouse question fills prefer rediscovered selectors over label text', () => {
@@ -1393,6 +1396,28 @@ test('Greenhouse managed actions retry known yes-no work and onsite choices by e
   );
   assert.equal(selectActions.some((action) => action.selector?.includes('Do you consent to the terms?')), false);
   assert.equal(actions.filter((action) => action.type === 'click').length, 0);
+});
+
+test('managed reviewed questions replay stored answers into label-scoped choice controls', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    ...capturePacket,
+    questions: [
+      { question: 'Are you currently enrolled in a degree program?', answer: 'Yes' },
+      { question: 'Graduation Year', answer: '2028' },
+      { question: 'Are you able to work onsite 4 days a week?', answer: 'Yes' },
+    ],
+  });
+
+  const scoped = actions.filter((action) => action.label?.startsWith('question:'));
+  assert.ok(scoped.some((action) => action.type === 'fillByLabelText' && action.text === 'Are you currently enrolled in a degree program?'));
+  assert.ok(scoped.some((action) => action.type === 'fillByLabelText' && action.text === 'Graduation Year'));
+  assert.ok(scoped.some((action) => action.type === 'fillByLabelText' && action.text === 'Are you able to work onsite 4 days a week?'));
+
+  const selects = actions.filter((action) => action.label?.startsWith('question_select:'));
+  assert.ok(selects.some((action) => action.type === 'select' && action.value === '1'));
+  assert.ok(selects.some((action) => action.type === 'select' && action.value === 'true'));
+  assert.ok(selects.some((action) => action.type === 'select' && action.value === '2028'));
+  assert.ok(selects.every((action) => (action.selector?.length ?? Infinity) <= 500));
 });
 
 test('the QA harness routes to the three new controlled adapters, by query param and by path', () => {

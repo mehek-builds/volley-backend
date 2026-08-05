@@ -510,6 +510,8 @@ export async function discoverAndResolveQuestions(
     // keep the fallback
   }
   const questionContext = applicationContextForQuestionResolution(row, current);
+  const portalSelectorForField = (field: DiscoveredQuestion): string | undefined =>
+    /^(?:text|email|tel|url|number|date|textarea)?$/i.test(field.inputType) ? field.selector : undefined;
 
   for (const field of discovered) {
     const label = normalizeDiscoveredLabel(field.label);
@@ -517,13 +519,20 @@ export async function discoverAndResolveQuestions(
     if (!label || !reviewLabel || normalizeStoredPortalQuestions([{ question: label, answer: '' }], portal).length === 0) continue;
     const existing = existingByLabel.get(reviewLabel.toLowerCase());
     if (existing) {
-      if (existing.answer.trim()) questions.push({ ...existing, question: reviewLabel, portal_selector: field.selector });
+      if (existing.answer.trim()) questions.push({ ...existing, question: reviewLabel, portal_selector: portalSelectorForField(field) });
       continue; // already answered by the client or a prior run
     }
 
     const known = resolveKnownAnswer(label, field.inputType, ap, questionContext);
     if (known && 'value' in known) {
-      questions.push({ id: randomUUID(), question: reviewLabel, answer: known.value, kind: 'required', required: false, portal_selector: field.selector });
+      questions.push({
+        id: randomUUID(),
+        question: reviewLabel,
+        answer: known.value,
+        kind: 'required',
+        required: false,
+        portal_selector: portalSelectorForField(field),
+      });
       continue;
     }
     if (known && 'skipReason' in known) {
@@ -643,6 +652,9 @@ async function loadApplicationProfileLike(userId: string): Promise<ApplicationPr
     gpa: str('gpa'),
     gpa_scale: str('gpa_scale'),
     major: str('major'),
+    languages: Array.isArray(app.languages)
+      ? app.languages.filter((language): language is string => typeof language === 'string' && language.trim().length > 0)
+      : undefined,
     eeo_prefs: sanitizeEeoPrefs(app.eeo_prefs) ?? undefined,
     referral_source_default: str('referral_source_default'),
   };

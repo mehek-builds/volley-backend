@@ -585,6 +585,49 @@ function greenhouseQuestionSelectSelectors(label: string): string[] {
   ];
 }
 
+function questionSelectSelectors(label: string): string[] {
+  const text = cssString(label);
+  return [
+    `label:has-text("${text}") ~ select`,
+    `label:has-text("${text}") + select`,
+    `fieldset:has(legend:has-text("${text}")) select`,
+    `div:has(> label:has-text("${text}")) select`,
+    `[role="group"]:has-text("${text}") select`,
+  ];
+}
+
+function selectValuesForAnswer(answer: string): string[] {
+  const trimmed = answer.trim();
+  if (!trimmed) return [];
+  const lower = trimmed.toLowerCase();
+  if (lower === 'yes') return ['Yes', 'yes', '1', 'true'];
+  if (lower === 'no') return ['No', 'no', '0', 'false'];
+  return [trimmed];
+}
+
+function pushScopedQuestionChoiceActions(
+  actions: ManagedBrowserAction[],
+  questionText: string,
+  answer: string,
+  labelPrefix: string,
+) {
+  actions.push({
+    type: 'fillByLabelText',
+    text: questionText,
+    value: answer,
+    label: `${labelPrefix}:${questionText.slice(0, 80)}`,
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
+  let index = 0;
+  for (const selector of questionSelectSelectors(questionText)) {
+    for (const value of selectValuesForAnswer(answer)) {
+      managedSelect(actions, selector, value, `${labelPrefix}_select:${index}:${questionText.slice(0, 80)}`);
+      index += 1;
+    }
+  }
+}
+
 function greenhouseKnownQuestionAliases(question: string, answer: string): string[] {
   const normalizedQuestion = question.toLowerCase();
   const normalizedAnswer = answer.trim().toLowerCase();
@@ -615,11 +658,19 @@ function greenhouseKnownQuestionAliases(question: string, answer: string): strin
   }
   if (
     /\b(?:onsite|on[\s-]?site|in[\s-]?office|office|hybrid)\b/.test(normalizedQuestion)
-    && /\b(?:five|5)\s+days?\b/.test(normalizedQuestion)
+    && /\b(?:three|four|five|3|4|5)\s+days?\b/.test(normalizedQuestion)
   ) {
     return [
+      'Are you able to work onsite three days a week?',
+      'Are you able to work on-site three days a week?',
+      'Are you able to work onsite four days a week?',
+      'Are you able to work on-site four days a week?',
       'Are you able to work onsite five days a week?',
       'Are you able to work on-site five days a week?',
+      'Are you able to work onsite in our San Francisco office 3 days a week?',
+      'Are you able to work onsite in our San Francisco office three days a week?',
+      'Are you able to work onsite in our San Francisco office 4 days a week?',
+      'Are you able to work onsite in our San Francisco office four days a week?',
       'Are you able to work onsite in our San Francisco office 5 days a week?',
       'Are you able to work onsite in our San Francisco office five days a week?',
     ];
@@ -643,13 +694,9 @@ function pushGreenhouseKnownQuestionAliases(actions: ManagedBrowserAction[], pac
         timeout: MANAGED_FILL_TIMEOUT_MS,
       });
       for (const [index, selectSelector] of greenhouseQuestionSelectSelectors(alias).entries()) {
-        managedSelect(actions, selectSelector, item.answer.trim(), `greenhouse_known_select:${index}:${alias.slice(0, 80)}`);
-        managedSelect(
-          actions,
-          selectSelector,
-          item.answer.trim().toLowerCase() === 'yes' ? '1' : '0',
-          `greenhouse_known_select_value:${index}:${alias.slice(0, 80)}`,
-        );
+        for (const value of selectValuesForAnswer(item.answer.trim())) {
+          managedSelect(actions, selectSelector, value, `greenhouse_known_select:${index}:${alias.slice(0, 80)}`);
+        }
       }
     }
   }
@@ -1162,14 +1209,7 @@ export function buildManagedPortalActions(
       managedFill(actions, portalSelector, item.answer, `question:${questionText.slice(0, 80)}`);
       continue;
     }
-    actions.push({
-      type: 'fillByLabelText',
-      text: questionText,
-      value: item.answer,
-      label: `question:${questionText.slice(0, 80)}`,
-      optional: true,
-      timeout: MANAGED_FILL_TIMEOUT_MS,
-    });
+    pushScopedQuestionChoiceActions(actions, questionText, item.answer, 'question');
   }
   if (portalFamily(portal) === 'greenhouse') {
     pushGreenhouseKnownQuestionAliases(actions, packet);
@@ -1241,14 +1281,7 @@ function pushPaylocityTraversal(actions: ManagedBrowserAction[], packet: Submiss
         managedFill(actions, portalSelector, item.answer, `question:${questionText.slice(0, 80)}`);
         continue;
       }
-      actions.push({
-        type: 'fillByLabelText',
-        text: questionText,
-        value: item.answer,
-        label: `question:${questionText.slice(0, 80)}`,
-        optional: true,
-        timeout: MANAGED_FILL_TIMEOUT_MS,
-      });
+      pushScopedQuestionChoiceActions(actions, questionText, item.answer, 'question');
     }
   }
 }
@@ -1558,6 +1591,13 @@ async function fillReviewedQuestions(page: Page, packet: SubmissionPacket, out: 
     const select = container.locator('select').first();
     if ((await select.count()) > 0) {
       await select.selectOption({ label: item.answer }).catch(() => select.selectOption(item.answer));
+      out.push(`question:${questionText.slice(0, 80)}`);
+      continue;
+    }
+    const answerPattern = new RegExp(`^\\s*${item.answer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i');
+    const choice = container.getByLabel(answerPattern).first();
+    if ((await choice.count()) > 0 && (await choice.isVisible().catch(() => false))) {
+      await choice.check().catch(() => choice.click());
       out.push(`question:${questionText.slice(0, 80)}`);
     }
   }
