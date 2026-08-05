@@ -501,6 +501,36 @@ test('Greenhouse core identity fields degrade gracefully instead of a 30s hard t
   }
 });
 
+test('Greenhouse fills academic fields from the submission packet', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    school: 'University of Southern California',
+    degree: 'Bachelor of Science in Computer Science',
+    graduationDate: 'May 2028',
+    graduationMonth: 'May',
+    graduationYear: '2028',
+    gpa: '3.89',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  const byLabel = actions.filter((action) => action.type === 'fillByLabelText');
+  assert.deepEqual(
+    byLabel.map((action) => [action.text, action.value, action.label]),
+    [
+      ['School', 'University of Southern California', 'education_school'],
+      ['Degree', 'Bachelor of Science in Computer Science', 'education_degree'],
+      ['What is your graduation date?', 'May 2028', 'graduation_date'],
+      ['End date month', 'May', 'education_end_month'],
+      ['End date year', '2028', 'education_end_year'],
+      ['GPA', '3.89', 'gpa'],
+    ],
+  );
+  assert.ok(byLabel.every((action) => action.optional === true));
+  assert.ok(byLabel.every((action) => (action.timeout ?? Infinity) < 30_000));
+});
+
 test('no managed action can burn the 30s default — every fill, upload, and question is bounded', () => {
   // Live Jump Trading retry, 2026-07-24: after the core-field fix the run cleared name/email and
   // then died on `locator.setInputFiles: Timeout 30000ms exceeded` at the resume input, because the

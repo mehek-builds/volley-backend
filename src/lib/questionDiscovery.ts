@@ -37,6 +37,8 @@ export type ApplicationProfileLike = StoredSalaryProfile & {
   date_of_birth?: string;
   availability_date?: string;
   availability_term?: string;
+  school?: string;
+  degree?: string;
   grad_date?: string;
   grad_year?: number;
   currently_enrolled?: boolean;
@@ -127,7 +129,7 @@ const NATIONALITY_TO_COUNTRY: Record<string, string> = {
 export type ProfileKey =
   | 'phone' | 'address_city' | 'address_state' | 'address_country'
   | 'linkedin_url' | 'github_url' | 'portfolio_url' | 'citizenship' | 'date_of_birth'
-  | 'availability_date' | 'availability_term' | 'graduation_date' | 'desired_salary'
+  | 'availability_date' | 'availability_term' | 'school' | 'degree' | 'graduation_date' | 'desired_salary'
   | 'gpa' | 'gpa_scale' | 'major' | 'referral_source_default';
 
 // Ported verbatim from generic.ts's classifyField (see that file for the full rationale on
@@ -156,6 +158,8 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
 
   if (/\bgpa\b|grade average|grade point/i.test(l)) return 'gpa';
   if (/gpa scale|out of.*(4\.0|100)|grading scale/i.test(l)) return 'gpa_scale';
+  if (/\b(school|university|college|institution)\b/i.test(l)) return 'school';
+  if (/\bdegree\b(?!\s+(?:program|subject))|education level|level of education/i.test(l)) return 'degree';
   if (/\bmajor\b|field of study|course of study|degree subject/i.test(l)) return 'major';
 
   if (/phone|mobile/i.test(l)) return 'phone';
@@ -466,6 +470,10 @@ export function resolveKnownAnswer(
       return ap.availability_term ? { value: ap.availability_term } : null;
     case 'availability_date':
       return ap.availability_date ? { value: ap.availability_date } : null;
+    case 'school':
+      return ap.school ? { value: ap.school } : null;
+    case 'degree':
+      return ap.degree ? { value: ap.degree } : null;
     case 'graduation_date': {
       if (MIXED_ENROLLMENT_GRADUATION_QUESTION.test(label) && !enrollmentConfirmedForGraduationDate(ap)) {
         return { skipReason: `enrollment/graduation date question left for you: "${label.slice(0, 60)}"` };

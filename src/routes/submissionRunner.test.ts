@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readMostRecentRole, shouldUseLocalControlledBrowser } from './submissionRunner';
+import { readMostRecentRole, shouldUseLocalControlledBrowser, submissionGraduationDateParts } from './submissionRunner';
 
 // readMostRecentRole runs inside buildPacket, which every prepare and every submit goes through -
 // on EVERY portal, not just the one that needs work history. So its failure mode is not "Paylocity
@@ -41,6 +41,25 @@ test('org is the fallback for company, and the FIRST entry wins because resumes 
   assert.equal(two?.company, 'Now Co');
   assert.equal(two?.startDate, 'Jun 2025');
   assert.equal(two?.summary, 'Built it.');
+});
+
+test('submission graduation parts use the end of an education range', () => {
+  assert.deepEqual(submissionGraduationDateParts('August 2024 - May 2028', undefined), {
+    month: 'May',
+    year: '2028',
+  });
+  assert.deepEqual(submissionGraduationDateParts('August 2024 - 2028-05-15', undefined), {
+    month: 'May',
+    year: '2028',
+  });
+  assert.deepEqual(submissionGraduationDateParts('2024-08-15 - 2028-05-15', undefined), {
+    month: 'May',
+    year: '2028',
+  });
+  assert.deepEqual(submissionGraduationDateParts('August 2024 - May 2028', 2029), {
+    month: 'May',
+    year: '2029',
+  });
 });
 
 test('the controlled QA portal uses the managed browser in production', () => {

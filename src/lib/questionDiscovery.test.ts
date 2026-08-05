@@ -124,6 +124,18 @@ test('expected graduation date resolves from the academic profile, not availabil
   );
 });
 
+test('school and degree resolve from the academic profile', () => {
+  const profile = {
+    school: 'University of Southern California',
+    degree: 'Bachelor of Science in Computer Science',
+  };
+  assert.equal(classifyField('School'), 'school');
+  assert.equal(classifyField('Degree'), 'degree');
+  assert.equal(classifyField('Degree subject'), 'major');
+  assert.deepEqual(resolveKnownAnswer('School', 'text', profile, undefined), { value: profile.school });
+  assert.deepEqual(resolveKnownAnswer('Degree', 'text', profile, undefined), { value: profile.degree });
+});
+
 test('graduation date inputs use the graduation end of an education range', () => {
   assert.equal(graduationDateAnswer('August 2024 - May 2028', 2028, 'date'), '2028-05-01');
   assert.equal(graduationDateAnswer('August 2024 - 2028-05-15', 2028, 'date'), '2028-05-01');
