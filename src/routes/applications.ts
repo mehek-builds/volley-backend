@@ -30,7 +30,7 @@ import { mintDownloadToken } from '../lib/resumeAccess';
 import { normalizeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import { requireAuth } from '../middleware/auth';
 import { declaredSkillsList } from './profile';
-import { processSubmissionApplication } from './submissionRunner';
+import { buildPacket, processSubmissionApplication } from './submissionRunner';
 import { isRefusedQuestion } from '../lib/questionDiscovery';
 import { resumeEditDisposition, submitRequestDisposition } from '../lib/submissionSafety';
 import { AUTONOMOUS_PORTAL_FAMILIES, detectPortal, isPortalSupported } from '../lib/portalSubmission';
@@ -42,6 +42,7 @@ import {
   packetEducationDrift,
 } from '../lib/submissionEducationGuard';
 import { resumeFileNameForRole } from '../lib/resumeFileName';
+import { sendUnsupportedPortalApplicationEmail } from '../lib/unsupportedPortalEmailFallback';
 import { monitoredJdAgrees } from '../lib/monitoredPortalRepair';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
@@ -642,16 +643,104 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (sensitive) {
         return reply.status(422).send({ error: `Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}` });
       }
-      // Refused here, before anything is claimed or a browser is booked, because the answer has
-      // been available since the packet was created. Without this the run started, drove a managed
-      // browser for minutes, and only then failed on detectPortal's throw - which is how nine of
-      // one account's ten failures came to be multi-minute waits for a verdict we already had. A
-      // client that respects portal_supported never reaches this line; it exists because a
-      // client-side check is not an enforcement point.
+      // Unsupported portals are handled here, before a browser is booked, because the answer has
+      // been available since the packet was created. Without this branch the run would start, drive
+      // a managed browser for minutes, and only then fail on detectPortal's throw. A client-side
+      // portal_supported check is helpful UI, not an enforcement point.
       if (current.portal_url && !isPortalSupported(current.portal_url)) {
-        return reply.status(422).send({
-          error: 'Litos cannot fill in this company’s application page yet. Your tailored resume is ready to download, so you can apply on their site.',
-          code: 'PORTAL_NOT_SUPPORTED',
+        const authorizedAt = new Date().toISOString();
+        const base = freshSubmitRequestReview(current, parsed.data.questions as ApplicationReviewQuestion[]);
+        const pending: ApplicationReviewState = {
+          ...base,
+          status: 'submitting',
+          updated_at: authorizedAt,
+          submission_authorization: current.submission_authorization ?? {
+            source: 'per_application_approval',
+            authorized_at: authorizedAt,
+          },
+        };
+        const claimed = await db.update(generated_resumes)
+          .set({ spec: reviewSpec(pending) })
+          .where(and(
+            eq(generated_resumes.id, row.id),
+            sql`${generated_resumes.spec}->'_review'->>'status' = ${current.status}`,
+          ))
+          .returning();
+        if (claimed.length === 0) {
+          const refreshed = await ownedResume(request, reply);
+          if (!refreshed) return;
+          const review = readApplicationReview(refreshed.spec);
+          return reply.status(202).send({ application_id: row.id, review: review ?? current });
+        }
+        const claimedRow = claimed[0];
+        let sent: { messageId: string; recipient: string };
+        try {
+          sent = await sendUnsupportedPortalApplicationEmail({
+            application: claimedRow,
+            review: pending,
+            packet: await buildPacket(claimedRow),
+          });
+        } catch (error) {
+          request.log.warn({ error, applicationId: row.id }, 'Unsupported portal email fallback failed');
+          const failedAt = new Date().toISOString();
+          const failed = {
+            ...pending,
+            status: 'failed' as const,
+            updated_at: failedAt,
+            submission_error: 'Litos could not email this application.',
+          };
+          await db.update(generated_resumes)
+            .set({ spec: reviewSpec(failed) })
+            .where(and(
+              eq(generated_resumes.id, row.id),
+              sql`${generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
+            ));
+          return reply.status(503).send({
+            error: 'Litos could not email this application. Try again once outbound application email is configured.',
+            code: 'UNSUPPORTED_PORTAL_EMAIL_UNAVAILABLE',
+          });
+        }
+        const submittedAt = new Date().toISOString();
+        const next: ApplicationReviewState = {
+          ...pending,
+          status: 'submitted',
+          updated_at: submittedAt,
+          submitted_at: submittedAt,
+          submission_error: undefined,
+          receipt: {
+            confirmation_text: `This application was emailed to ${sent.recipient}. Resend message id: ${sent.messageId}`,
+            final_url: current.portal_url,
+            captured_at: submittedAt,
+            reference_id: sent.messageId,
+            source: 'email_fallback',
+          },
+        };
+        const updated = await db.update(generated_resumes)
+          .set({
+            spec: reviewSpec(next),
+            pipeline_stage: 'applied',
+            pipeline_stage_at: new Date(submittedAt),
+          })
+          .where(and(
+            eq(generated_resumes.id, row.id),
+            sql`${generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
+          ))
+          .returning({ id: generated_resumes.id });
+        if (updated.length === 0) {
+          const refreshed = await ownedResume(request, reply);
+          if (!refreshed) return;
+          const review = readApplicationReview(refreshed.spec);
+          return reply.status(202).send({ application_id: row.id, review: review ?? current });
+        }
+        const [refreshed] = await db.select().from(generated_resumes).where(and(
+          eq(generated_resumes.id, row.id),
+          eq(generated_resumes.user_id, request.jwtPayload!.userId),
+        )).limit(1);
+        const responseRow = refreshed ?? { ...claimedRow, spec: { ...(claimedRow.spec as StoredSpec), _review: next } };
+        return reply.status(202).send({
+          application_id: row.id,
+          review: readApplicationReview(responseRow.spec) ?? next,
+          cover_letter: storedCoverLetter(responseRow),
         });
       }
       const controlledTest = process.env.LITOS_ENABLE_TEST_PORTAL === 'true'
