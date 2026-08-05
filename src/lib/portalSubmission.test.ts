@@ -1596,6 +1596,7 @@ test('Greenhouse managed actions retry known yes-no work and onsite choices by e
     resumeName: 'resume.pdf',
     questions: [
       { question: 'Are you currently eligible to legally work in the US?', answer: 'Yes' },
+      { question: 'Are you legally authorized to work in the country where the job is located?', answer: 'Yes' },
       { question: 'Will you now or in the future require immigration support/sponsorship?', answer: 'Yes' },
       { question: 'Are you able to work onsite in our San Francisco office 5 days a week?', answer: 'Yes' },
       {
@@ -1612,6 +1613,7 @@ test('Greenhouse managed actions retry known yes-no work and onsite choices by e
   assert.ok(aliasActions.every((action) => action.value === 'Yes'));
   assert.ok(aliasActions.every((action) => action.optional === true));
   assert.ok(aliasActions.some((action) => action.text === 'Are you currently eligible to legally work in the United States?'));
+  assert.ok(aliasActions.some((action) => action.text === 'Are you legally authorized to work in the country where the job is located?'));
   assert.ok(aliasActions.some((action) => action.text === 'Will you now or in the future require immigration support or sponsorship from Postman?'));
   assert.ok(aliasActions.some((action) => action.text === 'Are you able to work onsite in our San Francisco office 5 days a week?'));
   assert.equal(aliasActions.some((action) => action.text === 'Are you able to work onsite four days a week?'), false);

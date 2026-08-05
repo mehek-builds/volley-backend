@@ -19,6 +19,7 @@ import { resumeSafeTargetRole } from '../engine/resumePolicy';
 import {
   applyApplicationReviewEdit,
   deriveEditedTerms,
+  mergeSubmittedApplicationReviewQuestions,
   normalizeApplicationReviewQuestions,
   readApplicationReview,
   type ApplicationReviewQuestion,
@@ -691,7 +692,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         sensitiveProfile,
         typeof stored.jd_text === 'string' ? stored.jd_text : undefined,
       );
-      const normalizedSubmittedQuestions = normalizeApplicationReviewQuestions(submittedQuestions);
+      const normalizedSubmittedQuestions = mergeSubmittedApplicationReviewQuestions(current.questions, submittedQuestions);
       if (normalizedSubmittedQuestions.some((question) => question.required && !question.answer.trim())) {
         return reply.status(422).send({ error: 'Answer every required question before submitting.' });
       }
