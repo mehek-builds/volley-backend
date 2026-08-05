@@ -881,12 +881,20 @@ test('Greenhouse Databricks academic and reviewed question packet stays inside t
     portfolioUrl: 'https://github.com/mehek-builds',
     resume: Buffer.from('pdf'),
     resumeName: 'Mehek_Mandal_Product_Management_Intern_Resume.pdf',
+    eeoPrefs: {
+      gender: 'Female',
+      sexual_orientation: 'Heterosexual',
+      race: 'White',
+      veteran_status: 'Decline to self-identify',
+      disability_status: 'Decline to self-identify',
+    },
     questions: [
       { question: 'LinkedIn Profile', answer: 'https://www.linkedin.com/in/mehekmandal/' },
       { question: 'Website', answer: 'https://github.com/mehek-builds' },
       { question: 'How did you hear about this job?', answer: 'Company website' },
       { question: 'Are you legally authorized to work in the country in which you are applying?', answer: 'Yes' },
       { question: 'Do you now or will you in the future need sponsorship for employment visa status', answer: 'Yes' },
+      { question: 'Gender', answer: 'Female' },
       {
         question: "Please choose the single location that you're the most interested in, and we will discuss more with you as you move through the process.",
         answer: 'San Francisco, California',
@@ -897,11 +905,26 @@ test('Greenhouse Databricks academic and reviewed question packet stays inside t
         question: 'Do you currently or have you previously worked for Databricks in the past?',
         answer: "I have not worked for Databricks before, and I don't currently work there.",
       },
+      {
+        question: 'Please confirm whether any of the below applies to you. Select all that apply. Note: This information will only be used to ensure compliance with U.S. sanctions and export controls.',
+        answer: 'None of the above',
+      },
+      {
+        question: 'If you selected a response to the prior question other than none of the above, please confirm whether any of the following also applies to you. Select all that apply.',
+        answer: 'Not applicable (i.e., I selected none of the above for the prior question)',
+      },
     ],
   }, true);
 
   assert.ok(actions.some((action) => action.label?.startsWith('education_degree_combo_label:')));
   assert.ok(actions.some((action) => action.label?.startsWith('question_combo_label:')));
+  assert.ok(actions.some((action) => action.label?.startsWith('question_checkbox:')));
+  assert.equal(
+    actions.some((action) =>
+      action.label?.startsWith('question_select:')
+      && action.selector?.includes('What is your GPA?')),
+    false,
+  );
   assert.ok(actions.every((action) => (action.selector?.length ?? 0) <= 500));
   assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
 });
@@ -1048,15 +1071,11 @@ test('Greenhouse managed actions include explicitly saved demographic choices', 
       .map((action) => [action.text, action.value]),
     [
       ['What gender identity do you most closely identify with?', 'Female'],
-      ['What is your gender?', 'Female'],
       ['Are you a person of transgender experience?', 'Decline to self-identify'],
       ['What sexual orientation do you most closely identify with?', 'Heterosexual'],
       ['Do you live with a disability (as outlined by the ADA)?', 'Decline to self-identify'],
-      ['Disability status', 'Decline to self-identify'],
       ['Are you a veteran/have you served in the military?', 'Decline to self-identify'],
-      ['Veteran status', 'Decline to self-identify'],
       ['Please select up to 2 ethnicities that you most closely identify with.', 'White'],
-      ['Please select your racial/ethnic background', 'White'],
     ],
   );
 });
