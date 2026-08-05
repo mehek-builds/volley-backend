@@ -753,6 +753,53 @@ function xpathLiteral(value: string): string {
   return `concat(${value.split("'").map((part) => `'${part}'`).join(`, "'", `)})`;
 }
 
+function ashbyQuestionTextVariants(label: string): string[] {
+  const normalized = label.replace(/\s+/g, ' ').trim();
+  const variants = [normalized];
+  const prompt = normalized.match(/^(.{12,120}?[?!])(?:\s|$)/)?.[1]?.trim();
+  const prefix = normalized.length > 120 ? normalized.slice(0, 120).replace(/\s+\S*$/, '').trim() : undefined;
+  if (prompt || prefix) variants.push(prompt ?? prefix!);
+  return [...new Set(variants.filter(Boolean))];
+}
+
+function ashbyQuestionTextInputSelectors(label: string): string[] {
+  const selectorGroups = ashbyQuestionTextVariants(label).map(questionTextInputSelectors);
+  const selectors: string[] = [];
+  if (selectorGroups.length > 1) {
+    const variantPriority: Array<[number, number]> = [
+      [0, 0],
+      [1, 0],
+      [0, 1],
+      [1, 1],
+      [0, 7],
+      [1, 7],
+      [1, 8],
+      [1, 9],
+      [1, 4],
+    ];
+    for (const [groupIndex, selectorIndex] of variantPriority) {
+      const selector = selectorGroups[groupIndex]?.[selectorIndex];
+      if (selector && !selectors.includes(selector)) selectors.push(selector);
+      if (selectors.length >= ASHBY_QUESTION_TEXT_SELECTOR_LIMIT) break;
+    }
+    return selectors;
+  }
+  const priority = [0, 1, 7, 4, 8, 9, 2, 3, 5, 6];
+  for (const index of priority) {
+    if (selectors.length >= ASHBY_QUESTION_TEXT_SELECTOR_LIMIT) break;
+    let pushed = false;
+    for (const group of selectorGroups) {
+      const selector = group[index];
+      if (!selector || selectors.includes(selector)) continue;
+      selectors.push(selector);
+      pushed = true;
+      if (selectors.length >= ASHBY_QUESTION_TEXT_SELECTOR_LIMIT) break;
+    }
+    if (!pushed) break;
+  }
+  return selectors;
+}
+
 function selectValuesForAnswer(answer: string): string[] {
   const trimmed = answer.trim();
   if (!trimmed) return [];
@@ -983,7 +1030,7 @@ function pushAshbyQuestionTextFallbackActions(
   answer: string,
   labelPrefix: string,
 ) {
-  for (const [index, selector] of questionTextInputSelectors(questionText).slice(0, ASHBY_QUESTION_TEXT_SELECTOR_LIMIT).entries()) {
+  for (const [index, selector] of ashbyQuestionTextInputSelectors(questionText).entries()) {
     managedFill(actions, selector, answer, `${labelPrefix}_text:${index}:${questionText.slice(0, 80)}`);
   }
 }
