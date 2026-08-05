@@ -486,9 +486,36 @@ async function discoverAndResolveQuestions(
 }
 
 async function loadApplicationProfileLike(userId: string): Promise<ApplicationProfileLike> {
-  const [appRow] = await db.select().from(application_profile).where(eq(application_profile.user_id, userId)).limit(1);
+  const [[appRow], [profileRow]] = await Promise.all([
+    db.select().from(application_profile).where(eq(application_profile.user_id, userId)).limit(1),
+    db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1),
+  ]);
   const app = appRow ? (decryptRow(appRow) as Record<string, unknown>) : {};
+  const parsed = (profileRow?.parsed_json && typeof profileRow.parsed_json === 'object'
+    ? profileRow.parsed_json
+    : {}) as Record<string, unknown>;
+  const base = (profileRow?.base_resume_json && typeof profileRow.base_resume_json === 'object'
+    ? profileRow.base_resume_json
+    : {}) as Record<string, unknown>;
   const str = (key: string): string | undefined => (typeof app[key] === 'string' ? (app[key] as string) : undefined);
+  const academicStr = (key: string): string | undefined => {
+    const baseValue = base[key];
+    if (typeof baseValue === 'string' && baseValue.trim()) return baseValue;
+    const parsedValue = parsed[key];
+    return typeof parsedValue === 'string' && parsedValue.trim() ? parsedValue : undefined;
+  };
+  const academicNum = (key: string): number | undefined => {
+    const baseValue = base[key];
+    if (typeof baseValue === 'number' && baseValue > 0) return baseValue;
+    const parsedValue = parsed[key];
+    return typeof parsedValue === 'number' && parsedValue > 0 ? parsedValue : undefined;
+  };
+  const academicBoolean = (key: string): boolean | undefined => {
+    const baseValue = base[key];
+    if (typeof baseValue === 'boolean') return baseValue;
+    const parsedValue = parsed[key];
+    return typeof parsedValue === 'boolean' ? parsedValue : undefined;
+  };
   return {
     phone: str('phone'),
     address_city: str('address_city'),
@@ -501,6 +528,9 @@ async function loadApplicationProfileLike(userId: string): Promise<ApplicationPr
     date_of_birth: str('date_of_birth'),
     availability_date: str('availability_date'),
     availability_term: str('availability_term'),
+    grad_date: academicStr('grad_date'),
+    grad_year: academicNum('grad_year'),
+    currently_enrolled: academicBoolean('currently_enrolled'),
     desired_salary: str('desired_salary'),
     desired_salary_currency: str('desired_salary_currency'),
     gpa: str('gpa'),

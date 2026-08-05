@@ -35,6 +35,9 @@ export type ApplicationProfileLike = StoredSalaryProfile & {
   date_of_birth?: string;
   availability_date?: string;
   availability_term?: string;
+  grad_date?: string;
+  grad_year?: number;
+  currently_enrolled?: boolean;
   gpa?: string;
   gpa_scale?: string;
   major?: string;
@@ -73,6 +76,9 @@ export function isLocationCommitmentQuestion(label: string): boolean {
 
 export const REFERRAL_QUESTION = /how did you hear|referral source|hear about (this|us|the)|source of/i;
 export const START_DATE_QUESTION = /availab|start(ing)?\s+date|date.*you.*start|when can you start|earliest.*start/i;
+export const GRADUATION_DATE_QUESTION =
+  /\b(?:expected\s+)?graduat(?:ion|e)\s+(?:date|year)\b|\b(?:date|year)\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b|\bexpected\s+grad(?:uation)?\b|\bclass\s+of\b/i;
+const MIXED_ENROLLMENT_GRADUATION_QUESTION = /\bcurrently\s+enrolled\b|\bdegree\s+program\b/i;
 const TERM_QUESTION =
   /(length|duration|term)\b.*\bavailab|availab.*\b(length|duration|term)\b|how long.*(available|intern|stay|commit)|(weeks|months).*\b(available|internship|commit)|\bterm\s*\/?\s*length/i;
 const SALARY_QUESTION = /salary|compensat|desired pay|expected pay|pay expectation/i;
@@ -90,7 +96,7 @@ const NATIONALITY_TO_COUNTRY: Record<string, string> = {
 export type ProfileKey =
   | 'phone' | 'address_city' | 'address_state' | 'address_country'
   | 'linkedin_url' | 'github_url' | 'portfolio_url' | 'citizenship' | 'date_of_birth'
-  | 'availability_date' | 'availability_term' | 'desired_salary'
+  | 'availability_date' | 'availability_term' | 'graduation_date' | 'desired_salary'
   | 'gpa' | 'gpa_scale' | 'major' | 'referral_source_default';
 
 // Ported verbatim from generic.ts's classifyField (see that file for the full rationale on
@@ -110,6 +116,7 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
   if (SALARY_QUESTION.test(l)) return 'desired_salary';
   if (DOB_QUESTION.test(l)) return 'date_of_birth';
   if (TERM_QUESTION.test(l)) return 'availability_term';
+  if (GRADUATION_DATE_QUESTION.test(l)) return 'graduation_date';
   if (START_DATE_QUESTION.test(l)) return 'availability_date';
 
   if (/linkedin/i.test(l)) return 'linkedin_url';
@@ -163,6 +170,43 @@ export function fitToBudget(text: string, maxLen: number): string | null {
   for (let m = re.exec(slice); m; m = re.exec(slice)) lastEnd = m.index;
   if (lastEnd < 40) return null;
   return slice.slice(0, lastEnd + 1).trim();
+}
+
+const MONTH_TO_NUMBER: Record<string, string> = {
+  jan: '01', january: '01',
+  feb: '02', february: '02',
+  mar: '03', march: '03',
+  apr: '04', april: '04',
+  may: '05',
+  jun: '06', june: '06',
+  jul: '07', july: '07',
+  aug: '08', august: '08',
+  sep: '09', sept: '09', september: '09',
+  oct: '10', october: '10',
+  nov: '11', november: '11',
+  dec: '12', december: '12',
+};
+
+export function graduationDateAnswer(
+  gradDate: string | undefined,
+  gradYear: number | undefined,
+  inputType: string | undefined,
+): string | null {
+  const text = gradDate?.trim() || (gradYear ? String(gradYear) : '');
+  if (!text) return null;
+  if (inputType !== 'date') return text;
+  const preferredYear = gradYear && gradYear > 0 ? String(gradYear) : undefined;
+  const isoMatches = [...text.matchAll(/\b((?:19|20)\d{2})-(\d{2})(?:-\d{2})?\b/g)];
+  const iso = isoMatches.find((match) => match[1] === preferredYear) ?? isoMatches.at(-1);
+  if (iso) return `${iso[1]}-${iso[2]}-01`;
+  const monthYearMatches = [...text.matchAll(/\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b[^0-9]{0,20}\b((?:19|20)\d{2})\b/gi)];
+  const monthYear = monthYearMatches.find((match) => match[2] === preferredYear) ?? monthYearMatches.at(-1);
+  if (monthYear) return `${monthYear[2]}-${MONTH_TO_NUMBER[monthYear[1].toLowerCase()]}-01`;
+  const year = preferredYear ?? text.match(/\b(?:19|20)\d{2}\b/g)?.at(-1) ?? '';
+  if (!year) return null;
+  const monthToken = text.match(/\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i)?.[0].toLowerCase();
+  const month = monthToken ? MONTH_TO_NUMBER[monthToken] : '05';
+  return `${year}-${month}-01`;
 }
 
 export type DiscoveredQuestion = {
@@ -374,6 +418,13 @@ export function resolveKnownAnswer(
       return ap.availability_term ? { value: ap.availability_term } : null;
     case 'availability_date':
       return ap.availability_date ? { value: ap.availability_date } : null;
+    case 'graduation_date': {
+      if (MIXED_ENROLLMENT_GRADUATION_QUESTION.test(label) && ap.currently_enrolled !== true) {
+        return { skipReason: `enrollment/graduation date question left for you: "${label.slice(0, 60)}"` };
+      }
+      const value = graduationDateAnswer(ap.grad_date, ap.grad_year, inputType);
+      return value ? { value } : null;
+    }
     case 'gpa':
       return ap.gpa ? { value: ap.gpa } : null;
     case 'gpa_scale':
