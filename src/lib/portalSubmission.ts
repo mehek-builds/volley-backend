@@ -506,7 +506,10 @@ function greenhouseDegreeAliases(degree: string | undefined): string[] {
     ? 'Bachelor of Science (B.S.)'
     : undefined;
   const bachelorSciencePlain = bachelorScience ? 'Bachelor of Science' : undefined;
-  return uniqueDefined([level, asciiLevel, curlyLevel, bachelorScience, bachelorSciencePlain]);
+  const bachelorPlain = level === 'Bachelor\'s Degree' ? 'Bachelor\'s' : undefined;
+  const bachelor = level === 'Bachelor\'s Degree' ? 'Bachelor' : undefined;
+  const bs = bachelorScience ? 'B.S.' : undefined;
+  return uniqueDefined([level, asciiLevel, curlyLevel, bachelorScience, bachelorSciencePlain, bachelorPlain, bachelor, bs]);
 }
 
 function greenhouseDisciplineAliases(packet: SubmissionPacket): string[] {
@@ -521,11 +524,29 @@ function greenhouseDisciplineAliases(packet: SubmissionPacket): string[] {
 }
 
 function pushGreenhouseEducationComboboxActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
-  for (const [index, value] of greenhouseSchoolAliases(packet.school).entries()) {
+  const schoolAliases = greenhouseSchoolAliases(packet.school);
+  for (const [index, value] of schoolAliases.entries()) {
     managedGreenhouseReactSelectFill(actions, 'school--0', value, `education_school_combo:${index}`);
   }
-  for (const [index, value] of greenhouseDegreeAliases(packet.degree).entries()) {
+  for (const [index, value] of schoolAliases.slice(0, 1).entries()) {
+    managedComboboxFill(
+      actions,
+      '.select__container:has(> label:has-text("School")) input[role="combobox"]',
+      value,
+      `education_school_combo_label:${index}`,
+    );
+  }
+  const degreeAliases = greenhouseDegreeAliases(packet.degree);
+  for (const [index, value] of degreeAliases.entries()) {
     managedGreenhouseReactSelectFill(actions, 'degree--0', value, `education_degree_combo:${index}`);
+  }
+  for (const [index, value] of degreeAliases.slice(0, 2).entries()) {
+    managedComboboxFill(
+      actions,
+      '.select__container:has(> label:has-text("Degree")) input[role="combobox"]',
+      value,
+      `education_degree_combo_label:${index}`,
+    );
   }
   for (const [index, value] of greenhouseDisciplineAliases(packet).entries()) {
     managedGreenhouseReactSelectFill(actions, 'discipline--0', value, `education_discipline_combo:${index}`);
@@ -674,10 +695,20 @@ function greenhouseQuestionSelectSelectors(label: string): string[] {
   ];
 }
 
+function greenhouseQuestionComboboxSelectors(label: string): string[] {
+  const text = cssString(label);
+  return [
+    `.select__container:has(> label:has-text("${text}")) input[role="combobox"]`,
+    `.field-wrapper:has(label:has-text("${text}")) input[role="combobox"]`,
+    `div:has(> label:has-text("${text}")) input[role="combobox"]`,
+  ];
+}
+
 const GREENHOUSE_DEMOGRAPHIC_DATA_CONSENT_CHECKBOX_SELECTOR =
   'input[type="checkbox"][name="gdpr_demographic_data_consent_given"], input[type="checkbox"][id^="gdpr_demographic_data_consent_given"], label:has-text("By checking this box, I consent") input[type="checkbox"]';
 const GREENHOUSE_ALIAS_SELECT_SELECTOR_LIMIT = 1;
 const QUESTION_SELECT_SELECTOR_LIMIT = 1;
+const QUESTION_COMBOBOX_SELECTOR_LIMIT = 1;
 const CONFIRM_AFTER_FILL_FIELDS = new Set(['school', 'degree']);
 
 function questionSelectSelectors(label: string): string[] {
@@ -792,6 +823,23 @@ function pushGreenhouseQuestionComboboxActions(
   if (!isGreenhouseReactSelectQuestion(questionText)) return;
   for (const [index, value] of greenhouseComboboxValuesForQuestion(questionText, answer).entries()) {
     managedComboboxFill(actions, selector, value, `${labelPrefix}_combo:${index}:${questionText.slice(0, 80)}`);
+  }
+}
+
+function pushGreenhouseQuestionComboboxLabelActions(
+  actions: ManagedBrowserAction[],
+  questionText: string,
+  answer: string,
+  labelPrefix: string,
+) {
+  if (!isGreenhouseReactSelectQuestion(questionText)) return;
+  let index = 0;
+  const values = greenhouseComboboxValuesForQuestion(questionText, answer).slice(0, 2);
+  for (const selector of greenhouseQuestionComboboxSelectors(questionText).slice(0, QUESTION_COMBOBOX_SELECTOR_LIMIT)) {
+    for (const value of values) {
+      managedComboboxFill(actions, selector, value, `${labelPrefix}_combo_label:${index}:${questionText.slice(0, 80)}`);
+      index += 1;
+    }
   }
 }
 
@@ -1480,6 +1528,7 @@ export function buildManagedPortalActions(
     }
     pushScopedQuestionChoiceActions(actions, questionText, item.answer, 'question');
     if (portalFamily(portal) === 'greenhouse') {
+      pushGreenhouseQuestionComboboxLabelActions(actions, questionText, item.answer, 'question');
       pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');
     }
   }
