@@ -7,6 +7,7 @@ import {
   unsupportedPortalFallbackRecipient,
 } from './unsupportedPortalEmailFallback';
 import type { SubmissionPacket } from './portalSubmission';
+import { coverLetterFileNameForRole, resumeFileNameForRole } from './resumeFileName';
 
 function withEnv(values: Record<string, string | undefined>, run: () => void | Promise<void>) {
   const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
@@ -80,15 +81,20 @@ test('recipient can be configured with a fallback env var', async () => {
 
 test('application email uses applicant reply-to and attaches packet PDFs', async () => {
   await withEnv({ RESEND_FROM: 'Litos <apply@litos.example>' }, () => {
+    const role = 'Hardware Product Management Intern';
     const email = buildUnsupportedPortalApplicationEmail({
-      application: { id: 'app-1', job_context: { company: 'Acme' }, spec: {} },
-      review,
-      packet,
+      application: { id: 'app-1', job_context: { company: 'Acme', role }, spec: {} },
+      review: { ...review, role },
+      packet: {
+        ...packet,
+        resumeName: resumeFileNameForRole(packet.fullName, role),
+        coverLetterName: coverLetterFileNameForRole(packet.fullName, role),
+      },
       to: 'jobs@example.com',
     });
     assert.equal(email.reply_to, 'taylor@example.com');
     assert.equal(email.to[0], 'jobs@example.com');
-    assert.match(email.subject, /Backend Engineer/);
+    assert.match(email.subject, /Hardware Product Management Intern/);
     assert.match(email.subject, /Acme/);
     assert.match(email.html ?? '', /<p>/);
     assert.match(email.html ?? '', /not supported for direct Litos submission yet/);
@@ -96,8 +102,8 @@ test('application email uses applicant reply-to and attaches packet PDFs', async
     assert.doesNotMatch(email.html ?? '', /application packet/);
     assert.equal(email.attachments?.length, 2);
     assert.deepEqual(email.attachments?.map((item) => item.filename), [
-      'Taylor_Applicant_Resume.pdf',
-      'Taylor_Applicant_Cover_Letter.pdf',
+      'Taylor_Applicant_Hardware_Product_Management_Intern_resume.pdf',
+      'Taylor_Applicant_Hardware_Product_Management_Intern_cover_letter.pdf',
     ]);
     assert.equal(email.attachments?.[0]?.content, Buffer.from('%PDF resume').toString('base64'));
     assert.equal(email.attachments?.[0]?.content_type, 'application/pdf');

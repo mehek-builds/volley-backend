@@ -25,6 +25,17 @@ test('resume and cover letter filenames ignore middle names and sanitize role pu
   );
 });
 
+test('role-based filenames fall back when candidate or role data is missing', () => {
+  assert.equal(
+    resumeFileNameForRole('', ''),
+    'Candidate_Role_resume.pdf',
+  );
+  assert.equal(
+    coverLetterFileNameForRole(undefined, null),
+    'Candidate_Role_cover_letter.pdf',
+  );
+});
+
 test('download filename is safe for a quoted content disposition header', () => {
   assert.equal(
     contentDispositionFileName('Mehek_Mandal_AI/ML Engineer Resume.pdf'),
