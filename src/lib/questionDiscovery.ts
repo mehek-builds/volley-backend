@@ -98,6 +98,22 @@ export function isRefusedQuestion(label: string): boolean {
   return NEVER_FILL_PATTERNS.some((re) => re.test(l)) || WORK_ELIGIBILITY_QUESTION.test(l) || EEO_QUESTION.test(l);
 }
 
+function comparableAnswer(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+export function sensitiveQuestionRequiresAttention(
+  label: string,
+  answer: string,
+  inputType: string,
+  ap: ApplicationProfileLike,
+  jdText: string | undefined,
+): boolean {
+  if (!isRefusedQuestion(label)) return false;
+  const known = resolveKnownAnswer(label, inputType, ap, jdText);
+  return !(known && 'value' in known && comparableAnswer(known.value) === comparableAnswer(answer));
+}
+
 const RESIDENCE_QUESTION =
   /country of residence|which country|country you.{0,20}(based|resid|work from|located)|where are you based|based in which country|current country|country.{0,20}(residing|residence)|\bcountry\b/i;
 const LOCATION_COMMITMENT_STEM = /\b(?:are|can|could|do|did|will|would|should|may|might|have)\s+you\b/i;
