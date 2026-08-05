@@ -134,6 +134,18 @@ export function questionRequiresHumanAttention(question: { question: string; ans
   return false;
 }
 
+export function refreshKnownQuestionAnswers<T extends { question: string; answer: string }>(
+  questions: readonly T[],
+  ap: ApplicationProfileLike,
+  jdText: string | undefined,
+): T[] {
+  return questions.map((question) => {
+    const label = normalizeReviewQuestionLabel(question.question);
+    const known = label ? resolveKnownAnswer(label, 'text', ap, jdText) : null;
+    return known && 'value' in known ? { ...question, answer: known.value } : question;
+  });
+}
+
 const RESIDENCE_QUESTION =
   /country of residence|which country|country you.{0,20}(based|resid|work from|located)|where are you based|based in which country|current country|country.{0,20}(residing|residence)|\bcountry\b/i;
 const LOCATION_COMMITMENT_STEM = /\b(?:are|can|could|do|did|will|would|should|may|might|have)\s+you\b/i;

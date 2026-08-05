@@ -11,6 +11,7 @@ import {
   normalizeReviewQuestionLabel,
   normalizeStoredPortalQuestions,
   questionRequiresHumanAttention,
+  refreshKnownQuestionAnswers,
   REVIEW_QUESTION_TEXT_MAX_LENGTH,
   resolveKnownAnswer,
   sensitiveQuestionRequiresAttention,
@@ -208,6 +209,27 @@ test('profile-aware submit gate accepts exact stored work answers only', () => {
     sensitiveQuestionRequiresAttention('social security number', '123', 'text', { work_authorized: true }, undefined),
     true,
   );
+});
+
+test('send-time refresh replaces stale EEO prose with stored profile answers', () => {
+  const questions = refreshKnownQuestionAnswers([
+    {
+      question: 'are you a person of transgender experience? * 431',
+      answer: "I don't think that's relevant to my qualifications for this role.",
+    },
+    {
+      question: 'will you now or in the future require immigration sponsorship?',
+      answer: '',
+    },
+    {
+      question: 'briefly describe your experience with ads review',
+      answer: 'Reviewed policy signals in a fintech environment.',
+    },
+  ], { needs_sponsorship: true, eeo_prefs: null }, 'This role is based in New York.');
+  assert.equal(questions[0].answer, 'Decline to self-identify');
+  assert.equal(questions[1].answer, 'Yes');
+  assert.equal(questions[2].answer, 'Reviewed policy signals in a fintech environment.');
+  assert.equal(questionRequiresHumanAttention(questions[0]), false);
 });
 
 test('never answers SSN or driver license fields', () => {
