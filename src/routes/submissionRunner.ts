@@ -284,16 +284,16 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     ? profileRow[0].base_resume_json
     : {}) as Record<string, unknown>;
   const academicStr = (key: string): string | undefined => {
-    const baseValue = base[key];
-    if (typeof baseValue === 'string' && baseValue.trim()) return baseValue.trim();
     const parsedValue = parsed[key];
-    return typeof parsedValue === 'string' && parsedValue.trim() ? parsedValue.trim() : undefined;
+    if (typeof parsedValue === 'string' && parsedValue.trim()) return parsedValue.trim();
+    const baseValue = base[key];
+    return typeof baseValue === 'string' && baseValue.trim() ? baseValue.trim() : undefined;
   };
   const academicNum = (key: string): number | undefined => {
-    const baseValue = base[key];
-    if (typeof baseValue === 'number' && baseValue > 0) return baseValue;
     const parsedValue = parsed[key];
-    return typeof parsedValue === 'number' && parsedValue > 0 ? parsedValue : undefined;
+    if (typeof parsedValue === 'number' && parsedValue > 0) return parsedValue;
+    const baseValue = base[key];
+    return typeof baseValue === 'number' && baseValue > 0 ? baseValue : undefined;
   };
   const graduationDate = academicStr('grad_date');
   const graduationYear = academicNum('grad_year');
@@ -560,22 +560,22 @@ async function loadApplicationProfileLike(userId: string): Promise<ApplicationPr
   const str = (key: string): string | undefined => (typeof app[key] === 'string' ? (app[key] as string) : undefined);
   const appBoolean = (key: string): boolean | undefined => (typeof app[key] === 'boolean' ? (app[key] as boolean) : undefined);
   const academicStr = (key: string): string | undefined => {
-    const baseValue = base[key];
-    if (typeof baseValue === 'string' && baseValue.trim()) return baseValue;
     const parsedValue = parsed[key];
-    return typeof parsedValue === 'string' && parsedValue.trim() ? parsedValue : undefined;
+    if (typeof parsedValue === 'string' && parsedValue.trim()) return parsedValue;
+    const baseValue = base[key];
+    return typeof baseValue === 'string' && baseValue.trim() ? baseValue : undefined;
   };
   const academicNum = (key: string): number | undefined => {
-    const baseValue = base[key];
-    if (typeof baseValue === 'number' && baseValue > 0) return baseValue;
     const parsedValue = parsed[key];
-    return typeof parsedValue === 'number' && parsedValue > 0 ? parsedValue : undefined;
+    if (typeof parsedValue === 'number' && parsedValue > 0) return parsedValue;
+    const baseValue = base[key];
+    return typeof baseValue === 'number' && baseValue > 0 ? baseValue : undefined;
   };
   const academicBoolean = (key: string): boolean | undefined => {
-    const baseValue = base[key];
-    if (typeof baseValue === 'boolean') return baseValue;
     const parsedValue = parsed[key];
-    return typeof parsedValue === 'boolean' ? parsedValue : undefined;
+    if (typeof parsedValue === 'boolean') return parsedValue;
+    const baseValue = base[key];
+    return typeof baseValue === 'boolean' ? baseValue : undefined;
   };
   return {
     phone: str('phone'),
@@ -601,6 +601,9 @@ async function loadApplicationProfileLike(userId: string): Promise<ApplicationPr
     gpa: str('gpa'),
     gpa_scale: str('gpa_scale'),
     major: str('major'),
+    eeo_prefs: app.eeo_prefs && typeof app.eeo_prefs === 'object'
+      ? app.eeo_prefs as Record<string, string>
+      : undefined,
     referral_source_default: str('referral_source_default'),
   };
 }

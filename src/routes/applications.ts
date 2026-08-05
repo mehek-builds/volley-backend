@@ -31,7 +31,7 @@ import { normalizeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import { requireAuth } from '../middleware/auth';
 import { declaredSkillsList } from './profile';
 import { buildPacket, processSubmissionApplication } from './submissionRunner';
-import { isRefusedQuestion } from '../lib/questionDiscovery';
+import { questionRequiresHumanAttention } from '../lib/questionDiscovery';
 import { resumeEditDisposition, submitRequestDisposition } from '../lib/submissionSafety';
 import { canonicalSupportedPortalUrl, detectPortal, isPortalSupported } from '../lib/portalSubmission';
 import { dailySubmissionCap, withinDailyCap } from '../lib/submissionQueue';
@@ -363,7 +363,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           .from(profiles).where(eq(profiles.user_id, userId)).limit(1);
         const educationIssues = packetEducationDrift(row.spec, profileRows[0]?.parsed_json);
         if (educationIssues.length > 0) return { kind: 'education_drift' as const, issues: educationIssues };
-        const sensitive = current.questions.find((question) => isRefusedQuestion(question.question));
+        const sensitive = current.questions.find((question) => questionRequiresHumanAttention(question));
         if (sensitive) return { kind: 'sensitive_question' as const, question: sensitive.question };
         if (!withinDailyCap(countRows[0]?.total ?? 0, dailySubmissionCap())) return { kind: 'cap' as const };
         const now = new Date().toISOString();
@@ -654,7 +654,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           issues: preSendIssues,
         });
       }
-      const sensitive = parsed.data.questions.find((question) => isRefusedQuestion(question.question));
+      const sensitive = parsed.data.questions.find((question) => questionRequiresHumanAttention(question));
       if (sensitive) {
         return reply.status(422).send({ error: `Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}` });
       }
@@ -886,7 +886,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (current.questions.some((question) => question.required && !question.answer.trim())) {
         approvalIssues.push('A required application answer is still blank.');
       }
-      const sensitive = current.questions.find((question) => isRefusedQuestion(question.question));
+      const sensitive = current.questions.find((question) => questionRequiresHumanAttention(question));
       if (sensitive) {
         approvalIssues.push(`Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}`);
       }

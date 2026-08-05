@@ -45,6 +45,7 @@ export type ApplicationProfileLike = StoredSalaryProfile & {
   gpa?: string;
   gpa_scale?: string;
   major?: string;
+  eeo_prefs?: Record<string, string> | null;
   referral_source_default?: string;
 };
 
@@ -96,6 +97,15 @@ function workEligibilityAnswer(
 export function isRefusedQuestion(label: string): boolean {
   const l = label ?? '';
   return NEVER_FILL_PATTERNS.some((re) => re.test(l)) || WORK_ELIGIBILITY_QUESTION.test(l) || EEO_QUESTION.test(l);
+}
+
+export function questionRequiresHumanAttention(question: { question: string; answer?: string }): boolean {
+  const label = question.question ?? '';
+  const answer = question.answer?.trim() ?? '';
+  if (NEVER_FILL_PATTERNS.some((re) => re.test(label))) return true;
+  if (WORK_ELIGIBILITY_QUESTION.test(label)) return !/^(yes|no)$/i.test(answer);
+  if (EEO_QUESTION.test(label)) return answer.length === 0;
+  return false;
 }
 
 const RESIDENCE_QUESTION =
@@ -180,6 +190,18 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
 // EEO / demographics: exact-match-only (Mehek's 2026-07-17 ruling, R-018). Ported verbatim.
 export function eeoAnswer(pref: string | undefined): string {
   return pref && pref.trim() ? pref.trim() : 'Decline to self-identify';
+}
+
+function eeoPreferenceForLabel(label: string, prefs: Record<string, string> | null | undefined): string | undefined {
+  if (!prefs) return undefined;
+  const l = label.toLowerCase();
+  if (/gender|sex\b|transgender/.test(l)) return prefs.gender ?? prefs.sex;
+  if (/hispanic|latino/.test(l)) return prefs.hispanic_ethnicity ?? prefs.hispanic ?? prefs.ethnicity;
+  if (/race|ethnicit/.test(l)) return prefs.race ?? prefs.ethnicity;
+  if (/veteran|military/.test(l)) return prefs.veteran_status ?? prefs.veteran;
+  if (/disab/.test(l)) return prefs.disability_status ?? prefs.disability;
+  if (/sexual orientation/.test(l)) return prefs.sexual_orientation;
+  return undefined;
 }
 
 // Ported from isOpenEndedQuestion (R-033): does the label read like a prompt for prose, not a
@@ -459,6 +481,10 @@ export function resolveKnownAnswer(
 ): { value: string } | { skipReason: string } | null {
   const workEligibility = workEligibilityAnswer(label, ap, jdText);
   if (workEligibility) return workEligibility;
+
+  if (EEO_QUESTION.test(label)) {
+    return { value: eeoAnswer(eeoPreferenceForLabel(label, ap.eeo_prefs)) };
+  }
 
   if (isRefusedQuestion(label)) {
     return WORK_ELIGIBILITY_QUESTION.test(label) ? { skipReason: workEligibilitySkipReason(label) } : null;

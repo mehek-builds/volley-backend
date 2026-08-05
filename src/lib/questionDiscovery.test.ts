@@ -10,6 +10,7 @@ import {
   normalizeDiscoveredLabel,
   normalizeReviewQuestionLabel,
   normalizeStoredPortalQuestions,
+  questionRequiresHumanAttention,
   REVIEW_QUESTION_TEXT_MAX_LENGTH,
   resolveKnownAnswer,
   WORK_ELIGIBILITY_QUESTION,
@@ -84,12 +85,33 @@ test('answers work authorization and sponsorship only from explicit stored conse
   assert.ok(mixed && 'skipReason' in mixed);
 });
 
-test('never answers EEO / demographic questions', () => {
+test('answers EEO / demographic questions with stored preferences or decline', () => {
   const labels = ['what is your gender?', 'are you hispanic or latino?', 'veteran status', 'are you a person of transgender experience?'];
   for (const label of labels) {
     assert.equal(isRefusedQuestion(label), true, label);
     assert.equal(classifyField(label), null, label);
+    assert.deepEqual(resolveKnownAnswer(label, 'text', {}, undefined), { value: 'Decline to self-identify' });
   }
+  assert.deepEqual(
+    resolveKnownAnswer('what is your gender?', 'text', { eeo_prefs: { gender: 'Female' } }, undefined),
+    { value: 'Female' },
+  );
+});
+
+test('send-time sensitive guard allows stored work and EEO answers while blocking identity numbers', () => {
+  assert.equal(
+    questionRequiresHumanAttention({ question: 'are you legally authorized to work in the United States?', answer: 'Yes' }),
+    false,
+  );
+  assert.equal(
+    questionRequiresHumanAttention({ question: 'will you require sponsorship for work authorization?', answer: '' }),
+    true,
+  );
+  assert.equal(
+    questionRequiresHumanAttention({ question: 'gender', answer: 'Decline to self-identify' }),
+    false,
+  );
+  assert.equal(questionRequiresHumanAttention({ question: 'social security number', answer: '123' }), true);
 });
 
 test('never answers SSN or driver license fields', () => {
