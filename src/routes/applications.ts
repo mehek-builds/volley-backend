@@ -14,7 +14,7 @@ import {
   renderResumePdf,
   validateResumeVisualLayout,
 } from '../engine/resumeRender';
-import { validatePdfLayout, validateResumeSpec } from '../engine/resumeValidate';
+import { pruneUngroundedSkills, validatePdfLayout, validateResumeSpec } from '../engine/resumeValidate';
 import { resumeSafeTargetRole } from '../engine/resumePolicy';
 import {
   applyApplicationReviewEdit,
@@ -493,11 +493,14 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       // the unattended routes have to read the profile the same way, or a packet this route just
       // approved could be refused seconds later at submission.
       const education = candidateEducationFromParsedProfile(parsed);
+      const declaredSkills = declaredSkillsList(profileRows[0]?.skills);
+      const grounded = pruneUngroundedSkills(edited, bank, declaredSkills);
+      edited = grounded.spec;
       const validation = validateResumeSpec(
         edited,
         review.jd_text,
         bank,
-        declaredSkillsList(profileRows[0]?.skills),
+        declaredSkills,
         education,
         review.role,
         {
@@ -544,6 +547,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           ...(stored._quality as Record<string, unknown> | undefined),
           atsCoverage: validation.ats_keyword_coverage_pct,
           visualWarnings: visual.warnings,
+          groundingRemoved: grounded.removed,
           layoutOmissions: rendered.omissions,
         },
       };
