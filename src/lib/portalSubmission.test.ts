@@ -1384,7 +1384,7 @@ test('Greenhouse managed actions retry known yes-no work and onsite choices by e
   assert.equal(aliasActions.some((action) => action.text === 'Do you consent to the terms?'), false);
 
   const selectActions = actions.filter((action) => action.label?.startsWith('greenhouse_known_select'));
-  assert.ok(selectActions.length >= aliasActions.length * 2);
+  assert.equal(selectActions.length, aliasActions.length * 4);
   assert.ok(selectActions.every((action) => action.type === 'select'));
   assert.ok(selectActions.every((action) => action.optional === true));
   assert.ok(selectActions.some((action) => action.value === 'Yes'));
@@ -1418,6 +1418,53 @@ test('managed reviewed questions replay stored answers into label-scoped choice 
   assert.ok(selects.some((action) => action.type === 'select' && action.value === 'true'));
   assert.ok(selects.some((action) => action.type === 'select' && action.value === '2028'));
   assert.ok(selects.every((action) => (action.selector?.length ?? Infinity) <= 500));
+});
+
+test('Greenhouse managed actions stay inside the Stratus action budget on Reddit-style packets', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    phone: '+971501234567',
+    city: 'Dubai, United Arab Emirates',
+    country: 'United Arab Emirates',
+    linkedinUrl: 'https://www.linkedin.com/in/mehekmandal',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'Mehek_Mandal_Staff_Product_Manager_Ads_Trust_and_Safety_Resume.pdf',
+    coverLetter: Buffer.from('cover-pdf'),
+    coverLetterName: 'Mehek_Mandal_Staff_Product_Manager_Ads_Trust_and_Safety_Cover_Letter.pdf',
+    eeoPrefs: {
+      gender: "I don't wish to answer",
+      transgender_status: "I don't wish to answer",
+      sexual_orientation: "I don't wish to answer",
+      disability_status: "I don't wish to answer",
+      veteran_status: "I don't wish to answer",
+      race: "I don't wish to answer",
+    },
+    questions: [
+      { question: 'How did you hear about this job?', answer: 'Company website' },
+      {
+        question: 'Briefly describe your experience with Ads Review/Ads Trust and Safety',
+        answer: 'I have built and operated AI product workflows with review loops and operational controls.',
+      },
+      { question: 'Are you currently eligible to legally work in the United States?', answer: 'Yes' },
+      { question: 'Will you now or in the future require immigration support or sponsorship?', answer: 'Yes' },
+      { question: 'I agree to the Candidate Privacy Policy', answer: 'I agree' },
+      { question: 'Are you a person of transgender experience?', answer: "I don't wish to answer" },
+      { question: 'What gender identity do you most closely identify with?', answer: "I don't wish to answer" },
+      { question: 'What sexual orientation do you most closely identify with?', answer: "I don't wish to answer" },
+      { question: 'Do you live with a disability (as outlined by the ADA)?', answer: "I don't wish to answer" },
+      { question: 'Are you a veteran/have you served in the military?', answer: "I don't wish to answer" },
+      { question: 'Please select up to 2 ethnicities that you most closely identify with.', answer: "I don't wish to answer" },
+    ],
+  }, true);
+
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+  assert.ok(actions.some((action) => action.label?.startsWith('greenhouse_known_select:')));
+  assert.ok(actions.some((action) => action.label?.startsWith('greenhouse_demographic_select:')));
+  assert.ok(
+    actions.every((action) => !action.selector || action.selector.length <= 500),
+    'Stratus rejects selector strings longer than 500 characters',
+  );
 });
 
 test('the QA harness routes to the three new controlled adapters, by query param and by path', () => {

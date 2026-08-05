@@ -585,6 +585,9 @@ function greenhouseQuestionSelectSelectors(label: string): string[] {
   ];
 }
 
+const GREENHOUSE_ALIAS_SELECT_SELECTOR_LIMIT = 1;
+const QUESTION_SELECT_SELECTOR_LIMIT = 1;
+
 function questionSelectSelectors(label: string): string[] {
   const text = cssString(label);
   return [
@@ -620,8 +623,10 @@ function pushScopedQuestionChoiceActions(
     timeout: MANAGED_FILL_TIMEOUT_MS,
   });
   let index = 0;
+  const values = selectValuesForAnswer(answer);
   for (const selector of questionSelectSelectors(questionText)) {
-    for (const value of selectValuesForAnswer(answer)) {
+    if (index >= QUESTION_SELECT_SELECTOR_LIMIT * values.length) break;
+    for (const value of values) {
       managedSelect(actions, selector, value, `${labelPrefix}_select:${index}:${questionText.slice(0, 80)}`);
       index += 1;
     }
@@ -693,7 +698,7 @@ function pushGreenhouseKnownQuestionAliases(actions: ManagedBrowserAction[], pac
         optional: true,
         timeout: MANAGED_FILL_TIMEOUT_MS,
       });
-      for (const [index, selectSelector] of greenhouseQuestionSelectSelectors(alias).entries()) {
+      for (const [index, selectSelector] of greenhouseQuestionSelectSelectors(alias).slice(0, GREENHOUSE_ALIAS_SELECT_SELECTOR_LIMIT).entries()) {
         for (const value of selectValuesForAnswer(item.answer.trim())) {
           managedSelect(actions, selectSelector, value, `greenhouse_known_select:${index}:${alias.slice(0, 80)}`);
         }
@@ -760,7 +765,7 @@ function pushGreenhouseDemographicAliases(actions: ManagedBrowserAction[], packe
         optional: true,
         timeout: MANAGED_FILL_TIMEOUT_MS,
       });
-      for (const [index, selectSelector] of greenhouseQuestionSelectSelectors(alias).entries()) {
+      for (const [index, selectSelector] of greenhouseQuestionSelectSelectors(alias).slice(0, GREENHOUSE_ALIAS_SELECT_SELECTOR_LIMIT).entries()) {
         managedSelect(actions, selectSelector, value, `greenhouse_demographic_select:${index}:${alias.slice(0, 80)}`);
       }
     }
