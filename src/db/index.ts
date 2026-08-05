@@ -192,7 +192,7 @@ pool.query = ((...args: unknown[]) => {
         console.warn('[db] pooled endpoint stayed read-only; retrying once on the direct database endpoint');
         const client = await connectDedicatedDatabaseClient();
         try {
-          return await (client.query as (...a: unknown[]) => Promise<unknown>)(...args);
+          return await (client.query.bind(client) as (...a: unknown[]) => Promise<unknown>)(...args);
         } finally {
           await client.end().catch(() => undefined);
         }
