@@ -13,24 +13,73 @@ import {
   WORK_ELIGIBILITY_QUESTION,
 } from './questionDiscovery';
 
-// The single most important guarantee this module carries over from the extension: these
-// questions are NEVER answered, regardless of what the stored profile holds. See R-004 in the
-// extension's generic.ts - a false legal declaration shipped on a live application the one time
-// this was gotten wrong.
-test('never answers work-authorization or sponsorship questions', () => {
-  const labels = [
+// R-004 originally refused every work-eligibility question after one false legal declaration
+// shipped. These are now answerable only from explicit stored booleans, never by inference.
+test('answers work authorization and sponsorship only from explicit stored consent', () => {
+  assert.equal(isRefusedQuestion('are you legally authorized to work in the United States?'), true);
+  assert.equal(classifyField('are you legally authorized to work in the United States?'), null);
+
+  assert.deepEqual(
+    resolveKnownAnswer('are you legally authorized to work in the United States?', 'text', { work_authorized: true }, undefined),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'are you legally authorized to work in the country where the job is located?',
+      'text',
+      { work_authorized: true },
+      'This role is based in San Francisco, California.',
+    ),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('will you now or in the future require sponsorship for employment visa status?', 'text', { needs_sponsorship: true }, undefined),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('do you require visa sponsorship to work in the US?', 'text', { needs_sponsorship: false }, undefined),
+    { value: 'No' },
+  );
+
+  const missingConsent = resolveKnownAnswer(
     'are you legally authorized to work in the United States?',
-    'will you now or in the future require sponsorship for employment visa status?',
-    'do you require visa sponsorship to work in the US?',
-  ];
-  for (const label of labels) {
-    assert.equal(isRefusedQuestion(label), true, label);
-    assert.equal(classifyField(label), null, label);
-    // Never a *value* - it may come back as a skip reason (surfaced to the human, holds
-    // auto-submit) but resolveKnownAnswer must never return `{ value }` for one of these.
-    const resolved = resolveKnownAnswer(label, 'text', { citizenship: 'Indian', address_country: 'UAE' }, undefined);
-    assert.equal(resolved === null || 'skipReason' in resolved, true, label);
-  }
+    'text',
+    { citizenship: 'Indian', address_country: 'UAE' },
+    undefined,
+  );
+  assert.ok(missingConsent && 'skipReason' in missingConsent);
+
+  const nonUs = resolveKnownAnswer(
+    'are you legally authorized to work in Canada?',
+    'text',
+    { work_authorized: true },
+    undefined,
+  );
+  assert.ok(nonUs && 'skipReason' in nonUs);
+
+  const unknownJobCountry = resolveKnownAnswer(
+    'are you legally authorized to work in the country where the job is located?',
+    'text',
+    { work_authorized: true },
+    'This role is based in Toronto.',
+  );
+  assert.ok(unknownJobCountry && 'skipReason' in unknownJobCountry);
+
+  const nonUsSponsorship = resolveKnownAnswer(
+    'will you now or in the future require sponsorship to work in Canada?',
+    'text',
+    { needs_sponsorship: true },
+    undefined,
+  );
+  assert.ok(nonUsSponsorship && 'skipReason' in nonUsSponsorship);
+
+  const mixed = resolveKnownAnswer(
+    'are you authorized to work in the US without sponsorship?',
+    'text',
+    { work_authorized: true, needs_sponsorship: true },
+    undefined,
+  );
+  assert.ok(mixed && 'skipReason' in mixed);
 });
 
 test('never answers EEO / demographic questions', () => {

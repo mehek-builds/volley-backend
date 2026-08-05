@@ -423,12 +423,6 @@ async function discoverAndResolveQuestions(
     const label = normalizeDiscoveredLabel(field.label);
     if (!label || normalizeStoredPortalQuestions([{ question: label, answer: '' }], portal).length === 0) continue;
     if (existingLabels.has(label.toLowerCase())) continue; // already answered by the client or a prior run
-    if (isRefusedQuestion(label)) {
-      attentionReasons.push(WORK_ELIGIBILITY_QUESTION.test(label)
-        ? workEligibilitySkipReason(label)
-        : `sensitive question left for you: "${label.slice(0, 60)}"`);
-      continue; // EEO/SSN/etc: never answered, never surfaced as a field to fill
-    }
 
     const known = resolveKnownAnswer(label, field.inputType, ap, current.jd_text);
     if (known && 'value' in known) {
@@ -438,6 +432,12 @@ async function discoverAndResolveQuestions(
     if (known && 'skipReason' in known) {
       attentionReasons.push(known.skipReason);
       continue;
+    }
+    if (isRefusedQuestion(label)) {
+      attentionReasons.push(WORK_ELIGIBILITY_QUESTION.test(label)
+        ? workEligibilitySkipReason(label)
+        : `sensitive question left for you: "${label.slice(0, 60)}"`);
+      continue; // EEO/SSN/etc: never answered, never surfaced as a field to fill
     }
     if (!isOpenEndedQuestion(label)) continue; // not a known field, not an essay: leave it alone
 
@@ -499,6 +499,7 @@ async function loadApplicationProfileLike(userId: string): Promise<ApplicationPr
     ? profileRow.base_resume_json
     : {}) as Record<string, unknown>;
   const str = (key: string): string | undefined => (typeof app[key] === 'string' ? (app[key] as string) : undefined);
+  const appBoolean = (key: string): boolean | undefined => (typeof app[key] === 'boolean' ? (app[key] as boolean) : undefined);
   const academicStr = (key: string): string | undefined => {
     const baseValue = base[key];
     if (typeof baseValue === 'string' && baseValue.trim()) return baseValue;
@@ -526,6 +527,8 @@ async function loadApplicationProfileLike(userId: string): Promise<ApplicationPr
     github_url: str('github_url'),
     portfolio_url: str('portfolio_url'),
     citizenship: str('citizenship'),
+    work_authorized: appBoolean('work_authorized'),
+    needs_sponsorship: appBoolean('needs_sponsorship'),
     date_of_birth: str('date_of_birth'),
     availability_date: str('availability_date'),
     availability_term: str('availability_term'),

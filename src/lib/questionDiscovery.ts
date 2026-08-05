@@ -32,6 +32,8 @@ export type ApplicationProfileLike = StoredSalaryProfile & {
   github_url?: string;
   portfolio_url?: string;
   citizenship?: string;
+  work_authorized?: boolean;
+  needs_sponsorship?: boolean;
   date_of_birth?: string;
   availability_date?: string;
   availability_term?: string;
@@ -46,18 +48,47 @@ export type ApplicationProfileLike = StoredSalaryProfile & {
 
 const NEVER_FILL_PATTERNS = [/social security/i, /\bssn\b/i, /driver'?s?\s*licen[sc]e/i];
 
-// See WORK_ELIGIBILITY_QUESTION in the extension's generic.ts: work authorization AND sponsorship
-// are location-scoped questions the profile cannot answer with a single global flag (R-004, a
-// false legal declaration shipped on a live application). Litos never answers either, here or
-// client-side - this question is always left for the human.
+// See WORK_ELIGIBILITY_QUESTION in the extension's generic.ts: work authorization and sponsorship
+// used to be globally refused after a false legal declaration shipped once (R-004). They are now
+// answered only from explicit stored booleans, with ambiguous mixed wording still left to the user.
 export const WORK_ELIGIBILITY_QUESTION =
   /authori[sz](?:ed|ation)\s+to\s+work|legally\s+authori[sz]ed|right\s+to\s+work|work\s+authori[sz]|(?:requir\w*|need\w*|visa|immigration|without|employment)\s+(?:\w+\s+){0,3}sponsor|sponsor\w*\s+(?:\w+\s+){0,3}(?:requir\w*|need\w*)/i;
+const WORK_AUTHORIZATION_QUESTION =
+  /authori[sz](?:ed|ation)\s+to\s+work|legally\s+authori[sz]ed|right\s+to\s+work|work\s+authori[sz]/i;
+const SPONSORSHIP_QUESTION =
+  /(?:requir\w*|need\w*|visa|immigration|without|employment)\s+(?:\w+\s+){0,3}sponsor|sponsor\w*\s+(?:\w+\s+){0,3}(?:requir\w*|need\w*)/i;
+const NON_US_WORK_SCOPE =
+  /\b(canada|canadian|united kingdom|uk|britain|british|england|european union|eu|australia|australian|india|indian|united arab emirates|uae|dubai|singapore|germany|france|ireland|netherlands|japan|korea|china)\b/i;
+const JOB_LOCATION_SCOPE = /country\s+(?:where|in which)\s+the\s+job\s+is\s+located|country\s+where\s+the\s+role\s+is\s+located|where\s+the\s+job\s+is\s+located/i;
+const JD_US_SCOPE =
+  /\b(united states|u\.s\.|usa|remote\s*\(us\)|san francisco|san mateo|california|new york|austin|texas|washington|seattle|boston|massachusetts|chicago|illinois)\b/i;
 
 export const EEO_QUESTION =
   /transgender|\bgender\b|what is your sex\b|race|ethnicit|hispanic|latino|veteran|military|disab|sexual orientation|communities|identify with|current age|what is your age|age range|how old are you|\bage group\b/i;
 
 export function workEligibilitySkipReason(label: string): string {
   return `work-eligibility question left for you: "${label.slice(0, 60)}"`;
+}
+
+function workEligibilityAnswer(
+  label: string,
+  ap: ApplicationProfileLike,
+  jdText: string | undefined,
+): { value: string } | { skipReason: string } | null {
+  const asksAuthorization = WORK_AUTHORIZATION_QUESTION.test(label);
+  const asksSponsorship = SPONSORSHIP_QUESTION.test(label);
+  if (!asksAuthorization && !asksSponsorship) return null;
+  if (asksAuthorization && asksSponsorship) return { skipReason: workEligibilitySkipReason(label) };
+  if ((asksAuthorization || asksSponsorship) && (NON_US_WORK_SCOPE.test(label) || (JOB_LOCATION_SCOPE.test(label) && !JD_US_SCOPE.test(jdText ?? '')))) {
+    return { skipReason: workEligibilitySkipReason(label) };
+  }
+  if (asksAuthorization && typeof ap.work_authorized === 'boolean') {
+    return { value: ap.work_authorized ? 'Yes' : 'No' };
+  }
+  if (asksSponsorship && typeof ap.needs_sponsorship === 'boolean') {
+    return { value: ap.needs_sponsorship ? 'Yes' : 'No' };
+  }
+  return { skipReason: workEligibilitySkipReason(label) };
 }
 
 export function isRefusedQuestion(label: string): boolean {
@@ -392,6 +423,9 @@ export function resolveKnownAnswer(
   ap: ApplicationProfileLike,
   jdText: string | undefined,
 ): { value: string } | { skipReason: string } | null {
+  const workEligibility = workEligibilityAnswer(label, ap, jdText);
+  if (workEligibility) return workEligibility;
+
   if (isRefusedQuestion(label)) {
     return WORK_ELIGIBILITY_QUESTION.test(label) ? { skipReason: workEligibilitySkipReason(label) } : null;
   }
