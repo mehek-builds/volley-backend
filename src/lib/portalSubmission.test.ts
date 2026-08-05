@@ -245,7 +245,7 @@ test('managed controlled-portal actions include reviewed fields, resume upload, 
   }, true);
   assert.deepEqual(
     actions.filter((action) => action.type !== 'select').map((action) => action.type),
-    ['fill', 'fillByLabelText', 'fill', 'fill', 'upload', 'fillByLabelText', 'click', 'fillByLabelText', 'click'],
+    ['fill', 'fillByLabelText', 'fill', 'fill', 'upload', 'fillByLabelText', 'click'],
   );
   assert.ok(actions.some((action) => action.type === 'select' && action.label?.startsWith('question_select:')));
   assert.equal(actions.find((action) => action.type === 'upload')?.file?.base64, 'cGRm');
@@ -599,7 +599,7 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
     assert.equal(action.optional, true, `"${action.text}" must not be able to abort the run`);
   }
   // first_name, last_name, email (phone and location are omitted from this fixture), resume, then
-  // the two questions and explicit Greenhouse consent helper.
+  // the two optional reviewed questions.
   assert.deepEqual(
     actions.filter((a) => a.type !== 'select').map((a) => a.type),
     [
@@ -609,8 +609,6 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
       'fill',
       'upload',
       'fillByLabelText',
-      'fillByLabelText',
-      'click',
       'fillByLabelText',
     ],
   );
@@ -936,8 +934,7 @@ test('Greenhouse fills academic fields from the submission packet', () => {
   const byLabel = actions.filter(
     (action) =>
       action.type === 'fillByLabelText'
-      && !action.label?.startsWith('first_name')
-      && action.label !== 'greenhouse_demographic_data_consent',
+      && !action.label?.startsWith('first_name'),
   );
   assert.deepEqual(
     byLabel.map((action) => [action.text, action.value, action.label]),
@@ -1289,11 +1286,11 @@ test('choice controls are not auto-clicked by matching answer text', () => {
     resumeName: 'resume.pdf',
     questions: [{ question: 'Do you consent to the terms?', answer: 'Yes' }],
   });
-  const clicks = actions.filter((action) => action.type === 'click' && action.label !== 'greenhouse_demographic_data_consent_checkbox');
+  const clicks = actions.filter((action) => action.type === 'click');
   assert.equal(clicks.length, 0, 'no click action may be synthesized from an answer string');
 });
 
-test('Greenhouse managed actions include approved demographic data consent', () => {
+test('Greenhouse managed actions never include demographic data consent', () => {
   const actions = buildManagedPortalActions('greenhouse', {
     fullName: 'Taylor Example',
     email: 'taylor@example.com',
@@ -1301,22 +1298,8 @@ test('Greenhouse managed actions include approved demographic data consent', () 
     resumeName: 'resume.pdf',
     questions: [],
   });
-  const checkboxClick = actions.find((action) => action.label === 'greenhouse_demographic_data_consent_checkbox');
-  assert.equal(checkboxClick?.type, 'click');
-  assert.ok(checkboxClick?.selector?.includes('gdpr_demographic_data_consent_given'));
-  assert.ok((checkboxClick?.selector?.length ?? Infinity) <= 500);
-  assert.equal(checkboxClick?.optional, true);
-  assert.deepEqual(
-    actions.find((action) => action.label === 'greenhouse_demographic_data_consent'),
-    {
-      type: 'fillByLabelText',
-      text: 'By checking this box, I consent',
-      value: 'Yes',
-      label: 'greenhouse_demographic_data_consent',
-      optional: true,
-      timeout: 10000,
-    },
-  );
+  assert.equal(actions.some((action) => action.label === 'greenhouse_demographic_data_consent_checkbox'), false);
+  assert.equal(actions.some((action) => action.label === 'greenhouse_demographic_data_consent'), false);
 });
 
 test('Greenhouse managed actions include explicitly saved demographic choices', () => {
@@ -1889,7 +1872,6 @@ test('Greenhouse managed actions retry known yes-no work and onsite choices by e
   assert.equal(
     actions.filter((action) =>
       action.type === 'click'
-      && action.label !== 'greenhouse_demographic_data_consent_checkbox'
       && !action.label?.startsWith('education_school_combo_label')
       && !action.label?.startsWith('question_combo_label:')).length,
     0,
@@ -1959,6 +1941,7 @@ test('Greenhouse managed actions stay inside the Stratus action budget on Reddit
   assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
   assert.equal(actions.some((action) => action.label?.startsWith('greenhouse_known_select:')), false);
   assert.ok(actions.some((action) => action.label?.startsWith('greenhouse_demographic_select:')));
+  assert.equal(actions.some((action) => action.text === 'I agree to the Candidate Privacy Policy'), false);
   assert.ok(
     actions.every((action) => !action.selector || action.selector.length <= 500),
     'Stratus rejects selector strings longer than 500 characters',
