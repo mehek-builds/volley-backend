@@ -454,6 +454,13 @@ function managedGreenhouseReactSelectFill(
 ) {
   if (!value) return;
   const selector = `#${inputId}`;
+  actions.push({
+    type: 'click',
+    selector,
+    label: `${label}_open`,
+    optional,
+    timeout,
+  });
   actions.push({ type: 'fill', selector, value, label, optional, timeout });
   actions.push({
     type: 'click',
@@ -507,8 +514,8 @@ function greenhouseSchoolAliases(school: string | undefined): string[] {
   const uscAlias = /\bUniversity of Southern California\b/i.test(trimmed)
     ? 'University of Southern California'
     : undefined;
+  if (uscAlias) return [uscAlias];
   return uniqueDefined([
-    uscAlias,
     trimmed,
   ]);
 }
@@ -541,15 +548,6 @@ function pushGreenhouseEducationComboboxActions(actions: ManagedBrowserAction[],
   const schoolAliases = greenhouseSchoolAliases(packet.school);
   for (const [index, value] of schoolAliases.entries()) {
     managedGreenhouseReactSelectFill(actions, 'school--0', value, `education_school_combo:${index}`);
-  }
-  for (const [index, value] of schoolAliases.slice(0, 1).entries()) {
-    managedGreenhouseScopedReactSelectFill(
-      actions,
-      '.select__container:has(> label:has-text("School")) input[role="combobox"]',
-      GREENHOUSE_VISIBLE_REACT_SELECT_OPTION_SELECTOR,
-      value,
-      `education_school_combo_label:${index}`,
-    );
   }
   const degreeAliases = greenhouseDegreeAliases(packet.degree);
   for (const [index, value] of degreeAliases.entries()) {
@@ -844,6 +842,10 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string): 
 
 function isGreenhouseReactSelectQuestion(question: string): boolean {
   return /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bwhat\s+is\s+your\s+gpa\b|\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b|legally\s+authorized\s+to\s+work|sponsorship\s+for\s+employment\s+visa/i.test(question);
+}
+
+function isGreenhouseEducationComboboxQuestion(question: string): boolean {
+  return /\b(?:school|degree|discipline)--\d+\b/i.test(question);
 }
 
 function pushGreenhouseQuestionComboboxActions(
@@ -1573,6 +1575,7 @@ export function buildManagedPortalActions(
       continue;
     }
     if (portalFamily(portal) === 'greenhouse') {
+      if (isGreenhouseEducationComboboxQuestion(questionText)) continue;
       pushScopedQuestionChoiceActions(actions, questionText, item.answer, 'question', {
         includeSelectFallbacks: !isGreenhouseReactSelectQuestion(questionText),
       });
