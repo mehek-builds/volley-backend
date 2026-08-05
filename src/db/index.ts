@@ -188,12 +188,31 @@ pool.query = ((...args: unknown[]) => {
         console.warn(
           `[db] write rejected by a read-only backend, retrying on a fresh connection (attempt ${attempt})`,
         ),
+      onExhausted: async () => {
+        console.warn('[db] pooled endpoint stayed read-only; retrying once on the direct database endpoint');
+        const client = await connectDedicatedDatabaseClient();
+        try {
+          return await (client.query as (...a: unknown[]) => Promise<unknown>)(...args);
+        } finally {
+          await client.end().catch(() => undefined);
+        }
+      },
     },
   );
 }) as typeof pool.query;
 
 export const db = drizzle(pool, { schema });
 export { pool };
+
+export async function withDedicatedDatabase<T>(operation: (directDb: typeof db) => Promise<T>): Promise<T> {
+  const client = await connectDedicatedDatabaseClient();
+  try {
+    const directDb = drizzle(client, { schema }) as unknown as typeof db;
+    return await operation(directDb);
+  } finally {
+    await client.end().catch(() => undefined);
+  }
+}
 
 export function dedicatedDatabaseUrl(env: NodeJS.ProcessEnv = process.env): string {
   const configured = env.DATABASE_DIRECT_URL || env.DATABASE_URL || connectionString;

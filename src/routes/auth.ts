@@ -2,7 +2,7 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { createRemoteJWKSet, jwtVerify, SignJWT, type JWTPayload as JoseJWTPayload } from 'jose';
 import { createHash, randomInt } from 'node:crypto';
-import { db } from '../db/index';
+import { db, withDedicatedDatabase } from '../db/index';
 import { users, email_verification_codes } from '../db/schema';
 import { and, eq, gte, lt, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
@@ -10,6 +10,7 @@ import { allowHourly, rateLimitedReply, LIMITS, TRIAL_DAYS } from '../middleware
 import { PRODUCT_LINKS, PRODUCT_NAME } from '../lib/product';
 import { emailSender, sendEmail } from '../lib/email';
 import { requireAuth, type JWTPayload } from '../middleware/auth';
+import { withReadOnlyRetry } from '../db/readOnlyRetry';
 import {
   hashPassword,
   normalizePassword,
@@ -195,6 +196,15 @@ export function verificationFailure(
     return { status: 400, error: 'Incorrect code.', incrementAttempts: true };
   }
   return null;
+}
+
+export function withVerifyCodeTransactionRetry<T>(
+  operation: () => Promise<T>,
+  onRetry: (attempt: number) => void = (attempt) =>
+    console.warn(`[auth] verify-code transaction hit a read-only backend, retrying (attempt ${attempt})`),
+  onExhausted?: () => Promise<T>,
+): Promise<T> {
+  return withReadOnlyRetry(operation, { onRetry, onExhausted });
 }
 
 type SessionTokenOptions = {
@@ -928,97 +938,111 @@ export async function authRoutes(fastify: FastifyInstance) {
       // Consume the exact code and create or update the user in one transaction. A
       // concurrent verify cannot reuse the code, and a database failure rolls the
       // deletion back so the user can retry instead of being stranded.
-      const verificationResult = await db.transaction(async (tx) => {
-        const consumed = await tx
-          .delete(email_verification_codes)
-          .where(
-            and(
-              eq(email_verification_codes.email, email),
-              eq(email_verification_codes.code_hash, hashCode(body.code)),
-              gte(email_verification_codes.expires_at, new Date()),
-              lt(email_verification_codes.attempts, MAX_ATTEMPTS),
-            ),
-          )
-          .returning({ email: email_verification_codes.email });
-        if (consumed.length === 0) return null;
+      const runVerificationTransaction = (database: typeof db) =>
+        database.transaction(async (tx) => {
+          const consumed = await tx
+            .delete(email_verification_codes)
+            .where(
+              and(
+                eq(email_verification_codes.email, email),
+                eq(email_verification_codes.code_hash, hashCode(body.code)),
+                gte(email_verification_codes.expires_at, new Date()),
+                lt(email_verification_codes.attempts, MAX_ATTEMPTS),
+              ),
+            )
+            .returning({ email: email_verification_codes.email });
+          if (consumed.length === 0) return null;
 
-        const existing = await tx.select().from(users).where(eq(users.email, email)).limit(1);
-        if (guestUserId) {
-          if (existing.length > 0) {
-            const existingEmail = existing[0].email;
-            if (!existingEmail) return null;
+          const existing = await tx.select().from(users).where(eq(users.email, email)).limit(1);
+          if (guestUserId) {
+            if (existing.length > 0) {
+              const existingEmail = existing[0].email;
+              if (!existingEmail) return null;
+              return {
+                user: {
+                  id: existing[0].id,
+                  email: existingEmail,
+                  session_version: existing[0].session_version,
+                },
+                existingAccount: true,
+              };
+            }
+
+            const claimed = await tx
+              .update(users)
+              .set({
+                email,
+                email_verified: true,
+                is_guest: false,
+                guest_key_hash: null,
+                guest_expires_at: null,
+                claimed_at: new Date(),
+                session_valid_from: new Date(),
+                session_version: sql`${users.session_version} + 1`,
+              })
+              .where(and(eq(users.id, guestUserId), eq(users.is_guest, true)))
+              .returning({ id: users.id, email: users.email, session_version: users.session_version });
+            if (!claimed[0]?.email) return null;
             return {
-              user: {
-                id: existing[0].id,
-                email: existingEmail,
-                session_version: existing[0].session_version,
-              },
-              existingAccount: true,
+              user: claimed[0],
+              existingAccount: false,
             };
           }
 
-          const claimed = await tx
-            .update(users)
-            .set({
-              email,
-              email_verified: true,
-              is_guest: false,
-              guest_key_hash: null,
-              guest_expires_at: null,
-              claimed_at: new Date(),
-              session_valid_from: new Date(),
-              session_version: sql`${users.session_version} + 1`,
-            })
-            .where(and(eq(users.id, guestUserId), eq(users.is_guest, true)))
-            .returning({ id: users.id, email: users.email, session_version: users.session_version });
-          if (!claimed[0]?.email) return null;
+          if (existing.length === 0) {
+            const created = await tx
+              .insert(users)
+              .values({
+                id: uuidv4(),
+                email,
+                email_verified: true,
+                trial_ends_at: trialEnd(),
+                created_at: new Date(),
+              })
+              .returning({ id: users.id, email: users.email, session_version: users.session_version });
+            const user = created[0] ?? null;
+            return user?.email
+              ? { user, existingAccount: false }
+              : null;
+          }
+
+          if (!existing[0].email_verified) {
+            // Adopting a pre-existing UNVERIFIED account onto the same users.id. Any
+            // old unverified token is invalidated before this verified token is signed.
+            const updated = await tx
+              .update(users)
+              .set({
+                email_verified: true,
+                session_valid_from: new Date(),
+                session_version: sql`${users.session_version} + 1`,
+              })
+              .where(eq(users.email, email))
+              .returning({ session_version: users.session_version });
+            existing[0].session_version = updated[0]?.session_version ?? existing[0].session_version + 1;
+          }
+          if (!existing[0].email) return null;
           return {
-            user: claimed[0],
+            user: {
+              id: existing[0].id,
+              email: existing[0].email,
+              session_version: existing[0].session_version,
+            },
             existingAccount: false,
           };
-        }
-
-        if (existing.length === 0) {
-          const created = await tx
-            .insert(users)
-            .values({
-              id: uuidv4(),
-              email,
-              email_verified: true,
-              trial_ends_at: trialEnd(),
-              created_at: new Date(),
-            })
-            .returning({ id: users.id, email: users.email, session_version: users.session_version });
-          const user = created[0] ?? null;
-          return user?.email
-            ? { user, existingAccount: false }
-            : null;
-        }
-
-        if (!existing[0].email_verified) {
-          // Adopting a pre-existing UNVERIFIED account onto the same users.id. Any
-          // old unverified token is invalidated before this verified token is signed.
-          const updated = await tx
-            .update(users)
-            .set({
-              email_verified: true,
-              session_valid_from: new Date(),
-              session_version: sql`${users.session_version} + 1`,
-            })
-            .where(eq(users.email, email))
-            .returning({ session_version: users.session_version });
-          existing[0].session_version = updated[0]?.session_version ?? existing[0].session_version + 1;
-        }
-        if (!existing[0].email) return null;
-        return {
-          user: {
-            id: existing[0].id,
-            email: existing[0].email,
-            session_version: existing[0].session_version,
-          },
-          existingAccount: false,
-        };
-      });
+        });
+      const verificationResult = await withVerifyCodeTransactionRetry(
+        () => runVerificationTransaction(db),
+        (attempt) =>
+          request.log.warn(
+            { attempt },
+            'verify-code transaction hit a read-only database backend; retrying on a fresh connection',
+          ),
+        () =>
+          withDedicatedDatabase((directDb) => {
+            request.log.warn('verify-code pooled transaction stayed read-only; retrying on the direct database endpoint');
+            return runVerificationTransaction(directDb);
+          }),
+      );
 
       if (!verificationResult) {
         return reply.status(400).send({ error: 'Code expired or not found. Request a new one.' });

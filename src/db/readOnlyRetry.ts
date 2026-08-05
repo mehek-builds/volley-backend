@@ -67,6 +67,8 @@ export interface ReadOnlyRetryOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Called once per swallowed failure, for logs. */
   onRetry?: (attempt: number) => void;
+  /** Last resort after the normal attempts all hit a read-only backend. */
+  onExhausted?: () => Promise<unknown>;
 }
 
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -90,7 +92,11 @@ export async function withReadOnlyRetry<T>(
     try {
       return await operation();
     } catch (error) {
-      if (!isReadOnlyTransactionError(error) || attempt >= attempts) throw error;
+      if (!isReadOnlyTransactionError(error)) throw error;
+      if (attempt >= attempts) {
+        if (options.onExhausted) return await options.onExhausted() as T;
+        throw error;
+      }
       options.onRetry?.(attempt);
       if (delayMs > 0) await sleep(delayMs);
     }
