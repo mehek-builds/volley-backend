@@ -113,6 +113,14 @@ test('R-040: tokens minted without a blob URL (pre-fix) still read cleanly', () 
   assert.equal(payload.b, undefined);
 });
 
+test('download tokens carry the intended resume filename through the seal', () => {
+  const fileName = 'Mehek_Mandal_Product_Management_Intern_Resume.pdf';
+  const payload = readDownloadToken(mintDownloadToken(USER, KEY, { fileName }));
+  assert.ok(payload);
+  assert.equal(payload.n, fileName);
+  assert.ok(!Buffer.from(mintDownloadToken(USER, KEY, { fileName }), 'base64url').toString('utf8').includes(fileName));
+});
+
 test('R-040: a b that is not a Vercel Blob store URL is refused outright', () => {
   // The AEAD seal makes forgery a non-concern; this guards the mint path itself ever being
   // handed a foreign URL - the download route proxies b, so b must never name another host.

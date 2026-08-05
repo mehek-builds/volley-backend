@@ -95,6 +95,8 @@ export interface DownloadToken {
    * Optional so tokens minted by older code keep working through their 5-minute TTL.
    */
   b?: string;
+  /** Download filename presented to the user. */
+  n?: string;
 }
 
 // Format mirrors fieldCrypto: iv(12) + authTag(16) + ciphertext. base64url because this
@@ -102,11 +104,12 @@ export interface DownloadToken {
 export function mintDownloadToken(
   userId: string,
   objectKey: string,
-  opts: { ttlMs?: number; now?: number; blobUrl?: string } = {},
+  opts: { ttlMs?: number; now?: number; blobUrl?: string; fileName?: string } = {},
 ): string {
   const now = opts.now ?? Date.now();
   const payload: DownloadToken = { k: objectKey, u: userId, exp: now + (opts.ttlMs ?? DOWNLOAD_TOKEN_TTL_MS) };
   if (opts.blobUrl) payload.b = opts.blobUrl;
+  if (opts.fileName) payload.n = opts.fileName;
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', getKey(), iv);
   const ciphertext = Buffer.concat([cipher.update(JSON.stringify(payload), 'utf8'), cipher.final()]);
@@ -142,6 +145,7 @@ export function readDownloadToken(token: string, now = Date.now()): DownloadToke
         return null;
       }
     }
+    if (payload.n !== undefined && typeof payload.n !== 'string') return null;
     if (now > payload.exp) return null;
     // Defence in depth: a token is only ever minted for a key inside its own user's prefix, so
     // a payload claiming otherwise means the key derivation or the mint path is compromised.
