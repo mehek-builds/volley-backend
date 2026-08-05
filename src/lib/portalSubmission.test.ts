@@ -773,8 +773,10 @@ test('Greenhouse fills academic fields from the submission packet', () => {
   assert.ok(byLabel.every((action) => (action.timeout ?? Infinity) < 30_000));
   const comboFills = actions.filter((action) => action.type === 'fill' && action.label?.startsWith('education_'));
   assert.ok(comboFills.some((action) => action.selector === '#school--0' && action.value === 'University of Southern California'));
+  assert.ok(comboFills.some((action) => action.selector?.includes('label:has-text("School")') && action.value === 'University of Southern California'));
   assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s Degree'));
-  assert.equal(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s'), false);
+  assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s'));
+  assert.ok(comboFills.some((action) => action.selector?.includes('label:has-text("Degree")') && action.value === 'Bachelor\'s Degree'));
   assert.equal(
     comboFills.some((action) =>
       action.selector === '#degree--0' && action.value === 'Bachelor of Science in Computer Science'),
@@ -825,6 +827,83 @@ test('Greenhouse replays Databricks choice questions through React-select bucket
   assert.ok(actions.some((action) => action.type === 'press' && action.selector === 'input[id="question_24505242002"]' && action.label?.startsWith('question_combo')));
   assert.ok(actions.some((action) => action.type === 'press' && action.selector === 'input[id="question_32698502002"]' && action.label?.startsWith('question_combo')));
   assert.ok(actions.some((action) => action.type === 'press' && action.selector === 'input[id="question_30149518002"]' && action.label?.startsWith('question_combo')));
+});
+
+test('Greenhouse replays Databricks React-select buckets without portal selectors', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question: "Please choose the single location that you're the most interested in, and we will discuss more with you as you move through the process.",
+        answer: 'San Francisco, California',
+      },
+      {
+        question: 'What is your graduation date?',
+        answer: 'May 2027',
+      },
+      {
+        question: 'What is your GPA?',
+        answer: '3.89',
+      },
+      {
+        question: 'Do you currently or have you previously worked for Databricks in the past?',
+        answer: "I have not worked for Databricks before, and I don't currently work there.",
+      },
+    ],
+  });
+
+  const comboActions = actions.filter((action) => action.label?.startsWith('question_combo_label:'));
+  assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text("Please choose the single location') && action.value === 'San Francisco, CA'));
+  assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text("What is your graduation date?")') && action.value === 'Earlier than Fall 2027'));
+  assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text("What is your GPA?")') && action.value === '3.6 or above (out of 4.0)'));
+  assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text("Do you currently or have you previously worked for Databricks') && action.value === 'No'));
+  assert.ok(actions.some((action) => action.type === 'press' && action.label?.startsWith('question_combo_label:') && action.value === 'Enter'));
+  assert.ok(actions.every((action) => (action.selector?.length ?? 0) <= 500));
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+});
+
+test('Greenhouse Databricks academic and reviewed question packet stays inside the action budget', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    phone: '+971501234567',
+    school: 'University of Southern California, Viterbi School of Engineering',
+    degree: 'Bachelor of Science in Computer Science',
+    graduationDate: 'May 2027',
+    graduationMonth: 'May',
+    graduationYear: '2027',
+    gpa: '3.89',
+    major: 'Computer Science',
+    linkedinUrl: 'https://www.linkedin.com/in/mehekmandal/',
+    portfolioUrl: 'https://github.com/mehek-builds',
+    resume: Buffer.from('pdf'),
+    resumeName: 'Mehek_Mandal_Product_Management_Intern_Resume.pdf',
+    questions: [
+      { question: 'LinkedIn Profile', answer: 'https://www.linkedin.com/in/mehekmandal/' },
+      { question: 'Website', answer: 'https://github.com/mehek-builds' },
+      { question: 'How did you hear about this job?', answer: 'Company website' },
+      { question: 'Are you legally authorized to work in the country in which you are applying?', answer: 'Yes' },
+      { question: 'Do you now or will you in the future need sponsorship for employment visa status', answer: 'Yes' },
+      {
+        question: "Please choose the single location that you're the most interested in, and we will discuss more with you as you move through the process.",
+        answer: 'San Francisco, California',
+      },
+      { question: 'What is your graduation date?', answer: 'May 2027' },
+      { question: 'What is your GPA?', answer: '3.89' },
+      {
+        question: 'Do you currently or have you previously worked for Databricks in the past?',
+        answer: "I have not worked for Databricks before, and I don't currently work there.",
+      },
+    ],
+  }, true);
+
+  assert.ok(actions.some((action) => action.label?.startsWith('education_degree_combo_label:')));
+  assert.ok(actions.some((action) => action.label?.startsWith('question_combo_label:')));
+  assert.ok(actions.every((action) => (action.selector?.length ?? 0) <= 500));
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
 });
 
 test('Greenhouse replays Databricks export-control checkbox answers by exact option', () => {
