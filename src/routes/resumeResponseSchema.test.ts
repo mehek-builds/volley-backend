@@ -24,7 +24,7 @@ describe('resume response contract', () => {
     const result = resumeGenerateSuccessResponseSchema.safeParse({
       resume_id: 'd6693be1-9d1d-4f61-9911-8d95f1ad1b01',
       resume_url: 'https://api.example.com/resume/download?t=token',
-      file_name: 'Alex_Litos_Resume.pdf',
+      file_name: 'Alex_Example_Engineer_Resume.pdf',
       spec: {},
       application: {
         id: 'd6693be1-9d1d-4f61-9911-8d95f1ad1b01',

@@ -41,6 +41,7 @@ import {
   educationDriftResponse,
   packetEducationDrift,
 } from '../lib/submissionEducationGuard';
+import { resumeFileNameForRole } from '../lib/resumeFileName';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
 const questionSchema = z.object({
@@ -493,7 +494,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       return reply.send({
         id: row.id,
         spec: updatedSpec,
-        download_url: `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(userId, blob.pathname, { blobUrl: blob.url })}`,
+        download_url: `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(userId, blob.pathname, {
+          blobUrl: blob.url,
+          fileName: resumeFileNameForRole(contact.full_name, ((row.job_context ?? {}) as { role?: unknown }).role),
+        })}`,
       });
     },
   );

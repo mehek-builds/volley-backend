@@ -56,3 +56,9 @@ test('submit-request starts a fresh run instead of carrying stale run artifacts'
   assert.match(helper, /updated_at:\s*new Date\(\)\.toISOString\(\)/);
   assert.match(route, /const next = freshSubmitRequestReview\(current, parsed\.data\.questions as ApplicationReviewQuestion\[\]\)/);
 });
+
+test('submission packet attaches the role-specific resume filename', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  assert.match(runner, /resumeName:\s*resumeFileNameForRole\(fullName,\s*\(row\.job_context as \{ role\?: unknown \} \| null\)\?\.role\)/);
+  assert.doesNotMatch(runner, /resumeName:\s*`litos-\$\{row\.id\}\.pdf`/);
+});

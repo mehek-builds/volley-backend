@@ -34,6 +34,7 @@ import { postingRow, resolveJdText } from './jdMatch';
 import { baseResumeSelectionIssues } from '../llm/baseResume';
 import { deriveEditedTerms } from '../lib/applicationReview';
 import { isPortalSupported } from '../lib/portalSubmission';
+import { contentDispositionFileName, resumeFileNameForRole } from '../lib/resumeFileName';
 
 const MAX_SPEC_ATTEMPTS = 2; // 1 initial pass + 1 feedback-driven retry, per PRD-v2 Section 6.4's
 // "automated quality gate" - bounded so a stubborn JD can't loop the endpoint indefinitely.
@@ -607,10 +608,11 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     }
 
     const resumeId = randomUUID();
+    const resumeFileName = resumeFileNameForRole(body.contact.full_name, body.role);
     const responseTemplate = resumeGenerateSuccessResponseSchema.parse({
       resume_id: resumeId,
       resume_url: 'validated-before-storage',
-      file_name: `${body.contact.full_name.replace(/\s+/g, '_')}_${body.company.replace(/\s+/g, '_')}_Resume.pdf`,
+      file_name: resumeFileName,
       spec,
       quality: {
         ready_to_attach: true,
@@ -664,7 +666,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       // lookup rides list(), which is eventually consistent with no bound - a fresh resume can
       // 404 as "deleted" for the whole window a student is submitting in. put()'s URL is a
       // strong read target and it is in hand right here.
-      resumeUrl = `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(userId, objectKey, { blobUrl: blob.url })}`;
+      resumeUrl = `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(userId, objectKey, { blobUrl: blob.url, fileName: resumeFileName })}`;
     } catch (err) {
       fastify.log.error(err);
       await releaseCounterSlot(userId, period, 'resumes');
@@ -855,7 +857,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       // The whole point is that this URL is short-lived; a shared cache holding the PDF against
       // the token would quietly recreate the unauthenticated-copy problem.
       .header('Cache-Control', 'private, no-store')
-      .header('Content-Disposition', 'attachment; filename="resume.pdf"')
+      .header('Content-Disposition', `attachment; filename="${contentDispositionFileName(payload.n)}"`)
       .send(pdf);
   });
 
@@ -900,9 +902,12 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     const base = apiBaseFor(request);
     const resumes = rows.map((row) => {
       const coverLetter = ((row.spec as Record<string, unknown>)._cover_letter ?? {}) as Record<string, unknown>;
+      const contact = ((row.spec as Record<string, unknown>)._contact ?? {}) as Record<string, unknown>;
+      const job = (row.job_context ?? {}) as { role?: unknown };
+      const resumeFileName = resumeFileNameForRole(contact.full_name, job.role);
       return {
         ...row,
-        download_url: `${base}/resume/download?t=${mintDownloadToken(userId, row.resume_object_key)}`,
+        download_url: `${base}/resume/download?t=${mintDownloadToken(userId, row.resume_object_key, { fileName: resumeFileName })}`,
         cover_letter_download_url: typeof coverLetter.object_key === 'string'
           ? `${base}/resume/download?t=${mintDownloadToken(userId, coverLetter.object_key)}`
           : undefined,

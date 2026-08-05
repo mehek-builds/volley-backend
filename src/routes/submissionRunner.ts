@@ -77,6 +77,7 @@ import {
   submissionBatchSize,
   withinDailyCap,
 } from '../lib/submissionQueue';
+import { resumeFileNameForRole } from '../lib/resumeFileName';
 
 type ResumeRow = typeof generated_resumes.$inferSelect;
 type StoredSpec = Record<string, unknown>;
@@ -254,7 +255,7 @@ async function buildPacket(row: ResumeRow, controlledTest = false): Promise<Subm
     githubUrl: typeof app.github_url === 'string' ? app.github_url : undefined,
     portfolioUrl: typeof app.portfolio_url === 'string' ? app.portfolio_url : undefined,
     resume,
-    resumeName: `litos-${row.id}.pdf`,
+    resumeName: resumeFileNameForRole(fullName, (row.job_context as { role?: unknown } | null)?.role),
     coverLetter,
     coverLetterName: coverLetter
       ? String(coverLetterMeta.file_name ?? `litos-${row.id}-cover-letter.pdf`)
