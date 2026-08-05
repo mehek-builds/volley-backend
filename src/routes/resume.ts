@@ -741,17 +741,21 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     };
     const now = new Date().toISOString();
 
+    const canonicalApplicationPortalUrl = body.application
+      ? canonicalSupportedPortalUrl(body.application.portal_url, body.application.ats_name) ?? body.application.portal_url
+      : undefined;
+    const canonicalApplicationPortalSupported = isPortalSupported(canonicalApplicationPortalUrl);
     const applicationReview = {
       jd_text: jdText,
       role: body.role,
       ...(body.application ? {
-        portal_url: body.application.portal_url,
-        ats_name: body.application.ats_name,
+        portal_url: canonicalApplicationPortalUrl,
+        ats_name: canonicalApplicationPortalSupported && canonicalApplicationPortalUrl ? detectPortal(canonicalApplicationPortalUrl) : body.application.ats_name,
         // Answered here, at creation, because it is answerable here: the portal is a pure function
         // of the URL we were just handed. Deciding it lazily inside the submission run is what let
         // the Tracker call an unsubmittable packet "Ready" and hand the applicant a send button
         // that could only ever fail, minutes later.
-        portal_supported: isPortalSupported(body.application.portal_url),
+        portal_supported: canonicalApplicationPortalSupported,
       } : {}),
       status: body.application ? 'ready_to_submit' as const : 'resume_ready' as const,
       edited_terms: deriveEditedTerms(spec, bank),

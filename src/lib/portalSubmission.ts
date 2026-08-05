@@ -1834,6 +1834,16 @@ const APPLY_PATHS: Partial<Record<PortalFamily, RegExp>> = {
   ultipro: /^\/[^/]+\/JobBoard\//i,
 };
 
+function databricksGreenhouseJobId(url: URL): string | undefined {
+  if (!/^(?:www\.)?databricks\.com$/i.test(url.hostname)) return undefined;
+  const greenhouseJobId = url.searchParams.get('gh_jid') ?? '';
+  if (!/^\d+$/.test(greenhouseJobId)) return undefined;
+  const canonicalDatabricksJobPath = new RegExp(`^/company/careers/[a-z0-9-]+/[a-z0-9-]+-${greenhouseJobId}$`, 'i');
+  return url.pathname === '/company/careers/open-positions/job' || canonicalDatabricksJobPath.test(url.pathname)
+    ? greenhouseJobId
+    : undefined;
+}
+
 export function detectPortal(rawUrl: string): SupportedPortal {
   const url = new URL(rawUrl);
   if (
@@ -1856,6 +1866,12 @@ export function detectPortal(rawUrl: string): SupportedPortal {
     return 'controlled_test';
   }
   if (url.protocol !== 'https:') throw new Error('That application page is not a secure link');
+  // Databricks hosts Greenhouse applications behind a company-owned wrapper URL. Keep this pinned to
+  // the known careers path plus numeric Greenhouse job id so unrelated company pages with `gh_jid`
+  // query strings do not become supported by accident.
+  if (databricksGreenhouseJobId(url)) {
+    return 'greenhouse';
+  }
   for (const [portal, host] of Object.entries(HOSTS)) {
     if (!host.test(url.hostname)) continue;
     // See APPLY_PATHS. A family listed there must match its path too, because its host space also
@@ -1896,20 +1912,20 @@ export function isPortalSupported(rawUrl: string | undefined): boolean {
 
 export function canonicalSupportedPortalUrl(rawUrl: string | undefined, atsName?: string | null): string | undefined {
   if (!rawUrl) return undefined;
-  if (isPortalSupported(rawUrl)) return rawUrl;
   // Some company-hosted Greenhouse wrappers keep only gh_jid in the URL and are stored with a
-  // generic ats_name on older packets. The query parameter is Greenhouse's own convention, so the
-  // URL is stronger evidence than that stale label.
+  // generic ats_name on older packets. Only the Databricks wrapper shape is supported here; other
+  // company pages with a gh_jid query string stay unsupported until we verify their embedded form.
   void atsName;
   try {
     const url = new URL(rawUrl);
     if (url.protocol !== 'https:') return undefined;
-    const greenhouseJobId = url.searchParams.get('gh_jid')?.trim();
-    if (!greenhouseJobId || !/^\d{3,20}$/.test(greenhouseJobId)) return undefined;
-    return `https://boards.greenhouse.io/embed/job_app?token=${greenhouseJobId}`;
+    const greenhouseJobId = databricksGreenhouseJobId(url);
+    if (greenhouseJobId) return `https://boards.greenhouse.io/embed/job_app?token=${greenhouseJobId}`;
   } catch {
     return undefined;
   }
+  if (isPortalSupported(rawUrl)) return rawUrl;
+  return undefined;
 }
 
 export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): string {

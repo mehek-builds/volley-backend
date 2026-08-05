@@ -167,9 +167,8 @@ async function repairReviewPortalFromMonitoredJob(
   row: typeof generated_resumes.$inferSelect,
   current: ApplicationReviewState,
 ): Promise<ApplicationReviewState> {
-  if (current.portal_url && isPortalSupported(current.portal_url)) return current;
   const currentCanonicalUrl = canonicalSupportedPortalUrl(current.portal_url, current.ats_name);
-  if (currentCanonicalUrl) {
+  if (currentCanonicalUrl && currentCanonicalUrl !== current.portal_url) {
     return {
       ...current,
       portal_url: currentCanonicalUrl,
@@ -177,6 +176,7 @@ async function repairReviewPortalFromMonitoredJob(
       portal_supported: true,
     };
   }
+  if (current.portal_url && isPortalSupported(current.portal_url)) return current;
   const jobId = jobContextJobId(row);
   if (!jobId) return current;
   const expectedCompany = jobContextText(row, 'company');

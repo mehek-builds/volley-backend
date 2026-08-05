@@ -7,6 +7,7 @@ import {
   buildManagedDiscoveryActions,
   buildManagedPortalActions,
   canFillReviewedQuestions,
+  canonicalSupportedPortalUrl,
   coverLetterUploadSelector,
   detectPortal,
   fillPortal,
@@ -26,6 +27,8 @@ import { POLLABLE_JOB_BOARDS } from './jobMonitor';
 
 test('detects the four supported applicant portal families', () => {
   assert.equal(detectPortal('https://boards.greenhouse.io/acme/jobs/123'), 'greenhouse');
+  assert.equal(detectPortal('https://databricks.com/company/careers/open-positions/job?gh_jid=6883068002'), 'greenhouse');
+  assert.equal(detectPortal('https://www.databricks.com/company/careers/product/product-management-intern-summer-2027-6883068002?gh_jid=6883068002'), 'greenhouse');
   assert.equal(detectPortal('https://jobs.lever.co/acme/123/apply'), 'lever');
   assert.equal(detectPortal('https://jobs.ashbyhq.com/acme/123/application'), 'ashby');
   assert.equal(detectPortal('https://jobs.smartrecruiters.com/Acme/744000-role'), 'smartrecruiters');
@@ -57,6 +60,34 @@ test('a managed discovery run detects custom questions and cover-letter attachme
   const fillSelectors = actions.filter((a) => a.type === 'fill').map((a) => a.selector);
   assert.ok(fillSelectors.some((s) => s?.includes('first_name')));
   assert.equal(actions.some((a) => a.type === 'fillByLabelText' && a.label === 'first_name_label'), true);
+});
+
+test('Databricks wrapper URLs use the Greenhouse managed flow without submitting during discovery', () => {
+  const databricksUrl = 'https://databricks.com/company/careers/open-positions/job?gh_jid=6883068002';
+  const canonical = 'https://boards.greenhouse.io/embed/job_app?token=6883068002';
+  assert.equal(detectPortal(databricksUrl), 'greenhouse');
+  assert.equal(canonicalSupportedPortalUrl(databricksUrl, 'greenhouse'), canonical);
+  assert.equal(portalApplicationUrl('greenhouse', canonical), canonical);
+
+  const packet = {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  };
+  const discovery = buildManagedDiscoveryActions('greenhouse', packet);
+  assert.equal(discovery.some((action) => action.type === 'click' && action.selector === 'button[type="submit"], input[type="submit"]'), false);
+  assert.ok(discovery.some((action) => action.type === 'fill' && action.selector?.includes('first_name')));
+  assert.ok(discovery.some((action) => action.type === 'upload'));
+
+  const submitting = buildManagedPortalActions('greenhouse', packet, true);
+  assert.equal(
+    submitting.filter((action) => action.type === 'click' && action.selector === 'button[type="submit"], input[type="submit"]').length,
+    1,
+  );
+  assert.ok(submitting.every((action) => action.type !== 'fill' || (action.timeout ?? Infinity) < 30_000));
+  assert.ok(submitting.every((action) => action.type !== 'upload' || (action.timeout ?? Infinity) < 30_000));
 });
 
 test('managed cover-letter detection requires an actual file input extraction', () => {
@@ -96,6 +127,11 @@ test('SmartRecruiters managed actions open the application form before filling',
 });
 
 test('opens Ashby directly on its application tab for managed filling', () => {
+  const databricksUrl = 'https://databricks.com/company/careers/open-positions/job?gh_jid=6883068002';
+  const canonical = 'https://boards.greenhouse.io/embed/job_app?token=6883068002';
+  assert.equal(detectPortal(databricksUrl), 'greenhouse');
+  assert.equal(canonicalSupportedPortalUrl(databricksUrl, 'greenhouse'), canonical);
+  assert.equal(portalApplicationUrl('greenhouse', canonical), canonical);
   assert.equal(
     portalApplicationUrl('ashby', 'https://jobs.ashbyhq.com/acme/123'),
     'https://jobs.ashbyhq.com/acme/123/application',
@@ -112,6 +148,12 @@ test('opens Ashby directly on its application tab for managed filling', () => {
 
 test('rejects insecure and lookalike portal URLs', () => {
   assert.throws(() => detectPortal('http://boards.greenhouse.io/acme/jobs/123'), /secure link/);
+  assert.throws(() => detectPortal('https://databricks.com/company/careers/open-positions/job'), /cannot fill in/);
+  assert.throws(() => detectPortal('https://databricks.com/company/careers/open-positions/job?gh_jid=abc'), /cannot fill in/);
+  assert.throws(() => detectPortal('https://databricks.com/company/careers/open-positions?gh_jid=6883068002'), /cannot fill in/);
+  assert.throws(() => detectPortal('https://www.databricks.com/company/careers/product/product-management-intern-summer-2027-111?gh_jid=6883068002'), /cannot fill in/);
+  assert.throws(() => detectPortal('https://www.fivetran.com/careers/job?gh_jid=1'), /cannot fill in/);
+  assert.throws(() => detectPortal('https://nuro.ai/careers?gh_jid=4512345'), /cannot fill in/);
   assert.throws(() => detectPortal('https://greenhouse.io.attacker.example/acme'), /cannot fill in/);
   assert.throws(() => detectPortal('https://example.com/apply'), /cannot fill in/);
 });
