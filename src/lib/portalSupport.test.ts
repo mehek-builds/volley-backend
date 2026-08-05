@@ -143,16 +143,30 @@ test('the review route edits through the helper rather than a bare spread', () =
  */
 test('portal support is written at packet creation and unsupported portals use email fallback', () => {
   const resumeRoute = routeSource('resume.ts');
-  assert.match(resumeRoute, /import \{ isPortalSupported \} from '\.\.\/lib\/portalSubmission'/);
+  assert.match(resumeRoute, /import \{[^}]*isPortalSupported[^}]*\} from '\.\.\/lib\/portalSubmission'/);
   // Set on the review at creation, from the URL the caller just handed us.
   assert.match(resumeRoute, /portal_supported: isPortalSupported\(body\.application\.portal_url\)/);
+  // And repaired on history reads so the dashboard does not keep hiding the send path for old
+  // monitored-job packets whose review URL is stale or company-owned.
+  assert.match(resumeRoute, /function repairedHistorySpec/);
+  assert.match(resumeRoute, /monitored_jobs\.apply_url/);
+  assert.match(resumeRoute, /historyJdHash\(job\.description\)/);
+  assert.match(resumeRoute, /spec: repairedHistorySpec\(row, monitoredJobs\)/);
 
   const applicationsRoute = routeSource('applications.ts');
+  // Packets created from monitored jobs can outlive a bad or stale review URL. Before declaring the
+  // packet unsupported, submit-request must first repair from the canonical monitored job apply_url.
+  assert.match(applicationsRoute, /async function repairReviewPortalFromMonitoredJob/);
+  assert.match(applicationsRoute, /monitored_jobs\.apply_url/);
+  assert.match(applicationsRoute, /jdHash\(job\.description\) !== expectedJdHash/);
+  assert.match(applicationsRoute, /current = await repairReviewPortalFromMonitoredJob\(row, current\)/);
   assert.match(applicationsRoute, /sendUnsupportedPortalApplicationEmail/);
   assert.match(applicationsRoute, /!isPortalSupported\(current\.portal_url\)[\s\S]{0,1800}sendUnsupportedPortalApplicationEmail/);
   assert.doesNotMatch(applicationsRoute, /PORTAL_NOT_SUPPORTED/);
+  const repairIndex = applicationsRoute.indexOf('repairReviewPortalFromMonitoredJob(row, current)');
   const guardIndex = applicationsRoute.indexOf('!isPortalSupported(current.portal_url)');
   const runIndex = applicationsRoute.indexOf('processSubmissionApplication(row.id, fastify)');
+  assert.ok(repairIndex > 0 && guardIndex > repairIndex, 'the monitored-job URL repair must precede the unsupported portal branch');
   assert.ok(guardIndex > 0 && runIndex > guardIndex, 'the unsupported portal branch must precede the browser submission run');
   const browserConfigIndex = applicationsRoute.indexOf('PORTAL_RUNNER_NOT_CONFIGURED');
   assert.ok(browserConfigIndex > guardIndex, 'unsupported portal email fallback must not require a browser provider');

@@ -119,6 +119,25 @@ test('application email still sends HTML and text when no cover letter is attach
   });
 });
 
+test('email fallback does not promise or attach an unapproved generated cover letter', async () => {
+  await withEnv({ RESEND_FROM: 'Litos <apply@litos.example>' }, () => {
+    const email = buildUnsupportedPortalApplicationEmail({
+      application: { id: 'app-1', job_context: { company: 'Acme' }, spec: {} },
+      review,
+      packet: {
+        ...packet,
+        coverLetter: undefined,
+        coverLetterName: 'Taylor_Applicant_Cover_Letter.pdf',
+      },
+      to: 'jobs@example.com',
+    });
+    assert.equal(email.attachments?.length, 1);
+    assert.equal(email.attachments?.[0]?.filename, 'Taylor_Applicant_Resume.pdf');
+    assert.doesNotMatch(email.text, /cover letter is attached/);
+    assert.doesNotMatch(email.html ?? '', /cover letter is attached/);
+  });
+});
+
 test('an unconfigured fallback rejects before sending', async () => {
   await withEnv({
     RESEND_FROM: 'Litos <apply@litos.example>',

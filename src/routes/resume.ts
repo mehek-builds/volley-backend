@@ -1,10 +1,10 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { eq, desc } from 'drizzle-orm';
+import { eq, desc, and, inArray, sql } from 'drizzle-orm';
 import { createHash, randomUUID } from 'node:crypto';
 import { put } from '@vercel/blob';
 import { db } from '../db/index';
-import { profiles, generated_resumes, autofill_events, application_profile, monitored_jobs } from '../db/schema';
+import { profiles, generated_resumes, autofill_events, application_profile, monitored_jobs, career_page_sources } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
 import { allowHourly, claimCounterSlot, getCount, getEntitlements, LIMITS, monthPeriod, quotaExceededPayload, rateLimitedReply, releaseCounterSlot } from '../middleware/quota';
@@ -32,8 +32,8 @@ import { academicRecordRowFor } from './profile';
 import { warmRequirementCache } from '../engine/warmRequirements';
 import { postingRow, resolveJdText } from './jdMatch';
 import { baseResumeSelectionIssues } from '../llm/baseResume';
-import { deriveEditedTerms } from '../lib/applicationReview';
-import { isPortalSupported } from '../lib/portalSubmission';
+import { deriveEditedTerms, readApplicationReview, type ApplicationReviewState } from '../lib/applicationReview';
+import { AUTONOMOUS_PORTAL_FAMILIES, detectPortal, isPortalSupported } from '../lib/portalSubmission';
 import { contentDispositionFileName, resumeFileNameForRole } from '../lib/resumeFileName';
 
 const MAX_SPEC_ATTEMPTS = 2; // 1 initial pass + 1 feedback-driven retry, per PRD-v2 Section 6.4's
@@ -65,6 +65,51 @@ export const RESUME_DEADLINE_FOR_TEST = {
   requestDeadlineMs: REQUEST_DEADLINE_MS,
   postGenReserveMs: POST_GEN_RESERVE_MS,
 };
+
+function generatedResumeJobId(row: typeof generated_resumes.$inferSelect): string | null {
+  const context = row.job_context;
+  if (!context || typeof context !== 'object' || Array.isArray(context)) return null;
+  const parsed = z.string().uuid().safeParse((context as Record<string, unknown>).job_id);
+  return parsed.success ? parsed.data : null;
+}
+
+function generatedResumeContextText(row: typeof generated_resumes.$inferSelect, key: 'company' | 'role' | 'jd_hash'): string | null {
+  const context = row.job_context;
+  if (!context || typeof context !== 'object' || Array.isArray(context)) return null;
+  const value = (context as Record<string, unknown>)[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function normalizedJobIdentity(value: string | null): string {
+  return (value ?? '').trim().toLowerCase();
+}
+
+function historyJdHash(text: string): string {
+  return createHash('sha256').update(text).digest('hex').slice(0, 16);
+}
+
+function repairedHistorySpec(
+  row: typeof generated_resumes.$inferSelect,
+  monitoredJobs: ReadonlyMap<string, { applyUrl: string; company: string; role: string; jdHash: string }>,
+): unknown {
+  const jobId = generatedResumeJobId(row);
+  const job = jobId ? monitoredJobs.get(jobId) : undefined;
+  if (!job) return row.spec;
+  if (normalizedJobIdentity(job.company) !== normalizedJobIdentity(generatedResumeContextText(row, 'company'))) return row.spec;
+  if (normalizedJobIdentity(job.role) !== normalizedJobIdentity(generatedResumeContextText(row, 'role'))) return row.spec;
+  if (job.jdHash !== generatedResumeContextText(row, 'jd_hash')) return row.spec;
+  const review = readApplicationReview(row.spec);
+  if (!review || (review.portal_url && isPortalSupported(review.portal_url))) return row.spec;
+  const spec = row.spec;
+  if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return row.spec;
+  const repaired: ApplicationReviewState = {
+    ...review,
+    portal_url: job.applyUrl,
+    ats_name: detectPortal(job.applyUrl),
+    portal_supported: true,
+  };
+  return { ...(spec as Record<string, unknown>), _review: repaired };
+}
 
 // ─── Transient model-capacity handling (live QA 2026-07-16) ──────────────────
 // A real Anthropic `overloaded_error` incident killed a whole fill: the card showed "Failed to
@@ -902,6 +947,32 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       .where(eq(generated_resumes.user_id, userId))
       .orderBy(desc(generated_resumes.created_at))
       .limit(50);
+    const jobIds = [...new Set(rows.map(generatedResumeJobId).filter((id): id is string => Boolean(id)))];
+    const monitoredRows = jobIds.length === 0 ? [] : await db
+      .select({
+        id: monitored_jobs.id,
+        apply_url: monitored_jobs.apply_url,
+        company_name: monitored_jobs.company_name,
+        title: monitored_jobs.title,
+        description: sql<string>`left(${monitored_jobs.description}, 60000)`,
+      })
+      .from(monitored_jobs)
+      .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+      .where(and(
+        inArray(monitored_jobs.id, jobIds),
+        eq(career_page_sources.enabled, true),
+        inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
+      ));
+    const monitoredJobs = new Map(
+      monitoredRows
+        .filter((job) => isPortalSupported(job.apply_url))
+        .map((job) => [job.id, {
+          applyUrl: job.apply_url,
+          company: job.company_name,
+          role: job.title,
+          jdHash: historyJdHash(job.description),
+        }] as const),
+    );
     const base = apiBaseFor(request);
     const resumes = rows.map((row) => {
       const coverLetter = ((row.spec as Record<string, unknown>)._cover_letter ?? {}) as Record<string, unknown>;
@@ -910,6 +981,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       const resumeFileName = resumeFileNameForRole(contact.full_name, job.role);
       return {
         ...row,
+        spec: repairedHistorySpec(row, monitoredJobs),
         download_url: `${base}/resume/download?t=${mintDownloadToken(userId, row.resume_object_key, { fileName: resumeFileName })}`,
         cover_letter_download_url: typeof coverLetter.object_key === 'string'
           ? `${base}/resume/download?t=${mintDownloadToken(userId, coverLetter.object_key)}`

@@ -1,13 +1,13 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { put } from '@vercel/blob';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/index';
 import { settleStall } from '../lib/applicationStall';
 import type { ApplicationReviewState } from '../lib/applicationReview';
 import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
-import { generated_resumes, profiles, users, type ExperienceBankEntry } from '../db/schema';
+import { career_page_sources, generated_resumes, monitored_jobs, profiles, users, type ExperienceBankEntry } from '../db/schema';
 import {
   findPdfTextFidelityIssues,
   findPdfSafeMarginIssues,
@@ -33,7 +33,7 @@ import { declaredSkillsList } from './profile';
 import { buildPacket, processSubmissionApplication } from './submissionRunner';
 import { isRefusedQuestion } from '../lib/questionDiscovery';
 import { resumeEditDisposition, submitRequestDisposition } from '../lib/submissionSafety';
-import { detectPortal, isPortalSupported } from '../lib/portalSubmission';
+import { AUTONOMOUS_PORTAL_FAMILIES, detectPortal, isPortalSupported } from '../lib/portalSubmission';
 import { dailySubmissionCap, withinDailyCap } from '../lib/submissionQueue';
 import { canStartExtensionSubmission, extensionOutcomePatch, isSafeExtensionReceiptUrl } from '../lib/extensionSubmission';
 import {
@@ -138,6 +138,66 @@ function freshSubmitRequestReview(
     verification: undefined,
     receipt: undefined,
     stall: undefined,
+  };
+}
+
+function jobContextJobId(row: typeof generated_resumes.$inferSelect): string | null {
+  const jobContext = row.job_context;
+  if (!jobContext || typeof jobContext !== 'object' || Array.isArray(jobContext)) return null;
+  const jobId = (jobContext as Record<string, unknown>).job_id;
+  const parsed = z.string().uuid().safeParse(jobId);
+  return parsed.success ? parsed.data : null;
+}
+
+function jobContextText(row: typeof generated_resumes.$inferSelect, key: 'company' | 'role' | 'jd_hash'): string | null {
+  const jobContext = row.job_context;
+  if (!jobContext || typeof jobContext !== 'object' || Array.isArray(jobContext)) return null;
+  const value = (jobContext as Record<string, unknown>)[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function normalizedIdentity(value: string | null): string {
+  return (value ?? '').trim().toLowerCase();
+}
+
+function jdHash(text: string): string {
+  return createHash('sha256').update(text).digest('hex').slice(0, 16);
+}
+
+async function repairReviewPortalFromMonitoredJob(
+  row: typeof generated_resumes.$inferSelect,
+  current: ApplicationReviewState,
+): Promise<ApplicationReviewState> {
+  if (current.portal_url && isPortalSupported(current.portal_url)) return current;
+  const jobId = jobContextJobId(row);
+  if (!jobId) return current;
+  const expectedCompany = jobContextText(row, 'company');
+  const expectedRole = jobContextText(row, 'role');
+  const expectedJdHash = jobContextText(row, 'jd_hash');
+  if (!expectedCompany || !expectedRole || !expectedJdHash) return current;
+  const [job] = await db.select({
+    apply_url: monitored_jobs.apply_url,
+    company_name: monitored_jobs.company_name,
+    title: monitored_jobs.title,
+    description: sql<string>`left(${monitored_jobs.description}, 60000)`,
+  })
+    .from(monitored_jobs)
+    .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+    .where(and(
+      eq(monitored_jobs.id, jobId),
+      eq(career_page_sources.enabled, true),
+      inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
+    ))
+    .limit(1);
+  if (!job || !isPortalSupported(job.apply_url)) return current;
+  if (normalizedIdentity(job.company_name) !== normalizedIdentity(expectedCompany)) return current;
+  if (normalizedIdentity(job.title) !== normalizedIdentity(expectedRole)) return current;
+  if (jdHash(job.description) !== expectedJdHash) return current;
+  return {
+    ...current,
+    portal_url: job.apply_url,
+    ats_name: detectPortal(job.apply_url),
+    portal_supported: true,
   };
 }
 
@@ -549,8 +609,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         return reply.status(422).send({ error: 'Answer every required question before submitting.' });
       }
       const stored = row.spec as StoredSpec;
-      const current = readApplicationReview(stored);
+      let current = readApplicationReview(stored);
       if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
+      current = await repairReviewPortalFromMonitoredJob(row, current);
       const disposition = submitRequestDisposition(current.status, Boolean(current.submission_claimed_at));
       if (disposition === 'submitted') {
         return reply.status(200).send({ application_id: row.id, review: current, cover_letter: storedCoverLetter(row) });
