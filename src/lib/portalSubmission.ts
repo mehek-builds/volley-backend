@@ -573,7 +573,7 @@ function cssString(value: string): string {
   return value.replace(/["\\]/g, '\\$&');
 }
 
-function greenhouseQuestionSelectSelector(label: string): string {
+function greenhouseQuestionSelectSelectors(label: string): string[] {
   const text = cssString(label);
   return [
     `.field:has(label:has-text("${text}")) select`,
@@ -581,7 +581,7 @@ function greenhouseQuestionSelectSelector(label: string): string {
     `fieldset:has(legend:has-text("${text}")) select`,
     `label:has-text("${text}") ~ select`,
     `label:has-text("${text}") + select`,
-  ].join(', ');
+  ];
 }
 
 function greenhouseKnownQuestionAliases(question: string, answer: string): string[] {
@@ -641,14 +641,15 @@ function pushGreenhouseKnownQuestionAliases(actions: ManagedBrowserAction[], pac
         optional: true,
         timeout: MANAGED_FILL_TIMEOUT_MS,
       });
-      const selectSelector = greenhouseQuestionSelectSelector(alias);
-      managedSelect(actions, selectSelector, item.answer.trim(), `greenhouse_known_select:${alias.slice(0, 80)}`);
-      managedSelect(
-        actions,
-        selectSelector,
-        item.answer.trim().toLowerCase() === 'yes' ? '1' : '0',
-        `greenhouse_known_select_value:${alias.slice(0, 80)}`,
-      );
+      for (const [index, selectSelector] of greenhouseQuestionSelectSelectors(alias).entries()) {
+        managedSelect(actions, selectSelector, item.answer.trim(), `greenhouse_known_select:${index}:${alias.slice(0, 80)}`);
+        managedSelect(
+          actions,
+          selectSelector,
+          item.answer.trim().toLowerCase() === 'yes' ? '1' : '0',
+          `greenhouse_known_select_value:${index}:${alias.slice(0, 80)}`,
+        );
+      }
     }
   }
 }

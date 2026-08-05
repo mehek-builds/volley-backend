@@ -1274,6 +1274,11 @@ test('Greenhouse managed actions retry known yes-no work and onsite choices by e
       { question: 'Are you currently eligible to legally work in the US?', answer: 'Yes' },
       { question: 'Will you now or in the future require immigration support/sponsorship?', answer: 'Yes' },
       { question: 'Are you able to work onsite in our San Francisco office 5 days a week?', answer: 'Yes' },
+      {
+        question:
+          'Will you now, or will you in the future, require immigration sponsorship to work at this company in the United States?',
+        answer: 'Yes',
+      },
       { question: 'Do you consent to the terms?', answer: 'Yes' },
     ],
   });
@@ -1294,6 +1299,10 @@ test('Greenhouse managed actions retry known yes-no work and onsite choices by e
   assert.ok(selectActions.some((action) => action.value === 'Yes'));
   assert.ok(selectActions.some((action) => action.value === '1'));
   assert.ok(selectActions.some((action) => action.selector?.includes('.field:has(label:has-text("Are you currently eligible to legally work in the United States?")) select')));
+  assert.ok(
+    selectActions.every((action) => (action.selector?.length ?? Infinity) <= 500),
+    'Stratus rejects selector strings longer than 500 characters',
+  );
   assert.equal(selectActions.some((action) => action.selector?.includes('Do you consent to the terms?')), false);
   assert.equal(actions.filter((action) => action.type === 'click').length, 0);
 });
