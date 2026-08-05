@@ -104,7 +104,7 @@ export function buildUnsupportedPortalApplicationEmail(input: {
     text: [
       `Hello,`,
       ``,
-      `Litos is sending this application packet by email because the company's application portal is not supported for direct Litos submission yet.`,
+      `Litos is sending this application by email because the company's application portal is not supported for direct Litos submission yet.`,
       ``,
       ...textLine('Applicant', packet.fullName),
       ...textLine('Applicant email', packet.email),
@@ -120,7 +120,7 @@ export function buildUnsupportedPortalApplicationEmail(input: {
     ].join('\n'),
     html: [
       `<p>Hello,</p>`,
-      `<p>Litos is sending this application packet by email because the company's application portal is not supported for direct Litos submission yet.</p>`,
+      `<p>Litos is sending this application by email because the company's application portal is not supported for direct Litos submission yet.</p>`,
       htmlParagraph('Applicant', packet.fullName),
       htmlParagraph('Applicant email', packet.email),
       htmlParagraph('Role', role),

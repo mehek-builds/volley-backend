@@ -92,6 +92,8 @@ test('application email uses applicant reply-to and attaches packet PDFs', async
     assert.match(email.subject, /Acme/);
     assert.match(email.html ?? '', /<p>/);
     assert.match(email.html ?? '', /not supported for direct Litos submission yet/);
+    assert.doesNotMatch(email.text, /application packet/);
+    assert.doesNotMatch(email.html ?? '', /application packet/);
     assert.equal(email.attachments?.length, 2);
     assert.deepEqual(email.attachments?.map((item) => item.filename), [
       'Taylor_Applicant_Resume.pdf',

@@ -690,7 +690,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
             ...pending,
             status: 'failed' as const,
             updated_at: failedAt,
-            submission_error: 'Litos could not email this application packet.',
+            submission_error: 'Litos could not email this application.',
           };
           await db.update(generated_resumes)
             .set({ spec: reviewSpec(failed) })
@@ -699,7 +699,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
               sql`${generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
             ));
           return reply.status(503).send({
-            error: 'Litos could not email this application packet. Try again once outbound application email is configured.',
+            error: 'Litos could not email this application. Try again once outbound application email is configured.',
             code: 'UNSUPPORTED_PORTAL_EMAIL_UNAVAILABLE',
           });
         }
@@ -711,7 +711,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           submitted_at: submittedAt,
           submission_error: undefined,
           receipt: {
-            confirmation_text: `Application packet emailed to ${sent.recipient}. Resend message id: ${sent.messageId}`,
+            confirmation_text: `This application was emailed to ${sent.recipient}. Resend message id: ${sent.messageId}`,
             final_url: current.portal_url,
             captured_at: submittedAt,
             reference_id: sent.messageId,
