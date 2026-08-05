@@ -9,6 +9,7 @@ export type ApplicationReviewQuestion = {
   kind: 'essay' | 'required';
   required: boolean;
   portal_selector?: string;
+  portal_input_type?: string;
 };
 
 export function normalizeApplicationReviewQuestions(
@@ -30,17 +31,24 @@ export function normalizeApplicationReviewQuestions(
     }
     const existing = normalized[existingIndex];
     const portalSelector = preferredPortalSelector(existing.portal_selector, question.portal_selector);
+    const portalInputType = question.portal_input_type ?? existing.portal_input_type;
     if ((question.required && !existing.required) || (!existing.answer.trim() && question.answer.trim())) {
       const next = {
         ...existing,
         required: existing.required || question.required,
         answer: existing.answer.trim() ? existing.answer : question.answer,
       };
-      normalized[existingIndex] = portalSelector
-        ? { ...next, portal_selector: portalSelector }
-        : next;
-    } else if (portalSelector && portalSelector !== existing.portal_selector) {
-      normalized[existingIndex] = { ...existing, portal_selector: portalSelector };
+      normalized[existingIndex] = {
+        ...next,
+        ...(portalSelector ? { portal_selector: portalSelector } : {}),
+        ...(portalInputType ? { portal_input_type: portalInputType } : {}),
+      };
+    } else if ((portalSelector && portalSelector !== existing.portal_selector) || (portalInputType && portalInputType !== existing.portal_input_type)) {
+      normalized[existingIndex] = {
+        ...existing,
+        ...(portalSelector ? { portal_selector: portalSelector } : {}),
+        ...(portalInputType ? { portal_input_type: portalInputType } : {}),
+      };
     }
   }
   return normalized;
@@ -58,6 +66,7 @@ export function mergeSubmittedApplicationReviewQuestions(
   const merged = stored.map((question) => {
     const submittedQuestion = submittedByQuestion.get(questionKey(question.question));
     if (!submittedQuestion) return question;
+    const portalInputType = submittedQuestion.portal_input_type ?? question.portal_input_type;
     return {
       ...question,
       answer: submittedQuestion.answer,
@@ -65,6 +74,7 @@ export function mergeSubmittedApplicationReviewQuestions(
       required: question.required || submittedQuestion.required,
       question: submittedQuestion.question.trim() ? submittedQuestion.question : question.question,
       portal_selector: preferredPortalSelector(question.portal_selector, submittedQuestion.portal_selector),
+      ...(portalInputType ? { portal_input_type: portalInputType } : {}),
     };
   });
   const storedKeys = new Set(stored.map((question) => questionKey(question.question)).filter(Boolean));

@@ -497,15 +497,17 @@ test('required internship form fields resolve from profile-backed defaults inste
 });
 
 test('job location preference questions use the safe posting locations context', () => {
+  const label = "Please choose the single location that you're the most interested in, and we will discuss more with you as you move through the process.";
   const context = [
     'Build data systems for customers.',
     'Mountain View, CA',
     'San Francisco, CA',
   ].join('\n');
 
+  assert.equal(classifyField(label), null);
   assert.deepEqual(
     resolveKnownAnswer(
-      "Please choose the single location that you're the most interested in, and we will discuss more with you as you move through the process.",
+      label,
       'select',
       {},
       context,

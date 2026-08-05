@@ -338,6 +338,7 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
       question: item.question,
       answer: item.answer,
       portalSelector: item.portal_selector,
+      portalInputType: item.portal_input_type,
     })),
   };
 }
@@ -534,9 +535,10 @@ export async function discoverAndResolveQuestions(
           kind: 'required',
           required: false,
           portal_selector: portalSelectorForField(field),
+          portal_input_type: field.inputType,
         });
       } else if (existing.answer.trim()) {
-        questions.push({ ...existing, question: reviewLabel, portal_selector: portalSelectorForField(field) });
+        questions.push({ ...existing, question: reviewLabel, portal_selector: portalSelectorForField(field), portal_input_type: field.inputType });
       }
       continue; // already answered by the client or a prior run
     }
@@ -549,6 +551,7 @@ export async function discoverAndResolveQuestions(
         kind: 'required',
         required: false,
         portal_selector: portalSelectorForField(field),
+        portal_input_type: field.inputType,
       });
       continue;
     }
@@ -593,7 +596,7 @@ export async function discoverAndResolveQuestions(
         attentionReasons.push(`open-ended question left for you (could not draft a confident answer): "${label.slice(0, 60)}"`);
         continue;
       }
-      questions.push({ id: randomUUID(), question: reviewLabel, answer: fitted, kind: 'essay', required: false, portal_selector: field.selector });
+      questions.push({ id: randomUUID(), question: reviewLabel, answer: fitted, kind: 'essay', required: false, portal_selector: field.selector, portal_input_type: field.inputType });
       if (warnings.length > 0) {
         attentionReasons.push(`drafted answer needs your review: ${warnings.join('; ').slice(0, 300)}`);
       }
@@ -735,6 +738,7 @@ async function prepareManaged(
     question: q.question,
     answer: q.answer,
     portalSelector: q.portal_selector,
+    portalInputType: q.portal_input_type,
   }));
 
   const result = await runManagedBrowser(applicationUrl, buildManagedPortalActions(portal, packet));
@@ -915,6 +919,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       question: q.question,
       answer: q.answer,
       portalSelector: q.portal_selector,
+      portalInputType: q.portal_input_type,
     }));
 
     let result = await fillPortal(page, portal, packet);

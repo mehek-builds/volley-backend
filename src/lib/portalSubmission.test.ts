@@ -995,18 +995,22 @@ test('Greenhouse replays Databricks export-control checkbox answers by exact opt
         question: 'Please confirm whether any of the below applies to you. Select all that apply. Note: This information will only be used to ensure compliance with U.S. sanctions and export controls.',
         answer: 'None of the above',
         portalSelector: 'input[id="question_35110536002[]_221056618002"]',
+        portalInputType: 'checkbox',
       },
       {
         question: 'If you selected a response to the prior question other than none of the above, please confirm whether any of the following also applies to you. Select all that apply.',
         answer: 'Not applicable (i.e., I selected none of the above for the prior question)',
         portalSelector: 'input[id="question_35114221002[]_221073825002"]',
+        portalInputType: 'checkbox',
       },
     ],
   });
 
   const checkboxClicks = actions.filter((action) => action.label?.startsWith('question_checkbox:'));
+  assert.equal(actions.some((action) => action.label?.startsWith('question_choice:')), false);
   assert.ok(checkboxClicks.some((action) => action.type === 'click' && action.selector === 'input[name="question_35110536002[]"][value="221056618002"]'));
   assert.ok(checkboxClicks.some((action) => action.type === 'click' && action.selector === 'input[name="question_35114221002[]"][value="221073825002"]'));
+  assert.equal(checkboxClicks.some((action) => action.selector?.startsWith('label:has-text')), false);
   assert.ok(checkboxClicks.every((action) => action.optional === true));
   assert.ok(checkboxClicks.every((action) => (action.timeout ?? Infinity) < 30_000));
 });
