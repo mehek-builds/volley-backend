@@ -33,7 +33,7 @@ import { warmRequirementCache } from '../engine/warmRequirements';
 import { postingRow, resolveJdText } from './jdMatch';
 import { baseResumeSelectionIssues } from '../llm/baseResume';
 import { deriveEditedTerms, readApplicationReview, type ApplicationReviewState } from '../lib/applicationReview';
-import { AUTONOMOUS_PORTAL_FAMILIES, detectPortal, isPortalSupported } from '../lib/portalSubmission';
+import { detectPortal, isPortalSupported } from '../lib/portalSubmission';
 import { contentDispositionFileName, resumeFileNameForRole } from '../lib/resumeFileName';
 import { monitoredDescriptionHash, monitoredJdAgrees } from '../lib/monitoredPortalRepair';
 
@@ -958,7 +958,6 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       .where(and(
         inArray(monitored_jobs.id, jobIds),
         eq(career_page_sources.enabled, true),
-        inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
       ));
     const monitoredJobs = new Map(
       monitoredRows

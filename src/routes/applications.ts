@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { put } from '@vercel/blob';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/index';
 import { settleStall } from '../lib/applicationStall';
@@ -33,7 +33,7 @@ import { declaredSkillsList } from './profile';
 import { buildPacket, processSubmissionApplication } from './submissionRunner';
 import { isRefusedQuestion } from '../lib/questionDiscovery';
 import { resumeEditDisposition, submitRequestDisposition } from '../lib/submissionSafety';
-import { AUTONOMOUS_PORTAL_FAMILIES, detectPortal, isPortalSupported } from '../lib/portalSubmission';
+import { detectPortal, isPortalSupported } from '../lib/portalSubmission';
 import { dailySubmissionCap, withinDailyCap } from '../lib/submissionQueue';
 import { canStartExtensionSubmission, extensionOutcomePatch, isSafeExtensionReceiptUrl } from '../lib/extensionSubmission';
 import {
@@ -183,7 +183,6 @@ async function repairReviewPortalFromMonitoredJob(
     .where(and(
       eq(monitored_jobs.id, jobId),
       eq(career_page_sources.enabled, true),
-      inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
     ))
     .limit(1);
   if (!job || !isPortalSupported(job.apply_url)) return current;
@@ -786,8 +785,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
     async (request: FastifyRequest, reply: FastifyReply) => {
       const row = await ownedResume(request, reply);
       if (!row) return;
-      const review = readApplicationReview(row.spec);
+      let review = readApplicationReview(row.spec);
       if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
+      review = await repairReviewPortalFromMonitoredJob(row, review);
       let handoff_url: string | undefined;
       if (review.status === 'needs_attention' && review.browser_session_id) {
         try {
