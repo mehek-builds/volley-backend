@@ -562,9 +562,12 @@ async function discoverAndResolveQuestions(
 }
 
 async function loadApplicationProfileLike(userId: string): Promise<ApplicationProfileLike> {
-  const [[appRow], [profileRow]] = await Promise.all([
+  const [[appRow], [profileRow], [userRow]] = await Promise.all([
     db.select().from(application_profile).where(eq(application_profile.user_id, userId)).limit(1),
     db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1),
+    db.select({
+      sponsorship_answer: users.sponsorship_answer,
+    }).from(users).where(eq(users.id, userId)).limit(1),
   ]);
   const app = appRow ? (decryptRow(appRow) as Record<string, unknown>) : {};
   const parsed = (profileRow?.parsed_json && typeof profileRow.parsed_json === 'object'
@@ -593,6 +596,7 @@ async function loadApplicationProfileLike(userId: string): Promise<ApplicationPr
     const baseValue = base[key];
     return typeof baseValue === 'boolean' ? baseValue : undefined;
   };
+  const onboardingEligibility = workEligibilityFromSponsorshipAnswer(userRow?.sponsorship_answer);
   return {
     phone: str('phone'),
     address_city: str('address_city'),
@@ -602,8 +606,8 @@ async function loadApplicationProfileLike(userId: string): Promise<ApplicationPr
     github_url: str('github_url'),
     portfolio_url: str('portfolio_url'),
     citizenship: str('citizenship'),
-    work_authorized: appBoolean('work_authorized'),
-    needs_sponsorship: appBoolean('needs_sponsorship'),
+    work_authorized: appBoolean('work_authorized') ?? onboardingEligibility.workAuthorized,
+    needs_sponsorship: appBoolean('needs_sponsorship') ?? onboardingEligibility.needsSponsorship,
     date_of_birth: str('date_of_birth'),
     availability_date: str('availability_date'),
     availability_term: str('availability_term'),
@@ -622,6 +626,24 @@ async function loadApplicationProfileLike(userId: string): Promise<ApplicationPr
       : undefined,
     referral_source_default: str('referral_source_default'),
   };
+}
+
+export function workEligibilityFromSponsorshipAnswer(answer: unknown): {
+  workAuthorized?: boolean;
+  needsSponsorship?: boolean;
+} {
+  switch (answer) {
+    case 'needs_now':
+      return { needsSponsorship: true };
+    case 'needs_future':
+      return { workAuthorized: true, needsSponsorship: true };
+    case 'not_authorized':
+      return { workAuthorized: false, needsSponsorship: true };
+    case 'no':
+      return { workAuthorized: true, needsSponsorship: false };
+    default:
+      return {};
+  }
 }
 
 async function prepareManaged(
