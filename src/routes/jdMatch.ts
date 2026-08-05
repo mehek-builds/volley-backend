@@ -348,6 +348,7 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
       met: result.clauses.filter((c) => c.verdict === 'met').length,
       clauses: result.clauses.map((c) => ({
         text: c.text,
+        weight: c.weight,
         verdict: c.verdict,
         basis: c.basis,
         evidence: c.evidence ?? null,
