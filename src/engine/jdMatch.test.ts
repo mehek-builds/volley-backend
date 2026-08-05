@@ -21,8 +21,8 @@ import {
  */
 const MIN_SEPARATION = 30;
 
-/** Mirrors STATED_KINDS in jdMatch.ts: the sections where an employer states what the job needs. */
-const STATED_KINDS_FOR_TEST = new Set(['required', 'preferred', 'responsibilities']);
+/** Mirrors the primary fit-section hierarchy in jdMatch.ts. */
+const STATED_KINDS_FOR_TEST = new Set(['required', 'preferred']);
 
 // A realistic software JD, headings and all, including the noise sections that poisoned the old
 // denominator (benefits, EEO, about us).
@@ -236,7 +236,7 @@ You have some first hand experience with SQL and/or Python
     // scoreBand guard that stops "covered the responsibilities, missed every hard requirement"
     // from reading as a strong match. Restoring the section restores the guard's input.
     const result = scoreJdMatch('Python. Computer science.', jd, { company: 'Databricks' });
-    assert.notEqual(result.required_coverage, null, 'a posting with a requirements section has required coverage');
+    assert.equal(result.scorable, false, 'a sparse primary fit section refuses instead of padding from impact prose');
   });
 
   test('the widened heading patterns still do not swallow the company blurb', () => {
@@ -747,12 +747,9 @@ Requirements
     // These two cover the line between a genuinely underspecified posting and one whose stated
     // requirement sections are concrete enough that surrounding prose should not be pulled back in.
 
-    // (a) a stated set too small to stand alone. Three stated terms, ALL hard signal, so the
-    // signal half of the guard passes. Prose sits ABOVE the heading, because a heading closes the
-    // section before it and a blank line does not.
-    //
-    // This pins the fallback behavior a student sees: a three-term stated section still uses body
-    // prose because the stated denominator would be too small to score honestly.
+    // (a) a primary fit section too small to stand alone. Prose sits ABOVE the heading, because a
+    // heading closes the section before it and a blank line does not. The scorer refuses rather
+    // than padding the missing list with surrounding body terms.
     const tooFewStated = `We are a team that loves Datadog and Splunk and Grafana and Sentry and Snowplow every day.
 
 What we look for:
@@ -764,12 +761,16 @@ What we look for:
     const keysA = extractJdTerms(tooFewStated).map((t) => t.term);
     assert.ok(keysA.includes('kubernetes'), 'the stated requirements survive');
     assert.ok(
-      keysA.includes('datadog') && keysA.includes('splunk'),
-      'body prose is retained when the stated set alone is too small to score',
+      !keysA.includes('datadog') && !keysA.includes('splunk'),
+      'body prose is not retained once a primary fit section exists',
     );
+    const scoredA = scoreJdMatch('Kubernetes and Terraform.', tooFewStated);
+    assert.equal(scoredA.scorable, false, 'a sparse fit section refuses instead of padding from prose');
+    assert.deepEqual(scoredA.missing, []);
 
-    // (b) Enough stated terms still need enough signal. If the stated section is too low-signal,
-    // body fallback is allowed so the user sees a score instead of a refusal.
+    // (b) Enough stated terms still need enough signal. If the primary fit section is too
+    // low-signal, body fallback is still refused so the product does not invent missing
+    // requirements from prose.
     const tooLittleSignal = `We are a team that loves Python and Docker and Kubernetes and Terraform and Postgres.
 
 What we look for:
@@ -781,11 +782,12 @@ What we look for:
     assert.ok(statedB.filter((t) => t.signal).length < MIN_SIGNAL_TERMS, 'and must fail the signal half');
     const keysB = extractJdTerms(tooLittleSignal).map((t) => t.term);
     assert.ok(
-      keysB.includes('python') && keysB.includes('docker'),
-      'body prose is retained when the stated section is too low-signal to score',
+      !keysB.includes('python') && !keysB.includes('docker'),
+      'body prose is not retained when a primary fit section is too low-signal to score',
     );
     const scoredB = scoreJdMatch('Python and Docker and Kubernetes and Terraform and Postgres.', tooLittleSignal);
-    assert.equal(scoredB.scorable, true, 'low-signal stated sections still fall back to a user-visible score');
+    assert.equal(scoredB.scorable, false, 'low-signal primary fit sections refuse instead of padding');
+    assert.deepEqual(scoredB.missing, []);
   });
 
   test('prose still carries the whole denominator when nothing was stated', () => {
@@ -799,10 +801,10 @@ Our office runs on Notion Calendar, Linear Roadmaps and Superhuman Mail every si
     assert.ok(keys.includes('datadog') && keys.includes('splunk'), 'unheaded prose is still the denominator');
   });
 
-  test('a Preferred item yields to a full block of stated requirements', () => {
+  test('a Preferred item is part of the fit section, not prose padding', () => {
     const keys = extractJdTerms(SWE_JD).map((t) => t.term);
     assert.ok(keys.includes('python') && keys.includes('typescript'));
-    assert.ok(!keys.includes('terraform'), 'a Preferred item yields to twelve stated requirements');
+    assert.ok(keys.includes('terraform'), 'preferred fit requirements survive when the cap allows them');
   });
 
   test('the cap never turns a scorable posting into an unscorable one', () => {
@@ -811,11 +813,10 @@ Our office runs on Notion Calendar, Linear Roadmaps and Superhuman Mail every si
     // set of proper nouns under a Requirements heading outranks the lexicon hits on section weight
     // alone, and without the reservation it would crowd them out of the denominator and leave a
     // perfectly scorable posting looking like it stated nothing.
-    const jd = `Requirements\n${'abcdefghijklmnopqrstuvwxyz'
+    const jd = `Responsibilities\n${'abcdefghijklmnopqrstuvwxyz'
       .split('')
       .map((s) => `- Familiarity with Vendor${s}y Platform\n`)
       .join('')}
-Responsibilities
 - Write Python and SQL against a PostgreSQL warehouse using Docker
 `;
     const terms = extractJdTerms(jd);
@@ -824,7 +825,7 @@ Responsibilities
       terms.filter((t) => t.signal).length >= MIN_SIGNAL_TERMS,
       'the cap must not manufacture a refusal by dropping every hard-signal term',
     );
-    assert.equal(scoreJdMatch(SWE_RESUME, jd).scorable, true);
+    assert.equal(scoreJdMatch(SWE_RESUME, jd).scorable, true, 'responsibilities-only postings still score');
   });
 
   test('with no requirements section, repetition is what decides emphasis', () => {
@@ -1129,8 +1130,8 @@ Responsibilities
 - Work in Jira, Notion, Slack, Asana, Figma
 - Reporting in Excel, Tableau, SQL and Python`;
     const result = scoreJdMatch('I use Jira, Notion, Slack, Asana, Figma, Excel, Tableau, SQL and Python', jd);
-    assert.ok(result.required_coverage !== null && result.required_coverage < 0.5);
-    assert.notEqual(scoreBand(result.score!, result.required_coverage).tone, 'strong');
+    assert.equal(result.scorable, false, 'missing every sparse primary requirement refuses instead of padding');
+    assert.deepEqual(result.missing, []);
   });
 
   test('a 60k single-line posting scores without stalling the event loop', () => {
@@ -1388,8 +1389,88 @@ describe('a posting does not ask for its own address', () => {
     for (const place of ['san francisco', 'tokyo', 'london', 'bangalore']) {
       assert.ok(!keys.includes(place), `"${place}" is office policy prose, not a resume requirement`);
     }
+    for (const prose of ['development', 'optax', 'orbax', 'tensorstore']) {
+      assert.ok(!keys.includes(prose), `"${prose}" is responsibilities prose or a tool example, not a fit requirement`);
+    }
     for (const real of ['computer science', 'ml', 'rust', 'pytorch', 'jax', 'pandas', 'sql']) {
       assert.ok(keys.includes(real), `"${real}" is a real requirement`);
+    }
+  });
+
+  test('a sparse Postman-style About You section does not backfill from responsibilities', () => {
+    const jd = [
+      'Who Are We?',
+      'Postman is headquartered in San Francisco and has offices in Boston, New York, Austin, Tokyo, London, and Bangalore.',
+      'What You Will Do',
+      'Model Development',
+      'Build and validate AI models using PyTorch or JAX (Optax/Orbax/TensorStore/Grain) and similar tools.',
+      'Productionization',
+      'Help build inference APIs and batch scoring workflows.',
+      'About You',
+      'Currently pursuing a BS/MS/PhD in Computer Science.',
+      'Clear written and verbal communication.',
+      'What Else?',
+      'At Postman we value in person collaboration. We are in office five days a week for all roles based out of our hubs in San Francisco Bay Area, Boston, Austin, New York City, Tokyo and London.',
+    ].join('\n');
+    const result = scoreJdMatch('Computer Science.', jd, { company: 'Postman', role: 'AI Engineer, Intern' });
+    assert.equal(result.scorable, false, 'a sparse fit section refuses instead of padding from responsibilities');
+    const keys = extractJdTerms(jd, { company: 'Postman', role: 'AI Engineer, Intern' }).map((t) => t.term);
+    assert.ok(keys.includes('computer science'), 'the fit-section requirement survives');
+    for (const prose of ['development', 'pytorch', 'jax', 'optax', 'orbax', 'tensorstore', 'productionization']) {
+      assert.ok(!keys.includes(prose), `"${prose}" is outside the fit section`);
+    }
+  });
+
+  test('a primary fit section with no extractable terms still blocks responsibility backfill', () => {
+    const jd = [
+      'What You Will Do',
+      'Model Development',
+      'Build and validate AI models using PyTorch or JAX (Optax/Orbax/TensorStore/Grain).',
+      'Requirements',
+      'You are curious, thoughtful, collaborative, and eager to learn.',
+      'You communicate clearly and ask good questions.',
+    ].join('\n');
+    const terms = extractJdTerms(jd, { company: 'Postman', role: 'AI Engineer, Intern' });
+    assert.deepEqual(terms, [], 'the primary fit section exists, so responsibilities are not backfilled');
+    const result = scoreJdMatch('PyTorch and JAX.', jd, { company: 'Postman', role: 'AI Engineer, Intern' });
+    assert.equal(result.scorable, false);
+    assert.deepEqual(result.missing, []);
+  });
+
+  test('a What You Will Do block after About You is not absorbed into primary fit requirements', () => {
+    const jd = [
+      'About You',
+      'Currently pursuing a BS/MS/PhD in Computer Science.',
+      'Clear written and verbal communication.',
+      'What You Will Do',
+      'Build and validate AI models using PyTorch, JAX, Optax, Orbax, and TensorStore.',
+    ].join('\n');
+    const keys = extractJdTerms(jd, { company: 'Postman', role: 'AI Engineer, Intern' }).map((t) => t.term);
+    assert.ok(keys.includes('computer science'), 'the fit-section requirement survives');
+    for (const prose of ['pytorch', 'jax', 'optax', 'orbax', 'tensorstore']) {
+      assert.ok(!keys.includes(prose), `"${prose}" is generic work prose, not a fit requirement`);
+    }
+  });
+
+  test('local logistics inside an impact-example section does not drop later impact requirements', () => {
+    const jd = [
+      'Examples of how you will make an impact:',
+      '- Develop product requirement documents for vehicle hardware and embedded software.',
+      'This position is based onsite five days a week at our HQ in San Mateo, CA.',
+      '- Partner with engineering leaders spanning firmware, computer vision, AI, and machine learning.',
+      'What would make you a strong fit:',
+      '- Clear and effective communicator in technical contexts.',
+    ].join('\n');
+    const keys = extractJdTerms(jd, {
+      company: 'Skydio',
+      role: 'Product Management Intern',
+      location: 'San Mateo, CA',
+    }).map((t) => t.term);
+    for (const real of ['hardware', 'embedded', 'firmware', 'ai']) {
+      assert.ok(keys.includes(real), `"${real}" remains part of the impact-example section`);
+    }
+    for (const junk of ['hq', 'san mateo']) {
+      assert.ok(!keys.includes(junk), `"${junk}" is still logistics`);
     }
   });
 
@@ -2764,13 +2845,12 @@ describe('ISSUE-027: EEO, pay and address text is not a requirement', () => {
   });
 
   test('the terms that ARE stated survive', () => {
-    // What this posting actually names: a Computer Science / Computer Engineering degree, and API
-    // work in the role description. Its Qualifications block is otherwise soft - "Passionate about
-    // blockchain", "Self-motivated and proactive", "Strong communication skills" - which is the
-    // whole reason it ends up under the floor below.
+    // What this posting actually states in its Qualifications block: a Computer Science / Computer
+    // Engineering degree. Role-description API work is intentionally outside the primary fit
+    // section, so it is no longer counted as a resume requirement.
     const keys = extractJdTerms(GEMINI_JD, GEMINI_CONTEXT).map((t) => t.term);
     assert.ok(keys.includes('computer science'), 'the degree field is stated under Qualifications');
-    assert.ok(keys.includes('api'), 'the role description names API response times twice');
+    assert.ok(!keys.includes('api'), 'role-description API prose is not a primary fit requirement');
   });
 
   test('the pay paragraph, the hybrid paragraph and the EEO paragraph all score zero', () => {
@@ -2849,11 +2929,10 @@ describe('ISSUE-027: an inline label closes the section it interrupts', () => {
       assert.ok(found, `"${skill}" is stated under an inline Skills label`);
       assert.equal(found?.weight, 1, 'and carries the weight the employer gave it');
     }
-    // `Professional Mindset:` classifies as nothing, so its line stays at whatever weight the
-    // enclosing section had. What it must NOT do is inherit the weight-1 of the Skills label above.
+    // `Professional Mindset:` classifies as nothing, so its line is not part of the primary Skills
+    // label. Once a primary fit label exists, this prose is no longer pulled back in.
     const kubernetes = terms.find((t) => t.term === 'kubernetes');
-    assert.ok(kubernetes, 'the line below the label is still read');
-    assert.ok(kubernetes!.weight < 1, 'but it did not inherit the Skills label weight');
+    assert.equal(kubernetes, undefined, 'the line below the fit label is not treated as a requirement');
   });
 
   test('a bulleted line is never read as an inline label', () => {
@@ -2933,7 +3012,8 @@ describe('ISSUE-027: an address is not a requirement, wherever it is written', (
     for (const place of ['ny', 'york', 'york city', 'new york city']) {
       assert.ok(!keys.includes(place), `"${place}" is the office address`);
     }
-    assert.ok(keys.includes('react') && keys.includes('python'), 'the real requirements survive');
+    assert.ok(!keys.includes('react'), 'role prose is not retained once Requirements exists');
+    assert.ok(keys.includes('python'), 'the stated requirement survives');
   });
 
   test('"the State of X" is an address in any section', () => {
