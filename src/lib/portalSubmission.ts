@@ -464,6 +464,29 @@ function managedGreenhouseReactSelectFill(
   });
 }
 
+function managedGreenhouseScopedReactSelectFill(
+  actions: ManagedBrowserAction[],
+  inputSelector: string,
+  optionSelector: string | undefined,
+  value: string | undefined,
+  label: string,
+  optional = true,
+  timeout = MANAGED_FILL_TIMEOUT_MS,
+) {
+  if (!value) return;
+  actions.push({ type: 'fill', selector: inputSelector, value, label, optional, timeout });
+  if (optionSelector) {
+    actions.push({
+      type: 'click',
+      selector: optionSelector,
+      label: `${label}_option`,
+      optional,
+      timeout,
+    });
+  }
+  actions.push({ type: 'press', selector: inputSelector, value: 'Enter', label: `${label}_select`, optional, timeout });
+}
+
 function uniqueDefined(values: Array<string | undefined>): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
@@ -520,9 +543,10 @@ function pushGreenhouseEducationComboboxActions(actions: ManagedBrowserAction[],
     managedGreenhouseReactSelectFill(actions, 'school--0', value, `education_school_combo:${index}`);
   }
   for (const [index, value] of schoolAliases.slice(0, 1).entries()) {
-    managedComboboxFill(
+    managedGreenhouseScopedReactSelectFill(
       actions,
       '.select__container:has(> label:has-text("School")) input[role="combobox"]',
+      GREENHOUSE_VISIBLE_REACT_SELECT_OPTION_SELECTOR,
       value,
       `education_school_combo_label:${index}`,
     );
@@ -687,6 +711,8 @@ function greenhouseQuestionComboboxSelectors(label: string): string[] {
   ];
 }
 
+const GREENHOUSE_VISIBLE_REACT_SELECT_OPTION_SELECTOR = '[id^="react-select-"][id$="-option-0"]:visible';
+
 const GREENHOUSE_DEMOGRAPHIC_DATA_CONSENT_CHECKBOX_SELECTOR =
   'input[type="checkbox"][name="gdpr_demographic_data_consent_given"], input[type="checkbox"][id^="gdpr_demographic_data_consent_given"], label:has-text("By checking this box, I consent") input[type="checkbox"]';
 const GREENHOUSE_ALIAS_SELECT_SELECTOR_LIMIT = 1;
@@ -771,6 +797,7 @@ function abbreviatedUsLocation(value: string): string | undefined {
 
 function greenhouseComboboxValuesForQuestion(question: string, answer: string): string[] {
   const normalizedQuestion = question.toLowerCase();
+  const normalizedAnswer = answer.trim().toLowerCase();
   const values = selectValuesForAnswer(answer);
   if (/\bwhat\s+is\s+your\s+gpa\b|\bgpa\b/.test(normalizedQuestion)) {
     values.unshift(greenhouseGpaBucket(answer) ?? '');
@@ -781,12 +808,23 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string): 
   if (/\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\blocation\b[^?]{0,120}\b(?:single|top|preferred|preference|most interested)\b/.test(normalizedQuestion)) {
     values.unshift(abbreviatedUsLocation(answer) ?? '');
   }
+  if (/\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b/.test(normalizedQuestion)
+    && /\b(?:have\s+not|haven't|never)\s+(?:worked|been employed)\b/.test(answer.toLowerCase())) {
+    values.unshift('No');
+  }
   if (/legally\s+authorized\s+to\s+work|authori[sz](?:ed|ation)\s+to\s+work|work\s+authori[sz]/.test(normalizedQuestion)) {
-    values.unshift(
-      'Yes, I am authorized to work in the country where this job is located',
-      'Yes, I am authorized to work in the country where the job is located',
-      'Yes, I am authorized to work in the United States',
-    );
+    const negative = /^(?:no|false|0)\b/.test(normalizedAnswer) || /\bnot\s+authori[sz]ed\b/.test(normalizedAnswer);
+    const affirmative = /^(?:yes|true|1)\b/.test(normalizedAnswer) || (!negative && /\bauthori[sz]ed\b/.test(normalizedAnswer));
+    if (negative) {
+      values.unshift('No');
+    } else if (affirmative) {
+      values.unshift('Yes');
+      values.push(
+        'Yes, I am authorized to work in the country where this job is located',
+        'Yes, I am authorized to work in the country where the job is located',
+        'Yes, I am authorized to work in the United States',
+      );
+    }
   }
   return uniqueDefined(values);
 }
@@ -803,8 +841,14 @@ function pushGreenhouseQuestionComboboxActions(
   labelPrefix: string,
 ) {
   if (!isGreenhouseReactSelectQuestion(questionText)) return;
-  for (const [index, value] of greenhouseComboboxValuesForQuestion(questionText, answer).entries()) {
-    managedComboboxFill(actions, selector, value, `${labelPrefix}_combo:${index}:${questionText.slice(0, 80)}`);
+  for (const [index, value] of greenhouseComboboxValuesForQuestion(questionText, answer).slice(0, 1).entries()) {
+    managedGreenhouseScopedReactSelectFill(
+      actions,
+      selector,
+      GREENHOUSE_VISIBLE_REACT_SELECT_OPTION_SELECTOR,
+      value,
+      `${labelPrefix}_combo:${index}:${questionText.slice(0, 80)}`,
+    );
   }
 }
 
@@ -816,10 +860,16 @@ function pushGreenhouseQuestionComboboxLabelActions(
 ) {
   if (!isGreenhouseReactSelectQuestion(questionText)) return;
   let index = 0;
-  const values = greenhouseComboboxValuesForQuestion(questionText, answer).slice(0, 2);
+  const values = greenhouseComboboxValuesForQuestion(questionText, answer).slice(0, 1);
   for (const selector of greenhouseQuestionComboboxSelectors(questionText).slice(0, QUESTION_COMBOBOX_SELECTOR_LIMIT)) {
     for (const value of values) {
-      managedComboboxFill(actions, selector, value, `${labelPrefix}_combo_label:${index}:${questionText.slice(0, 80)}`);
+      managedGreenhouseScopedReactSelectFill(
+        actions,
+        selector,
+        GREENHOUSE_VISIBLE_REACT_SELECT_OPTION_SELECTOR,
+        value,
+        `${labelPrefix}_combo_label:${index}:${questionText.slice(0, 80)}`,
+      );
       index += 1;
     }
   }
