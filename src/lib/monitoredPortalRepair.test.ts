@@ -13,6 +13,12 @@ test('legacy preview agrees only when the stored hash belongs to that preview', 
   assert.equal(monitoredJdAgrees(monitoredDescriptionHash(legacyPreview), legacyPreview, canonical), true);
 });
 
+test('legacy board preview hash agrees after review text has been repaired to full JD', () => {
+  const longCanonical = `${canonical}${'Additional requirements and benefits copy. '.repeat(12)}`;
+  const boardPreview = longCanonical.slice(0, 600);
+  assert.equal(monitoredJdAgrees(monitoredDescriptionHash(boardPreview), longCanonical, longCanonical), true);
+});
+
 test('legacy preview prefix cannot bypass a mismatched generated packet hash', () => {
   assert.equal(monitoredJdAgrees(monitoredDescriptionHash('different job text'), legacyPreview, canonical), false);
 });
