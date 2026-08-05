@@ -141,20 +141,33 @@ test('the review route edits through the helper rather than a bare spread', () =
  * module is right, the composition root never mounts it, and the defect survives the fix. These
  * assert the three places the answer has to be used for the bug to actually be gone.
  */
-test('portal support is written at packet creation and enforced before a run starts', () => {
+test('portal support is written at packet creation and unsupported portals use email fallback', () => {
   const resumeRoute = routeSource('resume.ts');
   assert.match(resumeRoute, /import \{ isPortalSupported \} from '\.\.\/lib\/portalSubmission'/);
   // Set on the review at creation, from the URL the caller just handed us.
   assert.match(resumeRoute, /portal_supported: isPortalSupported\(body\.application\.portal_url\)/);
 
   const applicationsRoute = routeSource('applications.ts');
-  // Refused up front. A client-side check is not an enforcement point, so submit-request has to
-  // answer this itself rather than trusting the dashboard to have hidden the button.
-  assert.match(applicationsRoute, /!isPortalSupported\(current\.portal_url\)[\s\S]{0,400}PORTAL_NOT_SUPPORTED/);
-  // Refused BEFORE the run is kicked off, not after. Bounded span so a match cannot skip the file.
-  const guardIndex = applicationsRoute.indexOf('PORTAL_NOT_SUPPORTED');
+  assert.match(applicationsRoute, /sendUnsupportedPortalApplicationEmail/);
+  assert.match(applicationsRoute, /!isPortalSupported\(current\.portal_url\)[\s\S]{0,1800}sendUnsupportedPortalApplicationEmail/);
+  assert.doesNotMatch(applicationsRoute, /PORTAL_NOT_SUPPORTED/);
+  const guardIndex = applicationsRoute.indexOf('!isPortalSupported(current.portal_url)');
   const runIndex = applicationsRoute.indexOf('processSubmissionApplication(row.id, fastify)');
-  assert.ok(guardIndex > 0 && runIndex > guardIndex, 'the portal guard must precede the submission run');
+  assert.ok(guardIndex > 0 && runIndex > guardIndex, 'the unsupported portal branch must precede the browser submission run');
+  const browserConfigIndex = applicationsRoute.indexOf('PORTAL_RUNNER_NOT_CONFIGURED');
+  assert.ok(browserConfigIndex > guardIndex, 'unsupported portal email fallback must not require a browser provider');
+  assert.match(applicationsRoute, /pipeline_stage: 'applied'/);
+  assert.match(applicationsRoute, /source: 'email_fallback'/);
+  assert.match(applicationsRoute, /status: 'failed' as const[\s\S]{0,800}UNSUPPORTED_PORTAL_EMAIL_UNAVAILABLE/);
+  const failureStart = applicationsRoute.indexOf("Unsupported portal email fallback failed");
+  const failureEnd = applicationsRoute.indexOf('const submittedAt', failureStart);
+  assert.ok(failureStart > guardIndex, 'email fallback failure handling must be inside the unsupported branch');
+  assert.ok(failureEnd > failureStart, 'email fallback failure handling must return before the submitted write');
+  const failureBlock = applicationsRoute.slice(failureStart, failureEnd);
+  assert.match(failureBlock, /status: 'failed' as const/);
+  assert.match(failureBlock, /return reply\.status\(503\)\.send/);
+  assert.doesNotMatch(failureBlock, /status: 'submitted'/);
+  assert.doesNotMatch(failureBlock, /pipeline_stage: 'applied'/);
 });
 
 test('a cover letter failure degrades the run instead of aborting it', () => {

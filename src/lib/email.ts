@@ -42,6 +42,11 @@ export type OutboundEmail = {
   text: string;
   html?: string;
   reply_to?: string;
+  attachments?: Array<{
+    filename: string;
+    content: string;
+    content_type?: string;
+  }>;
 };
 
 /* Returns Resend's message id, which is the only proof the send was accepted.

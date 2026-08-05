@@ -226,8 +226,10 @@ test('submit-request returns the cover letter it generated for final approval', 
   assert.match(handler, /const processed = await processSubmissionApplication\(row\.id, fastify\)/);
   assert.match(handler, /const responseRow = refreshed \?\? row/);
   assert.match(handler, /cover_letter: storedCoverLetter\(responseRow\)/);
+  const runIndex = handler.indexOf('const processed = await processSubmissionApplication(row.id, fastify)');
+  const supportedResponseIndex = handler.indexOf('cover_letter: storedCoverLetter(responseRow)', runIndex);
   assert.ok(
-    handler.indexOf('processSubmissionApplication') < handler.indexOf('cover_letter: storedCoverLetter(responseRow)'),
+    runIndex > 0 && supportedResponseIndex > runIndex,
     'the response must read the cover letter after preparation has generated it',
   );
 });

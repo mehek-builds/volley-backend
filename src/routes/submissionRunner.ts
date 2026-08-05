@@ -212,7 +212,7 @@ async function holdRevokedSubmission(row: ResumeRow, review: ApplicationReviewSt
   }));
 }
 
-async function buildPacket(row: ResumeRow, controlledTest = false): Promise<SubmissionPacket> {
+export async function buildPacket(row: ResumeRow, controlledTest = false): Promise<SubmissionPacket> {
   const stored = row.spec as StoredSpec;
   const contact = (stored._contact ?? {}) as Record<string, unknown>;
   const coverLetterMeta = (stored._cover_letter ?? {}) as Record<string, unknown>;
