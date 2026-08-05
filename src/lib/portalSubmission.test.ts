@@ -781,9 +781,9 @@ test('Greenhouse fills academic fields from the submission packet', () => {
     false,
   );
   assert.ok(comboFills.some((action) => action.selector === '#discipline--0' && action.value === 'Computer Science'));
-  assert.ok(actions.some((action) => action.type === 'press' && action.selector === '#school--0' && action.label?.startsWith('education_school_combo')));
-  assert.ok(actions.some((action) => action.type === 'press' && action.selector === '#degree--0' && action.label?.startsWith('education_degree_combo')));
-  assert.ok(actions.some((action) => action.type === 'press' && action.selector === '#discipline--0' && action.label?.startsWith('education_discipline_combo')));
+  assert.ok(actions.some((action) => action.type === 'click' && action.selector === '#react-select-school--0-option-0' && action.label?.startsWith('education_school_combo')));
+  assert.ok(actions.some((action) => action.type === 'click' && action.selector === '#react-select-degree--0-option-0' && action.label?.startsWith('education_degree_combo')));
+  assert.ok(actions.some((action) => action.type === 'click' && action.selector === '#react-select-discipline--0-option-0' && action.label?.startsWith('education_discipline_combo')));
 });
 
 test('Greenhouse replays Databricks choice questions through React-select buckets', () => {

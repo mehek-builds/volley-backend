@@ -444,6 +444,26 @@ function managedComboboxFill(
   actions.push({ type: 'press', selector, value: 'Enter', label: `${label}_select`, optional, timeout });
 }
 
+function managedGreenhouseReactSelectFill(
+  actions: ManagedBrowserAction[],
+  inputId: 'school--0' | 'degree--0' | 'discipline--0',
+  value: string | undefined,
+  label: string,
+  optional = true,
+  timeout = MANAGED_FILL_TIMEOUT_MS,
+) {
+  if (!value) return;
+  const selector = `#${inputId}`;
+  actions.push({ type: 'fill', selector, value, label, optional, timeout });
+  actions.push({
+    type: 'click',
+    selector: `#react-select-${inputId}-option-0`,
+    label: `${label}_option`,
+    optional,
+    timeout,
+  });
+}
+
 function uniqueDefined(values: Array<string | undefined>): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
@@ -502,13 +522,13 @@ function greenhouseDisciplineAliases(packet: SubmissionPacket): string[] {
 
 function pushGreenhouseEducationComboboxActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
   for (const [index, value] of greenhouseSchoolAliases(packet.school).entries()) {
-    managedComboboxFill(actions, '#school--0', value, `education_school_combo:${index}`);
+    managedGreenhouseReactSelectFill(actions, 'school--0', value, `education_school_combo:${index}`);
   }
   for (const [index, value] of greenhouseDegreeAliases(packet.degree).entries()) {
-    managedComboboxFill(actions, '#degree--0', value, `education_degree_combo:${index}`);
+    managedGreenhouseReactSelectFill(actions, 'degree--0', value, `education_degree_combo:${index}`);
   }
   for (const [index, value] of greenhouseDisciplineAliases(packet).entries()) {
-    managedComboboxFill(actions, '#discipline--0', value, `education_discipline_combo:${index}`);
+    managedGreenhouseReactSelectFill(actions, 'discipline--0', value, `education_discipline_combo:${index}`);
   }
 }
 
