@@ -45,6 +45,7 @@ export type ApplicationProfileLike = StoredSalaryProfile & {
   gpa?: string;
   gpa_scale?: string;
   major?: string;
+  eeo_prefs?: Record<string, string> | null;
   referral_source_default?: string;
 };
 
@@ -63,7 +64,7 @@ const NON_US_WORK_SCOPE =
   /\b(canada|canadian|united kingdom|uk|britain|british|england|european union|eu|australia|australian|india|indian|united arab emirates|uae|dubai|singapore|germany|france|ireland|netherlands|japan|korea|china)\b/i;
 const JOB_LOCATION_SCOPE = /country\s+(?:where|in which)\s+the\s+job\s+is\s+located|country\s+where\s+the\s+role\s+is\s+located|where\s+the\s+job\s+is\s+located/i;
 const JD_US_SCOPE =
-  /\b(united states|u\.s\.|usa|remote\s*\(us\)|san francisco|san mateo|california|new york|austin|texas|washington|seattle|boston|massachusetts|chicago|illinois)\b/i;
+  /\b(united states|u\.s\.|usa|remote\s*\(us\)|san francisco|san mateo|mountain view|california|new york|austin|texas|washington|seattle|boston|massachusetts|chicago|illinois)\b/i;
 
 export const EEO_QUESTION =
   /transgender|\bgender\b|what is your sex\b|race|ethnicit|hispanic|latino|veteran|military|disab|sexual orientation|communities|identify with|current age|what is your age|age range|how old are you|\bage group\b/i;
@@ -110,8 +111,18 @@ export function sensitiveQuestionRequiresAttention(
   jdText: string | undefined,
 ): boolean {
   if (!isRefusedQuestion(label)) return false;
+  if (!WORK_ELIGIBILITY_QUESTION.test(label)) return true;
   const known = resolveKnownAnswer(label, inputType, ap, jdText);
   return !(known && 'value' in known && comparableAnswer(known.value) === comparableAnswer(answer));
+}
+
+export function questionRequiresHumanAttention(question: { question: string; answer?: string }): boolean {
+  const label = question.question ?? '';
+  const answer = question.answer?.trim() ?? '';
+  if (NEVER_FILL_PATTERNS.some((re) => re.test(label))) return true;
+  if (WORK_ELIGIBILITY_QUESTION.test(label)) return !/^(yes|no)$/i.test(answer);
+  if (EEO_QUESTION.test(label)) return answer.length === 0;
+  return false;
 }
 
 const RESIDENCE_QUESTION =
@@ -196,6 +207,18 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
 // EEO / demographics: exact-match-only (Mehek's 2026-07-17 ruling, R-018). Ported verbatim.
 export function eeoAnswer(pref: string | undefined): string {
   return pref && pref.trim() ? pref.trim() : 'Decline to self-identify';
+}
+
+function eeoPreferenceForLabel(label: string, prefs: Record<string, string> | null | undefined): string | undefined {
+  if (!prefs) return undefined;
+  const l = label.toLowerCase();
+  if (/gender|sex\b|transgender/.test(l)) return prefs.gender ?? prefs.sex;
+  if (/hispanic|latino/.test(l)) return prefs.hispanic_ethnicity ?? prefs.hispanic ?? prefs.ethnicity;
+  if (/race|ethnicit/.test(l)) return prefs.race ?? prefs.ethnicity;
+  if (/veteran|military/.test(l)) return prefs.veteran_status ?? prefs.veteran;
+  if (/disab/.test(l)) return prefs.disability_status ?? prefs.disability;
+  if (/sexual orientation/.test(l)) return prefs.sexual_orientation;
+  return undefined;
 }
 
 // Ported from isOpenEndedQuestion (R-033): does the label read like a prompt for prose, not a
@@ -475,6 +498,10 @@ export function resolveKnownAnswer(
 ): { value: string } | { skipReason: string } | null {
   const workEligibility = workEligibilityAnswer(label, ap, jdText);
   if (workEligibility) return workEligibility;
+
+  if (EEO_QUESTION.test(label)) {
+    return { value: eeoAnswer(eeoPreferenceForLabel(label, ap.eeo_prefs)) };
+  }
 
   if (isRefusedQuestion(label)) {
     return WORK_ELIGIBILITY_QUESTION.test(label) ? { skipReason: workEligibilitySkipReason(label) } : null;

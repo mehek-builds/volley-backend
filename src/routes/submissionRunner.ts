@@ -68,6 +68,7 @@ import {
   type DiscoveredQuestion,
 } from '../lib/questionDiscovery';
 import type { ApplicationReviewQuestion } from '../lib/applicationReview';
+import { jobCountry } from '../lib/jobLocation';
 import { generateStoredCoverLetter, storedCoverLetter } from '../lib/coverLetterService';
 import { mayClickFinalSubmit, preparedSubmissionStatus } from '../lib/submissionAuthorization';
 import { directPreparationIsSafe } from '../lib/submissionSafety';
@@ -284,16 +285,16 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     ? profileRow[0].base_resume_json
     : {}) as Record<string, unknown>;
   const academicStr = (key: string): string | undefined => {
-    const baseValue = base[key];
-    if (typeof baseValue === 'string' && baseValue.trim()) return baseValue.trim();
     const parsedValue = parsed[key];
-    return typeof parsedValue === 'string' && parsedValue.trim() ? parsedValue.trim() : undefined;
+    if (typeof parsedValue === 'string' && parsedValue.trim()) return parsedValue.trim();
+    const baseValue = base[key];
+    return typeof baseValue === 'string' && baseValue.trim() ? baseValue.trim() : undefined;
   };
   const academicNum = (key: string): number | undefined => {
-    const baseValue = base[key];
-    if (typeof baseValue === 'number' && baseValue > 0) return baseValue;
     const parsedValue = parsed[key];
-    return typeof parsedValue === 'number' && parsedValue > 0 ? parsedValue : undefined;
+    if (typeof parsedValue === 'number' && parsedValue > 0) return parsedValue;
+    const baseValue = base[key];
+    return typeof baseValue === 'number' && baseValue > 0 ? baseValue : undefined;
   };
   const graduationDate = academicStr('grad_date');
   const graduationYear = academicNum('grad_year');
@@ -303,6 +304,7 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     email,
     phone: typeof app.phone === 'string' ? app.phone : undefined,
     city: typeof app.address_city === 'string' ? app.address_city : undefined,
+    country: typeof app.address_country === 'string' ? app.address_country : undefined,
     linkedinUrl: typeof app.linkedin_url === 'string' ? app.linkedin_url : undefined,
     githubUrl: typeof app.github_url === 'string' ? app.github_url : undefined,
     portfolioUrl: typeof app.portfolio_url === 'string' ? app.portfolio_url : undefined,
@@ -442,6 +444,19 @@ async function packetForCoverLetterCapability(
   return { packet: await buildPacket(rows[0]) };
 }
 
+export function applicationContextForQuestionResolution(row: ResumeRow, current: ApplicationReviewState): string {
+  const context = (row.job_context && typeof row.job_context === 'object' ? row.job_context : {}) as Record<string, unknown>;
+  const locationValues = [
+    typeof context.location === 'string' ? context.location : '',
+    ...(Array.isArray(context.locations) ? context.locations.filter((value): value is string => typeof value === 'string') : []),
+  ].map((value) => value.trim()).filter(Boolean);
+  const classifiedLocations = [...new Set(locationValues)].map((value) => ({ value, country: jobCountry(value) }));
+  const safeLocations = classifiedLocations.length > 0 && classifiedLocations.every((item) => item.country === 'us')
+    ? classifiedLocations.map((item) => item.value).join('\n')
+    : '';
+  return [current.jd_text, safeLocations].filter((value) => value.trim()).join('\n');
+}
+
 // R-055 fix: the dashboard flow used to send only whatever `review.questions` the client already
 // supplied (empty on a fresh dashboard-only run), so a real posting's custom questions - GPA,
 // sponsorship, GitHub, essays - were never attempted. This resolves a raw discovered-question list
@@ -476,6 +491,7 @@ export async function discoverAndResolveQuestions(
   } catch {
     // keep the fallback
   }
+  const questionContext = applicationContextForQuestionResolution(row, current);
 
   for (const field of discovered) {
     const label = normalizeDiscoveredLabel(field.label);
@@ -483,7 +499,7 @@ export async function discoverAndResolveQuestions(
     if (!label || !reviewLabel || normalizeStoredPortalQuestions([{ question: label, answer: '' }], portal).length === 0) continue;
     if (existingLabels.has(reviewLabel.toLowerCase())) continue; // already answered by the client or a prior run
 
-    const known = resolveKnownAnswer(label, field.inputType, ap, current.jd_text);
+    const known = resolveKnownAnswer(label, field.inputType, ap, questionContext);
     if (known && 'value' in known) {
       questions.push({ id: randomUUID(), question: reviewLabel, answer: known.value, kind: 'required', required: false });
       continue;
@@ -560,22 +576,22 @@ async function loadApplicationProfileLike(userId: string): Promise<ApplicationPr
   const str = (key: string): string | undefined => (typeof app[key] === 'string' ? (app[key] as string) : undefined);
   const appBoolean = (key: string): boolean | undefined => (typeof app[key] === 'boolean' ? (app[key] as boolean) : undefined);
   const academicStr = (key: string): string | undefined => {
-    const baseValue = base[key];
-    if (typeof baseValue === 'string' && baseValue.trim()) return baseValue;
     const parsedValue = parsed[key];
-    return typeof parsedValue === 'string' && parsedValue.trim() ? parsedValue : undefined;
+    if (typeof parsedValue === 'string' && parsedValue.trim()) return parsedValue;
+    const baseValue = base[key];
+    return typeof baseValue === 'string' && baseValue.trim() ? baseValue : undefined;
   };
   const academicNum = (key: string): number | undefined => {
-    const baseValue = base[key];
-    if (typeof baseValue === 'number' && baseValue > 0) return baseValue;
     const parsedValue = parsed[key];
-    return typeof parsedValue === 'number' && parsedValue > 0 ? parsedValue : undefined;
+    if (typeof parsedValue === 'number' && parsedValue > 0) return parsedValue;
+    const baseValue = base[key];
+    return typeof baseValue === 'number' && baseValue > 0 ? baseValue : undefined;
   };
   const academicBoolean = (key: string): boolean | undefined => {
-    const baseValue = base[key];
-    if (typeof baseValue === 'boolean') return baseValue;
     const parsedValue = parsed[key];
-    return typeof parsedValue === 'boolean' ? parsedValue : undefined;
+    if (typeof parsedValue === 'boolean') return parsedValue;
+    const baseValue = base[key];
+    return typeof baseValue === 'boolean' ? baseValue : undefined;
   };
   return {
     phone: str('phone'),
@@ -601,6 +617,9 @@ async function loadApplicationProfileLike(userId: string): Promise<ApplicationPr
     gpa: str('gpa'),
     gpa_scale: str('gpa_scale'),
     major: str('major'),
+    eeo_prefs: app.eeo_prefs && typeof app.eeo_prefs === 'object'
+      ? app.eeo_prefs as Record<string, string>
+      : undefined,
     referral_source_default: str('referral_source_default'),
   };
 }

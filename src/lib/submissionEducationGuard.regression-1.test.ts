@@ -146,6 +146,22 @@ function slice(source: string, from: string, to: string): string {
   return source.slice(start, end);
 }
 
+test('submission runner prefers current parsed education over stale base resume education', () => {
+  const runner = strippedSource('src/routes/submissionRunner.ts');
+  const academicStr = slice(runner, 'const academicStr = (key: string): string | undefined => {', 'const academicNum =')
+    .replace(/\s+/g, '');
+  const academicNum = slice(runner, 'const academicNum = (key: string): number | undefined => {', 'const academicBoolean =')
+    .replace(/\s+/g, '');
+  assert.ok(
+    academicStr.indexOf('constparsedValue=parsed[key]') < academicStr.indexOf('constbaseValue=base[key]'),
+    'parsed grad_date must beat stale base resume grad_date',
+  );
+  assert.ok(
+    academicNum.indexOf('constparsedValue=parsed[key]') < academicNum.indexOf('constbaseValue=base[key]'),
+    'parsed grad_year must beat stale base resume grad_year',
+  );
+});
+
 test('extension-start refuses a drifted packet before it reserves the submission', () => {
   const handler = slice(routes, "'/applications/:id/submission/extension-start'", "'/applications/:id/submission/extension-outcome'");
   assert.match(handler, /packetEducationDrift\(row\.spec/);

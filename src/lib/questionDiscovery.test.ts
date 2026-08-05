@@ -10,6 +10,7 @@ import {
   normalizeDiscoveredLabel,
   normalizeReviewQuestionLabel,
   normalizeStoredPortalQuestions,
+  questionRequiresHumanAttention,
   REVIEW_QUESTION_TEXT_MAX_LENGTH,
   resolveKnownAnswer,
   sensitiveQuestionRequiresAttention,
@@ -32,6 +33,15 @@ test('answers work authorization and sponsorship only from explicit stored conse
       'text',
       { work_authorized: true },
       'This role is based in San Francisco, California.',
+    ),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Are you legally authorized to work in the country in which you are applying?',
+      'text',
+      { work_authorized: true },
+      'Mountain View, CA',
     ),
     { value: 'Yes' },
   );
@@ -85,12 +95,33 @@ test('answers work authorization and sponsorship only from explicit stored conse
   assert.ok(mixed && 'skipReason' in mixed);
 });
 
-test('never answers EEO / demographic questions', () => {
+test('answers EEO / demographic questions with stored preferences or decline', () => {
   const labels = ['what is your gender?', 'are you hispanic or latino?', 'veteran status', 'are you a person of transgender experience?'];
   for (const label of labels) {
     assert.equal(isRefusedQuestion(label), true, label);
     assert.equal(classifyField(label), null, label);
+    assert.deepEqual(resolveKnownAnswer(label, 'text', {}, undefined), { value: 'Decline to self-identify' });
   }
+  assert.deepEqual(
+    resolveKnownAnswer('what is your gender?', 'text', { eeo_prefs: { gender: 'Female' } }, undefined),
+    { value: 'Female' },
+  );
+});
+
+test('send-time sensitive guard allows stored work and EEO answers while blocking identity numbers', () => {
+  assert.equal(
+    questionRequiresHumanAttention({ question: 'are you legally authorized to work in the United States?', answer: 'Yes' }),
+    false,
+  );
+  assert.equal(
+    questionRequiresHumanAttention({ question: 'will you require sponsorship for work authorization?', answer: '' }),
+    true,
+  );
+  assert.equal(
+    questionRequiresHumanAttention({ question: 'gender', answer: 'Decline to self-identify' }),
+    false,
+  );
+  assert.equal(questionRequiresHumanAttention({ question: 'social security number', answer: '123' }), true);
 });
 
 test('never answers SSN or driver license fields', () => {
@@ -123,6 +154,26 @@ test('sensitive gates allow only exact stored work eligibility answers', () => {
     sensitiveQuestionRequiresAttention(
       'are you legally authorized to work in the United States?',
       'No',
+      'text',
+      { work_authorized: true },
+      undefined,
+    ),
+    true,
+  );
+  assert.equal(
+    sensitiveQuestionRequiresAttention(
+      'are you legally authorized to work in the United States?',
+      'Yes',
+      'text',
+      {},
+      undefined,
+    ),
+    true,
+  );
+  assert.equal(
+    sensitiveQuestionRequiresAttention(
+      'are you legally authorized to work in Canada?',
+      'Yes',
       'text',
       { work_authorized: true },
       undefined,

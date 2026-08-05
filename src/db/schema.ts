@@ -438,13 +438,10 @@ export const application_profile = pgTable('application_profile', {
   github_url: text('github_url'),
   portfolio_url: text('portfolio_url'),
   citizenship: text('citizenship'),
-  // Kept for the student's own reference ONLY. NEVER written into a form and never harvested
-  // back out of one: these are single global flags, but every real form asks a LOCATION-SCOPED
-  // question ("authorized to work in the location where this role is based?"), and deriving one
-  // from the other shipped a false legal declaration on a live application (R-004, Lever/Xsolla
-  // 2026-07-16). The adapters skip both via WORK_ELIGIBILITY_QUESTION and auto-submit HOLDS while
-  // either sits unanswered. Harvest treats them as a denylist for the same reason: a Berlin answer
-  // is not a Toronto answer, so replaying a captured one is the original bug wearing a new hat.
+  // Explicit student profile attestations. Harvest never writes these back out of an observed
+  // employer form: these are single global flags, while some forms ask a LOCATION-SCOPED question
+  // ("authorized to work in the location where this role is based?"). The submission runner may
+  // answer only from these stored values, and still holds ambiguous mixed-scope questions.
   work_authorized: boolean('work_authorized'),
   needs_sponsorship: boolean('needs_sponsorship'),
   // WHEN she can start. Stored ISO (YYYY-MM-DD) because onboarding uses <input type="date">:

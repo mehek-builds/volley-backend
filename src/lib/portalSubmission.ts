@@ -238,6 +238,7 @@ export type SubmissionPacket = {
   email: string;
   phone?: string;
   city?: string;
+  country?: string;
   linkedinUrl?: string;
   githubUrl?: string;
   portfolioUrl?: string;
@@ -320,12 +321,68 @@ function nationalPhoneForCountryCodeField(phone: string | undefined): string | u
   return national || phone;
 }
 
+const DIAL_CODE_COUNTRY_LABELS: Record<string, string> = {
+  '1': 'United States',
+  '7': 'Russia',
+  '20': 'Egypt',
+  '27': 'South Africa',
+  '30': 'Greece',
+  '31': 'Netherlands',
+  '32': 'Belgium',
+  '33': 'France',
+  '34': 'Spain',
+  '36': 'Hungary',
+  '39': 'Italy',
+  '40': 'Romania',
+  '41': 'Switzerland',
+  '43': 'Austria',
+  '44': 'United Kingdom',
+  '45': 'Denmark',
+  '46': 'Sweden',
+  '47': 'Norway',
+  '48': 'Poland',
+  '49': 'Germany',
+  '52': 'Mexico',
+  '55': 'Brazil',
+  '60': 'Malaysia',
+  '61': 'Australia',
+  '62': 'Indonesia',
+  '63': 'Philippines',
+  '65': 'Singapore',
+  '81': 'Japan',
+  '82': 'South Korea',
+  '86': 'China',
+  '90': 'Turkey',
+  '91': 'India',
+  '92': 'Pakistan',
+  '971': 'United Arab Emirates',
+};
+
+function countryForPhoneField(phone: string | undefined, fallbackCountry: string | undefined): string | undefined {
+  if (!phone) return fallbackCountry;
+  const digits = phone.trim().startsWith('+') ? phone.replace(/\D/g, '') : '';
+  if (!digits) return fallbackCountry;
+  const dialCode = Object.keys(DIAL_CODE_COUNTRY_LABELS)
+    .filter((code) => digits.startsWith(code))
+    .sort((a, b) => b.length - a.length)[0];
+  return dialCode ? DIAL_CODE_COUNTRY_LABELS[dialCode] : fallbackCountry;
+}
+
 function phoneForPortalField(portal: SupportedPortal, phone: string | undefined): string | undefined {
   const family = portalFamily(portal);
   if (family === 'rippling') {
     return nationalPhoneForCountryCodeField(phone);
   }
   return phone;
+}
+
+function greenhouseLocationSearch(packet: SubmissionPacket): string | undefined {
+  if (!packet.city) return undefined;
+  if (!packet.country) return packet.city;
+  const city = packet.city.trim();
+  const country = packet.country.trim();
+  if (!city || !country || city.toLowerCase().includes(country.toLowerCase())) return city;
+  return `${city}, ${country}`;
 }
 
 function receiptReference(body: string): string | undefined {
@@ -364,6 +421,19 @@ function managedFillByLabel(
 ) {
   if (!value) return;
   actions.push({ type: 'fillByLabelText', text, value, label, optional, timeout });
+}
+
+function managedComboboxFill(
+  actions: ManagedBrowserAction[],
+  selector: string,
+  value: string | undefined,
+  label: string,
+  optional = true,
+  timeout = MANAGED_FILL_TIMEOUT_MS,
+) {
+  if (!value) return;
+  actions.push({ type: 'fill', selector, value, label, optional, timeout });
+  actions.push({ type: 'press', selector, value: 'Enter', label: `${label}_select`, optional, timeout });
 }
 
 // The resume upload is always optional + bounded. On a real ATS form the file input is present and
@@ -712,8 +782,9 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedFill(actions, '#first_name, input[name="job_application[first_name]"]', parts[0], 'first_name');
     managedFill(actions, '#last_name, input[name="job_application[last_name]"]', parts.slice(1).join(' '), 'last_name');
     managedFill(actions, '#email, input[name="job_application[email]"]', packet.email, 'email');
+    managedComboboxFill(actions, '#country', countryForPhoneField(packet.phone, packet.country), 'phone_country');
     managedFill(actions, GREENHOUSE_PHONE_SELECTOR, phoneForPortalField(portal, packet.phone), 'phone');
-    managedFill(actions, '#candidate-location, input[autocomplete="address-level2"]', packet.city, 'location');
+    managedComboboxFill(actions, '#candidate-location, input[autocomplete="address-level2"]', greenhouseLocationSearch(packet), 'location');
     managedFillByLabel(actions, 'School', packet.school, 'education_school');
     managedFillByLabel(actions, 'Degree', packet.degree, 'education_degree');
     managedFillByLabel(actions, 'What is your graduation date?', packet.graduationDate, 'graduation_date');
@@ -1201,6 +1272,19 @@ async function fillFirst(page: Page, selectors: string[], value: string | undefi
   }
 }
 
+async function fillComboboxFirst(page: Page, selectors: string[], value: string | undefined, label: string, out: string[]) {
+  if (!value) return;
+  for (const selector of selectors) {
+    const field = page.locator(selector).first();
+    if ((await field.count()) > 0 && (await field.isVisible().catch(() => false))) {
+      await field.fill(value);
+      await field.press('Enter').catch(() => undefined);
+      out.push(label);
+      return;
+    }
+  }
+}
+
 async function uploadFirst(
   page: Page,
   selectors: string[],
@@ -1263,8 +1347,9 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['#first_name', 'input[name="job_application[first_name]"]'], parts[0], 'first_name', filledFields);
     await fillFirst(page, ['#last_name', 'input[name="job_application[last_name]"]'], parts.slice(1).join(' '), 'last_name', filledFields);
     await fillFirst(page, ['#email', 'input[name="job_application[email]"]'], packet.email, 'email', filledFields);
+    await fillComboboxFirst(page, ['#country'], countryForPhoneField(packet.phone, packet.country), 'phone_country', filledFields);
     await fillFirst(page, GREENHOUSE_PHONE_SELECTOR.split(', '), phoneForPortalField(portal, packet.phone), 'phone', filledFields);
-    await fillFirst(page, ['#candidate-location', 'input[autocomplete="address-level2"]'], packet.city, 'location', filledFields);
+    await fillComboboxFirst(page, ['#candidate-location', 'input[autocomplete="address-level2"]'], greenhouseLocationSearch(packet), 'location', filledFields);
     await uploadFirst(page, ['#resume', 'input[type="file"][name="job_application[resume]"]'], packet.resume, packet.resumeName, 'resume', filledFields);
     await uploadFirst(page, ['input#cover_letter[type="file"]', 'input[type="file"][name*="cover_letter" i]'], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
   } else if (family === 'lever') {
