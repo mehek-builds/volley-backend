@@ -480,7 +480,9 @@ function greenhouseDegreeAliases(degree: string | undefined): string[] {
   else if (/\bbachelor|b\.?s\.?|b\.?a\.?\b/i.test(lower)) level = 'Bachelor\'s Degree';
   else if (/\bassociate/i.test(lower)) level = 'Associate\'s Degree';
   else if (/\bhigh school/i.test(lower)) level = 'High School';
-  return uniqueDefined([level, trimmed, trimmed.replace(/\s*&\s*/g, ' and ')]);
+  const asciiLevel = level?.replace(/[’]/g, "'");
+  const curlyLevel = level?.replace(/[']/g, '’');
+  return uniqueDefined([level, asciiLevel, curlyLevel]);
 }
 
 function greenhouseDisciplineAliases(packet: SubmissionPacket): string[] {

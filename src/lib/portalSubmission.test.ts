@@ -774,6 +774,12 @@ test('Greenhouse fills academic fields from the submission packet', () => {
   const comboFills = actions.filter((action) => action.type === 'fill' && action.label?.startsWith('education_'));
   assert.ok(comboFills.some((action) => action.selector === '#school--0' && action.value === 'University of Southern California'));
   assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s Degree'));
+  assert.equal(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s'), false);
+  assert.equal(
+    comboFills.some((action) =>
+      action.selector === '#degree--0' && action.value === 'Bachelor of Science in Computer Science'),
+    false,
+  );
   assert.ok(comboFills.some((action) => action.selector === '#discipline--0' && action.value === 'Computer Science'));
   assert.ok(actions.some((action) => action.type === 'press' && action.selector === '#school--0' && action.label?.startsWith('education_school_combo')));
   assert.ok(actions.some((action) => action.type === 'press' && action.selector === '#degree--0' && action.label?.startsWith('education_degree_combo')));
