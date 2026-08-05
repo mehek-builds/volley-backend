@@ -248,6 +248,7 @@ export type SubmissionPacket = {
   graduationMonth?: string;
   graduationYear?: string;
   gpa?: string;
+  major?: string;
   resume: Buffer;
   resumeName: string;
   coverLetter?: Buffer;
@@ -441,6 +442,68 @@ function managedComboboxFill(
   if (!value) return;
   actions.push({ type: 'fill', selector, value, label, optional, timeout });
   actions.push({ type: 'press', selector, value: 'Enter', label: `${label}_select`, optional, timeout });
+}
+
+function uniqueDefined(values: Array<string | undefined>): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    const trimmed = value?.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+function greenhouseSchoolAliases(school: string | undefined): string[] {
+  const trimmed = school?.trim();
+  if (!trimmed) return [];
+  const uscAlias = /\bUniversity of Southern California\b/i.test(trimmed)
+    ? 'University of Southern California'
+    : undefined;
+  return uniqueDefined([
+    trimmed,
+    uscAlias,
+  ]);
+}
+
+function greenhouseDegreeAliases(degree: string | undefined): string[] {
+  const trimmed = degree?.trim();
+  if (!trimmed) return [];
+  const lower = trimmed.toLowerCase();
+  let level: string | undefined;
+  if (/\bph\.?d\b|doctor of philosophy|doctorate/i.test(lower)) level = 'Doctor of Philosophy (Ph.D.)';
+  else if (/\bmaster|m\.?s\.?|m\.?a\.?\b|mba|m\.?b\.?a\.?/i.test(lower)) level = 'Master\'s Degree';
+  else if (/\bbachelor|b\.?s\.?|b\.?a\.?\b/i.test(lower)) level = 'Bachelor\'s Degree';
+  else if (/\bassociate/i.test(lower)) level = 'Associate\'s Degree';
+  else if (/\bhigh school/i.test(lower)) level = 'High School';
+  return uniqueDefined([level, trimmed, trimmed.replace(/\s*&\s*/g, ' and ')]);
+}
+
+function greenhouseDisciplineAliases(packet: SubmissionPacket): string[] {
+  const major = packet.major?.trim();
+  const degree = packet.degree?.trim();
+  const inferred = degree?.match(/computer science/i)?.[0] ?? degree?.match(/\bfinance\b/i)?.[0];
+  return uniqueDefined([
+    major,
+    inferred,
+    major && /\bcs\b/i.test(major) ? 'Computer Science' : undefined,
+  ]);
+}
+
+function pushGreenhouseEducationComboboxActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
+  for (const [index, value] of greenhouseSchoolAliases(packet.school).entries()) {
+    managedComboboxFill(actions, '#school--0', value, `education_school_combo:${index}`);
+  }
+  for (const [index, value] of greenhouseDegreeAliases(packet.degree).entries()) {
+    managedComboboxFill(actions, '#degree--0', value, `education_degree_combo:${index}`);
+  }
+  for (const [index, value] of greenhouseDisciplineAliases(packet).entries()) {
+    managedComboboxFill(actions, '#discipline--0', value, `education_discipline_combo:${index}`);
+  }
 }
 
 function managedSelect(
@@ -1011,6 +1074,7 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedComboboxFill(actions, '#candidate-location, input[autocomplete="address-level2"]', greenhouseLocationSearch(packet), 'location');
     managedFillByLabel(actions, 'School', packet.school, 'education_school');
     managedFillByLabel(actions, 'Degree', packet.degree, 'education_degree');
+    pushGreenhouseEducationComboboxActions(actions, packet);
     managedFillByLabel(actions, 'What is your graduation date?', packet.graduationDate, 'graduation_date');
     managedFillByLabel(actions, 'End date month', packet.graduationMonth, 'education_end_month');
     managedFillByLabel(actions, 'End date year', packet.graduationYear, 'education_end_year');
