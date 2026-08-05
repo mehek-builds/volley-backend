@@ -4,6 +4,7 @@ import {
   classifyField,
   eeoAnswer,
   fitToBudget,
+  graduationDateAnswer,
   isOpenEndedQuestion,
   isRefusedQuestion,
   normalizeDiscoveredLabel,
@@ -61,6 +62,42 @@ test('a location-commitment question is never answered from a stored city (R-039
 test('duration beats start date on an ambiguous "availab" label (R-014)', () => {
   assert.equal(classifyField('length or term/length of availability'), 'availability_term');
   assert.equal(classifyField('when can you start?'), 'availability_date');
+});
+
+test('expected graduation date resolves from the academic profile, not availability', () => {
+  const label = 'Are you currently enrolled in a degree program? If so, expected graduation date';
+  assert.equal(classifyField(label), 'graduation_date');
+  assert.equal(graduationDateAnswer('May 2028', 2028, 'text'), 'May 2028');
+  assert.equal(graduationDateAnswer('May 2028', 2028, 'date'), '2028-05-01');
+  assert.deepEqual(
+    resolveKnownAnswer(label, 'date', { grad_date: 'May 2028', grad_year: 2028, currently_enrolled: true }, undefined),
+    { value: '2028-05-01' },
+  );
+});
+
+test('graduation date inputs use the graduation end of an education range', () => {
+  assert.equal(graduationDateAnswer('August 2024 - May 2028', 2028, 'date'), '2028-05-01');
+  assert.equal(graduationDateAnswer('August 2024 - 2028-05-15', 2028, 'date'), '2028-05-01');
+});
+
+test('graduation-related prose is not filled with a graduation date', () => {
+  const label = 'Describe your post-graduation plans and why they align with this role';
+  assert.equal(classifyField(label), null);
+  assert.equal(resolveKnownAnswer(label, 'textarea', { grad_date: 'May 2028', grad_year: 2028 }, undefined), null);
+  assert.equal(isOpenEndedQuestion(label), true);
+});
+
+test('mixed enrollment and graduation-date prompts require confirmed current enrollment', () => {
+  const label = 'Are you currently enrolled in a degree program? If so, expected graduation date';
+  const unknown = resolveKnownAnswer(label, 'date', { grad_date: 'May 2028', grad_year: 2028 }, undefined);
+  const falseEnrollment = resolveKnownAnswer(
+    label,
+    'date',
+    { grad_date: 'May 2028', grad_year: 2028, currently_enrolled: false },
+    undefined,
+  );
+  assert.ok(unknown && 'skipReason' in unknown);
+  assert.ok(falseEnrollment && 'skipReason' in falseEnrollment);
 });
 
 test('a bare salary figure only fills when the posting currency matches the stored one (R-031)', () => {
