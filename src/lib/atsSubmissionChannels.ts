@@ -77,7 +77,12 @@ export function greenhousePostingFromUrl(rawUrl: string | undefined): { boardTok
   if (url.protocol !== 'https:') return null;
   const host = url.hostname.toLowerCase();
   const parts = url.pathname.split('/').filter(Boolean);
-  if (host === 'boards.greenhouse.io' && parts.length >= 3 && parts[1] === 'jobs' && /^\d+$/.test(parts[2])) {
+  if (
+    (host === 'boards.greenhouse.io' || host === 'job-boards.greenhouse.io')
+    && parts.length >= 3
+    && parts[1] === 'jobs'
+    && /^\d+$/.test(parts[2])
+  ) {
     return { boardToken: parts[0], jobId: parts[2] };
   }
   if (GREENHOUSE_EMBED_TOKEN_HOSTS.has(host) && parts[0] === 'embed' && parts[1] === 'job_app') {
