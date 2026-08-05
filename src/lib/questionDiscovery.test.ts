@@ -434,6 +434,25 @@ test('stored academic and onsite facts answer repeated select-shaped live questi
   assert.deepEqual(resolveKnownAnswer('Do you speak English fluently?', 'select', profile, undefined), { value: 'Yes' });
 });
 
+test('job location preference questions use the safe posting locations context', () => {
+  const context = [
+    'Build data systems for customers.',
+    'Mountain View, CA',
+    'San Francisco, CA',
+  ].join('\n');
+
+  assert.deepEqual(
+    resolveKnownAnswer(
+      "Please choose the single location that you're the most interested in, and we will discuss more with you as you move through the process.",
+      'select',
+      {},
+      context,
+    ),
+    { value: 'San Francisco, CA' },
+  );
+  assert.deepEqual(resolveKnownAnswer('What is your current location?', 'text', { address_city: 'Dubai' }, context), { value: 'Dubai' });
+});
+
 test('graduation date inputs use the graduation end of an education range', () => {
   assert.equal(graduationDateAnswer('August 2024 - May 2028', 2028, 'date'), '2028-05-01');
   assert.equal(graduationDateAnswer('August 2024 - 2028-05-15', 2028, 'date'), '2028-05-01');
