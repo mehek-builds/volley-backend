@@ -317,7 +317,7 @@ const HEADING_PATTERNS: Array<{ kind: SectionKind; re: RegExp }> = [
   // above, reading the same constant so the two cannot drift. It is reached only because noise
   // declines these forms first.
   { kind: 'required', re: new RegExp(String.raw`\b(requirements?|qualifications?|what you'?ll need|what we('?re)? look(ing)? for|what would make you a strong fit|must[- ]have|minimum|basic qualifications|skills?|you have|your background|about\s+${SECOND_PERSON_SUBJECT})\b`, 'i') },
-  { kind: 'responsibilities', re: /\b(responsibilities|what you'?ll do|the role|(your|the) impact|make an impact|day[- ]to[- ]day|in this role|duties)\b/i },
+  { kind: 'responsibilities', re: /\b(responsibilities|what you'?ll do|what you will do|the role|(your|the) impact|make an impact|day[- ]to[- ]day|in this role|duties)\b/i },
 ];
 
 /**
@@ -523,6 +523,15 @@ function isNoiseBlockOpener(line: string): boolean {
   return NOISE_BLOCK.test(t);
 }
 
+function isImpactFitBlockOpener(line: string): boolean {
+  const t = headingCore(line);
+  if (!t || t.length > 120) return false;
+  if (/^[-*•·]/.test(t)) return false;
+  if (/\.$/.test(t)) return false;
+  if (t.split(/\s+/).length > 12) return false;
+  return IMPACT_FIT_HEADING_PATTERN.test(t);
+}
+
 /**
  * A heading the employer wrote INLINE, as a label on the front of the paragraph it introduces.
  *
@@ -650,6 +659,7 @@ export interface JdSection {
   kind: SectionKind;
   weight: number;
   text: string;
+  heading?: string;
   /**
    * This section was zeroed by FOOTER_PROSE, and the salvage pass in extractJdTerms must leave it
    * zeroed.
@@ -688,7 +698,7 @@ export function segmentJd(jdText: string): JdSection[] {
       const kind = classifyHeading(line);
       if (kind) {
         if (current.text.trim()) sections.push(current);
-        current = { kind, weight: SECTION_WEIGHT[kind], text: '' };
+        current = { kind, weight: SECTION_WEIGHT[kind], text: '', heading: headingCore(line) };
         continue;
       }
     }
@@ -697,6 +707,11 @@ export function segmentJd(jdText: string): JdSection[] {
     if (isNoiseBlockOpener(line)) {
       if (current.text.trim()) sections.push(current);
       current = { kind: 'noise', weight: SECTION_WEIGHT.noise, text: '' };
+      continue;
+    }
+    if (isImpactFitBlockOpener(line)) {
+      if (current.text.trim()) sections.push(current);
+      current = { kind: 'responsibilities', weight: SECTION_WEIGHT.responsibilities, text: '', heading: headingCore(line) };
       continue;
     }
     // Third, so a line that is a heading in its own right never reaches the label rule. What is
@@ -731,7 +746,7 @@ export function segmentJd(jdText: string): JdSection[] {
       // silently promotes whatever follows it. So the class that can over-reach safely is allowed
       // to, and the class that cannot, is not.
       const terminal = inline.kind === 'noise';
-      const resume = { kind: current.kind, weight: current.weight, footer: current.footer };
+      const resume = { kind: current.kind, weight: current.weight, footer: current.footer, heading: current.heading };
       if (current.text.trim()) sections.push(current);
       if (terminal) {
         current = { kind: 'noise', weight: SECTION_WEIGHT.noise, text: inline.rest + '\n' };
@@ -742,6 +757,7 @@ export function segmentJd(jdText: string): JdSection[] {
           kind: inline.kind,
           weight: SECTION_WEIGHT[inline.kind],
           text: inline.rest + '\n',
+          heading: headingCore(line).split(':', 1)[0],
         });
       }
       current = { ...resume, text: '' };
@@ -755,7 +771,7 @@ export function segmentJd(jdText: string): JdSection[] {
       continue;
     }
     if (isLogisticsProseLine(line)) {
-      const resume = { kind: current.kind, weight: current.weight, footer: current.footer };
+      const resume = { kind: current.kind, weight: current.weight, footer: current.footer, heading: current.heading };
       if (current.text.trim()) sections.push(current);
       sections.push({ kind: 'noise', weight: SECTION_WEIGHT.noise, text: line + '\n' });
       current = { ...resume, text: '' };
@@ -1864,7 +1880,14 @@ export function extractJdTerms(jdText: string, context?: JdContext): JdTerm[] {
     );
 
   const lowercased = lowercaseTokens(jdText);
-  const terms = preferStatedRequirements(strip(extractFrom(segmentJd(jdText), lowercased)));
+  const sections = segmentJd(jdText);
+  const hasPrimaryFitSection =
+    sections.some((s) => PRIMARY_STATED_KINDS.has(s.kind)) || hasPrimaryFitHeading(jdText);
+  const rawTerms = strip(extractFrom(sections, lowercased));
+  if (hasPrimaryFitSection) {
+    return capToEmphasis(strip(extractFrom(sections.filter(isPrimaryFitSection), lowercased)));
+  }
+  const terms = preferStatedRequirements(rawTerms);
   if (terms.length >= MIN_SCORABLE_TERMS) return capToEmphasis(terms);
 
   // A noise heading runs until the next recognised heading, so a posting that OPENS with
@@ -1898,7 +1921,6 @@ export function extractJdTerms(jdText: string, context?: JdContext): JdTerm[] {
   //
   // Footer sections are excluded from the noise side of the comparison as well as from the
   // re-reading, so a long EEO block cannot be what tips a posting into salvaging.
-  const sections = segmentJd(jdText);
   const salvageable = sections.filter((s) => s.kind === 'noise' && !s.footer);
   const chars = (list: JdSection[]) => list.reduce((n, s) => n + s.text.length, 0);
   if (chars(salvageable) <= chars(sections.filter((s) => s.weight > 0))) return capToEmphasis(terms);
@@ -1916,8 +1938,29 @@ export function extractJdTerms(jdText: string, context?: JdContext): JdTerm[] {
   return capToEmphasis(salvaged.length > terms.length ? salvaged : terms);
 }
 
-/** The sections where an employer states what the job needs, as opposed to prose around them. */
+/** The sections where an employer states candidate fit directly, as opposed to work prose around it. */
+const PRIMARY_STATED_KINDS = new Set<SectionKind>(['required', 'preferred']);
 const STATED_KINDS = new Set<SectionKind>(['required', 'preferred', 'responsibilities']);
+const PRIMARY_FIT_HEADING_PATTERN = new RegExp(
+  String.raw`\b(preferred|nice[- ]to[- ]have|bonus|plus(es)?|desired|good to have|additional qualifications|requirements?|qualifications?|what you'?ll need|what we('?re)? look(ing)? for|what would make you a strong fit|must[- ]have|minimum|basic qualifications|skills?|you have|your background|about\s+${SECOND_PERSON_SUBJECT})\b`,
+  'i',
+);
+const IMPACT_FIT_HEADING_PATTERN = /\b(examples? of how .+ impact|impact you will have|make an impact)\b/i;
+
+function isPrimaryFitSection(section: JdSection): boolean {
+  if (PRIMARY_STATED_KINDS.has(section.kind)) return true;
+  return section.kind === 'responsibilities' && IMPACT_FIT_HEADING_PATTERN.test(section.heading ?? '');
+}
+
+function hasPrimaryFitHeading(jdText: string): boolean {
+  for (const line of jdText.split(/\r?\n/)) {
+    const core = headingCore(line);
+    if (isHeadingLine(line) && PRIMARY_FIT_HEADING_PATTERN.test(core)) return true;
+    const inline = inlineLabel(line);
+    if (inline && PRIMARY_STATED_KINDS.has(inline.kind)) return true;
+  }
+  return false;
+}
 
 /**
  * When a posting says what it wants, score against THAT, not against the paragraph beside it.
@@ -1936,15 +1979,16 @@ const STATED_KINDS = new Set<SectionKind>(['required', 'preferred', 'responsibil
  * much prose the employer wrote around it.
  *
  * `body` still carries the whole denominator when nothing was stated, which is the short unheaded
- * posting SECTION_WEIGHT.body exists for. This only fires when the employer gave us something
- * better, and only when what they gave us is enough to score honestly on its own.
+ * posting SECTION_WEIGHT.body exists for. Once the employer gives us a primary fit section, even a
+ * sparse one, the caller refuses instead of inventing missing requirements from surrounding prose.
  */
 function preferStatedRequirements(list: JdTerm[]): JdTerm[] {
+  const primary = list.filter((t) => PRIMARY_STATED_KINDS.has(t.kind));
+  if (primary.length > 0) return primary;
   const stated = list.filter((t) => STATED_KINDS.has(t.kind));
   if (isScorable(stated)) return stated;
-  // If a stated section is present but too thin or too low-signal to score, keep the body fallback.
-  // Once the stated sections are scorable on their own, do not pull terms back from compensation,
-  // location, legal, or narrative prose just to pad the denominator.
+  // Responsibility-only postings still score when concrete enough; otherwise body prose is the
+  // fallback only for postings that never stated candidate-fit requirements.
   return list;
 }
 
