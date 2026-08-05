@@ -5,6 +5,7 @@ import {
   ashbyPostingFromUrl,
   configuredAtsSubmissionChannels,
   greenhousePostingFromUrl,
+  leverPostingFromUrl,
   tryAtsSubmissionChannel,
 } from './atsSubmissionChannels';
 import type { SubmissionPacket } from './portalSubmission';
@@ -45,26 +46,41 @@ test('parses Ashby organization and posting id from job URLs', () => {
   assert.equal(ashbyPostingFromUrl('https://boards.greenhouse.io/fluency/jobs/123'), null);
 });
 
+test('parses Lever site and posting ids from supported job URLs', () => {
+  assert.deepEqual(leverPostingFromUrl('https://jobs.lever.co/acme/abc-123'), {
+    site: 'acme',
+    postingId: 'abc-123',
+  });
+  assert.deepEqual(leverPostingFromUrl('https://jobs.eu.lever.co/acme/eu-123'), {
+    site: 'acme',
+    postingId: 'eu-123',
+  });
+  assert.equal(leverPostingFromUrl('https://jobs.example.com/acme/abc-123'), null);
+});
+
 test('channel config resolves only allowlisted employers with referenced secrets', () => {
   const env = {
     LITOS_EMPLOYER_API_SUBMISSION_CHANNELS_JSON: JSON.stringify([
       { ats: 'greenhouse', board_token: 'reddit', api_key_env: 'GH_REDDIT_KEY' },
       { ats: 'ashby', organization: 'fluency', api_key_env: 'ASHBY_FLUENCY_KEY' },
+      { ats: 'lever', site: 'acme', api_key_env: 'LEVER_ACME_KEY' },
       { ats: 'greenhouse', board_token: 'missing', api_key_env: 'MISSING_KEY' },
       { ats: 'lever', board_token: 'ignored', api_key_env: 'IGNORED_KEY' },
     ]),
     GH_REDDIT_KEY: 'gh-secret',
     ASHBY_FLUENCY_KEY: 'ashby-secret',
+    LEVER_ACME_KEY: 'lever-secret',
   };
   const channels = configuredAtsSubmissionChannels(env);
-  assert.equal(channels.length, 2);
-  assert.deepEqual(channels.map((item) => [item.ats, item.boardToken ?? item.organization]), [
+  assert.equal(channels.length, 3);
+  assert.deepEqual(channels.map((item) => [item.ats, item.boardToken ?? item.organization ?? item.site]), [
     ['greenhouse', 'reddit'],
     ['ashby', 'fluency'],
+    ['lever', 'acme'],
   ]);
 });
 
-test('assesses Greenhouse and Ashby packets as unavailable when credentials are absent', () => {
+test('assesses submit-capable packets as unavailable when credentials are absent', () => {
   const greenhouse = assessAtsSubmissionChannel('https://boards.greenhouse.io/reddit/jobs/1234567', {});
   assert.equal(greenhouse?.provider, 'greenhouse');
   assert.equal(greenhouse?.status, 'unavailable');
@@ -74,6 +90,61 @@ test('assesses Greenhouse and Ashby packets as unavailable when credentials are 
   assert.equal(ashby?.provider, 'ashby');
   assert.equal(ashby?.status, 'unavailable');
   assert.match(ashby?.reason ?? '', /Missing employer-authorized Ashby/);
+
+  const lever = assessAtsSubmissionChannel('https://jobs.lever.co/acme/abc-123', {});
+  assert.equal(lever?.provider, 'lever');
+  assert.equal(lever?.status, 'unavailable');
+  assert.match(lever?.reason ?? '', /Missing employer-authorized Lever/);
+});
+
+test('recognizes the 30 common ATS and job-board families with explicit API availability diagnostics', () => {
+  const samples = [
+    ['greenhouse', 'https://job-boards.greenhouse.io/reddit/jobs/8070669'],
+    ['ashby', 'https://jobs.ashbyhq.com/fluency/2aced4e2-485b-4525-802c-763e62c91e88'],
+    ['lever', 'https://jobs.lever.co/acme/abc-123'],
+    ['smartrecruiters', 'https://jobs.smartrecruiters.com/acme/743999999999999-engineer'],
+    ['workable', 'https://apply.workable.com/acme/j/ABC123DEF0/apply'],
+    ['workday', 'https://acme.wd1.myworkdayjobs.com/External/job/Seattle/Engineer_JR123'],
+    ['icims', 'https://careers-acme.icims.com/jobs/1234/engineer/job'],
+    ['bamboohr', 'https://acme.bamboohr.com/careers/123'],
+    ['jazzhr', 'https://acme.applytojob.com/apply/abc123/Engineer'],
+    ['paylocity', 'https://recruiting.paylocity.com/Recruiting/Jobs/Details/123'],
+    ['rippling', 'https://jobs.rippling.com/acme/jobs/abc123'],
+    ['breezy', 'https://jobs.breezy.hr/acme/jobs/abc123'],
+    ['oracle_taleo', 'https://acme.taleo.net/careersection/ex/jobdetail.ftl?job=123'],
+    ['sap_successfactors', 'https://acme.jobs2web.com/successfactors/job/Engineer/123'],
+    ['adp', 'https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?jobId=123'],
+    ['ukg', 'https://recruiting.ultipro.com/ACM1000/JobBoard/123'],
+    ['jobvite', 'https://jobs.jobvite.com/acme/job/abc123'],
+    ['dayforce', 'https://acme.dayforcehcm.com/CandidatePortal/en-US/acme/Posting/View/123'],
+    ['recruitee', 'https://acme.recruitee.com/o/engineer'],
+    ['teamtailor', 'https://acme.teamtailor.com/jobs/123-engineer'],
+    ['personio', 'https://acme.jobs.personio.com/job/123'],
+    ['pinpoint', 'https://acme.pinpointhq.com/postings/abc123'],
+    ['comeet', 'https://www.comeet.co/jobs/acme/123/engineer'],
+    ['zoho_recruit', 'https://acme.zohorecruit.com/jobs/Careers/123/Engineer'],
+    ['bullhorn', 'https://acme.bullhornstaffing.com/job/123'],
+    ['indeed', 'https://www.indeed.com/viewjob?jk=abc123'],
+    ['linkedin', 'https://www.linkedin.com/jobs/view/1234567890'],
+    ['ziprecruiter', 'https://www.ziprecruiter.com/jobs/acme-123-engineer'],
+    ['wellfound', 'https://wellfound.com/jobs/123-engineer'],
+    ['handshake', 'https://app.joinhandshake.com/stu/jobs/123'],
+  ] as const;
+
+  for (const [provider, url] of samples) {
+    const assessment = assessAtsSubmissionChannel(url, {});
+    assert.equal(assessment?.provider, provider, url);
+    assert.equal(assessment?.status, 'unavailable', url);
+    assert.ok(assessment?.reason, url);
+    assert.ok(assessment?.job_id, url);
+  }
+});
+
+test('unknown URLs do not pretend to be Greenhouse', async () => {
+  const result = await tryAtsSubmissionChannel('https://careers.example.com/jobs/123', basePacket(), {});
+  assert.equal(result.kind, 'not_applicable');
+  assert.equal(result.assessment.provider, 'unknown');
+  assert.equal(result.assessment.status, 'unavailable');
 });
 
 test('configured channel refuses reviewed questions without durable ATS field mappings', async () => {
@@ -180,6 +251,31 @@ test('configured Greenhouse channel posts reviewed answers only when ATS field m
   assert.equal(result.kind, 'submitted');
   assert.equal(body?.get('job_application[answers_attributes][0][boolean_value]'), 'Yes');
   assert.equal(body?.has('job_application[answers_attributes][1][text_value]'), false);
+});
+
+test('configured Lever channel posts multipart application with query key', async () => {
+  let requestUrl = '';
+  let body: FormData | undefined;
+  const fetchImpl: typeof fetch = async (url, init) => {
+    requestUrl = String(url);
+    body = init?.body as FormData;
+    return new Response('created', { status: 201, headers: { 'x-request-id': 'lever-req-1' } });
+  };
+  const result = await tryAtsSubmissionChannel('https://jobs.lever.co/acme/abc-123', basePacket(), {
+    env: {
+      LITOS_EMPLOYER_API_SUBMISSION_CHANNELS_JSON: JSON.stringify([
+        { ats: 'lever', site: 'acme', api_key_env: 'LEVER_ACME_KEY' },
+      ]),
+      LEVER_ACME_KEY: 'lever-secret',
+    },
+    fetchImpl,
+  });
+  assert.equal(result.kind, 'submitted');
+  assert.equal(result.referenceId, 'lever-req-1');
+  assert.equal(requestUrl, 'https://api.lever.co/v0/postings/acme/abc-123?key=lever-secret');
+  assert.equal(body?.get('name'), 'Mehek Mandal');
+  assert.equal(body?.get('email'), 'mehekmandal05@gmail.com');
+  assert.equal((body?.get('resume') as File).name, 'Mehek_Mandal_Software_Engineer_Resume.pdf');
 });
 
 test('configured Ashby channel posts core paths and reviewed question mappings', async () => {
