@@ -374,8 +374,10 @@ test('citizenship is answered but never substituted for residence', () => {
 
 test('a location-commitment question is never answered from a stored city (R-039)', () => {
   const label = 'this role is in-office three days a week, can you commit to that?';
-  assert.equal(classifyField(label), null);
-  assert.equal(resolveKnownAnswer(label, 'text', { address_city: 'Dubai' }, undefined), null);
+  assert.equal(classifyField(label), 'onsite_commitment');
+  assert.deepEqual(resolveKnownAnswer(label, 'select', { address_city: 'Dubai' }, undefined), { value: 'Yes' });
+  assert.equal(classifyField('are you willing to relocate to San Francisco?'), null);
+  assert.equal(resolveKnownAnswer('are you willing to relocate to San Francisco?', 'text', { address_city: 'Dubai' }, undefined), null);
 });
 
 test('duration beats start date on an ambiguous "availab" label (R-014)', () => {
@@ -404,6 +406,31 @@ test('school and degree resolve from the academic profile', () => {
   assert.equal(classifyField('Degree subject'), 'major');
   assert.deepEqual(resolveKnownAnswer('School', 'text', profile, undefined), { value: profile.school });
   assert.deepEqual(resolveKnownAnswer('Degree', 'text', profile, undefined), { value: profile.degree });
+});
+
+test('stored academic and onsite facts answer repeated select-shaped live questions', () => {
+  const profile = {
+    school: 'University of Southern California',
+    degree: 'Bachelor of Science',
+    major: 'Computer Science',
+    grad_date: 'May 2028',
+    grad_year: 2028,
+    currently_enrolled: true,
+    languages: ['English', 'Hindi'],
+  };
+
+  assert.deepEqual(resolveKnownAnswer('Are you able to work onsite 3 days a week?', 'select', profile, undefined), { value: 'Yes' });
+  assert.deepEqual(resolveKnownAnswer('Are you currently enrolled in a degree program?', 'radio', profile, undefined), { value: 'Yes' });
+  assert.deepEqual(resolveKnownAnswer('Will you be returning to a degree program after this internship?', 'select', profile, undefined), { value: 'Yes' });
+  assert.deepEqual(resolveKnownAnswer('Graduation Month', 'select', profile, undefined), { value: 'May' });
+  assert.deepEqual(resolveKnownAnswer('Graduation Year', 'select', profile, undefined), { value: '2028' });
+  assert.deepEqual(
+    resolveKnownAnswer('If you are enrolled in university, what degree are you currently pursuing?', 'select', profile, undefined),
+    { value: 'Bachelor of Science' },
+  );
+  assert.deepEqual(resolveKnownAnswer('What is your major?', 'text', profile, undefined), { value: 'Computer Science' });
+  assert.deepEqual(resolveKnownAnswer('What languages are you fluent in?', 'text', profile, undefined), { value: 'English, Hindi' });
+  assert.deepEqual(resolveKnownAnswer('Do you speak English fluently?', 'select', profile, undefined), { value: 'Yes' });
 });
 
 test('graduation date inputs use the graduation end of an education range', () => {

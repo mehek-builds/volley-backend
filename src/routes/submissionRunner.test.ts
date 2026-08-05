@@ -200,6 +200,99 @@ test('discovered US work authorization and sponsorship become reviewed Yes answe
   );
 });
 
+test('select and radio discoveries resolve from stored profile without direct textbox selectors', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'This internship is based in San Francisco, California.',
+    role: 'Software Engineering Intern',
+    portal_url: 'https://example.greenhouse.io/jobs/123',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+
+  const result = await discoverAndResolveQuestions(
+    [
+      {
+        label: 'Are you able to work onsite 4 days a week?',
+        selector: 'select[name="question_1"]',
+        inputType: 'select',
+        maxLength: null,
+      },
+      {
+        label: 'Are you currently enrolled in a degree program?',
+        selector: 'input[name="question_2"][type="radio"]',
+        inputType: 'radio',
+        maxLength: null,
+      },
+    ],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { currently_enrolled: true, grad_date: 'May 2028', grad_year: 2028 },
+    true,
+    'greenhouse',
+  );
+
+  assert.deepEqual(result.attentionReasons, []);
+  assert.deepEqual(
+    result.questions.map((question) => ({
+      question: question.question,
+      answer: question.answer,
+      portal_selector: question.portal_selector,
+    })),
+    [
+      { question: 'Are you able to work onsite 4 days a week?', answer: 'Yes', portal_selector: undefined },
+      { question: 'Are you currently enrolled in a degree program?', answer: 'Yes', portal_selector: undefined },
+    ],
+  );
+});
+
+test('existing reviewed choice answers do not keep direct selectors on retry', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'This internship is based in San Francisco, California.',
+    role: 'Software Engineering Intern',
+    portal_url: 'https://example.greenhouse.io/jobs/123',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [
+      {
+        id: 'q-existing',
+        question: 'Are you currently enrolled in a degree program?',
+        answer: 'Yes',
+        kind: 'required',
+        required: false,
+        portal_selector: 'input[name="question_2"][type="radio"]',
+      },
+    ],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+
+  const result = await discoverAndResolveQuestions(
+    [
+      {
+        label: 'Are you currently enrolled in a degree program?',
+        selector: 'input[name="question_2"][type="radio"]',
+        inputType: 'radio',
+        maxLength: null,
+      },
+    ],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { currently_enrolled: true },
+    true,
+    'greenhouse',
+  );
+
+  assert.equal(result.questions.length, 1);
+  assert.equal(result.questions[0]?.id, 'q-existing');
+  assert.equal(result.questions[0]?.answer, 'Yes');
+  assert.equal(result.questions[0]?.portal_selector, undefined);
+});
+
 // ─── The prepare-time gate for account-walled portals ─────────────────────────
 //
 // This is a SOURCE-LEVEL test, which is unusual here and deliberate. prepare() is not exported and
