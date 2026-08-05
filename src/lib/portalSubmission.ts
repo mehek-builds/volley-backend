@@ -710,6 +710,14 @@ function selectValuesForAnswer(answer: string): string[] {
   return [...new Set(values)];
 }
 
+function greenhouseAliasSelectValuesForAnswer(answer: string): string[] {
+  const trimmed = answer.trim();
+  const lower = trimmed.toLowerCase();
+  if (lower === 'yes') return ['Yes', '1'];
+  if (lower === 'no') return ['No', '0'];
+  return selectValuesForAnswer(answer);
+}
+
 function parsedGpa(value: string): number | null {
   const match = value.match(/\b([0-4](?:\.\d+)?)\b/);
   if (!match) return null;
@@ -939,7 +947,7 @@ function pushGreenhouseKnownQuestionAliases(actions: ManagedBrowserAction[], pac
         timeout: MANAGED_FILL_TIMEOUT_MS,
       });
       for (const [index, selectSelector] of greenhouseQuestionSelectSelectors(alias).slice(0, GREENHOUSE_ALIAS_SELECT_SELECTOR_LIMIT).entries()) {
-        for (const value of selectValuesForAnswer(item.answer.trim())) {
+        for (const value of greenhouseAliasSelectValuesForAnswer(item.answer.trim())) {
           managedSelect(actions, selectSelector, value, `greenhouse_known_select:${index}:${alias.slice(0, 80)}`);
         }
       }

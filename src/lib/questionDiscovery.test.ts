@@ -439,6 +439,63 @@ test('stored academic and onsite facts answer repeated select-shaped live questi
   assert.deepEqual(resolveKnownAnswer('Do you speak English fluently?', 'select', profile, undefined), { value: 'Yes' });
 });
 
+test('required internship form fields resolve from profile-backed defaults instead of drafts', () => {
+  const profile = {
+    address_city: 'Dubai',
+    address_country: 'United Arab Emirates',
+    degree: 'Bachelor of Science in Computer Science',
+    currently_enrolled: true,
+    grad_date: 'May 2028',
+    grad_year: 2028,
+    eeo_prefs: { gender: 'Female' },
+  };
+
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Please select your current state of residence. Select “Not in the US” if you reside outside the United States.',
+      'select',
+      profile,
+      undefined,
+    ),
+    { value: 'Not in the US' },
+  );
+  assert.deepEqual(resolveKnownAnswer('Do you currently reside in San Francisco?', 'select', profile, undefined), { value: 'No' });
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Are you currently residing in the greater Austin area or have confirmed plans to be in Austin for the duration of this internship?',
+      'select',
+      profile,
+      undefined,
+    ),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('Are you currently enrolled in a Masters or PhD program for a technical field?', 'select', profile, undefined),
+    { value: 'No' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('Please review and acknowledge Cloudflare\'s Candidate Privacy Policy (cloudflare.com/candidate-privacy-notice/).', 'checkbox', profile, undefined),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('Do you consider yourself a member of the LGBTQIA+ community?', 'select', profile, undefined),
+    { value: 'Decline to self-identify' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('Which categories describe you? Select all that apply to you', 'checkbox', profile, undefined),
+    { value: 'Decline to self-identify' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Are you currently bound by any agreements with a current or former employer that may restrict your ability to work for Scale AI?',
+      'select',
+      profile,
+      undefined,
+    ),
+    { value: 'No' },
+  );
+});
+
 test('job location preference questions use the safe posting locations context', () => {
   const context = [
     'Build data systems for customers.',

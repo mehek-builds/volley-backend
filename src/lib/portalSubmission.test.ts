@@ -1515,7 +1515,7 @@ test('Greenhouse managed actions retry known yes-no work and onsite choices by e
   assert.equal(aliasActions.some((action) => action.text === 'Do you consent to the terms?'), false);
 
   const selectActions = actions.filter((action) => action.label?.startsWith('greenhouse_known_select'));
-  assert.equal(selectActions.length, aliasActions.length * 4);
+  assert.equal(selectActions.length, aliasActions.length * 2);
   assert.ok(selectActions.every((action) => action.type === 'select'));
   assert.ok(selectActions.every((action) => action.optional === true));
   assert.ok(selectActions.some((action) => action.value === 'Yes'));
