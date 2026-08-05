@@ -80,7 +80,7 @@ import {
   withinDailyCap,
 } from '../lib/submissionQueue';
 import { coverLetterFileNameForRole, resumeFileNameForRole } from '../lib/resumeFileName';
-import { tryAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
+import { assessAtsSubmissionChannel, tryAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
 
 export type ResumeRow = typeof generated_resumes.$inferSelect;
 type StoredSpec = Record<string, unknown>;
@@ -837,6 +837,22 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
 
   const authorization = await standingAuthorization(row.user_id);
   assertControlledPortalEnabled(portal);
+  const atsAssessment = assessAtsSubmissionChannel(current.portal_url);
+  if (atsAssessment?.status === 'available') {
+    await writeReview(row, nextReview(current, {
+      ...preparedReviewPatch(authorization, true),
+      submission_run_id: runId,
+      browser_context_id: undefined,
+      browser_session_id: undefined,
+      attention_reason: undefined,
+      submission_error: undefined,
+    }));
+    fastify.log.info(
+      { applicationId: row.id, provider: atsAssessment.provider },
+      'Application prepared for employer-authorized ATS API submission',
+    );
+    return;
+  }
   if (shouldUseLocalControlledBrowser(portal)) {
     await prepareControlled(row, current, runId, authorization, fastify);
     return;
@@ -1076,6 +1092,47 @@ async function submitControlled(row: ResumeRow, review: ApplicationReviewState, 
   }
 }
 
+function packetForApiSubmission(review: ApplicationReviewState, builtPacket: SubmissionPacket): SubmissionPacket {
+  return review.cover_letter_supported === false ? omitCoverLetter(builtPacket) : builtPacket;
+}
+
+async function submitViaAtsSubmissionChannel(
+  row: ResumeRow,
+  review: ApplicationReviewState,
+  fastify: FastifyInstance,
+): Promise<boolean> {
+  if (!await authorizationValidAtClick(row, review)) {
+    await holdRevokedSubmission(row, review);
+    return true;
+  }
+  const packet = packetForApiSubmission(review, await buildPacket(row));
+  const atsResult = await tryAtsSubmissionChannel(review.portal_url, packet);
+  if (atsResult.kind === 'submitted') {
+    const capturedAt = new Date().toISOString();
+    await writeReview(row, nextReview(review, {
+      status: 'submitted',
+      submitted_at: capturedAt,
+      submission_error: undefined,
+      receipt: {
+        confirmation_text: atsResult.confirmationText,
+        final_url: atsResult.finalUrl,
+        captured_at: capturedAt,
+        reference_id: atsResult.referenceId,
+        source: 'ats_api',
+      },
+    }));
+    fastify.log.info({ applicationId: row.id, provider: atsResult.provider }, 'Application submission accepted by ATS API');
+    return true;
+  }
+  if (atsResult.assessment.status === 'unavailable') {
+    fastify.log.info(
+      { applicationId: row.id, provider: atsResult.assessment.provider, reason: atsResult.assessment.reason },
+      'ATS API submission channel unavailable, continuing with browser submission',
+    );
+  }
+  return false;
+}
+
 async function submit(row: ResumeRow, fastify: FastifyInstance) {
   const current = readApplicationReview(row.spec);
   if (!current?.submission_run_id || !current.portal_url) throw new Error('The prepared run is missing');
@@ -1106,34 +1163,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
     await submitControlled(row, claimedReview, fastify);
     return;
   }
-  {
-    const builtPacket = await buildPacket(row);
-    const packet = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
-    const atsResult = await tryAtsSubmissionChannel(claimedReview.portal_url, packet);
-    if (atsResult.kind === 'submitted') {
-      const capturedAt = new Date().toISOString();
-      await writeReview(row, nextReview(claimedReview, {
-        status: 'submitted',
-        submitted_at: capturedAt,
-        submission_error: undefined,
-        receipt: {
-          confirmation_text: atsResult.confirmationText,
-          final_url: atsResult.finalUrl,
-          captured_at: capturedAt,
-          reference_id: atsResult.referenceId,
-          source: 'ats_api',
-        },
-      }));
-      fastify.log.info({ applicationId: row.id, provider: atsResult.provider }, 'Application submission accepted by ATS API');
-      return;
-    }
-    if (atsResult.assessment.status === 'unavailable') {
-      fastify.log.info(
-        { applicationId: row.id, provider: atsResult.assessment.provider, reason: atsResult.assessment.reason },
-        'ATS API submission channel unavailable, continuing with browser submission',
-      );
-    }
-  }
+  if (await submitViaAtsSubmissionChannel(row, claimedReview, fastify)) return;
   // Portals that cannot be submitted in one run stop HERE, before either provider path.
   //
   // This gate used to live only inside buildManagedPortalActions, which was wrong in two ways that
