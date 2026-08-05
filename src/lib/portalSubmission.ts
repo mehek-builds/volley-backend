@@ -425,7 +425,7 @@ function managedFillByLabel(
 
 function durablePortalSelector(selector: string | undefined): string | undefined {
   const trimmed = selector?.trim();
-  if (!trimmed || trimmed.startsWith('[data-litos-discovered-')) return undefined;
+  if (!trimmed || trimmed.length > 500 || trimmed.startsWith('[data-litos-discovered-')) return undefined;
   return trimmed;
 }
 
