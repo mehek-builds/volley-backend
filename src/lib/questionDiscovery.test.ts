@@ -300,6 +300,26 @@ test('sensitive gates allow only exact stored work eligibility answers', () => {
   );
   assert.equal(sensitiveQuestionRequiresAttention('social security number', '123-45-6789', 'text', {}, undefined), true);
   assert.equal(sensitiveQuestionRequiresAttention('what is your gender?', 'Female', 'text', {}, undefined), true);
+  assert.equal(
+    sensitiveQuestionRequiresAttention(
+      'are you a person of transgender experience? * 431',
+      'Decline to self-identify',
+      'text',
+      { eeo_prefs: null },
+      undefined,
+    ),
+    false,
+  );
+  assert.equal(
+    sensitiveQuestionRequiresAttention(
+      'are you a person of transgender experience? * 431',
+      "I don't think that's relevant to my qualifications for this role.",
+      'text',
+      { eeo_prefs: null },
+      undefined,
+    ),
+    true,
+  );
 });
 
 test('citizenship is answered but never substituted for residence', () => {

@@ -120,7 +120,7 @@ export function sensitiveQuestionRequiresAttention(
   jdText: string | undefined,
 ): boolean {
   if (!isRefusedQuestion(label)) return false;
-  if (!WORK_ELIGIBILITY_QUESTION.test(label)) return true;
+  if (NEVER_FILL_PATTERNS.some((re) => re.test(label))) return true;
   const known = resolveKnownAnswer(label, inputType, ap, jdText);
   return !(known && 'value' in known && comparableAnswer(known.value) === comparableAnswer(answer));
 }
