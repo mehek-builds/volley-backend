@@ -717,6 +717,30 @@ test('the Ashby branch omits URL fills the packet does not carry', () => {
   assert.ok(!filledLabels.includes('portfolio'));
 });
 
+test('Ashby reviewed essay questions retry nearby textareas when labels are not associated', () => {
+  const actions = buildManagedPortalActions('ashby', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question: "Tell us about something you've built that you're proud of. What was hard about it?",
+        answer: 'I built a fast evaluation harness for AI agents.',
+      },
+    ],
+  });
+
+  assert.ok(actions.some((action) =>
+    action.type === 'fillByLabelText'
+    && action.text === "Tell us about something you've built that you're proud of. What was hard about it?",
+  ));
+  const fallbacks = actions.filter((action) => action.label?.startsWith('question_text:'));
+  assert.ok(fallbacks.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text')));
+  assert.ok(fallbacks.every((action) => action.value === 'I built a fast evaluation harness for AI agents.'));
+  assert.ok(fallbacks.every((action) => action.optional === true));
+});
+
 test('Greenhouse core identity fields degrade gracefully instead of a 30s hard timeout', () => {
   // Live regression, 2026-07-24: Jump Trading serves its Greenhouse posting through a branded
   // redirect whose form lacks the classic `job_application[...]` selectors, so a required fill on
