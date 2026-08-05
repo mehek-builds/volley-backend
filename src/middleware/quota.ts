@@ -1,6 +1,6 @@
 import { FastifyReply } from 'fastify';
 import { sql, and, eq } from 'drizzle-orm';
-import { db } from '../db/index';
+import { db, withDedicatedDatabase } from '../db/index';
 import { usage_counters, users } from '../db/schema';
 import { withReadOnlyRetry } from '../db/readOnlyRetry';
 import { PRODUCT_NAME } from '../lib/product';
@@ -78,6 +78,11 @@ async function counterTransaction<T>(operation: (tx: CounterTx) => Promise<T>): 
         console.warn(
           `[quota] transaction rejected by a read-only backend, retrying on a fresh connection (attempt ${attempt})`,
         ),
+      onExhausted: () =>
+        withDedicatedDatabase((directDb) => {
+          console.warn('[quota] pooled transaction stayed read-only; retrying on the direct database endpoint');
+          return directDb.transaction(operation);
+        }),
     },
   );
 }
