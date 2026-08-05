@@ -246,6 +246,7 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
   const fullName = String(contact.full_name ?? parsed.full_name ?? '').trim();
   const email = String(contact.email ?? userRow[0]?.email ?? '').trim();
   if (!fullName || !email) throw new Error('Full name and email are required before submission');
+  const roleTitle = (row.job_context as { role?: unknown } | null)?.role;
   return {
     fullName,
     email,
@@ -255,10 +256,10 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     githubUrl: typeof app.github_url === 'string' ? app.github_url : undefined,
     portfolioUrl: typeof app.portfolio_url === 'string' ? app.portfolio_url : undefined,
     resume,
-    resumeName: resumeFileNameForRole(fullName, (row.job_context as { role?: unknown } | null)?.role),
+    resumeName: resumeFileNameForRole(fullName, roleTitle),
     coverLetter,
     coverLetterName: coverLetter
-      ? coverLetterFileNameForRole(fullName, (row.job_context as { role?: unknown } | null)?.role)
+      ? coverLetterFileNameForRole(fullName, roleTitle)
       : undefined,
     mostRecentRole: readMostRecentRole(parsed),
     questions: review.questions.map((item) => ({ question: item.question, answer: item.answer })),

@@ -59,12 +59,14 @@ test('submit-request starts a fresh run instead of carrying stale run artifacts'
 
 test('submission packet attaches the role-specific resume filename', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  assert.match(runner, /resumeName:\s*resumeFileNameForRole\(fullName,\s*\(row\.job_context as \{ role\?: unknown \} \| null\)\?\.role\)/);
+  assert.match(runner, /const roleTitle = \(row\.job_context as \{ role\?: unknown \} \| null\)\?\.role/);
+  assert.match(runner, /resumeName:\s*resumeFileNameForRole\(fullName,\s*roleTitle\)/);
   assert.doesNotMatch(runner, /resumeName:\s*`litos-\$\{row\.id\}\.pdf`/);
 });
 
-test('submission packet attaches the role-specific cover letter filename', async () => {
+test('submission packet ignores stored cover-letter artifact names for outbound uploads', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  assert.match(runner, /coverLetterName:\s*coverLetter\s*\?\s*coverLetterFileNameForRole\(fullName,\s*\(row\.job_context as \{ role\?: unknown \} \| null\)\?\.role\)/);
-  assert.doesNotMatch(runner, /coverLetterName:\s*coverLetter\s*\?\s*String\(coverLetterMeta\.file_name/);
+  assert.match(runner, /coverLetterName:\s*coverLetter\s*\?\s*coverLetterFileNameForRole\(fullName,\s*roleTitle\)/);
+  assert.doesNotMatch(runner, /coverLetterName:[\s\S]{0,120}coverLetterMeta\.file_name/);
+  assert.doesNotMatch(runner, /litos-\$\{row\.id\}-cover-letter\.pdf/);
 });

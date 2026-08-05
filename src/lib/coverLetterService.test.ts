@@ -20,7 +20,7 @@ test('stored cover letter artifacts preserve the saved role-based filename', () 
     generated_at: '2026-08-05T00:00:00.000Z',
     approved_at: '2026-08-05T00:00:00.000Z',
     object_key: 'users/user-1/resumes/app-1-cover-letter.pdf',
-    file_name: 'Taylor_Applicant_Backend_Engineer_Cover_Letter.pdf',
+    file_name: 'Taylor_Applicant_Backend_Engineer_cover_letter.pdf',
   };
 
   assert.deepEqual(storedCoverLetter({ spec: { _cover_letter: artifact } } as never), artifact);
