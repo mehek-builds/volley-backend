@@ -807,7 +807,7 @@ test('Greenhouse managed actions include approved demographic data consent', () 
   });
   const checkboxClick = actions.find((action) => action.label === 'greenhouse_demographic_data_consent_checkbox');
   assert.equal(checkboxClick?.type, 'click');
-  assert.ok(checkboxClick?.selector?.includes('demographic_data_consent'));
+  assert.ok(checkboxClick?.selector?.includes('gdpr_demographic_data_consent_given'));
   assert.ok((checkboxClick?.selector?.length ?? Infinity) <= 500);
   assert.equal(checkboxClick?.optional, true);
   assert.deepEqual(

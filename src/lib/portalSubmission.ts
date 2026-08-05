@@ -586,7 +586,7 @@ function greenhouseQuestionSelectSelectors(label: string): string[] {
 }
 
 const GREENHOUSE_DEMOGRAPHIC_DATA_CONSENT_CHECKBOX_SELECTOR =
-  'input[type="checkbox"][name*="demographic_data_consent"], input[type="checkbox"][id*="demographic_data_consent"], label:has-text("By checking this box, I consent") input[type="checkbox"]';
+  'input[type="checkbox"][name="gdpr_demographic_data_consent_given"], input[type="checkbox"][id^="gdpr_demographic_data_consent_given"], label:has-text("By checking this box, I consent") input[type="checkbox"]';
 const GREENHOUSE_ALIAS_SELECT_SELECTOR_LIMIT = 1;
 const QUESTION_SELECT_SELECTOR_LIMIT = 1;
 
