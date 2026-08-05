@@ -59,32 +59,69 @@ export function hourPeriod(d = new Date()): string {
   return d.toISOString().slice(0, 13); // YYYY-MM-DDTHH
 }
 
+function counterLockKey(key: string, period: string, kind: string): string {
+  return `${key}\x1f${period}\x1f${kind}`;
+}
+
+async function lockCounterRow(
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  key: string,
+  period: string,
+  kind: string,
+): Promise<void> {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${counterLockKey(key, period, kind)}, 0::bigint))`);
+}
+
 // Atomic upsert-increment; returns the post-increment count.
 export async function bumpCounter(key: string, period: string, kind: string, by = 1): Promise<number> {
-  const rows = await db
-    .insert(usage_counters)
-    .values({ key, period, kind, count: by })
-    .onConflictDoUpdate({
-      target: [usage_counters.key, usage_counters.period, usage_counters.kind],
-      set: { count: sql`${usage_counters.count} + ${by}` },
-    })
-    .returning({ count: usage_counters.count });
-  return rows[0]?.count ?? by;
+  return db.transaction(async (tx) => {
+    await lockCounterRow(tx, key, period, kind);
+    const rows = await tx
+      .update(usage_counters)
+      .set({ count: sql`${usage_counters.count} + ${by}` })
+      .where(and(eq(usage_counters.key, key), eq(usage_counters.period, period), eq(usage_counters.kind, kind)))
+      .returning({ count: usage_counters.count });
+    if (rows[0]) return rows[0].count;
+    const inserted = await tx
+      .insert(usage_counters)
+      .values({ key, period, kind, count: by })
+      .returning({ count: usage_counters.count });
+    return inserted[0]?.count ?? by;
+  });
 }
 
 // Atomically reserves one or more units without ever crossing the supplied cap.
 // A null result means another request consumed the final slot first.
 export async function claimCounterSlot(key: string, period: string, kind: string, limit: number, by = 1): Promise<number | null> {
-  const rows = await db
-    .insert(usage_counters)
-    .values({ key, period, kind, count: by })
-    .onConflictDoUpdate({
-      target: [usage_counters.key, usage_counters.period, usage_counters.kind],
-      set: { count: sql`${usage_counters.count} + ${by}` },
-      setWhere: sql`${usage_counters.count} + ${by} <= ${limit}`,
-    })
-    .returning({ count: usage_counters.count });
-  return rows[0]?.count ?? null;
+  return db.transaction(async (tx) => {
+    await lockCounterRow(tx, key, period, kind);
+    const rows = await tx
+      .update(usage_counters)
+      .set({ count: sql`${usage_counters.count} + ${by}` })
+      .where(
+        and(
+          eq(usage_counters.key, key),
+          eq(usage_counters.period, period),
+          eq(usage_counters.kind, kind),
+          sql`${usage_counters.count} + ${by} <= ${limit}`,
+        ),
+      )
+      .returning({ count: usage_counters.count });
+    if (rows[0]) return rows[0].count;
+
+    const existing = await tx
+      .select({ count: usage_counters.count })
+      .from(usage_counters)
+      .where(and(eq(usage_counters.key, key), eq(usage_counters.period, period), eq(usage_counters.kind, kind)))
+      .limit(1);
+    if (existing[0] || by > limit) return null;
+
+    const inserted = await tx
+      .insert(usage_counters)
+      .values({ key, period, kind, count: by })
+      .returning({ count: usage_counters.count });
+    return inserted[0]?.count ?? by;
+  });
 }
 
 export async function releaseCounterSlot(key: string, period: string, kind: string, by = 1): Promise<void> {

@@ -166,7 +166,9 @@ test('resume generation atomically reserves the final monthly slot and refunds s
   const quotaSource = await readFile('src/middleware/quota.ts', 'utf8');
   const routeSource = await readFile('src/routes/resume.ts', 'utf8');
 
-  assert.match(quotaSource, /setWhere: sql`\$\{usage_counters\.count\} \+ \$\{by\} <= \$\{limit\}`/);
+  assert.match(quotaSource, /pg_advisory_xact_lock\(hashtextextended/);
+  assert.match(quotaSource, /sql`\$\{usage_counters\.count\} \+ \$\{by\} <= \$\{limit\}`/);
+  assert.doesNotMatch(quotaSource, /onConflictDoUpdate/);
   assert.match(routeSource, /claimCounterSlot\(userId, period, 'resumes', ent\.monthlyResumes\)/);
   assert.match(routeSource, /reservedCount === null[\s\S]*status\(402\)/);
   assert.match(routeSource, /catch \(err\) \{[\s\S]*releaseCounterSlot\(userId, period, 'resumes'\)[\s\S]*Failed to store generated resume/);
