@@ -761,7 +761,6 @@ test('Greenhouse fills academic fields from the submission packet', () => {
     byLabel.map((action) => [action.text, action.value, action.label]),
     [
       ['School', 'University of Southern California', 'education_school'],
-      ['Degree', 'Bachelor of Science in Computer Science', 'education_degree'],
       ['What is your graduation date?', 'May 2028', 'graduation_date'],
       ['End date month', 'May', 'education_end_month'],
       ['End date year', '2028', 'education_end_year'],
@@ -771,12 +770,17 @@ test('Greenhouse fills academic fields from the submission packet', () => {
   );
   assert.ok(byLabel.every((action) => action.optional === true));
   assert.ok(byLabel.every((action) => (action.timeout ?? Infinity) < 30_000));
+  assert.equal(
+    actions.some((action) => action.type === 'fillByLabelText' && action.text === 'Degree'),
+    false,
+  );
   const comboFills = actions.filter((action) => action.type === 'fill' && action.label?.startsWith('education_'));
   assert.ok(comboFills.some((action) => action.selector === '#school--0' && action.value === 'University of Southern California'));
   assert.ok(comboFills.some((action) => action.selector?.includes('label:has-text("School")') && action.value === 'University of Southern California'));
   assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s Degree'));
-  assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s'));
-  assert.ok(comboFills.some((action) => action.selector?.includes('label:has-text("Degree")') && action.value === 'Bachelor\'s Degree'));
+  assert.equal(comboFills.filter((action) => action.selector === '#degree--0').length, 1);
+  assert.equal(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s'), false);
+  assert.equal(comboFills.some((action) => action.selector?.includes('label:has-text("Degree")')), false);
   assert.equal(
     comboFills.some((action) =>
       action.selector === '#degree--0' && action.value === 'Bachelor of Science in Computer Science'),
@@ -916,7 +920,8 @@ test('Greenhouse Databricks academic and reviewed question packet stays inside t
     ],
   }, true);
 
-  assert.ok(actions.some((action) => action.label?.startsWith('education_degree_combo_label:')));
+  assert.ok(actions.some((action) => action.label?.startsWith('education_degree_combo:')));
+  assert.equal(actions.some((action) => action.label?.startsWith('education_degree_combo_label:')), false);
   assert.ok(actions.some((action) => action.label?.startsWith('question_combo_label:')));
   assert.ok(actions.some((action) => action.label?.startsWith('question_checkbox:')));
   assert.equal(

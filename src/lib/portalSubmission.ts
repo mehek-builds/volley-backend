@@ -500,16 +500,7 @@ function greenhouseDegreeAliases(degree: string | undefined): string[] {
   else if (/\bbachelor|b\.?s\.?|b\.?a\.?\b/i.test(lower)) level = 'Bachelor\'s Degree';
   else if (/\bassociate/i.test(lower)) level = 'Associate\'s Degree';
   else if (/\bhigh school/i.test(lower)) level = 'High School';
-  const asciiLevel = level?.replace(/[’]/g, "'");
-  const curlyLevel = level?.replace(/[']/g, '’');
-  const bachelorScience = /\bbachelor\b/i.test(lower) && /science|b\.?s\.?/i.test(lower)
-    ? 'Bachelor of Science (B.S.)'
-    : undefined;
-  const bachelorSciencePlain = bachelorScience ? 'Bachelor of Science' : undefined;
-  const bachelorPlain = level === 'Bachelor\'s Degree' ? 'Bachelor\'s' : undefined;
-  const bachelor = level === 'Bachelor\'s Degree' ? 'Bachelor' : undefined;
-  const bs = bachelorScience ? 'B.S.' : undefined;
-  return uniqueDefined([level, asciiLevel, curlyLevel, bachelorScience, bachelorSciencePlain, bachelorPlain, bachelor, bs]);
+  return uniqueDefined([level]);
 }
 
 function greenhouseDisciplineAliases(packet: SubmissionPacket): string[] {
@@ -539,14 +530,6 @@ function pushGreenhouseEducationComboboxActions(actions: ManagedBrowserAction[],
   const degreeAliases = greenhouseDegreeAliases(packet.degree);
   for (const [index, value] of degreeAliases.entries()) {
     managedGreenhouseReactSelectFill(actions, 'degree--0', value, `education_degree_combo:${index}`);
-  }
-  for (const [index, value] of degreeAliases.slice(0, 2).entries()) {
-    managedComboboxFill(
-      actions,
-      '.select__container:has(> label:has-text("Degree")) input[role="combobox"]',
-      value,
-      `education_degree_combo_label:${index}`,
-    );
   }
   for (const [index, value] of greenhouseDisciplineAliases(packet).entries()) {
     managedGreenhouseReactSelectFill(actions, 'discipline--0', value, `education_discipline_combo:${index}`);
@@ -1296,7 +1279,6 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedFill(actions, GREENHOUSE_PHONE_SELECTOR, phoneForPortalField(portal, packet.phone), 'phone');
     managedComboboxFill(actions, '#candidate-location, input[autocomplete="address-level2"]', greenhouseLocationSearch(packet), 'location');
     managedFillByLabel(actions, 'School', packet.school, 'education_school');
-    managedFillByLabel(actions, 'Degree', packet.degree, 'education_degree');
     pushGreenhouseEducationComboboxActions(actions, packet);
     managedFillByLabel(actions, 'What is your graduation date?', packet.graduationDate, 'graduation_date');
     managedFillByLabel(actions, 'End date month', packet.graduationMonth, 'education_end_month');
