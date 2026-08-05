@@ -781,7 +781,11 @@ test('Greenhouse fills academic fields from the submission packet', () => {
   assert.ok(comboFills.some((action) => action.selector === '#school--0' && action.value === 'University of Southern California'));
   assert.equal(comboFills[0]?.selector, '#school--0');
   assert.equal(comboFills[0]?.value, 'University of Southern California');
-  assert.ok(comboFills.some((action) => action.selector?.includes('label:has-text("School")')));
+  assert.equal(comboFills.some((action) => action.selector?.includes('label:has-text("School")')), false);
+  const schoolOpenIndex = actions.findIndex((action) => action.type === 'click' && action.selector === '#school--0');
+  const schoolFillIndex = actions.findIndex((action) => action.type === 'fill' && action.selector === '#school--0');
+  assert.ok(schoolOpenIndex >= 0);
+  assert.ok(schoolFillIndex > schoolOpenIndex);
   assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s Degree'));
   assert.equal(comboFills.filter((action) => action.selector === '#degree--0').length, 1);
   assert.equal(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s'), false);
@@ -793,9 +797,34 @@ test('Greenhouse fills academic fields from the submission packet', () => {
   );
   assert.ok(comboFills.some((action) => action.selector === '#discipline--0' && action.value === 'Computer Science'));
   assert.ok(actions.some((action) => action.type === 'click' && action.selector === '#react-select-school--0-option-0' && action.label?.startsWith('education_school_combo')));
-  assert.ok(actions.some((action) => action.type === 'click' && action.selector === '[id^="react-select-"][id$="-option-0"]:visible' && action.label?.startsWith('education_school_combo_label')));
   assert.ok(actions.some((action) => action.type === 'click' && action.selector === '#react-select-degree--0-option-0' && action.label?.startsWith('education_degree_combo')));
   assert.ok(actions.some((action) => action.type === 'click' && action.selector === '#react-select-discipline--0-option-0' && action.label?.startsWith('education_discipline_combo')));
+});
+
+test('Greenhouse fixed education combobox questions are not replayed as reviewed text', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    school: 'University of Southern California, Viterbi School of Engineering',
+    degree: 'Bachelor of Science in Computer Science',
+    major: 'Computer Science',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      { question: 'school* school--0', answer: 'University of Southern California, Viterbi School of Engineering' },
+      { question: 'degree* degree--0', answer: 'Bachelor\'s Degree' },
+      { question: 'discipline* discipline--0', answer: 'Computer Science' },
+    ],
+  });
+
+  const reviewedQuestionActions = actions.filter((action) => action.label?.startsWith('question:'));
+  assert.equal(reviewedQuestionActions.length, 0);
+  const schoolFills = actions.filter((action) => action.type === 'fill' && action.selector === '#school--0');
+  assert.equal(schoolFills.length, 1);
+  assert.equal(schoolFills[0]?.value, 'University of Southern California');
+  assert.ok(actions.some((action) => action.label?.startsWith('education_school_combo:')));
+  assert.ok(actions.some((action) => action.label?.startsWith('education_degree_combo:')));
+  assert.ok(actions.some((action) => action.label?.startsWith('education_discipline_combo:')));
 });
 
 test('Greenhouse replays Databricks choice questions through React-select buckets', () => {
