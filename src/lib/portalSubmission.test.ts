@@ -760,7 +760,6 @@ test('Greenhouse fills academic fields from the submission packet', () => {
   assert.deepEqual(
     byLabel.map((action) => [action.text, action.value, action.label]),
     [
-      ['School', 'University of Southern California', 'education_school'],
       ['What is your graduation date?', 'May 2028', 'graduation_date'],
       ['End date month', 'May', 'education_end_month'],
       ['End date year', '2028', 'education_end_year'],
@@ -774,9 +773,15 @@ test('Greenhouse fills academic fields from the submission packet', () => {
     actions.some((action) => action.type === 'fillByLabelText' && action.text === 'Degree'),
     false,
   );
+  assert.equal(
+    actions.some((action) => action.type === 'fillByLabelText' && action.text === 'School'),
+    false,
+  );
   const comboFills = actions.filter((action) => action.type === 'fill' && action.label?.startsWith('education_'));
   assert.ok(comboFills.some((action) => action.selector === '#school--0' && action.value === 'University of Southern California'));
-  assert.ok(comboFills.some((action) => action.selector?.includes('label:has-text("School")') && action.value === 'University of Southern California'));
+  assert.equal(comboFills[0]?.selector, '#school--0');
+  assert.equal(comboFills[0]?.value, 'University of Southern California');
+  assert.equal(comboFills.some((action) => action.selector?.includes('label:has-text("School")')), false);
   assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s Degree'));
   assert.equal(comboFills.filter((action) => action.selector === '#degree--0').length, 1);
   assert.equal(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s'), false);
