@@ -977,9 +977,10 @@ export function buildManagedPortalActions(
 ): ManagedBrowserAction[] {
   const actions: ManagedBrowserAction[] = [];
   pushFixedFieldActions(actions, portal, packet);
-  // See canFillReviewedQuestions: the managed runner throws on any non-text control and ignores
-  // `optional`, so a single checkbox takes down a run that had otherwise filled five fields
-  // correctly. Sending none of them is what makes the run survive to a usable handoff.
+  // Reviewed questions include stored attestations and EEO decline-style answers when present.
+  // The managed runner scopes every choice match to this question's container and verifies text
+  // values after filling, so a missing or unaccepted value returns as a blocker instead of being
+  // reported as completed.
   for (const item of canFillReviewedQuestions('managed') ? packet.questions : []) {
     if (!item.answer.trim()) continue;
     const questionText = normalizeReviewQuestionLabel(item.question);
@@ -993,12 +994,8 @@ export function buildManagedPortalActions(
       timeout: MANAGED_FILL_TIMEOUT_MS,
     });
   }
-  // Deliberately NOT attempted: clicking checkboxes and radios by matching their label to the
-  // answer text. It would fill more of the form, and it is the obvious next step, but a short
-  // generic answer ("Yes", "No") can match a label anywhere on the page, including a legal
-  // acknowledgement or a consent box. Ticking the wrong consent on a real application is a harm
-  // the student cannot undo, while an unanswered choice question is a blocker she resolves in
-  // seconds. Choice controls stay with the human until they can be scoped to their own question.
+  // Choice controls are filled only by the runner's scoped question-container logic. That keeps
+  // short answers such as "Yes" from matching an unrelated acknowledgement elsewhere on the page.
   // portalCanAutoSubmit is the second gate, and it is deliberately NOT the caller's job. A caller
   // passing submit=true is saying "the human approved sending this"; it is not saying the platform
   // is capable of being sent in one run. Paylocity's "Next Step" button and JazzHR's reCAPTCHA both
