@@ -389,7 +389,7 @@ function degreeAnswer(label: string, inputType: string | undefined, degree: stri
   const trimmed = degree?.trim();
   if (!trimmed) return null;
   const needsLevel = /most recent degree|highest degree|degree (?:you )?(?:obtained|earned)|education level|level of education/i.test(label)
-    || /select|radio/i.test(inputType ?? '');
+    || /select|radio|combobox/i.test(inputType ?? '');
   if (!needsLevel) return trimmed;
   if (/\bph\.?d\b|doctor of philosophy|doctorate/i.test(trimmed)) return 'Doctor of Philosophy (Ph.D.)';
   if (/\bmaster|m\.?s\.?|m\.?a\.?\b|mba|m\.?b\.?a\.?/i.test(trimmed)) return 'Master\'s Degree';
@@ -626,7 +626,9 @@ const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
     out.push({
       label: label,
       selector: stableSelector(el, marker),
-      inputType: el.tagName === 'TEXTAREA' ? 'textarea' : (el.tagName === 'SELECT' ? 'select' : (el.type || 'text')),
+      inputType: el.tagName === 'TEXTAREA'
+        ? 'textarea'
+        : (el.tagName === 'SELECT' ? 'select' : (el.getAttribute('role') === 'combobox' ? 'combobox' : (el.type || 'text'))),
       maxLength: el.maxLength > 0 ? el.maxLength : null,
     });
   }
