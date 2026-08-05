@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { ExperienceBankEntry } from '../db/schema';
+import { extractJdSignals } from '../engine/jdSignals';
 import { RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
 import { STRONG_VERBS } from '../engine/resumeValidate';
 
@@ -109,6 +110,9 @@ Rules:
 - Follow the JD's priority order: the earliest clearly stated responsibilities and requirements get
   the strongest supported evidence first. Order entries and bullets so a recruiter can compare the
   resume with the posting from top to bottom.
+- Use the JD extraction summary as the priority map. Hard requirements outrank preferences.
+  Preferences outrank general responsibilities. Action verbs are writing guidance, not candidate
+  evidence. Tools and skills may appear only when the applicant's source already supports them.
 - When the candidate's source evidence genuinely supports the same idea, copy the JD's exact
   multi-word terminology into the bullet. Do not use a creative synonym merely to sound different.
   Exact language never overrides truth: if the source does not support the phrase, omit it.
@@ -271,7 +275,8 @@ How to use it:
   const skillsBlock = skills?.length
     ? `\n\nSkills list (the applicant's own skills - the ONLY skills that may appear in "skills"):\n${JSON.stringify(skills)}`
     : `\n\nSkills list: none provided. Use only skills clearly evidenced by a bullet you selected, and do not add skills from the job description.`;
-  const contextBlock = `Job: ${role} at ${company}\n\nJob description:\n${jdText}\n\nEducation source (copy facts exactly; this is the only authority for school, degree, graduation date, enrollment, and coursework):\n${JSON.stringify(education)}${skillsBlock}${baseBlock}${priorityBlock}\n\nExperience bank:\n${JSON.stringify(bank)}`;
+  const jdSignals = extractJdSignals(jdText, { company, role });
+  const contextBlock = `Job: ${role} at ${company}\n\nJD extraction summary (use this to rank evidence; never use it as evidence that the applicant has a skill):\n${JSON.stringify(jdSignals)}\n\nJob description:\n${jdText}\n\nEducation source (copy facts exactly; this is the only authority for school, degree, graduation date, enrollment, and coursework):\n${JSON.stringify(education)}${skillsBlock}${baseBlock}${priorityBlock}\n\nExperience bank:\n${JSON.stringify(bank)}`;
   const response = await client.messages.create(
     {
       model: 'claude-sonnet-5',

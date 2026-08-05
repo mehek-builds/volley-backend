@@ -49,6 +49,8 @@ test('resume prompt pins every application-specific tailoring rule', () => {
   assert.match(RESUME_SYSTEM_PROMPT, /proof document for THIS application/);
   assert.match(RESUME_SYSTEM_PROMPT, /exact role named in the Job line/);
   assert.match(RESUME_SYSTEM_PROMPT, /Follow the JD's priority order/);
+  assert.match(RESUME_SYSTEM_PROMPT, /JD extraction summary as the priority map/);
+  assert.match(RESUME_SYSTEM_PROMPT, /Hard requirements outrank preferences/);
   assert.match(RESUME_SYSTEM_PROMPT, /copy the JD's exact\s+multi-word terminology/);
   assert.match(RESUME_SYSTEM_PROMPT, /company values or operating principles/);
   assert.match(RESUME_SYSTEM_PROMPT, /Exact language never overrides truth/);

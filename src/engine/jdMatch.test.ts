@@ -1854,6 +1854,11 @@ describe('route registration', () => {
     assert.match(routeFile, /'\/jd-match\/evidence'/);
   });
 
+  test('POST /jd-match/requirements returns the clause weight the preview needs', () => {
+    const routeFile = readFileSync(path.join(__dirname, '..', 'routes', 'jdMatch.ts'), 'utf8');
+    assert.match(routeFile, /weight: c\.weight/);
+  });
+
   /**
    * The review screen is the one surface that still shows resume coverage, so it is the surface
    * that most needs the geography out of its denominator and its missing list. It holds a saved

@@ -316,7 +316,7 @@ const HEADING_PATTERNS: Array<{ kind: SectionKind; re: RegExp }> = [
   // `about SECOND_PERSON_SUBJECT` is the other half of the exclusion carved out of the noise rule
   // above, reading the same constant so the two cannot drift. It is reached only because noise
   // declines these forms first.
-  { kind: 'required', re: new RegExp(String.raw`\b(requirements?|qualifications?|what you'?ll need|what we('?re)? look(ing)? for|what would make you a strong fit|must[- ]have|minimum|basic qualifications|skills?|you have|your background|about\s+${SECOND_PERSON_SUBJECT})\b`, 'i') },
+  { kind: 'required', re: new RegExp(String.raw`\b(requirements?|qualifications?|what you'?ll need|what you should have|what we('?re)? look(ing)? for|what would make you a strong fit|must[- ]have|minimum|basic qualifications|skills?|you have|your background|about\s+${SECOND_PERSON_SUBJECT})\b`, 'i') },
   { kind: 'responsibilities', re: /\b(responsibilities|what you'?ll do|what you will do|the role|(your|the) impact|make an impact|day[- ]to[- ]day|in this role|duties)\b/i },
 ];
 
