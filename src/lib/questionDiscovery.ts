@@ -68,9 +68,9 @@ const JD_US_SCOPE =
   /\b(united states|u\.s\.|usa|remote\s*\(us\)|san francisco|san mateo|mountain view|california|new york|austin|texas|washington|seattle|boston|massachusetts|chicago|illinois)\b/i;
 
 export const EEO_QUESTION =
-  /transgender|\bgender\b|what is your sex\b|race|racial|ethnicit|ethnic\b|hispanic|latino|veteran|military|disab|sexual orientation|communities|identify with|current age|what is your age|age range|how old are you|\bage group\b/i;
+  /transgender|\bgender\b|what is your sex\b|race|racial|ethnicit|ethnic\b|hispanic|latino|veteran|military|disab|sexual orientation|lgbtq|lgbtqia|communities|which categories describe you|identify with|current age|what is your age|age range|how old are you|\bage group\b/i;
 const LEGAL_CONSENT_QUESTION =
-  /candidate privacy policy|information (?:i|you) have provided.*process|by selecting ["']?i agree|demographic data survey|collecting,\s*storing,\s*and processing/i;
+  /candidate privacy policy|candidate-privacy-notice|privacy notice|review and acknowledge|information (?:i|you) have provided.*process|by selecting ["']?i agree|demographic data survey|collecting,\s*storing,\s*and processing/i;
 const LEGAL_ATTESTATION_QUESTION =
   /certif(?:y|ication)|true\s+and\s+(?:complete|accurate)|terms\s+and\s+conditions|background\s+check|criminal|conviction|arbitration/i;
 
@@ -191,6 +191,12 @@ const TERM_QUESTION =
 const SALARY_QUESTION = /salary|compensat|desired pay|expected pay|pay expectation/i;
 const DOB_QUESTION = /date of birth|birth\s*date|\bdob\b/i;
 const CITIZENSHIP_QUESTION = /citizen|nationalit/i;
+const ADVANCED_DEGREE_ENROLLMENT_QUESTION = /\bcurrently\s+enrolled\b[^?]{0,80}\b(?:masters?|master's|ph\.?d|doctorate)\b|\b(?:masters?|master's|ph\.?d|doctorate)\b[^?]{0,80}\bcurrently\s+enrolled\b/i;
+const EMPLOYER_RESTRICTION_AGREEMENT_QUESTION =
+  /\bbound\b[^?]{0,120}\bagreements?\b[^?]{0,180}\b(?:restrict|limit)\b[^?]{0,120}\b(?:ability\s+to\s+work|employment|duties)\b|\b(?:non-compete|non-solicitation|confidentiality|non-disclosure)\b[^?]{0,180}\b(?:restrict|limit|bound)\b/i;
+const US_STATE_RESIDENCE_SELECT_QUESTION = /\bstate\s+of\s+residence\b[^?]{0,160}\bnot\s+in\s+the\s+us\b/i;
+const SAN_FRANCISCO_RESIDENCE_QUESTION = /\bcurrently\s+reside\b[^?]{0,80}\bsan\s+francisco\b|\bsan\s+francisco\b[^?]{0,80}\bcurrently\s+reside\b/i;
+const CONFIRMED_PLANS_CITY_RE = /\b(?:currently\s+residing|confirmed\s+plans)\b[^?]{0,80}\b(?:greater\s+)?([a-z][a-z .'-]+?)\s+area\b|\bconfirmed\s+plans\b[^?]{0,80}\bin\s+([a-z][a-z .'-]+)\b/i;
 
 const NATIONALITY_TO_COUNTRY: Record<string, string> = {
   indian: 'India', american: 'United States', emirati: 'United Arab Emirates',
@@ -383,6 +389,31 @@ function currentEnrollmentAnswer(ap: ApplicationProfileLike): { value: string } 
   if (ap.currently_enrolled === true || graduationEvidenceIsFuture(ap.grad_date, ap.grad_year)) return { value: 'Yes' };
   if (ap.currently_enrolled === false) return { value: 'No' };
   return { skipReason: 'current enrollment question left for you' };
+}
+
+function advancedDegreeEnrollmentAnswer(ap: ApplicationProfileLike): { value: string } | null {
+  const degree = ap.degree?.trim();
+  if (!degree) return null;
+  if (/\b(master|m\.?s\.?|m\.?a\.?|mba|m\.?b\.?a\.?|ph\.?d|doctorate|doctor of philosophy)\b/i.test(degree)) {
+    return { value: 'Yes' };
+  }
+  return { value: 'No' };
+}
+
+function locationStatusAnswer(label: string, ap: ApplicationProfileLike): { value: string } | null {
+  if (US_STATE_RESIDENCE_SELECT_QUESTION.test(label) && !/\b(?:united states|usa|us|u\.s\.)\b/i.test(ap.address_country ?? '')) {
+    return { value: 'Not in the US' };
+  }
+  if (SAN_FRANCISCO_RESIDENCE_QUESTION.test(label)) {
+    return { value: /\bsan\s+francisco\b/i.test(ap.address_city ?? '') ? 'Yes' : 'No' };
+  }
+  const cityMatch = label.match(CONFIRMED_PLANS_CITY_RE);
+  const city = cityMatch?.[1] ?? cityMatch?.[2];
+  if (!city) return null;
+  if (ap.address_city && new RegExp(`\\b${city.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(ap.address_city)) {
+    return { value: 'Yes' };
+  }
+  return { value: 'Yes' };
 }
 
 function degreeAnswer(label: string, inputType: string | undefined, degree: string | undefined): string | null {
@@ -650,6 +681,18 @@ export function resolveKnownAnswer(
 ): { value: string } | { skipReason: string } | null {
   const preferredLocation = locationPreferenceAnswer(label, jdText);
   if (preferredLocation) return preferredLocation;
+
+  const locationStatus = locationStatusAnswer(label, ap);
+  if (locationStatus) return locationStatus;
+
+  if (ADVANCED_DEGREE_ENROLLMENT_QUESTION.test(label)) {
+    const advancedDegree = advancedDegreeEnrollmentAnswer(ap);
+    if (advancedDegree) return advancedDegree;
+  }
+
+  if (EMPLOYER_RESTRICTION_AGREEMENT_QUESTION.test(label)) {
+    return { value: 'No' };
+  }
 
   const workEligibility = workEligibilityAnswer(label, ap, jdText);
   if (workEligibility) return workEligibility;
