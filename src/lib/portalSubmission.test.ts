@@ -1013,11 +1013,35 @@ test('Greenhouse replays Faire option-style choices through React-select buckets
   const actions = buildManagedPortalActions('greenhouse', {
     fullName: 'Mehek Mandal',
     email: 'mehekmandal05@gmail.com',
+    phone: '+971501234567',
+    school: 'University of Southern California, Viterbi School of Engineering',
+    degree: 'Bachelor of Science in Computer Science',
+    graduationDate: 'May 2028',
+    graduationMonth: 'May',
+    graduationYear: '2028',
+    gpa: '3.89',
     resume: Buffer.from('pdf'),
     resumeName: 'resume.pdf',
+    coverLetter: Buffer.from('cover'),
+    coverLetterName: 'cover-letter.pdf',
     referralSourceDefault: 'Company website',
+    eeoPrefs: {
+      gender: 'Female',
+      transgender_status: 'Decline to self-identify',
+      sexual_orientation: 'Heterosexual',
+      disability_status: 'Decline to self-identify',
+      veteran_status: 'Decline to self-identify',
+      race: 'White',
+    },
     questions: [
       { question: 'Which team opening are you most interested in?', answer: 'Search & Recommendation' },
+      { question: 'Are you currently enrolled in a Masters or PhD program?', answer: 'No' },
+      {
+        question: 'If yes, please provide your program and expected graduation date.',
+        answer: 'N/A, I am currently an undergraduate at USC Viterbi and expect to graduate in May 2028.',
+      },
+      { question: 'Do you currently reside in San Francisco?', answer: 'No' },
+      { question: 'How familiar are you with Faire?', answer: 'Somewhat familiar' },
       { question: 'Do you identify as LGBTQIA+?', answer: 'No' },
       { question: 'Which category best describes you?', answer: 'White' },
       { question: 'Gender Identity', answer: 'Female' },
@@ -1041,9 +1065,42 @@ test('Greenhouse replays Faire option-style choices through React-select buckets
   assert.ok(actions.some((action) =>
     action.label?.startsWith('greenhouse_referral_combo_label:')
     && action.value === 'Company website'));
+  assert.ok(actions.some((action) =>
+    action.label?.startsWith('greenhouse_referral_combo_label:')
+    && action.label.includes('How did you hear about us')
+    && action.value === 'Company website'));
+  assert.equal(actions.some((action) =>
+    action.label?.startsWith('greenhouse_demographic:')
+    && action.label.includes('Gender')), false);
+  assert.equal(actions.some((action) =>
+    action.label?.startsWith('greenhouse_demographic:')
+    && action.label.includes('veteran')), false);
   assert.equal(comboFills.some((action) => action.label?.includes('Candidate Privacy Policy')), false);
   assert.equal(actions.some((action) => action.text === 'Faire Candidate Privacy Policy acknowledgment'), false);
   assert.ok(comboFills.every((action) => (action.selector?.length ?? Infinity) <= 500));
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+});
+
+test('Greenhouse demographic aliases keep race fallback for unrelated category questions', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    eeoPrefs: {
+      race: 'White',
+    },
+    questions: [
+      { question: 'Which product category are you most interested in?', answer: 'Search' },
+    ],
+  });
+
+  assert.ok(actions.some((action) =>
+    action.label?.startsWith('greenhouse_demographic_select:')
+    && action.value === 'White'));
+  assert.ok(actions.some((action) =>
+    action.label?.startsWith('greenhouse_demographic_combo:')
+    && action.value === 'White'));
   assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
 });
 
@@ -2019,7 +2076,10 @@ test('Greenhouse managed actions stay inside the Stratus action budget on Reddit
 
   assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
   assert.equal(actions.some((action) => action.label?.startsWith('greenhouse_known_select:')), false);
-  assert.ok(actions.some((action) => action.label?.startsWith('greenhouse_demographic_select:')));
+  assert.ok(actions.some((action) =>
+    action.label?.startsWith('question_combo_label:')
+    && action.label.includes('gender identity')));
+  assert.equal(actions.some((action) => action.label?.startsWith('greenhouse_demographic_select:')), false);
   assert.equal(actions.some((action) => action.text === 'I agree to the Candidate Privacy Policy'), false);
   assert.ok(
     actions.every((action) => !action.selector || action.selector.length <= 500),
