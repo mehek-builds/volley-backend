@@ -54,8 +54,9 @@ test('submit-request starts a fresh run instead of carrying stale run artifacts'
     assert.match(helper, new RegExp(`${field}:\\s*undefined`), `${field} must be cleared`);
   }
   assert.match(helper, /updated_at:\s*new Date\(\)\.toISOString\(\)/);
-  assert.match(route, /const submittedQuestions = normalizeApplicationReviewQuestions\(parsed\.data\.questions as ApplicationReviewQuestion\[\]\)/);
-  assert.match(route, /const next = freshSubmitRequestReview\(current, submittedQuestions\)/);
+  assert.match(route, /const submittedQuestions = refreshKnownQuestionAnswers\(/);
+  assert.match(route, /const normalizedSubmittedQuestions = normalizeApplicationReviewQuestions\(submittedQuestions\)/);
+  assert.match(route, /const next = freshSubmitRequestReview\(current, normalizedSubmittedQuestions\)/);
 });
 
 test('submission packet attaches the role-specific resume filename', async () => {

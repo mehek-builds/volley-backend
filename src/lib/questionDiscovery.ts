@@ -15,13 +15,11 @@ import {
 // (see the comments below, which are carried over verbatim from the source) - keep the two files
 // in sync by hand until they can share a package.
 //
-// Scope, deliberately narrower than the extension: this only discovers and answers TEXT-shaped
-// controls (input[text|email|tel|url|number|date], textarea), matching the extension's own
-// candidateInputs() scope and this backend's existing fillReviewedQuestions(), which already never
-// clicks a select/radio/checkbox. Select/radio/checkbox questions stay exactly where they already
-// were: unanswered, surfaced as a blocker for the human. Guessing the wrong option on a live form
-// is a harm the student cannot undo; an unanswered field she resolves in seconds is not (same
-// doctrine as buildManagedPortalActions' "Deliberately NOT attempted" comment on choice controls).
+// Scope: the discovery pass still surfaces text-shaped controls
+// (input[text|email|tel|url|number|date], textarea). Once a stored or reviewed answer exists, the
+// managed runner may apply it to the live control it finds, including scoped select/radio/checkbox
+// controls. Values that are not stored here still stay blank, and SSN/driver-license fields remain
+// hard-blocked.
 
 export type ApplicationProfileLike = StoredSalaryProfile & {
   phone?: string;
@@ -99,6 +97,23 @@ export function isRefusedQuestion(label: string): boolean {
   return NEVER_FILL_PATTERNS.some((re) => re.test(l)) || WORK_ELIGIBILITY_QUESTION.test(l) || EEO_QUESTION.test(l);
 }
 
+function comparableAnswer(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+export function sensitiveQuestionRequiresAttention(
+  label: string,
+  answer: string,
+  inputType: string,
+  ap: ApplicationProfileLike,
+  jdText: string | undefined,
+): boolean {
+  if (!isRefusedQuestion(label)) return false;
+  if (!WORK_ELIGIBILITY_QUESTION.test(label)) return true;
+  const known = resolveKnownAnswer(label, inputType, ap, jdText);
+  return !(known && 'value' in known && comparableAnswer(known.value) === comparableAnswer(answer));
+}
+
 export function questionRequiresHumanAttention(question: { question: string; answer?: string }): boolean {
   const label = question.question ?? '';
   const answer = question.answer?.trim() ?? '';
@@ -106,6 +121,18 @@ export function questionRequiresHumanAttention(question: { question: string; ans
   if (WORK_ELIGIBILITY_QUESTION.test(label)) return !/^(yes|no)$/i.test(answer);
   if (EEO_QUESTION.test(label)) return answer.length === 0;
   return false;
+}
+
+export function refreshKnownQuestionAnswers<T extends { question: string; answer: string }>(
+  questions: readonly T[],
+  ap: ApplicationProfileLike,
+  jdText: string | undefined,
+): T[] {
+  return questions.map((question) => {
+    const label = normalizeReviewQuestionLabel(question.question);
+    const known = label ? resolveKnownAnswer(label, 'text', ap, jdText) : null;
+    return known && 'value' in known ? { ...question, answer: known.value } : question;
+  });
 }
 
 const RESIDENCE_QUESTION =

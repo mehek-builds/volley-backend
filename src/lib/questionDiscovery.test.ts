@@ -11,8 +11,10 @@ import {
   normalizeReviewQuestionLabel,
   normalizeStoredPortalQuestions,
   questionRequiresHumanAttention,
+  refreshKnownQuestionAnswers,
   REVIEW_QUESTION_TEXT_MAX_LENGTH,
   resolveKnownAnswer,
+  sensitiveQuestionRequiresAttention,
   WORK_ELIGIBILITY_QUESTION,
 } from './questionDiscovery';
 
@@ -123,9 +125,95 @@ test('send-time sensitive guard allows stored work and EEO answers while blockin
   assert.equal(questionRequiresHumanAttention({ question: 'social security number', answer: '123' }), true);
 });
 
+test('send-time refresh replaces stale EEO prose with stored profile answers', () => {
+  const questions = refreshKnownQuestionAnswers([
+    {
+      question: 'are you a person of transgender experience? * 431',
+      answer: "I don't think that's relevant to my qualifications for this role.",
+    },
+    {
+      question: 'will you now or in the future require immigration sponsorship?',
+      answer: '',
+    },
+    {
+      question: 'briefly describe your experience with ads review',
+      answer: 'Reviewed policy signals in a fintech environment.',
+    },
+  ], { needs_sponsorship: true, eeo_prefs: null }, 'This role is based in New York.');
+  assert.equal(questions[0].answer, 'Decline to self-identify');
+  assert.equal(questions[1].answer, 'Yes');
+  assert.equal(questions[2].answer, 'Reviewed policy signals in a fintech environment.');
+  assert.equal(questionRequiresHumanAttention(questions[0]), false);
+});
+
 test('never answers SSN or driver license fields', () => {
   assert.equal(isRefusedQuestion('social security number'), true);
   assert.equal(isRefusedQuestion("driver's license number"), true);
+});
+
+test('sensitive gates allow only exact stored work eligibility answers', () => {
+  assert.equal(
+    sensitiveQuestionRequiresAttention(
+      'are you legally authorized to work in the United States?',
+      'Yes',
+      'text',
+      { work_authorized: true },
+      undefined,
+    ),
+    false,
+  );
+  assert.equal(
+    sensitiveQuestionRequiresAttention(
+      'will you now or in the future require sponsorship for employment visa status?',
+      'Yes',
+      'text',
+      { needs_sponsorship: true },
+      undefined,
+    ),
+    false,
+  );
+  assert.equal(
+    sensitiveQuestionRequiresAttention(
+      'are you legally authorized to work in the United States?',
+      'No',
+      'text',
+      { work_authorized: true },
+      undefined,
+    ),
+    true,
+  );
+  assert.equal(
+    sensitiveQuestionRequiresAttention(
+      'are you legally authorized to work in the United States?',
+      'Yes',
+      'text',
+      {},
+      undefined,
+    ),
+    true,
+  );
+  assert.equal(
+    sensitiveQuestionRequiresAttention(
+      'are you legally authorized to work in Canada?',
+      'Yes',
+      'text',
+      { work_authorized: true },
+      undefined,
+    ),
+    true,
+  );
+  assert.equal(
+    sensitiveQuestionRequiresAttention(
+      'are you authorized to work in the US without sponsorship?',
+      'Yes',
+      'text',
+      { work_authorized: true, needs_sponsorship: true },
+      undefined,
+    ),
+    true,
+  );
+  assert.equal(sensitiveQuestionRequiresAttention('social security number', '123-45-6789', 'text', {}, undefined), true);
+  assert.equal(sensitiveQuestionRequiresAttention('what is your gender?', 'Female', 'text', {}, undefined), true);
 });
 
 test('citizenship is answered but never substituted for residence', () => {

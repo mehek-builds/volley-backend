@@ -2,11 +2,14 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   applicationContextForQuestionResolution,
+  discoverAndResolveQuestions,
   readMostRecentRole,
   shouldUseLocalControlledBrowser,
   submissionGraduationDateParts,
   workEligibilityFromSponsorshipAnswer,
+  type ResumeRow,
 } from './submissionRunner';
+import type { ApplicationReviewState } from '../lib/applicationReview';
 
 // readMostRecentRole runs inside buildPacket, which every prepare and every submit goes through -
 // on EVERY portal, not just the one that needs work history. So its failure mode is not "Paylocity
@@ -135,6 +138,51 @@ test('the controlled QA portal uses the managed browser in production', () => {
     if (previousProvider === undefined) delete process.env.BROWSER_PROVIDER;
     else process.env.BROWSER_PROVIDER = previousProvider;
   }
+});
+
+test('discovered US work authorization and sponsorship become reviewed Yes answers', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'This internship is based in San Francisco, California.',
+    role: 'Software Engineering Intern',
+    portal_url: 'https://example.greenhouse.io/jobs/123',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+
+  const result = await discoverAndResolveQuestions(
+    [
+      {
+        label: 'Are you legally authorized to work in the United States?',
+        selector: '[data-litos-discovered-1]',
+        inputType: 'text',
+        maxLength: null,
+      },
+      {
+        label: 'Will you now or in the future require sponsorship for employment visa status?',
+        selector: '[data-litos-discovered-2]',
+        inputType: 'text',
+        maxLength: null,
+      },
+    ],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { work_authorized: true, needs_sponsorship: true },
+    true,
+    'greenhouse',
+  );
+
+  assert.deepEqual(result.attentionReasons, []);
+  assert.deepEqual(
+    result.questions.map((question) => ({ question: question.question, answer: question.answer })),
+    [
+      { question: 'Are you legally authorized to work in the United States?', answer: 'Yes' },
+      { question: 'Will you now or in the future require sponsorship for employment visa status?', answer: 'Yes' },
+    ],
+  );
 });
 
 // ─── The prepare-time gate for account-walled portals ─────────────────────────

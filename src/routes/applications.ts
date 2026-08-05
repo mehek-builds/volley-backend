@@ -7,7 +7,7 @@ import { db } from '../db/index';
 import { settleStall } from '../lib/applicationStall';
 import type { ApplicationReviewState } from '../lib/applicationReview';
 import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
-import { career_page_sources, generated_resumes, monitored_jobs, profiles, users, type ExperienceBankEntry } from '../db/schema';
+import { application_profile, career_page_sources, generated_resumes, monitored_jobs, profiles, users, type ExperienceBankEntry } from '../db/schema';
 import {
   findPdfTextFidelityIssues,
   findPdfSafeMarginIssues,
@@ -32,7 +32,7 @@ import { normalizeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import { requireAuth } from '../middleware/auth';
 import { declaredSkillsList } from './profile';
 import { buildPacket, processSubmissionApplication } from './submissionRunner';
-import { questionRequiresHumanAttention } from '../lib/questionDiscovery';
+import { refreshKnownQuestionAnswers, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { resumeEditDisposition, submitRequestDisposition } from '../lib/submissionSafety';
 import { canonicalSupportedPortalUrl, detectPortal, isPortalSupported } from '../lib/portalSubmission';
 import { dailySubmissionCap, withinDailyCap } from '../lib/submissionQueue';
@@ -320,6 +320,38 @@ function finalApprovalFieldIssues(review: ApplicationReviewState, coverLetterReq
   return issues;
 }
 
+function booleanOrUndefined(value: boolean | null | undefined): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+async function loadSensitiveQuestionProfile(userId: string): Promise<ApplicationProfileLike> {
+  const [row] = await db
+    .select({
+      work_authorized: application_profile.work_authorized,
+      needs_sponsorship: application_profile.needs_sponsorship,
+      eeo_prefs: application_profile.eeo_prefs,
+    })
+    .from(application_profile)
+    .where(eq(application_profile.user_id, userId))
+    .limit(1);
+  return {
+    work_authorized: booleanOrUndefined(row?.work_authorized),
+    needs_sponsorship: booleanOrUndefined(row?.needs_sponsorship),
+    eeo_prefs: row?.eeo_prefs && typeof row.eeo_prefs === 'object'
+      ? row.eeo_prefs as Record<string, string>
+      : null,
+  };
+}
+
+function sensitiveQuestionFor(
+  questions: readonly ApplicationReviewQuestion[],
+  profile: ApplicationProfileLike,
+  jdText: string | undefined,
+): ApplicationReviewQuestion | undefined {
+  return normalizeApplicationReviewQuestions(questions)
+    .find((question) => sensitiveQuestionRequiresAttention(question.question, question.answer, 'text', profile, jdText));
+}
+
 export async function applicationRoutes(fastify: FastifyInstance) {
   fastify.post(
     '/applications/:id/submission/extension-start',
@@ -364,8 +396,18 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           .from(profiles).where(eq(profiles.user_id, userId)).limit(1);
         const educationIssues = packetEducationDrift(row.spec, profileRows[0]?.parsed_json);
         if (educationIssues.length > 0) return { kind: 'education_drift' as const, issues: educationIssues };
-        const currentQuestions = normalizeApplicationReviewQuestions(current.questions);
-        const sensitive = currentQuestions.find((question) => questionRequiresHumanAttention(question));
+        const [sensitiveProfileRow] = await tx
+          .select({
+            work_authorized: application_profile.work_authorized,
+            needs_sponsorship: application_profile.needs_sponsorship,
+          })
+          .from(application_profile)
+          .where(eq(application_profile.user_id, userId))
+          .limit(1);
+        const sensitive = sensitiveQuestionFor(current.questions, {
+          work_authorized: booleanOrUndefined(sensitiveProfileRow?.work_authorized),
+          needs_sponsorship: booleanOrUndefined(sensitiveProfileRow?.needs_sponsorship),
+        }, current.jd_text);
         if (sensitive) return { kind: 'sensitive_question' as const, question: sensitive.question };
         if (!withinDailyCap(countRows[0]?.total ?? 0, dailySubmissionCap())) return { kind: 'cap' as const };
         const now = new Date().toISOString();
@@ -619,10 +661,6 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (!row) return;
       const parsed = submitBodySchema.safeParse(request.body);
       if (!parsed.success) return reply.status(400).send({ error: 'Invalid answers', detail: parsed.error.issues });
-      const submittedQuestions = normalizeApplicationReviewQuestions(parsed.data.questions as ApplicationReviewQuestion[]);
-      if (submittedQuestions.some((question) => question.required && !question.answer.trim())) {
-        return reply.status(422).send({ error: 'Answer every required question before submitting.' });
-      }
       const stored = row.spec as StoredSpec;
       let current = readApplicationReview(stored);
       if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
@@ -643,8 +681,20 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       // false, and submit-request accepts a bare list of answers from any authenticated caller. The
       // review screen saves through PATCH /resume before it sends, and that route runs this exact
       // comparison, so a correctly-saved packet reaches this line with nothing to report.
-      const submitProfileRows = await db.select({ parsed_json: profiles.parsed_json })
-        .from(profiles).where(eq(profiles.user_id, request.jwtPayload!.userId)).limit(1);
+      const [submitProfileRows, sensitiveProfile] = await Promise.all([
+        db.select({ parsed_json: profiles.parsed_json })
+          .from(profiles).where(eq(profiles.user_id, request.jwtPayload!.userId)).limit(1),
+        loadSensitiveQuestionProfile(request.jwtPayload!.userId),
+      ]);
+      const submittedQuestions = refreshKnownQuestionAnswers(
+        parsed.data.questions as ApplicationReviewQuestion[],
+        sensitiveProfile,
+        typeof stored.jd_text === 'string' ? stored.jd_text : undefined,
+      );
+      const normalizedSubmittedQuestions = normalizeApplicationReviewQuestions(submittedQuestions);
+      if (normalizedSubmittedQuestions.some((question) => question.required && !question.answer.trim())) {
+        return reply.status(422).send({ error: 'Answer every required question before submitting.' });
+      }
       const submitEducationIssues = packetEducationDrift(stored, submitProfileRows[0]?.parsed_json);
       if (submitEducationIssues.length > 0) {
         return reply.status(422).send(educationDriftResponse(submitEducationIssues));
@@ -657,7 +707,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           issues: preSendIssues,
         });
       }
-      const sensitive = submittedQuestions.find((question) => questionRequiresHumanAttention(question));
+      const sensitive = sensitiveQuestionFor(normalizedSubmittedQuestions, sensitiveProfile, current.jd_text);
       if (sensitive) {
         return reply.status(422).send({ error: `Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}` });
       }
@@ -667,7 +717,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       // portal_supported check is helpful UI, not an enforcement point.
       if (current.portal_url && !isPortalSupported(current.portal_url)) {
         const authorizedAt = new Date().toISOString();
-        const base = freshSubmitRequestReview(current, submittedQuestions);
+        const base = freshSubmitRequestReview(current, normalizedSubmittedQuestions);
         const pending: ApplicationReviewState = {
           ...base,
           status: 'submitting',
@@ -770,7 +820,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           code: 'PORTAL_RUNNER_NOT_CONFIGURED',
         });
       }
-      const next = freshSubmitRequestReview(current, submittedQuestions);
+      const next = freshSubmitRequestReview(current, normalizedSubmittedQuestions);
       const claimed = await db.update(generated_resumes)
         .set({ spec: reviewSpec(next) })
         .where(and(
@@ -890,7 +940,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (currentQuestions.some((question) => question.required && !question.answer.trim())) {
         approvalIssues.push('A required application answer is still blank.');
       }
-      const sensitive = currentQuestions.find((question) => questionRequiresHumanAttention(question));
+      const sensitiveProfile = await loadSensitiveQuestionProfile(request.jwtPayload!.userId);
+      const sensitive = sensitiveQuestionFor(currentQuestions, sensitiveProfile, current.jd_text);
       if (sensitive) {
         approvalIssues.push(`Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}`);
       }
