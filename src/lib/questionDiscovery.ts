@@ -338,9 +338,10 @@ function collapseRepeatedLabel(value: string): string {
   const words = value.trim().split(/\s+/).filter(Boolean);
   if (words.length < 2 || words.length % 2 !== 0) return value;
   const half = words.length / 2;
-  const left = words.slice(0, half).join(' ').toLowerCase();
-  const right = words.slice(half).join(' ').toLowerCase();
-  return left === right ? words.slice(0, half).join(' ') : value;
+  const left = words.slice(0, half).join(' ');
+  const right = words.slice(half).join(' ');
+  const comparable = (part: string) => part.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  return comparable(left) === comparable(right) ? left.replace(/[\s*.,;:!?]+$/u, '').trim() : value;
 }
 
 /**
