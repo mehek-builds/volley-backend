@@ -1,6 +1,6 @@
 import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
-import { isPortalSupported } from './portalSubmission';
+import { canonicalSupportedPortalUrl, detectPortal, isPortalSupported } from './portalSubmission';
 
 export type ApplicationReviewQuestion = {
   id: string;
@@ -315,12 +315,19 @@ export function applyApplicationReviewEdit(
   current: ApplicationReviewState,
   edit: ApplicationReviewEdit,
 ): ApplicationReviewState {
+  const canonicalPortalUrl = edit.portal_url === undefined
+    ? undefined
+    : canonicalSupportedPortalUrl(edit.portal_url, edit.ats_name ?? current.ats_name) ?? edit.portal_url;
   return {
     ...current,
     ...edit,
+    ...(canonicalPortalUrl === undefined ? {} : {
+      portal_url: canonicalPortalUrl,
+      ats_name: isPortalSupported(canonicalPortalUrl) ? detectPortal(canonicalPortalUrl) : edit.ats_name ?? current.ats_name,
+    }),
     // Only when the edit carries a URL. Deriving from an absent one would write false over a
     // perfectly good stored true, which is the same lockout arriving by a different door.
-    ...(edit.portal_url === undefined ? {} : { portal_supported: isPortalSupported(edit.portal_url) }),
+    ...(canonicalPortalUrl === undefined ? {} : { portal_supported: isPortalSupported(canonicalPortalUrl) }),
     status: edit.questions.length > 0 ? 'questions_ready' : 'ready_to_submit',
     updated_at: new Date().toISOString(),
   };
