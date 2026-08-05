@@ -852,7 +852,6 @@ function greenhouseCheckboxOptionSelectors(questionText: string, answer: string)
   ) {
     return [
       'input[name="question_35110536002[]"][value="221056618002"]',
-      'fieldset[id="question_35110536002[]"] label:has-text("None of the above")',
     ];
   }
   if (
@@ -861,7 +860,6 @@ function greenhouseCheckboxOptionSelectors(questionText: string, answer: string)
   ) {
     return [
       'input[name="question_35114221002[]"][value="221073825002"]',
-      'fieldset[id="question_35114221002[]"] label:has-text("Not applicable")',
     ];
   }
   return [];
@@ -894,6 +892,7 @@ function pushScopedQuestionChoiceActions(
   questionText: string,
   answer: string,
   labelPrefix: string,
+  options: { includeSelectFallbacks?: boolean } = {},
 ) {
   actions.push({
     type: 'fillByLabelText',
@@ -903,6 +902,7 @@ function pushScopedQuestionChoiceActions(
     optional: true,
     timeout: MANAGED_FILL_TIMEOUT_MS,
   });
+  if (options.includeSelectFallbacks === false) return;
   let index = 0;
   const values = selectValuesForAnswer(answer);
   for (const selector of questionSelectSelectors(questionText)) {
@@ -1008,7 +1008,6 @@ const GREENHOUSE_DEMOGRAPHIC_ALIASES: Array<{ key: string; aliases: string[] }> 
     key: 'gender',
     aliases: [
       'What gender identity do you most closely identify with?',
-      'What is your gender?',
     ],
   },
   {
@@ -1027,21 +1026,18 @@ const GREENHOUSE_DEMOGRAPHIC_ALIASES: Array<{ key: string; aliases: string[] }> 
     key: 'disability_status',
     aliases: [
       'Do you live with a disability (as outlined by the ADA)?',
-      'Disability status',
     ],
   },
   {
     key: 'veteran_status',
     aliases: [
       'Are you a veteran/have you served in the military?',
-      'Veteran status',
     ],
   },
   {
     key: 'race',
     aliases: [
       'Please select up to 2 ethnicities that you most closely identify with.',
-      'Please select your racial/ethnic background',
     ],
   },
 ];
@@ -1526,10 +1522,14 @@ export function buildManagedPortalActions(
       }
       continue;
     }
-    pushScopedQuestionChoiceActions(actions, questionText, item.answer, 'question');
     if (portalFamily(portal) === 'greenhouse') {
+      pushScopedQuestionChoiceActions(actions, questionText, item.answer, 'question', {
+        includeSelectFallbacks: !isGreenhouseReactSelectQuestion(questionText),
+      });
       pushGreenhouseQuestionComboboxLabelActions(actions, questionText, item.answer, 'question');
       pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');
+    } else {
+      pushScopedQuestionChoiceActions(actions, questionText, item.answer, 'question');
     }
   }
   if (portalFamily(portal) === 'greenhouse') {
