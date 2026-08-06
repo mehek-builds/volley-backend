@@ -291,6 +291,16 @@ application, forwards it to the user through Resend, and sets replies to go back
 employer sender. This handles receipts, ordinary verification-code emails, and recruiter replies;
 it does not solve CAPTCHA, account walls, or missing employer-authorized ATS API channels.
 
+To create or reuse the Resend webhook when a readable `RESEND_API_KEY` is available locally:
+
+```bash
+npm run setup:application-email-resend
+```
+
+That script registers `email.received` for
+`https://student-outreach-backend.vercel.app/webhooks/application-email/inbound` and stores the
+returned signing secret in Vercel as `RESEND_WEBHOOK_SECRET`.
+
 **Why a hand deploy used to report `null`.** Measured 2026-08-04 across the last 12 production
 deployments: Vercel fills the `VERCEL_GIT_*` variables from the **GitHub integration's** metadata,
 whose keys carry a `github` prefix. A `vercel --prod` from a laptop attaches its own git metadata
