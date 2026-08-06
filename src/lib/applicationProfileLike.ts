@@ -66,20 +66,29 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
     const company = entry.company ?? entry.org;
     return typeof company === 'string' && company.trim() ? company.trim() : undefined;
   };
-  const experienceEmployer = (value: Record<string, unknown>, predicate: (entry: Record<string, unknown>) => boolean): string | undefined => {
-      const experience = value.experience;
-      if (!Array.isArray(experience)) return undefined;
+  const experienceEmployers = (value: Record<string, unknown>, predicate: (entry: Record<string, unknown>) => boolean): string[] => {
+    const experience = value.experience;
+    if (!Array.isArray(experience)) return [];
+    const employers: string[] = [];
     for (const item of experience) {
       if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
       const entry = item as Record<string, unknown>;
       if (!predicate(entry)) continue;
       const company = employerCompany(entry);
-      if (company) return company;
+      if (company) employers.push(company);
     }
-    return undefined;
+    return employers;
+  };
+  const experienceEmployer = (value: Record<string, unknown>, predicate: (entry: Record<string, unknown>) => boolean): string | undefined => {
+    return experienceEmployers(value, predicate)[0];
   };
   const mostRecentEmployer = (): string | undefined => {
     return experienceEmployer(parsed, () => true) ?? experienceEmployer(base, () => true);
+  };
+  const employerHistory = (): string[] | undefined => {
+    const employers = [...experienceEmployers(parsed, () => true), ...experienceEmployers(base, () => true)];
+    const unique = [...new Set(employers)];
+    return unique.length ? unique : undefined;
   };
   const currentEmployer = (): string | undefined => {
     const currentExperience = (entry: Record<string, unknown>): boolean => {
@@ -105,6 +114,7 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
     availability_term: str('availability_term'),
     current_employer: currentEmployer(),
     most_recent_employer: mostRecentEmployer(),
+    employer_history: employerHistory(),
     school: academicStr('school'),
     degree: academicStr('degree'),
     grad_date: academicStr('grad_date'),

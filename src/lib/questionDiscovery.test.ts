@@ -447,6 +447,7 @@ test('live-audit profile labels beat generic wording and stay out of drafts', ()
   const profile = {
     linkedin_url: 'https://www.linkedin.com/in/mehekmandal/',
     most_recent_employer: 'Tonee - AI Texting Tone Detector',
+    employer_history: ['Tonee - AI Texting Tone Detector'],
     degree: 'Bachelor of Science in Computer Science & Business Administration, Finance Emphasis',
     major: 'Computer Science',
     grad_date: 'May 2028',
@@ -461,6 +462,15 @@ test('live-audit profile labels beat generic wording and stay out of drafts', ()
     value: 'Tonee - AI Texting Tone Detector',
   });
   assert.equal(resolveKnownAnswer('Current employer', 'text', profile, undefined), null);
+  assert.deepEqual(resolveKnownAnswer('Have you previously worked at Tonee - AI Texting Tone Detector?', 'select', profile, undefined), {
+    value: 'Yes',
+  });
+  const samsaraPriorEmployer = resolveKnownAnswer('Have you previously worked at Samsara?', 'select', profile, undefined);
+  assert.ok(samsaraPriorEmployer && 'skipReason' in samsaraPriorEmployer && samsaraPriorEmployer.skipReason.startsWith('prior employer'));
+  const nearMissPriorEmployer = resolveKnownAnswer('Have you previously worked at Tone?', 'select', profile, undefined);
+  assert.ok(nearMissPriorEmployer && 'skipReason' in nearMissPriorEmployer && nearMissPriorEmployer.skipReason.startsWith('prior employer'));
+  const genericPriorEmployer = resolveKnownAnswer('Have you previously worked at any employer in this industry?', 'select', profile, undefined);
+  assert.ok(genericPriorEmployer && 'skipReason' in genericPriorEmployer && genericPriorEmployer.skipReason.startsWith('prior employer'));
   assert.deepEqual(resolveKnownAnswer('When are you expecting to graduate from your degree?', 'select', profile, undefined), {
     value: 'May 2028',
   });
