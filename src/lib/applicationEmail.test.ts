@@ -2,13 +2,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applicationAliasFor,
+  applicationEmailRouteLabel,
   classifyApplicationEmail,
   retrieveResendReceivedEmail,
 } from './applicationEmail';
 
 test('application aliases are deterministic and live on the configured domain', () => {
+  const previousMailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
   const previousDomain = process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
   const previousSecret = process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
+  delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
   process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'apply.litos.test';
   process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = 'secret';
   try {
@@ -23,6 +26,32 @@ test('application aliases are deterministic and live on the configured domain', 
     assert.equal(first, second);
     assert.match(first ?? '', /^app-2222222222-[a-f0-9]{12}@apply\.litos\.test$/);
   } finally {
+    if (previousMailbox === undefined) delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+    else process.env.LITOS_APPLICATION_EMAIL_MAILBOX = previousMailbox;
+    if (previousDomain === undefined) delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+    else process.env.LITOS_APPLICATION_EMAIL_DOMAIN = previousDomain;
+    if (previousSecret === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
+    else process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = previousSecret;
+  }
+});
+
+test('application aliases can route through one main mailbox', () => {
+  const previousMailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+  const previousDomain = process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+  const previousSecret = process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
+  process.env.LITOS_APPLICATION_EMAIL_MAILBOX = 'applications@trylitos.com';
+  process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'apply.litos.test';
+  process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = 'secret';
+  try {
+    const alias = applicationAliasFor(
+      '11111111-1111-4111-8111-111111111111',
+      '22222222-2222-4222-8222-222222222222',
+    );
+    assert.match(alias ?? '', /^applications\+app-2222222222-[a-f0-9]{12}@trylitos\.com$/);
+    assert.equal(applicationEmailRouteLabel(), 'applications@trylitos.com');
+  } finally {
+    if (previousMailbox === undefined) delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+    else process.env.LITOS_APPLICATION_EMAIL_MAILBOX = previousMailbox;
     if (previousDomain === undefined) delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
     else process.env.LITOS_APPLICATION_EMAIL_DOMAIN = previousDomain;
     if (previousSecret === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
@@ -31,10 +60,12 @@ test('application aliases are deterministic and live on the configured domain', 
 });
 
 test('application aliases are disabled until a real secret is configured', () => {
+  const previousMailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
   const previousDomain = process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
   const previousAliasSecret = process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
   const previousCompatSecret = process.env.LITOS_APPLICATION_EMAIL_SECRET;
   const previousJwtSecret = process.env.JWT_SIGNING_SECRET;
+  delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
   process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'apply.litos.test';
   delete process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
   delete process.env.LITOS_APPLICATION_EMAIL_SECRET;
@@ -45,6 +76,8 @@ test('application aliases are disabled until a real secret is configured', () =>
       '22222222-2222-4222-8222-222222222222',
     ), null);
   } finally {
+    if (previousMailbox === undefined) delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+    else process.env.LITOS_APPLICATION_EMAIL_MAILBOX = previousMailbox;
     if (previousDomain === undefined) delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
     else process.env.LITOS_APPLICATION_EMAIL_DOMAIN = previousDomain;
     if (previousAliasSecret === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;

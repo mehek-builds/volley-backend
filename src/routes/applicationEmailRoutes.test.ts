@@ -28,4 +28,7 @@ test('application inbox schema and webhook route are registered', () => {
   assert.match(route, /svix-signature/);
   assert.match(route, /\/applications\/:id\/email-messages/);
   assert.match(service, /reply_to: input\.inbound\.from\?\.trim\(\) \|\| input\.alias/);
+  assert.match(service, /LITOS_APPLICATION_EMAIL_MAILBOX/);
+  assert.match(service, /\$\{mailbox\.local\}\+\$\{route\}@\$\{mailbox\.domain\}/);
+  assert.match(route, /applicationEmailRouteLabel\(\)/);
 });

@@ -41,6 +41,16 @@ type ResendReceivedEmail = {
   message_id?: string;
 };
 
+function configuredMailbox(): { local: string; domain: string; address: string } | null {
+  const mailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX?.trim().toLowerCase();
+  const match = mailbox?.match(/^([^@\s]+)@([a-z0-9.-]+\.[a-z]{2,})$/i);
+  if (!match) return null;
+  const local = match[1];
+  const domain = match[2];
+  if (!/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+$/i.test(local)) return null;
+  return { local, domain, address: `${local}@${domain}` };
+}
+
 function configuredDomain(): string | null {
   const domain = process.env.LITOS_APPLICATION_EMAIL_DOMAIN?.trim().toLowerCase();
   return domain && /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(domain) ? domain : null;
@@ -61,7 +71,11 @@ export function inboundWebhookSecret(): string | null {
 }
 
 export function isApplicationEmailConfigured(): boolean {
-  return Boolean(configuredDomain() && applicationAliasSecret());
+  return Boolean((configuredMailbox() || configuredDomain()) && applicationAliasSecret());
+}
+
+export function applicationEmailRouteLabel(): string | null {
+  return configuredMailbox()?.address || configuredDomain();
 }
 
 function digest(value: string, length = 10): string {
@@ -69,11 +83,15 @@ function digest(value: string, length = 10): string {
 }
 
 export function applicationAliasFor(userId: string, applicationId: string): string | null {
-  const domain = configuredDomain();
   const secret = applicationAliasSecret();
-  if (!domain || !secret) return null;
+  if (!secret) return null;
   const token = digest(`${secret}:${userId}:${applicationId}`, 12);
-  return `app-${applicationId.replace(/-/g, '').slice(0, 10)}-${token}@${domain}`;
+  const route = `app-${applicationId.replace(/-/g, '').slice(0, 10)}-${token}`;
+  const mailbox = configuredMailbox();
+  if (mailbox) return `${mailbox.local}+${route}@${mailbox.domain}`;
+  const domain = configuredDomain();
+  if (!domain) return null;
+  return `${route}@${domain}`;
 }
 
 export async function ensureApplicationEmailAlias(input: {
