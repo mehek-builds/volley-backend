@@ -449,6 +449,17 @@ function studyYearAnswer(ap: ApplicationProfileLike): string | null {
   return ['First year', 'Second year', 'Third year', 'Fourth year'][undergradYear - 1] ?? null;
 }
 
+function internshipAvailabilityAnswer(label: string, ap: ApplicationProfileLike): { value: string } | { skipReason: string } {
+  const stored = [ap.availability_term, ap.availability_date].filter(Boolean).join(' ').trim();
+  if (!stored) return { skipReason: `internship availability question left for you: "${label.slice(0, 60)}"` };
+  const asksFullTime = /\bfull-time\b|\b40\s*hours\b/i.test(label);
+  const asksTwelveWeeks = /\b12\s*weeks?\b|\btwelve\s+weeks?\b/i.test(label);
+  const confirmsFullTime = !asksFullTime || /\bfull-time\b|\b40\s*hours\b/i.test(stored);
+  const confirmsTwelveWeeks = !asksTwelveWeeks || /\b12\s*weeks?\b|\btwelve\s+weeks?\b|\b3\s*months?\b|\bthree\s+months?\b/i.test(stored);
+  if (confirmsFullTime && confirmsTwelveWeeks) return { value: 'Yes' };
+  return { skipReason: `internship availability question left for you: "${label.slice(0, 60)}"` };
+}
+
 function majorAnswer(ap: ApplicationProfileLike): string | null {
   const major = ap.major?.trim();
   if (major) return major;
@@ -774,11 +785,11 @@ export function resolveKnownAnswer(
   }
 
   if (PRIOR_EMPLOYER_OR_PROGRAM_QUESTION.test(label)) {
-    return { value: 'No' };
+    return { skipReason: `prior employer or program question left for you: "${label.slice(0, 60)}"` };
   }
 
   if (INTERNSHIP_AVAILABILITY_QUESTION.test(label)) {
-    return { value: 'Yes' };
+    return internshipAvailabilityAnswer(label, ap);
   }
 
   const workEligibility = workEligibilityAnswer(label, ap, jdText);

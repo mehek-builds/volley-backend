@@ -645,6 +645,7 @@ test('live-audit profile fields use question shape before generic enrollment wor
     grad_year: 2027,
     currently_enrolled: true,
     address_country: 'United States',
+    availability_term: 'Available full-time for 12 weeks',
   };
 
   assert.deepEqual(resolveKnownAnswer('Which university are you currently enrolled in?', 'select', profile, undefined), {
@@ -656,15 +657,27 @@ test('live-audit profile fields use question shape before generic enrollment wor
   assert.deepEqual(resolveKnownAnswer('If you are currently enrolled in a university or program, when do you expect to graduate or complete your program?', 'select', profile, undefined), {
     value: 'May 2027',
   });
-  assert.deepEqual(resolveKnownAnswer('Have you been enrolled in WorldQuant University in the past 12 months?', 'radio', profile, undefined), {
-    value: 'No',
-  });
-  assert.deepEqual(resolveKnownAnswer('Have you ever worked for Redwood Materials?', 'radio', profile, undefined), {
-    value: 'No',
-  });
+  assert.ok(
+    resolveKnownAnswer('Have you been enrolled in WorldQuant University in the past 12 months?', 'radio', profile, undefined)
+    && 'skipReason' in resolveKnownAnswer('Have you been enrolled in WorldQuant University in the past 12 months?', 'radio', profile, undefined)!,
+  );
+  assert.ok(
+    resolveKnownAnswer('Have you ever worked for Redwood Materials?', 'radio', profile, undefined)
+    && 'skipReason' in resolveKnownAnswer('Have you ever worked for Redwood Materials?', 'radio', profile, undefined)!,
+  );
   assert.deepEqual(resolveKnownAnswer('Are you available for a 12-week full-time (40 hours per week) internship between September - December 2026?', 'select', profile, undefined), {
     value: 'Yes',
   });
+  assert.ok(
+    resolveKnownAnswer('Are you available for a 12-week full-time (40 hours per week) internship between September - December 2026?', 'select', {
+      ...profile,
+      availability_term: undefined,
+    }, undefined)
+    && 'skipReason' in resolveKnownAnswer('Are you available for a 12-week full-time (40 hours per week) internship between September - December 2026?', 'select', {
+      ...profile,
+      availability_term: undefined,
+    }, undefined)!,
+  );
 });
 
 test('study year stays blank when graduation evidence cannot support it', () => {
