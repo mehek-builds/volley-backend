@@ -15,6 +15,7 @@ import {
   isAutonomousPortalFamily,
   isChoiceQuestion,
   isPaylocityTerminalStep,
+  managedResultFilledFields,
   managedResultHasCoverLetterUpload,
   portalApplicationUrl,
   portalCanAutoSubmit,
@@ -66,6 +67,9 @@ test('a managed discovery run detects custom questions and cover-letter attachme
   const fillSelectors = actions.filter((a) => a.type === 'fill').map((a) => a.selector);
   assert.ok(fillSelectors.some((s) => s?.includes('first_name')));
   assert.equal(actions.some((a) => a.type === 'fillByLabelText' && a.label === 'first_name_label'), true);
+  assert.ok(actions.some((a) => a.type === 'extract' && a.label === 'filled_field:first_name'));
+  assert.ok(actions.some((a) => a.type === 'extract' && a.label === 'filled_field:email'));
+  assert.ok(actions.some((a) => a.type === 'extract' && a.label === 'filled_field:resume'));
 });
 
 test('Databricks wrapper URLs use the Greenhouse managed flow without submitting during discovery', () => {
@@ -94,6 +98,34 @@ test('Databricks wrapper URLs use the Greenhouse managed flow without submitting
   );
   assert.ok(submitting.every((action) => action.type !== 'fill' || (action.timeout ?? Infinity) < 30_000));
   assert.ok(submitting.every((action) => action.type !== 'upload' || (action.timeout ?? Infinity) < 30_000));
+  assert.equal(submitting.some((action) => action.type === 'extract' && action.label?.startsWith('filled_field:')), false);
+});
+
+test('managed Greenhouse extracted field evidence repairs missing filledFields without storing values', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  const selector = (label: string) => actions.find((action) => action.label === label)?.selector;
+
+  assert.deepEqual(
+    managedResultFilledFields({
+      title: 'Apply',
+      url: 'https://example.com',
+      text: 'Apply for this job',
+      filledFields: [],
+      extracted: [
+        { selector: selector('filled_field:first_name')!, value: 'Taylor' },
+        { selector: selector('filled_field:last_name')!, value: 'Example' },
+        { selector: selector('filled_field:email')!, value: 'taylor@example.com' },
+        { selector: selector('filled_field:resume')!, value: 'C:\\fakepath\\resume.pdf' },
+      ],
+    }).sort(),
+    ['email', 'first_name', 'last_name', 'resume'].sort(),
+  );
 });
 
 test('managed cover-letter detection requires an actual file input extraction', () => {
@@ -634,6 +666,10 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
       'upload',
       'fillByLabelText',
       'fillByLabelText',
+      'extract',
+      'extract',
+      'extract',
+      'extract',
     ],
   );
   assert.ok(actions.some((a) => a.type === 'select' && a.label?.startsWith('question_select:')));
