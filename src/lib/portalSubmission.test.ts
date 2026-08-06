@@ -1954,6 +1954,32 @@ test('Greenhouse replays Databricks export-control checkbox answers by exact opt
   assert.ok(checkboxClicks.every((action) => (action.timeout ?? Infinity) < 30_000));
 });
 
+test('Greenhouse clicks reviewed durable checkbox selectors before exact-option fallbacks', () => {
+  const selector = 'input[id="question_35110536002[]_221056618002"]';
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question: 'Please confirm whether any of the below applies to you. Select all that apply. Note: This information will only be used to ensure compliance with U.S. sanctions and export controls.',
+        answer: 'None of the above',
+        portalSelector: selector,
+        portalInputType: 'checkbox',
+      },
+    ],
+  });
+
+  assert.ok(actions.some((action) =>
+    action.type === 'click'
+    && action.selector === selector
+    && action.label?.startsWith('question_choice_selector:')));
+  assert.ok(actions.some((action) =>
+    action.type === 'click'
+    && action.selector === 'input[name="question_35110536002[]"][value="221056618002"]'));
+});
+
 test('Greenhouse school aliases do not strip comma-separated campus names generically', () => {
   const actions = buildManagedPortalActions('greenhouse', {
     fullName: 'Taylor Example',

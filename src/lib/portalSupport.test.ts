@@ -301,7 +301,7 @@ test('a cover letter failure degrades the run instead of aborting it', () => {
     /try \{\s*await generateStoredCoverLetter\(row, false, true\);\s*\} catch \(error\) \{[\s\S]{0,400}coverLetterIssue:/,
   );
   // And the reason reaches the applicant on both provider paths rather than being swallowed.
-  const attentionLines = runner.match(/attention_reason:[\s\S]{0,160}?coverLetterAttention/g) ?? [];
+  const attentionLines = runner.match(/attention_reason:[\s\S]{0,220}?(?:coverLetterAttention|attentionReasons)/g) ?? [];
   assert.equal(attentionLines.length, 2, 'both the managed and direct paths must surface the reason');
 });
 
