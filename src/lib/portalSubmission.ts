@@ -732,6 +732,10 @@ export function isChoiceQuestion(question: string): boolean {
   return CHOICE_QUESTION_RE.test(question);
 }
 
+function shouldSkipReviewedConsentQuestion(questionText: string): boolean {
+  return isLegalConsentQuestion(questionText) && /demographic data survey/i.test(questionText);
+}
+
 // Whether reviewed questions may be sent to a given provider's runner.
 //
 // Both providers now can. This was briefly false for 'managed' as a containment measure: that
@@ -1082,6 +1086,7 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string, c
   const isRobloxContext = /\broblox\b/.test(normalizedQuestion) || /\broblox\b/.test(normalizedContext);
   const isAkunaContext = /\bakuna\b/.test(normalizedQuestion) || /\bakuna\b/.test(normalizedContext);
   const values = selectValuesForAnswer(answer);
+  const isGraduationPartQuestion = /\bgraduat(?:ion|e)\s+(?:month|year)\b|\bwhat\s+is\s+your\s+graduation\s+(?:month|year)\b/.test(normalizedQuestion);
   if (/\bwhat\s+is\s+your\s+gpa\b|\bgpa\b|academic\s+performance|grade\s+average|grade\s+point/.test(normalizedQuestion)) {
     values.unshift(greenhouseGpaBucket(answer) ?? '');
     if (isAkunaContext) values.unshift(greenhouseExactGpaOption(answer) ?? '');
@@ -1089,7 +1094,7 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string, c
   if (/\bclosest\s+date\b|\bgraduate\s+or\s+complete\s+your\s+program\b/.test(normalizedQuestion)) {
     values.unshift(greenhouseClosestGraduationOption(answer) ?? greenhouseGraduationBucket(answer) ?? '');
   }
-  if (/\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window)\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bexpected\s+graduat(?:ion|e)|\bexpect(?:ing)?\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b/.test(normalizedQuestion)) {
+  if (!isGraduationPartQuestion && /\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window|month|year)\b|\bwhat\s+is\s+your\s+graduation\s+(?:date|month|year)\b|\bexpected\s+graduat(?:ion|e)|\bexpect(?:ing)?\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b/.test(normalizedQuestion)) {
     const closestDateQuestion = /\bclosest\s+date\b|\bgraduate\s+or\s+complete\s+your\s+program\b/.test(normalizedQuestion);
     values.unshift(closestDateQuestion
       ? greenhouseClosestGraduationOption(answer) ?? greenhouseGraduationBucket(answer) ?? ''
@@ -1433,6 +1438,7 @@ function pushAshbyQuestionTextFallbackActions(
 function greenhouseKnownQuestionAliases(question: string, answer: string): string[] {
   const normalizedQuestion = question.toLowerCase();
   const normalizedAnswer = answer.trim().toLowerCase();
+  if (/^\s*yes,\s*i\s+consent\s*$/i.test(question)) return ['Yes, I consent'];
   if (!['yes', 'no'].includes(normalizedAnswer)) return [];
   if (
     /\b(?:eligible|authorized|authorised|legally\s+work|work\s+authorization|work\s+authorisation)\b/.test(normalizedQuestion)
@@ -1457,6 +1463,8 @@ function greenhouseKnownQuestionAliases(question: string, answer: string): strin
       'Will you now or in the future require immigration support or sponsorship from Postman?',
       'Will you now or in the future require sponsorship for employment visa status?',
       'Do you now or in the future require visa sponsorship?',
+      'Do you now, or will you in the future, require visa sponsorship to continue working in the United States?',
+      'Do you now, or will you in the future, need sponsorship from an employer in order to obtain, extend or renew your authorization to work in the United States?',
     ];
   }
   if (/\btop\s+preference\b|\banswering\s+[“"]?yes[”"]?\s+below\b/.test(normalizedQuestion)) {
@@ -1578,6 +1586,7 @@ function pushGreenhouseKnownQuestionAliases(
 ) {
   const seen = new Set<string>();
   if (mode === 'akunaRequired' && !packetLooksAkuna(packet)) return;
+  const packetQuestionContext = packet.jdText ?? packet.questions.map((item) => item.question).join('\n');
   for (const item of packet.questions) {
     const akunaAliases = greenhouseAkunaRequiredQuestionAliases(item.question, item.answer);
     const aliases = mode === 'akunaRequired'
@@ -1590,7 +1599,7 @@ function pushGreenhouseKnownQuestionAliases(
       if (seen.has(key)) continue;
       seen.add(key);
       if (mode === 'akunaRequired') {
-        pushGreenhouseQuestionComboboxLabelActions(actions, alias, item.answer, 'greenhouse_known_question');
+        pushGreenhouseQuestionComboboxLabelActions(actions, alias, item.answer, 'greenhouse_known_question', packetQuestionContext);
         continue;
       }
       actions.push({
@@ -1696,6 +1705,7 @@ const GREENHOUSE_LOW_PRIORITY_ACTION_GROUPS = [
   /^preferred_location_combo:[12]:/,
   /^education_graduation_date_combo:/,
   /^(?:graduation_date|graduation_date_label|graduation_date_expected|education_end_month|education_end_year|education_graduation_month|education_expected_graduation_year|education_discipline_label|gpa_question)$/,
+  /^education_discipline_combo:/,
   /^first_name_label$/,
   /^education_degree_combo:2$/,
   /^education_degree_combo:1$/,
@@ -2268,8 +2278,7 @@ export function buildManagedPortalActions(
     if (!item.answer.trim()) continue;
     const questionText = normalizeReviewQuestionLabel(item.question);
     if (!questionText) continue;
-    const greenhouseRoutinePrivacy = portalFamily(portal) === 'greenhouse' && isRoutineCandidatePrivacyAcknowledgement(questionText);
-    if (isLegalConsentQuestion(questionText) && !greenhouseRoutinePrivacy) continue;
+    if (shouldSkipReviewedConsentQuestion(questionText)) continue;
     const rawPortalSelector = reviewQuestionPortalSelector(item);
     const portalInputType = reviewQuestionPortalInputType(item);
     const portalSelector = durablePortalSelector(rawPortalSelector);
@@ -2411,7 +2420,7 @@ function pushPaylocityTraversal(actions: ManagedBrowserAction[], packet: Submiss
       if (!item.answer.trim()) continue;
       const questionText = normalizeReviewQuestionLabel(item.question);
       if (!questionText) continue;
-      if (isLegalConsentQuestion(questionText)) continue;
+      if (shouldSkipReviewedConsentQuestion(questionText)) continue;
       const portalSelector = durablePortalSelector(reviewQuestionPortalSelector(item));
       if (portalSelector) {
         managedFill(actions, portalSelector, item.answer, `question:${questionText.slice(0, 80)}`);
@@ -2788,8 +2797,7 @@ async function fillReviewedQuestions(page: Page, portal: SupportedPortal, packet
     if (!item.answer.trim()) continue;
     const questionText = normalizeReviewQuestionLabel(item.question);
     if (!questionText) continue;
-    const greenhouseRoutinePrivacy = portalFamily(portal) === 'greenhouse' && isRoutineCandidatePrivacyAcknowledgement(questionText);
-    if (isLegalConsentQuestion(questionText) && !greenhouseRoutinePrivacy) continue;
+    if (shouldSkipReviewedConsentQuestion(questionText)) continue;
     const portalSelector = durablePortalSelector(reviewQuestionPortalSelector(item));
     if (/^(?:checkbox|radio)$/i.test(reviewQuestionPortalInputType(item) ?? '')) {
       if (portalFamily(portal) === 'greenhouse') {

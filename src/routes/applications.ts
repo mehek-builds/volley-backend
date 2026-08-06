@@ -324,13 +324,15 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         const educationIssues = packetEducationDrift(row.spec, profileRows[0]?.parsed_json);
         if (educationIssues.length > 0) return { kind: 'education_drift' as const, issues: educationIssues };
         const sensitiveProfile = await loadSensitiveQuestionProfile(userId);
-        const sensitive = sensitiveQuestionFor(current.questions, sensitiveProfile, current.jd_text);
+        const refreshedQuestions = refreshKnownQuestionAnswers(current.questions, sensitiveProfile, current.jd_text);
+        const sensitive = sensitiveQuestionFor(refreshedQuestions, sensitiveProfile, current.jd_text);
         if (sensitive) return { kind: 'sensitive_question' as const, question: sensitive.question };
         if (!withinDailyCap(countRows[0]?.total ?? 0, dailySubmissionCap())) return { kind: 'cap' as const };
         const now = new Date().toISOString();
         const claimId = randomUUID();
         const next = {
           ...current,
+          questions: refreshedQuestions,
           status: 'submitting' as const,
           submission_claimed_at: now,
           submission_claim_id: claimId,

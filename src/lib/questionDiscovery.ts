@@ -104,6 +104,9 @@ function workEligibilityAnswer(
   ap: ApplicationProfileLike,
   jdText: string | undefined,
 ): { value: string } | { skipReason: string } | null {
+  if (WORK_AUTHORIZATION_DETAIL_QUESTION.test(label)) {
+    return { skipReason: workEligibilitySkipReason(label) };
+  }
   const asksAuthorization = WORK_AUTHORIZATION_QUESTION.test(label);
   const asksSponsorship = SPONSORSHIP_QUESTION.test(label);
   if (asksAuthorization && asksSponsorship && SPONSORSHIP_WORK_AUTHORIZATION_SUPPORT_QUESTION.test(label)) {
@@ -132,6 +135,7 @@ function workEligibilityAnswer(
 function routineConsentAnswer(label: string): { value: string } | null {
   if (/^\s*processing\s+of\s+personal\s+data\s*$/i.test(label)) return { value: 'Acknowledge/Confirm' };
   if (/demographic data survey/i.test(label)) return null;
+  if (/^\s*yes,\s*i\s+consent\s*$/i.test(label)) return { value: 'Yes, I consent' };
   if (TOP_ROLE_PREFERENCE_ACKNOWLEDGEMENT.test(label)) return { value: 'Yes' };
   if (RESUME_PDF_ACKNOWLEDGEMENT.test(label)) return { value: 'Yes' };
   if (TRUE_COMPLETE_ACCURATE_CERTIFICATION.test(label)) return null;
@@ -265,6 +269,12 @@ const INTERNSHIP_JOIN_QUESTION =
   /\bwhen\b[^?]{0,120}\b(?:able|available|start|join)\b[^?]{0,120}\bintern\b|\bintern\b[^?]{0,120}\b(?:able|available|start|join)\b/i;
 const SOFTWARE_ENGINEERING_AREA_QUESTION =
   /\b(?:area|track|team)\s+of\s+interest\b[^?]{0,120}\bsoftware\s+engineering\b|\bsoftware\s+engineering\b[^?]{0,120}\b(?:area|track|team)\s+of\s+interest\b/i;
+const HIGH_SCHOOL_DIPLOMA_CONFIRMATION_QUESTION =
+  /\b(?:earned|have|hold|received|obtained)\b[^?]{0,120}\b(?:high\s+school\s+diploma|equivalent\s+degree|ged)\b|\b(?:high\s+school\s+diploma|equivalent\s+degree|ged)\b[^?]{0,120}\b(?:confirm|acknowledge|certify|required|must\s+have)\b/i;
+const OFFER_DEADLINE_QUESTION =
+  /\b(?:offers?|offer\s+deadlines?|outstanding\s+offers?|deadlines?)\b[^?]{0,120}\b(?:aware|currently|have|should\s+we\s+know|tell\s+us|provide|share)\b|\b(?:do\s+you\s+have|currently\s+have)\b[^?]{0,120}\b(?:offers?|deadlines?)\b/i;
+const OPTIONAL_FOLLOWUP_AFTER_NO_QUESTION =
+  /\bif\s+you\s+(?:answered|said|selected)\s+["'“”]?\s*yes\b[^?]{0,180}\b(?:provide|respond|explain|list|tell|details?|additional)\b|\bif\s+applicable\b[^?]{0,120}\b(?:provide|list|explain|details?|extension)\b/i;
 const US_STATE_RESIDENCE_SELECT_QUESTION = /\bstate\s+of\s+residence\b[^?]{0,160}\bnot\s+in\s+the\s+us\b/i;
 const SAN_FRANCISCO_RESIDENCE_QUESTION = /\bcurrently\s+reside\b[^?]{0,80}\bsan\s+francisco\b|\bsan\s+francisco\b[^?]{0,80}\bcurrently\s+reside\b/i;
 const CONFIRMED_PLANS_CITY_RE = /\b(?:currently\s+residing|confirmed\s+plans)\b[^?]{0,80}\b(?:greater\s+)?([a-z][a-z .'-]+?)\s+area\b|\bconfirmed\s+plans\b[^?]{0,80}\bin\s+([a-z][a-z .'-]+)\b/i;
@@ -955,6 +965,22 @@ export function resolveKnownAnswer(
     return { skipReason: `options market making experience question left for you: "${label.slice(0, 60)}"` };
   }
 
+  if (HIGH_SCHOOL_DIPLOMA_CONFIRMATION_QUESTION.test(label)) {
+    return { value: 'Yes' };
+  }
+
+  if (OFFER_DEADLINE_QUESTION.test(label)) {
+    return { value: 'No' };
+  }
+
+  if (WORK_AUTHORIZATION_DETAIL_QUESTION.test(label)) {
+    return { skipReason: workEligibilitySkipReason(label) };
+  }
+
+  if (OPTIONAL_FOLLOWUP_AFTER_NO_QUESTION.test(label)) {
+    return { value: 'N/A' };
+  }
+
   if (PRIOR_EMPLOYER_OR_PROGRAM_QUESTION.test(label)) {
     const priorEmployer = priorEmployerAnswer(label, ap);
     if (priorEmployer) return priorEmployer;
@@ -989,10 +1015,6 @@ export function resolveKnownAnswer(
 
   const routineLocationCommitment = routineLocationCommitmentAnswer(label);
   if (routineLocationCommitment) return routineLocationCommitment;
-
-  if (WORK_AUTHORIZATION_DETAIL_QUESTION.test(label)) {
-    return { skipReason: workEligibilitySkipReason(label) };
-  }
 
   const workEligibility = workEligibilityAnswer(label, ap, jdText);
   if (workEligibility) return workEligibility;

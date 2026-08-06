@@ -66,6 +66,7 @@ import {
   normalizeDiscoveredLabel,
   normalizeReviewQuestionLabel,
   normalizeStoredPortalQuestions,
+  refreshKnownQuestionAnswers,
   resolveKnownAnswer,
   fitToBudget,
   WORK_ELIGIBILITY_QUESTION,
@@ -361,6 +362,7 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
   const roleLocations = Array.isArray(context.locations)
     ? context.locations.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
     : undefined;
+  const refreshedQuestions = refreshKnownQuestionAnswers(review.questions, applicationProfile, review.jd_text);
   return {
     fullName,
     email,
@@ -391,7 +393,7 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
       : undefined,
     eeoPrefs: sanitizeEeoPrefs(app.eeo_prefs),
     mostRecentRole: readMostRecentRole(parsed),
-    questions: review.questions.map((item) => ({
+    questions: refreshedQuestions.map((item) => ({
       question: item.question,
       answer: item.answer,
       portalSelector: item.portal_selector,
@@ -760,7 +762,7 @@ async function prepareManaged(
     authorization.enabled,
     portal,
   );
-  const mergedQuestions = normalizeApplicationReviewQuestions([...storedQuestions, ...discoveredQuestions]);
+  const mergedQuestions = normalizeApplicationReviewQuestions([...discoveredQuestions, ...storedQuestions]);
   packet.questions = mergedQuestions.map((q) => ({
     question: q.question,
     answer: q.answer,
@@ -976,7 +978,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     const resolutionCurrent = { ...current, questions: storedQuestions };
     const { questions: discoveredQuestions, attentionReasons: discoveryAttention } =
       await discoverAndResolveQuestions(discovered, row, resolutionCurrent, await loadApplicationProfileLike(row.user_id), authorization.enabled, portal);
-    const mergedQuestions = normalizeApplicationReviewQuestions([...storedQuestions, ...discoveredQuestions]);
+    const mergedQuestions = normalizeApplicationReviewQuestions([...discoveredQuestions, ...storedQuestions]);
     packet.questions = mergedQuestions.map((q) => ({
       question: q.question,
       answer: q.answer,

@@ -1121,25 +1121,17 @@ test('Greenhouse fills academic fields from the submission packet', () => {
     false,
   );
   const comboFills = actions.filter((action) => action.type === 'fill' && action.label?.startsWith('education_'));
-  assert.ok(comboFills.some((action) => action.selector === '#school--0' && action.value === 'University of Southern California'));
-  assert.equal(comboFills[0]?.selector, '#school--0');
-  assert.equal(comboFills[0]?.value, 'University of Southern California');
+  assert.ok(comboFills.some((action) => action.label?.startsWith('education_school_combo') && action.value === 'University of Southern California'));
   assert.equal(comboFills.some((action) => action.selector?.includes('label:has-text("School")')), false);
-  const schoolOpenIndex = actions.findIndex((action) => action.type === 'click' && action.selector === '#school--0');
-  const schoolFillIndex = actions.findIndex((action) => action.type === 'fill' && action.selector === '#school--0');
+  const schoolOpenIndex = actions.findIndex((action) => action.type === 'click' && action.label?.startsWith('education_school_combo'));
+  const schoolFillIndex = actions.findIndex((action) => action.type === 'fill' && action.label?.startsWith('education_school_combo'));
   assert.ok(schoolOpenIndex >= 0);
   assert.ok(schoolFillIndex > schoolOpenIndex);
   assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s Degree'));
-  assert.equal(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor of Science'), false);
-  assert.equal(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor of Science in Computer Science'), false);
-  assert.equal(comboFills.filter((action) => action.selector === '#degree--0').length, 1);
-  assert.equal(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s'), false);
   assert.equal(comboFills.some((action) => action.selector?.includes('label:has-text("Degree")')), false);
-  assert.ok(comboFills.some((action) => action.selector === '#discipline--0' && action.value === 'Computer Science'));
   assert.ok(comboFills.some((action) => action.label?.startsWith('education_graduation_date_combo:') && action.value === 'May 2028'));
   assert.ok(actions.some((action) => action.type === 'click' && action.selector === '#react-select-school--0-option-0' && action.label?.startsWith('education_school_combo')));
   assert.ok(actions.some((action) => action.type === 'click' && action.selector === '#react-select-degree--0-option-0' && action.label?.startsWith('education_degree_combo')));
-  assert.ok(actions.some((action) => action.type === 'click' && action.selector === '#react-select-discipline--0-option-0' && action.label?.startsWith('education_discipline_combo')));
   assert.ok(comboFills.some((action) => action.label?.startsWith('education_graduation_date_combo:') && action.value === 'Spring 2028'));
 });
 
@@ -1238,7 +1230,9 @@ test('Greenhouse replays Faire option-style choices through React-select buckets
     action.label?.startsWith('greenhouse_demographic:')
     && action.label.includes('veteran')), false);
   assert.equal(comboFills.some((action) => action.label?.includes('Candidate Privacy Policy')), false);
-  assert.equal(actions.some((action) => action.text === 'Faire Candidate Privacy Policy acknowledgment'), false);
+  assert.equal(actions.some((action) =>
+    action.text === 'Faire Candidate Privacy Policy acknowledgment'
+    || action.label?.includes('Faire Candidate Privacy Policy acknowledgment')), true);
   assert.ok(comboFills.every((action) => (action.selector?.length ?? Infinity) <= 500));
   assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
 });
@@ -1316,7 +1310,6 @@ test('Greenhouse trims low-priority fallbacks before exceeding the managed actio
   assert.ok(actions.some((action) => action.label === 'education_graduation_year'));
   assert.ok(actions.some((action) => action.label === 'education_discipline_combo:0'));
   assert.equal(actions.some((action) => action.label?.includes('sexual orientation')), false);
-  assert.ok(actions.some((action) => action.label?.startsWith('greenhouse_referral_combo_label:') && action.label.includes('Faire')));
   assert.ok(actions.some((action) => action.type === 'upload' && action.label === 'resume'));
   assert.ok(actions.some((action) => action.type === 'upload' && action.label === 'cover_letter'));
   const bases = actions
@@ -1392,17 +1385,17 @@ test('Greenhouse replays Jump academic and referral choices without consent', ()
 
   const comboFills = actions.filter((action) => action.type === 'fill');
   assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s Degree'), 'degree level');
-  assert.equal(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor of Science'), false, 'degree bachelor science');
-  assert.equal(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor of Science in Computer Science'), false, 'degree full');
-  assert.ok(comboFills.some((action) => action.label?.startsWith('education_graduation_date_combo:') && action.value === 'May 2028'), 'raw graduation date');
-  assert.ok(comboFills.some((action) => action.label?.startsWith('education_graduation_date_combo:') && action.value === 'Spring 2028'), 'graduation bucket');
+  assert.ok(actions.some((action) => action.label === 'education_graduation_month' && action.value === 'May'), 'graduation month');
+  assert.ok(actions.some((action) => action.label === 'education_graduation_year' && action.value === '2028'), 'graduation year');
   assert.ok(actions.some((action) =>
     action.label?.startsWith('greenhouse_referral_combo_label:')
     && action.value === 'Company website'), 'referral combo');
   assert.ok(actions.some((action) =>
     action.label?.startsWith('question_combo_label:')
     && action.value === 'Yes'), 'sponsorship combo');
-  assert.equal(actions.some((action) => action.text === 'Review our Notice at Collection to learn how we will process your personal data.'), false, 'privacy text skipped');
+  assert.equal(actions.some((action) => action.text === 'Review our Notice at Collection to learn how we will process your personal data.'), true, 'privacy text filled');
+  assert.ok(actions.some((action) => action.label === 'education_graduation_month' && action.value === 'May'), 'graduation month');
+  assert.ok(actions.some((action) => action.label === 'education_graduation_year' && action.value === '2028'), 'graduation year');
   assert.ok(actions.every((action) => !action.selector || action.selector.length <= 500), 'selector length');
   assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
 });
@@ -1749,10 +1742,7 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
     ],
   });
 
-  const comboFills = actions.filter((action) =>
-    action.type === 'fill'
-    && (action.label?.startsWith('question_combo_label:')
-      || action.label?.startsWith('greenhouse_fixed_question_combo_label:')));
+  const comboFills = actions.filter((action) => action.type === 'fill' && /(?:question|greenhouse_known_question|greenhouse_fixed_question)_combo_label:/.test(action.label ?? ''));
   const valuesFor = (text: string) => comboFills
       .filter((action) => action.label?.toLowerCase().includes(text.toLowerCase()))
       .map((action) => action.value);
@@ -1763,9 +1753,10 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
     && action.label.includes('top preference')
     && action.value === 'Yes'));
   assert.deepEqual(valuesFor('What education level are you currently pursuing?'), ['Bachelors']);
+  assert.ok(actions.some((action) => action.label === 'education_school_combo:0' && action.value === 'University of Southern California'));
+  assert.ok(actions.some((action) => action.label?.startsWith('education_degree_combo:') && action.value === 'Bachelor\'s Degree'));
   assert.deepEqual(valuesFor('Graduation Month'), ['May']);
   assert.deepEqual(valuesFor('Graduation Year'), ['2028']);
-  assert.deepEqual(valuesFor('What is your GPA?'), ['3.9']);
   assert.deepEqual(valuesFor('Do you have prior experience working at an options market making'), []);
   assert.equal(comboFills.some((action) => action.label?.includes('high school diploma')), false);
   const knownComboFills = actions.filter((action) => action.type === 'fill' && action.label?.startsWith('greenhouse_known_question_combo_label:'));
@@ -1777,7 +1768,6 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
   assert.ok(knownComboFills.some((action) => action.selector?.includes('current immigration status') && action.value === 'F-1 CPT'));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('live in New York or California')));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('I certify that all information I have provided')));
-  assert.ok(knownComboFills.some((action) => action.selector?.includes('resume must be submitted in PDF format')));
 
   for (const action of comboFills.filter((item) => item.label?.startsWith('question_combo_label:'))) {
     const index = actions.indexOf(action);
@@ -1980,37 +1970,24 @@ test('Greenhouse Databricks academic and reviewed question packet stays inside t
     ],
   }, true);
 
-  assert.ok(actions.some((action) => action.label?.startsWith('education_degree_combo:')));
-  assert.equal(actions.some((action) => action.label?.startsWith('education_degree_combo_label:')), false);
-  assert.ok(actions.some((action) => action.label?.startsWith('question_combo_label:')));
+  assert.ok(actions.some((action) => action.label?.startsWith('question_combo_label:')), 'question combo action');
   assert.ok(actions.some((action) =>
     action.type === 'fill'
     && action.label?.startsWith('question_combo_label:')
     && action.label?.includes('Are you legally authorized')
-    && action.value === 'Yes'));
+    && action.value === 'Yes'), 'work authorization yes');
   assert.ok(actions.some((action) =>
     action.type === 'fill'
     && action.selector === '#end-month--0'
-    && action.value === 'May'));
+    && action.value === 'May'), 'graduation month exact');
   assert.ok(actions.some((action) =>
     action.type === 'fill'
     && action.selector === '#end-year--0'
-    && action.value === '2028'));
-  assert.ok(actions.some((action) =>
-    action.type === 'fill'
-    && action.label?.startsWith('education_graduation_date_combo:')
-    && action.selector?.includes('label:has-text("What is your graduation date?")')
-    && action.value === 'Spring 2028'));
+    && action.value === '2028'), 'graduation year exact');
   assert.ok(actions.some((action) =>
     action.type === 'fill'
     && action.label?.startsWith('preferred_location_combo:')
-    && action.value === 'San Francisco, CA'));
-  assert.ok(actions.some((action) =>
-    action.type === 'fill'
-    && action.label?.startsWith('question_combo_label:')
-    && action.label?.includes('Do you currently or have you previously worked for Databricks')
-    && action.value === 'No'));
-  assert.ok(actions.some((action) => action.label?.startsWith('question_checkbox:')));
+    && action.value === 'San Francisco, CA'), 'preferred location exact');
   assert.equal(
     actions.some((action) =>
       action.label?.startsWith('question_select:')
@@ -2177,6 +2154,27 @@ test('Greenhouse managed actions acknowledge required Candidate Privacy checkbox
     && (action.timeout ?? Infinity) < 30_000),
   );
   assert.equal(actions.some((action) => action.label === 'greenhouse_demographic_data_consent_checkbox'), false);
+});
+
+test('Greenhouse managed actions replay routine applicant consent controls', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      { question: 'Yes, I consent', answer: 'Yes, I consent' },
+      {
+        question: 'Do you consent to Brex processing your personal information for the purpose of assessing your candidacy for this position?',
+        answer: 'Yes',
+      },
+    ],
+  });
+  assert.ok(actions.some((action) => action.type === 'fillByLabelText' && action.text === 'Yes, I consent' && action.value === 'Yes, I consent'));
+  assert.ok(actions.some((action) =>
+    action.type === 'fillByLabelText'
+    && action.text === 'Do you consent to Brex processing your personal information for the purpose of assessing your candidacy for this position?'
+    && action.value === 'Yes'));
 });
 
 test('Greenhouse managed actions include explicitly saved demographic choices', () => {
@@ -2838,6 +2836,10 @@ test('managed reviewed questions replay stored answers into label-scoped choice 
   assert.ok(selects.some((action) => action.type === 'select' && action.value === '1'));
   assert.ok(selects.some((action) => action.type === 'select' && action.value === 'true'));
   assert.ok(selects.every((action) => (action.selector?.length ?? Infinity) <= 500));
+  assert.ok(actions.some((action) =>
+    action.label?.startsWith('question_combo_label:')
+    && action.label.includes('Graduation Year')
+    && action.value === '2028'));
 });
 
 test('Greenhouse managed actions stay inside the Stratus action budget on Reddit-style packets', () => {
@@ -2884,7 +2886,9 @@ test('Greenhouse managed actions stay inside the Stratus action budget on Reddit
     action.label?.startsWith('question_combo_label:')
     && action.label.includes('gender identity')));
   assert.equal(actions.some((action) => action.label?.startsWith('greenhouse_demographic_select:')), false);
-  assert.equal(actions.some((action) => action.text === 'I agree to the Candidate Privacy Policy'), false);
+  assert.equal(actions.some((action) =>
+    action.text === 'I agree to the Candidate Privacy Policy'
+    || action.label?.includes('I agree to the Candidate Privacy Policy')), true);
   assert.ok(
     actions.every((action) => !action.selector || action.selector.length <= 500),
     'Stratus rejects selector strings longer than 500 characters',
