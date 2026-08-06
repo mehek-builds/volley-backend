@@ -1423,6 +1423,56 @@ test('Greenhouse replays Cloudflare graduation and degree choice buckets', () =>
   );
 });
 
+test('Greenhouse replays Roblox required select buckets with exact live options', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekman@usc.edu',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    degree: 'Bachelor of Science in Computer Science',
+    jdText: 'Roblox is hiring a software engineering intern.',
+    questions: [
+      { question: 'degree* degree--0', answer: 'Bachelor\'s Degree' },
+      {
+        question: 'If you were to join us for a technical interview, what is your preferred coding language when answering general coding questions? You may interview in any coding language of your preference.',
+        answer: 'Python is my strongest language.',
+      },
+      { question: 'How did you first hear about this role?', answer: 'Company website' },
+      { question: 'Please review and acknowledge Roblox\'s Job Applicant Privacy Notice', answer: 'Yes' },
+      { question: 'How would you describe your gender identity?', answer: 'Female' },
+    ],
+  });
+
+  const comboLabels = actions
+    .filter((action) => action.type === 'fill' && action.label?.startsWith('question_combo_label:'))
+    .map((action) => `${action.label}:${action.value}`);
+  assert.ok(actions.some((action) => action.type === 'fill' && action.label === 'education_degree_combo:0' && action.value === 'Bachelor\'s Degree'));
+  assert.ok(comboLabels.some((label) => label.toLowerCase().includes('preferred coding') && label.endsWith('Python 3')));
+  assert.ok(comboLabels.some((label) => label.toLowerCase().includes('first hear about this role') && label.endsWith('Roblox Careers Site')));
+  assert.ok(comboLabels.some((label) => label.toLowerCase().includes('job applicant privacy notice') && label.endsWith('I acknowledge that I have read and understood Roblox\'s Job Applicant Privacy Notice.')));
+  assert.ok(comboLabels.some((label) => label.toLowerCase().includes('gender identity') && label.endsWith('Woman')));
+});
+
+test('Greenhouse Roblox-specific select labels stay scoped to Roblox context', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekman@usc.edu',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      { question: 'How did you first hear about this role?', answer: 'Company website' },
+      { question: 'Please review and acknowledge Acme\'s Job Applicant Privacy Notice', answer: 'Yes' },
+    ],
+  });
+
+  const comboLabels = actions
+    .filter((action) => action.type === 'fill' && action.label?.startsWith('question_combo_label:'))
+    .map((action) => `${action.label}:${action.value}`);
+  assert.equal(comboLabels.some((label) => label.endsWith('Roblox Careers Site')), false);
+  assert.equal(comboLabels.some((label) => label.endsWith('I acknowledge that I have read and understood Roblox\'s Job Applicant Privacy Notice.')), false);
+  assert.ok(comboLabels.some((label) => label.toLowerCase().includes('first hear about this role') && label.endsWith('Company website')));
+});
+
 test('Greenhouse replays Databricks choice questions through React-select buckets', () => {
   const actions = buildManagedPortalActions('greenhouse', {
     fullName: 'Mehek Mandal',

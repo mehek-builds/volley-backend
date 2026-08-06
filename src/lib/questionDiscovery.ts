@@ -77,6 +77,8 @@ const ROUTINE_APPLICANT_CONSENT_QUESTION =
 
 export const EEO_QUESTION =
   /transgender|\bgender\b|what is your sex\b|race|racial|ethnicit|ethnic\b|hispanic|latino|veteran|military|disab|sexual orientation|lgbtq|lgbtqia|communities|which categories describe you|identify with|current age|what is your age|age range|how old are you|\bage group\b/i;
+const AGE_ATTESTATION_QUESTION =
+  /(?:\b18\+\s*(?:years?)?|\beighteen\b|\bat\s+least\s+18\b|\b18\s+years?\s+of\s+age\b|\bage\s+of\s+18\b)/i;
 const LEGAL_CONSENT_QUESTION =
   /candidate privacy policy|candidate-privacy-notice|privacy notice|notice at collection|review and acknowledge|information (?:i|you) have provided.*process|by selecting ["']?i agree|demographic data survey|collecting,\s*storing,\s*and processing/i;
 
@@ -142,7 +144,7 @@ function routineLocationCommitmentAnswer(label: string): { value: string } | nul
 
 export function isRefusedQuestion(label: string): boolean {
   const l = label ?? '';
-  return NEVER_FILL_PATTERNS.some((re) => re.test(l)) || WORK_ELIGIBILITY_QUESTION.test(l) || EEO_QUESTION.test(l);
+  return NEVER_FILL_PATTERNS.some((re) => re.test(l)) || AGE_ATTESTATION_QUESTION.test(l) || WORK_ELIGIBILITY_QUESTION.test(l) || EEO_QUESTION.test(l);
 }
 
 function comparableAnswer(value: string): string {
@@ -841,6 +843,8 @@ export function resolveKnownAnswer(
 
   const workEligibility = workEligibilityAnswer(label, ap, jdText);
   if (workEligibility) return workEligibility;
+
+  if (AGE_ATTESTATION_QUESTION.test(label)) return null;
 
   if (EEO_QUESTION.test(label)) {
     return { value: eeoAnswer(eeoPreferenceForLabel(label, ap.eeo_prefs)) };
