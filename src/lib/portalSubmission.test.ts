@@ -25,6 +25,12 @@ import {
 } from './portalSubmission';
 import { POLLABLE_JOB_BOARDS } from './jobMonitor';
 
+function isGreenhousePreflightClick(action: { type: string; label?: string }) {
+  return action.type === 'click'
+    && (action.label?.startsWith('greenhouse_cookie_preflight:') === true
+      || action.label === 'greenhouse_open_application_form');
+}
+
 test('detects the four supported applicant portal families', () => {
   assert.equal(detectPortal('https://boards.greenhouse.io/acme/jobs/123'), 'greenhouse');
   assert.equal(detectPortal('https://databricks.com/company/careers/open-positions/job?gh_jid=6883068002'), 'greenhouse');
@@ -56,7 +62,7 @@ test('a managed discovery run detects custom questions and cover-letter attachme
     timeout: 10_000,
   });
   assert.equal(actions.some((a) => a.type === 'fillByLabelText' && a.label?.startsWith('question:')), false);
-  assert.equal(actions.some((a) => a.type === 'click'), false);
+  assert.equal(actions.some((a) => a.type === 'click' && !isGreenhousePreflightClick(a)), false);
   const fillSelectors = actions.filter((a) => a.type === 'fill').map((a) => a.selector);
   assert.ok(fillSelectors.some((s) => s?.includes('first_name')));
   assert.equal(actions.some((a) => a.type === 'fillByLabelText' && a.label === 'first_name_label'), true);
@@ -244,8 +250,21 @@ test('managed controlled-portal actions include reviewed fields, resume upload, 
     questions: [{ question: 'Why this role?', answer: 'I enjoy systems work.' }],
   }, true);
   assert.deepEqual(
-    actions.filter((action) => action.type !== 'select').map((action) => action.type),
-    ['fill', 'fillByLabelText', 'fill', 'fill', 'upload', 'fillByLabelText', 'click'],
+    actions
+      .filter((action) => action.type !== 'select' && !isGreenhousePreflightClick(action))
+      .map((action) => action.type),
+    [
+      'waitForSelector',
+      'fill',
+      'fillByLabelText',
+      'fill',
+      'fillByLabelText',
+      'fill',
+      'fillByLabelText',
+      'upload',
+      'fillByLabelText',
+      'click',
+    ],
   );
   assert.ok(actions.some((action) => action.type === 'select' && action.label?.startsWith('question_select:')));
   assert.equal(actions.find((action) => action.type === 'upload')?.file?.base64, 'cGRm');
@@ -601,12 +620,17 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
   // first_name, last_name, email (phone and location are omitted from this fixture), resume, then
   // the two optional reviewed questions.
   assert.deepEqual(
-    actions.filter((a) => a.type !== 'select').map((a) => a.type),
+    actions
+      .filter((a) => a.type !== 'select' && !isGreenhousePreflightClick(a))
+      .map((a) => a.type),
     [
+      'waitForSelector',
       'fill',
       'fillByLabelText',
       'fill',
+      'fillByLabelText',
       'fill',
+      'fillByLabelText',
       'upload',
       'fillByLabelText',
       'fillByLabelText',
@@ -934,7 +958,9 @@ test('Greenhouse fills academic fields from the submission packet', () => {
   const byLabel = actions.filter(
     (action) =>
       action.type === 'fillByLabelText'
-      && !action.label?.startsWith('first_name'),
+      && action.label?.startsWith('first_name') !== true
+      && action.label?.startsWith('last_name') !== true
+      && action.label?.startsWith('email') !== true,
   );
   assert.deepEqual(
     byLabel.map((action) => [action.text, action.value, action.label]),
@@ -1494,7 +1520,7 @@ test('choice controls are not auto-clicked by matching answer text', () => {
     resumeName: 'resume.pdf',
     questions: [{ question: 'Do you consent to the terms?', answer: 'Yes' }],
   });
-  const clicks = actions.filter((action) => action.type === 'click');
+  const clicks = actions.filter((action) => action.type === 'click' && !isGreenhousePreflightClick(action));
   assert.equal(clicks.length, 0, 'no click action may be synthesized from an answer string');
 });
 
@@ -2044,6 +2070,80 @@ test('Greenhouse fixed actions include semantic and label fallbacks for first na
   );
 });
 
+test('Greenhouse managed actions open branded job pages and clear cookie overlays before filling', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  const openFormIndex = actions.findIndex((action) => action.label === 'greenhouse_open_application_form');
+  const firstNameIndex = actions.findIndex((action) => action.label === 'first_name');
+  assert.ok(openFormIndex >= 0, 'Greenhouse managed run must click the branded apply button when present');
+  assert.ok(firstNameIndex > openFormIndex, 'Greenhouse form entry must happen before fixed-field filling');
+  assert.ok(actions.some((action) => action.selector === '#onetrust-accept-btn-handler'));
+  assert.ok(actions.some((action) => action.selector?.includes('Allow All')));
+  assert.ok(actions.some((action) => action.label === 'greenhouse_application_form_ready'));
+});
+
+test('Greenhouse fixed actions include semantic and label fallbacks for last name and email', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  const lastNameFill = actions.find((action) => action.label === 'last_name');
+  assert.equal(lastNameFill?.type, 'fill');
+  assert.match(lastNameFill?.selector ?? '', /autocomplete="family-name"/);
+  assert.match(lastNameFill?.selector ?? '', /aria-label="Last Name"/);
+
+  const lastNameByLabel = actions.find((action) => action.label === 'last_name_label');
+  assert.deepEqual(
+    {
+      type: lastNameByLabel?.type,
+      text: lastNameByLabel?.text,
+      value: lastNameByLabel?.value,
+      optional: lastNameByLabel?.optional,
+    },
+    { type: 'fillByLabelText', text: 'Last Name', value: 'Example', optional: true },
+  );
+
+  const emailFill = actions.find((action) => action.label === 'email');
+  assert.equal(emailFill?.type, 'fill');
+  assert.match(emailFill?.selector ?? '', /type="email"/);
+  assert.match(emailFill?.selector ?? '', /autocomplete="email"/);
+
+  const emailByLabel = actions.find((action) => action.label === 'email_label');
+  assert.deepEqual(
+    {
+      type: emailByLabel?.type,
+      text: emailByLabel?.text,
+      value: emailByLabel?.value,
+      optional: emailByLabel?.optional,
+    },
+    { type: 'fillByLabelText', text: 'Email', value: 'taylor@example.com', optional: true },
+  );
+});
+
+test('Greenhouse resume upload includes modern semantic file-input fallbacks', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  const upload = actions.find((action) => action.label === 'resume');
+  assert.equal(upload?.type, 'upload');
+  assert.match(upload?.selector ?? '', /id\*="resume"/);
+  assert.match(upload?.selector ?? '', /name\*="resume"/);
+  assert.match(upload?.selector ?? '', /aria-label\*="resume"/);
+  assert.doesNotMatch(upload?.selector ?? '', /cover_letter/);
+});
+
 test('Greenhouse managed actions retry known yes-no work and onsite choices by exact portal labels', () => {
   const actions = buildManagedPortalActions('greenhouse', {
     fullName: 'Taylor Example',
@@ -2080,6 +2180,7 @@ test('Greenhouse managed actions retry known yes-no work and onsite choices by e
   assert.equal(
     actions.filter((action) =>
       action.type === 'click'
+      && !isGreenhousePreflightClick(action)
       && !action.label?.startsWith('education_school_combo_label')
       && !action.label?.startsWith('question_combo_label:')).length,
     0,
