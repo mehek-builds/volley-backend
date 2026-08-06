@@ -219,9 +219,13 @@ test('dashboard resume edits prune generated off-list skills before validation',
 test('portal support is written at packet creation and unsupported portals use email fallback', () => {
   const resumeRoute = routeSource('resume.ts');
   assert.match(resumeRoute, /import \{[^}]*isPortalSupported[^}]*\} from '\.\.\/lib\/portalSubmission'/);
-  // Set on the review at creation, from the URL the caller just handed us.
   assert.match(resumeRoute, /import \{ repairReviewPortalFromMonitoredJob \} from '\.\.\/lib\/applicationPortalRepair'/);
-  assert.match(resumeRoute, /const canonicalApplicationPortalUrl = body\.application[\s\S]{0,250}canonicalSupportedPortalUrl\(body\.application\.portal_url, body\.application\.ats_name\)/);
+  // Set on the review at creation, from the URL the caller just handed us.
+  assert.match(resumeRoute, /async function monitoredApplicationUrlForGenerate\(body: ResumeGenerateBody\)/);
+  assert.match(resumeRoute, /canonicalMonitoredPortalUrl\(job\.apply_url, job\.ats_name, job\.board_token\)/);
+  assert.match(resumeRoute, /const monitoredApplicationUrl = await monitoredApplicationUrlForGenerate\(body\)/);
+  assert.match(resumeRoute, /const canonicalApplicationPortalUrl = body\.application[\s\S]{0,300}monitoredApplicationUrl \?\? canonicalSupportedPortalUrl\(body\.application\.portal_url, body\.application\.ats_name\)/);
+  assert.match(resumeRoute, /inArray\(career_page_sources\.ats_name,[\s\S]{0,80}AUTONOMOUS_PORTAL_FAMILIES/);
   assert.match(resumeRoute, /portal_url: canonicalApplicationPortalUrl/);
   assert.match(resumeRoute, /applicationReview = await repairReviewPortalFromMonitoredJob\(/);
   assert.match(resumeRoute, /const canonicalApplicationPortalSupported = isPortalSupported\(canonicalApplicationPortalUrl\)/);
@@ -234,8 +238,6 @@ test('portal support is written at packet creation and unsupported portals use e
   assert.match(resumeRoute, /canonicalMonitoredPortalUrl\(job\.apply_url, job\.ats_name, job\.board_token\)/);
   assert.match(resumeRoute, /monitoredDescriptionHash\(job\.description\)/);
   assert.match(resumeRoute, /spec: repairedHistorySpec\(row, monitoredJobs\)/);
-  assert.doesNotMatch(resumeRoute, /inArray\(career_page_sources\.ats_name,[\s\S]{0,80}AUTONOMOUS_PORTAL_FAMILIES/);
-
   const applicationsRoute = routeSource('applications.ts');
   const repairSource = libSource('applicationPortalRepair.ts');
   // Packets created from monitored jobs can outlive a bad or stale review URL. Before declaring the
