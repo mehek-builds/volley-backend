@@ -263,6 +263,22 @@ export function sanitizeEeoPrefs(value: unknown): Record<string, string> | null 
   return Object.keys(cleaned).length > 0 ? cleaned : null;
 }
 
+function majorFromAcademicProfile(major: string | undefined, degree: string | undefined): string | undefined {
+  if (major?.trim()) return major.trim();
+  const trimmed = degree?.trim();
+  if (!trimmed) return undefined;
+  const cleaned = trimmed
+    .replace(/\b(?:b\.?s\.?|b\.?a\.?|m\.?s\.?|m\.?a\.?|m\.?b\.?a\.?)\b/gi, ' ')
+    .replace(/\b(?:bachelor|bachelor's|bachelors|master|master's|masters|doctor|doctorate|ph\.?d)\s+(?:of\s+)?(?:science|arts|business\s+administration)?\s+(?:degree\s+)?(?:in\s+)?/gi, ' ')
+    .replace(/\b(?:degree\s+in|with\s+a\s+degree\s+in|in)\b/gi, ' ')
+    .replace(/(?:,\s*)?[^,;&()]{0,40}\b(?:emphasis|concentration|minor)\b.*$/i, '')
+    .replace(/[(),]/g, ' ')
+    .replace(/\s*&\s*/g, ' and ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned || trimmed;
+}
+
 export async function buildPacket(row: ResumeRow, controlledTest = false): Promise<SubmissionPacket> {
   const stored = row.spec as StoredSpec;
   const contact = (stored._contact ?? {}) as Record<string, unknown>;
@@ -316,6 +332,10 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
   const graduationDate = academicStr('grad_date');
   const graduationYear = academicNum('grad_year');
   const graduationParts = submissionGraduationDateParts(graduationDate, graduationYear);
+  const degree = academicStr('degree');
+  const appStr = (key: string): string | undefined => (typeof app[key] === 'string' && (app[key] as string).trim()
+    ? (app[key] as string).trim()
+    : undefined);
   return {
     fullName,
     email,
@@ -326,12 +346,12 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     githubUrl: typeof app.github_url === 'string' ? app.github_url : undefined,
     portfolioUrl: typeof app.portfolio_url === 'string' ? app.portfolio_url : undefined,
     school: academicStr('school'),
-    degree: academicStr('degree'),
+    degree,
     graduationDate,
     graduationMonth: graduationParts.month,
     graduationYear: graduationParts.year,
-    gpa: typeof app.gpa === 'string' ? app.gpa : undefined,
-    major: typeof app.major === 'string' ? app.major : undefined,
+    gpa: appStr('gpa') ?? academicStr('gpa'),
+    major: appStr('major') ?? majorFromAcademicProfile(academicStr('major'), degree),
     referralSourceDefault: typeof app.referral_source_default === 'string' ? app.referral_source_default : undefined,
     resume,
     resumeName: resumeFileNameForRole(fullName, roleTitle),
@@ -679,9 +699,9 @@ async function loadApplicationProfileLike(userId: string): Promise<ApplicationPr
     currently_enrolled: academicBoolean('currently_enrolled'),
     desired_salary: str('desired_salary'),
     desired_salary_currency: str('desired_salary_currency'),
-    gpa: str('gpa'),
-    gpa_scale: str('gpa_scale'),
-    major: str('major'),
+    gpa: str('gpa') ?? academicStr('gpa'),
+    gpa_scale: str('gpa_scale') ?? academicStr('gpa_scale'),
+    major: str('major') ?? majorFromAcademicProfile(academicStr('major'), academicStr('degree')),
     languages: Array.isArray(app.languages)
       ? app.languages.filter((language): language is string => typeof language === 'string' && language.trim().length > 0)
       : undefined,
