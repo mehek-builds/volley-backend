@@ -114,7 +114,7 @@ describe('rankByFit', () => {
     assert.deepStrictEqual(rankByFit([], RESUME), []);
   });
 
-  test('account role preferences outrank resume similarity', () => {
+  test('resume similarity outranks account role preferences when a match score exists', () => {
     const ranked = rankByFit(
       [
         job({ title: 'Frontend Engineer', scored_description: FRONTEND }),
@@ -123,7 +123,34 @@ describe('rankByFit', () => {
       RESUME,
       normalizeTargeting({ categories: ['product'], titles: ['Product Manager'], role_types: ['full-time'] }),
     );
+    assert.strictEqual(ranked[0]!.row.title, 'Frontend Engineer');
+    assert.ok(ranked[0]!.score! > ranked[1]!.score!);
+  });
+
+  test('account role preferences break ties between equal resume scores', () => {
+    const ranked = rankByFit(
+      [
+        job({ title: 'Frontend Engineer', scored_description: FRONTEND }),
+        job({ title: 'Product Manager', scored_description: FRONTEND }),
+      ],
+      RESUME,
+      normalizeTargeting({ categories: ['product'], titles: ['Product Manager'], role_types: ['full-time'] }),
+    );
+    assert.strictEqual(ranked[0]!.score, ranked[1]!.score);
     assert.strictEqual(ranked[0]!.row.title, 'Product Manager');
+  });
+
+  test('account role preferences still order rows when there is no resume score', () => {
+    const ranked = rankByFit(
+      [
+        job({ title: 'Frontend Engineer', scored_description: FRONTEND }),
+        job({ title: 'Product Manager', scored_description: INFRA }),
+      ],
+      '',
+      normalizeTargeting({ categories: ['product'], titles: ['Product Manager'], role_types: ['full-time'] }),
+    );
+    assert.strictEqual(ranked[0]!.row.title, 'Product Manager');
+    assert.strictEqual(ranked[0]!.score, null);
   });
 });
 
