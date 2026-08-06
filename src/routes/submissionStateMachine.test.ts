@@ -123,6 +123,17 @@ test('submission packet attaches the role-specific resume filename', async () =>
   assert.doesNotMatch(runner, /resumeName:\s*`litos-\$\{row\.id\}\.pdf`/);
 });
 
+test('submission packet uses the Litos application email alias before the account email', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  assert.match(runner, /import \{ ensureApplicationEmailAlias \} from '\.\.\/lib\/applicationEmail'/);
+  const buildPacketIndex = runner.indexOf('export async function buildPacket');
+  const aliasIndex = runner.indexOf('const applicationEmail = await ensureApplicationEmailAlias', buildPacketIndex);
+  const emailIndex = runner.indexOf('const email = String(applicationEmail ?? contact.email ?? accountEmail)', buildPacketIndex);
+  assert.ok(aliasIndex > buildPacketIndex, 'buildPacket must mint or read a Litos application alias');
+  assert.ok(emailIndex > aliasIndex, 'the applicant email must prefer the Litos alias before personal email fallbacks');
+  assert.match(runner.slice(aliasIndex, emailIndex), /\.catch\(\(\) => undefined\)/, 'alias creation failure must not block fallback email submission');
+});
+
 test('submission packet ignores stored cover-letter artifact names for outbound uploads', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
   assert.match(runner, /coverLetterName:\s*coverLetter\s*\?\s*coverLetterFileNameForRole\(fullName,\s*roleTitle\)/);

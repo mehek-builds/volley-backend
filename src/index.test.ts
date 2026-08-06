@@ -199,6 +199,50 @@ test('/health reports ATS API submission capability without exposing secrets', a
   }
 });
 
+test('/health reports application email routing capability without exposing secrets', async () => {
+  const saved = {
+    domain: process.env.LITOS_APPLICATION_EMAIL_DOMAIN,
+    aliasSecret: process.env.LITOS_APPLICATION_EMAIL_SECRET,
+    inboundSecret: process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET,
+    resendKey: process.env.RESEND_API_KEY,
+    resendFrom: process.env.RESEND_FROM,
+  };
+  try {
+    process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'apply.trylitos.com';
+    process.env.LITOS_APPLICATION_EMAIL_SECRET = 'secret-alias-key';
+    process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET = 'secret-webhook-key';
+    process.env.RESEND_API_KEY = 'secret-resend-key';
+    process.env.RESEND_FROM = 'ops@trylitos.com';
+
+    const { buildApp } = await import('./index');
+    const app = await buildApp();
+    const res = await app.inject({ method: 'GET', url: '/health' });
+    const body = res.json();
+
+    assert.deepEqual(body.application_email, {
+      domain_configured: true,
+      inbound_webhook_configured: true,
+      forwarding_configured: true,
+      enabled_aliases: body.database === 'ok' ? body.application_email.enabled_aliases : null,
+    });
+    assert.ok(!res.body.includes('secret-alias-key'));
+    assert.ok(!res.body.includes('secret-webhook-key'));
+    assert.ok(!res.body.includes('secret-resend-key'));
+    await app.close();
+  } finally {
+    if (saved.domain === undefined) delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+    else process.env.LITOS_APPLICATION_EMAIL_DOMAIN = saved.domain;
+    if (saved.aliasSecret === undefined) delete process.env.LITOS_APPLICATION_EMAIL_SECRET;
+    else process.env.LITOS_APPLICATION_EMAIL_SECRET = saved.aliasSecret;
+    if (saved.inboundSecret === undefined) delete process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET;
+    else process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET = saved.inboundSecret;
+    if (saved.resendKey === undefined) delete process.env.RESEND_API_KEY;
+    else process.env.RESEND_API_KEY = saved.resendKey;
+    if (saved.resendFrom === undefined) delete process.env.RESEND_FROM;
+    else process.env.RESEND_FROM = saved.resendFrom;
+  }
+});
+
 test('/health identifies the build even when no git SHA is exposed', async () => {
   // The exact production shape this exists for: a bare `vercel --prod` sets VERCEL_DEPLOYMENT_ID
   // but not VERCEL_GIT_COMMIT_SHA, and on 2026-08-04 that made /health report `revision: null` for

@@ -574,6 +574,54 @@ export const generated_resumes = pgTable('generated_resumes', {
   userCreatedIdx: index('generated_resumes_user_created_idx').on(t.user_id, t.created_at),
 }));
 
+// ---- application_email_aliases ----
+// Employer-facing application addresses owned by Litos. The account email remains the login and
+// forwarding destination; this address is what application packets type into ATS forms so receipts,
+// OTP emails, and recruiter replies can be routed and audited per saved application.
+export const application_email_aliases = pgTable('application_email_aliases', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  generated_resume_id: uuid('generated_resume_id').references(() => generated_resumes.id, { onDelete: 'cascade' }).notNull(),
+  local_part: text('local_part').unique().notNull(),
+  email: text('email').unique().notNull(),
+  forwarding_email: text('forwarding_email').notNull(),
+  enabled: boolean('enabled').default(true).notNull(),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  userIdx: index('application_email_aliases_user_idx').on(t.user_id),
+  resumeUnique: uniqueIndex('application_email_aliases_resume_unique').on(t.generated_resume_id),
+}));
+
+// ---- application_email_messages ----
+// Inbound mail sent to a Litos application alias. Full headers are deliberately not stored as a
+// top-level column; provider payloads can carry opaque routing internals, so raw shape stays in
+// raw_json and the searchable fields are explicit.
+export const application_email_messages = pgTable('application_email_messages', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  alias_id: uuid('alias_id').references(() => application_email_aliases.id, { onDelete: 'cascade' }).notNull(),
+  user_id: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  generated_resume_id: uuid('generated_resume_id').references(() => generated_resumes.id, { onDelete: 'cascade' }),
+  provider_message_id: text('provider_message_id'),
+  from_email: text('from_email'),
+  from_name: text('from_name'),
+  to_email: text('to_email').notNull(),
+  subject: text('subject').notNull(),
+  text_body: text('text_body'),
+  html_body: text('html_body'),
+  dedupe_key: text('dedupe_key').unique().notNull(),
+  raw_json: jsonb('raw_json'),
+  forwarded_message_id: text('forwarded_message_id'),
+  forwarding_claimed_at: timestamp('forwarding_claimed_at', { withTimezone: true }),
+  forwarded_at: timestamp('forwarded_at', { withTimezone: true }),
+  forward_error: text('forward_error'),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  aliasCreatedIdx: index('application_email_messages_alias_created_idx').on(t.alias_id, t.created_at),
+  userCreatedIdx: index('application_email_messages_user_created_idx').on(t.user_id, t.created_at),
+  providerMessageIdx: index('application_email_messages_provider_message_idx').on(t.provider_message_id),
+}));
+
 // ---- career_page_sources ----
 // Operator-managed company career boards. The polling worker reads the public ATS APIs rather
 // than scraping job aggregators, so Litos can show first-party postings with a stable apply URL.
@@ -831,6 +879,10 @@ export type NewApplicationProfile = typeof application_profile.$inferInsert;
 export type ResumeTemplate = typeof resume_templates.$inferSelect;
 export type GeneratedResume = typeof generated_resumes.$inferSelect;
 export type NewGeneratedResume = typeof generated_resumes.$inferInsert;
+export type ApplicationEmailAlias = typeof application_email_aliases.$inferSelect;
+export type NewApplicationEmailAlias = typeof application_email_aliases.$inferInsert;
+export type ApplicationEmailMessage = typeof application_email_messages.$inferSelect;
+export type NewApplicationEmailMessage = typeof application_email_messages.$inferInsert;
 export type CareerPageSource = typeof career_page_sources.$inferSelect;
 export type NewCareerPageSource = typeof career_page_sources.$inferInsert;
 export type MonitoredJob = typeof monitored_jobs.$inferSelect;

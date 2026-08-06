@@ -36,12 +36,14 @@ import { jobExtractRoutes } from './routes/jobExtract';
 import { jobMonitorRoutes } from './routes/jobMonitor';
 import { coverLetterRoutes } from './routes/coverLetter';
 import { emailConnectionRoutes } from './routes/emailConnections';
+import { applicationEmailRoutes } from './routes/applicationEmail';
 import { API_VERSION, PRODUCT_NAME, PRODUCT_LINKS } from './lib/product';
 import { createRateLimitHook, defaultRateLimitConfig, type RateLimitConfig } from './middleware/rateLimit';
 import { sharedRankingConfigured } from './lib/rankingCache';
 import { resolveBuild, resolveRevision } from './lib/buildInfo';
 import { dashboardBootstrapRoutes } from './routes/dashboardBootstrap';
 import { configuredAtsSubmissionChannels } from './lib/atsSubmissionChannels';
+import { applicationEmailHealth } from './lib/applicationEmail';
 
 export interface BuildAppOptions {
   rateLimit?: RateLimitConfig;
@@ -184,6 +186,23 @@ export async function buildApp(options: BuildAppOptions = {}) {
       request.log.error({ reason: database.reason, ms: database.ms }, 'health: database unreachable');
     }
 
+    const applicationEmail = database.status === 'ok'
+      ? await applicationEmailHealth().catch((error) => {
+        request.log.error({ err: error }, 'health: application email status unavailable');
+        return {
+          domain_configured: Boolean(process.env.LITOS_APPLICATION_EMAIL_DOMAIN?.trim()),
+          inbound_webhook_configured: Boolean(process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET?.trim()),
+          forwarding_configured: Boolean(process.env.RESEND_API_KEY?.trim() && process.env.RESEND_FROM?.trim()),
+          enabled_aliases: null,
+        };
+      })
+      : {
+        domain_configured: Boolean(process.env.LITOS_APPLICATION_EMAIL_DOMAIN?.trim()),
+        inbound_webhook_configured: Boolean(process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET?.trim()),
+        forwarding_configured: Boolean(process.env.RESEND_API_KEY?.trim() && process.env.RESEND_FROM?.trim()),
+        enabled_aliases: null,
+      };
+
     return reply.status(healthStatusCode(database)).send({
       /* 'degraded', not 'error': the service is up and answering, and is correctly reporting that a
          dependency it cannot work without is unavailable. Every identity field below is still
@@ -242,6 +261,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
         channel_config_present: Boolean(process.env.LITOS_EMPLOYER_API_SUBMISSION_CHANNELS_JSON?.trim()),
         configured_channels: configuredAtsSubmissionChannels().length,
       },
+      application_email: applicationEmail,
       ts: new Date().toISOString(),
     });
   });
@@ -277,6 +297,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await fastify.register(jobMonitorRoutes);
   await fastify.register(coverLetterRoutes);
   await fastify.register(emailConnectionRoutes);
+  await fastify.register(applicationEmailRoutes);
   await fastify.register(resumeRoutes);
   await fastify.register(baseResumeRoutes);
   await fastify.register(accountRoutes);
