@@ -38,6 +38,7 @@ export type ApplicationProfileLike = StoredSalaryProfile & {
   availability_term?: string;
   current_employer?: string;
   most_recent_employer?: string;
+  employer_history?: string[];
   school?: string;
   degree?: string;
   grad_date?: string;
@@ -223,7 +224,7 @@ export function isLocationChoiceQuestion(label: string): boolean {
   return LOCATION_CHOICE_QUESTION.test(label);
 }
 
-export const REFERRAL_QUESTION = /how did you .*hear|how did you hear|first hear|referral source|hear about (this|us|the)|source of/i;
+export const REFERRAL_QUESTION = /how did you .*hear|how did you hear|first hear|referral source|hear about (this|us|the)|where have you learned about|source of/i;
 export const START_DATE_QUESTION = /availab|start(ing)?\s+date|date.*you.*start|when can you start|earliest.*start/i;
 export const GRADUATION_DATE_QUESTION =
   /\b(?:expected\s+)?graduat(?:ion|e)\s+(?:date|year|semester|term|time\s*frame|timeframe|window)\b|\b(?:date|year|semester|term|time\s*frame|timeframe|window)\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b|\bexpected\s+grad(?:uation)?\b|\bexpect(?:ing)?\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b|\bclass\s+of\b/i;
@@ -251,7 +252,7 @@ const CURRENT_EMPLOYER_QUESTION =
 const MOST_RECENT_EMPLOYER_QUESTION =
   /\bwhere\s+have\s+you\s+most\s+recently\s+worked\b|\bmost\s+recent\s+employer\b/i;
 const PRIOR_EMPLOYER_OR_PROGRAM_QUESTION =
-  /\bhave\s+you\s+(?:ever\s+)?(?:worked|been\s+employed)\s+(?:for|by|at)\b|\bhave\s+you\s+been\s+enrolled\s+in\b[^?]{0,120}\bin\s+the\s+past\s+\d+\s+months\b/i;
+  /\bhave\s+you\s+(?:ever\s+|previously\s+)?(?:worked|been\s+employed)\s+(?:for|by|at)\b|\bhave\s+you\s+been\s+enrolled\s+in\b[^?]{0,120}\bin\s+the\s+past\s+\d+\s+months\b/i;
 const STEM_MAJOR_QUESTION =
   /\bmajoring\s+in\s+STEM\b|\bSTEM\b[^?]{0,160}\b(?:Computer Science|Electrical Engineering|Data Science|Mathematics|Machine Learning)\b/i;
 const AI_INTERVIEW_POLICY_QUESTION =
@@ -588,6 +589,28 @@ function stemMajorAnswer(label: string, ap: ApplicationProfileLike): { value: st
     return { value: 'Yes' };
   }
   return null;
+}
+
+function normalizeEmployerName(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/\b(?:inc|incorporated|llc|ltd|limited|corp|corporation|company|co)\b\.?/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function priorEmployerAnswer(label: string, ap: ApplicationProfileLike): { value: string } | null {
+  const history = ap.employer_history?.map(normalizeEmployerName).filter(Boolean);
+  if (!history?.length) return null;
+  const match = label.match(/\bworked\s+(?:for|by|at)\s+([^?.,;:]+)/i);
+  const rawTarget = match?.[1]
+    ?.replace(/\b(?:before|previously|in\s+the\s+past|as\s+a|as\s+an)\b[\s\S]*$/i, '')
+    .trim();
+  if (!rawTarget || /\b(?:any|a|an|the|company|organization|employer|program)\b/i.test(rawTarget)) return null;
+  const target = normalizeEmployerName(rawTarget);
+  if (!target) return null;
+  const knownMatch = history.some((employer) => employer === target);
+  return knownMatch ? { value: 'Yes' } : null;
 }
 
 function locationStatusAnswer(label: string, ap: ApplicationProfileLike): { value: string } | null {
@@ -931,6 +954,8 @@ export function resolveKnownAnswer(
   }
 
   if (PRIOR_EMPLOYER_OR_PROGRAM_QUESTION.test(label)) {
+    const priorEmployer = priorEmployerAnswer(label, ap);
+    if (priorEmployer) return priorEmployer;
     return { skipReason: `prior employer or program question left for you: "${label.slice(0, 60)}"` };
   }
 
