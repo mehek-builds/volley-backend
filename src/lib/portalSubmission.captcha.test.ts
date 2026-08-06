@@ -263,7 +263,7 @@ test('the final click still happens on a page with no challenge', async () => {
 // decision function; the extract semantics of the remote runner itself are NOT verified here and
 // need one live run against the QA portal.
 
-function probeResult(entries: Array<{ selector: string; value: string | null }>): ManagedBrowserResult {
+function probeResult(entries: NonNullable<ManagedBrowserResult['extracted']>): ManagedBrowserResult {
   return { title: '', url: '', text: '', extracted: entries };
 }
 
@@ -295,6 +295,10 @@ test('the managed probe keys on an attribute every matched node has', () => {
 test('a rendered widget stops the managed submit', () => {
   assert.equal(
     managedResultRequiresCaptchaAttention(probeResult([{ selector: CHALLENGE_SEL, value: 'site-key-abc' }])),
+    true,
+  );
+  assert.equal(
+    managedResultRequiresCaptchaAttention(probeResult([{ selector: '#ignored', label: 'captcha_challenge', value: 'site-key-abc' }])),
     true,
   );
 });

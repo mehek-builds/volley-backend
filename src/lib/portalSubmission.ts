@@ -1410,14 +1410,20 @@ function trimGreenhouseManagedActionsToBudget(actions: ManagedBrowserAction[], l
 
 function truncateManagedActionsToBudget(actions: ManagedBrowserAction[], limit: number) {
   while (actions.length > limit) {
-    const base = managedActionLabelBase(actions.at(-1)!);
+    let tailIndex = actions.length - 1;
+    while (tailIndex >= 0 && /^filled_field:/.test(actions[tailIndex]?.label ?? '')) {
+      tailIndex -= 1;
+    }
+    if (tailIndex < 0) break;
+    const action = actions[tailIndex]!;
+    const base = managedActionLabelBase(action);
     if (!base) {
-      actions.pop();
+      actions.splice(tailIndex, 1);
       continue;
     }
-    for (let index = actions.length - 1; index >= 0; index -= 1) {
+    for (let index = tailIndex; index >= 0; index -= 1) {
       if (managedActionLabelBase(actions[index]!) !== base) break;
-      actions.pop();
+      actions.splice(index, 1);
     }
   }
 }
@@ -1619,7 +1625,8 @@ export function coverLetterUploadSelector(portal: SupportedPortal): string {
 export function managedResultHasCoverLetterUpload(result: ManagedBrowserResult | null, portal: SupportedPortal): boolean {
   const selector = coverLetterUploadSelector(portal);
   return result?.extracted?.some((item) => (
-    item.selector === selector && item.value?.trim().toLowerCase() === 'file'
+    (item.label === 'cover_letter_capability' || item.selector === selector)
+    && item.value?.trim().toLowerCase() === 'file'
   )) === true;
 }
 
@@ -1632,22 +1639,44 @@ export async function hasCoverLetterUpload(page: Page, portal: SupportedPortal):
   return false;
 }
 
+function managedLabelInputSelector(text: string): string {
+  const quoted = text.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return [
+    `label:has-text("${quoted}") input`,
+    `label:has-text("${quoted}") textarea`,
+    `label:has-text("${quoted}") select`,
+  ].join(', ');
+}
+
+function managedLabelFileSelector(text: string): string {
+  const quoted = text.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return `label:has-text("${quoted}") input[type="file"]`;
+}
+
+function greenhouseCoreFieldEvidenceSelectors(label: 'first_name' | 'last_name' | 'email' | 'resume'): string[] {
+  if (label === 'first_name') return [GREENHOUSE_FIRST_NAME_SELECTOR, managedLabelInputSelector('First Name')];
+  if (label === 'last_name') return [GREENHOUSE_LAST_NAME_SELECTOR, managedLabelInputSelector('Last Name')];
+  if (label === 'email') return [GREENHOUSE_EMAIL_SELECTOR, managedLabelInputSelector('Email')];
+  return [
+    GREENHOUSE_RESUME_SELECTOR,
+    managedLabelFileSelector('Resume/CV'),
+    managedLabelFileSelector('Resume'),
+  ];
+}
+
 function pushManagedCoreFieldExtractActions(actions: ManagedBrowserAction[], portal: SupportedPortal) {
   if (portalFamily(portal) !== 'greenhouse') return;
-  for (const [label, selector] of [
-    ['first_name', GREENHOUSE_FIRST_NAME_SELECTOR],
-    ['last_name', GREENHOUSE_LAST_NAME_SELECTOR],
-    ['email', GREENHOUSE_EMAIL_SELECTOR],
-    ['resume', GREENHOUSE_RESUME_SELECTOR],
-  ] as const) {
-    actions.push({
-      type: 'extract',
-      selector,
-      attribute: 'value',
-      label: `filled_field:${label}`,
-      optional: true,
-      timeout: MANAGED_FILL_TIMEOUT_MS,
-    });
+  for (const label of ['first_name', 'last_name', 'email', 'resume'] as const) {
+    for (const selector of greenhouseCoreFieldEvidenceSelectors(label)) {
+      actions.push({
+        type: 'extract',
+        selector,
+        attribute: 'value',
+        label: `filled_field:${label}`,
+        optional: true,
+        timeout: MANAGED_FILL_TIMEOUT_MS,
+      });
+    }
   }
 }
 
@@ -1655,10 +1684,17 @@ export function managedResultFilledFields(result: ManagedBrowserResult): string[
   const fields = new Set(result.filledFields ?? []);
   for (const item of result.extracted ?? []) {
     if (!item.value?.trim()) continue;
-    if (item.selector === GREENHOUSE_FIRST_NAME_SELECTOR) fields.add('first_name');
-    else if (item.selector === GREENHOUSE_LAST_NAME_SELECTOR) fields.add('last_name');
-    else if (item.selector === GREENHOUSE_EMAIL_SELECTOR) fields.add('email');
-    else if (item.selector === GREENHOUSE_RESUME_SELECTOR) fields.add('resume');
+    const labelled = item.label?.match(/^filled_field:(first_name|last_name|email|resume)$/)?.[1];
+    if (labelled) {
+      fields.add(labelled);
+      continue;
+    }
+    for (const label of ['first_name', 'last_name', 'email', 'resume'] as const) {
+      if (greenhouseCoreFieldEvidenceSelectors(label).includes(item.selector)) {
+        fields.add(label);
+        break;
+      }
+    }
   }
   return [...fields];
 }
@@ -1704,7 +1740,9 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     pushGreenhouseGraduationDateComboboxActions(actions, packet);
     managedFillByLabel(actions, 'GPA', packet.gpa, 'gpa');
     managedFillByLabel(actions, 'What is your GPA?', packet.gpa, 'gpa_question');
-    managedUpload(actions, GREENHOUSE_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    for (const selector of greenhouseCoreFieldEvidenceSelectors('resume')) {
+      managedUpload(actions, selector, 'resume', packet.resume, packet.resumeName);
+    }
     managedUpload(actions, 'input#cover_letter[type="file"], input[type="file"][name*="cover_letter" i]', 'cover_letter', packet.coverLetter, packet.coverLetterName);
   } else if (family === 'lever') {
     managedFill(actions, 'input[name="name"]', packet.fullName, 'name', false);
@@ -2752,7 +2790,8 @@ export function managedResultRequiresCaptchaAttention(result: ManagedBrowserResu
   // the selector is multi-match and the runner may echo one entry per matched node, so inspecting
   // only the first would let a real widget in a later entry through.
   return extracted.some((item) => (
-    item.selector === MANAGED_CAPTCHA_CHALLENGE_SELECTOR && item.value !== null
+    (item.label === 'captcha_challenge' || item.selector === MANAGED_CAPTCHA_CHALLENGE_SELECTOR)
+    && item.value !== null
   ));
 }
 
