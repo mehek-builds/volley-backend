@@ -895,26 +895,30 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (current.handoff_expires_at && Date.parse(current.handoff_expires_at) < Date.now()) {
         return reply.status(409).send({ error: 'That took too long and timed out. Start the application again.' });
       }
+      const sensitiveProfile = await loadSensitiveQuestionProfile(request.jwtPayload!.userId);
+      const approvalReview: ApplicationReviewState = {
+        ...current,
+        questions: refreshKnownQuestionAnswers(current.questions, sensitiveProfile, current.jd_text),
+      };
       const approvalIssues: string[] = [];
-      if (current.portal_url && !isPortalSupported(current.portal_url)) {
+      if (approvalReview.portal_url && !isPortalSupported(approvalReview.portal_url)) {
         approvalIssues.push('Litos cannot fill in this company’s application page yet.');
       }
-      if (!current.preview_screenshot_url?.trim()) {
+      if (!approvalReview.preview_screenshot_url?.trim()) {
         approvalIssues.push('The filled form preview is missing.');
       }
-      if ((current.filled_fields ?? []).length === 0) {
+      if ((approvalReview.filled_fields ?? []).length === 0) {
         approvalIssues.push('No filled application fields were recorded.');
       }
       const coverLetter = storedCoverLetter(row);
-      if (current.cover_letter_supported === true && !coverLetter) {
+      if (approvalReview.cover_letter_supported === true && !coverLetter) {
         approvalIssues.push('The cover letter must be reviewed before sending.');
       }
-      approvalIssues.push(...finalApprovalFieldIssues(current, current.cover_letter_supported === true && Boolean(coverLetter)));
-      if (current.questions.some((question) => question.required && !question.answer.trim())) {
+      approvalIssues.push(...finalApprovalFieldIssues(approvalReview, approvalReview.cover_letter_supported === true && Boolean(coverLetter)));
+      if (approvalReview.questions.some((question) => question.required && !question.answer.trim())) {
         approvalIssues.push('A required application answer is still blank.');
       }
-      const sensitiveProfile = await loadSensitiveQuestionProfile(request.jwtPayload!.userId);
-      const sensitive = sensitiveQuestionFor(current.questions, sensitiveProfile, current.jd_text);
+      const sensitive = sensitiveQuestionFor(approvalReview.questions, sensitiveProfile, approvalReview.jd_text);
       if (sensitive) {
         approvalIssues.push(`Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}`);
       }
@@ -928,7 +932,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       }
       const now = new Date().toISOString();
       const next = {
-        ...current,
+        ...approvalReview,
         status: 'submitting' as const,
         final_approved_at: now,
         submission_authorization: {

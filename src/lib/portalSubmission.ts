@@ -1490,10 +1490,14 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
   for (let index = 0; index < (await required.count()); index += 1) {
     const field = required.nth(index);
     if (!(await field.isVisible().catch(() => false))) continue;
-    const type = await field.getAttribute('type');
+    const type = (await field.getAttribute('type'))?.toLowerCase() ?? null;
     if (type === 'hidden') continue;
-    const value = await field.inputValue().catch(() => '');
-    if (value) continue;
+    if (type === 'checkbox' || type === 'radio') {
+      if (await field.isChecked().catch(() => false)) continue;
+    } else {
+      const value = await field.inputValue().catch(() => '');
+      if (value) continue;
+    }
 
     const label = await resolveFieldLabel(page, field);
     if (label && await fillResolvedRequiredField(field, label, packet, filledFields)) continue;

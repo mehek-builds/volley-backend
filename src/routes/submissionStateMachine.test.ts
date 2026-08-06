@@ -68,6 +68,24 @@ test('application routes refresh answers through the decrypted profile loader', 
   assert.match(route, /questions: refreshKnownQuestionAnswers\(review\.questions, profile, review\.jd_text\)/);
 });
 
+test('final approval validates and submits refreshed known question answers', async () => {
+  const route = await readFile('src/routes/applications.ts', 'utf8');
+  const start = route.indexOf("'/applications/:id/submission/approve'");
+  assert.ok(start >= 0, 'approval route is missing');
+  const end = route.indexOf("'/applications/:id/status'", start);
+  assert.ok(end > start, 'could not bound approval route');
+  const approve = route.slice(start, end);
+
+  assert.match(approve, /const sensitiveProfile = await loadSensitiveQuestionProfile/);
+  assert.match(approve, /const approvalReview: ApplicationReviewState = \{/);
+  assert.match(approve, /questions: refreshKnownQuestionAnswers\(current\.questions, sensitiveProfile, current\.jd_text\)/);
+  assert.match(approve, /approvalReview\.questions\.some/);
+  assert.match(approve, /sensitiveQuestionFor\(approvalReview\.questions, sensitiveProfile, approvalReview\.jd_text\)/);
+  assert.match(approve, /\.\.\.approvalReview,[\s\S]{0,120}status:\s*'submitting'/);
+  assert.doesNotMatch(approve, /current\.questions\.some/);
+  assert.doesNotMatch(approve, /sensitiveQuestionFor\(current\.questions/);
+});
+
 test('resume history refreshes known question answers without changing review status', async () => {
   const route = await readFile('src/routes/resume.ts', 'utf8');
   assert.match(route, /function refreshedHistorySpec/);
