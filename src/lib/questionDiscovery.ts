@@ -22,6 +22,7 @@ import {
 // hard-blocked.
 
 export type ApplicationProfileLike = StoredSalaryProfile & {
+  full_name?: string;
   phone?: string;
   address_city?: string;
   address_state?: string;
@@ -130,6 +131,9 @@ function workEligibilityAnswer(
 function routineConsentAnswer(label: string): { value: string } | null {
   if (/^\s*processing\s+of\s+personal\s+data\s*$/i.test(label)) return { value: 'Acknowledge/Confirm' };
   if (/demographic data survey/i.test(label)) return null;
+  if (TOP_ROLE_PREFERENCE_ACKNOWLEDGEMENT.test(label)) return { value: 'Yes' };
+  if (RESUME_PDF_ACKNOWLEDGEMENT.test(label)) return { value: 'Yes' };
+  if (TRUE_COMPLETE_ACCURATE_CERTIFICATION.test(label)) return null;
   if (
     /\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b/i.test(label)
     && /\b(?:agree|consent|acknowledg\w*|processed?|processing)\b/i.test(label)
@@ -263,6 +267,18 @@ const SOFTWARE_ENGINEERING_AREA_QUESTION =
 const US_STATE_RESIDENCE_SELECT_QUESTION = /\bstate\s+of\s+residence\b[^?]{0,160}\bnot\s+in\s+the\s+us\b/i;
 const SAN_FRANCISCO_RESIDENCE_QUESTION = /\bcurrently\s+reside\b[^?]{0,80}\bsan\s+francisco\b|\bsan\s+francisco\b[^?]{0,80}\bcurrently\s+reside\b/i;
 const CONFIRMED_PLANS_CITY_RE = /\b(?:currently\s+residing|confirmed\s+plans)\b[^?]{0,80}\b(?:greater\s+)?([a-z][a-z .'-]+?)\s+area\b|\bconfirmed\s+plans\b[^?]{0,80}\bin\s+([a-z][a-z .'-]+)\b/i;
+const LEGAL_FIRST_NAME_QUESTION =
+  /\blegal\s+first\s+name\b|\bfirst\s+name\b[^?]{0,120}\blegal\b/i;
+const TOP_ROLE_PREFERENCE_ACKNOWLEDGEMENT =
+  /\banswering\s+[“"]?yes[”"]?\s+below\b[^?]{0,220}\btop\s+preference\b|\btop\s+preference\b[^?]{0,220}\banswering\s+[“"]?yes[”"]?\s+below\b/i;
+const RESUME_PDF_ACKNOWLEDGEMENT =
+  /\bresume\b[^?]{0,120}\bPDF\s+format\b|\bPDF\s+format\b[^?]{0,120}\bresume\b/i;
+const TRUE_COMPLETE_ACCURATE_CERTIFICATION =
+  /\bcertify\b[^?]{0,220}\btrue\b[^?]{0,120}\bcomplete\b[^?]{0,120}\baccurate\b/i;
+const NY_CA_RESIDENCE_QUESTION =
+  /\b(?:live|reside|located)\b[^?]{0,80}\bnew\s+york\b[^?]{0,80}\bcalifornia\b|\bnew\s+york\b[^?]{0,80}\bcalifornia\b[^?]{0,80}\b(?:live|reside|located)\b/i;
+const OPTIONS_MARKET_MAKING_EXPERIENCE_QUESTION =
+  /\b(?:options\s+market\s+making|market\s+making\s+trading|trading\s+firm)\b/i;
 
 const NATIONALITY_TO_COUNTRY: Record<string, string> = {
   indian: 'India', american: 'United States', emirati: 'United Arab Emirates',
@@ -578,6 +594,11 @@ function locationStatusAnswer(label: string, ap: ApplicationProfileLike): { valu
   if (US_STATE_RESIDENCE_SELECT_QUESTION.test(label) && !/\b(?:united states|usa|us|u\.s\.)\b/i.test(ap.address_country ?? '')) {
     return { value: 'Not in the US' };
   }
+  if (NY_CA_RESIDENCE_QUESTION.test(label)) {
+    const state = `${ap.address_state ?? ''} ${ap.address_city ?? ''}`.trim();
+    if (!state) return null;
+    return /\b(?:ny|new\s+york|ca|california)\b/i.test(state) ? { value: 'Yes' } : { value: 'No' };
+  }
   if (SAN_FRANCISCO_RESIDENCE_QUESTION.test(label)) {
     return { value: /\bsan\s+francisco\b/i.test(ap.address_city ?? '') ? 'Yes' : 'No' };
   }
@@ -882,6 +903,11 @@ export function resolveKnownAnswer(
   ap: ApplicationProfileLike,
   jdText: string | undefined,
 ): { value: string } | { skipReason: string } | null {
+  if (LEGAL_FIRST_NAME_QUESTION.test(label)) {
+    const firstName = ap.full_name?.trim().split(/\s+/)[0];
+    return firstName ? { value: firstName } : null;
+  }
+
   const preferredLocation = locationPreferenceAnswer(label, jdText);
   if (preferredLocation) return preferredLocation;
   if (isLocationChoiceQuestion(label)) {
@@ -898,6 +924,10 @@ export function resolveKnownAnswer(
 
   if (EMPLOYER_RESTRICTION_AGREEMENT_QUESTION.test(label)) {
     return { value: 'No' };
+  }
+
+  if (OPTIONS_MARKET_MAKING_EXPERIENCE_QUESTION.test(label)) {
+    return { skipReason: `options market making experience question left for you: "${label.slice(0, 60)}"` };
   }
 
   if (PRIOR_EMPLOYER_OR_PROGRAM_QUESTION.test(label)) {
