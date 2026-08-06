@@ -847,6 +847,13 @@ export function rankByFit<T extends RankableJob>(
   return scored.map(({ row, score }) => ({ row, score }));
 }
 
+export const MIN_RANKED_MATCH_SCORE = 25;
+
+export function rankedMatchEligible(score: number | null | undefined, hasResumeScore: boolean): boolean {
+  if (!hasResumeScore) return true;
+  return score !== null && score !== undefined && score >= MIN_RANKED_MATCH_SCORE;
+}
+
 /**
  * The student's main resume as plain text, or null if there is nothing to rank against.
  *
@@ -1700,8 +1707,23 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     const gradDate = await studentGradDate(request.jwtPayload?.userId);
     let hiddenByGraduation = 0;
     let eligibleIds = ranking.ids;
+    const hasResumeScore = Boolean(resumeText?.trim());
+    const beforeMatchGate = eligibleIds.length;
+    eligibleIds = eligibleIds.filter((id) => rankedMatchEligible(ranking!.scores.get(id), hasResumeScore));
+    const hiddenByMatchScore = beforeMatchGate - eligibleIds.length;
+    if (hiddenByMatchScore > 0) {
+      request.log.info(
+        {
+          userId: request.jwtPayload?.userId,
+          hiddenByMatchScore,
+          minimumMatchScore: MIN_RANKED_MATCH_SCORE,
+          pool: ranking.ids.length,
+        },
+        'match score gate hid postings',
+      );
+    }
     if (gradDate) {
-      const gateRows = ranking.ids.length
+      const gateRows = eligibleIds.length
         ? await db
             .select({
               id: monitored_jobs.id,
@@ -1709,7 +1731,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
               employment_type: monitored_jobs.employment_type,
             })
             .from(monitored_jobs)
-            .where(inArray(monitored_jobs.id, ranking.ids))
+            .where(inArray(monitored_jobs.id, eligibleIds))
         : [];
       const blocked = new Set(
         gateRows
@@ -1717,7 +1739,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
           .map((row) => row.id),
       );
       if (blocked.size > 0) {
-        eligibleIds = ranking.ids.filter((id) => !blocked.has(id));
+        eligibleIds = eligibleIds.filter((id) => !blocked.has(id));
         hiddenByGraduation = blocked.size;
         /* LOGGED AND REPORTED, because the product hides these with nothing on screen to say so.
            A student cannot tell a role they are ineligible for from a role that does not exist, so
@@ -1783,6 +1805,8 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       has_more: eligibleIds.length > offset + limit,
       ranked: true,
       ranked_pool: eligibleIds.length,
+      match_hidden: hiddenByMatchScore,
+      minimum_match_score: hasResumeScore ? MIN_RANKED_MATCH_SCORE : null,
       /* How many the graduation gate removed. Not rendered anywhere by choice; it exists so the
          gate is debuggable from a response when a student says a role they expected is missing. */
       eligibility_hidden: hiddenByGraduation,
