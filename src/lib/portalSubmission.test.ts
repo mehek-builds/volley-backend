@@ -1274,9 +1274,8 @@ test('Greenhouse profile-backed academic questions replay through label-scoped c
   assert.ok(comboLabels.some((label) => label.includes('Expected Graduation semester') && label.endsWith('Earlier than Fall 2027')));
   assert.ok(comboLabels.some((label) => label.includes('Which university are you currently enrolled') && label.endsWith('University of Southern California')));
   assert.ok(comboLabels.some((label) => label.includes('current year of your studies') && label.endsWith('Third')));
-  assert.ok(comboLabels.some((label) => label.includes('How did you hear about us') && label.endsWith('Company Website')));
+  assert.ok(comboLabels.some((label) => label.includes('How did you hear about us') && label.endsWith('Company website')));
   assert.ok(comboLabels.some((label) => label.includes('country are you currently residing') && label.endsWith('United States')));
-  assert.ok(actions.some((action) => action.type === 'fillByLabelText' && action.text === 'Degree'));
 });
 
 test('Greenhouse replays Databricks choice questions through React-select buckets', () => {

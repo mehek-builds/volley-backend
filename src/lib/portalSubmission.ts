@@ -973,7 +973,7 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string): 
     values.unshift(answer.replace(/\s+year$/i, ''), answer);
   }
   if (/\b(?:how\s+did\s+you\s+hear|referral\s+source|hear\s+about|source)\b/.test(normalizedQuestion)) {
-    values.unshift('Company Website', 'Company website', 'Careers page', 'Career site', 'Other');
+    values.push('Company Website', 'Company website', 'Careers page', 'Career site', 'Other');
   }
   if (/\b(?:country|currently\s+residing|current\s+location|where\s+are\s+you\s+currently\s+(?:located|living|based))\b/.test(normalizedQuestion)) {
     values.unshift(answer, cityOnlyLocation(answer) ?? '');
@@ -1003,7 +1003,7 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string): 
 }
 
 function isGreenhouseReactSelectQuestion(question: string): boolean {
-  return /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window)\b|\bexpected\s+graduat(?:ion|e)\b|\bwhat\s+is\s+your\s+gpa\b|\bacademic\s+performance\b|\bdegree\b|\bdiscipline\b|\bfield\s+of\s+study\b|\bmajor\b|\bcourse\b|\bschool\b|\buniversity\b|\bcurrent\s+year\b|\byear\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\bacademic\s+year\b|\bhow\s+did\s+you\s+hear\b|\breferral\s+source\b|\bhear\s+about\b|\bsource\b|\bsource\s+of\b|\bcountry\b|\bcurrent\s+location\b|\bwhere\s+are\s+you\s+currently\s+(?:located|living|based)\b|\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b|legally\s+authorized\s+to\s+work|(?:require|need)\s+sponsorship|sponsorship\s+for\s+(?:employment\s+visa|work\s+authorization)|\bteam\s+opening\b|\bopening\b[^?]{0,80}\binterested\b|\bLGBTQIA?\+?\b|sexual\s+orientation|\bgender(?:\s+identity)?\b|\bveteran\b|\bmilitary\b|\brace\b|\bethnicit|\bcategory\b/i.test(question);
+  return /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window)\b|\bexpected\s+graduat(?:ion|e)\b|\bwhat\s+is\s+your\s+gpa\b|\bacademic\s+performance\b|\bdegree\b(?!\s+program)|\bdiscipline\b|\bfield\s+of\s+study\b|\bmajor\b|\bcourse\b|\bschool\b|\buniversity\b|\bcurrent\s+year\b|\byear\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\bacademic\s+year\b|\bhow\s+did\s+you\s+hear\b|\breferral\s+source\b|\bhear\s+about\b|\bsource\b|\bsource\s+of\b|\bcountry\b|\bcurrent\s+location\b|\bwhere\s+are\s+you\s+currently\s+(?:located|living|based)\b|\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b|legally\s+authorized\s+to\s+work|(?:require|need)\s+sponsorship|sponsorship\s+for\s+(?:employment\s+visa|work\s+authorization)|\bteam\s+opening\b|\bopening\b[^?]{0,80}\binterested\b|\bLGBTQIA?\+?\b|sexual\s+orientation|\bgender(?:\s+identity)?\b|\bveteran\b|\bmilitary\b|\brace\b|\bethnicit|\bcategory\b/i.test(question);
 }
 
 function isGreenhouseEducationComboboxQuestion(question: string): boolean {
@@ -1335,7 +1335,6 @@ function managedActionLabelBase(action: ManagedBrowserAction): string | undefine
 
 const GREENHOUSE_LOW_PRIORITY_ACTION_GROUPS = [
   /^greenhouse_demographic/,
-  /^greenhouse_referral_combo_label:(?!.*How did you hear about Faire)/,
   /^education_discipline_combo:/,
   /^education_graduation_date_combo:/,
   /^(?:graduation_date|graduation_date_label|graduation_date_expected|education_end_month|education_end_year|education_graduation_month|education_graduation_year|gpa_question)$/,

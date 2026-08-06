@@ -82,10 +82,6 @@ export function isLegalConsentQuestion(label: string): boolean {
   return LEGAL_CONSENT_QUESTION.test(label);
 }
 
-export function isLegalConsentQuestion(label: string): boolean {
-  return LEGAL_CONSENT_QUESTION.test(label);
-}
-
 export function workEligibilitySkipReason(label: string): string {
   return `work-eligibility question left for you: "${label.slice(0, 60)}"`;
 }
