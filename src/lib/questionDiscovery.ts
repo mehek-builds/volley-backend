@@ -611,18 +611,25 @@ function normalizeEmployerName(value: string): string {
     .trim();
 }
 
+function isSinglePlainEmployerTarget(value: string): boolean {
+  return !/\b(?:or|and|affiliates?|subsidiar(?:y|ies)|parents?|partner(?:s|ships?)?|group|division|business\s+unit|portfolio\s+compan(?:y|ies))\b/i.test(value);
+}
+
 function priorEmployerAnswer(label: string, ap: ApplicationProfileLike): { value: string } | null {
   const history = ap.employer_history?.map(normalizeEmployerName).filter(Boolean);
   if (!history?.length) return null;
-  const match = label.match(/\bworked\s+(?:for|by|at)\s+([^?.,;:]+)/i);
-  const rawTarget = match?.[1]
+  const match = label.match(/\bworked\s+(?:for|by|at)\s+([^?]+)/i);
+  const rawPhrase = match?.[1]?.trim();
+  if (!rawPhrase || !isSinglePlainEmployerTarget(rawPhrase)) return null;
+  const rawTarget = rawPhrase
     ?.replace(/\b(?:before|previously|in\s+the\s+past|as\s+a|as\s+an)\b[\s\S]*$/i, '')
+    .replace(/[.,;:]+$/g, '')
     .trim();
   if (!rawTarget || /\b(?:any|a|an|the|company|organization|employer|program)\b/i.test(rawTarget)) return null;
   const target = normalizeEmployerName(rawTarget);
-  if (!target) return null;
+  if (!target || target.length < 5) return null;
   const knownMatch = history.some((employer) => employer === target);
-  return knownMatch ? { value: 'Yes' } : null;
+  return { value: knownMatch ? 'Yes' : 'No' };
 }
 
 function locationStatusAnswer(label: string, ap: ApplicationProfileLike): { value: string } | null {

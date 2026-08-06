@@ -1096,9 +1096,11 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string, c
   }
   if (!isGraduationPartQuestion && /\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window|month|year)\b|\bwhat\s+is\s+your\s+graduation\s+(?:date|month|year)\b|\bexpected\s+graduat(?:ion|e)|\bexpect(?:ing)?\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b/.test(normalizedQuestion)) {
     const closestDateQuestion = /\bclosest\s+date\b|\bgraduate\s+or\s+complete\s+your\s+program\b/.test(normalizedQuestion);
-    values.unshift(closestDateQuestion
-      ? greenhouseClosestGraduationOption(answer) ?? greenhouseGraduationBucket(answer) ?? ''
-      : greenhouseGraduationBucket(answer) ?? '');
+    if (closestDateQuestion) {
+      values.unshift(greenhouseClosestGraduationOption(answer) ?? greenhouseGraduationBucket(answer) ?? '');
+    } else {
+      values.unshift(greenhouseGraduationBucket(answer) ?? '', greenhouseClosestGraduationOption(answer) ?? '');
+    }
     if (/\bexpecting\s+to\s+graduat(?:e|ion)\b/.test(normalizedQuestion)) values.unshift(answer.match(/\b20\d{2}\b/)?.[0] ?? '');
   }
   if (/\bdegree\b/.test(normalizedQuestion) && /\bbachelor/i.test(answer)) {
@@ -1259,7 +1261,11 @@ function pushGreenhouseQuestionComboboxActions(
       `input[role="combobox"]:right-of(${selector})`,
     );
   }
-  for (const [index, value] of greenhouseComboboxValuesForQuestion(questionText, answer, contextText).slice(0, 1).entries()) {
+  const valueLimit = /\bdatabricks\b/i.test(`${questionText}\n${contextText}`)
+    && /\bgraduat(?:ion|e)\b|\bexpect(?:ing)?\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b/i.test(questionText)
+    ? 3
+    : 1;
+  for (const [index, value] of greenhouseComboboxValuesForQuestion(questionText, answer, contextText).slice(0, valueLimit).entries()) {
     for (const [selectorIndex, inputSelector] of selectors.entries()) {
       managedGreenhouseScopedReactSelectFill(
         actions,
@@ -1295,7 +1301,11 @@ function pushGreenhouseQuestionComboboxLabelActions(
 ) {
   if (!isGreenhouseReactSelectQuestion(questionText)) return;
   let index = 0;
-  const values = greenhouseComboboxValuesForQuestion(questionText, answer, contextText).slice(0, 1);
+  const valueLimit = /\bdatabricks\b/i.test(`${questionText}\n${contextText}`)
+    && /\bgraduat(?:ion|e)\b|\bexpect(?:ing)?\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b/i.test(questionText)
+    ? 3
+    : 1;
+  const values = greenhouseComboboxValuesForQuestion(questionText, answer, contextText).slice(0, valueLimit);
   for (const selector of greenhouseQuestionComboboxSelectors(questionText).slice(0, QUESTION_COMBOBOX_SELECTOR_LIMIT)) {
     for (const value of values) {
       managedGreenhouseScopedReactSelectFill(
