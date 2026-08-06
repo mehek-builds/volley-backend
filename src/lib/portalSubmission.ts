@@ -1682,7 +1682,16 @@ function pushManagedCoreFieldExtractActions(actions: ManagedBrowserAction[], por
   }
 }
 
-export function managedResultFilledFields(result: ManagedBrowserResult): string[] {
+function coreFilledFieldFromActionLabel(label: string | undefined): string | undefined {
+  const base = label?.replace(/_label$/, '');
+  if (base === 'first_name' || base === 'last_name' || base === 'email' || base === 'resume') return base;
+  return undefined;
+}
+
+export function managedResultFilledFields(
+  result: ManagedBrowserResult,
+  actions: readonly ManagedBrowserAction[] = [],
+): string[] {
   const fields = new Set(result.filledFields ?? []);
   for (const item of result.extracted ?? []) {
     if (!item.value?.trim()) continue;
@@ -1697,6 +1706,15 @@ export function managedResultFilledFields(result: ManagedBrowserResult): string[
         break;
       }
     }
+  }
+  const skipped = new Set((result.skipped ?? []).map((item) => item.toLowerCase()));
+  for (const action of actions) {
+    if (action.type !== 'fill' && action.type !== 'fillByLabelText' && action.type !== 'upload') continue;
+    const field = coreFilledFieldFromActionLabel(action.label);
+    if (!field) continue;
+    const label = action.label?.toLowerCase();
+    if (label && skipped.has(label)) continue;
+    fields.add(field);
   }
   return [...fields];
 }

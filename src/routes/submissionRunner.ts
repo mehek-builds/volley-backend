@@ -706,7 +706,8 @@ async function prepareManaged(
     portalInputType: q.portal_input_type,
   }));
 
-  const result = await runManagedBrowser(applicationUrl, buildManagedPortalActions(portal, packet));
+  const managedPortalActions = buildManagedPortalActions(portal, packet);
+  const result = await runManagedBrowser(applicationUrl, managedPortalActions);
   if (!result.screenshot) throw new Error('Stratus managed browser did not return a preview screenshot');
   const preview = await put(
     `users/${row.user_id}/submission-runs/${runId}/filled.png`,
@@ -729,7 +730,7 @@ async function prepareManaged(
   // A missing cover letter is worth telling the applicant about, but it is not a blocker: the form
   // is filled and sendable without it, so it must not flip the run out of the safe path.
   const coverLetterAttention = coverLetterOutcome.coverLetterIssue ? [coverLetterOutcome.coverLetterIssue] : [];
-  const filledFields = managedResultFilledFields(result);
+  const filledFields = managedResultFilledFields(result, managedPortalActions);
   const evidenceBlockers = preparationEvidenceBlockers({ ...result, filledFields }, packet);
   const safe = blockers.length === 0 && discoveryAttention.length === 0 && evidenceBlockers.length === 0;
   const review = nextReview(current, {

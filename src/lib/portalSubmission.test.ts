@@ -152,6 +152,27 @@ test('managed Greenhouse extracted field evidence repairs missing filledFields w
   );
 });
 
+test('managed Greenhouse core action labels repair missing provider field evidence', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+
+  assert.deepEqual(
+    managedResultFilledFields({
+      title: 'Apply',
+      url: 'https://example.com',
+      text: 'Apply for this job',
+      filledFields: [],
+      extracted: [],
+    }, actions).sort(),
+    ['email', 'first_name', 'last_name', 'resume'].sort(),
+  );
+});
+
 test('managed cover-letter detection requires an actual file input extraction', () => {
   const selector = coverLetterUploadSelector('greenhouse');
   assert.equal(managedResultHasCoverLetterUpload({ title: 'Apply', url: 'https://example.com', text: 'Cover letter is optional', extracted: [{ selector, value: 'file' }] }, 'greenhouse'), true);
