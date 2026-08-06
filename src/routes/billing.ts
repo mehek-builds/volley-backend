@@ -9,7 +9,16 @@ import {
   eventFromPaidCheckout,
   litosProcessorConfigured,
   litosProcessorTrialConfigured,
+  parseLitosCheckoutToken,
 } from '../lib/litosPayCore';
+import {
+  createStripeCheckoutSession,
+  parseStripeCheckoutCompleted,
+  secureStripeCheckoutUrl,
+  stripeAcquiringConfigured,
+  stripeRequiresLivemode,
+  verifyStripeWebhookSignature,
+} from '../lib/stripeAcquiring';
 import {
   buildLemonSqueezyCheckoutUrl,
   lemonSqueezyCheckoutReadyUrl,
@@ -24,6 +33,14 @@ type CheckoutBody = {
 };
 
 type LitosTrialBody = {
+  token?: string;
+};
+
+type LitosCheckoutParams = {
+  intentId: string;
+};
+
+type LitosCheckoutQuery = {
   token?: string;
 };
 
@@ -44,6 +61,15 @@ async function createLitosCheckoutOffer(input: {
 }) {
   const intent = buildLitosCheckoutIntent(input);
   if (!intent) return null;
+  const stripeSession = stripeAcquiringConfigured()
+    ? await createStripeCheckoutSession({
+      intentId: intent.intentId,
+      userId: input.userId,
+      email: input.email,
+      interval: intent.interval,
+    })
+    : null;
+  if (stripeAcquiringConfigured() && !stripeSession) return null;
   await db.insert(pricing_offers).values({
     id: intent.intentId,
     user_id: input.userId,
@@ -57,9 +83,11 @@ async function createLitosCheckoutOffer(input: {
     currency: intent.currency,
     base_amount_cents: intent.amountCents,
     amount_cents: intent.amountCents,
-    status: 'checkout_created',
-    provider_checkout_id: intent.intentId,
-    provider_checkout_url: intent.url,
+    status: stripeSession ? 'stripe_checkout_created' : 'checkout_created',
+    provider_checkout_id: stripeSession?.id ?? intent.intentId,
+    provider_checkout_url: stripeSession?.url ?? intent.url,
+    provider_customer_id: stripeSession?.customerId ?? undefined,
+    provider_subscription_id: stripeSession?.subscriptionId ?? undefined,
     expires_at: intent.expiresAt,
     checkout_created_at: new Date(),
   });
@@ -91,6 +119,42 @@ async function applyLitosPaidCheckout(token: string) {
     await tx.update(users).set({
       plan: event.plan,
       billing_provider: 'litos',
+      billing_customer_id: event.customerId,
+      billing_subscription_id: event.subscriptionId,
+      billing_variant_id: event.interval,
+      billing_status: event.status,
+      billing_renews_at: event.renewsAt,
+      billing_ends_at: event.endsAt,
+      billing_portal_url: null,
+      billing_event_updated_at: event.happenedAt,
+    }).where(eq(users.id, event.userId));
+  });
+  return { ...event, processed };
+}
+
+async function applyStripePaidCheckout(event: NonNullable<ReturnType<typeof parseStripeCheckoutCompleted>>) {
+  let processed = false;
+  await db.transaction(async (tx) => {
+    const inserted = await tx.insert(billing_webhook_events).values({
+      event_key: event.eventKey,
+      provider: 'stripe',
+      event_name: event.eventName,
+      result: 'processed',
+      processed_at: event.happenedAt,
+    }).onConflictDoNothing().returning({ event_key: billing_webhook_events.event_key });
+    if (inserted.length === 0) return;
+    processed = true;
+    await tx.update(pricing_offers).set({
+      status: 'paid',
+      provider_customer_id: event.customerId,
+      provider_subscription_id: event.subscriptionId,
+      paid_at: event.happenedAt,
+      verified_at: event.happenedAt,
+      updated_at: event.happenedAt,
+    }).where(eq(pricing_offers.id, event.intentId));
+    await tx.update(users).set({
+      plan: event.plan,
+      billing_provider: 'stripe',
       billing_customer_id: event.customerId,
       billing_subscription_id: event.subscriptionId,
       billing_variant_id: event.interval,
@@ -193,8 +257,95 @@ export async function billingRoutes(fastify: FastifyInstance) {
     });
   });
 
+  fastify.get<{ Params: LitosCheckoutParams; Querystring: LitosCheckoutQuery }>(
+    '/billing/litos-pay/checkout/:intentId',
+    async (request, reply) => {
+      const token = typeof request.query.token === 'string' ? request.query.token : '';
+      const intent = parseLitosCheckoutToken(token);
+      if (!intent || intent.intentId !== request.params.intentId) {
+        return reply.status(400).send({ error: 'Invalid or expired checkout token.', code: 'invalid_checkout_token' });
+      }
+      const offers = await db.select().from(pricing_offers).where(eq(pricing_offers.id, intent.intentId)).limit(1);
+      const offer = offers[0];
+      if (!offer || offer.user_id !== intent.userId || offer.subject_id !== intent.email) {
+        return reply.status(404).send({ error: 'Checkout intent not found.', code: 'checkout_not_found' });
+      }
+      if (offer.paid_at || offer.status === 'paid') {
+        return reply.status(409).send({ error: 'Checkout already completed.', code: 'checkout_completed' });
+      }
+      if (offer.expires_at && offer.expires_at <= new Date()) {
+        return reply.status(410).send({ error: 'Checkout expired.', code: 'checkout_expired' });
+      }
+      const stripeUrl = secureStripeCheckoutUrl(offer.provider_checkout_url);
+      if (!stripeUrl || !offer.provider_checkout_id?.startsWith('cs_')) {
+        return reply.status(503).send({ error: 'Live card acquiring is not configured.', code: 'card_acquiring_not_configured' });
+      }
+      return reply.redirect(stripeUrl, 303);
+    },
+  );
+
   fastify.addContentTypeParser('application/json', { parseAs: 'buffer' }, (_req, body, done) => {
     done(null, body);
+  });
+
+  fastify.post('/billing/stripe-webhook', async (request: FastifyRequest, reply: FastifyReply) => {
+    const secret = process.env.STRIPE_WEBHOOK_SECRET?.trim();
+    if (!secret || !stripeAcquiringConfigured()) {
+      return reply.status(503).send({ error: 'billing not configured' });
+    }
+
+    const signature = request.headers['stripe-signature'];
+    const raw = request.body as Buffer;
+    if (typeof signature !== 'string' || !Buffer.isBuffer(raw)) {
+      return reply.status(400).send({ error: 'bad request' });
+    }
+    if (!verifyStripeWebhookSignature({ rawBody: raw, signatureHeader: signature, secret })) {
+      return reply.status(400).send({ error: 'bad signature' });
+    }
+
+    let parsed: ReturnType<typeof parseStripeCheckoutCompleted>;
+    try {
+      parsed = parseStripeCheckoutCompleted(JSON.parse(raw.toString('utf8')));
+    } catch {
+      return reply.status(400).send({ error: 'unparseable event' });
+    }
+    if (!parsed) return reply.status(200).send({ received: true, ignored: true });
+    if (stripeRequiresLivemode() && !parsed.livemode) {
+      fastify.log.warn({ checkoutIntentId: parsed.intentId }, 'ignored Stripe test-mode checkout in production');
+      return reply.status(200).send({ received: true, ignored: true, reason: 'test_mode_event' });
+    }
+    const existingEvents = await db.select()
+      .from(billing_webhook_events)
+      .where(eq(billing_webhook_events.event_key, parsed.eventKey))
+      .limit(1);
+    if (existingEvents.length > 0) {
+      return reply.status(200).send({ received: true, provider: 'stripe', processed: false });
+    }
+
+    const matched = await db.select().from(users).where(eq(users.id, parsed.userId)).limit(1);
+    const user = matched[0];
+    if (!user) {
+      fastify.log.error({ checkoutIntentId: parsed.intentId }, 'Stripe checkout did not match a Litos account');
+      return reply.status(422).send({ error: 'account not found' });
+    }
+    const offers = await db.select().from(pricing_offers).where(eq(pricing_offers.id, parsed.intentId)).limit(1);
+    const offer = offers[0];
+    if (
+      !offer ||
+      offer.user_id !== parsed.userId ||
+      offer.provider_checkout_id !== parsed.sessionId ||
+      offer.status !== 'stripe_checkout_created'
+    ) {
+      fastify.log.error({ checkoutIntentId: parsed.intentId }, 'Stripe checkout did not match a Litos offer');
+      return reply.status(422).send({ error: 'checkout not found' });
+    }
+    if (user.billing_event_updated_at && parsed.happenedAt < user.billing_event_updated_at) {
+      return reply.status(200).send({ received: true, ignored: true, reason: 'stale_event' });
+    }
+
+    const event = await applyStripePaidCheckout(parsed);
+    fastify.log.info({ userId: parsed.userId, checkoutIntentId: parsed.intentId }, 'synced Stripe checkout');
+    return reply.status(200).send({ received: true, provider: 'stripe', processed: event.processed });
   });
 
   fastify.post('/billing/lemonsqueezy-webhook', async (request: FastifyRequest, reply: FastifyReply) => {
