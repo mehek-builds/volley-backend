@@ -85,6 +85,47 @@ Skills
 Python, TypeScript, React, PostgreSQL, Docker, AWS, Git, GraphQL
 `;
 
+const MEHEK_PM_SWE_RESUME = `
+Mehek Mandal
+University of Southern California, Viterbi School of Engineering
+Bachelor of Science in Computer Science, May 2028
+
+Product Management Intern, SoFi
+- Owned product requirements, roadmap prioritization, user research, stakeholder interviews,
+  analytics dashboards, KPI tracking, and PRD delivery for fintech product launches.
+- Partnered with engineering, design, data, legal, and operations teams to ship user-facing product
+  experiments and improve conversion metrics.
+
+AI Engineer, Traeco - AI Agent Cost Infrastructure
+- Built full-stack software with Python, TypeScript, React, Node.js, REST APIs, SQL, PostgreSQL,
+  Docker, Git, and cloud deployment.
+- Shipped LLM agent evaluation systems, automation pipelines, analytics dashboards, and production
+  monitoring for AI products.
+
+Skills
+Product management, product strategy, customer discovery, user research, roadmap, PRDs, analytics,
+SQL, Python, TypeScript, React, Node.js, REST APIs, Git, Docker, Figma
+`;
+
+const PRODUCT_INTERN_JD = `
+About the Role
+As a Product Management Intern, you will work closely with customers and engineering teams to shape
+next-generation products.
+
+Responsibilities
+- Define product requirements and write PRDs.
+- Conduct customer discovery, user research, and competitive analysis.
+- Partner cross-functionally with design, engineering, data, and go-to-market teams.
+- Use metrics, dashboards, and experimentation to prioritize roadmap decisions.
+
+Qualifications
+- Experience with product management or product strategy.
+- Experience with user research, customer discovery, roadmap planning, product requirements, PRDs,
+  metrics, dashboards, and experimentation.
+- Currently pursuing a Bachelor's degree in Computer Science, Business, or related field.
+- Experience shipping user-facing products or software projects.
+`;
+
 describe('segmentJd', () => {
   test('a boilerplate banner too wordy to be a heading still closes the section above it', () => {
     // phonepe's "Senior Executive, Compliance". The line below is 80 characters and 12 words, so
@@ -495,6 +536,7 @@ describe('normalizeTerm and resumeCovers', () => {
   test('matches across plural and hyphenation', () => {
     assert.ok(resumeCovers('Built data pipelines in Python', 'pipeline'));
     assert.ok(resumeCovers('Owned CI/CD for the team', 'ci cd'));
+    assert.ok(resumeCovers('Built a public API in Python', 'APIs'));
   });
 
   test('does not match a substring of an unrelated word', () => {
@@ -517,6 +559,46 @@ describe('normalizeTerm and resumeCovers', () => {
 });
 
 describe('scoreJdMatch', () => {
+  test('a tailored PM/SWE resume is not pinned near the floor on product internships', () => {
+    const r = scoreJdMatch(MEHEK_PM_SWE_RESUME, PRODUCT_INTERN_JD, {
+      role: 'Product Management Intern',
+    });
+    assert.equal(r.scorable, true);
+    assert.ok(r.score !== null && r.score >= 55, `expected a strong PM/SWE score, got ${r.score}`);
+    for (const covered of ['product management', 'product strategy', 'user research', 'roadmap', 'dashboards']) {
+      assert.ok(
+        r.matched.some((t) => t.term === covered),
+        `${covered} is on both documents and must be counted`,
+      );
+    }
+  });
+
+  test('a required product-management phrase is not deleted by the posting title', () => {
+    const terms = extractJdTerms(
+      'Qualifications\n- Experience with product management or product strategy.\n- Python.\n- SQL.\n- Git.\n',
+      { role: 'Product Management Intern' },
+    ).map((t) => t.term);
+    assert.ok(terms.includes('product management'), 'the requirement survives despite the role title');
+    assert.ok(terms.includes('product strategy'), 'the alternate PM requirement survives too');
+  });
+
+  test('guarded SWE equivalents count exact same-capability wording without broad synonym credit', () => {
+    const jd = [
+      'Qualifications',
+      '- Familiarity with JavaScript, frontend development, backend services, and APIs.',
+      '- Experience with Git, SQL, Docker, and Python.',
+    ].join('\n');
+    const r = scoreJdMatch(
+      'Built TypeScript and React applications with Node.js services, REST API integrations, Git, SQL, Docker, and Python.',
+      jd,
+    );
+    assert.equal(r.scorable, true);
+    assert.ok(r.score !== null && r.score >= 85, `expected same-capability coverage, got ${r.score}`);
+    for (const covered of ['JavaScript', 'frontend', 'backend', 'APIs']) {
+      assert.ok(r.matched.some((t) => t.display === covered), `${covered} should be matched`);
+    }
+  });
+
   test('a matching resume lands in a believable band, not pinned near zero', () => {
     const r = scoreJdMatch(SWE_RESUME, SWE_JD);
     assert.equal(r.scorable, true);
