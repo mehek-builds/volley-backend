@@ -1248,6 +1248,7 @@ test('Greenhouse trims low-priority fallbacks before exceeding the managed actio
 
   assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
   assert.equal(actions.at(-1)?.type, 'click');
+  assert.equal(actions.at(-1)?.selector, 'button[type="submit"], input[type="submit"]');
   assert.ok(actions.some((action) => action.label === 'phone_country'));
   assert.ok(actions.some((action) => action.label === 'location'));
   assert.ok(actions.some((action) => action.label?.startsWith('question_combo_label:') && action.label.includes('team opening')));
@@ -1255,9 +1256,17 @@ test('Greenhouse trims low-priority fallbacks before exceeding the managed actio
   assert.ok(actions.some((action) => action.label?.startsWith('greenhouse_referral_combo_label:') && action.label.includes('Faire')));
   assert.ok(actions.some((action) => action.type === 'upload' && action.label === 'resume'));
   assert.ok(actions.some((action) => action.type === 'upload' && action.label === 'cover_letter'));
+  const bases = actions
+    .filter((action) => action.label?.startsWith('question_combo_label:'))
+    .map((action) => action.label?.replace(/_(?:open|option_value|option|select)$/, ''));
+  for (const base of new Set(bases)) {
+    const group = actions.filter((action) => action.label?.replace(/_(?:open|option_value|option|select)$/, '') === base);
+    const hasValueOption = group.some((action) => action.label?.endsWith('_option_value'));
+    assert.equal(hasValueOption, group.some((action) => action.type === 'fill'));
+  }
 });
 
-test('Greenhouse skips submit when preserved answers alone exceed the managed action budget', () => {
+test('Greenhouse preserves submit when reviewed answers exceed the managed action budget', () => {
   const actions = buildManagedPortalActions('greenhouse', {
     fullName: 'Mehek Mandal',
     email: 'mehekmandal05@gmail.com',
@@ -1271,7 +1280,7 @@ test('Greenhouse skips submit when preserved answers alone exceed the managed ac
   }, true);
 
   assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
-  assert.notEqual(actions.at(-1)?.selector, 'button[type="submit"], input[type="submit"]');
+  assert.equal(actions.at(-1)?.selector, 'button[type="submit"], input[type="submit"]');
   assert.ok(actions.some((action) => action.type === 'upload' && action.label === 'resume'));
 });
 
@@ -1411,15 +1420,21 @@ test('Greenhouse replays Cloudflare graduation and degree choice buckets', () =>
     .filter((action) => action.type === 'fill' && action.label?.startsWith('question_combo_label:'))
     .map((action) => `${action.label}:${action.value}`);
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('how did you hear about this job') && label.endsWith('Other (none of the above)')));
-  assert.ok(comboLabels.some((label) => label.toLowerCase().includes('when do you expect to') && label.endsWith('June 2028')));
+  assert.ok(
+    comboLabels.some((label) => label.toLowerCase().includes('when do you expect to') && label.endsWith('June 2028')),
+    comboLabels.join('\n'),
+  );
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('degree are you currently pursuing') && label.endsWith('Bachelor\'s')));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('are you available for a 12-week') && label.endsWith('Yes')));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('area of interest in software engineering') && label.endsWith('Backend/Systems')));
-  assert.ok(actions.some((action) =>
-    action.type === 'click'
-    && action.label?.startsWith('question_checkbox:')
-    && action.label.includes('Candidate Privacy Policy')
-    && action.selector === 'label:has-text("Acknowledge/Confirm") input[type="checkbox"]'),
+  assert.ok(
+    actions.some((action) =>
+      action.type === 'click'
+      && action.label?.startsWith('question_checkbox:')
+      && action.label.includes('Candidate Privacy Policy')
+      && action.selector === 'label:has-text("Acknowledge/Confirm") input[type="checkbox"]'
+    ),
+    actions.map((action) => `${action.type}:${action.label}:${action.selector}:${action.value}`).join('\n'),
   );
 });
 
@@ -1508,6 +1523,8 @@ test('Greenhouse replays Databricks choice questions through React-select bucket
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector === 'input[id="question_24505242002"]' && action.value === 'Earlier than Fall 2027'));
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector === 'input[id="question_32698502002"]' && action.value === '3.6 or above (out of 4.0)'));
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector === 'input[id="question_30149518002"]' && action.value === 'No'));
+  assert.ok(comboActions.some((action) => action.type === 'click' && action.selector === 'input[id="question_32707214002"]' && action.label?.endsWith('_open')));
+  assert.ok(comboActions.some((action) => action.type === 'click' && action.selector?.includes(':has-text("San Francisco, CA")')));
   assert.ok(comboActions.some((action) => action.type === 'click' && action.selector === '[id^="react-select-"][id$="-option-0"]:visible'));
   assert.ok(actions.some((action) => action.type === 'press' && action.selector === 'input[id="question_32707214002"]' && action.label?.startsWith('question_combo')));
   assert.ok(actions.some((action) => action.type === 'press' && action.selector === 'input[id="question_24505242002"]' && action.label?.startsWith('question_combo')));
@@ -1546,17 +1563,86 @@ test('Greenhouse replays Databricks React-select buckets without portal selector
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text("What is your graduation date?")') && action.value === 'Earlier than Fall 2027'));
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text("What is your GPA?")') && action.value === '3.6 or above (out of 4.0)'));
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text("Do you currently or have you previously worked for Databricks') && action.value === 'No'));
+  assert.equal(comboActions.filter((action) => action.type === 'click' && action.label?.endsWith('_open')).length, 4);
+  assert.equal(comboActions.filter((action) => action.type === 'click' && action.label?.endsWith('_option_value')).length, 4);
   assert.equal(comboActions.filter((action) => action.type === 'click' && action.selector === '[id^="react-select-"][id$="-option-0"]:visible').length, 4);
   for (const action of comboActions.filter((candidate) => candidate.type === 'fill')) {
     const index = actions.indexOf(action);
+    assert.equal(actions[index - 1]?.type, 'click');
+    assert.equal(actions[index - 1]?.selector, action.selector);
     assert.equal(actions[index + 1]?.type, 'click');
-    assert.equal(actions[index + 1]?.selector, '[id^="react-select-"][id$="-option-0"]:visible');
-    assert.equal(actions[index + 2]?.type, 'press');
-    assert.equal(actions[index + 2]?.selector, action.selector);
+    assert.match(actions[index + 1]?.selector ?? '', /\[id\^="react-select-"\]\[id\*="-option-"\]:has-text/);
+    assert.equal(actions[index + 2]?.type, 'click');
+    assert.equal(actions[index + 2]?.selector, '[id^="react-select-"][id$="-option-0"]:visible');
+    assert.equal(actions[index + 3]?.type, 'press');
+    assert.equal(actions[index + 3]?.selector, action.selector);
   }
   assert.ok(actions.some((action) => action.type === 'press' && action.label?.startsWith('question_combo_label:') && action.value === 'Enter'));
   assert.ok(actions.every((action) => (action.selector?.length ?? 0) <= 500));
   assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+});
+
+test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped React-selects', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    school: 'University of Southern California, Viterbi School of Engineering',
+    degree: 'Bachelor of Science in Computer Science',
+    graduationDate: 'May 2028',
+    graduationMonth: 'May',
+    graduationYear: '2028',
+    gpa: '3.89',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    referralSourceDefault: 'Company website',
+    questions: [
+      { question: 'Which University do/did you attend?', answer: 'University of Southern California, Viterbi School of Engineering' },
+      { question: 'What education level are you currently pursuing?', answer: 'Bachelor\'s Degree' },
+      { question: 'Graduation Month', answer: 'May' },
+      { question: 'Graduation Year', answer: '2028' },
+      { question: 'What is your GPA?', answer: '3.89' },
+      { question: 'Have you ever applied to a full time or internship position with Akuna in the past?', answer: "I have not applied to Akuna in the past." },
+      { question: 'Have you applied to this role at Akuna previously?', answer: 'I have not applied to this role at Akuna previously.' },
+      { question: 'How did you hear about this job?', answer: 'Company website' },
+      { question: 'Do you have any offer deadlines that we should be aware of?', answer: "I don't have any offer deadlines right now." },
+      { question: 'Do you have prior experience working at an options market making trading firm?', answer: "I don't have prior experience at an options market making firm." },
+      { question: 'Do you live in New York or California?', answer: 'No' },
+      { question: 'I acknowledge that my resume must be submitted in PDF format to be considered.', answer: 'Yes' },
+      {
+        question: 'To be considered for this role, you must have earned a high school diploma (or an equivalent degree). Please confirm the month and year that most accurately reflects your high school graduation.',
+        answer: '',
+      },
+    ],
+  });
+
+  const comboFills = actions.filter((action) => action.type === 'fill' && action.label?.startsWith('question_combo_label:'));
+  const valuesFor = (text: string) => comboFills
+    .filter((action) => action.label?.toLowerCase().includes(text.toLowerCase()))
+    .map((action) => action.value);
+  assert.deepEqual(valuesFor('Which University do/did you attend?'), ['University of Southern California']);
+  assert.deepEqual(valuesFor('What education level are you currently pursuing?'), ['Bachelor\'s']);
+  assert.deepEqual(valuesFor('Graduation Month'), ['May']);
+  assert.deepEqual(valuesFor('Graduation Year'), ['2028']);
+  assert.deepEqual(valuesFor('What is your GPA?'), ['3.6 or above (out of 4.0)']);
+  assert.deepEqual(valuesFor('Have you ever applied to a full time or internship position'), ['No']);
+  assert.deepEqual(valuesFor('Have you applied to this role at Akuna previously?'), ['No']);
+  assert.deepEqual(valuesFor('How did you hear about this job?'), ['Other (none of the above)']);
+  assert.deepEqual(valuesFor('Do you have any offer deadlines'), ['No']);
+  assert.deepEqual(valuesFor('Do you have prior experience working at an options market making'), ['No']);
+  assert.deepEqual(valuesFor('Do you live in New York or California?'), ['No']);
+  assert.deepEqual(valuesFor('I acknowledge that my resume must be submitted in PDF format'), ['Yes']);
+  assert.equal(comboFills.some((action) => action.label?.includes('high school diploma')), false);
+
+  for (const action of comboFills) {
+    const index = actions.indexOf(action);
+    assert.equal(actions[index - 1]?.type, 'click');
+    assert.equal(actions[index - 1]?.selector, action.selector);
+    assert.equal(actions[index + 1]?.type, 'click');
+    assert.match(actions[index + 1]?.selector ?? '', /\[id\^="react-select-"\]\[id\*="-option-"\]:has-text/);
+    assert.equal(actions[index + 2]?.type, 'click');
+    assert.equal(actions[index + 2]?.selector, '[id^="react-select-"][id$="-option-0"]:visible');
+    assert.equal(actions[index + 3]?.type, 'press');
+  }
 });
 
 test('Greenhouse work authorization React-select respects negative reviewed answers', () => {
@@ -2439,13 +2525,16 @@ test('managed reviewed questions replay stored answers into label-scoped choice 
 
   const scoped = actions.filter((action) => action.label?.startsWith('question:'));
   assert.ok(scoped.some((action) => action.type === 'fillByLabelText' && action.text === 'Are you currently enrolled in a degree program?'));
-  assert.ok(scoped.some((action) => action.type === 'fillByLabelText' && action.text === 'Graduation Year'));
   assert.ok(scoped.some((action) => action.type === 'fillByLabelText' && action.text === 'Are you able to work onsite 4 days a week?'));
+  assert.ok(actions.some((action) =>
+    action.type === 'fill'
+    && action.label?.startsWith('question_combo_label:')
+    && action.label.includes('Graduation Year')
+    && action.value === '2028'));
 
   const selects = actions.filter((action) => action.label?.startsWith('question_select:'));
   assert.ok(selects.some((action) => action.type === 'select' && action.value === '1'));
   assert.ok(selects.some((action) => action.type === 'select' && action.value === 'true'));
-  assert.ok(selects.some((action) => action.type === 'select' && action.value === '2028'));
   assert.ok(selects.every((action) => (action.selector?.length ?? Infinity) <= 500));
 });
 
