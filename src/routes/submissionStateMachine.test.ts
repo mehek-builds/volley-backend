@@ -16,7 +16,7 @@ test('post-click failures retain the claimed row and become uncertain attention'
   /* The intent, not the formatting. This asserted the exact one-line ternary and broke when a
      third stop reason (NoSubmitControlError) was added and the expression wrapped. What matters is
      that an uncertain-after-claim failure still lands on needs_attention rather than failed. */
-  assert.match(runner, /uncertainAfterClaim\s*\n?\s*\?\s*'needs_attention'/);
+  assert.match(runner, /uncertainAfterClaim\s*\|\|\s*providerSessionFailure\s*\n?\s*\?\s*'needs_attention'/);
   assert.match(runner, /const uncertainAfterClaim = Boolean\(current\.submission_claimed_at\)/);
 });
 
