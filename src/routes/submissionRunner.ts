@@ -1424,10 +1424,11 @@ export function submissionFailureOutcome(input: {
   noSubmitControl: boolean;
   uncertainAfterClaim: boolean;
   externalGate: boolean;
+  providerSessionFailure: boolean;
   currentAttentionReason: string | undefined;
 }): { status: ApplicationReviewState['status']; attentionReason: string | undefined } {
-  const { captchaStop, noSubmitControl, uncertainAfterClaim, externalGate } = input;
-  const status: ApplicationReviewState['status'] = captchaStop || noSubmitControl || uncertainAfterClaim
+  const { captchaStop, noSubmitControl, uncertainAfterClaim, externalGate, providerSessionFailure } = input;
+  const status: ApplicationReviewState['status'] = captchaStop || noSubmitControl || uncertainAfterClaim || providerSessionFailure
     ? 'needs_attention'
     : externalGate ? 'submit_requested' : 'failed';
   const attentionReason = captchaStop === 'at_submit'
@@ -1440,10 +1441,16 @@ export function submissionFailureOutcome(input: {
            timed out before dispatching - so naming any one cause would be false most of the time.
            What is always true, and all that matters, is that nothing was sent. */
         ? 'Litos could not find the button that sends this application, so nothing has been sent and there is no confirmation to look for. Open it when you have a minute and finish it off.'
-        : uncertainAfterClaim
-          ? 'The final submission was attempted, but Litos could not verify the employer confirmation. Check the portal or your email before trying again.'
+        : providerSessionFailure
+          ? 'Litos hit a temporary secure-browser error before it could finish this application. Nothing was sent. Try this one again in a few minutes.'
+          : uncertainAfterClaim
+            ? 'The final submission was attempted, but Litos could not verify the employer confirmation. Check the portal or your email before trying again.'
           : input.currentAttentionReason ?? undefined;
   return { status, attentionReason };
+}
+
+export function isProviderSessionFailureMessage(message: string): boolean {
+  return /sandbox stream was closed|not accepting commands/i.test(message);
 }
 
 async function fail(row: ResumeRow, error: unknown) {
@@ -1452,6 +1459,7 @@ async function fail(row: ResumeRow, error: unknown) {
   if (!current) return;
   const message = error instanceof Error ? error.message : 'Submission runner failed';
   const externalGate = /browserbase|stratus managed browser is not configured|secure browser provider is not configured/i.test(message);
+  const providerSessionFailure = isProviderSessionFailureMessage(message);
   const uncertainAfterClaim = Boolean(current.submission_claimed_at);
 
   // Takes precedence over uncertainAfterClaim, and that precedence is the whole point. The claim is
@@ -1473,7 +1481,7 @@ async function fail(row: ResumeRow, error: unknown) {
   const noSubmitControl = error instanceof NoSubmitControlError;
 
   const outcome = submissionFailureOutcome({
-    captchaStop, noSubmitControl, uncertainAfterClaim, externalGate,
+    captchaStop, noSubmitControl, uncertainAfterClaim, externalGate, providerSessionFailure,
     currentAttentionReason: current.attention_reason,
   });
 

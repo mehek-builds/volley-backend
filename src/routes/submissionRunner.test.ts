@@ -6,10 +6,12 @@ import {
   attentionBlockersForManagedResult,
   atsApiSubmissionEnabled,
   discoverAndResolveQuestions,
+  isProviderSessionFailureMessage,
   reconcileManagedProviderBlockers,
   readMostRecentRole,
   sanitizeEeoPrefs,
   shouldUseLocalControlledBrowser,
+  submissionFailureOutcome,
   submissionGraduationDateParts,
   type ResumeRow,
 } from './submissionRunner';
@@ -109,6 +111,27 @@ test('CAPTCHA blocker display hides empty fields only when preview shows selecte
     'CAPTCHA requires your attention',
     '"[Compensation] Do you accept the listed salary range for this position?" is required and is still empty',
   ]);
+});
+
+test('provider stream failures are retryable attention, not dead failed applications', () => {
+  const outcome = submissionFailureOutcome({
+    captchaStop: null,
+    noSubmitControl: false,
+    uncertainAfterClaim: true,
+    externalGate: false,
+    providerSessionFailure: true,
+    currentAttentionReason: undefined,
+  });
+
+  assert.equal(outcome.status, 'needs_attention');
+  assert.match(outcome.attentionReason ?? '', /temporary secure-browser error/);
+  assert.match(outcome.attentionReason ?? '', /Nothing was sent/);
+});
+
+test('provider stream classifier does not absorb post-click page closures', () => {
+  assert.equal(isProviderSessionFailureMessage('Sandbox stream was closed and is not accepting commands.'), true);
+  assert.equal(isProviderSessionFailureMessage('Target closed while reading receipt'), false);
+  assert.equal(isProviderSessionFailureMessage('Page closed during screenshot'), false);
 });
 
 test('question resolution context includes stored job locations', () => {

@@ -11,6 +11,7 @@ const base = {
      verify it", and sends someone hunting for a receipt that cannot exist. */
   uncertainAfterClaim: true,
   externalGate: false,
+  providerSessionFailure: false,
   currentAttentionReason: undefined as string | undefined,
 };
 
