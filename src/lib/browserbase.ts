@@ -89,9 +89,34 @@ function stratusAction(action: ManagedBrowserAction): ManagedBrowserAction {
   }
   if (action.type !== 'fillByLabelText') return action;
   const selector = selectorFromLabelText(action.text);
-  if (!selector) return action;
   const { text: _text, ...rest } = action;
-  return { ...rest, type: 'fill', selector };
+  return { ...rest, type: 'fill', ...(selector ? { selector } : {}) };
+}
+
+function invalidSelectorReason(action: ManagedBrowserAction): string | undefined {
+  const selector = action.selector?.trim();
+  if (!selector) return 'empty';
+  if (selector.length > STRATUS_SELECTOR_MAX_LENGTH) return 'too_long';
+  return undefined;
+}
+
+function normalizeStratusActions(actions: ManagedBrowserAction[]): ManagedBrowserAction[] {
+  const outbound: ManagedBrowserAction[] = [];
+  const invalidRequired: ManagedBrowserAction[] = [];
+  for (const action of actions.map(stratusAction)) {
+    const reason = invalidSelectorReason(action);
+    if (!reason) {
+      outbound.push(action);
+      continue;
+    }
+    const audited = { ...action, label: action.label ? `${action.label}:${reason}` : reason };
+    if (action.optional) continue;
+    invalidRequired.push(audited);
+  }
+  if (invalidRequired.length > 0) {
+    throw new Error(`Managed Stratus action has an invalid selector; action_audit=${managedActionAudit(invalidRequired)}`);
+  }
+  return outbound;
 }
 
 function preview(value: string | undefined): string | undefined {
@@ -205,7 +230,7 @@ export async function runManagedBrowser(
     ? `Bearer ${await getVercelOidcToken()}`
     : undefined;
   if (!apiKey && !authorization) throw new Error('Stratus managed browser is not configured');
-  const outboundActions = actions.map(stratusAction);
+  const outboundActions = normalizeStratusActions(actions);
   const response = await fetch(`${baseUrl}/api/run`, {
     method: 'POST',
     headers: {
