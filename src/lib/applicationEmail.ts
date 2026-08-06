@@ -46,14 +46,21 @@ function configuredDomain(): string | null {
   return domain && /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(domain) ? domain : null;
 }
 
-export function isApplicationEmailConfigured(): boolean {
-  return Boolean(configuredDomain());
+export function applicationAliasSecret(): string | null {
+  const configured = process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET?.trim()
+    || process.env.LITOS_APPLICATION_EMAIL_SECRET?.trim()
+    || process.env.JWT_SIGNING_SECRET?.trim();
+  return configured || null;
 }
 
-export function applicationAliasSecret(): string {
-  return process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET
-    || process.env.JWT_SIGNING_SECRET
-    || 'litos-local-alias-secret';
+export function inboundWebhookSecret(): string | null {
+  const configured = process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET?.trim()
+    || process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_SECRET?.trim();
+  return configured || null;
+}
+
+export function isApplicationEmailConfigured(): boolean {
+  return Boolean(configuredDomain() && applicationAliasSecret());
 }
 
 function digest(value: string, length = 10): string {
@@ -62,8 +69,9 @@ function digest(value: string, length = 10): string {
 
 export function applicationAliasFor(userId: string, applicationId: string): string | null {
   const domain = configuredDomain();
-  if (!domain) return null;
-  const token = digest(`${applicationAliasSecret()}:${userId}:${applicationId}`, 12);
+  const secret = applicationAliasSecret();
+  if (!domain || !secret) return null;
+  const token = digest(`${secret}:${userId}:${applicationId}`, 12);
   return `app-${applicationId.replace(/-/g, '').slice(0, 10)}-${token}@${domain}`;
 }
 
@@ -155,7 +163,7 @@ function safeEqual(left: string, right: string): boolean {
 }
 
 export function inboundSecretMatches(value: string | undefined): boolean {
-  const expected = process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_SECRET?.trim();
+  const expected = inboundWebhookSecret();
   return Boolean(expected && value && safeEqual(value, expected));
 }
 
@@ -181,8 +189,29 @@ export async function retrieveResendReceivedEmail(input: {
     text: body.text ?? input.fallback.text,
     html: body.html ?? input.fallback.html,
     receivedAt: body.created_at ? new Date(body.created_at) : input.fallback.receivedAt,
-    raw: { webhook: input.fallback.raw, received_email: body },
+    raw: {
+      provider: 'resend',
+      email_id: body.id || input.emailId,
+      message_id: body.message_id,
+      to: body.to,
+      subject: body.subject,
+    },
   };
+}
+
+function dedupeKeyFor(input: InboundApplicationEmail): string {
+  const provider = input.provider?.trim().toLowerCase() || 'unknown';
+  const providerMessageId = input.providerMessageId?.trim();
+  if (providerMessageId) return `provider:${provider}:${providerMessageId}`;
+  return `content:${digest(JSON.stringify({
+    provider,
+    from: input.from?.trim().toLowerCase() || null,
+    to: input.to.map((item) => item.trim().toLowerCase()).sort(),
+    subject: input.subject?.trim() || null,
+    text: input.text?.slice(0, 4096) || null,
+    html: input.html?.slice(0, 4096) || null,
+    receivedAt: input.receivedAt?.toISOString() || null,
+  }), 32)}`;
 }
 
 async function markSubmittedFromConfirmation(input: {
@@ -236,6 +265,7 @@ export async function processInboundApplicationEmail(input: InboundApplicationEm
   if (!aliasRow) return { accepted: false };
   const receivedAt = input.receivedAt ?? new Date();
   const classification = classifyApplicationEmail(input.subject, input.text || input.html);
+  const dedupeKey = dedupeKeyFor(input);
   const inserted = await db.insert(application_email_messages).values({
     alias: aliasRow.alias,
     user_id: aliasRow.user_id,
@@ -243,6 +273,7 @@ export async function processInboundApplicationEmail(input: InboundApplicationEm
     direction: 'inbound',
     provider: input.provider,
     provider_message_id: input.providerMessageId,
+    dedupe_key: dedupeKey,
     from_email: input.from,
     to_email: aliasRow.alias,
     subject: input.subject,
@@ -251,11 +282,33 @@ export async function processInboundApplicationEmail(input: InboundApplicationEm
     classification,
     raw_json: input.raw as Record<string, unknown> | undefined,
     received_at: receivedAt,
-  }).onConflictDoNothing().returning({ id: application_email_messages.id });
-  if (inserted.length === 0) return { accepted: true, alias: aliasRow.alias, classification, forwarded: false };
+  }).onConflictDoNothing({ target: application_email_messages.dedupe_key }).returning({
+    id: application_email_messages.id,
+    forwarded_at: application_email_messages.forwarded_at,
+  });
+  const message = inserted[0] ?? (await db
+    .select({
+      id: application_email_messages.id,
+      forwarded_at: application_email_messages.forwarded_at,
+    })
+    .from(application_email_messages)
+    .where(eq(application_email_messages.dedupe_key, dedupeKey))
+    .limit(1))[0];
+  if (!message || message.forwarded_at) return { accepted: true, alias: aliasRow.alias, classification, forwarded: false };
 
-  const messageId = inserted[0].id;
+  const messageId = message.id;
   let forwarded = false;
+  const staleClaimBefore = new Date(Date.now() - 10 * 60 * 1000);
+  const claimed = await db.update(application_email_messages)
+    .set({ forwarding_claimed_at: new Date(), forward_error: null })
+    .where(and(
+      eq(application_email_messages.id, messageId),
+      sql`${application_email_messages.forwarded_at} is null`,
+      sql`(${application_email_messages.forwarding_claimed_at} is null or ${application_email_messages.forwarding_claimed_at} < ${staleClaimBefore})`,
+    ))
+    .returning({ id: application_email_messages.id });
+  if (claimed.length === 0) return { accepted: true, alias: aliasRow.alias, classification, forwarded: false };
+
   try {
     await sendEmail(forwardEmailPayload({
       alias: aliasRow.alias,
@@ -265,10 +318,14 @@ export async function processInboundApplicationEmail(input: InboundApplicationEm
     }));
     forwarded = true;
     await db.update(application_email_messages)
-      .set({ direction: 'forwarded', forwarded_at: new Date() })
+      .set({ direction: 'forwarded', forwarded_at: new Date(), forward_error: null })
       .where(eq(application_email_messages.id, messageId));
-  } catch {
-    forwarded = false;
+  } catch (error) {
+    const message = String(error instanceof Error ? error.message : error).slice(0, 1000);
+    await db.update(application_email_messages)
+      .set({ forwarding_claimed_at: null, forward_error: message })
+      .where(eq(application_email_messages.id, messageId));
+    throw error;
   }
 
   if (classification === 'submission_confirmation' && aliasRow.generated_resume_id) {
@@ -280,4 +337,22 @@ export async function processInboundApplicationEmail(input: InboundApplicationEm
     });
   }
   return { accepted: true, alias: aliasRow.alias, classification, forwarded };
+}
+
+export async function applicationEmailHealth(): Promise<{
+  domain_configured: boolean;
+  inbound_webhook_configured: boolean;
+  forwarding_configured: boolean;
+  enabled_aliases: number;
+}> {
+  const rows = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(application_email_aliases)
+    .where(eq(application_email_aliases.status, 'active'));
+  return {
+    domain_configured: Boolean(configuredDomain() && applicationAliasSecret()),
+    inbound_webhook_configured: Boolean(inboundWebhookSecret()),
+    forwarding_configured: Boolean(process.env.RESEND_API_KEY?.trim() && process.env.RESEND_FROM?.trim()),
+    enabled_aliases: Number(rows[0]?.count ?? 0),
+  };
 }

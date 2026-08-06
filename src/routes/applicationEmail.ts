@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from 'crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
@@ -6,22 +7,74 @@ import { application_email_aliases, application_email_messages } from '../db/sch
 import { requireAuth } from '../middleware/auth';
 import {
   type InboundApplicationEmail,
-  inboundSecretMatches,
+  inboundWebhookSecret,
   isApplicationEmailConfigured,
   processInboundApplicationEmail,
   retrieveResendReceivedEmail,
 } from '../lib/applicationEmail';
 
+const WEBHOOK_MAX_SKEW_MS = 5 * 60 * 1000;
+
+function recipientValues(value: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap(recipientValues);
+  if (typeof value !== 'string') return [];
+  return value.split(',').map((item) => item.trim().toLowerCase()).filter(Boolean);
+}
+
+function allRecipients(value: {
+  to?: string | string[];
+  recipients?: string | string[];
+  cc?: string | string[];
+  envelope_to?: string | string[];
+  delivered_to?: string | string[];
+  recipient?: string | string[];
+}): string[] {
+  return [
+    ...recipientValues(value.to),
+    ...recipientValues(value.recipients),
+    ...recipientValues(value.cc),
+    ...recipientValues(value.envelope_to),
+    ...recipientValues(value.delivered_to),
+    ...recipientValues(value.recipient),
+  ];
+}
+
+function safeEqual(left: string, right: string): boolean {
+  const a = Buffer.from(left);
+  const b = Buffer.from(right);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function inboundSecretMatches(request: FastifyRequest): boolean {
+  const secret = inboundWebhookSecret();
+  const timestampHeader = request.headers['x-litos-webhook-timestamp'];
+  const signatureHeader = request.headers['x-litos-webhook-signature'];
+  const timestamp = Array.isArray(timestampHeader) ? timestampHeader[0] : timestampHeader;
+  const provided = Array.isArray(signatureHeader) ? signatureHeader[0] : signatureHeader;
+  if (!secret || !timestamp || !provided) return false;
+  const epochMs = Number(timestamp);
+  if (!Number.isFinite(epochMs) || Math.abs(Date.now() - epochMs) > WEBHOOK_MAX_SKEW_MS) return false;
+  const expected = createHmac('sha256', secret)
+    .update(`${timestamp}.${JSON.stringify(request.body ?? {})}`)
+    .digest('hex');
+  return safeEqual(provided, expected);
+}
+
 const directInboundBodySchema = z.object({
   provider: z.string().trim().max(80).optional(),
   provider_message_id: z.string().trim().max(200).optional(),
   from: z.string().trim().max(500).optional(),
-  to: z.union([z.string(), z.array(z.string())]).transform((value) => Array.isArray(value) ? value : [value]),
+  to: z.union([z.string(), z.array(z.string())]).optional(),
+  recipients: z.union([z.string(), z.array(z.string())]).optional(),
+  cc: z.union([z.string(), z.array(z.string())]).optional(),
+  envelope_to: z.union([z.string(), z.array(z.string())]).optional(),
+  delivered_to: z.union([z.string(), z.array(z.string())]).optional(),
+  recipient: z.union([z.string(), z.array(z.string())]).optional(),
   subject: z.string().max(1000).optional(),
   text: z.string().max(200_000).optional(),
   html: z.string().max(500_000).optional(),
   received_at: z.string().datetime().optional(),
-}).passthrough();
+}).passthrough().refine((value) => allRecipients(value).length > 0, 'At least one recipient is required');
 
 const resendReceivedBodySchema = z.object({
   type: z.literal('email.received'),
@@ -35,8 +88,6 @@ const resendReceivedBodySchema = z.object({
   }).passthrough(),
 }).passthrough();
 
-const inboundQuerySchema = z.object({ secret: z.string().optional() }).passthrough();
-
 function unauthorized(reply: FastifyReply) {
   return reply.status(401).send({ error: 'Invalid inbound email webhook secret' });
 }
@@ -44,30 +95,48 @@ function unauthorized(reply: FastifyReply) {
 async function inboundEmailFromWebhookBody(body: unknown): Promise<InboundApplicationEmail | null> {
   const resend = resendReceivedBodySchema.safeParse(body);
   if (resend.success) {
+    const sanitized = {
+      rawJson: {
+        provider: 'resend',
+        email_id: resend.data.data.email_id,
+        message_id: resend.data.data.message_id,
+        to: resend.data.data.to,
+        subject: resend.data.data.subject,
+      },
+    };
     const fallback: InboundApplicationEmail = {
       provider: 'resend',
       providerMessageId: resend.data.data.message_id || resend.data.data.email_id,
       from: resend.data.data.from,
-      to: resend.data.data.to,
+      to: resend.data.data.to.map((item) => item.trim().toLowerCase()).filter(Boolean),
       subject: resend.data.data.subject,
       receivedAt: resend.data.data.created_at ? new Date(resend.data.data.created_at) : undefined,
-      raw: resend.data,
+      raw: sanitized.rawJson,
     };
     return retrieveResendReceivedEmail({ emailId: resend.data.data.email_id, fallback });
   }
 
   const direct = directInboundBodySchema.safeParse(body);
   if (!direct.success) return null;
+  const sanitized = {
+    rawJson: {
+      provider: direct.data.provider,
+      provider_message_id: direct.data.provider_message_id,
+      from: direct.data.from,
+      to: allRecipients(direct.data),
+      subject: direct.data.subject,
+    },
+  };
   return {
     provider: direct.data.provider,
     providerMessageId: direct.data.provider_message_id,
     from: direct.data.from,
-    to: direct.data.to,
+    to: allRecipients(direct.data),
     subject: direct.data.subject,
     text: direct.data.text,
     html: direct.data.html,
     receivedAt: direct.data.received_at ? new Date(direct.data.received_at) : undefined,
-    raw: direct.data,
+    raw: sanitized.rawJson,
   };
 }
 
@@ -124,10 +193,7 @@ export async function applicationEmailRoutes(fastify: FastifyInstance) {
   });
 
   fastify.post('/webhooks/application-email/inbound', async (request: FastifyRequest, reply: FastifyReply) => {
-    const secret = request.headers['x-litos-inbound-secret'];
-    const provided = Array.isArray(secret) ? secret[0] : secret;
-    const query = inboundQuerySchema.safeParse(request.query);
-    if (!inboundSecretMatches(provided) && !inboundSecretMatches(query.success ? query.data.secret : undefined)) {
+    if (!inboundSecretMatches(request)) {
       return unauthorized(reply);
     }
 

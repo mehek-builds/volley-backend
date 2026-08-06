@@ -69,6 +69,9 @@ Set these for Production (and Preview if you want):
 | `JOB_MONITOR_SOURCES_JSON` | optional JSON array of extra Greenhouse, Lever, Ashby, or Workable boards loaded by each daily monitor run |
 | `LITOS_ATS_API_SUBMISSION_ENABLED` | set to literal `true` only when employer-authorized ATS submission channels may POST applications |
 | `LITOS_EMPLOYER_API_SUBMISSION_CHANNELS_JSON` | JSON array of allowlisted Greenhouse, Ashby, or Lever submit channels; references key env names, never raw secrets |
+| `LITOS_APPLICATION_EMAIL_DOMAIN` | domain that receives employer application mail for generated aliases, for example `apply.trylitos.com` |
+| `LITOS_APPLICATION_EMAIL_ALIAS_SECRET` | stable secret used to mint opaque per-application alias local parts |
+| `LITOS_INBOUND_EMAIL_WEBHOOK_SECRET` | HMAC secret for signed `POST /application-email/inbound` calls from the inbound email provider |
 | `LEMONSQUEEZY_CHECKOUT_URL` | reusable live product URL containing `/checkout/buy/` |
 | `LEMONSQUEEZY_VARIANT_ID` | numeric ID of the $49.99 monthly Pro variant |
 | `LEMONSQUEEZY_WEBHOOK_SECRET` | signing secret configured on the Lemon Squeezy webhook |
@@ -274,6 +277,17 @@ temp-named Vercel project instead of shipping Litos production.
 literal string `true`; an empty variable, `1`, or `false` leaves ATS API posting disabled. Public
 job-board reads can work without this, but application POSTs still need an allowlisted channel in
 `LITOS_EMPLOYER_API_SUBMISSION_CHANNELS_JSON` plus the referenced employer-authorized key env vars.
+
+**Application email routing is separate from ATS submission.** When
+`LITOS_APPLICATION_EMAIL_DOMAIN` is set, submission packets use a per-application Litos alias as
+the applicant email and keep the user's verified account email as the forwarding destination. Point
+the inbound email provider for that domain at `POST /application-email/inbound`. The caller must
+send `X-Litos-Webhook-Timestamp` as epoch milliseconds and `X-Litos-Webhook-Signature` as
+`hex(hmac_sha256(LITOS_INBOUND_EMAIL_WEBHOOK_SECRET, timestamp + "." + JSON.stringify(body)))`
+within a five minute freshness window. The webhook stores the inbound message against the
+application, forwards it to the user through Resend, and sets replies to go back to the original
+employer sender. This handles receipts, ordinary verification-code emails, and recruiter replies;
+it does not solve CAPTCHA, account walls, or missing employer-authorized ATS API channels.
 
 **Why a hand deploy used to report `null`.** Measured 2026-08-04 across the last 12 production
 deployments: Vercel fills the `VERCEL_GIT_*` variables from the **GitHub integration's** metadata,

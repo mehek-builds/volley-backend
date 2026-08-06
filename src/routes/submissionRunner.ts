@@ -84,6 +84,7 @@ import {
 } from '../lib/submissionQueue';
 import { coverLetterFileNameForRole, resumeFileNameForRole } from '../lib/resumeFileName';
 import { assessAtsSubmissionChannel, tryAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
+import { ensureApplicationEmailAlias } from '../lib/applicationEmail';
 
 export type ResumeRow = typeof generated_resumes.$inferSelect;
 type StoredSpec = Record<string, unknown>;
@@ -313,7 +314,13 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     coverLetter = Buffer.from(await coverLetterResponse.arrayBuffer());
   }
   const fullName = String(contact.full_name ?? parsed.full_name ?? '').trim();
-  const email = String(contact.email ?? userRow[0]?.email ?? '').trim();
+  const accountEmail = String(userRow[0]?.email ?? '').trim();
+  const applicationEmail = await ensureApplicationEmailAlias({
+    userId: row.user_id,
+    applicationId: row.id,
+    forwardTo: accountEmail,
+  }).catch(() => undefined);
+  const email = String(applicationEmail?.alias ?? contact.email ?? accountEmail).trim();
   if (!fullName || !email) throw new Error('Full name and email are required before submission');
   const roleTitle = (row.job_context as { role?: unknown } | null)?.role;
   const base = (profileRow[0]?.base_resume_json && typeof profileRow[0].base_resume_json === 'object'

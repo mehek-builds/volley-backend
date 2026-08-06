@@ -36,6 +36,7 @@ async function main() {
         direction text not null,
         provider text,
         provider_message_id text,
+        dedupe_key text,
         from_email text,
         to_email text,
         subject text,
@@ -44,12 +45,27 @@ async function main() {
         classification text not null default 'other',
         raw_json jsonb,
         received_at timestamptz,
+        forwarding_claimed_at timestamptz,
         forwarded_at timestamptz,
+        forward_error text,
         created_at timestamptz not null default now()
       )
     `);
+    await client.query('alter table application_email_messages add column if not exists dedupe_key text');
+    await client.query('alter table application_email_messages add column if not exists forwarding_claimed_at timestamptz');
+    await client.query('alter table application_email_messages add column if not exists forward_error text');
+    await client.query(`
+      update application_email_messages
+      set dedupe_key = coalesce(
+        'provider:' || provider || ':' || provider_message_id,
+        'legacy:' || id::text
+      )
+      where dedupe_key is null
+    `);
+    await client.query('alter table application_email_messages alter column dedupe_key set not null');
     await client.query('create index if not exists application_email_messages_user_created_idx on application_email_messages(user_id, created_at)');
     await client.query('create index if not exists application_email_messages_alias_created_idx on application_email_messages(alias, created_at)');
+    await client.query('create unique index if not exists application_email_messages_dedupe_key_unique on application_email_messages(dedupe_key)');
     await client.query(`
       create unique index if not exists application_email_messages_provider_id_unique
       on application_email_messages(provider, provider_message_id)

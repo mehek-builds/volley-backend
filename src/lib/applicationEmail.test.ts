@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import {
   applicationAliasFor,
   classifyApplicationEmail,
-  inboundSecretMatches,
   retrieveResendReceivedEmail,
 } from './applicationEmail';
 
@@ -31,6 +30,32 @@ test('application aliases are deterministic and live on the configured domain', 
   }
 });
 
+test('application aliases are disabled until a real secret is configured', () => {
+  const previousDomain = process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+  const previousAliasSecret = process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
+  const previousCompatSecret = process.env.LITOS_APPLICATION_EMAIL_SECRET;
+  const previousJwtSecret = process.env.JWT_SIGNING_SECRET;
+  process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'apply.litos.test';
+  delete process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
+  delete process.env.LITOS_APPLICATION_EMAIL_SECRET;
+  delete process.env.JWT_SIGNING_SECRET;
+  try {
+    assert.equal(applicationAliasFor(
+      '11111111-1111-4111-8111-111111111111',
+      '22222222-2222-4222-8222-222222222222',
+    ), null);
+  } finally {
+    if (previousDomain === undefined) delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+    else process.env.LITOS_APPLICATION_EMAIL_DOMAIN = previousDomain;
+    if (previousAliasSecret === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
+    else process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = previousAliasSecret;
+    if (previousCompatSecret === undefined) delete process.env.LITOS_APPLICATION_EMAIL_SECRET;
+    else process.env.LITOS_APPLICATION_EMAIL_SECRET = previousCompatSecret;
+    if (previousJwtSecret === undefined) delete process.env.JWT_SIGNING_SECRET;
+    else process.env.JWT_SIGNING_SECRET = previousJwtSecret;
+  }
+});
+
 test('application email classifier recognizes employer outcomes', () => {
   assert.equal(
     classifyApplicationEmail('Thank you for applying', 'We received your application.'),
@@ -44,19 +69,6 @@ test('application email classifier recognizes employer outcomes', () => {
     classifyApplicationEmail('Your verification code', 'Use passcode 123456.'),
     'verification_code',
   );
-});
-
-test('inbound webhook secret uses exact comparison', () => {
-  const previous = process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_SECRET;
-  process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_SECRET = 'hook-secret';
-  try {
-    assert.equal(inboundSecretMatches('hook-secret'), true);
-    assert.equal(inboundSecretMatches('hook-secret '), false);
-    assert.equal(inboundSecretMatches('wrong'), false);
-  } finally {
-    if (previous === undefined) delete process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_SECRET;
-    else process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_SECRET = previous;
-  }
 });
 
 test('resend received email hydration fetches the full body before routing', async () => {

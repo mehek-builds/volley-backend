@@ -12,6 +12,8 @@ import {
   autofill_events,
   usage_counters,
   email_verification_codes,
+  application_email_aliases,
+  application_email_messages,
 } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { deleteBlobsForUser, mintDownloadToken } from '../lib/resumeAccess';
@@ -41,6 +43,8 @@ export async function accountRoutes(fastify: FastifyInstance) {
     const resumes = await db.select().from(generated_resumes).where(eq(generated_resumes.user_id, userId));
     const outreach = await db.select().from(outreach_events).where(eq(outreach_events.user_id, userId));
     const fills = await db.select().from(autofill_events).where(eq(autofill_events.user_id, userId));
+    const applicationEmailAliases = await db.select().from(application_email_aliases).where(eq(application_email_aliases.user_id, userId));
+    const applicationEmailMessages = await db.select().from(application_email_messages).where(eq(application_email_messages.user_id, userId));
     // usage_counters has no FK to users (it is keyed by a plain string so pre-auth endpoints can
     // rate-limit by email), so it has to be queried - and later deleted - by key explicitly. Both
     // keys: auth.ts rate-limits the pre-auth endpoints by EMAIL, so an export keyed only on the
@@ -70,6 +74,8 @@ export async function accountRoutes(fastify: FastifyInstance) {
       })),
       outreach_events: outreach,
       autofill_events: fills,
+      application_email_aliases: applicationEmailAliases,
+      application_email_messages: applicationEmailMessages,
       usage_counters: counters,
       notes: {
         generated_resume_files:
@@ -129,7 +135,8 @@ export async function accountRoutes(fastify: FastifyInstance) {
       await db.delete(usage_counters).where(inArray(usage_counters.key, counterKeys));
       if (email) await db.delete(email_verification_codes).where(eq(email_verification_codes.email, email));
       // Cascades to profiles, application_profile, experience_bank, generated_resumes,
-      // outreach_events and autofill_events; learning_signals is onDelete:'set null', which
+      // application email aliases, routed application email, outreach_events and autofill_events;
+      // learning_signals is onDelete:'set null', which
       // anonymizes those aggregate rows rather than keeping them tied to a deleted account.
       await db.delete(users).where(eq(users.id, userId));
     } catch (err) {

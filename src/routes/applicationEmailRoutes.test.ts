@@ -24,7 +24,7 @@ test('application inbox schema and webhook route are registered', () => {
   assert.match(route, /inboundSecretMatches/);
   assert.match(route, /resendReceivedBodySchema/);
   assert.match(route, /retrieveResendReceivedEmail/);
-  assert.match(route, /query\.data\.secret/);
+  assert.match(route, /x-litos-webhook-signature/);
   assert.match(route, /\/applications\/:id\/email-messages/);
   assert.match(service, /reply_to: input\.inbound\.from\?\.trim\(\) \|\| input\.alias/);
 });
