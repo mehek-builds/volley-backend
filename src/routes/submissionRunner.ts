@@ -330,6 +330,12 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     const baseValue = base[key];
     return typeof baseValue === 'number' && baseValue > 0 ? baseValue : undefined;
   };
+  const academicBoolean = (key: string): boolean | undefined => {
+    const parsedValue = parsed[key];
+    if (typeof parsedValue === 'boolean') return parsedValue;
+    const baseValue = base[key];
+    return typeof baseValue === 'boolean' ? baseValue : undefined;
+  };
   const graduationDate = academicStr('grad_date');
   const graduationYear = academicNum('grad_year');
   const graduationParts = submissionGraduationDateParts(graduationDate, graduationYear);
@@ -354,6 +360,7 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     graduationYear: graduationParts.year,
     gpa: appStr('gpa') ?? academicStr('gpa'),
     major: appStr('major') ?? majorFromAcademicProfile(academicStr('major'), degree),
+    currentlyEnrolled: academicBoolean('currently_enrolled'),
     referralSourceDefault: typeof app.referral_source_default === 'string' ? app.referral_source_default : undefined,
     applicationProfile,
     jdText: review.jd_text,
