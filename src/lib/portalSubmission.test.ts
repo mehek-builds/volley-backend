@@ -1773,7 +1773,7 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
     ],
   });
 
-  const comboFills = actions.filter((action) => action.type === 'fill' && /(?:question|greenhouse_known_question|greenhouse_fixed_question)_combo_label:/.test(action.label ?? ''));
+  const comboFills = actions.filter((action) => action.type === 'fill' && /(?:question|greenhouse_known_question|greenhouse_fixed_question|greenhouse_akuna_attestation)_combo_label:/.test(action.label ?? ''));
   const valuesFor = (text: string) => comboFills
       .filter((action) => action.label?.toLowerCase().includes(text.toLowerCase()))
       .map((action) => action.value);
@@ -1790,9 +1790,9 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
   assert.deepEqual(valuesFor('Graduation Year'), ['2028']);
   assert.deepEqual(valuesFor('Do you have prior experience working at an options market making'), []);
   assert.equal(comboFills.some((action) => action.label?.includes('high school diploma')), false);
+  assert.ok(comboFills.some((action) => action.selector?.includes('What is your GPA?') && action.value === '3.9'));
   const knownComboFills = actions.filter((action) => action.type === 'fill' && action.label?.startsWith('greenhouse_known_question_combo_label:'));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('this role is my top preference')));
-  assert.ok(knownComboFills.some((action) => action.selector?.includes('What is your GPA?') && action.value === '3.9'));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('Have you ever applied to a full time or internship position with Akuna in the past?') && action.value === 'No'));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('Have you applied to this role at Akuna previously?') && action.value === 'No'));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('How did you hear about this job')));
@@ -1801,8 +1801,9 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
   assert.ok(knownComboFills.some((action) => action.selector?.includes('Do you now, or will you in the future, require visa sponsorship')));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('current immigration status') && action.value === 'F-1 CPT'));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('live in New York or California')));
-  assert.ok(knownComboFills.some((action) => action.selector?.includes('I certify that all information I have provided')));
-  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+  assert.ok(comboFills.some((action) => action.selector?.includes('I certify that all information I have provided') && action.value === 'Yes'));
+  assert.ok(comboFills.some((action) => action.selector?.includes('resume must be submitted in PDF format') && action.value === 'Yes'));
+  assert.ok(actions.length <= 100, `expected at most 100 actions, got ${actions.length}`);
 
   for (const action of comboFills.filter((item) => item.label?.startsWith('question_combo_label:'))) {
     const index = actions.indexOf(action);
@@ -1838,7 +1839,23 @@ test('Greenhouse promotes canonical Akuna prior-application no answers into earl
   const knownComboFills = actions.filter((action) => action.type === 'fill' && action.label?.startsWith('greenhouse_known_question_combo_label:'));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('Have you ever applied to a full time or internship position with Akuna in the past?') && action.value === 'No'));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('Have you applied to this role at Akuna previously?') && action.value === 'No'));
-  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+  assert.ok(actions.length <= 100, `expected at most 100 actions, got ${actions.length}`);
+});
+
+test('Greenhouse fills fixed Akuna attestations even when discovery misses them', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    jdText: 'Akuna Capital software engineer internship',
+    questions: [],
+  });
+
+  const fills = actions.filter((action) => action.type === 'fill' && action.label?.startsWith('greenhouse_akuna_attestation_combo_label:'));
+  assert.ok(fills.some((action) => action.selector?.includes('I certify that all information I have provided') && action.value === 'Yes'));
+  assert.ok(fills.some((action) => action.selector?.includes('resume must be submitted in PDF format') && action.value === 'Yes'));
+  assert.ok(actions.length <= 100, `expected at most 100 actions, got ${actions.length}`);
 });
 
 test('Greenhouse replays fixed Akuna graduation month and year when discovery misses them', () => {

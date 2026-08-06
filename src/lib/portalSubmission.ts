@@ -1316,10 +1316,11 @@ function pushGreenhouseQuestionComboboxLabelActions(
   const values = greenhouseComboboxValuesForQuestion(questionText, answer, contextText).slice(0, valueLimit);
   for (const selector of greenhouseQuestionComboboxSelectors(questionText).slice(0, QUESTION_COMBOBOX_SELECTOR_LIMIT)) {
     for (const value of values) {
+      const compactKnownLabel = /^(?:greenhouse_fixed_question|greenhouse_known_question|greenhouse_akuna_attestation)$/.test(labelPrefix);
       managedGreenhouseScopedReactSelectFill(
         actions,
         selector,
-        GREENHOUSE_VISIBLE_REACT_SELECT_OPTION_SELECTOR,
+        compactKnownLabel ? undefined : GREENHOUSE_VISIBLE_REACT_SELECT_OPTION_SELECTOR,
         value,
         `${labelPrefix}_combo_label:${index}:${questionText.slice(0, 80)}`,
       );
@@ -1561,9 +1562,6 @@ function greenhouseKnownQuestionAliases(question: string, answer: string): strin
 function greenhouseAkunaRequiredQuestionAliases(question: string, answer: string): string[] {
   const normalizedQuestion = question.toLowerCase();
   const normalizedAnswer = answer.trim().toLowerCase();
-  if (/\bwhat\s+is\s+your\s+gpa\b|\bgpa\b/.test(normalizedQuestion)) {
-    return ['What is your GPA?'];
-  }
   if (/\bapplied\b[^?]{0,120}\b(?:past|previously|before|role|position)\b/.test(normalizedQuestion)
     && (/^(?:no|false|0)\b/.test(normalizedAnswer)
       || /\b(?:have\s+not|haven't|never)\s+applied\b|\bnot\s+applied\b/.test(normalizedAnswer))) {
@@ -1609,13 +1607,42 @@ function greenhouseAkunaRequiredQuestionAliases(question: string, answer: string
   if (/\b(?:live|reside|located)\b[^?]{0,80}\b(?:new\s+york|california)\b/.test(normalizedQuestion)) {
     return ['live in New York or California'];
   }
-  if (/\bcertify\b[^?]{0,120}\b(?:true|complete|accurate)\b/.test(normalizedQuestion)) {
-    return ['I certify that all information I have provided'];
-  }
-  if (/\bresume\b[^?]{0,80}\bpdf\s+format\b/.test(normalizedQuestion)) {
-    return ['resume must be submitted in PDF format'];
-  }
   return [];
+}
+
+function greenhouseAkunaRequiredAliasPriority(alias: string): number {
+  const normalized = alias.toLowerCase();
+  if (/\bcertify\b|\bresume must\b/.test(normalized)) return 0;
+  if (/\bapplied\b/.test(normalized)) return 1;
+  if (/\boffer deadlines?\b|\bhow did you hear\b/.test(normalized)) return 2;
+  if (/\bimmigration status\b|\bwork authorization\b|visa sponsorship/.test(normalized)) return 3;
+  return 4;
+}
+
+function pushGreenhouseAkunaSafeTextActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
+  if (!packetLooksAkuna(packet)) return;
+  for (const item of packet.questions) {
+    const questionText = normalizeReviewQuestionLabel(item.question);
+    const value = item.answer.trim();
+    if (!questionText || !value) continue;
+    if (/\bwhat\s+is\s+your\s+legal\s+first\s+name\b/i.test(questionText)) {
+      managedFillByLabel(actions, questionText, value, `greenhouse_akuna_text:${questionText.slice(0, 80)}`);
+    }
+    if (/\bpreferred\s+name\b/i.test(questionText)) {
+      managedFillByLabel(actions, questionText, value, `greenhouse_akuna_text:${questionText.slice(0, 80)}`);
+    }
+  }
+}
+
+function pushGreenhouseAkunaFixedAttestationActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
+  if (!packetLooksAkuna(packet)) return;
+  const packetQuestionContext = packet.jdText ?? packet.questions.map((item) => item.question).join('\n');
+  for (const label of [
+    'I certify that all information I have provided',
+    'resume must be submitted in PDF format',
+  ]) {
+    pushGreenhouseQuestionComboboxLabelActions(actions, label, 'Yes', 'greenhouse_akuna_attestation', packetQuestionContext);
+  }
 }
 
 function packetLooksAkuna(packet: SubmissionPacket): boolean {
@@ -1650,7 +1677,16 @@ function pushGreenhouseKnownQuestionAliases(
   const seen = new Set<string>();
   if (mode === 'akunaRequired' && !packetLooksAkuna(packet)) return;
   const packetQuestionContext = packet.jdText ?? packet.questions.map((item) => item.question).join('\n');
-  for (const item of packet.questions) {
+  const items = mode === 'akunaRequired'
+    ? [...packet.questions].sort((left, right) => {
+      const leftAnswer = greenhouseReviewedQuestionAnswer(left, packet);
+      const rightAnswer = greenhouseReviewedQuestionAnswer(right, packet);
+      const leftPriority = Math.min(...greenhouseAkunaRequiredQuestionAliases(left.question, leftAnswer).map(greenhouseAkunaRequiredAliasPriority), 99);
+      const rightPriority = Math.min(...greenhouseAkunaRequiredQuestionAliases(right.question, rightAnswer).map(greenhouseAkunaRequiredAliasPriority), 99);
+      return leftPriority - rightPriority;
+    })
+    : packet.questions;
+  for (const item of items) {
     const answer = greenhouseReviewedQuestionAnswer(item, packet);
     const akunaAliases = greenhouseAkunaRequiredQuestionAliases(item.question, answer);
     const aliases = mode === 'akunaRequired'
@@ -1764,6 +1800,9 @@ const GREENHOUSE_LOW_PRIORITY_ACTION_GROUPS = [
   /^preferred_(?:first|last)_name$/,
   /^question_select:/,
   /^greenhouse_known_question:/,
+  /^question_combo_label:.*(?:by submitting this application|which university|what education level|graduation month|graduation year|what is your gpa|have you ever applied|have you applied to this role|how did you hear|offer deadlines|resume must|if you selected ['"]?other['"]?)/,
+  /^question_combo_label:.*undergraduate.*master/,
+  /^question:.*(?:legal first name|preferred name)/,
   /^question:(?:If yes|How familiar|Do you currently reside|Are you currently enrolled in a Masters|Do you identify as LGBTQIA|Which category best describes you|Gender Identity|Veteran Status)/,
   /^question_combo_label:.*If you answered.*current immigration status/,
   /^preferred_location_combo:[12]:/,
@@ -2332,6 +2371,8 @@ export function buildManagedPortalActions(
   const actions: ManagedBrowserAction[] = [];
   pushFixedFieldActions(actions, portal, packet);
   if (portalFamily(portal) === 'greenhouse') {
+    pushGreenhouseAkunaSafeTextActions(actions, packet);
+    pushGreenhouseAkunaFixedAttestationActions(actions, packet);
     pushGreenhouseKnownQuestionAliases(actions, packet, 'akunaRequired');
   }
   // Reviewed questions include stored attestations and EEO decline-style answers when present.
@@ -2443,7 +2484,8 @@ export function buildManagedPortalActions(
 
   const canAppendSubmit = submit && portalCanAutoSubmit(portal);
   if (portalFamily(portal) === 'greenhouse') {
-    const actionLimit = canAppendSubmit ? MANAGED_ACTION_LIMIT - 1 : MANAGED_ACTION_LIMIT;
+    const greenhouseActionLimit = packetLooksAkuna(packet) ? 100 : MANAGED_ACTION_LIMIT;
+    const actionLimit = canAppendSubmit ? greenhouseActionLimit - 1 : greenhouseActionLimit;
     trimGreenhouseManagedActionsToBudget(actions, actionLimit);
     if (actions.length > actionLimit) {
       truncateManagedActionsToBudget(actions, actionLimit);
