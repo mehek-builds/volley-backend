@@ -1031,11 +1031,17 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string): 
 }
 
 function isGreenhouseReactSelectQuestion(question: string): boolean {
-  return /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window)\b|\bexpected\s+graduat(?:ion|e)\b|\bwhat\s+is\s+your\s+gpa\b|\bacademic\s+performance\b|\bdegree\b(?!\s+program)|\bdiscipline\b|\bfield\s+of\s+study\b|\bmajor\b|\bcourse\b|\bschool\b|\buniversity\b|\bcurrent\s+year\b|\byear\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\bacademic\s+year\b|\bhow\s+did\s+you\s+hear\b|\breferral\s+source\b|\bhear\s+about\b|\bsource\b|\bsource\s+of\b|\bcountry\b|\bcurrent\s+location\b|\bwhere\s+are\s+you\s+currently\s+(?:located|living|based)\b|\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b|legally\s+authorized\s+to\s+work|(?:require|need)\s+sponsorship|sponsorship\s+for\s+(?:employment\s+visa|work\s+authorization)|\bteam\s+opening\b|\bopening\b[^?]{0,80}\binterested\b|\bLGBTQIA?\+?\b|sexual\s+orientation|\bgender(?:\s+identity)?\b|\bveteran\b|\bmilitary\b|\brace\b|\bethnicit|\bcategory\b/i.test(question);
+  return /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window)\b|\bexpected\s+graduat(?:ion|e)\b|\bwhat\s+is\s+your\s+gpa\b|\bacademic\s+performance\b|\bdegree\b(?!\s+program)|\bdiscipline\b|\bfield\s+of\s+study\b|\bmajor\b|\bcourse\b|\bschool\b|\buniversity\b|\bcurrent\s+year\b|\byear\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\bacademic\s+year\b|\bhow\s+did\s+you\s+hear\b|\breferral\s+source\b|\bhear\s+about\b|\bsource\b|\bsource\s+of\b|\bcountry\b|\bcurrent\s+location\b|\bwhere\s+are\s+you\s+currently\s+(?:located|living|based)\b|\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b|legally\s+authorized\s+to\s+work|(?:require|need)\s+sponsorship|sponsorship\s+for\s+(?:employment\s+visa|work\s+authorization)|\b(?:are|will)\s+you\s+available\b[^?]{0,160}\b(?:internship|full-time|40\s*hours|weeks?)\b|\b(?:internship|full-time|40\s*hours|weeks?)\b[^?]{0,160}\b(?:are|will)\s+you\s+available\b|\barea\s+of\s+interest\b|\bteam\s+opening\b|\bopening\b[^?]{0,80}\binterested\b|\bLGBTQIA?\+?\b|sexual\s+orientation|\bgender(?:\s+identity)?\b|\bveteran\b|\bmilitary\b|\brace\b|\bethnicit|\bcategory\b/i.test(question);
 }
 
 function isGreenhouseEducationComboboxQuestion(question: string): boolean {
   return /\b(?:school|degree|discipline)--\d+\b/i.test(question);
+}
+
+function isRoutineCandidatePrivacyAcknowledgement(question: string): boolean {
+  return /\bplease\s+review\s+and\s+acknowledg\w*\b[\s\S]{0,120}\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b/i.test(question)
+    || (/\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b/i.test(question)
+      && /\b(?:acknowledg\w*|confirm|agree|consent)\b/i.test(question));
 }
 
 function pushGreenhouseQuestionComboboxActions(
@@ -1116,6 +1122,16 @@ function pushGreenhouseReferralSourceAliases(actions: ManagedBrowserAction[], pa
 function greenhouseCheckboxOptionSelectors(questionText: string, answer: string): string[] {
   const normalizedQuestion = questionText.toLowerCase();
   const normalizedAnswer = answer.toLowerCase();
+  if (
+    isRoutineCandidatePrivacyAcknowledgement(questionText)
+    && /^(?:yes|i\s+agree|agree|acknowledge(?:d)?|confirm(?:ed)?|acknowledge\/confirm)$/i.test(answer.trim())
+  ) {
+    return [
+      'label:has-text("Acknowledge/Confirm") input[type="checkbox"]',
+      'input[type="checkbox"]:left-of(label:has-text("Acknowledge/Confirm"))',
+      'input[type="checkbox"][name^="question_"][name$="[]"]',
+    ];
+  }
   if (
     /sanctions\s+and\s+export\s+controls|cuba,\s*iran,\s*north\s+korea/.test(normalizedQuestion)
     && /none\s+of\s+the\s+above/.test(normalizedAnswer)
@@ -1883,7 +1899,8 @@ export function buildManagedPortalActions(
     if (!item.answer.trim()) continue;
     const questionText = normalizeReviewQuestionLabel(item.question);
     if (!questionText) continue;
-    if (isLegalConsentQuestion(questionText)) continue;
+    const greenhouseRoutinePrivacy = portalFamily(portal) === 'greenhouse' && isRoutineCandidatePrivacyAcknowledgement(questionText);
+    if (isLegalConsentQuestion(questionText) && !greenhouseRoutinePrivacy) continue;
     const portalSelector = durablePortalSelector(item.portalSelector);
     if (portalSelector) {
       if (/^(?:checkbox|radio)$/i.test(item.portalInputType ?? '')) {
@@ -1910,6 +1927,10 @@ export function buildManagedPortalActions(
       continue;
     }
     if (portalFamily(portal) === 'greenhouse') {
+      if (isRoutineCandidatePrivacyAcknowledgement(questionText)) {
+        pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');
+        continue;
+      }
       if (isGreenhouseEducationComboboxQuestion(questionText)) {
         pushGreenhouseQuestionComboboxLabelActions(actions, questionText, item.answer, 'question');
         continue;
@@ -2352,7 +2373,8 @@ async function fillReviewedQuestions(page: Page, portal: SupportedPortal, packet
     if (!item.answer.trim()) continue;
     const questionText = normalizeReviewQuestionLabel(item.question);
     if (!questionText) continue;
-    if (isLegalConsentQuestion(questionText)) continue;
+    const greenhouseRoutinePrivacy = portalFamily(portal) === 'greenhouse' && isRoutineCandidatePrivacyAcknowledgement(questionText);
+    if (isLegalConsentQuestion(questionText) && !greenhouseRoutinePrivacy) continue;
     const portalSelector = durablePortalSelector(item.portalSelector);
     if (/^(?:checkbox|radio)$/i.test(item.portalInputType ?? '')) {
       if (portalFamily(portal) === 'greenhouse') {
@@ -2374,6 +2396,17 @@ async function fillReviewedQuestions(page: Page, portal: SupportedPortal, packet
         out.push(`question:${questionText.slice(0, 80)}`);
         continue;
       }
+    }
+    if (portalFamily(portal) === 'greenhouse' && isRoutineCandidatePrivacyAcknowledgement(questionText)) {
+      for (const selector of greenhouseCheckboxOptionSelectors(questionText, item.answer)) {
+        const field = page.locator(selector).first();
+        if ((await field.count()) > 0 && (await field.isVisible().catch(() => false))) {
+          await field.check().catch(() => field.click());
+          out.push(`question_checkbox:${questionText.slice(0, 80)}`);
+          break;
+        }
+      }
+      continue;
     }
     const label = page.getByText(questionText, { exact: false }).first();
     if ((await label.count()) === 0) continue;
