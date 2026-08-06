@@ -127,6 +127,22 @@ test('answers work authorization and sponsorship only from explicit stored conse
     undefined,
   );
   assert.ok(mixed && 'skipReason' in mixed);
+
+  const statusDetail = resolveKnownAnswer(
+    'If you answered “Yes” above to requiring visa sponsorship now or in the future for work authorization, please respond to the following questions. What is your current immigration status/basis of your current work authorization?',
+    'text',
+    { work_authorized: true, needs_sponsorship: true },
+    undefined,
+  );
+  assert.ok(statusDetail && 'skipReason' in statusDetail);
+
+  const expiryDetail = resolveKnownAnswer(
+    'If you have a current work authorization/status, when does it expire?',
+    'text',
+    { work_authorized: true, needs_sponsorship: true },
+    undefined,
+  );
+  assert.ok(expiryDetail && 'skipReason' in expiryDetail);
 });
 
 test('answers EEO / demographic questions with stored preferences or decline', () => {
@@ -445,6 +461,49 @@ test('school and degree resolve from the academic profile', () => {
   assert.deepEqual(resolveKnownAnswer('What is your expected graduation year?', 'text', { grad_year: 2028 }, undefined), { value: '2028' });
 });
 
+test('live-audit profile labels beat generic wording and stay out of drafts', () => {
+  const profile = {
+    linkedin_url: 'https://www.linkedin.com/in/mehekmandal/',
+    most_recent_employer: 'Tonee - AI Texting Tone Detector',
+    employer_history: ['Tonee - AI Texting Tone Detector'],
+    degree: 'Bachelor of Science in Computer Science & Business Administration, Finance Emphasis',
+    major: 'Computer Science',
+    grad_date: 'May 2028',
+    grad_year: 2028,
+  };
+
+  assert.equal(classifyField('LinkedIn Profile, if available'), 'linkedin_url');
+  assert.deepEqual(resolveKnownAnswer('LinkedIn Profile, if available', 'textarea', profile, undefined), {
+    value: 'https://www.linkedin.com/in/mehekmandal/',
+  });
+  assert.deepEqual(resolveKnownAnswer('Where have you most recently worked?', 'text', profile, undefined), {
+    value: 'Tonee - AI Texting Tone Detector',
+  });
+  assert.equal(resolveKnownAnswer('Current employer', 'text', profile, undefined), null);
+  assert.deepEqual(resolveKnownAnswer('Have you previously worked at Tonee - AI Texting Tone Detector?', 'select', profile, undefined), {
+    value: 'Yes',
+  });
+  const samsaraPriorEmployer = resolveKnownAnswer('Have you previously worked at Samsara?', 'select', profile, undefined);
+  assert.ok(samsaraPriorEmployer && 'skipReason' in samsaraPriorEmployer && samsaraPriorEmployer.skipReason.startsWith('prior employer'));
+  const nearMissPriorEmployer = resolveKnownAnswer('Have you previously worked at Tone?', 'select', profile, undefined);
+  assert.ok(nearMissPriorEmployer && 'skipReason' in nearMissPriorEmployer && nearMissPriorEmployer.skipReason.startsWith('prior employer'));
+  const genericPriorEmployer = resolveKnownAnswer('Have you previously worked at any employer in this industry?', 'select', profile, undefined);
+  assert.ok(genericPriorEmployer && 'skipReason' in genericPriorEmployer && genericPriorEmployer.skipReason.startsWith('prior employer'));
+  assert.deepEqual(resolveKnownAnswer('When are you expecting to graduate from your degree?', 'select', profile, undefined), {
+    value: 'May 2028',
+  });
+  assert.deepEqual(resolveKnownAnswer('Processing of Personal Data', 'select', profile, undefined), {
+    value: 'Acknowledge/Confirm',
+  });
+  assert.deepEqual(
+    resolveKnownAnswer('Are you majoring in STEM (Computer Science, Electrical Engineering, Data Science, Cog Sci, Information Management/Systems, Mathematics, Machine Learning, etc.)?', 'select', profile, undefined),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(resolveKnownAnswer('AI Policy for Interviewers', 'select', profile, undefined), {
+    value: 'Yes',
+  });
+});
+
 test('referral source handles first-heard wording', () => {
   assert.deepEqual(resolveKnownAnswer('How did you first hear about Five Rings?', 'text', {}, undefined), {
     value: 'Company website',
@@ -453,6 +512,7 @@ test('referral source handles first-heard wording', () => {
 
 test('stored academic and onsite facts answer repeated select-shaped live questions', () => {
   const profile = {
+    full_name: 'Mehek Mandal',
     school: 'University of Southern California',
     degree: 'Bachelor of Science',
     major: 'Computer Science',
@@ -462,6 +522,15 @@ test('stored academic and onsite facts answer repeated select-shaped live questi
     languages: ['English', 'Hindi'],
   };
 
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'What is your legal first name? (Please also ensure that you input your legal first name in the first name field above).',
+      'text',
+      profile,
+      undefined,
+    ),
+    { value: 'Mehek' },
+  );
   assert.deepEqual(resolveKnownAnswer('Are you able to work onsite 3 days a week?', 'select', profile, undefined), { value: 'Yes' });
   assert.deepEqual(resolveKnownAnswer('Are you currently enrolled in a degree program?', 'radio', profile, undefined), { value: 'Yes' });
   assert.deepEqual(resolveKnownAnswer('Will you be returning to a degree program after this internship?', 'select', profile, undefined), { value: 'Yes' });
@@ -507,6 +576,8 @@ test('required internship form fields resolve from profile-backed defaults inste
     { value: 'Not in the US' },
   );
   assert.deepEqual(resolveKnownAnswer('Do you currently reside in San Francisco?', 'select', profile, undefined), { value: 'No' });
+  assert.deepEqual(resolveKnownAnswer('Do you live in New York or California?', 'select', profile, undefined), { value: 'No' });
+  assert.equal(resolveKnownAnswer('Do you live in New York or California?', 'select', {}, undefined), null);
   assert.deepEqual(
     resolveKnownAnswer(
       'Are you currently residing in the greater Austin area or have confirmed plans to be in Austin for the duration of this internship?',
@@ -565,6 +636,44 @@ test('required internship form fields resolve from profile-backed defaults inste
       undefined,
     ),
     { value: 'No' },
+  );
+});
+
+test('routine Greenhouse acknowledgements resolve without drafting', () => {
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'By submitting this application and answering "yes" below, I acknowledge that this role is my top preference.',
+      'combobox',
+      {},
+      undefined,
+    ),
+    { value: 'Yes' },
+  );
+  const optionsMarket = resolveKnownAnswer(
+    'Do you have prior experience working at an options market making trading firm?',
+    'combobox',
+    {},
+    undefined,
+  );
+  assert.ok(optionsMarket && 'skipReason' in optionsMarket);
+  assert.equal(optionsMarket?.skipReason.includes('options market making experience question left for you'), true);
+  assert.equal(
+    resolveKnownAnswer(
+      'I certify that all information I have provided in order to apply for this position with Akuna is true, complete, and accurate.',
+      'combobox',
+      {},
+      undefined,
+    ),
+    null,
+  );
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'I acknowledge that my resume must be submitted in PDF format to be considered.',
+      'combobox',
+      {},
+      undefined,
+    ),
+    { value: 'Yes' },
   );
 });
 
