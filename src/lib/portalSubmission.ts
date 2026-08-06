@@ -1597,6 +1597,37 @@ export async function hasCoverLetterUpload(page: Page, portal: SupportedPortal):
   return false;
 }
 
+function pushManagedCoreFieldExtractActions(actions: ManagedBrowserAction[], portal: SupportedPortal) {
+  if (portalFamily(portal) !== 'greenhouse') return;
+  for (const [label, selector] of [
+    ['first_name', GREENHOUSE_FIRST_NAME_SELECTOR],
+    ['last_name', GREENHOUSE_LAST_NAME_SELECTOR],
+    ['email', GREENHOUSE_EMAIL_SELECTOR],
+    ['resume', GREENHOUSE_RESUME_SELECTOR],
+  ] as const) {
+    actions.push({
+      type: 'extract',
+      selector,
+      attribute: 'value',
+      label: `filled_field:${label}`,
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
+  }
+}
+
+export function managedResultFilledFields(result: ManagedBrowserResult): string[] {
+  const fields = new Set(result.filledFields ?? []);
+  for (const item of result.extracted ?? []) {
+    if (!item.value?.trim()) continue;
+    if (item.selector === GREENHOUSE_FIRST_NAME_SELECTOR) fields.add('first_name');
+    else if (item.selector === GREENHOUSE_LAST_NAME_SELECTOR) fields.add('last_name');
+    else if (item.selector === GREENHOUSE_EMAIL_SELECTOR) fields.add('email');
+    else if (item.selector === GREENHOUSE_RESUME_SELECTOR) fields.add('resume');
+  }
+  return [...fields];
+}
+
 // Fixed-field fills only (name/email/phone/location/links/resume) - shared by
 // buildManagedPortalActions (the real fill+submit run) and buildManagedDiscoveryActions (a
 // cheaper first pass that also asks the runner to scan the page for custom questions). Splitting
@@ -1805,6 +1836,7 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
 export function buildManagedDiscoveryActions(portal: SupportedPortal, packet: SubmissionPacket): ManagedBrowserAction[] {
   const actions: ManagedBrowserAction[] = [];
   pushFixedFieldActions(actions, portal, packet);
+  pushManagedCoreFieldExtractActions(actions, portal);
   actions.push({ type: 'discover', optional: true, timeout: MANAGED_FILL_TIMEOUT_MS });
   actions.push({
     type: 'extract',
@@ -1881,6 +1913,7 @@ export function buildManagedPortalActions(
     pushGreenhouseReferralSourceAliases(actions, packet);
     pushGreenhouseDemographicAliases(actions, packet);
   }
+  if (!submit) pushManagedCoreFieldExtractActions(actions, portal);
   // Choice controls are filled only by the runner's scoped question-container logic. That keeps
   // short answers such as "Yes" from matching an unrelated acknowledgement elsewhere on the page.
   // portalCanAutoSubmit is the second gate, and it is deliberately NOT the caller's job. A caller

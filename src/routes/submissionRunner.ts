@@ -29,6 +29,7 @@ import {
   managedResultRequiresCaptchaAttention,
   fillPortal,
   hasCoverLetterUpload,
+  managedResultFilledFields,
   managedResultHasCoverLetterUpload,
   navigateToApplicationForm,
   portalApplicationUrl,
@@ -719,12 +720,13 @@ async function prepareManaged(
   // A missing cover letter is worth telling the applicant about, but it is not a blocker: the form
   // is filled and sendable without it, so it must not flip the run out of the safe path.
   const coverLetterAttention = coverLetterOutcome.coverLetterIssue ? [coverLetterOutcome.coverLetterIssue] : [];
-  const evidenceBlockers = preparationEvidenceBlockers(result, packet);
+  const filledFields = managedResultFilledFields(result);
+  const evidenceBlockers = preparationEvidenceBlockers({ ...result, filledFields }, packet);
   const safe = blockers.length === 0 && discoveryAttention.length === 0 && evidenceBlockers.length === 0;
   const review = nextReview(current, {
     ...preparedReviewPatch(authorization, safe),
     submission_run_id: runId,
-    filled_fields: result.filledFields ?? [],
+    filled_fields: filledFields,
     preview_screenshot_url: preview.url,
     verification: { status: verificationHandoff ? 'handoff' : 'not_needed' },
     questions: mergedQuestions,
