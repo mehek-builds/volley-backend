@@ -11,41 +11,41 @@ import {
 const at = (n: number) => standingConsentEligibility(n);
 
 describe('standingConsentEligibility', () => {
-  test('a new account cannot hand over the click', () => {
+  test('a new account can enable standing consent immediately', () => {
     const e = at(0);
-    assert.equal(e.eligible, false);
-    assert.equal(e.remaining, MIN_REVIEWED_SUBMITS);
+    assert.equal(e.eligible, true);
+    assert.equal(e.reviewed_submits, 0);
+    assert.equal(e.required, MIN_REVIEWED_SUBMITS);
+    assert.equal(e.remaining, 0);
   });
 
-  test('eligibility arrives exactly at the threshold, not before', () => {
-    assert.equal(at(MIN_REVIEWED_SUBMITS - 1).eligible, false);
-    assert.equal(at(MIN_REVIEWED_SUBMITS).eligible, true);
+  test('eligibility stays open once enabled by policy', () => {
+    for (const count of [0, 1, MIN_REVIEWED_SUBMITS, 99]) {
+      assert.equal(at(count).eligible, true);
+    }
   });
 
   test('remaining never goes negative once past the threshold', () => {
     assert.equal(at(MIN_REVIEWED_SUBMITS + 50).remaining, 0);
   });
 
-  test('garbage counts are treated as zero rather than trusted', () => {
+  test('garbage counts are normalized to zero', () => {
     for (const value of [Number.NaN, -5, Infinity]) {
-      assert.equal(standingConsentEligibility(value as number).eligible, false);
+      const eligibility = standingConsentEligibility(value as number);
+      assert.equal(eligibility.reviewed_submits, 0);
+      assert.equal(eligibility.eligible, true);
+      assert.equal(eligibility.remaining, 0);
     }
   });
 });
 
 describe('mayChangeStandingConsent', () => {
-  test('an ineligible student cannot enable it', () => {
+  test('an account may enable it without prior reviewed submissions', () => {
     const result = mayChangeStandingConsent({ enabling: true, eligibility: at(0) });
-    assert.equal(result.allowed, false);
+    assert.equal(result.allowed, true);
   });
 
-  test('the refusal says how many are left, not just no', () => {
-    const result = mayChangeStandingConsent({ enabling: true, eligibility: at(1) });
-    assert.equal(result.allowed, false);
-    assert.match(result.allowed === false ? result.reason : '', /2 to go/);
-  });
-
-  test('an eligible student can enable it', () => {
+  test('an account with prior reviewed submissions can still enable it', () => {
     assert.equal(mayChangeStandingConsent({ enabling: true, eligibility: at(MIN_REVIEWED_SUBMITS) }).allowed, true);
   });
 
@@ -58,13 +58,14 @@ describe('mayChangeStandingConsent', () => {
 });
 
 /**
- * The gate has to hold at every WRITER, not just in the pure function.
+ * Consent writes still have to pass through one helper at every WRITER, not just in the pure
+ * function.
  *
  * Pre-merge review found POST /onboarding/complete wrote automatic_submission_enabled straight from
  * the request body with no check, and the /start finish screen shipped a live checkbox wired to it,
- * so a brand-new student turned unattended submission on at reviewed_submits = 0. Every unit test
- * in this file passed with that hole wide open, which is exactly why this one reads the route
- * source: a third writer must fail CI rather than ship.
+ * so one route could record different consent evidence than another. Every unit test in this file
+ * passed with that hole wide open, which is exactly why this one reads the route source: a third
+ * writer must fail CI rather than ship.
  */
 describe('every writer of the setting goes through the gate', () => {
   const routes = readFileSync(path.join(__dirname, '..', 'routes', 'onboarding.ts'), 'utf8');
