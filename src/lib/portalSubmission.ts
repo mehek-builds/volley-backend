@@ -1685,11 +1685,8 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     // card. The resume upload is optional + bounded for the same reason (managedUpload): the live
     // Jump Trading retry proved the run now clears name/email and stops at the resume file input.
     managedFill(actions, GREENHOUSE_FIRST_NAME_SELECTOR, parts[0], 'first_name');
-    managedFillByLabel(actions, 'First Name', parts[0], 'first_name_label');
     managedFill(actions, GREENHOUSE_LAST_NAME_SELECTOR, parts.slice(1).join(' '), 'last_name');
-    managedFillByLabel(actions, 'Last Name', parts.slice(1).join(' '), 'last_name_label');
     managedFill(actions, GREENHOUSE_EMAIL_SELECTOR, packet.email, 'email');
-    managedFillByLabel(actions, 'Email', packet.email, 'email_label');
     managedComboboxFill(actions, '#country', countryForPhoneField(packet.phone, packet.country), 'phone_country');
     managedFill(actions, GREENHOUSE_PHONE_SELECTOR, phoneForPortalField(portal, packet.phone), 'phone');
     managedComboboxFill(actions, '#candidate-location, input[autocomplete="address-level2"]', greenhouseLocationSearch(packet), 'location');
