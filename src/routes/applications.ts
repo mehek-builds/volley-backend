@@ -35,7 +35,13 @@ import { declaredSkillsList } from './profile';
 import { buildPacket, processSubmissionApplication } from './submissionRunner';
 import { refreshKnownQuestionAnswers, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { resumeEditDisposition, submitRequestDisposition } from '../lib/submissionSafety';
-import { canonicalSupportedPortalUrl, detectPortal, isPortalSupported } from '../lib/portalSubmission';
+import {
+  canonicalMonitoredPortalUrl,
+  canonicalSupportedPortalUrl,
+  detectPortal,
+  greenhousePortalUrlNeedsBoardToken,
+  isPortalSupported,
+} from '../lib/portalSubmission';
 import { dailySubmissionCap, withinDailyCap } from '../lib/submissionQueue';
 import { canStartExtensionSubmission, extensionOutcomePatch, isSafeExtensionReceiptUrl } from '../lib/extensionSubmission';
 import {
@@ -179,7 +185,11 @@ async function repairReviewPortalFromMonitoredJob(
       portal_supported: true,
     };
   }
-  if (current.portal_url && isPortalSupported(current.portal_url)) return current;
+  if (
+    current.portal_url
+    && isPortalSupported(current.portal_url)
+    && !greenhousePortalUrlNeedsBoardToken(current.portal_url)
+  ) return current;
   const jobId = jobContextJobId(row);
   if (!jobId) return current;
   const expectedCompany = jobContextText(row, 'company');
@@ -189,6 +199,7 @@ async function repairReviewPortalFromMonitoredJob(
   const [job] = await db.select({
     apply_url: monitored_jobs.apply_url,
     ats_name: career_page_sources.ats_name,
+    board_token: career_page_sources.board_token,
     company_name: monitored_jobs.company_name,
     title: monitored_jobs.title,
     description: sql<string>`left(${monitored_jobs.description}, 60000)`,
@@ -201,7 +212,7 @@ async function repairReviewPortalFromMonitoredJob(
     ))
     .limit(1);
   if (!job) return current;
-  const applyUrl = canonicalSupportedPortalUrl(job.apply_url, job.ats_name);
+  const applyUrl = canonicalMonitoredPortalUrl(job.apply_url, job.ats_name, job.board_token);
   if (!applyUrl) return current;
   if (normalizedIdentity(job.company_name) !== normalizedIdentity(expectedCompany)) return current;
   if (normalizedIdentity(job.title) !== normalizedIdentity(expectedRole)) return current;

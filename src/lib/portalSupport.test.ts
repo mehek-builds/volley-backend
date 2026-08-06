@@ -7,7 +7,12 @@ import {
   readApplicationReview,
   type ApplicationReviewState,
 } from './applicationReview';
-import { canonicalSupportedPortalUrl, isPortalSupported } from './portalSubmission';
+import {
+  canonicalMonitoredPortalUrl,
+  canonicalSupportedPortalUrl,
+  greenhousePortalUrlNeedsBoardToken,
+  isPortalSupported,
+} from './portalSubmission';
 
 // __dirname rather than import.meta.url: tsconfig.api.json compiles this tree as CommonJS, where
 // import.meta is a hard error. Matches serverlessRespond.test.ts and the other source-reading tests.
@@ -57,6 +62,30 @@ test('greenhouse wrapper canonicalization trusts the gh_jid URL convention and r
   assert.equal(canonicalSupportedPortalUrl('https://nuro.ai/careers?gh_jid=4512345', 'greenhouse'), undefined);
   assert.equal(canonicalSupportedPortalUrl('https://www.fivetran.com/careers/job?gh_jid=1', 'greenhouse'), undefined);
   assert.equal(canonicalSupportedPortalUrl('https://databricks.com/company/careers/open-positions?gh_jid=6883068002', 'greenhouse'), undefined);
+});
+
+test('monitored Greenhouse sources canonicalize company wrappers with source board tokens', () => {
+  assert.equal(
+    canonicalMonitoredPortalUrl('https://nuro.ai/careers?gh_jid=4512345', 'greenhouse', 'nuro'),
+    'https://job-boards.greenhouse.io/nuro/jobs/4512345',
+  );
+  assert.equal(
+    canonicalMonitoredPortalUrl('https://www.jumptrading.com/hr/job?gh_jid=8052281', 'greenhouse', 'jumptrading'),
+    'https://job-boards.greenhouse.io/jumptrading/jobs/8052281',
+  );
+  assert.equal(
+    canonicalMonitoredPortalUrl('https://boards.greenhouse.io/embed/job_app?token=7351061', 'greenhouse', 'nuro'),
+    'https://job-boards.greenhouse.io/nuro/jobs/7351061',
+  );
+  assert.equal(canonicalMonitoredPortalUrl('https://nuro.ai/careers?gh_jid=4512345', 'greenhouse'), undefined);
+  assert.equal(canonicalMonitoredPortalUrl('https://nuro.ai/careers?gh_jid=abc', 'greenhouse', 'nuro'), undefined);
+});
+
+test('bare Greenhouse embed links are supported but still need monitored board-token repair', () => {
+  assert.equal(isPortalSupported('https://boards.greenhouse.io/embed/job_app?token=7351061'), true);
+  assert.equal(greenhousePortalUrlNeedsBoardToken('https://boards.greenhouse.io/embed/job_app?token=7351061'), true);
+  assert.equal(greenhousePortalUrlNeedsBoardToken('https://boards.greenhouse.io/embed/job_app?for=nuro&token=7351061'), false);
+  assert.equal(greenhousePortalUrlNeedsBoardToken('https://job-boards.greenhouse.io/nuro/jobs/7351061'), false);
 });
 
 test('a question about a missing or malformed URL gets an answer, not an exception', () => {
@@ -199,7 +228,7 @@ test('portal support is written at packet creation and unsupported portals use e
   assert.match(resumeRoute, /function repairedHistorySpec/);
   assert.match(resumeRoute, /canonicalSupportedPortalUrl\(review\.portal_url, review\.ats_name\)/);
   assert.match(resumeRoute, /monitored_jobs\.apply_url/);
-  assert.match(resumeRoute, /canonicalSupportedPortalUrl\(job\.apply_url, job\.ats_name\)/);
+  assert.match(resumeRoute, /canonicalMonitoredPortalUrl\(job\.apply_url, job\.ats_name, job\.board_token\)/);
   assert.match(resumeRoute, /monitoredDescriptionHash\(job\.description\)/);
   assert.match(resumeRoute, /spec: repairedHistorySpec\(row, monitoredJobs\)/);
   assert.doesNotMatch(resumeRoute, /inArray\(career_page_sources\.ats_name,[\s\S]{0,80}AUTONOMOUS_PORTAL_FAMILIES/);
@@ -209,9 +238,9 @@ test('portal support is written at packet creation and unsupported portals use e
   // packet unsupported, submit-request must first repair from the canonical monitored job apply_url.
   assert.match(applicationsRoute, /async function repairReviewPortalFromMonitoredJob/);
   assert.match(applicationsRoute, /const currentCanonicalUrl = canonicalSupportedPortalUrl\(current\.portal_url, current\.ats_name\)[\s\S]{0,250}currentCanonicalUrl !== current\.portal_url/);
-  assert.match(applicationsRoute, /if \(current\.portal_url && isPortalSupported\(current\.portal_url\)\) return current/);
+  assert.match(applicationsRoute, /greenhousePortalUrlNeedsBoardToken\(current\.portal_url\)/);
   assert.match(applicationsRoute, /monitored_jobs\.apply_url/);
-  assert.match(applicationsRoute, /canonicalSupportedPortalUrl\(job\.apply_url, job\.ats_name\)/);
+  assert.match(applicationsRoute, /canonicalMonitoredPortalUrl\(job\.apply_url, job\.ats_name, job\.board_token\)/);
   assert.match(applicationsRoute, /monitoredJdAgrees\(expectedJdHash, current\.jd_text, job\.description\)/);
   assert.match(applicationsRoute, /current = await repairReviewPortalFromMonitoredJob\(row, current\)/);
   assert.match(applicationsRoute, /review = await repairReviewPortalFromMonitoredJob\(row, review\)/);
