@@ -2045,6 +2045,14 @@ test('Greenhouse Databricks academic and reviewed question packet stays inside t
     && action.selector === '#end-year--0'
     && action.value === '2028'), 'graduation year exact');
   assert.ok(actions.some((action) =>
+    action.type === 'fillByLabelText'
+    && action.label === 'databricks_graduation_date'
+    && action.value === 'May 2028'), 'graduation date label fill survives budget trim');
+  assert.ok(actions.some((action) =>
+    action.type === 'fill'
+    && action.label?.startsWith('databricks_graduation_date_combo:')
+    && action.value === 'Spring 2028'), 'graduation date combobox fallback survives budget trim');
+  assert.ok(actions.some((action) =>
     action.type === 'fill'
     && action.label?.startsWith('question_combo_label:')
     && action.label.includes('What is your graduation date?')

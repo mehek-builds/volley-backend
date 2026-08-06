@@ -611,9 +611,13 @@ function pushGreenhouseGraduationDateComboboxActions(actions: ManagedBrowserActi
     packet.graduationDate ? greenhouseGraduationBucket(packet.graduationDate) : undefined,
     packet.graduationDate ? greenhouseClosestGraduationOption(packet.graduationDate) : undefined,
   ]).slice(0, 3);
-  const labels = ['What is your graduation date?', 'Graduation Date', 'Expected Graduation Date'];
+  const databricks = packetLooksDatabricks(packet);
+  const labels = databricks
+    ? ['What is your graduation date?']
+    : ['What is your graduation date?', 'Graduation Date', 'Expected Graduation Date'];
   let index = 0;
-  const selectorLimit = packetLooksDatabricks(packet) ? 3 : QUESTION_COMBOBOX_SELECTOR_LIMIT;
+  const selectorLimit = databricks ? 3 : QUESTION_COMBOBOX_SELECTOR_LIMIT;
+  const labelPrefix = databricks ? 'databricks_graduation_date_combo' : 'education_graduation_date_combo';
   for (const label of labels) {
     for (const value of values) {
       for (const selector of greenhouseQuestionComboboxSelectors(label).slice(0, selectorLimit)) {
@@ -622,7 +626,7 @@ function pushGreenhouseGraduationDateComboboxActions(actions: ManagedBrowserActi
           selector,
           GREENHOUSE_VISIBLE_REACT_SELECT_OPTION_SELECTOR,
           value,
-          `education_graduation_date_combo:${index}:${label}`,
+          `${labelPrefix}:${index}:${label}`,
         );
         index += 1;
       }
@@ -2119,6 +2123,9 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedFillByLabel(actions, 'What is your graduation date?', packet.graduationDate, 'graduation_date');
     managedFillByLabel(actions, 'Graduation Date', packet.graduationDate, 'graduation_date_label');
     managedFillByLabel(actions, 'Expected Graduation Date', packet.graduationDate, 'graduation_date_expected');
+    if (packetLooksDatabricks(packet)) {
+      managedFillByLabel(actions, 'What is your graduation date?', packet.graduationDate, 'databricks_graduation_date');
+    }
     managedFillByLabel(actions, 'End date month', packet.graduationMonth, 'education_end_month');
     managedFillByLabel(actions, 'End date year', packet.graduationYear, 'education_end_year');
     managedFillByLabel(actions, 'Graduation Month', packet.graduationMonth, 'education_graduation_month');
