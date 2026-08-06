@@ -1145,7 +1145,7 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string, c
       values.unshift('N/A (I do not require work authorization)');
     }
   }
-  if (/\bresume\b[^?]{0,80}\bPDF\s+format\b/.test(normalizedQuestion)
+  if (/\bresume\b[^?]{0,80}\bpdf\s+format\b/.test(normalizedQuestion)
     && /^(?:yes|true|1|i\s+acknowledge|acknowledge|confirm)/i.test(answer.trim())) {
     values.unshift('Yes');
   }
@@ -1386,6 +1386,36 @@ function greenhouseKnownQuestionAliases(question: string, answer: string): strin
       'Do you now or in the future require visa sponsorship?',
     ];
   }
+  if (/\btop\s+preference\b|\banswering\s+[“"]?yes[”"]?\s+below\b/.test(normalizedQuestion)) {
+    return [
+      'By submitting this application and answering',
+      'this role is my top preference',
+    ];
+  }
+  if (/\b(?:options\s+market\s+making|trading\s+firm)\b/.test(normalizedQuestion)) {
+    return [
+      'Do you have prior experience working at an options market making trading firm?',
+      'prior experience working at an options market making trading firm',
+    ];
+  }
+  if (/\b(?:live|reside|located)\b[^?]{0,80}\b(?:new\s+york|california)\b/.test(normalizedQuestion)) {
+    return [
+      'Do you live in New York or California?',
+      'live in New York or California',
+    ];
+  }
+  if (/\bcertify\b[^?]{0,120}\b(?:true|complete|accurate)\b/.test(normalizedQuestion)) {
+    return [
+      'I certify that all information I have provided',
+      'true, complete, and accurate',
+    ];
+  }
+  if (/\bresume\b[^?]{0,80}\bpdf\s+format\b/.test(normalizedQuestion)) {
+    return [
+      'I acknowledge that my resume must be submitted in PDF format',
+      'resume must be submitted in PDF format',
+    ];
+  }
   if (
     /\b(?:onsite|on[\s-]?site|in[\s-]?office|office|hybrid)\b/.test(normalizedQuestion)
     && /\b(?:three|four|five|3|4|5)\s+days?\b/.test(normalizedQuestion)
@@ -1423,10 +1453,48 @@ function greenhouseKnownQuestionAliases(question: string, answer: string): strin
   return [];
 }
 
-function pushGreenhouseKnownQuestionAliases(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
+function greenhouseAkunaRequiredQuestionAliases(question: string, answer: string): string[] {
+  const normalizedQuestion = question.toLowerCase();
+  const normalizedAnswer = answer.trim().toLowerCase();
+  if (!['yes', 'no'].includes(normalizedAnswer)) return [];
+  if (/\btop\s+preference\b|\banswering\s+[“"]?yes[”"]?\s+below\b/.test(normalizedQuestion)) {
+    return ['this role is my top preference'];
+  }
+  if (/\b(?:options\s+market\s+making|trading\s+firm)\b/.test(normalizedQuestion)) {
+    return ['prior experience working at an options market making trading firm'];
+  }
+  if (/\b(?:live|reside|located)\b[^?]{0,80}\b(?:new\s+york|california)\b/.test(normalizedQuestion)) {
+    return ['live in New York or California'];
+  }
+  if (/\bcertify\b[^?]{0,120}\b(?:true|complete|accurate)\b/.test(normalizedQuestion)) {
+    return ['I certify that all information is true'];
+  }
+  if (/\bresume\b[^?]{0,80}\bpdf\s+format\b/.test(normalizedQuestion)) {
+    return ['resume must be submitted in PDF format'];
+  }
+  return [];
+}
+
+function packetLooksAkuna(packet: SubmissionPacket): boolean {
+  return /\bakuna\b/i.test(packet.jdText ?? '')
+    || packet.questions.some((item) => /\bakuna\b/i.test(item.question));
+}
+
+function pushGreenhouseKnownQuestionAliases(
+  actions: ManagedBrowserAction[],
+  packet: SubmissionPacket,
+  mode: 'all' | 'akunaRequired' | 'legacy' = 'all',
+) {
   const seen = new Set<string>();
+  if (mode === 'akunaRequired' && !packetLooksAkuna(packet)) return;
   for (const item of packet.questions) {
-    for (const alias of greenhouseKnownQuestionAliases(item.question, item.answer)) {
+    const akunaAliases = greenhouseAkunaRequiredQuestionAliases(item.question, item.answer);
+    const aliases = mode === 'akunaRequired'
+      ? akunaAliases
+      : mode === 'legacy' && akunaAliases.length > 0
+        ? []
+        : greenhouseKnownQuestionAliases(item.question, item.answer);
+    for (const alias of aliases) {
       const key = `${alias}\n${item.answer.trim()}`;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -1438,6 +1506,9 @@ function pushGreenhouseKnownQuestionAliases(actions: ManagedBrowserAction[], pac
         optional: true,
         timeout: MANAGED_FILL_TIMEOUT_MS,
       });
+      if (mode === 'akunaRequired') {
+        pushGreenhouseQuestionComboboxLabelActions(actions, alias, item.answer, 'greenhouse_known_question');
+      }
     }
   }
 }
@@ -2085,6 +2156,9 @@ export function buildManagedPortalActions(
 ): ManagedBrowserAction[] {
   const actions: ManagedBrowserAction[] = [];
   pushFixedFieldActions(actions, portal, packet);
+  if (portalFamily(portal) === 'greenhouse') {
+    pushGreenhouseKnownQuestionAliases(actions, packet, 'akunaRequired');
+  }
   // Reviewed questions include stored attestations and EEO decline-style answers when present.
   // The managed runner scopes every choice match to this question's container and verifies text
   // values after filling, so a missing or unaccepted value returns as a blocker instead of being
@@ -2151,7 +2225,7 @@ export function buildManagedPortalActions(
     }
   }
   if (portalFamily(portal) === 'greenhouse') {
-    pushGreenhouseKnownQuestionAliases(actions, packet);
+    pushGreenhouseKnownQuestionAliases(actions, packet, 'legacy');
     pushGreenhouseReferralSourceAliases(actions, packet);
     pushGreenhouseDemographicAliases(actions, packet);
   }

@@ -90,6 +90,7 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
   };
   const onboardingEligibility = workEligibilityFromSponsorshipAnswer(userRow?.sponsorship_answer);
   return {
+    full_name: academicStr('full_name'),
     phone: str('phone'),
     address_city: str('address_city'),
     address_state: str('address_state'),

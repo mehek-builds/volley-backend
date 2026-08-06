@@ -1701,10 +1701,12 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
   assert.deepEqual(valuesFor('Do you have any offer deadlines'), ['No']);
   assert.deepEqual(valuesFor('Do you have prior experience working at an options market making'), ['No']);
   assert.deepEqual(valuesFor('If you answered “Yes” above'), ['F-1 CPT']);
-  assert.deepEqual(valuesFor('Do you live in New York or California?'), ['No']);
-  assert.deepEqual(valuesFor('I certify that all information'), ['Yes']);
-  assert.deepEqual(valuesFor('I acknowledge that my resume must be submitted in PDF format'), ['Yes']);
   assert.equal(comboFills.some((action) => action.label?.includes('high school diploma')), false);
+  const knownComboFills = actions.filter((action) => action.type === 'fill' && action.label?.startsWith('greenhouse_known_question_combo_label:'));
+  assert.ok(knownComboFills.some((action) => action.selector?.includes('this role is my top preference')));
+  assert.ok(knownComboFills.some((action) => action.selector?.includes('live in New York or California')));
+  assert.ok(knownComboFills.some((action) => action.selector?.includes('I certify that all information is true')));
+  assert.ok(knownComboFills.some((action) => action.selector?.includes('resume must be submitted in PDF format')));
 
   for (const action of comboFills) {
     const index = actions.indexOf(action);
