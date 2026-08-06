@@ -491,12 +491,44 @@ function selectEvidenceValues(answer: string | undefined): string[] {
   return [...new Set(values)];
 }
 
+function academicEvidenceValuesForLabel(label: string, packet: SubmissionPacket): string[] {
+  const normalizedLabel = normalizeReviewQuestionLabel(label).toLowerCase();
+  const values: string[] = [];
+  if (/\bgraduation\s+month\b/.test(normalizedLabel)) values.push(...selectEvidenceValues(packet.graduationMonth));
+  if (/\bgraduation\s+year\b|\byear\s+of\s+graduation\b|\bexpected\s+graduation\s+year\b/.test(normalizedLabel)) {
+    values.push(...selectEvidenceValues(packet.graduationYear));
+  }
+  if (/\bgraduation\s+date\b|\bexpected\s+graduation\b|\bexpect\s+to\s+graduate\b|\bgraduate\s+or\s+complete\s+your\s+program\b/.test(normalizedLabel)) {
+    values.push(...selectEvidenceValues(packet.graduationDate));
+    values.push(...selectEvidenceValues(packet.graduationYear));
+  }
+  if (/\bgpa\b|\boverall\s+gpa\b|\bgrade\s+point\b/.test(normalizedLabel)) values.push(...selectEvidenceValues(packet.gpa));
+  if (/\bdiscipline\b|\bfield\s+of\s+study\b|\bmajor\b|\bcourse\b/.test(normalizedLabel)) {
+    values.push(...selectEvidenceValues(packet.major));
+    if (/computer science/i.test(packet.degree ?? '')) values.push('Computer Science');
+  }
+  if (/\bschool\b|\buniversity\b|\bcollege\b|\binstitution\b/.test(normalizedLabel)
+    && !/\bhigh\s+school\b/.test(normalizedLabel)
+    && !/\bgraduat/.test(normalizedLabel)) {
+    values.push(...selectEvidenceValues(packet.school));
+    if (/university of southern california/i.test(packet.school ?? '')) values.push('University of Southern California');
+  }
+  if (/\bdegree\b|\beducation\s+level\b|\blevel\s+of\s+education\b/.test(normalizedLabel)) {
+    values.push(...selectEvidenceValues(packet.degree));
+  }
+  if (/\bhow\s+did\s+you\s+hear\b|\bhear\s+about\b|\breferral\s+source\b|\bsource\b/.test(normalizedLabel)) {
+    values.push(...selectEvidenceValues(packet.referralSourceDefault ?? 'Company website'));
+  }
+  if (/\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b|\bnotice\s+at\s+collection\b|\bprocess\s+your\s+personal\s+data\b|\bprocessing\s+of\s+personal\s+data\b/.test(normalizedLabel)) {
+    values.push('Yes', 'I agree', 'Acknowledge/Confirm', 'Yes, I consent');
+  }
+  return [...new Set(values)];
+}
+
 function expectedGreenhouseRequiredValues(label: string, packet: SubmissionPacket): string[] {
   const normalizedLabel = normalizeReviewQuestionLabel(label);
   const values: string[] = [];
-  if (/\bgraduation\s+month\b/i.test(label)) values.push(...selectEvidenceValues(packet.graduationMonth));
-  if (/\bgraduation\s+year\b/i.test(label)) values.push(...selectEvidenceValues(packet.graduationYear));
-  if (/\bgpa\b/i.test(label)) values.push(...selectEvidenceValues(packet.gpa));
+  values.push(...academicEvidenceValuesForLabel(label, packet));
   for (const question of packet.questions) {
     const normalizedQuestion = normalizeReviewQuestionLabel(question.question);
     if (!normalizedQuestion) continue;
@@ -535,11 +567,10 @@ export function reconcileManagedProviderBlockers(
   });
 }
 
-function preparationEvidenceBlockers(result: { text?: string; filledFields?: string[] }, packet: SubmissionPacket): string[] {
-  return [
-    ...previewContentBlockers(result.text),
-    ...filledFieldBlockers(result.filledFields, packet),
-  ];
+export function preparationEvidenceBlockers(result: { text?: string; filledFields?: string[] }, packet: SubmissionPacket): string[] {
+  const previewBlockers = previewContentBlockers(result.text);
+  if (previewBlockers.length > 0) return previewBlockers;
+  return filledFieldBlockers(result.filledFields, packet);
 }
 
 export function attentionCategoriesForReasons(reasons: readonly string[]): ApplicationAttentionCategory[] {
