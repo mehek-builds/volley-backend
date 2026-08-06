@@ -33,7 +33,13 @@ import { warmRequirementCache } from '../engine/warmRequirements';
 import { postingRow, resolveJdText } from './jdMatch';
 import { baseResumeSelectionIssues } from '../llm/baseResume';
 import { deriveEditedTerms, readApplicationReview, type ApplicationReviewState } from '../lib/applicationReview';
-import { canonicalSupportedPortalUrl, detectPortal, isPortalSupported } from '../lib/portalSubmission';
+import {
+  canonicalMonitoredPortalUrl,
+  canonicalSupportedPortalUrl,
+  detectPortal,
+  greenhousePortalUrlNeedsBoardToken,
+  isPortalSupported,
+} from '../lib/portalSubmission';
 import { contentDispositionFileName, resumeFileNameForRole } from '../lib/resumeFileName';
 import { monitoredDescriptionHash, monitoredJdAgrees } from '../lib/monitoredPortalRepair';
 
@@ -90,7 +96,14 @@ function repairedHistorySpec(
   monitoredJobs: ReadonlyMap<string, { applyUrl: string; company: string; role: string; description: string; jdHash: string }>,
 ): unknown {
   const review = readApplicationReview(row.spec);
-  if (!review || (review.portal_url && isPortalSupported(review.portal_url))) return row.spec;
+  if (
+    !review
+    || (
+      review.portal_url
+      && isPortalSupported(review.portal_url)
+      && !greenhousePortalUrlNeedsBoardToken(review.portal_url)
+    )
+  ) return row.spec;
   const currentCanonicalUrl = canonicalSupportedPortalUrl(review.portal_url, review.ats_name);
   if (currentCanonicalUrl) {
     const spec = row.spec;
@@ -966,6 +979,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         id: monitored_jobs.id,
         apply_url: monitored_jobs.apply_url,
         ats_name: career_page_sources.ats_name,
+        board_token: career_page_sources.board_token,
         company_name: monitored_jobs.company_name,
         title: monitored_jobs.title,
         description: sql<string>`left(${monitored_jobs.description}, 60000)`,
@@ -978,7 +992,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       ));
     const monitoredJobs = new Map(
       monitoredRows
-        .map((job) => ({ ...job, apply_url: canonicalSupportedPortalUrl(job.apply_url, job.ats_name) }))
+        .map((job) => ({ ...job, apply_url: canonicalMonitoredPortalUrl(job.apply_url, job.ats_name, job.board_token) }))
         .filter((job): job is typeof job & { apply_url: string } => Boolean(job.apply_url))
         .map((job) => [job.id, {
           applyUrl: job.apply_url,

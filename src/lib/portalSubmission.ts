@@ -2064,6 +2064,43 @@ export function canonicalSupportedPortalUrl(rawUrl: string | undefined, atsName?
   return undefined;
 }
 
+export function canonicalMonitoredPortalUrl(
+  rawUrl: string | undefined,
+  atsName?: string | null,
+  boardToken?: string | null,
+): string | undefined {
+  const canonical = canonicalSupportedPortalUrl(rawUrl, atsName);
+  if (canonical && !greenhousePortalUrlNeedsBoardToken(canonical)) return canonical;
+  if (!rawUrl || atsName?.trim().toLowerCase() !== 'greenhouse') return undefined;
+  const token = boardToken?.trim();
+  if (!token) return undefined;
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== 'https:') return undefined;
+    const greenhouseJobId = url.searchParams.get('gh_jid') ?? url.searchParams.get('token') ?? '';
+    if (!/^\d+$/.test(greenhouseJobId)) return undefined;
+    return `https://job-boards.greenhouse.io/${encodeURIComponent(token)}/jobs/${greenhouseJobId}`;
+  } catch {
+    return undefined;
+  }
+}
+
+export function greenhousePortalUrlNeedsBoardToken(rawUrl: string | undefined): boolean {
+  if (!rawUrl) return false;
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== 'https:') return false;
+    const host = url.hostname.toLowerCase();
+    return (host === 'boards.greenhouse.io' || host === 'job-boards.greenhouse.io')
+      && url.pathname === '/embed/job_app'
+      && /^\d+$/.test(url.searchParams.get('token') ?? '')
+      && !url.searchParams.get('for')
+      && !url.searchParams.get('b');
+  } catch {
+    return false;
+  }
+}
+
 export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): string {
   if (portal !== 'ashby') return rawUrl;
   const url = new URL(rawUrl);
