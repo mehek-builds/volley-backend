@@ -346,6 +346,8 @@ test('managed controlled-portal actions include reviewed fields, resume upload, 
       'waitForSelector',
       'fill',
       'fill',
+      'fillByLabelText',
+      'fillByLabelText',
       'fill',
       'upload',
       'upload',
@@ -708,7 +710,7 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
   for (const action of questionActions) {
     assert.equal(action.optional, true, `"${action.text}" must not be able to abort the run`);
   }
-  // first_name, last_name, email (phone and location are omitted from this fixture), resume, then
+  // first_name, last_name, preferred names, email (phone and location are omitted from this fixture), resume, then
   // the two optional reviewed questions.
   assert.deepEqual(
     actions
@@ -721,6 +723,8 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
       'waitForSelector',
       'fill',
       'fill',
+      'fillByLabelText',
+      'fillByLabelText',
       'fill',
       'upload',
       'upload',
@@ -760,6 +764,30 @@ test('managed Greenhouse question fills prefer rediscovered selectors over label
   assert.equal(questionAction?.selector, 'textarea[name="job_application[answers_attributes][0][text_value]"]');
   assert.equal(questionAction?.value, '3.89');
   assert.equal(actions.some((action) => action.type === 'fillByLabelText' && action.text === 'Please indicate your overall GPA.'), false);
+});
+
+test('managed Greenhouse durable textarea selectors do not get live select retries', () => {
+  const questions = Array.from({ length: 35 }, (_, index) => ({
+    question: `Describe project ${index + 1}`,
+    answer: `Project answer ${index + 1}`,
+    portalSelector: `textarea[name="job_application[answers_attributes][${index}][text_value]"]`,
+    portalInputType: 'textarea',
+  }));
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions,
+  }, true);
+
+  assert.equal(actions.some((action) => action.label?.startsWith('question_select_live:')), false);
+  assert.equal(actions.some((action) => action.type === 'select' && action.label?.startsWith('question')), false);
+  assert.ok(actions.some((action) =>
+    action.type === 'fill'
+    && action.selector === 'textarea[name="job_application[answers_attributes][0][text_value]"]'
+    && action.value === 'Project answer 1'));
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
 });
 
 test('managed Greenhouse academic questions confirm rediscovered autocomplete selectors', () => {
@@ -1067,6 +1095,8 @@ test('Greenhouse fills academic fields from the submission packet', () => {
   assert.deepEqual(
     byLabel.map((action) => [action.text, action.value, action.label]),
     [
+      ['Preferred First Name', 'Taylor', 'preferred_first_name'],
+      ['Preferred Last Name', 'Example', 'preferred_last_name'],
       ['What is your graduation date?', 'May 2028', 'graduation_date'],
       ['Graduation Date', 'May 2028', 'graduation_date_label'],
       ['Expected Graduation Date', 'May 2028', 'graduation_date_expected'],
@@ -1540,7 +1570,15 @@ test('Greenhouse replays Samsara required selects with exact live options', () =
       { question: 'When are you expecting to graduate from your degree?', answer: 'May 2028' },
       { question: 'Are you majoring in STEM (Computer Science, Electrical Engineering, Data Science, Cog Sci, Information Management/Systems, Mathematics, Machine Learning, etc.)?', answer: 'Yes' },
       { question: 'AI Policy for Interviewers', answer: 'Yes' },
-      { question: 'How do you identify? (gender identity)', answer: 'Female' },
+      { question: 'How do you identify? (gender identity)', answer: 'Female', portal_selector: '[data-litos-discovered-25]', portal_input_type: 'text' },
+      { question: 'How do you identify? (race/ethnicity)', answer: 'Decline to self-identify', portal_selector: '[data-litos-discovered-26]', portal_input_type: 'text' },
+      { question: 'If you are based in the US, what is your veteran status?', answer: 'No', portal_selector: '[data-litos-discovered-27]', portal_input_type: 'text' },
+      {
+        question: 'Do you have a physical or mental disability, impairment, or condition that substantially limits major life activity?',
+        answer: 'No',
+        portal_selector: '[data-litos-discovered-28]',
+        portal_input_type: 'text',
+      },
     ],
   });
 
@@ -1550,7 +1588,13 @@ test('Greenhouse replays Samsara required selects with exact live options', () =
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('processing of personal data') && label.endsWith('Acknowledge/Confirm')));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('how did you hear about this opportunity') && label.endsWith('Samsara Careers Site')));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('where have you learned about samsara') && label.endsWith('Samsara blog or website')));
-  assert.ok(actions.some((action) => action.type === 'fill' && action.selector === '[data-litos-discovered-23] input[role="combobox"]' && action.value === 'Samsara blog or website'));
+  assert.ok(actions.some((action) => action.type === 'select' && action.selector === '[data-litos-discovered-23]' && action.value === 'Samsara blog or website'));
+  assert.ok(actions.some((action) => action.type === 'select' && action.selector === '[data-litos-discovered-25]' && action.value === 'Woman'));
+  assert.ok(actions.some((action) => action.type === 'select' && action.selector === '[data-litos-discovered-26]' && action.value === 'Decline To Self Identify'));
+  assert.ok(actions.some((action) => action.type === 'select' && action.selector === '[data-litos-discovered-27]' && action.value === 'I am not a protected veteran'));
+  assert.ok(actions.some((action) => action.type === 'select' && action.selector === '[data-litos-discovered-28]' && action.value === 'No, I do not have a disability and have not had one in the past'));
+  assert.ok(actions.some((action) => action.type === 'fillByLabelText' && action.text === 'Preferred First Name' && action.value === 'Mehek'));
+  assert.ok(actions.some((action) => action.type === 'fillByLabelText' && action.text === 'Preferred Last Name' && action.value === 'Mandal'));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('expecting to graduate') && label.endsWith('2028')));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('majoring in stem') && label.endsWith('Yes')));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('ai policy for interviewers') && label.endsWith('Yes')));
@@ -1963,6 +2007,32 @@ test('Greenhouse replays Databricks export-control checkbox answers by exact opt
   assert.equal(checkboxClicks.some((action) => action.selector?.startsWith('label:has-text')), false);
   assert.ok(checkboxClicks.every((action) => action.optional === true));
   assert.ok(checkboxClicks.every((action) => (action.timeout ?? Infinity) < 30_000));
+});
+
+test('Greenhouse clicks reviewed durable checkbox selectors before exact-option fallbacks', () => {
+  const selector = 'input[id="question_35110536002[]_221056618002"]';
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question: 'Please confirm whether any of the below applies to you. Select all that apply. Note: This information will only be used to ensure compliance with U.S. sanctions and export controls.',
+        answer: 'None of the above',
+        portalSelector: selector,
+        portalInputType: 'checkbox',
+      },
+    ],
+  });
+
+  assert.ok(actions.some((action) =>
+    action.type === 'click'
+    && action.selector === selector
+    && action.label?.startsWith('question_choice_selector:')));
+  assert.ok(actions.some((action) =>
+    action.type === 'click'
+    && action.selector === 'input[name="question_35110536002[]"][value="221056618002"]'));
 });
 
 test('Greenhouse school aliases do not strip comma-separated campus names generically', () => {

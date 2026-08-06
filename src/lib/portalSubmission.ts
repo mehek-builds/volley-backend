@@ -1138,6 +1138,15 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string, c
   if (/\bgender\s+identity\b/.test(normalizedQuestion) && /^female$/i.test(answer.trim())) {
     values.unshift('Woman');
   }
+  if (/\brace\/ethnicity\b|\brace\b|\bethnicit/.test(normalizedQuestion) && /decline|self-ident/i.test(answer.trim())) {
+    values.unshift('Decline To Self Identify', 'Decline to self-identify', 'I don\'t wish to answer');
+  }
+  if (/\bveteran\b/.test(normalizedQuestion) && /^no$/i.test(answer.trim())) {
+    values.unshift('I am not a protected veteran');
+  }
+  if (/\bdisability\b|\bimpairment\b/.test(normalizedQuestion) && /^no$/i.test(answer.trim())) {
+    values.unshift('No, I do not have a disability and have not had one in the past');
+  }
   if (/^processing\s+of\s+personal\s+data$/i.test(question.trim()) && /^(?:yes|acknowledge|acknowledge\/confirm|confirm)$/i.test(answer.trim())) {
     values.unshift('Acknowledge/Confirm');
   }
@@ -1213,6 +1222,11 @@ function isSamsaraLearnedAboutQuestion(question: string): boolean {
   return /\bwhere\s+have\s+you\s+learned\s+about\s+samsara\b/i.test(question);
 }
 
+function isGreenhouseRuntimeSelectReplayQuestion(question: string): boolean {
+  if (!isGreenhouseReactSelectQuestion(question)) return false;
+  return /\b(?:how\s+did\s+you\s+hear|where\s+have\s+you\s+learned|gender|race|ethnicit|veteran|disability|processing\s+of\s+personal\s+data)\b/i.test(question);
+}
+
 function isGreenhouseEducationComboboxQuestion(question: string): boolean {
   return /\b(?:school|degree|discipline)--\d+\b/i.test(question);
 }
@@ -1250,6 +1264,20 @@ function pushGreenhouseQuestionComboboxActions(
         `${labelPrefix}_combo:${index}:${selectorIndex}:${questionText.slice(0, 80)}`,
       );
     }
+  }
+}
+
+function pushGreenhouseQuestionSelectActions(
+  actions: ManagedBrowserAction[],
+  selector: string,
+  questionText: string,
+  answer: string,
+  labelPrefix: string,
+  contextText = '',
+) {
+  const values = greenhouseComboboxValuesForQuestion(questionText, answer, contextText).slice(0, 3);
+  for (const [index, value] of values.entries()) {
+    managedSelect(actions, selector, value, `${labelPrefix}_select_live:${index}:${questionText.slice(0, 80)}`);
   }
 }
 
@@ -1660,11 +1688,13 @@ function managedActionLabelBase(action: ManagedBrowserAction): string | undefine
 
 const GREENHOUSE_LOW_PRIORITY_ACTION_GROUPS = [
   /^greenhouse_demographic/,
+  /^preferred_(?:first|last)_name$/,
   /^question_select:/,
   /^greenhouse_known_question:/,
   /^question:(?:If yes|How familiar|Do you currently reside|Are you currently enrolled in a Masters|Do you identify as LGBTQIA|Which category best describes you|Gender Identity|Veteran Status)/,
   /^question_combo_label:.*If you answered.*current immigration status/,
   /^preferred_location_combo:[12]:/,
+  /^education_graduation_date_combo:/,
   /^(?:graduation_date|graduation_date_label|graduation_date_expected|education_end_month|education_end_year|education_graduation_month|education_expected_graduation_year|education_discipline_label|gpa_question)$/,
   /^first_name_label$/,
   /^education_degree_combo:2$/,
@@ -2005,6 +2035,8 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     // Jump Trading retry proved the run now clears name/email and stops at the resume file input.
     managedFill(actions, GREENHOUSE_FIRST_NAME_SELECTOR, parts[0], 'first_name');
     managedFill(actions, GREENHOUSE_LAST_NAME_SELECTOR, parts.slice(1).join(' '), 'last_name');
+    managedFillByLabel(actions, 'Preferred First Name', parts[0], 'preferred_first_name');
+    managedFillByLabel(actions, 'Preferred Last Name', parts.slice(1).join(' '), 'preferred_last_name');
     managedFill(actions, GREENHOUSE_EMAIL_SELECTOR, packet.email, 'email');
     managedComboboxFill(actions, '#country', countryForPhoneField(packet.phone, packet.country), 'phone_country');
     managedFill(actions, GREENHOUSE_PHONE_SELECTOR, phoneForPortalField(portal, packet.phone), 'phone');
@@ -2027,7 +2059,7 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     for (const selector of greenhouseCoreFieldEvidenceSelectors('resume')) {
       managedUpload(actions, selector, 'resume', packet.resume, packet.resumeName);
     }
-    managedUpload(actions, 'input#cover_letter[type="file"], input[type="file"][name*="cover_letter" i]', 'cover_letter', packet.coverLetter, packet.coverLetterName);
+    managedUpload(actions, coverLetterUploadSelector(portal), 'cover_letter', packet.coverLetter, packet.coverLetterName);
     actions.push({
       type: 'click',
       selector: GREENHOUSE_CANDIDATE_PRIVACY_CHECKBOX_SELECTOR,
@@ -2242,12 +2274,12 @@ export function buildManagedPortalActions(
     const portalInputType = reviewQuestionPortalInputType(item);
     const portalSelector = durablePortalSelector(rawPortalSelector);
     const runtimeGreenhouseSelector = portalFamily(portal) === 'greenhouse'
-      && isSamsaraLearnedAboutQuestion(questionText)
+      && isGreenhouseRuntimeSelectReplayQuestion(questionText)
       && rawPortalSelector?.trim().startsWith('[data-litos-discovered-')
       ? rawPortalSelector.trim()
       : undefined;
     if (runtimeGreenhouseSelector) {
-      pushGreenhouseQuestionComboboxActions(actions, runtimeGreenhouseSelector, questionText, item.answer, 'question', packet.jdText);
+      pushGreenhouseQuestionSelectActions(actions, runtimeGreenhouseSelector, questionText, item.answer, 'question', packet.jdText);
       pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');
     }
     if (portalSelector) {
@@ -2258,6 +2290,13 @@ export function buildManagedPortalActions(
       }
       if (/^(?:checkbox|radio)$/i.test(portalInputType ?? '')) {
         if (portalFamily(portal) === 'greenhouse') {
+          actions.push({
+            type: 'click',
+            selector: portalSelector,
+            label: `question_choice_selector:${questionText.slice(0, 80)}`,
+            optional: true,
+            timeout: MANAGED_FILL_TIMEOUT_MS,
+          });
           pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');
         }
         continue;
