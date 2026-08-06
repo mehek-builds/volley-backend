@@ -84,6 +84,11 @@ const extensionOutcomeBodySchema = z.object({
   confirmation_text: z.string().max(2000).optional(),
   final_url: extensionReceiptUrlSchema,
 });
+const handoffCompleteBodySchema = z.object({
+  outcome: z.enum(['cleared', 'submitted']).default('cleared'),
+  confirmation_text: z.string().max(2000).optional(),
+  final_url: extensionReceiptUrlSchema.optional(),
+}).default({ outcome: 'cleared' });
 
 type StoredSpec = Record<string, unknown>;
 type StoredContact = {
@@ -840,15 +845,59 @@ export async function applicationRoutes(fastify: FastifyInstance) {
     async (request: FastifyRequest, reply: FastifyReply) => {
       const row = await ownedResume(request, reply);
       if (!row) return;
+      const parsed = handoffCompleteBodySchema.safeParse(request.body ?? {});
+      if (!parsed.success) return reply.status(400).send({ error: 'Invalid handoff completion request' });
       const stored = row.spec as StoredSpec;
       const current = readApplicationReview(stored);
       if (!current || current.status !== 'needs_attention') {
         return reply.status(409).send({ error: 'This application is not waiting on you' });
       }
+      const now = new Date().toISOString();
       if (current.handoff_expires_at && Date.parse(current.handoff_expires_at) < Date.now()) {
         return reply.status(409).send({ error: 'That took too long and timed out. Start the application again.' });
       }
-      const next = { ...current, status: 'ready_for_final_approval' as const, attention_reason: undefined, updated_at: new Date().toISOString() };
+      if (parsed.data.outcome === 'submitted') {
+        if (!current.browser_session_id) {
+          return reply.status(409).send({ error: 'Open the company page first so we can attach this submission to a live handoff.' });
+        }
+        const finalUrl = parsed.data.final_url ?? current.portal_url;
+        if (!finalUrl) return reply.status(409).send({ error: 'This application is missing the company page URL' });
+        const next = {
+          ...current,
+          status: 'submitted' as const,
+          submitted_at: now,
+          attention_reason: undefined,
+          submission_error: undefined,
+          updated_at: now,
+          receipt: {
+            confirmation_text: parsed.data.confirmation_text?.trim()
+              || 'Submitted by the applicant in the live company page',
+            final_url: finalUrl,
+            captured_at: now,
+            source: 'attended_handoff' as const,
+          },
+        };
+        const submitted = await db.update(generated_resumes)
+          .set({
+            spec: reviewSpec(next),
+            pipeline_stage: 'applied',
+            pipeline_stage_at: new Date(now),
+          })
+          .where(and(
+            eq(generated_resumes.id, row.id),
+            eq(generated_resumes.user_id, request.jwtPayload!.userId),
+            sql`${generated_resumes.spec}->'_review'->>'status' = 'needs_attention'`,
+          ))
+          .returning({ id: generated_resumes.id });
+        if (submitted.length === 0) {
+          const refreshed = await ownedResume(request, reply);
+          if (!refreshed) return;
+          const review = readApplicationReview(refreshed.spec);
+          return reply.status(202).send({ application_id: row.id, review: review ?? current });
+        }
+        return reply.send({ application_id: row.id, review: next, cover_letter: storedCoverLetter(row) });
+      }
+      const next = { ...current, status: 'ready_for_final_approval' as const, attention_reason: undefined, updated_at: now };
       const completed = await db.update(generated_resumes)
         .set({ spec: reviewSpec(next) })
         .where(and(

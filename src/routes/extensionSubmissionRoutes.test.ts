@@ -19,3 +19,18 @@ test('extension outcomes only mark confirmed claims applied', () => {
   assert.match(source, /current\.submission_claim_id !== parsed\.data\.claim_id/);
   assert.match(source, /extensionReceiptUrlSchema/);
 });
+
+test('attended handoff can record a user-confirmed submission without an ATS key', () => {
+  assert.match(source, /handoffCompleteBodySchema/);
+  assert.match(source, /submission\/handoff-complete'[\s\S]*?preHandler: requireAuth/);
+  assert.match(source, /parsed\.data\.outcome === 'submitted'/);
+  assert.match(source, /!current\.browser_session_id/);
+  assert.match(source, /source: 'attended_handoff'/);
+  assert.match(source, /pipeline_stage: 'applied'/);
+  assert.match(source, /Submitted by the applicant in the live company page/);
+  const handler = source.slice(source.indexOf("'/applications/:id/submission/handoff-complete'"));
+  assert.ok(
+    handler.indexOf('handoff_expires_at') < handler.indexOf("parsed.data.outcome === 'submitted'"),
+    'expired handoffs must be rejected before either completion outcome mutates state',
+  );
+});
