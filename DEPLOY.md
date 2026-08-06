@@ -71,7 +71,8 @@ Set these for Production (and Preview if you want):
 | `LITOS_EMPLOYER_API_SUBMISSION_CHANNELS_JSON` | JSON array of allowlisted Greenhouse, Ashby, or Lever submit channels; references key env names, never raw secrets |
 | `LITOS_APPLICATION_EMAIL_DOMAIN` | domain that receives employer application mail for generated aliases, for example `apply.trylitos.com` |
 | `LITOS_APPLICATION_EMAIL_ALIAS_SECRET` | stable secret used to mint opaque per-application alias local parts |
-| `LITOS_INBOUND_EMAIL_WEBHOOK_SECRET` | HMAC secret for signed `POST /application-email/inbound` calls from the inbound email provider |
+| `RESEND_WEBHOOK_SECRET` | Resend `email.received` webhook signing secret, returned when the webhook is created |
+| `LITOS_INBOUND_EMAIL_WEBHOOK_SECRET` | compatibility HMAC secret for signed non-Resend `POST /application-email/inbound` calls |
 | `LEMONSQUEEZY_CHECKOUT_URL` | reusable live product URL containing `/checkout/buy/` |
 | `LEMONSQUEEZY_VARIANT_ID` | numeric ID of the $49.99 monthly Pro variant |
 | `LEMONSQUEEZY_WEBHOOK_SECRET` | signing secret configured on the Lemon Squeezy webhook |
@@ -282,7 +283,8 @@ job-board reads can work without this, but application POSTs still need an allow
 `LITOS_APPLICATION_EMAIL_DOMAIN` is set, submission packets use a per-application Litos alias as
 the applicant email and keep the user's verified account email as the forwarding destination. Point
 the inbound email provider for that domain at `POST /application-email/inbound`. The caller must
-send `X-Litos-Webhook-Timestamp` as epoch milliseconds and `X-Litos-Webhook-Signature` as
+send Resend's `svix-id`, `svix-timestamp`, and `svix-signature` headers, verified against
+`RESEND_WEBHOOK_SECRET`. Non-Resend test providers can send `X-Litos-Webhook-Timestamp` as epoch milliseconds and `X-Litos-Webhook-Signature` as
 `hex(hmac_sha256(LITOS_INBOUND_EMAIL_WEBHOOK_SECRET, timestamp + "." + JSON.stringify(body)))`
 within a five minute freshness window. The webhook stores the inbound message against the
 application, forwards it to the user through Resend, and sets replies to go back to the original

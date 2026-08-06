@@ -16,6 +16,8 @@ test('inbound application email route avoids raw provider payload storage and st
   assert.match(route, /timingSafeEqual/);
   assert.match(route, /X-Litos-Webhook-Timestamp/i);
   assert.match(route, /X-Litos-Webhook-Signature/i);
+  assert.match(route, /svix-signature/);
+  assert.match(route, /svixSecretBytes/);
   assert.match(route, /createHmac\('sha256'/);
   assert.match(route, /WEBHOOK_MAX_SKEW_MS/);
   assert.match(route, /rawJson:\s*\{/);

@@ -45,8 +45,46 @@ function safeEqual(left: string, right: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+function rawPayload(body: unknown): string {
+  if (Buffer.isBuffer(body)) return body.toString('utf8');
+  if (typeof body === 'string') return body;
+  return JSON.stringify(body ?? {});
+}
+
+function parsedJsonBody(body: unknown): unknown {
+  if (Buffer.isBuffer(body) || typeof body === 'string') {
+    return JSON.parse(rawPayload(body));
+  }
+  return body;
+}
+
+function svixSecretBytes(secret: string): Buffer {
+  const value = secret.startsWith('whsec_') ? secret.slice('whsec_'.length) : secret;
+  return Buffer.from(value, 'base64');
+}
+
+function svixSignatureMatches(request: FastifyRequest, secret: string): boolean {
+  const idHeader = request.headers['svix-id'];
+  const timestampHeader = request.headers['svix-timestamp'];
+  const signatureHeader = request.headers['svix-signature'];
+  const id = Array.isArray(idHeader) ? idHeader[0] : idHeader;
+  const timestamp = Array.isArray(timestampHeader) ? timestampHeader[0] : timestampHeader;
+  const provided = Array.isArray(signatureHeader) ? signatureHeader[0] : signatureHeader;
+  if (!id || !timestamp || !provided) return false;
+  const epochMs = Number(timestamp) * 1000;
+  if (!Number.isFinite(epochMs) || Math.abs(Date.now() - epochMs) > WEBHOOK_MAX_SKEW_MS) return false;
+  const expected = createHmac('sha256', svixSecretBytes(secret))
+    .update(`${id}.${timestamp}.${rawPayload(request.body)}`)
+    .digest('base64');
+  return provided
+    .split(' ')
+    .map((part) => part.trim())
+    .some((part) => part.startsWith('v1,') && safeEqual(part.slice(3), expected));
+}
+
 function inboundSecretMatches(request: FastifyRequest): boolean {
   const secret = inboundWebhookSecret();
+  if (secret && svixSignatureMatches(request, secret)) return true;
   const timestampHeader = request.headers['x-litos-webhook-timestamp'];
   const signatureHeader = request.headers['x-litos-webhook-signature'];
   const timestamp = Array.isArray(timestampHeader) ? timestampHeader[0] : timestampHeader;
@@ -55,7 +93,7 @@ function inboundSecretMatches(request: FastifyRequest): boolean {
   const epochMs = Number(timestamp);
   if (!Number.isFinite(epochMs) || Math.abs(Date.now() - epochMs) > WEBHOOK_MAX_SKEW_MS) return false;
   const expected = createHmac('sha256', secret)
-    .update(`${timestamp}.${JSON.stringify(request.body ?? {})}`)
+    .update(`${timestamp}.${rawPayload(request.body)}`)
     .digest('hex');
   return safeEqual(provided, expected);
 }
@@ -93,7 +131,13 @@ function unauthorized(reply: FastifyReply) {
 }
 
 async function inboundEmailFromWebhookBody(body: unknown): Promise<InboundApplicationEmail | null> {
-  const resend = resendReceivedBodySchema.safeParse(body);
+  let parsed: unknown;
+  try {
+    parsed = parsedJsonBody(body);
+  } catch {
+    return null;
+  }
+  const resend = resendReceivedBodySchema.safeParse(parsed);
   if (resend.success) {
     const sanitized = {
       rawJson: {
@@ -116,7 +160,7 @@ async function inboundEmailFromWebhookBody(body: unknown): Promise<InboundApplic
     return retrieveResendReceivedEmail({ emailId: resend.data.data.email_id, fallback });
   }
 
-  const direct = directInboundBodySchema.safeParse(body);
+  const direct = directInboundBodySchema.safeParse(parsed);
   if (!direct.success) return null;
   const sanitized = {
     rawJson: {
@@ -141,6 +185,10 @@ async function inboundEmailFromWebhookBody(body: unknown): Promise<InboundApplic
 }
 
 export async function applicationEmailRoutes(fastify: FastifyInstance) {
+  fastify.addContentTypeParser('application/json', { parseAs: 'buffer' }, (_request, body, done) => {
+    done(null, body);
+  });
+
   fastify.get('/application-email', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
     const aliases = await db
