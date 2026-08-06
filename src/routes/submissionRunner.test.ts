@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   applicationContextForQuestionResolution,
+  atsApiSubmissionEnabled,
   discoverAndResolveQuestions,
   readMostRecentRole,
+  sanitizeEeoPrefs,
   shouldUseLocalControlledBrowser,
   submissionGraduationDateParts,
   type ResumeRow,
@@ -125,6 +127,27 @@ test('onboarding sponsorship answers keep non-US-authorized cases explicit', () 
   });
 });
 
+test('ATS API submission is disabled unless explicitly enabled', () => {
+  assert.equal(atsApiSubmissionEnabled({}), false);
+  assert.equal(atsApiSubmissionEnabled({ LITOS_ATS_API_SUBMISSION_ENABLED: 'false' }), false);
+  assert.equal(atsApiSubmissionEnabled({ LITOS_ATS_API_SUBMISSION_ENABLED: '1' }), false);
+  assert.equal(atsApiSubmissionEnabled({ LITOS_ATS_API_SUBMISSION_ENABLED: 'true' }), true);
+});
+
+test('malformed EEO preferences are dropped before packet building can trim them', () => {
+  assert.deepEqual(sanitizeEeoPrefs({
+    gender: ' Female ',
+    race: true,
+    veteran_status: '',
+    sexual_orientation: 'Heterosexual',
+  }), {
+    gender: 'Female',
+    sexual_orientation: 'Heterosexual',
+  });
+  assert.equal(sanitizeEeoPrefs({ gender: true }), null);
+  assert.equal(sanitizeEeoPrefs(['Female']), null);
+});
+
 test('the controlled QA portal uses the managed browser in production', () => {
   const previousProvider = process.env.BROWSER_PROVIDER;
   try {
@@ -181,6 +204,241 @@ test('discovered US work authorization and sponsorship become reviewed Yes answe
     [
       { question: 'Are you legally authorized to work in the United States?', answer: 'Yes' },
       { question: 'Will you now or in the future require sponsorship for employment visa status?', answer: 'Yes' },
+    ],
+  );
+});
+
+test('select and radio discoveries resolve from stored profile without direct textbox selectors', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'This internship is based in San Francisco, California.',
+    role: 'Software Engineering Intern',
+    portal_url: 'https://example.greenhouse.io/jobs/123',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+
+  const result = await discoverAndResolveQuestions(
+    [
+      {
+        label: 'Are you able to work onsite 4 days a week?',
+        selector: 'select[name="question_1"]',
+        inputType: 'select',
+        maxLength: null,
+      },
+      {
+        label: 'Are you currently enrolled in a degree program?',
+        selector: 'input[name="question_2"][type="radio"]',
+        inputType: 'radio',
+        maxLength: null,
+      },
+    ],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { currently_enrolled: true, grad_date: 'May 2028', grad_year: 2028 },
+    true,
+    'greenhouse',
+  );
+
+  assert.deepEqual(result.attentionReasons, []);
+  assert.deepEqual(
+    result.questions.map((question) => ({
+      question: question.question,
+      answer: question.answer,
+      portal_selector: question.portal_selector,
+    })),
+    [
+      { question: 'Are you able to work onsite 4 days a week?', answer: 'Yes', portal_selector: undefined },
+      { question: 'Are you currently enrolled in a degree program?', answer: 'Yes', portal_selector: undefined },
+    ],
+  );
+});
+
+test('combobox discoveries resolve stored academic facts without direct text selectors', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'This internship asks for an education history.',
+    role: 'Software Engineering Intern',
+    portal_url: 'https://example.greenhouse.io/jobs/123',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+
+  const result = await discoverAndResolveQuestions(
+    [
+      {
+        label: 'Degree',
+        selector: '[data-litos-discovered-6]',
+        inputType: 'combobox',
+        maxLength: null,
+      },
+    ],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { degree: 'Bachelor of Science in Computer Science' },
+    true,
+    'greenhouse',
+  );
+
+  assert.deepEqual(result.attentionReasons, []);
+  assert.deepEqual(
+    result.questions.map((question) => ({
+      question: question.question,
+      answer: question.answer,
+      portal_selector: question.portal_selector,
+    })),
+    [
+      { question: 'Degree', answer: 'Bachelor\'s Degree', portal_selector: undefined },
+    ],
+  );
+});
+
+test('managed Greenhouse education combobox labels are not replayed as text fields', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'This internship asks for an education history.',
+    role: 'Software Engineering Intern',
+    portal_url: 'https://example.greenhouse.io/jobs/123',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+
+  const result = await discoverAndResolveQuestions(
+    [
+      {
+        label: 'degree* degree--0',
+        selector: '[data-litos-discovered-6]',
+        inputType: 'text',
+        maxLength: null,
+      },
+    ],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { degree: 'Bachelor of Science in Computer Science' },
+    true,
+    'greenhouse',
+  );
+
+  assert.deepEqual(result.questions.map((question) => ({
+    question: question.question,
+    answer: question.answer,
+    portal_selector: question.portal_selector,
+  })), [
+    { question: 'degree* degree--0', answer: 'Bachelor\'s Degree', portal_selector: undefined },
+  ]);
+});
+
+test('existing reviewed choice answers do not keep direct selectors on retry', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'This internship is based in San Francisco, California.',
+    role: 'Software Engineering Intern',
+    portal_url: 'https://example.greenhouse.io/jobs/123',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [
+      {
+        id: 'q-existing',
+        question: 'Are you currently enrolled in a degree program?',
+        answer: 'Yes',
+        kind: 'required',
+        required: false,
+        portal_selector: 'input[name="question_2"][type="radio"]',
+      },
+    ],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+
+  const result = await discoverAndResolveQuestions(
+    [
+      {
+        label: 'Are you currently enrolled in a degree program?',
+        selector: 'input[name="question_2"][type="radio"]',
+        inputType: 'radio',
+        maxLength: null,
+      },
+    ],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { currently_enrolled: true },
+    true,
+    'greenhouse',
+  );
+
+  assert.equal(result.questions.length, 1);
+  assert.equal(result.questions[0]?.id, 'q-existing');
+  assert.equal(result.questions[0]?.answer, 'Yes');
+  assert.equal(result.questions[0]?.portal_selector, undefined);
+});
+
+test('rediscovered profile-backed questions replace stale drafted retry answers', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'This internship is based in Austin, Texas.',
+    role: 'Marketing Programs and Analytics Intern',
+    portal_url: 'https://example.greenhouse.io/jobs/123',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [
+      {
+        id: 'degree-existing',
+        question: 'If you are enrolled in university, what degree are you currently pursuing?',
+        answer: "I'm pursuing a degree at USC.",
+        kind: 'essay',
+        required: false,
+        portal_selector: '[data-litos-discovered-1]',
+      },
+      {
+        id: 'gender-existing',
+        question: 'How do you currently describe your gender identity? * 4000408002',
+        answer: 'I prefer to focus on my qualifications.',
+        kind: 'essay',
+        required: false,
+        portal_selector: '[data-litos-discovered-2]',
+      },
+    ],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+
+  const result = await discoverAndResolveQuestions(
+    [
+      {
+        label: 'If you are enrolled in university, what degree are you currently pursuing?',
+        selector: '[data-litos-discovered-1]',
+        inputType: 'combobox',
+        maxLength: null,
+      },
+      {
+        label: 'How do you currently describe your gender identity? * 4000408002',
+        selector: '[data-litos-discovered-2]',
+        inputType: 'select',
+        maxLength: null,
+      },
+    ],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { degree: 'Bachelor of Science in Computer Science', eeo_prefs: { gender: 'Female' } },
+    true,
+    'greenhouse',
+  );
+
+  assert.deepEqual(result.attentionReasons, []);
+  assert.deepEqual(
+    result.questions.map((question) => ({ id: question.id, answer: question.answer, kind: question.kind })),
+    [
+      { id: 'degree-existing', answer: 'Bachelor\'s Degree', kind: 'required' },
+      { id: 'gender-existing', answer: 'Female', kind: 'required' },
     ],
   );
 });

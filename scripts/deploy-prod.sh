@@ -30,6 +30,26 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+EXPECTED_PROJECT_ID="prj_5gPI7ADAT5M26VIxhiAKe1efsJPi"
+EXPECTED_PROJECT_NAME="student-outreach-backend"
+PROJECT_FILE=".vercel/project.json"
+
+if [ ! -f "$PROJECT_FILE" ]; then
+  echo "REFUSING: $PROJECT_FILE is missing." >&2
+  echo "A CLI deploy from an unlinked checkout can create or deploy the wrong Vercel project." >&2
+  exit 1
+fi
+
+PROJECT_ID="$(node -e "const p=require('./$PROJECT_FILE'); process.stdout.write(String(p.projectId || ''))")"
+PROJECT_NAME="$(node -e "const p=require('./$PROJECT_FILE'); process.stdout.write(String(p.projectName || ''))")"
+if [ "$PROJECT_ID" != "$EXPECTED_PROJECT_ID" ] || [ "$PROJECT_NAME" != "$EXPECTED_PROJECT_NAME" ]; then
+  echo "REFUSING: this checkout is linked to the wrong Vercel project." >&2
+  echo "  projectId   $PROJECT_ID" >&2
+  echo "  projectName $PROJECT_NAME" >&2
+  echo "Expected projectId=$EXPECTED_PROJECT_ID projectName=$EXPECTED_PROJECT_NAME" >&2
+  exit 1
+fi
+
 if [ -n "$(git status --porcelain)" ]; then
   echo "REFUSING: the working tree is dirty." >&2
   echo "A CLI deploy ships the tree, so uncommitted work would go to production." >&2

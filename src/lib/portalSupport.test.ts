@@ -7,11 +7,17 @@ import {
   readApplicationReview,
   type ApplicationReviewState,
 } from './applicationReview';
-import { canonicalSupportedPortalUrl, isPortalSupported } from './portalSubmission';
+import {
+  canonicalMonitoredPortalUrl,
+  canonicalSupportedPortalUrl,
+  greenhousePortalUrlNeedsBoardToken,
+  isPortalSupported,
+} from './portalSubmission';
 
 // __dirname rather than import.meta.url: tsconfig.api.json compiles this tree as CommonJS, where
 // import.meta is a hard error. Matches serverlessRespond.test.ts and the other source-reading tests.
 const routeSource = (name: string) => readFileSync(join(__dirname, '..', 'routes', name), 'utf8');
+const libSource = (name: string) => readFileSync(join(__dirname, name), 'utf8');
 
 /**
  * Portals Litos can actually fill in are knowable from the URL, so nothing should have to run to
@@ -23,6 +29,8 @@ const routeSource = (name: string) => readFileSync(join(__dirname, '..', 'routes
  */
 test('supported boards are recognised from the URL alone', () => {
   assert.equal(isPortalSupported('https://boards.greenhouse.io/gemini/jobs/4512345'), true);
+  assert.equal(isPortalSupported('https://databricks.com/company/careers/open-positions/job?gh_jid=6883068002'), true);
+  assert.equal(isPortalSupported('https://www.databricks.com/company/careers/product/product-management-intern-summer-2027-6883068002?gh_jid=6883068002'), true);
   assert.equal(isPortalSupported('https://jobs.lever.co/acme/abc-123'), true);
   assert.equal(isPortalSupported('https://jobs.ashbyhq.com/acme/00000000-0000-0000-0000-000000000000'), true);
 });
@@ -52,6 +60,33 @@ test('greenhouse wrapper canonicalization trusts the gh_jid URL convention and r
   assert.equal(canonicalSupportedPortalUrl('https://databricks.com/company/careers/open-positions/job?gh_jid=6883068002', 'lever'), 'https://boards.greenhouse.io/embed/job_app?token=6883068002');
   assert.equal(canonicalSupportedPortalUrl('https://databricks.com/company/careers/open-positions/job?gh_jid=abc', 'greenhouse'), undefined);
   assert.equal(canonicalSupportedPortalUrl('http://databricks.com/company/careers/open-positions/job?gh_jid=6883068002', 'greenhouse'), undefined);
+  assert.equal(canonicalSupportedPortalUrl('https://nuro.ai/careers?gh_jid=4512345', 'greenhouse'), undefined);
+  assert.equal(canonicalSupportedPortalUrl('https://www.fivetran.com/careers/job?gh_jid=1', 'greenhouse'), undefined);
+  assert.equal(canonicalSupportedPortalUrl('https://databricks.com/company/careers/open-positions?gh_jid=6883068002', 'greenhouse'), undefined);
+});
+
+test('monitored Greenhouse sources canonicalize company wrappers with source board tokens', () => {
+  assert.equal(
+    canonicalMonitoredPortalUrl('https://nuro.ai/careers?gh_jid=4512345', 'greenhouse', 'nuro'),
+    'https://job-boards.greenhouse.io/nuro/jobs/4512345',
+  );
+  assert.equal(
+    canonicalMonitoredPortalUrl('https://www.jumptrading.com/hr/job?gh_jid=8052281', 'greenhouse', 'jumptrading'),
+    'https://job-boards.greenhouse.io/jumptrading/jobs/8052281',
+  );
+  assert.equal(
+    canonicalMonitoredPortalUrl('https://boards.greenhouse.io/embed/job_app?token=7351061', 'greenhouse', 'nuro'),
+    'https://job-boards.greenhouse.io/nuro/jobs/7351061',
+  );
+  assert.equal(canonicalMonitoredPortalUrl('https://nuro.ai/careers?gh_jid=4512345', 'greenhouse'), undefined);
+  assert.equal(canonicalMonitoredPortalUrl('https://nuro.ai/careers?gh_jid=abc', 'greenhouse', 'nuro'), undefined);
+});
+
+test('bare Greenhouse embed links are supported but still need monitored board-token repair', () => {
+  assert.equal(isPortalSupported('https://boards.greenhouse.io/embed/job_app?token=7351061'), true);
+  assert.equal(greenhousePortalUrlNeedsBoardToken('https://boards.greenhouse.io/embed/job_app?token=7351061'), true);
+  assert.equal(greenhousePortalUrlNeedsBoardToken('https://boards.greenhouse.io/embed/job_app?for=nuro&token=7351061'), false);
+  assert.equal(greenhousePortalUrlNeedsBoardToken('https://job-boards.greenhouse.io/nuro/jobs/7351061'), false);
 });
 
 test('a question about a missing or malformed URL gets an answer, not an exception', () => {
@@ -132,6 +167,18 @@ test('editing an unsupported packet onto a real board unlocks it again', () => {
   assert.equal(edited.portal_supported, true);
 });
 
+test('editing onto a Databricks wrapper stores the Greenhouse embed URL', () => {
+  const edited = applyApplicationReviewEdit(reviewAt('https://www.optiver.com/careers/1', false), {
+    ats_name: 'Greenhouse',
+    portal_url: 'https://databricks.com/company/careers/open-positions/job?gh_jid=6883068002',
+    questions: [],
+    skipped_reasons: [],
+  });
+  assert.equal(edited.portal_url, 'https://boards.greenhouse.io/embed/job_app?token=6883068002');
+  assert.equal(edited.ats_name, 'greenhouse');
+  assert.equal(edited.portal_supported, true);
+});
+
 test('an edit that carries no URL leaves the stored verdict alone', () => {
   // Deriving from an absent URL would write false over a good true, which is the same lockout
   // arriving by a different door. The route's schema requires portal_url, so this is the guard
@@ -172,28 +219,40 @@ test('dashboard resume edits prune generated off-list skills before validation',
 test('portal support is written at packet creation and unsupported portals use email fallback', () => {
   const resumeRoute = routeSource('resume.ts');
   assert.match(resumeRoute, /import \{[^}]*isPortalSupported[^}]*\} from '\.\.\/lib\/portalSubmission'/);
+  assert.match(resumeRoute, /import \{ repairReviewPortalFromMonitoredJob \} from '\.\.\/lib\/applicationPortalRepair'/);
   // Set on the review at creation, from the URL the caller just handed us.
-  assert.match(resumeRoute, /portal_supported: isPortalSupported\(body\.application\.portal_url\)/);
+  assert.match(resumeRoute, /async function monitoredApplicationUrlForGenerate\(body: ResumeGenerateBody\)/);
+  assert.match(resumeRoute, /canonicalMonitoredPortalUrl\(job\.apply_url, job\.ats_name, job\.board_token\)/);
+  assert.match(resumeRoute, /const monitoredApplicationUrl = await monitoredApplicationUrlForGenerate\(body\)/);
+  assert.match(resumeRoute, /const canonicalApplicationPortalUrl = body\.application[\s\S]{0,300}monitoredApplicationUrl \?\? canonicalSupportedPortalUrl\(body\.application\.portal_url, body\.application\.ats_name\)/);
+  assert.match(resumeRoute, /inArray\(career_page_sources\.ats_name,[\s\S]{0,80}AUTONOMOUS_PORTAL_FAMILIES/);
+  assert.match(resumeRoute, /portal_url: canonicalApplicationPortalUrl/);
+  assert.match(resumeRoute, /applicationReview = await repairReviewPortalFromMonitoredJob\(/);
+  assert.match(resumeRoute, /const canonicalApplicationPortalSupported = isPortalSupported\(canonicalApplicationPortalUrl\)/);
+  assert.match(resumeRoute, /portal_supported: canonicalApplicationPortalSupported/);
   // And repaired on history reads so the dashboard does not keep hiding the send path for old
   // monitored-job packets whose review URL is stale or company-owned.
   assert.match(resumeRoute, /function repairedHistorySpec/);
   assert.match(resumeRoute, /canonicalSupportedPortalUrl\(review\.portal_url, review\.ats_name\)/);
   assert.match(resumeRoute, /monitored_jobs\.apply_url/);
-  assert.match(resumeRoute, /canonicalSupportedPortalUrl\(job\.apply_url, job\.ats_name\)/);
+  assert.match(resumeRoute, /canonicalMonitoredPortalUrl\(job\.apply_url, job\.ats_name, job\.board_token\)/);
   assert.match(resumeRoute, /monitoredDescriptionHash\(job\.description\)/);
-  assert.match(resumeRoute, /spec: repairedHistorySpec\(row, monitoredJobs\)/);
-  assert.doesNotMatch(resumeRoute, /inArray\(career_page_sources\.ats_name,[\s\S]{0,80}AUTONOMOUS_PORTAL_FAMILIES/);
-
+  assert.match(resumeRoute, /spec: refreshedHistorySpec\(repairedHistorySpec\(row, monitoredJobs\), profile\)/);
   const applicationsRoute = routeSource('applications.ts');
+  const repairSource = libSource('applicationPortalRepair.ts');
   // Packets created from monitored jobs can outlive a bad or stale review URL. Before declaring the
   // packet unsupported, submit-request must first repair from the canonical monitored job apply_url.
-  assert.match(applicationsRoute, /async function repairReviewPortalFromMonitoredJob/);
-  assert.match(applicationsRoute, /canonicalSupportedPortalUrl\(current\.portal_url, current\.ats_name\)/);
-  assert.match(applicationsRoute, /monitored_jobs\.apply_url/);
-  assert.match(applicationsRoute, /canonicalSupportedPortalUrl\(job\.apply_url, job\.ats_name\)/);
-  assert.match(applicationsRoute, /monitoredJdAgrees\(expectedJdHash, current\.jd_text, job\.description\)/);
+  assert.match(applicationsRoute, /import \{ repairReviewPortalFromMonitoredJob \} from '\.\.\/lib\/applicationPortalRepair'/);
+  assert.match(repairSource, /export async function repairReviewPortalFromMonitoredJob/);
+  assert.match(repairSource, /const currentCanonicalUrl = canonicalSupportedPortalUrl\(current\.portal_url, current\.ats_name\)[\s\S]{0,250}currentCanonicalUrl !== current\.portal_url/);
+  assert.match(repairSource, /greenhousePortalUrlNeedsBoardToken\(current\.portal_url\)/);
+  assert.match(repairSource, /monitored_jobs\.apply_url/);
+  assert.match(repairSource, /canonicalMonitoredPortalUrl\(job\.apply_url, job\.ats_name, job\.board_token\)/);
+  assert.match(repairSource, /monitoredJdAgrees\(expectedJdHash, current\.jd_text, job\.description\)/);
   assert.match(applicationsRoute, /current = await repairReviewPortalFromMonitoredJob\(row, current\)/);
   assert.match(applicationsRoute, /review = await repairReviewPortalFromMonitoredJob\(row, review\)/);
+  assert.match(applicationsRoute, /\/applications\/:id\/submission\/channels/);
+  assert.match(applicationsRoute, /assessAtsSubmissionChannel\(review\.portal_url\)/);
   assert.doesNotMatch(applicationsRoute, /inArray\(career_page_sources\.ats_name,[\s\S]{0,80}AUTONOMOUS_PORTAL_FAMILIES/);
   assert.match(applicationsRoute, /sendUnsupportedPortalApplicationEmail/);
   assert.match(applicationsRoute, /!isPortalSupported\(current\.portal_url\)[\s\S]{0,1800}sendUnsupportedPortalApplicationEmail/);
@@ -217,6 +276,11 @@ test('portal support is written at packet creation and unsupported portals use e
   assert.match(failureBlock, /return reply\.status\(503\)\.send/);
   assert.doesNotMatch(failureBlock, /status: 'submitted'/);
   assert.doesNotMatch(failureBlock, /pipeline_stage: 'applied'/);
+
+  const applicationReviewSource = routeSource('../lib/applicationReview.ts');
+  assert.match(applicationReviewSource, /canonicalSupportedPortalUrl\(edit\.portal_url, edit\.ats_name \?\? current\.ats_name\)/);
+  assert.match(applicationReviewSource, /portal_url: canonicalPortalUrl/);
+  assert.match(applicationReviewSource, /portal_supported: isPortalSupported\(canonicalPortalUrl\)/);
 });
 
 test('a cover letter failure degrades the run instead of aborting it', () => {

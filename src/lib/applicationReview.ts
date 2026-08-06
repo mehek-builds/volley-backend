@@ -1,6 +1,6 @@
 import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
-import { isPortalSupported } from './portalSubmission';
+import { canonicalSupportedPortalUrl, detectPortal, isPortalSupported } from './portalSubmission';
 
 export type ApplicationReviewQuestion = {
   id: string;
@@ -8,7 +8,109 @@ export type ApplicationReviewQuestion = {
   answer: string;
   kind: 'essay' | 'required';
   required: boolean;
+  portal_selector?: string;
+  portal_input_type?: string;
+  ats_api_field?: string;
 };
+
+export function normalizeApplicationReviewQuestions(
+  questions: readonly ApplicationReviewQuestion[],
+): ApplicationReviewQuestion[] {
+  const normalized: ApplicationReviewQuestion[] = [];
+  const indexByQuestion = new Map<string, number>();
+  for (const question of questions) {
+    const key = questionKey(question.question);
+    if (!key) {
+      normalized.push(question);
+      continue;
+    }
+    const existingIndex = indexByQuestion.get(key);
+    if (existingIndex === undefined) {
+      indexByQuestion.set(key, normalized.length);
+      normalized.push(question);
+      continue;
+    }
+    const existing = normalized[existingIndex];
+    const portalSelector = preferredPortalSelector(existing.portal_selector, question.portal_selector);
+    const portalInputType = question.portal_input_type ?? existing.portal_input_type;
+    const atsApiField = question.ats_api_field ?? existing.ats_api_field;
+    if ((question.required && !existing.required) || (!existing.answer.trim() && question.answer.trim())) {
+      const next = {
+        ...existing,
+        required: existing.required || question.required,
+        answer: existing.answer.trim() ? existing.answer : question.answer,
+      };
+      normalized[existingIndex] = {
+        ...next,
+        ...(portalSelector ? { portal_selector: portalSelector } : {}),
+        ...(portalInputType ? { portal_input_type: portalInputType } : {}),
+        ...(atsApiField ? { ats_api_field: atsApiField } : {}),
+      };
+    } else if (
+      (portalSelector && portalSelector !== existing.portal_selector)
+      || (portalInputType && portalInputType !== existing.portal_input_type)
+      || (atsApiField && atsApiField !== existing.ats_api_field)
+    ) {
+      normalized[existingIndex] = {
+        ...existing,
+        ...(portalSelector ? { portal_selector: portalSelector } : {}),
+        ...(portalInputType ? { portal_input_type: portalInputType } : {}),
+        ...(atsApiField ? { ats_api_field: atsApiField } : {}),
+      };
+    }
+  }
+  return normalized;
+}
+
+export function mergeSubmittedApplicationReviewQuestions(
+  stored: readonly ApplicationReviewQuestion[],
+  submitted: readonly ApplicationReviewQuestion[],
+): ApplicationReviewQuestion[] {
+  const submittedByQuestion = new Map<string, ApplicationReviewQuestion>();
+  for (const question of submitted) {
+    const key = questionKey(question.question);
+    if (key) submittedByQuestion.set(key, question);
+  }
+  const merged = stored.map((question) => {
+    const submittedQuestion = submittedByQuestion.get(questionKey(question.question));
+    if (!submittedQuestion) return question;
+    const portalSelector = preferredPortalSelector(question.portal_selector, submittedQuestion.portal_selector);
+    const portalInputType = submittedQuestion.portal_input_type ?? question.portal_input_type;
+    const atsApiField = question.ats_api_field;
+    return {
+      ...question,
+      answer: submittedQuestion.answer,
+      kind: submittedQuestion.kind,
+      required: question.required || submittedQuestion.required,
+      question: submittedQuestion.question.trim() ? submittedQuestion.question : question.question,
+      ...(portalSelector ? { portal_selector: portalSelector } : {}),
+      ...(portalInputType ? { portal_input_type: portalInputType } : {}),
+      ...(atsApiField ? { ats_api_field: atsApiField } : {}),
+    };
+  });
+  const storedKeys = new Set(stored.map((question) => questionKey(question.question)).filter(Boolean));
+  for (const question of submitted) {
+    const key = questionKey(question.question);
+    if (!key || storedKeys.has(key)) continue;
+    merged.push(question);
+  }
+  return normalizeApplicationReviewQuestions(merged);
+}
+
+function questionKey(question: string): string {
+  return question.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function isTemporaryPortalSelector(selector: string | undefined): boolean {
+  return selector?.trim().startsWith('[data-litos-discovered-') === true;
+}
+
+function preferredPortalSelector(existing: string | undefined, next: string | undefined): string | undefined {
+  if (!next) return existing;
+  if (!existing || isTemporaryPortalSelector(existing)) return next;
+  if (!isTemporaryPortalSelector(next)) return next;
+  return existing;
+}
 
 export type ApplicationReviewState = {
   jd_text: string;
@@ -113,7 +215,7 @@ export type ApplicationReviewState = {
     screenshot_url?: string;
     captured_at: string;
     reference_id?: string;
-    source?: 'managed_browser' | 'chrome_extension' | 'email_fallback';
+    source?: 'managed_browser' | 'chrome_extension' | 'email_fallback' | 'ats_api';
   };
 };
 
@@ -224,12 +326,19 @@ export function applyApplicationReviewEdit(
   current: ApplicationReviewState,
   edit: ApplicationReviewEdit,
 ): ApplicationReviewState {
+  const canonicalPortalUrl = edit.portal_url === undefined
+    ? undefined
+    : canonicalSupportedPortalUrl(edit.portal_url, edit.ats_name ?? current.ats_name) ?? edit.portal_url;
   return {
     ...current,
     ...edit,
+    ...(canonicalPortalUrl === undefined ? {} : {
+      portal_url: canonicalPortalUrl,
+      ats_name: isPortalSupported(canonicalPortalUrl) ? detectPortal(canonicalPortalUrl) : edit.ats_name ?? current.ats_name,
+    }),
     // Only when the edit carries a URL. Deriving from an absent one would write false over a
     // perfectly good stored true, which is the same lockout arriving by a different door.
-    ...(edit.portal_url === undefined ? {} : { portal_supported: isPortalSupported(edit.portal_url) }),
+    ...(canonicalPortalUrl === undefined ? {} : { portal_supported: isPortalSupported(canonicalPortalUrl) }),
     status: edit.questions.length > 0 ? 'questions_ready' : 'ready_to_submit',
     updated_at: new Date().toISOString(),
   };

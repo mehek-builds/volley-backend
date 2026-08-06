@@ -6,7 +6,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db/index';
 import { application_profile, generated_resumes, profiles, users } from '../db/schema';
-import { readApplicationReview, type ApplicationReviewState } from '../lib/applicationReview';
+import { normalizeApplicationReviewQuestions, readApplicationReview, type ApplicationReviewState } from '../lib/applicationReview';
 import {
   connectToSession,
   createBrowserContext,
@@ -71,6 +71,7 @@ import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import type { ApplicationReviewQuestion } from '../lib/applicationReview';
 import { jobCountry } from '../lib/jobLocation';
 import { generateStoredCoverLetter, storedCoverLetter } from '../lib/coverLetterService';
+import { repairReviewPortalFromMonitoredJob } from '../lib/applicationPortalRepair';
 import { mayClickFinalSubmit, preparedSubmissionStatus } from '../lib/submissionAuthorization';
 import { directPreparationIsSafe } from '../lib/submissionSafety';
 import {
@@ -81,6 +82,7 @@ import {
   withinDailyCap,
 } from '../lib/submissionQueue';
 import { coverLetterFileNameForRole, resumeFileNameForRole } from '../lib/resumeFileName';
+import { assessAtsSubmissionChannel, tryAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
 
 export type ResumeRow = typeof generated_resumes.$inferSelect;
 type StoredSpec = Record<string, unknown>;
@@ -96,6 +98,10 @@ type StandingAuthorization = {
 // through exactly the same code.
 function nextReview(current: ApplicationReviewState, patch: Partial<ApplicationReviewState>): ApplicationReviewState {
   return applyReviewPatch(current, patch);
+}
+
+export function atsApiSubmissionEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.LITOS_ATS_API_SUBMISSION_ENABLED === 'true';
 }
 
 async function writeReview(row: ResumeRow, review: ApplicationReviewState) {
@@ -247,6 +253,17 @@ export function submissionGraduationDateParts(
   return { month: month ? month[0].toUpperCase() + month.slice(1).toLowerCase() : undefined, year };
 }
 
+export function sanitizeEeoPrefs(value: unknown): Record<string, string> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const cleaned: Record<string, string> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (typeof raw !== 'string') continue;
+    const trimmed = raw.trim();
+    if (trimmed) cleaned[key] = trimmed;
+  }
+  return Object.keys(cleaned).length > 0 ? cleaned : null;
+}
+
 export async function buildPacket(row: ResumeRow, controlledTest = false): Promise<SubmissionPacket> {
   const stored = row.spec as StoredSpec;
   const contact = (stored._contact ?? {}) as Record<string, unknown>;
@@ -316,6 +333,8 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     graduationMonth: graduationParts.month,
     graduationYear: graduationParts.year,
     gpa: typeof app.gpa === 'string' ? app.gpa : undefined,
+    major: typeof app.major === 'string' ? app.major : undefined,
+    referralSourceDefault: typeof app.referral_source_default === 'string' ? app.referral_source_default : undefined,
     applicationProfile,
     jdText: review.jd_text,
     resume,
@@ -324,8 +343,15 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     coverLetterName: coverLetter
       ? coverLetterFileNameForRole(fullName, roleTitle)
       : undefined,
+    eeoPrefs: sanitizeEeoPrefs(app.eeo_prefs),
     mostRecentRole: readMostRecentRole(parsed),
-    questions: review.questions.map((item) => ({ question: item.question, answer: item.answer })),
+    questions: review.questions.map((item) => ({
+      question: item.question,
+      answer: item.answer,
+      portalSelector: item.portal_selector,
+      portalInputType: item.portal_input_type,
+      atsApiField: item.ats_api_field,
+    })),
   };
 }
 
@@ -481,7 +507,9 @@ export async function discoverAndResolveQuestions(
   automaticSubmissionEnabled: boolean,
   portal: SupportedPortal,
 ): Promise<{ questions: ApplicationReviewQuestion[]; attentionReasons: string[] }> {
-  const existingLabels = new Set(current.questions.map((q) => normalizeDiscoveredLabel(q.question).toLowerCase()));
+  const existingByLabel = new Map(
+    current.questions.map((q) => [normalizeReviewQuestionLabel(q.question).toLowerCase(), q] as const),
+  );
   const questions: ApplicationReviewQuestion[] = [];
   const attentionReasons: string[] = [];
 
@@ -496,16 +524,49 @@ export async function discoverAndResolveQuestions(
     // keep the fallback
   }
   const questionContext = applicationContextForQuestionResolution(row, current);
+  const managedGreenhouseEducationCombobox = (field: DiscoveredQuestion): boolean =>
+    portal === 'greenhouse'
+    && /\b(?:school|degree|discipline)--\d+\b/i.test(normalizeDiscoveredLabel(field.label));
+  const portalSelectorForField = (field: DiscoveredQuestion): string | undefined =>
+    !managedGreenhouseEducationCombobox(field) && /^(?:text|email|tel|url|number|date|textarea)?$/i.test(field.inputType)
+      ? field.selector
+      : undefined;
 
   for (const field of discovered) {
     const label = normalizeDiscoveredLabel(field.label);
     const reviewLabel = normalizeReviewQuestionLabel(field.label);
     if (!label || !reviewLabel || normalizeStoredPortalQuestions([{ question: label, answer: '' }], portal).length === 0) continue;
-    if (existingLabels.has(reviewLabel.toLowerCase())) continue; // already answered by the client or a prior run
-
+    const existing = existingByLabel.get(reviewLabel.toLowerCase());
     const known = resolveKnownAnswer(label, field.inputType, ap, questionContext);
+    if (existing) {
+      if (known && 'skipReason' in known) {
+        attentionReasons.push(known.skipReason);
+      } else if (known && 'value' in known) {
+        questions.push({
+          ...existing,
+          question: reviewLabel,
+          answer: known.value,
+          kind: 'required',
+          required: false,
+          portal_selector: portalSelectorForField(field),
+          portal_input_type: field.inputType,
+        });
+      } else if (existing.answer.trim()) {
+        questions.push({ ...existing, question: reviewLabel, portal_selector: portalSelectorForField(field), portal_input_type: field.inputType });
+      }
+      continue; // already answered by the client or a prior run
+    }
+
     if (known && 'value' in known) {
-      questions.push({ id: randomUUID(), question: reviewLabel, answer: known.value, kind: 'required', required: false });
+      questions.push({
+        id: randomUUID(),
+        question: reviewLabel,
+        answer: known.value,
+        kind: 'required',
+        required: false,
+        portal_selector: portalSelectorForField(field),
+        portal_input_type: field.inputType,
+      });
       continue;
     }
     if (known && 'skipReason' in known) {
@@ -549,7 +610,7 @@ export async function discoverAndResolveQuestions(
         attentionReasons.push(`open-ended question left for you (could not draft a confident answer): "${label.slice(0, 60)}"`);
         continue;
       }
-      questions.push({ id: randomUUID(), question: reviewLabel, answer: fitted, kind: 'essay', required: false });
+      questions.push({ id: randomUUID(), question: reviewLabel, answer: fitted, kind: 'essay', required: false, portal_selector: field.selector, portal_input_type: field.inputType });
       if (warnings.length > 0) {
         attentionReasons.push(`drafted answer needs your review: ${warnings.join('; ').slice(0, 300)}`);
       }
@@ -600,8 +661,13 @@ async function prepareManaged(
     authorization.enabled,
     portal,
   );
-  const mergedQuestions = [...storedQuestions, ...discoveredQuestions];
-  packet.questions = mergedQuestions.map((q) => ({ question: q.question, answer: q.answer }));
+  const mergedQuestions = normalizeApplicationReviewQuestions([...storedQuestions, ...discoveredQuestions]);
+  packet.questions = mergedQuestions.map((q) => ({
+    question: q.question,
+    answer: q.answer,
+    portalSelector: q.portal_selector,
+    portalInputType: q.portal_input_type,
+  }));
 
   const result = await runManagedBrowser(applicationUrl, buildManagedPortalActions(portal, packet));
   if (!result.screenshot) throw new Error('Stratus managed browser did not return a preview screenshot');
@@ -650,9 +716,12 @@ async function prepareManaged(
 
 async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = false) {
   const stored = row.spec as StoredSpec;
-  const current = readApplicationReview(stored);
-  if (!current?.portal_url) throw new Error('We do not have a link to the company application page');
-  const portal = detectPortal(current.portal_url);
+  let current = readApplicationReview(stored);
+  if (!current) throw new Error('We do not have a link to the company application page');
+  current = await repairReviewPortalFromMonitoredJob(row, current);
+  const portalUrl = current.portal_url;
+  if (!portalUrl) throw new Error('We do not have a link to the company application page');
+  const portal = detectPortal(portalUrl);
   const runId = current.submission_run_id ?? randomUUID();
 
   /* THE GRADUATION BLOCK, and it stops the unattended run before anything is spent or sent.
@@ -694,6 +763,22 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
 
   const authorization = await standingAuthorization(row.user_id);
   assertControlledPortalEnabled(portal);
+  const atsAssessment = atsApiSubmissionEnabled() ? assessAtsSubmissionChannel(portalUrl) : null;
+  if (atsAssessment?.status === 'available') {
+    await writeReview(row, nextReview(current, {
+      ...preparedReviewPatch(authorization, true),
+      submission_run_id: runId,
+      browser_context_id: undefined,
+      browser_session_id: undefined,
+      attention_reason: undefined,
+      submission_error: undefined,
+    }));
+    fastify.log.info(
+      { applicationId: row.id, provider: atsAssessment.provider },
+      'Application prepared for employer-authorized ATS API submission',
+    );
+    return;
+  }
   if (shouldUseLocalControlledBrowser(portal)) {
     await prepareControlled(row, current, runId, authorization, fastify);
     return;
@@ -742,7 +827,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     return;
   }
   const contextId = current.browser_context_id ?? (await createBrowserContext());
-  const session = await createBrowserSession(contextId, current.portal_url);
+  const session = await createBrowserSession(contextId, portalUrl);
   {
     const verificationRequestedAt = new Date();
     const connected = await connectToSession(session);
@@ -754,14 +839,14 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       browser_session_id: session.id,
       submission_error: undefined,
     }));
-    await page.goto(current.portal_url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await page.goto(portalUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     await navigateToApplicationForm(page, portal); // no-op except SmartRecruiters's JD-page/form-page split
     const [verificationSettings] = await db.select({ enabled: users.automatic_verification_enabled })
       .from(users).where(eq(users.id, row.user_id)).limit(1);
     let verification: BrowserVerificationResult = await completeEmailVerificationIfPresent({
       page,
       userId: row.user_id,
-      portalUrl: current.portal_url,
+      portalUrl,
       requestedAt: verificationRequestedAt,
       permissionGranted: verificationSettings?.enabled === true,
     });
@@ -776,14 +861,19 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     const resolutionCurrent = { ...current, questions: storedQuestions };
     const { questions: discoveredQuestions, attentionReasons: discoveryAttention } =
       await discoverAndResolveQuestions(discovered, row, resolutionCurrent, await loadApplicationProfileLike(row.user_id), authorization.enabled, portal);
-    const mergedQuestions = [...storedQuestions, ...discoveredQuestions];
-    packet.questions = mergedQuestions.map((q) => ({ question: q.question, answer: q.answer }));
+    const mergedQuestions = normalizeApplicationReviewQuestions([...storedQuestions, ...discoveredQuestions]);
+    packet.questions = mergedQuestions.map((q) => ({
+      question: q.question,
+      answer: q.answer,
+      portalSelector: q.portal_selector,
+      portalInputType: q.portal_input_type,
+    }));
 
     let result = await fillPortal(page, portal, packet);
     const postFillVerification = await completeEmailVerificationIfPresent({
       page,
       userId: row.user_id,
-      portalUrl: current.portal_url,
+      portalUrl,
       requestedAt: verificationRequestedAt,
       permissionGranted: verificationSettings?.enabled === true,
     });
@@ -928,6 +1018,49 @@ async function submitControlled(row: ResumeRow, review: ApplicationReviewState, 
   }
 }
 
+function packetForApiSubmission(review: ApplicationReviewState, builtPacket: SubmissionPacket): SubmissionPacket {
+  return review.cover_letter_supported === false ? omitCoverLetter(builtPacket) : builtPacket;
+}
+
+async function submitViaAtsSubmissionChannel(
+  row: ResumeRow,
+  review: ApplicationReviewState,
+  fastify: FastifyInstance,
+): Promise<boolean> {
+  if (!atsApiSubmissionEnabled()) return false;
+  review = await repairReviewPortalFromMonitoredJob(row, review);
+  if (!await authorizationValidAtClick(row, review)) {
+    await holdRevokedSubmission(row, review);
+    return true;
+  }
+  const packet = packetForApiSubmission(review, await buildPacket(row));
+  const atsResult = await tryAtsSubmissionChannel(review.portal_url, packet);
+  if (atsResult.kind === 'submitted') {
+    const capturedAt = new Date().toISOString();
+    await writeReview(row, nextReview(review, {
+      status: 'submitted',
+      submitted_at: capturedAt,
+      submission_error: undefined,
+      receipt: {
+        confirmation_text: atsResult.confirmationText,
+        final_url: atsResult.finalUrl,
+        captured_at: capturedAt,
+        reference_id: atsResult.referenceId,
+        source: 'ats_api',
+      },
+    }));
+    fastify.log.info({ applicationId: row.id, provider: atsResult.provider }, 'Application submission accepted by ATS API');
+    return true;
+  }
+  if (atsResult.assessment.status === 'unavailable') {
+    fastify.log.info(
+      { applicationId: row.id, provider: atsResult.assessment.provider, reason: atsResult.assessment.reason },
+      'ATS API submission channel unavailable, continuing with browser submission',
+    );
+  }
+  return false;
+}
+
 async function submit(row: ResumeRow, fastify: FastifyInstance) {
   const current = readApplicationReview(row.spec);
   if (!current?.submission_run_id || !current.portal_url) throw new Error('The prepared run is missing');
@@ -950,14 +1083,16 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
   const claimedRow = await claimSubmission(row);
   if (!claimedRow) return;
   row = claimedRow;
-  const claimedReview = readApplicationReview(row.spec);
+  let claimedReview = readApplicationReview(row.spec);
   if (!claimedReview) return;
+  claimedReview = await repairReviewPortalFromMonitoredJob(row, claimedReview);
   const claimedPortal = detectPortal(claimedReview.portal_url!);
   assertControlledPortalEnabled(claimedPortal);
   if (shouldUseLocalControlledBrowser(claimedPortal)) {
     await submitControlled(row, claimedReview, fastify);
     return;
   }
+  if (await submitViaAtsSubmissionChannel(row, claimedReview, fastify)) return;
   // Portals that cannot be submitted in one run stop HERE, before either provider path.
   //
   // This gate used to live only inside buildManagedPortalActions, which was wrong in two ways that

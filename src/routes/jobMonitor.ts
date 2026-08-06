@@ -838,11 +838,11 @@ export function rankByFit<T extends RankableJob>(
     index,
   }));
   scored.sort((a, b) => {
-    if (a.preferenceScore !== b.preferenceScore) return b.preferenceScore - a.preferenceScore;
-    if (a.score === null && b.score === null) return a.index - b.index;
+    if (a.score === null && b.score === null) return b.preferenceScore - a.preferenceScore || a.index - b.index;
     if (a.score === null) return 1;
     if (b.score === null) return -1;
-    return b.score - a.score || a.index - b.index;
+    if (a.score !== b.score) return b.score - a.score;
+    return b.preferenceScore - a.preferenceScore || a.index - b.index;
   });
   return scored.map(({ row, score }) => ({ row, score }));
 }

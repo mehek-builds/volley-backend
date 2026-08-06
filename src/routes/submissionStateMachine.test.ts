@@ -56,7 +56,65 @@ test('submit-request starts a fresh run instead of carrying stale run artifacts'
   assert.match(helper, /updated_at:\s*new Date\(\)\.toISOString\(\)/);
   assert.match(route, /const submittedQuestions = refreshKnownQuestionAnswers\(/);
   assert.match(route, /current\.jd_text/);
-  assert.match(route, /const next = freshSubmitRequestReview\(current, submittedQuestions\)/);
+  assert.match(route, /const normalizedSubmittedQuestions = mergeSubmittedApplicationReviewQuestions\(current\.questions, submittedQuestions\)/);
+  assert.match(route, /const next = freshSubmitRequestReview\(current, normalizedSubmittedQuestions\)/);
+});
+
+test('ATS API channel can prepare without opening a CAPTCHA-prone browser path only when posting is explicitly enabled', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  assert.match(runner, /import \{ assessAtsSubmissionChannel, tryAtsSubmissionChannel \} from '\.\.\/lib\/atsSubmissionChannels'/);
+  assert.match(runner, /export function atsApiSubmissionEnabled\(env: NodeJS\.ProcessEnv = process\.env\)/);
+  const prepareIndex = runner.indexOf('async function prepare(');
+  const atsAssessmentIndex = runner.indexOf('const atsAssessment = atsApiSubmissionEnabled() ? assessAtsSubmissionChannel', prepareIndex);
+  const localControlledIndex = runner.indexOf('if (shouldUseLocalControlledBrowser(portal))', prepareIndex);
+  const accountGateIndex = runner.indexOf('isAccountWalledFamily(portal)', prepareIndex);
+  assert.ok(atsAssessmentIndex > prepareIndex, 'prepare must assess employer-authorized API channels only after the explicit posting gate');
+  assert.ok(localControlledIndex > atsAssessmentIndex, 'API-capable employers must skip browser preparation');
+  assert.ok(accountGateIndex > atsAssessmentIndex, 'API-capable employers must skip CAPTCHA and account-wall preparation gates');
+  assert.match(runner.slice(atsAssessmentIndex, localControlledIndex), /preparedReviewPatch\(authorization, true\)/);
+  assert.match(runner.slice(atsAssessmentIndex, localControlledIndex), /browser_context_id: undefined/);
+  assert.match(runner.slice(atsAssessmentIndex, localControlledIndex), /browser_session_id: undefined/);
+});
+
+test('ATS API channel runs after final claim and before browser submission', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  assert.match(runner, /import \{ assessAtsSubmissionChannel, tryAtsSubmissionChannel \} from '\.\.\/lib\/atsSubmissionChannels'/);
+  assert.match(runner, /import \{ repairReviewPortalFromMonitoredJob \} from '\.\.\/lib\/applicationPortalRepair'/);
+  const prepareIndex = runner.indexOf('async function prepare(');
+  const prepareMissingReviewGuardIndex = runner.indexOf("if (!current) throw new Error('We do not have a link to the company application page');", prepareIndex);
+  const prepareRepairIndex = runner.indexOf('current = await repairReviewPortalFromMonitoredJob(row, current);', prepareIndex);
+  const prepareMissingUrlGuardIndex = runner.indexOf('if (!portalUrl) throw new Error', prepareIndex);
+  const helperIndex = runner.indexOf('async function submitViaAtsSubmissionChannel');
+  const enabledIndex = runner.indexOf('if (!atsApiSubmissionEnabled()) return false;', helperIndex);
+  const repairIndex = runner.indexOf('review = await repairReviewPortalFromMonitoredJob(row, review);', helperIndex);
+  const atsIndex = runner.indexOf('const atsResult = await tryAtsSubmissionChannel', helperIndex);
+  const authCheckIndex = runner.indexOf('if (!await authorizationValidAtClick(row, review))', helperIndex);
+  const claimIndex = runner.indexOf('const claimedRow = await claimSubmission(row)');
+  const claimedRepairIndex = runner.indexOf('claimedReview = await repairReviewPortalFromMonitoredJob(row, claimedReview);', claimIndex);
+  const detectIndex = runner.indexOf('const claimedPortal = detectPortal(claimedReview.portal_url!);', claimIndex);
+  const callIndex = runner.indexOf('if (await submitViaAtsSubmissionChannel(row, claimedReview, fastify)) return;');
+  const browserGateIndex = runner.indexOf('portalCanAutoSubmit(portal)', callIndex);
+  const managedIndex = runner.indexOf('if (isManagedStratusProvider())', callIndex);
+  assert.ok(prepareIndex > 0, 'prepare helper is missing');
+  assert.ok(prepareMissingReviewGuardIndex > prepareIndex && prepareMissingReviewGuardIndex < prepareRepairIndex, 'prepare must only require a review before monitored portal repair');
+  assert.ok(prepareRepairIndex > prepareMissingReviewGuardIndex && prepareRepairIndex < prepareMissingUrlGuardIndex, 'prepare must repair monitored portal URLs before requiring portal_url');
+  assert.ok(helperIndex > 0, 'ATS API submission helper is missing');
+  assert.ok(enabledIndex > helperIndex && enabledIndex < authCheckIndex, 'API submission must be disabled by default before any POST path');
+  assert.ok(repairIndex > enabledIndex && repairIndex < authCheckIndex, 'API submission must repair monitored portal URLs before consent and POST');
+  assert.ok(authCheckIndex > repairIndex && authCheckIndex < atsIndex, 'API submission must re-check consent before send');
+  assert.ok(claimIndex > 0, 'submit must atomically claim the final submission before any send path');
+  assert.ok(claimedRepairIndex > claimIndex && claimedRepairIndex < detectIndex, 'submit must repair stale monitored portal URLs before detecting the portal');
+  assert.ok(callIndex > claimIndex, 'ATS API submission must run only after the final claim');
+  assert.ok(browserGateIndex > callIndex, 'ATS API submission must run before browser-only portal gates');
+  assert.ok(managedIndex > callIndex, 'ATS API submission must run before managed browser submission');
+  assert.match(runner.slice(atsIndex, browserGateIndex), /source: 'ats_api'/);
+});
+
+test('ATS API packet keeps an approved cover letter unless the prepared form explicitly rejected it', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const helperIndex = runner.indexOf('function packetForApiSubmission(');
+  assert.ok(helperIndex > 0, 'API packet helper is missing');
+  assert.match(runner.slice(helperIndex, runner.indexOf('\nasync function submit(', helperIndex)), /review\.cover_letter_supported === false \? omitCoverLetter\(builtPacket\) : builtPacket/);
 });
 
 test('application routes refresh answers through the decrypted profile loader', async () => {

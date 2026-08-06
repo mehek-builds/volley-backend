@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { DOMParser } from '@xmldom/xmldom';
 import type { Page } from 'playwright-core';
 import {
   AUTONOMOUS_PORTAL_FAMILIES,
   buildManagedDiscoveryActions,
   buildManagedPortalActions,
   canFillReviewedQuestions,
+  canonicalSupportedPortalUrl,
   coverLetterUploadSelector,
   detectPortal,
   fillPortal,
@@ -23,8 +25,16 @@ import {
 } from './portalSubmission';
 import { POLLABLE_JOB_BOARDS } from './jobMonitor';
 
+function isGreenhousePreflightClick(action: { type: string; label?: string }) {
+  return action.type === 'click'
+    && (action.label?.startsWith('greenhouse_cookie_preflight:') === true
+      || action.label === 'greenhouse_open_application_form');
+}
+
 test('detects the four supported applicant portal families', () => {
   assert.equal(detectPortal('https://boards.greenhouse.io/acme/jobs/123'), 'greenhouse');
+  assert.equal(detectPortal('https://databricks.com/company/careers/open-positions/job?gh_jid=6883068002'), 'greenhouse');
+  assert.equal(detectPortal('https://www.databricks.com/company/careers/product/product-management-intern-summer-2027-6883068002?gh_jid=6883068002'), 'greenhouse');
   assert.equal(detectPortal('https://jobs.lever.co/acme/123/apply'), 'lever');
   assert.equal(detectPortal('https://jobs.ashbyhq.com/acme/123/application'), 'ashby');
   assert.equal(detectPortal('https://jobs.smartrecruiters.com/Acme/744000-role'), 'smartrecruiters');
@@ -51,10 +61,39 @@ test('a managed discovery run detects custom questions and cover-letter attachme
     optional: true,
     timeout: 10_000,
   });
-  assert.equal(actions.some((a) => a.type === 'fillByLabelText'), false);
-  assert.equal(actions.some((a) => a.type === 'click'), false);
+  assert.equal(actions.some((a) => a.type === 'fillByLabelText' && a.label?.startsWith('question:')), false);
+  assert.equal(actions.some((a) => a.type === 'click' && !isGreenhousePreflightClick(a)), false);
   const fillSelectors = actions.filter((a) => a.type === 'fill').map((a) => a.selector);
   assert.ok(fillSelectors.some((s) => s?.includes('first_name')));
+  assert.equal(actions.some((a) => a.type === 'fillByLabelText' && a.label === 'first_name_label'), true);
+});
+
+test('Databricks wrapper URLs use the Greenhouse managed flow without submitting during discovery', () => {
+  const databricksUrl = 'https://databricks.com/company/careers/open-positions/job?gh_jid=6883068002';
+  const canonical = 'https://boards.greenhouse.io/embed/job_app?token=6883068002';
+  assert.equal(detectPortal(databricksUrl), 'greenhouse');
+  assert.equal(canonicalSupportedPortalUrl(databricksUrl, 'greenhouse'), canonical);
+  assert.equal(portalApplicationUrl('greenhouse', canonical), canonical);
+
+  const packet = {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  };
+  const discovery = buildManagedDiscoveryActions('greenhouse', packet);
+  assert.equal(discovery.some((action) => action.type === 'click' && action.selector === 'button[type="submit"], input[type="submit"]'), false);
+  assert.ok(discovery.some((action) => action.type === 'fill' && action.selector?.includes('first_name')));
+  assert.ok(discovery.some((action) => action.type === 'upload'));
+
+  const submitting = buildManagedPortalActions('greenhouse', packet, true);
+  assert.equal(
+    submitting.filter((action) => action.type === 'click' && action.selector === 'button[type="submit"], input[type="submit"]').length,
+    1,
+  );
+  assert.ok(submitting.every((action) => action.type !== 'fill' || (action.timeout ?? Infinity) < 30_000));
+  assert.ok(submitting.every((action) => action.type !== 'upload' || (action.timeout ?? Infinity) < 30_000));
 });
 
 test('managed cover-letter detection requires an actual file input extraction', () => {
@@ -94,6 +133,11 @@ test('SmartRecruiters managed actions open the application form before filling',
 });
 
 test('opens Ashby directly on its application tab for managed filling', () => {
+  const databricksUrl = 'https://databricks.com/company/careers/open-positions/job?gh_jid=6883068002';
+  const canonical = 'https://boards.greenhouse.io/embed/job_app?token=6883068002';
+  assert.equal(detectPortal(databricksUrl), 'greenhouse');
+  assert.equal(canonicalSupportedPortalUrl(databricksUrl, 'greenhouse'), canonical);
+  assert.equal(portalApplicationUrl('greenhouse', canonical), canonical);
   assert.equal(
     portalApplicationUrl('ashby', 'https://jobs.ashbyhq.com/acme/123'),
     'https://jobs.ashbyhq.com/acme/123/application',
@@ -110,6 +154,12 @@ test('opens Ashby directly on its application tab for managed filling', () => {
 
 test('rejects insecure and lookalike portal URLs', () => {
   assert.throws(() => detectPortal('http://boards.greenhouse.io/acme/jobs/123'), /secure link/);
+  assert.throws(() => detectPortal('https://databricks.com/company/careers/open-positions/job'), /cannot fill in/);
+  assert.throws(() => detectPortal('https://databricks.com/company/careers/open-positions/job?gh_jid=abc'), /cannot fill in/);
+  assert.throws(() => detectPortal('https://databricks.com/company/careers/open-positions?gh_jid=6883068002'), /cannot fill in/);
+  assert.throws(() => detectPortal('https://www.databricks.com/company/careers/product/product-management-intern-summer-2027-111?gh_jid=6883068002'), /cannot fill in/);
+  assert.throws(() => detectPortal('https://www.fivetran.com/careers/job?gh_jid=1'), /cannot fill in/);
+  assert.throws(() => detectPortal('https://nuro.ai/careers?gh_jid=4512345'), /cannot fill in/);
   assert.throws(() => detectPortal('https://greenhouse.io.attacker.example/acme'), /cannot fill in/);
   assert.throws(() => detectPortal('https://example.com/apply'), /cannot fill in/);
 });
@@ -199,9 +249,24 @@ test('managed controlled-portal actions include reviewed fields, resume upload, 
     resumeName: 'resume.pdf',
     questions: [{ question: 'Why this role?', answer: 'I enjoy systems work.' }],
   }, true);
-  assert.deepEqual(actions.map((action) => action.type), [
-    'fill', 'fill', 'fill', 'upload', 'fillByLabelText', 'click',
-  ]);
+  assert.deepEqual(
+    actions
+      .filter((action) => action.type !== 'select' && !isGreenhousePreflightClick(action))
+      .map((action) => action.type),
+    [
+      'waitForSelector',
+      'fill',
+      'fillByLabelText',
+      'fill',
+      'fillByLabelText',
+      'fill',
+      'fillByLabelText',
+      'upload',
+      'fillByLabelText',
+      'click',
+    ],
+  );
+  assert.ok(actions.some((action) => action.type === 'select' && action.label?.startsWith('question_select:')));
   assert.equal(actions.find((action) => action.type === 'upload')?.file?.base64, 'cGRm');
 });
 
@@ -382,6 +447,13 @@ function directFillPage(selectors: string[]) {
       press: async (key: string) => {
         if (present) values.set(`${selector}::press`, key);
       },
+      selectOption: async (option: string | { label?: string }) => {
+        if (!present) return [];
+        const value = typeof option === 'string' ? option : option.label;
+        if (!value) return [];
+        values.set(selector, value);
+        return [value];
+      },
       getAttribute: async () => null,
       inputValue: async () => values.get(selector) ?? '',
       locator: () => makeLocator(`${selector} child`, 0),
@@ -457,6 +529,32 @@ test('direct Greenhouse fill confirms phone country and city comboboxes', async 
   assert.equal(values.get('#candidate-location::press'), 'Enter');
 });
 
+test('direct Greenhouse fill selects saved demographic choices', async () => {
+  const genderSelector = '.field:has(label:has-text("What gender identity do you most closely identify with?")) select';
+  const orientationSelector = '.field:has(label:has-text("What sexual orientation do you most closely identify with?")) select';
+  const raceSelector = '.field:has(label:has-text("Please select up to 2 ethnicities that you most closely identify with.")) select';
+  const { page, values } = directFillPage([
+    genderSelector,
+    orientationSelector,
+    raceSelector,
+  ]);
+  await fillPortal(page, 'greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    eeoPrefs: {
+      gender: 'Female',
+      sexual_orientation: 'Heterosexual',
+      race: 'White',
+    },
+    questions: [],
+  });
+  assert.equal(values.get(genderSelector), 'Female');
+  assert.equal(values.get(orientationSelector), 'Heterosexual');
+  assert.equal(values.get(raceSelector), 'White');
+});
+
 test('managed receipt requires confirmation language and captures the reference', () => {
   assert.deepEqual(readManagedReceipt({
     title: 'Complete',
@@ -514,16 +612,96 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
   // Both questions are sent now that the runner dispatches on control type (stratus PR #6), and
   // both stay optional so a control it still cannot handle degrades to a blocker rather than
   // taking the whole run down and discarding the fields already filled.
-  const questionActions = actions.filter((action) => action.type === 'fillByLabelText');
+  const questionActions = actions.filter((action) => action.type === 'fillByLabelText' && action.label?.startsWith('question:'));
   assert.equal(questionActions.length, 2);
   for (const action of questionActions) {
     assert.equal(action.optional, true, `"${action.text}" must not be able to abort the run`);
   }
   // first_name, last_name, email (phone and location are omitted from this fixture), resume, then
-  // the two questions.
-  assert.deepEqual(actions.map((a) => a.type), [
-    'fill', 'fill', 'fill', 'upload', 'fillByLabelText', 'fillByLabelText',
-  ]);
+  // the two optional reviewed questions.
+  assert.deepEqual(
+    actions
+      .filter((a) => a.type !== 'select' && !isGreenhousePreflightClick(a))
+      .map((a) => a.type),
+    [
+      'waitForSelector',
+      'fill',
+      'fillByLabelText',
+      'fill',
+      'fillByLabelText',
+      'fill',
+      'fillByLabelText',
+      'upload',
+      'fillByLabelText',
+      'fillByLabelText',
+    ],
+  );
+  assert.ok(actions.some((a) => a.type === 'select' && a.label?.startsWith('question_select:')));
+});
+
+test('managed Greenhouse question fills prefer rediscovered selectors over label text', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question: 'Please indicate your overall GPA.',
+        answer: '3.89',
+        portalSelector: 'textarea[name="job_application[answers_attributes][0][text_value]"]',
+      },
+    ],
+  });
+  const questionAction = actions.find((action) => action.label === 'question:Please indicate your overall GPA.');
+  assert.equal(questionAction?.type, 'fill');
+  assert.equal(questionAction?.selector, 'textarea[name="job_application[answers_attributes][0][text_value]"]');
+  assert.equal(questionAction?.value, '3.89');
+  assert.equal(actions.some((action) => action.type === 'fillByLabelText' && action.text === 'Please indicate your overall GPA.'), false);
+});
+
+test('managed Greenhouse academic questions confirm rediscovered autocomplete selectors', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question: 'School',
+        answer: 'University of Southern California',
+        portalSelector: 'input[name="job_application[educations_attributes][0][school_name_id]"]',
+      },
+      {
+        question: 'Degree',
+        answer: 'Bachelor of Science in Computer Science',
+        portalSelector: 'input[name="job_application[educations_attributes][0][degree_id]"]',
+      },
+    ],
+  });
+
+  assert.ok(actions.some((action) => action.type === 'press' && action.label === 'question_confirm:School' && action.value === 'Enter'));
+  assert.ok(actions.some((action) => action.type === 'press' && action.label === 'question_confirm:Degree' && action.value === 'Enter'));
+});
+
+test('managed question fills fall back to label text when a discovered selector exceeds the provider limit', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question: 'Please indicate your overall GPA.',
+        answer: '3.89',
+        portalSelector: `textarea[name="${'x'.repeat(501)}"]`,
+      },
+    ],
+  });
+  const questionAction = actions.find((action) => action.label === 'question:Please indicate your overall GPA.');
+  assert.equal(questionAction?.type, 'fillByLabelText');
+  assert.equal(questionAction?.text, 'Please indicate your overall GPA.');
+  assert.equal(questionAction?.value, '3.89');
 });
 
 test('managed question actions skip empty labels and cap long discovered text', () => {
@@ -539,7 +717,7 @@ test('managed question actions skip empty labels and cap long discovered text', 
       { question: longLabel, answer: 'I built a reliable workflow system.' },
     ],
   });
-  const questionActions = actions.filter((action) => action.type === 'fillByLabelText');
+  const questionActions = actions.filter((action) => action.type === 'fillByLabelText' && action.label?.startsWith('question:'));
   assert.equal(questionActions.length, 1);
   const [questionAction] = questionActions;
   assert.ok(questionAction);
@@ -604,6 +782,145 @@ test('the Ashby branch omits URL fills the packet does not carry', () => {
   assert.ok(!filledLabels.includes('portfolio'));
 });
 
+test('Ashby reviewed essay questions retry nearby textareas when labels are not associated', () => {
+  const actions = buildManagedPortalActions('ashby', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question: "Tell us about something you've built that you're proud of. What was hard about it?",
+        answer: 'I built a fast evaluation harness for AI agents.',
+      },
+    ],
+  });
+
+  assert.ok(actions.some((action) =>
+    action.type === 'fillByLabelText'
+    && action.text === "Tell us about something you've built that you're proud of. What was hard about it?",
+  ));
+  const fallbacks = actions.filter((action) => action.label?.startsWith('question_text:'));
+  assert.ok(fallbacks.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text')));
+  assert.ok(fallbacks.some((action) => action.type === 'fill' && action.selector?.includes('/parent::*/parent::*[not(self::form)')));
+  assert.ok(fallbacks.some((action) => action.type === 'fill' && action.selector?.startsWith('xpath=')));
+  assert.equal(fallbacks.length, 9);
+  assert.equal(fallbacks.some((action) => action.type === 'fill' && action.selector?.includes('following::')), false);
+  assert.equal(fallbacks.some((action) => action.type === 'fill' && action.selector?.includes('ancestor::')), false);
+  assert.ok(fallbacks.every((action) => action.value === 'I built a fast evaluation harness for AI agents.'));
+  assert.ok(fallbacks.every((action) => action.optional === true));
+});
+
+test('Ashby nested-label textarea fallback stays scoped to its question container', () => {
+  const markup = `
+    <form>
+      <div class="question">
+        <div><label>First essay prompt</label></div>
+        <div><textarea id="first"></textarea></div>
+      </div>
+      <div class="question">
+        <div><label>Second essay prompt</label></div>
+        <div><textarea id="second"></textarea></div>
+      </div>
+    </form>
+  `;
+
+  assert.equal(nearestNonFormTextareaId(markup, 'First essay prompt'), 'first');
+  assert.equal(nearestNonFormTextareaId(markup, 'Second essay prompt'), 'second');
+
+  const actions = buildManagedPortalActions('ashby', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      { question: 'First essay prompt', answer: 'First answer' },
+      { question: 'Second essay prompt', answer: 'Second answer' },
+    ],
+  });
+  const xpaths = actions
+    .filter((action) => action.type === 'fill' && action.label?.startsWith('question_text:') && action.selector?.startsWith('xpath='))
+    .map((action) => action.selector ?? '');
+  assert.ok(xpaths.some((selector) => selector.includes('First essay prompt') && selector.includes('/parent::*/parent::*[not(self::form)')));
+  assert.ok(xpaths.some((selector) => selector.includes('Second essay prompt') && selector.includes('/parent::*/parent::*[not(self::form)')));
+  assert.equal(xpaths.some((selector) => selector.includes('following::') || selector.includes('ancestor::')), false);
+  assert.equal(xpaths.every((selector) => selector.includes('[not(self::form)')), true);
+});
+
+test('Ashby long reviewed questions retry the visible prompt stem inside the same fallback budget', () => {
+  const question = 'What is the most impressive thing you’ve personally built or automated with AI? Describe exactly what you did, how it worked, and why it mattered.';
+  const actions = buildManagedPortalActions('ashby', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question,
+        answer: 'I built a fast evaluation harness for AI agents.',
+      },
+    ],
+  });
+
+  const fallbacks = actions.filter((action) => action.label?.startsWith('question_text:'));
+  assert.equal(fallbacks.length, 9);
+  assert.ok(fallbacks.some((action) =>
+    action.type === 'fill'
+    && action.selector?.includes('What is the most impressive thing you’ve personally built or automated with AI?')
+    && !action.selector.includes('Describe exactly what you did')));
+  assert.ok(fallbacks.some((action) =>
+    action.type === 'fill'
+    && action.selector?.startsWith('xpath=')
+    && action.selector.includes('What is the most impressive thing you’ve personally built or automated with AI?')));
+  assert.ok(fallbacks.some((action) =>
+    action.type === 'fill'
+    && action.selector?.includes('What is the most impressive thing you’ve personally built or automated with AI?')
+    && action.selector.includes('/parent::*/parent::*[not(self::form)')));
+  assert.ok(fallbacks.some((action) =>
+    action.type === 'fill'
+    && action.selector?.includes('What is the most impressive thing you’ve personally built or automated with AI?')
+    && action.selector.includes('/parent::*/parent::*/parent::*[not(self::form)')));
+  assert.equal(fallbacks.some((action) => action.type === 'fill' && action.selector?.includes('following::')), false);
+  assert.ok(fallbacks.every((action) => action.value === 'I built a fast evaluation harness for AI agents.'));
+});
+
+test('Ashby reviewed essay packet stays inside the Stratus action budget', () => {
+  const questions = Array.from({ length: 10 }, (_, index) => ({
+    question: `Essay prompt ${index + 1}`,
+    answer: `Answer ${index + 1}`,
+  }));
+  const actions = buildManagedPortalActions('ashby', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    phone: '+971501234567',
+    linkedinUrl: 'https://www.linkedin.com/in/mehekmandal/',
+    githubUrl: 'https://github.com/mehek-builds',
+    portfolioUrl: 'https://github.com/mehek-builds',
+    resume: Buffer.from('pdf'),
+    resumeName: 'Mehek_Mandal_Engineering_Intern_Resume.pdf',
+    questions,
+  }, true);
+
+  assert.ok(actions.every((action) => (action.selector?.length ?? 0) <= 500));
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+});
+
+function nearestNonFormTextareaId(markup: string, labelText: string): string | undefined {
+  const doc = new DOMParser().parseFromString(markup, 'text/html');
+  const labels = Array.from(doc.getElementsByTagName('label'));
+  const label = labels.find((candidate) => candidate.textContent?.replace(/\s+/g, ' ').trim() === labelText);
+  let node = label?.parentNode as any;
+  while (node && String(node.nodeName).toLowerCase() !== 'form') {
+    const textareas = typeof node.getElementsByTagName === 'function'
+      ? Array.from(node.getElementsByTagName('textarea') as ArrayLike<any>)
+      : [];
+    const id = textareas[0]?.getAttribute?.('id');
+    if (id) return id;
+    node = node.parentNode;
+  }
+  return undefined;
+}
+
 test('Greenhouse core identity fields degrade gracefully instead of a 30s hard timeout', () => {
   // Live regression, 2026-07-24: Jump Trading serves its Greenhouse posting through a branded
   // redirect whose form lacks the classic `job_application[...]` selectors, so a required fill on
@@ -633,24 +950,528 @@ test('Greenhouse fills academic fields from the submission packet', () => {
     graduationMonth: 'May',
     graduationYear: '2028',
     gpa: '3.89',
+    major: 'Computer Science',
     resume: Buffer.from('pdf'),
     resumeName: 'resume.pdf',
     questions: [],
   });
-  const byLabel = actions.filter((action) => action.type === 'fillByLabelText');
+  const byLabel = actions.filter(
+    (action) =>
+      action.type === 'fillByLabelText'
+      && action.label?.startsWith('first_name') !== true
+      && action.label?.startsWith('last_name') !== true
+      && action.label?.startsWith('email') !== true,
+  );
   assert.deepEqual(
     byLabel.map((action) => [action.text, action.value, action.label]),
     [
-      ['School', 'University of Southern California', 'education_school'],
-      ['Degree', 'Bachelor of Science in Computer Science', 'education_degree'],
       ['What is your graduation date?', 'May 2028', 'graduation_date'],
+      ['Graduation Date', 'May 2028', 'graduation_date_label'],
+      ['Expected Graduation Date', 'May 2028', 'graduation_date_expected'],
       ['End date month', 'May', 'education_end_month'],
       ['End date year', '2028', 'education_end_year'],
+      ['Graduation Month', 'May', 'education_graduation_month'],
+      ['Graduation Year', '2028', 'education_graduation_year'],
       ['GPA', '3.89', 'gpa'],
+      ['What is your GPA?', '3.89', 'gpa_question'],
     ],
   );
   assert.ok(byLabel.every((action) => action.optional === true));
   assert.ok(byLabel.every((action) => (action.timeout ?? Infinity) < 30_000));
+  assert.equal(
+    actions.some((action) => action.type === 'fillByLabelText' && action.text === 'Degree'),
+    false,
+  );
+  assert.equal(
+    actions.some((action) => action.type === 'fillByLabelText' && action.text === 'School'),
+    false,
+  );
+  const comboFills = actions.filter((action) => action.type === 'fill' && action.label?.startsWith('education_'));
+  assert.ok(comboFills.some((action) => action.selector === '#school--0' && action.value === 'University of Southern California'));
+  assert.equal(comboFills[0]?.selector, '#school--0');
+  assert.equal(comboFills[0]?.value, 'University of Southern California');
+  assert.equal(comboFills.some((action) => action.selector?.includes('label:has-text("School")')), false);
+  const schoolOpenIndex = actions.findIndex((action) => action.type === 'click' && action.selector === '#school--0');
+  const schoolFillIndex = actions.findIndex((action) => action.type === 'fill' && action.selector === '#school--0');
+  assert.ok(schoolOpenIndex >= 0);
+  assert.ok(schoolFillIndex > schoolOpenIndex);
+  assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s Degree'));
+  assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor of Science'));
+  assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor of Science in Computer Science'));
+  assert.equal(comboFills.filter((action) => action.selector === '#degree--0').length, 3);
+  assert.equal(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s'), false);
+  assert.equal(comboFills.some((action) => action.selector?.includes('label:has-text("Degree")')), false);
+  assert.ok(comboFills.some((action) => action.selector === '#discipline--0' && action.value === 'Computer Science'));
+  assert.ok(comboFills.some((action) => action.label?.startsWith('education_graduation_date_combo:') && action.value === 'May 2028'));
+  assert.ok(actions.some((action) => action.type === 'click' && action.selector === '#react-select-school--0-option-0' && action.label?.startsWith('education_school_combo')));
+  assert.ok(actions.some((action) => action.type === 'click' && action.selector === '#react-select-degree--0-option-0' && action.label?.startsWith('education_degree_combo')));
+  assert.ok(actions.some((action) => action.type === 'click' && action.selector === '#react-select-discipline--0-option-0' && action.label?.startsWith('education_discipline_combo')));
+  assert.ok(comboFills.some((action) => action.label?.startsWith('education_graduation_date_combo:') && action.value === 'Spring 2028'));
+});
+
+test('Greenhouse fixed education combobox questions are not replayed as reviewed text', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    school: 'University of Southern California, Viterbi School of Engineering',
+    degree: 'Bachelor of Science in Computer Science',
+    major: 'Computer Science',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      { question: 'school* school--0', answer: 'University of Southern California, Viterbi School of Engineering' },
+      { question: 'degree* degree--0', answer: 'Bachelor\'s Degree' },
+      { question: 'discipline* discipline--0', answer: 'Computer Science' },
+    ],
+  });
+
+  const reviewedQuestionActions = actions.filter((action) => action.label?.startsWith('question:'));
+  assert.equal(reviewedQuestionActions.length, 0);
+  const schoolFills = actions.filter((action) => action.type === 'fill' && action.selector === '#school--0');
+  assert.equal(schoolFills.length, 1);
+  assert.equal(schoolFills[0]?.value, 'University of Southern California');
+  assert.ok(actions.some((action) => action.label?.startsWith('education_school_combo:')));
+  assert.ok(actions.some((action) => action.label?.startsWith('education_degree_combo:')));
+  assert.ok(actions.some((action) => action.label?.startsWith('education_discipline_combo:')));
+});
+
+test('Greenhouse replays Faire option-style choices through React-select buckets', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    phone: '+971501234567',
+    city: 'Dubai',
+    country: 'United Arab Emirates',
+    school: 'University of Southern California, Viterbi School of Engineering',
+    degree: 'Bachelor of Science in Computer Science',
+    graduationDate: 'May 2028',
+    graduationMonth: 'May',
+    graduationYear: '2028',
+    gpa: '3.89',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    coverLetter: Buffer.from('cover'),
+    coverLetterName: 'cover-letter.pdf',
+    referralSourceDefault: 'Company website',
+    eeoPrefs: {
+      gender: 'Female',
+      transgender_status: 'Decline to self-identify',
+      sexual_orientation: 'Heterosexual',
+      disability_status: 'Decline to self-identify',
+      veteran_status: 'Decline to self-identify',
+      race: 'White',
+    },
+    questions: [
+      { question: 'Which team opening are you most interested in?', answer: 'Search & Recommendation' },
+      { question: 'Are you currently enrolled in a Masters or PhD program?', answer: 'No' },
+      {
+        question: 'If yes, please provide your program and expected graduation date.',
+        answer: 'N/A, I am currently an undergraduate at USC Viterbi and expect to graduate in May 2028.',
+      },
+      { question: 'Do you currently reside in San Francisco?', answer: 'No' },
+      { question: 'How familiar are you with Faire?', answer: 'Somewhat familiar' },
+      { question: 'Do you identify as LGBTQIA+?', answer: 'No' },
+      { question: 'Which category best describes you?', answer: 'White' },
+      { question: 'Gender Identity', answer: 'Female' },
+      { question: 'Veteran Status', answer: 'Decline to self-identify' },
+      { question: 'Faire Candidate Privacy Policy acknowledgment', answer: 'Yes' },
+    ],
+  });
+
+  const comboFills = actions.filter((action) =>
+    action.type === 'fill'
+    && action.label?.startsWith('question_combo_label:'));
+  for (const value of [
+    'Search & Recommendation',
+    'No',
+    'White',
+    'Female',
+    'Decline to self-identify',
+  ]) {
+    assert.ok(comboFills.some((action) => action.value === value), value);
+  }
+  assert.ok(actions.some((action) =>
+    action.label?.startsWith('greenhouse_referral_combo_label:')
+    && action.value === 'Company website'));
+  assert.ok(actions.some((action) =>
+    action.label?.startsWith('greenhouse_referral_combo_label:')
+    && action.label.includes('How did you hear about us')
+    && action.value === 'Company website'));
+  assert.equal(actions.some((action) =>
+    action.label?.startsWith('greenhouse_demographic:')
+    && action.label.includes('Gender')), false);
+  assert.equal(actions.some((action) =>
+    action.label?.startsWith('greenhouse_demographic:')
+    && action.label.includes('veteran')), false);
+  assert.equal(comboFills.some((action) => action.label?.includes('Candidate Privacy Policy')), false);
+  assert.equal(actions.some((action) => action.text === 'Faire Candidate Privacy Policy acknowledgment'), false);
+  assert.ok(comboFills.every((action) => (action.selector?.length ?? Infinity) <= 500));
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+});
+
+test('Greenhouse demographic aliases keep race fallback for unrelated category questions', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    eeoPrefs: {
+      race: 'White',
+    },
+    questions: [
+      { question: 'Which product category are you most interested in?', answer: 'Search' },
+    ],
+  });
+
+  assert.ok(actions.some((action) =>
+    action.label?.startsWith('greenhouse_demographic_select:')
+    && action.value === 'White'));
+  assert.ok(actions.some((action) =>
+    action.label?.startsWith('greenhouse_demographic_combo:')
+    && action.value === 'White'));
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+});
+
+test('Greenhouse trims low-priority fallbacks before exceeding the managed action budget', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    phone: '+971501234567',
+    city: 'Dubai',
+    country: 'United Arab Emirates',
+    school: 'University of Southern California, Viterbi School of Engineering',
+    degree: 'Bachelor of Science in Computer Science',
+    major: 'Computer Science',
+    graduationDate: 'May 2028',
+    graduationMonth: 'May',
+    graduationYear: '2028',
+    gpa: '3.89',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    coverLetter: Buffer.from('cover'),
+    coverLetterName: 'cover-letter.pdf',
+    referralSourceDefault: 'Company website',
+    eeoPrefs: {
+      gender: 'Female',
+      transgender_status: 'Decline to self-identify',
+      sexual_orientation: 'Heterosexual',
+      disability_status: 'Decline to self-identify',
+      veteran_status: 'Decline to self-identify',
+      race: 'White',
+    },
+    questions: [
+      { question: 'Which team opening are you most interested in?', answer: 'Search & Recommendation' },
+      { question: 'How familiar are you with Faire?', answer: 'Somewhat familiar' },
+      { question: 'Are you currently eligible to legally work in the United States?', answer: 'Yes' },
+      { question: 'Will you now or in the future require immigration support or sponsorship?', answer: 'Yes' },
+      { question: 'Are you able to work onsite in our San Francisco office 5 days a week?', answer: 'Yes' },
+      { question: 'Which product category are you most interested in?', answer: 'Search' },
+      { question: 'Which opening are you most interested in?', answer: 'Data Science' },
+      { question: 'Which location are you most interested in?', answer: 'San Francisco, California' },
+      { question: 'What is your graduation date?', answer: 'May 2028' },
+      { question: 'What is your GPA?', answer: '3.89' },
+    ],
+  }, true);
+
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+  assert.equal(actions.at(-1)?.type, 'click');
+  assert.ok(actions.some((action) => action.label === 'phone_country'));
+  assert.ok(actions.some((action) => action.label === 'location'));
+  assert.ok(actions.some((action) => action.label?.startsWith('question_combo_label:') && action.label.includes('team opening')));
+  assert.equal(actions.some((action) => action.label?.includes('sexual orientation')), false);
+  assert.ok(actions.some((action) => action.label?.startsWith('greenhouse_referral_combo_label:') && action.label.includes('Faire')));
+  assert.ok(actions.some((action) => action.type === 'upload' && action.label === 'resume'));
+  assert.ok(actions.some((action) => action.type === 'upload' && action.label === 'cover_letter'));
+});
+
+test('Greenhouse skips submit when preserved answers alone exceed the managed action budget', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    phone: '+971501234567',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: Array.from({ length: 140 }, (_, index) => ({
+      question: `Describe project ${index + 1}`,
+      answer: `Project ${index + 1} answer`,
+    })),
+  }, true);
+
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+  assert.notEqual(actions.at(-1)?.selector, 'button[type="submit"], input[type="submit"]');
+  assert.ok(actions.some((action) => action.type === 'upload' && action.label === 'resume'));
+});
+
+test('Greenhouse replays Jump academic and referral choices without consent', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    phone: '+971501234567',
+    school: 'University of Southern California, Viterbi School of Engineering',
+    degree: 'Bachelor of Science in Computer Science',
+    graduationDate: 'May 2028',
+    graduationMonth: 'May',
+    graduationYear: '2028',
+    referralSourceDefault: 'Company website',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      { question: 'Do you currently have any offers from other firms or deadlines we should be aware of?', answer: 'No' },
+      { question: 'If you said yes above, please tell us about your offers and deadlines.', answer: 'N/A' },
+      { question: 'Will you require sponsorship for work authorization in the future?', answer: 'Yes' },
+      { question: 'Review our Notice at Collection to learn how we will process your personal data.', answer: 'I agree' },
+    ],
+  });
+
+  const comboFills = actions.filter((action) => action.type === 'fill');
+  assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s Degree'), 'degree level');
+  assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor of Science'), 'degree bachelor science');
+  assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor of Science in Computer Science'), 'degree full');
+  assert.ok(comboFills.some((action) => action.label?.startsWith('education_graduation_date_combo:') && action.value === 'May 2028'), 'raw graduation date');
+  assert.ok(comboFills.some((action) => action.label?.startsWith('education_graduation_date_combo:') && action.value === 'Spring 2028'), 'graduation bucket');
+  assert.ok(actions.some((action) =>
+    action.label?.startsWith('greenhouse_referral_combo_label:')
+    && action.value === 'Company website'), 'referral combo');
+  assert.ok(actions.some((action) =>
+    action.label?.startsWith('question_combo_label:')
+    && action.value === 'Yes'), 'sponsorship combo');
+  assert.equal(actions.some((action) => action.text === 'Review our Notice at Collection to learn how we will process your personal data.'), false, 'privacy text skipped');
+  assert.ok(actions.every((action) => !action.selector || action.selector.length <= 500), 'selector length');
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+});
+
+test('Greenhouse replays Databricks choice questions through React-select buckets', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question: "Please choose the single location that you're the most interested in, and we will discuss more with you as you move through the process.",
+        answer: 'San Francisco, California',
+        portalSelector: 'input[id="question_32707214002"]',
+      },
+      {
+        question: 'What is your graduation date?',
+        answer: 'May 2027',
+        portalSelector: 'input[id="question_24505242002"]',
+      },
+      {
+        question: 'What is your GPA?',
+        answer: '3.89',
+        portalSelector: 'input[id="question_32698502002"]',
+      },
+      {
+        question: 'Do you currently or have you previously worked for Databricks in the past?',
+        answer: "I have not worked for Databricks before, and I don't currently work there.",
+        portalSelector: 'input[id="question_30149518002"]',
+      },
+    ],
+  });
+
+  const comboActions = actions.filter((action) => action.label?.startsWith('question_combo:'));
+  assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector === 'input[id="question_32707214002"]' && action.value === 'San Francisco, CA'));
+  assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector === 'input[id="question_24505242002"]' && action.value === 'Earlier than Fall 2027'));
+  assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector === 'input[id="question_32698502002"]' && action.value === '3.6 or above (out of 4.0)'));
+  assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector === 'input[id="question_30149518002"]' && action.value === 'No'));
+  assert.ok(comboActions.some((action) => action.type === 'click' && action.selector === '[id^="react-select-"][id$="-option-0"]:visible'));
+  assert.ok(actions.some((action) => action.type === 'press' && action.selector === 'input[id="question_32707214002"]' && action.label?.startsWith('question_combo')));
+  assert.ok(actions.some((action) => action.type === 'press' && action.selector === 'input[id="question_24505242002"]' && action.label?.startsWith('question_combo')));
+  assert.ok(actions.some((action) => action.type === 'press' && action.selector === 'input[id="question_32698502002"]' && action.label?.startsWith('question_combo')));
+  assert.ok(actions.some((action) => action.type === 'press' && action.selector === 'input[id="question_30149518002"]' && action.label?.startsWith('question_combo')));
+});
+
+test('Greenhouse replays Databricks React-select buckets without portal selectors', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question: "Please choose the single location that you're the most interested in, and we will discuss more with you as you move through the process.",
+        answer: 'San Francisco, California',
+      },
+      {
+        question: 'What is your graduation date?',
+        answer: 'May 2027',
+      },
+      {
+        question: 'What is your GPA?',
+        answer: '3.89',
+      },
+      {
+        question: 'Do you currently or have you previously worked for Databricks in the past?',
+        answer: "I have not worked for Databricks before, and I don't currently work there.",
+      },
+    ],
+  });
+
+  const comboActions = actions.filter((action) => action.label?.startsWith('question_combo_label:'));
+  assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text("Please choose the single location') && action.value === 'San Francisco, CA'));
+  assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text("What is your graduation date?")') && action.value === 'Earlier than Fall 2027'));
+  assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text("What is your GPA?")') && action.value === '3.6 or above (out of 4.0)'));
+  assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text("Do you currently or have you previously worked for Databricks') && action.value === 'No'));
+  assert.equal(comboActions.filter((action) => action.type === 'click' && action.selector === '[id^="react-select-"][id$="-option-0"]:visible').length, 4);
+  for (const action of comboActions.filter((candidate) => candidate.type === 'fill')) {
+    const index = actions.indexOf(action);
+    assert.equal(actions[index + 1]?.type, 'click');
+    assert.equal(actions[index + 1]?.selector, '[id^="react-select-"][id$="-option-0"]:visible');
+    assert.equal(actions[index + 2]?.type, 'press');
+    assert.equal(actions[index + 2]?.selector, action.selector);
+  }
+  assert.ok(actions.some((action) => action.type === 'press' && action.label?.startsWith('question_combo_label:') && action.value === 'Enter'));
+  assert.ok(actions.every((action) => (action.selector?.length ?? 0) <= 500));
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+});
+
+test('Greenhouse work authorization React-select respects negative reviewed answers', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question: 'Are you legally authorized to work in the country in which you are applying?',
+        answer: 'No',
+      },
+    ],
+  });
+
+  const comboFills = actions.filter((action) =>
+    action.type === 'fill'
+    && action.label?.startsWith('question_combo_label:')
+    && action.label?.includes('Are you legally authorized'));
+  assert.equal(comboFills.length, 1);
+  assert.equal(comboFills[0]?.value, 'No');
+  assert.equal(
+    actions.some((action) =>
+      action.type === 'fill'
+      && action.label?.startsWith('question_combo_label:')
+      && action.label?.includes('Are you legally authorized')
+      && action.value === 'Yes'),
+    false,
+  );
+});
+
+test('Greenhouse Databricks academic and reviewed question packet stays inside the action budget', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    phone: '+971501234567',
+    school: 'University of Southern California, Viterbi School of Engineering',
+    degree: 'Bachelor of Science in Computer Science',
+    graduationDate: 'May 2027',
+    graduationMonth: 'May',
+    graduationYear: '2027',
+    gpa: '3.89',
+    major: 'Computer Science',
+    linkedinUrl: 'https://www.linkedin.com/in/mehekmandal/',
+    portfolioUrl: 'https://github.com/mehek-builds',
+    resume: Buffer.from('pdf'),
+    resumeName: 'Mehek_Mandal_Product_Management_Intern_Resume.pdf',
+    eeoPrefs: {
+      gender: 'Female',
+      sexual_orientation: 'Heterosexual',
+      race: 'White',
+      veteran_status: 'Decline to self-identify',
+      disability_status: 'Decline to self-identify',
+    },
+    questions: [
+      { question: 'LinkedIn Profile', answer: 'https://www.linkedin.com/in/mehekmandal/' },
+      { question: 'Website', answer: 'https://github.com/mehek-builds' },
+      { question: 'How did you hear about this job?', answer: 'Company website' },
+      { question: 'Are you legally authorized to work in the country in which you are applying?', answer: 'Yes' },
+      { question: 'Do you now or will you in the future need sponsorship for employment visa status', answer: 'Yes' },
+      { question: 'Gender', answer: 'Female' },
+      {
+        question: "Please choose the single location that you're the most interested in, and we will discuss more with you as you move through the process.",
+        answer: 'San Francisco, California',
+      },
+      { question: 'What is your graduation date?', answer: 'May 2027' },
+      { question: 'What is your GPA?', answer: '3.89' },
+      {
+        question: 'Do you currently or have you previously worked for Databricks in the past?',
+        answer: "I have not worked for Databricks before, and I don't currently work there.",
+      },
+      {
+        question: 'Please confirm whether any of the below applies to you. Select all that apply. Note: This information will only be used to ensure compliance with U.S. sanctions and export controls.',
+        answer: 'None of the above',
+      },
+      {
+        question: 'If you selected a response to the prior question other than none of the above, please confirm whether any of the following also applies to you. Select all that apply.',
+        answer: 'Not applicable (i.e., I selected none of the above for the prior question)',
+      },
+    ],
+  }, true);
+
+  assert.ok(actions.some((action) => action.label?.startsWith('education_degree_combo:')));
+  assert.equal(actions.some((action) => action.label?.startsWith('education_degree_combo_label:')), false);
+  assert.ok(actions.some((action) => action.label?.startsWith('question_combo_label:')));
+  assert.ok(actions.some((action) =>
+    action.type === 'fill'
+    && action.label?.startsWith('question_combo_label:')
+    && action.label?.includes('Are you legally authorized')
+    && action.value === 'Yes'));
+  assert.ok(actions.some((action) => action.label?.startsWith('question_checkbox:')));
+  assert.equal(
+    actions.some((action) =>
+      action.label?.startsWith('question_select:')
+      && action.selector?.includes('What is your GPA?')),
+    false,
+  );
+  assert.ok(actions.every((action) => (action.selector?.length ?? 0) <= 500));
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+});
+
+test('Greenhouse replays Databricks export-control checkbox answers by exact option', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question: 'Please confirm whether any of the below applies to you. Select all that apply. Note: This information will only be used to ensure compliance with U.S. sanctions and export controls.',
+        answer: 'None of the above',
+        portalSelector: 'input[id="question_35110536002[]_221056618002"]',
+        portalInputType: 'checkbox',
+      },
+      {
+        question: 'If you selected a response to the prior question other than none of the above, please confirm whether any of the following also applies to you. Select all that apply.',
+        answer: 'Not applicable (i.e., I selected none of the above for the prior question)',
+        portalSelector: 'input[id="question_35114221002[]_221073825002"]',
+        portalInputType: 'checkbox',
+      },
+    ],
+  });
+
+  const checkboxClicks = actions.filter((action) => action.label?.startsWith('question_checkbox:'));
+  assert.equal(actions.some((action) => action.label?.startsWith('question_choice:')), false);
+  assert.ok(checkboxClicks.some((action) => action.type === 'click' && action.selector === 'input[name="question_35110536002[]"][value="221056618002"]'));
+  assert.ok(checkboxClicks.some((action) => action.type === 'click' && action.selector === 'input[name="question_35114221002[]"][value="221073825002"]'));
+  assert.equal(checkboxClicks.some((action) => action.selector?.startsWith('label:has-text')), false);
+  assert.ok(checkboxClicks.every((action) => action.optional === true));
+  assert.ok(checkboxClicks.every((action) => (action.timeout ?? Infinity) < 30_000));
+});
+
+test('Greenhouse school aliases do not strip comma-separated campus names generically', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    school: 'University of California, Berkeley',
+    degree: 'Bachelor of Science in Computer Science',
+    major: 'Computer Science',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  const schoolValues = actions
+    .filter((action) => action.type === 'fill' && action.selector === '#school--0')
+    .map((action) => action.value);
+  assert.deepEqual(schoolValues, ['University of California, Berkeley']);
 });
 
 test('no managed action can burn the 30s default — every fill, upload, and question is bounded', () => {
@@ -699,8 +1520,51 @@ test('choice controls are not auto-clicked by matching answer text', () => {
     resumeName: 'resume.pdf',
     questions: [{ question: 'Do you consent to the terms?', answer: 'Yes' }],
   });
-  const clicks = actions.filter((action) => action.type === 'click');
+  const clicks = actions.filter((action) => action.type === 'click' && !isGreenhousePreflightClick(action));
   assert.equal(clicks.length, 0, 'no click action may be synthesized from an answer string');
+});
+
+test('Greenhouse managed actions never include demographic data consent', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  assert.equal(actions.some((action) => action.label === 'greenhouse_demographic_data_consent_checkbox'), false);
+  assert.equal(actions.some((action) => action.label === 'greenhouse_demographic_data_consent'), false);
+});
+
+test('Greenhouse managed actions include explicitly saved demographic choices', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    eeoPrefs: {
+      gender: 'Female',
+      transgender_status: 'Decline to self-identify',
+      sexual_orientation: 'Heterosexual',
+      disability_status: 'Decline to self-identify',
+      veteran_status: 'Decline to self-identify',
+      race: 'White',
+    },
+    questions: [],
+  });
+  assert.deepEqual(
+    actions
+      .filter((action) => action.label?.startsWith('greenhouse_demographic:'))
+      .map((action) => [action.text, action.value]),
+    [
+      ['What gender identity do you most closely identify with?', 'Female'],
+      ['Are you a person of transgender experience?', 'Decline to self-identify'],
+      ['What sexual orientation do you most closely identify with?', 'Heterosexual'],
+      ['Do you live with a disability (as outlined by the ADA)?', 'Decline to self-identify'],
+      ['Are you a veteran/have you served in the military?', 'Decline to self-identify'],
+      ['Please select up to 2 ethnicities that you most closely identify with.', 'White'],
+    ],
+  );
 });
 
 test('question wording alone cannot predict a control type', () => {
@@ -1193,6 +2057,259 @@ test('the 2026-07-29 host rules reject every login, marketing and unrelated-prod
     detectPortal('https://recruiting.ultipro.com/she1011sphs/JobBoard/62d52737-46c1-4699-83e3-3a1747e3b981'),
     'ultipro',
   );
+});
+
+test('Greenhouse fixed actions include semantic and label fallbacks for first name', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  const firstNameFill = actions.find((action) => action.label === 'first_name');
+  assert.equal(firstNameFill?.type, 'fill');
+  assert.match(firstNameFill?.selector ?? '', /autocomplete="given-name"/);
+  assert.match(firstNameFill?.selector ?? '', /aria-label="First Name"/);
+
+  const firstNameByLabel = actions.find((action) => action.label === 'first_name_label');
+  assert.deepEqual(
+    {
+      type: firstNameByLabel?.type,
+      text: firstNameByLabel?.text,
+      value: firstNameByLabel?.value,
+      optional: firstNameByLabel?.optional,
+    },
+    { type: 'fillByLabelText', text: 'First Name', value: 'Taylor', optional: true },
+  );
+});
+
+test('Greenhouse managed actions open branded job pages and clear cookie overlays before filling', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  const openFormIndex = actions.findIndex((action) => action.label === 'greenhouse_open_application_form');
+  const firstNameIndex = actions.findIndex((action) => action.label === 'first_name');
+  assert.ok(openFormIndex >= 0, 'Greenhouse managed run must click the branded apply button when present');
+  assert.ok(firstNameIndex > openFormIndex, 'Greenhouse form entry must happen before fixed-field filling');
+  assert.ok(actions.some((action) => action.selector === '#onetrust-accept-btn-handler'));
+  assert.ok(actions.some((action) => action.selector?.includes('Allow All')));
+  assert.ok(actions.some((action) => action.label === 'greenhouse_application_form_ready'));
+});
+
+test('Greenhouse fixed actions include semantic and label fallbacks for last name and email', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  const lastNameFill = actions.find((action) => action.label === 'last_name');
+  assert.equal(lastNameFill?.type, 'fill');
+  assert.match(lastNameFill?.selector ?? '', /autocomplete="family-name"/);
+  assert.match(lastNameFill?.selector ?? '', /aria-label="Last Name"/);
+
+  const lastNameByLabel = actions.find((action) => action.label === 'last_name_label');
+  assert.deepEqual(
+    {
+      type: lastNameByLabel?.type,
+      text: lastNameByLabel?.text,
+      value: lastNameByLabel?.value,
+      optional: lastNameByLabel?.optional,
+    },
+    { type: 'fillByLabelText', text: 'Last Name', value: 'Example', optional: true },
+  );
+
+  const emailFill = actions.find((action) => action.label === 'email');
+  assert.equal(emailFill?.type, 'fill');
+  assert.match(emailFill?.selector ?? '', /type="email"/);
+  assert.match(emailFill?.selector ?? '', /autocomplete="email"/);
+
+  const emailByLabel = actions.find((action) => action.label === 'email_label');
+  assert.deepEqual(
+    {
+      type: emailByLabel?.type,
+      text: emailByLabel?.text,
+      value: emailByLabel?.value,
+      optional: emailByLabel?.optional,
+    },
+    { type: 'fillByLabelText', text: 'Email', value: 'taylor@example.com', optional: true },
+  );
+});
+
+test('Greenhouse resume upload includes modern semantic file-input fallbacks', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  const upload = actions.find((action) => action.label === 'resume');
+  assert.equal(upload?.type, 'upload');
+  assert.match(upload?.selector ?? '', /id\*="resume"/);
+  assert.match(upload?.selector ?? '', /name\*="resume"/);
+  assert.match(upload?.selector ?? '', /aria-label\*="resume"/);
+  assert.doesNotMatch(upload?.selector ?? '', /cover_letter/);
+});
+
+test('Greenhouse managed actions retry known yes-no work and onsite choices by exact portal labels', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      { question: 'Are you currently eligible to legally work in the US?', answer: 'Yes' },
+      { question: 'Are you legally authorized to work in the country where the job is located?', answer: 'Yes' },
+      { question: 'Will you now or in the future require immigration support/sponsorship?', answer: 'Yes' },
+      { question: 'Are you able to work onsite in our San Francisco office 5 days a week?', answer: 'Yes' },
+      {
+        question:
+          'Will you now, or will you in the future, require immigration sponsorship to work at this company in the United States?',
+        answer: 'Yes',
+      },
+      { question: 'Do you consent to the terms?', answer: 'Yes' },
+    ],
+  });
+  const aliasActions = actions.filter((action) => action.label?.startsWith('greenhouse_known_question:'));
+  assert.ok(aliasActions.length >= 8);
+  assert.ok(aliasActions.every((action) => action.type === 'fillByLabelText'));
+  assert.ok(aliasActions.every((action) => action.value === 'Yes'));
+  assert.ok(aliasActions.every((action) => action.optional === true));
+  assert.ok(aliasActions.some((action) => action.text === 'Are you currently eligible to legally work in the United States?'));
+  assert.ok(aliasActions.some((action) => action.text === 'Are you legally authorized to work in the country where the job is located?'));
+  assert.ok(aliasActions.some((action) => action.text === 'Will you now or in the future require immigration support or sponsorship from Postman?'));
+  assert.ok(aliasActions.some((action) => action.text === 'Are you able to work onsite in our San Francisco office 5 days a week?'));
+  assert.equal(aliasActions.some((action) => action.text === 'Are you able to work onsite four days a week?'), false);
+  assert.equal(aliasActions.some((action) => action.text === 'Do you consent to the terms?'), false);
+
+  const selectActions = actions.filter((action) => action.label?.startsWith('greenhouse_known_select'));
+  assert.equal(selectActions.length, 0);
+  assert.equal(
+    actions.filter((action) =>
+      action.type === 'click'
+      && !isGreenhousePreflightClick(action)
+      && !action.label?.startsWith('education_school_combo_label')
+      && !action.label?.startsWith('question_combo_label:')).length,
+    0,
+  );
+});
+
+test('managed reviewed questions replay stored answers into label-scoped choice controls', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    ...capturePacket,
+    questions: [
+      { question: 'Are you currently enrolled in a degree program?', answer: 'Yes' },
+      { question: 'Graduation Year', answer: '2028' },
+      { question: 'Are you able to work onsite 4 days a week?', answer: 'Yes' },
+    ],
+  });
+
+  const scoped = actions.filter((action) => action.label?.startsWith('question:'));
+  assert.ok(scoped.some((action) => action.type === 'fillByLabelText' && action.text === 'Are you currently enrolled in a degree program?'));
+  assert.ok(scoped.some((action) => action.type === 'fillByLabelText' && action.text === 'Graduation Year'));
+  assert.ok(scoped.some((action) => action.type === 'fillByLabelText' && action.text === 'Are you able to work onsite 4 days a week?'));
+
+  const selects = actions.filter((action) => action.label?.startsWith('question_select:'));
+  assert.ok(selects.some((action) => action.type === 'select' && action.value === '1'));
+  assert.ok(selects.some((action) => action.type === 'select' && action.value === 'true'));
+  assert.ok(selects.some((action) => action.type === 'select' && action.value === '2028'));
+  assert.ok(selects.every((action) => (action.selector?.length ?? Infinity) <= 500));
+});
+
+test('Greenhouse managed actions stay inside the Stratus action budget on Reddit-style packets', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    phone: '+971501234567',
+    city: 'Dubai, United Arab Emirates',
+    country: 'United Arab Emirates',
+    linkedinUrl: 'https://www.linkedin.com/in/mehekmandal',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'Mehek_Mandal_Staff_Product_Manager_Ads_Trust_and_Safety_Resume.pdf',
+    coverLetter: Buffer.from('cover-pdf'),
+    coverLetterName: 'Mehek_Mandal_Staff_Product_Manager_Ads_Trust_and_Safety_Cover_Letter.pdf',
+    eeoPrefs: {
+      gender: "I don't wish to answer",
+      transgender_status: "I don't wish to answer",
+      sexual_orientation: "I don't wish to answer",
+      disability_status: "I don't wish to answer",
+      veteran_status: "I don't wish to answer",
+      race: "I don't wish to answer",
+    },
+    questions: [
+      { question: 'How did you hear about this job?', answer: 'Company website' },
+      {
+        question: 'Briefly describe your experience with Ads Review/Ads Trust and Safety',
+        answer: 'I have built and operated AI product workflows with review loops and operational controls.',
+      },
+      { question: 'Are you currently eligible to legally work in the United States?', answer: 'Yes' },
+      { question: 'Will you now or in the future require immigration support or sponsorship?', answer: 'Yes' },
+      { question: 'I agree to the Candidate Privacy Policy', answer: 'I agree' },
+      { question: 'Are you a person of transgender experience?', answer: "I don't wish to answer" },
+      { question: 'What gender identity do you most closely identify with?', answer: "I don't wish to answer" },
+      { question: 'What sexual orientation do you most closely identify with?', answer: "I don't wish to answer" },
+      { question: 'Do you live with a disability (as outlined by the ADA)?', answer: "I don't wish to answer" },
+      { question: 'Are you a veteran/have you served in the military?', answer: "I don't wish to answer" },
+      { question: 'Please select up to 2 ethnicities that you most closely identify with.', answer: "I don't wish to answer" },
+    ],
+  }, true);
+
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+  assert.equal(actions.some((action) => action.label?.startsWith('greenhouse_known_select:')), false);
+  assert.ok(actions.some((action) =>
+    action.label?.startsWith('question_combo_label:')
+    && action.label.includes('gender identity')));
+  assert.equal(actions.some((action) => action.label?.startsWith('greenhouse_demographic_select:')), false);
+  assert.equal(actions.some((action) => action.text === 'I agree to the Candidate Privacy Policy'), false);
+  assert.ok(
+    actions.every((action) => !action.selector || action.selector.length <= 500),
+    'Stratus rejects selector strings longer than 500 characters',
+  );
+});
+
+test('Greenhouse managed actions stay inside the Stratus action budget on Nuro-style onsite packets', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    phone: '+971501234567',
+    city: 'Dubai, United Arab Emirates',
+    country: 'United Arab Emirates',
+    linkedinUrl: 'https://www.linkedin.com/in/mehekmandal/',
+    portfolioUrl: 'https://github.com/mehek-builds',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'Mehek_Mandal_Software_Engineer_AI_Platform_Intern_Resume.pdf',
+    coverLetter: Buffer.from('cover-pdf'),
+    coverLetterName: 'Mehek_Mandal_Software_Engineer_AI_Platform_Intern_Cover_Letter.pdf',
+    questions: [
+      { question: 'LinkedIn Profile', answer: 'https://www.linkedin.com/in/mehekmandal/' },
+      { question: 'Website', answer: 'https://github.com/mehek-builds' },
+      { question: 'Are you authorized to work in the country in which you are applying?', answer: 'Yes' },
+      {
+        question: 'Do you now, or will you in the future, require sponsorship for employment in the country which you are applying?',
+        answer: 'Yes',
+      },
+      {
+        question:
+          'This position is hybrid and requires 4 days a week in office, including Thursdays in our Mountain View, CA headquarters and the remaining 3 days in either Mountain View or our San Francisco, CA office. Are you able to meet this requirement?',
+        answer: 'Yes',
+      },
+    ],
+  }, true);
+
+  const onsiteAliases = actions.filter((action) =>
+    action.label?.startsWith('greenhouse_known_question:')
+    && /onsite|on-site/i.test(action.text ?? ''),
+  );
+  assert.equal(onsiteAliases.length, 4);
+  assert.ok(onsiteAliases.every((action) => /four|4/.test(action.text ?? '')));
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
 });
 
 test('the QA harness routes to the three new controlled adapters, by query param and by path', () => {

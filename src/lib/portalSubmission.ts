@@ -1,7 +1,13 @@
 import type { Page } from 'playwright-core';
 import type { ManagedBrowserAction, ManagedBrowserResult } from './browserbase';
 import { describeRequiredBlocker, describeUnlabelledBlockers, humanFieldLabel } from './fieldLabel';
-import { normalizeReviewQuestionLabel, resolveKnownAnswer, type ApplicationProfileLike } from './questionDiscovery';
+import {
+  classifyField,
+  isLegalConsentQuestion,
+  normalizeReviewQuestionLabel,
+  resolveKnownAnswer,
+  type ApplicationProfileLike,
+} from './questionDiscovery';
 import type { Locator } from 'playwright-core';
 
 // Portal field ids legitimately contain CSS-syntax characters (Greenhouse uses UUIDs, others use
@@ -248,12 +254,15 @@ export type SubmissionPacket = {
   graduationMonth?: string;
   graduationYear?: string;
   gpa?: string;
+  major?: string;
+  referralSourceDefault?: string;
   applicationProfile?: ApplicationProfileLike;
   jdText?: string;
   resume: Buffer;
   resumeName: string;
   coverLetter?: Buffer;
   coverLetterName?: string;
+  eeoPrefs?: Record<string, string> | null;
   // The single most recent role from the parsed resume, for portals that ask for work history as
   // structured fields rather than accepting the resume file alone (Paylocity's step one). Only one
   // entry, deliberately: portals render additional rows behind an "Add" button, and creating rows
@@ -266,7 +275,13 @@ export type SubmissionPacket = {
     startDate?: string;
     endDate?: string;
   };
-  questions: Array<{ question: string; answer: string }>;
+  questions: Array<{
+    question: string;
+    answer: string;
+    portalSelector?: string;
+    portalInputType?: string;
+    atsApiField?: string;
+  }>;
 };
 
 export type FillResult = {
@@ -425,6 +440,12 @@ function managedFillByLabel(
   actions.push({ type: 'fillByLabelText', text, value, label, optional, timeout });
 }
 
+function durablePortalSelector(selector: string | undefined): string | undefined {
+  const trimmed = selector?.trim();
+  if (!trimmed || trimmed.length > 500 || trimmed.startsWith('[data-litos-discovered-')) return undefined;
+  return trimmed;
+}
+
 function managedComboboxFill(
   actions: ManagedBrowserAction[],
   selector: string,
@@ -436,6 +457,158 @@ function managedComboboxFill(
   if (!value) return;
   actions.push({ type: 'fill', selector, value, label, optional, timeout });
   actions.push({ type: 'press', selector, value: 'Enter', label: `${label}_select`, optional, timeout });
+}
+
+function managedGreenhouseReactSelectFill(
+  actions: ManagedBrowserAction[],
+  inputId: 'school--0' | 'degree--0' | 'discipline--0',
+  value: string | undefined,
+  label: string,
+  optional = true,
+  timeout = MANAGED_FILL_TIMEOUT_MS,
+) {
+  if (!value) return;
+  const selector = `#${inputId}`;
+  actions.push({
+    type: 'click',
+    selector,
+    label: `${label}_open`,
+    optional,
+    timeout,
+  });
+  actions.push({ type: 'fill', selector, value, label, optional, timeout });
+  actions.push({
+    type: 'click',
+    selector: `#react-select-${inputId}-option-0`,
+    label: `${label}_option`,
+    optional,
+    timeout,
+  });
+}
+
+function managedGreenhouseScopedReactSelectFill(
+  actions: ManagedBrowserAction[],
+  inputSelector: string,
+  optionSelector: string | undefined,
+  value: string | undefined,
+  label: string,
+  optional = true,
+  timeout = MANAGED_FILL_TIMEOUT_MS,
+) {
+  if (!value) return;
+  actions.push({ type: 'fill', selector: inputSelector, value, label, optional, timeout });
+  if (optionSelector) {
+    actions.push({
+      type: 'click',
+      selector: optionSelector,
+      label: `${label}_option`,
+      optional,
+      timeout,
+    });
+  }
+  actions.push({ type: 'press', selector: inputSelector, value: 'Enter', label: `${label}_select`, optional, timeout });
+}
+
+function uniqueDefined(values: Array<string | undefined>): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    const trimmed = value?.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+function greenhouseSchoolAliases(school: string | undefined): string[] {
+  const trimmed = school?.trim();
+  if (!trimmed) return [];
+  const uscAlias = /\bUniversity of Southern California\b/i.test(trimmed)
+    ? 'University of Southern California'
+    : undefined;
+  if (uscAlias) return [uscAlias];
+  return uniqueDefined([
+    trimmed,
+  ]);
+}
+
+function greenhouseDegreeAliases(degree: string | undefined): string[] {
+  const trimmed = degree?.trim();
+  if (!trimmed) return [];
+  const lower = trimmed.toLowerCase();
+  let level: string | undefined;
+  if (/\bph\.?d\b|doctor of philosophy|doctorate/i.test(lower)) level = 'Doctor of Philosophy (Ph.D.)';
+  else if (/\bmaster|m\.?s\.?|m\.?a\.?\b|mba|m\.?b\.?a\.?/i.test(lower)) level = 'Master\'s Degree';
+  else if (/\bbachelor|b\.?s\.?|b\.?a\.?\b/i.test(lower)) level = 'Bachelor\'s Degree';
+  else if (/\bassociate/i.test(lower)) level = 'Associate\'s Degree';
+  else if (/\bhigh school/i.test(lower)) level = 'High School';
+  const bachelorScience = level === 'Bachelor\'s Degree' && /\b(?:science|b\.?s\.?)\b/i.test(lower)
+    ? 'Bachelor of Science'
+    : undefined;
+  return uniqueDefined([level, bachelorScience, trimmed]);
+}
+
+function greenhouseDisciplineAliases(packet: SubmissionPacket): string[] {
+  const major = packet.major?.trim();
+  const degree = packet.degree?.trim();
+  const inferred = degree?.match(/computer science/i)?.[0] ?? degree?.match(/\bfinance\b/i)?.[0];
+  return uniqueDefined([
+    major,
+    inferred,
+    major && /\bcs\b/i.test(major) ? 'Computer Science' : undefined,
+  ]);
+}
+
+function pushGreenhouseEducationComboboxActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
+  const schoolAliases = greenhouseSchoolAliases(packet.school);
+  for (const [index, value] of schoolAliases.entries()) {
+    managedGreenhouseReactSelectFill(actions, 'school--0', value, `education_school_combo:${index}`);
+  }
+  const degreeAliases = greenhouseDegreeAliases(packet.degree);
+  for (const [index, value] of degreeAliases.entries()) {
+    managedGreenhouseReactSelectFill(actions, 'degree--0', value, `education_degree_combo:${index}`);
+  }
+  for (const [index, value] of greenhouseDisciplineAliases(packet).entries()) {
+    managedGreenhouseReactSelectFill(actions, 'discipline--0', value, `education_discipline_combo:${index}`);
+  }
+}
+
+function pushGreenhouseGraduationDateComboboxActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
+  const values = uniqueDefined([
+    packet.graduationDate,
+    packet.graduationDate ? greenhouseGraduationBucket(packet.graduationDate) : undefined,
+  ]).slice(0, 2);
+  const labels = ['Graduation Date', 'Expected Graduation Date'];
+  let index = 0;
+  for (const label of labels) {
+    for (const value of values) {
+      for (const selector of greenhouseQuestionComboboxSelectors(label).slice(0, QUESTION_COMBOBOX_SELECTOR_LIMIT)) {
+        managedGreenhouseScopedReactSelectFill(
+          actions,
+          selector,
+          GREENHOUSE_VISIBLE_REACT_SELECT_OPTION_SELECTOR,
+          value,
+          `education_graduation_date_combo:${index}:${label}`,
+        );
+        index += 1;
+      }
+    }
+  }
+}
+
+function managedSelect(
+  actions: ManagedBrowserAction[],
+  selector: string,
+  value: string | undefined,
+  label: string,
+  optional = true,
+  timeout = MANAGED_FILL_TIMEOUT_MS,
+) {
+  if (!value) return;
+  actions.push({ type: 'select', selector, value, label, optional, timeout });
 }
 
 // The resume upload is always optional + bounded. On a real ATS form the file input is present and
@@ -515,8 +688,16 @@ const ASHBY_PORTFOLIO_SELECTOR =
 // number to be entered into an unrelated text answer.
 const SEMANTIC_PHONE_SELECTOR =
   'input[type="tel" i], input[autocomplete*="tel" i], input[aria-label="Phone" i], input[aria-label="Phone number" i], input[placeholder="Phone" i], input[placeholder="Phone number" i]';
+const GREENHOUSE_FIRST_NAME_SELECTOR =
+  '#first_name, input[name="job_application[first_name]"], input[autocomplete="given-name" i], input[aria-label="First Name" i], input[placeholder="First Name" i]';
+const GREENHOUSE_LAST_NAME_SELECTOR =
+  '#last_name, input[name="job_application[last_name]"], input[autocomplete="family-name" i], input[aria-label="Last Name" i], input[placeholder="Last Name" i]';
+const GREENHOUSE_EMAIL_SELECTOR =
+  '#email, input[name="job_application[email]"], input[type="email" i], input[autocomplete="email" i], input[aria-label="Email" i], input[placeholder="Email" i]';
 const GREENHOUSE_PHONE_SELECTOR =
   `#phone, input[name="job_application[phone]"], ${SEMANTIC_PHONE_SELECTOR}`;
+const GREENHOUSE_RESUME_SELECTOR =
+  '#resume, input[type="file"][name="job_application[resume]"], input[type="file"][id*="resume" i], input[type="file"][name*="resume" i], input[type="file"][aria-label*="resume" i], label:has-text("Resume") input[type="file"]';
 const ASHBY_PHONE_SELECTOR =
   `#phone, input[name="phone"], input[name="_systemfield_phone"], ${SEMANTIC_PHONE_SELECTOR}`;
 
@@ -550,6 +731,643 @@ const CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR = '[id="linkedin-input"]';
 const CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR = '[id="website-input"]';
 const ASHBY_RESUME_SELECTOR = 'input#_systemfield_resume[type="file"], input[type="file"][name="_systemfield_resume"], input[type="file"][name*="resume" i]';
 const ASHBY_COVER_LETTER_SELECTOR = 'input#cover_letter[type="file"], input[type="file"][id*="cover" i], input[type="file"][name*="cover" i], input[type="file"][aria-label*="cover" i]';
+
+function cssString(value: string): string {
+  return value.replace(/["\\]/g, '\\$&');
+}
+
+function greenhouseQuestionSelectSelectors(label: string): string[] {
+  const text = cssString(label);
+  return [
+    `.field:has(label:has-text("${text}")) select`,
+    `div:has(> label:has-text("${text}")) select`,
+    `fieldset:has(legend:has-text("${text}")) select`,
+    `label:has-text("${text}") ~ select`,
+    `label:has-text("${text}") + select`,
+  ];
+}
+
+function greenhouseQuestionComboboxSelectors(label: string): string[] {
+  const text = cssString(label);
+  return [
+    `.select__container:has(> label:has-text("${text}")) input[role="combobox"]`,
+    `.field-wrapper:has(label:has-text("${text}")) input[role="combobox"]`,
+    `div:has(> label:has-text("${text}")) input[role="combobox"]`,
+  ];
+}
+
+const GREENHOUSE_VISIBLE_REACT_SELECT_OPTION_SELECTOR = '[id^="react-select-"][id$="-option-0"]:visible';
+
+const GREENHOUSE_ALIAS_SELECT_SELECTOR_LIMIT = 1;
+const QUESTION_SELECT_SELECTOR_LIMIT = 1;
+const QUESTION_COMBOBOX_SELECTOR_LIMIT = 1;
+const ASHBY_QUESTION_TEXT_SELECTOR_LIMIT = 9;
+const MANAGED_ACTION_LIMIT = 120;
+const CONFIRM_AFTER_FILL_FIELDS = new Set(['school', 'degree']);
+
+function pushGreenhouseManagedPreflightActions(actions: ManagedBrowserAction[]) {
+  const cookieClicks = [
+    '#onetrust-accept-btn-handler',
+    '.onetrust-close-btn-handler',
+    'button:has-text("Allow All")',
+    'button:has-text("Accept All Cookies")',
+    'button:has-text("Accept Cookies")',
+    'button:has-text("Confirm My Choices")',
+  ];
+  for (const [index, selector] of cookieClicks.entries()) {
+    actions.push({
+      type: 'click',
+      selector,
+      label: `greenhouse_cookie_preflight:${index}`,
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
+  }
+  actions.push({
+    type: 'click',
+    selector: [
+      'a:has-text("Apply Now")',
+      'button:has-text("Apply Now")',
+      'a:has-text("Apply for this job")',
+      'button:has-text("Apply for this job")',
+      'a:has-text("Apply for this role")',
+      'button:has-text("Apply for this role")',
+      'a:has-text("Start application")',
+      'button:has-text("Start application")',
+    ].join(', '),
+    label: 'greenhouse_open_application_form',
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
+  actions.push({
+    type: 'waitForSelector',
+    selector: `${GREENHOUSE_EMAIL_SELECTOR}, ${GREENHOUSE_RESUME_SELECTOR}`,
+    label: 'greenhouse_application_form_ready',
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
+}
+
+function questionSelectSelectors(label: string): string[] {
+  const text = cssString(label);
+  return [
+    `label:has-text("${text}") ~ select`,
+    `label:has-text("${text}") + select`,
+    `fieldset:has(legend:has-text("${text}")) select`,
+    `div:has(> label:has-text("${text}")) select`,
+    `[role="group"]:has-text("${text}") select`,
+  ];
+}
+
+function questionTextInputSelectors(label: string): string[] {
+  const text = cssString(label);
+  const xpathText = xpathLiteral(label);
+  return [
+    `label:has-text("${text}") ~ textarea`,
+    `label:has-text("${text}") + textarea`,
+    `label:has-text("${text}") ~ div textarea`,
+    `label:has-text("${text}") + div textarea`,
+    `div:has(> label:has-text("${text}")) textarea`,
+    `div:has(> label:has-text("${text}")) input[type="text"]`,
+    `fieldset:has(legend:has-text("${text}")) textarea`,
+    `xpath=(//label[contains(normalize-space(.), ${xpathText})]/parent::*[not(self::form) and .//textarea]//textarea)[1]`,
+    `xpath=(//label[contains(normalize-space(.), ${xpathText})]/parent::*/parent::*[not(self::form) and .//textarea]//textarea)[1]`,
+    `xpath=(//label[contains(normalize-space(.), ${xpathText})]/parent::*/parent::*/parent::*[not(self::form) and .//textarea]//textarea)[1]`,
+  ];
+}
+
+function xpathLiteral(value: string): string {
+  if (!value.includes("'")) return `'${value}'`;
+  if (!value.includes('"')) return `"${value}"`;
+  return `concat(${value.split("'").map((part) => `'${part}'`).join(`, "'", `)})`;
+}
+
+function ashbyQuestionTextVariants(label: string): string[] {
+  const normalized = label.replace(/\s+/g, ' ').trim();
+  const variants = [normalized];
+  const prompt = normalized.match(/^(.{12,120}?[?!])(?:\s|$)/)?.[1]?.trim();
+  const prefix = normalized.length > 120 ? normalized.slice(0, 120).replace(/\s+\S*$/, '').trim() : undefined;
+  if (prompt || prefix) variants.push(prompt ?? prefix!);
+  return [...new Set(variants.filter(Boolean))];
+}
+
+function ashbyQuestionTextInputSelectors(label: string): string[] {
+  const selectorGroups = ashbyQuestionTextVariants(label).map(questionTextInputSelectors);
+  const selectors: string[] = [];
+  if (selectorGroups.length > 1) {
+    const variantPriority: Array<[number, number]> = [
+      [0, 0],
+      [1, 0],
+      [0, 1],
+      [1, 1],
+      [0, 7],
+      [1, 7],
+      [1, 8],
+      [1, 9],
+      [1, 4],
+    ];
+    for (const [groupIndex, selectorIndex] of variantPriority) {
+      const selector = selectorGroups[groupIndex]?.[selectorIndex];
+      if (selector && !selectors.includes(selector)) selectors.push(selector);
+      if (selectors.length >= ASHBY_QUESTION_TEXT_SELECTOR_LIMIT) break;
+    }
+    return selectors;
+  }
+  const priority = [0, 1, 7, 4, 8, 9, 2, 3, 5, 6];
+  for (const index of priority) {
+    if (selectors.length >= ASHBY_QUESTION_TEXT_SELECTOR_LIMIT) break;
+    let pushed = false;
+    for (const group of selectorGroups) {
+      const selector = group[index];
+      if (!selector || selectors.includes(selector)) continue;
+      selectors.push(selector);
+      pushed = true;
+      if (selectors.length >= ASHBY_QUESTION_TEXT_SELECTOR_LIMIT) break;
+    }
+    if (!pushed) break;
+  }
+  return selectors;
+}
+
+function selectValuesForAnswer(answer: string): string[] {
+  const trimmed = answer.trim();
+  if (!trimmed) return [];
+  const lower = trimmed.toLowerCase();
+  if (lower === 'yes') return ['Yes', 'yes', '1', 'true'];
+  if (lower === 'no') return ['No', 'no', '0', 'false'];
+  const values = [trimmed];
+  if (/\b(?:have\s+not|haven't|never)\s+(?:worked|been employed)\b/.test(lower)) {
+    values.push('No', 'No, I have not', 'I have not worked there before');
+  }
+  if (/\bnone\s+of\s+the\s+above\b/.test(lower)) {
+    values.push('None of the above', 'None');
+  }
+  if (/^(?:n\/?a|not applicable)$/i.test(trimmed)) {
+    values.push('N/A', 'Not applicable');
+  }
+  return [...new Set(values)];
+}
+
+function parsedGpa(value: string): number | null {
+  const match = value.match(/\b([0-4](?:\.\d+)?)\b/);
+  if (!match) return null;
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function greenhouseGpaBucket(value: string): string | undefined {
+  const gpa = parsedGpa(value);
+  if (gpa === null) return undefined;
+  if (gpa >= 3.6) return '3.6 or above (out of 4.0)';
+  if (gpa >= 3.4) return '3.4 - 3.5 (out of 4.0)';
+  if (gpa >= 3.1) return '3.1 - 3.3 (out of 4.0)';
+  if (gpa >= 2.8) return '2.8 - 3.0 (out of 4.0)';
+  if (gpa >= 2.5) return '2.5 - 2.7 (out of 4.0)';
+  return '2.4 or below';
+}
+
+function greenhouseGraduationBucket(value: string): string | undefined {
+  const year = Number(value.match(/\b(20\d{2})\b/)?.[1]);
+  if (!Number.isFinite(year)) return undefined;
+  if (year < 2027) return 'Earlier than Fall 2027';
+  if (year === 2027) {
+    if (/\b(?:jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|spring|summer)\b/i.test(value)) {
+      return 'Earlier than Fall 2027';
+    }
+    return 'Fall 2027';
+  }
+  if (year === 2028 && /\b(?:jan|january|feb|february|mar|march|apr|april|may|spring)\b/i.test(value)) {
+    return 'Spring 2028';
+  }
+  return 'Later than Summer 2028';
+}
+
+function abbreviatedUsLocation(value: string): string | undefined {
+  const stateMap: Record<string, string> = { california: 'CA', washington: 'WA' };
+  const match = value.match(/^\s*([^,]+),\s*([^,]+?)(?:,\s*(?:United States|USA|US|U\.S\.))?\s*$/i);
+  if (!match) return undefined;
+  const city = match[1]?.trim();
+  const state = match[2]?.trim();
+  if (!city || !state) return undefined;
+  const abbreviation = /^[A-Z]{2}$/i.test(state) ? state.toUpperCase() : stateMap[state.toLowerCase()];
+  return abbreviation ? `${city}, ${abbreviation}` : undefined;
+}
+
+function cityOnlyLocation(value: string): string | undefined {
+  const match = value.match(/^\s*([^,]+),\s*[^,]+(?:,\s*(?:United States|USA|US|U\.S\.))?\s*$/i);
+  return match?.[1]?.trim() || undefined;
+}
+
+function greenhouseComboboxValuesForQuestion(question: string, answer: string): string[] {
+  const normalizedQuestion = question.toLowerCase();
+  const normalizedAnswer = answer.trim().toLowerCase();
+  const values = selectValuesForAnswer(answer);
+  if (/\bwhat\s+is\s+your\s+gpa\b|\bgpa\b/.test(normalizedQuestion)) {
+    values.unshift(greenhouseGpaBucket(answer) ?? '');
+  }
+  if (/\bgraduat(?:ion|e)\s+date\b|\bwhat\s+is\s+your\s+graduation\s+date\b/.test(normalizedQuestion)) {
+    values.unshift(greenhouseGraduationBucket(answer) ?? '');
+  }
+  if (/\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\blocation\b[^?]{0,120}\b(?:single|top|preferred|preference|most interested)\b/.test(normalizedQuestion)) {
+    values.unshift(abbreviatedUsLocation(answer) ?? '', cityOnlyLocation(answer) ?? '');
+  }
+  if (/\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b/.test(normalizedQuestion)
+    && /\b(?:have\s+not|haven't|never)\s+(?:worked|been employed)\b/.test(answer.toLowerCase())) {
+    values.unshift('No');
+  }
+  if (/legally\s+authorized\s+to\s+work|authori[sz](?:ed|ation)\s+to\s+work|work\s+authori[sz]/.test(normalizedQuestion)) {
+    const negative = /^(?:no|false|0)\b/.test(normalizedAnswer) || /\bnot\s+authori[sz]ed\b/.test(normalizedAnswer);
+    const affirmative = /^(?:yes|true|1)\b/.test(normalizedAnswer) || (!negative && /\bauthori[sz]ed\b/.test(normalizedAnswer));
+    if (negative) {
+      values.unshift('No');
+    } else if (affirmative) {
+      values.unshift('Yes');
+      values.push(
+        'Yes, I am authorized to work in the country where this job is located',
+        'Yes, I am authorized to work in the country where the job is located',
+        'Yes, I am authorized to work in the United States',
+      );
+    }
+  }
+  return uniqueDefined(values);
+}
+
+function isGreenhouseReactSelectQuestion(question: string): boolean {
+  return /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bgraduat(?:ion|e)\s+date\b|\bwhat\s+is\s+your\s+gpa\b|\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b|legally\s+authorized\s+to\s+work|(?:require|need)\s+sponsorship|sponsorship\s+for\s+(?:employment\s+visa|work\s+authorization)|\bhow\s+did\s+you\s+hear\b|referral\s+source|source\s+of\b|\bteam\s+opening\b|\bopening\b[^?]{0,80}\binterested\b|\bLGBTQIA?\+?\b|sexual\s+orientation|\bgender(?:\s+identity)?\b|\bveteran\b|\bmilitary\b|\brace\b|\bethnicit|\bcategory\b/i.test(question);
+}
+
+function isGreenhouseEducationComboboxQuestion(question: string): boolean {
+  return /\b(?:school|degree|discipline)--\d+\b/i.test(question);
+}
+
+function pushGreenhouseQuestionComboboxActions(
+  actions: ManagedBrowserAction[],
+  selector: string,
+  questionText: string,
+  answer: string,
+  labelPrefix: string,
+) {
+  if (!isGreenhouseReactSelectQuestion(questionText)) return;
+  for (const [index, value] of greenhouseComboboxValuesForQuestion(questionText, answer).slice(0, 1).entries()) {
+    managedGreenhouseScopedReactSelectFill(
+      actions,
+      selector,
+      GREENHOUSE_VISIBLE_REACT_SELECT_OPTION_SELECTOR,
+      value,
+      `${labelPrefix}_combo:${index}:${questionText.slice(0, 80)}`,
+    );
+  }
+}
+
+function pushGreenhouseQuestionComboboxLabelActions(
+  actions: ManagedBrowserAction[],
+  questionText: string,
+  answer: string,
+  labelPrefix: string,
+) {
+  if (!isGreenhouseReactSelectQuestion(questionText)) return;
+  let index = 0;
+  const values = greenhouseComboboxValuesForQuestion(questionText, answer).slice(0, 1);
+  for (const selector of greenhouseQuestionComboboxSelectors(questionText).slice(0, QUESTION_COMBOBOX_SELECTOR_LIMIT)) {
+    for (const value of values) {
+      managedGreenhouseScopedReactSelectFill(
+        actions,
+        selector,
+        GREENHOUSE_VISIBLE_REACT_SELECT_OPTION_SELECTOR,
+        value,
+        `${labelPrefix}_combo_label:${index}:${questionText.slice(0, 80)}`,
+      );
+      index += 1;
+    }
+  }
+}
+
+function pushGreenhouseDemographicComboboxLabelActions(
+  actions: ManagedBrowserAction[],
+  label: string,
+  value: string,
+) {
+  for (const [index, selector] of greenhouseQuestionComboboxSelectors(label).slice(0, QUESTION_COMBOBOX_SELECTOR_LIMIT).entries()) {
+    managedGreenhouseScopedReactSelectFill(
+      actions,
+      selector,
+      GREENHOUSE_VISIBLE_REACT_SELECT_OPTION_SELECTOR,
+      value,
+      `greenhouse_demographic_combo:${index}:${label.slice(0, 80)}`,
+    );
+  }
+}
+
+function pushGreenhouseReferralSourceAliases(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
+  const value = packet.referralSourceDefault?.trim();
+  if (!value) return;
+  const aliases = [
+    'How did you hear about this job?',
+    'How did you hear about this job',
+    'How did you hear about us?',
+    'How did you hear about us',
+    'How did you hear about Faire?',
+    'How did you hear about Faire',
+    'Referral source',
+  ];
+  for (const alias of aliases) {
+    pushGreenhouseQuestionComboboxLabelActions(actions, alias, value, 'greenhouse_referral');
+  }
+}
+
+function greenhouseCheckboxOptionSelectors(questionText: string, answer: string): string[] {
+  const normalizedQuestion = questionText.toLowerCase();
+  const normalizedAnswer = answer.toLowerCase();
+  if (
+    /sanctions\s+and\s+export\s+controls|cuba,\s*iran,\s*north\s+korea/.test(normalizedQuestion)
+    && /none\s+of\s+the\s+above/.test(normalizedAnswer)
+  ) {
+    return [
+      'input[name="question_35110536002[]"][value="221056618002"]',
+    ];
+  }
+  if (
+    /prior\s+question\s+other\s+than\s+[“"]?none\s+of\s+the\s+above|if\s+you\s+selected\s+a\s+response\s+to\s+the\s+prior\s+question/.test(normalizedQuestion)
+    && /not\s+applicable|none\s+of\s+the\s+above/.test(normalizedAnswer)
+  ) {
+    return [
+      'input[name="question_35114221002[]"][value="221073825002"]',
+    ];
+  }
+  return [];
+}
+
+function pushGreenhouseCheckboxOptionActions(
+  actions: ManagedBrowserAction[],
+  questionText: string,
+  answer: string,
+  labelPrefix: string,
+) {
+  for (const [index, selector] of greenhouseCheckboxOptionSelectors(questionText, answer).entries()) {
+    actions.push({
+      type: 'click',
+      selector,
+      label: `${labelPrefix}_checkbox:${index}:${questionText.slice(0, 80)}`,
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
+  }
+}
+
+function questionFillShouldPressEnter(questionText: string): boolean {
+  const key = classifyField(questionText);
+  return key ? CONFIRM_AFTER_FILL_FIELDS.has(key) : false;
+}
+
+function pushScopedQuestionChoiceActions(
+  actions: ManagedBrowserAction[],
+  questionText: string,
+  answer: string,
+  labelPrefix: string,
+  options: { includeSelectFallbacks?: boolean } = {},
+) {
+  actions.push({
+    type: 'fillByLabelText',
+    text: questionText,
+    value: answer,
+    label: `${labelPrefix}:${questionText.slice(0, 80)}`,
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
+  if (options.includeSelectFallbacks === false) return;
+  let index = 0;
+  const values = selectValuesForAnswer(answer);
+  for (const selector of questionSelectSelectors(questionText)) {
+    if (index >= QUESTION_SELECT_SELECTOR_LIMIT * values.length) break;
+    for (const value of values) {
+      managedSelect(actions, selector, value, `${labelPrefix}_select:${index}:${questionText.slice(0, 80)}`);
+      index += 1;
+    }
+  }
+}
+
+function pushAshbyQuestionTextFallbackActions(
+  actions: ManagedBrowserAction[],
+  questionText: string,
+  answer: string,
+  labelPrefix: string,
+) {
+  for (const [index, selector] of ashbyQuestionTextInputSelectors(questionText).entries()) {
+    managedFill(actions, selector, answer, `${labelPrefix}_text:${index}:${questionText.slice(0, 80)}`);
+  }
+}
+
+function greenhouseKnownQuestionAliases(question: string, answer: string): string[] {
+  const normalizedQuestion = question.toLowerCase();
+  const normalizedAnswer = answer.trim().toLowerCase();
+  if (!['yes', 'no'].includes(normalizedAnswer)) return [];
+  if (
+    /\b(?:eligible|authorized|authorised|legally\s+work|work\s+authorization|work\s+authorisation)\b/.test(normalizedQuestion)
+    && (/\b(?:u\.?s\.?a?|united\s+states)\b/.test(normalizedQuestion) || /\bcountry\s+where\s+the\s+job\s+is\s+located\b/.test(normalizedQuestion))
+    && !/\bwithout\s+sponsorship\b/.test(normalizedQuestion)
+  ) {
+    return [
+      'Are you currently eligible to legally work in the United States?',
+      'Are you currently eligible to legally work in the U.S.?',
+      'Are you legally authorized to work in the United States?',
+      'Are you authorized to work in the United States?',
+      'Are you legally authorized to work in the country where the job is located?',
+    ];
+  }
+  if (
+    /\b(?:future|now)\b/.test(normalizedQuestion)
+    && /\b(?:immigration|visa|sponsorship|sponsor)\b/.test(normalizedQuestion)
+    && !/\bwithout\s+sponsorship\b/.test(normalizedQuestion)
+  ) {
+    return [
+      'Will you now or in the future require immigration support or sponsorship?',
+      'Will you now or in the future require immigration support or sponsorship from Postman?',
+      'Will you now or in the future require sponsorship for employment visa status?',
+      'Do you now or in the future require visa sponsorship?',
+    ];
+  }
+  if (
+    /\b(?:onsite|on[\s-]?site|in[\s-]?office|office|hybrid)\b/.test(normalizedQuestion)
+    && /\b(?:three|four|five|3|4|5)\s+days?\b/.test(normalizedQuestion)
+  ) {
+    const requiredDay = normalizedQuestion.match(/\brequires?\s+(?:\w+\s+){0,4}(three|four|five|3|4|5)\s+days?\b/)?.[1];
+    const firstDay = normalizedQuestion.match(/\b(three|four|five|3|4|5)\s+days?\b/)?.[1];
+    const day = requiredDay ?? firstDay;
+    const aliases: string[] = [];
+    if (day === 'three' || day === '3') {
+      aliases.push(
+        'Are you able to work onsite three days a week?',
+        'Are you able to work on-site three days a week?',
+        'Are you able to work onsite in our San Francisco office 3 days a week?',
+        'Are you able to work onsite in our San Francisco office three days a week?',
+      );
+    }
+    if (day === 'four' || day === '4') {
+      aliases.push(
+        'Are you able to work onsite four days a week?',
+        'Are you able to work on-site four days a week?',
+        'Are you able to work onsite in our San Francisco office 4 days a week?',
+        'Are you able to work onsite in our San Francisco office four days a week?',
+      );
+    }
+    if (day === 'five' || day === '5') {
+      aliases.push(
+        'Are you able to work onsite five days a week?',
+        'Are you able to work on-site five days a week?',
+        'Are you able to work onsite in our San Francisco office 5 days a week?',
+        'Are you able to work onsite in our San Francisco office five days a week?',
+      );
+    }
+    return aliases;
+  }
+  return [];
+}
+
+function pushGreenhouseKnownQuestionAliases(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
+  const seen = new Set<string>();
+  for (const item of packet.questions) {
+    for (const alias of greenhouseKnownQuestionAliases(item.question, item.answer)) {
+      const key = `${alias}\n${item.answer.trim()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      actions.push({
+        type: 'fillByLabelText',
+        text: alias,
+        value: item.answer.trim(),
+        label: `greenhouse_known_question:${alias.slice(0, 80)}`,
+        optional: true,
+        timeout: MANAGED_FILL_TIMEOUT_MS,
+      });
+    }
+  }
+}
+
+const GREENHOUSE_DEMOGRAPHIC_ALIASES: Array<{ key: string; aliases: string[] }> = [
+  {
+    key: 'gender',
+    aliases: [
+      'What gender identity do you most closely identify with?',
+    ],
+  },
+  {
+    key: 'transgender_status',
+    aliases: [
+      'Are you a person of transgender experience?',
+    ],
+  },
+  {
+    key: 'sexual_orientation',
+    aliases: [
+      'What sexual orientation do you most closely identify with?',
+    ],
+  },
+  {
+    key: 'disability_status',
+    aliases: [
+      'Do you live with a disability (as outlined by the ADA)?',
+    ],
+  },
+  {
+    key: 'veteran_status',
+    aliases: [
+      'Are you a veteran/have you served in the military?',
+    ],
+  },
+  {
+    key: 'race',
+    aliases: [
+      'Please select up to 2 ethnicities that you most closely identify with.',
+    ],
+  },
+];
+
+function packetHasGreenhouseReviewedDemographicAnswer(packet: SubmissionPacket, key: string): boolean {
+  const patterns: Record<string, RegExp> = {
+    gender: /\bgender(?:\s+identity)?\b/i,
+    transgender_status: /transgender/i,
+    sexual_orientation: /sexual\s+orientation/i,
+    disability_status: /\bdisab/i,
+    veteran_status: /\bveteran\b|\bmilitary\b/i,
+    race: /\brace\b|\bethnicit|which\s+categor(?:y|ies)\b[^?]{0,120}(?:describe|identify)|hispanic|latino/i,
+  };
+  const pattern = patterns[key];
+  if (!pattern) return false;
+  return packet.questions.some((item) => item.answer.trim() && pattern.test(normalizeReviewQuestionLabel(item.question)));
+}
+
+function pushGreenhouseDemographicAliases(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
+  const prefs = packet.eeoPrefs;
+  if (!prefs) return;
+  for (const item of GREENHOUSE_DEMOGRAPHIC_ALIASES) {
+    const value = prefs[item.key]?.trim();
+    if (!value) continue;
+    if (packetHasGreenhouseReviewedDemographicAnswer(packet, item.key)) continue;
+    for (const alias of item.aliases) {
+      actions.push({
+        type: 'fillByLabelText',
+        text: alias,
+        value,
+        label: `greenhouse_demographic:${alias.slice(0, 80)}`,
+        optional: true,
+        timeout: MANAGED_FILL_TIMEOUT_MS,
+      });
+      for (const [index, selectSelector] of greenhouseQuestionSelectSelectors(alias).slice(0, GREENHOUSE_ALIAS_SELECT_SELECTOR_LIMIT).entries()) {
+        managedSelect(actions, selectSelector, value, `greenhouse_demographic_select:${index}:${alias.slice(0, 80)}`);
+      }
+      pushGreenhouseDemographicComboboxLabelActions(actions, alias, value);
+    }
+  }
+}
+
+function managedActionLabelBase(action: ManagedBrowserAction): string | undefined {
+  return action.label?.replace(/_(?:open|option|select)$/, '');
+}
+
+const GREENHOUSE_LOW_PRIORITY_ACTION_GROUPS = [
+  /^greenhouse_demographic/,
+  /^greenhouse_referral_combo_label:(?!.*How did you hear about Faire)/,
+  /^education_discipline_combo:/,
+  /^education_graduation_date_combo:/,
+  /^(?:graduation_date|graduation_date_label|graduation_date_expected|education_end_month|education_end_year|education_graduation_month|education_graduation_year|gpa_question)$/,
+  /^first_name_label$/,
+  /^education_degree_combo:2$/,
+  /^education_degree_combo:1$/,
+] as const;
+
+function trimGreenhouseManagedActionsToBudget(actions: ManagedBrowserAction[], limit: number) {
+  for (const pattern of GREENHOUSE_LOW_PRIORITY_ACTION_GROUPS) {
+    while (actions.length > limit) {
+      let removableBase: string | undefined;
+      for (let index = actions.length - 1; index >= 0; index -= 1) {
+        const base = managedActionLabelBase(actions[index]!);
+        if (!base || !pattern.test(base)) continue;
+        removableBase = base;
+        break;
+      }
+      if (!removableBase) break;
+      const before = actions.length;
+      for (let index = actions.length - 1; index >= 0; index -= 1) {
+        if (managedActionLabelBase(actions[index]!) === removableBase) actions.splice(index, 1);
+      }
+      if (actions.length === before) break;
+    }
+    if (actions.length <= limit) return;
+  }
+}
+
+function truncateManagedActionsToBudget(actions: ManagedBrowserAction[], limit: number) {
+  while (actions.length > limit) {
+    const base = managedActionLabelBase(actions.at(-1)!);
+    if (!base) {
+      actions.pop();
+      continue;
+    }
+    for (let index = actions.length - 1; index >= 0; index -= 1) {
+      if (managedActionLabelBase(actions[index]!) !== base) break;
+      actions.pop();
+    }
+  }
+}
 
 // ─── Workable (apply.workable.com) ────────────────────────────────────────────
 // Read off a live Suade posting, 2026-07-28 (apply.workable.com/suade/j/9C43981D17/apply). Plain
@@ -774,6 +1592,7 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
   // was found and merely refused. It was never reached.
   if (ACCOUNT_WALLED_FAMILIES.has(family)) return;
   if (family === 'greenhouse') {
+    pushGreenhouseManagedPreflightActions(actions);
     const parts = packet.fullName.trim().split(/\s+/);
     // optional (managedFill default) + bounded, not required: a branded-redirect Greenhouse customer
     // (Jump Trading serves its posting through www.jumptrading.com with a different form DOM) has
@@ -781,19 +1600,27 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     // aborted the whole run. Optional means a missed core field degrades to a required-field blocker
     // card. The resume upload is optional + bounded for the same reason (managedUpload): the live
     // Jump Trading retry proved the run now clears name/email and stops at the resume file input.
-    managedFill(actions, '#first_name, input[name="job_application[first_name]"]', parts[0], 'first_name');
-    managedFill(actions, '#last_name, input[name="job_application[last_name]"]', parts.slice(1).join(' '), 'last_name');
-    managedFill(actions, '#email, input[name="job_application[email]"]', packet.email, 'email');
+    managedFill(actions, GREENHOUSE_FIRST_NAME_SELECTOR, parts[0], 'first_name');
+    managedFillByLabel(actions, 'First Name', parts[0], 'first_name_label');
+    managedFill(actions, GREENHOUSE_LAST_NAME_SELECTOR, parts.slice(1).join(' '), 'last_name');
+    managedFillByLabel(actions, 'Last Name', parts.slice(1).join(' '), 'last_name_label');
+    managedFill(actions, GREENHOUSE_EMAIL_SELECTOR, packet.email, 'email');
+    managedFillByLabel(actions, 'Email', packet.email, 'email_label');
     managedComboboxFill(actions, '#country', countryForPhoneField(packet.phone, packet.country), 'phone_country');
     managedFill(actions, GREENHOUSE_PHONE_SELECTOR, phoneForPortalField(portal, packet.phone), 'phone');
     managedComboboxFill(actions, '#candidate-location, input[autocomplete="address-level2"]', greenhouseLocationSearch(packet), 'location');
-    managedFillByLabel(actions, 'School', packet.school, 'education_school');
-    managedFillByLabel(actions, 'Degree', packet.degree, 'education_degree');
+    pushGreenhouseEducationComboboxActions(actions, packet);
     managedFillByLabel(actions, 'What is your graduation date?', packet.graduationDate, 'graduation_date');
+    managedFillByLabel(actions, 'Graduation Date', packet.graduationDate, 'graduation_date_label');
+    managedFillByLabel(actions, 'Expected Graduation Date', packet.graduationDate, 'graduation_date_expected');
     managedFillByLabel(actions, 'End date month', packet.graduationMonth, 'education_end_month');
     managedFillByLabel(actions, 'End date year', packet.graduationYear, 'education_end_year');
+    managedFillByLabel(actions, 'Graduation Month', packet.graduationMonth, 'education_graduation_month');
+    managedFillByLabel(actions, 'Graduation Year', packet.graduationYear, 'education_graduation_year');
+    pushGreenhouseGraduationDateComboboxActions(actions, packet);
     managedFillByLabel(actions, 'GPA', packet.gpa, 'gpa');
-    managedUpload(actions, '#resume, input[type="file"][name="job_application[resume]"]', 'resume', packet.resume, packet.resumeName);
+    managedFillByLabel(actions, 'What is your GPA?', packet.gpa, 'gpa_question');
+    managedUpload(actions, GREENHOUSE_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
     managedUpload(actions, 'input#cover_letter[type="file"], input[type="file"][name*="cover_letter" i]', 'cover_letter', packet.coverLetter, packet.coverLetterName);
   } else if (family === 'lever') {
     managedFill(actions, 'input[name="name"]', packet.fullName, 'name', false);
@@ -987,14 +1814,51 @@ export function buildManagedPortalActions(
     if (!item.answer.trim()) continue;
     const questionText = normalizeReviewQuestionLabel(item.question);
     if (!questionText) continue;
-    actions.push({
-      type: 'fillByLabelText',
-      text: questionText,
-      value: item.answer,
-      label: `question:${questionText.slice(0, 80)}`,
-      optional: true,
-      timeout: MANAGED_FILL_TIMEOUT_MS,
-    });
+    if (isLegalConsentQuestion(questionText)) continue;
+    const portalSelector = durablePortalSelector(item.portalSelector);
+    if (portalSelector) {
+      if (/^(?:checkbox|radio)$/i.test(item.portalInputType ?? '')) {
+        if (portalFamily(portal) === 'greenhouse') {
+          pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');
+        }
+        continue;
+      }
+      managedFill(actions, portalSelector, item.answer, `question:${questionText.slice(0, 80)}`);
+      if (portalFamily(portal) === 'greenhouse' && questionFillShouldPressEnter(questionText)) {
+        actions.push({
+          type: 'press',
+          selector: portalSelector,
+          value: 'Enter',
+          label: `question_confirm:${questionText.slice(0, 80)}`,
+          optional: true,
+          timeout: MANAGED_FILL_TIMEOUT_MS,
+        });
+      }
+      if (portalFamily(portal) === 'greenhouse') {
+        pushGreenhouseQuestionComboboxActions(actions, portalSelector, questionText, item.answer, 'question');
+        pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');
+      }
+      continue;
+    }
+    if (portalFamily(portal) === 'greenhouse') {
+      if (isGreenhouseEducationComboboxQuestion(questionText)) continue;
+      const isReactSelectQuestion = isGreenhouseReactSelectQuestion(questionText);
+      if (!isReactSelectQuestion) {
+        pushScopedQuestionChoiceActions(actions, questionText, item.answer, 'question');
+      }
+      pushGreenhouseQuestionComboboxLabelActions(actions, questionText, item.answer, 'question');
+      pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');
+    } else {
+      pushScopedQuestionChoiceActions(actions, questionText, item.answer, 'question');
+      if (portalFamily(portal) === 'ashby') {
+        pushAshbyQuestionTextFallbackActions(actions, questionText, item.answer, 'question');
+      }
+    }
+  }
+  if (portalFamily(portal) === 'greenhouse') {
+    pushGreenhouseKnownQuestionAliases(actions, packet);
+    pushGreenhouseReferralSourceAliases(actions, packet);
+    pushGreenhouseDemographicAliases(actions, packet);
   }
   // Choice controls are filled only by the runner's scoped question-container logic. That keeps
   // short answers such as "Yes" from matching an unrelated acknowledgement elsewhere on the page.
@@ -1014,7 +1878,18 @@ export function buildManagedPortalActions(
   // was shown an empty attestation page as the evidence of what she was approving.
   if (submit && portalFamily(portal) === 'paylocity') pushPaylocityTraversal(actions, packet);
 
-  if (submit && portalCanAutoSubmit(portal)) {
+  const canAppendSubmit = submit && portalCanAutoSubmit(portal);
+  let skipSubmitForManagedActionBudget = false;
+  if (portalFamily(portal) === 'greenhouse') {
+    const actionLimit = canAppendSubmit ? MANAGED_ACTION_LIMIT - 1 : MANAGED_ACTION_LIMIT;
+    trimGreenhouseManagedActionsToBudget(actions, actionLimit);
+    if (actions.length > actionLimit) {
+      skipSubmitForManagedActionBudget = canAppendSubmit;
+      truncateManagedActionsToBudget(actions, MANAGED_ACTION_LIMIT);
+    }
+  }
+
+  if (canAppendSubmit && !skipSubmitForManagedActionBudget) {
     actions.push({ type: 'click', selector: 'button[type="submit"], input[type="submit"]' });
   }
   return actions;
@@ -1049,14 +1924,13 @@ function pushPaylocityTraversal(actions: ManagedBrowserAction[], packet: Submiss
       if (!item.answer.trim()) continue;
       const questionText = normalizeReviewQuestionLabel(item.question);
       if (!questionText) continue;
-      actions.push({
-        type: 'fillByLabelText',
-        text: questionText,
-        value: item.answer,
-        label: `question:${questionText.slice(0, 80)}`,
-        optional: true,
-        timeout: MANAGED_FILL_TIMEOUT_MS,
-      });
+      if (isLegalConsentQuestion(questionText)) continue;
+      const portalSelector = durablePortalSelector(item.portalSelector);
+      if (portalSelector) {
+        managedFill(actions, portalSelector, item.answer, `question:${questionText.slice(0, 80)}`);
+        continue;
+      }
+      pushScopedQuestionChoiceActions(actions, questionText, item.answer, 'question');
     }
   }
 }
@@ -1156,6 +2030,16 @@ const APPLY_PATHS: Partial<Record<PortalFamily, RegExp>> = {
   ultipro: /^\/[^/]+\/JobBoard\//i,
 };
 
+function databricksGreenhouseJobId(url: URL): string | undefined {
+  if (!/^(?:www\.)?databricks\.com$/i.test(url.hostname)) return undefined;
+  const greenhouseJobId = url.searchParams.get('gh_jid') ?? '';
+  if (!/^\d+$/.test(greenhouseJobId)) return undefined;
+  const canonicalDatabricksJobPath = new RegExp(`^/company/careers/[a-z0-9-]+/[a-z0-9-]+-${greenhouseJobId}$`, 'i');
+  return url.pathname === '/company/careers/open-positions/job' || canonicalDatabricksJobPath.test(url.pathname)
+    ? greenhouseJobId
+    : undefined;
+}
+
 export function detectPortal(rawUrl: string): SupportedPortal {
   const url = new URL(rawUrl);
   if (
@@ -1178,6 +2062,12 @@ export function detectPortal(rawUrl: string): SupportedPortal {
     return 'controlled_test';
   }
   if (url.protocol !== 'https:') throw new Error('That application page is not a secure link');
+  // Databricks hosts Greenhouse applications behind a company-owned wrapper URL. Keep this pinned to
+  // the known careers path plus numeric Greenhouse job id so unrelated company pages with `gh_jid`
+  // query strings do not become supported by accident.
+  if (databricksGreenhouseJobId(url)) {
+    return 'greenhouse';
+  }
   for (const [portal, host] of Object.entries(HOSTS)) {
     if (!host.test(url.hostname)) continue;
     // See APPLY_PATHS. A family listed there must match its path too, because its host space also
@@ -1218,19 +2108,56 @@ export function isPortalSupported(rawUrl: string | undefined): boolean {
 
 export function canonicalSupportedPortalUrl(rawUrl: string | undefined, atsName?: string | null): string | undefined {
   if (!rawUrl) return undefined;
-  if (isPortalSupported(rawUrl)) return rawUrl;
   // Some company-hosted Greenhouse wrappers keep only gh_jid in the URL and are stored with a
-  // generic ats_name on older packets. The query parameter is Greenhouse's own convention, so the
-  // URL is stronger evidence than that stale label.
+  // generic ats_name on older packets. Only the Databricks wrapper shape is supported here; other
+  // company pages with a gh_jid query string stay unsupported until we verify their embedded form.
   void atsName;
   try {
     const url = new URL(rawUrl);
     if (url.protocol !== 'https:') return undefined;
-    const greenhouseJobId = url.searchParams.get('gh_jid')?.trim();
-    if (!greenhouseJobId || !/^\d{3,20}$/.test(greenhouseJobId)) return undefined;
-    return `https://boards.greenhouse.io/embed/job_app?token=${greenhouseJobId}`;
+    const greenhouseJobId = databricksGreenhouseJobId(url);
+    if (greenhouseJobId) return `https://boards.greenhouse.io/embed/job_app?token=${greenhouseJobId}`;
   } catch {
     return undefined;
+  }
+  if (isPortalSupported(rawUrl)) return rawUrl;
+  return undefined;
+}
+
+export function canonicalMonitoredPortalUrl(
+  rawUrl: string | undefined,
+  atsName?: string | null,
+  boardToken?: string | null,
+): string | undefined {
+  const canonical = canonicalSupportedPortalUrl(rawUrl, atsName);
+  if (canonical && !greenhousePortalUrlNeedsBoardToken(canonical)) return canonical;
+  if (!rawUrl || atsName?.trim().toLowerCase() !== 'greenhouse') return undefined;
+  const token = boardToken?.trim();
+  if (!token) return undefined;
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== 'https:') return undefined;
+    const greenhouseJobId = url.searchParams.get('gh_jid') ?? url.searchParams.get('token') ?? '';
+    if (!/^\d+$/.test(greenhouseJobId)) return undefined;
+    return `https://job-boards.greenhouse.io/${encodeURIComponent(token)}/jobs/${greenhouseJobId}`;
+  } catch {
+    return undefined;
+  }
+}
+
+export function greenhousePortalUrlNeedsBoardToken(rawUrl: string | undefined): boolean {
+  if (!rawUrl) return false;
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== 'https:') return false;
+    const host = url.hostname.toLowerCase();
+    return (host === 'boards.greenhouse.io' || host === 'job-boards.greenhouse.io')
+      && url.pathname === '/embed/job_app'
+      && /^\d+$/.test(url.searchParams.get('token') ?? '')
+      && !url.searchParams.get('for')
+      && !url.searchParams.get('b');
+  } catch {
+    return false;
   }
 }
 
@@ -1284,6 +2211,37 @@ async function fillComboboxFirst(page: Page, selectors: string[], value: string 
   }
 }
 
+async function selectFirst(page: Page, selectors: string[], value: string | undefined, label: string, out: string[]) {
+  if (!value) return;
+  for (const selector of selectors) {
+    const field = page.locator(selector).first();
+    if ((await field.count()) === 0 || !(await field.isVisible().catch(() => false))) continue;
+    const selected = await field.selectOption({ label: value }).catch(() => field.selectOption(value).catch(() => null));
+    if (selected && selected.length > 0) {
+      out.push(label);
+      return;
+    }
+  }
+}
+
+async function fillGreenhouseDemographicAliases(page: Page, packet: SubmissionPacket, out: string[]) {
+  const prefs = packet.eeoPrefs;
+  if (!prefs) return;
+  for (const item of GREENHOUSE_DEMOGRAPHIC_ALIASES) {
+    const value = prefs[item.key]?.trim();
+    if (!value) continue;
+    for (const alias of item.aliases) {
+      await selectFirst(
+        page,
+        greenhouseQuestionSelectSelectors(alias),
+        value,
+        `greenhouse_demographic:${alias.slice(0, 80)}`,
+        out,
+      );
+    }
+  }
+}
+
 async function uploadFirst(
   page: Page,
   selectors: string[],
@@ -1309,11 +2267,34 @@ async function uploadFirst(
   }
 }
 
-async function fillReviewedQuestions(page: Page, packet: SubmissionPacket, out: string[]) {
+async function fillReviewedQuestions(page: Page, portal: SupportedPortal, packet: SubmissionPacket, out: string[]) {
   for (const item of packet.questions) {
     if (!item.answer.trim()) continue;
     const questionText = normalizeReviewQuestionLabel(item.question);
     if (!questionText) continue;
+    if (isLegalConsentQuestion(questionText)) continue;
+    const portalSelector = durablePortalSelector(item.portalSelector);
+    if (/^(?:checkbox|radio)$/i.test(item.portalInputType ?? '')) {
+      if (portalFamily(portal) === 'greenhouse') {
+        for (const selector of greenhouseCheckboxOptionSelectors(questionText, item.answer)) {
+          const field = page.locator(selector).first();
+          if ((await field.count()) > 0 && (await field.isVisible().catch(() => false))) {
+            await field.check();
+            out.push(`question_checkbox:${questionText.slice(0, 80)}`);
+            break;
+          }
+        }
+      }
+      continue;
+    }
+    if (portalSelector) {
+      const field = page.locator(portalSelector).first();
+      if ((await field.count()) > 0 && (await field.isVisible().catch(() => false))) {
+        await field.fill(item.answer);
+        out.push(`question:${questionText.slice(0, 80)}`);
+        continue;
+      }
+    }
     const label = page.getByText(questionText, { exact: false }).first();
     if ((await label.count()) === 0) continue;
     const container = label.locator('xpath=ancestor::*[self::div or self::fieldset][1]');
@@ -1326,6 +2307,13 @@ async function fillReviewedQuestions(page: Page, packet: SubmissionPacket, out: 
     const select = container.locator('select').first();
     if ((await select.count()) > 0) {
       await select.selectOption({ label: item.answer }).catch(() => select.selectOption(item.answer));
+      out.push(`question:${questionText.slice(0, 80)}`);
+      continue;
+    }
+    const answerPattern = new RegExp(`^\\s*${item.answer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i');
+    const choice = container.getByLabel(answerPattern).first();
+    if ((await choice.count()) > 0 && (await choice.isVisible().catch(() => false))) {
+      await choice.check().catch(() => choice.click());
       out.push(`question:${questionText.slice(0, 80)}`);
     }
   }
@@ -1372,14 +2360,15 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
   }
   if (family === 'greenhouse') {
     const parts = packet.fullName.trim().split(/\s+/);
-    await fillFirst(page, ['#first_name', 'input[name="job_application[first_name]"]'], parts[0], 'first_name', filledFields);
-    await fillFirst(page, ['#last_name', 'input[name="job_application[last_name]"]'], parts.slice(1).join(' '), 'last_name', filledFields);
-    await fillFirst(page, ['#email', 'input[name="job_application[email]"]'], packet.email, 'email', filledFields);
+    await fillFirst(page, GREENHOUSE_FIRST_NAME_SELECTOR.split(', '), parts[0], 'first_name', filledFields);
+    await fillFirst(page, GREENHOUSE_LAST_NAME_SELECTOR.split(', '), parts.slice(1).join(' '), 'last_name', filledFields);
+    await fillFirst(page, GREENHOUSE_EMAIL_SELECTOR.split(', '), packet.email, 'email', filledFields);
     await fillComboboxFirst(page, ['#country'], countryForPhoneField(packet.phone, packet.country), 'phone_country', filledFields);
     await fillFirst(page, GREENHOUSE_PHONE_SELECTOR.split(', '), phoneForPortalField(portal, packet.phone), 'phone', filledFields);
     await fillComboboxFirst(page, ['#candidate-location', 'input[autocomplete="address-level2"]'], greenhouseLocationSearch(packet), 'location', filledFields);
-    await uploadFirst(page, ['#resume', 'input[type="file"][name="job_application[resume]"]'], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, GREENHOUSE_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields);
     await uploadFirst(page, ['input#cover_letter[type="file"]', 'input[type="file"][name*="cover_letter" i]'], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await fillGreenhouseDemographicAliases(page, packet, filledFields);
   } else if (family === 'lever') {
     await fillFirst(page, ['input[name="name"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="email"]'], packet.email, 'email', filledFields);
@@ -1477,7 +2466,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await uploadFirst(page, ASHBY_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields);
     await uploadFirst(page, ASHBY_COVER_LETTER_SELECTOR.split(', '), packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
   }
-  await fillReviewedQuestions(page, packet, filledFields);
+  await fillReviewedQuestions(page, portal, packet, filledFields);
 
   const blockers: string[] = [];
   // String kept verbatim: it is already surfaced to applicants and matched downstream.

@@ -19,9 +19,12 @@ import { resumeSafeTargetRole } from '../engine/resumePolicy';
 import {
   applyApplicationReviewEdit,
   deriveEditedTerms,
+  mergeSubmittedApplicationReviewQuestions,
+  normalizeApplicationReviewQuestions,
   readApplicationReview,
   type ApplicationReviewQuestion,
 } from '../lib/applicationReview';
+import { repairReviewPortalFromMonitoredJob } from '../lib/applicationPortalRepair';
 import { getLiveViewUrl, isBrowserbaseConfigured } from '../lib/browserbase';
 import { apiBaseFor } from '../lib/apiBase';
 import { extractPdfText } from '../lib/pdfText';
@@ -34,7 +37,10 @@ import { buildPacket, processSubmissionApplication } from './submissionRunner';
 import { refreshKnownQuestionAnswers, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { resumeEditDisposition, submitRequestDisposition } from '../lib/submissionSafety';
-import { canonicalSupportedPortalUrl, detectPortal, isPortalSupported } from '../lib/portalSubmission';
+import {
+  detectPortal,
+  isPortalSupported,
+} from '../lib/portalSubmission';
 import { dailySubmissionCap, withinDailyCap } from '../lib/submissionQueue';
 import { canStartExtensionSubmission, extensionOutcomePatch, isSafeExtensionReceiptUrl } from '../lib/extensionSubmission';
 import {
@@ -44,7 +50,7 @@ import {
 } from '../lib/submissionEducationGuard';
 import { resumeFileNameForRole } from '../lib/resumeFileName';
 import { sendUnsupportedPortalApplicationEmail } from '../lib/unsupportedPortalEmailFallback';
-import { monitoredJdAgrees } from '../lib/monitoredPortalRepair';
+import { assessAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
 const questionSchema = z.object({
@@ -53,6 +59,8 @@ const questionSchema = z.object({
   answer: z.string().max(20_000),
   kind: z.enum(['essay', 'required']),
   required: z.boolean(),
+  portal_selector: z.string().max(2000).optional(),
+  portal_input_type: z.string().max(100).optional(),
 });
 const reviewBodySchema = z.object({
   ats_name: z.string().min(1).max(100),
@@ -140,73 +148,6 @@ function freshSubmitRequestReview(
     verification: undefined,
     receipt: undefined,
     stall: undefined,
-  };
-}
-
-function jobContextJobId(row: typeof generated_resumes.$inferSelect): string | null {
-  const jobContext = row.job_context;
-  if (!jobContext || typeof jobContext !== 'object' || Array.isArray(jobContext)) return null;
-  const jobId = (jobContext as Record<string, unknown>).job_id;
-  const parsed = z.string().uuid().safeParse(jobId);
-  return parsed.success ? parsed.data : null;
-}
-
-function jobContextText(row: typeof generated_resumes.$inferSelect, key: 'company' | 'role' | 'jd_hash'): string | null {
-  const jobContext = row.job_context;
-  if (!jobContext || typeof jobContext !== 'object' || Array.isArray(jobContext)) return null;
-  const value = (jobContext as Record<string, unknown>)[key];
-  return typeof value === 'string' && value.trim() ? value.trim() : null;
-}
-
-function normalizedIdentity(value: string | null): string {
-  return (value ?? '').trim().toLowerCase();
-}
-
-async function repairReviewPortalFromMonitoredJob(
-  row: typeof generated_resumes.$inferSelect,
-  current: ApplicationReviewState,
-): Promise<ApplicationReviewState> {
-  if (current.portal_url && isPortalSupported(current.portal_url)) return current;
-  const currentCanonicalUrl = canonicalSupportedPortalUrl(current.portal_url, current.ats_name);
-  if (currentCanonicalUrl) {
-    return {
-      ...current,
-      portal_url: currentCanonicalUrl,
-      ats_name: detectPortal(currentCanonicalUrl),
-      portal_supported: true,
-    };
-  }
-  const jobId = jobContextJobId(row);
-  if (!jobId) return current;
-  const expectedCompany = jobContextText(row, 'company');
-  const expectedRole = jobContextText(row, 'role');
-  const expectedJdHash = jobContextText(row, 'jd_hash');
-  if (!expectedCompany || !expectedRole || !expectedJdHash) return current;
-  const [job] = await db.select({
-    apply_url: monitored_jobs.apply_url,
-    ats_name: career_page_sources.ats_name,
-    company_name: monitored_jobs.company_name,
-    title: monitored_jobs.title,
-    description: sql<string>`left(${monitored_jobs.description}, 60000)`,
-  })
-    .from(monitored_jobs)
-    .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
-    .where(and(
-      eq(monitored_jobs.id, jobId),
-      eq(career_page_sources.enabled, true),
-    ))
-    .limit(1);
-  if (!job) return current;
-  const applyUrl = canonicalSupportedPortalUrl(job.apply_url, job.ats_name);
-  if (!applyUrl) return current;
-  if (normalizedIdentity(job.company_name) !== normalizedIdentity(expectedCompany)) return current;
-  if (normalizedIdentity(job.title) !== normalizedIdentity(expectedRole)) return current;
-  if (!monitoredJdAgrees(expectedJdHash, current.jd_text, job.description)) return current;
-  return {
-    ...current,
-    portal_url: applyUrl,
-    ats_name: detectPortal(applyUrl),
-    portal_supported: true,
   };
 }
 
@@ -329,7 +270,8 @@ function sensitiveQuestionFor(
   profile: ApplicationProfileLike,
   jdText: string | undefined,
 ): ApplicationReviewQuestion | undefined {
-  return questions.find((question) => sensitiveQuestionRequiresAttention(question.question, question.answer, 'text', profile, jdText));
+  return normalizeApplicationReviewQuestions(questions)
+    .find((question) => sensitiveQuestionRequiresAttention(question.question, question.answer, 'text', profile, jdText));
 }
 
 export async function applicationRoutes(fastify: FastifyInstance) {
@@ -661,7 +603,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         sensitiveProfile,
         current.jd_text,
       );
-      if (submittedQuestions.some((question) => question.required && !question.answer.trim())) {
+      const normalizedSubmittedQuestions = mergeSubmittedApplicationReviewQuestions(current.questions, submittedQuestions);
+      if (normalizedSubmittedQuestions.some((question) => question.required && !question.answer.trim())) {
         return reply.status(422).send({ error: 'Answer every required question before submitting.' });
       }
       const submitEducationIssues = packetEducationDrift(stored, submitProfileRows[0]?.parsed_json);
@@ -676,7 +619,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           issues: preSendIssues,
         });
       }
-      const sensitive = sensitiveQuestionFor(submittedQuestions, sensitiveProfile, current.jd_text);
+      const sensitive = sensitiveQuestionFor(normalizedSubmittedQuestions, sensitiveProfile, current.jd_text);
       if (sensitive) {
         return reply.status(422).send({ error: `Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}` });
       }
@@ -686,7 +629,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       // portal_supported check is helpful UI, not an enforcement point.
       if (current.portal_url && !isPortalSupported(current.portal_url)) {
         const authorizedAt = new Date().toISOString();
-        const base = freshSubmitRequestReview(current, submittedQuestions);
+        const base = freshSubmitRequestReview(current, normalizedSubmittedQuestions);
         const pending: ApplicationReviewState = {
           ...base,
           status: 'submitting',
@@ -789,7 +732,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           code: 'PORTAL_RUNNER_NOT_CONFIGURED',
         });
       }
-      const next = freshSubmitRequestReview(current, submittedQuestions);
+      const next = freshSubmitRequestReview(current, normalizedSubmittedQuestions);
       const claimed = await db.update(generated_resumes)
         .set({ spec: reviewSpec(next) })
         .where(and(
@@ -813,6 +756,25 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         application_id: row.id,
         review: readApplicationReview(responseRow.spec) ?? processed ?? next,
         cover_letter: storedCoverLetter(responseRow),
+      });
+    },
+  );
+
+  fastify.get(
+    '/applications/:id/submission/channels',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      let review = readApplicationReview(row.spec);
+      if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
+      review = await repairReviewPortalFromMonitoredJob(row, review);
+      const assessment = assessAtsSubmissionChannel(review.portal_url);
+      return reply.send({
+        application_id: row.id,
+        review_status: review.status,
+        portal_url: review.portal_url,
+        channels: assessment ? [assessment] : [],
       });
     },
   );
@@ -914,6 +876,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (approvalReview.cover_letter_supported === true && !coverLetter) {
         approvalIssues.push('The cover letter must be reviewed before sending.');
       }
+      approvalReview.questions = normalizeApplicationReviewQuestions(approvalReview.questions);
       approvalIssues.push(...finalApprovalFieldIssues(approvalReview, approvalReview.cover_letter_supported === true && Boolean(coverLetter)));
       if (approvalReview.questions.some((question) => question.required && !question.answer.trim())) {
         approvalIssues.push('A required application answer is still blank.');

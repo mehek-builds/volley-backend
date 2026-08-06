@@ -29,6 +29,10 @@ test('answers work authorization and sponsorship only from explicit stored conse
     { value: 'Yes' },
   );
   assert.deepEqual(
+    resolveKnownAnswer('Are you currently eligible to legally work in the United States?', 'text', { work_authorized: true }, undefined),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
     resolveKnownAnswer(
       'are you legally authorized to work in the country where the job is located?',
       'text',
@@ -108,6 +112,14 @@ test('answers work authorization and sponsorship only from explicit stored conse
   );
   assert.ok(nonUsSponsorshipWorkAuth && 'skipReason' in nonUsSponsorshipWorkAuth);
 
+  const nonUsEmployerCountry = resolveKnownAnswer(
+    'are you legally authorized to work for Formlabs in Hungary?',
+    'text',
+    { work_authorized: true },
+    undefined,
+  );
+  assert.ok(nonUsEmployerCountry && 'skipReason' in nonUsEmployerCountry);
+
   const mixed = resolveKnownAnswer(
     'are you authorized to work in the US without sponsorship?',
     'text',
@@ -118,7 +130,13 @@ test('answers work authorization and sponsorship only from explicit stored conse
 });
 
 test('answers EEO / demographic questions with stored preferences or decline', () => {
-  const labels = ['what is your gender?', 'are you hispanic or latino?', 'veteran status', 'are you a person of transgender experience?'];
+  const labels = [
+    'what is your gender?',
+    'are you hispanic or latino?',
+    'veteran status',
+    'are you a person of transgender experience?',
+    'please select your racial/ethnic background',
+  ];
   for (const label of labels) {
     assert.equal(isRefusedQuestion(label), true, label);
     assert.equal(classifyField(label), null, label);
@@ -128,6 +146,33 @@ test('answers EEO / demographic questions with stored preferences or decline', (
     resolveKnownAnswer('what is your gender?', 'text', { eeo_prefs: { gender: 'Female' } }, undefined),
     { value: 'Female' },
   );
+  assert.deepEqual(
+    resolveKnownAnswer('are you a person of transgender experience?', 'text', { eeo_prefs: { gender: 'Female' } }, undefined),
+    { value: 'Decline to self-identify' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('please select your racial/ethnic background', 'text', { eeo_prefs: { gender: 'Female' } }, undefined),
+    { value: 'Decline to self-identify' },
+  );
+});
+
+test('auto-answers candidate privacy consent while leaving demographic survey consent for attention', () => {
+  const privacy = resolveKnownAnswer(
+    'By selecting "I agree," I understand that the information I have provided as part of this job application will be processed in accordance with the Candidate Privacy Policy.',
+    'text',
+    {},
+    undefined,
+  );
+  assert.deepEqual(privacy, { value: 'Yes' });
+
+  const demographicConsent = resolveKnownAnswer(
+    'By checking this box, I consent to Reddit collecting, storing, and processing my responses to the demographic data survey above.',
+    'text',
+    {},
+    undefined,
+  );
+  assert.ok(demographicConsent && 'skipReason' in demographicConsent);
+  assert.match(demographicConsent.skipReason, /consent question left for you/);
 });
 
 test('send-time sensitive guard allows stored work and EEO answers while blocking identity numbers', () => {
@@ -237,6 +282,13 @@ test('never answers SSN or driver license fields', () => {
   assert.equal(isRefusedQuestion("driver's license number"), true);
 });
 
+test('never answers CAPTCHA or recording consent fields', () => {
+  assert.equal(isRefusedQuestion('Please complete the CAPTCHA'), true);
+  assert.equal(resolveKnownAnswer('Please complete the CAPTCHA', 'checkbox', {}, undefined), null);
+  assert.equal(isRefusedQuestion('Do you consent to this interview being recorded?'), true);
+  assert.equal(resolveKnownAnswer('Do you consent to this interview being recorded?', 'checkbox', {}, undefined), null);
+});
+
 test('sensitive gates allow only exact stored work eligibility answers', () => {
   assert.equal(
     sensitiveQuestionRequiresAttention(
@@ -331,8 +383,19 @@ test('citizenship is answered but never substituted for residence', () => {
 
 test('a routine location-commitment question is answered as an approved logistics acknowledgement', () => {
   const label = 'this role is in-office three days a week, can you commit to that?';
+  assert.equal(classifyField(label), 'onsite_commitment');
+  assert.deepEqual(resolveKnownAnswer(label, 'select', { address_city: 'Dubai' }, undefined), { value: 'Yes' });
+  assert.equal(classifyField('are you willing to relocate to San Francisco?'), null);
+  assert.deepEqual(resolveKnownAnswer('are you willing to relocate to San Francisco?', 'text', { address_city: 'Dubai' }, undefined), { value: 'Yes' });
+});
+
+test('a preferred-location choice is not drafted as prose', () => {
+  const label = "Please choose the single location that you're the most interested in, and we will discuss more with you as you move through the process.";
   assert.equal(classifyField(label), null);
-  assert.deepEqual(resolveKnownAnswer(label, 'text', { address_city: 'Dubai' }, undefined), { value: 'Yes' });
+  assert.equal(isOpenEndedQuestion(label), false);
+  const resolved = resolveKnownAnswer(label, 'text', { address_city: 'Los Angeles' }, 'Locations to be discussed with your recruiter.');
+  assert.ok(resolved && 'skipReason' in resolved);
+  assert.match(resolved.skipReason, /location choice left for you/);
 });
 
 test('routine applicant data and privacy consent questions are answered yes', () => {
@@ -384,6 +447,144 @@ test('referral source handles first-heard wording', () => {
   });
 });
 
+test('stored academic and onsite facts answer repeated select-shaped live questions', () => {
+  const profile = {
+    school: 'University of Southern California',
+    degree: 'Bachelor of Science',
+    major: 'Computer Science',
+    grad_date: 'May 2028',
+    grad_year: 2028,
+    currently_enrolled: true,
+    languages: ['English', 'Hindi'],
+  };
+
+  assert.deepEqual(resolveKnownAnswer('Are you able to work onsite 3 days a week?', 'select', profile, undefined), { value: 'Yes' });
+  assert.deepEqual(resolveKnownAnswer('Are you currently enrolled in a degree program?', 'radio', profile, undefined), { value: 'Yes' });
+  assert.deepEqual(resolveKnownAnswer('Will you be returning to a degree program after this internship?', 'select', profile, undefined), { value: 'Yes' });
+  assert.deepEqual(resolveKnownAnswer('Graduation Month', 'select', profile, undefined), { value: 'May' });
+  assert.deepEqual(resolveKnownAnswer('Graduation Year', 'select', profile, undefined), { value: '2028' });
+  assert.deepEqual(
+    resolveKnownAnswer('If you are enrolled in university, what degree are you currently pursuing?', 'select', profile, undefined),
+    { value: 'Bachelor\'s Degree' },
+  );
+  assert.deepEqual(resolveKnownAnswer('Degree', 'combobox', profile, undefined), { value: 'Bachelor\'s Degree' });
+  assert.deepEqual(resolveKnownAnswer('What is the most recent degree you obtained?', 'select', profile, undefined), { value: 'Bachelor\'s Degree' });
+  assert.deepEqual(resolveKnownAnswer('What is your major?', 'text', profile, undefined), { value: 'Computer Science' });
+  assert.deepEqual(resolveKnownAnswer('What languages are you fluent in?', 'text', profile, undefined), { value: 'English, Hindi' });
+  assert.deepEqual(resolveKnownAnswer('Do you speak English fluently?', 'select', profile, undefined), { value: 'Yes' });
+});
+
+test('required internship form fields resolve from profile-backed defaults instead of drafts', () => {
+  const profile = {
+    address_city: 'Dubai',
+    address_country: 'United Arab Emirates',
+    degree: 'Bachelor of Science in Computer Science',
+    currently_enrolled: true,
+    grad_date: 'May 2028',
+    grad_year: 2028,
+    eeo_prefs: { gender: 'Female' },
+  };
+
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Please select your current state of residence. Select “Not in the US” if you reside outside the United States.',
+      'select',
+      profile,
+      undefined,
+    ),
+    { value: 'Not in the US' },
+  );
+  assert.deepEqual(resolveKnownAnswer('Do you currently reside in San Francisco?', 'select', profile, undefined), { value: 'No' });
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Are you currently residing in the greater Austin area or have confirmed plans to be in Austin for the duration of this internship?',
+      'select',
+      profile,
+      undefined,
+    ),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('Are you currently enrolled in a Masters or PhD program for a technical field?', 'select', profile, undefined),
+    { value: 'No' },
+  );
+  const privacy = resolveKnownAnswer(
+    'Please review and acknowledge Cloudflare\'s Candidate Privacy Policy (cloudflare.com/candidate-privacy-notice/).',
+    'checkbox',
+    profile,
+    undefined,
+  );
+  assert.deepEqual(privacy, { value: 'Yes' });
+  assert.deepEqual(
+    resolveKnownAnswer('Do you consider yourself a member of the LGBTQIA+ community?', 'select', profile, undefined),
+    { value: 'Decline to self-identify' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('Which categories describe you? Select all that apply to you', 'checkbox', profile, undefined),
+    { value: 'Decline to self-identify' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Are you currently bound by any agreements with a current or former employer that may restrict your ability to work for Scale AI?',
+      'select',
+      profile,
+      undefined,
+    ),
+    { value: 'No' },
+  );
+});
+
+test('job location preference questions use the safe posting locations context', () => {
+  const label = "Please choose the single location that you're the most interested in, and we will discuss more with you as you move through the process.";
+  const context = [
+    'Build data systems for customers.',
+    'Mountain View, CA',
+    'San Francisco, CA',
+  ].join('\n');
+
+  assert.equal(classifyField(label), null);
+  assert.deepEqual(
+    resolveKnownAnswer(
+      label,
+      'select',
+      {},
+      context,
+    ),
+    { value: 'San Francisco, CA' },
+  );
+  assert.deepEqual(resolveKnownAnswer('What is your current location?', 'text', { address_city: 'Dubai' }, context), { value: 'Dubai' });
+});
+
+test('Databricks export-control checkbox questions are not inferred from profile geography', () => {
+  assert.equal(
+    resolveKnownAnswer(
+      'Please confirm whether any of the below applies to you. Select all that apply. Note: This information will only be used to ensure compliance with U.S. sanctions and export controls.',
+      'checkbox',
+      { address_country: 'United Arab Emirates', citizenship: 'Indian' },
+      undefined,
+    ),
+    null,
+  );
+  assert.equal(
+    resolveKnownAnswer(
+      'If you selected a response to the prior question other than none of the above, please confirm whether any of the following also applies to you. Select all that apply.',
+      'checkbox',
+      { address_country: 'United Arab Emirates', citizenship: 'Indian' },
+      undefined,
+    ),
+    null,
+  );
+  assert.equal(
+    resolveKnownAnswer(
+      'Please confirm whether any of the below applies to you. Select all that apply. Note: This information will only be used to ensure compliance with U.S. sanctions and export controls.',
+      'checkbox',
+      {},
+      undefined,
+    ),
+    null,
+  );
+});
+
 test('graduation date inputs use the graduation end of an education range', () => {
   assert.equal(graduationDateAnswer('August 2024 - May 2028', 2028, 'date'), '2028-05-01');
   assert.equal(graduationDateAnswer('August 2024 - 2028-05-15', 2028, 'date'), '2028-05-01');
@@ -415,18 +616,78 @@ test('mixed enrollment and graduation-date prompts still skip past graduation ev
   assert.ok(resolved && 'skipReason' in resolved);
 });
 
-test('a bare salary figure only fills when the posting currency matches the stored one (R-031)', () => {
-  const ap = { desired_salary: '80000', desired_salary_currency: 'USD' };
-  const usd = resolveKnownAnswer('expected salary (USD)', 'text', ap, undefined);
-  assert.ok(usd && 'value' in usd);
-  const eur = resolveKnownAnswer('expected salary (EUR)', 'text', ap, undefined);
-  assert.ok(eur && 'skipReason' in eur, 'a currency mismatch must flag, never convert');
+test('live-audit education variants resolve from stored education profile facts', () => {
+  const now = new Date();
+  const academicStartYear = now.getUTCMonth() >= 7 ? now.getUTCFullYear() : now.getUTCFullYear() - 1;
+  const gradYear = academicStartYear + 2;
+  const expectedStudyYear = 'Third year';
+  const profile = {
+    school: 'University of Southern California',
+    degree: 'Bachelor of Science in Computer Science & Business Administration, Finance Emphasis',
+    grad_date: `May ${gradYear}`,
+    grad_year: gradYear,
+    currently_enrolled: true,
+    gpa: '3.89/4.0',
+  };
+
+  assert.deepEqual(resolveKnownAnswer('Please re-confirm the university you currently attend', 'select', profile, undefined), {
+    value: 'University of Southern California',
+  });
+  assert.deepEqual(resolveKnownAnswer('Undergrad Discipline(s)', 'select', profile, undefined), {
+    value: 'Computer Science and Business Administration',
+  });
+  assert.deepEqual(resolveKnownAnswer('What is your latest field of study?', 'select', profile, undefined), {
+    value: 'Computer Science and Business Administration',
+  });
+  assert.deepEqual(resolveKnownAnswer('Which course are you currently enrolled in?', 'select', profile, undefined), {
+    value: 'Computer Science and Business Administration',
+  });
+  assert.deepEqual(resolveKnownAnswer('Please confirm your current degree graduation time frame.', 'select', profile, undefined), {
+    value: `May ${gradYear}`,
+  });
+  assert.deepEqual(resolveKnownAnswer('Expected Graduation semester', 'select', profile, undefined), {
+    value: `Spring ${gradYear}`,
+  });
+  assert.deepEqual(resolveKnownAnswer('What is the current year of your studies?', 'select', profile, undefined), {
+    value: expectedStudyYear,
+  });
+  assert.deepEqual(resolveKnownAnswer('What is your current academic performance rating?', 'select', profile, undefined), {
+    value: '3.89/4.0',
+  });
 });
 
-test('a stated range in the label fills its median regardless of stored value', () => {
+test('study year stays blank when graduation evidence cannot support it', () => {
+  assert.equal(
+    resolveKnownAnswer('What is the current year of your studies?', 'select', { grad_date: 'May 2024', grad_year: 2024 }, undefined),
+    null,
+  );
+  assert.equal(
+    resolveKnownAnswer(
+      'What is the current year of your studies?',
+      'select',
+      {
+        degree: 'Master of Science in Computer Science',
+        grad_date: 'May 2099',
+        grad_year: 2099,
+        currently_enrolled: true,
+      },
+      undefined,
+    ),
+    null,
+  );
+});
+
+test('salary questions are left for human attention', () => {
+  const ap = { desired_salary: '80000', desired_salary_currency: 'USD' };
+  const usd = resolveKnownAnswer('expected salary (USD)', 'text', ap, undefined);
+  assert.ok(usd && 'skipReason' in usd);
+  const eur = resolveKnownAnswer('expected salary (EUR)', 'text', ap, undefined);
+  assert.ok(eur && 'skipReason' in eur);
+});
+
+test('salary questions stay blank even when the label states a range', () => {
   const resolved = resolveKnownAnswer('desired salary (e.g. USD 90,000 - 110,000)', 'text', {}, undefined);
-  assert.ok(resolved && 'value' in resolved);
-  assert.match((resolved as { value: string }).value, /100,000/);
+  assert.ok(resolved && 'skipReason' in resolved);
 });
 
 test('eeoAnswer is exact-match-only, never a near-miss (R-018)', () => {
@@ -518,6 +779,24 @@ test('Ashby fixed profile fields never reappear as editable custom questions', (
 test('review question labels are never empty or longer than the managed runner limit', () => {
   assert.equal(normalizeReviewQuestionLabel('required field'), '');
   assert.equal(normalizeReviewQuestionLabel('56f41b98-0250-4e12-a2d1-aa038a33af27'), '');
+  assert.equal(
+    normalizeReviewQuestionLabel('how did you hear about this job?* how did you hear about this job?'),
+    'how did you hear about this job',
+  );
+  assert.equal(
+    normalizeReviewQuestionLabel(
+      'briefly describe your experience with ads review/ads trust and safety* briefly describe your experience with ads review/ads trust and safety',
+    ),
+    'briefly describe your experience with ads review/ads trust and safety',
+  );
+  assert.equal(
+    normalizeReviewQuestionLabel('what gender identity do you most closely identify with? * 430'),
+    'what gender identity do you most closely identify with?',
+  );
+  assert.equal(
+    normalizeReviewQuestionLabel('are you a person of transgender experience? * 431'),
+    'are you a person of transgender experience?',
+  );
 
   const longLabel = `Why Samsara? ${'Tell us more about your systems work '.repeat(30)}`;
   const normalized = normalizeReviewQuestionLabel(longLabel);

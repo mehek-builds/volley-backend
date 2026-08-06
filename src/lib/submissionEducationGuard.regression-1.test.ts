@@ -222,8 +222,9 @@ test('final approval revalidates the full packet before it clicks submit', () =>
   assert.match(handler, /finalApprovalFieldIssues\(current, current\.cover_letter_supported === true && Boolean\(coverLetter\)\)/);
   assert.match(handler, /const coverLetter = storedCoverLetter\(row\)/);
   assert.match(handler, /current\.cover_letter_supported === true && !coverLetter/);
-  assert.match(handler, /current\.questions\.some\(\(question\) => question\.required && !question\.answer\.trim\(\)\)/);
-  assert.match(handler, /sensitiveQuestionFor\(current\.questions/);
+  assert.match(handler, /const currentQuestions = normalizeApplicationReviewQuestions\(current\.questions\)/);
+  assert.match(handler, /currentQuestions\.some\(\(question\) => question\.required && !question\.answer\.trim\(\)\)/);
+  assert.match(handler, /sensitiveQuestionFor\(currentQuestions/);
   assert.match(handler, /Sensitive question requires your attention/);
   assert.match(handler, /preSendResumeVerificationIssues\(request\.jwtPayload!\.userId, stored\)/);
   assert.match(handler, /FINAL_APPROVAL_VERIFICATION_FAILED/);

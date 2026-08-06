@@ -43,25 +43,32 @@ export type ApplicationProfileLike = StoredSalaryProfile & {
   gpa?: string;
   gpa_scale?: string;
   major?: string;
+  languages?: string[] | null;
   eeo_prefs?: Record<string, string> | null;
   referral_source_default?: string;
 };
 
-const NEVER_FILL_PATTERNS = [/social security/i, /\bssn\b/i, /driver'?s?\s*licen[sc]e/i];
+const NEVER_FILL_PATTERNS = [
+  /social security/i,
+  /\bssn\b/i,
+  /driver'?s?\s*licen[sc]e/i,
+  /\bcaptcha\b|recaptcha|hcaptcha|human verification/i,
+  /\brecord(?:ing|ed)?\s+consent\b|\bconsent\b[^?]{0,80}\b(?:record|recording|recorded)\b|\b(?:record|recording|recorded)\b[^?]{0,80}\bconsent\b/i,
+];
 
 // See WORK_ELIGIBILITY_QUESTION in the extension's generic.ts: work authorization and sponsorship
 // used to be globally refused after a false legal declaration shipped once (R-004). They are now
 // answered only from explicit stored booleans, with ambiguous mixed wording still left to the user.
 export const WORK_ELIGIBILITY_QUESTION =
-  /(?:eligible|eligibility)\s+to\s+work|authori[sz](?:ed|ation)\s+to\s+work|legally\s+authori[sz]ed|right\s+to\s+work|work\s+authori[sz]|(?:requir\w*|need\w*|visa|immigration|without|employment)\s+(?:\w+\s+){0,3}sponsor|sponsor\w*\s+(?:\w+\s+){0,3}(?:requir\w*|need\w*)/i;
+  /(?:eligible|eligibility)\s+(?:to\s+)?(?:legally\s+)?work|authori[sz](?:ed|ation)\s+to\s+work|legally\s+authori[sz]ed|right\s+to\s+work|work\s+authori[sz]|(?:requir\w*|need\w*|visa|immigration|without|employment)\s+(?:\w+\s+){0,3}sponsor|sponsor\w*\s+(?:\w+\s+){0,3}(?:requir\w*|need\w*)/i;
 const WORK_AUTHORIZATION_QUESTION =
-  /(?:eligible|eligibility)\s+to\s+work|authori[sz](?:ed|ation)\s+to\s+work|legally\s+authori[sz]ed|right\s+to\s+work|work\s+authori[sz]/i;
+  /(?:eligible|eligibility)\s+(?:to\s+)?(?:legally\s+)?work|authori[sz](?:ed|ation)\s+to\s+work|legally\s+authori[sz]ed|right\s+to\s+work|work\s+authori[sz]/i;
 const SPONSORSHIP_QUESTION =
   /(?:requir\w*|need\w*|visa|immigration|without|employment)\s+(?:\w+\s+){0,3}sponsor|sponsor\w*\s+(?:\w+\s+){0,3}(?:requir\w*|need\w*)/i;
 const SPONSORSHIP_WORK_AUTHORIZATION_SUPPORT_QUESTION =
   /\b(?:do|will|would|can|could)?\s*(?:you\s+)?(?:now\s+or\s+in\s+the\s+future\s+)?(?:requir\w*|need\w*)\b[^?]{0,80}\b(?:sponsor\w*|visa)\b[^?]{0,50}\bwork\s+authori[sz]ation\b/i;
 const NON_US_WORK_SCOPE =
-  /\b(canada|canadian|united kingdom|uk|britain|british|england|european union|eu|australia|australian|india|indian|united arab emirates|uae|dubai|singapore|germany|france|ireland|netherlands|japan|korea|china)\b/i;
+  /\b(canada|canadian|united kingdom|uk|britain|british|england|european union|eu|australia|australian|india|indian|united arab emirates|uae|dubai|singapore|germany|france|ireland|netherlands|hungary|hungarian|japan|korea|china)\b/i;
 const JOB_LOCATION_SCOPE = /country\s+(?:where|in which)\s+the\s+job\s+is\s+located|country\s+where\s+the\s+role\s+is\s+located|where\s+the\s+job\s+is\s+located/i;
 const JD_US_SCOPE =
   /\b(united states|u\.s\.|usa|remote\s*\(us\)|san francisco|san mateo|mountain view|california|new york|austin|texas|washington|seattle|boston|massachusetts|chicago|illinois)\b/i;
@@ -69,10 +76,20 @@ const ROUTINE_APPLICANT_CONSENT_QUESTION =
   /\b(?:consent|agree|acknowledg\w*|approve|confirm)\b[\s\S]{0,180}\b(?:process(?:ing)?|use|using|collect(?:ion)?|retain|store|privacy\s+policy|privacy\s+notice|notice\s+at\s+collection)\b[\s\S]{0,180}\b(?:personal\s+information|personal\s+data|application|applicant|candidacy|candidate|privacy\s+policy|privacy\s+notice|notice\s+at\s+collection|infrastructure|platform|data)\b|\bplease\s+review\s+and\s+acknowledg\w*\b[\s\S]{0,120}\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b|\byes,\s*i\s+consent\b/i;
 
 export const EEO_QUESTION =
-  /transgender|\bgender\b|what is your sex\b|race|ethnicit|hispanic|latino|veteran|military|disab|sexual orientation|communities|identify with|current age|what is your age|age range|how old are you|\bage group\b/i;
+  /transgender|\bgender\b|what is your sex\b|race|racial|ethnicit|ethnic\b|hispanic|latino|veteran|military|disab|sexual orientation|lgbtq|lgbtqia|communities|which categories describe you|identify with|current age|what is your age|age range|how old are you|\bage group\b/i;
+const LEGAL_CONSENT_QUESTION =
+  /candidate privacy policy|candidate-privacy-notice|privacy notice|notice at collection|review and acknowledge|information (?:i|you) have provided.*process|by selecting ["']?i agree|demographic data survey|collecting,\s*storing,\s*and processing/i;
+
+export function isLegalConsentQuestion(label: string): boolean {
+  return LEGAL_CONSENT_QUESTION.test(label);
+}
 
 export function workEligibilitySkipReason(label: string): string {
   return `work-eligibility question left for you: "${label.slice(0, 60)}"`;
+}
+
+export function legalConsentSkipReason(label: string): string {
+  return `consent question left for you: "${label.slice(0, 60)}"`;
 }
 
 function workEligibilityAnswer(
@@ -106,6 +123,16 @@ function workEligibilityAnswer(
 }
 
 function routineConsentAnswer(label: string): { value: string } | null {
+  if (/demographic data survey/i.test(label)) return null;
+  if (
+    /\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b/i.test(label)
+    && /\b(?:agree|consent|acknowledg\w*|processed?|processing)\b/i.test(label)
+  ) {
+    return { value: 'Yes' };
+  }
+  if (/\bjob application\b/i.test(label) && /\bprocess(?:ed|ing)?\b/i.test(label) && /\b(?:information|data)\b/i.test(label)) {
+    return { value: 'Yes' };
+  }
   return ROUTINE_APPLICANT_CONSENT_QUESTION.test(label) ? { value: 'Yes' } : null;
 }
 
@@ -160,21 +187,56 @@ const RESIDENCE_QUESTION =
   /country of residence|which country|country you.{0,20}(based|resid|work from|located)|where are you based|based in which country|current country|country.{0,20}(residing|residence)|\bcountry\b/i;
 const LOCATION_COMMITMENT_STEM = /\b(?:are|can|could|do|did|will|would|should|may|might|have)\s+you\b/i;
 const LOCATION_COMMITMENT_VOCAB = /\boffice\b|in[\s-]?office|on[\s-]?site|\bonsite\b|\bhybrid\b|relocat|commut/i;
+const STORED_ONSITE_COMMITMENT_QUESTION =
+  /\b(?:able|willing|available|prepared|can|could|would)\b[^?]{0,80}\b(?:office|in[\s-]?office|on[\s-]?site|onsite|hybrid)\b|\b(?:office|in[\s-]?office|on[\s-]?site|onsite|hybrid)\b[^?]{0,80}\b(?:able|willing|available|prepared|can|could|would)\b/i;
+const ONSITE_DAY_COUNT_QUESTION = /\b(?:three|four|five|3|4|5)\s+days?\b/i;
+const LOCATION_PREFERENCE_QUESTION =
+  /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\blocation\b[^?]{0,120}\b(?:single|top|preferred|preference|most interested)\b/i;
+const LOCATION_CHOICE_QUESTION =
+  /\b(?:choose|select|pick)\b[^?]{0,120}\b(?:single|top|preferred|preference|most interested|location|office)\b|\b(?:single|top|most interested)\b[^?]{0,120}\blocation\b|\blocation\b[^?]{0,120}\b(?:single|top|most interested)\b/i;
+const SAFE_US_LOCATION_LINE =
+  /^(?:remote(?:,\s*)?(?:us|u\.s\.|usa|united states)?|[A-Z][A-Za-z .'-]+,\s*(?:[A-Z]{2}|Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New Hampshire|New Jersey|New Mexico|New York|North Carolina|North Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode Island|South Carolina|South Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West Virginia|Wisconsin|Wyoming)(?:,\s*(?:United States|USA|US|U\.S\.))?)$/i;
 
 export function isLocationCommitmentQuestion(label: string): boolean {
   return LOCATION_COMMITMENT_STEM.test(label) && LOCATION_COMMITMENT_VOCAB.test(label);
 }
 
+function locationPreferenceAnswer(label: string, jdText: string | undefined): { value: string } | null {
+  if (!LOCATION_PREFERENCE_QUESTION.test(label)) return null;
+  for (const line of (jdText ?? '').split(/\n+/).map((value) => value.trim()).filter(Boolean).reverse()) {
+    if (line.length <= 120 && SAFE_US_LOCATION_LINE.test(line)) return { value: line };
+  }
+  return null;
+}
+
+export function isLocationChoiceQuestion(label: string): boolean {
+  return LOCATION_CHOICE_QUESTION.test(label);
+}
+
 export const REFERRAL_QUESTION = /how did you .*hear|how did you hear|first hear|referral source|hear about (this|us|the)|source of/i;
 export const START_DATE_QUESTION = /availab|start(ing)?\s+date|date.*you.*start|when can you start|earliest.*start/i;
 export const GRADUATION_DATE_QUESTION =
-  /\b(?:expected\s+)?graduat(?:ion|e)\s+(?:date|year)\b|\b(?:date|year)\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b|\bexpected\s+grad(?:uation)?\b|\bclass\s+of\b/i;
+  /\b(?:expected\s+)?graduat(?:ion|e)\s+(?:date|year|semester|term|time\s*frame|timeframe|window)\b|\b(?:date|year|semester|term|time\s*frame|timeframe|window)\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b|\bexpected\s+grad(?:uation)?\b|\bclass\s+of\b/i;
+const GRADUATION_MONTH_QUESTION = /\bgraduat(?:ion|e)\s+month\b|\bmonth\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b/i;
+const GRADUATION_YEAR_QUESTION = /\bgraduat(?:ion|e)\s+year\b|\byear\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b|\bclass\s+year\b/i;
 const MIXED_ENROLLMENT_GRADUATION_QUESTION = /\bcurrently\s+enrolled\b|\bdegree\s+program\b/i;
+const CURRENT_ENROLLMENT_QUESTION =
+  /\bcurrently\s+enrolled\b|\bcurrent\s+student\b|\benrolled\s+in\s+(?:a\s+)?(?:degree\s+)?program\b|\breturn(?:ing)?\s+to\s+(?:a\s+)?(?:degree\s+)?program\b|\breturn(?:ing)?\s+to\s+(?:school|college|university)\b/i;
+const MAJOR_QUESTION =
+  /\bmajor\b|field of study|course of study|degree subject|\bdiscipline\b|\bcourse\b[^?]{0,80}\benrolled\b|\benrolled\b[^?]{0,80}\bcourse\b/i;
+const LANGUAGE_QUESTION =
+  /\bspoken\s+languages?\b|\blanguages?\s+(?:do\s+you\s+|are\s+you\s+)?(?:speak|know|fluent|proficient)|\b(?:speak|fluent|proficient)\b[^?]{0,40}\blanguages?\b|\b(?:speak|fluent|proficient)\b[^?]{0,40}\b(?:english|hindi|arabic|spanish|french|german|portuguese|mandarin|chinese|cantonese|tamil|punjabi|urdu)\b/i;
 const TERM_QUESTION =
   /(length|duration|term)\b.*\bavailab|availab.*\b(length|duration|term)\b|how long.*(available|intern|stay|commit)|(weeks|months).*\b(available|internship|commit)|\bterm\s*\/?\s*length/i;
 const SALARY_QUESTION = /salary|compensat|desired pay|expected pay|pay expectation/i;
 const DOB_QUESTION = /date of birth|birth\s*date|\bdob\b/i;
 const CITIZENSHIP_QUESTION = /citizen|nationalit/i;
+const ADVANCED_DEGREE_ENROLLMENT_QUESTION = /\bcurrently\s+enrolled\b[^?]{0,80}\b(?:masters?|master's|ph\.?d|doctorate)\b|\b(?:masters?|master's|ph\.?d|doctorate)\b[^?]{0,80}\bcurrently\s+enrolled\b/i;
+const EMPLOYER_RESTRICTION_AGREEMENT_QUESTION =
+  /\bbound\b[^?]{0,120}\bagreements?\b[^?]{0,180}\b(?:restrict|limit)\b[^?]{0,120}\b(?:ability\s+to\s+work|employment|duties)\b|\b(?:non-compete|non-solicitation|confidentiality|non-disclosure)\b[^?]{0,180}\b(?:restrict|limit|bound)\b/i;
+const US_STATE_RESIDENCE_SELECT_QUESTION = /\bstate\s+of\s+residence\b[^?]{0,160}\bnot\s+in\s+the\s+us\b/i;
+const SAN_FRANCISCO_RESIDENCE_QUESTION = /\bcurrently\s+reside\b[^?]{0,80}\bsan\s+francisco\b|\bsan\s+francisco\b[^?]{0,80}\bcurrently\s+reside\b/i;
+const CONFIRMED_PLANS_CITY_RE = /\b(?:currently\s+residing|confirmed\s+plans)\b[^?]{0,80}\b(?:greater\s+)?([a-z][a-z .'-]+?)\s+area\b|\bconfirmed\s+plans\b[^?]{0,80}\bin\s+([a-z][a-z .'-]+)\b/i;
 
 const NATIONALITY_TO_COUNTRY: Record<string, string> = {
   indian: 'India', american: 'United States', emirati: 'United Arab Emirates',
@@ -188,7 +250,8 @@ export type ProfileKey =
   | 'phone' | 'address_city' | 'address_state' | 'address_country'
   | 'linkedin_url' | 'github_url' | 'portfolio_url' | 'citizenship' | 'date_of_birth'
   | 'availability_date' | 'availability_term' | 'school' | 'degree' | 'graduation_date' | 'desired_salary'
-  | 'gpa' | 'gpa_scale' | 'major' | 'referral_source_default';
+  | 'graduation_month' | 'graduation_year' | 'current_enrollment' | 'study_year' | 'gpa' | 'gpa_scale' | 'major'
+  | 'languages' | 'onsite_commitment' | 'referral_source_default';
 
 // Ported verbatim from generic.ts's classifyField (see that file for the full rationale on
 // ordering - refusals first, citizenship before residence, term before start date, state before
@@ -199,36 +262,49 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
   if (type === 'tel') return 'phone';
 
   const locationCommitment = isLocationCommitmentQuestion(l);
+  const locationChoice = isLocationChoiceQuestion(l);
 
   if (CITIZENSHIP_QUESTION.test(l)) return 'citizenship';
-  if (!locationCommitment && RESIDENCE_QUESTION.test(l)) return 'address_country';
+  if (!locationCommitment && !locationChoice && RESIDENCE_QUESTION.test(l)) return 'address_country';
 
   if (REFERRAL_QUESTION.test(l)) return 'referral_source_default';
   if (SALARY_QUESTION.test(l)) return 'desired_salary';
   if (DOB_QUESTION.test(l)) return 'date_of_birth';
   if (TERM_QUESTION.test(l)) return 'availability_term';
+  if (STORED_ONSITE_COMMITMENT_QUESTION.test(l) && (ONSITE_DAY_COUNT_QUESTION.test(l) || !/relocat/i.test(l))) {
+    return 'onsite_commitment';
+  }
+  if (/\bcurrent\s+year\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\byear\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\bacademic\s+year\b/i.test(l)) return 'study_year';
+  if (GRADUATION_MONTH_QUESTION.test(l)) return 'graduation_month';
+  if (GRADUATION_YEAR_QUESTION.test(l)) return 'graduation_year';
   if (GRADUATION_DATE_QUESTION.test(l)) return 'graduation_date';
+  if (MAJOR_QUESTION.test(l)) return 'major';
+  if (CURRENT_ENROLLMENT_QUESTION.test(l) && !GRADUATION_DATE_QUESTION.test(l)) return 'current_enrollment';
   if (START_DATE_QUESTION.test(l)) return 'availability_date';
+  if (LOCATION_PREFERENCE_QUESTION.test(l)) return null;
 
   if (/linkedin/i.test(l)) return 'linkedin_url';
   if (/github/i.test(l)) return 'github_url';
   if (/portfolio|personal\s*(web)?site|\bwebsite\b/i.test(l)) return 'portfolio_url';
 
-  if (/\bgpa\b|grade average|grade point/i.test(l)) return 'gpa';
+  if (/\bgpa\b|grade average|grade point|academic performance/i.test(l)) return 'gpa';
   if (/gpa scale|out of.*(4\.0|100)|grading scale/i.test(l)) return 'gpa_scale';
   if (/\bhigh school\b/i.test(l) && /graduat|when|date|year/i.test(l)) return null;
-  if (/\b(school|university|college|institution)\b/i.test(l)) return 'school';
+  if (LANGUAGE_QUESTION.test(l)) return 'languages';
   if (/\bdegree\b(?!\s+(?:program|subject))|education level|level of education/i.test(l)) return 'degree';
-  if (/\bmajor\b|\bdiscipline\b|field of study|course of study|degree subject/i.test(l)) return 'major';
+  if (/\b(school|university|college|institution)\b/i.test(l)) return 'school';
+  if (MAJOR_QUESTION.test(l)) return 'major';
 
   if (/phone|mobile/i.test(l)) return 'phone';
   if (
     !locationCommitment &&
+    !locationChoice &&
     /\b(state|province|prefecture)\b(?!\s+(?:your|the|you|it|why|how|what|when|where))|state\s*\/\s*province/i.test(l)
   )
     return 'address_state';
   if (
     !locationCommitment &&
+    !locationChoice &&
     /\b(city|town)\b|\blocation\b|where are you (currently )?(located|living|based)|current location|where do you live/i.test(l)
   )
     return 'address_city';
@@ -244,9 +320,10 @@ export function eeoAnswer(pref: string | undefined): string {
 function eeoPreferenceForLabel(label: string, prefs: Record<string, string> | null | undefined): string | undefined {
   if (!prefs) return undefined;
   const l = label.toLowerCase();
-  if (/gender|sex\b|transgender/.test(l)) return prefs.gender ?? prefs.sex;
+  if (/transgender/.test(l)) return prefs.transgender_status ?? prefs.transgender;
+  if (/gender|sex\b/.test(l)) return prefs.gender ?? prefs.sex;
   if (/hispanic|latino/.test(l)) return prefs.hispanic_ethnicity ?? prefs.hispanic ?? prefs.ethnicity;
-  if (/race|ethnicit/.test(l)) return prefs.race ?? prefs.ethnicity;
+  if (/race|racial|ethnicit|ethnic\b/.test(l)) return prefs.race ?? prefs.ethnicity;
   if (/veteran|military/.test(l)) return prefs.veteran_status ?? prefs.veteran;
   if (/disab/.test(l)) return prefs.disability_status ?? prefs.disability;
   if (/sexual orientation/.test(l)) return prefs.sexual_orientation;
@@ -258,6 +335,7 @@ function eeoPreferenceForLabel(label: string, prefs: Record<string, string> | nu
 export function isOpenEndedQuestion(label: string): boolean {
   const l = (label ?? '').trim().toLowerCase();
   if (!l) return false;
+  if (isLocationChoiceQuestion(l)) return false;
   if (
     /\b(why\b|describ\w+|explain\w*|tell (?:us|me)\b|share\b|elaborat\w+|discuss\b|sentences?\b|paragraphs?\b|in your own words|what interest\w*|what excit\w*|what motivat\w*|what makes\b|how (?:did|do|would|have) you|brief note\b|note on\b|you (?:most )?enjoy\b)/.test(l)
   )
@@ -291,6 +369,20 @@ const MONTH_TO_NUMBER: Record<string, string> = {
   oct: '10', october: '10',
   nov: '11', november: '11',
   dec: '12', december: '12',
+};
+const NUMBER_TO_MONTH: Record<string, string> = {
+  '01': 'January',
+  '02': 'February',
+  '03': 'March',
+  '04': 'April',
+  '05': 'May',
+  '06': 'June',
+  '07': 'July',
+  '08': 'August',
+  '09': 'September',
+  '10': 'October',
+  '11': 'November',
+  '12': 'December',
 };
 
 export function graduationDateAnswer(
@@ -329,6 +421,136 @@ function enrollmentConfirmedForGraduationDate(ap: ApplicationProfileLike): boole
   return graduationEvidenceIsFuture(ap.grad_date, ap.grad_year);
 }
 
+function graduationMonthAnswer(gradDate: string | undefined, gradYear: number | undefined): string | null {
+  const iso = graduationDateAnswer(gradDate, gradYear, 'date');
+  const month = iso?.match(/^\d{4}-(\d{2})-/)?.[1];
+  if (!month) return null;
+  return NUMBER_TO_MONTH[month] ?? null;
+}
+
+function graduationYearAnswer(gradDate: string | undefined, gradYear: number | undefined): string | null {
+  if (gradYear && gradYear > 0) return String(gradYear);
+  return graduationDateAnswer(gradDate, gradYear, 'date')?.match(/^(\d{4})-/)?.[1] ?? null;
+}
+
+function graduationSemesterAnswer(gradDate: string | undefined, gradYear: number | undefined): string | null {
+  const iso = graduationDateAnswer(gradDate, gradYear, 'date');
+  const match = iso?.match(/^(\d{4})-(\d{2})-/);
+  if (!match) return null;
+  const month = Number(match[2]);
+  if (!Number.isFinite(month)) return null;
+  const semester = month <= 5 ? 'Spring' : month <= 8 ? 'Summer' : 'Fall';
+  return `${semester} ${match[1]}`;
+}
+
+function currentEnrollmentAnswer(ap: ApplicationProfileLike): { value: string } | { skipReason: string } | null {
+  if (ap.currently_enrolled === true || graduationEvidenceIsFuture(ap.grad_date, ap.grad_year)) return { value: 'Yes' };
+  if (ap.currently_enrolled === false) return { value: 'No' };
+  return { skipReason: 'current enrollment question left for you' };
+}
+
+function studyYearAnswer(ap: ApplicationProfileLike): string | null {
+  if (!/\b(?:bachelor|b\.?s\.?|b\.?a\.?)\b/i.test(ap.degree ?? '')) return null;
+  const gradYear = ap.grad_year && ap.grad_year > 0 ? ap.grad_year : Number(graduationYearAnswer(ap.grad_date, ap.grad_year));
+  if (!gradYear || !enrollmentConfirmedForGraduationDate(ap)) return null;
+  const now = new Date();
+  const academicStartYear = now.getUTCMonth() >= 7 ? now.getUTCFullYear() : now.getUTCFullYear() - 1;
+  const yearsUntilGraduation = gradYear - academicStartYear;
+  const undergradYear = 4 - yearsUntilGraduation + 1;
+  if (undergradYear <= 0 || undergradYear > 4) return null;
+  return ['First year', 'Second year', 'Third year', 'Fourth year'][undergradYear - 1] ?? null;
+}
+
+function majorAnswer(ap: ApplicationProfileLike): string | null {
+  const major = ap.major?.trim();
+  if (major) return major;
+  const degree = ap.degree?.trim();
+  if (!degree) return null;
+  const cleaned = degree
+    .replace(/\b(?:b\.?s\.?|b\.?a\.?|m\.?s\.?|m\.?a\.?|m\.?b\.?a\.?)\b/gi, ' ')
+    .replace(/\b(?:bachelor|bachelor's|bachelors|master|master's|masters|doctor|doctorate|ph\.?d)\s+(?:of\s+)?(?:science|arts|business\s+administration)?\s+(?:degree\s+)?(?:in\s+)?/gi, ' ')
+    .replace(/\b(?:degree\s+in|with\s+a\s+degree\s+in|in)\b/gi, ' ')
+    .replace(/(?:,\s*)?[^,;&()]{0,40}\b(?:emphasis|concentration|minor)\b.*$/i, '')
+    .replace(/[(),]/g, ' ')
+    .replace(/\s*&\s*/g, ' and ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned || degree;
+}
+
+function advancedDegreeEnrollmentAnswer(ap: ApplicationProfileLike): { value: string } | null {
+  const degree = ap.degree?.trim();
+  if (!degree) return null;
+  if (/\b(master|m\.?s\.?|m\.?a\.?|mba|m\.?b\.?a\.?|ph\.?d|doctorate|doctor of philosophy)\b/i.test(degree)) {
+    return { value: 'Yes' };
+  }
+  return { value: 'No' };
+}
+
+function locationStatusAnswer(label: string, ap: ApplicationProfileLike): { value: string } | null {
+  if (US_STATE_RESIDENCE_SELECT_QUESTION.test(label) && !/\b(?:united states|usa|us|u\.s\.)\b/i.test(ap.address_country ?? '')) {
+    return { value: 'Not in the US' };
+  }
+  if (SAN_FRANCISCO_RESIDENCE_QUESTION.test(label)) {
+    return { value: /\bsan\s+francisco\b/i.test(ap.address_city ?? '') ? 'Yes' : 'No' };
+  }
+  const cityMatch = label.match(CONFIRMED_PLANS_CITY_RE);
+  const city = cityMatch?.[1] ?? cityMatch?.[2];
+  if (!city) return null;
+  if (ap.address_city && new RegExp(`\\b${city.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(ap.address_city)) {
+    return { value: 'Yes' };
+  }
+  return { value: 'Yes' };
+}
+
+function degreeAnswer(label: string, inputType: string | undefined, degree: string | undefined): string | null {
+  const trimmed = degree?.trim();
+  if (!trimmed) return null;
+  const needsLevel = /most recent degree|highest degree|degree (?:you )?(?:obtained|earned)|education level|level of education/i.test(label)
+    || /\bdegree--\d+\b/i.test(label)
+    || /select|radio|combobox/i.test(inputType ?? '');
+  if (!needsLevel) return trimmed;
+  if (/\bph\.?d\b|doctor of philosophy|doctorate/i.test(trimmed)) return 'Doctor of Philosophy (Ph.D.)';
+  if (/\bmaster|m\.?s\.?|m\.?a\.?\b|mba|m\.?b\.?a\.?/i.test(trimmed)) return 'Master\'s Degree';
+  if (/\bbachelor|b\.?s\.?|b\.?a\.?\b/i.test(trimmed)) return 'Bachelor\'s Degree';
+  if (/\bassociate/i.test(trimmed)) return 'Associate\'s Degree';
+  if (/\bhigh school/i.test(trimmed)) return 'High School';
+  return trimmed;
+}
+
+const SPOKEN_LANGUAGE_ALIASES: Record<string, string> = {
+  english: 'English',
+  hindi: 'Hindi',
+  arabic: 'Arabic',
+  spanish: 'Spanish',
+  french: 'French',
+  german: 'German',
+  portuguese: 'Portuguese',
+  mandarin: 'Mandarin',
+  chinese: 'Chinese',
+  cantonese: 'Cantonese',
+  tamil: 'Tamil',
+  punjabi: 'Punjabi',
+  urdu: 'Urdu',
+};
+
+function normalizedStoredLanguages(ap: ApplicationProfileLike): string[] {
+  return (Array.isArray(ap.languages) ? ap.languages : [])
+    .map((language) => language.trim())
+    .filter(Boolean);
+}
+
+function languageAnswer(label: string, ap: ApplicationProfileLike): { value: string } | null {
+  const stored = normalizedStoredLanguages(ap);
+  if (stored.length === 0) return null;
+  const specific = Object.entries(SPOKEN_LANGUAGE_ALIASES).find(([token]) =>
+    new RegExp(`\\b${token}\\b`, 'i').test(label));
+  if (specific) {
+    return { value: stored.some((language) => language.toLowerCase() === specific[1].toLowerCase()) ? 'Yes' : 'No' };
+  }
+  return { value: stored.join(', ') };
+}
+
 export type DiscoveredQuestion = {
   label: string;
   selector: string;
@@ -340,15 +562,17 @@ export const REVIEW_QUESTION_TEXT_MAX_LENGTH = 500;
 
 const INLINE_UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
 const GREENHOUSE_QUESTION_HANDLE_RE = /\bquestion_\d+\b/gi;
+const GREENHOUSE_TRAILING_NUMERIC_HANDLE_RE = /\s*\*?\s+\d{2,5}\s*$/u;
 const TRAILING_ANSWER_PLACEHOLDER_RE = /\s+(?:type|enter|write)\s+(?:your\s+)?(?:answer\s+)?here(?:\.{3}|…)?\s*$/i;
 
 function collapseRepeatedLabel(value: string): string {
   const words = value.trim().split(/\s+/).filter(Boolean);
   if (words.length < 2 || words.length % 2 !== 0) return value;
   const half = words.length / 2;
-  const left = words.slice(0, half).join(' ').toLowerCase();
-  const right = words.slice(half).join(' ').toLowerCase();
-  return left === right ? words.slice(0, half).join(' ') : value;
+  const left = words.slice(0, half).join(' ');
+  const right = words.slice(half).join(' ');
+  const comparable = (part: string) => part.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  return comparable(left) === comparable(right) ? left.replace(/[\s*.,;:!?]+$/u, '').trim() : value;
 }
 
 /**
@@ -360,6 +584,7 @@ export function normalizeDiscoveredLabel(raw: string): string {
   const withoutHandles = raw
     .replace(INLINE_UUID_RE, ' ')
     .replace(GREENHOUSE_QUESTION_HANDLE_RE, ' ')
+    .replace(GREENHOUSE_TRAILING_NUMERIC_HANDLE_RE, ' ')
     .replace(/\s+/g, ' ')
     .trim();
   const withoutPlaceholder = withoutHandles.replace(TRAILING_ANSWER_PLACEHOLDER_RE, '').trim();
@@ -442,11 +667,23 @@ export function normalizeStoredPortalQuestions<T extends { question: string; ans
 // pull in project-wide. Playwright evaluates a string in the live page exactly like a function -
 // the real browser DOM Playwright is driving has the same APIs the extension's own
 // candidateInputs()/questionLabel() rely on, so this is a straight port of that discovery logic,
-// not new logic. Deliberately excludes select/radio/checkbox (see module header). Keep this in
-// sync with the extension source by hand, the same as any other ported function in this file.
+// with one backend-specific addition: selects, radios, and checkboxes are discovered for stored
+// answer resolution, then filled later by label-scoped actions rather than direct selector typing.
+// Keep this in sync with the extension source by hand, the same as any other ported function in
+// this file.
 const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
   function clean(s) {
     return (s == null ? '' : s).replace(/[​‌‍﻿ ]/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+  function quoteAttr(s) {
+    return String(s).replace(/["\\]/g, '\\$&');
+  }
+  function stableSelector(el, marker) {
+    var tag = el.tagName ? el.tagName.toLowerCase() : '';
+    if (el.id) return tag + '[id="' + quoteAttr(el.id) + '"]';
+    var name = el.getAttribute('name');
+    if (name) return tag + '[name="' + quoteAttr(name) + '"]';
+    return '[' + marker + ']';
   }
   function isVisible(el) {
     var rect = el.getBoundingClientRect();
@@ -489,7 +726,7 @@ const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
   var els = Array.prototype.slice
     .call(
       document.querySelectorAll(
-        'input[type="text"], input[type="email"], input[type="tel"], input[type="url"], input[type="number"], input[type="date"], input:not([type]), textarea',
+        'input[type="text"], input[type="email"], input[type="tel"], input[type="url"], input[type="number"], input[type="date"], input:not([type]), textarea, select, input[type="radio"], input[type="checkbox"]',
       ),
     )
     .filter(function (el) {
@@ -507,8 +744,10 @@ const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
     el.setAttribute(marker, '1');
     out.push({
       label: label,
-      selector: '[' + marker + ']',
-      inputType: el.tagName === 'TEXTAREA' ? 'textarea' : (el.type || 'text'),
+      selector: stableSelector(el, marker),
+      inputType: el.tagName === 'TEXTAREA'
+        ? 'textarea'
+        : (el.tagName === 'SELECT' ? 'select' : (el.getAttribute('role') === 'combobox' ? 'combobox' : (el.type || 'text'))),
       maxLength: el.maxLength > 0 ? el.maxLength : null,
     });
   }
@@ -528,6 +767,24 @@ export function resolveKnownAnswer(
   ap: ApplicationProfileLike,
   jdText: string | undefined,
 ): { value: string } | { skipReason: string } | null {
+  const preferredLocation = locationPreferenceAnswer(label, jdText);
+  if (preferredLocation) return preferredLocation;
+  if (isLocationChoiceQuestion(label)) {
+    return { skipReason: `location choice left for you: "${label.slice(0, 60)}"` };
+  }
+
+  const locationStatus = locationStatusAnswer(label, ap);
+  if (locationStatus) return locationStatus;
+
+  if (ADVANCED_DEGREE_ENROLLMENT_QUESTION.test(label)) {
+    const advancedDegree = advancedDegreeEnrollmentAnswer(ap);
+    if (advancedDegree) return advancedDegree;
+  }
+
+  if (EMPLOYER_RESTRICTION_AGREEMENT_QUESTION.test(label)) {
+    return { value: 'No' };
+  }
+
   const routineConsent = routineConsentAnswer(label);
   if (routineConsent) return routineConsent;
 
@@ -539,6 +796,10 @@ export function resolveKnownAnswer(
 
   if (EEO_QUESTION.test(label)) {
     return { value: eeoAnswer(eeoPreferenceForLabel(label, ap.eeo_prefs)) };
+  }
+
+  if (isLegalConsentQuestion(label)) {
+    return { skipReason: legalConsentSkipReason(label) };
   }
 
   if (isRefusedQuestion(label)) {
@@ -569,11 +830,11 @@ export function resolveKnownAnswer(
     case 'referral_source_default':
       return ap.referral_source_default ? { value: ap.referral_source_default } : { value: 'Company website' };
     case 'desired_salary': {
-      const salary = resolveSalary(
+      resolveSalary(
         { label, field: inputType === 'number' ? 'numeric' : 'freetext', jdText },
         storedSalaryOf(ap),
       );
-      return salary.action === 'fill' ? { value: salary.value } : { skipReason: salary.reason };
+      return { skipReason: `salary question left for you: "${label.slice(0, 60)}"` };
     }
     case 'date_of_birth':
       return ap.date_of_birth ? { value: ap.date_of_birth } : null;
@@ -581,15 +842,38 @@ export function resolveKnownAnswer(
       return ap.availability_term ? { value: ap.availability_term } : null;
     case 'availability_date':
       return ap.availability_date ? { value: ap.availability_date } : null;
+    case 'onsite_commitment':
+      return { value: 'Yes' };
+    case 'current_enrollment':
+      return currentEnrollmentAnswer(ap);
+    case 'study_year': {
+      const value = studyYearAnswer(ap);
+      return value ? { value } : null;
+    }
     case 'school':
       return ap.school ? { value: ap.school } : null;
     case 'degree':
-      return ap.degree ? { value: ap.degree } : null;
+      {
+        const value = degreeAnswer(label, inputType, ap.degree);
+        return value ? { value } : null;
+      }
     case 'graduation_date': {
       if (MIXED_ENROLLMENT_GRADUATION_QUESTION.test(label) && !enrollmentConfirmedForGraduationDate(ap)) {
         return { skipReason: `enrollment/graduation date question left for you: "${label.slice(0, 60)}"` };
       }
+      if (/\bgraduat(?:ion|e)\s+(?:semester|term)\b|\b(?:expected\s+)?graduat(?:ion|e)\s+semester\b/i.test(label)) {
+        const value = graduationSemesterAnswer(ap.grad_date, ap.grad_year);
+        return value ? { value } : null;
+      }
       const value = graduationDateAnswer(ap.grad_date, ap.grad_year, inputType);
+      return value ? { value } : null;
+    }
+    case 'graduation_month': {
+      const value = graduationMonthAnswer(ap.grad_date, ap.grad_year);
+      return value ? { value } : null;
+    }
+    case 'graduation_year': {
+      const value = graduationYearAnswer(ap.grad_date, ap.grad_year);
       return value ? { value } : null;
     }
     case 'gpa':
@@ -597,7 +881,12 @@ export function resolveKnownAnswer(
     case 'gpa_scale':
       return ap.gpa_scale ? { value: ap.gpa_scale } : null;
     case 'major':
-      return ap.major ? { value: ap.major } : null;
+      {
+        const value = majorAnswer(ap);
+        return value ? { value } : null;
+      }
+    case 'languages':
+      return languageAnswer(label, ap);
     default:
       return null;
   }
