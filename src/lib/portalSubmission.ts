@@ -682,8 +682,14 @@ const SEMANTIC_PHONE_SELECTOR =
   'input[type="tel" i], input[autocomplete*="tel" i], input[aria-label="Phone" i], input[aria-label="Phone number" i], input[placeholder="Phone" i], input[placeholder="Phone number" i]';
 const GREENHOUSE_FIRST_NAME_SELECTOR =
   '#first_name, input[name="job_application[first_name]"], input[autocomplete="given-name" i], input[aria-label="First Name" i], input[placeholder="First Name" i]';
+const GREENHOUSE_LAST_NAME_SELECTOR =
+  '#last_name, input[name="job_application[last_name]"], input[autocomplete="family-name" i], input[aria-label="Last Name" i], input[placeholder="Last Name" i]';
+const GREENHOUSE_EMAIL_SELECTOR =
+  '#email, input[name="job_application[email]"], input[type="email" i], input[autocomplete="email" i], input[aria-label="Email" i], input[placeholder="Email" i]';
 const GREENHOUSE_PHONE_SELECTOR =
   `#phone, input[name="job_application[phone]"], ${SEMANTIC_PHONE_SELECTOR}`;
+const GREENHOUSE_RESUME_SELECTOR =
+  '#resume, input[type="file"][name="job_application[resume]"], input[type="file"][id*="resume" i], input[type="file"][name*="resume" i], input[type="file"][aria-label*="resume" i], label:has-text("Resume") input[type="file"]';
 const ASHBY_PHONE_SELECTOR =
   `#phone, input[name="phone"], input[name="_systemfield_phone"], ${SEMANTIC_PHONE_SELECTOR}`;
 
@@ -750,6 +756,49 @@ const QUESTION_COMBOBOX_SELECTOR_LIMIT = 1;
 const ASHBY_QUESTION_TEXT_SELECTOR_LIMIT = 9;
 const MANAGED_ACTION_LIMIT = 120;
 const CONFIRM_AFTER_FILL_FIELDS = new Set(['school', 'degree']);
+
+function pushGreenhouseManagedPreflightActions(actions: ManagedBrowserAction[]) {
+  const cookieClicks = [
+    '#onetrust-accept-btn-handler',
+    '.onetrust-close-btn-handler',
+    'button:has-text("Allow All")',
+    'button:has-text("Accept All Cookies")',
+    'button:has-text("Accept Cookies")',
+    'button:has-text("Confirm My Choices")',
+  ];
+  for (const [index, selector] of cookieClicks.entries()) {
+    actions.push({
+      type: 'click',
+      selector,
+      label: `greenhouse_cookie_preflight:${index}`,
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
+  }
+  actions.push({
+    type: 'click',
+    selector: [
+      'a:has-text("Apply Now")',
+      'button:has-text("Apply Now")',
+      'a:has-text("Apply for this job")',
+      'button:has-text("Apply for this job")',
+      'a:has-text("Apply for this role")',
+      'button:has-text("Apply for this role")',
+      'a:has-text("Start application")',
+      'button:has-text("Start application")',
+    ].join(', '),
+    label: 'greenhouse_open_application_form',
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
+  actions.push({
+    type: 'waitForSelector',
+    selector: `${GREENHOUSE_EMAIL_SELECTOR}, ${GREENHOUSE_RESUME_SELECTOR}`,
+    label: 'greenhouse_application_form_ready',
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
+}
 
 function questionSelectSelectors(label: string): string[] {
   const text = cssString(label);
@@ -1535,6 +1584,7 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
   // was found and merely refused. It was never reached.
   if (ACCOUNT_WALLED_FAMILIES.has(family)) return;
   if (family === 'greenhouse') {
+    pushGreenhouseManagedPreflightActions(actions);
     const parts = packet.fullName.trim().split(/\s+/);
     // optional (managedFill default) + bounded, not required: a branded-redirect Greenhouse customer
     // (Jump Trading serves its posting through www.jumptrading.com with a different form DOM) has
@@ -1544,8 +1594,10 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     // Jump Trading retry proved the run now clears name/email and stops at the resume file input.
     managedFill(actions, GREENHOUSE_FIRST_NAME_SELECTOR, parts[0], 'first_name');
     managedFillByLabel(actions, 'First Name', parts[0], 'first_name_label');
-    managedFill(actions, '#last_name, input[name="job_application[last_name]"]', parts.slice(1).join(' '), 'last_name');
-    managedFill(actions, '#email, input[name="job_application[email]"]', packet.email, 'email');
+    managedFill(actions, GREENHOUSE_LAST_NAME_SELECTOR, parts.slice(1).join(' '), 'last_name');
+    managedFillByLabel(actions, 'Last Name', parts.slice(1).join(' '), 'last_name_label');
+    managedFill(actions, GREENHOUSE_EMAIL_SELECTOR, packet.email, 'email');
+    managedFillByLabel(actions, 'Email', packet.email, 'email_label');
     managedComboboxFill(actions, '#country', countryForPhoneField(packet.phone, packet.country), 'phone_country');
     managedFill(actions, GREENHOUSE_PHONE_SELECTOR, phoneForPortalField(portal, packet.phone), 'phone');
     managedComboboxFill(actions, '#candidate-location, input[autocomplete="address-level2"]', greenhouseLocationSearch(packet), 'location');
@@ -1560,7 +1612,7 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     pushGreenhouseGraduationDateComboboxActions(actions, packet);
     managedFillByLabel(actions, 'GPA', packet.gpa, 'gpa');
     managedFillByLabel(actions, 'What is your GPA?', packet.gpa, 'gpa_question');
-    managedUpload(actions, '#resume, input[type="file"][name="job_application[resume]"]', 'resume', packet.resume, packet.resumeName);
+    managedUpload(actions, GREENHOUSE_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
     managedUpload(actions, 'input#cover_letter[type="file"], input[type="file"][name*="cover_letter" i]', 'cover_letter', packet.coverLetter, packet.coverLetterName);
   } else if (family === 'lever') {
     managedFill(actions, 'input[name="name"]', packet.fullName, 'name', false);
@@ -2272,12 +2324,12 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
   if (family === 'greenhouse') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, GREENHOUSE_FIRST_NAME_SELECTOR.split(', '), parts[0], 'first_name', filledFields);
-    await fillFirst(page, ['#last_name', 'input[name="job_application[last_name]"]'], parts.slice(1).join(' '), 'last_name', filledFields);
-    await fillFirst(page, ['#email', 'input[name="job_application[email]"]'], packet.email, 'email', filledFields);
+    await fillFirst(page, GREENHOUSE_LAST_NAME_SELECTOR.split(', '), parts.slice(1).join(' '), 'last_name', filledFields);
+    await fillFirst(page, GREENHOUSE_EMAIL_SELECTOR.split(', '), packet.email, 'email', filledFields);
     await fillComboboxFirst(page, ['#country'], countryForPhoneField(packet.phone, packet.country), 'phone_country', filledFields);
     await fillFirst(page, GREENHOUSE_PHONE_SELECTOR.split(', '), phoneForPortalField(portal, packet.phone), 'phone', filledFields);
     await fillComboboxFirst(page, ['#candidate-location', 'input[autocomplete="address-level2"]'], greenhouseLocationSearch(packet), 'location', filledFields);
-    await uploadFirst(page, ['#resume', 'input[type="file"][name="job_application[resume]"]'], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, GREENHOUSE_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields);
     await uploadFirst(page, ['input#cover_letter[type="file"]', 'input[type="file"][name*="cover_letter" i]'], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
     await fillGreenhouseDemographicAliases(page, packet, filledFields);
   } else if (family === 'lever') {
