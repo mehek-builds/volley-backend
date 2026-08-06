@@ -34,6 +34,7 @@ import { postingRow, resolveJdText } from './jdMatch';
 import { baseResumeSelectionIssues } from '../llm/baseResume';
 import { deriveEditedTerms, readApplicationReview, type ApplicationReviewState } from '../lib/applicationReview';
 import {
+  AUTONOMOUS_PORTAL_FAMILIES,
   canonicalMonitoredPortalUrl,
   canonicalSupportedPortalUrl,
   detectPortal,
@@ -85,6 +86,24 @@ function generatedResumeContextText(row: typeof generated_resumes.$inferSelect, 
   if (!context || typeof context !== 'object' || Array.isArray(context)) return null;
   const value = (context as Record<string, unknown>)[key];
   return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+async function monitoredApplicationUrlForGenerate(body: ResumeGenerateBody): Promise<string | undefined> {
+  if (!body.application || !body.job_id) return undefined;
+  const [job] = await db.select({
+    apply_url: monitored_jobs.apply_url,
+    ats_name: career_page_sources.ats_name,
+    board_token: career_page_sources.board_token,
+  })
+    .from(monitored_jobs)
+    .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+    .where(and(
+      eq(monitored_jobs.id, body.job_id),
+      eq(career_page_sources.enabled, true),
+      inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
+    ))
+    .limit(1);
+  return job ? canonicalMonitoredPortalUrl(job.apply_url, job.ats_name, job.board_token) : undefined;
 }
 
 function normalizedJobIdentity(value: string | null): string {
@@ -754,8 +773,9 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     };
     const now = new Date().toISOString();
 
+    const monitoredApplicationUrl = await monitoredApplicationUrlForGenerate(body);
     const canonicalApplicationPortalUrl = body.application
-      ? canonicalSupportedPortalUrl(body.application.portal_url, body.application.ats_name) ?? body.application.portal_url
+      ? monitoredApplicationUrl ?? canonicalSupportedPortalUrl(body.application.portal_url, body.application.ats_name) ?? body.application.portal_url
       : undefined;
     const canonicalApplicationPortalSupported = isPortalSupported(canonicalApplicationPortalUrl);
     const applicationReview = {
