@@ -74,9 +74,10 @@ function selectorFromLabelText(text: string | undefined): string | undefined {
     `label:has-text("${quoted}") input`,
     `label:has-text("${quoted}") textarea`,
     `label:has-text("${quoted}") select`,
+    `label:has-text("${quoted}") + input`,
+    `label:has-text("${quoted}") ~ input`,
     `input[aria-label="${quoted}"]`,
     `textarea[aria-label="${quoted}"]`,
-    `select[aria-label="${quoted}"]`,
     `input[placeholder="${quoted}"]`,
     `textarea[placeholder="${quoted}"]`,
   ].join(', ');

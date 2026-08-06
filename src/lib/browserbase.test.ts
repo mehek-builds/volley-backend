@@ -176,6 +176,9 @@ test('managed Stratus converts label fills into selector-backed fill actions', a
   assert.equal(action?.value, 'Taylor');
   assert.equal(typeof action?.selector, 'string');
   assert.match(String(action?.selector), /label:has-text\("First Name"\)/);
+  assert.match(String(action?.selector), /label:has-text\("First Name"\) \+ input/);
+  assert.match(String(action?.selector), /label:has-text\("First Name"\) ~ input/);
+  assert.match(String(action?.selector), /input\[aria-label="First Name"\]/);
   assert.doesNotMatch(String(action?.selector), /:right-of|:below|:is\(/);
   assert.ok(String(action?.selector).length <= 500);
 
