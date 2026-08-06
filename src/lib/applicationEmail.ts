@@ -54,7 +54,8 @@ export function applicationAliasSecret(): string | null {
 }
 
 export function inboundWebhookSecret(): string | null {
-  const configured = process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET?.trim()
+  const configured = process.env.RESEND_WEBHOOK_SECRET?.trim()
+    || process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET?.trim()
     || process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_SECRET?.trim();
   return configured || null;
 }

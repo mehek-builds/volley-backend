@@ -191,14 +191,14 @@ export async function buildApp(options: BuildAppOptions = {}) {
         request.log.error({ err: error }, 'health: application email status unavailable');
         return {
           domain_configured: Boolean(process.env.LITOS_APPLICATION_EMAIL_DOMAIN?.trim()),
-          inbound_webhook_configured: Boolean((process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET || process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_SECRET)?.trim()),
+          inbound_webhook_configured: Boolean((process.env.RESEND_WEBHOOK_SECRET || process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET || process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_SECRET)?.trim()),
           forwarding_configured: Boolean(process.env.RESEND_API_KEY?.trim() && process.env.RESEND_FROM?.trim()),
           enabled_aliases: null,
         };
       })
       : {
         domain_configured: Boolean(process.env.LITOS_APPLICATION_EMAIL_DOMAIN?.trim()),
-        inbound_webhook_configured: Boolean((process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET || process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_SECRET)?.trim()),
+        inbound_webhook_configured: Boolean((process.env.RESEND_WEBHOOK_SECRET || process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET || process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_SECRET)?.trim()),
         forwarding_configured: Boolean(process.env.RESEND_API_KEY?.trim() && process.env.RESEND_FROM?.trim()),
         enabled_aliases: null,
       };
