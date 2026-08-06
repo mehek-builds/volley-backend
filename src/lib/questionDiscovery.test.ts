@@ -656,6 +656,56 @@ test('live-audit education variants resolve from stored education profile facts'
   });
 });
 
+test('live-audit profile fields use question shape before generic enrollment words', () => {
+  const profile = {
+    school: 'University of Southern California',
+    degree: 'Bachelor of Science in Computer Science',
+    grad_date: 'May 2027',
+    grad_year: 2027,
+    currently_enrolled: true,
+    address_country: 'United States',
+    availability_term: 'Available full-time for 12 weeks',
+  };
+
+  assert.deepEqual(resolveKnownAnswer('Which university are you currently enrolled in?', 'select', profile, undefined), {
+    value: 'University of Southern California',
+  });
+  assert.deepEqual(resolveKnownAnswer("University / Institution (Bachelor's Degree)", 'select', profile, undefined), {
+    value: 'University of Southern California',
+  });
+  assert.deepEqual(resolveKnownAnswer('If you are currently enrolled in a university or program, when do you expect to graduate or complete your program?', 'select', profile, undefined), {
+    value: 'May 2027',
+  });
+  assert.ok(
+    resolveKnownAnswer('Have you been enrolled in WorldQuant University in the past 12 months?', 'radio', profile, undefined)
+    && 'skipReason' in resolveKnownAnswer('Have you been enrolled in WorldQuant University in the past 12 months?', 'radio', profile, undefined)!,
+  );
+  assert.ok(
+    resolveKnownAnswer('Have you ever worked for Redwood Materials?', 'radio', profile, undefined)
+    && 'skipReason' in resolveKnownAnswer('Have you ever worked for Redwood Materials?', 'radio', profile, undefined)!,
+  );
+  assert.ok(
+    resolveKnownAnswer('Are you available for a 12-week full-time (40 hours per week) internship between September - December 2026?', 'select', profile, undefined)
+    && 'skipReason' in resolveKnownAnswer('Are you available for a 12-week full-time (40 hours per week) internship between September - December 2026?', 'select', profile, undefined)!,
+  );
+  assert.deepEqual(resolveKnownAnswer('Are you available for a 12-week full-time (40 hours per week) internship between September - December 2026?', 'select', {
+    ...profile,
+    availability_term: 'Available full-time for 12 weeks between September and December 2026',
+  }, undefined), {
+    value: 'Yes',
+  });
+  assert.ok(
+    resolveKnownAnswer('Are you available for a 12-week full-time (40 hours per week) internship between September - December 2026?', 'select', {
+      ...profile,
+      availability_term: undefined,
+    }, undefined)
+    && 'skipReason' in resolveKnownAnswer('Are you available for a 12-week full-time (40 hours per week) internship between September - December 2026?', 'select', {
+      ...profile,
+      availability_term: undefined,
+    }, undefined)!,
+  );
+});
+
 test('study year stays blank when graduation evidence cannot support it', () => {
   assert.equal(
     resolveKnownAnswer('What is the current year of your studies?', 'select', { grad_date: 'May 2024', grad_year: 2024 }, undefined),

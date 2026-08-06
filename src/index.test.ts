@@ -163,6 +163,42 @@ test('/health reports which ranking-cache tiers are running', async () => {
   }
 });
 
+test('/health reports ATS API submission capability without exposing secrets', async () => {
+  const saved = {
+    enabled: process.env.LITOS_ATS_API_SUBMISSION_ENABLED,
+    channels: process.env.LITOS_EMPLOYER_API_SUBMISSION_CHANNELS_JSON,
+    key: process.env.GH_HEALTH_TEST_KEY,
+  };
+  try {
+    process.env.LITOS_ATS_API_SUBMISSION_ENABLED = 'true';
+    process.env.LITOS_EMPLOYER_API_SUBMISSION_CHANNELS_JSON = JSON.stringify([
+      { ats: 'greenhouse', board_token: 'healthco', api_key_env: 'GH_HEALTH_TEST_KEY' },
+    ]);
+    process.env.GH_HEALTH_TEST_KEY = 'secret-health-key';
+
+    const { buildApp } = await import('./index');
+    const app = await buildApp();
+    const res = await app.inject({ method: 'GET', url: '/health' });
+    const body = res.json();
+
+    assert.deepEqual(body.ats_api_submission, {
+      enabled: true,
+      channel_config_present: true,
+      configured_channels: 1,
+    });
+    assert.ok(!res.body.includes('secret-health-key'));
+    assert.ok(!res.body.includes('GH_HEALTH_TEST_KEY'));
+    await app.close();
+  } finally {
+    if (saved.enabled === undefined) delete process.env.LITOS_ATS_API_SUBMISSION_ENABLED;
+    else process.env.LITOS_ATS_API_SUBMISSION_ENABLED = saved.enabled;
+    if (saved.channels === undefined) delete process.env.LITOS_EMPLOYER_API_SUBMISSION_CHANNELS_JSON;
+    else process.env.LITOS_EMPLOYER_API_SUBMISSION_CHANNELS_JSON = saved.channels;
+    if (saved.key === undefined) delete process.env.GH_HEALTH_TEST_KEY;
+    else process.env.GH_HEALTH_TEST_KEY = saved.key;
+  }
+});
+
 test('/health identifies the build even when no git SHA is exposed', async () => {
   // The exact production shape this exists for: a bare `vercel --prod` sets VERCEL_DEPLOYMENT_ID
   // but not VERCEL_GIT_COMMIT_SHA, and on 2026-08-04 that made /health report `revision: null` for

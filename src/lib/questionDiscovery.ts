@@ -216,7 +216,7 @@ export function isLocationChoiceQuestion(label: string): boolean {
 export const REFERRAL_QUESTION = /how did you .*hear|how did you hear|first hear|referral source|hear about (this|us|the)|source of/i;
 export const START_DATE_QUESTION = /availab|start(ing)?\s+date|date.*you.*start|when can you start|earliest.*start/i;
 export const GRADUATION_DATE_QUESTION =
-  /\b(?:expected\s+)?graduat(?:ion|e)\s+(?:date|year|semester|term|time\s*frame|timeframe|window)\b|\b(?:date|year|semester|term|time\s*frame|timeframe|window)\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b|\bexpected\s+grad(?:uation)?\b|\bclass\s+of\b/i;
+  /\b(?:expected\s+)?graduat(?:ion|e)\s+(?:date|year|semester|term|time\s*frame|timeframe|window)\b|\b(?:date|year|semester|term|time\s*frame|timeframe|window)\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b|\bexpected\s+grad(?:uation)?\b|\bexpect\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b|\bclass\s+of\b/i;
 const GRADUATION_MONTH_QUESTION = /\bgraduat(?:ion|e)\s+month\b|\bmonth\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b/i;
 const GRADUATION_YEAR_QUESTION = /\bgraduat(?:ion|e)\s+year\b|\byear\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b|\bclass\s+year\b/i;
 const MIXED_ENROLLMENT_GRADUATION_QUESTION = /\bcurrently\s+enrolled\b|\bdegree\s+program\b/i;
@@ -234,6 +234,10 @@ const CITIZENSHIP_QUESTION = /citizen|nationalit/i;
 const ADVANCED_DEGREE_ENROLLMENT_QUESTION = /\bcurrently\s+enrolled\b[^?]{0,80}\b(?:masters?|master's|ph\.?d|doctorate)\b|\b(?:masters?|master's|ph\.?d|doctorate)\b[^?]{0,80}\bcurrently\s+enrolled\b/i;
 const EMPLOYER_RESTRICTION_AGREEMENT_QUESTION =
   /\bbound\b[^?]{0,120}\bagreements?\b[^?]{0,180}\b(?:restrict|limit)\b[^?]{0,120}\b(?:ability\s+to\s+work|employment|duties)\b|\b(?:non-compete|non-solicitation|confidentiality|non-disclosure)\b[^?]{0,180}\b(?:restrict|limit|bound)\b/i;
+const PRIOR_EMPLOYER_OR_PROGRAM_QUESTION =
+  /\bhave\s+you\s+(?:ever\s+)?(?:worked|been\s+employed)\s+(?:for|by|at)\b|\bhave\s+you\s+been\s+enrolled\s+in\b[^?]{0,120}\bin\s+the\s+past\s+\d+\s+months\b/i;
+const INTERNSHIP_AVAILABILITY_QUESTION =
+  /\b(?:are|will)\s+you\s+available\b[^?]{0,160}\b(?:internship|full-time|40\s*hours|weeks?)\b|\b(?:internship|full-time|40\s*hours|weeks?)\b[^?]{0,160}\b(?:are|will)\s+you\s+available\b/i;
 const US_STATE_RESIDENCE_SELECT_QUESTION = /\bstate\s+of\s+residence\b[^?]{0,160}\bnot\s+in\s+the\s+us\b/i;
 const SAN_FRANCISCO_RESIDENCE_QUESTION = /\bcurrently\s+reside\b[^?]{0,80}\bsan\s+francisco\b|\bsan\s+francisco\b[^?]{0,80}\bcurrently\s+reside\b/i;
 const CONFIRMED_PLANS_CITY_RE = /\b(?:currently\s+residing|confirmed\s+plans)\b[^?]{0,80}\b(?:greater\s+)?([a-z][a-z .'-]+?)\s+area\b|\bconfirmed\s+plans\b[^?]{0,80}\bin\s+([a-z][a-z .'-]+)\b/i;
@@ -278,6 +282,7 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
   if (GRADUATION_MONTH_QUESTION.test(l)) return 'graduation_month';
   if (GRADUATION_YEAR_QUESTION.test(l)) return 'graduation_year';
   if (GRADUATION_DATE_QUESTION.test(l)) return 'graduation_date';
+  if (/\bwhich\s+(?:school|university|college|institution)\b|\b(?:school|university|college|institution)\s+(?:name|are\s+you\s+currently\s+attending|are\s+you\s+currently\s+enrolled|currently\s+attend|currently\s+enrolled\s+in)\b|^university\s*\/\s*institution\b/i.test(l)) return 'school';
   if (MAJOR_QUESTION.test(l)) return 'major';
   if (CURRENT_ENROLLMENT_QUESTION.test(l) && !GRADUATION_DATE_QUESTION.test(l)) return 'current_enrollment';
   if (START_DATE_QUESTION.test(l)) return 'availability_date';
@@ -459,6 +464,24 @@ function studyYearAnswer(ap: ApplicationProfileLike): string | null {
   const undergradYear = 4 - yearsUntilGraduation + 1;
   if (undergradYear <= 0 || undergradYear > 4) return null;
   return ['First year', 'Second year', 'Third year', 'Fourth year'][undergradYear - 1] ?? null;
+}
+
+function internshipAvailabilityAnswer(label: string, ap: ApplicationProfileLike): { value: string } | { skipReason: string } {
+  const stored = [ap.availability_term, ap.availability_date].filter(Boolean).join(' ').trim();
+  if (!stored) return { skipReason: `internship availability question left for you: "${label.slice(0, 60)}"` };
+  const asksFullTime = /\bfull-time\b|\b40\s*hours\b/i.test(label);
+  const asksTwelveWeeks = /\b12\s*weeks?\b|\btwelve\s+weeks?\b/i.test(label);
+  const asksDateWindow = /\b(?:between|from)\b[^?]{0,120}\b(?:20\d{2}|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i.test(label);
+  const confirmsFullTime = !asksFullTime || /\bfull-time\b|\b40\s*hours\b/i.test(stored);
+  const confirmsTwelveWeeks = !asksTwelveWeeks || /\b12\s*weeks?\b|\btwelve\s+weeks?\b|\b3\s*months?\b|\bthree\s+months?\b/i.test(stored);
+  const confirmsDateWindow = !asksDateWindow || labelDateTokens(label).every((token) => stored.toLowerCase().includes(token));
+  if (confirmsFullTime && confirmsTwelveWeeks && confirmsDateWindow) return { value: 'Yes' };
+  return { skipReason: `internship availability question left for you: "${label.slice(0, 60)}"` };
+}
+
+function labelDateTokens(label: string): string[] {
+  const tokens = label.toLowerCase().match(/\b(?:20\d{2}|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/g) ?? [];
+  return [...new Set(tokens)];
 }
 
 function majorAnswer(ap: ApplicationProfileLike): string | null {
@@ -783,6 +806,14 @@ export function resolveKnownAnswer(
 
   if (EMPLOYER_RESTRICTION_AGREEMENT_QUESTION.test(label)) {
     return { value: 'No' };
+  }
+
+  if (PRIOR_EMPLOYER_OR_PROGRAM_QUESTION.test(label)) {
+    return { skipReason: `prior employer or program question left for you: "${label.slice(0, 60)}"` };
+  }
+
+  if (INTERNSHIP_AVAILABILITY_QUESTION.test(label)) {
+    return internshipAvailabilityAnswer(label, ap);
   }
 
   const routineConsent = routineConsentAnswer(label);

@@ -1,6 +1,17 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert';
-import { pickDiversePool, PER_COMPANY_CAP, rankByFit, RANKING_POOL, SCORING_CHARS, type RankableJob, scatterRanked } from './jobMonitor';
+import { readFileSync } from 'node:fs';
+import {
+  MIN_RANKED_MATCH_SCORE,
+  pickDiversePool,
+  PER_COMPANY_CAP,
+  rankByFit,
+  rankedMatchEligible,
+  RANKING_POOL,
+  SCORING_CHARS,
+  type RankableJob,
+  scatterRanked,
+} from './jobMonitor';
 import { normalizeTargeting } from '../lib/jobPreferences';
 
 /* A posting with enough real requirements for jdMatch to agree to score it. The requirements block
@@ -151,6 +162,29 @@ describe('rankByFit', () => {
     );
     assert.strictEqual(ranked[0]!.row.title, 'Product Manager');
     assert.strictEqual(ranked[0]!.score, null);
+  });
+});
+
+describe('ranked match visibility gate', () => {
+  test('hides scored jobs below the minimum ranked match threshold', () => {
+    assert.equal(rankedMatchEligible(MIN_RANKED_MATCH_SCORE - 1, true), false);
+    assert.equal(rankedMatchEligible(0, true), false);
+  });
+
+  test('keeps the threshold score and anything stronger', () => {
+    assert.equal(rankedMatchEligible(MIN_RANKED_MATCH_SCORE, true), true);
+    assert.equal(rankedMatchEligible(81, true), true);
+  });
+
+  test('hides unscored jobs only when a resume-ranked board is available', () => {
+    assert.equal(rankedMatchEligible(null, true), false);
+    assert.equal(rankedMatchEligible(null, false), true);
+  });
+
+  test('later eligibility gates cannot restore rows hidden by the match gate', () => {
+    const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+    assert.doesNotMatch(source, /eligibleIds\s*=\s*ranking\.ids\.filter/);
+    assert.match(source, /eligibleIds\s*=\s*eligibleIds\.filter\(\(id\) => !blocked\.has\(id\)\)/);
   });
 });
 

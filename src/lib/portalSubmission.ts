@@ -896,6 +896,9 @@ function selectValuesForAnswer(answer: string): string[] {
   if (lower === 'yes') return ['Yes', 'yes', '1', 'true'];
   if (lower === 'no') return ['No', 'no', '0', 'false'];
   const values = [trimmed];
+  if (/^company website$/i.test(trimmed)) {
+    values.push('Company Website', 'Company website', 'Careers page', 'Career site', 'Other');
+  }
   if (/\b(?:have\s+not|haven't|never)\s+(?:worked|been employed)\b/.test(lower)) {
     values.push('No', 'No, I have not', 'I have not worked there before');
   }
@@ -962,11 +965,26 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string): 
   const normalizedQuestion = question.toLowerCase();
   const normalizedAnswer = answer.trim().toLowerCase();
   const values = selectValuesForAnswer(answer);
-  if (/\bwhat\s+is\s+your\s+gpa\b|\bgpa\b/.test(normalizedQuestion)) {
+  if (/\bwhat\s+is\s+your\s+gpa\b|\bgpa\b|academic\s+performance|grade\s+average|grade\s+point/.test(normalizedQuestion)) {
     values.unshift(greenhouseGpaBucket(answer) ?? '');
   }
-  if (/\bgraduat(?:ion|e)\s+date\b|\bwhat\s+is\s+your\s+graduation\s+date\b/.test(normalizedQuestion)) {
+  if (/\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window)\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bexpected\s+graduat(?:ion|e)/.test(normalizedQuestion)) {
     values.unshift(greenhouseGraduationBucket(answer) ?? '');
+  }
+  if (/\bdegree\b/.test(normalizedQuestion) && /\bbachelor/i.test(answer)) {
+    values.unshift('Bachelor\'s Degree');
+  }
+  if (/\b(?:discipline|field\s+of\s+study|major|course)\b/.test(normalizedQuestion) && /computer science/i.test(answer)) {
+    values.unshift('Computer Science');
+  }
+  if (/\b(?:current\s+year|year\s+of\s+(?:your\s+)?stud(?:y|ies)|academic\s+year)\b/.test(normalizedQuestion)) {
+    values.unshift(answer.replace(/\s+year$/i, ''), answer);
+  }
+  if (/\b(?:how\s+did\s+you\s+hear|referral\s+source|hear\s+about|source)\b/.test(normalizedQuestion)) {
+    values.push('Company Website', 'Company website', 'Careers page', 'Career site', 'Other');
+  }
+  if (/\b(?:country|currently\s+residing|current\s+location|where\s+are\s+you\s+currently\s+(?:located|living|based))\b/.test(normalizedQuestion)) {
+    values.unshift(answer, cityOnlyLocation(answer) ?? '');
   }
   if (/\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\blocation\b[^?]{0,120}\b(?:single|top|preferred|preference|most interested)\b/.test(normalizedQuestion)) {
     values.unshift(abbreviatedUsLocation(answer) ?? '', cityOnlyLocation(answer) ?? '');
@@ -993,7 +1011,7 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string): 
 }
 
 function isGreenhouseReactSelectQuestion(question: string): boolean {
-  return /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bgraduat(?:ion|e)\s+date\b|\bwhat\s+is\s+your\s+gpa\b|\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b|legally\s+authorized\s+to\s+work|(?:require|need)\s+sponsorship|sponsorship\s+for\s+(?:employment\s+visa|work\s+authorization)|\bhow\s+did\s+you\s+hear\b|referral\s+source|source\s+of\b|\bteam\s+opening\b|\bopening\b[^?]{0,80}\binterested\b|\bLGBTQIA?\+?\b|sexual\s+orientation|\bgender(?:\s+identity)?\b|\bveteran\b|\bmilitary\b|\brace\b|\bethnicit|\bcategory\b/i.test(question);
+  return /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window)\b|\bexpected\s+graduat(?:ion|e)\b|\bwhat\s+is\s+your\s+gpa\b|\bacademic\s+performance\b|\bdegree\b(?!\s+program)|\bdiscipline\b|\bfield\s+of\s+study\b|\bmajor\b|\bcourse\b|\bschool\b|\buniversity\b|\bcurrent\s+year\b|\byear\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\bacademic\s+year\b|\bhow\s+did\s+you\s+hear\b|\breferral\s+source\b|\bhear\s+about\b|\bsource\b|\bsource\s+of\b|\bcountry\b|\bcurrent\s+location\b|\bwhere\s+are\s+you\s+currently\s+(?:located|living|based)\b|\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b|legally\s+authorized\s+to\s+work|(?:require|need)\s+sponsorship|sponsorship\s+for\s+(?:employment\s+visa|work\s+authorization)|\bteam\s+opening\b|\bopening\b[^?]{0,80}\binterested\b|\bLGBTQIA?\+?\b|sexual\s+orientation|\bgender(?:\s+identity)?\b|\bveteran\b|\bmilitary\b|\brace\b|\bethnicit|\bcategory\b/i.test(question);
 }
 
 function isGreenhouseEducationComboboxQuestion(question: string): boolean {
@@ -1325,7 +1343,6 @@ function managedActionLabelBase(action: ManagedBrowserAction): string | undefine
 
 const GREENHOUSE_LOW_PRIORITY_ACTION_GROUPS = [
   /^greenhouse_demographic/,
-  /^greenhouse_referral_combo_label:(?!.*How did you hear about Faire)/,
   /^education_discipline_combo:/,
   /^education_graduation_date_combo:/,
   /^(?:graduation_date|graduation_date_label|graduation_date_expected|education_end_month|education_end_year|education_graduation_month|education_graduation_year|gpa_question)$/,
@@ -1841,7 +1858,10 @@ export function buildManagedPortalActions(
       continue;
     }
     if (portalFamily(portal) === 'greenhouse') {
-      if (isGreenhouseEducationComboboxQuestion(questionText)) continue;
+      if (isGreenhouseEducationComboboxQuestion(questionText)) {
+        pushGreenhouseQuestionComboboxLabelActions(actions, questionText, item.answer, 'question');
+        continue;
+      }
       const isReactSelectQuestion = isGreenhouseReactSelectQuestion(questionText);
       if (!isReactSelectQuestion) {
         pushScopedQuestionChoiceActions(actions, questionText, item.answer, 'question');

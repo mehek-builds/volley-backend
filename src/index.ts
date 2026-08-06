@@ -41,6 +41,7 @@ import { createRateLimitHook, defaultRateLimitConfig, type RateLimitConfig } fro
 import { sharedRankingConfigured } from './lib/rankingCache';
 import { resolveBuild, resolveRevision } from './lib/buildInfo';
 import { dashboardBootstrapRoutes } from './routes/dashboardBootstrap';
+import { configuredAtsSubmissionChannels } from './lib/atsSubmissionChannels';
 
 export interface BuildAppOptions {
   rateLimit?: RateLimitConfig;
@@ -229,6 +230,18 @@ export async function buildApp(options: BuildAppOptions = {}) {
        * whether a capability is on, not what its credentials are.
        */
       ranking_cache: sharedRankingConfigured() ? 'shared' : 'local',
+      /* WHICH ATS SUBMIT CONFIG IS LIVE.
+       *
+       * Public capability state, never secrets. A Vercel env var can exist by name while the
+       * running deployment still sees a blank value, and ATS submission is gated on the exact
+       * literal string `true`. This lets the runbook distinguish "not deployed", "enabled but no
+       * allowlisted channels", and "channels resolved with referenced secrets".
+       */
+      ats_api_submission: {
+        enabled: process.env.LITOS_ATS_API_SUBMISSION_ENABLED === 'true',
+        channel_config_present: Boolean(process.env.LITOS_EMPLOYER_API_SUBMISSION_CHANNELS_JSON?.trim()),
+        configured_channels: configuredAtsSubmissionChannels().length,
+      },
       ts: new Date().toISOString(),
     });
   });
