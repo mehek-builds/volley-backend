@@ -1286,6 +1286,10 @@ test('Greenhouse replays Cloudflare graduation and degree choice buckets', () =>
     resumeName: 'resume.pdf',
     questions: [
       {
+        question: 'How did you hear about this job?',
+        answer: 'Company website',
+      },
+      {
         question: 'If you are currently enrolled in a university or program, when do you expect to graduate or complete your program? (Select the closest date.)',
         answer: 'May 2028',
       },
@@ -1299,7 +1303,8 @@ test('Greenhouse replays Cloudflare graduation and degree choice buckets', () =>
   const comboLabels = actions
     .filter((action) => action.type === 'fill' && action.label?.startsWith('question_combo_label:'))
     .map((action) => `${action.label}:${action.value}`);
-  assert.ok(comboLabels.some((label) => label.toLowerCase().includes('when do you expect to') && label.endsWith('Spring 2028')));
+  assert.ok(comboLabels.some((label) => label.toLowerCase().includes('how did you hear about this job') && label.endsWith('Other (none of the above)')));
+  assert.ok(comboLabels.some((label) => label.toLowerCase().includes('when do you expect to') && label.endsWith('June 2028')));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('degree are you currently pursuing') && label.endsWith('Bachelor\'s')));
 });
 
