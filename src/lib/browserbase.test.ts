@@ -5,7 +5,6 @@ import { buildManagedDiscoveryActions, buildManagedPortalActions } from './porta
 
 function assertStratusSafeActions(actions: Array<Record<string, unknown>>) {
   for (const action of actions) {
-    assert.notEqual(action.type, 'fillByLabelText');
     assert.equal(typeof action.selector, 'string', JSON.stringify(action));
     assert.ok(String(action.selector).trim().length > 0, JSON.stringify(action));
     assert.ok(String(action.selector).length <= 500, JSON.stringify(action));
@@ -170,17 +169,11 @@ test('managed Stratus converts label fills into selector-backed fill actions', a
     timeout: 10000,
   }]);
 
-  assert.deepEqual(captured.body?.actions?.map((action) => action.type), ['fill']);
+  assert.deepEqual(captured.body?.actions?.map((action) => action.type), ['fillByLabelText']);
   const action = captured.body?.actions?.[0];
-  assert.equal(action?.text, undefined);
+  assert.equal(action?.text, 'First Name');
   assert.equal(action?.value, 'Taylor');
-  assert.equal(typeof action?.selector, 'string');
-  assert.match(String(action?.selector), /label:has-text\("First Name"\)/);
-  assert.match(String(action?.selector), /label:has-text\("First Name"\) \+ input/);
-  assert.match(String(action?.selector), /label:has-text\("First Name"\) ~ input/);
-  assert.match(String(action?.selector), /input\[aria-label="First Name"\]/);
-  assert.doesNotMatch(String(action?.selector), /:right-of|:below|:is\(/);
-  assert.ok(String(action?.selector).length <= 500);
+  assert.equal(action?.selector, 'body');
 
   globalThis.fetch = previousFetch;
   if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
@@ -370,6 +363,11 @@ test('managed Stratus Greenhouse builder payloads are selector-safe after normal
     assert.ok(Array.isArray(body.actions));
     assertStratusSafeActions(body.actions);
   }
+  assert.ok(capturedBodies[1]?.actions?.some((action) =>
+    action.type === 'fillByLabelText'
+    && action.text === 'Why this role?'
+    && action.selector === 'body'
+  ));
 
   globalThis.fetch = previousFetch;
   if (previousKey === undefined) delete process.env.STRATUS_API_KEY;

@@ -60,38 +60,16 @@ type SessionResponse = {
 };
 
 const STRATUS_SELECTOR_MAX_LENGTH = 500;
-const STRATUS_LABEL_SELECTOR_TEXT_LIMIT = 80;
-
-function cssString(value: string): string {
-  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-}
-
-function selectorFromLabelText(text: string | undefined): string | undefined {
-  const stem = text?.replace(/\s+/g, ' ').trim().slice(0, STRATUS_LABEL_SELECTOR_TEXT_LIMIT);
-  if (!stem) return undefined;
-  const quoted = cssString(stem);
-  const selector = [
-    `label:has-text("${quoted}") input`,
-    `label:has-text("${quoted}") textarea`,
-    `label:has-text("${quoted}") select`,
-    `label:has-text("${quoted}") + input`,
-    `label:has-text("${quoted}") ~ input`,
-    `input[aria-label="${quoted}"]`,
-    `textarea[aria-label="${quoted}"]`,
-    `input[placeholder="${quoted}"]`,
-    `textarea[placeholder="${quoted}"]`,
-  ].join(', ');
-  return selector.length <= STRATUS_SELECTOR_MAX_LENGTH ? selector : undefined;
-}
 
 function stratusAction(action: ManagedBrowserAction): ManagedBrowserAction {
   if (action.type === 'discover' && !action.selector?.trim()) {
     return { ...action, selector: 'body' };
   }
-  if (action.type !== 'fillByLabelText') return action;
-  const selector = selectorFromLabelText(action.text);
-  const { text: _text, ...rest } = action;
-  return { ...rest, type: 'fill', ...(selector ? { selector } : {}) };
+  if (action.type === 'fillByLabelText') {
+    if (!action.text?.trim()) return action;
+    return { ...action, selector: action.selector?.trim() || 'body' };
+  }
+  return action;
 }
 
 function invalidSelectorReason(action: ManagedBrowserAction): string | undefined {
