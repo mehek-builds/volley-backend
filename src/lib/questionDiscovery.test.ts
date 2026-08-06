@@ -453,10 +453,12 @@ test('school and degree resolve from the academic profile', () => {
   assert.equal(classifyField('Degree'), 'degree');
   assert.equal(classifyField('Degree subject'), 'major');
   assert.equal(classifyField('Discipline'), 'major');
+  assert.equal(classifyField('What is your expected graduation year?'), 'graduation_year');
   assert.equal(classifyField('When did you graduate from High School?'), null);
   assert.deepEqual(resolveKnownAnswer('School', 'text', profile, undefined), { value: profile.school });
   assert.deepEqual(resolveKnownAnswer('Degree', 'text', profile, undefined), { value: profile.degree });
   assert.deepEqual(resolveKnownAnswer('Discipline', 'text', profile, undefined), { value: profile.major });
+  assert.deepEqual(resolveKnownAnswer('What is your expected graduation year?', 'text', { grad_year: 2028 }, undefined), { value: '2028' });
 });
 
 test('live-audit profile labels beat generic wording and stay out of drafts', () => {

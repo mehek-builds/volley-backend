@@ -630,11 +630,18 @@ function pushGreenhouseGraduationDateComboboxActions(actions: ManagedBrowserActi
 
 function pushGreenhouseFixedQuestionComboboxActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
   if (!packetLooksAkuna(packet)) return;
+  const reviewedLabels = new Set(packet.questions
+    .map((item) => normalizeReviewQuestionLabel(item.question).toLowerCase())
+    .filter(Boolean));
   const fixedQuestions: Array<{ label: string; value: string | undefined }> = [
+    { label: 'Which University do/did you attend?', value: packet.school },
+    { label: 'What education level are you currently pursuing?', value: packet.degree },
     { label: 'Graduation Month', value: packet.graduationMonth },
     { label: 'Graduation Year', value: packet.graduationYear },
+    { label: 'What is your GPA?', value: packet.gpa },
   ];
   for (const item of fixedQuestions) {
+    if (reviewedLabels.has(normalizeReviewQuestionLabel(item.label).toLowerCase())) continue;
     pushGreenhouseQuestionComboboxLabelActions(actions, item.label, item.value ?? '', 'greenhouse_fixed_question', packet.jdText);
   }
 }
@@ -1318,12 +1325,12 @@ function pushGreenhouseReferralSourceAliases(actions: ManagedBrowserAction[], pa
   const value = packet.referralSourceDefault?.trim();
   if (!value) return;
   const aliases = [
-    'How did you hear about this job?',
-    'How did you hear about this job',
-    'How did you hear about us?',
-    'How did you hear about us',
     'How did you hear about Faire?',
     'How did you hear about Faire',
+    'How did you hear about us?',
+    'How did you hear about us',
+    'How did you hear about this job?',
+    'How did you hear about this job',
     'Referral source',
   ];
   for (const alias of aliases) {
@@ -1524,7 +1531,7 @@ function greenhouseAkunaRequiredQuestionAliases(question: string, answer: string
   const normalizedAnswer = answer.trim().toLowerCase();
   if (/\bcurrent\s+immigration\s+status\b|\bbasis\s+of\s+your\s+current\s+work\s+authorization\b/.test(normalizedQuestion)) {
     if (/\bf-?1\b|\bcpt\b|\bopt\b|\bstem\b|n\/?a|not applicable/i.test(answer)) {
-      return ['current immigration status/basis of your current work authorization'];
+      return ['current immigration status or basis of your current work authorization'];
     }
     return [];
   }
@@ -1682,10 +1689,14 @@ function managedActionLabelBase(action: ManagedBrowserAction): string | undefine
 const GREENHOUSE_LOW_PRIORITY_ACTION_GROUPS = [
   /^greenhouse_demographic/,
   /^preferred_(?:first|last)_name$/,
-  /^first_name_label$/,
-  /^education_discipline_combo:/,
+  /^question_select:/,
+  /^greenhouse_known_question:/,
+  /^question:(?:If yes|How familiar|Do you currently reside|Are you currently enrolled in a Masters|Do you identify as LGBTQIA|Which category best describes you|Gender Identity|Veteran Status)/,
+  /^question_combo_label:.*If you answered.*current immigration status/,
+  /^preferred_location_combo:[12]:/,
   /^education_graduation_date_combo:/,
-  /^(?:graduation_date|graduation_date_label|graduation_date_expected|education_end_month|education_end_year|education_graduation_month|education_graduation_year|gpa_question)$/,
+  /^(?:graduation_date|graduation_date_label|graduation_date_expected|education_end_month|education_end_year|education_graduation_month|education_expected_graduation_year|education_discipline_label|gpa_question)$/,
+  /^first_name_label$/,
   /^education_degree_combo:2$/,
   /^education_degree_combo:1$/,
 ] as const;
@@ -1724,9 +1735,8 @@ function truncateManagedActionsToBudget(actions: ManagedBrowserAction[], limit: 
       actions.splice(tailIndex, 1);
       continue;
     }
-    for (let index = tailIndex; index >= 0; index -= 1) {
-      if (managedActionLabelBase(actions[index]!) !== base) break;
-      actions.splice(index, 1);
+    for (let index = actions.length - 1; index >= 0; index -= 1) {
+      if (managedActionLabelBase(actions[index]!) === base) actions.splice(index, 1);
     }
   }
 }
@@ -2039,8 +2049,10 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedFillByLabel(actions, 'End date year', packet.graduationYear, 'education_end_year');
     managedFillByLabel(actions, 'Graduation Month', packet.graduationMonth, 'education_graduation_month');
     managedFillByLabel(actions, 'Graduation Year', packet.graduationYear, 'education_graduation_year');
+    managedFillByLabel(actions, 'What is your expected graduation year?', packet.graduationYear, 'education_expected_graduation_year');
+    managedFillByLabel(actions, 'Discipline', packet.major, 'education_discipline_label');
     pushGreenhouseFixedQuestionComboboxActions(actions, packet);
-    pushGreenhouseGraduationDateComboboxActions(actions, packet);
+    if (!packetLooksAkuna(packet)) pushGreenhouseGraduationDateComboboxActions(actions, packet);
     managedFillByLabel(actions, 'GPA', packet.gpa, 'gpa');
     managedFillByLabel(actions, 'What is your GPA?', packet.gpa, 'gpa_question');
     pushGreenhousePreferredLocationFallbackActions(actions, packet);

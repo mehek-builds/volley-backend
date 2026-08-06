@@ -1104,6 +1104,8 @@ test('Greenhouse fills academic fields from the submission packet', () => {
       ['End date year', '2028', 'education_end_year'],
       ['Graduation Month', 'May', 'education_graduation_month'],
       ['Graduation Year', '2028', 'education_graduation_year'],
+      ['What is your expected graduation year?', '2028', 'education_expected_graduation_year'],
+      ['Discipline', 'Computer Science', 'education_discipline_label'],
       ['GPA', '3.89', 'gpa'],
       ['What is your GPA?', '3.89', 'gpa_question'],
     ],
@@ -1227,7 +1229,7 @@ test('Greenhouse replays Faire option-style choices through React-select buckets
     && action.value === 'Company website'));
   assert.ok(actions.some((action) =>
     action.label?.startsWith('greenhouse_referral_combo_label:')
-    && action.label.includes('How did you hear about us')
+    && (action.label.includes('How did you hear about us') || action.label.includes('How did you hear about Faire'))
     && action.value === 'Company website'));
   assert.equal(actions.some((action) =>
     action.label?.startsWith('greenhouse_demographic:')
@@ -1311,6 +1313,8 @@ test('Greenhouse trims low-priority fallbacks before exceeding the managed actio
   assert.ok(actions.some((action) => action.label === 'phone_country'));
   assert.ok(actions.some((action) => action.label === 'location'));
   assert.ok(actions.some((action) => action.label?.startsWith('question_combo_label:') && action.label.includes('team opening')));
+  assert.ok(actions.some((action) => action.label === 'education_graduation_year'));
+  assert.ok(actions.some((action) => action.label === 'education_discipline_combo:0'));
   assert.equal(actions.some((action) => action.label?.includes('sexual orientation')), false);
   assert.ok(actions.some((action) => action.label?.startsWith('greenhouse_referral_combo_label:') && action.label.includes('Faire')));
   assert.ok(actions.some((action) => action.type === 'upload' && action.label === 'resume'));
@@ -1745,12 +1749,19 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
     ],
   });
 
-  const comboFills = actions.filter((action) => action.type === 'fill' && action.label?.startsWith('question_combo_label:'));
+  const comboFills = actions.filter((action) =>
+    action.type === 'fill'
+    && (action.label?.startsWith('question_combo_label:')
+      || action.label?.startsWith('greenhouse_fixed_question_combo_label:')));
   const valuesFor = (text: string) => comboFills
       .filter((action) => action.label?.toLowerCase().includes(text.toLowerCase()))
       .map((action) => action.value);
   assert.deepEqual(valuesFor('Which University do/did you attend?'), ['University of Southern California']);
-  assert.deepEqual(valuesFor('By submitting this application'), ['Yes']);
+  assert.ok(actions.some((action) =>
+    action.type === 'fill'
+    && action.label?.startsWith('greenhouse_known_question_combo_label:')
+    && action.label.includes('top preference')
+    && action.value === 'Yes'));
   assert.deepEqual(valuesFor('What education level are you currently pursuing?'), ['Bachelors']);
   assert.deepEqual(valuesFor('Graduation Month'), ['May']);
   assert.deepEqual(valuesFor('Graduation Year'), ['2028']);
@@ -1763,12 +1774,12 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
   assert.ok(knownComboFills.some((action) => action.selector?.includes('Do you have any offer deadlines')));
   assert.ok(knownComboFills.some((action) => action.label?.includes('Disclaimer: Akuna Capital is a global company') && action.value === 'Yes'));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('Do you now, or will you in the future, require visa sponsorship')));
-  assert.ok(knownComboFills.some((action) => action.selector?.includes('current immigration status/basis') && action.value === 'F-1 CPT'));
+  assert.ok(knownComboFills.some((action) => action.selector?.includes('current immigration status') && action.value === 'F-1 CPT'));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('live in New York or California')));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('I certify that all information I have provided')));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('resume must be submitted in PDF format')));
 
-  for (const action of comboFills) {
+  for (const action of comboFills.filter((item) => item.label?.startsWith('question_combo_label:'))) {
     const index = actions.indexOf(action);
     assert.equal(actions[index - 1]?.type, 'click');
     assert.equal(actions[index - 1]?.selector, action.selector);
