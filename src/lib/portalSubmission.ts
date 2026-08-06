@@ -2170,7 +2170,7 @@ export function greenhousePortalUrlNeedsBoardToken(rawUrl: string | undefined): 
     const url = new URL(rawUrl);
     if (url.protocol !== 'https:') return false;
     const host = url.hostname.toLowerCase();
-    return (host === 'boards.greenhouse.io' || host === 'job-boards.greenhouse.io')
+    return (host === 'boards.greenhouse.io' || host === 'job-boards.greenhouse.io' || host === 'job-boards.eu.greenhouse.io')
       && url.pathname === '/embed/job_app'
       && /^\d+$/.test(url.searchParams.get('token') ?? '')
       && !url.searchParams.get('for')

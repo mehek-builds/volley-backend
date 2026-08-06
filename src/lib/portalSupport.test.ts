@@ -93,7 +93,9 @@ test('monitored Greenhouse sources canonicalize company wrappers with source boa
 test('bare Greenhouse embed links are supported but still need monitored board-token repair', () => {
   assert.equal(isPortalSupported('https://boards.greenhouse.io/embed/job_app?token=7351061'), true);
   assert.equal(greenhousePortalUrlNeedsBoardToken('https://boards.greenhouse.io/embed/job_app?token=7351061'), true);
+  assert.equal(greenhousePortalUrlNeedsBoardToken('https://job-boards.eu.greenhouse.io/embed/job_app?token=4829785101'), true);
   assert.equal(greenhousePortalUrlNeedsBoardToken('https://boards.greenhouse.io/embed/job_app?for=nuro&token=7351061'), false);
+  assert.equal(greenhousePortalUrlNeedsBoardToken('https://job-boards.eu.greenhouse.io/embed/job_app?for=imc&token=4829785101'), false);
   assert.equal(greenhousePortalUrlNeedsBoardToken('https://job-boards.greenhouse.io/nuro/jobs/7351061'), false);
 });
 
