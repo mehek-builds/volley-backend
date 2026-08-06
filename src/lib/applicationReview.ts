@@ -13,6 +13,15 @@ export type ApplicationReviewQuestion = {
   ats_api_field?: string;
 };
 
+export type ApplicationAttentionCategory =
+  | 'captcha'
+  | 'required_document'
+  | 'sensitive_attestation'
+  | 'required_field'
+  | 'evidence_gap'
+  | 'cover_letter'
+  | 'unknown';
+
 export function normalizeApplicationReviewQuestions(
   questions: readonly ApplicationReviewQuestion[],
 ): ApplicationReviewQuestion[] {
@@ -140,6 +149,7 @@ export type ApplicationReviewState = {
   browser_context_id?: string;
   browser_session_id?: string;
   attention_reason?: string;
+  attention_categories?: ApplicationAttentionCategory[];
   /* The TYPED half of attention_reason, which is prose and always will be.
    *
    * attention_reason is written for a person and is the right thing to show them. It is the wrong

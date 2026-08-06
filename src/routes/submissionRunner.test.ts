@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  attentionCategoriesForReasons,
   applicationContextForQuestionResolution,
   atsApiSubmissionEnabled,
   discoverAndResolveQuestions,
@@ -104,6 +105,32 @@ test('question resolution context excludes mixed-country job locations', () => {
   assert.match(context, /Build data infrastructure/);
   assert.doesNotMatch(context, /Mountain View, CA/);
   assert.doesNotMatch(context, /Toronto/);
+});
+
+test('attention categories distinguish captcha from document and attestation blockers', () => {
+  assert.deepEqual(
+    attentionCategoriesForReasons(['CAPTCHA requires your attention']),
+    ['captcha'],
+  );
+  assert.deepEqual(
+    attentionCategoriesForReasons(['open-ended question left for you (could not draft a confident answer): "Have you ever built an hcaptcha integration?"']),
+    ['unknown'],
+  );
+  assert.deepEqual(
+    attentionCategoriesForReasons(['"Please provide a recent transcript of your undergraduate studies." is required and is still empty']),
+    ['required_document'],
+  );
+  assert.deepEqual(
+    attentionCategoriesForReasons(['sensitive question left for you: "Please confirm whether any of the below applies to you. Select all that apply. Note: This information will only be used to ensure compliance with U.S. sanctions and export controls."']),
+    ['sensitive_attestation'],
+  );
+  assert.deepEqual(
+    attentionCategoriesForReasons([
+      'The filled form did not record a resume upload.',
+      '"Portfolio" is required and is still empty',
+    ]),
+    ['evidence_gap', 'required_field'],
+  );
 });
 
 test('future sponsorship onboarding answer supplies work eligibility for US applications', () => {

@@ -6,7 +6,12 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db/index';
 import { application_profile, generated_resumes, profiles, users } from '../db/schema';
-import { normalizeApplicationReviewQuestions, readApplicationReview, type ApplicationReviewState } from '../lib/applicationReview';
+import {
+  normalizeApplicationReviewQuestions,
+  readApplicationReview,
+  type ApplicationAttentionCategory,
+  type ApplicationReviewState,
+} from '../lib/applicationReview';
 import {
   connectToSession,
   createBrowserContext,
@@ -465,6 +470,29 @@ function preparationEvidenceBlockers(result: { text?: string; filledFields?: str
   ];
 }
 
+export function attentionCategoriesForReasons(reasons: readonly string[]): ApplicationAttentionCategory[] {
+  const categories = new Set<ApplicationAttentionCategory>();
+  for (const reason of reasons) {
+    const normalized = reason.toLowerCase();
+    if (/^captcha requires your attention$|prove you are human/.test(normalized)) {
+      categories.add('captcha');
+    } else if (/filled form did not record|preview did not include|preview looks like/.test(normalized)) {
+      categories.add('evidence_gap');
+    } else if (/transcript|upload|attach|file|document/.test(normalized)) {
+      categories.add('required_document');
+    } else if (/export control|sanctions|legally authorized|sponsorship|visa|sensitive question|work authorization/.test(normalized)) {
+      categories.add('sensitive_attestation');
+    } else if (/required.+still empty|required field|still blank/.test(normalized)) {
+      categories.add('required_field');
+    } else if (/cover letter/.test(normalized)) {
+      categories.add('cover_letter');
+    } else if (normalized.trim()) {
+      categories.add('unknown');
+    }
+  }
+  return [...categories];
+}
+
 /**
  * Build the packet, writing a cover letter first when the portal has somewhere to put one.
  *
@@ -740,25 +768,40 @@ async function prepareManaged(
   const coverLetterAttention = coverLetterOutcome.coverLetterIssue ? [coverLetterOutcome.coverLetterIssue] : [];
   const filledFields = managedResultFilledFields(result);
   const evidenceBlockers = preparationEvidenceBlockers({ ...result, filledFields }, packet);
+  const attentionReasons = [...blockers, ...discoveryAttention, ...evidenceBlockers, ...coverLetterAttention];
+  const attentionCategories = attentionCategoriesForReasons(attentionReasons);
+  const captchaAttention = blockersIncludeCaptcha(blockers);
   const safe = blockers.length === 0 && discoveryAttention.length === 0 && evidenceBlockers.length === 0;
   const review = nextReview(current, {
     ...preparedReviewPatch(authorization, safe),
+    ...(captchaAttention
+      ? beginStall(current, {
+        surface: 'server_run',
+        provider: 'unknown',
+        stage: 'before_fill',
+        source: 'observed',
+      })
+      : {}),
     submission_run_id: runId,
     filled_fields: filledFields,
     preview_screenshot_url: preview.url,
     verification: { status: verificationHandoff ? 'handoff' : 'not_needed' },
     questions: mergedQuestions,
     cover_letter_supported: coverLetterSupported,
-    attention_reason: [...blockers, ...discoveryAttention, ...evidenceBlockers, ...coverLetterAttention].join('\n') || undefined,
-    // No stall write here, deliberately. CAPTCHA_BLOCKER is pushed in exactly one place -
-    // fillPortal - and the managed path never calls it, so matching on that string here would be
-    // dead code that reads like coverage. The managed path's real challenge signal is the probe in
-    // submitManaged, which throws CaptchaUnresolvedError and records the stall through fail().
+    attention_reason: attentionReasons.join('\n') || undefined,
+    attention_categories: attentionCategories.length > 0 ? attentionCategories : undefined,
     handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
     submission_error: undefined,
   });
   await writeReview(row, review);
-  fastify.log.info({ applicationId: row.id, portal, status: review.status }, 'Application portal prepared with Stratus Sandbox');
+  fastify.log.info({
+    applicationId: row.id,
+    portal,
+    status: review.status,
+    attentionCategories,
+    attentionReasonCount: attentionReasons.length,
+    captchaOnly: attentionCategories.length === 1 && attentionCategories[0] === 'captcha',
+  }, 'Application portal prepared with Stratus Sandbox');
 }
 
 async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = false) {

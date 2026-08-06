@@ -2016,7 +2016,7 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     for (const selector of greenhouseCoreFieldEvidenceSelectors('resume')) {
       managedUpload(actions, selector, 'resume', packet.resume, packet.resumeName);
     }
-    managedUpload(actions, 'input#cover_letter[type="file"], input[type="file"][name*="cover_letter" i]', 'cover_letter', packet.coverLetter, packet.coverLetterName);
+    managedUpload(actions, coverLetterUploadSelector(portal), 'cover_letter', packet.coverLetter, packet.coverLetterName);
     actions.push({
       type: 'click',
       selector: GREENHOUSE_CANDIDATE_PRIVACY_CHECKBOX_SELECTOR,
@@ -2247,6 +2247,13 @@ export function buildManagedPortalActions(
       }
       if (/^(?:checkbox|radio)$/i.test(portalInputType ?? '')) {
         if (portalFamily(portal) === 'greenhouse') {
+          actions.push({
+            type: 'click',
+            selector: portalSelector,
+            label: `question_choice_selector:${questionText.slice(0, 80)}`,
+            optional: true,
+            timeout: MANAGED_FILL_TIMEOUT_MS,
+          });
           pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');
         }
         continue;
