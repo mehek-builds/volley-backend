@@ -71,6 +71,9 @@ function selectorFromLabelText(text: string | undefined): string | undefined {
 }
 
 function stratusAction(action: ManagedBrowserAction): ManagedBrowserAction {
+  if (action.type === 'discover' && !action.selector?.trim()) {
+    return { ...action, selector: 'body' };
+  }
   if (action.type !== 'fillByLabelText') return action;
   const selector = selectorFromLabelText(action.text);
   if (!selector) return action;
