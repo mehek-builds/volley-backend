@@ -36,6 +36,7 @@ import { jobExtractRoutes } from './routes/jobExtract';
 import { jobMonitorRoutes } from './routes/jobMonitor';
 import { coverLetterRoutes } from './routes/coverLetter';
 import { emailConnectionRoutes } from './routes/emailConnections';
+import { applicationEmailRoutes } from './routes/applicationEmail';
 import { API_VERSION, PRODUCT_NAME, PRODUCT_LINKS } from './lib/product';
 import { createRateLimitHook, defaultRateLimitConfig, type RateLimitConfig } from './middleware/rateLimit';
 import { sharedRankingConfigured } from './lib/rankingCache';
@@ -264,6 +265,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await fastify.register(jobMonitorRoutes);
   await fastify.register(coverLetterRoutes);
   await fastify.register(emailConnectionRoutes);
+  await fastify.register(applicationEmailRoutes);
   await fastify.register(resumeRoutes);
   await fastify.register(baseResumeRoutes);
   await fastify.register(accountRoutes);

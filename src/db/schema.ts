@@ -574,6 +574,51 @@ export const generated_resumes = pgTable('generated_resumes', {
   userCreatedIdx: index('generated_resumes_user_created_idx').on(t.user_id, t.created_at),
 }));
 
+// ---- application_email_aliases ----
+// Litos-owned applicant addresses. Employers see the alias; Litos forwards inbound mail to the
+// verified user email and records the thread against the application packet.
+export const application_email_aliases = pgTable('application_email_aliases', {
+  alias: text('alias').primaryKey(),
+  user_id: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  generated_resume_id: uuid('generated_resume_id').references(() => generated_resumes.id, { onDelete: 'cascade' }),
+  forward_to: text('forward_to').notNull(),
+  status: text('status').default('active').notNull(),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  userIdx: index('application_email_aliases_user_id_idx').on(t.user_id),
+  resumeIdx: index('application_email_aliases_resume_id_idx').on(t.generated_resume_id),
+}));
+
+// ---- application_email_messages ----
+// Minimal inbound/outbound ledger for application aliases. raw_json is kept for provider-specific
+// debugging, while the dashboard reads only the normalized columns.
+export const application_email_messages = pgTable('application_email_messages', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  alias: text('alias').references(() => application_email_aliases.alias, { onDelete: 'cascade' }).notNull(),
+  user_id: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  generated_resume_id: uuid('generated_resume_id').references(() => generated_resumes.id, { onDelete: 'cascade' }),
+  direction: text('direction').notNull(),
+  provider: text('provider'),
+  provider_message_id: text('provider_message_id'),
+  from_email: text('from_email'),
+  to_email: text('to_email'),
+  subject: text('subject'),
+  text: text('text'),
+  html: text('html'),
+  classification: text('classification').default('other').notNull(),
+  raw_json: jsonb('raw_json'),
+  received_at: timestamp('received_at', { withTimezone: true }),
+  forwarded_at: timestamp('forwarded_at', { withTimezone: true }),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  userCreatedIdx: index('application_email_messages_user_created_idx').on(t.user_id, t.created_at),
+  aliasCreatedIdx: index('application_email_messages_alias_created_idx').on(t.alias, t.created_at),
+  providerMessageUnique: uniqueIndex('application_email_messages_provider_id_unique')
+    .on(t.provider, t.provider_message_id)
+    .where(sql`${t.provider_message_id} is not null`),
+}));
+
 // ---- career_page_sources ----
 // Operator-managed company career boards. The polling worker reads the public ATS APIs rather
 // than scraping job aggregators, so Litos can show first-party postings with a stable apply URL.
