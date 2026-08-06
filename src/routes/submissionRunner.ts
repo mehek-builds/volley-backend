@@ -98,6 +98,10 @@ function nextReview(current: ApplicationReviewState, patch: Partial<ApplicationR
   return applyReviewPatch(current, patch);
 }
 
+export function atsApiSubmissionEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.LITOS_ATS_API_SUBMISSION_ENABLED === 'true';
+}
+
 async function writeReview(row: ResumeRow, review: ApplicationReviewState) {
   await db.update(generated_resumes).set({
     spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(review)}::jsonb, true)`,
@@ -837,7 +841,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
 
   const authorization = await standingAuthorization(row.user_id);
   assertControlledPortalEnabled(portal);
-  const atsAssessment = assessAtsSubmissionChannel(current.portal_url);
+  const atsAssessment = atsApiSubmissionEnabled() ? assessAtsSubmissionChannel(current.portal_url) : null;
   if (atsAssessment?.status === 'available') {
     await writeReview(row, nextReview(current, {
       ...preparedReviewPatch(authorization, true),
@@ -1101,6 +1105,7 @@ async function submitViaAtsSubmissionChannel(
   review: ApplicationReviewState,
   fastify: FastifyInstance,
 ): Promise<boolean> {
+  if (!atsApiSubmissionEnabled()) return false;
   if (!await authorizationValidAtClick(row, review)) {
     await holdRevokedSubmission(row, review);
     return true;

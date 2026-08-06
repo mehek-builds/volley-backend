@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   applicationContextForQuestionResolution,
+  atsApiSubmissionEnabled,
   discoverAndResolveQuestions,
   readMostRecentRole,
   sanitizeEeoPrefs,
@@ -124,6 +125,13 @@ test('onboarding sponsorship answers keep non-US-authorized cases explicit', () 
   assert.deepEqual(workEligibilityFromSponsorshipAnswer('needs_now'), {
     needsSponsorship: true,
   });
+});
+
+test('ATS API submission is disabled unless explicitly enabled', () => {
+  assert.equal(atsApiSubmissionEnabled({}), false);
+  assert.equal(atsApiSubmissionEnabled({ LITOS_ATS_API_SUBMISSION_ENABLED: 'false' }), false);
+  assert.equal(atsApiSubmissionEnabled({ LITOS_ATS_API_SUBMISSION_ENABLED: '1' }), false);
+  assert.equal(atsApiSubmissionEnabled({ LITOS_ATS_API_SUBMISSION_ENABLED: 'true' }), true);
 });
 
 test('malformed EEO preferences are dropped before packet building can trim them', () => {
