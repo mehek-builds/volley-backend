@@ -55,7 +55,25 @@ test('submit-request starts a fresh run instead of carrying stale run artifacts'
   }
   assert.match(helper, /updated_at:\s*new Date\(\)\.toISOString\(\)/);
   assert.match(route, /const submittedQuestions = refreshKnownQuestionAnswers\(/);
+  assert.match(route, /current\.jd_text/);
   assert.match(route, /const next = freshSubmitRequestReview\(current, submittedQuestions\)/);
+});
+
+test('application routes refresh answers through the decrypted profile loader', async () => {
+  const route = await readFile('src/routes/applications.ts', 'utf8');
+  assert.match(route, /import \{ loadApplicationProfileLike \} from '\.\.\/lib\/applicationProfileLike'/);
+  assert.match(route, /return loadApplicationProfileLike\(userId\)/);
+  assert.doesNotMatch(route, /application_profile\.work_authorized/);
+  assert.doesNotMatch(route, /application_profile\.needs_sponsorship/);
+  assert.match(route, /questions: refreshKnownQuestionAnswers\(review\.questions, profile, review\.jd_text\)/);
+});
+
+test('resume history refreshes known question answers without changing review status', async () => {
+  const route = await readFile('src/routes/resume.ts', 'utf8');
+  assert.match(route, /function refreshedHistorySpec/);
+  assert.match(route, /loadApplicationProfileLike\(userId\)/);
+  assert.match(route, /questions: refreshKnownQuestionAnswers\(review\.questions, profile, review\.jd_text\)/);
+  assert.doesNotMatch(route, /status:\s*'ready_to_submit'[\s\S]{0,300}refreshKnownQuestionAnswers/);
 });
 
 test('submission packet attaches the role-specific resume filename', async () => {

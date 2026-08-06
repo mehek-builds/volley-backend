@@ -36,6 +36,8 @@ import { deriveEditedTerms, readApplicationReview, type ApplicationReviewState }
 import { canonicalSupportedPortalUrl, detectPortal, isPortalSupported } from '../lib/portalSubmission';
 import { contentDispositionFileName, resumeFileNameForRole } from '../lib/resumeFileName';
 import { monitoredDescriptionHash, monitoredJdAgrees } from '../lib/monitoredPortalRepair';
+import { refreshKnownQuestionAnswers, type ApplicationProfileLike } from '../lib/questionDiscovery';
+import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 
 const MAX_SPEC_ATTEMPTS = 2; // 1 initial pass + 1 feedback-driven retry, per PRD-v2 Section 6.4's
 // "automated quality gate" - bounded so a stubborn JD can't loop the endpoint indefinitely.
@@ -118,6 +120,18 @@ function repairedHistorySpec(
     portal_supported: true,
   };
   return { ...(spec as Record<string, unknown>), _review: repaired };
+}
+
+function refreshedHistorySpec(spec: unknown, profile: ApplicationProfileLike): unknown {
+  const review = readApplicationReview(spec);
+  if (!review || !spec || typeof spec !== 'object' || Array.isArray(spec)) return spec;
+  return {
+    ...(spec as Record<string, unknown>),
+    _review: {
+      ...review,
+      questions: refreshKnownQuestionAnswers(review.questions, profile, review.jd_text),
+    },
+  };
 }
 
 // ─── Transient model-capacity handling (live QA 2026-07-16) ──────────────────
@@ -984,7 +998,10 @@ export async function resumeRoutes(fastify: FastifyInstance) {
           jdHash: monitoredDescriptionHash(job.description),
         }] as const),
     );
-    const base = apiBaseFor(request);
+    const [profile, base] = await Promise.all([
+      loadApplicationProfileLike(userId),
+      Promise.resolve(apiBaseFor(request)),
+    ]);
     const resumes = rows.map((row) => {
       const coverLetter = ((row.spec as Record<string, unknown>)._cover_letter ?? {}) as Record<string, unknown>;
       const contact = ((row.spec as Record<string, unknown>)._contact ?? {}) as Record<string, unknown>;
@@ -992,7 +1009,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       const resumeFileName = resumeFileNameForRole(contact.full_name, job.role);
       return {
         ...row,
-        spec: repairedHistorySpec(row, monitoredJobs),
+        spec: refreshedHistorySpec(repairedHistorySpec(row, monitoredJobs), profile),
         download_url: `${base}/resume/download?t=${mintDownloadToken(userId, row.resume_object_key, { fileName: resumeFileName })}`,
         cover_letter_download_url: typeof coverLetter.object_key === 'string'
           ? `${base}/resume/download?t=${mintDownloadToken(userId, coverLetter.object_key)}`
