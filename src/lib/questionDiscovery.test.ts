@@ -127,6 +127,22 @@ test('answers work authorization and sponsorship only from explicit stored conse
     undefined,
   );
   assert.ok(mixed && 'skipReason' in mixed);
+
+  const statusDetail = resolveKnownAnswer(
+    'If you answered “Yes” above to requiring visa sponsorship now or in the future for work authorization, please respond to the following questions. What is your current immigration status/basis of your current work authorization?',
+    'text',
+    { work_authorized: true, needs_sponsorship: true },
+    undefined,
+  );
+  assert.ok(statusDetail && 'skipReason' in statusDetail);
+
+  const expiryDetail = resolveKnownAnswer(
+    'If you have a current work authorization/status, when does it expire?',
+    'text',
+    { work_authorized: true, needs_sponsorship: true },
+    undefined,
+  );
+  assert.ok(expiryDetail && 'skipReason' in expiryDetail);
 });
 
 test('answers EEO / demographic questions with stored preferences or decline', () => {

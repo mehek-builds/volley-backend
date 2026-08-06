@@ -280,6 +280,8 @@ const NY_CA_RESIDENCE_QUESTION =
   /\b(?:live|reside|located)\b[^?]{0,80}\bnew\s+york\b[^?]{0,80}\bcalifornia\b|\bnew\s+york\b[^?]{0,80}\bcalifornia\b[^?]{0,80}\b(?:live|reside|located)\b/i;
 const OPTIONS_MARKET_MAKING_EXPERIENCE_QUESTION =
   /\b(?:options\s+market\s+making|market\s+making\s+trading|trading\s+firm)\b/i;
+const WORK_AUTHORIZATION_DETAIL_QUESTION =
+  /\b(?:current\s+immigration\s+status|basis\s+of\s+your\s+current\s+work\s+authorization|when\s+does\s+it\s+expire|extension\s+options?|additional\s+detail\s+about\s+your\s+sponsorship\s+need)\b/i;
 
 const NATIONALITY_TO_COUNTRY: Record<string, string> = {
   indian: 'India', american: 'United States', emirati: 'United Arab Emirates',
@@ -987,6 +989,10 @@ export function resolveKnownAnswer(
 
   const routineLocationCommitment = routineLocationCommitmentAnswer(label);
   if (routineLocationCommitment) return routineLocationCommitment;
+
+  if (WORK_AUTHORIZATION_DETAIL_QUESTION.test(label)) {
+    return { skipReason: workEligibilitySkipReason(label) };
+  }
 
   const workEligibility = workEligibilityAnswer(label, ap, jdText);
   if (workEligibility) return workEligibility;
