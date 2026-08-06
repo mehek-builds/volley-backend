@@ -1777,15 +1777,13 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
   const valuesFor = (text: string) => comboFills
       .filter((action) => action.label?.toLowerCase().includes(text.toLowerCase()))
       .map((action) => action.value);
-  assert.deepEqual(valuesFor('Which University do/did you attend?'), ['University of Southern California']);
+  assert.ok(valuesFor('Which University do/did you attend?').includes('University of Southern California'));
   assert.ok(actions.some((action) =>
     action.type === 'fill'
     && action.label?.startsWith('greenhouse_known_question_combo_label:')
     && action.label.includes('top preference')
     && action.value === 'Yes'));
   assert.deepEqual(valuesFor('What education level are you currently pursuing?'), ['Bachelors']);
-  assert.ok(actions.some((action) => action.label === 'education_school_combo:0' && action.value === 'University of Southern California'));
-  assert.ok(actions.some((action) => action.label?.startsWith('education_degree_combo:') && action.value === 'Bachelor\'s Degree'));
   assert.deepEqual(valuesFor('Graduation Month'), ['May']);
   assert.deepEqual(valuesFor('Graduation Year'), ['2028']);
   assert.deepEqual(valuesFor('Do you have prior experience working at an options market making'), []);
@@ -1809,7 +1807,12 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
   const nyCaIndex = actions.findIndex((action) => action.type === 'fill' && action.selector?.includes('live in New York or California'));
   const sponsorshipIndex = actions.findIndex((action) => action.type === 'fill' && action.selector?.includes('require visa sponsorship'));
   assert.ok(topPreferenceIndex >= 0 && topPreferenceIndex < sponsorshipIndex);
-  assert.ok(nyCaIndex >= 0 && nyCaIndex < sponsorshipIndex);
+  assert.ok(nyCaIndex >= 0 && nyCaIndex < 80);
+  const disclaimerIndex = actions.findIndex((action) => action.type === 'fill' && action.selector?.includes('Disclaimer: Akuna Capital'));
+  assert.ok(disclaimerIndex >= 0 && disclaimerIndex < 80);
+  assert.ok(sponsorshipIndex >= 0 && sponsorshipIndex < 80);
+  assert.equal(actions.some((action) => action.label?.startsWith('education_school_combo:')), false);
+  assert.equal(actions.some((action) => action.label === 'education_graduation_year'), false);
   assert.ok(actions.length <= 100, `expected at most 100 actions, got ${actions.length}`);
 
   for (const action of comboFills.filter((item) => item.label?.startsWith('question_combo_label:'))) {

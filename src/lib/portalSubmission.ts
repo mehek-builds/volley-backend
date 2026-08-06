@@ -1617,7 +1617,7 @@ function greenhouseAkunaRequiredQuestionAliases(question: string, answer: string
 function greenhouseAkunaRequiredAliasPriority(alias: string): number {
   const normalized = alias.toLowerCase();
   if (/\bcertify\b|\bresume must\b/.test(normalized)) return 0;
-  if (/\btop preference\b|\blive in new york or california\b/.test(normalized)) return 1;
+  if (/\btop preference\b|\blive in new york or california\b|\bdisclaimer:\s+akuna\b|\bvisa sponsorship\b/.test(normalized)) return 1;
   if (/\bapplied\b/.test(normalized)) return 1;
   if (/\boffer deadlines?\b|\bhow did you hear\b/.test(normalized)) return 2;
   if (/\bimmigration status\b|\bwork authorization\b|visa sponsorship/.test(normalized)) return 3;
@@ -1805,7 +1805,7 @@ const GREENHOUSE_LOW_PRIORITY_ACTION_GROUPS = [
   /^preferred_(?:first|last)_name$/,
   /^question_select:/,
   /^greenhouse_known_question:/,
-  /^question_combo_label:.*(?:by submitting this application|which university|what education level|graduation month|graduation year|what is your gpa|have you ever applied|have you applied to this role|how did you hear|offer deadlines|resume must|if you selected ['"]?other['"]?)/,
+  /^question_combo_label:.*(?:by submitting this application|which university|what education level|graduation month|graduation year|what is your gpa|have you ever applied|have you applied to this role|how did you hear|offer deadlines|disclaimer: akuna|visa sponsorship|live in new york|resume must|if you selected ['"]?other['"]?)/,
   /^question_combo_label:.*undergraduate.*master/,
   /^question:.*(?:legal first name|preferred name)/,
   /^question:(?:If yes|How familiar|Do you currently reside|Are you currently enrolled in a Masters|Do you identify as LGBTQIA|Which category best describes you|Gender Identity|Veteran Status)/,
@@ -2159,19 +2159,23 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedComboboxFill(actions, '#country', countryForPhoneField(packet.phone, packet.country), 'phone_country');
     managedFill(actions, GREENHOUSE_PHONE_SELECTOR, phoneForPortalField(portal, packet.phone), 'phone');
     managedComboboxFill(actions, '#candidate-location, input[autocomplete="address-level2"]', greenhouseLocationSearch(packet), 'location');
-    pushGreenhouseEducationComboboxActions(actions, packet);
-    managedFillByLabel(actions, 'What is your graduation date?', packet.graduationDate, 'graduation_date');
-    managedFillByLabel(actions, 'Graduation Date', packet.graduationDate, 'graduation_date_label');
-    managedFillByLabel(actions, 'Expected Graduation Date', packet.graduationDate, 'graduation_date_expected');
+    if (!packetLooksAkuna(packet)) {
+      pushGreenhouseEducationComboboxActions(actions, packet);
+      managedFillByLabel(actions, 'What is your graduation date?', packet.graduationDate, 'graduation_date');
+      managedFillByLabel(actions, 'Graduation Date', packet.graduationDate, 'graduation_date_label');
+      managedFillByLabel(actions, 'Expected Graduation Date', packet.graduationDate, 'graduation_date_expected');
+    }
     if (packetLooksDatabricks(packet)) {
       managedFillByLabel(actions, 'What is your graduation date?', packet.graduationDate, 'databricks_graduation_date');
     }
-    managedFillByLabel(actions, 'End date month', packet.graduationMonth, 'education_end_month');
-    managedFillByLabel(actions, 'End date year', packet.graduationYear, 'education_end_year');
-    managedFillByLabel(actions, 'Graduation Month', packet.graduationMonth, 'education_graduation_month');
-    managedFillByLabel(actions, 'Graduation Year', packet.graduationYear, 'education_graduation_year');
-    managedFillByLabel(actions, 'What is your expected graduation year?', packet.graduationYear, 'education_expected_graduation_year');
-    managedFillByLabel(actions, 'Discipline', packet.major, 'education_discipline_label');
+    if (!packetLooksAkuna(packet)) {
+      managedFillByLabel(actions, 'End date month', packet.graduationMonth, 'education_end_month');
+      managedFillByLabel(actions, 'End date year', packet.graduationYear, 'education_end_year');
+      managedFillByLabel(actions, 'Graduation Month', packet.graduationMonth, 'education_graduation_month');
+      managedFillByLabel(actions, 'Graduation Year', packet.graduationYear, 'education_graduation_year');
+      managedFillByLabel(actions, 'What is your expected graduation year?', packet.graduationYear, 'education_expected_graduation_year');
+      managedFillByLabel(actions, 'Discipline', packet.major, 'education_discipline_label');
+    }
     pushGreenhouseFixedQuestionComboboxActions(actions, packet);
     if (!packetLooksAkuna(packet)) pushGreenhouseGraduationDateComboboxActions(actions, packet);
     if (!packetLooksAkuna(packet)) {
