@@ -955,6 +955,14 @@ function greenhouseGpaBucket(value: string): string | undefined {
   return '2.4 or below';
 }
 
+function greenhouseExactGpaOption(value: string): string | undefined {
+  const gpa = parsedGpa(value);
+  if (gpa === null) return undefined;
+  if (gpa > 4) return '>4.0';
+  if (gpa < 2) return '<2.0';
+  return (Math.round(gpa * 10) / 10).toFixed(1);
+}
+
 function greenhouseGraduationBucket(value: string): string | undefined {
   const year = Number(value.match(/\b(20\d{2})\b/)?.[1]);
   if (!Number.isFinite(year)) return undefined;
@@ -1005,9 +1013,11 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string, c
   const normalizedAnswer = answer.trim().toLowerCase();
   const normalizedContext = contextText.toLowerCase();
   const isRobloxContext = /\broblox\b/.test(normalizedQuestion) || /\broblox\b/.test(normalizedContext);
+  const isAkunaContext = /\bakuna\b/.test(normalizedQuestion) || /\bakuna\b/.test(normalizedContext);
   const values = selectValuesForAnswer(answer);
   if (/\bwhat\s+is\s+your\s+gpa\b|\bgpa\b|academic\s+performance|grade\s+average|grade\s+point/.test(normalizedQuestion)) {
     values.unshift(greenhouseGpaBucket(answer) ?? '');
+    if (isAkunaContext) values.unshift(greenhouseExactGpaOption(answer) ?? '');
   }
   if (/\bclosest\s+date\b|\bgraduate\s+or\s+complete\s+your\s+program\b/.test(normalizedQuestion)) {
     values.unshift(greenhouseClosestGraduationOption(answer) ?? greenhouseGraduationBucket(answer) ?? '');
@@ -1025,7 +1035,8 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string, c
     values.push(wantsCompactBachelor ? 'Bachelor\'s Degree' : 'Bachelor\'s');
   }
   if (/\beducation\s+level\b|\blevel\s+of\s+education\b/.test(normalizedQuestion) && /\bbachelor/i.test(answer)) {
-    values.unshift('Bachelor\'s');
+    values.unshift(isAkunaContext ? 'Bachelors' : 'Bachelor\'s');
+    values.push(isAkunaContext ? 'Bachelor\'s' : 'Bachelors');
   }
   if (/\b(?:discipline|field\s+of\s+study|major|course)\b/.test(normalizedQuestion) && /computer science/i.test(answer)) {
     values.unshift('Computer Science');
@@ -1038,7 +1049,7 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string, c
       values.unshift('Roblox Careers Site');
     }
     if (/\bhow\s+did\s+you\s+hear\s+about\s+this\s+job\b/.test(normalizedQuestion) && /^company website$/i.test(answer.trim())) {
-      values.unshift('Other (none of the above)');
+      values.unshift(isAkunaContext ? 'Other' : 'Other (none of the above)');
     }
     values.push('Company Website', 'Company website', 'Careers page', 'Career site', 'Other');
   }
@@ -1079,6 +1090,26 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string, c
     && /\b(?:do\s+not|don't|no)\s+have\b[^.]{0,80}\b(?:market\s+making|trading\s+firm|options)\b/.test(answer.toLowerCase())) {
     values.unshift('No');
   }
+  if (/\bcurrent\s+immigration\s+status\b|\bwork\s+authorization\/status\b/.test(normalizedQuestion)) {
+    if (/\bf-?1\b|\bcpt\b/.test(normalizedAnswer)) values.unshift('F-1 CPT');
+    if (/\bopt\b/.test(normalizedAnswer) && !/\bstem\b/.test(normalizedAnswer)) values.unshift('F-1 OPT');
+    if (/\bstem\b/.test(normalizedAnswer)) values.unshift('F-1 STEM');
+    if (/n\/?a|not applicable|do not require work authorization|do not require sponsorship/i.test(answer)) {
+      values.unshift('N/A (I do not require work authorization)');
+    }
+  }
+  if (/\bresume\b[^?]{0,80}\bPDF\s+format\b/.test(normalizedQuestion)
+    && /^(?:yes|true|1|i\s+acknowledge|acknowledge|confirm)/i.test(answer.trim())) {
+    values.unshift('Yes');
+  }
+  if (/\bcertify\b[^?]{0,120}\b(?:true|complete|accurate)\b/.test(normalizedQuestion)
+    && /^(?:yes|true|1|i\s+certify|certify|confirm)/i.test(answer.trim())) {
+    values.unshift('Yes');
+  }
+  if (/\btop\s+preference\b|\banswering\s+[“"]?yes[”"]?\s+below\b/.test(normalizedQuestion)
+    && /^(?:yes|true|1|i\s+acknowledge|acknowledge|confirm)/i.test(answer.trim())) {
+    values.unshift('Yes');
+  }
   if (/legally\s+authorized\s+to\s+work|authori[sz](?:ed|ation)\s+to\s+work|work\s+authori[sz]/.test(normalizedQuestion)) {
     const negative = /^(?:no|false|0)\b/.test(normalizedAnswer) || /\bnot\s+authori[sz]ed\b/.test(normalizedAnswer);
     const affirmative = /^(?:yes|true|1)\b/.test(normalizedAnswer) || (!negative && /\bauthori[sz]ed\b/.test(normalizedAnswer));
@@ -1097,7 +1128,7 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string, c
 }
 
 function isGreenhouseReactSelectQuestion(question: string): boolean {
-  return /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window|month|year)\b|\bexpected\s+graduat(?:ion|e)\b|\bexpect\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b|\bwhat\s+is\s+your\s+gpa\b|\bacademic\s+performance\b|\beducation\s+level\b|\blevel\s+of\s+education\b|\bdegree\b(?!\s+program)|\bdiscipline\b|\bfield\s+of\s+study\b|\bmajor\b|\bcourse\b|\bschool\b|\buniversity\b|\bcurrent\s+year\b|\byear\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\bacademic\s+year\b|\bhow\s+did\s+you\s+hear\b|\breferral\s+source\b|\bhear\s+about\b|\bsource\b|\bsource\s+of\b|\bcountry\b|\bcurrent\s+location\b|\bwhere\s+are\s+you\s+currently\s+(?:located|living|based)\b|\b(?:live|reside|located)\b[^?]{0,80}\b(?:new\s+york|california)\b|\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b|\bapplied\b[^?]{0,120}\b(?:past|previously|before|role|position)\b|\boffer\s+deadlines?\b|\bprior\s+experience\b[^?]{0,120}\b(?:options\s+market\s+making|trading\s+firm)\b|legally\s+authorized\s+to\s+work|(?:require|need)\s+sponsorship|sponsorship\s+for\s+(?:employment\s+visa|work\s+authorization)|\b(?:are|will)\s+you\s+available\b[^?]{0,160}\b(?:internship|full-time|40\s*hours|weeks?)\b|\b(?:internship|full-time|40\s*hours|weeks?)\b[^?]{0,160}\b(?:are|will)\s+you\s+available\b|\bpreferred\s+coding\s+language\b|\bcoding\s+language\b[^?]{0,120}\bpreference\b|\bjob\s+applicant\s+privacy\s+notice\b|\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b|\bresume\b[^?]{0,80}\bPDF\s+format\b|\bcertify\b[^?]{0,120}\b(?:true|complete|accurate)\b|\barea\s+of\s+interest\b|\bteam\s+opening\b|\bopening\b[^?]{0,80}\binterested\b|\bLGBTQIA?\+?\b|sexual\s+orientation|\bgender(?:\s+identity)?\b|\bveteran\b|\bmilitary\b|\brace\b|\bethnicit|\bcategory\b/i.test(question);
+  return /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\btop\s+preference\b|\banswering\s+[“"]?yes[”"]?\s+below\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window|month|year)\b|\bexpected\s+graduat(?:ion|e)\b|\bexpect\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b|\bwhat\s+is\s+your\s+gpa\b|\bacademic\s+performance\b|\beducation\s+level\b|\blevel\s+of\s+education\b|\bdegree\b(?!\s+program)|\bdiscipline\b|\bfield\s+of\s+study\b|\bmajor\b|\bcourse\b|\bschool\b|\buniversity\b|\bcurrent\s+year\b|\byear\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\bacademic\s+year\b|\bhow\s+did\s+you\s+hear\b|\breferral\s+source\b|\bhear\s+about\b|\bsource\b|\bsource\s+of\b|\bcountry\b|\bcurrent\s+location\b|\bwhere\s+are\s+you\s+currently\s+(?:located|living|based)\b|\b(?:live|reside|located)\b[^?]{0,80}\b(?:new\s+york|california)\b|\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b|\bapplied\b[^?]{0,120}\b(?:past|previously|before|role|position)\b|\boffer\s+deadlines?\b|\bprior\s+experience\b[^?]{0,120}\b(?:options\s+market\s+making|trading\s+firm)\b|\bcurrent\s+immigration\s+status\b|\bwork\s+authorization\/status\b|legally\s+authorized\s+to\s+work|(?:require|need)\s+sponsorship|sponsorship\s+for\s+(?:employment\s+visa|work\s+authorization)|\b(?:are|will)\s+you\s+available\b[^?]{0,160}\b(?:internship|full-time|40\s*hours|weeks?)\b|\b(?:internship|full-time|40\s*hours|weeks?)\b[^?]{0,160}\b(?:are|will)\s+you\s+available\b|\bpreferred\s+coding\s+language\b|\bcoding\s+language\b[^?]{0,120}\bpreference\b|\bjob\s+applicant\s+privacy\s+notice\b|\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b|\bresume\b[^?]{0,80}\bPDF\s+format\b|\bcertify\b[^?]{0,120}\b(?:true|complete|accurate)\b|\barea\s+of\s+interest\b|\bteam\s+opening\b|\bopening\b[^?]{0,80}\binterested\b|\bLGBTQIA?\+?\b|sexual\s+orientation|\bgender(?:\s+identity)?\b|\bveteran\b|\bmilitary\b|\brace\b|\bethnicit|\bcategory\b/i.test(question);
 }
 
 function isGreenhouseEducationComboboxQuestion(question: string): boolean {
@@ -2013,6 +2044,11 @@ export function buildManagedPortalActions(
     if (isLegalConsentQuestion(questionText) && !greenhouseRoutinePrivacy) continue;
     const portalSelector = durablePortalSelector(item.portalSelector);
     if (portalSelector) {
+      if (portalFamily(portal) === 'greenhouse' && /^combobox$/i.test(item.portalInputType ?? '')) {
+        pushGreenhouseQuestionComboboxActions(actions, portalSelector, questionText, item.answer, 'question', packet.jdText);
+        pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');
+        continue;
+      }
       if (/^(?:checkbox|radio)$/i.test(item.portalInputType ?? '')) {
         if (portalFamily(portal) === 'greenhouse') {
           pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');

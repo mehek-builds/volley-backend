@@ -294,7 +294,7 @@ test('combobox discoveries resolve stored academic facts without direct text sel
       portal_selector: question.portal_selector,
     })),
     [
-      { question: 'Degree', answer: 'Bachelor\'s Degree', portal_selector: undefined },
+      { question: 'Degree', answer: 'Bachelor\'s Degree', portal_selector: '[data-litos-discovered-6]' },
     ],
   );
 });
@@ -345,8 +345,8 @@ test('discovered GPA and major questions resolve from profile-backed academic fa
       portal_selector: question.portal_selector,
     })),
     [
-      { question: 'What is your GPA?', answer: '3.89', portal_selector: undefined },
-      { question: 'What is your major?', answer: 'Computer Science', portal_selector: undefined },
+      { question: 'What is your GPA?', answer: '3.89', portal_selector: '[data-litos-discovered-7]' },
+      { question: 'What is your major?', answer: 'Computer Science', portal_selector: '[data-litos-discovered-8]' },
     ],
   );
 });

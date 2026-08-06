@@ -1595,7 +1595,12 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
     resume: Buffer.from('pdf'),
     resumeName: 'resume.pdf',
     referralSourceDefault: 'Company website',
+    jdText: 'Akuna Capital software engineer internship',
     questions: [
+      {
+        question: 'By submitting this application and answering "yes" below, I acknowledge that this role is my top preference.',
+        answer: 'Yes',
+      },
       { question: 'Which University do/did you attend?', answer: 'University of Southern California, Viterbi School of Engineering' },
       { question: 'What education level are you currently pursuing?', answer: 'Bachelor\'s Degree' },
       { question: 'Graduation Month', answer: 'May' },
@@ -1606,7 +1611,15 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
       { question: 'How did you hear about this job?', answer: 'Company website' },
       { question: 'Do you have any offer deadlines that we should be aware of?', answer: "I don't have any offer deadlines right now." },
       { question: 'Do you have prior experience working at an options market making trading firm?', answer: "I don't have prior experience at an options market making firm." },
+      {
+        question: 'If you answered “Yes” above to requiring visa sponsorship now or in the future for work authorization, please respond to the following questions. What is your current immigration status/basis of your current work authorization?',
+        answer: 'F-1 CPT',
+      },
       { question: 'Do you live in New York or California?', answer: 'No' },
+      {
+        question: 'I certify that all information I have provided in order to apply for this position with Akuna is true, complete, and accurate.',
+        answer: 'Yes',
+      },
       { question: 'I acknowledge that my resume must be submitted in PDF format to be considered.', answer: 'Yes' },
       {
         question: 'To be considered for this role, you must have earned a high school diploma (or an equivalent degree). Please confirm the month and year that most accurately reflects your high school graduation.',
@@ -1617,19 +1630,22 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
 
   const comboFills = actions.filter((action) => action.type === 'fill' && action.label?.startsWith('question_combo_label:'));
   const valuesFor = (text: string) => comboFills
-    .filter((action) => action.label?.toLowerCase().includes(text.toLowerCase()))
-    .map((action) => action.value);
+      .filter((action) => action.label?.toLowerCase().includes(text.toLowerCase()))
+      .map((action) => action.value);
   assert.deepEqual(valuesFor('Which University do/did you attend?'), ['University of Southern California']);
-  assert.deepEqual(valuesFor('What education level are you currently pursuing?'), ['Bachelor\'s']);
+  assert.deepEqual(valuesFor('By submitting this application'), ['Yes']);
+  assert.deepEqual(valuesFor('What education level are you currently pursuing?'), ['Bachelors']);
   assert.deepEqual(valuesFor('Graduation Month'), ['May']);
   assert.deepEqual(valuesFor('Graduation Year'), ['2028']);
-  assert.deepEqual(valuesFor('What is your GPA?'), ['3.6 or above (out of 4.0)']);
+  assert.deepEqual(valuesFor('What is your GPA?'), ['3.9']);
   assert.deepEqual(valuesFor('Have you ever applied to a full time or internship position'), ['No']);
   assert.deepEqual(valuesFor('Have you applied to this role at Akuna previously?'), ['No']);
-  assert.deepEqual(valuesFor('How did you hear about this job?'), ['Other (none of the above)']);
+  assert.deepEqual(valuesFor('How did you hear about this job?'), ['Other']);
   assert.deepEqual(valuesFor('Do you have any offer deadlines'), ['No']);
   assert.deepEqual(valuesFor('Do you have prior experience working at an options market making'), ['No']);
+  assert.deepEqual(valuesFor('If you answered “Yes” above'), ['F-1 CPT']);
   assert.deepEqual(valuesFor('Do you live in New York or California?'), ['No']);
+  assert.deepEqual(valuesFor('I certify that all information'), ['Yes']);
   assert.deepEqual(valuesFor('I acknowledge that my resume must be submitted in PDF format'), ['Yes']);
   assert.equal(comboFills.some((action) => action.label?.includes('high school diploma')), false);
 
@@ -1643,6 +1659,50 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
     assert.equal(actions[index + 2]?.selector, '[id^="react-select-"][id$="-option-0"]:visible');
     assert.equal(actions[index + 3]?.type, 'press');
   }
+});
+
+test('Greenhouse uses preserved combobox portal selectors without raw-filling React-select inputs', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    jdText: 'Akuna Capital software engineer internship',
+    questions: [
+      {
+        question: 'What education level are you currently pursuing?',
+        answer: 'Bachelor\'s Degree',
+        portalSelector: 'input[id="question_123"]',
+        portalInputType: 'combobox',
+      },
+    ],
+  });
+
+  const scoped = actions.filter((action) => action.label?.startsWith('question_combo:'));
+  assert.ok(scoped.some((action) => action.type === 'fill' && action.selector === 'input[id="question_123"]' && action.value === 'Bachelors'));
+  assert.equal(actions.some((action) => action.label?.startsWith('question:What education level')), false);
+  assert.ok(scoped.some((action) => action.type === 'click' && action.label?.endsWith('_option_value')));
+  assert.ok(scoped.some((action) => action.type === 'press' && action.label?.endsWith('_select')));
+});
+
+test('Greenhouse keeps generic education level labels outside Akuna context', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question: 'What education level are you currently pursuing?',
+        answer: 'Bachelor\'s Degree',
+      },
+    ],
+  });
+  const fill = actions.find((action) =>
+    action.type === 'fill'
+    && action.label?.startsWith('question_combo_label:')
+    && action.label.includes('What education level are you currently pursuing?'));
+  assert.equal(fill?.value, 'Bachelor\'s');
 });
 
 test('Greenhouse work authorization React-select respects negative reviewed answers', () => {
