@@ -287,6 +287,8 @@ test('never answers CAPTCHA or recording consent fields', () => {
   assert.equal(resolveKnownAnswer('Please complete the CAPTCHA', 'checkbox', {}, undefined), null);
   assert.equal(isRefusedQuestion('Do you consent to this interview being recorded?'), true);
   assert.equal(resolveKnownAnswer('Do you consent to this interview being recorded?', 'checkbox', {}, undefined), null);
+  assert.equal(isRefusedQuestion('At the time of application, are you 18+ years of age?'), true);
+  assert.equal(resolveKnownAnswer('At the time of application, are you 18+ years of age?', 'text', {}, undefined), null);
 });
 
 test('sensitive gates allow only exact stored work eligibility answers', () => {
