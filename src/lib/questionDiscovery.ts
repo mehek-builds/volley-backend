@@ -44,6 +44,7 @@ export type ApplicationProfileLike = StoredSalaryProfile & {
   gpa_scale?: string;
   major?: string;
   languages?: string[] | null;
+  skills?: string[] | null;
   eeo_prefs?: Record<string, string> | null;
   referral_source_default?: string;
 };
@@ -228,6 +229,8 @@ const MAJOR_QUESTION =
   /\bmajor\b|field of study|course of study|degree subject|\bdiscipline\b|\bcourse\b[^?]{0,80}\benrolled\b|\benrolled\b[^?]{0,80}\bcourse\b/i;
 const LANGUAGE_QUESTION =
   /\bspoken\s+languages?\b|\blanguages?\s+(?:do\s+you\s+|are\s+you\s+)?(?:speak|know|fluent|proficient)|\b(?:speak|fluent|proficient)\b[^?]{0,40}\blanguages?\b|\b(?:speak|fluent|proficient)\b[^?]{0,40}\b(?:english|hindi|arabic|spanish|french|german|portuguese|mandarin|chinese|cantonese|tamil|punjabi|urdu)\b/i;
+const PROGRAMMING_LANGUAGE_QUESTION =
+  /\bpreferred\s+coding\s+language\b|\bcoding\s+language\b[^?]{0,160}\b(?:preference|preferred|interview)\b|\binterview\b[^?]{0,160}\bcoding\s+language\b|\bpreferred\s+programming\s+language\b/i;
 const TERM_QUESTION =
   /(length|duration|term)\b.*\bavailab|availab.*\b(length|duration|term)\b|how long.*(available|intern|stay|commit)|(weeks|months).*\b(available|internship|commit)|\bterm\s*\/?\s*length/i;
 const SALARY_QUESTION = /salary|compensat|desired pay|expected pay|pay expectation/i;
@@ -590,6 +593,34 @@ function languageAnswer(label: string, ap: ApplicationProfileLike): { value: str
   return { value: stored.join(', ') };
 }
 
+const PROGRAMMING_LANGUAGE_ALIASES: Array<{ value: string; patterns: RegExp[] }> = [
+  { value: 'Python', patterns: [/\bpython(?:\s*3)?\b/i] },
+  { value: 'TypeScript', patterns: [/\btypescript\b|\bts\b/i] },
+  { value: 'JavaScript', patterns: [/\bjavascript\b|\bjs\b/i] },
+  { value: 'Java', patterns: [/\bjava\b/i] },
+  { value: 'C++', patterns: [/(?<!\w)c\+\+(?!\w)|\bcpp\b/i] },
+  { value: 'C#', patterns: [/(?<!\w)c#(?!\w)|\bc-sharp\b/i] },
+  { value: 'Go', patterns: [/\bgolang\b|\bgo\b/i] },
+  { value: 'Ruby', patterns: [/\bruby\b/i] },
+  { value: 'Swift', patterns: [/\bswift\b/i] },
+  { value: 'Lua', patterns: [/\blua\b/i] },
+];
+
+function normalizedStoredSkills(ap: ApplicationProfileLike): string[] {
+  return (Array.isArray(ap.skills) ? ap.skills : [])
+    .map((skill) => skill.trim())
+    .filter(Boolean);
+}
+
+function programmingLanguageAnswer(label: string, ap: ApplicationProfileLike): { value: string } | null {
+  if (!PROGRAMMING_LANGUAGE_QUESTION.test(label)) return null;
+  const stored = normalizedStoredSkills(ap);
+  if (stored.length === 0) return null;
+  const joined = stored.join(' ');
+  const match = PROGRAMMING_LANGUAGE_ALIASES.find((item) => item.patterns.some((pattern) => pattern.test(joined)));
+  return match ? { value: match.value } : null;
+}
+
 export type DiscoveredQuestion = {
   label: string;
   selector: string;
@@ -834,6 +865,9 @@ export function resolveKnownAnswer(
 
   const softwareEngineeringArea = softwareEngineeringAreaAnswer(label, jdText);
   if (softwareEngineeringArea) return softwareEngineeringArea;
+
+  const programmingLanguage = programmingLanguageAnswer(label, ap);
+  if (programmingLanguage) return programmingLanguage;
 
   const routineConsent = routineConsentAnswer(label);
   if (routineConsent) return routineConsent;
