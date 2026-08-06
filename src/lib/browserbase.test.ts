@@ -135,6 +135,45 @@ test('managed Stratus posts bounded actions to the private production run endpoi
   else process.env.STRATUS_BASE_URL = previousUrl;
 });
 
+test('managed Stratus converts label fills into selector-backed fill actions', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  let captured: { body?: { actions?: Array<Record<string, unknown>> } } = {};
+  globalThis.fetch = (async (_input, init) => {
+    captured = { body: JSON.parse(String(init?.body)) };
+    return new Response(JSON.stringify({ run: { title: 'Complete', url: 'https://portal.example/complete', text: 'Thank you' } }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  await runManagedBrowser('https://portal.example/apply', [{
+    type: 'fillByLabelText',
+    text: 'First Name',
+    value: 'Taylor',
+    label: 'first_name_label',
+    optional: true,
+    timeout: 10000,
+  }]);
+
+  assert.deepEqual(captured.body?.actions?.map((action) => action.type), ['fill']);
+  const action = captured.body?.actions?.[0];
+  assert.equal(action?.text, undefined);
+  assert.equal(action?.value, 'Taylor');
+  assert.equal(typeof action?.selector, 'string');
+  assert.match(String(action?.selector), /label:has-text\("First Name"\)/);
+  assert.ok(String(action?.selector).length <= 500);
+
+  globalThis.fetch = previousFetch;
+  if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+  else process.env.STRATUS_API_KEY = previousKey;
+  if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+  else process.env.STRATUS_BASE_URL = previousUrl;
+});
+
 test('managed Stratus surfaces structured provider errors as readable messages', async () => {
   const previousKey = process.env.STRATUS_API_KEY;
   const previousUrl = process.env.STRATUS_BASE_URL;
