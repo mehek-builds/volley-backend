@@ -59,14 +59,15 @@ test('submit-request starts a fresh run instead of carrying stale run artifacts'
   assert.match(route, /const next = freshSubmitRequestReview\(current, normalizedSubmittedQuestions\)/);
 });
 
-test('ATS API channel can prepare without opening a CAPTCHA-prone browser path', async () => {
+test('ATS API channel can prepare without opening a CAPTCHA-prone browser path only when posting is explicitly enabled', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
   assert.match(runner, /import \{ assessAtsSubmissionChannel, tryAtsSubmissionChannel \} from '\.\.\/lib\/atsSubmissionChannels'/);
+  assert.match(runner, /export function atsApiSubmissionEnabled\(env: NodeJS\.ProcessEnv = process\.env\)/);
   const prepareIndex = runner.indexOf('async function prepare(');
-  const atsAssessmentIndex = runner.indexOf('const atsAssessment = assessAtsSubmissionChannel', prepareIndex);
+  const atsAssessmentIndex = runner.indexOf('const atsAssessment = atsApiSubmissionEnabled() ? assessAtsSubmissionChannel', prepareIndex);
   const localControlledIndex = runner.indexOf('if (shouldUseLocalControlledBrowser(portal))', prepareIndex);
   const accountGateIndex = runner.indexOf('isAccountWalledFamily(portal)', prepareIndex);
-  assert.ok(atsAssessmentIndex > prepareIndex, 'prepare must assess employer-authorized API channels');
+  assert.ok(atsAssessmentIndex > prepareIndex, 'prepare must assess employer-authorized API channels only after the explicit posting gate');
   assert.ok(localControlledIndex > atsAssessmentIndex, 'API-capable employers must skip browser preparation');
   assert.ok(accountGateIndex > atsAssessmentIndex, 'API-capable employers must skip CAPTCHA and account-wall preparation gates');
   assert.match(runner.slice(atsAssessmentIndex, localControlledIndex), /preparedReviewPatch\(authorization, true\)/);
@@ -78,6 +79,7 @@ test('ATS API channel runs after final claim and before browser submission', asy
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
   assert.match(runner, /import \{ assessAtsSubmissionChannel, tryAtsSubmissionChannel \} from '\.\.\/lib\/atsSubmissionChannels'/);
   const helperIndex = runner.indexOf('async function submitViaAtsSubmissionChannel');
+  const enabledIndex = runner.indexOf('if (!atsApiSubmissionEnabled()) return false;', helperIndex);
   const atsIndex = runner.indexOf('const atsResult = await tryAtsSubmissionChannel', helperIndex);
   const authCheckIndex = runner.indexOf('if (!await authorizationValidAtClick(row, review))', helperIndex);
   const claimIndex = runner.indexOf('const claimedRow = await claimSubmission(row)');
@@ -85,6 +87,7 @@ test('ATS API channel runs after final claim and before browser submission', asy
   const browserGateIndex = runner.indexOf('portalCanAutoSubmit(portal)', callIndex);
   const managedIndex = runner.indexOf('if (isManagedStratusProvider())', callIndex);
   assert.ok(helperIndex > 0, 'ATS API submission helper is missing');
+  assert.ok(enabledIndex > helperIndex && enabledIndex < authCheckIndex, 'API submission must be disabled by default before any POST path');
   assert.ok(authCheckIndex > helperIndex && authCheckIndex < atsIndex, 'API submission must re-check consent before send');
   assert.ok(claimIndex > 0, 'submit must atomically claim the final submission before any send path');
   assert.ok(callIndex > claimIndex, 'ATS API submission must run only after the final claim');
