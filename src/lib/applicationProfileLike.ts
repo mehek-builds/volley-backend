@@ -39,6 +39,11 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
     : {}) as Record<string, unknown>;
   const str = (key: string): string | undefined => (typeof app[key] === 'string' ? (app[key] as string) : undefined);
   const appBoolean = (key: string): boolean | undefined => (typeof app[key] === 'boolean' ? (app[key] as boolean) : undefined);
+  const strings = (value: unknown): string[] | undefined => {
+    if (!Array.isArray(value)) return undefined;
+    const out = value.map((item) => (typeof item === 'string' ? item.trim() : '')).filter(Boolean);
+    return out.length > 0 ? [...new Set(out)] : undefined;
+  };
   const academicStr = (key: string): string | undefined => {
     const parsedValue = parsed[key];
     if (typeof parsedValue === 'string' && parsedValue.trim()) return parsedValue;
@@ -82,6 +87,8 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
     gpa: str('gpa'),
     gpa_scale: str('gpa_scale'),
     major: str('major'),
+    languages: strings(app.languages),
+    skills: strings(profileRow?.skills) ?? strings(parsed.skills) ?? strings(base.skills),
     eeo_prefs: app.eeo_prefs && typeof app.eeo_prefs === 'object'
       ? app.eeo_prefs as Record<string, string>
       : undefined,
