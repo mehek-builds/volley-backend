@@ -1181,6 +1181,10 @@ function isGreenhouseReactSelectQuestion(question: string): boolean {
   return /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\btop\s+preference\b|\banswering\s+[“"]?yes[”"]?\s+below\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window|month|year)\b|\bexpected\s+graduat(?:ion|e)\b|\bexpect(?:ing)?\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b|\bwhat\s+is\s+your\s+gpa\b|\bacademic\s+performance\b|\beducation\s+level\b|\blevel\s+of\s+education\b|\bdegree\b(?!\s+program)|\bdiscipline\b|\bfield\s+of\s+study\b|\bmajor\b|\bcourse\b|\bschool\b|\buniversity\b|\bcurrent\s+year\b|\byear\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\bacademic\s+year\b|\bhow\s+did\s+you\s+hear\b|\breferral\s+source\b|\bhear\s+about\b|\bwhere\s+have\s+you\s+learned\s+about\b|\bsource\b|\bsource\s+of\b|\bcountry\b|\bcurrent\s+location\b|\bwhere\s+are\s+you\s+currently\s+(?:located|living|based)\b|\b(?:live|reside|located)\b[^?]{0,80}\b(?:new\s+york|california)\b|\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b|\bapplied\b[^?]{0,120}\b(?:past|previously|before|role|position)\b|\boffer\s+deadlines?\b|\bprior\s+experience\b[^?]{0,120}\b(?:options\s+market\s+making|trading\s+firm)\b|\bcurrent\s+immigration\s+status\b|\bwork\s+authorization\/status\b|legally\s+authorized\s+to\s+work|(?:require|need)\s+sponsorship|sponsorship\s+for\s+(?:employment\s+visa|work\s+authorization)|\b(?:are|will)\s+you\s+available\b[^?]{0,160}\b(?:internship|full-time|40\s*hours|weeks?)\b|\b(?:internship|full-time|40\s*hours|weeks?)\b[^?]{0,160}\b(?:are|will)\s+you\s+available\b|\bpreferred\s+coding\s+language\b|\bcoding\s+language\b[^?]{0,120}\bpreference\b|\bjob\s+applicant\s+privacy\s+notice\b|\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b|\bprocessing\s+of\s+personal\s+data\b|\bAI\s+Policy\s+for\s+Interviewers\b|\bmajoring\s+in\s+STEM\b|\bresume\b[^?]{0,80}\bPDF\s+format\b|\bcertify\b[^?]{0,120}\b(?:true|complete|accurate)\b|\barea\s+of\s+interest\b|\bteam\s+opening\b|\bopening\b[^?]{0,80}\binterested\b|\bLGBTQIA?\+?\b|sexual\s+orientation|\bgender(?:\s+identity)?\b|\bveteran\b|\bmilitary\b|\brace\b|\bethnicit|\bcategory\b/i.test(question);
 }
 
+function isSamsaraLearnedAboutQuestion(question: string): boolean {
+  return /\bwhere\s+have\s+you\s+learned\s+about\s+samsara\b/i.test(question);
+}
+
 function isGreenhouseEducationComboboxQuestion(question: string): boolean {
   return /\b(?:school|degree|discipline)--\d+\b/i.test(question);
 }
@@ -1200,14 +1204,24 @@ function pushGreenhouseQuestionComboboxActions(
   contextText = '',
 ) {
   if (!isGreenhouseReactSelectQuestion(questionText)) return;
-  for (const [index, value] of greenhouseComboboxValuesForQuestion(questionText, answer, contextText).slice(0, 1).entries()) {
-    managedGreenhouseScopedReactSelectFill(
-      actions,
-      selector,
-      GREENHOUSE_VISIBLE_REACT_SELECT_OPTION_SELECTOR,
-      value,
-      `${labelPrefix}_combo:${index}:${questionText.slice(0, 80)}`,
+  const selectors = [selector];
+  if (isSamsaraLearnedAboutQuestion(questionText)) {
+    selectors.push(
+      `${selector} input[role="combobox"]`,
+      `${selector} [role="combobox"]`,
+      `input[role="combobox"]:right-of(${selector})`,
     );
+  }
+  for (const [index, value] of greenhouseComboboxValuesForQuestion(questionText, answer, contextText).slice(0, 1).entries()) {
+    for (const [selectorIndex, inputSelector] of selectors.entries()) {
+      managedGreenhouseScopedReactSelectFill(
+        actions,
+        inputSelector,
+        GREENHOUSE_VISIBLE_REACT_SELECT_OPTION_SELECTOR,
+        value,
+        `${labelPrefix}_combo:${index}:${selectorIndex}:${questionText.slice(0, 80)}`,
+      );
+    }
   }
 }
 
@@ -2173,6 +2187,15 @@ export function buildManagedPortalActions(
     const greenhouseRoutinePrivacy = portalFamily(portal) === 'greenhouse' && isRoutineCandidatePrivacyAcknowledgement(questionText);
     if (isLegalConsentQuestion(questionText) && !greenhouseRoutinePrivacy) continue;
     const portalSelector = durablePortalSelector(item.portalSelector);
+    const runtimeGreenhouseSelector = portalFamily(portal) === 'greenhouse'
+      && isSamsaraLearnedAboutQuestion(questionText)
+      && item.portalSelector?.trim().startsWith('[data-litos-discovered-')
+      ? item.portalSelector.trim()
+      : undefined;
+    if (runtimeGreenhouseSelector) {
+      pushGreenhouseQuestionComboboxActions(actions, runtimeGreenhouseSelector, questionText, item.answer, 'question', packet.jdText);
+      pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');
+    }
     if (portalSelector) {
       if (portalFamily(portal) === 'greenhouse' && /^combobox$/i.test(item.portalInputType ?? '')) {
         pushGreenhouseQuestionComboboxActions(actions, portalSelector, questionText, item.answer, 'question', packet.jdText);
