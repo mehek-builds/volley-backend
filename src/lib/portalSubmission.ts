@@ -699,6 +699,8 @@ const GREENHOUSE_PHONE_SELECTOR =
   `#phone, input[name="job_application[phone]"], ${SEMANTIC_PHONE_SELECTOR}`;
 const GREENHOUSE_RESUME_SELECTOR =
   '#resume, input[type="file"][name="job_application[resume]"], input[type="file"][id*="resume" i], input[type="file"][name*="resume" i], input[type="file"][aria-label*="resume" i], label:has-text("Resume") input[type="file"]';
+const GREENHOUSE_CANDIDATE_PRIVACY_CHECKBOX_SELECTOR =
+  'input[type="checkbox"][required][description*="Candidate Privacy Policy" i], input[type="checkbox"][required][description*="Candidate Privacy Notice" i], input[type="checkbox"][required][description*="Applicant Privacy Policy" i], input[type="checkbox"][required][description*="Applicant Privacy Notice" i]';
 const ASHBY_PHONE_SELECTOR =
   `#phone, input[name="phone"], input[name="_systemfield_phone"], ${SEMANTIC_PHONE_SELECTOR}`;
 
@@ -1706,6 +1708,13 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedFillByLabel(actions, 'What is your GPA?', packet.gpa, 'gpa_question');
     managedUpload(actions, GREENHOUSE_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
     managedUpload(actions, 'input#cover_letter[type="file"], input[type="file"][name*="cover_letter" i]', 'cover_letter', packet.coverLetter, packet.coverLetterName);
+    actions.push({
+      type: 'click',
+      selector: GREENHOUSE_CANDIDATE_PRIVACY_CHECKBOX_SELECTOR,
+      label: 'greenhouse_candidate_privacy_acknowledgement',
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
   } else if (family === 'lever') {
     managedFill(actions, 'input[name="name"]', packet.fullName, 'name', false);
     managedFill(actions, 'input[name="email"]', packet.email, 'email', false);

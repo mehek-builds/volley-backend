@@ -32,6 +32,11 @@ function isGreenhousePreflightClick(action: { type: string; label?: string }) {
       || action.label === 'greenhouse_open_application_form');
 }
 
+function isGreenhouseFixedCandidatePrivacyClick(action: { type: string; label?: string }) {
+  return action.type === 'click'
+    && action.label === 'greenhouse_candidate_privacy_acknowledgement';
+}
+
 test('detects the four supported applicant portal families', () => {
   assert.equal(detectPortal('https://boards.greenhouse.io/acme/jobs/123'), 'greenhouse');
   assert.equal(detectPortal('https://databricks.com/company/careers/open-positions/job?gh_jid=6883068002'), 'greenhouse');
@@ -63,7 +68,10 @@ test('a managed discovery run detects custom questions and cover-letter attachme
     timeout: 10_000,
   });
   assert.equal(actions.some((a) => a.type === 'fillByLabelText' && a.label?.startsWith('question:')), false);
-  assert.equal(actions.some((a) => a.type === 'click' && !isGreenhousePreflightClick(a)), false);
+  assert.equal(actions.some((a) =>
+    a.type === 'click'
+    && !isGreenhousePreflightClick(a)
+    && !isGreenhouseFixedCandidatePrivacyClick(a)), false);
   const fillSelectors = actions.filter((a) => a.type === 'fill').map((a) => a.selector);
   assert.ok(fillSelectors.some((s) => s?.includes('first_name')));
   assert.equal(actions.some((a) => a.type === 'fillByLabelText' && a.label === 'first_name_label'), true);
@@ -283,7 +291,10 @@ test('managed controlled-portal actions include reviewed fields, resume upload, 
   }, true);
   assert.deepEqual(
     actions
-      .filter((action) => action.type !== 'select' && !isGreenhousePreflightClick(action))
+      .filter((action) =>
+        action.type !== 'select'
+        && !isGreenhousePreflightClick(action)
+        && !isGreenhouseFixedCandidatePrivacyClick(action))
       .map((action) => action.type),
     [
       'waitForSelector',
@@ -653,7 +664,10 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
   // the two optional reviewed questions.
   assert.deepEqual(
     actions
-      .filter((a) => a.type !== 'select' && !isGreenhousePreflightClick(a))
+      .filter((a) =>
+        a.type !== 'select'
+        && !isGreenhousePreflightClick(a)
+        && !isGreenhouseFixedCandidatePrivacyClick(a))
       .map((a) => a.type),
     [
       'waitForSelector',
@@ -1644,7 +1658,10 @@ test('choice controls are not auto-clicked by matching answer text', () => {
     resumeName: 'resume.pdf',
     questions: [{ question: 'Do you consent to the terms?', answer: 'Yes' }],
   });
-  const clicks = actions.filter((action) => action.type === 'click' && !isGreenhousePreflightClick(action));
+  const clicks = actions.filter((action) =>
+    action.type === 'click'
+    && !isGreenhousePreflightClick(action)
+    && !isGreenhouseFixedCandidatePrivacyClick(action));
   assert.equal(clicks.length, 0, 'no click action may be synthesized from an answer string');
 });
 
@@ -1658,6 +1675,25 @@ test('Greenhouse managed actions never include demographic data consent', () => 
   });
   assert.equal(actions.some((action) => action.label === 'greenhouse_demographic_data_consent_checkbox'), false);
   assert.equal(actions.some((action) => action.label === 'greenhouse_demographic_data_consent'), false);
+});
+
+test('Greenhouse managed actions acknowledge required Candidate Privacy checkboxes discovered only on the live form', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+
+  assert.ok(actions.some((action) =>
+    action.type === 'click'
+    && action.label === 'greenhouse_candidate_privacy_acknowledgement'
+    && action.selector?.includes('[description*="Candidate Privacy Policy" i]')
+    && action.optional === true
+    && (action.timeout ?? Infinity) < 30_000),
+  );
+  assert.equal(actions.some((action) => action.label === 'greenhouse_demographic_data_consent_checkbox'), false);
 });
 
 test('Greenhouse managed actions include explicitly saved demographic choices', () => {
@@ -2319,6 +2355,7 @@ test('Greenhouse managed actions retry known yes-no work and onsite choices by e
     actions.filter((action) =>
       action.type === 'click'
       && !isGreenhousePreflightClick(action)
+      && !isGreenhouseFixedCandidatePrivacyClick(action)
       && !action.label?.startsWith('education_school_combo_label')
       && !action.label?.startsWith('question_combo_label:')).length,
     0,
