@@ -827,8 +827,8 @@ function greenhouseQuestionSelectSelectors(label: string): string[] {
 function greenhouseQuestionComboboxSelectors(label: string): string[] {
   const text = cssString(label);
   return [
-    `.select__container:has(> label:has-text("${text}")) input[role="combobox"]`,
     `.field-wrapper:has(label:has-text("${text}")) input[role="combobox"]`,
+    `.select__container:has(> label:has-text("${text}")) input[role="combobox"]`,
     `div:has(> label:has-text("${text}")) input[role="combobox"]`,
   ];
 }

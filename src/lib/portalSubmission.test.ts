@@ -1797,6 +1797,49 @@ test('Greenhouse replays fixed Akuna graduation month and year when discovery mi
   const fixedComboFills = actions.filter((action) => action.type === 'fill' && action.label?.startsWith('greenhouse_fixed_question_combo_label:'));
   assert.ok(fixedComboFills.some((action) => action.selector?.includes('Graduation Month') && action.value === 'May'));
   assert.ok(fixedComboFills.some((action) => action.selector?.includes('Graduation Year') && action.value === '2028'));
+  assert.ok(fixedComboFills.every((action) => action.selector?.startsWith('.field-wrapper:has(label:has-text(')));
+});
+
+test('Greenhouse Akuna fixed combobox selector follows the live nested field-wrapper shape', () => {
+  const liveNestedMarkup = new DOMParser().parseFromString(`
+    <div class="field-wrapper">
+      <div class="select">
+        <div class="select__container">
+          <label for="question_67727951">Graduation Month</label>
+          <div class="select-shell">
+            <div class="select__control">
+              <input id="question_67727951" role="combobox" aria-autocomplete="list" />
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `, 'text/html');
+  const label = Array.from(liveNestedMarkup.getElementsByTagName('label'))
+    .find((element) => element.textContent === 'Graduation Month');
+  const combobox = Array.from(liveNestedMarkup.getElementsByTagName('input'))
+    .find((element) => element.getAttribute('role') === 'combobox');
+  const fieldWrapper = label?.parentNode?.parentNode?.parentNode;
+
+  assert.equal(fieldWrapper?.nodeName, 'div');
+  assert.equal((fieldWrapper as Element).getAttribute('class'), 'field-wrapper');
+  assert.equal(fieldWrapper, combobox?.parentNode?.parentNode?.parentNode?.parentNode?.parentNode);
+
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    graduationMonth: 'May',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    jdText: 'Akuna Capital software engineer internship',
+    questions: [],
+  });
+
+  const monthFill = actions.find((action) =>
+    action.type === 'fill'
+    && action.label?.startsWith('greenhouse_fixed_question_combo_label:')
+    && action.selector?.includes('Graduation Month'));
+  assert.equal(monthFill?.selector, '.field-wrapper:has(label:has-text("Graduation Month")) input[role="combobox"]');
 });
 
 test('Greenhouse uses preserved combobox portal selectors without raw-filling React-select inputs', () => {
