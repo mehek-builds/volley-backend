@@ -946,6 +946,19 @@ function greenhouseGraduationBucket(value: string): string | undefined {
   return 'Later than Summer 2028';
 }
 
+function greenhouseClosestGraduationOption(value: string): string | undefined {
+  const year = Number(value.match(/\b(20\d{2})\b/)?.[1]);
+  if (!Number.isFinite(year)) return undefined;
+  if (year < 2025) return 'Before 2025';
+  if (year > 2029) return undefined;
+  const monthToken = value.match(/\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|spring|summer|fall|autumn|winter)\b/i)?.[1]?.toLowerCase();
+  const month =
+    !monthToken ? 12
+      : /^(?:jan|feb|mar|apr|may|jun|spring|summer)/.test(monthToken) ? 6
+        : 12;
+  return `${month === 6 ? 'June' : 'December'} ${year}`;
+}
+
 function abbreviatedUsLocation(value: string): string | undefined {
   const stateMap: Record<string, string> = { california: 'CA', washington: 'WA' };
   const match = value.match(/^\s*([^,]+),\s*([^,]+?)(?:,\s*(?:United States|USA|US|U\.S\.))?\s*$/i);
@@ -970,7 +983,10 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string): 
     values.unshift(greenhouseGpaBucket(answer) ?? '');
   }
   if (/\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window)\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bexpected\s+graduat(?:ion|e)|\bexpect\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b/.test(normalizedQuestion)) {
-    values.unshift(greenhouseGraduationBucket(answer) ?? '');
+    const closestDateQuestion = /\bclosest\s+date\b|\bgraduate\s+or\s+complete\s+your\s+program\b/.test(normalizedQuestion);
+    values.unshift(closestDateQuestion
+      ? greenhouseClosestGraduationOption(answer) ?? greenhouseGraduationBucket(answer) ?? ''
+      : greenhouseGraduationBucket(answer) ?? '');
   }
   if (/\bdegree\b/.test(normalizedQuestion) && /\bbachelor/i.test(answer)) {
     values.unshift(/\b(?:currently\s+pursuing|pursuing|enrolled\s+in\s+university)\b/.test(normalizedQuestion) ? 'Bachelor\'s' : 'Bachelor\'s Degree');
@@ -982,6 +998,9 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string): 
     values.unshift(answer.replace(/\s+year$/i, ''), answer);
   }
   if (/\b(?:how\s+did\s+you\s+hear|referral\s+source|hear\s+about|source)\b/.test(normalizedQuestion)) {
+    if (/\bhow\s+did\s+you\s+hear\s+about\s+this\s+job\b/.test(normalizedQuestion) && /^company website$/i.test(answer.trim())) {
+      values.unshift('Other (none of the above)');
+    }
     values.push('Company Website', 'Company website', 'Careers page', 'Career site', 'Other');
   }
   if (/\b(?:country|currently\s+residing|current\s+location|where\s+are\s+you\s+currently\s+(?:located|living|based))\b/.test(normalizedQuestion)) {
