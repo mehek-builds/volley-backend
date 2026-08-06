@@ -637,6 +637,36 @@ test('live-audit education variants resolve from stored education profile facts'
   });
 });
 
+test('live-audit profile fields use question shape before generic enrollment words', () => {
+  const profile = {
+    school: 'University of Southern California',
+    degree: 'Bachelor of Science in Computer Science',
+    grad_date: 'May 2027',
+    grad_year: 2027,
+    currently_enrolled: true,
+    address_country: 'United States',
+  };
+
+  assert.deepEqual(resolveKnownAnswer('Which university are you currently enrolled in?', 'select', profile, undefined), {
+    value: 'University of Southern California',
+  });
+  assert.deepEqual(resolveKnownAnswer("University / Institution (Bachelor's Degree)", 'select', profile, undefined), {
+    value: 'University of Southern California',
+  });
+  assert.deepEqual(resolveKnownAnswer('If you are currently enrolled in a university or program, when do you expect to graduate or complete your program?', 'select', profile, undefined), {
+    value: 'May 2027',
+  });
+  assert.deepEqual(resolveKnownAnswer('Have you been enrolled in WorldQuant University in the past 12 months?', 'radio', profile, undefined), {
+    value: 'No',
+  });
+  assert.deepEqual(resolveKnownAnswer('Have you ever worked for Redwood Materials?', 'radio', profile, undefined), {
+    value: 'No',
+  });
+  assert.deepEqual(resolveKnownAnswer('Are you available for a 12-week full-time (40 hours per week) internship between September - December 2026?', 'select', profile, undefined), {
+    value: 'Yes',
+  });
+});
+
 test('study year stays blank when graduation evidence cannot support it', () => {
   assert.equal(
     resolveKnownAnswer('What is the current year of your studies?', 'select', { grad_date: 'May 2024', grad_year: 2024 }, undefined),

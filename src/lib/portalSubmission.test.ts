@@ -1240,6 +1240,45 @@ test('Greenhouse replays Jump academic and referral choices without consent', ()
   assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
 });
 
+test('Greenhouse profile-backed academic questions replay through label-scoped comboboxes', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    school: 'University of Southern California',
+    degree: 'Bachelor of Science in Computer Science',
+    major: 'Computer Science',
+    graduationDate: 'May 2027',
+    gpa: '3.89/4.0',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      { question: 'Degree', answer: 'Bachelor of Science in Computer Science' },
+      { question: 'Discipline', answer: 'Computer Science' },
+      { question: 'What is your latest field of study?', answer: 'Computer Science' },
+      { question: 'What is your current academic performance rating?', answer: '3.89/4.0' },
+      { question: 'Expected Graduation semester', answer: 'Spring 2027' },
+      { question: 'Which university are you currently enrolled in?', answer: 'University of Southern California' },
+      { question: 'What is the current year of your studies?', answer: 'Third year' },
+      { question: 'How did you hear about us?', answer: 'Company website' },
+      { question: 'What country are you currently residing?', answer: 'United States' },
+    ],
+  });
+
+  const comboLabels = actions
+    .filter((action) => action.type === 'fill' && action.label?.startsWith('question_combo_label:'))
+    .map((action) => `${action.label}:${action.value}`);
+  assert.ok(comboLabels.some((label) => label.includes('Degree') && label.endsWith('Bachelor\'s Degree')));
+  assert.ok(comboLabels.some((label) => label.includes('Discipline') && label.endsWith('Computer Science')));
+  assert.ok(comboLabels.some((label) => label.includes('latest field of study') && label.endsWith('Computer Science')));
+  assert.ok(comboLabels.some((label) => label.includes('academic performance rating') && label.endsWith('3.6 or above (out of 4.0)')));
+  assert.ok(comboLabels.some((label) => label.includes('Expected Graduation semester') && label.endsWith('Earlier than Fall 2027')));
+  assert.ok(comboLabels.some((label) => label.includes('Which university are you currently enrolled') && label.endsWith('University of Southern California')));
+  assert.ok(comboLabels.some((label) => label.includes('current year of your studies') && label.endsWith('Third')));
+  assert.ok(comboLabels.some((label) => label.includes('How did you hear about us') && label.endsWith('Company Website')));
+  assert.ok(comboLabels.some((label) => label.includes('country are you currently residing') && label.endsWith('United States')));
+  assert.ok(actions.some((action) => action.type === 'fillByLabelText' && action.text === 'Degree'));
+});
+
 test('Greenhouse replays Databricks choice questions through React-select buckets', () => {
   const actions = buildManagedPortalActions('greenhouse', {
     fullName: 'Mehek Mandal',
