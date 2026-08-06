@@ -665,7 +665,14 @@ test('live-audit profile fields use question shape before generic enrollment wor
     resolveKnownAnswer('Have you ever worked for Redwood Materials?', 'radio', profile, undefined)
     && 'skipReason' in resolveKnownAnswer('Have you ever worked for Redwood Materials?', 'radio', profile, undefined)!,
   );
-  assert.deepEqual(resolveKnownAnswer('Are you available for a 12-week full-time (40 hours per week) internship between September - December 2026?', 'select', profile, undefined), {
+  assert.ok(
+    resolveKnownAnswer('Are you available for a 12-week full-time (40 hours per week) internship between September - December 2026?', 'select', profile, undefined)
+    && 'skipReason' in resolveKnownAnswer('Are you available for a 12-week full-time (40 hours per week) internship between September - December 2026?', 'select', profile, undefined)!,
+  );
+  assert.deepEqual(resolveKnownAnswer('Are you available for a 12-week full-time (40 hours per week) internship between September - December 2026?', 'select', {
+    ...profile,
+    availability_term: 'Available full-time for 12 weeks between September and December 2026',
+  }, undefined), {
     value: 'Yes',
   });
   assert.ok(

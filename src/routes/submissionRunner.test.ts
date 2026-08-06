@@ -299,6 +299,58 @@ test('combobox discoveries resolve stored academic facts without direct text sel
   );
 });
 
+test('discovered GPA and major questions resolve from profile-backed academic fallbacks', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'This internship asks for an education history.',
+    role: 'Software Engineering Intern',
+    portal_url: 'https://example.greenhouse.io/jobs/123',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+
+  const result = await discoverAndResolveQuestions(
+    [
+      {
+        label: 'What is your GPA?',
+        selector: '[data-litos-discovered-7]',
+        inputType: 'combobox',
+        maxLength: null,
+      },
+      {
+        label: 'What is your major?',
+        selector: '[data-litos-discovered-8]',
+        inputType: 'combobox',
+        maxLength: null,
+      },
+    ],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    {
+      degree: 'Bachelor of Science in Computer Science',
+      gpa: '3.89',
+    },
+    true,
+    'greenhouse',
+  );
+
+  assert.deepEqual(result.attentionReasons, []);
+  assert.deepEqual(
+    result.questions.map((question) => ({
+      question: question.question,
+      answer: question.answer,
+      portal_selector: question.portal_selector,
+    })),
+    [
+      { question: 'What is your GPA?', answer: '3.89', portal_selector: undefined },
+      { question: 'What is your major?', answer: 'Computer Science', portal_selector: undefined },
+    ],
+  );
+});
+
 test('managed Greenhouse education combobox labels are not replayed as text fields', async () => {
   const current: ApplicationReviewState = {
     jd_text: 'This internship asks for an education history.',

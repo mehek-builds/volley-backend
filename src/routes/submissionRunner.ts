@@ -698,9 +698,9 @@ async function loadApplicationProfileLike(userId: string): Promise<ApplicationPr
     currently_enrolled: academicBoolean('currently_enrolled'),
     desired_salary: str('desired_salary'),
     desired_salary_currency: str('desired_salary_currency'),
-    gpa: str('gpa'),
-    gpa_scale: str('gpa_scale'),
-    major: str('major'),
+    gpa: str('gpa') ?? academicStr('gpa'),
+    gpa_scale: str('gpa_scale') ?? academicStr('gpa_scale'),
+    major: str('major') ?? majorFromAcademicProfile(academicStr('major'), academicStr('degree')),
     languages: Array.isArray(app.languages)
       ? app.languages.filter((language): language is string => typeof language === 'string' && language.trim().length > 0)
       : undefined,

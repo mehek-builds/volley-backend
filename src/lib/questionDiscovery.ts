@@ -450,10 +450,17 @@ function internshipAvailabilityAnswer(label: string, ap: ApplicationProfileLike)
   if (!stored) return { skipReason: `internship availability question left for you: "${label.slice(0, 60)}"` };
   const asksFullTime = /\bfull-time\b|\b40\s*hours\b/i.test(label);
   const asksTwelveWeeks = /\b12\s*weeks?\b|\btwelve\s+weeks?\b/i.test(label);
+  const asksDateWindow = /\b(?:between|from)\b[^?]{0,120}\b(?:20\d{2}|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i.test(label);
   const confirmsFullTime = !asksFullTime || /\bfull-time\b|\b40\s*hours\b/i.test(stored);
   const confirmsTwelveWeeks = !asksTwelveWeeks || /\b12\s*weeks?\b|\btwelve\s+weeks?\b|\b3\s*months?\b|\bthree\s+months?\b/i.test(stored);
-  if (confirmsFullTime && confirmsTwelveWeeks) return { value: 'Yes' };
+  const confirmsDateWindow = !asksDateWindow || labelDateTokens(label).every((token) => stored.toLowerCase().includes(token));
+  if (confirmsFullTime && confirmsTwelveWeeks && confirmsDateWindow) return { value: 'Yes' };
   return { skipReason: `internship availability question left for you: "${label.slice(0, 60)}"` };
+}
+
+function labelDateTokens(label: string): string[] {
+  const tokens = label.toLowerCase().match(/\b(?:20\d{2}|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/g) ?? [];
+  return [...new Set(tokens)];
 }
 
 function majorAnswer(ap: ApplicationProfileLike): string | null {
