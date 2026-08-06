@@ -67,6 +67,8 @@ Set these for Production (and Preview if you want):
 | `APOLLO_API_KEY` | your Apollo key (optional fallback) |
 | `INTERNAL_CRON_SECRET` | random secret shared with the GitHub Actions job-monitor workflow |
 | `JOB_MONITOR_SOURCES_JSON` | optional JSON array of extra Greenhouse, Lever, Ashby, or Workable boards loaded by each daily monitor run |
+| `LITOS_ATS_API_SUBMISSION_ENABLED` | set to literal `true` only when employer-authorized ATS submission channels may POST applications |
+| `LITOS_EMPLOYER_API_SUBMISSION_CHANNELS_JSON` | JSON array of allowlisted Greenhouse, Ashby, or Lever submit channels; references key env names, never raw secrets |
 | `LEMONSQUEEZY_CHECKOUT_URL` | reusable live product URL containing `/checkout/buy/` |
 | `LEMONSQUEEZY_VARIANT_ID` | numeric ID of the $49.99 monthly Pro variant |
 | `LEMONSQUEEZY_WEBHOOK_SECRET` | signing secret configured on the Lemon Squeezy webhook |
@@ -262,6 +264,16 @@ missing SHA diagnosable instead of merely disappointing:
 | `vercel-git` | The GitHub integration deployed it. The normal path. |
 | `git-sha` | A CLI deploy that went through `npm run deploy:prod`. |
 | `none` | A bare `vercel --prod`. The SHA is genuinely unknown; use `build`. |
+
+**Manual deploys must target the real backend project.** `npm run deploy:prod` refuses to run unless
+`.vercel/project.json` points at `student-outreach-backend` with project id
+`prj_5gPI7ADAT5M26VIxhiAKe1efsJPi`. A temporary worktree without that file can create a new
+temp-named Vercel project instead of shipping Litos production.
+
+**ATS API submit config is opt-in and exact.** `LITOS_ATS_API_SUBMISSION_ENABLED` must be the
+literal string `true`; an empty variable, `1`, or `false` leaves ATS API posting disabled. Public
+job-board reads can work without this, but application POSTs still need an allowlisted channel in
+`LITOS_EMPLOYER_API_SUBMISSION_CHANNELS_JSON` plus the referenced employer-authorized key env vars.
 
 **Why a hand deploy used to report `null`.** Measured 2026-08-04 across the last 12 production
 deployments: Vercel fills the `VERCEL_GIT_*` variables from the **GitHub integration's** metadata,

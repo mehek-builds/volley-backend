@@ -7,7 +7,7 @@ import { db } from '../db/index';
 import { settleStall } from '../lib/applicationStall';
 import type { ApplicationReviewState } from '../lib/applicationReview';
 import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
-import { application_profile, career_page_sources, generated_resumes, monitored_jobs, profiles, users, type ExperienceBankEntry } from '../db/schema';
+import { application_profile, generated_resumes, profiles, users, type ExperienceBankEntry } from '../db/schema';
 import {
   findPdfTextFidelityIssues,
   findPdfSafeMarginIssues,
@@ -24,6 +24,7 @@ import {
   readApplicationReview,
   type ApplicationReviewQuestion,
 } from '../lib/applicationReview';
+import { repairReviewPortalFromMonitoredJob } from '../lib/applicationPortalRepair';
 import { getLiveViewUrl, isBrowserbaseConfigured } from '../lib/browserbase';
 import { apiBaseFor } from '../lib/apiBase';
 import { extractPdfText } from '../lib/pdfText';
@@ -36,10 +37,7 @@ import { buildPacket, processSubmissionApplication } from './submissionRunner';
 import { refreshKnownQuestionAnswers, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { resumeEditDisposition, submitRequestDisposition } from '../lib/submissionSafety';
 import {
-  canonicalMonitoredPortalUrl,
-  canonicalSupportedPortalUrl,
   detectPortal,
-  greenhousePortalUrlNeedsBoardToken,
   isPortalSupported,
 } from '../lib/portalSubmission';
 import { dailySubmissionCap, withinDailyCap } from '../lib/submissionQueue';
@@ -51,7 +49,6 @@ import {
 } from '../lib/submissionEducationGuard';
 import { resumeFileNameForRole } from '../lib/resumeFileName';
 import { sendUnsupportedPortalApplicationEmail } from '../lib/unsupportedPortalEmailFallback';
-import { monitoredJdAgrees } from '../lib/monitoredPortalRepair';
 import { assessAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
@@ -150,78 +147,6 @@ function freshSubmitRequestReview(
     verification: undefined,
     receipt: undefined,
     stall: undefined,
-  };
-}
-
-function jobContextJobId(row: typeof generated_resumes.$inferSelect): string | null {
-  const jobContext = row.job_context;
-  if (!jobContext || typeof jobContext !== 'object' || Array.isArray(jobContext)) return null;
-  const jobId = (jobContext as Record<string, unknown>).job_id;
-  const parsed = z.string().uuid().safeParse(jobId);
-  return parsed.success ? parsed.data : null;
-}
-
-function jobContextText(row: typeof generated_resumes.$inferSelect, key: 'company' | 'role' | 'jd_hash'): string | null {
-  const jobContext = row.job_context;
-  if (!jobContext || typeof jobContext !== 'object' || Array.isArray(jobContext)) return null;
-  const value = (jobContext as Record<string, unknown>)[key];
-  return typeof value === 'string' && value.trim() ? value.trim() : null;
-}
-
-function normalizedIdentity(value: string | null): string {
-  return (value ?? '').trim().toLowerCase();
-}
-
-async function repairReviewPortalFromMonitoredJob(
-  row: typeof generated_resumes.$inferSelect,
-  current: ApplicationReviewState,
-): Promise<ApplicationReviewState> {
-  const currentCanonicalUrl = canonicalSupportedPortalUrl(current.portal_url, current.ats_name);
-  if (currentCanonicalUrl && currentCanonicalUrl !== current.portal_url) {
-    return {
-      ...current,
-      portal_url: currentCanonicalUrl,
-      ats_name: detectPortal(currentCanonicalUrl),
-      portal_supported: true,
-    };
-  }
-  if (
-    current.portal_url
-    && isPortalSupported(current.portal_url)
-    && !greenhousePortalUrlNeedsBoardToken(current.portal_url)
-  ) return current;
-  const jobId = jobContextJobId(row);
-  if (!jobId) return current;
-  const expectedCompany = jobContextText(row, 'company');
-  const expectedRole = jobContextText(row, 'role');
-  const expectedJdHash = jobContextText(row, 'jd_hash');
-  if (!expectedCompany || !expectedRole || !expectedJdHash) return current;
-  const [job] = await db.select({
-    apply_url: monitored_jobs.apply_url,
-    ats_name: career_page_sources.ats_name,
-    board_token: career_page_sources.board_token,
-    company_name: monitored_jobs.company_name,
-    title: monitored_jobs.title,
-    description: sql<string>`left(${monitored_jobs.description}, 60000)`,
-  })
-    .from(monitored_jobs)
-    .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
-    .where(and(
-      eq(monitored_jobs.id, jobId),
-      eq(career_page_sources.enabled, true),
-    ))
-    .limit(1);
-  if (!job) return current;
-  const applyUrl = canonicalMonitoredPortalUrl(job.apply_url, job.ats_name, job.board_token);
-  if (!applyUrl) return current;
-  if (normalizedIdentity(job.company_name) !== normalizedIdentity(expectedCompany)) return current;
-  if (normalizedIdentity(job.title) !== normalizedIdentity(expectedRole)) return current;
-  if (!monitoredJdAgrees(expectedJdHash, current.jd_text, job.description)) return current;
-  return {
-    ...current,
-    portal_url: applyUrl,
-    ats_name: detectPortal(applyUrl),
-    portal_supported: true,
   };
 }
 
