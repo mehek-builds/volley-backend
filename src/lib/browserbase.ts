@@ -39,10 +39,18 @@ export type ManagedBrowserResult = {
 
 type ManagedBrowserError = string | { message?: string; code?: string };
 
-function managedBrowserErrorMessage(error: ManagedBrowserError | undefined, status: number): string {
-  if (typeof error === 'string' && error.trim()) return error;
-  if (error && typeof error === 'object' && typeof error.message === 'string' && error.message.trim()) return error.message;
-  return `Stratus managed browser request failed with status ${status}`;
+function managedBrowserErrorMessage(
+  error: ManagedBrowserError | undefined,
+  status: number,
+  actions: ManagedBrowserAction[] = [],
+): string {
+  const message = typeof error === 'string' && error.trim()
+    ? error
+    : error && typeof error === 'object' && typeof error.message === 'string' && error.message.trim()
+      ? error.message
+      : `Stratus managed browser request failed with status ${status}`;
+  if (!/selector/i.test(message)) return message;
+  return `${message}; action_audit=${managedActionAudit(actions)}`;
 }
 
 type SessionResponse = {
@@ -63,9 +71,14 @@ function selectorFromLabelText(text: string | undefined): string | undefined {
   if (!stem) return undefined;
   const quoted = cssString(stem);
   const selector = [
-    `label:has-text("${quoted}") :is(input, textarea, select)`,
-    `:is(input, textarea, select):right-of(label:has-text("${quoted}"))`,
-    `:is(input, textarea, select):below(label:has-text("${quoted}"))`,
+    `label:has-text("${quoted}") input`,
+    `label:has-text("${quoted}") textarea`,
+    `label:has-text("${quoted}") select`,
+    `input[aria-label="${quoted}"]`,
+    `textarea[aria-label="${quoted}"]`,
+    `select[aria-label="${quoted}"]`,
+    `input[placeholder="${quoted}"]`,
+    `textarea[placeholder="${quoted}"]`,
   ].join(', ');
   return selector.length <= STRATUS_SELECTOR_MAX_LENGTH ? selector : undefined;
 }
@@ -79,6 +92,49 @@ function stratusAction(action: ManagedBrowserAction): ManagedBrowserAction {
   if (!selector) return action;
   const { text: _text, ...rest } = action;
   return { ...rest, type: 'fill', selector };
+}
+
+function preview(value: string | undefined): string | undefined {
+  const trimmed = value?.replace(/\s+/g, ' ').trim();
+  if (!trimmed) return undefined;
+  return trimmed.length > 120 ? `${trimmed.slice(0, 117)}...` : trimmed;
+}
+
+function managedActionAudit(actions: ManagedBrowserAction[]): string {
+  const selectorless = actions
+    .filter((action) => !action.selector?.trim())
+    .slice(0, 5)
+    .map((action) => ({ type: action.type, label: preview(action.label), text: preview(action.text) }));
+  const tooLong = actions
+    .filter((action) => (action.selector?.length ?? 0) > STRATUS_SELECTOR_MAX_LENGTH)
+    .slice(0, 5)
+    .map((action) => ({
+      type: action.type,
+      label: preview(action.label),
+      length: action.selector?.length ?? 0,
+      selector: preview(action.selector),
+    }));
+  const maxSelectors = actions
+    .filter((action) => action.selector?.trim())
+    .map((action) => ({
+      type: action.type,
+      label: preview(action.label),
+      length: action.selector?.length ?? 0,
+      selector: preview(action.selector),
+    }))
+    .sort((a, b) => b.length - a.length)
+    .slice(0, 3);
+  const typeCounts = actions.reduce<Record<string, number>>((counts, action) => {
+    counts[action.type] = (counts[action.type] ?? 0) + 1;
+    return counts;
+  }, {});
+  return JSON.stringify({
+    count: actions.length,
+    typeCounts,
+    selectorless,
+    tooLong,
+    maxSelectors,
+  });
 }
 
 function config() {
@@ -149,6 +205,7 @@ export async function runManagedBrowser(
     ? `Bearer ${await getVercelOidcToken()}`
     : undefined;
   if (!apiKey && !authorization) throw new Error('Stratus managed browser is not configured');
+  const outboundActions = actions.map(stratusAction);
   const response = await fetch(`${baseUrl}/api/run`, {
     method: 'POST',
     headers: {
@@ -158,7 +215,7 @@ export async function runManagedBrowser(
     },
     body: JSON.stringify({
       url: portalUrl,
-      actions: actions.map(stratusAction),
+      actions: outboundActions,
       screenshot: options.screenshot ?? true,
       fullPage: true,
       waitUntil: 'domcontentloaded',
@@ -166,7 +223,7 @@ export async function runManagedBrowser(
   });
   const payload = await response.json().catch(() => ({})) as { run?: ManagedBrowserResult; error?: ManagedBrowserError };
   if (!response.ok || !payload.run) {
-    throw new Error(managedBrowserErrorMessage(payload.error, response.status));
+    throw new Error(managedBrowserErrorMessage(payload.error, response.status, outboundActions));
   }
   return payload.run;
 }

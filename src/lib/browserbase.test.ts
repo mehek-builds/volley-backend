@@ -165,6 +165,7 @@ test('managed Stratus converts label fills into selector-backed fill actions', a
   assert.equal(action?.value, 'Taylor');
   assert.equal(typeof action?.selector, 'string');
   assert.match(String(action?.selector), /label:has-text\("First Name"\)/);
+  assert.doesNotMatch(String(action?.selector), /:right-of|:below|:is\(/);
   assert.ok(String(action?.selector).length <= 500);
 
   globalThis.fetch = previousFetch;
@@ -227,6 +228,43 @@ test('managed Stratus surfaces structured provider errors as readable messages',
   await assert.rejects(
     runManagedBrowser('https://portal.example/apply', []),
     /Portal field selector timed out/,
+  );
+
+  globalThis.fetch = previousFetch;
+  if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+  else process.env.STRATUS_API_KEY = previousKey;
+  if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+  else process.env.STRATUS_BASE_URL = previousUrl;
+});
+
+test('managed Stratus selector errors include a sanitized outbound action audit', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example';
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    error: { message: 'Each selector must be a non-empty string no longer than 500 characters' },
+  }), {
+    status: 400,
+    headers: { 'Content-Type': 'application/json' },
+  })) as typeof fetch;
+
+  await assert.rejects(
+    runManagedBrowser('https://portal.example/apply', [
+      { type: 'fill', selector: '#email', value: 'private@example.com', label: 'email' },
+      { type: 'discover', label: 'discover_questions' },
+    ]),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Each selector must be a non-empty string/);
+      assert.match(error.message, /action_audit=/);
+      assert.match(error.message, /"count":2/);
+      assert.match(error.message, /"discover":1/);
+      assert.doesNotMatch(error.message, /private@example\.com/);
+      assert.doesNotMatch(error.message, /"selectorless":\[\{/);
+      return true;
+    },
   );
 
   globalThis.fetch = previousFetch;
