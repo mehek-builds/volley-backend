@@ -1278,6 +1278,31 @@ test('Greenhouse profile-backed academic questions replay through label-scoped c
   assert.ok(comboLabels.some((label) => label.includes('country are you currently residing') && label.endsWith('United States')));
 });
 
+test('Greenhouse replays Cloudflare graduation and degree choice buckets', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekman@usc.edu',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question: 'If you are currently enrolled in a university or program, when do you expect to graduate or complete your program? (Select the closest date.)',
+        answer: 'May 2028',
+      },
+      {
+        question: 'If you are enrolled in university, what degree are you currently pursuing?',
+        answer: 'Bachelor of Science in Computer Science & Business Administration, Finance Emphasis',
+      },
+    ],
+  });
+
+  const comboLabels = actions
+    .filter((action) => action.type === 'fill' && action.label?.startsWith('question_combo_label:'))
+    .map((action) => `${action.label}:${action.value}`);
+  assert.ok(comboLabels.some((label) => label.toLowerCase().includes('when do you expect to') && label.endsWith('Spring 2028')));
+  assert.ok(comboLabels.some((label) => label.toLowerCase().includes('degree are you currently pursuing') && label.endsWith('Bachelor\'s')));
+});
+
 test('Greenhouse replays Databricks choice questions through React-select buckets', () => {
   const actions = buildManagedPortalActions('greenhouse', {
     fullName: 'Mehek Mandal',
