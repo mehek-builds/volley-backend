@@ -512,7 +512,9 @@ export function applicationContextForQuestionResolution(row: ResumeRow, current:
   const safeLocations = classifiedLocations.length > 0 && classifiedLocations.every((item) => item.country === 'us')
     ? classifiedLocations.map((item) => item.value).join('\n')
     : '';
-  return [current.jd_text, safeLocations].filter((value) => value.trim()).join('\n');
+  return [current.role, current.jd_text, safeLocations]
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    .join('\n');
 }
 
 // R-055 fix: the dashboard flow used to send only whatever `review.questions` the client already

@@ -1326,12 +1326,24 @@ test('Greenhouse replays Cloudflare graduation and degree choice buckets', () =>
         answer: 'Company website',
       },
       {
+        question: 'Please review and acknowledge Cloudflare\'s Candidate Privacy Policy (cloudflare.com/candidate-privacy-notice/).',
+        answer: 'Yes',
+      },
+      {
         question: 'If you are currently enrolled in a university or program, when do you expect to graduate or complete your program? (Select the closest date.)',
         answer: 'May 2028',
       },
       {
         question: 'If you are enrolled in university, what degree are you currently pursuing?',
         answer: 'Bachelor of Science in Computer Science & Business Administration, Finance Emphasis',
+      },
+      {
+        question: 'Are you available for a 12-week full-time (40 hours per week) internship between September - December 2026?',
+        answer: 'Yes',
+      },
+      {
+        question: '1st choice: Area of interest in Software Engineering',
+        answer: 'Backend/Systems',
       },
     ],
   });
@@ -1342,6 +1354,14 @@ test('Greenhouse replays Cloudflare graduation and degree choice buckets', () =>
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('how did you hear about this job') && label.endsWith('Other (none of the above)')));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('when do you expect to') && label.endsWith('June 2028')));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('degree are you currently pursuing') && label.endsWith('Bachelor\'s')));
+  assert.ok(comboLabels.some((label) => label.toLowerCase().includes('are you available for a 12-week') && label.endsWith('Yes')));
+  assert.ok(comboLabels.some((label) => label.toLowerCase().includes('area of interest in software engineering') && label.endsWith('Backend/Systems')));
+  assert.ok(actions.some((action) =>
+    action.type === 'click'
+    && action.label?.startsWith('question_checkbox:')
+    && action.label.includes('Candidate Privacy Policy')
+    && action.selector === 'label:has-text("Acknowledge/Confirm") input[type="checkbox"]'),
+  );
 });
 
 test('Greenhouse replays Databricks choice questions through React-select buckets', () => {

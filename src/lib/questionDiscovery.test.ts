@@ -704,6 +704,19 @@ test('live-audit profile fields use question shape before generic enrollment wor
       availability_term: undefined,
     }, undefined)!,
   );
+  assert.deepEqual(
+    resolveKnownAnswer(
+      '1st choice: Area of interest in Software Engineering',
+      'select',
+      profile,
+      'Engineering teams build software that handles traffic across our global network. Technologies include Go, Rust, C/C++ and Python services.',
+    ),
+    { value: 'Backend/Systems' },
+  );
+  assert.ok(
+    resolveKnownAnswer('1st choice: Area of interest in Software Engineering', 'select', profile, 'Software engineering internship')
+    && 'skipReason' in resolveKnownAnswer('1st choice: Area of interest in Software Engineering', 'select', profile, 'Software engineering internship')!,
+  );
 });
 
 test('study year stays blank when graduation evidence cannot support it', () => {

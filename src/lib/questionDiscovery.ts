@@ -238,6 +238,8 @@ const PRIOR_EMPLOYER_OR_PROGRAM_QUESTION =
   /\bhave\s+you\s+(?:ever\s+)?(?:worked|been\s+employed)\s+(?:for|by|at)\b|\bhave\s+you\s+been\s+enrolled\s+in\b[^?]{0,120}\bin\s+the\s+past\s+\d+\s+months\b/i;
 const INTERNSHIP_AVAILABILITY_QUESTION =
   /\b(?:are|will)\s+you\s+available\b[^?]{0,160}\b(?:internship|full-time|40\s*hours|weeks?)\b|\b(?:internship|full-time|40\s*hours|weeks?)\b[^?]{0,160}\b(?:are|will)\s+you\s+available\b/i;
+const SOFTWARE_ENGINEERING_AREA_QUESTION =
+  /\b(?:area|track|team)\s+of\s+interest\b[^?]{0,120}\bsoftware\s+engineering\b|\bsoftware\s+engineering\b[^?]{0,120}\b(?:area|track|team)\s+of\s+interest\b/i;
 const US_STATE_RESIDENCE_SELECT_QUESTION = /\bstate\s+of\s+residence\b[^?]{0,160}\bnot\s+in\s+the\s+us\b/i;
 const SAN_FRANCISCO_RESIDENCE_QUESTION = /\bcurrently\s+reside\b[^?]{0,80}\bsan\s+francisco\b|\bsan\s+francisco\b[^?]{0,80}\bcurrently\s+reside\b/i;
 const CONFIRMED_PLANS_CITY_RE = /\b(?:currently\s+residing|confirmed\s+plans)\b[^?]{0,80}\b(?:greater\s+)?([a-z][a-z .'-]+?)\s+area\b|\bconfirmed\s+plans\b[^?]{0,80}\bin\s+([a-z][a-z .'-]+)\b/i;
@@ -499,6 +501,18 @@ function majorAnswer(ap: ApplicationProfileLike): string | null {
     .replace(/\s+/g, ' ')
     .trim();
   return cleaned || degree;
+}
+
+function softwareEngineeringAreaAnswer(label: string, jdText: string | undefined): { value: string } | { skipReason: string } | null {
+  if (!SOFTWARE_ENGINEERING_AREA_QUESTION.test(label)) return null;
+  const text = jdText ?? '';
+  const backendSignals = (text.match(/\b(?:backend|back-end|systems?|infrastructure|platform|network|distributed|api|apis|service|services|security|rust|go|c\+\+|python)\b/gi) ?? []).length;
+  const frontendSignals = (text.match(/\b(?:frontend|front-end|ui|ux|react|web\s+app|interface|client-side)\b/gi) ?? []).length;
+  const fullStackSignals = (text.match(/\b(?:full-stack|fullstack|end-to-end)\b/gi) ?? []).length;
+  if (backendSignals > Math.max(frontendSignals, fullStackSignals)) return { value: 'Backend/Systems' };
+  if (fullStackSignals > Math.max(backendSignals, frontendSignals)) return { value: 'Full-stack' };
+  if (frontendSignals > Math.max(backendSignals, fullStackSignals)) return { value: 'Frontend' };
+  return { skipReason: `area of interest left for you: "${label.slice(0, 60)}"` };
 }
 
 function advancedDegreeEnrollmentAnswer(ap: ApplicationProfileLike): { value: string } | null {
@@ -815,6 +829,9 @@ export function resolveKnownAnswer(
   if (INTERNSHIP_AVAILABILITY_QUESTION.test(label)) {
     return internshipAvailabilityAnswer(label, ap);
   }
+
+  const softwareEngineeringArea = softwareEngineeringAreaAnswer(label, jdText);
+  if (softwareEngineeringArea) return softwareEngineeringArea;
 
   const routineConsent = routineConsentAnswer(label);
   if (routineConsent) return routineConsent;
