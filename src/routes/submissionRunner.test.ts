@@ -7,6 +7,7 @@ import {
   atsApiSubmissionEnabled,
   discoverAndResolveQuestions,
   isProviderSessionFailureMessage,
+  preparationEvidenceBlockers,
   reconcileManagedProviderBlockers,
   readMostRecentRole,
   sanitizeEeoPrefs,
@@ -233,6 +234,52 @@ test('Greenhouse managed blockers are reconciled with selected React-select prev
   ]);
 });
 
+test('CAPTCHA blocker display hides profile-backed academic and privacy fields when preview shows values', () => {
+  const packet = {
+    school: 'University of Southern California, Viterbi School of Engineering',
+    degree: 'Bachelor of Science in Computer Science',
+    major: 'Computer Science',
+    graduationDate: 'May 2028',
+    graduationMonth: 'May',
+    graduationYear: '2028',
+    gpa: '3.89',
+    referralSourceDefault: 'Company website',
+    questions: [],
+  } as unknown as import('../lib/portalSubmission').SubmissionPacket;
+  const blockers = attentionBlockersForManagedResult(
+    'greenhouse',
+    [
+      'CAPTCHA requires your attention',
+      '"Discipline" is required and is still empty',
+      '"Which university are you currently attending? Select "Other" if not listed" is required and is still empty',
+      '"What education level are you currently pursuing?" is required and is still empty',
+      '"What is your expected graduation year?" is required and is still empty',
+      '"What is your GPA?" is required and is still empty',
+      '"How did you hear about this job?" is required and is still empty',
+      '"Please review and acknowledge Candidate Privacy Policy." is required and is still empty',
+      '"Do you have prior experience working at an options market making trading firm?" is required and is still empty',
+    ],
+    {
+      text: [
+        'Discipline*Computer Science',
+        'Which university are you currently attending? Select "Other" if not listed*University of Southern California',
+        'What education level are you currently pursuing?*Bachelors',
+        'What is your expected graduation year?*2028',
+        'What is your GPA?*3.9',
+        'How did you hear about this job?*Other',
+        'Please review and acknowledge Candidate Privacy Policy.*Acknowledge/Confirm',
+      ].join(' '),
+      filledFields: ['first_name', 'last_name', 'email', 'resume'],
+    },
+    packet,
+  );
+
+  assert.deepEqual(blockers, [
+    'CAPTCHA requires your attention',
+    '"Do you have prior experience working at an options market making trading firm?" is required and is still empty',
+  ]);
+});
+
 test('Greenhouse managed blocker reconciliation does not hide labels without matching preview values', () => {
   const packet = {
     graduationMonth: 'May',
@@ -265,6 +312,73 @@ test('Greenhouse managed blocker reconciliation does not trust attempted-fill la
   );
 
   assert.deepEqual(blockers, ['"What education level are you currently pursuing?" is required and is still empty']);
+});
+
+test('broken previews suppress duplicate core-field evidence noise', () => {
+  const packet = {
+    fullName: 'Mehek Mandal',
+    email: 'mehek@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  };
+
+  assert.deepEqual(
+    preparationEvidenceBlockers(
+      {
+        text: 'Sorry, but we cannot find that page.',
+        filledFields: [],
+      },
+      packet,
+    ),
+    ['The filled form preview looks like an error, login, or missing page instead of a completed application form.'],
+  );
+  assert.deepEqual(
+    preparationEvidenceBlockers(
+      {
+        text: 'First Name Mehek Last Name Mandal Email mehek@example.com Resume resume.pdf',
+        filledFields: [],
+      },
+      packet,
+    ),
+    [
+      'The filled form did not record an email field.',
+      'The filled form did not record a resume upload.',
+      'The filled form did not record the applicant name fields.',
+    ],
+  );
+  assert.deepEqual(
+    attentionBlockersForManagedResult(
+      'greenhouse',
+      ['CAPTCHA requires your attention'],
+      {
+        text: 'Sorry, but we cannot find that page.',
+        filledFields: [],
+      },
+      packet,
+    ),
+    ['CAPTCHA requires your attention'],
+  );
+});
+
+test('non-CAPTCHA managed blocker reconciliation waits for normal evidence handling', () => {
+  const blockers = attentionBlockersForManagedResult(
+    'greenhouse',
+    ['The filled form did not record an email field.'],
+    {
+      text: 'Sorry, but we cannot find that page.',
+      filledFields: [],
+    },
+    {
+      fullName: 'Mehek Mandal',
+      email: 'mehek@example.com',
+      resume: Buffer.from('pdf'),
+      resumeName: 'resume.pdf',
+      questions: [],
+    },
+  );
+
+  assert.deepEqual(blockers, ['The filled form did not record an email field.']);
 });
 
 test('future sponsorship onboarding answer supplies work eligibility for US applications', () => {
