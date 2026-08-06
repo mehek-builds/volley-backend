@@ -89,7 +89,8 @@ type SubmitOptions = {
 };
 
 const CHANNEL_CONFIG_ENV = 'LITOS_EMPLOYER_API_SUBMISSION_CHANNELS_JSON';
-const GREENHOUSE_EMBED_TOKEN_HOSTS = new Set(['boards.greenhouse.io', 'job-boards.greenhouse.io']);
+const GREENHOUSE_JOB_BOARD_HOSTS = new Set(['boards.greenhouse.io', 'job-boards.greenhouse.io', 'job-boards.eu.greenhouse.io']);
+const GREENHOUSE_EMBED_TOKEN_HOSTS = GREENHOUSE_JOB_BOARD_HOSTS;
 const SUPPORTED_CHANNELS = new Set<AtsSubmissionChannelProvider>([
   'greenhouse',
   'ashby',
@@ -181,7 +182,7 @@ export function greenhousePostingFromUrl(rawUrl: string | undefined): { boardTok
   const host = url.hostname.toLowerCase();
   const parts = pathParts(url);
   if (
-    (host === 'boards.greenhouse.io' || host === 'job-boards.greenhouse.io')
+    GREENHOUSE_JOB_BOARD_HOSTS.has(host)
     && parts.length >= 3
     && parts[1] === 'jobs'
     && /^\d+$/.test(parts[2])

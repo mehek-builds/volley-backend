@@ -70,6 +70,7 @@ import {
 import type { ApplicationReviewQuestion } from '../lib/applicationReview';
 import { jobCountry } from '../lib/jobLocation';
 import { generateStoredCoverLetter, storedCoverLetter } from '../lib/coverLetterService';
+import { repairReviewPortalFromMonitoredJob } from '../lib/applicationPortalRepair';
 import { mayClickFinalSubmit, preparedSubmissionStatus } from '../lib/submissionAuthorization';
 import { directPreparationIsSafe } from '../lib/submissionSafety';
 import {
@@ -797,9 +798,12 @@ async function prepareManaged(
 
 async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = false) {
   const stored = row.spec as StoredSpec;
-  const current = readApplicationReview(stored);
-  if (!current?.portal_url) throw new Error('We do not have a link to the company application page');
-  const portal = detectPortal(current.portal_url);
+  let current = readApplicationReview(stored);
+  if (!current) throw new Error('We do not have a link to the company application page');
+  current = await repairReviewPortalFromMonitoredJob(row, current);
+  const portalUrl = current.portal_url;
+  if (!portalUrl) throw new Error('We do not have a link to the company application page');
+  const portal = detectPortal(portalUrl);
   const runId = current.submission_run_id ?? randomUUID();
 
   /* THE GRADUATION BLOCK, and it stops the unattended run before anything is spent or sent.
@@ -841,7 +845,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
 
   const authorization = await standingAuthorization(row.user_id);
   assertControlledPortalEnabled(portal);
-  const atsAssessment = atsApiSubmissionEnabled() ? assessAtsSubmissionChannel(current.portal_url) : null;
+  const atsAssessment = atsApiSubmissionEnabled() ? assessAtsSubmissionChannel(portalUrl) : null;
   if (atsAssessment?.status === 'available') {
     await writeReview(row, nextReview(current, {
       ...preparedReviewPatch(authorization, true),
@@ -905,7 +909,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     return;
   }
   const contextId = current.browser_context_id ?? (await createBrowserContext());
-  const session = await createBrowserSession(contextId, current.portal_url);
+  const session = await createBrowserSession(contextId, portalUrl);
   {
     const verificationRequestedAt = new Date();
     const connected = await connectToSession(session);
@@ -917,14 +921,14 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       browser_session_id: session.id,
       submission_error: undefined,
     }));
-    await page.goto(current.portal_url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await page.goto(portalUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     await navigateToApplicationForm(page, portal); // no-op except SmartRecruiters's JD-page/form-page split
     const [verificationSettings] = await db.select({ enabled: users.automatic_verification_enabled })
       .from(users).where(eq(users.id, row.user_id)).limit(1);
     let verification: BrowserVerificationResult = await completeEmailVerificationIfPresent({
       page,
       userId: row.user_id,
-      portalUrl: current.portal_url,
+      portalUrl,
       requestedAt: verificationRequestedAt,
       permissionGranted: verificationSettings?.enabled === true,
     });
@@ -951,7 +955,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     const postFillVerification = await completeEmailVerificationIfPresent({
       page,
       userId: row.user_id,
-      portalUrl: current.portal_url,
+      portalUrl,
       requestedAt: verificationRequestedAt,
       permissionGranted: verificationSettings?.enabled === true,
     });
@@ -1106,6 +1110,7 @@ async function submitViaAtsSubmissionChannel(
   fastify: FastifyInstance,
 ): Promise<boolean> {
   if (!atsApiSubmissionEnabled()) return false;
+  review = await repairReviewPortalFromMonitoredJob(row, review);
   if (!await authorizationValidAtClick(row, review)) {
     await holdRevokedSubmission(row, review);
     return true;
@@ -1160,8 +1165,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
   const claimedRow = await claimSubmission(row);
   if (!claimedRow) return;
   row = claimedRow;
-  const claimedReview = readApplicationReview(row.spec);
+  let claimedReview = readApplicationReview(row.spec);
   if (!claimedReview) return;
+  claimedReview = await repairReviewPortalFromMonitoredJob(row, claimedReview);
   const claimedPortal = detectPortal(claimedReview.portal_url!);
   assertControlledPortalEnabled(claimedPortal);
   if (shouldUseLocalControlledBrowser(claimedPortal)) {

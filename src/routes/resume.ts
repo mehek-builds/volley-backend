@@ -33,6 +33,7 @@ import { warmRequirementCache } from '../engine/warmRequirements';
 import { postingRow, resolveJdText } from './jdMatch';
 import { baseResumeSelectionIssues } from '../llm/baseResume';
 import { deriveEditedTerms, readApplicationReview, type ApplicationReviewState } from '../lib/applicationReview';
+import { repairReviewPortalFromMonitoredJob } from '../lib/applicationPortalRepair';
 import {
   AUTONOMOUS_PORTAL_FAMILIES,
   canonicalMonitoredPortalUrl,
@@ -778,7 +779,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       ? monitoredApplicationUrl ?? canonicalSupportedPortalUrl(body.application.portal_url, body.application.ats_name) ?? body.application.portal_url
       : undefined;
     const canonicalApplicationPortalSupported = isPortalSupported(canonicalApplicationPortalUrl);
-    const applicationReview = {
+    let applicationReview: ApplicationReviewState = {
       jd_text: jdText,
       role: body.role,
       ...(body.application ? {
@@ -796,6 +797,12 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       skipped_reasons: [],
       updated_at: now,
     };
+    if (body.job_id && body.application) {
+      applicationReview = await repairReviewPortalFromMonitoredJob(
+        { job_context: jobContext, spec: { _review: applicationReview } } as typeof generated_resumes.$inferSelect,
+        applicationReview,
+      );
+    }
     const storedSpec = {
       ...spec,
       _contact: body.contact,
