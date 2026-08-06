@@ -2245,6 +2245,27 @@ function databricksGreenhouseJobId(url: URL): string | undefined {
     : undefined;
 }
 
+function greenhouseEmbedApplicationUrl(rawUrl: string): string | undefined {
+  const url = new URL(rawUrl);
+  if (url.protocol !== 'https:') return undefined;
+  const databricksJobId = databricksGreenhouseJobId(url);
+  if (databricksJobId) return `https://boards.greenhouse.io/embed/job_app?token=${databricksJobId}`;
+  const host = url.hostname.toLowerCase();
+  if (host === 'boards.greenhouse.io' && url.pathname === '/embed/job_app') {
+    const token = url.searchParams.get('token') ?? '';
+    if (!/^\d+$/.test(token)) return undefined;
+    const board = url.searchParams.get('for') ?? url.searchParams.get('b') ?? '';
+    return board
+      ? `https://boards.greenhouse.io/embed/job_app?for=${encodeURIComponent(board)}&token=${token}`
+      : `https://boards.greenhouse.io/embed/job_app?token=${token}`;
+  }
+  if (host !== 'boards.greenhouse.io' && host !== 'job-boards.greenhouse.io') return undefined;
+  const jobMatch = url.pathname.match(/^\/([^/]+)\/jobs\/(\d+)\/?$/i);
+  if (!jobMatch) return undefined;
+  const [, board, greenhouseJobId] = jobMatch;
+  return `https://boards.greenhouse.io/embed/job_app?for=${encodeURIComponent(board)}&token=${greenhouseJobId}`;
+}
+
 export function detectPortal(rawUrl: string): SupportedPortal {
   const url = new URL(rawUrl);
   if (
@@ -2374,6 +2395,7 @@ export function greenhousePortalUrlNeedsBoardToken(rawUrl: string | undefined): 
 }
 
 export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): string {
+  if (portal === 'greenhouse') return greenhouseEmbedApplicationUrl(rawUrl) ?? rawUrl;
   if (portal !== 'ashby') return rawUrl;
   const url = new URL(rawUrl);
   if (!url.pathname.endsWith('/application')) url.pathname = `${url.pathname.replace(/\/$/, '')}/application`;

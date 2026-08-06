@@ -85,6 +85,7 @@ test('Databricks wrapper URLs use the Greenhouse managed flow without submitting
   const canonical = 'https://boards.greenhouse.io/embed/job_app?token=6883068002';
   assert.equal(detectPortal(databricksUrl), 'greenhouse');
   assert.equal(canonicalSupportedPortalUrl(databricksUrl, 'greenhouse'), canonical);
+  assert.equal(portalApplicationUrl('greenhouse', databricksUrl), canonical);
   assert.equal(portalApplicationUrl('greenhouse', canonical), canonical);
 
   const packet = {
@@ -107,6 +108,21 @@ test('Databricks wrapper URLs use the Greenhouse managed flow without submitting
   assert.ok(submitting.every((action) => action.type !== 'fill' || (action.timeout ?? Infinity) < 30_000));
   assert.ok(submitting.every((action) => action.type !== 'upload' || (action.timeout ?? Infinity) < 30_000));
   assert.equal(submitting.some((action) => action.type === 'extract' && action.label?.startsWith('filled_field:')), false);
+});
+
+test('Greenhouse job board detail URLs open the embedded application form for managed filling', () => {
+  assert.equal(
+    portalApplicationUrl('greenhouse', 'https://job-boards.greenhouse.io/databricks/jobs/6883068002'),
+    'https://boards.greenhouse.io/embed/job_app?for=databricks&token=6883068002',
+  );
+  assert.equal(
+    portalApplicationUrl('greenhouse', 'https://boards.greenhouse.io/gemini/jobs/4512345'),
+    'https://boards.greenhouse.io/embed/job_app?for=gemini&token=4512345',
+  );
+  assert.equal(
+    portalApplicationUrl('greenhouse', 'https://boards.greenhouse.io/embed/job_app?for=databricks&token=6883068002'),
+    'https://boards.greenhouse.io/embed/job_app?for=databricks&token=6883068002',
+  );
 });
 
 test('managed Greenhouse extracted field evidence repairs missing filledFields without storing values', () => {
