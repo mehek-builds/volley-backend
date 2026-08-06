@@ -1527,7 +1527,12 @@ test('Greenhouse replays Samsara required selects with exact live options', () =
     questions: [
       { question: 'Processing of Personal Data', answer: 'Acknowledge/Confirm' },
       { question: 'How did you hear about this opportunity?', answer: 'Company website' },
-      { question: 'Where have you learned about Samsara? Select all that apply.', answer: 'Company website' },
+      {
+        question: 'Where have you learned about Samsara? Select all that apply.',
+        answer: 'Company website',
+        portalSelector: '[data-litos-discovered-23]',
+        portalInputType: 'text',
+      },
       { question: 'When are you expecting to graduate from your degree?', answer: 'May 2028' },
       { question: 'Are you majoring in STEM (Computer Science, Electrical Engineering, Data Science, Cog Sci, Information Management/Systems, Mathematics, Machine Learning, etc.)?', answer: 'Yes' },
       { question: 'AI Policy for Interviewers', answer: 'Yes' },
@@ -1541,6 +1546,7 @@ test('Greenhouse replays Samsara required selects with exact live options', () =
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('processing of personal data') && label.endsWith('Acknowledge/Confirm')));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('how did you hear about this opportunity') && label.endsWith('Samsara Careers Site')));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('where have you learned about samsara') && label.endsWith('Samsara blog or website')));
+  assert.ok(actions.some((action) => action.type === 'fill' && action.selector === '[data-litos-discovered-23] input[role="combobox"]' && action.value === 'Samsara blog or website'));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('expecting to graduate') && label.endsWith('2028')));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('majoring in stem') && label.endsWith('Yes')));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('ai policy for interviewers') && label.endsWith('Yes')));
