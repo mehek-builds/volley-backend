@@ -465,6 +465,76 @@ function previewContentBlockers(text: string | undefined): string[] {
   return [];
 }
 
+function compactEvidenceText(value: string | undefined): string {
+  return (value ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function gpaEvidenceValues(value: string | undefined): string[] {
+  const match = value?.match(/\b([0-4](?:\.\d+)?)\b/);
+  if (!match) return [];
+  const numeric = Number(match[1]);
+  if (!Number.isFinite(numeric)) return [];
+  return [numeric.toFixed(1).replace(/\.0$/, '.0')];
+}
+
+function selectEvidenceValues(answer: string | undefined): string[] {
+  const trimmed = answer?.trim();
+  if (!trimmed) return [];
+  const values = [trimmed];
+  const lower = trimmed.toLowerCase();
+  if (lower === 'yes') values.push('Yes');
+  if (lower === 'no') values.push('No');
+  if (/^company website$/i.test(trimmed)) values.push('Other', 'Company Website', 'Company website');
+  if (/\bbachelor/.test(lower)) values.push('Bachelors');
+  if (/\bmaster/.test(lower)) values.push('Masters');
+  values.push(...gpaEvidenceValues(trimmed));
+  return [...new Set(values)];
+}
+
+function expectedGreenhouseRequiredValues(label: string, packet: SubmissionPacket): string[] {
+  const normalizedLabel = normalizeReviewQuestionLabel(label);
+  const values: string[] = [];
+  if (/\bgraduation\s+month\b/i.test(label)) values.push(...selectEvidenceValues(packet.graduationMonth));
+  if (/\bgraduation\s+year\b/i.test(label)) values.push(...selectEvidenceValues(packet.graduationYear));
+  if (/\bgpa\b/i.test(label)) values.push(...selectEvidenceValues(packet.gpa));
+  for (const question of packet.questions) {
+    const normalizedQuestion = normalizeReviewQuestionLabel(question.question);
+    if (!normalizedQuestion) continue;
+    if (!normalizedQuestion.includes(normalizedLabel) && !normalizedLabel.includes(normalizedQuestion.slice(0, 80))) continue;
+    values.push(...selectEvidenceValues(question.answer));
+  }
+  return [...new Set(values)];
+}
+
+function resultEvidenceMatchesRequiredLabel(
+  label: string,
+  result: { text?: string; filledFields?: string[] },
+  packet: SubmissionPacket,
+): boolean {
+  const labelKey = compactEvidenceText(label).slice(0, 80);
+  if (!labelKey) return false;
+  const text = compactEvidenceText(result.text);
+  if (!text.includes(labelKey)) return false;
+  return expectedGreenhouseRequiredValues(label, packet).some((value) => {
+    const valueKey = compactEvidenceText(value);
+    return valueKey.length > 0 && text.includes(`${labelKey}${valueKey}`);
+  });
+}
+
+export function reconcileManagedProviderBlockers(
+  portal: SupportedPortal,
+  blockers: readonly string[],
+  result: { text?: string; filledFields?: string[] },
+  packet: SubmissionPacket,
+): string[] {
+  if (portal !== 'greenhouse') return [...blockers];
+  return blockers.filter((blocker) => {
+    const match = blocker.match(/^"(.+)" is required and is still empty$/);
+    if (!match) return true;
+    return !resultEvidenceMatchesRequiredLabel(match[1]!, result, packet);
+  });
+}
+
 function preparationEvidenceBlockers(result: { text?: string; filledFields?: string[] }, packet: SubmissionPacket): string[] {
   return [
     ...previewContentBlockers(result.text),
@@ -495,29 +565,14 @@ export function attentionCategoriesForReasons(reasons: readonly string[]): Appli
   return [...categories];
 }
 
-function emptyRequiredBlockerLabel(blocker: string): string | null {
-  const match = blocker.match(/^"(.+)" is required and is still empty$/i);
-  return match?.[1]?.trim() || null;
-}
-
-function normalizedQuestionKey(value: string): string {
-  return normalizeReviewQuestionLabel(value).toLowerCase().replace(/[^a-z0-9]+/g, '');
-}
-
-export function attentionBlockersForManagedResult(blockers: readonly string[], packet: SubmissionPacket): string[] {
-  const hasCaptcha = blockersIncludeCaptcha(blockers);
-  if (!hasCaptcha) return [...blockers];
-  const answered = new Set(
-    packet.questions
-      .filter((question) => question.answer.trim().length > 0)
-      .map((question) => normalizedQuestionKey(question.question))
-      .filter(Boolean),
-  );
-  return blockers.filter((blocker) => {
-    const label = emptyRequiredBlockerLabel(blocker);
-    if (!label) return true;
-    return !answered.has(normalizedQuestionKey(label));
-  });
+export function attentionBlockersForManagedResult(
+  portal: SupportedPortal,
+  blockers: readonly string[],
+  result: { text?: string; filledFields?: string[] },
+  packet: SubmissionPacket,
+): string[] {
+  if (!blockersIncludeCaptcha(blockers)) return [...blockers];
+  return reconcileManagedProviderBlockers(portal, blockers, result, packet);
 }
 
 /**
@@ -786,7 +841,12 @@ async function prepareManaged(
   // Sanitized at the boundary, not upstream: the managed provider scans the form in its own
   // service and returns finished sentences, so it never passes through this repo's label
   // resolution. Live QA proved that gap by showing three raw UUIDs on a real Ashby posting.
-  const blockers = attentionBlockersForManagedResult(sanitizeProviderBlockers(result.blockers ?? []), packet);
+  const blockers = attentionBlockersForManagedResult(
+    portal,
+    sanitizeProviderBlockers(result.blockers ?? []),
+    result,
+    packet,
+  );
   const verificationHandoff = blockers.some((blocker) =>
     /verification code|security code|one[ -]?time code|passcode|\botp\b/i.test(blocker),
   );
