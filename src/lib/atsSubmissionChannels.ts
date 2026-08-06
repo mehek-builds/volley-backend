@@ -456,6 +456,87 @@ function appendMappedQuestionFields(form: FormData, packet: SubmissionPacket) {
   }
 }
 
+function normalizedAtsQuestionLabel(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/\s+\*$/, '')
+    .trim()
+    .toLowerCase();
+  return normalized || undefined;
+}
+
+function greenhouseQuestionFieldName(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const fields = Array.isArray(record.fields) ? record.fields : [];
+  for (const field of fields) {
+    if (!field || typeof field !== 'object' || Array.isArray(field)) continue;
+    const candidate = trimmed((field as Record<string, unknown>).name)
+      ?? trimmed((field as Record<string, unknown>).id);
+    if (candidate) return candidate;
+  }
+  return undefined;
+}
+
+async function greenhousePublicQuestionFieldMap(
+  posting: { boardToken: string; jobId: string },
+  fetchImpl: typeof fetch,
+): Promise<Map<string, string>> {
+  const response = await fetchImpl(
+    `https://boards-api.greenhouse.io/v1/boards/${encodeURIComponent(posting.boardToken)}/jobs/${encodeURIComponent(posting.jobId)}?questions=true`,
+    { method: 'GET' },
+  );
+  if (!response.ok) return new Map();
+  let parsed: unknown;
+  try {
+    parsed = await response.json();
+  } catch {
+    return new Map();
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return new Map();
+  const questions = Array.isArray((parsed as Record<string, unknown>).questions)
+    ? (parsed as Record<string, unknown>).questions as unknown[]
+    : [];
+  const fields = new Map<string, string>();
+  for (const question of questions) {
+    if (!question || typeof question !== 'object' || Array.isArray(question)) continue;
+    const record = question as Record<string, unknown>;
+    const label = normalizedAtsQuestionLabel(record.label);
+    const fieldName = greenhouseQuestionFieldName(record);
+    if (label && fieldName) fields.set(label, fieldName);
+  }
+  return fields;
+}
+
+async function appendGreenhouseQuestionFields(
+  form: FormData,
+  posting: { boardToken: string; jobId: string },
+  packet: SubmissionPacket,
+  fetchImpl: typeof fetch,
+): Promise<string[]> {
+  const unmapped = packet.questions.filter((item) => item.answer.trim() && !item.atsApiField?.trim());
+  const fieldMap = unmapped.length > 0
+    ? await greenhousePublicQuestionFieldMap(posting, fetchImpl)
+    : new Map<string, string>();
+  const missingFields: string[] = [];
+  for (const item of packet.questions) {
+    if (!item.answer.trim()) continue;
+    const directField = item.atsApiField?.trim();
+    const publicField = normalizedAtsQuestionLabel(item.question)
+      ? fieldMap.get(normalizedAtsQuestionLabel(item.question)!)
+      : undefined;
+    const field = directField ?? publicField;
+    if (!field) {
+      missingFields.push(item.question.slice(0, 120));
+      continue;
+    }
+    form.append(field, item.answer);
+  }
+  return missingFields;
+}
+
 function authHeader(apiKey: string): string {
   return `Basic ${Buffer.from(`${apiKey}:`).toString('base64')}`;
 }
@@ -472,7 +553,18 @@ async function submitGreenhouse(
 ): Promise<AtsSubmissionResult> {
   const posting = greenhousePostingFromUrl(rawUrl);
   if (!posting) throw new Error('Greenhouse posting URL could not be parsed');
-  const missingFields = questionFieldBlockers(packet);
+  const { firstName, lastName } = fullNameParts(packet.fullName);
+  const form = new FormData();
+  form.append('first_name', firstName);
+  form.append('last_name', lastName);
+  form.append('email', packet.email);
+  if (packet.phone) form.append('phone', packet.phone);
+  if (packet.city) form.append('location', packet.city);
+  form.append('resume', pdfBlob(packet.resume), packet.resumeName);
+  if (packet.coverLetter && packet.coverLetterName) {
+    form.append('cover_letter', pdfBlob(packet.coverLetter), packet.coverLetterName);
+  }
+  const missingFields = await appendGreenhouseQuestionFields(form, posting, packet, fetchImpl);
   if (missingFields.length > 0) {
     return {
       kind: 'not_applicable',
@@ -486,18 +578,6 @@ async function submitGreenhouse(
       },
     };
   }
-  const { firstName, lastName } = fullNameParts(packet.fullName);
-  const form = new FormData();
-  form.append('first_name', firstName);
-  form.append('last_name', lastName);
-  form.append('email', packet.email);
-  if (packet.phone) form.append('phone', packet.phone);
-  if (packet.city) form.append('location', packet.city);
-  form.append('resume', pdfBlob(packet.resume), packet.resumeName);
-  if (packet.coverLetter && packet.coverLetterName) {
-    form.append('cover_letter', pdfBlob(packet.coverLetter), packet.coverLetterName);
-  }
-  appendMappedQuestionFields(form, packet);
   const response = await fetchImpl(
     `https://boards-api.greenhouse.io/v1/boards/${encodeURIComponent(posting.boardToken)}/jobs/${encodeURIComponent(posting.jobId)}`,
     {
