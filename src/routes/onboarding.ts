@@ -21,19 +21,18 @@ import { hasActiveEmailConnection, isComposioConfigured } from '../lib/composioC
 /**
  * How many submissions has this student personally approved AND seen reach the employer?
  *
- * Both halves matter. `per_application_approval` means the student clicked the final submit
- * themselves, and `submitted` means it actually landed: an approval that then failed taught them
- * nothing about what Litos fills in on a real form. This is the counter that unlocks unattended
- * submission, so it counts experience, not intent.
+ * This is now profile evidence, not an unlock. `per_application_approval` means the student clicked
+ * the final submit themselves, and `submitted` means it actually landed. The value is still returned
+ * in onboarding state for transparency, but standing consent no longer waits for a minimum count.
  */
 /**
  * The ONE way either route may turn automatic submission on.
  *
  * Pre-merge review found the gate had a second, unguarded writer: POST /onboarding/complete wrote
  * the column straight from the request body, with no completed-onboarding guard, so a curl (or the
- * /start finish screen's own checkbox) turned standing consent on at reviewed_submits = 0 and
- * defeated the feature entirely. Two call sites checking the same rule is a rule that will be
- * skipped a third time; this makes skipping it impossible without deleting the helper.
+ * /start finish screen's own checkbox) turned standing consent on with different consent evidence
+ * than Settings. The helper remains the one writer path so version stamping and connection checks
+ * cannot drift apart by route.
  */
 async function gatedAutomationConsent(
   userId: string,
