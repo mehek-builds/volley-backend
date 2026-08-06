@@ -237,7 +237,7 @@ test('portal support is written at packet creation and unsupported portals use e
   assert.match(resumeRoute, /monitored_jobs\.apply_url/);
   assert.match(resumeRoute, /canonicalMonitoredPortalUrl\(job\.apply_url, job\.ats_name, job\.board_token\)/);
   assert.match(resumeRoute, /monitoredDescriptionHash\(job\.description\)/);
-  assert.match(resumeRoute, /spec: repairedHistorySpec\(row, monitoredJobs\)/);
+  assert.match(resumeRoute, /spec: refreshedHistorySpec\(repairedHistorySpec\(row, monitoredJobs\), profile\)/);
   const applicationsRoute = routeSource('applications.ts');
   const repairSource = libSource('applicationPortalRepair.ts');
   // Packets created from monitored jobs can outlive a bad or stale review URL. Before declaring the

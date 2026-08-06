@@ -1,7 +1,13 @@
 import type { Page } from 'playwright-core';
 import type { ManagedBrowserAction, ManagedBrowserResult } from './browserbase';
 import { describeRequiredBlocker, describeUnlabelledBlockers, humanFieldLabel } from './fieldLabel';
-import { classifyField, isLegalConsentQuestion, normalizeReviewQuestionLabel } from './questionDiscovery';
+import {
+  classifyField,
+  isLegalConsentQuestion,
+  normalizeReviewQuestionLabel,
+  resolveKnownAnswer,
+  type ApplicationProfileLike,
+} from './questionDiscovery';
 import type { Locator } from 'playwright-core';
 
 // Portal field ids legitimately contain CSS-syntax characters (Greenhouse uses UUIDs, others use
@@ -250,6 +256,8 @@ export type SubmissionPacket = {
   gpa?: string;
   major?: string;
   referralSourceDefault?: string;
+  applicationProfile?: ApplicationProfileLike;
+  jdText?: string;
   resume: Buffer;
   resumeName: string;
   coverLetter?: Buffer;
@@ -2331,6 +2339,35 @@ async function fillReviewedQuestions(page: Page, portal: SupportedPortal, packet
   }
 }
 
+async function fillResolvedRequiredField(
+  field: Locator,
+  label: string,
+  packet: SubmissionPacket,
+  out: string[],
+): Promise<boolean> {
+  if (!packet.applicationProfile) return false;
+  const tag = (await field.evaluate((el) => el.tagName).catch(() => '')).toLowerCase();
+  const type = (await field.getAttribute('type').catch(() => null))?.toLowerCase() ?? (tag === 'textarea' ? 'textarea' : 'text');
+  const known = resolveKnownAnswer(label, type, packet.applicationProfile, packet.jdText);
+  if (!known || !('value' in known) || !known.value.trim()) return false;
+  const value = known.value.trim();
+  try {
+    if (tag === 'select') {
+      await field.selectOption({ label: value }).catch(() => field.selectOption(value));
+    } else if (type === 'checkbox' || type === 'radio') {
+      const wantsYes = /^(yes|true|i agree|agree|accepted?|confirm(?:ed)?|acknowledge(?:d)?)$/i.test(value);
+      if (!wantsYes) return false;
+      await field.check();
+    } else {
+      await field.fill(value);
+    }
+    out.push(`required:${label.slice(0, 80)}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function fillPortal(page: Page, portal: SupportedPortal, packet: SubmissionPacket): Promise<FillResult> {
   const filledFields: string[] = [];
   const family = portalFamily(portal);
@@ -2462,12 +2499,17 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
   for (let index = 0; index < (await required.count()); index += 1) {
     const field = required.nth(index);
     if (!(await field.isVisible().catch(() => false))) continue;
-    const type = await field.getAttribute('type');
+    const type = (await field.getAttribute('type'))?.toLowerCase() ?? null;
     if (type === 'hidden') continue;
-    const value = await field.inputValue().catch(() => '');
-    if (value) continue;
+    if (type === 'checkbox' || type === 'radio') {
+      if (await field.isChecked().catch(() => false)) continue;
+    } else {
+      const value = await field.inputValue().catch(() => '');
+      if (value) continue;
+    }
 
     const label = await resolveFieldLabel(page, field);
+    if (label && await fillResolvedRequiredField(field, label, packet, filledFields)) continue;
     if (label) labelledBlockers.push(describeRequiredBlocker(label, { type }));
     else unlabelledCount += 1;
   }

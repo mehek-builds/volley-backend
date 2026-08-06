@@ -8,9 +8,9 @@ import {
   sanitizeEeoPrefs,
   shouldUseLocalControlledBrowser,
   submissionGraduationDateParts,
-  workEligibilityFromSponsorshipAnswer,
   type ResumeRow,
 } from './submissionRunner';
+import { workEligibilityFromSponsorshipAnswer } from '../lib/applicationProfileLike';
 import type { ApplicationReviewState } from '../lib/applicationReview';
 
 // readMostRecentRole runs inside buildPacket, which every prepare and every submit goes through -

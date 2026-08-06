@@ -1796,6 +1796,20 @@ test('the wizard is only walked on a real submit run, never on the preview that 
   assert.ok(real.some((a) => a.type === 'click'), 'a submit run still walks it');
 });
 
+test('direct required-field fallback treats unchecked required choices as empty', async () => {
+  const source = await import('node:fs/promises').then((fs) => fs.readFile('src/lib/portalSubmission.ts', 'utf8'));
+  const start = source.indexOf("const required = page.locator('input[required], textarea[required], select[required]')");
+  assert.ok(start >= 0, 'required-field scanner is missing');
+  const end = source.indexOf('blockers.push(...new Set(labelledBlockers))', start);
+  assert.ok(end > start, 'could not bound required-field scanner');
+  const scanner = source.slice(start, end);
+
+  assert.match(scanner, /type === 'checkbox' \|\| type === 'radio'/);
+  assert.match(scanner, /field\.isChecked\(\)/);
+  assert.match(scanner, /fillResolvedRequiredField\(field, label, packet, filledFields\)/);
+  assert.doesNotMatch(scanner, /const value = await field\.inputValue\(\)[\s\S]{0,80}if \(value\) continue;[\s\S]{0,80}type === 'checkbox'/);
+});
+
 test('the QA harness routes to each new controlled adapter, by query param and by path', () => {
   const previous = process.env.LITOS_ENABLE_TEST_PORTAL;
   process.env.LITOS_ENABLE_TEST_PORTAL = 'true';

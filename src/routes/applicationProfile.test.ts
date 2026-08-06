@@ -73,3 +73,15 @@ describe('languages round-trip (PUT accepts, GET serves)', () => {
     assert.equal((ENCRYPTED_FIELDS as readonly string[]).includes('languages'), false);
   });
 });
+
+describe('EEO preferences round-trip (PUT accepts, GET serves)', () => {
+  test('bodySchema keeps optional self-identification preferences', () => {
+    const parsed = bodySchema.parse({ eeo_prefs: { gender: 'Female', race: 'Asian' } });
+    assert.deepEqual(parsed.eeo_prefs, { gender: 'Female', race: 'Asian' });
+  });
+
+  test('decryptRow passes stored EEO preferences through untouched', () => {
+    const served = decryptRow(row({ eeo_prefs: { gender: 'Female', race: 'Asian' } }));
+    assert.deepEqual(served.eeo_prefs, { gender: 'Female', race: 'Asian' });
+  });
+});

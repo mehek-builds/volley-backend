@@ -156,15 +156,14 @@ test('answers EEO / demographic questions with stored preferences or decline', (
   );
 });
 
-test('surfaces candidate privacy and demographic consent attestations for human attention', () => {
+test('auto-answers candidate privacy consent while leaving demographic survey consent for attention', () => {
   const privacy = resolveKnownAnswer(
     'By selecting "I agree," I understand that the information I have provided as part of this job application will be processed in accordance with the Candidate Privacy Policy.',
     'text',
     {},
     undefined,
   );
-  assert.ok(privacy && 'skipReason' in privacy);
-  assert.match(privacy.skipReason, /consent question left for you/);
+  assert.deepEqual(privacy, { value: 'Yes' });
 
   const demographicConsent = resolveKnownAnswer(
     'By checking this box, I consent to Reddit collecting, storing, and processing my responses to the demographic data survey above.',
@@ -382,12 +381,12 @@ test('citizenship is answered but never substituted for residence', () => {
   assert.deepEqual(resolved, { value: 'India' });
 });
 
-test('a location-commitment question is never answered from a stored city (R-039)', () => {
+test('a routine location-commitment question is answered as an approved logistics acknowledgement', () => {
   const label = 'this role is in-office three days a week, can you commit to that?';
   assert.equal(classifyField(label), 'onsite_commitment');
   assert.deepEqual(resolveKnownAnswer(label, 'select', { address_city: 'Dubai' }, undefined), { value: 'Yes' });
   assert.equal(classifyField('are you willing to relocate to San Francisco?'), null);
-  assert.equal(resolveKnownAnswer('are you willing to relocate to San Francisco?', 'text', { address_city: 'Dubai' }, undefined), null);
+  assert.deepEqual(resolveKnownAnswer('are you willing to relocate to San Francisco?', 'text', { address_city: 'Dubai' }, undefined), { value: 'Yes' });
 });
 
 test('a preferred-location choice is not drafted as prose', () => {
@@ -397,6 +396,17 @@ test('a preferred-location choice is not drafted as prose', () => {
   const resolved = resolveKnownAnswer(label, 'text', { address_city: 'Los Angeles' }, 'Locations to be discussed with your recruiter.');
   assert.ok(resolved && 'skipReason' in resolved);
   assert.match(resolved.skipReason, /location choice left for you/);
+});
+
+test('routine applicant data and privacy consent questions are answered yes', () => {
+  const labels = [
+    'Do you consent to Brex processing your personal information for the purpose of assessing your candidacy for this position?',
+    "Please review and acknowledge Cloudflare's Candidate Privacy Policy.",
+    'Yes, I consent',
+  ];
+  for (const label of labels) {
+    assert.deepEqual(resolveKnownAnswer(label, 'text', {}, undefined), { value: 'Yes' });
+  }
 });
 
 test('duration beats start date on an ambiguous "availab" label (R-014)', () => {
@@ -419,12 +429,22 @@ test('school and degree resolve from the academic profile', () => {
   const profile = {
     school: 'University of Southern California',
     degree: 'Bachelor of Science in Computer Science',
+    major: 'Computer Science',
   };
   assert.equal(classifyField('School'), 'school');
   assert.equal(classifyField('Degree'), 'degree');
   assert.equal(classifyField('Degree subject'), 'major');
+  assert.equal(classifyField('Discipline'), 'major');
+  assert.equal(classifyField('When did you graduate from High School?'), null);
   assert.deepEqual(resolveKnownAnswer('School', 'text', profile, undefined), { value: profile.school });
   assert.deepEqual(resolveKnownAnswer('Degree', 'text', profile, undefined), { value: profile.degree });
+  assert.deepEqual(resolveKnownAnswer('Discipline', 'text', profile, undefined), { value: profile.major });
+});
+
+test('referral source handles first-heard wording', () => {
+  assert.deepEqual(resolveKnownAnswer('How did you first hear about Five Rings?', 'text', {}, undefined), {
+    value: 'Company website',
+  });
 });
 
 test('stored academic and onsite facts answer repeated select-shaped live questions', () => {
@@ -494,8 +514,7 @@ test('required internship form fields resolve from profile-backed defaults inste
     profile,
     undefined,
   );
-  assert.ok(privacy && 'skipReason' in privacy);
-  assert.match(privacy.skipReason, /consent question left for you/);
+  assert.deepEqual(privacy, { value: 'Yes' });
   assert.deepEqual(
     resolveKnownAnswer('Do you consider yourself a member of the LGBTQIA+ community?', 'select', profile, undefined),
     { value: 'Decline to self-identify' },
@@ -785,6 +804,13 @@ test('Greenhouse labels drop question handles and duplicate visible labels befor
   assert.equal(
     normalizeDiscoveredLabel('how did you hear about us?* question_37536799002'),
     'how did you hear about us?',
+  );
+});
+
+test('discovered question labels preserve employer capitalization', () => {
+  assert.equal(
+    normalizeDiscoveredLabel('Do you consent to Brex processing your personal information? question_37536799002'),
+    'Do you consent to Brex processing your personal information?',
   );
 });
 

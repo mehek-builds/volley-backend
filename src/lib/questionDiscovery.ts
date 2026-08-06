@@ -72,6 +72,8 @@ const NON_US_WORK_SCOPE =
 const JOB_LOCATION_SCOPE = /country\s+(?:where|in which)\s+the\s+job\s+is\s+located|country\s+where\s+the\s+role\s+is\s+located|where\s+the\s+job\s+is\s+located/i;
 const JD_US_SCOPE =
   /\b(united states|u\.s\.|usa|remote\s*\(us\)|san francisco|san mateo|mountain view|california|new york|austin|texas|washington|seattle|boston|massachusetts|chicago|illinois)\b/i;
+const ROUTINE_APPLICANT_CONSENT_QUESTION =
+  /\b(?:consent|agree|acknowledg\w*|approve|confirm)\b[\s\S]{0,180}\b(?:process(?:ing)?|use|using|collect(?:ion)?|retain|store|privacy\s+policy|privacy\s+notice|notice\s+at\s+collection)\b[\s\S]{0,180}\b(?:personal\s+information|personal\s+data|application|applicant|candidacy|candidate|privacy\s+policy|privacy\s+notice|notice\s+at\s+collection|infrastructure|platform|data)\b|\bplease\s+review\s+and\s+acknowledg\w*\b[\s\S]{0,120}\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b|\byes,\s*i\s+consent\b/i;
 
 export const EEO_QUESTION =
   /transgender|\bgender\b|what is your sex\b|race|racial|ethnicit|ethnic\b|hispanic|latino|veteran|military|disab|sexual orientation|lgbtq|lgbtqia|communities|which categories describe you|identify with|current age|what is your age|age range|how old are you|\bage group\b/i;
@@ -118,6 +120,24 @@ function workEligibilityAnswer(
     return { value: ap.needs_sponsorship ? 'Yes' : 'No' };
   }
   return { skipReason: workEligibilitySkipReason(label) };
+}
+
+function routineConsentAnswer(label: string): { value: string } | null {
+  if (/demographic data survey/i.test(label)) return null;
+  if (
+    /\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b/i.test(label)
+    && /\b(?:agree|consent|acknowledg\w*|processed?|processing)\b/i.test(label)
+  ) {
+    return { value: 'Yes' };
+  }
+  if (/\bjob application\b/i.test(label) && /\bprocess(?:ed|ing)?\b/i.test(label) && /\b(?:information|data)\b/i.test(label)) {
+    return { value: 'Yes' };
+  }
+  return ROUTINE_APPLICANT_CONSENT_QUESTION.test(label) ? { value: 'Yes' } : null;
+}
+
+function routineLocationCommitmentAnswer(label: string): { value: string } | null {
+  return isLocationCommitmentQuestion(label) ? { value: 'Yes' } : null;
 }
 
 export function isRefusedQuestion(label: string): boolean {
@@ -193,7 +213,7 @@ export function isLocationChoiceQuestion(label: string): boolean {
   return LOCATION_CHOICE_QUESTION.test(label);
 }
 
-export const REFERRAL_QUESTION = /how did you hear|referral source|hear about (this|us|the)|source of/i;
+export const REFERRAL_QUESTION = /how did you .*hear|how did you hear|first hear|referral source|hear about (this|us|the)|source of/i;
 export const START_DATE_QUESTION = /availab|start(ing)?\s+date|date.*you.*start|when can you start|earliest.*start/i;
 export const GRADUATION_DATE_QUESTION =
   /\b(?:expected\s+)?graduat(?:ion|e)\s+(?:date|year|semester|term|time\s*frame|timeframe|window)\b|\b(?:date|year|semester|term|time\s*frame|timeframe|window)\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b|\bexpected\s+grad(?:uation)?\b|\bexpect\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b|\bclass\s+of\b/i;
@@ -274,6 +294,7 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
 
   if (/\bgpa\b|grade average|grade point|academic performance/i.test(l)) return 'gpa';
   if (/gpa scale|out of.*(4\.0|100)|grading scale/i.test(l)) return 'gpa_scale';
+  if (/\bhigh school\b/i.test(l) && /graduat|when|date|year/i.test(l)) return null;
   if (LANGUAGE_QUESTION.test(l)) return 'languages';
   if (/\bdegree\b(?!\s+(?:program|subject))|education level|level of education/i.test(l)) return 'degree';
   if (/\b(school|university|college|institution)\b/i.test(l)) return 'school';
@@ -705,10 +726,10 @@ const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
     var fieldset = el.closest('fieldset');
     var legend = fieldset ? fieldset.querySelector('legend') : null;
     var legendText = legend && legend.textContent ? legend.textContent.trim() : '';
-    if (legendText) return legendText.toLowerCase();
+    if (legendText) return legendText;
     var group = el.closest('[role="group"], [role="radiogroup"]');
     var groupLabel = group ? group.getAttribute('aria-label') : null;
-    if (groupLabel) return groupLabel.toLowerCase();
+    if (groupLabel) return groupLabel;
     var labelEl = (el.labels && el.labels[0]) || (el.id ? document.querySelector('label[for="' + CSS.escape(el.id) + '"]') : null);
     var labelText = labelEl && labelEl.textContent ? labelEl.textContent : '';
     var parts = [
@@ -718,11 +739,11 @@ const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
       el.getAttribute('name') || '',
       el.id || '',
     ];
-    var own = clean(parts.join(' ')).toLowerCase();
+    var own = clean(parts.join(' '));
     if (own) return own;
     var block = el.closest('div, section, li');
     var fallback = block ? block.querySelector('label, legend, .question, h3, h4') : null;
-    return ((fallback && fallback.textContent) || '').toLowerCase().trim();
+    return ((fallback && fallback.textContent) || '').trim();
   }
 
   var els = Array.prototype.slice
@@ -794,6 +815,12 @@ export function resolveKnownAnswer(
   if (INTERNSHIP_AVAILABILITY_QUESTION.test(label)) {
     return internshipAvailabilityAnswer(label, ap);
   }
+
+  const routineConsent = routineConsentAnswer(label);
+  if (routineConsent) return routineConsent;
+
+  const routineLocationCommitment = routineLocationCommitmentAnswer(label);
+  if (routineLocationCommitment) return routineLocationCommitment;
 
   const workEligibility = workEligibilityAnswer(label, ap, jdText);
   if (workEligibility) return workEligibility;

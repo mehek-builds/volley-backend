@@ -7,7 +7,7 @@ import { db } from '../db/index';
 import { settleStall } from '../lib/applicationStall';
 import type { ApplicationReviewState } from '../lib/applicationReview';
 import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
-import { application_profile, generated_resumes, profiles, users, type ExperienceBankEntry } from '../db/schema';
+import { career_page_sources, generated_resumes, monitored_jobs, profiles, users, type ExperienceBankEntry } from '../db/schema';
 import {
   findPdfTextFidelityIssues,
   findPdfSafeMarginIssues,
@@ -35,6 +35,7 @@ import { requireAuth } from '../middleware/auth';
 import { declaredSkillsList } from './profile';
 import { buildPacket, processSubmissionApplication } from './submissionRunner';
 import { refreshKnownQuestionAnswers, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
+import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { resumeEditDisposition, submitRequestDisposition } from '../lib/submissionSafety';
 import {
   detectPortal,
@@ -265,27 +266,8 @@ function finalApprovalFieldIssues(review: ApplicationReviewState, coverLetterReq
   return issues;
 }
 
-function booleanOrUndefined(value: boolean | null | undefined): boolean | undefined {
-  return typeof value === 'boolean' ? value : undefined;
-}
-
 async function loadSensitiveQuestionProfile(userId: string): Promise<ApplicationProfileLike> {
-  const [row] = await db
-    .select({
-      work_authorized: application_profile.work_authorized,
-      needs_sponsorship: application_profile.needs_sponsorship,
-      eeo_prefs: application_profile.eeo_prefs,
-    })
-    .from(application_profile)
-    .where(eq(application_profile.user_id, userId))
-    .limit(1);
-  return {
-    work_authorized: booleanOrUndefined(row?.work_authorized),
-    needs_sponsorship: booleanOrUndefined(row?.needs_sponsorship),
-    eeo_prefs: row?.eeo_prefs && typeof row.eeo_prefs === 'object'
-      ? row.eeo_prefs as Record<string, string>
-      : null,
-  };
+  return loadApplicationProfileLike(userId);
 }
 
 function sensitiveQuestionFor(
@@ -341,18 +323,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           .from(profiles).where(eq(profiles.user_id, userId)).limit(1);
         const educationIssues = packetEducationDrift(row.spec, profileRows[0]?.parsed_json);
         if (educationIssues.length > 0) return { kind: 'education_drift' as const, issues: educationIssues };
-        const [sensitiveProfileRow] = await tx
-          .select({
-            work_authorized: application_profile.work_authorized,
-            needs_sponsorship: application_profile.needs_sponsorship,
-          })
-          .from(application_profile)
-          .where(eq(application_profile.user_id, userId))
-          .limit(1);
-        const sensitive = sensitiveQuestionFor(current.questions, {
-          work_authorized: booleanOrUndefined(sensitiveProfileRow?.work_authorized),
-          needs_sponsorship: booleanOrUndefined(sensitiveProfileRow?.needs_sponsorship),
-        }, current.jd_text);
+        const sensitiveProfile = await loadSensitiveQuestionProfile(userId);
+        const sensitive = sensitiveQuestionFor(current.questions, sensitiveProfile, current.jd_text);
         if (sensitive) return { kind: 'sensitive_question' as const, question: sensitive.question };
         if (!withinDailyCap(countRows[0]?.total ?? 0, dailySubmissionCap())) return { kind: 'cap' as const };
         const now = new Date().toISOString();
@@ -634,7 +606,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const submittedQuestions = refreshKnownQuestionAnswers(
         parsed.data.questions as ApplicationReviewQuestion[],
         sensitiveProfile,
-        typeof stored.jd_text === 'string' ? stored.jd_text : undefined,
+        current.jd_text,
       );
       const normalizedSubmittedQuestions = mergeSubmittedApplicationReviewQuestions(current.questions, submittedQuestions);
       if (normalizedSubmittedQuestions.some((question) => question.required && !question.answer.trim())) {
@@ -821,6 +793,11 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       let review = readApplicationReview(row.spec);
       if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
       review = await repairReviewPortalFromMonitoredJob(row, review);
+      const profile = await loadSensitiveQuestionProfile(request.jwtPayload!.userId);
+      review = {
+        ...review,
+        questions: refreshKnownQuestionAnswers(review.questions, profile, review.jd_text),
+      };
       let handoff_url: string | undefined;
       if (review.status === 'needs_attention' && review.browser_session_id) {
         try {
@@ -929,27 +906,31 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (current.handoff_expires_at && Date.parse(current.handoff_expires_at) < Date.now()) {
         return reply.status(409).send({ error: 'That took too long and timed out. Start the application again.' });
       }
+      const sensitiveProfile = await loadSensitiveQuestionProfile(request.jwtPayload!.userId);
+      const approvalReview: ApplicationReviewState = {
+        ...current,
+        questions: refreshKnownQuestionAnswers(current.questions, sensitiveProfile, current.jd_text),
+      };
       const approvalIssues: string[] = [];
-      if (current.portal_url && !isPortalSupported(current.portal_url)) {
+      if (approvalReview.portal_url && !isPortalSupported(approvalReview.portal_url)) {
         approvalIssues.push('Litos cannot fill in this company’s application page yet.');
       }
-      if (!current.preview_screenshot_url?.trim()) {
+      if (!approvalReview.preview_screenshot_url?.trim()) {
         approvalIssues.push('The filled form preview is missing.');
       }
-      if ((current.filled_fields ?? []).length === 0) {
+      if ((approvalReview.filled_fields ?? []).length === 0) {
         approvalIssues.push('No filled application fields were recorded.');
       }
       const coverLetter = storedCoverLetter(row);
-      if (current.cover_letter_supported === true && !coverLetter) {
+      if (approvalReview.cover_letter_supported === true && !coverLetter) {
         approvalIssues.push('The cover letter must be reviewed before sending.');
       }
-      approvalIssues.push(...finalApprovalFieldIssues(current, current.cover_letter_supported === true && Boolean(coverLetter)));
-      const currentQuestions = normalizeApplicationReviewQuestions(current.questions);
-      if (currentQuestions.some((question) => question.required && !question.answer.trim())) {
+      approvalReview.questions = normalizeApplicationReviewQuestions(approvalReview.questions);
+      approvalIssues.push(...finalApprovalFieldIssues(approvalReview, approvalReview.cover_letter_supported === true && Boolean(coverLetter)));
+      if (approvalReview.questions.some((question) => question.required && !question.answer.trim())) {
         approvalIssues.push('A required application answer is still blank.');
       }
-      const sensitiveProfile = await loadSensitiveQuestionProfile(request.jwtPayload!.userId);
-      const sensitive = sensitiveQuestionFor(currentQuestions, sensitiveProfile, current.jd_text);
+      const sensitive = sensitiveQuestionFor(approvalReview.questions, sensitiveProfile, approvalReview.jd_text);
       if (sensitive) {
         approvalIssues.push(`Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}`);
       }
@@ -963,7 +944,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       }
       const now = new Date().toISOString();
       const next = {
-        ...current,
+        ...approvalReview,
         status: 'submitting' as const,
         final_approved_at: now,
         submission_authorization: {
