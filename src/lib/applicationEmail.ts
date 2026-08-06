@@ -18,7 +18,7 @@ export type ApplicationEmailClassification =
   | 'recruiter_reply'
   | 'other';
 
-type InboundApplicationEmail = {
+export type InboundApplicationEmail = {
   provider?: string;
   providerMessageId?: string;
   from?: string;
@@ -28,6 +28,17 @@ type InboundApplicationEmail = {
   html?: string;
   receivedAt?: Date;
   raw?: unknown;
+};
+
+type ResendReceivedEmail = {
+  id?: string;
+  to?: string[];
+  from?: string;
+  created_at?: string;
+  subject?: string;
+  html?: string | null;
+  text?: string | null;
+  message_id?: string;
 };
 
 function configuredDomain(): string | null {
@@ -146,6 +157,32 @@ function safeEqual(left: string, right: string): boolean {
 export function inboundSecretMatches(value: string | undefined): boolean {
   const expected = process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_SECRET?.trim();
   return Boolean(expected && value && safeEqual(value, expected));
+}
+
+export async function retrieveResendReceivedEmail(input: {
+  emailId: string;
+  fallback: InboundApplicationEmail;
+}): Promise<InboundApplicationEmail> {
+  const key = process.env.RESEND_API_KEY?.trim();
+  if (!key) throw new Error('RESEND_API_KEY is required to read received email content');
+  const response = await fetch(`https://api.resend.com/emails/receiving/${encodeURIComponent(input.emailId)}`, {
+    headers: { Authorization: `Bearer ${key}` },
+  });
+  if (!response.ok) {
+    throw new Error(`Resend received email lookup failed with ${response.status}`);
+  }
+  const body = await response.json() as ResendReceivedEmail;
+  return {
+    provider: 'resend',
+    providerMessageId: body.message_id || body.id || input.emailId,
+    from: body.from || input.fallback.from,
+    to: Array.isArray(body.to) && body.to.length > 0 ? body.to : input.fallback.to,
+    subject: body.subject ?? input.fallback.subject,
+    text: body.text ?? input.fallback.text,
+    html: body.html ?? input.fallback.html,
+    receivedAt: body.created_at ? new Date(body.created_at) : input.fallback.receivedAt,
+    raw: { webhook: input.fallback.raw, received_email: body },
+  };
 }
 
 async function markSubmittedFromConfirmation(input: {

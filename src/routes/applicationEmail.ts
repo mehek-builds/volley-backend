@@ -5,12 +5,14 @@ import { db } from '../db';
 import { application_email_aliases, application_email_messages } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import {
+  type InboundApplicationEmail,
   inboundSecretMatches,
   isApplicationEmailConfigured,
   processInboundApplicationEmail,
+  retrieveResendReceivedEmail,
 } from '../lib/applicationEmail';
 
-const inboundBodySchema = z.object({
+const directInboundBodySchema = z.object({
   provider: z.string().trim().max(80).optional(),
   provider_message_id: z.string().trim().max(200).optional(),
   from: z.string().trim().max(500).optional(),
@@ -21,8 +23,52 @@ const inboundBodySchema = z.object({
   received_at: z.string().datetime().optional(),
 }).passthrough();
 
+const resendReceivedBodySchema = z.object({
+  type: z.literal('email.received'),
+  data: z.object({
+    email_id: z.string().trim().min(1).max(200),
+    from: z.string().trim().max(500).optional(),
+    to: z.array(z.string()).default([]),
+    subject: z.string().max(1000).optional(),
+    created_at: z.string().datetime().optional(),
+    message_id: z.string().max(500).optional(),
+  }).passthrough(),
+}).passthrough();
+
+const inboundQuerySchema = z.object({ secret: z.string().optional() }).passthrough();
+
 function unauthorized(reply: FastifyReply) {
   return reply.status(401).send({ error: 'Invalid inbound email webhook secret' });
+}
+
+async function inboundEmailFromWebhookBody(body: unknown): Promise<InboundApplicationEmail | null> {
+  const resend = resendReceivedBodySchema.safeParse(body);
+  if (resend.success) {
+    const fallback: InboundApplicationEmail = {
+      provider: 'resend',
+      providerMessageId: resend.data.data.message_id || resend.data.data.email_id,
+      from: resend.data.data.from,
+      to: resend.data.data.to,
+      subject: resend.data.data.subject,
+      receivedAt: resend.data.data.created_at ? new Date(resend.data.data.created_at) : undefined,
+      raw: resend.data,
+    };
+    return retrieveResendReceivedEmail({ emailId: resend.data.data.email_id, fallback });
+  }
+
+  const direct = directInboundBodySchema.safeParse(body);
+  if (!direct.success) return null;
+  return {
+    provider: direct.data.provider,
+    providerMessageId: direct.data.provider_message_id,
+    from: direct.data.from,
+    to: direct.data.to,
+    subject: direct.data.subject,
+    text: direct.data.text,
+    html: direct.data.html,
+    receivedAt: direct.data.received_at ? new Date(direct.data.received_at) : undefined,
+    raw: direct.data,
+  };
 }
 
 export async function applicationEmailRoutes(fastify: FastifyInstance) {
@@ -80,21 +126,14 @@ export async function applicationEmailRoutes(fastify: FastifyInstance) {
   fastify.post('/webhooks/application-email/inbound', async (request: FastifyRequest, reply: FastifyReply) => {
     const secret = request.headers['x-litos-inbound-secret'];
     const provided = Array.isArray(secret) ? secret[0] : secret;
-    if (!inboundSecretMatches(provided)) return unauthorized(reply);
+    const query = inboundQuerySchema.safeParse(request.query);
+    if (!inboundSecretMatches(provided) && !inboundSecretMatches(query.success ? query.data.secret : undefined)) {
+      return unauthorized(reply);
+    }
 
-    const parsed = inboundBodySchema.safeParse(request.body);
-    if (!parsed.success) return reply.status(400).send({ error: 'Invalid inbound email payload' });
-    const result = await processInboundApplicationEmail({
-      provider: parsed.data.provider,
-      providerMessageId: parsed.data.provider_message_id,
-      from: parsed.data.from,
-      to: parsed.data.to,
-      subject: parsed.data.subject,
-      text: parsed.data.text,
-      html: parsed.data.html,
-      receivedAt: parsed.data.received_at ? new Date(parsed.data.received_at) : undefined,
-      raw: parsed.data,
-    });
+    const inbound = await inboundEmailFromWebhookBody(request.body);
+    if (!inbound) return reply.status(400).send({ error: 'Invalid inbound email payload' });
+    const result = await processInboundApplicationEmail(inbound);
     return reply.status(result.accepted ? 202 : 404).send(result);
   });
 }

@@ -4,6 +4,7 @@ import {
   applicationAliasFor,
   classifyApplicationEmail,
   inboundSecretMatches,
+  retrieveResendReceivedEmail,
 } from './applicationEmail';
 
 test('application aliases are deterministic and live on the configured domain', () => {
@@ -55,5 +56,39 @@ test('inbound webhook secret uses exact comparison', () => {
   } finally {
     if (previous === undefined) delete process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_SECRET;
     else process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_SECRET = previous;
+  }
+});
+
+test('resend received email hydration fetches the full body before routing', async () => {
+  const previousKey = process.env.RESEND_API_KEY;
+  const previousFetch = globalThis.fetch;
+  process.env.RESEND_API_KEY = 're_test';
+  try {
+    globalThis.fetch = (async (url, init) => {
+      assert.equal(String(url), 'https://api.resend.com/emails/receiving/email_123');
+      assert.equal((init?.headers as Record<string, string>).Authorization, 'Bearer re_test');
+      return new Response(JSON.stringify({
+        id: 'email_123',
+        to: ['app-abc@apply.litos.test'],
+        from: 'recruiter@example.com',
+        created_at: '2026-08-06T10:00:00.000Z',
+        subject: 'Interview availability',
+        text: 'Can you schedule a call?',
+        html: '<p>Can you schedule a call?</p>',
+        message_id: '<message@example.com>',
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch;
+    const hydrated = await retrieveResendReceivedEmail({
+      emailId: 'email_123',
+      fallback: { provider: 'resend', to: [], raw: { type: 'email.received' } },
+    });
+    assert.equal(hydrated.providerMessageId, '<message@example.com>');
+    assert.equal(hydrated.from, 'recruiter@example.com');
+    assert.equal(hydrated.text, 'Can you schedule a call?');
+    assert.deepEqual(hydrated.to, ['app-abc@apply.litos.test']);
+  } finally {
+    if (previousKey === undefined) delete process.env.RESEND_API_KEY;
+    else process.env.RESEND_API_KEY = previousKey;
+    globalThis.fetch = previousFetch;
   }
 });
