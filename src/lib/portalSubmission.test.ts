@@ -622,6 +622,31 @@ test('direct Greenhouse fill confirms phone country and city comboboxes', async 
   assert.equal(values.get('#candidate-location::press'), 'Enter');
 });
 
+test('direct Greenhouse reviewed graduation fill prefers packet date over stale reviewed answer', async () => {
+  const graduationSelector = 'input[id="question_123"]';
+  const { page, values } = directFillPage([
+    '#first_name',
+    '#last_name',
+    '#email',
+    graduationSelector,
+  ]);
+  await fillPortal(page, 'greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    graduationDate: 'May 2028',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question: 'What is your graduation date?',
+        answer: 'May 2027',
+        portalSelector: graduationSelector,
+      },
+    ],
+  });
+  assert.equal(values.get(graduationSelector), 'May 2028');
+});
+
 test('direct Greenhouse fill selects saved demographic choices', async () => {
   const genderSelector = '.field:has(label:has-text("What gender identity do you most closely identify with?")) select';
   const orientationSelector = '.field:has(label:has-text("What sexual orientation do you most closely identify with?")) select';
@@ -2021,6 +2046,20 @@ test('Greenhouse Databricks academic and reviewed question packet stays inside t
     && action.value === '2028'), 'graduation year exact');
   assert.ok(actions.some((action) =>
     action.type === 'fill'
+    && action.label?.startsWith('question_combo_label:')
+    && action.label.includes('What is your graduation date?')
+    && action.value === 'Spring 2028'), 'reviewed graduation uses packet date bucket');
+  assert.equal(
+    actions.some((action) =>
+      action.type === 'fill'
+      && action.label?.startsWith('question_combo_label:')
+      && action.label.includes('What is your graduation date?')
+      && action.value === 'Spring 2027'),
+    false,
+    'stale reviewed graduation date is not preferred over packet date',
+  );
+  assert.ok(actions.some((action) =>
+    action.type === 'fill'
     && action.label?.startsWith('preferred_location_combo:')
     && action.value === 'San Francisco, CA'), 'preferred location exact');
   assert.equal(
@@ -2057,9 +2096,10 @@ test('Greenhouse replays Databricks export-control checkbox answers by exact opt
 
   const checkboxClicks = actions.filter((action) => action.label?.startsWith('question_checkbox:'));
   assert.equal(actions.some((action) => action.label?.startsWith('question_choice:')), false);
+  assert.ok(checkboxClicks.some((action) => action.type === 'click' && action.selector?.includes('Please confirm whether any of the below') && action.selector?.includes('None of the above')));
+  assert.ok(checkboxClicks.some((action) => action.type === 'click' && action.selector?.includes('If you selected a response to the prior question') && action.selector?.includes('Not applicable')));
   assert.ok(checkboxClicks.some((action) => action.type === 'click' && action.selector === 'input[name="question_35110536002[]"][value="221056618002"]'));
   assert.ok(checkboxClicks.some((action) => action.type === 'click' && action.selector === 'input[name="question_35114221002[]"][value="221073825002"]'));
-  assert.equal(checkboxClicks.some((action) => action.selector?.startsWith('label:has-text')), false);
   assert.ok(checkboxClicks.every((action) => action.optional === true));
   assert.ok(checkboxClicks.every((action) => (action.timeout ?? Infinity) < 30_000));
 });

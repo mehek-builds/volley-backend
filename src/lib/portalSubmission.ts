@@ -609,12 +609,14 @@ function pushGreenhouseGraduationDateComboboxActions(actions: ManagedBrowserActi
   const values = uniqueDefined([
     packet.graduationDate,
     packet.graduationDate ? greenhouseGraduationBucket(packet.graduationDate) : undefined,
-  ]).slice(0, 2);
+    packet.graduationDate ? greenhouseClosestGraduationOption(packet.graduationDate) : undefined,
+  ]).slice(0, 3);
   const labels = ['What is your graduation date?', 'Graduation Date', 'Expected Graduation Date'];
   let index = 0;
+  const selectorLimit = packetLooksDatabricks(packet) ? 3 : QUESTION_COMBOBOX_SELECTOR_LIMIT;
   for (const label of labels) {
     for (const value of values) {
-      for (const selector of greenhouseQuestionComboboxSelectors(label).slice(0, QUESTION_COMBOBOX_SELECTOR_LIMIT)) {
+      for (const selector of greenhouseQuestionComboboxSelectors(label).slice(0, selectorLimit)) {
         managedGreenhouseScopedReactSelectFill(
           actions,
           selector,
@@ -835,8 +837,12 @@ function greenhouseQuestionComboboxSelectors(label: string): string[] {
   const text = cssString(label);
   return [
     `.field-wrapper:has(label:has-text("${text}")) input[role="combobox"]`,
+    `.field:has(label:has-text("${text}")) input[role="combobox"]`,
     `.select__container:has(> label:has-text("${text}")) input[role="combobox"]`,
     `div:has(> label:has-text("${text}")) input[role="combobox"]`,
+    `fieldset:has(legend:has-text("${text}")) input[role="combobox"]`,
+    `label:has-text("${text}") + div input[role="combobox"]`,
+    `label:has-text("${text}") ~ div input[role="combobox"]`,
   ];
 }
 
@@ -1373,6 +1379,9 @@ function greenhouseCheckboxOptionSelectors(questionText: string, answer: string)
     && /none\s+of\s+the\s+above/.test(normalizedAnswer)
   ) {
     return [
+      '.field:has(label:has-text("Please confirm whether any of the below")) label:has-text("None of the above") input[type="checkbox"]',
+      '.field-wrapper:has(label:has-text("Please confirm whether any of the below")) label:has-text("None of the above") input[type="checkbox"]',
+      'fieldset:has(legend:has-text("Please confirm whether any of the below")) label:has-text("None of the above") input[type="checkbox"]',
       'input[name="question_35110536002[]"][value="221056618002"]',
     ];
   }
@@ -1381,6 +1390,9 @@ function greenhouseCheckboxOptionSelectors(questionText: string, answer: string)
     && /not\s+applicable|none\s+of\s+the\s+above/.test(normalizedAnswer)
   ) {
     return [
+      '.field:has(label:has-text("If you selected a response to the prior question")) label:has-text("Not applicable") input[type="checkbox"]',
+      '.field-wrapper:has(label:has-text("If you selected a response to the prior question")) label:has-text("Not applicable") input[type="checkbox"]',
+      'fieldset:has(legend:has-text("If you selected a response to the prior question")) label:has-text("Not applicable") input[type="checkbox"]',
       'input[name="question_35114221002[]"][value="221073825002"]',
     ];
   }
@@ -1611,6 +1623,25 @@ function packetLooksAkuna(packet: SubmissionPacket): boolean {
     || packet.questions.some((item) => /\bakuna\b/i.test(item.question));
 }
 
+function packetLooksDatabricks(packet: SubmissionPacket): boolean {
+  return /\bdatabricks\b/i.test(packet.jdText ?? '')
+    || packet.questions.some((item) => /\bdatabricks\b/i.test(`${item.question}\n${item.answer}`));
+}
+
+function greenhouseReviewedQuestionAnswer(item: SubmissionPacket['questions'][number], packet: SubmissionPacket): string {
+  const questionText = normalizeReviewQuestionLabel(item.question);
+  if (/\bgraduat(?:ion|e)\s+date\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bexpected\s+graduat(?:ion|e)\b/i.test(questionText)) {
+    return packet.graduationDate?.trim() || item.answer;
+  }
+  if (/\bgraduat(?:ion|e)\s+month\b|\bwhat\s+is\s+your\s+graduation\s+month\b/i.test(questionText)) {
+    return packet.graduationMonth?.trim() || item.answer;
+  }
+  if (/\bgraduat(?:ion|e)\s+year\b|\bwhat\s+is\s+your\s+graduation\s+year\b|\bexpected\s+graduat(?:ion|e)\s+year\b/i.test(questionText)) {
+    return packet.graduationYear?.trim() || item.answer;
+  }
+  return item.answer;
+}
+
 function pushGreenhouseKnownQuestionAliases(
   actions: ManagedBrowserAction[],
   packet: SubmissionPacket,
@@ -1620,24 +1651,25 @@ function pushGreenhouseKnownQuestionAliases(
   if (mode === 'akunaRequired' && !packetLooksAkuna(packet)) return;
   const packetQuestionContext = packet.jdText ?? packet.questions.map((item) => item.question).join('\n');
   for (const item of packet.questions) {
-    const akunaAliases = greenhouseAkunaRequiredQuestionAliases(item.question, item.answer);
+    const answer = greenhouseReviewedQuestionAnswer(item, packet);
+    const akunaAliases = greenhouseAkunaRequiredQuestionAliases(item.question, answer);
     const aliases = mode === 'akunaRequired'
       ? akunaAliases
       : mode === 'legacy' && akunaAliases.length > 0
         ? []
-        : greenhouseKnownQuestionAliases(item.question, item.answer);
+        : greenhouseKnownQuestionAliases(item.question, answer);
     for (const alias of aliases) {
-      const key = `${alias}\n${item.answer.trim()}`;
+      const key = `${alias}\n${answer.trim()}`;
       if (seen.has(key)) continue;
       seen.add(key);
       if (mode === 'akunaRequired') {
-        pushGreenhouseQuestionComboboxLabelActions(actions, alias, item.answer, 'greenhouse_known_question', packetQuestionContext);
+        pushGreenhouseQuestionComboboxLabelActions(actions, alias, answer, 'greenhouse_known_question', packetQuestionContext);
         continue;
       }
       actions.push({
         type: 'fillByLabelText',
         text: alias,
-        value: item.answer.trim(),
+        value: answer.trim(),
         label: `greenhouse_known_question:${alias.slice(0, 80)}`,
         optional: true,
         timeout: MANAGED_FILL_TIMEOUT_MS,
@@ -2307,7 +2339,8 @@ export function buildManagedPortalActions(
   // values after filling, so a missing or unaccepted value returns as a blocker instead of being
   // reported as completed.
   for (const item of canFillReviewedQuestions('managed') ? packet.questions : []) {
-    if (!item.answer.trim()) continue;
+    const answer = greenhouseReviewedQuestionAnswer(item, packet);
+    if (!answer.trim()) continue;
     const questionText = normalizeReviewQuestionLabel(item.question);
     if (!questionText) continue;
     if (shouldSkipReviewedConsentQuestion(questionText)) continue;
@@ -2320,13 +2353,13 @@ export function buildManagedPortalActions(
       ? rawPortalSelector.trim()
       : undefined;
     if (runtimeGreenhouseSelector) {
-      pushGreenhouseQuestionSelectActions(actions, runtimeGreenhouseSelector, questionText, item.answer, 'question', packet.jdText);
-      pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');
+      pushGreenhouseQuestionSelectActions(actions, runtimeGreenhouseSelector, questionText, answer, 'question', packet.jdText);
+      pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
     }
     if (portalSelector) {
       if (portalFamily(portal) === 'greenhouse' && /^combobox$/i.test(portalInputType ?? '')) {
-        pushGreenhouseQuestionComboboxActions(actions, portalSelector, questionText, item.answer, 'question', packet.jdText);
-        pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');
+        pushGreenhouseQuestionComboboxActions(actions, portalSelector, questionText, answer, 'question', packet.jdText);
+        pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
         continue;
       }
       if (/^(?:checkbox|radio)$/i.test(portalInputType ?? '')) {
@@ -2338,11 +2371,11 @@ export function buildManagedPortalActions(
             optional: true,
             timeout: MANAGED_FILL_TIMEOUT_MS,
           });
-          pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');
+          pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
         }
         continue;
       }
-      managedFill(actions, portalSelector, item.answer, `question:${questionText.slice(0, 80)}`);
+      managedFill(actions, portalSelector, answer, `question:${questionText.slice(0, 80)}`);
       if (portalFamily(portal) === 'greenhouse' && questionFillShouldPressEnter(questionText)) {
         actions.push({
           type: 'press',
@@ -2354,33 +2387,33 @@ export function buildManagedPortalActions(
         });
       }
       if (portalFamily(portal) === 'greenhouse') {
-        pushGreenhouseQuestionComboboxActions(actions, portalSelector, questionText, item.answer, 'question', packet.jdText);
-        pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');
+        pushGreenhouseQuestionComboboxActions(actions, portalSelector, questionText, answer, 'question', packet.jdText);
+        pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
       }
       continue;
     }
     if (portalFamily(portal) === 'greenhouse') {
       if (isRoutineCandidatePrivacyAcknowledgement(questionText)) {
-        pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');
+        pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
         if (/\bjob\s+applicant\s+privacy\s+notice\b/i.test(questionText)) {
-          pushGreenhouseQuestionComboboxLabelActions(actions, questionText, item.answer, 'question', packet.jdText);
+          pushGreenhouseQuestionComboboxLabelActions(actions, questionText, answer, 'question', packet.jdText);
         }
         continue;
       }
       if (isGreenhouseEducationComboboxQuestion(questionText)) {
-        pushGreenhouseQuestionComboboxLabelActions(actions, questionText, item.answer, 'question', packet.jdText);
+        pushGreenhouseQuestionComboboxLabelActions(actions, questionText, answer, 'question', packet.jdText);
         continue;
       }
       const isReactSelectQuestion = isGreenhouseReactSelectQuestion(questionText);
       if (!isReactSelectQuestion) {
-        pushScopedQuestionChoiceActions(actions, questionText, item.answer, 'question');
+        pushScopedQuestionChoiceActions(actions, questionText, answer, 'question');
       }
-      pushGreenhouseQuestionComboboxLabelActions(actions, questionText, item.answer, 'question', packet.jdText);
-      pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');
+      pushGreenhouseQuestionComboboxLabelActions(actions, questionText, answer, 'question', packet.jdText);
+      pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
     } else {
-      pushScopedQuestionChoiceActions(actions, questionText, item.answer, 'question');
+      pushScopedQuestionChoiceActions(actions, questionText, answer, 'question');
       if (portalFamily(portal) === 'ashby') {
-        pushAshbyQuestionTextFallbackActions(actions, questionText, item.answer, 'question');
+        pushAshbyQuestionTextFallbackActions(actions, questionText, answer, 'question');
       }
     }
   }
@@ -2826,14 +2859,15 @@ async function uploadFirst(
 
 async function fillReviewedQuestions(page: Page, portal: SupportedPortal, packet: SubmissionPacket, out: string[]) {
   for (const item of packet.questions) {
-    if (!item.answer.trim()) continue;
+    const answer = greenhouseReviewedQuestionAnswer(item, packet);
+    if (!answer.trim()) continue;
     const questionText = normalizeReviewQuestionLabel(item.question);
     if (!questionText) continue;
     if (shouldSkipReviewedConsentQuestion(questionText)) continue;
     const portalSelector = durablePortalSelector(reviewQuestionPortalSelector(item));
     if (/^(?:checkbox|radio)$/i.test(reviewQuestionPortalInputType(item) ?? '')) {
       if (portalFamily(portal) === 'greenhouse') {
-        for (const selector of greenhouseCheckboxOptionSelectors(questionText, item.answer)) {
+        for (const selector of greenhouseCheckboxOptionSelectors(questionText, answer)) {
           const field = page.locator(selector).first();
           if ((await field.count()) > 0 && (await field.isVisible().catch(() => false))) {
             await field.check();
@@ -2847,13 +2881,13 @@ async function fillReviewedQuestions(page: Page, portal: SupportedPortal, packet
     if (portalSelector) {
       const field = page.locator(portalSelector).first();
       if ((await field.count()) > 0 && (await field.isVisible().catch(() => false))) {
-        await field.fill(item.answer);
+        await field.fill(answer);
         out.push(`question:${questionText.slice(0, 80)}`);
         continue;
       }
     }
     if (portalFamily(portal) === 'greenhouse' && isRoutineCandidatePrivacyAcknowledgement(questionText)) {
-      for (const selector of greenhouseCheckboxOptionSelectors(questionText, item.answer)) {
+      for (const selector of greenhouseCheckboxOptionSelectors(questionText, answer)) {
         const field = page.locator(selector).first();
         if ((await field.count()) > 0 && (await field.isVisible().catch(() => false))) {
           await field.check().catch(() => field.click());
