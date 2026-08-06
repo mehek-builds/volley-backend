@@ -146,11 +146,28 @@ function slice(source: string, from: string, to: string): string {
   return source.slice(start, end);
 }
 
+function functionSlice(source: string, from: string): string {
+  const start = source.indexOf(from);
+  assert.ok(start >= 0, `expected to find ${from}`);
+  const bodyStart = source.indexOf('{', start);
+  assert.ok(bodyStart > start, `expected to find function body for ${from}`);
+  let depth = 0;
+  for (let i = bodyStart; i < source.length; i += 1) {
+    const char = source[i];
+    if (char === '{') depth += 1;
+    if (char === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  assert.fail(`expected to find function end for ${from}`);
+}
+
 test('submission runner prefers current parsed education over stale base resume education', () => {
   const runner = strippedSource('src/routes/submissionRunner.ts');
   const academicStr = slice(runner, 'const academicStr = (key: string): string | undefined => {', 'const academicNum =')
     .replace(/\s+/g, '');
-  const academicNum = slice(runner, 'const academicNum = (key: string): number | undefined => {', 'const academicBoolean =')
+  const academicNum = functionSlice(runner, 'const academicNum = (key: string): number | undefined => {')
     .replace(/\s+/g, '');
   assert.ok(
     academicStr.indexOf('constparsedValue=parsed[key]') < academicStr.indexOf('constbaseValue=base[key]'),
@@ -217,14 +234,15 @@ test('submit-request revalidates resume content and PDF layout before the browse
 
 test('final approval revalidates the full packet before it clicks submit', () => {
   const handler = slice(routes, "'/applications/:id/submission/approve'", "'/applications/:id/status'");
-  assert.match(handler, /current\.preview_screenshot_url/);
-  assert.match(handler, /current\.filled_fields/);
-  assert.match(handler, /finalApprovalFieldIssues\(current, current\.cover_letter_supported === true && Boolean\(coverLetter\)\)/);
+  assert.match(handler, /questions: refreshKnownQuestionAnswers\(current\.questions, sensitiveProfile, current\.jd_text\)/);
+  assert.match(handler, /approvalReview\.preview_screenshot_url/);
+  assert.match(handler, /approvalReview\.filled_fields/);
+  assert.match(handler, /finalApprovalFieldIssues\(approvalReview, approvalReview\.cover_letter_supported === true && Boolean\(coverLetter\)\)/);
   assert.match(handler, /const coverLetter = storedCoverLetter\(row\)/);
-  assert.match(handler, /current\.cover_letter_supported === true && !coverLetter/);
-  assert.match(handler, /const currentQuestions = normalizeApplicationReviewQuestions\(current\.questions\)/);
-  assert.match(handler, /currentQuestions\.some\(\(question\) => question\.required && !question\.answer\.trim\(\)\)/);
-  assert.match(handler, /sensitiveQuestionFor\(currentQuestions/);
+  assert.match(handler, /approvalReview\.cover_letter_supported === true && !coverLetter/);
+  assert.match(handler, /approvalReview\.questions = normalizeApplicationReviewQuestions\(approvalReview\.questions\)/);
+  assert.match(handler, /approvalReview\.questions\.some\(\(question\) => question\.required && !question\.answer\.trim\(\)\)/);
+  assert.match(handler, /sensitiveQuestionFor\(approvalReview\.questions/);
   assert.match(handler, /Sensitive question requires your attention/);
   assert.match(handler, /preSendResumeVerificationIssues\(request\.jwtPayload!\.userId, stored\)/);
   assert.match(handler, /FINAL_APPROVAL_VERIFICATION_FAILED/);
@@ -233,7 +251,7 @@ test('final approval revalidates the full packet before it clicks submit', () =>
     'final approval verification must run before the browser clicks submit',
   );
   assert.ok(
-    handler.indexOf('current.preview_screenshot_url') < handler.indexOf('processSubmissionApplication'),
+    handler.indexOf('approvalReview.preview_screenshot_url') < handler.indexOf('processSubmissionApplication'),
     'a missing filled-form preview must block final submission',
   );
 });
