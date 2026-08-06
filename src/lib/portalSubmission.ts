@@ -618,6 +618,17 @@ function pushGreenhouseGraduationDateComboboxActions(actions: ManagedBrowserActi
   }
 }
 
+function pushGreenhouseFixedQuestionComboboxActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
+  if (!packetLooksAkuna(packet)) return;
+  const fixedQuestions: Array<{ label: string; value: string | undefined }> = [
+    { label: 'Graduation Month', value: packet.graduationMonth },
+    { label: 'Graduation Year', value: packet.graduationYear },
+  ];
+  for (const item of fixedQuestions) {
+    pushGreenhouseQuestionComboboxLabelActions(actions, item.label, item.value ?? '', 'greenhouse_fixed_question', packet.jdText);
+  }
+}
+
 function greenhousePreferredLocationAnswer(packet: SubmissionPacket): string | undefined {
   const sourceLocations = uniqueDefined([
     packet.roleLocation,
@@ -1178,7 +1189,7 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string, c
 }
 
 function isGreenhouseReactSelectQuestion(question: string): boolean {
-  return /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\btop\s+preference\b|\banswering\s+[“"]?yes[”"]?\s+below\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window|month|year)\b|\bexpected\s+graduat(?:ion|e)\b|\bexpect(?:ing)?\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b|\bwhat\s+is\s+your\s+gpa\b|\bacademic\s+performance\b|\beducation\s+level\b|\blevel\s+of\s+education\b|\bdegree\b(?!\s+program)|\bdiscipline\b|\bfield\s+of\s+study\b|\bmajor\b|\bcourse\b|\bschool\b|\buniversity\b|\bcurrent\s+year\b|\byear\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\bacademic\s+year\b|\bhow\s+did\s+you\s+hear\b|\breferral\s+source\b|\bhear\s+about\b|\bwhere\s+have\s+you\s+learned\s+about\b|\bsource\b|\bsource\s+of\b|\bcountry\b|\bcurrent\s+location\b|\bwhere\s+are\s+you\s+currently\s+(?:located|living|based)\b|\b(?:live|reside|located)\b[^?]{0,80}\b(?:new\s+york|california)\b|\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b|\bapplied\b[^?]{0,120}\b(?:past|previously|before|role|position)\b|\boffer\s+deadlines?\b|\bprior\s+experience\b[^?]{0,120}\b(?:options\s+market\s+making|trading\s+firm)\b|\bcurrent\s+immigration\s+status\b|\bwork\s+authorization\/status\b|legally\s+authorized\s+to\s+work|(?:require|need)\s+sponsorship|sponsorship\s+for\s+(?:employment\s+visa|work\s+authorization)|\b(?:are|will)\s+you\s+available\b[^?]{0,160}\b(?:internship|full-time|40\s*hours|weeks?)\b|\b(?:internship|full-time|40\s*hours|weeks?)\b[^?]{0,160}\b(?:are|will)\s+you\s+available\b|\bpreferred\s+coding\s+language\b|\bcoding\s+language\b[^?]{0,120}\bpreference\b|\bjob\s+applicant\s+privacy\s+notice\b|\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b|\bprocessing\s+of\s+personal\s+data\b|\bAI\s+Policy\s+for\s+Interviewers\b|\bmajoring\s+in\s+STEM\b|\bresume\b[^?]{0,80}\bPDF\s+format\b|\bcertify\b[^?]{0,120}\b(?:true|complete|accurate)\b|\barea\s+of\s+interest\b|\bteam\s+opening\b|\bopening\b[^?]{0,80}\binterested\b|\bLGBTQIA?\+?\b|sexual\s+orientation|\bgender(?:\s+identity)?\b|\bveteran\b|\bmilitary\b|\brace\b|\bethnicit|\bcategory\b/i.test(question);
+  return /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\btop\s+preference\b|\banswering\s+[“"]?yes[”"]?\s+below\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window|month|year)\b|\bexpected\s+graduat(?:ion|e)\b|\bexpect(?:ing)?\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b|\bwhat\s+is\s+your\s+gpa\b|\bacademic\s+performance\b|\beducation\s+level\b|\blevel\s+of\s+education\b|\bdegree\b(?!\s+program)|\bdiscipline\b|\bfield\s+of\s+study\b|\bmajor\b|\bcourse\b|\bschool\b|\buniversity\b|\bcurrent\s+year\b|\byear\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\bacademic\s+year\b|\bhow\s+did\s+you\s+hear\b|\breferral\s+source\b|\bhear\s+about\b|\bwhere\s+have\s+you\s+learned\s+about\b|\bsource\b|\bsource\s+of\b|\bcountry\b|\bcurrent\s+location\b|\bwhere\s+are\s+you\s+currently\s+(?:located|living|based)\b|\b(?:live|reside|located)\b[^?]{0,80}\b(?:new\s+york|california)\b|\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b|\bapplied\b[^?]{0,120}\b(?:past|previously|before|role|position)\b|\boffer\s+deadlines?\b|\bprior\s+experience\b[^?]{0,120}\b(?:options\s+market\s+making|trading\s+firm)\b|\bcurrent\s+immigration\s+status\b|\bwork\s+authorization\/status\b|legally\s+authorized\s+to\s+work|(?:require|need)\s+(?:visa\s+)?sponsorship|sponsorship\s+for\s+(?:employment\s+visa|work\s+authorization)|\bsponsor\b[^?]{0,80}\bwork\s+authorization\b|\b(?:are|will)\s+you\s+available\b[^?]{0,160}\b(?:internship|full-time|40\s*hours|weeks?)\b|\b(?:internship|full-time|40\s*hours|weeks?)\b[^?]{0,160}\b(?:are|will)\s+you\s+available\b|\bpreferred\s+coding\s+language\b|\bcoding\s+language\b[^?]{0,120}\bpreference\b|\bjob\s+applicant\s+privacy\s+notice\b|\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b|\bprocessing\s+of\s+personal\s+data\b|\bAI\s+Policy\s+for\s+Interviewers\b|\bmajoring\s+in\s+STEM\b|\bresume\b[^?]{0,80}\bPDF\s+format\b|\bcertify\b[^?]{0,120}\b(?:information|true|complete|accurate)\b|\barea\s+of\s+interest\b|\bteam\s+opening\b|\bopening\b[^?]{0,80}\binterested\b|\bLGBTQIA?\+?\b|sexual\s+orientation|\bgender(?:\s+identity)?\b|\bveteran\b|\bmilitary\b|\brace\b|\bethnicit|\bcategory\b/i.test(question);
 }
 
 function isGreenhouseEducationComboboxQuestion(question: string): boolean {
@@ -1459,6 +1470,18 @@ function greenhouseKnownQuestionAliases(question: string, answer: string): strin
 function greenhouseAkunaRequiredQuestionAliases(question: string, answer: string): string[] {
   const normalizedQuestion = question.toLowerCase();
   const normalizedAnswer = answer.trim().toLowerCase();
+  if (/\bcurrent\s+immigration\s+status\b|\bbasis\s+of\s+your\s+current\s+work\s+authorization\b/.test(normalizedQuestion)) {
+    if (/\bf-?1\b|\bcpt\b|\bopt\b|\bstem\b|n\/?a|not applicable/i.test(answer)) {
+      return ['current immigration status/basis of your current work authorization'];
+    }
+    return [];
+  }
+  if (/\bhow\s+did\s+you\s+hear\b|\bhear\s+about\s+this\s+job\b/.test(normalizedQuestion)) {
+    return ['How did you hear about this job?'];
+  }
+  if (/\boffer\s+deadlines?\b/.test(normalizedQuestion)) {
+    return ['Do you have any offer deadlines that we should be aware of?'];
+  }
   if (!['yes', 'no'].includes(normalizedAnswer)) return [];
   if (/\btop\s+preference\b|\banswering\s+[“"]?yes[”"]?\s+below\b/.test(normalizedQuestion)) {
     return ['this role is my top preference'];
@@ -1466,11 +1489,17 @@ function greenhouseAkunaRequiredQuestionAliases(question: string, answer: string
   if (/\b(?:options\s+market\s+making|trading\s+firm)\b/.test(normalizedQuestion)) {
     return ['prior experience working at an options market making trading firm'];
   }
+  if (/\bdisclaimer\b[^?]{0,120}\bakuna\b[^?]{0,220}\bsponsor\b/.test(normalizedQuestion)) {
+    return ['Disclaimer: Akuna Capital is a global company which wants to attract the highest quality talent. We will sponsor any qualified candidate for US work authorization'];
+  }
+  if (/\b(?:now|future)\b[^?]{0,180}\bvisa\s+sponsorship\b/.test(normalizedQuestion)) {
+    return ['Do you now, or will you in the future, require visa sponsorship'];
+  }
   if (/\b(?:live|reside|located)\b[^?]{0,80}\b(?:new\s+york|california)\b/.test(normalizedQuestion)) {
     return ['live in New York or California'];
   }
   if (/\bcertify\b[^?]{0,120}\b(?:true|complete|accurate)\b/.test(normalizedQuestion)) {
-    return ['I certify that all information is true'];
+    return ['I certify that all information I have provided'];
   }
   if (/\bresume\b[^?]{0,80}\bpdf\s+format\b/.test(normalizedQuestion)) {
     return ['resume must be submitted in PDF format'];
@@ -1501,6 +1530,10 @@ function pushGreenhouseKnownQuestionAliases(
       const key = `${alias}\n${item.answer.trim()}`;
       if (seen.has(key)) continue;
       seen.add(key);
+      if (mode === 'akunaRequired') {
+        pushGreenhouseQuestionComboboxLabelActions(actions, alias, item.answer, 'greenhouse_known_question');
+        continue;
+      }
       actions.push({
         type: 'fillByLabelText',
         text: alias,
@@ -1509,9 +1542,6 @@ function pushGreenhouseKnownQuestionAliases(
         optional: true,
         timeout: MANAGED_FILL_TIMEOUT_MS,
       });
-      if (mode === 'akunaRequired') {
-        pushGreenhouseQuestionComboboxLabelActions(actions, alias, item.answer, 'greenhouse_known_question');
-      }
     }
   }
 }
@@ -1954,6 +1984,7 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedFillByLabel(actions, 'End date year', packet.graduationYear, 'education_end_year');
     managedFillByLabel(actions, 'Graduation Month', packet.graduationMonth, 'education_graduation_month');
     managedFillByLabel(actions, 'Graduation Year', packet.graduationYear, 'education_graduation_year');
+    pushGreenhouseFixedQuestionComboboxActions(actions, packet);
     pushGreenhouseGraduationDateComboboxActions(actions, packet);
     managedFillByLabel(actions, 'GPA', packet.gpa, 'gpa');
     managedFillByLabel(actions, 'What is your GPA?', packet.gpa, 'gpa_question');

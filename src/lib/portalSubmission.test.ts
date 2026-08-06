@@ -1671,6 +1671,14 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
       { question: 'Do you have any offer deadlines that we should be aware of?', answer: "I don't have any offer deadlines right now." },
       { question: 'Do you have prior experience working at an options market making trading firm?', answer: "I don't have prior experience at an options market making firm." },
       {
+        question: 'Disclaimer: Akuna Capital is a global company which wants to attract the highest quality talent. We will sponsor any qualified candidate for US work authorization if we are legally able.',
+        answer: 'Yes',
+      },
+      {
+        question: 'Do you now, or will you in the future, require visa sponsorship to continue working in the United States (e.g. H-1B, TN, E-3)?',
+        answer: 'Yes',
+      },
+      {
         question: 'If you answered “Yes” above to requiring visa sponsorship now or in the future for work authorization, please respond to the following questions. What is your current immigration status/basis of your current work authorization?',
         answer: 'F-1 CPT',
       },
@@ -1697,17 +1705,17 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
   assert.deepEqual(valuesFor('Graduation Month'), ['May']);
   assert.deepEqual(valuesFor('Graduation Year'), ['2028']);
   assert.deepEqual(valuesFor('What is your GPA?'), ['3.9']);
-  assert.deepEqual(valuesFor('Have you ever applied to a full time or internship position'), ['No']);
-  assert.deepEqual(valuesFor('Have you applied to this role at Akuna previously?'), ['No']);
-  assert.deepEqual(valuesFor('How did you hear about this job?'), ['Other']);
-  assert.deepEqual(valuesFor('Do you have any offer deadlines'), ['No']);
-  assert.deepEqual(valuesFor('Do you have prior experience working at an options market making'), ['No']);
-  assert.deepEqual(valuesFor('If you answered “Yes” above'), ['F-1 CPT']);
+  assert.deepEqual(valuesFor('Do you have prior experience working at an options market making'), []);
   assert.equal(comboFills.some((action) => action.label?.includes('high school diploma')), false);
   const knownComboFills = actions.filter((action) => action.type === 'fill' && action.label?.startsWith('greenhouse_known_question_combo_label:'));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('this role is my top preference')));
+  assert.ok(knownComboFills.some((action) => action.selector?.includes('How did you hear about this job')));
+  assert.ok(knownComboFills.some((action) => action.selector?.includes('Do you have any offer deadlines')));
+  assert.ok(knownComboFills.some((action) => action.label?.includes('Disclaimer: Akuna Capital is a global company') && action.value === 'Yes'));
+  assert.ok(knownComboFills.some((action) => action.selector?.includes('Do you now, or will you in the future, require visa sponsorship')));
+  assert.ok(knownComboFills.some((action) => action.selector?.includes('current immigration status/basis') && action.value === 'F-1 CPT'));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('live in New York or California')));
-  assert.ok(knownComboFills.some((action) => action.selector?.includes('I certify that all information is true')));
+  assert.ok(knownComboFills.some((action) => action.selector?.includes('I certify that all information I have provided')));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('resume must be submitted in PDF format')));
 
   for (const action of comboFills) {
@@ -1720,6 +1728,25 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
     assert.equal(actions[index + 2]?.selector, '[id^="react-select-"][id$="-option-0"]:visible');
     assert.equal(actions[index + 3]?.type, 'press');
   }
+});
+
+test('Greenhouse replays fixed Akuna graduation month and year when discovery misses them', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    graduationMonth: 'May',
+    graduationYear: '2028',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    jdText: 'Akuna Capital software engineer internship',
+    questions: [
+      { question: 'What is your GPA?', answer: '3.89' },
+    ],
+  });
+
+  const fixedComboFills = actions.filter((action) => action.type === 'fill' && action.label?.startsWith('greenhouse_fixed_question_combo_label:'));
+  assert.ok(fixedComboFills.some((action) => action.selector?.includes('Graduation Month') && action.value === 'May'));
+  assert.ok(fixedComboFills.some((action) => action.selector?.includes('Graduation Year') && action.value === '2028'));
 });
 
 test('Greenhouse uses preserved combobox portal selectors without raw-filling React-select inputs', () => {
