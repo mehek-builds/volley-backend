@@ -549,7 +549,7 @@ function greenhouseDegreeAliases(degree: string | undefined): string[] {
   const bachelorScience = level === 'Bachelor\'s Degree' && /\b(?:science|b\.?s\.?)\b/i.test(lower)
     ? 'Bachelor of Science'
     : undefined;
-  return uniqueDefined([level, bachelorScience, trimmed]);
+  return uniqueDefined([level, bachelorScience, trimmed]).slice(0, 1);
 }
 
 function greenhouseDisciplineAliases(packet: SubmissionPacket): string[] {
