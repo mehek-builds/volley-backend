@@ -2577,7 +2577,6 @@ function resumeHaystack(resumeText: string): string {
 
 const SAME_CAPABILITY_TERMS = new Map<string, string[]>([
   ['javascript', ['typescript']],
-  ['typescript', ['javascript']],
   ['frontend', ['react', 'vue', 'angular', 'svelte']],
   ['backend', ['nodejs', 'express', 'django', 'flask', 'fastapi', 'rails', 'spring']],
   ['api', ['rest', 'graphql']],

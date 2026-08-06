@@ -597,6 +597,19 @@ describe('scoreJdMatch', () => {
     for (const covered of ['JavaScript', 'frontend', 'backend', 'APIs']) {
       assert.ok(r.matched.some((t) => t.display === covered), `${covered} should be matched`);
     }
+
+    const reverse = scoreJdMatch(
+      'Built JavaScript, React, Node.js, REST API integrations, Git, SQL, Docker, and Python.',
+      [
+        'Qualifications',
+        '- Familiarity with TypeScript, frontend development, backend services, and APIs.',
+        '- Experience with Git, SQL, Docker, and Python.',
+      ].join('\n'),
+    );
+    assert.ok(
+      reverse.missing.some((t) => t.term === 'typescript'),
+      'plain JavaScript must not satisfy a TypeScript requirement',
+    );
   });
 
   test('a matching resume lands in a believable band, not pinned near zero', () => {
