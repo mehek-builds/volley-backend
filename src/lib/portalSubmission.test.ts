@@ -1761,6 +1761,9 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
   assert.equal(comboFills.some((action) => action.label?.includes('high school diploma')), false);
   const knownComboFills = actions.filter((action) => action.type === 'fill' && action.label?.startsWith('greenhouse_known_question_combo_label:'));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('this role is my top preference')));
+  assert.ok(knownComboFills.some((action) => action.selector?.includes('What is your GPA?') && action.value === '3.9'));
+  assert.ok(knownComboFills.some((action) => action.selector?.includes('Have you ever applied to a full time or internship position with Akuna in the past?') && action.value === 'No'));
+  assert.ok(knownComboFills.some((action) => action.selector?.includes('Have you applied to this role at Akuna previously?') && action.value === 'No'));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('How did you hear about this job')));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('Do you have any offer deadlines')));
   assert.ok(knownComboFills.some((action) => action.label?.includes('Disclaimer: Akuna Capital is a global company') && action.value === 'Yes'));
@@ -1768,6 +1771,7 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
   assert.ok(knownComboFills.some((action) => action.selector?.includes('current immigration status') && action.value === 'F-1 CPT'));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('live in New York or California')));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('I certify that all information I have provided')));
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
 
   for (const action of comboFills.filter((item) => item.label?.startsWith('question_combo_label:'))) {
     const index = actions.indexOf(action);
@@ -1779,6 +1783,31 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
     assert.equal(actions[index + 2]?.selector, '[id^="react-select-"][id$="-option-0"]:visible');
     assert.equal(actions[index + 3]?.type, 'press');
   }
+});
+
+test('Greenhouse promotes canonical Akuna prior-application no answers into early React-selects', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    school: 'University of Southern California',
+    degree: 'Bachelor of Science in Computer Science',
+    graduationDate: 'May 2028',
+    graduationMonth: 'May',
+    graduationYear: '2028',
+    gpa: '3.89',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    jdText: 'Akuna Capital software engineer internship',
+    questions: [
+      { question: 'Have you ever applied to a full time or internship position with Akuna in the past?', answer: 'No' },
+      { question: 'Have you applied to this role at Akuna previously?', answer: 'No' },
+    ],
+  });
+
+  const knownComboFills = actions.filter((action) => action.type === 'fill' && action.label?.startsWith('greenhouse_known_question_combo_label:'));
+  assert.ok(knownComboFills.some((action) => action.selector?.includes('Have you ever applied to a full time or internship position with Akuna in the past?') && action.value === 'No'));
+  assert.ok(knownComboFills.some((action) => action.selector?.includes('Have you applied to this role at Akuna previously?') && action.value === 'No'));
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
 });
 
 test('Greenhouse replays fixed Akuna graduation month and year when discovery misses them', () => {

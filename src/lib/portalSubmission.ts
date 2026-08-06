@@ -630,9 +630,6 @@ function pushGreenhouseGraduationDateComboboxActions(actions: ManagedBrowserActi
 
 function pushGreenhouseFixedQuestionComboboxActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
   if (!packetLooksAkuna(packet)) return;
-  const reviewedLabels = new Set(packet.questions
-    .map((item) => normalizeReviewQuestionLabel(item.question).toLowerCase())
-    .filter(Boolean));
   const fixedQuestions: Array<{ label: string; value: string | undefined }> = [
     { label: 'Which University do/did you attend?', value: packet.school },
     { label: 'What education level are you currently pursuing?', value: packet.degree },
@@ -641,7 +638,6 @@ function pushGreenhouseFixedQuestionComboboxActions(actions: ManagedBrowserActio
     { label: 'What is your GPA?', value: packet.gpa },
   ];
   for (const item of fixedQuestions) {
-    if (reviewedLabels.has(normalizeReviewQuestionLabel(item.label).toLowerCase())) continue;
     pushGreenhouseQuestionComboboxLabelActions(actions, item.label, item.value ?? '', 'greenhouse_fixed_question', packet.jdText);
   }
 }
@@ -1085,6 +1081,11 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string, c
   const normalizedContext = contextText.toLowerCase();
   const isRobloxContext = /\broblox\b/.test(normalizedQuestion) || /\broblox\b/.test(normalizedContext);
   const isAkunaContext = /\bakuna\b/.test(normalizedQuestion) || /\bakuna\b/.test(normalizedContext);
+  if (isAkunaContext
+    && /\bhigh\s+school\s+diploma\b|\bhigh\s+school\b[^?]{0,120}\bgraduation\b/.test(normalizedQuestion)
+    && !/\b(?:spring|summer|fall|winter|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|20\d{2})\b/i.test(answer)) {
+    return [];
+  }
   const values = selectValuesForAnswer(answer);
   const isGraduationPartQuestion = /\bgraduat(?:ion|e)\s+(?:month|year)\b|\bwhat\s+is\s+your\s+graduation\s+(?:month|year)\b/.test(normalizedQuestion);
   if (/\bwhat\s+is\s+your\s+gpa\b|\bgpa\b|academic\s+performance|grade\s+average|grade\s+point/.test(normalizedQuestion)) {
@@ -1171,7 +1172,8 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string, c
     values.unshift('No');
   }
   if (/\bapplied\b[^?]{0,120}\b(?:past|previously|before|role|position)\b/.test(normalizedQuestion)
-    && /\b(?:have\s+not|haven't|never)\s+applied\b|\bnot\s+applied\b/.test(answer.toLowerCase())) {
+    && (/^(?:no|false|0)\b/.test(normalizedAnswer)
+      || /\b(?:have\s+not|haven't|never)\s+applied\b|\bnot\s+applied\b/.test(answer.toLowerCase()))) {
     values.unshift('No');
   }
   if (/\boffer\s+deadlines?\b/.test(normalizedQuestion)
@@ -1537,6 +1539,26 @@ function greenhouseKnownQuestionAliases(question: string, answer: string): strin
 function greenhouseAkunaRequiredQuestionAliases(question: string, answer: string): string[] {
   const normalizedQuestion = question.toLowerCase();
   const normalizedAnswer = answer.trim().toLowerCase();
+  if (/\bwhat\s+is\s+your\s+gpa\b|\bgpa\b/.test(normalizedQuestion)) {
+    return ['What is your GPA?'];
+  }
+  if (/\bapplied\b[^?]{0,120}\b(?:past|previously|before|role|position)\b/.test(normalizedQuestion)
+    && (/^(?:no|false|0)\b/.test(normalizedAnswer)
+      || /\b(?:have\s+not|haven't|never)\s+applied\b|\bnot\s+applied\b/.test(normalizedAnswer))) {
+    const aliases: string[] = [];
+    if (/\b(?:ever\s+)?applied\b[^?]{0,120}\b(?:full\s*time|internship|position|past)\b|\bin\s+the\s+past\b/.test(normalizedQuestion)) {
+      aliases.push('Have you ever applied to a full time or internship position with Akuna in the past?');
+    }
+    if (/\b(?:this\s+role|role\s+at\s+akuna|this\s+position)\b/.test(normalizedQuestion)) {
+      aliases.push('Have you applied to this role at Akuna previously?');
+    }
+    return aliases.length > 0
+      ? aliases
+      : [
+        'Have you ever applied to a full time or internship position with Akuna in the past?',
+        'Have you applied to this role at Akuna previously?',
+      ];
+  }
   if (/\bcurrent\s+immigration\s+status\b|\bbasis\s+of\s+your\s+current\s+work\s+authorization\b/.test(normalizedQuestion)) {
     if (/\bf-?1\b|\bcpt\b|\bopt\b|\bstem\b|n\/?a|not applicable/i.test(answer)) {
       return ['current immigration status or basis of your current work authorization'];
