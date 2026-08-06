@@ -493,6 +493,31 @@ export function attentionCategoriesForReasons(reasons: readonly string[]): Appli
   return [...categories];
 }
 
+function emptyRequiredBlockerLabel(blocker: string): string | null {
+  const match = blocker.match(/^"(.+)" is required and is still empty$/i);
+  return match?.[1]?.trim() || null;
+}
+
+function normalizedQuestionKey(value: string): string {
+  return normalizeReviewQuestionLabel(value).toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+export function attentionBlockersForManagedResult(blockers: readonly string[], packet: SubmissionPacket): string[] {
+  const hasCaptcha = blockersIncludeCaptcha(blockers);
+  if (!hasCaptcha) return [...blockers];
+  const answered = new Set(
+    packet.questions
+      .filter((question) => question.answer.trim().length > 0)
+      .map((question) => normalizedQuestionKey(question.question))
+      .filter(Boolean),
+  );
+  return blockers.filter((blocker) => {
+    const label = emptyRequiredBlockerLabel(blocker);
+    if (!label) return true;
+    return !answered.has(normalizedQuestionKey(label));
+  });
+}
+
 /**
  * Build the packet, writing a cover letter first when the portal has somewhere to put one.
  *
@@ -759,7 +784,7 @@ async function prepareManaged(
   // Sanitized at the boundary, not upstream: the managed provider scans the form in its own
   // service and returns finished sentences, so it never passes through this repo's label
   // resolution. Live QA proved that gap by showing three raw UUIDs on a real Ashby posting.
-  const blockers = sanitizeProviderBlockers(result.blockers ?? []);
+  const blockers = attentionBlockersForManagedResult(sanitizeProviderBlockers(result.blockers ?? []), packet);
   const verificationHandoff = blockers.some((blocker) =>
     /verification code|security code|one[ -]?time code|passcode|\botp\b/i.test(blocker),
   );

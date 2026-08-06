@@ -99,6 +99,19 @@ test('the blocker sentence quotes the field so it can be found on the page', () 
   );
 });
 
+test('provider blocker blobs are split before required fields are sanitized', () => {
+  assert.deepEqual(
+    sanitizeProviderBlockers([
+      'CAPTCHA requires your attention\nquestion[12] is required.\nWhere have you learned about Samsara? Select all that apply. is required.',
+    ]),
+    [
+      'CAPTCHA requires your attention',
+      '"Where have you learned about Samsara? Select all that apply." is required and is still empty',
+      'A required field on the form has no label Litos can read, and is still empty',
+    ],
+  );
+});
+
 test('an unlabelled field is described by its input type when that helps', () => {
   assert.match(describeRequiredBlocker(null, { type: 'file' }), /required file field/);
   assert.match(describeRequiredBlocker(null, { type: null }), /A required field on the form/);
