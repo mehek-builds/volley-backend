@@ -423,8 +423,29 @@ test('routine applicant data and privacy consent questions are answered yes', ()
     'Yes, I consent',
   ];
   for (const label of labels) {
-    assert.deepEqual(resolveKnownAnswer(label, 'text', {}, undefined), { value: 'Yes' });
+    const expected = label === 'Yes, I consent' ? 'Yes, I consent' : 'Yes';
+    assert.deepEqual(resolveKnownAnswer(label, 'text', {}, undefined), { value: expected });
   }
+});
+
+test('routine confirmations and offer-deadline logistics do not wait for manual approval', () => {
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'To be considered for this role, you must have earned a high school diploma (or an equivalent degree). Please confirm the statement below.',
+      'select',
+      {},
+      undefined,
+    ),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('Do you have any offer deadlines that we should be aware of?', 'select', {}, undefined),
+    { value: 'No' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('If you answered “Yes” above, please provide details about your offer deadlines.', 'textarea', {}, undefined),
+    { value: 'N/A' },
+  );
 });
 
 test('duration beats start date on an ambiguous "availab" label (R-014)', () => {

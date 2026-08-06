@@ -199,7 +199,8 @@ test('extension-start refuses a drifted packet before it reserves the submission
 
 test('extension-start refuses sensitive questions before it reserves the submission', () => {
   const handler = slice(routes, "'/applications/:id/submission/extension-start'", "'/applications/:id/submission/extension-outcome'");
-  assert.match(handler, /sensitiveQuestionFor\(current\.questions/);
+  assert.match(handler, /const refreshedQuestions = refreshKnownQuestionAnswers\(current\.questions, sensitiveProfile, current\.jd_text\)/);
+  assert.match(handler, /sensitiveQuestionFor\(refreshedQuestions/);
   assert.match(handler, /kind: 'sensitive_question'/);
   assert.match(handler, /result\.kind === 'sensitive_question'/);
   assert.match(handler, /Sensitive question requires your attention/);
