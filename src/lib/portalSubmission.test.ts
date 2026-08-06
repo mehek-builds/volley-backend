@@ -1518,7 +1518,7 @@ test('Greenhouse replays Databricks choice questions through React-select bucket
       },
       {
         question: 'What is your graduation date?',
-        answer: 'May 2027',
+        answer: 'May 2028',
         portalSelector: 'input[id="question_24505242002"]',
       },
       {
@@ -1528,7 +1528,7 @@ test('Greenhouse replays Databricks choice questions through React-select bucket
       },
       {
         question: 'Do you currently or have you previously worked for Databricks in the past?',
-        answer: "I have not worked for Databricks before, and I don't currently work there.",
+        answer: 'I have not previously worked for or currently work at Databricks. My PM and AI engineering experience so far has been at SoFi, Traeco, and through building Tonee, but none of it has been with Databricks.',
         portalSelector: 'input[id="question_30149518002"]',
       },
     ],
@@ -1536,7 +1536,7 @@ test('Greenhouse replays Databricks choice questions through React-select bucket
 
   const comboActions = actions.filter((action) => action.label?.startsWith('question_combo:'));
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector === 'input[id="question_32707214002"]' && action.value === 'San Francisco, CA'));
-  assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector === 'input[id="question_24505242002"]' && action.value === 'Earlier than Fall 2027'));
+  assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector === 'input[id="question_24505242002"]' && action.value === 'Spring 2028'));
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector === 'input[id="question_32698502002"]' && action.value === '3.6 or above (out of 4.0)'));
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector === 'input[id="question_30149518002"]' && action.value === 'No'));
   assert.ok(comboActions.some((action) => action.type === 'click' && action.selector === 'input[id="question_32707214002"]' && action.label?.endsWith('_open')));
@@ -1561,7 +1561,7 @@ test('Greenhouse replays Databricks React-select buckets without portal selector
       },
       {
         question: 'What is your graduation date?',
-        answer: 'May 2027',
+        answer: 'May 2028',
       },
       {
         question: 'What is your GPA?',
@@ -1569,14 +1569,14 @@ test('Greenhouse replays Databricks React-select buckets without portal selector
       },
       {
         question: 'Do you currently or have you previously worked for Databricks in the past?',
-        answer: "I have not worked for Databricks before, and I don't currently work there.",
+        answer: 'I have not previously worked for or currently work at Databricks. My PM and AI engineering experience so far has been at SoFi, Traeco, and through building Tonee, but none of it has been with Databricks.',
       },
     ],
   });
 
   const comboActions = actions.filter((action) => action.label?.startsWith('question_combo_label:'));
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text("Please choose the single location') && action.value === 'San Francisco, CA'));
-  assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text("What is your graduation date?")') && action.value === 'Earlier than Fall 2027'));
+  assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text("What is your graduation date?")') && action.value === 'Spring 2028'));
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text("What is your GPA?")') && action.value === '3.6 or above (out of 4.0)'));
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text("Do you currently or have you previously worked for Databricks') && action.value === 'No'));
   assert.equal(comboActions.filter((action) => action.type === 'click' && action.label?.endsWith('_open')).length, 4);
@@ -1758,11 +1758,13 @@ test('Greenhouse Databricks academic and reviewed question packet stays inside t
     phone: '+971501234567',
     school: 'University of Southern California, Viterbi School of Engineering',
     degree: 'Bachelor of Science in Computer Science',
-    graduationDate: 'May 2027',
+    graduationDate: 'May 2028',
     graduationMonth: 'May',
-    graduationYear: '2027',
+    graduationYear: '2028',
     gpa: '3.89',
     major: 'Computer Science',
+    roleLocation: 'Bellevue, Washington; Mountain View, California; San Francisco, California',
+    roleLocations: ['Bellevue, Washington', 'Mountain View, California', 'San Francisco, California'],
     linkedinUrl: 'https://www.linkedin.com/in/mehekmandal/',
     portfolioUrl: 'https://github.com/mehek-builds',
     resume: Buffer.from('pdf'),
@@ -1789,7 +1791,7 @@ test('Greenhouse Databricks academic and reviewed question packet stays inside t
       { question: 'What is your GPA?', answer: '3.89' },
       {
         question: 'Do you currently or have you previously worked for Databricks in the past?',
-        answer: "I have not worked for Databricks before, and I don't currently work there.",
+        answer: 'I have not previously worked for or currently work at Databricks. My PM and AI engineering experience so far has been at SoFi, Traeco, and through building Tonee, but none of it has been with Databricks.',
       },
       {
         question: 'Please confirm whether any of the below applies to you. Select all that apply. Note: This information will only be used to ensure compliance with U.S. sanctions and export controls.',
@@ -1810,6 +1812,28 @@ test('Greenhouse Databricks academic and reviewed question packet stays inside t
     && action.label?.startsWith('question_combo_label:')
     && action.label?.includes('Are you legally authorized')
     && action.value === 'Yes'));
+  assert.ok(actions.some((action) =>
+    action.type === 'fill'
+    && action.selector === '#end-month--0'
+    && action.value === 'May'));
+  assert.ok(actions.some((action) =>
+    action.type === 'fill'
+    && action.selector === '#end-year--0'
+    && action.value === '2028'));
+  assert.ok(actions.some((action) =>
+    action.type === 'fill'
+    && action.label?.startsWith('education_graduation_date_combo:')
+    && action.selector?.includes('label:has-text("What is your graduation date?")')
+    && action.value === 'Spring 2028'));
+  assert.ok(actions.some((action) =>
+    action.type === 'fill'
+    && action.label?.startsWith('preferred_location_combo:')
+    && action.value === 'San Francisco, CA'));
+  assert.ok(actions.some((action) =>
+    action.type === 'fill'
+    && action.label?.startsWith('question_combo_label:')
+    && action.label?.includes('Do you currently or have you previously worked for Databricks')
+    && action.value === 'No'));
   assert.ok(actions.some((action) => action.label?.startsWith('question_checkbox:')));
   assert.equal(
     actions.some((action) =>

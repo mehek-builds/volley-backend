@@ -352,6 +352,10 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     ? (app[key] as string).trim()
     : undefined);
   const applicationProfile = await loadApplicationProfileLike(row.user_id);
+  const context = (row.job_context && typeof row.job_context === 'object' ? row.job_context : {}) as Record<string, unknown>;
+  const roleLocations = Array.isArray(context.locations)
+    ? context.locations.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    : undefined;
   return {
     fullName,
     email,
@@ -370,6 +374,8 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     major: appStr('major') ?? majorFromAcademicProfile(academicStr('major'), degree),
     currentlyEnrolled: academicBoolean('currently_enrolled'),
     referralSourceDefault: typeof app.referral_source_default === 'string' ? app.referral_source_default : undefined,
+    roleLocation: typeof context.location === 'string' ? context.location : undefined,
+    roleLocations,
     applicationProfile,
     jdText: review.jd_text,
     resume,

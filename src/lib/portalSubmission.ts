@@ -256,6 +256,8 @@ export type SubmissionPacket = {
   currentlyEnrolled?: boolean;
   gpa?: string;
   major?: string;
+  roleLocation?: string;
+  roleLocations?: string[];
   referralSourceDefault?: string;
   applicationProfile?: ApplicationProfileLike;
   jdText?: string;
@@ -462,7 +464,7 @@ function managedComboboxFill(
 
 function managedGreenhouseReactSelectFill(
   actions: ManagedBrowserAction[],
-  inputId: 'school--0' | 'degree--0' | 'discipline--0',
+  inputId: string,
   value: string | undefined,
   label: string,
   optional = true,
@@ -589,6 +591,8 @@ function pushGreenhouseEducationComboboxActions(actions: ManagedBrowserAction[],
   for (const [index, value] of greenhouseDisciplineAliases(packet).entries()) {
     managedGreenhouseReactSelectFill(actions, 'discipline--0', value, `education_discipline_combo:${index}`);
   }
+  managedGreenhouseReactSelectFill(actions, 'end-month--0', packet.graduationMonth, 'education_end_month_combo');
+  managedFill(actions, '#end-year--0', packet.graduationYear, 'education_end_year_field');
 }
 
 function pushGreenhouseGraduationDateComboboxActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
@@ -596,7 +600,7 @@ function pushGreenhouseGraduationDateComboboxActions(actions: ManagedBrowserActi
     packet.graduationDate,
     packet.graduationDate ? greenhouseGraduationBucket(packet.graduationDate) : undefined,
   ]).slice(0, 2);
-  const labels = ['Graduation Date', 'Expected Graduation Date'];
+  const labels = ['What is your graduation date?', 'Graduation Date', 'Expected Graduation Date'];
   let index = 0;
   for (const label of labels) {
     for (const value of values) {
@@ -610,6 +614,41 @@ function pushGreenhouseGraduationDateComboboxActions(actions: ManagedBrowserActi
         );
         index += 1;
       }
+    }
+  }
+}
+
+function greenhousePreferredLocationAnswer(packet: SubmissionPacket): string | undefined {
+  const sourceLocations = uniqueDefined([
+    packet.roleLocation,
+    ...(packet.roleLocations ?? []),
+  ].flatMap((value) => value?.split(/\s*;\s*/)));
+  if (sourceLocations.length === 0) return undefined;
+  const preferred = sourceLocations.find((value) => /\bsan\s+francisco\b/i.test(value))
+    ?? sourceLocations.find((value) => /\bmountain\s+view\b/i.test(value))
+    ?? sourceLocations[0];
+  return abbreviatedUsLocation(preferred) ?? preferred;
+}
+
+function pushGreenhousePreferredLocationFallbackActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
+  const value = greenhousePreferredLocationAnswer(packet);
+  if (!value) return;
+  const labels = [
+    "Please choose the single location that you're the most interested in",
+    'Preferred location',
+    'Location preference',
+  ];
+  let index = 0;
+  for (const label of labels) {
+    for (const selector of greenhouseQuestionComboboxSelectors(label).slice(0, QUESTION_COMBOBOX_SELECTOR_LIMIT)) {
+      managedGreenhouseScopedReactSelectFill(
+        actions,
+        selector,
+        GREENHOUSE_VISIBLE_REACT_SELECT_OPTION_SELECTOR,
+        value,
+        `preferred_location_combo:${index}:${label}`,
+      );
+      index += 1;
     }
   }
 }
@@ -1075,7 +1114,8 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string, c
     values.unshift(abbreviatedUsLocation(answer) ?? '', cityOnlyLocation(answer) ?? '');
   }
   if (/\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b/.test(normalizedQuestion)
-    && /\b(?:have\s+not|haven't|never)\s+(?:worked|been employed)\b/.test(answer.toLowerCase())) {
+    && (/\b(?:have\s+not|haven't|never)\b.{0,80}\b(?:worked|work|been employed)\b/.test(answer.toLowerCase())
+      || /\bnone\s+of\s+(?:it|this)\s+has\s+been\s+with\s+databricks\b/.test(answer.toLowerCase()))) {
     values.unshift('No');
   }
   if (/\bapplied\b[^?]{0,120}\b(?:past|previously|before|role|position)\b/.test(normalizedQuestion)
@@ -1836,6 +1876,7 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     pushGreenhouseGraduationDateComboboxActions(actions, packet);
     managedFillByLabel(actions, 'GPA', packet.gpa, 'gpa');
     managedFillByLabel(actions, 'What is your GPA?', packet.gpa, 'gpa_question');
+    pushGreenhousePreferredLocationFallbackActions(actions, packet);
     for (const selector of greenhouseCoreFieldEvidenceSelectors('resume')) {
       managedUpload(actions, selector, 'resume', packet.resume, packet.resumeName);
     }
