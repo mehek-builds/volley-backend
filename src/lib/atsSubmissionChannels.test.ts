@@ -334,6 +334,109 @@ test('configured Ashby channel posts core paths and reviewed question mappings',
   assert.equal(body?.get('applicationForm[answers.whyFluency]'), 'The role matches my product engineering work.');
 });
 
+test('configured ATS submission channel accepts five distinct application packets end-to-end', async () => {
+  const requests: Array<{ url: string; method: string; body: FormData; auth: string | null }> = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    requests.push({
+      url: String(url),
+      method: init?.method ?? 'GET',
+      body: init?.body as FormData,
+      auth: new Headers(init?.headers).get('authorization'),
+    });
+    return new Response(`accepted-${requests.length}`, {
+      status: 201,
+      headers: { 'x-request-id': `ats-req-${requests.length}` },
+    });
+  };
+  const env = {
+    LITOS_EMPLOYER_API_SUBMISSION_CHANNELS_JSON: JSON.stringify([
+      { ats: 'greenhouse', board_token: 'reddit', api_key_env: 'GH_REDDIT_KEY' },
+      { ats: 'greenhouse', board_token: 'postman', api_key_env: 'GH_POSTMAN_KEY' },
+      {
+        ats: 'ashby',
+        organization: 'fluency',
+        api_key_env: 'ASHBY_FLUENCY_KEY',
+        field_paths: {
+          name: 'person.name',
+          email: 'person.email',
+          phone: 'person.phone',
+          resume: 'files.resume',
+          cover_letter: 'files.coverLetter',
+        },
+      },
+      {
+        ats: 'ashby',
+        organization: 'deepgram',
+        api_key_env: 'ASHBY_DEEPGRAM_KEY',
+        field_paths: {
+          name: 'candidate.name',
+          email: 'candidate.email',
+          resume: 'candidate.resume',
+        },
+      },
+      { ats: 'lever', site: 'acme', api_key_env: 'LEVER_ACME_KEY' },
+    ]),
+    GH_REDDIT_KEY: 'reddit-secret',
+    GH_POSTMAN_KEY: 'postman-secret',
+    ASHBY_FLUENCY_KEY: 'fluency-secret',
+    ASHBY_DEEPGRAM_KEY: 'deepgram-secret',
+    LEVER_ACME_KEY: 'lever-secret',
+  };
+  const applications = [
+    {
+      url: 'https://boards.greenhouse.io/reddit/jobs/8070669',
+      packet: { ...basePacket(), resumeName: 'Mehek_Mandal_Reddit_Resume.pdf' },
+      expectedRequestUrl: 'https://boards-api.greenhouse.io/v1/boards/reddit/jobs/8070669',
+      expectedResumeField: 'resume',
+    },
+    {
+      url: 'https://job-boards.greenhouse.io/postman/jobs/7823417003',
+      packet: { ...basePacket(), resumeName: 'Mehek_Mandal_Postman_Resume.pdf' },
+      expectedRequestUrl: 'https://boards-api.greenhouse.io/v1/boards/postman/jobs/7823417003',
+      expectedResumeField: 'resume',
+    },
+    {
+      url: 'https://jobs.ashbyhq.com/fluency/2aced4e2-485b-4525-802c-763e62c91e88',
+      packet: { ...basePacket(), resumeName: 'Mehek_Mandal_Fluency_Resume.pdf' },
+      expectedRequestUrl: 'https://api.ashbyhq.com/applicationForm.submit',
+      expectedResumeField: 'applicationForm[files.resume]',
+    },
+    {
+      url: 'https://jobs.ashbyhq.com/deepgram/dc8693b5-72ce-4ca3-ab15-9c8434d35da1',
+      packet: { ...basePacket(), resumeName: 'Mehek_Mandal_Deepgram_Resume.pdf', coverLetter: undefined, coverLetterName: undefined },
+      expectedRequestUrl: 'https://api.ashbyhq.com/applicationForm.submit',
+      expectedResumeField: 'applicationForm[candidate.resume]',
+    },
+    {
+      url: 'https://jobs.lever.co/acme/abc-123',
+      packet: { ...basePacket(), resumeName: 'Mehek_Mandal_Acme_Resume.pdf' },
+      expectedRequestUrl: 'https://api.lever.co/v0/postings/acme/abc-123?key=lever-secret',
+      expectedResumeField: 'resume',
+    },
+  ] as const;
+
+  for (const application of applications) {
+    const result = await tryAtsSubmissionChannel(application.url, application.packet, { env, fetchImpl });
+    assert.equal(result.kind, 'submitted');
+    assert.equal(result.referenceId, `ats-req-${requests.length}`);
+    assert.equal(result.confirmationText, `accepted-${requests.length}`);
+  }
+
+  assert.equal(requests.length, 5);
+  for (const [index, application] of applications.entries()) {
+    const request = requests[index];
+    assert.equal(request.method, 'POST');
+    assert.equal(request.url, application.expectedRequestUrl);
+    assert.ok(request.body instanceof FormData);
+    assert.equal((request.body.get(application.expectedResumeField) as File).name, application.packet.resumeName);
+  }
+  assert.equal(requests[0].auth, `Basic ${Buffer.from('reddit-secret:').toString('base64')}`);
+  assert.equal(requests[1].auth, `Basic ${Buffer.from('postman-secret:').toString('base64')}`);
+  assert.equal(requests[2].auth, `Basic ${Buffer.from('fluency-secret:').toString('base64')}`);
+  assert.equal(requests[3].auth, `Basic ${Buffer.from('deepgram-secret:').toString('base64')}`);
+  assert.equal(requests[4].auth, null);
+});
+
 test('configured ATS channel surfaces API submission failures', async () => {
   const fetchImpl: typeof fetch = async () => new Response('invalid field', { status: 422 });
   await assert.rejects(
