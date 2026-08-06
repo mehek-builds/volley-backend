@@ -1803,6 +1803,13 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
   assert.ok(knownComboFills.some((action) => action.selector?.includes('live in New York or California')));
   assert.ok(comboFills.some((action) => action.selector?.includes('I certify that all information I have provided') && action.value === 'Yes'));
   assert.ok(comboFills.some((action) => action.selector?.includes('resume must be submitted in PDF format') && action.value === 'Yes'));
+  assert.equal(actions.some((action) => action.type === 'fillByLabelText' && action.label === 'gpa'), false);
+  assert.equal(actions.some((action) => action.type === 'fillByLabelText' && action.label === 'gpa_question'), false);
+  const topPreferenceIndex = actions.findIndex((action) => action.type === 'fill' && action.selector?.includes('this role is my top preference'));
+  const nyCaIndex = actions.findIndex((action) => action.type === 'fill' && action.selector?.includes('live in New York or California'));
+  const sponsorshipIndex = actions.findIndex((action) => action.type === 'fill' && action.selector?.includes('require visa sponsorship'));
+  assert.ok(topPreferenceIndex >= 0 && topPreferenceIndex < sponsorshipIndex);
+  assert.ok(nyCaIndex >= 0 && nyCaIndex < sponsorshipIndex);
   assert.ok(actions.length <= 100, `expected at most 100 actions, got ${actions.length}`);
 
   for (const action of comboFills.filter((item) => item.label?.startsWith('question_combo_label:'))) {

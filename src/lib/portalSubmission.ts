@@ -1617,6 +1617,7 @@ function greenhouseAkunaRequiredQuestionAliases(question: string, answer: string
 function greenhouseAkunaRequiredAliasPriority(alias: string): number {
   const normalized = alias.toLowerCase();
   if (/\bcertify\b|\bresume must\b/.test(normalized)) return 0;
+  if (/\btop preference\b|\blive in new york or california\b/.test(normalized)) return 1;
   if (/\bapplied\b/.test(normalized)) return 1;
   if (/\boffer deadlines?\b|\bhow did you hear\b/.test(normalized)) return 2;
   if (/\bimmigration status\b|\bwork authorization\b|visa sponsorship/.test(normalized)) return 3;
@@ -2173,8 +2174,10 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedFillByLabel(actions, 'Discipline', packet.major, 'education_discipline_label');
     pushGreenhouseFixedQuestionComboboxActions(actions, packet);
     if (!packetLooksAkuna(packet)) pushGreenhouseGraduationDateComboboxActions(actions, packet);
-    managedFillByLabel(actions, 'GPA', packet.gpa, 'gpa');
-    managedFillByLabel(actions, 'What is your GPA?', packet.gpa, 'gpa_question');
+    if (!packetLooksAkuna(packet)) {
+      managedFillByLabel(actions, 'GPA', packet.gpa, 'gpa');
+      managedFillByLabel(actions, 'What is your GPA?', packet.gpa, 'gpa_question');
+    }
     pushGreenhousePreferredLocationFallbackActions(actions, packet);
     for (const selector of greenhouseCoreFieldEvidenceSelectors('resume')) {
       managedUpload(actions, selector, 'resume', packet.resume, packet.resumeName);
