@@ -67,6 +67,7 @@ import {
   type ApplicationProfileLike,
   type DiscoveredQuestion,
 } from '../lib/questionDiscovery';
+import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import type { ApplicationReviewQuestion } from '../lib/applicationReview';
 import { jobCountry } from '../lib/jobLocation';
 import { generateStoredCoverLetter, storedCoverLetter } from '../lib/coverLetterService';
@@ -264,6 +265,22 @@ export function sanitizeEeoPrefs(value: unknown): Record<string, string> | null 
   return Object.keys(cleaned).length > 0 ? cleaned : null;
 }
 
+function majorFromAcademicProfile(major: string | undefined, degree: string | undefined): string | undefined {
+  if (major?.trim()) return major.trim();
+  const trimmed = degree?.trim();
+  if (!trimmed) return undefined;
+  const cleaned = trimmed
+    .replace(/\b(?:b\.?s\.?|b\.?a\.?|m\.?s\.?|m\.?a\.?|m\.?b\.?a\.?)\b/gi, ' ')
+    .replace(/\b(?:bachelor|bachelor's|bachelors|master|master's|masters|doctor|doctorate|ph\.?d)\s+(?:of\s+)?(?:science|arts|business\s+administration)?\s+(?:degree\s+)?(?:in\s+)?/gi, ' ')
+    .replace(/\b(?:degree\s+in|with\s+a\s+degree\s+in|in)\b/gi, ' ')
+    .replace(/(?:,\s*)?[^,;&()]{0,40}\b(?:emphasis|concentration|minor)\b.*$/i, '')
+    .replace(/[(),]/g, ' ')
+    .replace(/\s*&\s*/g, ' and ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned || trimmed;
+}
+
 export async function buildPacket(row: ResumeRow, controlledTest = false): Promise<SubmissionPacket> {
   const stored = row.spec as StoredSpec;
   const contact = (stored._contact ?? {}) as Record<string, unknown>;
@@ -300,9 +317,9 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
   const applicationEmail = await ensureApplicationEmailAlias({
     userId: row.user_id,
     applicationId: row.id,
-    forwardingEmail: accountEmail,
+    forwardTo: accountEmail,
   }).catch(() => undefined);
-  const email = String(applicationEmail ?? contact.email ?? accountEmail).trim();
+  const email = String(applicationEmail?.alias ?? contact.email ?? accountEmail).trim();
   if (!fullName || !email) throw new Error('Full name and email are required before submission');
   const roleTitle = (row.job_context as { role?: unknown } | null)?.role;
   const base = (profileRow[0]?.base_resume_json && typeof profileRow[0].base_resume_json === 'object'
@@ -320,9 +337,20 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     const baseValue = base[key];
     return typeof baseValue === 'number' && baseValue > 0 ? baseValue : undefined;
   };
+  const academicBoolean = (key: string): boolean | undefined => {
+    const parsedValue = parsed[key];
+    if (typeof parsedValue === 'boolean') return parsedValue;
+    const baseValue = base[key];
+    return typeof baseValue === 'boolean' ? baseValue : undefined;
+  };
   const graduationDate = academicStr('grad_date');
   const graduationYear = academicNum('grad_year');
   const graduationParts = submissionGraduationDateParts(graduationDate, graduationYear);
+  const degree = academicStr('degree');
+  const appStr = (key: string): string | undefined => (typeof app[key] === 'string' && (app[key] as string).trim()
+    ? (app[key] as string).trim()
+    : undefined);
+  const applicationProfile = await loadApplicationProfileLike(row.user_id);
   return {
     fullName,
     email,
@@ -333,13 +361,16 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     githubUrl: typeof app.github_url === 'string' ? app.github_url : undefined,
     portfolioUrl: typeof app.portfolio_url === 'string' ? app.portfolio_url : undefined,
     school: academicStr('school'),
-    degree: academicStr('degree'),
+    degree,
     graduationDate,
     graduationMonth: graduationParts.month,
     graduationYear: graduationParts.year,
-    gpa: typeof app.gpa === 'string' ? app.gpa : undefined,
-    major: typeof app.major === 'string' ? app.major : undefined,
+    gpa: appStr('gpa') ?? academicStr('gpa'),
+    major: appStr('major') ?? majorFromAcademicProfile(academicStr('major'), degree),
+    currentlyEnrolled: academicBoolean('currently_enrolled'),
     referralSourceDefault: typeof app.referral_source_default === 'string' ? app.referral_source_default : undefined,
+    applicationProfile,
+    jdText: review.jd_text,
     resume,
     resumeName: resumeFileNameForRole(fullName, roleTitle),
     coverLetter,
@@ -627,92 +658,6 @@ export async function discoverAndResolveQuestions(
   }
 
   return { questions, attentionReasons };
-}
-
-async function loadApplicationProfileLike(userId: string): Promise<ApplicationProfileLike> {
-  const [[appRow], [profileRow], [userRow]] = await Promise.all([
-    db.select().from(application_profile).where(eq(application_profile.user_id, userId)).limit(1),
-    db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1),
-    db.select({
-      sponsorship_answer: users.sponsorship_answer,
-    }).from(users).where(eq(users.id, userId)).limit(1),
-  ]);
-  const app = appRow ? (decryptRow(appRow) as Record<string, unknown>) : {};
-  const parsed = (profileRow?.parsed_json && typeof profileRow.parsed_json === 'object'
-    ? profileRow.parsed_json
-    : {}) as Record<string, unknown>;
-  const base = (profileRow?.base_resume_json && typeof profileRow.base_resume_json === 'object'
-    ? profileRow.base_resume_json
-    : {}) as Record<string, unknown>;
-  const str = (key: string): string | undefined => (typeof app[key] === 'string' ? (app[key] as string) : undefined);
-  const appBoolean = (key: string): boolean | undefined => (typeof app[key] === 'boolean' ? (app[key] as boolean) : undefined);
-  const academicStr = (key: string): string | undefined => {
-    const parsedValue = parsed[key];
-    if (typeof parsedValue === 'string' && parsedValue.trim()) return parsedValue;
-    const baseValue = base[key];
-    return typeof baseValue === 'string' && baseValue.trim() ? baseValue : undefined;
-  };
-  const academicNum = (key: string): number | undefined => {
-    const parsedValue = parsed[key];
-    if (typeof parsedValue === 'number' && parsedValue > 0) return parsedValue;
-    const baseValue = base[key];
-    return typeof baseValue === 'number' && baseValue > 0 ? baseValue : undefined;
-  };
-  const academicBoolean = (key: string): boolean | undefined => {
-    const parsedValue = parsed[key];
-    if (typeof parsedValue === 'boolean') return parsedValue;
-    const baseValue = base[key];
-    return typeof baseValue === 'boolean' ? baseValue : undefined;
-  };
-  const onboardingEligibility = workEligibilityFromSponsorshipAnswer(userRow?.sponsorship_answer);
-  return {
-    phone: str('phone'),
-    address_city: str('address_city'),
-    address_state: str('address_state'),
-    address_country: str('address_country'),
-    linkedin_url: str('linkedin_url'),
-    github_url: str('github_url'),
-    portfolio_url: str('portfolio_url'),
-    citizenship: str('citizenship'),
-    work_authorized: appBoolean('work_authorized') ?? onboardingEligibility.workAuthorized,
-    needs_sponsorship: appBoolean('needs_sponsorship') ?? onboardingEligibility.needsSponsorship,
-    date_of_birth: str('date_of_birth'),
-    availability_date: str('availability_date'),
-    availability_term: str('availability_term'),
-    school: academicStr('school'),
-    degree: academicStr('degree'),
-    grad_date: academicStr('grad_date'),
-    grad_year: academicNum('grad_year'),
-    currently_enrolled: academicBoolean('currently_enrolled'),
-    desired_salary: str('desired_salary'),
-    desired_salary_currency: str('desired_salary_currency'),
-    gpa: str('gpa'),
-    gpa_scale: str('gpa_scale'),
-    major: str('major'),
-    languages: Array.isArray(app.languages)
-      ? app.languages.filter((language): language is string => typeof language === 'string' && language.trim().length > 0)
-      : undefined,
-    eeo_prefs: sanitizeEeoPrefs(app.eeo_prefs) ?? undefined,
-    referral_source_default: str('referral_source_default'),
-  };
-}
-
-export function workEligibilityFromSponsorshipAnswer(answer: unknown): {
-  workAuthorized?: boolean;
-  needsSponsorship?: boolean;
-} {
-  switch (answer) {
-    case 'needs_now':
-      return { needsSponsorship: true };
-    case 'needs_future':
-      return { workAuthorized: true, needsSponsorship: true };
-    case 'not_authorized':
-      return { workAuthorized: false, needsSponsorship: true };
-    case 'no':
-      return { workAuthorized: true, needsSponsorship: false };
-    default:
-      return {};
-  }
 }
 
 async function prepareManaged(

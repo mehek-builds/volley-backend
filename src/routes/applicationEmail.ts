@@ -1,183 +1,205 @@
+import { createHmac, timingSafeEqual } from 'crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { createHmac, timingSafeEqual } from 'node:crypto';
-import { and, eq } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db';
-import { application_email_aliases, generated_resumes } from '../db/schema';
+import { application_email_aliases, application_email_messages } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import {
-  applicationAliasEmail,
-  recordAndForwardApplicationEmail,
+  type InboundApplicationEmail,
+  inboundWebhookSecret,
+  isApplicationEmailConfigured,
+  processInboundApplicationEmail,
+  retrieveResendReceivedEmail,
 } from '../lib/applicationEmail';
 
-const paramsSchema = z.object({ id: z.string().uuid() });
+const WEBHOOK_MAX_SKEW_MS = 5 * 60 * 1000;
 
-const recipientSchema = z.union([
-  z.string(),
-  z.object({ email: z.string().optional() }),
-]);
-
-const inboundSchema = z.object({
-  id: z.string().max(500).optional(),
-  message_id: z.string().max(500).optional(),
-  from: z.union([
-    z.string(),
-    z.object({ email: z.string().optional(), name: z.string().optional() }),
-  ]).optional(),
-  from_email: z.string().optional(),
-  from_name: z.string().optional(),
-  to: z.union([
-    z.string(),
-    z.array(recipientSchema),
-  ]).optional(),
-  cc: z.union([z.string(), z.array(z.string())]).optional(),
-  envelope_to: z.string().optional(),
-  delivered_to: z.string().optional(),
-  recipient: z.string().optional(),
-  recipients: z.array(recipientSchema).optional(),
-  subject: z.string().max(1000).optional(),
-  text: z.string().optional(),
-  text_body: z.string().optional(),
-  html: z.string().optional(),
-  html_body: z.string().optional(),
-}).passthrough()
-  .refine((value) => allRecipients(value).length > 0, 'At least one recipient is required');
-
-const WEBHOOK_MAX_SKEW_MS = 5 * 60_000;
-
-function secretMatches(provided: string | undefined, configured: string): boolean {
-  if (!provided) return false;
-  const left = Buffer.from(provided);
-  const right = Buffer.from(configured);
-  return left.length === right.length && timingSafeEqual(left, right);
+function recipientValues(value: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap(recipientValues);
+  if (typeof value !== 'string') return [];
+  return value.split(',').map((item) => item.trim().toLowerCase()).filter(Boolean);
 }
 
-function signedPayload(body: unknown, timestamp: string): string {
-  return `${timestamp}.${JSON.stringify(body ?? {})}`;
+function allRecipients(value: {
+  to?: string | string[];
+  recipients?: string | string[];
+  cc?: string | string[];
+  envelope_to?: string | string[];
+  delivered_to?: string | string[];
+  recipient?: string | string[];
+}): string[] {
+  return [
+    ...recipientValues(value.to),
+    ...recipientValues(value.recipients),
+    ...recipientValues(value.cc),
+    ...recipientValues(value.envelope_to),
+    ...recipientValues(value.delivered_to),
+    ...recipientValues(value.recipient),
+  ];
 }
 
-function freshTimestamp(value: string | undefined, now = Date.now()): boolean {
-  if (!value || !/^\d+$/.test(value)) return false;
-  const timestamp = Number(value);
-  return Number.isFinite(timestamp) && Math.abs(now - timestamp) <= WEBHOOK_MAX_SKEW_MS;
+function safeEqual(left: string, right: string): boolean {
+  const a = Buffer.from(left);
+  const b = Buffer.from(right);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
-function expectedSignature(configured: string, body: unknown, timestamp: string): string {
-  return createHmac('sha256', configured).update(signedPayload(body, timestamp)).digest('hex');
-}
-
-function authorizeInbound(request: FastifyRequest, reply: FastifyReply): boolean {
-  const configured = process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET?.trim();
-  if (!configured) {
-    reply.status(503).send({ error: 'Application email inbound routing is not configured' });
-    return false;
-  }
+function inboundSecretMatches(request: FastifyRequest): boolean {
+  const secret = inboundWebhookSecret();
   const timestampHeader = request.headers['x-litos-webhook-timestamp'];
   const signatureHeader = request.headers['x-litos-webhook-signature'];
   const timestamp = Array.isArray(timestampHeader) ? timestampHeader[0] : timestampHeader;
-  const signature = Array.isArray(signatureHeader) ? signatureHeader[0] : signatureHeader;
-  if (
-    freshTimestamp(timestamp)
-    && secretMatches(signature, expectedSignature(configured, request.body, timestamp!))
-  ) return true;
-  reply.status(401).send({ error: 'Unauthorized inbound email webhook' });
-  return false;
+  const provided = Array.isArray(signatureHeader) ? signatureHeader[0] : signatureHeader;
+  if (!secret || !timestamp || !provided) return false;
+  const epochMs = Number(timestamp);
+  if (!Number.isFinite(epochMs) || Math.abs(Date.now() - epochMs) > WEBHOOK_MAX_SKEW_MS) return false;
+  const expected = createHmac('sha256', secret)
+    .update(`${timestamp}.${JSON.stringify(request.body ?? {})}`)
+    .digest('hex');
+  return safeEqual(provided, expected);
 }
 
-function recipientsFrom(value: unknown): string[] {
-  if (!value) return [];
-  if (typeof value === 'string') return [value];
-  if (!Array.isArray(value)) return [];
-  return value
-    .map((item: unknown) => {
-      if (typeof item === 'string') return item;
-      if (item && typeof item === 'object' && 'email' in item) {
-        const email = (item as { email?: unknown }).email;
-        return typeof email === 'string' ? email : undefined;
-      }
-      return undefined;
-    })
-    .filter((email): email is string => Boolean(email));
+const directInboundBodySchema = z.object({
+  provider: z.string().trim().max(80).optional(),
+  provider_message_id: z.string().trim().max(200).optional(),
+  from: z.string().trim().max(500).optional(),
+  to: z.union([z.string(), z.array(z.string())]).optional(),
+  recipients: z.union([z.string(), z.array(z.string())]).optional(),
+  cc: z.union([z.string(), z.array(z.string())]).optional(),
+  envelope_to: z.union([z.string(), z.array(z.string())]).optional(),
+  delivered_to: z.union([z.string(), z.array(z.string())]).optional(),
+  recipient: z.union([z.string(), z.array(z.string())]).optional(),
+  subject: z.string().max(1000).optional(),
+  text: z.string().max(200_000).optional(),
+  html: z.string().max(500_000).optional(),
+  received_at: z.string().datetime().optional(),
+}).passthrough().refine((value) => allRecipients(value).length > 0, 'At least one recipient is required');
+
+const resendReceivedBodySchema = z.object({
+  type: z.literal('email.received'),
+  data: z.object({
+    email_id: z.string().trim().min(1).max(200),
+    from: z.string().trim().max(500).optional(),
+    to: z.array(z.string()).default([]),
+    subject: z.string().max(1000).optional(),
+    created_at: z.string().datetime().optional(),
+    message_id: z.string().max(500).optional(),
+  }).passthrough(),
+}).passthrough();
+
+function unauthorized(reply: FastifyReply) {
+  return reply.status(401).send({ error: 'Invalid inbound email webhook secret' });
 }
 
-function stringList(value: unknown): string[] {
-  if (!value) return [];
-  if (typeof value === 'string') return [value];
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is string => typeof item === 'string');
-}
-
-function allRecipients(value: Record<string, unknown>): string[] {
-  return [
-    ...recipientsFrom(value.to),
-    ...recipientsFrom(value.recipients),
-    ...stringList(value.cc),
-    value.envelope_to,
-    value.delivered_to,
-    value.recipient,
-  ].filter((email): email is string => Boolean(email));
-}
-
-function senderParts(value: z.infer<typeof inboundSchema>) {
-  if (typeof value.from === 'string') {
-    const email = value.from.match(/<([^>]+)>/)?.[1] ?? value.from;
-    const name = value.from.includes('<') ? value.from.slice(0, value.from.indexOf('<')).trim().replace(/^"|"$/g, '') : undefined;
-    return { email, name };
+async function inboundEmailFromWebhookBody(body: unknown): Promise<InboundApplicationEmail | null> {
+  const resend = resendReceivedBodySchema.safeParse(body);
+  if (resend.success) {
+    const sanitized = {
+      rawJson: {
+        provider: 'resend',
+        email_id: resend.data.data.email_id,
+        message_id: resend.data.data.message_id,
+        to: resend.data.data.to,
+        subject: resend.data.data.subject,
+      },
+    };
+    const fallback: InboundApplicationEmail = {
+      provider: 'resend',
+      providerMessageId: resend.data.data.message_id || resend.data.data.email_id,
+      from: resend.data.data.from,
+      to: resend.data.data.to.map((item) => item.trim().toLowerCase()).filter(Boolean),
+      subject: resend.data.data.subject,
+      receivedAt: resend.data.data.created_at ? new Date(resend.data.data.created_at) : undefined,
+      raw: sanitized.rawJson,
+    };
+    return retrieveResendReceivedEmail({ emailId: resend.data.data.email_id, fallback });
   }
+
+  const direct = directInboundBodySchema.safeParse(body);
+  if (!direct.success) return null;
+  const sanitized = {
+    rawJson: {
+      provider: direct.data.provider,
+      provider_message_id: direct.data.provider_message_id,
+      from: direct.data.from,
+      to: allRecipients(direct.data),
+      subject: direct.data.subject,
+    },
+  };
   return {
-    email: value.from_email ?? value.from?.email,
-    name: value.from_name ?? value.from?.name,
+    provider: direct.data.provider,
+    providerMessageId: direct.data.provider_message_id,
+    from: direct.data.from,
+    to: allRecipients(direct.data),
+    subject: direct.data.subject,
+    text: direct.data.text,
+    html: direct.data.html,
+    receivedAt: direct.data.received_at ? new Date(direct.data.received_at) : undefined,
+    raw: sanitized.rawJson,
   };
 }
 
 export async function applicationEmailRoutes(fastify: FastifyInstance) {
-  fastify.get('/applications/:id/email', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
-    const parsed = paramsSchema.safeParse(request.params);
-    if (!parsed.success) return reply.status(400).send({ error: 'Invalid application id' });
+  fastify.get('/application-email', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
-    const [application] = await db.select({ id: generated_resumes.id })
-      .from(generated_resumes)
-      .where(and(eq(generated_resumes.id, parsed.data.id), eq(generated_resumes.user_id, userId)))
-      .limit(1);
-    if (!application) return reply.status(404).send({ error: 'Application not found' });
-
-    const [alias] = await db.select()
+    const aliases = await db
+      .select({
+        alias: application_email_aliases.alias,
+        generated_resume_id: application_email_aliases.generated_resume_id,
+        forward_to: application_email_aliases.forward_to,
+        status: application_email_aliases.status,
+        created_at: application_email_aliases.created_at,
+      })
       .from(application_email_aliases)
-      .where(eq(application_email_aliases.generated_resume_id, application.id))
-      .limit(1);
+      .where(eq(application_email_aliases.user_id, userId))
+      .orderBy(desc(application_email_aliases.created_at))
+      .limit(50);
     return reply.send({
-      configured: Boolean(applicationAliasEmail(userId, application.id)),
-      email: alias?.email ?? applicationAliasEmail(userId, application.id),
-      enabled: alias?.enabled ?? false,
-      forwarding_email: alias?.forwarding_email ?? request.jwtPayload!.email ?? null,
+      configured: isApplicationEmailConfigured(),
+      domain: process.env.LITOS_APPLICATION_EMAIL_DOMAIN?.trim() || null,
+      aliases,
     });
   });
 
-  fastify.post('/application-email/inbound', async (request: FastifyRequest, reply: FastifyReply) => {
-    if (!authorizeInbound(request, reply)) return;
-    const parsed = inboundSchema.safeParse(request.body);
-    if (!parsed.success) return reply.status(400).send({ error: 'Invalid inbound email payload' });
-    const sender = senderParts(parsed.data);
-    const recipients = allRecipients(parsed.data);
-    const result = await recordAndForwardApplicationEmail({
-      inbound: {
-        providerMessageId: parsed.data.message_id ?? parsed.data.id,
-        fromEmail: sender.email,
-        fromName: sender.name,
-        toEmail: recipients[0] ?? '',
-        recipientEmails: recipients,
-        subject: parsed.data.subject ?? 'Employer email',
-        textBody: parsed.data.text_body ?? parsed.data.text,
-        htmlBody: parsed.data.html_body ?? parsed.data.html,
-        rawJson: {
-          provider_message_id: parsed.data.message_id ?? parsed.data.id,
-          from_email: sender.email,
-          to: recipients,
-          subject: parsed.data.subject ?? 'Employer email',
-        },
-      },
-    });
-    const statusCode = result.status === 'not_found' ? 404 : result.status === 'failed' ? 502 : 202;
-    return reply.status(statusCode).send(result);
+  fastify.get('/applications/:id/email-messages', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
+    if (!params.success) return reply.status(400).send({ error: 'Invalid application id' });
+    const userId = request.jwtPayload!.userId;
+    const messages = await db
+      .select({
+        id: application_email_messages.id,
+        alias: application_email_messages.alias,
+        direction: application_email_messages.direction,
+        from_email: application_email_messages.from_email,
+        to_email: application_email_messages.to_email,
+        subject: application_email_messages.subject,
+        text: application_email_messages.text,
+        classification: application_email_messages.classification,
+        received_at: application_email_messages.received_at,
+        forwarded_at: application_email_messages.forwarded_at,
+        created_at: application_email_messages.created_at,
+      })
+      .from(application_email_messages)
+      .where(eq(application_email_messages.generated_resume_id, params.data.id))
+      .orderBy(desc(application_email_messages.created_at))
+      .limit(50);
+    const owned = messages.filter((message) => message.alias);
+    const aliases = await db.select({ alias: application_email_aliases.alias })
+      .from(application_email_aliases)
+      .where(eq(application_email_aliases.user_id, userId));
+    const allowed = new Set(aliases.map((item) => item.alias));
+    return reply.send({ messages: owned.filter((message) => allowed.has(message.alias)) });
+  });
+
+  fastify.post('/webhooks/application-email/inbound', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!inboundSecretMatches(request)) {
+      return unauthorized(reply);
+    }
+
+    const inbound = await inboundEmailFromWebhookBody(request.body);
+    if (!inbound) return reply.status(400).send({ error: 'Invalid inbound email payload' });
+    const result = await processInboundApplicationEmail(inbound);
+    return reply.status(result.accepted ? 202 : 404).send(result);
   });
 }

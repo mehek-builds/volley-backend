@@ -55,6 +55,7 @@ test('submit-request starts a fresh run instead of carrying stale run artifacts'
   }
   assert.match(helper, /updated_at:\s*new Date\(\)\.toISOString\(\)/);
   assert.match(route, /const submittedQuestions = refreshKnownQuestionAnswers\(/);
+  assert.match(route, /current\.jd_text/);
   assert.match(route, /const normalizedSubmittedQuestions = mergeSubmittedApplicationReviewQuestions\(current\.questions, submittedQuestions\)/);
   assert.match(route, /const next = freshSubmitRequestReview\(current, normalizedSubmittedQuestions\)/);
 });
@@ -116,6 +117,41 @@ test('ATS API packet keeps an approved cover letter unless the prepared form exp
   assert.match(runner.slice(helperIndex, runner.indexOf('\nasync function submit(', helperIndex)), /review\.cover_letter_supported === false \? omitCoverLetter\(builtPacket\) : builtPacket/);
 });
 
+test('application routes refresh answers through the decrypted profile loader', async () => {
+  const route = await readFile('src/routes/applications.ts', 'utf8');
+  assert.match(route, /import \{ loadApplicationProfileLike \} from '\.\.\/lib\/applicationProfileLike'/);
+  assert.match(route, /return loadApplicationProfileLike\(userId\)/);
+  assert.doesNotMatch(route, /application_profile\.work_authorized/);
+  assert.doesNotMatch(route, /application_profile\.needs_sponsorship/);
+  assert.match(route, /questions: refreshKnownQuestionAnswers\(review\.questions, profile, review\.jd_text\)/);
+});
+
+test('final approval validates and submits refreshed known question answers', async () => {
+  const route = await readFile('src/routes/applications.ts', 'utf8');
+  const start = route.indexOf("'/applications/:id/submission/approve'");
+  assert.ok(start >= 0, 'approval route is missing');
+  const end = route.indexOf("'/applications/:id/status'", start);
+  assert.ok(end > start, 'could not bound approval route');
+  const approve = route.slice(start, end);
+
+  assert.match(approve, /const sensitiveProfile = await loadSensitiveQuestionProfile/);
+  assert.match(approve, /const approvalReview: ApplicationReviewState = \{/);
+  assert.match(approve, /questions: refreshKnownQuestionAnswers\(current\.questions, sensitiveProfile, current\.jd_text\)/);
+  assert.match(approve, /approvalReview\.questions\.some/);
+  assert.match(approve, /sensitiveQuestionFor\(approvalReview\.questions, sensitiveProfile, approvalReview\.jd_text\)/);
+  assert.match(approve, /\.\.\.approvalReview,[\s\S]{0,120}status:\s*'submitting'/);
+  assert.doesNotMatch(approve, /current\.questions\.some/);
+  assert.doesNotMatch(approve, /sensitiveQuestionFor\(current\.questions/);
+});
+
+test('resume history refreshes known question answers without changing review status', async () => {
+  const route = await readFile('src/routes/resume.ts', 'utf8');
+  assert.match(route, /function refreshedHistorySpec/);
+  assert.match(route, /loadApplicationProfileLike\(userId\)/);
+  assert.match(route, /questions: refreshKnownQuestionAnswers\(review\.questions, profile, review\.jd_text\)/);
+  assert.doesNotMatch(route, /status:\s*'ready_to_submit'[\s\S]{0,300}refreshKnownQuestionAnswers/);
+});
+
 test('submission packet attaches the role-specific resume filename', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
   assert.match(runner, /const roleTitle = \(row\.job_context as \{ role\?: unknown \} \| null\)\?\.role/);
@@ -128,7 +164,7 @@ test('submission packet uses the Litos application email alias before the accoun
   assert.match(runner, /import \{ ensureApplicationEmailAlias \} from '\.\.\/lib\/applicationEmail'/);
   const buildPacketIndex = runner.indexOf('export async function buildPacket');
   const aliasIndex = runner.indexOf('const applicationEmail = await ensureApplicationEmailAlias', buildPacketIndex);
-  const emailIndex = runner.indexOf('const email = String(applicationEmail ?? contact.email ?? accountEmail)', buildPacketIndex);
+  const emailIndex = runner.indexOf('const email = String(applicationEmail?.alias ?? contact.email ?? accountEmail)', buildPacketIndex);
   assert.ok(aliasIndex > buildPacketIndex, 'buildPacket must mint or read a Litos application alias');
   assert.ok(emailIndex > aliasIndex, 'the applicant email must prefer the Litos alias before personal email fallbacks');
   assert.match(runner.slice(aliasIndex, emailIndex), /\.catch\(\(\) => undefined\)/, 'alias creation failure must not block fallback email submission');

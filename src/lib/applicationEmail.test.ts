@@ -1,131 +1,106 @@
-import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import assert from 'node:assert/strict';
 import {
-  applicationAliasEmail,
-  applicationAliasLocalPart,
-  applicationEmailDomain,
-  buildForwardedApplicationEmail,
-  inboundDedupeKey,
-  plainTextFromHtml,
+  applicationAliasFor,
+  classifyApplicationEmail,
+  retrieveResendReceivedEmail,
 } from './applicationEmail';
 
-async function withEnv<T>(patch: Record<string, string | undefined>, fn: () => Promise<T> | T): Promise<T> {
-  const saved = Object.fromEntries(Object.keys(patch).map((key) => [key, process.env[key]]));
+test('application aliases are deterministic and live on the configured domain', () => {
+  const previousDomain = process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+  const previousSecret = process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
+  process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'apply.litos.test';
+  process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = 'secret';
   try {
-    for (const [key, value] of Object.entries(patch)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-    return await fn();
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
-}
-
-test('application aliases are opaque, deterministic, and domain gated', async () => {
-  await withEnv({
-    LITOS_APPLICATION_EMAIL_DOMAIN: 'apply.trylitos.com',
-    LITOS_APPLICATION_EMAIL_SECRET: 'test-secret',
-  }, () => {
-    const first = applicationAliasEmail('user-1', 'application-1');
-    const second = applicationAliasEmail('user-1', 'application-1');
-    const other = applicationAliasEmail('user-1', 'application-2');
+    const first = applicationAliasFor(
+      '11111111-1111-4111-8111-111111111111',
+      '22222222-2222-4222-8222-222222222222',
+    );
+    const second = applicationAliasFor(
+      '11111111-1111-4111-8111-111111111111',
+      '22222222-2222-4222-8222-222222222222',
+    );
     assert.equal(first, second);
-    assert.notEqual(first, other);
-    assert.match(first ?? '', /^apply-[a-z0-9_-]{18}@apply\.trylitos\.com$/);
-    assert.equal((first ?? '').includes('user-1'), false);
-    assert.equal((first ?? '').includes('application-1'), false);
-  });
-
-  await withEnv({ LITOS_APPLICATION_EMAIL_DOMAIN: '' }, () => {
-    assert.equal(applicationEmailDomain(), null);
-    assert.equal(applicationAliasEmail('user-1', 'application-1'), null);
-  });
-
-  await withEnv({
-    LITOS_APPLICATION_EMAIL_DOMAIN: 'apply.trylitos.com',
-    LITOS_APPLICATION_EMAIL_SECRET: undefined,
-    JWT_SIGNING_SECRET: undefined,
-  }, () => {
-    assert.equal(applicationAliasEmail('user-1', 'application-1'), null);
-    assert.throws(() => applicationAliasLocalPart('user-1', 'application-1'), /not configured/);
-  });
+    assert.match(first ?? '', /^app-2222222222-[a-f0-9]{12}@apply\.litos\.test$/);
+  } finally {
+    if (previousDomain === undefined) delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+    else process.env.LITOS_APPLICATION_EMAIL_DOMAIN = previousDomain;
+    if (previousSecret === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
+    else process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = previousSecret;
+  }
 });
 
-test('application alias local part changes when the secret changes', async () => {
-  let first = '';
-  let second = '';
-  await withEnv({ LITOS_APPLICATION_EMAIL_SECRET: 'first-secret' }, () => {
-    first = applicationAliasLocalPart('user-1', 'application-1');
-  });
-  await withEnv({ LITOS_APPLICATION_EMAIL_SECRET: 'second-secret' }, () => {
-    second = applicationAliasLocalPart('user-1', 'application-1');
-  });
-  assert.notEqual(first, second);
+test('application aliases are disabled until a real secret is configured', () => {
+  const previousDomain = process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+  const previousAliasSecret = process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
+  const previousCompatSecret = process.env.LITOS_APPLICATION_EMAIL_SECRET;
+  const previousJwtSecret = process.env.JWT_SIGNING_SECRET;
+  process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'apply.litos.test';
+  delete process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
+  delete process.env.LITOS_APPLICATION_EMAIL_SECRET;
+  delete process.env.JWT_SIGNING_SECRET;
+  try {
+    assert.equal(applicationAliasFor(
+      '11111111-1111-4111-8111-111111111111',
+      '22222222-2222-4222-8222-222222222222',
+    ), null);
+  } finally {
+    if (previousDomain === undefined) delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+    else process.env.LITOS_APPLICATION_EMAIL_DOMAIN = previousDomain;
+    if (previousAliasSecret === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
+    else process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = previousAliasSecret;
+    if (previousCompatSecret === undefined) delete process.env.LITOS_APPLICATION_EMAIL_SECRET;
+    else process.env.LITOS_APPLICATION_EMAIL_SECRET = previousCompatSecret;
+    if (previousJwtSecret === undefined) delete process.env.JWT_SIGNING_SECRET;
+    else process.env.JWT_SIGNING_SECRET = previousJwtSecret;
+  }
 });
 
-test('forwarded employer mail replies to the employer instead of looping through the alias', async () => {
-  await withEnv({ RESEND_FROM: 'ops@trylitos.com' }, () => {
-    const message = buildForwardedApplicationEmail({
-      forwardingEmail: 'mehek@example.com',
-      applicationEmail: 'apply-abc@apply.trylitos.com',
-      inbound: {
-        fromEmail: 'recruiting@example.com',
-        fromName: 'Recruiting',
-        toEmail: 'apply-abc@apply.trylitos.com',
-        subject: 'Interview request',
-        htmlBody: '<p>Can you meet Friday?</p>',
-      },
+test('application email classifier recognizes employer outcomes', () => {
+  assert.equal(
+    classifyApplicationEmail('Thank you for applying', 'We received your application.'),
+    'submission_confirmation',
+  );
+  assert.equal(
+    classifyApplicationEmail('Interview availability', 'Can you schedule a call with our recruiter?'),
+    'interview_request',
+  );
+  assert.equal(
+    classifyApplicationEmail('Your verification code', 'Use passcode 123456.'),
+    'verification_code',
+  );
+});
+
+test('resend received email hydration fetches the full body before routing', async () => {
+  const previousKey = process.env.RESEND_API_KEY;
+  const previousFetch = globalThis.fetch;
+  process.env.RESEND_API_KEY = 're_test';
+  try {
+    globalThis.fetch = (async (url, init) => {
+      assert.equal(String(url), 'https://api.resend.com/emails/receiving/email_123');
+      assert.equal((init?.headers as Record<string, string>).Authorization, 'Bearer re_test');
+      return new Response(JSON.stringify({
+        id: 'email_123',
+        to: ['app-abc@apply.litos.test'],
+        from: 'recruiter@example.com',
+        created_at: '2026-08-06T10:00:00.000Z',
+        subject: 'Interview availability',
+        text: 'Can you schedule a call?',
+        html: '<p>Can you schedule a call?</p>',
+        message_id: '<message@example.com>',
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch;
+    const hydrated = await retrieveResendReceivedEmail({
+      emailId: 'email_123',
+      fallback: { provider: 'resend', to: [], raw: { type: 'email.received' } },
     });
-    assert.deepEqual(message.to, ['mehek@example.com']);
-    assert.equal(message.reply_to, 'recruiting@example.com');
-    assert.match(message.subject, /^\[Litos application\] Interview request$/);
-    assert.match(message.html ?? '', /Can you meet Friday\?/);
-    assert.doesNotMatch(message.html ?? '', /mehek@example\.com/);
-  });
-});
-
-test('inbound dedupe key is provider-stable or body-stable', () => {
-  assert.equal(
-    inboundDedupeKey({
-      aliasId: 'alias-1',
-      providerMessageId: 'provider-123',
-      subject: 'Receipt',
-    }),
-    'provider:alias-1:provider-123',
-  );
-  assert.equal(
-    inboundDedupeKey({
-      aliasId: 'alias-1',
-      fromEmail: 'recruiting@example.com',
-      subject: 'Receipt',
-      textBody: 'Thanks',
-    }),
-    inboundDedupeKey({
-      aliasId: 'alias-1',
-      fromEmail: 'RECRUITING@example.com',
-      subject: 'Receipt',
-      textBody: 'Thanks',
-    }),
-  );
-});
-
-test('html can be converted to a readable forwarding text fallback', () => {
-  assert.equal(plainTextFromHtml('<p>Hello<br>World</p><p>A &amp; B</p>'), 'Hello\nWorld\n\nA & B');
-});
-
-test('duplicate inbound messages retry forwarding until a forward succeeds', async () => {
-  const source = await readFile('src/lib/applicationEmail.ts', 'utf8');
-  assert.match(source, /onConflictDoNothing\(\{ target: application_email_messages\.dedupe_key \}\)/);
-  assert.match(source, /where\(eq\(application_email_messages\.dedupe_key, dedupeKey\)\)/);
-  assert.match(source, /if \(message\.forwarded_at\) return \{ status: 'duplicate'/);
-  assert.match(source, /forwarding_claimed_at: new Date\(\)/);
-  assert.match(source, /forwarding_claimed_at} is null/);
-  assert.match(source, /forwarding_claimed_at} < now\(\) - interval '10 minutes'/);
-  assert.match(source, /set\(\{ forwarded_message_id: forwardedId, forwarded_at: new Date\(\), forward_error: null \}\)/);
-  assert.match(source, /forwarding_claimed_at: null/);
+    assert.equal(hydrated.providerMessageId, '<message@example.com>');
+    assert.equal(hydrated.from, 'recruiter@example.com');
+    assert.equal(hydrated.text, 'Can you schedule a call?');
+    assert.deepEqual(hydrated.to, ['app-abc@apply.litos.test']);
+  } finally {
+    if (previousKey === undefined) delete process.env.RESEND_API_KEY;
+    else process.env.RESEND_API_KEY = previousKey;
+    globalThis.fetch = previousFetch;
+  }
 });

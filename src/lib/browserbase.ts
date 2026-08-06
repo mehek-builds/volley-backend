@@ -51,6 +51,36 @@ type SessionResponse = {
   connect_url?: string;
 };
 
+const STRATUS_SELECTOR_MAX_LENGTH = 500;
+const STRATUS_LABEL_SELECTOR_TEXT_LIMIT = 80;
+
+function cssString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function selectorFromLabelText(text: string | undefined): string | undefined {
+  const stem = text?.replace(/\s+/g, ' ').trim().slice(0, STRATUS_LABEL_SELECTOR_TEXT_LIMIT);
+  if (!stem) return undefined;
+  const quoted = cssString(stem);
+  const selector = [
+    `label:has-text("${quoted}") :is(input, textarea, select)`,
+    `:is(input, textarea, select):right-of(label:has-text("${quoted}"))`,
+    `:is(input, textarea, select):below(label:has-text("${quoted}"))`,
+  ].join(', ');
+  return selector.length <= STRATUS_SELECTOR_MAX_LENGTH ? selector : undefined;
+}
+
+function stratusAction(action: ManagedBrowserAction): ManagedBrowserAction {
+  if (action.type === 'discover' && !action.selector?.trim()) {
+    return { ...action, selector: 'body' };
+  }
+  if (action.type !== 'fillByLabelText') return action;
+  const selector = selectorFromLabelText(action.text);
+  if (!selector) return action;
+  const { text: _text, ...rest } = action;
+  return { ...rest, type: 'fill', selector };
+}
+
 function config() {
   const provider: BrowserProvider = process.env.BROWSER_PROVIDER === 'stratus-managed'
     ? 'stratus-managed'
@@ -128,7 +158,7 @@ export async function runManagedBrowser(
     },
     body: JSON.stringify({
       url: portalUrl,
-      actions,
+      actions: actions.map(stratusAction),
       screenshot: options.screenshot ?? true,
       fullPage: true,
       waitUntil: 'domcontentloaded',

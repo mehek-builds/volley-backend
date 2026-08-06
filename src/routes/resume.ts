@@ -21,6 +21,7 @@ import { validateResumeSpec, validatePdfLayout, pruneUngroundedContent } from '.
 import { mintDownloadToken, readDownloadToken, resolveBlobUrl } from '../lib/resumeAccess';
 import { apiBaseFor } from '../lib/apiBase';
 import { resumeGenerateBodySchema, type ResumeGenerateBody } from './resumeRequestSchema';
+import { applicationAliasFor, ensureApplicationEmailAlias, type ApplicationEmailIdentity } from '../lib/applicationEmail';
 import {
   resumeGenerateSuccessResponseSchema,
   resumeQualityHoldResponseSchema,
@@ -44,6 +45,8 @@ import {
 } from '../lib/portalSubmission';
 import { contentDispositionFileName, resumeFileNameForRole } from '../lib/resumeFileName';
 import { monitoredDescriptionHash, monitoredJdAgrees } from '../lib/monitoredPortalRepair';
+import { refreshKnownQuestionAnswers, type ApplicationProfileLike } from '../lib/questionDiscovery';
+import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 
 const MAX_SPEC_ATTEMPTS = 2; // 1 initial pass + 1 feedback-driven retry, per PRD-v2 Section 6.4's
 // "automated quality gate" - bounded so a stubborn JD can't loop the endpoint indefinitely.
@@ -151,6 +154,18 @@ function repairedHistorySpec(
     portal_supported: true,
   };
   return { ...(spec as Record<string, unknown>), _review: repaired };
+}
+
+function refreshedHistorySpec(spec: unknown, profile: ApplicationProfileLike): unknown {
+  const review = readApplicationReview(spec);
+  if (!review || !spec || typeof spec !== 'object' || Array.isArray(spec)) return spec;
+  return {
+    ...(spec as Record<string, unknown>),
+    _review: {
+      ...review,
+      questions: refreshKnownQuestionAnswers(review.questions, profile, review.jd_text),
+    },
+  };
 }
 
 // ─── Transient model-capacity handling (live QA 2026-07-16) ──────────────────
@@ -372,6 +387,19 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       return rateLimitedReply(reply);
     }
 
+    const resumeId = randomUUID();
+    const litosApplicationAlias = body.application ? applicationAliasFor(userId, resumeId) : null;
+    const applicationEmail: ApplicationEmailIdentity | null = litosApplicationAlias && body.contact.email
+      ? {
+        alias: litosApplicationAlias,
+        forwards_to: body.contact.email.trim().toLowerCase(),
+        mode: 'litos_application_alias',
+      }
+      : null;
+    const applicationContact = applicationEmail
+      ? { ...body.contact, email: applicationEmail.alias }
+      : body.contact;
+
     // These reads are independent. Starting them together removes one database round trip from
     // every generation while preserving readExperienceBank's load-bearing row ordering (R-022).
     /* application_profile joins the pair because it, not the parse, is the source of truth for the
@@ -537,7 +565,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       }
 
       const result = validateResumeSpec(spec, jdText, bank, declaredSkills, education, body.role);
-      const typographyIssues = findResumeTypographyIssues(spec, body.contact);
+      const typographyIssues = findResumeTypographyIssues(spec, applicationContact);
       specIssues = [...result.issues, ...typographyIssues];
       if (priorityEntry) specIssues.push(...baseResumeSelectionIssues(spec, [priorityEntry]));
       specWarnings = result.warnings;
@@ -608,7 +636,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     let visualWarnings: string[];
     let visualIssues: string[];
     try {
-      const rendered = await renderResumePdf(spec, body.contact, jdText);
+      const rendered = await renderResumePdf(spec, applicationContact, jdText);
       pdfBuffer = rendered.buffer;
       spec = rendered.spec;
       trimmedForFit = rendered.trimmed;
@@ -667,7 +695,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       const parsedPdf = await extractPdfText(pdfBuffer);
       layoutIssues.push(...validatePdfLayout(parsedPdf.text, parsedPdf.numpages).issues);
       layoutIssues.push(...findPdfSafeMarginIssues(parsedPdf.pages, visualLayout));
-      layoutIssues.push(...findPdfTextFidelityIssues(parsedPdf.text, spec, body.contact));
+      layoutIssues.push(...findPdfTextFidelityIssues(parsedPdf.text, spec, applicationContact));
     } catch (err) {
       // Fail closed when validation cannot run. Returning or storing an unverified PDF would
       // turn a parser failure into a false quality pass and repeat R-017's failure mode.
@@ -696,8 +724,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       }));
     }
 
-    const resumeId = randomUUID();
-    const resumeFileName = resumeFileNameForRole(body.contact.full_name, body.role);
+    const resumeFileName = resumeFileNameForRole(applicationContact.full_name, body.role);
     const responseTemplate = resumeGenerateSuccessResponseSchema.parse({
       resume_id: resumeId,
       resume_url: 'validated-before-storage',
@@ -805,7 +832,8 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     }
     const storedSpec = {
       ...spec,
-      _contact: body.contact,
+      _contact: applicationContact,
+      ...(applicationEmail ? { _application_email: applicationEmail } : {}),
       _review: applicationReview,
       _quality: {
         specIssues: [],
@@ -836,6 +864,13 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         spec: storedSpec,
         resume_object_key: objectKey,
       });
+      if (applicationEmail) {
+        await ensureApplicationEmailAlias({
+          userId,
+          applicationId: resumeId,
+          forwardTo: applicationEmail.forwards_to,
+        });
+      }
       persisted = true;
     } catch (err) {
       fastify.log.error(err);
@@ -1029,7 +1064,10 @@ export async function resumeRoutes(fastify: FastifyInstance) {
           jdHash: monitoredDescriptionHash(job.description),
         }] as const),
     );
-    const base = apiBaseFor(request);
+    const [profile, base] = await Promise.all([
+      loadApplicationProfileLike(userId),
+      Promise.resolve(apiBaseFor(request)),
+    ]);
     const resumes = rows.map((row) => {
       const coverLetter = ((row.spec as Record<string, unknown>)._cover_letter ?? {}) as Record<string, unknown>;
       const contact = ((row.spec as Record<string, unknown>)._contact ?? {}) as Record<string, unknown>;
@@ -1037,7 +1075,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       const resumeFileName = resumeFileNameForRole(contact.full_name, job.role);
       return {
         ...row,
-        spec: repairedHistorySpec(row, monitoredJobs),
+        spec: refreshedHistorySpec(repairedHistorySpec(row, monitoredJobs), profile),
         download_url: `${base}/resume/download?t=${mintDownloadToken(userId, row.resume_object_key, { fileName: resumeFileName })}`,
         cover_letter_download_url: typeof coverLetter.object_key === 'string'
           ? `${base}/resume/download?t=${mintDownloadToken(userId, coverLetter.object_key)}`

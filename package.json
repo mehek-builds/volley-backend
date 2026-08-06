@@ -74,6 +74,7 @@
     "sponsors:build": "node scripts/build-h1b-sponsors.mjs",
     "sponsors:check": "node scripts/build-h1b-sponsors.mjs --check",
     "db:pipeline-stage": "node scripts/apply-pipeline-stage-schema.mjs",
+    "db:application-email": "node scripts/apply-application-email-schema.mjs",
     "logo:check": "node --import tsx scripts/check-logo-coverage.mjs",
     "logo:resolve": "node --import tsx scripts/resolve-company-domains.mjs",
     "db:job-pay": "node scripts/apply-job-pay-schema.mjs",

@@ -52,7 +52,9 @@
  * TWO RULES THIS MODULE HOLDS, both inherited from R-015:
  *
  *   - IT NEVER INVENTS A MATCH. Matching is literal, plus morphology we can defend (plural,
- *     hyphen/space/dot spelling). There is deliberately NO synonym or hypernym table here. The
+ *     hyphen/space/dot spelling), plus explicitly enumerated same-capability pairs like
+ *     TypeScript satisfying JavaScript. There is deliberately NO broad synonym or hypernym table
+ *     here. The
  *     resumeSpec.ts skill_source note documents the model generalising "Hugging Face" to "Machine
  *     Learning" and why that is laundering rather than tailoring. A scorer that credits a broader
  *     term for a narrower one makes the same error silently.
@@ -1008,8 +1010,33 @@ payroll ergonomics
 inventory dispatch warehousing kaizen sigma lean
 journalism proofreading transcription translation interpreting
 seo sem ppc crm cms erp roi kpi saas b2b b2c ux ui qa etl elt ci cd api sdk llm nlp ml ai
-copywriting analytics automation visualization prototyping wireframing benchmarking underwriting`
+copywriting analytics automation visualization prototyping wireframing benchmarking underwriting
+roadmap metric dashboard experimentation prd frontend backend`
     .split(/\s+/)
+    .filter(Boolean),
+);
+
+const PHRASE_LEXICON = new Set(
+  `product management
+product manager
+product strategy
+product roadmap
+roadmap planning
+user research
+customer research
+customer discovery
+customer interview
+stakeholder interview
+competitive analysis
+product requirement
+product requirements
+product requirement document
+product requirements document
+ab testing
+a b testing
+conversion funnel`
+    .split(/\n/)
+    .map((s) => normalizeTerm(s))
     .filter(Boolean),
 );
 
@@ -1829,6 +1856,7 @@ function locationTokens(location: string | null | undefined): string[] {
  * either of them said out loud, so it wins.
  */
 const PLACE_SAFE_KINDS: ReadonlySet<SectionKind> = new Set<SectionKind>(['body']);
+const ROLE_SAFE_KINDS: ReadonlySet<SectionKind> = new Set<SectionKind>(['body', 'responsibilities']);
 
 /**
  * The company and the role, which are excluded from EVERY section rather than only from prose.
@@ -1839,13 +1867,22 @@ const PLACE_SAFE_KINDS: ReadonlySet<SectionKind> = new Set<SectionKind>(['body']
  */
 function selfReferenceTokens(context?: JdContext): Set<string> {
   const tokens = new Set(SELF_REFERENCE);
-  for (const value of [context?.company, context?.role]) {
+  for (const value of [context?.company]) {
     if (!value) continue;
     const normalized = normalizeTerm(value);
     // The whole phrase AND each word: "Litos QA" must not survive as "Litos" or as "QA" either.
     tokens.add(normalized);
     for (const word of normalized.split(' ')) if (word.length > 1) tokens.add(word);
   }
+  return tokens;
+}
+
+function roleReferenceTokens(role: string | null | undefined): Set<string> {
+  const tokens = new Set<string>();
+  const normalized = normalizeTerm(role ?? '');
+  if (!normalized) return tokens;
+  tokens.add(normalized);
+  for (const word of normalized.split(' ')) if (word.length > 1) tokens.add(word);
   return tokens;
 }
 
@@ -1881,6 +1918,7 @@ function companyBrandTokens(company: string | null | undefined): Set<string> {
 
 export function extractJdTerms(jdText: string, context?: JdContext): JdTerm[] {
   const self = selfReferenceTokens(context);
+  const roleSelf = roleReferenceTokens(context?.role);
   const places = new Set(locationTokens(context?.location));
   const brand = companyBrandTokens(context?.company);
   const excluded = (t: JdTerm, words: Set<string>) =>
@@ -1891,7 +1929,11 @@ export function extractJdTerms(jdText: string, context?: JdContext): JdTerm[] {
     t.term.includes(' ') && t.term.split(' ').some((w) => brand.has(w));
   const strip = (list: JdTerm[]) =>
     list.filter(
-      (t) => !excluded(t, self) && !branded(t) && !(PLACE_SAFE_KINDS.has(t.kind) && excluded(t, places)),
+      (t) =>
+        !excluded(t, self) &&
+        !(ROLE_SAFE_KINDS.has(t.kind) && excluded(t, roleSelf)) &&
+        !branded(t) &&
+        !(PLACE_SAFE_KINDS.has(t.kind) && excluded(t, places)),
     );
 
   const lowercased = lowercaseTokens(jdText);
@@ -2225,6 +2267,16 @@ function capToEmphasis(terms: JdTerm[]): JdTerm[] {
   return [...kept.values()].sort((x, y) => y.weight - x.weight || x.term.localeCompare(y.term));
 }
 
+function countNormalizedMentions(haystack: string, needle: string): number {
+  let count = 0;
+  let at = haystack.indexOf(` ${needle} `);
+  while (at !== -1) {
+    count += 1;
+    at = haystack.indexOf(` ${needle} `, at + needle.length + 1);
+  }
+  return count;
+}
+
 function extractFrom(sections: JdSection[], alsoLowercased?: Set<string>): JdTerm[] {
   const byTerm = new Map<string, JdTerm>();
   // A character offset, not a counter over the extraction passes.
@@ -2262,6 +2314,27 @@ function extractFrom(sections: JdSection[], alsoLowercased?: Set<string>): JdTer
     // spared for the "Java, Indonesia" case: see addressSpans.
     const isAddress = (tok: SectionToken) =>
       inAddress(spans, tok.start, tok.end) && !inLexicon(normalizeTerm(tok.text));
+
+    const normalizedSection = ` ${normalizeTerm(sectionText)} `;
+    for (const term of PHRASE_LEXICON) {
+      const mentionCount = countNormalizedMentions(normalizedSection, term);
+      if (mentionCount === 0) continue;
+      const existing = byTerm.get(term);
+      const mentions = (existing?.mentions ?? 0) + mentionCount;
+      if (!existing || section.weight > existing.weight) {
+        byTerm.set(term, {
+          term,
+          display: term.toUpperCase() === 'PRD' ? 'PRD' : term,
+          weight: section.weight,
+          kind: section.kind,
+          signal: true,
+          mentions,
+          order: existing?.order ?? sectionBase + Math.max(0, normalizedSection.indexOf(` ${term} `) - 1),
+        });
+      } else {
+        existing.mentions = mentions;
+      }
+    }
 
     // Unigrams. Match on the original casing so isSpecific can see proper nouns.
     for (const tok of tokens) {
@@ -2502,37 +2575,38 @@ function resumeHaystack(resumeText: string): string {
   return lastResumeHaystack;
 }
 
+const SAME_CAPABILITY_TERMS = new Map<string, string[]>([
+  ['javascript', ['typescript']],
+  ['frontend', ['react', 'vue', 'angular', 'svelte']],
+  ['backend', ['nodejs', 'express', 'django', 'flask', 'fastapi', 'rails', 'spring']],
+  ['api', ['rest', 'graphql']],
+  ['apis', ['rest', 'graphql']],
+]);
+
 /**
  * Does the resume satisfy this requirement, including where one product has two spellings?
  *
  * A term with `alternatives` stands for one requirement written several ways, so ANY member
  * satisfies it.
  *
- * IT IS CURRENTLY EQUIVALENT TO resumeCovers(term.term), AND THAT IS WORTH SAYING OUT LOUD rather
- * than leaving for someone to discover. The only writer of `alternatives` today is the
- * VENDOR_SPELLINGS merge, which always keeps the BARE PRODUCT as the representative and folds the
- * vendor-qualified phrase into it. Every alternative therefore CONTAINS its representative as a
- * whole word ("microsoft excel" contains "excel"), so a resume matching any alternative already
- * matches the representative. A test pins that containment invariant.
- *
- * SO WHY KEEP IT. Because the invariant is a property of one enumerated list, not of the field, and
- * the moment any writer produces an alternative that is NOT a superstring of the representative the
- * equivalence breaks silently. Grouping a disjunction the employer wrote ("React, Angular, Vue or
- * Scala" represented by `react`) is exactly that case, it was attempted, and it is recorded as a
- * live residual at EMPHASIS_LIMIT. When it lands, every holder of a JdTerm must call THIS rather
- * than resumeCovers - including gapEvidence.ts and interviewPrep.ts, which both claim in comments
- * to use "the same matcher the score uses" and would both quietly stop doing so. They are left on
- * resumeCovers today because today it is the same function.
+ * This is intentionally wider than a raw resumeCovers(term.term) call. Vendor spellings,
+ * lexicon-backed plurals, and the small SAME_CAPABILITY_TERMS table all name the same capability
+ * rather than a broader field: TypeScript for JavaScript, React for frontend, REST for APIs. That
+ * keeps the score from charging a student for wording differences while still refusing loose
+ * hypernyms such as "machine learning" satisfying "PyTorch".
  */
 function resumeSatisfies(resumeText: string, term: JdTerm): boolean {
   if (term.alternatives) return term.alternatives.some((t) => resumeCovers(resumeText, t));
-  return resumeCovers(resumeText, term.term);
+  if (resumeCovers(resumeText, term.term)) return true;
+  return (SAME_CAPABILITY_TERMS.get(normalizeTerm(term.term)) ?? []).some((t) => resumeCovers(resumeText, t));
 }
 
 export function resumeCovers(resumeText: string, term: string): boolean {
   const hay = resumeHaystack(resumeText);
   const needle = normalizeTerm(term);
   if (hay.includes(` ${needle} `)) return true;
+  const foldedNeedle = foldKey(needle);
+  if (foldedNeedle !== needle && hay.includes(` ${foldedNeedle} `)) return true;
   const singularNeedle = needle.split(' ').map(singular).join(' ');
   if (hay.includes(` ${singularNeedle} `)) return true;
   // The resume may pluralise where the JD did not.

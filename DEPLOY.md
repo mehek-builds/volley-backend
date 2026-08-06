@@ -70,7 +70,7 @@ Set these for Production (and Preview if you want):
 | `LITOS_ATS_API_SUBMISSION_ENABLED` | set to literal `true` only when employer-authorized ATS submission channels may POST applications |
 | `LITOS_EMPLOYER_API_SUBMISSION_CHANNELS_JSON` | JSON array of allowlisted Greenhouse, Ashby, or Lever submit channels; references key env names, never raw secrets |
 | `LITOS_APPLICATION_EMAIL_DOMAIN` | domain that receives employer application mail for generated aliases, for example `apply.trylitos.com` |
-| `LITOS_APPLICATION_EMAIL_SECRET` | stable secret used to mint opaque per-application alias local parts; defaults to `JWT_SIGNING_SECRET` |
+| `LITOS_APPLICATION_EMAIL_ALIAS_SECRET` | stable secret used to mint opaque per-application alias local parts |
 | `LITOS_INBOUND_EMAIL_WEBHOOK_SECRET` | HMAC secret for signed `POST /application-email/inbound` calls from the inbound email provider |
 | `LEMONSQUEEZY_CHECKOUT_URL` | reusable live product URL containing `/checkout/buy/` |
 | `LEMONSQUEEZY_VARIANT_ID` | numeric ID of the $49.99 monthly Pro variant |

@@ -68,15 +68,23 @@ test('greenhouse wrapper canonicalization trusts the gh_jid URL convention and r
 test('monitored Greenhouse sources canonicalize company wrappers with source board tokens', () => {
   assert.equal(
     canonicalMonitoredPortalUrl('https://nuro.ai/careers?gh_jid=4512345', 'greenhouse', 'nuro'),
-    'https://job-boards.greenhouse.io/nuro/jobs/4512345',
+    'https://job-boards.greenhouse.io/embed/job_app?for=nuro&token=4512345',
   );
   assert.equal(
     canonicalMonitoredPortalUrl('https://www.jumptrading.com/hr/job?gh_jid=8052281', 'greenhouse', 'jumptrading'),
-    'https://job-boards.greenhouse.io/jumptrading/jobs/8052281',
+    'https://job-boards.greenhouse.io/embed/job_app?for=jumptrading&token=8052281',
   );
   assert.equal(
     canonicalMonitoredPortalUrl('https://boards.greenhouse.io/embed/job_app?token=7351061', 'greenhouse', 'nuro'),
-    'https://job-boards.greenhouse.io/nuro/jobs/7351061',
+    'https://job-boards.greenhouse.io/embed/job_app?for=nuro&token=7351061',
+  );
+  assert.equal(
+    canonicalMonitoredPortalUrl('https://job-boards.greenhouse.io/akunacapital/jobs/8018893', 'greenhouse', 'akunacapital'),
+    'https://job-boards.greenhouse.io/embed/job_app?for=akunacapital&token=8018893',
+  );
+  assert.equal(
+    canonicalMonitoredPortalUrl('https://job-boards.eu.greenhouse.io/imc/jobs/4829785101', 'greenhouse', 'imc'),
+    'https://job-boards.eu.greenhouse.io/embed/job_app?for=imc&token=4829785101',
   );
   assert.equal(canonicalMonitoredPortalUrl('https://nuro.ai/careers?gh_jid=4512345', 'greenhouse'), undefined);
   assert.equal(canonicalMonitoredPortalUrl('https://nuro.ai/careers?gh_jid=abc', 'greenhouse', 'nuro'), undefined);
@@ -85,7 +93,9 @@ test('monitored Greenhouse sources canonicalize company wrappers with source boa
 test('bare Greenhouse embed links are supported but still need monitored board-token repair', () => {
   assert.equal(isPortalSupported('https://boards.greenhouse.io/embed/job_app?token=7351061'), true);
   assert.equal(greenhousePortalUrlNeedsBoardToken('https://boards.greenhouse.io/embed/job_app?token=7351061'), true);
+  assert.equal(greenhousePortalUrlNeedsBoardToken('https://job-boards.eu.greenhouse.io/embed/job_app?token=4829785101'), true);
   assert.equal(greenhousePortalUrlNeedsBoardToken('https://boards.greenhouse.io/embed/job_app?for=nuro&token=7351061'), false);
+  assert.equal(greenhousePortalUrlNeedsBoardToken('https://job-boards.eu.greenhouse.io/embed/job_app?for=imc&token=4829785101'), false);
   assert.equal(greenhousePortalUrlNeedsBoardToken('https://job-boards.greenhouse.io/nuro/jobs/7351061'), false);
 });
 
@@ -237,7 +247,7 @@ test('portal support is written at packet creation and unsupported portals use e
   assert.match(resumeRoute, /monitored_jobs\.apply_url/);
   assert.match(resumeRoute, /canonicalMonitoredPortalUrl\(job\.apply_url, job\.ats_name, job\.board_token\)/);
   assert.match(resumeRoute, /monitoredDescriptionHash\(job\.description\)/);
-  assert.match(resumeRoute, /spec: repairedHistorySpec\(row, monitoredJobs\)/);
+  assert.match(resumeRoute, /spec: refreshedHistorySpec\(repairedHistorySpec\(row, monitoredJobs\), profile\)/);
   const applicationsRoute = routeSource('applications.ts');
   const repairSource = libSource('applicationPortalRepair.ts');
   // Packets created from monitored jobs can outlive a bad or stale review URL. Before declaring the
