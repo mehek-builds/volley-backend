@@ -31,6 +31,10 @@ test('parses Greenhouse board and job ids from supported job URLs', () => {
     boardToken: 'postman',
     jobId: '7823417003',
   });
+  assert.deepEqual(greenhousePostingFromUrl('https://job-boards.eu.greenhouse.io/imc/jobs/4829785101'), {
+    boardToken: 'imc',
+    jobId: '4829785101',
+  });
   assert.deepEqual(greenhousePostingFromUrl('https://boards.greenhouse.io/embed/job_app?for=postman&token=7654321'), {
     boardToken: 'postman',
     jobId: '7654321',
