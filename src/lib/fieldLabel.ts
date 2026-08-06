@@ -138,8 +138,8 @@ export function sanitizeProviderBlockers(blockers: readonly string[]): string[] 
   const readable: string[] = [];
   let unlabelled = 0;
 
-  for (const raw of blockers) {
-    const line = typeof raw === 'string' ? raw.trim() : '';
+  for (const rawLine of blockers.flatMap((raw) => (typeof raw === 'string' ? raw.split(/\r?\n/) : []))) {
+    const line = rawLine.trim();
     if (!line) continue;
 
     // The shape every provider uses for a missing required field: "<something> is required".

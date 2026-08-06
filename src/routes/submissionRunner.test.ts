@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   attentionCategoriesForReasons,
   applicationContextForQuestionResolution,
+  attentionBlockersForManagedResult,
   atsApiSubmissionEnabled,
   discoverAndResolveQuestions,
   readMostRecentRole,
@@ -72,6 +73,30 @@ test('submission graduation parts use the end of an education range', () => {
     month: 'May',
     year: '2029',
   });
+});
+
+test('CAPTCHA blocker display hides empty fields Litos already answered', () => {
+  const blockers = attentionBlockersForManagedResult([
+    'CAPTCHA requires your attention',
+    '"Where have you learned about Samsara? Select all that apply." is required and is still empty',
+    '"How do you identify? (gender identity)" is required and is still empty',
+    '"[Compensation] Do you accept the listed salary range for this position?" is required and is still empty',
+  ], {
+    fullName: 'Mehek Mandal',
+    email: 'mehek@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      { question: 'Where have you learned about Samsara? Select all that apply.', answer: 'Company website' },
+      { question: 'How do you identify? (gender identity)', answer: 'Female' },
+      { question: '[Compensation] Do you accept the listed salary range for this position?', answer: '' },
+    ],
+  });
+
+  assert.deepEqual(blockers, [
+    'CAPTCHA requires your attention',
+    '"[Compensation] Do you accept the listed salary range for this position?" is required and is still empty',
+  ]);
 });
 
 test('question resolution context includes stored job locations', () => {
