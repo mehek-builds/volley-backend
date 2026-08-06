@@ -35,6 +35,8 @@ export type ApplicationProfileLike = StoredSalaryProfile & {
   date_of_birth?: string;
   availability_date?: string;
   availability_term?: string;
+  current_employer?: string;
+  most_recent_employer?: string;
   school?: string;
   degree?: string;
   grad_date?: string;
@@ -126,6 +128,7 @@ function workEligibilityAnswer(
 }
 
 function routineConsentAnswer(label: string): { value: string } | null {
+  if (/^\s*processing\s+of\s+personal\s+data\s*$/i.test(label)) return { value: 'Acknowledge/Confirm' };
   if (/demographic data survey/i.test(label)) return null;
   if (
     /\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b/i.test(label)
@@ -219,7 +222,7 @@ export function isLocationChoiceQuestion(label: string): boolean {
 export const REFERRAL_QUESTION = /how did you .*hear|how did you hear|first hear|referral source|hear about (this|us|the)|source of/i;
 export const START_DATE_QUESTION = /availab|start(ing)?\s+date|date.*you.*start|when can you start|earliest.*start/i;
 export const GRADUATION_DATE_QUESTION =
-  /\b(?:expected\s+)?graduat(?:ion|e)\s+(?:date|year|semester|term|time\s*frame|timeframe|window)\b|\b(?:date|year|semester|term|time\s*frame|timeframe|window)\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b|\bexpected\s+grad(?:uation)?\b|\bexpect\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b|\bclass\s+of\b/i;
+  /\b(?:expected\s+)?graduat(?:ion|e)\s+(?:date|year|semester|term|time\s*frame|timeframe|window)\b|\b(?:date|year|semester|term|time\s*frame|timeframe|window)\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b|\bexpected\s+grad(?:uation)?\b|\bexpect(?:ing)?\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b|\bclass\s+of\b/i;
 const GRADUATION_MONTH_QUESTION = /\bgraduat(?:ion|e)\s+month\b|\bmonth\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b/i;
 const GRADUATION_YEAR_QUESTION = /\bgraduat(?:ion|e)\s+year\b|\byear\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b|\bclass\s+year\b/i;
 const MIXED_ENROLLMENT_GRADUATION_QUESTION = /\bcurrently\s+enrolled\b|\bdegree\s+program\b/i;
@@ -239,8 +242,16 @@ const CITIZENSHIP_QUESTION = /citizen|nationalit/i;
 const ADVANCED_DEGREE_ENROLLMENT_QUESTION = /\bcurrently\s+enrolled\b[^?]{0,80}\b(?:masters?|master's|ph\.?d|doctorate)\b|\b(?:masters?|master's|ph\.?d|doctorate)\b[^?]{0,80}\bcurrently\s+enrolled\b/i;
 const EMPLOYER_RESTRICTION_AGREEMENT_QUESTION =
   /\bbound\b[^?]{0,120}\bagreements?\b[^?]{0,180}\b(?:restrict|limit)\b[^?]{0,120}\b(?:ability\s+to\s+work|employment|duties)\b|\b(?:non-compete|non-solicitation|confidentiality|non-disclosure)\b[^?]{0,180}\b(?:restrict|limit|bound)\b/i;
+const CURRENT_EMPLOYER_QUESTION =
+  /\bcurrent\s+employer\b|\bwhere\s+do\s+you\s+(?:currently\s+)?work\b|\bwhere\s+are\s+you\s+currently\s+(?:employed|working)\b/i;
+const MOST_RECENT_EMPLOYER_QUESTION =
+  /\bwhere\s+have\s+you\s+most\s+recently\s+worked\b|\bmost\s+recent\s+employer\b/i;
 const PRIOR_EMPLOYER_OR_PROGRAM_QUESTION =
   /\bhave\s+you\s+(?:ever\s+)?(?:worked|been\s+employed)\s+(?:for|by|at)\b|\bhave\s+you\s+been\s+enrolled\s+in\b[^?]{0,120}\bin\s+the\s+past\s+\d+\s+months\b/i;
+const STEM_MAJOR_QUESTION =
+  /\bmajoring\s+in\s+STEM\b|\bSTEM\b[^?]{0,160}\b(?:Computer Science|Electrical Engineering|Data Science|Mathematics|Machine Learning)\b/i;
+const AI_INTERVIEW_POLICY_QUESTION =
+  /\bAI\s+Policy\s+for\s+Interviewers\b|\bdo\s+not\s+use\s+any\s+AI\s+tools\b[^?]{0,160}\binterview\b/i;
 const INTERNSHIP_AVAILABILITY_QUESTION =
   /\b(?:are|will)\s+you\s+available\b[^?]{0,160}\b(?:internship|full-time|40\s*hours|weeks?)\b|\b(?:internship|full-time|40\s*hours|weeks?)\b[^?]{0,160}\b(?:are|will)\s+you\s+available\b/i;
 const INTERNSHIP_SEASON_QUESTION =
@@ -264,7 +275,7 @@ const NATIONALITY_TO_COUNTRY: Record<string, string> = {
 export type ProfileKey =
   | 'phone' | 'address_city' | 'address_state' | 'address_country'
   | 'linkedin_url' | 'github_url' | 'portfolio_url' | 'citizenship' | 'date_of_birth'
-  | 'availability_date' | 'availability_term' | 'school' | 'degree' | 'graduation_date' | 'desired_salary'
+  | 'availability_date' | 'availability_term' | 'current_employer' | 'most_recent_employer' | 'school' | 'degree' | 'graduation_date' | 'desired_salary'
   | 'graduation_month' | 'graduation_year' | 'current_enrollment' | 'study_year' | 'gpa' | 'gpa_scale' | 'major'
   | 'languages' | 'onsite_commitment' | 'referral_source_default';
 
@@ -285,6 +296,11 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
   if (REFERRAL_QUESTION.test(l)) return 'referral_source_default';
   if (SALARY_QUESTION.test(l)) return 'desired_salary';
   if (DOB_QUESTION.test(l)) return 'date_of_birth';
+  if (/linkedin/i.test(l)) return 'linkedin_url';
+  if (/github/i.test(l)) return 'github_url';
+  if (/portfolio|personal\s*(web)?site|\bwebsite\b/i.test(l)) return 'portfolio_url';
+  if (CURRENT_EMPLOYER_QUESTION.test(l)) return 'current_employer';
+  if (MOST_RECENT_EMPLOYER_QUESTION.test(l)) return 'most_recent_employer';
   if (TERM_QUESTION.test(l)) return 'availability_term';
   if (STORED_ONSITE_COMMITMENT_QUESTION.test(l) && (ONSITE_DAY_COUNT_QUESTION.test(l) || !/relocat/i.test(l))) {
     return 'onsite_commitment';
@@ -298,10 +314,6 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
   if (CURRENT_ENROLLMENT_QUESTION.test(l) && !GRADUATION_DATE_QUESTION.test(l)) return 'current_enrollment';
   if (START_DATE_QUESTION.test(l)) return 'availability_date';
   if (LOCATION_PREFERENCE_QUESTION.test(l)) return null;
-
-  if (/linkedin/i.test(l)) return 'linkedin_url';
-  if (/github/i.test(l)) return 'github_url';
-  if (/portfolio|personal\s*(web)?site|\bwebsite\b/i.test(l)) return 'portfolio_url';
 
   if (/\bgpa\b|grade average|grade point|academic performance/i.test(l)) return 'gpa';
   if (/gpa scale|out of.*(4\.0|100)|grading scale/i.test(l)) return 'gpa_scale';
@@ -551,6 +563,15 @@ function advancedDegreeEnrollmentAnswer(ap: ApplicationProfileLike): { value: st
     return { value: 'Yes' };
   }
   return { value: 'No' };
+}
+
+function stemMajorAnswer(label: string, ap: ApplicationProfileLike): { value: string } | null {
+  if (!STEM_MAJOR_QUESTION.test(label)) return null;
+  const evidence = [ap.major, ap.degree].filter(Boolean).join(' ');
+  if (/\b(computer science|electrical engineering|data science|cog(?:nitive)?\s+sci|information management|information systems|mathematics|machine learning|software engineering)\b/i.test(evidence)) {
+    return { value: 'Yes' };
+  }
+  return null;
 }
 
 function locationStatusAnswer(label: string, ap: ApplicationProfileLike): { value: string } | null {
@@ -883,6 +904,13 @@ export function resolveKnownAnswer(
     return { skipReason: `prior employer or program question left for you: "${label.slice(0, 60)}"` };
   }
 
+  if (AI_INTERVIEW_POLICY_QUESTION.test(label)) {
+    return { value: 'Yes' };
+  }
+
+  const stemMajor = stemMajorAnswer(label, ap);
+  if (stemMajor) return stemMajor;
+
   const internshipSeason = postingSeasonAnswer(label, jdText);
   if (internshipSeason) return internshipSeason;
 
@@ -958,6 +986,10 @@ export function resolveKnownAnswer(
       return ap.availability_term ? { value: ap.availability_term } : null;
     case 'availability_date':
       return ap.availability_date ? { value: ap.availability_date } : null;
+    case 'current_employer':
+      return ap.current_employer ? { value: ap.current_employer } : null;
+    case 'most_recent_employer':
+      return ap.most_recent_employer ? { value: ap.most_recent_employer } : null;
     case 'onsite_commitment':
       return { value: 'Yes' };
     case 'current_enrollment':

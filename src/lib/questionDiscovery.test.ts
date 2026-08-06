@@ -443,6 +443,39 @@ test('school and degree resolve from the academic profile', () => {
   assert.deepEqual(resolveKnownAnswer('Discipline', 'text', profile, undefined), { value: profile.major });
 });
 
+test('live-audit profile labels beat generic wording and stay out of drafts', () => {
+  const profile = {
+    linkedin_url: 'https://www.linkedin.com/in/mehekmandal/',
+    most_recent_employer: 'Tonee - AI Texting Tone Detector',
+    degree: 'Bachelor of Science in Computer Science & Business Administration, Finance Emphasis',
+    major: 'Computer Science',
+    grad_date: 'May 2028',
+    grad_year: 2028,
+  };
+
+  assert.equal(classifyField('LinkedIn Profile, if available'), 'linkedin_url');
+  assert.deepEqual(resolveKnownAnswer('LinkedIn Profile, if available', 'textarea', profile, undefined), {
+    value: 'https://www.linkedin.com/in/mehekmandal/',
+  });
+  assert.deepEqual(resolveKnownAnswer('Where have you most recently worked?', 'text', profile, undefined), {
+    value: 'Tonee - AI Texting Tone Detector',
+  });
+  assert.equal(resolveKnownAnswer('Current employer', 'text', profile, undefined), null);
+  assert.deepEqual(resolveKnownAnswer('When are you expecting to graduate from your degree?', 'select', profile, undefined), {
+    value: 'May 2028',
+  });
+  assert.deepEqual(resolveKnownAnswer('Processing of Personal Data', 'select', profile, undefined), {
+    value: 'Acknowledge/Confirm',
+  });
+  assert.deepEqual(
+    resolveKnownAnswer('Are you majoring in STEM (Computer Science, Electrical Engineering, Data Science, Cog Sci, Information Management/Systems, Mathematics, Machine Learning, etc.)?', 'select', profile, undefined),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(resolveKnownAnswer('AI Policy for Interviewers', 'select', profile, undefined), {
+    value: 'Yes',
+  });
+});
+
 test('referral source handles first-heard wording', () => {
   assert.deepEqual(resolveKnownAnswer('How did you first hear about Five Rings?', 'text', {}, undefined), {
     value: 'Company website',

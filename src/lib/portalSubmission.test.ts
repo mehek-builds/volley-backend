@@ -225,6 +225,19 @@ test('opens Ashby directly on its application tab for managed filling', () => {
   );
 });
 
+test('Ashby fills split custom first and last name fields when present', () => {
+  const actions = buildManagedPortalActions('ashby', {
+    fullName: 'Mehek Mandal',
+    email: 'mehek@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+
+  assert.ok(actions.some((action) => action.type === 'fillByLabelText' && action.text === 'First Name' && action.value === 'Mehek'));
+  assert.ok(actions.some((action) => action.type === 'fillByLabelText' && action.text === 'Last Name / Surname' && action.value === 'Mandal'));
+});
+
 test('rejects insecure and lookalike portal URLs', () => {
   assert.throws(() => detectPortal('http://boards.greenhouse.io/acme/jobs/123'), /secure link/);
   assert.throws(() => detectPortal('https://databricks.com/company/careers/open-positions/job'), /cannot fill in/);
@@ -1174,7 +1187,7 @@ test('Greenhouse replays Faire option-style choices through React-select buckets
     'Search & Recommendation',
     'No',
     'White',
-    'Female',
+    'Woman',
     'Decline to self-identify',
   ]) {
     assert.ok(comboFills.some((action) => action.value === value), value);
@@ -1502,6 +1515,34 @@ test('Greenhouse Roblox-specific select labels stay scoped to Roblox context', (
   assert.equal(comboLabels.some((label) => label.endsWith('Roblox Careers Site')), false);
   assert.equal(comboLabels.some((label) => label.endsWith('I acknowledge that I have read and understood Roblox\'s Job Applicant Privacy Notice.')), false);
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('first hear about this role') && label.endsWith('Company website')));
+});
+
+test('Greenhouse replays Samsara required selects with exact live options', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehek@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    jdText: 'Samsara is hiring a Software Engineer I New Grad.',
+    questions: [
+      { question: 'Processing of Personal Data', answer: 'Acknowledge/Confirm' },
+      { question: 'How did you hear about this opportunity?', answer: 'Company website' },
+      { question: 'When are you expecting to graduate from your degree?', answer: 'May 2028' },
+      { question: 'Are you majoring in STEM (Computer Science, Electrical Engineering, Data Science, Cog Sci, Information Management/Systems, Mathematics, Machine Learning, etc.)?', answer: 'Yes' },
+      { question: 'AI Policy for Interviewers', answer: 'Yes' },
+      { question: 'How do you identify? (gender identity)', answer: 'Female' },
+    ],
+  });
+
+  const comboLabels = actions
+    .filter((action) => action.type === 'fill' && action.label?.startsWith('question_combo_label:'))
+    .map((action) => `${action.label}:${action.value}`);
+  assert.ok(comboLabels.some((label) => label.toLowerCase().includes('processing of personal data') && label.endsWith('Acknowledge/Confirm')));
+  assert.ok(comboLabels.some((label) => label.toLowerCase().includes('how did you hear about this opportunity') && label.endsWith('Samsara Careers Site')));
+  assert.ok(comboLabels.some((label) => label.toLowerCase().includes('expecting to graduate') && label.endsWith('2028')));
+  assert.ok(comboLabels.some((label) => label.toLowerCase().includes('majoring in stem') && label.endsWith('Yes')));
+  assert.ok(comboLabels.some((label) => label.toLowerCase().includes('ai policy for interviewers') && label.endsWith('Yes')));
+  assert.ok(comboLabels.some((label) => label.toLowerCase().includes('gender identity') && label.endsWith('Woman')));
 });
 
 test('Greenhouse replays Databricks choice questions through React-select buckets', () => {
