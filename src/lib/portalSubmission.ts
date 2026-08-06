@@ -1022,11 +1022,12 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string, c
   if (/\bclosest\s+date\b|\bgraduate\s+or\s+complete\s+your\s+program\b/.test(normalizedQuestion)) {
     values.unshift(greenhouseClosestGraduationOption(answer) ?? greenhouseGraduationBucket(answer) ?? '');
   }
-  if (/\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window)\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bexpected\s+graduat(?:ion|e)|\bexpect\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b/.test(normalizedQuestion)) {
+  if (/\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window)\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bexpected\s+graduat(?:ion|e)|\bexpect(?:ing)?\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b/.test(normalizedQuestion)) {
     const closestDateQuestion = /\bclosest\s+date\b|\bgraduate\s+or\s+complete\s+your\s+program\b/.test(normalizedQuestion);
     values.unshift(closestDateQuestion
       ? greenhouseClosestGraduationOption(answer) ?? greenhouseGraduationBucket(answer) ?? ''
       : greenhouseGraduationBucket(answer) ?? '');
+    if (/\bexpecting\s+to\s+graduat(?:e|ion)\b/.test(normalizedQuestion)) values.unshift(answer.match(/\b20\d{2}\b/)?.[0] ?? '');
   }
   if (/\bdegree\b/.test(normalizedQuestion) && /\bbachelor/i.test(answer)) {
     const wantsCompactBachelor = /\b(?:currently\s+pursuing|pursuing|enrolled\s+in\s+university)\b/.test(normalizedQuestion)
@@ -1045,6 +1046,9 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string, c
     values.unshift(answer.replace(/\s+year$/i, ''), answer);
   }
   if (/\b(?:how\s+did\s+you\s+hear|referral\s+source|hear\s+about|source)\b/.test(normalizedQuestion)) {
+    if (/\bsamsara\b/.test(normalizedQuestion + ' ' + normalizedContext) && /^company website$/i.test(answer.trim())) {
+      values.unshift('Samsara Careers Site');
+    }
     if (isRobloxContext && /\bhow\s+did\s+you\s+first\s+hear\s+about\s+this\s+role\b/.test(normalizedQuestion) && /^company website$/i.test(answer.trim())) {
       values.unshift('Roblox Careers Site');
     }
@@ -1061,8 +1065,11 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string, c
     && /^(?:yes|i\s+agree|agree|acknowledge(?:d)?|confirm(?:ed)?|understood|read)/i.test(answer.trim())) {
     values.unshift('I acknowledge that I have read and understood Roblox\'s Job Applicant Privacy Notice.');
   }
-  if (/\bdescribe\s+your\s+gender\s+identity\b/.test(normalizedQuestion) && /^female$/i.test(answer.trim())) {
+  if (/\bgender\s+identity\b/.test(normalizedQuestion) && /^female$/i.test(answer.trim())) {
     values.unshift('Woman');
+  }
+  if (/^processing\s+of\s+personal\s+data$/i.test(question.trim()) && /^(?:yes|acknowledge|acknowledge\/confirm|confirm)$/i.test(answer.trim())) {
+    values.unshift('Acknowledge/Confirm');
   }
   if (/\bwhich\s+(?:school|university|college|institution)\b|\b(?:school|university|college|institution)\b[^?]{0,80}\b(?:name|attend|enrolled\s+in)\b/.test(normalizedQuestion)
     && !/\bgraduat(?:ion|e)\b|\bexpect\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\b/.test(normalizedQuestion)) {
@@ -1128,7 +1135,7 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string, c
 }
 
 function isGreenhouseReactSelectQuestion(question: string): boolean {
-  return /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\btop\s+preference\b|\banswering\s+[“"]?yes[”"]?\s+below\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window|month|year)\b|\bexpected\s+graduat(?:ion|e)\b|\bexpect\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b|\bwhat\s+is\s+your\s+gpa\b|\bacademic\s+performance\b|\beducation\s+level\b|\blevel\s+of\s+education\b|\bdegree\b(?!\s+program)|\bdiscipline\b|\bfield\s+of\s+study\b|\bmajor\b|\bcourse\b|\bschool\b|\buniversity\b|\bcurrent\s+year\b|\byear\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\bacademic\s+year\b|\bhow\s+did\s+you\s+hear\b|\breferral\s+source\b|\bhear\s+about\b|\bsource\b|\bsource\s+of\b|\bcountry\b|\bcurrent\s+location\b|\bwhere\s+are\s+you\s+currently\s+(?:located|living|based)\b|\b(?:live|reside|located)\b[^?]{0,80}\b(?:new\s+york|california)\b|\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b|\bapplied\b[^?]{0,120}\b(?:past|previously|before|role|position)\b|\boffer\s+deadlines?\b|\bprior\s+experience\b[^?]{0,120}\b(?:options\s+market\s+making|trading\s+firm)\b|\bcurrent\s+immigration\s+status\b|\bwork\s+authorization\/status\b|legally\s+authorized\s+to\s+work|(?:require|need)\s+sponsorship|sponsorship\s+for\s+(?:employment\s+visa|work\s+authorization)|\b(?:are|will)\s+you\s+available\b[^?]{0,160}\b(?:internship|full-time|40\s*hours|weeks?)\b|\b(?:internship|full-time|40\s*hours|weeks?)\b[^?]{0,160}\b(?:are|will)\s+you\s+available\b|\bpreferred\s+coding\s+language\b|\bcoding\s+language\b[^?]{0,120}\bpreference\b|\bjob\s+applicant\s+privacy\s+notice\b|\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b|\bresume\b[^?]{0,80}\bPDF\s+format\b|\bcertify\b[^?]{0,120}\b(?:true|complete|accurate)\b|\barea\s+of\s+interest\b|\bteam\s+opening\b|\bopening\b[^?]{0,80}\binterested\b|\bLGBTQIA?\+?\b|sexual\s+orientation|\bgender(?:\s+identity)?\b|\bveteran\b|\bmilitary\b|\brace\b|\bethnicit|\bcategory\b/i.test(question);
+  return /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\btop\s+preference\b|\banswering\s+[“"]?yes[”"]?\s+below\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window|month|year)\b|\bexpected\s+graduat(?:ion|e)\b|\bexpect(?:ing)?\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b|\bwhat\s+is\s+your\s+gpa\b|\bacademic\s+performance\b|\beducation\s+level\b|\blevel\s+of\s+education\b|\bdegree\b(?!\s+program)|\bdiscipline\b|\bfield\s+of\s+study\b|\bmajor\b|\bcourse\b|\bschool\b|\buniversity\b|\bcurrent\s+year\b|\byear\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\bacademic\s+year\b|\bhow\s+did\s+you\s+hear\b|\breferral\s+source\b|\bhear\s+about\b|\bsource\b|\bsource\s+of\b|\bcountry\b|\bcurrent\s+location\b|\bwhere\s+are\s+you\s+currently\s+(?:located|living|based)\b|\b(?:live|reside|located)\b[^?]{0,80}\b(?:new\s+york|california)\b|\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b|\bapplied\b[^?]{0,120}\b(?:past|previously|before|role|position)\b|\boffer\s+deadlines?\b|\bprior\s+experience\b[^?]{0,120}\b(?:options\s+market\s+making|trading\s+firm)\b|\bcurrent\s+immigration\s+status\b|\bwork\s+authorization\/status\b|legally\s+authorized\s+to\s+work|(?:require|need)\s+sponsorship|sponsorship\s+for\s+(?:employment\s+visa|work\s+authorization)|\b(?:are|will)\s+you\s+available\b[^?]{0,160}\b(?:internship|full-time|40\s*hours|weeks?)\b|\b(?:internship|full-time|40\s*hours|weeks?)\b[^?]{0,160}\b(?:are|will)\s+you\s+available\b|\bpreferred\s+coding\s+language\b|\bcoding\s+language\b[^?]{0,120}\bpreference\b|\bjob\s+applicant\s+privacy\s+notice\b|\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b|\bprocessing\s+of\s+personal\s+data\b|\bAI\s+Policy\s+for\s+Interviewers\b|\bmajoring\s+in\s+STEM\b|\bresume\b[^?]{0,80}\bPDF\s+format\b|\bcertify\b[^?]{0,120}\b(?:true|complete|accurate)\b|\barea\s+of\s+interest\b|\bteam\s+opening\b|\bopening\b[^?]{0,80}\binterested\b|\bLGBTQIA?\+?\b|sexual\s+orientation|\bgender(?:\s+identity)?\b|\bveteran\b|\bmilitary\b|\brace\b|\bethnicit|\bcategory\b/i.test(question);
 }
 
 function isGreenhouseEducationComboboxQuestion(question: string): boolean {
@@ -1982,7 +1989,12 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     // desiredPay (R-031 governs salary and is currency-gated, handled by the reviewed-question path),
     // and educationLevelId. All surface as required-field blockers for the human.
   } else {
+    const parts = packet.fullName.trim().split(/\s+/);
+    const firstName = parts[0] ?? '';
+    const lastName = parts.slice(1).join(' ');
     managedFill(actions, 'input[name="_systemfield_name"]', packet.fullName, 'name', false);
+    pushScopedQuestionChoiceActions(actions, 'First Name', firstName, 'ashby_first_name', { includeSelectFallbacks: false });
+    pushScopedQuestionChoiceActions(actions, 'Last Name / Surname', lastName, 'ashby_last_name', { includeSelectFallbacks: false });
     managedFill(actions, 'input[name="_systemfield_email"]', packet.email, 'email', false);
     managedFill(actions, ASHBY_PHONE_SELECTOR, phoneForPortalField(portal, packet.phone), 'phone');
     managedFill(actions, 'input[name="_systemfield_location"]', packet.city, 'location');

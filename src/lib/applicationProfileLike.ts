@@ -62,6 +62,32 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
     const baseValue = base[key];
     return typeof baseValue === 'boolean' ? baseValue : undefined;
   };
+  const employerCompany = (entry: Record<string, unknown>): string | undefined => {
+    const company = entry.company ?? entry.org;
+    return typeof company === 'string' && company.trim() ? company.trim() : undefined;
+  };
+  const experienceEmployer = (value: Record<string, unknown>, predicate: (entry: Record<string, unknown>) => boolean): string | undefined => {
+      const experience = value.experience;
+      if (!Array.isArray(experience)) return undefined;
+    for (const item of experience) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+      const entry = item as Record<string, unknown>;
+      if (!predicate(entry)) continue;
+      const company = employerCompany(entry);
+      if (company) return company;
+    }
+    return undefined;
+  };
+  const mostRecentEmployer = (): string | undefined => {
+    return experienceEmployer(parsed, () => true) ?? experienceEmployer(base, () => true);
+  };
+  const currentEmployer = (): string | undefined => {
+    const currentExperience = (entry: Record<string, unknown>): boolean => {
+      const end = entry.end_date ?? entry.endDate ?? entry.end ?? entry.to ?? entry.date_range ?? entry.dates;
+      return typeof end === 'string' && /\b(?:present|current|now|ongoing)\b/i.test(end);
+    };
+    return str('current_employer') ?? experienceEmployer(parsed, currentExperience) ?? experienceEmployer(base, currentExperience);
+  };
   const onboardingEligibility = workEligibilityFromSponsorshipAnswer(userRow?.sponsorship_answer);
   return {
     phone: str('phone'),
@@ -77,6 +103,8 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
     date_of_birth: str('date_of_birth'),
     availability_date: str('availability_date'),
     availability_term: str('availability_term'),
+    current_employer: currentEmployer(),
+    most_recent_employer: mostRecentEmployer(),
     school: academicStr('school'),
     degree: academicStr('degree'),
     grad_date: academicStr('grad_date'),
