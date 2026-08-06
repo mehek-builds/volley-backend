@@ -1600,6 +1600,7 @@ test('Greenhouse replays Databricks choice questions through React-select bucket
     email: 'mehekmandal05@gmail.com',
     resume: Buffer.from('pdf'),
     resumeName: 'resume.pdf',
+    jdText: 'Databricks Product Management Intern application.',
     questions: [
       {
         question: "Please choose the single location that you're the most interested in, and we will discuss more with you as you move through the process.",
@@ -1627,6 +1628,8 @@ test('Greenhouse replays Databricks choice questions through React-select bucket
   const comboActions = actions.filter((action) => action.label?.startsWith('question_combo:'));
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector === 'input[id="question_32707214002"]' && action.value === 'San Francisco, CA'));
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector === 'input[id="question_24505242002"]' && action.value === 'Spring 2028'));
+  assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector === 'input[id="question_24505242002"]' && action.value === 'June 2028'));
+  assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector === 'input[id="question_24505242002"]' && action.value === 'May 2028'));
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector === 'input[id="question_32698502002"]' && action.value === '3.6 or above (out of 4.0)'));
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector === 'input[id="question_30149518002"]' && action.value === 'No'));
   assert.ok(comboActions.some((action) => action.type === 'click' && action.selector === 'input[id="question_32707214002"]' && action.label?.endsWith('_open')));
@@ -1644,6 +1647,7 @@ test('Greenhouse replays Databricks React-select buckets without portal selector
     email: 'mehekmandal05@gmail.com',
     resume: Buffer.from('pdf'),
     resumeName: 'resume.pdf',
+    jdText: 'Databricks Product Management Intern application.',
     questions: [
       {
         question: "Please choose the single location that you're the most interested in, and we will discuss more with you as you move through the process.",
@@ -1667,11 +1671,13 @@ test('Greenhouse replays Databricks React-select buckets without portal selector
   const comboActions = actions.filter((action) => action.label?.startsWith('question_combo_label:'));
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text("Please choose the single location') && action.value === 'San Francisco, CA'));
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text("What is your graduation date?")') && action.value === 'Spring 2028'));
+  assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text("What is your graduation date?")') && action.value === 'June 2028'));
+  assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text("What is your graduation date?")') && action.value === 'May 2028'));
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text("What is your GPA?")') && action.value === '3.6 or above (out of 4.0)'));
   assert.ok(comboActions.some((action) => action.type === 'fill' && action.selector?.includes('label:has-text("Do you currently or have you previously worked for Databricks') && action.value === 'No'));
-  assert.equal(comboActions.filter((action) => action.type === 'click' && action.label?.endsWith('_open')).length, 4);
-  assert.equal(comboActions.filter((action) => action.type === 'click' && action.label?.endsWith('_option_value')).length, 4);
-  assert.equal(comboActions.filter((action) => action.type === 'click' && action.selector === '[id^="react-select-"][id$="-option-0"]:visible').length, 4);
+  assert.equal(comboActions.filter((action) => action.type === 'click' && action.label?.endsWith('_open')).length, 6);
+  assert.equal(comboActions.filter((action) => action.type === 'click' && action.label?.endsWith('_option_value')).length, 6);
+  assert.equal(comboActions.filter((action) => action.type === 'click' && action.selector === '[id^="react-select-"][id$="-option-0"]:visible').length, 6);
   for (const action of comboActions.filter((candidate) => candidate.type === 'fill')) {
     const index = actions.indexOf(action);
     assert.equal(actions[index - 1]?.type, 'click');

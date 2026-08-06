@@ -484,6 +484,7 @@ test('school and degree resolve from the academic profile', () => {
 
 test('live-audit profile labels beat generic wording and stay out of drafts', () => {
   const profile = {
+    full_name: 'Mehek Mandal',
     linkedin_url: 'https://www.linkedin.com/in/mehekmandal/',
     most_recent_employer: 'Tonee - AI Texting Tone Detector',
     employer_history: ['Tonee - AI Texting Tone Detector'],
@@ -504,8 +505,9 @@ test('live-audit profile labels beat generic wording and stay out of drafts', ()
   assert.deepEqual(resolveKnownAnswer('Have you previously worked at Tonee - AI Texting Tone Detector?', 'select', profile, undefined), {
     value: 'Yes',
   });
-  const samsaraPriorEmployer = resolveKnownAnswer('Have you previously worked at Samsara?', 'select', profile, undefined);
-  assert.ok(samsaraPriorEmployer && 'skipReason' in samsaraPriorEmployer && samsaraPriorEmployer.skipReason.startsWith('prior employer'));
+  assert.deepEqual(resolveKnownAnswer('Have you previously worked at Samsara?', 'select', profile, undefined), {
+    value: 'No',
+  });
   const nearMissPriorEmployer = resolveKnownAnswer('Have you previously worked at Tone?', 'select', profile, undefined);
   assert.ok(nearMissPriorEmployer && 'skipReason' in nearMissPriorEmployer && nearMissPriorEmployer.skipReason.startsWith('prior employer'));
   const genericPriorEmployer = resolveKnownAnswer('Have you previously worked at any employer in this industry?', 'select', profile, undefined);
@@ -747,6 +749,55 @@ test('Databricks export-control checkbox questions are not inferred from profile
     ),
     null,
   );
+});
+
+test('Databricks prior employer questions answer no from known employer history', () => {
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Do you currently or have you previously worked for Databricks in the past?',
+      'combobox',
+      { employer_history: ['SoFi', 'Traeco', 'Tonee'] },
+      undefined,
+    ),
+    { value: 'No' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Do you currently or have you previously worked for Databricks in the past?',
+      'combobox',
+      { employer_history: ['Databricks, Inc.'] },
+      undefined,
+    ),
+    { value: 'Yes' },
+  );
+  const composite = resolveKnownAnswer(
+    'Have you previously worked for Goldman Sachs or its affiliates?',
+    'combobox',
+    { employer_history: ['SoFi', 'Traeco', 'Tonee'] },
+    undefined,
+  );
+  assert.ok(composite && 'skipReason' in composite && composite.skipReason.startsWith('prior employer'));
+  const subsidiary = resolveKnownAnswer(
+    'Have you previously worked for Databricks or any subsidiary?',
+    'combobox',
+    { employer_history: ['SoFi', 'Traeco', 'Tonee'] },
+    undefined,
+  );
+  assert.ok(subsidiary && 'skipReason' in subsidiary && subsidiary.skipReason.startsWith('prior employer'));
+  const punctuationComposite = resolveKnownAnswer(
+    'Have you previously worked for Databricks, its subsidiaries or affiliates?',
+    'combobox',
+    { employer_history: ['SoFi', 'Traeco', 'Tonee'] },
+    undefined,
+  );
+  assert.ok(punctuationComposite && 'skipReason' in punctuationComposite && punctuationComposite.skipReason.startsWith('prior employer'));
+  const relatedButNotEqual = resolveKnownAnswer(
+    'Have you previously worked at Tone?',
+    'combobox',
+    { employer_history: ['Tonee - AI Texting Tone Detector'] },
+    undefined,
+  );
+  assert.ok(relatedButNotEqual && 'skipReason' in relatedButNotEqual && relatedButNotEqual.skipReason.startsWith('prior employer'));
 });
 
 test('graduation date inputs use the graduation end of an education range', () => {
