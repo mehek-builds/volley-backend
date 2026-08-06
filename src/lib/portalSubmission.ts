@@ -247,6 +247,7 @@ export type SubmissionPacket = {
   graduationDate?: string;
   graduationMonth?: string;
   graduationYear?: string;
+  currentlyEnrolled?: boolean;
   gpa?: string;
   major?: string;
   referralSourceDefault?: string;
