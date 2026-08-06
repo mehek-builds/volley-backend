@@ -148,6 +148,11 @@ test('unknown URLs do not pretend to be Greenhouse', async () => {
 });
 
 test('configured channel refuses reviewed questions without durable ATS field mappings', async () => {
+  const fetchImpl: typeof fetch = async () => new Response(JSON.stringify({
+    questions: [
+      { label: 'A different question', fields: [{ name: 'question_999' }] },
+    ],
+  }), { status: 200, headers: { 'content-type': 'application/json' } });
   const result = await tryAtsSubmissionChannel(
     'https://boards.greenhouse.io/reddit/jobs/1234567',
     {
@@ -161,6 +166,7 @@ test('configured channel refuses reviewed questions without durable ATS field ma
         ]),
         GH_REDDIT_KEY: 'secret',
       },
+      fetchImpl,
     },
   );
   assert.equal(result.kind, 'not_applicable');
@@ -251,6 +257,53 @@ test('configured Greenhouse channel posts reviewed answers only when ATS field m
   assert.equal(result.kind, 'submitted');
   assert.equal(body?.get('job_application[answers_attributes][0][boolean_value]'), 'Yes');
   assert.equal(body?.has('job_application[answers_attributes][1][text_value]'), false);
+});
+
+test('configured Greenhouse channel maps reviewed answers from public Job Board API questions', async () => {
+  const calls: Array<{ url: string; method: string }> = [];
+  let body: FormData | undefined;
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), method: init?.method ?? 'GET' });
+    if (String(url).includes('questions=true')) {
+      return new Response(JSON.stringify({
+        questions: [
+          {
+            label: 'Are you currently eligible to legally work in the United States?\n',
+            fields: [{ name: 'question_31609742003' }],
+          },
+        ],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    body = init?.body as FormData;
+    return new Response('created', { status: 201, headers: { 'x-request-id': 'req-public-fields' } });
+  };
+  const result = await tryAtsSubmissionChannel(
+    'https://job-boards.greenhouse.io/postman/jobs/7823417003',
+    {
+      ...basePacket(),
+      questions: [
+        {
+          question: 'Are you currently eligible to legally work in the United States?',
+          answer: 'Yes',
+        },
+      ],
+    },
+    {
+      env: {
+        LITOS_EMPLOYER_API_SUBMISSION_CHANNELS_JSON: JSON.stringify([
+          { ats: 'greenhouse', board_token: 'postman', api_key_env: 'GH_POSTMAN_KEY' },
+        ]),
+        GH_POSTMAN_KEY: 'secret',
+      },
+      fetchImpl,
+    },
+  );
+  assert.equal(result.kind, 'submitted');
+  assert.deepEqual(calls.map((call) => [call.method, call.url]), [
+    ['GET', 'https://boards-api.greenhouse.io/v1/boards/postman/jobs/7823417003?questions=true'],
+    ['POST', 'https://boards-api.greenhouse.io/v1/boards/postman/jobs/7823417003'],
+  ]);
+  assert.equal(body?.get('question_31609742003'), 'Yes');
 });
 
 test('configured Lever channel posts multipart application with query key', async () => {
