@@ -1061,6 +1061,9 @@ test('Greenhouse fills academic fields from the submission packet', () => {
       ['End date year', '2028', 'education_end_year'],
       ['Graduation Month', 'May', 'education_graduation_month'],
       ['Graduation Year', '2028', 'education_graduation_year'],
+      ['What is your expected graduation year?', '2028', 'education_expected_graduation_year'],
+      ['Expected Graduation Year', '2028', 'education_expected_graduation_year_label'],
+      ['Discipline', 'Computer Science', 'education_discipline_label'],
       ['GPA', '3.89', 'gpa'],
       ['What is your GPA?', '3.89', 'gpa_question'],
     ],
@@ -1268,6 +1271,10 @@ test('Greenhouse trims low-priority fallbacks before exceeding the managed actio
   assert.ok(actions.some((action) => action.label === 'phone_country'));
   assert.ok(actions.some((action) => action.label === 'location'));
   assert.ok(actions.some((action) => action.label?.startsWith('question_combo_label:') && action.label.includes('team opening')));
+  assert.ok(actions.some((action) => action.label === 'education_discipline_label'));
+  assert.ok(actions.some((action) => action.label === 'education_graduation_year'));
+  assert.ok(actions.some((action) => action.label === 'education_expected_graduation_year'));
+  assert.ok(actions.some((action) => action.label === 'education_discipline_combo:0'));
   assert.equal(actions.some((action) => action.label?.includes('sexual orientation')), false);
   assert.ok(actions.some((action) => action.label?.startsWith('greenhouse_referral_combo_label:') && action.label.includes('Faire')));
   assert.ok(actions.some((action) => action.type === 'upload' && action.label === 'resume'));

@@ -1478,9 +1478,8 @@ function managedActionLabelBase(action: ManagedBrowserAction): string | undefine
 
 const GREENHOUSE_LOW_PRIORITY_ACTION_GROUPS = [
   /^greenhouse_demographic/,
-  /^education_discipline_combo:/,
   /^education_graduation_date_combo:/,
-  /^(?:graduation_date|graduation_date_label|graduation_date_expected|education_end_month|education_end_year|education_graduation_month|education_graduation_year|gpa_question)$/,
+  /^(?:graduation_date|graduation_date_label|graduation_date_expected|education_end_month|education_end_year|education_graduation_month|gpa_question)$/,
   /^first_name_label$/,
   /^education_degree_combo:2$/,
   /^education_degree_combo:1$/,
@@ -1833,6 +1832,9 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
     managedFillByLabel(actions, 'End date year', packet.graduationYear, 'education_end_year');
     managedFillByLabel(actions, 'Graduation Month', packet.graduationMonth, 'education_graduation_month');
     managedFillByLabel(actions, 'Graduation Year', packet.graduationYear, 'education_graduation_year');
+    managedFillByLabel(actions, 'What is your expected graduation year?', packet.graduationYear, 'education_expected_graduation_year');
+    managedFillByLabel(actions, 'Expected Graduation Year', packet.graduationYear, 'education_expected_graduation_year_label');
+    managedFillByLabel(actions, 'Discipline', packet.major, 'education_discipline_label');
     pushGreenhouseGraduationDateComboboxActions(actions, packet);
     managedFillByLabel(actions, 'GPA', packet.gpa, 'gpa');
     managedFillByLabel(actions, 'What is your GPA?', packet.gpa, 'gpa_question');
