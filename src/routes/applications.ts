@@ -257,7 +257,7 @@ function finalApprovalFieldIssues(review: ApplicationReviewState, coverLetterReq
   const issues: string[] = [];
   if (!has('email')) issues.push('The filled form did not record an email field.');
   if (!has('resume')) issues.push('The filled form did not record a resume upload.');
-  if (!has('name') && !(has('firstname') && has('lastname'))) {
+  if (!has('name') && !(has('first') && has('last'))) {
     issues.push('The filled form did not record the applicant name fields.');
   }
   if (coverLetterRequired && !has('cover')) {

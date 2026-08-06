@@ -134,11 +134,28 @@ test('managed Greenhouse extracted field evidence repairs missing filledFields w
     }).sort(),
     ['email', 'first_name', 'last_name', 'resume'].sort(),
   );
+
+  assert.deepEqual(
+    managedResultFilledFields({
+      title: 'Apply',
+      url: 'https://example.com',
+      text: 'Apply for this job',
+      filledFields: [],
+      extracted: [
+        { selector: '#ignored-first', label: 'filled_field:first_name', value: 'Taylor' },
+        { selector: '#ignored-last', label: 'filled_field:last_name', value: 'Example' },
+        { selector: '#ignored-email', label: 'filled_field:email', value: 'taylor@example.com' },
+        { selector: '#ignored-resume', label: 'filled_field:resume', value: 'C:\\fakepath\\resume.pdf' },
+      ],
+    }).sort(),
+    ['email', 'first_name', 'last_name', 'resume'].sort(),
+  );
 });
 
 test('managed cover-letter detection requires an actual file input extraction', () => {
   const selector = coverLetterUploadSelector('greenhouse');
   assert.equal(managedResultHasCoverLetterUpload({ title: 'Apply', url: 'https://example.com', text: 'Cover letter is optional', extracted: [{ selector, value: 'file' }] }, 'greenhouse'), true);
+  assert.equal(managedResultHasCoverLetterUpload({ title: 'Apply', url: 'https://example.com', text: 'Cover letter is optional', extracted: [{ selector: '#cover', label: 'cover_letter_capability', value: 'file' }] }, 'greenhouse'), true);
   assert.equal(managedResultHasCoverLetterUpload({ title: 'Apply', url: 'https://example.com', text: 'Cover letter is optional', extracted: [{ selector: '#resume', value: 'file' }] }, 'greenhouse'), false);
   assert.equal(managedResultHasCoverLetterUpload({ title: 'Apply', url: 'https://example.com', text: 'Cover letter is optional', extracted: [] }, 'greenhouse'), false);
   assert.equal(managedResultHasCoverLetterUpload(null, 'greenhouse'), false);
@@ -302,6 +319,8 @@ test('managed controlled-portal actions include reviewed fields, resume upload, 
       'fill',
       'fill',
       'upload',
+      'upload',
+      'upload',
       'fillByLabelText',
       'click',
     ],
@@ -322,12 +341,15 @@ test('managed portals upload a tailored cover letter without replacing the resum
       questions: [],
     });
     const uploads = actions.filter((action) => action.type === 'upload');
-    assert.deepEqual(uploads.map((action) => action.label), ['resume', 'cover_letter']);
-    assert.equal(uploads[0]?.file?.name, 'resume.pdf');
-    assert.equal(uploads[1]?.file?.name, 'cover-letter.pdf');
-    assert.notEqual(uploads[0]?.selector, uploads[1]?.selector);
-    if (portal === 'greenhouse') assert.doesNotMatch(uploads[1]?.selector ?? '', /(^|,\s*)#cover_letter/);
-    if (portal === 'ashby') assert.doesNotMatch(uploads[0]?.selector ?? '', /cover/i);
+    const resumeUploads = uploads.filter((action) => action.label === 'resume');
+    const coverLetterUploads = uploads.filter((action) => action.label === 'cover_letter');
+    assert.ok(resumeUploads.length >= 1);
+    assert.equal(coverLetterUploads.length, 1);
+    assert.ok(resumeUploads.every((action) => action.file?.name === 'resume.pdf'));
+    assert.equal(coverLetterUploads[0]?.file?.name, 'cover-letter.pdf');
+    assert.ok(resumeUploads.every((action) => action.selector !== coverLetterUploads[0]?.selector));
+    if (portal === 'greenhouse') assert.doesNotMatch(coverLetterUploads[0]?.selector ?? '', /(^|,\s*)#cover_letter/);
+    if (portal === 'ashby') assert.doesNotMatch(resumeUploads[0]?.selector ?? '', /cover/i);
   }
 });
 
@@ -672,8 +694,15 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
       'fill',
       'fill',
       'upload',
+      'upload',
+      'upload',
       'fillByLabelText',
       'fillByLabelText',
+      'extract',
+      'extract',
+      'extract',
+      'extract',
+      'extract',
       'extract',
       'extract',
       'extract',
@@ -1244,6 +1273,28 @@ test('Greenhouse skips submit when preserved answers alone exceed the managed ac
   assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
   assert.notEqual(actions.at(-1)?.selector, 'button[type="submit"], input[type="submit"]');
   assert.ok(actions.some((action) => action.type === 'upload' && action.label === 'resume'));
+});
+
+test('large Greenhouse preview packets preserve core field evidence extracts inside the managed action budget', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    phone: '+971501234567',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: Array.from({ length: 140 }, (_, index) => ({
+      question: `Describe project ${index + 1}`,
+      answer: `Project ${index + 1} answer`,
+    })),
+  });
+
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+  for (const label of ['first_name', 'last_name', 'email', 'resume']) {
+    assert.ok(
+      actions.some((action) => action.type === 'extract' && action.label === `filled_field:${label}`),
+      `missing filled_field:${label}`,
+    );
+  }
 });
 
 test('Greenhouse replays Jump academic and referral choices without consent', () => {

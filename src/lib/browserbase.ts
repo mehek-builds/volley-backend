@@ -34,7 +34,7 @@ export type ManagedBrowserResult = {
   blockers?: string[];
   skipped?: string[];
   discovered?: ManagedDiscoveredQuestion[];
-  extracted?: Array<{ selector: string; value: string | null }>;
+  extracted?: Array<{ selector: string; label?: string; value: string | null }>;
 };
 
 type ManagedBrowserError = string | { message?: string; code?: string };
