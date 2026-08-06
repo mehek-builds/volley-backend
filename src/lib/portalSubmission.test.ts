@@ -74,7 +74,7 @@ test('a managed discovery run detects custom questions and cover-letter attachme
     && !isGreenhouseFixedCandidatePrivacyClick(a)), false);
   const fillSelectors = actions.filter((a) => a.type === 'fill').map((a) => a.selector);
   assert.ok(fillSelectors.some((s) => s?.includes('first_name')));
-  assert.equal(actions.some((a) => a.type === 'fillByLabelText' && a.label === 'first_name_label'), true);
+  assert.equal(actions.some((a) => a.type === 'fillByLabelText' && a.label === 'first_name_label'), false);
   assert.ok(actions.some((a) => a.type === 'extract' && a.label === 'filled_field:first_name'));
   assert.ok(actions.some((a) => a.type === 'extract' && a.label === 'filled_field:email'));
   assert.ok(actions.some((a) => a.type === 'extract' && a.label === 'filled_field:resume'));
@@ -299,11 +299,8 @@ test('managed controlled-portal actions include reviewed fields, resume upload, 
     [
       'waitForSelector',
       'fill',
-      'fillByLabelText',
       'fill',
-      'fillByLabelText',
       'fill',
-      'fillByLabelText',
       'upload',
       'fillByLabelText',
       'click',
@@ -672,11 +669,8 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
     [
       'waitForSelector',
       'fill',
-      'fillByLabelText',
       'fill',
-      'fillByLabelText',
       'fill',
-      'fillByLabelText',
       'upload',
       'fillByLabelText',
       'fillByLabelText',
@@ -2219,7 +2213,7 @@ test('the 2026-07-29 host rules reject every login, marketing and unrelated-prod
   );
 });
 
-test('Greenhouse fixed actions include semantic and label fallbacks for first name', () => {
+test('Greenhouse fixed first name fill uses semantic selectors only', () => {
   const actions = buildManagedPortalActions('greenhouse', {
     fullName: 'Taylor Example',
     email: 'taylor@example.com',
@@ -2231,17 +2225,7 @@ test('Greenhouse fixed actions include semantic and label fallbacks for first na
   assert.equal(firstNameFill?.type, 'fill');
   assert.match(firstNameFill?.selector ?? '', /autocomplete="given-name"/);
   assert.match(firstNameFill?.selector ?? '', /aria-label="First Name"/);
-
-  const firstNameByLabel = actions.find((action) => action.label === 'first_name_label');
-  assert.deepEqual(
-    {
-      type: firstNameByLabel?.type,
-      text: firstNameByLabel?.text,
-      value: firstNameByLabel?.value,
-      optional: firstNameByLabel?.optional,
-    },
-    { type: 'fillByLabelText', text: 'First Name', value: 'Taylor', optional: true },
-  );
+  assert.equal(actions.some((action) => action.label === 'first_name_label'), false);
 });
 
 test('Greenhouse managed actions open branded job pages and clear cookie overlays before filling', () => {
@@ -2261,7 +2245,7 @@ test('Greenhouse managed actions open branded job pages and clear cookie overlay
   assert.ok(actions.some((action) => action.label === 'greenhouse_application_form_ready'));
 });
 
-test('Greenhouse fixed actions include semantic and label fallbacks for last name and email', () => {
+test('Greenhouse fixed last name and email fills use semantic selectors only', () => {
   const actions = buildManagedPortalActions('greenhouse', {
     fullName: 'Taylor Example',
     email: 'taylor@example.com',
@@ -2273,33 +2257,13 @@ test('Greenhouse fixed actions include semantic and label fallbacks for last nam
   assert.equal(lastNameFill?.type, 'fill');
   assert.match(lastNameFill?.selector ?? '', /autocomplete="family-name"/);
   assert.match(lastNameFill?.selector ?? '', /aria-label="Last Name"/);
-
-  const lastNameByLabel = actions.find((action) => action.label === 'last_name_label');
-  assert.deepEqual(
-    {
-      type: lastNameByLabel?.type,
-      text: lastNameByLabel?.text,
-      value: lastNameByLabel?.value,
-      optional: lastNameByLabel?.optional,
-    },
-    { type: 'fillByLabelText', text: 'Last Name', value: 'Example', optional: true },
-  );
+  assert.equal(actions.some((action) => action.label === 'last_name_label'), false);
 
   const emailFill = actions.find((action) => action.label === 'email');
   assert.equal(emailFill?.type, 'fill');
   assert.match(emailFill?.selector ?? '', /type="email"/);
   assert.match(emailFill?.selector ?? '', /autocomplete="email"/);
-
-  const emailByLabel = actions.find((action) => action.label === 'email_label');
-  assert.deepEqual(
-    {
-      type: emailByLabel?.type,
-      text: emailByLabel?.text,
-      value: emailByLabel?.value,
-      optional: emailByLabel?.optional,
-    },
-    { type: 'fillByLabelText', text: 'Email', value: 'taylor@example.com', optional: true },
-  );
+  assert.equal(actions.some((action) => action.label === 'email_label'), false);
 });
 
 test('Greenhouse resume upload includes modern semantic file-input fallbacks', () => {
