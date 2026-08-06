@@ -7,6 +7,7 @@ import { application_email_aliases, application_email_messages } from '../db/sch
 import { requireAuth } from '../middleware/auth';
 import {
   type InboundApplicationEmail,
+  applicationEmailRouteLabel,
   inboundWebhookSecret,
   isApplicationEmailConfigured,
   processInboundApplicationEmail,
@@ -205,7 +206,7 @@ export async function applicationEmailRoutes(fastify: FastifyInstance) {
       .limit(50);
     return reply.send({
       configured: isApplicationEmailConfigured(),
-      domain: process.env.LITOS_APPLICATION_EMAIL_DOMAIN?.trim() || null,
+      domain: applicationEmailRouteLabel(),
       aliases,
     });
   });
