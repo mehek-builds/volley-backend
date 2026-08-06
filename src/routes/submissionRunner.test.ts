@@ -6,6 +6,7 @@ import {
   attentionBlockersForManagedResult,
   atsApiSubmissionEnabled,
   discoverAndResolveQuestions,
+  reconcileManagedProviderBlockers,
   readMostRecentRole,
   sanitizeEeoPrefs,
   shouldUseLocalControlledBrowser,
@@ -75,23 +76,34 @@ test('submission graduation parts use the end of an education range', () => {
   });
 });
 
-test('CAPTCHA blocker display hides empty fields Litos already answered', () => {
-  const blockers = attentionBlockersForManagedResult([
-    'CAPTCHA requires your attention',
-    '"Where have you learned about Samsara? Select all that apply." is required and is still empty',
-    '"How do you identify? (gender identity)" is required and is still empty',
-    '"[Compensation] Do you accept the listed salary range for this position?" is required and is still empty',
-  ], {
-    fullName: 'Mehek Mandal',
-    email: 'mehek@example.com',
-    resume: Buffer.from('pdf'),
-    resumeName: 'resume.pdf',
-    questions: [
-      { question: 'Where have you learned about Samsara? Select all that apply.', answer: 'Company website' },
-      { question: 'How do you identify? (gender identity)', answer: 'Female' },
-      { question: '[Compensation] Do you accept the listed salary range for this position?', answer: '' },
+test('CAPTCHA blocker display hides empty fields only when preview shows selected values', () => {
+  const blockers = attentionBlockersForManagedResult(
+    'greenhouse',
+    [
+      'CAPTCHA requires your attention',
+      '"Where have you learned about Samsara? Select all that apply." is required and is still empty',
+      '"How do you identify? (gender identity)" is required and is still empty',
+      '"[Compensation] Do you accept the listed salary range for this position?" is required and is still empty',
     ],
-  });
+    {
+      text: [
+        'Where have you learned about Samsara? Select all that apply.*Other',
+        'How do you identify? (gender identity)*Female',
+        '[Compensation] Do you accept the listed salary range for this position?*Select...',
+      ].join(' '),
+    },
+    {
+      fullName: 'Mehek Mandal',
+      email: 'mehek@example.com',
+      resume: Buffer.from('pdf'),
+      resumeName: 'resume.pdf',
+      questions: [
+        { question: 'Where have you learned about Samsara? Select all that apply.', answer: 'Company website' },
+        { question: 'How do you identify? (gender identity)', answer: 'Female' },
+        { question: '[Compensation] Do you accept the listed salary range for this position?', answer: '' },
+      ],
+    },
+  );
 
   assert.deepEqual(blockers, [
     'CAPTCHA requires your attention',
@@ -156,6 +168,80 @@ test('attention categories distinguish captcha from document and attestation blo
     ]),
     ['evidence_gap', 'required_field'],
   );
+});
+
+test('Greenhouse managed blockers are reconciled with selected React-select preview evidence', () => {
+  const packet = {
+    graduationMonth: 'May',
+    graduationYear: '2028',
+    gpa: '3.89',
+    questions: [
+      { question: 'What education level are you currently pursuing?', answer: 'Bachelor\'s Degree' },
+      { question: 'How did you hear about this job?', answer: 'Company website' },
+    ],
+  } as unknown as import('../lib/portalSubmission').SubmissionPacket;
+  const blockers = reconcileManagedProviderBlockers(
+    'greenhouse',
+    [
+      'CAPTCHA requires your attention',
+      '"Graduation Month" is required and is still empty',
+      '"Graduation Year" is required and is still empty',
+      '"What education level are you currently pursuing?" is required and is still empty',
+      '"What is your GPA?" is required and is still empty',
+      '"How did you hear about this job?" is required and is still empty',
+      '"Do you have prior experience working at an options market making trading firm?" is required and is still empty',
+    ],
+    {
+      text: [
+        'Graduation Month*May',
+        'Graduation Year*2028',
+        'What education level are you currently pursuing?*Bachelors',
+        'What is your GPA?*3.9',
+        'How did you hear about this job?*Other',
+      ].join(' '),
+      filledFields: [],
+    },
+    packet,
+  );
+
+  assert.deepEqual(blockers, [
+    'CAPTCHA requires your attention',
+    '"Do you have prior experience working at an options market making trading firm?" is required and is still empty',
+  ]);
+});
+
+test('Greenhouse managed blocker reconciliation does not hide labels without matching preview values', () => {
+  const packet = {
+    graduationMonth: 'May',
+    questions: [],
+  } as unknown as import('../lib/portalSubmission').SubmissionPacket;
+  const blockers = reconcileManagedProviderBlockers(
+    'greenhouse',
+    ['"Graduation Month" is required and is still empty'],
+    { text: 'Graduation Month*Select...' },
+    packet,
+  );
+
+  assert.deepEqual(blockers, ['"Graduation Month" is required and is still empty']);
+});
+
+test('Greenhouse managed blocker reconciliation does not trust attempted-fill labels alone', () => {
+  const packet = {
+    questions: [
+      { question: 'What education level are you currently pursuing?', answer: 'Bachelor\'s Degree' },
+    ],
+  } as unknown as import('../lib/portalSubmission').SubmissionPacket;
+  const blockers = reconcileManagedProviderBlockers(
+    'greenhouse',
+    ['"What education level are you currently pursuing?" is required and is still empty'],
+    {
+      text: 'What education level are you currently pursuing?*Select...',
+      filledFields: ['question_combo_label:0:What education level are you currently pursuing?'],
+    },
+    packet,
+  );
+
+  assert.deepEqual(blockers, ['"What education level are you currently pursuing?" is required and is still empty']);
 });
 
 test('future sponsorship onboarding answer supplies work eligibility for US applications', () => {
