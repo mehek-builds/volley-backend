@@ -283,6 +283,8 @@ export type SubmissionPacket = {
     answer: string;
     portalSelector?: string;
     portalInputType?: string;
+    portal_selector?: string;
+    portal_input_type?: string;
     atsApiField?: string;
   }>;
 };
@@ -447,6 +449,14 @@ function durablePortalSelector(selector: string | undefined): string | undefined
   const trimmed = selector?.trim();
   if (!trimmed || trimmed.length > 500 || trimmed.startsWith('[data-litos-discovered-')) return undefined;
   return trimmed;
+}
+
+function reviewQuestionPortalSelector(item: SubmissionPacket['questions'][number]): string | undefined {
+  return item.portalSelector ?? item.portal_selector;
+}
+
+function reviewQuestionPortalInputType(item: SubmissionPacket['questions'][number]): string | undefined {
+  return item.portalInputType ?? item.portal_input_type;
 }
 
 function managedComboboxFill(
@@ -2186,23 +2196,25 @@ export function buildManagedPortalActions(
     if (!questionText) continue;
     const greenhouseRoutinePrivacy = portalFamily(portal) === 'greenhouse' && isRoutineCandidatePrivacyAcknowledgement(questionText);
     if (isLegalConsentQuestion(questionText) && !greenhouseRoutinePrivacy) continue;
-    const portalSelector = durablePortalSelector(item.portalSelector);
+    const rawPortalSelector = reviewQuestionPortalSelector(item);
+    const portalInputType = reviewQuestionPortalInputType(item);
+    const portalSelector = durablePortalSelector(rawPortalSelector);
     const runtimeGreenhouseSelector = portalFamily(portal) === 'greenhouse'
       && isSamsaraLearnedAboutQuestion(questionText)
-      && item.portalSelector?.trim().startsWith('[data-litos-discovered-')
-      ? item.portalSelector.trim()
+      && rawPortalSelector?.trim().startsWith('[data-litos-discovered-')
+      ? rawPortalSelector.trim()
       : undefined;
     if (runtimeGreenhouseSelector) {
       pushGreenhouseQuestionComboboxActions(actions, runtimeGreenhouseSelector, questionText, item.answer, 'question', packet.jdText);
       pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');
     }
     if (portalSelector) {
-      if (portalFamily(portal) === 'greenhouse' && /^combobox$/i.test(item.portalInputType ?? '')) {
+      if (portalFamily(portal) === 'greenhouse' && /^combobox$/i.test(portalInputType ?? '')) {
         pushGreenhouseQuestionComboboxActions(actions, portalSelector, questionText, item.answer, 'question', packet.jdText);
         pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');
         continue;
       }
-      if (/^(?:checkbox|radio)$/i.test(item.portalInputType ?? '')) {
+      if (/^(?:checkbox|radio)$/i.test(portalInputType ?? '')) {
         if (portalFamily(portal) === 'greenhouse') {
           pushGreenhouseCheckboxOptionActions(actions, questionText, item.answer, 'question');
         }
@@ -2319,7 +2331,7 @@ function pushPaylocityTraversal(actions: ManagedBrowserAction[], packet: Submiss
       const questionText = normalizeReviewQuestionLabel(item.question);
       if (!questionText) continue;
       if (isLegalConsentQuestion(questionText)) continue;
-      const portalSelector = durablePortalSelector(item.portalSelector);
+      const portalSelector = durablePortalSelector(reviewQuestionPortalSelector(item));
       if (portalSelector) {
         managedFill(actions, portalSelector, item.answer, `question:${questionText.slice(0, 80)}`);
         continue;
@@ -2697,8 +2709,8 @@ async function fillReviewedQuestions(page: Page, portal: SupportedPortal, packet
     if (!questionText) continue;
     const greenhouseRoutinePrivacy = portalFamily(portal) === 'greenhouse' && isRoutineCandidatePrivacyAcknowledgement(questionText);
     if (isLegalConsentQuestion(questionText) && !greenhouseRoutinePrivacy) continue;
-    const portalSelector = durablePortalSelector(item.portalSelector);
-    if (/^(?:checkbox|radio)$/i.test(item.portalInputType ?? '')) {
+    const portalSelector = durablePortalSelector(reviewQuestionPortalSelector(item));
+    if (/^(?:checkbox|radio)$/i.test(reviewQuestionPortalInputType(item) ?? '')) {
       if (portalFamily(portal) === 'greenhouse') {
         for (const selector of greenhouseCheckboxOptionSelectors(questionText, item.answer)) {
           const field = page.locator(selector).first();

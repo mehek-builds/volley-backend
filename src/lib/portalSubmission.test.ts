@@ -1530,8 +1530,8 @@ test('Greenhouse replays Samsara required selects with exact live options', () =
       {
         question: 'Where have you learned about Samsara? Select all that apply.',
         answer: 'Company website',
-        portalSelector: '[data-litos-discovered-23]',
-        portalInputType: 'text',
+        portal_selector: '[data-litos-discovered-23]',
+        portal_input_type: 'text',
       },
       { question: 'When are you expecting to graduate from your degree?', answer: 'May 2028' },
       { question: 'Are you majoring in STEM (Computer Science, Electrical Engineering, Data Science, Cog Sci, Information Management/Systems, Mathematics, Machine Learning, etc.)?', answer: 'Yes' },
