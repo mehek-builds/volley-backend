@@ -518,6 +518,28 @@ test('required internship form fields resolve from profile-backed defaults inste
     resolveKnownAnswer('Are you currently enrolled in a Masters or PhD program for a technical field?', 'select', profile, undefined),
     { value: 'No' },
   );
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Please confirm the season you are applying for.',
+      'select',
+      profile,
+      'Software Engineer- Backend Intern (Fall 2026)',
+    ),
+    { value: 'Fall 2026' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'When are you able to join Astranis as an intern? (12 week minimum)',
+      'text',
+      profile,
+      'Software Engineer- Backend Intern (Fall 2026)',
+    ),
+    { value: 'Fall 2026' },
+  );
+  assert.ok(
+    resolveKnownAnswer('When are you able to join Astranis as an intern? (12 week minimum)', 'text', profile, undefined)
+    && 'skipReason' in resolveKnownAnswer('When are you able to join Astranis as an intern? (12 week minimum)', 'text', profile, undefined)!,
+  );
   const privacy = resolveKnownAnswer(
     'Please review and acknowledge Cloudflare\'s Candidate Privacy Policy (cloudflare.com/candidate-privacy-notice/).',
     'checkbox',

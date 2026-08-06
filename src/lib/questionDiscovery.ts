@@ -243,6 +243,10 @@ const PRIOR_EMPLOYER_OR_PROGRAM_QUESTION =
   /\bhave\s+you\s+(?:ever\s+)?(?:worked|been\s+employed)\s+(?:for|by|at)\b|\bhave\s+you\s+been\s+enrolled\s+in\b[^?]{0,120}\bin\s+the\s+past\s+\d+\s+months\b/i;
 const INTERNSHIP_AVAILABILITY_QUESTION =
   /\b(?:are|will)\s+you\s+available\b[^?]{0,160}\b(?:internship|full-time|40\s*hours|weeks?)\b|\b(?:internship|full-time|40\s*hours|weeks?)\b[^?]{0,160}\b(?:are|will)\s+you\s+available\b/i;
+const INTERNSHIP_SEASON_QUESTION =
+  /\bconfirm\b[^?]{0,100}\bseason\b[^?]{0,100}\bapplying\b|\bseason\b[^?]{0,100}\bapplying\b/i;
+const INTERNSHIP_JOIN_QUESTION =
+  /\bwhen\b[^?]{0,120}\b(?:able|available|start|join)\b[^?]{0,120}\bintern\b|\bintern\b[^?]{0,120}\b(?:able|available|start|join)\b/i;
 const SOFTWARE_ENGINEERING_AREA_QUESTION =
   /\b(?:area|track|team)\s+of\s+interest\b[^?]{0,120}\bsoftware\s+engineering\b|\bsoftware\s+engineering\b[^?]{0,120}\b(?:area|track|team)\s+of\s+interest\b/i;
 const US_STATE_RESIDENCE_SELECT_QUESTION = /\bstate\s+of\s+residence\b[^?]{0,160}\bnot\s+in\s+the\s+us\b/i;
@@ -471,6 +475,26 @@ function studyYearAnswer(ap: ApplicationProfileLike): string | null {
   const undergradYear = 4 - yearsUntilGraduation + 1;
   if (undergradYear <= 0 || undergradYear > 4) return null;
   return ['First year', 'Second year', 'Third year', 'Fourth year'][undergradYear - 1] ?? null;
+}
+
+function postingSeasonAnswer(label: string, jdText: string | undefined): { value: string } | null {
+  if (!INTERNSHIP_SEASON_QUESTION.test(label)) return null;
+  const match = (jdText ?? '').match(/\b(spring|summer|fall|winter)\s+((?:20)\d{2})\b/i);
+  if (!match) return null;
+  const season = match[1].toLowerCase().replace(/^\w/u, (letter) => letter.toUpperCase());
+  return { value: `${season} ${match[2]}` };
+}
+
+function internshipJoinAnswer(label: string, ap: ApplicationProfileLike, jdText: string | undefined): { value: string } | { skipReason: string } | null {
+  if (!INTERNSHIP_JOIN_QUESTION.test(label)) return null;
+  const storedDate = ap.availability_date?.trim();
+  if (storedDate) return { value: storedDate };
+  const season = (jdText ?? '').match(/\b(spring|summer|fall|winter)\s+((?:20)\d{2})\b/i);
+  if (season) {
+    const value = season[1].toLowerCase().replace(/^\w/u, (letter) => letter.toUpperCase());
+    return { value: `${value} ${season[2]}` };
+  }
+  return { skipReason: `internship availability question left for you: "${label.slice(0, 60)}"` };
 }
 
 function internshipAvailabilityAnswer(label: string, ap: ApplicationProfileLike): { value: string } | { skipReason: string } {
@@ -858,6 +882,12 @@ export function resolveKnownAnswer(
   if (PRIOR_EMPLOYER_OR_PROGRAM_QUESTION.test(label)) {
     return { skipReason: `prior employer or program question left for you: "${label.slice(0, 60)}"` };
   }
+
+  const internshipSeason = postingSeasonAnswer(label, jdText);
+  if (internshipSeason) return internshipSeason;
+
+  const internshipJoin = internshipJoinAnswer(label, ap, jdText);
+  if (internshipJoin) return internshipJoin;
 
   if (INTERNSHIP_AVAILABILITY_QUESTION.test(label)) {
     return internshipAvailabilityAnswer(label, ap);
