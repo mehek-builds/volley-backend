@@ -1069,9 +1069,9 @@ test('Greenhouse fills academic fields from the submission packet', () => {
   assert.ok(schoolOpenIndex >= 0);
   assert.ok(schoolFillIndex > schoolOpenIndex);
   assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s Degree'));
-  assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor of Science'));
-  assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor of Science in Computer Science'));
-  assert.equal(comboFills.filter((action) => action.selector === '#degree--0').length, 3);
+  assert.equal(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor of Science'), false);
+  assert.equal(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor of Science in Computer Science'), false);
+  assert.equal(comboFills.filter((action) => action.selector === '#degree--0').length, 1);
   assert.equal(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s'), false);
   assert.equal(comboFills.some((action) => action.selector?.includes('label:has-text("Degree")')), false);
   assert.ok(comboFills.some((action) => action.selector === '#discipline--0' && action.value === 'Computer Science'));
@@ -1320,8 +1320,8 @@ test('Greenhouse replays Jump academic and referral choices without consent', ()
 
   const comboFills = actions.filter((action) => action.type === 'fill');
   assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor\'s Degree'), 'degree level');
-  assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor of Science'), 'degree bachelor science');
-  assert.ok(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor of Science in Computer Science'), 'degree full');
+  assert.equal(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor of Science'), false, 'degree bachelor science');
+  assert.equal(comboFills.some((action) => action.selector === '#degree--0' && action.value === 'Bachelor of Science in Computer Science'), false, 'degree full');
   assert.ok(comboFills.some((action) => action.label?.startsWith('education_graduation_date_combo:') && action.value === 'May 2028'), 'raw graduation date');
   assert.ok(comboFills.some((action) => action.label?.startsWith('education_graduation_date_combo:') && action.value === 'Spring 2028'), 'graduation bucket');
   assert.ok(actions.some((action) =>
