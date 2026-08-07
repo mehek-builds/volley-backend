@@ -41,6 +41,13 @@ export type ApplicationProfileLike = StoredSalaryProfile & {
   employer_history?: string[];
   school?: string;
   degree?: string;
+  /**
+   * When the applicant STARTED the degree, taken from the parsed education history. Deliberately
+   * separate from availability_date: an employer's education block asks for this, and answering it
+   * from job availability puts a job start date into an education field (see
+   * EDUCATION_ATTENDANCE_DATE_QUESTION).
+   */
+  education_start_date?: string;
   grad_date?: string;
   grad_year?: number;
   currently_enrolled?: boolean;
@@ -121,6 +128,9 @@ function workEligibilityAnswer(
   if (!asksAuthorization && !asksSponsorship) return null;
   if (asksAuthorization && asksSponsorship) return { skipReason: workEligibilitySkipReason(label) };
   if ((asksAuthorization || asksSponsorship) && (NON_US_WORK_SCOPE.test(label) || (JOB_LOCATION_SCOPE.test(label) && !JD_US_SCOPE.test(jdText ?? '')))) {
+    return { skipReason: workEligibilitySkipReason(label) };
+  }
+  if (asksAuthorization && UNRESTRICTED_WORK_AUTHORIZATION_QUESTION.test(label) && ap.needs_sponsorship === true) {
     return { skipReason: workEligibilitySkipReason(label) };
   }
   if (asksAuthorization && typeof ap.work_authorized === 'boolean') {
@@ -230,6 +240,18 @@ export function isLocationChoiceQuestion(label: string): boolean {
 
 export const REFERRAL_QUESTION = /how did you .*hear|how did you hear|first hear|referral source|hear about (this|us|the)|where have you learned about|source of/i;
 export const START_DATE_QUESTION = /availab|start(ing)?\s+date|date.*you.*start|when can you start|earliest.*start/i;
+// Greenhouse renders its education block as one row per school: "School", "Degree", "Discipline",
+// "Start date month", "Start date year", "End date month", "End date year" (handles school--0,
+// degree--0, discipline--0, start-month--0, ...). Those start/end dates are when the APPLICANT
+// ATTENDED, not when they can start the job - but "start date month" also matches
+// START_DATE_QUESTION, so availability_date won and Five Rings, IMC and Tower were all sent
+// "August 6, 2026" as an education start month. This must be recognised before START_DATE_QUESTION.
+export const EDUCATION_ATTENDANCE_DATE_QUESTION =
+  /\b(?:start|end)\s*date\s*(?:month|year)\b|\b(?:start|end)[\s-]*(?:month|year)--\d+\b|\b(?:start|end)\s*(?:month|year)\b[^?]{0,80}\b(?:school|university|college|institution|program|degree|stud(?:y|ies))\b|\b(?:school|university|college|institution|program|degree|stud(?:y|ies))\b[^?]{0,80}\b(?:start|end)\s*(?:month|year)\b|\bdates?\s+attended\b|\battendance\s+dates?\b/i;
+const EDUCATION_ATTENDANCE_START_MARKER = /\bstart\b/i;
+const EDUCATION_ATTENDANCE_END_MARKER = /\bend\b|\bgraduat/i;
+const EDUCATION_ATTENDANCE_MONTH_MARKER = /\bmonth\b/i;
+const EDUCATION_ATTENDANCE_YEAR_MARKER = /\byear\b/i;
 export const GRADUATION_DATE_QUESTION =
   /\b(?:expected\s+)?graduat(?:ion|e)\s+(?:date|year|semester|term|time\s*frame|timeframe|window)\b|\b(?:date|year|semester|term|time\s*frame|timeframe|window)\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b|\bexpected\s+grad(?:uation)?\b|\bexpect(?:ing)?\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b|\bclass\s+of\b/i;
 const GRADUATION_MONTH_QUESTION = /\bgraduat(?:ion|e)\s+month\b|\bmonth\s+(?:of\s+)?(?:expected\s+)?graduat(?:ion|e)\b/i;
@@ -288,10 +310,38 @@ const TRUE_COMPLETE_ACCURATE_CERTIFICATION =
   /\bcertify\b[^?]{0,220}\btrue\b[^?]{0,120}\bcomplete\b[^?]{0,120}\baccurate\b/i;
 const NY_CA_RESIDENCE_QUESTION =
   /\b(?:live|reside|located)\b[^?]{0,80}\bnew\s+york\b[^?]{0,80}\bcalifornia\b|\bnew\s+york\b[^?]{0,80}\bcalifornia\b[^?]{0,80}\b(?:live|reside|located)\b/i;
+// Politically-exposed-person declarations (Tower asks two). These are regulated legal statements
+// about public office held by the applicant or an immediate family member. Nothing in the profile
+// answers them, and a drafted paragraph would be an invented declaration. One already went out
+// answered "Dubai", because the label mentions a "state-owned bank" and the address_state fallback
+// took the word "state"; the other was answered with drafted prose.
+const POLITICALLY_EXPOSED_PERSON_QUESTION =
+  /\bpolitically\s+exposed\s+person\b|\bentrusted\s+with\s+a\s+(?:prominent\s+)?(?:public\s+)?(?:position|function)\b|\bstate-(?:owned|controlled|run)\b[^?]{0,160}\b(?:bank|brokerage|enterprise)\b|\bimmediate\s+family\s+member\s+of\s+someone\s+holding\s+such\s+a\s+position\b/i;
+// "Authorized to work for ALL employers", "without sponsorship", "without restriction": a narrower
+// claim than work_authorized records. Someone who needs sponsorship is authorized to work, but not
+// for every employer without one, so answering these "Yes" off work_authorized is a false legal
+// declaration - the exact failure R-004 was opened for.
+const UNRESTRICTED_WORK_AUTHORIZATION_QUESTION =
+  /\ball\s+employers?\b|\bany\s+employer\b|\bwithout\s+(?:the\s+need\s+for\s+)?(?:visa\s+)?sponsorship\b|\bwithout\s+restriction\b|\bwithout\s+(?:any\s+)?(?:current\s+or\s+future\s+)?need\s+for\s+sponsorship\b/i;
 const OPTIONS_MARKET_MAKING_EXPERIENCE_QUESTION =
   /\b(?:options\s+market\s+making|market\s+making\s+trading|trading\s+firm)\b/i;
 const WORK_AUTHORIZATION_DETAIL_QUESTION =
   /\b(?:current\s+immigration\s+status|basis\s+of\s+your\s+current\s+work\s+authorization|when\s+does\s+it\s+expire|extension\s+options?|additional\s+detail\s+about\s+your\s+sponsorship\s+need)\b/i;
+// school/degree/grad_date describe the programme the applicant is in NOW. A question scoped to a
+// DIFFERENT or LATER programme is not answered by them, however closely the wording matches. Two
+// shipped wrong: Akuna was sent the bachelor's date as a "potential master's graduation date", and
+// Five Rings was sent the current bachelor's as the degree she "plans to pursue" - directly after
+// she had answered that she was not planning further study.
+const FUTURE_OR_OTHER_PROGRAMME_QUESTION =
+  /\b(?:plan(?:ning)?\s+to\s+pursue|intend(?:ing)?\s+to\s+pursue|following\s+graduation|after\s+(?:you\s+)?(?:graduat\w+|completing)|further\s+education|additional\s+degree|next\s+degree|potential\s+(?:master|masters|ph\.?d|doctorate))\b/i;
+const CURRENT_PROGRAMME_KEYS = new Set<ProfileKey>([
+  'school', 'degree', 'major', 'graduation_date', 'graduation_month', 'graduation_year',
+  'education_start_date', 'education_end_date', 'study_year', 'gpa', 'gpa_scale',
+]);
+// "Please confirm the month and year of your high school graduation" is a DATE request wearing a
+// confirmation's clothes. Answering the diploma confirmation's "Yes" there is not an answer.
+const HIGH_SCHOOL_GRADUATION_DATE_REQUEST =
+  /\b(?:month|year|date)\b[^?]{0,80}\b(?:high\s+school|equivalent)\b|\b(?:high\s+school|equivalent)\b[^?]{0,80}\b(?:month|year|date)\b/i;
 
 const NATIONALITY_TO_COUNTRY: Record<string, string> = {
   indian: 'India', american: 'United States', emirati: 'United Arab Emirates',
@@ -306,7 +356,37 @@ export type ProfileKey =
   | 'linkedin_url' | 'github_url' | 'portfolio_url' | 'citizenship' | 'date_of_birth'
   | 'availability_date' | 'availability_term' | 'current_employer' | 'most_recent_employer' | 'school' | 'degree' | 'graduation_date' | 'desired_salary'
   | 'graduation_month' | 'graduation_year' | 'current_enrollment' | 'study_year' | 'gpa' | 'gpa_scale' | 'major'
+  | 'education_start_date' | 'education_end_date'
   | 'languages' | 'onsite_commitment' | 'referral_source_default';
+
+// The bare-keyword fallbacks at the bottom of classifyField exist for field-name labels a portal
+// renders with no sentence around them: "School", "Current university", "State", "Phone". They are
+// the only place where a single word anywhere in the label decides the answer, and that is exactly
+// how "please provide your university email address" was answered with the university's name and
+// how a politically-exposed-person question mentioning a "state-owned bank" was answered "Dubai".
+// Two independent gates before a bare keyword is allowed to decide anything:
+//   1. the label must be SHAPED like a field name - short, and not a question; and
+//   2. it must not be asking for a different kind of value about that noun.
+// Anything richer than a field name has to be matched by an explicit pattern higher up, or go
+// unanswered. A blank field stalls the run; a confident wrong answer gets submitted.
+const FIELD_NAME_LABEL_MAX_WORDS = 6;
+const KEYWORD_SUBJECT_QUALIFIER =
+  /\be-?mails?\b|\baddress(?:es)?\b|\bdates?\b|\bmonths?\b|\byears?\b|\bwhen\b|\bwebsite\b|\burl\b|\blink\b|\bdepartment\b|\bfaculty\b|\badvisor\b|\bprofessor\b|\breferences?\b|\brank(?:ing)?\b|\bscores?\b|\bgpa\b|\bgrades?\b|\bscale\b|\blevel\b|\bowned\b|\bcontrolled\b|\brun\b/i;
+
+export function labelNamesProfileField(label: string, noun: RegExp): boolean {
+  if (!noun.test(label)) return false;
+  const core = (label ?? '').replace(/[*:•]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!core || core.includes('?')) return false;
+  if (core.split(' ').length > FIELD_NAME_LABEL_MAX_WORDS) return false;
+  return !KEYWORD_SUBJECT_QUALIFIER.test(core.replace(noun, ' '));
+}
+
+const SCHOOL_NOUN = /\b(school|university|college|institution)\b/i;
+const PHONE_NOUN = /\b(phone|mobile)\b/i;
+const STATE_NOUN = /\b(state|province|prefecture)\b(?!\s+(?:your|the|you|it|why|how|what|when|where))|state\s*\/\s*province/i;
+const CITY_NOUN = /\b(city|town)\b|\blocation\b/i;
+const EXPLICIT_CITY_QUESTION =
+  /where are you (currently )?(located|living|based)|current location|where do you live/i;
 
 // Ported verbatim from generic.ts's classifyField (see that file for the full rationale on
 // ordering - refusals first, citizenship before residence, term before start date, state before
@@ -338,9 +418,16 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
   if (GRADUATION_MONTH_QUESTION.test(l)) return 'graduation_month';
   if (GRADUATION_YEAR_QUESTION.test(l)) return 'graduation_year';
   if (GRADUATION_DATE_QUESTION.test(l)) return 'graduation_date';
-  if (/\bwhich\s+(?:school|university|college|institution)\b|\b(?:school|university|college|institution)\s+(?:name|are\s+you\s+currently\s+attending|are\s+you\s+currently\s+enrolled|currently\s+attend|currently\s+enrolled\s+in)\b|^university\s*\/\s*institution\b/i.test(l)) return 'school';
+  // Explicit phrasings that unambiguously ask for the institution's NAME. Everything else has to
+  // clear labelNamesProfileField further down: the bare keyword is not enough on its own.
+  if (/\bwhich\s+(?:school|university|college|institution)\b|\b(?:school|university|college|institution)\s+(?:name|(?:you\s+|are\s+you\s+)?(?:currently\s+)?(?:attend(?:ing|ed)?|enrolled(?:\s+in)?))\b|\bname\s+of\s+(?:your\s+)?(?:school|university|college|institution)\b|^university\s*\/\s*institution\b/i.test(l)) return 'school';
   if (MAJOR_QUESTION.test(l)) return 'major';
   if (CURRENT_ENROLLMENT_QUESTION.test(l) && !GRADUATION_DATE_QUESTION.test(l)) return 'current_enrollment';
+  if (EDUCATION_ATTENDANCE_DATE_QUESTION.test(l)) {
+    // One control asking for BOTH ends of the range cannot be satisfied by the end alone.
+    if (EDUCATION_ATTENDANCE_START_MARKER.test(l)) return 'education_start_date';
+    return 'education_end_date';
+  }
   if (START_DATE_QUESTION.test(l)) return 'availability_date';
   if (LOCATION_PREFERENCE_QUESTION.test(l)) return null;
 
@@ -349,20 +436,17 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
   if (/\bhigh school\b/i.test(l) && /graduat|when|date|year/i.test(l)) return null;
   if (LANGUAGE_QUESTION.test(l)) return 'languages';
   if (/\bdegree\b(?!\s+(?:program|subject))|education level|level of education/i.test(l)) return 'degree';
-  if (/\b(school|university|college|institution)\b/i.test(l)) return 'school';
+  if (labelNamesProfileField(l, SCHOOL_NOUN)) return 'school';
   if (MAJOR_QUESTION.test(l)) return 'major';
 
-  if (/phone|mobile/i.test(l)) return 'phone';
-  if (
-    !locationCommitment &&
-    !locationChoice &&
-    /\b(state|province|prefecture)\b(?!\s+(?:your|the|you|it|why|how|what|when|where))|state\s*\/\s*province/i.test(l)
-  )
+  if (labelNamesProfileField(l, PHONE_NOUN)) return 'phone';
+  if (!locationCommitment && !locationChoice && labelNamesProfileField(l, STATE_NOUN)) {
     return 'address_state';
+  }
   if (
     !locationCommitment &&
     !locationChoice &&
-    /\b(city|town)\b|\blocation\b|where are you (currently )?(located|living|based)|current location|where do you live/i.test(l)
+    (EXPLICIT_CITY_QUESTION.test(l) || labelNamesProfileField(l, CITY_NOUN))
   )
     return 'address_city';
 
@@ -488,6 +572,41 @@ function graduationMonthAnswer(gradDate: string | undefined, gradYear: number | 
 function graduationYearAnswer(gradDate: string | undefined, gradYear: number | undefined): string | null {
   if (gradYear && gradYear > 0) return String(gradYear);
   return graduationDateAnswer(gradDate, gradYear, 'date')?.match(/^(\d{4})-/)?.[1] ?? null;
+}
+
+/**
+ * An education start month/year comes from the education history and from nowhere else. When the
+ * history has no start date the honest output is nothing: the applicant fills it in. It is never
+ * availability_date, and never the graduation date.
+ */
+function educationStartAnswer(label: string, ap: ApplicationProfileLike): string | null {
+  // A single control asking for the whole range ("start month/year of university and end
+  // month/year of university") needs both ends; without a start there is no partial answer.
+  const stored = ap.education_start_date?.trim();
+  if (!stored) return null;
+  if (EDUCATION_ATTENDANCE_END_MARKER.test(label)) {
+    const end = educationEndAnswer(label, ap);
+    return end ? `${stored} to ${end}` : null;
+  }
+  return narrowDatePart(label, stored);
+}
+
+function educationEndAnswer(label: string, ap: ApplicationProfileLike): string | null {
+  const stored = ap.grad_date?.trim() || (ap.grad_year ? String(ap.grad_year) : '');
+  return stored ? narrowDatePart(label, stored) : null;
+}
+
+/** "Start date month" wants "May", "Start date year" wants "2028"; anything else gets the whole date. */
+function narrowDatePart(label: string, date: string): string | null {
+  const iso = graduationDateAnswer(date, undefined, 'date');
+  const monthOnly = EDUCATION_ATTENDANCE_MONTH_MARKER.test(label) && !EDUCATION_ATTENDANCE_YEAR_MARKER.test(label);
+  const yearOnly = EDUCATION_ATTENDANCE_YEAR_MARKER.test(label) && !EDUCATION_ATTENDANCE_MONTH_MARKER.test(label);
+  if (monthOnly) {
+    const month = iso?.match(/^\d{4}-(\d{2})-/)?.[1];
+    return month ? NUMBER_TO_MONTH[month] ?? null : null;
+  }
+  if (yearOnly) return iso?.match(/^(\d{4})-/)?.[1] ?? date.match(/\b(?:19|20)\d{2}\b/)?.[0] ?? null;
+  return date;
 }
 
 function graduationSemesterAnswer(gradDate: string | undefined, gradYear: number | undefined): string | null {
@@ -968,11 +1087,20 @@ export function resolveKnownAnswer(
     return { value: 'No' };
   }
 
+  if (POLITICALLY_EXPOSED_PERSON_QUESTION.test(label)) {
+    return { skipReason: `politically-exposed-person declaration left for you: "${label.slice(0, 60)}"` };
+  }
+
   if (OPTIONS_MARKET_MAKING_EXPERIENCE_QUESTION.test(label)) {
     return { skipReason: `options market making experience question left for you: "${label.slice(0, 60)}"` };
   }
 
   if (HIGH_SCHOOL_DIPLOMA_CONFIRMATION_QUESTION.test(label)) {
+    // Akuna's version ends "...please confirm the month and year that most accurately reflects your
+    // high school graduation". That asks for a date the profile does not hold, and "Yes" is not one.
+    if (HIGH_SCHOOL_GRADUATION_DATE_REQUEST.test(label)) {
+      return { skipReason: `high school graduation date left for you: "${label.slice(0, 60)}"` };
+    }
     return { value: 'Yes' };
   }
 
@@ -1041,6 +1169,11 @@ export function resolveKnownAnswer(
   }
 
   const key = classifyField(label, inputType === 'tel' ? 'tel' : undefined);
+  // Last gate before the profile answers it: the stored education facts are about the current
+  // programme, so a question scoped to a later or different one gets nothing from them.
+  if (key && CURRENT_PROGRAMME_KEYS.has(key) && FUTURE_OR_OTHER_PROGRAMME_QUESTION.test(label)) {
+    return { skipReason: `question about a future or different programme left for you: "${label.slice(0, 60)}"` };
+  }
   switch (key) {
     case 'citizenship': {
       if (!ap.citizenship) return null;
@@ -1105,6 +1238,19 @@ export function resolveKnownAnswer(
       }
       const value = graduationDateAnswer(ap.grad_date, ap.grad_year, inputType);
       return value ? { value } : null;
+    }
+    case 'education_start_date': {
+      const value = educationStartAnswer(label, ap);
+      return value
+        ? { value }
+        : { skipReason: `education start date left for you: "${label.slice(0, 60)}"` };
+    }
+    case 'education_end_date': {
+      // The end of the current programme IS the graduation date, so this one is answerable.
+      const value = educationEndAnswer(label, ap);
+      return value
+        ? { value }
+        : { skipReason: `education end date left for you: "${label.slice(0, 60)}"` };
     }
     case 'graduation_month': {
       const value = graduationMonthAnswer(ap.grad_date, ap.grad_year);
