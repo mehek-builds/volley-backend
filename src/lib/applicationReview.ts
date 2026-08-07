@@ -15,6 +15,17 @@ export type ApplicationReviewQuestion = {
 
 export type ApplicationAttentionCategory =
   | 'captcha'
+  /* The run never got to the application form at all: no field was typed, no control was located,
+   * nothing was discovered. Deliberately NOT 'evidence_gap', which means the opposite - the form
+   * was reached and the evidence of specific fields is missing. Five owner packets on 2026-08-06
+   * (Akuna x3, Jump Trading, Nuro) were filed as evidence_gap with three sentences describing a
+   * filled form, when the preview screenshots show a job description page and, for Jump Trading, a
+   * branded careers page with no form on it at all. */
+  | 'form_not_reached'
+  /* The run threw and stopped. Every terminal state owes a cause, and before this existed a run
+   * could end in status 'failed' with attention_reason unset, which is unactionable for the
+   * applicant and undebuggable for us. */
+  | 'run_failed'
   | 'required_document'
   | 'sensitive_attestation'
   | 'required_field'

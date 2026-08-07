@@ -276,13 +276,18 @@ test('portal support is written at packet creation and unsupported portals use e
   assert.ok(browserConfigIndex > guardIndex, 'unsupported portal email fallback must not require a browser provider');
   assert.match(applicationsRoute, /pipeline_stage: 'applied'/);
   assert.match(applicationsRoute, /source: 'email_fallback'/);
-  assert.match(applicationsRoute, /status: 'failed' as const[\s\S]{0,800}UNSUPPORTED_PORTAL_EMAIL_UNAVAILABLE/);
+  assert.match(applicationsRoute, /status: 'failed'[\s\S]{0,900}UNSUPPORTED_PORTAL_EMAIL_UNAVAILABLE/);
   const failureStart = applicationsRoute.indexOf("Unsupported portal email fallback failed");
   const failureEnd = applicationsRoute.indexOf('const submittedAt', failureStart);
   assert.ok(failureStart > guardIndex, 'email fallback failure handling must be inside the unsupported branch');
   assert.ok(failureEnd > failureStart, 'email fallback failure handling must return before the submitted write');
   const failureBlock = applicationsRoute.slice(failureStart, failureEnd);
-  assert.match(failureBlock, /status: 'failed' as const/);
+  /* The intent, not the formatting. This pinned the literal `status: 'failed' as const`, which was
+     part of a bare spread that built a terminal review outside applyReviewPatch and so could
+     persist a failure with no stated cause. What matters is that the row lands on 'failed' through
+     the shared merge, carrying a reason. */
+  assert.match(failureBlock, /applyReviewPatch\([\s\S]{0,200}status: 'failed'/);
+  assert.match(failureBlock, /attention_reason: 'Litos could not email this application/);
   assert.match(failureBlock, /return reply\.status\(503\)\.send/);
   assert.doesNotMatch(failureBlock, /status: 'submitted'/);
   assert.doesNotMatch(failureBlock, /pipeline_stage: 'applied'/);
@@ -314,7 +319,13 @@ test('preview evidence blocks broken pages and incomplete form fills before fina
   assert.match(runner, /The filled form did not record a resume upload/);
   assert.match(runner, /The filled form did not record the applicant name fields/);
   assert.match(runner, /The filled form did not record the cover letter attachment/);
-  assert.match(runner, /preparationEvidenceBlockers\(\{ text: pageText, filledFields: result\.filledFields \}, packet\)/);
+  /* Loosened from the exact one-line call, which broke when the reach evidence (provider blockers
+     and discovered questions) was added as further arguments. The requirement is that the direct
+     path feeds the live page text and the filled fields into the same evidence check the managed
+     path uses, not that the argument object stays one line long. */
+  assert.match(runner, /preparationEvidenceBlockers\(\{[\s\S]{0,400}text: pageText,[\s\S]{0,400}filledFields: result\.filledFields/);
+  // And those per-field sentences are only reachable once the form is known to have been reached.
+  assert.match(runner, /if \(!applicationFormWasReached\(\{[\s\S]{0,600}return \[FORM_NOT_REACHED_REASON\];/);
 });
 
 test('the applicant is told what happened, not what the model said', () => {

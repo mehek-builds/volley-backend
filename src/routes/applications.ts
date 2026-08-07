@@ -4,7 +4,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/index';
-import { settleStall } from '../lib/applicationStall';
+import { applyReviewPatch, settleStall } from '../lib/applicationStall';
 import type { ApplicationReviewState } from '../lib/applicationReview';
 import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
 import { career_page_sources, generated_resumes, monitored_jobs, profiles, users, type ExperienceBankEntry } from '../db/schema';
@@ -385,10 +385,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         return reply.status(409).send({ error: 'This extension submission is no longer active' });
       }
       const now = new Date().toISOString();
-      const next = { ...current, ...extensionOutcomePatch(parsed.data.outcome, now, {
+      // Through applyReviewPatch, not a bare spread. extensionOutcomePatch's 'failed' arm writes
+      // attention_reason: undefined, so the spread persisted a terminal state with no stated cause
+      // in exactly the way the server runner used to.
+      const next = applyReviewPatch(current, extensionOutcomePatch(parsed.data.outcome, now, {
         confirmationText: parsed.data.confirmation_text,
         finalUrl: parsed.data.final_url,
-      }), updated_at: now };
+      }), () => now);
       const updated = await db.update(generated_resumes).set({
         spec: reviewSpec(next),
         ...(parsed.data.outcome === 'confirmed' ? { pipeline_stage: 'applied', pipeline_stage_at: new Date(now) } : {}),
@@ -670,12 +673,14 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         } catch (error) {
           request.log.warn({ error, applicationId: row.id }, 'Unsupported portal email fallback failed');
           const failedAt = new Date().toISOString();
-          const failed = {
-            ...pending,
-            status: 'failed' as const,
-            updated_at: failedAt,
+          // Same reason as the extension outcome above: a terminal status written by a bare spread
+          // skips the one place that guarantees it carries a cause. This one at least has a
+          // sentence worth showing, so it names it rather than falling back to the generic.
+          const failed = applyReviewPatch(pending, {
+            status: 'failed',
             submission_error: 'Litos could not email this application.',
-          };
+            attention_reason: 'Litos could not email this application to the company, so nothing has been sent. Try it again once outbound application email is working.',
+          }, () => failedAt);
           await db.update(generated_resumes)
             .set({ spec: reviewSpec(failed) })
             .where(and(
