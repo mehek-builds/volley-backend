@@ -99,7 +99,7 @@ import {
 } from '../lib/submissionQueue';
 import { coverLetterFileNameForRole, resumeFileNameForRole } from '../lib/resumeFileName';
 import { assessAtsSubmissionChannel, tryAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
-import { ensureApplicationEmailAlias } from '../lib/applicationEmail';
+import { resolveApplicantEmail } from '../lib/applicationEmail';
 
 export type ResumeRow = typeof generated_resumes.$inferSelect;
 type StoredSpec = Record<string, unknown>;
@@ -330,12 +330,26 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
   }
   const fullName = String(contact.full_name ?? parsed.full_name ?? '').trim();
   const accountEmail = String(userRow[0]?.email ?? '').trim();
-  const applicationEmail = await ensureApplicationEmailAlias({
+  /* THE ADDRESS THE EMPLOYER WILL BE ASKED TO WRITE TO.
+   *
+   * This line used to take the minted alias first and fall through to the contact and account
+   * addresses only if there was no alias, which put a generated alias on a real employer's form on
+   * the strength of an environment variable being set. On 2026-08-08 apply.trylitos.com had no MX
+   * record, so that address could not receive
+   * mail: every confirmation and every recruiter reply bounced, and the applicant was unreachable
+   * on an application she cannot send twice.
+   *
+   * resolveApplicantEmail will not hand back an alias unless the alias domain has been MEASURED
+   * able to receive mail, and falls back to her real address otherwise. The decision, including
+   * why, is recorded on the review state by the callers of buildPacket, so nothing can tell her
+   * her replies are being tracked when they are not. */
+  const applicantEmail = await resolveApplicantEmail({
     userId: row.user_id,
     applicationId: row.id,
-    forwardTo: accountEmail,
-  }).catch(() => undefined);
-  const email = String(applicationEmail?.alias ?? contact.email ?? accountEmail).trim();
+    accountEmail,
+    contactEmail: typeof contact.email === 'string' ? contact.email : null,
+  });
+  const email = applicantEmail.address.trim();
   if (!fullName || !email) throw new Error('Full name and email are required before submission');
   const roleTitle = (row.job_context as { role?: unknown } | null)?.role;
   const base = (profileRow[0]?.base_resume_json && typeof profileRow[0].base_resume_json === 'object'
@@ -401,6 +415,9 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
       ? coverLetterFileNameForRole(fullName, roleTitle)
       : undefined,
     eeoPrefs: sanitizeEeoPrefs(app.eeo_prefs),
+    // Metadata, not a fill field: `email` above is what gets typed. Carried on the packet so the
+    // prepare paths can write which address was used, and why, onto the review state.
+    applicantEmail,
     mostRecentRole: readMostRecentRole(parsed),
     questions: refreshedQuestions.map((item) => ({
       question: item.question,
@@ -1023,6 +1040,8 @@ async function prepareManaged(
       : {}),
     submission_run_id: runId,
     filled_fields: filledFields,
+    // Which address this form was filled with, and why. See ApplicationReviewState.applicant_email.
+    ...(packet.applicantEmail ? { applicant_email: packet.applicantEmail } : {}),
     preview_screenshot_url: preview.url,
     verification: { status: verificationHandoff ? 'handoff' : 'not_needed' },
     questions: mergedQuestions,
@@ -1239,6 +1258,8 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       browser_context_id: contextId,
       browser_session_id: session.id,
       filled_fields: result.filledFields,
+      // Which address this form was filled with, and why. See ApplicationReviewState.applicant_email.
+      ...(packet.applicantEmail ? { applicant_email: packet.applicantEmail } : {}),
       preview_screenshot_url: preview.url,
       verification: {
         status: verification.status,
