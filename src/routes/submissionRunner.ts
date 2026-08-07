@@ -82,7 +82,7 @@ import {
   type ApplicationProfileLike,
   type DiscoveredQuestion,
 } from '../lib/questionDiscovery';
-import { profileBackedBlockerLabels, resolveProfileField } from '../lib/profileFieldResolution';
+import { profileBackedBlockerLabels, resolveProfileField, usableOptions } from '../lib/profileFieldResolution';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import type { ApplicationReviewQuestion } from '../lib/applicationReview';
 import { jobCountry } from '../lib/jobLocation';
@@ -832,6 +832,20 @@ export async function discoverAndResolveQuestions(
       )
       : null;
     const knownValue = resolvedField?.value ?? (known && 'value' in known ? known.value : '');
+    // "I had an answer and deliberately did not pick anything off this list."
+    //
+    // resolveProfileField reports that as matchedOption: false, and this loop used to throw the
+    // flag away, so the one case where Litos KNOWS a control will be left unfilled was the one case
+    // the applicant never heard about. The refusal itself is correct: snapping a stored answer onto
+    // a closed list it does not actually appear in is how a wrong answer gets submitted under a
+    // question with legal weight. But a select nobody chose from is a required field left empty at
+    // the portal, so it is work for her, and it has to reach her as work rather than as silence.
+    //
+    // Only when the control really had a list. matchedOption is false for every free-text field
+    // too, and those are filled with the value beside it.
+    if (resolvedField && !resolvedField.matchedOption && usableOptions(field.options).length > 0) {
+      attentionReasons.push(`none of the options match your saved answer, so this one is left for you: "${label.slice(0, 60)}"`);
+    }
     if (existing) {
       if (known && 'skipReason' in known) {
         attentionReasons.push(known.skipReason);

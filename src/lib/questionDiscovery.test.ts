@@ -6,6 +6,7 @@ import {
   fitToBudget,
   graduationDateAnswer,
   isOpenEndedQuestion,
+  isPolarQuestion,
   isRefusedQuestion,
   normalizeDiscoveredLabel,
   normalizeReviewQuestionLabel,
@@ -1228,6 +1229,67 @@ test('a label merely containing a profile keyword is not grounds to answer it wi
   assert.equal(classifyField('State / Province'), 'address_state');
   assert.equal(classifyField('City'), 'address_city');
   assert.equal(classifyField('Please re-confirm the university you currently attend'), 'school');
+});
+
+/* The gate above was written as "and the label must not contain a question mark", and a question
+ * mark is not evidence that a label is naming something other than the field. It is evidence the
+ * portal wrote the field name as a sentence, which most of them do. Measured on the tree that
+ * shipped it, every one of these returned null and left a required field EMPTY:
+ *
+ *   What is your phone number?              What university do you attend?
+ *   What state do you live in?              Which city do you live in?
+ *   In which state do you currently reside? What is your current city of residence?
+ *
+ * Phone is the one that hurts most. It is required on nearly every application form, and the
+ * `type === 'tel'` escape at the top of classifyField cannot save it on the managed path, because
+ * the runner reports every inputType as `text`. Asserted here with no type argument for exactly
+ * that reason. */
+test('a field name written as a question is still a field name', () => {
+  assert.equal(classifyField('what is your phone number?'), 'phone');
+  assert.equal(classifyField('what university do you attend?'), 'school');
+  assert.equal(classifyField('what state do you live in?'), 'address_state');
+  assert.equal(classifyField('which city do you live in?'), 'address_city');
+  assert.equal(classifyField('in which state do you currently reside?'), 'address_state');
+  assert.equal(classifyField('what is your current city of residence?'), 'address_city');
+});
+
+/* What the question mark was actually earning its keep on, and the reason it cannot simply be
+ * deleted: a POLAR question mentions the noun to ask something ABOUT it, and the stored value is
+ * not an answer to it. "May we contact you by phone?" wants a yes; the phone number is not one.
+ *
+ * The distinction is the opening word, not the punctuation. An auxiliary opens a yes/no question;
+ * what, which and where open a request for the value itself. */
+test('a yes/no question about a field is not a request for that field', () => {
+  assert.equal(classifyField('may we contact you by phone?'), null);
+  assert.equal(classifyField('do you have a mobile phone?'), null);
+  assert.equal(classifyField('do you live in new york or california?'), null);
+  assert.equal(classifyField('are you based in a state that taxes remote work?'), null);
+  assert.equal(classifyField('is your school on our partner list?'), null);
+  // isPolarQuestion is the one rule, and it needs BOTH halves: an auxiliary at the front and a
+  // question mark. Either alone would refuse a field name.
+  assert.equal(isPolarQuestion('may we contact you by phone?'), true);
+  assert.equal(isPolarQuestion('what is your phone number?'), false);
+  assert.equal(isPolarQuestion('may graduation'), false);
+  assert.equal(isPolarQuestion('Phone number'), false);
+});
+
+/* And the two defects the question-mark gate was added for, verified to be refused without it.
+ * Neither one needs it: the first has no question mark at all and is caught by the qualifier list,
+ * the second is far past the word budget. Both are asserted in the test above this block as well;
+ * repeated here so that deleting the gate a second time cannot pass unnoticed. */
+test('the two labels the question-mark gate was added for are refused without it', () => {
+  // Six words, no question mark, refused on `email` and `address` in the qualifier list.
+  assert.equal(classifyField('please provide your university email address'), null);
+  // Seventeen words, refused by the word count, with `owned` in the qualifier list as well.
+  const politicallyExposed =
+    'are you or an immediate family member a politically exposed person, or connected to a '
+    + 'state-owned bank or government body?';
+  assert.equal(classifyField(politicallyExposed), null);
+  // And refused a second time, before classification is ever consulted, by resolveKnownAnswer.
+  assert.deepEqual(
+    resolveKnownAnswer(politicallyExposed, 'text', PROD_OWNER_PROFILE, undefined),
+    { skipReason: `politically-exposed-person declaration left for you: "${politicallyExposed.slice(0, 60)}"` },
+  );
 });
 
 test('stored education facts describe the CURRENT programme only (Akuna, Five Rings)', () => {

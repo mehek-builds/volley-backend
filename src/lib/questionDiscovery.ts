@@ -364,20 +364,61 @@ export type ProfileKey =
 // the only place where a single word anywhere in the label decides the answer, and that is exactly
 // how "please provide your university email address" was answered with the university's name and
 // how a politically-exposed-person question mentioning a "state-owned bank" was answered "Dubai".
-// Two independent gates before a bare keyword is allowed to decide anything:
-//   1. the label must be SHAPED like a field name - short, and not a question; and
-//   2. it must not be asking for a different kind of value about that noun.
+// Three independent gates before a bare keyword is allowed to decide anything:
+//   1. the label must be SHORT - field-name length, not sentence length;
+//   2. it must not be a YES/NO question, which asks about the noun rather than for it; and
+//   3. it must not be asking for a different kind of value about that noun.
 // Anything richer than a field name has to be matched by an explicit pattern higher up, or go
 // unanswered. A blank field stalls the run; a confident wrong answer gets submitted.
+//
+// Gate 2 replaces a blunter one, "the label must not contain a question mark at all", which was
+// over-broad and cost six ordinary shapes, every one of which came back null and left a required
+// field empty - the exact harm this whole effort is undoing:
+//   "What is your phone number?"            "What university do you attend?"
+//   "What state do you live in?"            "Which city do you live in?"
+//   "In which state do you currently reside?"   "What is your current city of residence?"
+// A question mark does not mean a label is not naming a field; it means the portal wrote the field
+// name as a sentence. What actually distinguishes the one label the old gate was earning its keep
+// on, "may we contact you by phone?", is that it is POLAR: it opens with an auxiliary and wants a
+// yes or a no, so the phone number is not an answer to it. A wh-question opening with what, which
+// or where wants the value itself. That is the distinction gate 2 draws, and it is the whole
+// difference between refusing a consent checkbox and refusing every phone field on the internet.
+//
+// Verified by execution before narrowing it, on both defects the old gate was added for:
+//   "please provide your university email address" is six words with no question mark at all, and
+//   is refused by the qualifier on `email` and `address`;
+//   the politically-exposed-person label is 17 words, refused by the word count, with `owned` in
+//   the qualifier list as well, and refused a second time by POLITICALLY_EXPOSED_PERSON_QUESTION
+//   in resolveKnownAnswer before classification is ever consulted.
+// Phone is the one that matters most: it is required on most application forms, and on the managed
+// path the `type === 'tel'` escape at the top of classifyField never fires, because the runner
+// reports every inputType as `text`.
 const FIELD_NAME_LABEL_MAX_WORDS = 6;
+const POLAR_QUESTION_STEM =
+  /^(?:do|does|did|are|is|was|were|am|be|been|have|has|had|can|could|may|might|will|would|shall|should|must)\b/i;
 const KEYWORD_SUBJECT_QUALIFIER =
   /\be-?mails?\b|\baddress(?:es)?\b|\bdates?\b|\bmonths?\b|\byears?\b|\bwhen\b|\bwebsite\b|\burl\b|\blink\b|\bdepartment\b|\bfaculty\b|\badvisor\b|\bprofessor\b|\breferences?\b|\brank(?:ing)?\b|\bscores?\b|\bgpa\b|\bgrades?\b|\bscale\b|\blevel\b|\bowned\b|\bcontrolled\b|\brun\b/i;
+
+/**
+ * A yes/no question: opens with an auxiliary and is punctuated as a question.
+ *
+ * Both halves are required. The auxiliary alone would refuse a field named "Is" or a label opening
+ * with a month ("May graduation"), and the question mark alone is the over-broad gate this
+ * replaced. Exported so the explicit residence phrasings can be held to the same rule as the bare
+ * keyword: "are you based in a state that taxes remote work?" must not be answered "California"
+ * however plainly it names the noun.
+ */
+export function isPolarQuestion(label: string): boolean {
+  const core = (label ?? '').replace(/[*:•]/g, ' ').replace(/\s+/g, ' ').trim();
+  return core.includes('?') && POLAR_QUESTION_STEM.test(core);
+}
 
 export function labelNamesProfileField(label: string, noun: RegExp): boolean {
   if (!noun.test(label)) return false;
   const core = (label ?? '').replace(/[*:•]/g, ' ').replace(/\s+/g, ' ').trim();
-  if (!core || core.includes('?')) return false;
+  if (!core) return false;
   if (core.split(' ').length > FIELD_NAME_LABEL_MAX_WORDS) return false;
+  if (isPolarQuestion(core)) return false;
   return !KEYWORD_SUBJECT_QUALIFIER.test(core.replace(noun, ' '));
 }
 
@@ -385,6 +426,24 @@ const SCHOOL_NOUN = /\b(school|university|college|institution)\b/i;
 const PHONE_NOUN = /\b(phone|mobile)\b/i;
 const STATE_NOUN = /\b(state|province|prefecture)\b(?!\s+(?:your|the|you|it|why|how|what|when|where))|state\s*\/\s*province/i;
 const CITY_NOUN = /\b(city|town)\b|\blocation\b/i;
+// Two of the six recovered shapes run to seven words - "In which state do you currently reside?"
+// and "What is your current city of residence?" - so dropping the question-mark gate alone does not
+// reach them; the word budget still refuses them, and raising that budget would loosen the bare
+// keyword everywhere to buy back two labels. These say plainly which value they want, so they are
+// matched explicitly instead, the same way the school and graduation phrasings above are. Nothing
+// here fires without a personal-residence verb beside the noun, which is what keeps a state-owned
+// bank out: "state-owned" has no "do you live" after it, and the pattern cannot cross a `?`.
+const PERSONAL_RESIDENCE_VERB = String.raw`(?:do|are)\s+you\b[^?]{0,40}\b(?:live|living|reside|residing|located|based)`;
+const EXPLICIT_STATE_QUESTION = new RegExp(
+  String.raw`\b(?:state|province|prefecture)\b[^?]{0,40}\b${PERSONAL_RESIDENCE_VERB}\b`
+  + String.raw`|\b(?:state|province|prefecture)\s+of\s+(?:residence|residency)\b`,
+  'i',
+);
+const EXPLICIT_CITY_RESIDENCE_QUESTION = new RegExp(
+  String.raw`\b(?:city|town)\b[^?]{0,40}\b${PERSONAL_RESIDENCE_VERB}\b`
+  + String.raw`|\b(?:city|town)\s+of\s+(?:residence|residency)\b`,
+  'i',
+);
 const EXPLICIT_CITY_QUESTION =
   /where are you (currently )?(located|living|based)|current location|where do you live/i;
 
@@ -440,13 +499,22 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
   if (MAJOR_QUESTION.test(l)) return 'major';
 
   if (labelNamesProfileField(l, PHONE_NOUN)) return 'phone';
-  if (!locationCommitment && !locationChoice && labelNamesProfileField(l, STATE_NOUN)) {
+  // The explicit residence phrasings are held to the polar rule too. "Do you live in New York or
+  // California?" names the noun as plainly as "In which state do you currently reside?" and wants
+  // a yes or a no, not an address.
+  const polar = isPolarQuestion(l);
+  if (
+    !locationCommitment &&
+    !locationChoice &&
+    ((!polar && EXPLICIT_STATE_QUESTION.test(l)) || labelNamesProfileField(l, STATE_NOUN))
+  ) {
     return 'address_state';
   }
   if (
     !locationCommitment &&
     !locationChoice &&
-    (EXPLICIT_CITY_QUESTION.test(l) || labelNamesProfileField(l, CITY_NOUN))
+    ((!polar && (EXPLICIT_CITY_QUESTION.test(l) || EXPLICIT_CITY_RESIDENCE_QUESTION.test(l)))
+      || labelNamesProfileField(l, CITY_NOUN))
   )
     return 'address_city';
 

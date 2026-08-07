@@ -543,6 +543,129 @@ test('the managed probe reads the invisible widget its own sitekey', () => {
   assert.match(action.selector ?? '', /:not\(\.grecaptcha-badge\):not\(\.grecaptcha-badge \*\)/);
 });
 
+/* ---- two widgets, ONE site key ----
+ *
+ * The per-widget rule above was written as SET membership, and reCAPTCHA site keys are issued per
+ * DOMAIN, so the realistic two-widget employer page is the one where both widgets carry the same
+ * key. Measured on the tree that shipped the per-widget rule:
+ *
+ *   two widgets, distinct keys, one invisible  -> requires = true    (the case that was fixed)
+ *   SAME sitekey twice, one invisible          -> requires = false   (the case that was not)
+ *
+ * The live shape: a Greenhouse posting with the invisible reCAPTCHA on the application form and a
+ * rendered v2 checkbox on a "join our talent community" block, both wired to the company's single
+ * site key. `['K','K'].filter(k => !new Set(['K']).has(k))` is empty, nothing was left unexplained,
+ * and the submit gate opened on a challenge no one had cleared.
+ *
+ * One invisible reading accounts for ONE widget now. The invisible selector is the challenge
+ * selector narrowed by `[data-size="invisible"]`, so its matches are a subset of the challenge
+ * matches and multiset subtraction is the arithmetic that matches the markup. */
+test('two widgets sharing one site key do not cancel each other', () => {
+  assert.equal(
+    managedResultRequiresCaptchaAttention(probeResult([
+      { selector: CHALLENGE_SEL, label: 'captcha_challenge', value: '6LcSharedDomainKey' },
+      { selector: CHALLENGE_SEL, label: 'captcha_challenge', value: '6LcSharedDomainKey' },
+      { selector: '[data-sitekey][data-size="invisible" i]', label: 'captcha_invisible_sitekey', value: '6LcSharedDomainKey' },
+    ])),
+    true,
+  );
+  // The distinct-key case it was already right about must stay right.
+  assert.equal(
+    managedResultRequiresCaptchaAttention(probeResult([
+      { selector: CHALLENGE_SEL, label: 'captcha_challenge', value: '6LcInvisibleWidget' },
+      { selector: CHALLENGE_SEL, label: 'captcha_challenge', value: '6LcRealVisibleWidget' },
+      { selector: '[data-sitekey][data-size="invisible" i]', label: 'captcha_invisible_sitekey', value: '6LcInvisibleWidget' },
+    ])),
+    true,
+  );
+  // And a page whose every widget is accounted for, duplicates included, still does not block.
+  assert.equal(
+    managedResultRequiresCaptchaAttention(probeResult([
+      { selector: CHALLENGE_SEL, label: 'captcha_challenge', value: '6LcSharedDomainKey' },
+      { selector: CHALLENGE_SEL, label: 'captcha_challenge', value: '6LcSharedDomainKey' },
+      { selector: '[data-sitekey][data-size="invisible" i]', label: 'captcha_invisible_sitekey', value: '6LcSharedDomainKey' },
+      { selector: '[data-sitekey][data-size="invisible" i]', label: 'captcha_invisible_sitekey', value: '6LcSharedDomainKey' },
+    ])),
+    false,
+  );
+});
+
+/* ---- the signal that needs no comparison ----
+ *
+ * An anchor iframe declares its own size in its src, and the code collected that and only ever read
+ * it in the NEGATIVE direction: it was consulted for the badge-only page and ignored the moment any
+ * data-sitekey was also readable. Measured on the tree that shipped the per-widget rule:
+ *
+ *   widget with NO sitekey, anchor size=normal   -> requires = false
+ *   two anchors, one invisible one normal        -> requires = false
+ *
+ * A rendered checkbox announcing itself in plain text was waved through. */
+test('an anchor that has not declared itself invisible is a rendered checkbox', () => {
+  assert.equal(
+    managedResultRequiresCaptchaAttention(probeResult([
+      { selector: 'iframe', label: 'captcha_anchor', value: 'https://www.google.com/recaptcha/api2/anchor?ar=1&k=6Lc-Key&size=normal' },
+    ])),
+    true,
+  );
+  assert.equal(
+    managedResultRequiresCaptchaAttention(probeResult([
+      { selector: 'iframe', label: 'captcha_anchor', value: 'https://www.google.com/recaptcha/api2/anchor?ar=1&k=6Lc-Key&size=invisible' },
+      { selector: 'iframe', label: 'captcha_anchor', value: 'https://www.google.com/recaptcha/api2/anchor?ar=1&k=6Lc-Key&size=normal' },
+    ])),
+    true,
+  );
+  // An anchor that names no size at all is a checkbox too: reCAPTCHA's default size is `normal`,
+  // and reading an absent value as invisible would favour the one direction that ends in a submit
+  // under an unsolved challenge.
+  assert.equal(
+    managedResultRequiresCaptchaAttention(probeResult([
+      { selector: 'iframe', label: 'captcha_anchor', value: 'https://www.google.com/recaptcha/api2/anchor?ar=1&k=6Lc-Key' },
+    ])),
+    true,
+  );
+  // The Akuna badge-only page is the whole reason the anchor reading exists and must stay open.
+  assert.equal(managedResultRequiresCaptchaAttention(AKUNA_INVISIBLE_PROBE), false);
+  assert.deepEqual(corroborateManagedCaptchaBlockers('greenhouse', [CAPTCHA_BLOCKER], AKUNA_INVISIBLE_PROBE), []);
+});
+
+/* ---- correct under either extract cardinality ----
+ *
+ * Every list-against-list rule here rests on an assumption this repo cannot verify: that the remote
+ * Stratus runner echoes one entry per matched NODE. If `extract` returns one value per SELECTOR
+ * instead, `sitekeys` holds at most one element, the two-widget page collapses to one entry against
+ * one entry, the subtraction cancels, and per-widget reasoning silently becomes the page-aggregate
+ * reading it replaced.
+ *
+ * `captcha_rendered_sitekey` is the answer to that, and it is why the fix is not the subtraction
+ * alone. Its selector is the challenge set MINUS the nodes that declare themselves invisible, so
+ * any value at all under that label is a widget that has not said it is invisible - one entry or
+ * ten, first in DOM order or last. The fixture below is the same shared-key page as above, reported
+ * the way a per-selector runner would report it: the subtraction sees nothing and the gate still
+ * closes. */
+test('a widget that has not declared itself invisible blocks whatever the runner echoed', () => {
+  const perSelectorRunner = probeResult([
+    { selector: CHALLENGE_SEL, label: 'captcha_challenge', value: '6LcSharedDomainKey' },
+    { selector: '[data-sitekey][data-size="invisible" i]', label: 'captcha_invisible_sitekey', value: '6LcSharedDomainKey' },
+    { selector: '[data-sitekey]:not([data-size="invisible" i])', label: 'captcha_rendered_sitekey', value: '6LcSharedDomainKey' },
+  ]);
+  assert.equal(managedResultRequiresCaptchaAttention(perSelectorRunner), true);
+  assert.equal(managedCaptchaVerdictIsCorroborated('greenhouse', perSelectorRunner), true);
+  assert.deepEqual(
+    corroborateManagedCaptchaBlockers('greenhouse', [CAPTCHA_BLOCKER], perSelectorRunner),
+    [CAPTCHA_BLOCKER],
+  );
+});
+
+// The probe has to ASK for it, or the test above can never be true in production.
+test('the managed probe reads the sitekey of a widget that is NOT invisible', () => {
+  const action = buildManagedCaptchaProbeActions().find((entry) => entry.label === 'captcha_rendered_sitekey');
+  assert.ok(action, 'the probe must read the widgets that have not declared themselves invisible');
+  assert.equal(action.attribute, 'data-sitekey');
+  assert.equal(action.optional, true);
+  assert.match(action.selector ?? '', /:not\(\[data-size="invisible" i\]\)/);
+  assert.match(action.selector ?? '', /:not\(\.grecaptcha-badge\):not\(\.grecaptcha-badge \*\)/);
+});
+
 // Escalation. The widget still says invisible; the bframe says a human is looking at an image grid.
 test('an invisible widget with a bframe open blocks the managed submit', () => {
   assert.equal(

@@ -574,6 +574,100 @@ test('combobox discoveries resolve stored academic facts without direct text sel
   );
 });
 
+/* "I had an answer and I deliberately did not pick anything off this list."
+ *
+ * resolveProfileField reports that as matchedOption: false, and this function used to read the
+ * resolved VALUE off it and throw the flag away. So the one case where Litos knows in advance that
+ * a control will be left unfilled was the only case the applicant never heard about: the select
+ * stays on "Select...", the employer's own validation calls it required and empty, and the run
+ * stalls on a blocker she had no warning of.
+ *
+ * The refusal is right and stays. `chooseClosestOption(['Yes'], ['Yes, with sponsorship', 'Yes,
+ * without sponsorship', 'No'])` returns null because every option adds a legal claim the stored
+ * answer does not make, and picking one would submit a sponsorship declaration nobody authorized.
+ * What changes is that refusing now says so out loud. */
+test('an option list with no match for the saved answer is reported to the applicant', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'This internship is based in San Francisco, California.',
+    role: 'Software Engineering Intern',
+    portal_url: 'https://example.greenhouse.io/jobs/123',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+
+  const result = await discoverAndResolveQuestions(
+    [
+      {
+        label: 'Are you legally authorized to work in the United States?',
+        selector: 'select[name="question_1"]',
+        inputType: 'select',
+        maxLength: null,
+        options: ['Yes, with sponsorship', 'Yes, without sponsorship', 'No'],
+      },
+    ],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { work_authorized: true, needs_sponsorship: true },
+    true,
+    'greenhouse',
+  );
+
+  assert.deepEqual(result.attentionReasons, [
+    'none of the options match your saved answer, so this one is left for you: '
+    + '"Are you legally authorized to work in the United States?"',
+  ]);
+  // The question is still recorded with the honest answer beside it, so a fill layer that CAN see
+  // the menu is not deprived of the value; the reason is a warning, not a withdrawal.
+  assert.equal(result.questions.length, 1);
+  assert.equal(result.questions[0].answer, 'Yes');
+});
+
+// The mirror image, and the one this must not cost. A list the answer IS in produces no reason at
+// all, and neither does a free-text control, where matchedOption is false for every field on the
+// form because there was never a list to match against.
+test('a matched option and a free-text field are not reported as work for the applicant', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'This internship asks for an education history.',
+    role: 'Software Engineering Intern',
+    portal_url: 'https://example.greenhouse.io/jobs/123',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+
+  const result = await discoverAndResolveQuestions(
+    [
+      {
+        label: 'Graduation Month',
+        selector: 'select[name="grad_month"]',
+        inputType: 'select',
+        maxLength: null,
+        options: ['Select...', 'January', 'May', 'December'],
+      },
+      {
+        label: 'Graduation Month',
+        selector: '[data-litos-discovered-2]',
+        inputType: 'text',
+        maxLength: null,
+      },
+    ],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { grad_date: 'May 2028', grad_year: 2028 },
+    true,
+    'greenhouse',
+  );
+
+  assert.deepEqual(result.attentionReasons, []);
+});
+
 test('discovered GPA and major questions resolve from profile-backed academic fallbacks', async () => {
   const current: ApplicationReviewState = {
     jd_text: 'This internship asks for an education history.',

@@ -319,7 +319,14 @@ test('a reCAPTCHA anchor iframe is not evidence that an application form was rea
 });
 
 test('every labelled CAPTCHA evidence read is subtracted from reach, whatever it returned', () => {
-  for (const label of ['captcha_challenge', 'captcha_size', 'captcha_invisible_sitekey', 'captcha_anchor', 'captcha_bframe']) {
+  for (const label of [
+    'captcha_challenge',
+    'captcha_size',
+    'captcha_invisible_sitekey',
+    'captcha_rendered_sitekey',
+    'captcha_anchor',
+    'captcha_bframe',
+  ]) {
     assert.equal(
       applicationFormWasReached({ extracted: [{ label, value: 'something the widget said' }] }),
       false,
@@ -328,6 +335,35 @@ test('every labelled CAPTCHA evidence read is subtracted from reach, whatever it
   }
   // And an extract off the form itself still counts, which is the signal this must not cost.
   assert.equal(applicationFormWasReached({ extracted: [{ label: 'email', value: 'mehek@example.com' }] }), true);
+});
+
+/* The label is the easy case. The subtraction also has to work when the runner echoes an extract
+ * back WITHOUT the label it was asked with, which is the reason the value-shape fallback exists at
+ * all - the Akuna reproduction did exactly that.
+ *
+ * It caught a labelless anchor URL and missed a labelless size read, because the size read is the
+ * one evidence extract whose value carries no captcha vocabulary: it comes back as the bare
+ * contents of `data-size`. Measured:
+ *
+ *   {label: undefined, selector: undefined, value: 'invisible'} -> false
+ *
+ * so a page that reported nothing but its widget's size was recorded as having reached an
+ * application form. Reporting-only, and wrong in the direction that hides a run that never opened
+ * a form. */
+test('a size read with no label is still a CAPTCHA evidence read, not a form field', () => {
+  for (const value of ['invisible', 'normal', 'compact', 'Invisible']) {
+    assert.equal(
+      applicationFormWasReached({ extracted: [{ value }] }),
+      false,
+      `a labelless "${value}" is a data-size read, not something seen on the form`,
+    );
+  }
+  // The whole value, not a substring. An application answer that merely contains the word is a
+  // real answer off a real form, and subtracting it would cost the reach signal it proves.
+  assert.equal(
+    applicationFormWasReached({ extracted: [{ value: 'I am comfortable working normal business hours' }] }),
+    true,
+  );
 });
 
 test('a broken preview still outranks the reach question', () => {

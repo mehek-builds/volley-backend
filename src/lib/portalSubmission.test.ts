@@ -736,11 +736,12 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
     assert.equal(action.optional, true, `"${action.text}" must not be able to abort the run`);
   }
   // first_name, last_name, preferred names, email (phone and location are omitted from this fixture), resume, then
-  // the two optional reviewed questions, then the nine core-field evidence extracts and the four
-  // CAPTCHA evidence reads (data-size, the invisible widget's own sitekey, anchor src, bframe src)
-  // the prepare run carries so the runner's CAPTCHA verdict can be corroborated instead of
-  // believed. The sitekey read is what makes an invisible finding belong to a widget rather than
-  // to the whole page.
+  // the two optional reviewed questions, then the nine core-field evidence extracts and the five
+  // CAPTCHA evidence reads (data-size, the invisible widget's own sitekey, the sitekey of a widget
+  // that has NOT declared itself invisible, anchor src, bframe src) the prepare run carries so the
+  // runner's CAPTCHA verdict can be corroborated instead of believed. The two sitekey reads are
+  // what make an invisible finding belong to a widget rather than to the whole page, and the
+  // rendered one is the half that survives the runner echoing one entry per selector.
   assert.deepEqual(
     actions
       .filter((a) =>
@@ -760,6 +761,7 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
       'upload',
       'fillByLabelText',
       'fillByLabelText',
+      'extract',
       'extract',
       'extract',
       'extract',
