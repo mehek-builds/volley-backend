@@ -88,6 +88,7 @@ import type { ApplicationReviewQuestion } from '../lib/applicationReview';
 import { jobCountry } from '../lib/jobLocation';
 import { generateStoredCoverLetter, storedCoverLetter } from '../lib/coverLetterService';
 import { repairReviewPortalFromMonitoredJob } from '../lib/applicationPortalRepair';
+import { selectApplicationProfileRow } from '../lib/applicationFacts';
 import { mayClickFinalSubmit, preparedSubmissionStatus } from '../lib/submissionAuthorization';
 import { directPreparationIsSafe } from '../lib/submissionSafety';
 import {
@@ -303,10 +304,11 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
   const coverLetterMeta = (stored._cover_letter ?? {}) as Record<string, unknown>;
   const [userRow, appRow, profileRow] = await Promise.all([
     db.select().from(users).where(eq(users.id, row.user_id)).limit(1),
-    db.select().from(application_profile).where(eq(application_profile.user_id, row.user_id)).limit(1),
+    // Tolerant read, see lib/applicationFacts.ts.
+    selectApplicationProfileRow(row.user_id),
     db.select().from(profiles).where(eq(profiles.user_id, row.user_id)).limit(1),
   ]);
-  const app = appRow[0] ? decryptRow(appRow[0]) : {};
+  const app = appRow ? decryptRow(appRow) : {};
   const parsed = (profileRow[0]?.parsed_json ?? {}) as Record<string, unknown>;
   const review = readApplicationReview(stored);
   if (!review) throw new Error('We could not find this application');

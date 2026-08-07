@@ -35,6 +35,7 @@ import {
 } from '../engine/resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { openSseResponse, trackSseConnection } from '../lib/sseResponse';
+import { selectApplicationProfileRow } from '../lib/applicationFacts';
 
 /* GET /resume/base        - the stored base resume, or 404 if never built.
  * POST /resume/base/stream - build it, streaming each piece as it is decided (SSE).
@@ -269,10 +270,11 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
     const email = request.jwtPayload!.email;
     // appProfile and target are read for the ATS gate: the first supplies the contact lines the
     // rendered PDF must round-trip, the second the roles its keyword coverage is scored against.
-    const [[profile], bank, [appProfile], [target]] = await Promise.all([
+    const [[profile], bank, appProfile, [target]] = await Promise.all([
       db.select().from(profiles).where(eq(profiles.user_id, userId)),
       readExperienceBank(userId),
-      db.select().from(application_profile).where(eq(application_profile.user_id, userId)),
+      // Tolerant read, see lib/applicationFacts.ts.
+      selectApplicationProfileRow(userId),
       db.select().from(targeting).where(eq(targeting.user_id, userId)),
     ]);
 

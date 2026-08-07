@@ -6,6 +6,7 @@ import { application_profile, users } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { encryptField, decryptField } from '../lib/fieldCrypto';
 import { ENCRYPTED_FIELDS } from './applicationProfile';
+import { selectApplicationProfileRow, type ApplicationProfileRow } from '../lib/applicationFacts';
 
 // POST /profile/harvest
 //
@@ -87,7 +88,7 @@ type Harvestable = z.infer<typeof harvestable>;
 // A value that will not decrypt is treated as absent rather than thrown on: refusing to harvest
 // because of a key rotation would be a worse outcome than re-learning the field.
 function currentValue(
-  row: typeof application_profile.$inferSelect,
+  row: ApplicationProfileRow,
   key: keyof Harvestable,
 ): string | null {
   const stored = row[key as keyof typeof row] as unknown;
@@ -133,10 +134,8 @@ export async function harvestRoutes(fastify: FastifyInstance) {
       return reply.status(403).send({ error: 'onboarding_complete' });
     }
 
-    const [existing] = await db
-      .select()
-      .from(application_profile)
-      .where(eq(application_profile.user_id, userId));
+    // Tolerant read, see lib/applicationFacts.ts.
+    const existing = await selectApplicationProfileRow(userId);
 
     // Rule 2. Compare against the DECRYPTED value: an encrypted column is always a non-empty
     // string at rest, so testing the raw row would make every field look already-set and harvest

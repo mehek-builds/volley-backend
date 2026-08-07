@@ -1,10 +1,9 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { eq } from 'drizzle-orm';
-import { db } from '../db/index';
 import { application_profile } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { encryptField, decryptField, looksEncrypted, FieldDecryptError } from '../lib/fieldCrypto';
+import { selectApplicationProfileRow, upsertApplicationProfile, type ApplicationProfileRow } from '../lib/applicationFacts';
 
 // Fields sensitive enough to encrypt at rest per PRD-v2 Section 4: phone/address/
 // work-authorization status. Links and referral_source are not identity-sensitive
@@ -75,7 +74,38 @@ export const bodySchema = z.object({
   // means every autofill selects "Decline to Self-Identify" where that option exists.
   eeo_prefs: z.record(z.string()).nullable().optional(),
   referral_source_default: z.string().nullable().optional(),
+
+  /* ---- application facts asked once in onboarding ----
+   * See schema.ts for why each of these exists and what null means. Plaintext, so none of them is
+   * in ENCRYPTED_FIELDS above. Every one accepts null for the round-trip reason in the comment at
+   * the top of this schema: the client re-sends the whole fetched profile on save.
+   */
+  pronouns: z.string().nullable().optional(),
+  legal_first_name: z.string().nullable().optional(),
+  preferred_first_name: z.string().nullable().optional(),
+  high_school_grad_date: z.string().nullable().optional(),
+  // A string[] of employers previously applied to. [] is a real answer ("none"), which is why the
+  // array is not collapsed to a boolean here or anywhere downstream.
+  prior_application_employers: z.array(z.string()).nullable().optional(),
+  has_outstanding_offers: z.boolean().nullable().optional(),
+  outstanding_offer_details: z.string().nullable().optional(),
+  military_service: z.string().nullable().optional(),
+  politically_exposed: z.string().nullable().optional(),
+  politically_exposed_family: z.string().nullable().optional(),
+  // Constrained rather than free text: the resolver turns it into Yes/No answers on real forms, and
+  // an unrecognised string would silently mean "never asked" instead of failing the save.
+  advanced_study_plan: z.enum(['no', 'considering', 'committed']).nullable().optional(),
+  attest_truthful_information: z.boolean().nullable().optional(),
+  accept_privacy_notices: z.boolean().nullable().optional(),
 });
+
+/* The consent timestamp is SERVER-SET, never taken from the body, which is why it has no line
+ * above. It is the evidence that the two attestation booleans were granted, and evidence a client
+ * can post is not evidence. Same rule automationConsentValues follows for the users.* permissions. */
+export function attestationConsentStamp(body: z.infer<typeof bodySchema>): { application_attestations_consented_at: Date } | Record<string, never> {
+  const touched = body.attest_truthful_information !== undefined || body.accept_privacy_notices !== undefined;
+  return touched ? { application_attestations_consented_at: new Date() } : {};
+}
 
 function encryptRow(body: z.infer<typeof bodySchema>) {
   const row: Record<string, unknown> = { ...body };
@@ -110,7 +140,7 @@ function encryptRow(body: z.infer<typeof bodySchema>) {
 // serves - an export that returned ciphertext would not be an export. It inherits the throw above
 // deliberately: an export that silently handed back base64 would be worse here than anywhere,
 // since the student is being told this file IS their data.
-export function decryptRow(row: typeof application_profile.$inferSelect) {
+export function decryptRow(row: ApplicationProfileRow) {
   const out: Record<string, unknown> = { ...row };
   for (const field of ENCRYPTED_FIELDS) {
     const value = out[field];
@@ -127,7 +157,7 @@ export function decryptRow(row: typeof application_profile.$inferSelect) {
 function sendProfile(
   fastify: FastifyInstance,
   reply: FastifyReply,
-  row: typeof application_profile.$inferSelect,
+  row: ApplicationProfileRow,
   userId: string,
 ) {
   try {
@@ -150,11 +180,13 @@ function sendProfile(
 export async function applicationProfileRoutes(fastify: FastifyInstance) {
   fastify.get('/profile/application', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
-    const rows = await db.select().from(application_profile).where(eq(application_profile.user_id, userId)).limit(1);
-    if (rows.length === 0) {
+    // Tolerant read: the facts migration is run by hand and a merge is a deploy, so this code can
+    // be live against a database that does not have those columns yet. See lib/applicationFacts.ts.
+    const row = await selectApplicationProfileRow(userId);
+    if (!row) {
       return reply.status(404).send({ error: 'Application profile not found' });
     }
-    return sendProfile(fastify, reply, rows[0], userId);
+    return sendProfile(fastify, reply, row, userId);
   });
 
   fastify.put('/profile/application', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
@@ -167,22 +199,23 @@ export async function applicationProfileRoutes(fastify: FastifyInstance) {
       return reply.status(400).send({ error: 'Invalid request body' });
     }
 
-    const encrypted = encryptRow(body);
+    const encrypted = { ...encryptRow(body), ...attestationConsentStamp(body) };
 
     try {
-      await db
-        .insert(application_profile)
-        .values({ user_id: userId, ...encrypted, updated_at: new Date() })
-        .onConflictDoUpdate({
-          target: application_profile.user_id,
-          set: { ...encrypted, updated_at: new Date() },
-        });
+      const { droppedFactColumns } = await upsertApplicationProfile(userId, encrypted);
+      if (droppedFactColumns) {
+        fastify.log.warn(
+          { userId },
+          'Saved the application profile without the onboarding fact columns: this deploy is ahead of scripts/apply-application-facts-schema.mjs. Run that migration; the dropped answers read back as "never asked" until it has.',
+        );
+      }
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to save application profile' });
     }
 
-    const rows = await db.select().from(application_profile).where(eq(application_profile.user_id, userId)).limit(1);
-    return sendProfile(fastify, reply, rows[0], userId);
+    const row = await selectApplicationProfileRow(userId);
+    if (!row) return reply.status(500).send({ error: 'Failed to save application profile' });
+    return sendProfile(fastify, reply, row, userId);
   });
 }

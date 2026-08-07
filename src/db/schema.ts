@@ -509,6 +509,128 @@ export const application_profile = pgTable('application_profile', {
   languages: jsonb('languages'),
   eeo_prefs: jsonb('eeo_prefs'), // nullable, only set if the student explicitly opts in
   referral_source_default: text('referral_source_default').default('Company website'),
+
+  /* ---- application facts asked once in onboarding (2026-08-08) ----
+   *
+   * Measured, not guessed. Every column below was counted across the 25 most recent production
+   * packets for the owner account: each one names a question that BLOCKED at least two distinct
+   * job postings with "is required and is still empty", and that no existing column could answer.
+   * Fields that appeared on exactly one posting (SAT/ACT scores at IMC) were deliberately left out
+   * rather than added speculatively - see the counts in the migration script's header.
+   *
+   * ALL NULLABLE, and null is a real state everywhere: it means "never asked", and the fill path
+   * must leave the question alone rather than substitute a default. That is not a nicety here.
+   * Nine of these are SELF-DECLARATIONS about a person (pronouns, military service, politically
+   * exposed person status) or CONSENTS given to an employer, and a default value for any of them
+   * is a statement Litos would be making on the student's behalf that she never made.
+   *
+   * PLAINTEXT, all of them, deliberately NOT added to ENCRYPTED_FIELDS. The precedent is
+   * `languages` and `eeo_prefs` directly above: their entire purpose is to be typed into an
+   * employer form on every application, so putting them behind decrypt-or-fail (R-021) would buy
+   * nothing and cost the read path a failure mode. The identity bar is also already set elsewhere
+   * - profiles.parsed_json stores full_name, school and grad_date in the clear - so encrypting a
+   * legal first name here while the full name sits plaintext one table over would be theatre.
+   */
+
+  // "We care about addressing everyone correctly. Add your personal pronouns below." Blocked 2
+  // Akuna postings across 9 packets. Stored as the literal string to type ("she/her"), including
+  // "Prefer not to say" when that is what the student chose: a pronoun is never inferred from a
+  // name, a gender answer, or anything else.
+  pronouns: text('pronouns'),
+  // "What is your legal first name? (please also ensure that you input your legal first name in
+  // the *first name* field above)". Blocked 2 Akuna postings across 7 packets. Null falls back to
+  // the first token of the parsed full name, which is what the resolver already did - this column
+  // exists for the person whose legal name is NOT the name on their resume, which is the only
+  // reason a form asks the question separately.
+  legal_first_name: text('legal_first_name'),
+  // The other half of that pair. Asked directly by Akuna ("do you have a preferred name, other
+  // than the name indicated above?"), and without it "legal first name" has nothing to be
+  // distinct FROM. Empty string is not a valid value; null means never answered.
+  preferred_first_name: text('preferred_first_name'),
+  // "To be considered for this role, you must have earned a high school diploma... please confirm
+  // the month and year" (Akuna, 2 postings) and "When did you graduate from High School?" (IMC).
+  // Free text month-and-year like grad_date, e.g. "June 2024", because that is what the forms ask
+  // for and a full ISO date would be a precision the student does not have to hand.
+  high_school_grad_date: text('high_school_grad_date'),
+  /* "Have you previously applied to work at Point72?" / "...with Akuna in the past?" / "...another
+   * role @IMC within the last 12-18 months?" - 4 postings, 3 companies.
+   *
+   * A string[] of employers the student has applied to before, NOT a global boolean, because the
+   * question is per-employer and a single bit cannot answer it. The three states are all real and
+   * all different:
+   *   null  - never asked. The resolver leaves the question for the applicant.
+   *   []    - "I have not applied anywhere before", which answers No for every employer.
+   *   [...] - answers Yes for a named match and No otherwise.
+   * Before this column the LLM drafter answered these, and it invented the fact: one packet
+   * carries a 600-word essay opening "I have not applied to Akuna in the past", which is a claim
+   * about the student's history that nothing on file supported.
+   */
+  prior_application_employers: jsonb('prior_application_employers'),
+  // "Do you have any offer deadlines that we should be aware of?" (Akuna), "Are you holding any
+  // outstanding offers?" (Five Rings), "Do you currently have any offers?" (IMC), "Do you have any
+  // outstanding offers or deadlines?" (Virtu), "Do you currently have an offer? If so, what is
+  // your deadline" (Tower). 5 postings, 5 companies - the widest gap measured.
+  //
+  // The boolean and the detail are separate because the forms ask both shapes and a bare "Yes" is
+  // not an answer to "what is your deadline". Before this, the resolver returned a hardcoded "No",
+  // which is a factual claim about the student's job search that no stored value backed.
+  has_outstanding_offers: boolean('has_outstanding_offers'),
+  outstanding_offer_details: text('outstanding_offer_details'),
+  // "Have you served in the military?" (Point72, a required Yes/No that is NOT part of an EEO
+  // block). Stored as the literal declared answer, "Yes" / "No" / "Prefer not to say". Kept apart
+  // from eeo_prefs.veteran_status on purpose: that one answers a voluntary self-identification
+  // block whose option list is "I am a veteran / I am not / I decline to self-identify", and
+  // pouring "Decline to self-identify" into a required Yes/No select is exactly what left the
+  // Point72 field empty.
+  military_service: text('military_service'),
+  // "Are you or have you been entrusted with a position or function in any government,
+  // international organization, or state-owned enterprise?" and the immediate-family variant
+  // (Tower Research). Two columns because they are two questions with two different answers.
+  //
+  // THE REASON THIS IS A STORED DECLARATION AND NOT AN INFERENCE. On 2026-08-06 the live answer
+  // Litos gave to the first of these was "Dubai": classifyField's `\b(state|province)\b` residence
+  // rule matched the word "state" inside "state-owned", so a politically-exposed-person question
+  // was answered with the applicant's home city. Nothing may ever guess at these. Null means the
+  // question is left for the applicant, and the classifier now refuses the label outright.
+  politically_exposed: text('politically_exposed'),
+  politically_exposed_family: text('politically_exposed_family'),
+  // "Are you considering or committed to pursuing further education immediately after completing
+  // your current academic studies?" (Five Rings), "if you are an undergraduate considering a
+  // master's degree following graduation, when is your potential master's graduation date?"
+  // (Akuna, 2 postings), "Are you currently enrolled in a PhD program?" (IMC). 4 postings, 3
+  // companies - and not on the original list, found by counting.
+  //
+  // One of 'no' | 'considering' | 'committed'. Akuna's master's-graduation-date question was being
+  // answered "May 2028" - the student's UNDERGRADUATE graduation date, replayed onto a question
+  // about a degree she has not said she is doing.
+  advanced_study_plan: text('advanced_study_plan'),
+  /* ---- the two attestations Litos is allowed to tick, and nothing else ----
+   *
+   * "I certify that all information I have provided is true, complete, and accurate" (Akuna, 2
+   * postings), "Privacy Policy Acknowledgement" (Five Rings), "Privacy Statement" (IMC),
+   * "Privacy" (Point72). 5 postings, 4 companies.
+   *
+   * These are the ONLY two categories of checkbox an automated submission may affirm, and each one
+   * may only be affirmed from an explicit stored `true` here. A required affirmation that the
+   * information is truthful restates something the student already did by building the packet; an
+   * acceptance of a candidate privacy notice is the routine condition of applying at all.
+   *
+   * Everything else stays with the applicant, including things that look adjacent and are not:
+   * Akuna's "I acknowledge that this role is my top preference and I will not be considered for
+   * other tech and/or quant roles at Akuna this season" is a binding exclusivity commitment, and
+   * IMC's "Interview Code of Conduct" is acceptance of a behavioural policy. Both were previously
+   * auto-answered "Yes" with nothing stored behind them. Neither is a truthfulness attestation and
+   * neither is a privacy notice, so neither may be ticked by us at any price.
+   *
+   * null and false are treated identically by the resolver (do not tick). They are stored apart so
+   * "never asked" and "asked and declined" stay distinguishable in the record.
+   */
+  attest_truthful_information: boolean('attest_truthful_information'),
+  accept_privacy_notices: boolean('accept_privacy_notices'),
+  // When the two booleans above were last set. Consent evidence, in the same shape users.* records
+  // it for the automation permissions: a permission with no timestamp cannot be audited later.
+  application_attestations_consented_at: timestamp('application_attestations_consented_at', { withTimezone: true }),
+
   updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
 

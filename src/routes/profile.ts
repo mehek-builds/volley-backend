@@ -26,6 +26,7 @@ import {
   deleteUploadedResumeBlobsForUser,
   deleteUploadedResumeThenClear,
 } from '../lib/resumeAccess';
+import { selectApplicationProfileRow, type ApplicationProfileRow } from '../lib/applicationFacts';
 import {
   applyImpactAnswers,
   assessImpactBullet,
@@ -463,11 +464,8 @@ async function applicationRowForProfile(
   userId: string,
   fastify: FastifyInstance,
 ): Promise<Record<string, unknown> | undefined> {
-  const [row] = await db
-    .select()
-    .from(application_profile)
-    .where(eq(application_profile.user_id, userId))
-    .limit(1);
+  // Tolerant read, see lib/applicationFacts.ts.
+  const row = await selectApplicationProfileRow(userId);
   return academicRecordRowFor(row, (err) =>
     fastify.log.error(
       { err, userId },
@@ -487,7 +485,7 @@ async function applicationRowForProfile(
  * application_profile for the ATS gate's contact lines, and a second query for a column it is
  * holding would be a round trip bought with nothing. */
 export function academicRecordRowFor(
-  row: typeof application_profile.$inferSelect | undefined,
+  row: ApplicationProfileRow | undefined,
   onDecryptError: (err: unknown) => void,
 ): Record<string, unknown> | undefined {
   if (!row) return undefined;
@@ -934,10 +932,7 @@ export async function profileRoutes(fastify: FastifyInstance) {
     let gaps_prefilled: string[] = [];
     let seedRowExists = false;
     try {
-      const [existing] = await db
-        .select()
-        .from(application_profile)
-        .where(eq(application_profile.user_id, userId));
+      const existing = await selectApplicationProfileRow(userId);
       seedRowExists = Boolean(existing);
       const seed = academicSeedFrom(parsedProfile, existing as Record<string, unknown> | undefined);
       if (Object.keys(seed).length > 0) {

@@ -17,6 +17,7 @@ import { AUTOMATIC_CAPTCHA_CONSENT_VERSION, AUTOMATIC_SUBMISSION_CONSENT_VERSION
 import { standingConsentEligibility, mayChangeStandingConsent } from '../engine/standingConsent';
 import { generated_resumes } from '../db/schema';
 import { hasActiveEmailConnection, isComposioConfigured } from '../lib/composioConnections';
+import { selectApplicationProfileRow } from '../lib/applicationFacts';
 
 /**
  * How many submissions has this student personally approved AND seen reach the employer?
@@ -237,10 +238,12 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
   fastify.get('/onboarding/state', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
 
-    const [[user], [profile], [appProfile], [bankCount], [applyCount], [target]] = await Promise.all([
+    const [[user], [profile], appProfile, [bankCount], [applyCount], [target]] = await Promise.all([
       db.select().from(users).where(eq(users.id, userId)),
       db.select().from(profiles).where(eq(profiles.user_id, userId)),
-      db.select().from(application_profile).where(eq(application_profile.user_id, userId)),
+      // Tolerant read, see lib/applicationFacts.ts: /onboarding/state is the first call /start
+      // makes, and a 500 here is a blank setup flow for every student in the deploy window.
+      selectApplicationProfileRow(userId),
       db
         .select({ n: sql<number>`count(*)::int` })
         .from(experience_bank)

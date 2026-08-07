@@ -51,6 +51,29 @@ export type ApplicationProfileLike = StoredSalaryProfile & {
   skills?: string[] | null;
   eeo_prefs?: Record<string, string> | null;
   referral_source_default?: string;
+
+  /* ---- application facts asked once in onboarding ----
+   *
+   * See db/schema.ts for the measured counts behind each one. The rule for every field here is the
+   * same and is not negotiable: `undefined` means NEVER ASKED, and a question with nothing stored
+   * is left for the applicant rather than answered from something adjacent. These are
+   * self-declarations and consents; a default value for any of them is Litos making a statement to
+   * an employer on the student's behalf that she never made.
+   */
+  pronouns?: string;
+  legal_first_name?: string;
+  preferred_first_name?: string;
+  high_school_grad_date?: string;
+  // [] is a real answer meaning "I have not applied anywhere before". undefined is "never asked".
+  prior_application_employers?: string[];
+  has_outstanding_offers?: boolean;
+  outstanding_offer_details?: string;
+  military_service?: string;
+  politically_exposed?: string;
+  politically_exposed_family?: string;
+  advanced_study_plan?: 'no' | 'considering' | 'committed';
+  attest_truthful_information?: boolean;
+  accept_privacy_notices?: boolean;
 };
 
 const NEVER_FILL_PATTERNS = [
@@ -132,23 +155,244 @@ function workEligibilityAnswer(
   return { skipReason: workEligibilitySkipReason(label) };
 }
 
-function routineConsentAnswer(label: string): { value: string } | null {
-  if (/^\s*processing\s+of\s+personal\s+data\s*$/i.test(label)) return { value: 'Acknowledge/Confirm' };
+export function attestationSkipReason(label: string, what: string): string {
+  return `${what} left for you to agree to yourself: "${label.slice(0, 60)}"`;
+}
+
+/**
+ * Every checkbox-shaped agreement on an employer form, resolved against the two consents the
+ * student may grant once in onboarding - and refused by name otherwise.
+ *
+ * THE RULE, which the rest of this function is only an implementation of: Litos may affirm exactly
+ * two things on somebody's behalf. That the information supplied is truthful, which restates what
+ * she already did by approving the packet. And that a candidate privacy notice is accepted, which
+ * is the routine condition of applying at all. Both require an explicit stored `true`; neither is
+ * ever inferred from the fact that she pressed submit.
+ *
+ * Everything else is refused, INCLUDING things that sit right next to those two on the same form:
+ *   - "I acknowledge that this role is my top preference and I will not be considered for other
+ *     tech and/or quant roles at Akuna this season" is a binding exclusivity commitment over the
+ *     rest of her recruiting season. It was being auto-answered "Yes".
+ *   - "I acknowledge that my resume must be submitted in PDF format" is a process term. Harmless
+ *     to agree to and still not ours to agree to; it was also being auto-answered "Yes".
+ *   - "Interview Code of Conduct" is acceptance of a behavioural policy.
+ * Each of those returns a skipReason naming what is being agreed to, so the student is asked for a
+ * tick rather than discovering afterwards that a machine ticked it.
+ */
+function applicationConsentAnswer(
+  label: string,
+  ap: ApplicationProfileLike,
+): { value: string } | { skipReason: string } | null {
+  if (TRUE_COMPLETE_ACCURATE_CERTIFICATION.test(label)) {
+    return ap.attest_truthful_information === true
+      ? { value: 'Yes' }
+      : { skipReason: attestationSkipReason(label, 'certification that your information is true') };
+  }
+  if (TOP_ROLE_PREFERENCE_ACKNOWLEDGEMENT.test(label)) {
+    return { skipReason: attestationSkipReason(label, 'commitment about which roles you will be considered for') };
+  }
+  if (RESUME_PDF_ACKNOWLEDGEMENT.test(label)) {
+    return { skipReason: attestationSkipReason(label, 'acknowledgement about how your resume is submitted') };
+  }
+  if (CODE_OF_CONDUCT_ACKNOWLEDGEMENT.test(label)) {
+    return { skipReason: attestationSkipReason(label, 'agreement to a code of conduct') };
+  }
+  if (BARE_PRIVACY_ACKNOWLEDGEMENT.test(label)) {
+    return ap.accept_privacy_notices === true
+      ? { value: 'Yes' }
+      : { skipReason: attestationSkipReason(label, 'privacy notice') };
+  }
+  return null;
+}
+
+/** True when the student granted the standing privacy-notice consent in onboarding. */
+function privacyNoticesAccepted(ap: ApplicationProfileLike): boolean {
+  return ap.accept_privacy_notices === true;
+}
+
+function routineConsentAnswer(
+  label: string,
+  ap: ApplicationProfileLike,
+): { value: string } | { skipReason: string } | null {
+  // Every branch below is an acceptance of a data-processing or privacy term, so every branch now
+  // needs the same stored consent. They used to return "Yes" unconditionally, which is the thing
+  // the rule above forbids: Litos was agreeing on her behalf to notices she had never seen.
+  const consented = privacyNoticesAccepted(ap);
+  const gate = (value: string): { value: string } | { skipReason: string } =>
+    (consented ? { value } : { skipReason: attestationSkipReason(label, 'privacy notice') });
+
+  if (/^\s*processing\s+of\s+personal\s+data\s*$/i.test(label)) return gate('Acknowledge/Confirm');
   if (/demographic data survey/i.test(label)) return null;
-  if (/^\s*yes,\s*i\s+consent\s*$/i.test(label)) return { value: 'Yes, I consent' };
-  if (TOP_ROLE_PREFERENCE_ACKNOWLEDGEMENT.test(label)) return { value: 'Yes' };
-  if (RESUME_PDF_ACKNOWLEDGEMENT.test(label)) return { value: 'Yes' };
-  if (TRUE_COMPLETE_ACCURATE_CERTIFICATION.test(label)) return null;
+  if (/^\s*yes,\s*i\s+consent\s*$/i.test(label)) return gate('Yes, I consent');
   if (
     /\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b/i.test(label)
     && /\b(?:agree|consent|acknowledg\w*|processed?|processing)\b/i.test(label)
   ) {
-    return { value: 'Yes' };
+    return gate('Yes');
   }
   if (/\bjob application\b/i.test(label) && /\bprocess(?:ed|ing)?\b/i.test(label) && /\b(?:information|data)\b/i.test(label)) {
+    return gate('Yes');
+  }
+  return ROUTINE_APPLICANT_CONSENT_QUESTION.test(label) ? gate('Yes') : null;
+}
+
+/* ---- the self-declarations ----
+ *
+ * All four of these return a skipReason rather than null when nothing is stored. That is the
+ * difference that matters: null falls through to classifyField and then to the essay drafter, and
+ * both of those have already answered one of these questions wrongly on a live application. A
+ * skipReason stops the fall and tells the applicant which question is waiting for her.
+ */
+
+function politicallyExposedAnswer(
+  label: string,
+  ap: ApplicationProfileLike,
+): { value: string } | { skipReason: string } | null {
+  const isFamily = POLITICALLY_EXPOSED_FAMILY_QUESTION.test(label);
+  if (!isFamily && !POLITICALLY_EXPOSED_PERSON_QUESTION.test(label)) return null;
+  const stored = isFamily ? ap.politically_exposed_family : ap.politically_exposed;
+  if (stored) return { value: stored };
+  return {
+    skipReason: `politically exposed person question left for you (we never guess this): "${label.slice(0, 60)}"`,
+  };
+}
+
+function pronounsAnswer(label: string, ap: ApplicationProfileLike): { value: string } | { skipReason: string } | null {
+  if (!PRONOUNS_QUESTION.test(label)) return null;
+  if (ap.pronouns) return { value: ap.pronouns };
+  return { skipReason: `pronouns question left for you: "${label.slice(0, 60)}"` };
+}
+
+function militaryServiceAnswer(label: string, ap: ApplicationProfileLike): { value: string } | null {
+  if (!MILITARY_SERVICE_QUESTION.test(label)) return null;
+  // Inside a voluntary self-identification block, the student's own EEO wording wins: it was
+  // written against that block's option list, and eeoAnswer already handles the decline case.
+  if (EEO_QUESTION.test(label)) {
+    const pref = ap.eeo_prefs?.veteran_status ?? ap.eeo_prefs?.veteran;
+    if (pref && pref.trim()) return null;
+  }
+  return ap.military_service ? { value: ap.military_service } : null;
+}
+
+function highSchoolGraduationAnswer(
+  label: string,
+  ap: ApplicationProfileLike,
+): { value: string } | { skipReason: string } | null {
+  if (!HIGH_SCHOOL_GRADUATION_QUESTION.test(label)) return null;
+  const stored = ap.high_school_grad_date;
+  if (!stored) {
+    return { skipReason: `high school graduation question left for you: "${label.slice(0, 60)}"` };
+  }
+  // Akuna asks for the month and year; a bare "did you earn one" is a Yes that the stored date is
+  // the evidence for. Without a date on file neither is answerable, which is the branch above.
+  const asksWhen = /\bmonth\b|\byear\b|\bwhen\b|\bdate\b/i.test(label);
+  return { value: asksWhen ? stored : 'Yes' };
+}
+
+/** The employer a "have you applied here before?" question is actually asking about. */
+function employerNamedInApplicationQuestion(label: string): string | undefined {
+  const match = label.match(/(?:\bwith\b|\bat\b|\bto\s+work\s+(?:at|for)\b|@)\s*([a-z0-9][a-z0-9 .&'’-]{1,40})/i);
+  const raw = match?.[1]
+    ?.replace(/\b(?:before|previously|in\s+the\s+past|within\s+the\s+last|or\s+another\s+role|as\s+an?)\b[\s\S]*$/i, '')
+    .replace(/[.,;:?]+$/g, '')
+    .trim();
+  if (!raw) return undefined;
+  if (/^(?:any|a|an|the|this|our|your|company|organization|organisation|employer|role|position|firm)$/i.test(raw)) {
+    return undefined;
+  }
+  const normalized = normalizeEmployerName(raw);
+  return normalized.length >= 3 ? normalized : undefined;
+}
+
+/**
+ * Whether a declared employer and the employer named in the question are the same company.
+ *
+ * Token-prefix, not string equality. Forms print the short trading name ("Akuna", "@IMC") while a
+ * student types the legal one ("Akuna Capital"), and requiring an exact match would answer "No" to
+ * "have you applied to Akuna before?" from a list whose first entry is Akuna Capital - a wrong
+ * answer given confidently, which is worse than the blank it replaced. Prefix rather than
+ * substring: "Tone" must not match "Tonee", the near-miss the prior-employer rule already guards.
+ */
+function employerMatchesTarget(declared: string, target: string): boolean {
+  if (!declared || !target) return false;
+  const a = declared.split(' ').filter(Boolean);
+  const b = target.split(' ').filter(Boolean);
+  const shared = Math.min(a.length, b.length);
+  if (shared === 0) return false;
+  for (let i = 0; i < shared; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function previouslyAppliedAnswer(
+  label: string,
+  ap: ApplicationProfileLike,
+): { value: string } | { skipReason: string } | null {
+  if (!PREVIOUSLY_APPLIED_QUESTION.test(label)) return null;
+  const declared = ap.prior_application_employers;
+  // undefined is "never asked". An empty array is the student saying she has not applied anywhere
+  // before, which answers No for every employer - the two must not be collapsed.
+  if (!declared) {
+    return { skipReason: `prior application question left for you: "${label.slice(0, 60)}"` };
+  }
+  if (declared.length === 0) return { value: 'No' };
+  const target = employerNamedInApplicationQuestion(label);
+  if (!target) {
+    return { skipReason: `prior application question left for you: "${label.slice(0, 60)}"` };
+  }
+  const matched = declared.some((employer) => employerMatchesTarget(normalizeEmployerName(employer), target));
+  return { value: matched ? 'Yes' : 'No' };
+}
+
+function outstandingOfferAnswer(
+  label: string,
+  inputType: string,
+  ap: ApplicationProfileLike,
+): { value: string } | { skipReason: string } | null {
+  /* Two shapes, and the second one is why this is not a single regex. "Do you have any offers?" is
+   * the question; "If you answered Yes above, please provide details about your offer deadlines" is
+   * its follow-up box, which reads as a generic conditional and would otherwise be swept up by
+   * OPTIONAL_FOLLOWUP_AFTER_NO_QUESTION's blanket "N/A" even when there ARE offers to describe. */
+  const isFollowUp = OPTIONAL_FOLLOWUP_AFTER_NO_QUESTION.test(label) && /\boffers?\b|\bdeadlines?\b/i.test(label);
+  if (!isFollowUp && !OFFER_DEADLINE_QUESTION.test(label)) return null;
+  // "N/A" is the honest answer to a detail box when the answer above was no; "No" is the honest
+  // answer to the question itself.
+  if (ap.has_outstanding_offers === false) return { value: isFollowUp ? 'N/A' : 'No' };
+  if (ap.has_outstanding_offers === true) {
+    const details = ap.outstanding_offer_details;
+    const asksDetail = isFollowUp
+      || inputType === 'textarea'
+      || /\bdeadline|\bwhen\b|\bwhich\b|\bwhat\b|\bdetails?\b|\bspecify\b|\bplease\s+(?:list|share|provide|describe)\b/i.test(label);
+    if (asksDetail && details) return { value: details };
+    // "Yes" with no detail stored, on a box that wants the detail, would be an answer the employer
+    // cannot use. Say so rather than half-answer it.
+    if (asksDetail) return { skipReason: `offer question left for you: "${label.slice(0, 60)}"` };
     return { value: 'Yes' };
   }
-  return ROUTINE_APPLICANT_CONSENT_QUESTION.test(label) ? { value: 'Yes' } : null;
+  return { skipReason: `offer question left for you: "${label.slice(0, 60)}"` };
+}
+
+function furtherEducationAnswer(
+  label: string,
+  ap: ApplicationProfileLike,
+): { value: string } | { skipReason: string } | null {
+  const plan = ap.advanced_study_plan;
+  // Checked FIRST, and never answered from grad_date. A packet in production carried "May 2028" -
+  // the undergraduate graduation date - as the answer to Akuna's "when is your potential master's
+  // graduation date?", which states that she is doing a master's.
+  if (POTENTIAL_ADVANCED_GRADUATION_DATE_QUESTION.test(label)) {
+    if (plan === 'no') return { value: 'N/A' };
+    return { skipReason: `further-education question left for you: "${label.slice(0, 60)}"` };
+  }
+  if (FURTHER_EDUCATION_DEGREE_TYPE_QUESTION.test(label)) {
+    if (plan === 'no') return { value: 'N/A' };
+    return { skipReason: `further-education question left for you: "${label.slice(0, 60)}"` };
+  }
+  if (!FURTHER_EDUCATION_PLAN_QUESTION.test(label)) return null;
+  if (plan === 'no') return { value: 'No' };
+  if (plan === 'considering' || plan === 'committed') return { value: 'Yes' };
+  return { skipReason: `further-education question left for you: "${label.slice(0, 60)}"` };
 }
 
 function routineLocationCommitmentAnswer(label: string): { value: string } | null {
@@ -272,7 +516,9 @@ const SOFTWARE_ENGINEERING_AREA_QUESTION =
 const HIGH_SCHOOL_DIPLOMA_CONFIRMATION_QUESTION =
   /\b(?:earned|have|hold|received|obtained)\b[^?]{0,120}\b(?:high\s+school\s+diploma|equivalent\s+degree|ged)\b|\b(?:high\s+school\s+diploma|equivalent\s+degree|ged)\b[^?]{0,120}\b(?:confirm|acknowledge|certify|required|must\s+have)\b/i;
 const OFFER_DEADLINE_QUESTION =
-  /\b(?:offers?|offer\s+deadlines?|outstanding\s+offers?|deadlines?)\b[^?]{0,120}\b(?:aware|currently|have|should\s+we\s+know|tell\s+us|provide|share)\b|\b(?:do\s+you\s+have|currently\s+have)\b[^?]{0,120}\b(?:offers?|deadlines?)\b/i;
+  // The third alternative was added for Five Rings' "Are you holding any outstanding offers?",
+  // which has no "do you have" stem and so matched neither of the first two.
+  /\b(?:offers?|offer\s+deadlines?|outstanding\s+offers?|deadlines?)\b[^?]{0,120}\b(?:aware|currently|have|should\s+we\s+know|tell\s+us|provide|share)\b|\b(?:do\s+you\s+have|currently\s+have)\b[^?]{0,120}\b(?:offers?|deadlines?)\b|\b(?:are\s+you\s+)?hold(?:ing)?\b[^?]{0,60}\b(?:outstanding\s+)?offers?\b/i;
 const OPTIONAL_FOLLOWUP_AFTER_NO_QUESTION =
   /\bif\s+you\s+(?:answered|said|selected)\s+["'“”]?\s*yes\b[^?]{0,180}\b(?:provide|respond|explain|list|tell|details?|additional)\b|\bif\s+applicable\b[^?]{0,120}\b(?:provide|list|explain|details?|extension)\b/i;
 const US_STATE_RESIDENCE_SELECT_QUESTION = /\bstate\s+of\s+residence\b[^?]{0,160}\bnot\s+in\s+the\s+us\b/i;
@@ -292,6 +538,84 @@ const OPTIONS_MARKET_MAKING_EXPERIENCE_QUESTION =
   /\b(?:options\s+market\s+making|market\s+making\s+trading|trading\s+firm)\b/i;
 const WORK_AUTHORIZATION_DETAIL_QUESTION =
   /\b(?:current\s+immigration\s+status|basis\s+of\s+your\s+current\s+work\s+authorization|when\s+does\s+it\s+expire|extension\s+options?|additional\s+detail\s+about\s+your\s+sponsorship\s+need)\b/i;
+
+/* ---- the questions employers keep asking that nothing on file could answer ----
+ *
+ * Each pattern below was written against the exact labels measured on the 25 most recent
+ * production packets, and each has a handler in resolveKnownAnswer that answers ONLY from an
+ * explicit stored declaration. Every one of them runs BEFORE classifyField, which is the point:
+ * these are the labels a catch-all gets wrong, and the whole class of bug is a broad rule reaching
+ * a question that was never its business.
+ */
+
+// "We care about addressing everyone correctly. Add your personal pronouns below to share with the
+// hiring team." Also the self-describe follow-up, which asks for the same fact in a second box.
+const PRONOUNS_QUESTION = /\bpronouns?\b/i;
+
+/* POLITICALLY EXPOSED PERSON. The narrowest patterns in this file, on purpose.
+ *
+ * `state-owned enterprise` is in here as a POSITIVE match precisely because it is the phrase that
+ * caused the harm: classifyField's residence rule reads `\b(state|province)\b`, the word "state"
+ * appears inside "state-owned", and on 2026-08-06 Tower Research's PEP question was answered with
+ * the applicant's home city, "Dubai". Naming the phrase here means the question is recognised for
+ * what it is and short-circuited before any residence rule can see it. */
+const POLITICALLY_EXPOSED_PERSON_QUESTION =
+  /\bpolitically\s+exposed\b|\bentrusted\s+with\s+a\s+(?:prominent\s+)?(?:public\s+)?(?:position|function)\b|\bstate[-\s]owned\s+enterprise\b|\bsenior\s+(?:political|government)\s+figure\b/i;
+const POLITICALLY_EXPOSED_FAMILY_QUESTION =
+  /\bimmediate\s+family\s+member\b[\s\S]{0,200}\b(?:holding\s+such|such\s+a\s+position|politically\s+exposed)\b|\b(?:close\s+associate|family\s+member)\b[\s\S]{0,160}\bpolitically\s+exposed\b/i;
+
+// Point72's "Have you served in the military?" - a required Yes/No that is not part of an EEO
+// block, and so cannot be answered with "Decline to self-identify".
+const MILITARY_SERVICE_QUESTION =
+  /\bmilitary\b|\barmed\s+forces\b|\bveteran\b/i;
+
+// "Do you have a preferred name, other than the name indicated above?"
+const PREFERRED_NAME_QUESTION =
+  /\bpreferred\s+(?:first\s+)?name\b|\bname\s+you\s+(?:go\s+by|prefer\s+to\s+be\s+called)\b/i;
+
+// Akuna's "please confirm the month and year" diploma question and IMC's "When did you graduate
+// from High School?". Distinct from every other graduation rule in this file, and checked before
+// them, so the UNIVERSITY graduation date can never be replayed as a high-school one.
+const HIGH_SCHOOL_GRADUATION_QUESTION =
+  /\bhigh\s+school\b[\s\S]{0,200}\b(?:graduat\w*|diploma|ged|month\s+and\s+year|when)\b|\b(?:graduat\w*|when|month|year)\b[\s\S]{0,120}\bhigh\s+school\b/i;
+
+// "Have you previously applied to work at Point72?" / "...with Akuna in the past?" / "...another
+// role @IMC within the last 12-18 months?". About APPLICATIONS, not employment, which is why it is
+// separate from PRIOR_EMPLOYER_OR_PROGRAM_QUESTION above.
+const PREVIOUSLY_APPLIED_QUESTION =
+  /\b(?:have|had)\s+you\s+(?:ever\s+|previously\s+)?applied\b|\bpreviously\s+applied\b|\bapplied\s+(?:to|for|with)\b[\s\S]{0,160}\b(?:previously|before|in\s+the\s+past|within\s+the\s+last)\b/i;
+
+// Further education AFTER the current degree. Checked before every graduation-date rule so that
+// "when is your potential master's graduation date?" cannot be handed the undergraduate date -
+// which is exactly what a live Akuna packet carried, answered "May 2028".
+const ADVANCED_DEGREE_WORD = String.raw`master(?:['’]s)?|masters|m\.?s\.?|mba|ph\.?\s?d|doctorate|graduate\s+(?:school|studies|degree)`;
+const POTENTIAL_ADVANCED_GRADUATION_DATE_QUESTION = new RegExp(
+  String.raw`\b(?:${ADVANCED_DEGREE_WORD})\b[\s\S]{0,120}\bgraduation\s+date\b|\b(?:potential|expected|anticipated)\b[\s\S]{0,80}\b(?:${ADVANCED_DEGREE_WORD})\b[\s\S]{0,80}\bgraduat\w*`,
+  'i',
+);
+const FURTHER_EDUCATION_PLAN_QUESTION = new RegExp(
+  String.raw`\b(?:considering|committed|plan(?:ning)?|intend\w*|pursuing)\b[\s\S]{0,160}\b(?:further\s+education|additional\s+degree|${ADVANCED_DEGREE_WORD})\b|\bfurther\s+education\b[\s\S]{0,160}\b(?:after|following|immediately)\b`,
+  'i',
+);
+const FURTHER_EDUCATION_DEGREE_TYPE_QUESTION =
+  /\btype\s+of\s+degree\s+you\s+(?:plan|intend|would\s+like)\s+to\s+pursue\b|\bif\s+so\b[\s\S]{0,80}\btype\s+of\s+degree\b/i;
+
+/* ---- attestations ----
+ *
+ * Two categories, and only two, may ever be ticked by an automated submission, and each only from
+ * an explicit stored consent (application_profile.attest_truthful_information and
+ * accept_privacy_notices). Everything else here is named so it can be REFUSED by name rather than
+ * swept up by a general consent rule.
+ */
+// Bare-label privacy acknowledgements. Five Rings ships "Privacy Policy Acknowledgement", IMC
+// "Privacy Statement", Point72 just "Privacy": no verb, no sentence, nothing for the prose-shaped
+// ROUTINE_APPLICANT_CONSENT_QUESTION to match, which is why all three sat empty.
+const BARE_PRIVACY_ACKNOWLEDGEMENT =
+  /^\s*(?:candidate\s+|applicant\s+)?privacy(?:\s+(?:policy|statement|notice))?(?:\s+acknowledg\w*|\s+consent)?\s*$/i;
+// A behavioural policy is not a privacy notice and not a statement of truth. IMC's "Interview Code
+// of Conduct" was previously auto-answered "Yes" with nothing stored behind it.
+const CODE_OF_CONDUCT_ACKNOWLEDGEMENT =
+  /\bcode\s+of\s+conduct\b|\bcode\s+of\s+ethics\b|\bacceptable\s+use\s+policy\b/i;
 
 const NATIONALITY_TO_COUNTRY: Record<string, string> = {
   indian: 'India', american: 'United States', emirati: 'United Arab Emirates',
@@ -314,6 +638,16 @@ export type ProfileKey =
 export function classifyField(label: string, type?: string): ProfileKey | null {
   const l = label ?? '';
   if (isRefusedQuestion(l)) return null;
+  /* Belt and braces on the "Dubai" defect. resolveKnownAnswer already short-circuits these labels,
+   * but classifyField has two other callers (portalSubmission's questionFillShouldPressEnter and
+   * profileFieldResolution's profileFieldIntent), and the bug was never in the resolver's ordering
+   * - it was that `\b(state|province)\b` matched "state" inside "state-owned enterprise" and
+   * handed a politically-exposed-person question to the residence rule. A question about a
+   * government position has no profile field, in this function or anywhere else. */
+  if (POLITICALLY_EXPOSED_PERSON_QUESTION.test(l) || POLITICALLY_EXPOSED_FAMILY_QUESTION.test(l)) return null;
+  // Same shape of hazard: "personal pronouns" carries no residence, name or degree word that a
+  // rule below could latch onto today, and this makes sure none added later can.
+  if (PRONOUNS_QUESTION.test(l)) return null;
   if (type === 'tel') return 'phone';
 
   const locationCommitment = isLocationCommitmentQuestion(l);
@@ -1024,9 +1358,48 @@ export function resolveKnownAnswer(
   ap: ApplicationProfileLike,
   jdText: string | undefined,
 ): { value: string } | { skipReason: string } | null {
+  /* THE SELF-DECLARATIONS COME FIRST, before every classifier in this file.
+   *
+   * Not a style choice. Each of these is a question a broad rule further down has already answered
+   * wrongly on a live application - the PEP question got the applicant's home city because
+   * `\bstate\b` matched inside "state-owned", and the master's-graduation-date question got her
+   * undergraduate date. Recognising them up here means no later rule can reach them, and each one
+   * returns a skipReason rather than null when nothing is stored, so the fall-through to the essay
+   * drafter cannot invent an answer either. */
+  const politicallyExposed = politicallyExposedAnswer(label, ap);
+  if (politicallyExposed) return politicallyExposed;
+
+  const pronouns = pronounsAnswer(label, ap);
+  if (pronouns) return pronouns;
+
+  const furtherEducation = furtherEducationAnswer(label, ap);
+  if (furtherEducation) return furtherEducation;
+
+  const highSchool = highSchoolGraduationAnswer(label, ap);
+  if (highSchool) return highSchool;
+
+  const previouslyApplied = previouslyAppliedAnswer(label, ap);
+  if (previouslyApplied) return previouslyApplied;
+
+  const outstandingOffer = outstandingOfferAnswer(label, inputType, ap);
+  if (outstandingOffer) return outstandingOffer;
+
+  const applicationConsent = applicationConsentAnswer(label, ap);
+  if (applicationConsent) return applicationConsent;
+
   if (LEGAL_FIRST_NAME_QUESTION.test(label)) {
-    const firstName = ap.full_name?.trim().split(/\s+/)[0];
+    // The stored legal name wins over the resume's. That is the entire reason the form asks the
+    // question twice: for the person whose legal first name is not the name on their resume, the
+    // parsed full name is the WRONG answer, and it is the one we would otherwise give.
+    const firstName = ap.legal_first_name ?? ap.full_name?.trim().split(/\s+/)[0];
     return firstName ? { value: firstName } : null;
+  }
+
+  if (PREFERRED_NAME_QUESTION.test(label)) {
+    // Answered only from an explicit declaration. Null falls through unchanged, because "I have no
+    // preferred name" and "never asked" are not distinguishable from an empty column, and stating
+    // the first when we only know the second is a claim we cannot back.
+    if (ap.preferred_first_name) return { value: ap.preferred_first_name };
   }
 
   const preferredLocation = locationPreferenceAnswer(label, jdText);
@@ -1052,12 +1425,18 @@ export function resolveKnownAnswer(
   }
 
   if (HIGH_SCHOOL_DIPLOMA_CONFIRMATION_QUESTION.test(label)) {
-    return { value: 'Yes' };
+    // Was an unconditional "Yes". A confirmation that a qualification was earned is a claim about
+    // the student's record, so it now needs the record: highSchoolGraduationAnswer above handles
+    // every label that says "high school", and this one covers the "equivalent degree"/"GED"
+    // phrasings that do not.
+    return ap.high_school_grad_date
+      ? { value: 'Yes' }
+      : { skipReason: `high school graduation question left for you: "${label.slice(0, 60)}"` };
   }
 
-  if (OFFER_DEADLINE_QUESTION.test(label)) {
-    return { value: 'No' };
-  }
+  // Offers are handled by outstandingOfferAnswer at the top of this function, from the stored
+  // declaration. The unconditional "No" that used to sit here was a statement about the student's
+  // live job search that nothing on file supported.
 
   if (WORK_AUTHORIZATION_DETAIL_QUESTION.test(label)) {
     return { skipReason: workEligibilitySkipReason(label) };
@@ -1096,7 +1475,7 @@ export function resolveKnownAnswer(
   const programmingLanguage = programmingLanguageAnswer(label, ap);
   if (programmingLanguage) return programmingLanguage;
 
-  const routineConsent = routineConsentAnswer(label);
+  const routineConsent = routineConsentAnswer(label, ap);
   if (routineConsent) return routineConsent;
 
   const routineLocationCommitment = routineLocationCommitmentAnswer(label);
@@ -1106,6 +1485,12 @@ export function resolveKnownAnswer(
   if (workEligibility) return workEligibility;
 
   if (AGE_ATTESTATION_QUESTION.test(label)) return null;
+
+  // Before the EEO branch: Point72's "Have you served in the military?" is a required Yes/No with
+  // no decline option, and eeoAnswer's "Decline to self-identify" fits none of its choices, so the
+  // field stayed empty. Falls through untouched when the question really is an EEO self-ID block.
+  const militaryService = militaryServiceAnswer(label, ap);
+  if (militaryService) return militaryService;
 
   if (EEO_QUESTION.test(label)) {
     return { value: eeoAnswer(eeoPreferenceForLabel(label, ap.eeo_prefs)) };

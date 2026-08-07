@@ -19,6 +19,7 @@ import { requireAuth } from '../middleware/auth';
 import { deleteBlobsForUser, mintDownloadToken } from '../lib/resumeAccess';
 import { apiBaseFor } from '../lib/apiBase';
 import { decryptRow } from './applicationProfile';
+import { selectApplicationProfileRow } from '../lib/applicationFacts';
 
 // The privacy policy promises the student can export or delete everything we hold. Until now
 // nothing here backed that claim: there was no delete path in the codebase at all, so the only
@@ -34,11 +35,9 @@ export async function accountRoutes(fastify: FastifyInstance) {
     if (!user) return reply.status(404).send({ error: 'Account not found' });
 
     const [profile] = await db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1);
-    const [appProfile] = await db
-      .select()
-      .from(application_profile)
-      .where(eq(application_profile.user_id, userId))
-      .limit(1);
+    // Tolerant read (lib/applicationFacts.ts): an export must not 500 during the window where
+    // this code is deployed and the facts migration has not been run yet.
+    const appProfile = await selectApplicationProfileRow(userId);
     const bank = await db.select().from(experience_bank).where(eq(experience_bank.user_id, userId));
     const resumes = await db.select().from(generated_resumes).where(eq(generated_resumes.user_id, userId));
     const outreach = await db.select().from(outreach_events).where(eq(outreach_events.user_id, userId));
