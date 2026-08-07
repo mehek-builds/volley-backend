@@ -27,7 +27,6 @@ import {
   buildManagedDiscoveryActions,
   corroborateManagedCaptchaBlockers,
   managedCaptchaProvider,
-  managedCaptchaVerdictIsCorroborated,
   detectCaptchaProvider,
   captchaProviderForFamily,
   buildManagedPortalActions,
@@ -35,6 +34,7 @@ import {
   clickFinalSubmit,
   detectPortal,
   managedResultRequiresCaptchaAttention,
+  isManagedCaptchaEvidenceExtract,
   fillPortal,
   hasCoverLetterUpload,
   managedResultFilledFields,
@@ -620,22 +620,34 @@ const REQUIRED_AND_EMPTY_BLOCKER = /^"(.+)" is required and is still empty$/;
  *    found that control (this is what makes the Nuro run of 2026-08-06 genuinely "form reached,
  *    fields empty" while the Jump Trading run beside it was not);
  *  - a discovered question means the discover pass enumerated real inputs;
- *  - a non-null extract means the probed element existed;
+ *  - a non-null extract of something on the FORM means the probed element existed;
  *  - the applicant's own email appearing in the page text means it was typed there, whatever the
  *    provider did or did not report back.
+ *
+ * CAPTCHA EVIDENCE IS SUBTRACTED FIRST, and this is the part that has to stay. Every managed fill
+ * run appends the challenge reads to its extract list, and one of them is a reCAPTCHA anchor iframe
+ * whose selector deliberately does not exclude the badge, because the badge's own anchor is the
+ * only thing that identifies an invisible-only page. That anchor exists on a large share of
+ * employer pages, application form or not - the Akuna Greenhouse page carries one over a page this
+ * runner never filled a field on. Counting it as reach turned "we cannot confirm we reached your
+ * application form" into the three-sentence description of a form that was never opened, on every
+ * reCAPTCHA-bearing page, which is precisely the sentence the not-reached reason exists to delete.
+ *
+ * A challenge widget is evidence that a page loaded. It is not evidence of an application form.
  */
 export function applicationFormWasReached(input: {
   filledFields?: readonly string[];
   providerBlockers?: readonly string[];
   discoveredQuestionCount?: number;
-  extracted?: ReadonlyArray<{ value: string | null }>;
+  extracted?: ReadonlyArray<{ label?: string; selector?: string; value: string | null }>;
   text?: string;
   email?: string;
 }): boolean {
   if ((input.filledFields?.length ?? 0) > 0) return true;
   if ((input.providerBlockers ?? []).some((blocker) => REQUIRED_AND_EMPTY_BLOCKER.test(blocker))) return true;
   if ((input.discoveredQuestionCount ?? 0) > 0) return true;
-  if ((input.extracted ?? []).some((item) => item.value?.trim())) return true;
+  const formExtracts = (input.extracted ?? []).filter((item) => !isManagedCaptchaEvidenceExtract(item));
+  if (formExtracts.some((item) => item.value?.trim())) return true;
   const email = compactEvidenceText(input.email);
   return email.length > 0 && compactEvidenceText(input.text).includes(email);
 }
@@ -646,7 +658,7 @@ export function preparationEvidenceBlockers(
     filledFields?: string[];
     blockers?: readonly string[];
     discovered?: ReadonlyArray<unknown>;
-    extracted?: ReadonlyArray<{ value: string | null }>;
+    extracted?: ReadonlyArray<{ label?: string; selector?: string; value: string | null }>;
   },
   packet: SubmissionPacket,
 ): string[] {
@@ -1517,13 +1529,16 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
         fastify.log.warn({ applicationId: row.id, detail }, 'CAPTCHA probe failed, continuing unprobed');
         return null;
       });
-    // Corroborated as well as probed, because this predicate alone decides whether ANY managed
-    // submission is allowed to proceed - one function, every employer, every ATS. On the families
-    // Litos claims it can finish unaided, the page markup has to agree before the run stops.
-    if (
-      managedResultRequiresCaptchaAttention(captchaProbe)
-      && managedCaptchaVerdictIsCorroborated(portal, captchaProbe)
-    ) {
+    // ONE check, named once. This used to read
+    //   managedResultRequiresCaptchaAttention(probe) && managedCaptchaVerdictIsCorroborated(portal, probe)
+    // and presented itself as probe-plus-corroboration. It was not. Both terms call
+    // readManagedCaptchaEvidence on the same probe result and short-circuit on the same invisible
+    // predicate, so on an autonomous family the second cannot disagree with the first and the
+    // conjunction is a tautology. Corroboration is a real question exactly where the two sources
+    // differ - the prepare path, which is judging the REMOTE RUNNER's blocker list against markup
+    // this repo read itself - and it is still asked there. Here there is only one source, so
+    // writing it as two invited the next reader to trust a layer that does not exist.
+    if (managedResultRequiresCaptchaAttention(captchaProbe)) {
       // The provider is passed, not defaulted. Defaulting recorded `unknown` on pages carrying a
       // g-recaptcha-response and a reCAPTCHA anchor iframe, which is a reporting defect of its own:
       // the stall's whole job is to say what stopped the run, and this was the one stop site in the
