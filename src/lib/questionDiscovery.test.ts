@@ -173,13 +173,17 @@ test('answers EEO / demographic questions with stored preferences or decline', (
   );
 });
 
-test('auto-answers candidate privacy consent while leaving demographic survey consent for attention', () => {
-  const privacy = resolveKnownAnswer(
-    'By selecting "I agree," I understand that the information I have provided as part of this job application will be processed in accordance with the Candidate Privacy Policy.',
-    'text',
-    {},
-    undefined,
-  );
+test('answers candidate privacy consent only from the stored acceptance, and never the demographic survey', () => {
+  /* CHANGED 2026-08-08, and the change is the point. This used to pass `{}` and expect "Yes": Litos
+     accepted an employer's privacy notice on the student's behalf with nothing stored behind it.
+     Acceptance of a privacy notice is one of the two things an automated submission MAY affirm, but
+     only from an explicit consent, which is now collected once in onboarding. */
+  const label = 'By selecting "I agree," I understand that the information I have provided as part of this job application will be processed in accordance with the Candidate Privacy Policy.';
+  const unasked = resolveKnownAnswer(label, 'text', {}, undefined);
+  assert.ok(unasked && 'skipReason' in unasked);
+  assert.match(unasked.skipReason, /privacy notice left for you to agree to yourself/);
+
+  const privacy = resolveKnownAnswer(label, 'text', { accept_privacy_notices: true }, undefined);
   assert.deepEqual(privacy, { value: 'Yes' });
 
   const demographicConsent = resolveKnownAnswer(
@@ -417,7 +421,7 @@ test('a preferred-location choice is not drafted as prose', () => {
   assert.match(resolved.skipReason, /location choice left for you/);
 });
 
-test('routine applicant data and privacy consent questions are answered yes', () => {
+test('routine applicant data and privacy consent questions are answered yes once the consent is stored', () => {
   const labels = [
     'Do you consent to Brex processing your personal information for the purpose of assessing your candidacy for this position?',
     "Please review and acknowledge Cloudflare's Candidate Privacy Policy.",
@@ -425,27 +429,74 @@ test('routine applicant data and privacy consent questions are answered yes', ()
   ];
   for (const label of labels) {
     const expected = label === 'Yes, I consent' ? 'Yes, I consent' : 'Yes';
-    assert.deepEqual(resolveKnownAnswer(label, 'text', {}, undefined), { value: expected });
+    assert.deepEqual(resolveKnownAnswer(label, 'text', { accept_privacy_notices: true }, undefined), { value: expected });
+    // And the same label with nothing stored is held, rather than agreed to on her behalf.
+    const unasked = resolveKnownAnswer(label, 'text', {}, undefined);
+    assert.ok(unasked && 'skipReason' in unasked, `${label} should be held without a stored consent`);
   }
 });
 
-test('routine confirmations and offer-deadline logistics do not wait for manual approval', () => {
+test('the bare privacy labels three employers actually ship are recognised', () => {
+  // Five Rings ships "Privacy Policy Acknowledgement", IMC "Privacy Statement", Point72 just
+  // "Privacy". None of them is a sentence, so the prose-shaped consent rule matched none of them
+  // and all three sat empty and blocked the application.
+  for (const label of ['Privacy', 'Privacy Statement', 'Privacy Policy Acknowledgement', 'Candidate Privacy Notice']) {
+    assert.deepEqual(
+      resolveKnownAnswer(label, 'checkbox', { accept_privacy_notices: true }, undefined),
+      { value: 'Yes' },
+      label,
+    );
+    const unasked = resolveKnownAnswer(label, 'checkbox', {}, undefined);
+    assert.ok(unasked && 'skipReason' in unasked, label);
+  }
+});
+
+test('a code of conduct is neither a truthfulness attestation nor a privacy notice, so it is never ticked', () => {
+  // IMC ships "Interview Code of Conduct" beside "Privacy Statement". Accepting a behavioural
+  // policy is not one of the two things Litos may affirm, and no stored consent unlocks it.
+  for (const ap of [{}, { accept_privacy_notices: true, attest_truthful_information: true }]) {
+    const resolved = resolveKnownAnswer('Interview Code of Conduct', 'checkbox', ap, undefined);
+    assert.ok(resolved && 'skipReason' in resolved);
+    assert.match(resolved.skipReason, /code of conduct/);
+  }
+});
+
+test('high school and offer questions are answered from the stored facts, not from a default', () => {
+  /* CHANGED 2026-08-08. Both of these used to answer from a constant with nothing on file: "Yes" to
+     a confirmation about a qualification, and "No" to "do you have any offers?". Each is a factual
+     claim about the student made to an employer, and neither was hers. */
+  const diploma = 'To be considered for this role, you must have earned a high school diploma (or an equivalent degree). Please confirm the statement below.';
+  const held = resolveKnownAnswer(diploma, 'select', {}, undefined);
+  assert.ok(held && 'skipReason' in held);
+  assert.match(held.skipReason, /high school graduation question left for you/);
   assert.deepEqual(
-    resolveKnownAnswer(
-      'To be considered for this role, you must have earned a high school diploma (or an equivalent degree). Please confirm the statement below.',
-      'select',
-      {},
-      undefined,
-    ),
+    resolveKnownAnswer(diploma, 'select', { high_school_grad_date: 'June 2024' }, undefined),
     { value: 'Yes' },
   );
+
+  const offers = 'Do you have any offer deadlines that we should be aware of?';
+  const offersHeld = resolveKnownAnswer(offers, 'select', {}, undefined);
+  assert.ok(offersHeld && 'skipReason' in offersHeld);
+  assert.match(offersHeld.skipReason, /offer question left for you/);
   assert.deepEqual(
-    resolveKnownAnswer('Do you have any offer deadlines that we should be aware of?', 'select', {}, undefined),
+    resolveKnownAnswer(offers, 'select', { has_outstanding_offers: false }, undefined),
     { value: 'No' },
   );
+
+  // The follow-up detail box after a "no" is N/A, not "No": it is asking what the offers are.
   assert.deepEqual(
-    resolveKnownAnswer('If you answered “Yes” above, please provide details about your offer deadlines.', 'textarea', {}, undefined),
+    resolveKnownAnswer('If you answered “Yes” above, please provide details about your offer deadlines.', 'textarea', { has_outstanding_offers: false }, undefined),
     { value: 'N/A' },
+  );
+  // And when there ARE offers, the same box gets the stored detail rather than a blanket N/A.
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'If you answered “Yes” above, please provide details about your offer deadlines.',
+      'textarea',
+      { has_outstanding_offers: true, outstanding_offer_details: 'One offer, decision due 15 November 2026.' },
+      undefined,
+    ),
+    { value: 'One offer, decision due 15 November 2026.' },
   );
 });
 
@@ -526,9 +577,13 @@ test('live-audit profile labels beat generic wording and stay out of drafts', ()
   assert.deepEqual(resolveKnownAnswer('When are you expecting to graduate from your degree?', 'select', profile, undefined), {
     value: 'May 2028',
   });
-  assert.deepEqual(resolveKnownAnswer('Processing of Personal Data', 'select', profile, undefined), {
-    value: 'Acknowledge/Confirm',
-  });
+  assert.deepEqual(
+    resolveKnownAnswer('Processing of Personal Data', 'select', { ...profile, accept_privacy_notices: true }, undefined),
+    { value: 'Acknowledge/Confirm' },
+  );
+  // Same label, no stored acceptance: held rather than confirmed on her behalf.
+  const unconsentedProcessing = resolveKnownAnswer('Processing of Personal Data', 'select', profile, undefined);
+  assert.ok(unconsentedProcessing && 'skipReason' in unconsentedProcessing);
   assert.deepEqual(
     resolveKnownAnswer('Are you majoring in STEM (Computer Science, Electrical Engineering, Data Science, Cog Sci, Information Management/Systems, Mathematics, Machine Learning, etc.)?', 'select', profile, undefined),
     { value: 'Yes' },
@@ -650,7 +705,7 @@ test('required internship form fields resolve from profile-backed defaults inste
   const privacy = resolveKnownAnswer(
     'Please review and acknowledge Cloudflare\'s Candidate Privacy Policy (cloudflare.com/candidate-privacy-notice/).',
     'checkbox',
-    profile,
+    { ...profile, accept_privacy_notices: true },
     undefined,
   );
   assert.deepEqual(privacy, { value: 'Yes' });
@@ -673,16 +728,23 @@ test('required internship form fields resolve from profile-backed defaults inste
   );
 });
 
-test('routine Greenhouse acknowledgements resolve without drafting', () => {
-  assert.deepEqual(
-    resolveKnownAnswer(
-      'By submitting this application and answering "yes" below, I acknowledge that this role is my top preference.',
-      'combobox',
-      {},
-      undefined,
-    ),
-    { value: 'Yes' },
+test('Greenhouse acknowledgements: only truthfulness and privacy may be ticked, and only from a stored consent', () => {
+  /* CHANGED 2026-08-08. Two of these were auto-answered "Yes" with nothing stored:
+     - "this role is my top preference and I will not be considered for other tech and/or quant
+       roles at Akuna this season" is a binding exclusivity commitment over her whole recruiting
+       season. It is not a truthfulness attestation and it is not a privacy notice.
+     - "my resume must be submitted in PDF format" is a process term. Harmless and still not ours.
+     Meanwhile the ONE thing Litos may legitimately affirm - that her information is true - was
+     returning null and blocking every Akuna application. Both halves are now the right way round. */
+  const topPreference = resolveKnownAnswer(
+    'By submitting this application and answering "yes" below, I acknowledge that this role is my top preference and I will not be considered for other tech and/or quant roles at Akuna for this recruiting season.',
+    'combobox',
+    { attest_truthful_information: true, accept_privacy_notices: true },
+    undefined,
   );
+  assert.ok(topPreference && 'skipReason' in topPreference);
+  assert.match(topPreference.skipReason, /which roles you will be considered for/);
+
   const optionsMarket = resolveKnownAnswer(
     'Do you have prior experience working at an options market making trading firm?',
     'combobox',
@@ -691,24 +753,24 @@ test('routine Greenhouse acknowledgements resolve without drafting', () => {
   );
   assert.ok(optionsMarket && 'skipReason' in optionsMarket);
   assert.equal(optionsMarket?.skipReason.includes('options market making experience question left for you'), true);
-  assert.equal(
-    resolveKnownAnswer(
-      'I certify that all information I have provided in order to apply for this position with Akuna is true, complete, and accurate.',
-      'combobox',
-      {},
-      undefined,
-    ),
-    null,
-  );
+
+  const certification = 'I certify that all information I have provided in order to apply for this position with Akuna is true, complete, and accurate.';
+  const uncertified = resolveKnownAnswer(certification, 'combobox', {}, undefined);
+  assert.ok(uncertified && 'skipReason' in uncertified);
+  assert.match(uncertified.skipReason, /certification that your information is true/);
   assert.deepEqual(
-    resolveKnownAnswer(
-      'I acknowledge that my resume must be submitted in PDF format to be considered.',
-      'combobox',
-      {},
-      undefined,
-    ),
+    resolveKnownAnswer(certification, 'combobox', { attest_truthful_information: true }, undefined),
     { value: 'Yes' },
   );
+
+  const pdf = resolveKnownAnswer(
+    'I acknowledge that my resume must be submitted in PDF format to be considered.',
+    'combobox',
+    { attest_truthful_information: true, accept_privacy_notices: true },
+    undefined,
+  );
+  assert.ok(pdf && 'skipReason' in pdf);
+  assert.match(pdf.skipReason, /how your resume is submitted/);
 });
 
 test('job location preference questions use the safe posting locations context', () => {
@@ -1318,15 +1380,26 @@ test('a high school diploma question that asks for a month and year is not answe
     + 'please confirm the month and year that most accurately reflects your high school (or equivalent) graduation',
     'select',
   );
-  // The plain confirmation variant is still a routine "Yes".
+  /* CHANGED 2026-08-08 by feat/onboarding-application-facts, which supersedes this rule rather than
+     contradicting it. The refusal above was right because "the profile does not hold" that date;
+     the profile holds it now, so the same label ANSWERS with it. And the plain confirmation variant
+     is no longer a routine "Yes" either: confirming that a qualification was earned is a claim
+     about the student's record, so it needs the record. */
+  const plain = 'To be considered for this role, you must have earned a high school diploma (or an equivalent degree). Please confirm the statement below.';
+  refuses(plain, 'select');
+  assert.deepEqual(
+    resolveKnownAnswer(plain, 'select', { ...PROD_OWNER_PROFILE, high_school_grad_date: 'June 2024' }, undefined),
+    { value: 'Yes' },
+  );
   assert.deepEqual(
     resolveKnownAnswer(
-      'To be considered for this role, you must have earned a high school diploma (or an equivalent degree). Please confirm the statement below.',
+      'to be considered for this role, you must have earned a high school diploma (or an equivalent degree). '
+      + 'please confirm the month and year that most accurately reflects your high school (or equivalent) graduation',
       'select',
-      PROD_OWNER_PROFILE,
+      { ...PROD_OWNER_PROFILE, high_school_grad_date: 'June 2024' },
       undefined,
     ),
-    { value: 'Yes' },
+    { value: 'June 2024' },
   );
 });
 

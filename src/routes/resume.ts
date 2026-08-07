@@ -53,6 +53,7 @@ import { contentDispositionFileName, resumeFileNameForRole } from '../lib/resume
 import { monitoredDescriptionHash, monitoredJdAgrees } from '../lib/monitoredPortalRepair';
 import { refreshKnownQuestionAnswers, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
+import { selectApplicationProfileRow } from '../lib/applicationFacts';
 
 const MAX_SPEC_ATTEMPTS = 2; // 1 initial pass + 1 feedback-driven retry, per PRD-v2 Section 6.4's
 // "automated quality gate" - bounded so a stubborn JD can't loop the endpoint indefinitely.
@@ -434,10 +435,11 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     /* application_profile joins the pair because it, not the parse, is the source of truth for the
        GPA the rendered PDF prints (see educationFrom). Read in the same batch rather than after the
        bank check, so the authoritative academic record costs no wall clock on the happy path. */
-    const [bank, profileRows, applicationRows] = await Promise.all([
+    const [bank, profileRows, applicationRow] = await Promise.all([
       readExperienceBankOrSeedFromBaseResume(userId),
       db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1),
-      db.select().from(application_profile).where(eq(application_profile.user_id, userId)).limit(1),
+      // Tolerant read, see lib/applicationFacts.ts.
+      selectApplicationProfileRow(userId),
     ]);
     if (bank.length === 0) {
       return reply.status(400).send({ error: 'Nothing saved about your work yet. Finish setting up first.' });
@@ -472,7 +474,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       mergeEducationFallback(
         educationFrom(
           parsed,
-          academicRecordRowFor(applicationRows[0], (err) =>
+          academicRecordRowFor(applicationRow, (err) =>
             request.log.error(
               { err, userId },
               'application_profile could not be decrypted while generating a tailored resume. Printing no GPA rather than the resume parse, which is not the source of truth for it.',

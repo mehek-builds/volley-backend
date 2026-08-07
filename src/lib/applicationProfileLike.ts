@@ -3,6 +3,7 @@ import { db } from '../db/index';
 import { application_profile, profiles, users } from '../db/schema';
 import { decryptRow } from '../routes/applicationProfile';
 import type { ApplicationProfileLike } from './questionDiscovery';
+import { selectApplicationProfileRow, factBoolean, factString, factStringList } from './applicationFacts';
 
 export function workEligibilityFromSponsorshipAnswer(answer: unknown): {
   workAuthorized?: boolean;
@@ -23,8 +24,10 @@ export function workEligibilityFromSponsorshipAnswer(answer: unknown): {
 }
 
 export async function loadApplicationProfileLike(userId: string): Promise<ApplicationProfileLike> {
-  const [[appRow], [profileRow], [userRow]] = await Promise.all([
-    db.select().from(application_profile).where(eq(application_profile.user_id, userId)).limit(1),
+  const [appRow, [profileRow], [userRow]] = await Promise.all([
+    // Tolerant read, see lib/applicationFacts.ts. This is the resolver's own profile read, so a
+    // 42703 here would stall every in-flight submission, not just the new questions.
+    selectApplicationProfileRow(userId),
     db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1),
     db.select({
       sponsorship_answer: users.sponsorship_answer,
@@ -151,5 +154,36 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
       ? app.eeo_prefs as Record<string, string>
       : undefined,
     referral_source_default: str('referral_source_default'),
+
+    /* ---- application facts asked once in onboarding ----
+     *
+     * Read off `appRow`, the RAW row, not off `app` (the decrypted view). None of these is in
+     * ENCRYPTED_FIELDS, so decryptRow passes them through untouched and either source would work
+     * today - but reading the raw row keeps that true if one of them is ever encrypted, and the
+     * fact* helpers are the single place that decides what counts as "answered".
+     *
+     * undefined reaches the resolver as "never asked", which is what makes it leave the question
+     * for the applicant instead of inventing an answer. That is also what the caller sees during
+     * the window where this code is deployed and the migration has not run: selectApplicationProfileRow
+     * returns the row without these columns, and every one of them reads undefined.
+     */
+    pronouns: factString(appRow, 'pronouns'),
+    legal_first_name: factString(appRow, 'legal_first_name'),
+    preferred_first_name: factString(appRow, 'preferred_first_name'),
+    high_school_grad_date: factString(appRow, 'high_school_grad_date'),
+    prior_application_employers: factStringList(appRow, 'prior_application_employers'),
+    has_outstanding_offers: factBoolean(appRow, 'has_outstanding_offers'),
+    outstanding_offer_details: factString(appRow, 'outstanding_offer_details'),
+    military_service: factString(appRow, 'military_service'),
+    politically_exposed: factString(appRow, 'politically_exposed'),
+    politically_exposed_family: factString(appRow, 'politically_exposed_family'),
+    advanced_study_plan: advancedStudyPlan(factString(appRow, 'advanced_study_plan')),
+    attest_truthful_information: factBoolean(appRow, 'attest_truthful_information'),
+    accept_privacy_notices: factBoolean(appRow, 'accept_privacy_notices'),
   };
+}
+
+/** Narrows the stored text to the three answers the resolver knows how to act on. */
+function advancedStudyPlan(value: string | undefined): 'no' | 'considering' | 'committed' | undefined {
+  return value === 'no' || value === 'considering' || value === 'committed' ? value : undefined;
 }

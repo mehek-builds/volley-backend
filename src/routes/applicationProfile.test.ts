@@ -35,6 +35,23 @@ function row(over: Partial<ApplicationProfile> = {}): ApplicationProfile {
     languages: null,
     eeo_prefs: null,
     referral_source_default: null,
+    // Application facts asked once in onboarding. Present here as nulls on purpose: this fixture is
+    // the FULL row shape, so a column added to schema.ts with no line here fails the build, which is
+    // the same trap the file header describes for bodySchema.
+    pronouns: null,
+    legal_first_name: null,
+    preferred_first_name: null,
+    high_school_grad_date: null,
+    prior_application_employers: null,
+    has_outstanding_offers: null,
+    outstanding_offer_details: null,
+    military_service: null,
+    politically_exposed: null,
+    politically_exposed_family: null,
+    advanced_study_plan: null,
+    attest_truthful_information: null,
+    accept_privacy_notices: null,
+    application_attestations_consented_at: null,
     updated_at: null,
     ...over,
   };
