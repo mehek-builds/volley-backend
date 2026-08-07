@@ -462,14 +462,85 @@ test('the invisible reCAPTCHA on the live Greenhouse page is not a human challen
 // Even if the sitekey extract DOES come back - the widget container is on the page either way -
 // size=invisible with no bframe means nothing is being asked. This is the shape that must never
 // block on any path.
-test('a site key does not block when the widget declares itself invisible', () => {
+//
+// REWRITTEN, and the rewrite is the fix. This test used to pass `captcha_size: invisible` beside a
+// sitekey and assert that the run continued, which made the invisible finding a property of the
+// PAGE: any widget could declare invisible on behalf of any other. The fixture below is now
+// byte-identical to the one in "an invisible widget does not hide a real one beside it", so the old
+// assertion and the correct one could not both be true. What makes THIS page harmless is that the
+// invisible declaration carries the sitekey of the widget it describes, and it is the same sitekey.
+test('a site key does not block when that same widget declares itself invisible', () => {
   assert.equal(
     managedResultRequiresCaptchaAttention(probeResult([
       { selector: CHALLENGE_SEL, label: 'captcha_challenge', value: '6Lc-ExampleSiteKey' },
       { selector: '[data-sitekey][data-size]', label: 'captcha_size', value: 'invisible' },
+      { selector: '[data-sitekey][data-size="invisible" i]', label: 'captcha_invisible_sitekey', value: '6Lc-ExampleSiteKey' },
     ])),
     false,
   );
+});
+
+/* THE MANAGED PATH'S HALF OF "an invisible widget does not hide a real one beside it".
+ *
+ * The direct path has closed this since the badge exclusion went in. The managed path is the one
+ * that actually runs unattended in production, and it was open: readManagedCaptchaEvidence reduced
+ * the whole page to four scalars by first-non-empty-per-label, so one invisible widget switched the
+ * gate off for a real one standing next to it. Measured on the merged tree:
+ *
+ *   extracted: [{label:'captcha_size', value:'invisible'},
+ *               {label:'captcha_challenge', value:'6LcRealVisibleWidget'}]
+ *   managedResultRequiresCaptchaAttention          -> false
+ *   managedCaptchaVerdictIsCorroborated('greenhouse', ...) -> false
+ *
+ * A real unsolved sitekey was present and the submit gate opened on it. */
+const INVISIBLE_BESIDE_A_REAL_ONE = probeResult([
+  { selector: '[data-sitekey][data-size]', label: 'captcha_size', value: 'invisible' },
+  { selector: CHALLENGE_SEL, label: 'captcha_challenge', value: '6LcRealVisibleWidget' },
+]);
+
+test('a page-wide invisible reading does not switch off the gate for a real widget beside it', () => {
+  assert.equal(managedResultRequiresCaptchaAttention(INVISIBLE_BESIDE_A_REAL_ONE), true);
+  assert.equal(managedCaptchaVerdictIsCorroborated('greenhouse', INVISIBLE_BESIDE_A_REAL_ONE), true);
+  assert.deepEqual(
+    corroborateManagedCaptchaBlockers('greenhouse', [CAPTCHA_BLOCKER], INVISIBLE_BESIDE_A_REAL_ONE),
+    [CAPTCHA_BLOCKER],
+  );
+});
+
+// Two widgets, one of each, with the invisible one properly attributed. The real one still stops
+// the run: being able to explain one widget is not being able to explain the other.
+test('an attributed invisible widget still leaves an unexplained one blocking', () => {
+  assert.equal(
+    managedResultRequiresCaptchaAttention(probeResult([
+      { selector: CHALLENGE_SEL, label: 'captcha_challenge', value: '6LcInvisibleWidget' },
+      { selector: CHALLENGE_SEL, label: 'captcha_challenge', value: '6LcRealVisibleWidget' },
+      { selector: '[data-sitekey][data-size="invisible" i]', label: 'captcha_invisible_sitekey', value: '6LcInvisibleWidget' },
+    ])),
+    true,
+  );
+});
+
+// And the honest negative for the same shape: both widgets accounted for, nothing asks a human.
+test('two widgets that are both attributed as invisible do not block', () => {
+  assert.equal(
+    managedResultRequiresCaptchaAttention(probeResult([
+      { selector: CHALLENGE_SEL, label: 'captcha_challenge', value: '6LcFirst' },
+      { selector: CHALLENGE_SEL, label: 'captcha_challenge', value: '6LcSecond' },
+      { selector: '[data-sitekey][data-size="invisible" i]', label: 'captcha_invisible_sitekey', value: '6LcFirst' },
+      { selector: '[data-sitekey][data-size="invisible" i]', label: 'captcha_invisible_sitekey', value: '6LcSecond' },
+    ])),
+    false,
+  );
+});
+
+// The probe has to ASK for the attribution or none of the above can ever be true in production.
+test('the managed probe reads the invisible widget its own sitekey', () => {
+  const action = buildManagedCaptchaProbeActions().find((entry) => entry.label === 'captcha_invisible_sitekey');
+  assert.ok(action, 'the probe must read which widget the invisible declaration belongs to');
+  assert.equal(action.attribute, 'data-sitekey');
+  assert.equal(action.optional, true);
+  assert.match(action.selector ?? '', /\[data-size="invisible" i\]/);
+  assert.match(action.selector ?? '', /:not\(\.grecaptcha-badge\):not\(\.grecaptcha-badge \*\)/);
 });
 
 // Escalation. The widget still says invisible; the bframe says a human is looking at an image grid.
@@ -555,7 +626,7 @@ test('the prepare fill run carries the CAPTCHA evidence reads and the submit run
     resumeName: 'resume.pdf',
     questions: [],
   };
-  const evidenceLabels = ['captcha_size', 'captcha_anchor', 'captcha_bframe'];
+  const evidenceLabels = ['captcha_size', 'captcha_invisible_sitekey', 'captcha_anchor', 'captcha_bframe'];
   const preparing = buildManagedPortalActions('greenhouse', packet, false);
   for (const label of evidenceLabels) {
     assert.ok(
