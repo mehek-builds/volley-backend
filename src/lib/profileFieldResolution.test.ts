@@ -8,8 +8,10 @@ import {
   optionCoversMonthYear,
   parseNumericRange,
   profileBackedBlockerLabels,
+  referralSourceLadder,
   resolveProfileField,
   schoolAliasLadder,
+  usableOptions,
 } from './profileFieldResolution';
 import type { ApplicationProfileLike } from './questionDiscovery';
 
@@ -270,6 +272,125 @@ test('chooseClosestOption refuses a weak match rather than picking a wrong legal
   assert.equal(chooseClosestOption(['Yes'], null), null);
 });
 
+/* BLOCKER 2. An option that states the answer and then keeps going is a different answer.
+ *
+ * Measured on the merged tree, with needs_sponsorship: true so the resolver's own answer is "Yes,
+ * I need sponsorship":
+ *
+ *   chooseClosestOption(['Yes'],
+ *     ['Yes - I am authorized to work in the US for any employer','No - I will require sponsorship'])
+ *   -> 'Yes - I am authorized to work in the US for any employer'
+ *
+ * The resolver selected the sentence asserting the opposite of the answer it was given, on a
+ * question with legal weight, and reported matchedOption: true. Refusing costs an empty field the
+ * applicant can fill in herself. This cost her the truth. */
+test('a short answer never adopts a longer option that adds meaning', () => {
+  assert.equal(
+    chooseClosestOption(['Yes'], [
+      'Yes - I am authorized to work in the US for any employer',
+      'No - I will require sponsorship',
+    ]),
+    null,
+  );
+  // Several options share the prefix, so there is nothing to disambiguate on. Refuse.
+  assert.equal(chooseClosestOption(['Yes'], ['Yes, with sponsorship', 'Yes, without sponsorship', 'No']), null);
+  // A bare Yes/No list is unambiguous and still answered, which is the case that must not regress.
+  assert.equal(chooseClosestOption(['Yes'], ['Yes', 'No']), 'Yes');
+  assert.equal(
+    resolveProfileField(
+      {
+        label: 'Are you legally authorized to work in the United States?',
+        options: ['Yes, with sponsorship', 'Yes, without sponsorship', 'No'],
+      },
+      STORED_PROFILE,
+    )?.matchedOption,
+    false,
+    'an unmatched option list must never be reported as a confident selection',
+  );
+});
+
+/* The same rule on a proper noun. The school ladder drops a trailing "..., Viterbi School of
+ * Engineering" clause to reach an option that names the institution alone, and on a Berkeley
+ * profile that truncation also drops the campus:
+ *
+ *   schoolAliasLadder('University of California, Berkeley') -> [..., 'University of California']
+ *   vs options ['University of California, Los Angeles','University of California, Davis'] -> UCLA
+ *
+ * Two employers would have been told she attends UCLA. Nothing in the list is her university, so
+ * nothing is selected. */
+test('a truncated school name never picks a campus it cannot distinguish', () => {
+  assert.deepEqual(
+    schoolAliasLadder('University of California, Berkeley'),
+    ['University of California, Berkeley', 'University of California'],
+  );
+  assert.equal(
+    chooseClosestOption(schoolAliasLadder('University of California, Berkeley'), [
+      'University of California, Los Angeles',
+      'University of California, Davis',
+    ]),
+    null,
+  );
+  // One campus in the list is no better: "Los Angeles" is a distinguishing word, not a spelling of
+  // the same institution, so a single matching option is still a different university.
+  assert.equal(
+    chooseClosestOption(schoolAliasLadder('University of California, Berkeley'), [
+      'University of California, Los Angeles',
+      'Stanford University',
+    ]),
+    null,
+  );
+  // Her own campus, spelled either way, still resolves. The rule refuses guesses, not answers.
+  assert.equal(
+    chooseClosestOption(schoolAliasLadder('University of California, Berkeley'), [
+      'University of California, Berkeley',
+      'University of California, Davis',
+    ]),
+    'University of California, Berkeley',
+  );
+  // And a parenthetical initialism adds no meaning, so it is still allowed through.
+  assert.equal(
+    chooseClosestOption(['University of Southern California'], ['University of Southern California (USC)']),
+    'University of Southern California (USC)',
+  );
+});
+
+/* BOTH EXTRAS, because each one puts a false statement on a form.
+ *
+ * referralSourceLadder listed 'Job Board' ahead of 'Other', so a stored "Company website" against
+ * ['LinkedIn','Job Board','Employee referral','Other'] returned Job Board: a claim about how she
+ * found the role that did not happen. "Other" is true however she arrived. */
+test('a referral source never claims a channel the applicant did not use', () => {
+  assert.equal(
+    answer('How did you hear about this job?', ['LinkedIn', 'Job Board', 'Employee referral', 'Other']),
+    'Other',
+  );
+  assert.deepEqual(referralSourceLadder('Company website').at(-1), 'Other');
+  assert.equal(referralSourceLadder('Company website').includes('Job Board'), false);
+  // A stored value that is NOT the company's own site does not get the company-site synonyms
+  // offered on its behalf either. Stored value, then Other, and nothing invented in between.
+  assert.deepEqual(referralSourceLadder('LinkedIn'), ['LinkedIn', 'Other']);
+  assert.equal(
+    chooseClosestOption(referralSourceLadder('LinkedIn'), ['Company Website', 'Job Board', 'Other']),
+    'Other',
+  );
+  // The truthful specific option still beats Other whenever it is on the list.
+  assert.equal(
+    answer('How did you hear about this job?', ['LinkedIn', 'Company Website', 'Job Board', 'Other']),
+    'Company Website',
+  );
+});
+
+/* usableOptions stripped 'none' and 'n/a' as placeholder rows. For "outstanding offers", "prior
+ * applications" and "test scores" None IS the answer, so the correct entry was filtered out of its
+ * own option list and the control came back "required and is still empty". */
+test('None and N/A are answers, not placeholder rows', () => {
+  assert.deepEqual(usableOptions(['Select...', 'None', 'N/A', 'Yes']), ['None', 'N/A', 'Yes']);
+  assert.equal(chooseClosestOption(['None'], ['Select...', 'None', '1', '2']), 'None');
+  assert.equal(chooseClosestOption(['N/A'], ['Please select', 'N/A', 'SAT', 'ACT']), 'N/A');
+  // The rows that really are placeholders still go.
+  assert.deepEqual(usableOptions(['Select...', '--', 'Please select', '-- Choose --', 'Yes']), ['Yes']);
+});
+
 test('chooseClosestOption ignores case, punctuation, and possessive spelling', () => {
   assert.equal(chooseClosestOption(["Bachelor's Degree"], ['bachelors degree', 'masters degree']), 'bachelors degree');
   assert.equal(chooseClosestOption(['Company website'], ['Company Website']), 'Company Website');
@@ -295,6 +416,75 @@ test('optionCoversMonthYear distinguishes the halves of a graduation year', () =
   assert.equal(optionCoversMonthYear('2028', 5, 2028), true);
   assert.equal(optionCoversMonthYear('2027', 5, 2028), false);
   assert.equal(optionCoversMonthYear('2027 - 2029', 5, 2028), true);
+});
+
+/* BLOCKER 1. A boundary qualifier is not decoration, it is the whole meaning of the option.
+ *
+ * Measured against the real stored profile (grad_date 'May 2028') on the merged tree:
+ *   optionCoversMonthYear('Before 2028', 5, 2028)        -> true
+ *   optionCoversMonthYear('After 2028', 5, 2028)         -> true
+ *   optionCoversMonthYear('2028 or earlier', 5, 2028)    -> true
+ *   optionCoversMonthYear('No later than 2028', 5, 2028) -> true
+ * All four answered the same, because the year was parsed out and the qualifier thrown away. Two of
+ * the four are flatly false about a person graduating in May 2028, and "graduated before 2028" is a
+ * hard eligibility filter on a campus role. parseNumericRange has read above/below/or-higher off a
+ * GPA bucket since it was written; the calendar path now reads the same shapes.
+ */
+test('a boundary qualifier decides which side of the year an option covers', () => {
+  assert.equal(optionCoversMonthYear('Before 2028', 5, 2028), false);
+  assert.equal(optionCoversMonthYear('After 2028', 5, 2028), false);
+  assert.equal(optionCoversMonthYear('Prior to 2028', 5, 2028), false);
+  // These two are inclusive of 2028 and were right by accident. They stay right on purpose.
+  assert.equal(optionCoversMonthYear('2028 or earlier', 5, 2028), true);
+  assert.equal(optionCoversMonthYear('No later than 2028', 5, 2028), true);
+  assert.equal(optionCoversMonthYear('2028 or later', 5, 2028), true);
+  // ...and each one still excludes the side it is supposed to exclude.
+  assert.equal(optionCoversMonthYear('Before 2029', 5, 2028), true);
+  assert.equal(optionCoversMonthYear('After 2027', 5, 2028), true);
+  assert.equal(optionCoversMonthYear('2027 or earlier', 5, 2028), false);
+  assert.equal(optionCoversMonthYear('2029 or later', 5, 2028), false);
+  // A month-precision boundary is read at month precision, not rounded to the year.
+  assert.equal(optionCoversMonthYear('Before June 2028', 5, 2028), true);
+  assert.equal(optionCoversMonthYear('Before May 2028', 5, 2028), false);
+  assert.equal(optionCoversMonthYear('After May 2028', 5, 2028), false);
+  // A written range states both of its ends, so a stray qualifier word cannot reopen one.
+  assert.equal(optionCoversMonthYear('From January 2027 through December 2027', 5, 2028), false);
+  // Winter is December, January and February. Collapsing it to min-to-max swallowed the year.
+  assert.equal(optionCoversMonthYear('Winter 2028', 5, 2028), false);
+  assert.equal(optionCoversMonthYear('Winter 2028', 1, 2028), true);
+  assert.equal(optionCoversMonthYear('Winter 2028', 12, 2028), true);
+});
+
+/* The same defect at the level the applicant actually feels it. chooseClosestOption took the FIRST
+ * covering option in DOM order, and a graduation select routinely opens with a catch-all:
+ *
+ *   options: ['Before 2028','January 2028 - June 2028','July 2028 - December 2028','After 2028']
+ *   -> 'Before 2028', matchedOption: true
+ *
+ * She graduates in May 2028 and the form said she had already graduated before 2028, reported with
+ * confidence. The narrowest covering bucket wins now, wherever it sits in the list. */
+test('the narrowest covering graduation bucket wins, not the first one listed', () => {
+  const range = resolveProfileField(
+    {
+      label: 'When is your anticipated graduation date - please select a Graduation Date range',
+      options: ['Before 2028', 'January 2028 - June 2028', 'July 2028 - December 2028', 'After 2028'],
+    },
+    STORED_PROFILE,
+  );
+  assert.equal(range?.value, 'January 2028 - June 2028');
+  assert.equal(range?.matchedOption, true);
+
+  // A catch-all that genuinely does cover her still loses to anything more specific.
+  assert.equal(
+    chooseClosestOption(['May 2028'], ['2028 or earlier', 'January 2028 - June 2028']),
+    'January 2028 - June 2028',
+  );
+  assert.equal(chooseClosestOption(['May 2028'], ['2028 or earlier', 'Spring 2028']), 'Spring 2028');
+  assert.equal(chooseClosestOption(['May 2028'], ['2028 or earlier', '2028']), '2028');
+  // And when the catch-all is the only thing that covers her, it is the honest answer.
+  assert.equal(chooseClosestOption(['May 2028'], ['2027 or earlier', '2028 or later']), '2028 or later');
+  // Nothing covers May 2028, so nothing is selected.
+  assert.equal(chooseClosestOption(['May 2028'], ['Before 2028', 'After 2028']), null);
 });
 
 test('the alias ladders are derived from the stored value, never from an employer name', () => {
