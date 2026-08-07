@@ -4,20 +4,27 @@ import type { Page } from 'playwright-core';
 import { browserSessionBody, type ManagedBrowserResult } from './browserbase';
 import {
   buildManagedCaptchaProbeActions,
+  buildManagedPortalActions,
+  CAPTCHA_BLOCKER,
   CAPTCHA_CHALLENGE_SELECTOR,
   CAPTCHA_RESPONSE_SELECTOR,
   CAPTCHA_PROVIDER_MARKERS,
+  RECAPTCHA_BFRAME_SELECTOR,
   RECAPTCHA_INTERACTIVE_SELECTOR,
   captchaProviderForFamily,
   captchaSnapshotRequiresAttention,
+  corroborateManagedCaptchaBlockers,
   detectCaptchaProvider,
   isCaptchaGatedFamily,
   clickFinalSubmit,
   hasUnresolvedCaptcha,
+  managedCaptchaProvider,
+  managedCaptchaVerdictIsCorroborated,
   managedResultRequiresCaptchaAttention,
   CaptchaUnresolvedError,
   SUBMIT_CANDIDATE_SELECTOR,
   NoSubmitControlError,
+  type SubmissionPacket,
 } from './portalSubmission';
 
 // ---- snapshot logic ----
@@ -65,9 +72,21 @@ type FakeNode = {
   ancestors?: string[][];
   visible?: boolean;
   visibilityThrows?: boolean;
+  /**
+   * True when this node, or a container around it, carries reCAPTCHA's invisible-mode marker
+   * (`data-size="invisible"` on the widget div, or `size=invisible` in an anchor iframe's src).
+   * Modelled as one flag rather than as attributes because the production selector matches the node
+   * OR an ancestor, and both readings must reach the same stub answer.
+   */
+  invisibleMode?: boolean;
 };
 
-// Implements BOTH closest() and classList so the stub does not silently decide which idiom the
+// The invisible-mode selector is a compound attribute selector, not a class, so the class-chain
+// logic below cannot answer it. Recognised by content rather than by identity so the stub keeps
+// working if the selector gains another invisible-mode shape.
+const asksAboutInvisibleMode = (selector: string) => /size=("?)invisible\1/i.test(selector);
+
+// Implements matches(), closest() and classList so the stub does not silently decide which idiom the
 // production code is allowed to use. If hasUnresolvedCaptcha is ever refactored to a self-only
 // classList check, these tests still run it and still fail on the nested-iframe case, which is the
 // point: the stub models the DOM, not the current implementation.
@@ -76,18 +95,24 @@ function stubElement(node: FakeNode) {
   const chain = [own, ...(node.ancestors ?? [])];
   return {
     classList: { contains: (name: string) => own.includes(name) },
+    matches(selector: string) {
+      if (asksAboutInvisibleMode(selector)) return node.invisibleMode === true;
+      return own.includes(selector.replace(/^\./, ''));
+    },
     closest(selector: string) {
+      if (asksAboutInvisibleMode(selector)) return node.invisibleMode === true ? {} : null;
       const wanted = selector.replace(/^\./, '');
       return chain.some((classes) => classes.includes(wanted)) ? {} : null;
     },
   };
 }
 
-function fakePage(options: { tokens: string[]; challenges: FakeNode[] }): Page {
+function fakePage(options: { tokens: string[]; challenges: FakeNode[]; bframes?: number }): Page {
   const responseLocator = {
     count: async () => options.tokens.length,
     nth: (index: number) => ({ inputValue: async () => options.tokens[index] ?? '' }),
   };
+  const bframeLocator = { count: async () => options.bframes ?? 0 };
   const challengeLocator = {
     count: async () => options.challenges.length,
     nth: (index: number) => {
@@ -108,6 +133,7 @@ function fakePage(options: { tokens: string[]; challenges: FakeNode[] }): Page {
     locator: (selector: string) => {
       if (selector === CAPTCHA_RESPONSE_SELECTOR) return responseLocator;
       if (selector === CAPTCHA_CHALLENGE_SELECTOR) return challengeLocator;
+      if (selector === RECAPTCHA_BFRAME_SELECTOR) return bframeLocator;
       throw new Error(`unexpected selector in fakePage: ${selector}`);
     },
   } as unknown as Page;
@@ -161,6 +187,43 @@ test('a badge does not hide a real widget rendered outside it', async () => {
     await hasUnresolvedCaptcha(fakePage({
       tokens: [''],
       challenges: [{ classes: ['grecaptcha-badge'] }, { classes: ['g-recaptcha'] }],
+    })),
+    true,
+  );
+});
+
+// The badge exclusion does not cover a form that mounts its OWN invisible widget outside the badge,
+// and that node matches [class*="captcha"], is visible, and carries an empty response field - so it
+// read as a live challenge on a page asking a human for nothing.
+test('an invisible reCAPTCHA rendered outside the badge is not a challenge', async () => {
+  assert.equal(
+    await hasUnresolvedCaptcha(fakePage({
+      tokens: [''],
+      challenges: [{ classes: ['g-recaptcha'], invisibleMode: true }],
+    })),
+    false,
+  );
+});
+
+// The escalation case, and the reason `size` alone cannot be the whole rule. reCAPTCHA opens the
+// image grid in a bframe while the widget still declares itself invisible: at that moment a person
+// really is being asked to pick traffic lights.
+test('an invisible widget with the challenge popup open IS a challenge', async () => {
+  assert.equal(
+    await hasUnresolvedCaptcha(fakePage({
+      tokens: [''],
+      challenges: [{ classes: ['g-recaptcha'], invisibleMode: true }],
+      bframes: 1,
+    })),
+    true,
+  );
+});
+
+test('an invisible widget does not hide a real one beside it', async () => {
+  assert.equal(
+    await hasUnresolvedCaptcha(fakePage({
+      tokens: [''],
+      challenges: [{ classes: ['g-recaptcha'], invisibleMode: true }, { classes: ['h-captcha'] }],
     })),
     true,
   );
@@ -337,6 +400,181 @@ test('an unreadable probe result never blocks a submission', () => {
   assert.equal(managedResultRequiresCaptchaAttention(null), false);
   assert.equal(managedResultRequiresCaptchaAttention(probeResult([])), false);
   assert.equal(managedResultRequiresCaptchaAttention({ title: '', url: '', text: '' }), false);
+});
+
+/* THE FALSE POSITIVE THAT STOPPED THE PRODUCT.
+ *
+ * "Fails OPEN by construction" was true of exactly one spelling of nothing. `value !== null` calls
+ * `undefined`, `""` and a whitespace echo a rendered widget, so an optional extract that matched
+ * zero nodes reported a challenge on a page that has none. ManagedBrowserResult declares
+ * `value: string | null`, but Stratus is an external service and that declaration is this repo's
+ * hope, not its contract - the two other readers of the same array already test `value?.trim()`.
+ *
+ * Table-driven so the next empty representation is one line, not another copy of the test. */
+for (const [name, value] of [
+  ['undefined', undefined],
+  ['an empty string', ''],
+  ['whitespace', '   '],
+  ['a newline', '\n'],
+] as const) {
+  test(`an optional extract that matched nothing and came back as ${name} does not block`, () => {
+    assert.equal(
+      managedResultRequiresCaptchaAttention(probeResult([
+        { selector: CHALLENGE_SEL, label: 'captcha_challenge', value: value as unknown as string | null },
+      ])),
+      false,
+    );
+  });
+}
+
+// The genuine positive still stops the run. Nothing above is allowed to buy the false-negative side
+// of this trade: a real widget with a real site key and no invisible marker blocks, as it always did.
+test('a real site key with no invisible marker still stops the managed submit', () => {
+  assert.equal(
+    managedResultRequiresCaptchaAttention(probeResult([
+      { selector: CHALLENGE_SEL, label: 'captcha_challenge', value: '6Lc-ExampleSiteKey' },
+      { selector: 'iframe', label: 'captcha_bframe', value: '' },
+    ])),
+    true,
+  );
+});
+
+/* The live Akuna Greenhouse page, measured 2026-08-08 at the portal_url stored on eleven stalled
+ * packets: an invisible reCAPTCHA Enterprise. window.grecaptcha defined, a g-recaptcha-response
+ * textarea present and empty, an anchor iframe at size=invisible, no bframe, and every node matching
+ * any challenge selector sitting inside .grecaptcha-badge. A person filling that form by hand clicks
+ * Submit and is never asked anything. */
+const AKUNA_INVISIBLE_PROBE = probeResult([
+  { selector: CHALLENGE_SEL, label: 'captcha_challenge', value: null },
+  { selector: '[data-sitekey][data-size]', label: 'captcha_size', value: 'invisible' },
+  {
+    selector: 'iframe',
+    label: 'captcha_anchor',
+    value: 'https://www.recaptcha.net/recaptcha/enterprise/anchor?ar=1&k=6Lc-ExampleSiteKey&size=invisible&anchor-ms=20000&execute-ms=30000',
+  },
+  { selector: 'iframe', label: 'captcha_bframe', value: null },
+]);
+
+test('the invisible reCAPTCHA on the live Greenhouse page is not a human challenge', () => {
+  assert.equal(managedResultRequiresCaptchaAttention(AKUNA_INVISIBLE_PROBE), false);
+});
+
+// Even if the sitekey extract DOES come back - the widget container is on the page either way -
+// size=invisible with no bframe means nothing is being asked. This is the shape that must never
+// block on any path.
+test('a site key does not block when the widget declares itself invisible', () => {
+  assert.equal(
+    managedResultRequiresCaptchaAttention(probeResult([
+      { selector: CHALLENGE_SEL, label: 'captcha_challenge', value: '6Lc-ExampleSiteKey' },
+      { selector: '[data-sitekey][data-size]', label: 'captcha_size', value: 'invisible' },
+    ])),
+    false,
+  );
+});
+
+// Escalation. The widget still says invisible; the bframe says a human is looking at an image grid.
+test('an invisible widget with a bframe open blocks the managed submit', () => {
+  assert.equal(
+    managedResultRequiresCaptchaAttention(probeResult([
+      { selector: '[data-sitekey][data-size]', label: 'captcha_size', value: 'invisible' },
+      { selector: 'iframe', label: 'captcha_bframe', value: 'https://www.recaptcha.net/recaptcha/enterprise/bframe?k=x' },
+    ])),
+    true,
+  );
+});
+
+// ---- the provider recorded on the stall ----
+
+test('a stopped run names the provider instead of shrugging', () => {
+  assert.equal(
+    managedCaptchaProvider(probeResult([
+      { selector: 'iframe', label: 'captcha_bframe', value: 'https://www.recaptcha.net/recaptcha/enterprise/bframe?k=x' },
+    ]), 'greenhouse'),
+    'recaptcha_v2',
+  );
+  assert.equal(managedCaptchaProvider(AKUNA_INVISIBLE_PROBE, 'greenhouse'), 'recaptcha_v3');
+});
+
+// Not a guess. A bare [data-sitekey] with no reCAPTCHA frame beside it is as consistent with
+// hCaptcha or Turnstile, and a wrong provider label is worse than an absent one.
+test('a provider with no frame evidence falls back to the family reading', () => {
+  assert.equal(
+    managedCaptchaProvider(probeResult([{ selector: CHALLENGE_SEL, label: 'captcha_challenge', value: 'key' }]), 'greenhouse'),
+    captchaProviderForFamily('greenhouse'),
+  );
+  assert.equal(managedCaptchaProvider(null, 'jazzhr'), 'recaptcha_v2');
+});
+
+// ---- corroboration: the second layer ----
+//
+// One predicate gates every managed submission Litos makes. When it said yes wrongly the whole
+// product stopped, so on the families Litos claims it can finish unaided the page has to agree.
+
+test('an uncorroborated CAPTCHA verdict is dropped on an autonomous family', () => {
+  assert.deepEqual(
+    corroborateManagedCaptchaBlockers('greenhouse', [CAPTCHA_BLOCKER, '"GPA" is required and is still empty'], null),
+    ['"GPA" is required and is still empty'],
+  );
+  assert.deepEqual(
+    corroborateManagedCaptchaBlockers('greenhouse', [CAPTCHA_BLOCKER], AKUNA_INVISIBLE_PROBE),
+    [],
+  );
+});
+
+test('a corroborated CAPTCHA verdict still stops an autonomous family', () => {
+  const corroborating = probeResult([{ selector: CHALLENGE_SEL, label: 'captcha_challenge', value: '6Lc-ExampleSiteKey' }]);
+  assert.deepEqual(corroborateManagedCaptchaBlockers('greenhouse', [CAPTCHA_BLOCKER], corroborating), [CAPTCHA_BLOCKER]);
+  assert.equal(managedCaptchaVerdictIsCorroborated('greenhouse', corroborating), true);
+});
+
+// Outside the autonomous families the provider's word stands. JazzHR and BambooHR really do gate
+// every form, portalCanAutoSubmit already refuses to submit them, and there is nothing to protect.
+test('a CAPTCHA-gated family is believed without corroboration', () => {
+  assert.equal(managedCaptchaVerdictIsCorroborated('jazzhr', null), true);
+  assert.deepEqual(corroborateManagedCaptchaBlockers('jazzhr', [CAPTCHA_BLOCKER], null), [CAPTCHA_BLOCKER]);
+});
+
+// ...but an invisible reCAPTCHA is never a human challenge, on ANY path or family.
+test('an invisible reCAPTCHA is not believed even on a CAPTCHA-gated family', () => {
+  assert.equal(managedCaptchaVerdictIsCorroborated('jazzhr', AKUNA_INVISIBLE_PROBE), false);
+});
+
+test('nothing but a CAPTCHA blocker is ever removed', () => {
+  const others = ['"GPA" is required and is still empty', 'A required field on the form has no label Litos can read'];
+  assert.deepEqual(corroborateManagedCaptchaBlockers('greenhouse', others, null), others);
+});
+
+// The prepare run has no probe call of its own - it reads the runner's blocker list - so the
+// evidence has to ride along on the fill actions or corroboration has nothing to read. The submit
+// run does make the probe call, so repeating the reads there would spend budget for nothing.
+test('the prepare fill run carries the CAPTCHA evidence reads and the submit run does not', () => {
+  const packet: SubmissionPacket = {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  };
+  const evidenceLabels = ['captcha_size', 'captcha_anchor', 'captcha_bframe'];
+  const preparing = buildManagedPortalActions('greenhouse', packet, false);
+  for (const label of evidenceLabels) {
+    assert.ok(
+      preparing.some((action) => action.type === 'extract' && action.label === label && action.optional === true),
+      `prepare run is missing the ${label} read`,
+    );
+  }
+  const submitting = buildManagedPortalActions('greenhouse', packet, true);
+  assert.equal(submitting.some((action) => evidenceLabels.includes(action.label ?? '')), false);
+});
+
+// Same rule as the challenge read: never ask the runner for the token. It belongs in the applicant's
+// session, and g-recaptcha-response is a <textarea> whose value is a DOM property anyway.
+test('the evidence reads never ask the runner for a response token', () => {
+  for (const action of buildManagedCaptchaProbeActions()) {
+    assert.doesNotMatch(action.selector ?? '', /response/i);
+    assert.notEqual(action.attribute, 'value');
+    assert.equal(action.optional, true);
+  }
 });
 
 // ---- the boundary itself ----

@@ -736,7 +736,9 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
     assert.equal(action.optional, true, `"${action.text}" must not be able to abort the run`);
   }
   // first_name, last_name, preferred names, email (phone and location are omitted from this fixture), resume, then
-  // the two optional reviewed questions.
+  // the two optional reviewed questions, then the nine core-field evidence extracts and the three
+  // CAPTCHA evidence reads (data-size, anchor src, bframe src) the prepare run carries so the
+  // runner's CAPTCHA verdict can be corroborated instead of believed.
   assert.deepEqual(
     actions
       .filter((a) =>
@@ -756,6 +758,9 @@ test('a question that cannot be typed degrades to a blocker instead of killing t
       'upload',
       'fillByLabelText',
       'fillByLabelText',
+      'extract',
+      'extract',
+      'extract',
       'extract',
       'extract',
       'extract',

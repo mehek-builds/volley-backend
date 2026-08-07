@@ -25,6 +25,9 @@ import {
   blockersIncludeCaptcha,
   buildManagedCaptchaProbeActions,
   buildManagedDiscoveryActions,
+  corroborateManagedCaptchaBlockers,
+  managedCaptchaProvider,
+  managedCaptchaVerdictIsCorroborated,
   detectCaptchaProvider,
   captchaProviderForFamily,
   buildManagedPortalActions,
@@ -929,11 +932,24 @@ async function prepareManaged(
   // Sanitized at the boundary, not upstream: the managed provider scans the form in its own
   // service and returns finished sentences, so it never passes through this repo's label
   // resolution. Live QA proved that gap by showing three raw UUIDs on a real Ashby posting.
-  const blockers = attentionBlockersForManagedResult(
+  //
+  // THIS IS WHERE EVERY STALLED PACKET ACTUALLY STOPPED, measured against prod on 2026-08-08: all
+  // fourteen open stalls in the database were written below by this function, not by the submit
+  // path's probe. Each one carries `submission_error: null` and an attention_reason whose first line
+  // is the provider's own "CAPTCHA requires your attention" - the throw at the submit probe writes a
+  // submission_error and a different sentence, and neither appears on any row Litos has ever
+  // written. So the runner's CAPTCHA verdict, arriving here in result.blockers, is what stopped
+  // them, on Greenhouse pages whose only challenge is an invisible reCAPTCHA behind the badge.
+  // corroborateManagedCaptchaBlockers is the layer that asks the page rather than the provider.
+  const blockers = corroborateManagedCaptchaBlockers(
     portal,
-    sanitizeProviderBlockers(result.blockers ?? []),
+    attentionBlockersForManagedResult(
+      portal,
+      sanitizeProviderBlockers(result.blockers ?? []),
+      result,
+      packet,
+    ),
     result,
-    packet,
   );
   const verificationHandoff = blockers.some((blocker) =>
     /verification code|security code|one[ -]?time code|passcode|\botp\b/i.test(blocker),
@@ -961,7 +977,11 @@ async function prepareManaged(
     ...(captchaAttention
       ? beginStall(current, {
         surface: 'server_run',
-        provider: 'unknown',
+        // Read off the page's own markup rather than hard-coded. `unknown` was written on every one
+        // of the fourteen stalls in prod, including pages carrying a reCAPTCHA anchor iframe, which
+        // made the instrumentation unable to answer the single question it exists for: which
+        // providers actually gate us. A run that stops owes a reason, and "I did not look" is not one.
+        provider: managedCaptchaProvider(result, portal),
         stage: 'before_fill',
         source: 'observed',
       })
@@ -1441,8 +1461,18 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
         fastify.log.warn({ applicationId: row.id, detail }, 'CAPTCHA probe failed, continuing unprobed');
         return null;
       });
-    if (managedResultRequiresCaptchaAttention(captchaProbe)) {
-      throw new CaptchaUnresolvedError('before_fill');
+    // Corroborated as well as probed, because this predicate alone decides whether ANY managed
+    // submission is allowed to proceed - one function, every employer, every ATS. On the families
+    // Litos claims it can finish unaided, the page markup has to agree before the run stops.
+    if (
+      managedResultRequiresCaptchaAttention(captchaProbe)
+      && managedCaptchaVerdictIsCorroborated(portal, captchaProbe)
+    ) {
+      // The provider is passed, not defaulted. Defaulting recorded `unknown` on pages carrying a
+      // g-recaptcha-response and a reCAPTCHA anchor iframe, which is a reporting defect of its own:
+      // the stall's whole job is to say what stopped the run, and this was the one stop site in the
+      // codebase that declined to.
+      throw new CaptchaUnresolvedError('before_fill', managedCaptchaProvider(captchaProbe, portal));
     }
     const builtPacket = await buildPacket(row);
     const packet = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
