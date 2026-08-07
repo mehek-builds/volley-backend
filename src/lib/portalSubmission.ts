@@ -1843,7 +1843,11 @@ function trimGreenhouseManagedActionsToBudget(actions: ManagedBrowserAction[], l
 function truncateManagedActionsToBudget(actions: ManagedBrowserAction[], limit: number) {
   while (actions.length > limit) {
     let tailIndex = actions.length - 1;
-    while (tailIndex >= 0 && /^filled_field:/.test(actions[tailIndex]?.label ?? '')) {
+    // The evidence reads are protected alongside the filled_field extracts, and for the same reason:
+    // they are what the run is JUDGED by afterwards, not part of what it fills. Truncating them off
+    // the tail of a large Akuna packet would silently remove the corroboration that decides whether
+    // a CAPTCHA blocker is believed, on exactly the packets most likely to hit the budget.
+    while (tailIndex >= 0 && /^(?:filled_field:|captcha_)/.test(actions[tailIndex]?.label ?? '')) {
       tailIndex -= 1;
     }
     if (tailIndex < 0) break;
@@ -2477,7 +2481,14 @@ export function buildManagedPortalActions(
     pushGreenhouseReferralSourceAliases(actions, packet);
     pushGreenhouseDemographicAliases(actions, packet);
   }
-  if (!submit) pushManagedCoreFieldExtractActions(actions, portal);
+  // Prepare only. The submit path makes the standalone probe call above this one and reads its
+  // evidence from there, so repeating the reads inside the submit action list would spend budget on
+  // a page that is about to be clicked anyway. On prepare there is no probe call at all, and this is
+  // the only thing that lets the runner's CAPTCHA verdict be corroborated instead of believed.
+  if (!submit) {
+    pushManagedCoreFieldExtractActions(actions, portal);
+    actions.push(...managedCaptchaEvidenceActions());
+  }
   // Choice controls are filled only by the runner's scoped question-container logic. That keeps
   // short answers such as "Yes" from matching an unrelated acknowledgement elsewhere on the page.
   // portalCanAutoSubmit is the second gate, and it is deliberately NOT the caller's job. A caller
@@ -3260,6 +3271,21 @@ const CAPTCHA_MAX_CANDIDATE_NODES = 20;
 // always right beats a broad one that misfires in both directions.
 const MANAGED_CAPTCHA_CHALLENGE_SELECTOR = '[data-sitekey]:not(.grecaptcha-badge):not(.grecaptcha-badge *)';
 
+// The three extra reads that tell an INVISIBLE reCAPTCHA apart from a real one, measured against the
+// live Akuna Greenhouse page on 2026-08-08. That page carries `grecaptcha`, a `g-recaptcha-response`
+// textarea and an anchor iframe, and asks a human for nothing: the anchor is `size=invisible`, every
+// captcha-matching node sits inside `.grecaptcha-badge`, and there is no bframe. A person filling
+// that form by hand clicks Submit and never sees a challenge.
+//
+// The bframe is the load-bearing one. reCAPTCHA renders the image-grid popup in a SECOND iframe
+// whose src contains `bframe`; the anchor iframe is only the checkbox-or-badge. So "anchor present"
+// means a widget is wired up, and "bframe present" means a human is actually being asked something.
+// Read as an attribute, not a count, because the runner's extract contract returns attribute values
+// and `src` is present on every iframe it can match.
+const MANAGED_CAPTCHA_SIZE_SELECTOR = '[data-sitekey][data-size]:not(.grecaptcha-badge):not(.grecaptcha-badge *)';
+const MANAGED_CAPTCHA_ANCHOR_SELECTOR = 'iframe[src*="/recaptcha/"][src*="anchor"]';
+const MANAGED_CAPTCHA_BFRAME_SELECTOR = 'iframe[src*="/recaptcha/"][src*="bframe"]';
+
 // The managed runner's /api/run is STATELESS and executes the whole action list before returning,
 // so a check placed inside the submit list cannot stop the click it is meant to gate - by the time
 // the result comes back the application is already sent. This is a separate, cheap call made first:
@@ -3282,24 +3308,190 @@ export function buildManagedCaptchaProbeActions(): ManagedBrowserAction[] {
       optional: true,
       timeout: MANAGED_FILL_TIMEOUT_MS,
     },
+    ...managedCaptchaEvidenceActions(),
   ];
 }
 
-// Fails OPEN by construction, and that is deliberate rather than lazy. The remote runner's extract
-// semantics are not defined in this repo, so if it returns a shape this does not recognise the
-// verdict is "no challenge seen" - exactly the behaviour the managed path had before this probe
-// existed. That makes the probe a strict improvement in every case and a regression in none, at the
-// cost of needing one live run against the QA portal to confirm it actually fires.
+// The evidence reads, shared by the standalone submit-time probe and the prepare-time fill run.
+//
+// Appended to the fill run too because the prepare path never calls the probe: it reads a CAPTCHA
+// verdict off the REMOTE RUNNER's blocker list, which is a third-party judgement this repo cannot
+// see the reasoning behind. Carrying the same three attributes back on the fill result is what lets
+// corroboration happen at all. Three optional extracts, no screenshot, no token.
+export function managedCaptchaEvidenceActions(): ManagedBrowserAction[] {
+  return [
+    {
+      type: 'extract',
+      selector: MANAGED_CAPTCHA_SIZE_SELECTOR,
+      attribute: 'data-size',
+      label: 'captcha_size',
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    },
+    {
+      type: 'extract',
+      selector: MANAGED_CAPTCHA_ANCHOR_SELECTOR,
+      attribute: 'src',
+      label: 'captcha_anchor',
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    },
+    {
+      type: 'extract',
+      selector: MANAGED_CAPTCHA_BFRAME_SELECTOR,
+      attribute: 'src',
+      label: 'captcha_bframe',
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    },
+  ];
+}
+
+/**
+ * What an extract entry actually SAW, with every spelling of "matched nothing" collapsed to null.
+ *
+ * `ManagedBrowserResult.extracted` types `value` as `string | null`, but Stratus is an external
+ * service and that type is a declaration in this repo, not a contract it enforces. An unmatched
+ * optional extract can come back as `null`, as `undefined`, as `""`, or as the selector echoed with
+ * a whitespace value, and the previous `item.value !== null` test called three of those four a
+ * challenge. The other two readers of this same array already knew better: managedResultFilledFields
+ * and managedResultHasCoverLetterUpload both test `value?.trim()`. This puts that reading in one
+ * place so a fourth reader cannot reintroduce the strict-null version.
+ */
+export function managedExtractedValue(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+export type ManagedCaptchaEvidence = {
+  /** A data-sitekey outside the badge: a widget container is on the page. */
+  sitekey: string | null;
+  /** The widget's declared size, when it declares one. `invisible` asks a human for nothing. */
+  size: string | null;
+  /** The reCAPTCHA anchor iframe's src: the checkbox-or-badge frame. */
+  anchorSrc: string | null;
+  /** The reCAPTCHA bframe's src: the image-grid popup. Its presence IS a human being asked. */
+  bframeSrc: string | null;
+};
+
+function managedExtractedFirst(
+  result: ManagedBrowserResult | null,
+  label: string,
+  selector: string,
+): string | null {
+  // Scans every entry rather than taking the first, for the reason the old some() call documented:
+  // the selectors are multi-match and the runner may echo one entry per matched node, so a leading
+  // unmatched entry must not hide a real widget behind it.
+  for (const item of result?.extracted ?? []) {
+    if (item?.label !== label && item?.selector !== selector) continue;
+    const value = managedExtractedValue(item?.value);
+    if (value) return value;
+  }
+  return null;
+}
+
+export function readManagedCaptchaEvidence(result: ManagedBrowserResult | null): ManagedCaptchaEvidence {
+  return {
+    sitekey: managedExtractedFirst(result, 'captcha_challenge', MANAGED_CAPTCHA_CHALLENGE_SELECTOR),
+    size: managedExtractedFirst(result, 'captcha_size', MANAGED_CAPTCHA_SIZE_SELECTOR),
+    anchorSrc: managedExtractedFirst(result, 'captcha_anchor', MANAGED_CAPTCHA_ANCHOR_SELECTOR),
+    bframeSrc: managedExtractedFirst(result, 'captcha_bframe', MANAGED_CAPTCHA_BFRAME_SELECTOR),
+  };
+}
+
+/**
+ * An invisible reCAPTCHA is not a human challenge, and must never be counted as one on any path.
+ *
+ * Invisible mode computes a score from behaviour and mints the token on submit. Nothing is rendered
+ * for a person to clear, which is precisely why the badge exclusion above already exists. This is
+ * the same judgement expressed on the two signals a remote runner can hand back instead of a Page.
+ *
+ * The bframe check comes FIRST and overrides both. If reCAPTCHA escalates an invisible widget it
+ * opens the image grid in the bframe, and at that moment a human genuinely is being asked something
+ * even though the widget still declares itself invisible. Reading `size` alone would wave that
+ * through.
+ */
+export function isInvisibleRecaptchaEvidence(evidence: ManagedCaptchaEvidence): boolean {
+  if (evidence.bframeSrc) return false;
+  if (evidence.size && /^invisible$/i.test(evidence.size)) return true;
+  return evidence.anchorSrc !== null && /[?&]size=invisible\b/i.test(evidence.anchorSrc);
+}
+
+// Fails OPEN by construction, and now actually does. The remote runner's extract semantics are not
+// defined in this repo, so if it returns a shape this does not recognise the verdict is "no
+// challenge seen" - exactly the behaviour the managed path had before this probe existed. That was
+// the promise the previous version made in this comment and did not keep: only a literal `null`
+// read as "nothing here", so `""`, `undefined` and a whitespace echo each reported a challenge on a
+// page where `[data-sitekey]` matched zero nodes, which is what stopped every managed submission.
 export function managedResultRequiresCaptchaAttention(result: ManagedBrowserResult | null): boolean {
-  const extracted = result?.extracted;
-  if (!extracted) return false;
-  // some(), not find(). managedResultHasCoverLetterUpload scans every entry for exactly this reason:
-  // the selector is multi-match and the runner may echo one entry per matched node, so inspecting
-  // only the first would let a real widget in a later entry through.
-  return extracted.some((item) => (
-    (item.label === 'captcha_challenge' || item.selector === MANAGED_CAPTCHA_CHALLENGE_SELECTOR)
-    && item.value !== null
-  ));
+  const evidence = readManagedCaptchaEvidence(result);
+  if (isInvisibleRecaptchaEvidence(evidence)) return false;
+  if (evidence.bframeSrc) return true;
+  return evidence.sitekey !== null;
+}
+
+/**
+ * Which provider a managed run was stopped by, named rather than shrugged at.
+ *
+ * A stall recorded as `provider: unknown` on a page carrying a reCAPTCHA anchor iframe is a
+ * reporting defect in its own right: the whole reason the provider is on the stall is to answer
+ * "which families actually gate us", and `unknown` is the one answer that cannot. Every other stop
+ * site already records a real provider, either from detectCaptchaProvider on a live Page or from
+ * captchaProviderForFamily where there is no Page to read.
+ *
+ * Falls back to the family reading, not to a guess: a bare `[data-sitekey]` with no reCAPTCHA frame
+ * beside it is as consistent with hCaptcha or Turnstile as with reCAPTCHA, and a wrong provider
+ * label is worse than an absent one.
+ */
+export function managedCaptchaProvider(
+  result: ManagedBrowserResult | null,
+  portal: SupportedPortal,
+): CaptchaProvider {
+  const evidence = readManagedCaptchaEvidence(result);
+  if (evidence.bframeSrc) return 'recaptcha_v2';
+  if (evidence.anchorSrc) return isInvisibleRecaptchaEvidence(evidence) ? 'recaptcha_v3' : 'recaptcha_v2';
+  return captchaProviderForFamily(portal);
+}
+
+/**
+ * The second layer, because the probe is a single point of failure for the entire product.
+ *
+ * One predicate deciding "a human is needed" gates every managed submission Litos makes, on every
+ * employer, on every ATS. When it said yes wrongly the whole product stopped, and it did: fourteen
+ * packets carried an identical `human_verification / before_fill / unknown` stall against pages that
+ * ask a human for nothing. A verdict with that blast radius should not be taken on one signal.
+ *
+ * So on the families Litos is claiming it can finish unaided, a challenge verdict has to be
+ * corroborated by markup this repo read itself before it is allowed to stop the run. Those families
+ * are in AUTONOMOUS_PORTAL_FAMILIES precisely because they were measured as CAPTCHA-free; a
+ * challenge there is the surprising claim, and the surprising claim is the one that needs evidence.
+ * Outside them the provider's word stands unchallenged - JazzHR and BambooHR really do gate every
+ * form, portalCanAutoSubmit already refuses to submit them, and there is nothing to protect.
+ *
+ * Uncorroborating is safe at the point it is used. It drops a blocker off a PREPARE result, which
+ * fills a form and screenshots it; it never presses submit. The submit path runs its own probe
+ * afterwards, and portalCanAutoSubmit still stands in front of that. The cost of a false negative
+ * here is a preview the applicant reviews anyway. The cost of the false positive was the product.
+ */
+export function managedCaptchaVerdictIsCorroborated(
+  portal: SupportedPortal,
+  result: ManagedBrowserResult | null,
+): boolean {
+  const evidence = readManagedCaptchaEvidence(result);
+  if (isInvisibleRecaptchaEvidence(evidence)) return false;
+  if (!isAutonomousPortalFamily(portalFamily(portal))) return true;
+  return evidence.bframeSrc !== null || evidence.sitekey !== null;
+}
+
+export function corroborateManagedCaptchaBlockers(
+  portal: SupportedPortal,
+  blockers: readonly string[],
+  result: ManagedBrowserResult | null,
+): string[] {
+  if (!blockersIncludeCaptcha(blockers)) return [...blockers];
+  if (managedCaptchaVerdictIsCorroborated(portal, result)) return [...blockers];
+  return blockers.filter((blocker) => blocker !== CAPTCHA_BLOCKER);
 }
 
 // Which provider is asking. Recorded on the stall so the instrumentation can answer "which families
@@ -3315,6 +3507,16 @@ export type CaptchaProvider =
   | 'unknown';
 
 export const RECAPTCHA_INTERACTIVE_SELECTOR = `iframe[src*="recaptcha" i]:not(.${CAPTCHA_BADGE_CLASS} *)`;
+
+// The direct path's half of the same invisible-reCAPTCHA rule the managed path applies to extract
+// values. The badge exclusion above already covers the common shape, where every captcha node sits
+// inside `.grecaptcha-badge`. It does NOT cover the other one: a form that renders its own
+// `<div class="g-recaptcha" data-size="invisible">` outside the badge, or an anchor iframe mounted
+// outside it. Both match `[class*="captcha" i]`, both are visible, and both would be counted - a
+// false positive on a page where nothing is being asked, which is the exact failure the badge
+// exclusion exists to prevent, arriving through a door it does not watch.
+export const RECAPTCHA_BFRAME_SELECTOR = 'iframe[src*="/recaptcha/"][src*="bframe" i]';
+const RECAPTCHA_INVISIBLE_MARKER_SELECTOR = '[data-size="invisible"], iframe[src*="size=invisible" i]';
 
 export const CAPTCHA_PROVIDER_MARKERS: ReadonlyArray<{ provider: CaptchaProvider; selector: string }> = [
   { provider: 'turnstile', selector: '[name="cf-turnstile-response"], iframe[src*="challenges.cloudflare.com" i]' },
@@ -3366,6 +3568,10 @@ export async function hasUnresolvedCaptcha(page: Page): Promise<boolean> {
     );
   }
 
+  // Fails CLOSED on a throw, like every other probe here: `1` means "assume the popup is open",
+  // which switches the invisible exclusion OFF and leaves the node counted. A probe that cannot see
+  // must assume the thing it guards against.
+  const bframeCount = await page.locator(RECAPTCHA_BFRAME_SELECTOR).count().catch(() => 1);
   const challenges = page.locator(CAPTCHA_CHALLENGE_SELECTOR);
   const challengeCount = Math.min(await challenges.count(), CAPTCHA_MAX_CANDIDATE_NODES);
   let visibleChallengeCount = 0;
@@ -3383,6 +3589,20 @@ export async function hasUnresolvedCaptcha(page: Page): Promise<boolean> {
       })
       .catch(() => false);
     if (insideBadge) continue;
+    // Only while no bframe is open. An escalated invisible widget still declares itself invisible,
+    // so without the bframe test this would wave through the one case where a human really is
+    // looking at an image grid. Matched with matches() OR closest(), same reasoning as the badge:
+    // the invisible marker sits on the widget CONTAINER, and the iframe inside it carries neither.
+    if (bframeCount === 0) {
+      const invisibleOnly = await challenge
+        .evaluate(
+          (node, selector) => node.matches(selector) || node.closest(selector) !== null,
+          RECAPTCHA_INVISIBLE_MARKER_SELECTOR,
+          { timeout: CAPTCHA_PROBE_TIMEOUT_MS },
+        )
+        .catch(() => false);
+      if (invisibleOnly) continue;
+    }
     visibleChallengeCount += 1;
   }
   return captchaSnapshotRequiresAttention(responseTokens, visibleChallengeCount);
