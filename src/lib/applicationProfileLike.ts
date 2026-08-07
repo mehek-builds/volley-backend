@@ -97,6 +97,24 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
     };
     return str('current_employer') ?? experienceEmployer(parsed, currentExperience) ?? experienceEmployer(base, currentExperience);
   };
+  // When the applicant STARTED their current programme. Employer education blocks ask for this and
+  // it must never be answered from availability_date. Only the parsed education history can supply
+  // it; today no parse produces one, so the resolver refuses the field rather than guessing.
+  const educationStartDate = (): string | undefined => {
+    const direct = academicStr('education_start_date');
+    if (direct) return direct;
+    for (const source of [parsed, base]) {
+      const education = source.education;
+      if (!Array.isArray(education)) continue;
+      for (const item of education) {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+        const entry = item as Record<string, unknown>;
+        const start = entry.start ?? entry.start_date ?? entry.startDate ?? entry.from;
+        if (typeof start === 'string' && start.trim()) return start.trim();
+      }
+    }
+    return undefined;
+  };
   const onboardingEligibility = workEligibilityFromSponsorshipAnswer(userRow?.sponsorship_answer);
   return {
     full_name: academicStr('full_name'),
@@ -118,6 +136,7 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
     employer_history: employerHistory(),
     school: academicStr('school'),
     degree: academicStr('degree'),
+    education_start_date: educationStartDate(),
     grad_date: academicStr('grad_date'),
     grad_year: academicNum('grad_year'),
     currently_enrolled: academicBoolean('currently_enrolled'),
