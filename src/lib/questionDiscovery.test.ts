@@ -477,7 +477,17 @@ test('school and degree resolve from the academic profile', () => {
   assert.equal(classifyField('What is your expected graduation year?'), 'graduation_year');
   assert.equal(classifyField('When did you graduate from High School?'), null);
   assert.deepEqual(resolveKnownAnswer('School', 'text', profile, undefined), { value: profile.school });
-  assert.deepEqual(resolveKnownAnswer('Degree', 'text', profile, undefined), { value: profile.degree });
+  // A bare "Degree" is the education section's LEVEL picker on every ATS that has one, and it is
+  // a closed list. This used to be recognised only through Greenhouse's `degree--0` handle, which
+  // normalizeDiscoveredLabel now strips as noise, so the rule moved onto the visible label. The
+  // old expectation here (the full degree sentence) is the Class A defect in miniature: a list
+  // offering "Bachelor's Degree" was asked for "Bachelor of Science in Computer Science",
+  // matched nothing, and the field came back "required and is still empty".
+  assert.deepEqual(resolveKnownAnswer('Degree', 'text', profile, undefined), { value: "Bachelor's Degree" });
+  assert.deepEqual(
+    resolveKnownAnswer('What degree are you currently pursuing?', 'text', profile, undefined),
+    { value: profile.degree },
+  );
   assert.deepEqual(resolveKnownAnswer('Discipline', 'text', profile, undefined), { value: profile.major });
   assert.deepEqual(resolveKnownAnswer('What is your expected graduation year?', 'text', { grad_year: 2028 }, undefined), { value: '2028' });
 });

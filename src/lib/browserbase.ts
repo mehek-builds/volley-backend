@@ -23,6 +23,10 @@ export type ManagedDiscoveredQuestion = {
   selector: string;
   inputType: string;
   maxLength: number | null;
+  // Optional because the managed provider does not report option lists yet. When it starts to,
+  // the resolver snaps the answer onto a real option with no further change here; until then it
+  // falls back to the ranked alias ladder in profileFieldResolution.ts.
+  options?: string[] | null;
 };
 
 export type ManagedBrowserResult = {

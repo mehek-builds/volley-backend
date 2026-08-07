@@ -8,6 +8,7 @@ import {
   resolveKnownAnswer,
   type ApplicationProfileLike,
 } from './questionDiscovery';
+import { profileAnswerAliases, resolveProfileField } from './profileFieldResolution';
 import type { Locator } from 'playwright-core';
 
 // Portal field ids legitimately contain CSS-syntax characters (Greenhouse uses UUIDs, others use
@@ -1097,6 +1098,13 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string, c
     return [];
   }
   const values = selectValuesForAnswer(answer);
+  // The general, employer-independent ladder: education level enum, discipline family, the
+  // institution name without its trailing "... School of Engineering" clause, GPA to two and one
+  // decimal places, month name plus its number, term and year forms of a graduation date, and the
+  // standard referral-source wordings. Appended rather than unshifted so every rule below still
+  // wins the head of the list; these exist so the SECOND and THIRD attempts are useful instead of
+  // absent. uniqueDefined at the end of this function dedupes against whatever they add.
+  values.push(...profileAnswerAliases(question, answer));
   const isGraduationPartQuestion = /\bgraduat(?:ion|e)\s+(?:month|year)\b|\bwhat\s+is\s+your\s+graduation\s+(?:month|year)\b/.test(normalizedQuestion);
   if (/\bwhat\s+is\s+your\s+gpa\b|\bgpa\b|academic\s+performance|grade\s+average|grade\s+point/.test(normalizedQuestion)) {
     values.unshift(greenhouseGpaBucket(answer) ?? '');
@@ -1273,10 +1281,7 @@ function pushGreenhouseQuestionComboboxActions(
       `input[role="combobox"]:right-of(${selector})`,
     );
   }
-  const valueLimit = /\bdatabricks\b/i.test(`${questionText}\n${contextText}`)
-    && /\bgraduat(?:ion|e)\b|\bexpect(?:ing)?\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b/i.test(questionText)
-    ? 3
-    : 1;
+  const valueLimit = comboboxValueLimit(questionText, contextText);
   for (const [index, value] of greenhouseComboboxValuesForQuestion(questionText, answer, contextText).slice(0, valueLimit).entries()) {
     for (const [selectorIndex, inputSelector] of selectors.entries()) {
       managedGreenhouseScopedReactSelectFill(
@@ -1288,6 +1293,22 @@ function pushGreenhouseQuestionComboboxActions(
       );
     }
   }
+}
+
+/**
+ * How many alias forms one combobox is worth attempting.
+ *
+ * Deliberately still 1 for the ordinary case. Each attempt costs several actions against
+ * MANAGED_ACTION_LIMIT, and the budget is already tight enough that Greenhouse has a dedicated
+ * trimming pass; widening this across the board pushed real fills out of the run. The ladder in
+ * profileFieldResolution.ts is therefore spent where it is free: on the direct-Playwright path,
+ * which reads the control's real options and snaps, and on any question this already widened.
+ */
+function comboboxValueLimit(questionText: string, contextText: string): number {
+  return /\bdatabricks\b/i.test(`${questionText}\n${contextText}`)
+    && /\bgraduat(?:ion|e)\b|\bexpect(?:ing)?\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b/i.test(questionText)
+    ? 3
+    : 1;
 }
 
 function pushGreenhouseQuestionSelectActions(
@@ -1313,10 +1334,7 @@ function pushGreenhouseQuestionComboboxLabelActions(
 ) {
   if (!isGreenhouseReactSelectQuestion(questionText)) return;
   let index = 0;
-  const valueLimit = /\bdatabricks\b/i.test(`${questionText}\n${contextText}`)
-    && /\bgraduat(?:ion|e)\b|\bexpect(?:ing)?\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b/i.test(questionText)
-    ? 3
-    : 1;
+  const valueLimit = comboboxValueLimit(questionText, contextText);
   const values = greenhouseComboboxValuesForQuestion(questionText, answer, contextText).slice(0, valueLimit);
   for (const selector of greenhouseQuestionComboboxSelectors(questionText).slice(0, QUESTION_COMBOBOX_SELECTOR_LIMIT)) {
     for (const value of values) {
@@ -2986,13 +3004,38 @@ async function fillResolvedRequiredField(
   if (!packet.applicationProfile) return false;
   const tag = (await field.evaluate((el) => el.tagName).catch(() => '')).toLowerCase();
   const type = (await field.getAttribute('type').catch(() => null))?.toLowerCase() ?? (tag === 'textarea' ? 'textarea' : 'text');
-  const known = resolveKnownAnswer(label, type, packet.applicationProfile, packet.jdText);
-  if (!known || !('value' in known) || !known.value.trim()) return false;
-  const value = known.value.trim();
+  // Read the control's REAL options before deciding what to say. A select used to be handed the
+  // profile's own phrasing and told to match it exactly, so a list offering "University of
+  // Southern California" was asked for "University of Southern California, Viterbi School of
+  // Engineering", matched nothing, and the field was then reported required-and-empty with the
+  // answer sitting in the packet the whole time.
+  const options = tag === 'select'
+    ? await field.locator('option').allTextContents().catch(() => [] as string[])
+    : [];
+  const resolved = resolveProfileField(
+    { label, inputType: tag === 'select' ? 'select' : type, options },
+    packet.applicationProfile,
+    packet.jdText,
+  );
+  if (!resolved || !resolved.value.trim()) return false;
+  const value = resolved.value.trim();
   try {
     if (tag === 'select') {
-      await field.selectOption({ label: value }).catch(() => field.selectOption(value));
-    } else if (type === 'checkbox' || type === 'radio') {
+      // Try the whole ladder, best first. selectOption throws when nothing matches, so a failed
+      // attempt costs one exception and the next alias still gets its turn; before this, one
+      // miss ended the field.
+      for (const candidate of [value, ...resolved.candidates]) {
+        const selected = await field.selectOption({ label: candidate })
+          .then(() => true)
+          .catch(() => field.selectOption(candidate).then(() => true).catch(() => false));
+        if (selected) {
+          out.push(`required:${label.slice(0, 80)}`);
+          return true;
+        }
+      }
+      return false;
+    }
+    if (type === 'checkbox' || type === 'radio') {
       const wantsYes = /^(yes|true|i agree|agree|accepted?|confirm(?:ed)?|acknowledge(?:d)?)$/i.test(value);
       if (!wantsYes) return false;
       await field.check();

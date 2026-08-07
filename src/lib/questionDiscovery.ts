@@ -656,7 +656,12 @@ function locationStatusAnswer(label: string, ap: ApplicationProfileLike): { valu
 function degreeAnswer(label: string, inputType: string | undefined, degree: string | undefined): string | null {
   const trimmed = degree?.trim();
   if (!trimmed) return null;
+  // A bare "Degree" label is the education section's level picker on every ATS that has one, and
+  // it is a closed list. It used to be recognised only by its Greenhouse handle (`degree--0`),
+  // which normalizeDiscoveredLabel now strips as noise, so the rule is stated on the label the
+  // employer actually shows instead of on a provider's internal id.
   const needsLevel = /most recent degree|highest degree|degree (?:you )?(?:obtained|earned)|education level|level of education/i.test(label)
+    || /^\s*degree\s*$/i.test(label)
     || /\bdegree--\d+\b/i.test(label)
     || /select|radio|combobox/i.test(inputType ?? '');
   if (!needsLevel) return trimmed;
@@ -734,6 +739,16 @@ export type DiscoveredQuestion = {
   selector: string;
   inputType: string;
   maxLength: number | null;
+  /**
+   * The control's real option texts, when it has a closed list (a select, a radio or checkbox
+   * group, or a datalist). Nothing in this codebase used to capture these, which is why a closed
+   * list was fed the profile's own phrasing: the stored school is "University of Southern
+   * California, Viterbi School of Engineering" and the option reads "University of Southern
+   * California", so nothing was ever selected and the field came back required-and-empty.
+   * Optional because a provider that does not report options must still work; the resolver falls
+   * back to a ranked alias ladder in that case.
+   */
+  options?: string[] | null;
 };
 
 export const REVIEW_QUESTION_TEXT_MAX_LENGTH = 500;
@@ -741,6 +756,18 @@ export const REVIEW_QUESTION_TEXT_MAX_LENGTH = 500;
 const INLINE_UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
 const GREENHOUSE_QUESTION_HANDLE_RE = /\bquestion_\d+\b/gi;
 const GREENHOUSE_TRAILING_NUMERIC_HANDLE_RE = /\s*\*?\s+\d{2,5}\s*$/u;
+// Greenhouse's repeated-section handles: degree--0, school--0, discipline--0, start-month--0,
+// end-year--1. Discovery concatenates the control's `name` and `id` onto the visible label, so
+// these land INSIDE the question text: prod packets stored questions literally titled
+// "degree* degree--0" and "discipline* discipline--0". Every managed fill for such a question is
+// scoped with `label:has-text("<the stored text>")`, which can never match a page whose label
+// reads "Degree", so the control was left untouched and came back as
+// '"Discipline" is required and is still empty' with the answer already resolved in the packet.
+// Stripping the handle restores the employer's own label, which is what the scope needs.
+const GREENHOUSE_SECTION_HANDLE_RE = /\b[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*--\d+\b/gi;
+// What is left of an array-shaped question name (question_37536799002[]) once the handle above is
+// removed. A bare "[]" is not part of anyone's question.
+const EMPTY_BRACKET_HANDLE_RE = /\[\s*\]/g;
 const TRAILING_ANSWER_PLACEHOLDER_RE = /\s+(?:type|enter|write)\s+(?:your\s+)?(?:answer\s+)?here(?:\.{3}|…)?\s*$/i;
 
 function collapseRepeatedLabel(value: string): string {
@@ -762,6 +789,8 @@ export function normalizeDiscoveredLabel(raw: string): string {
   const withoutHandles = raw
     .replace(INLINE_UUID_RE, ' ')
     .replace(GREENHOUSE_QUESTION_HANDLE_RE, ' ')
+    .replace(GREENHOUSE_SECTION_HANDLE_RE, ' ')
+    .replace(EMPTY_BRACKET_HANDLE_RE, ' ')
     .replace(GREENHOUSE_TRAILING_NUMERIC_HANDLE_RE, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -900,6 +929,55 @@ const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
     var fallback = block ? block.querySelector('label, legend, .question, h3, h4') : null;
     return ((fallback && fallback.textContent) || '').trim();
   }
+  function optionLabel(input) {
+    var labelEl = (input.labels && input.labels[0])
+      || (input.id ? document.querySelector('label[for="' + CSS.escape(input.id) + '"]') : null);
+    return clean(
+      (labelEl && labelEl.textContent)
+      || input.getAttribute('aria-label')
+      || input.getAttribute('data-qa')
+      || input.value
+      || '',
+    );
+  }
+  // The control's REAL option texts, so the resolver can snap the profile's phrasing onto one of
+  // them instead of typing a value the list does not contain. A react-select is not covered here
+  // (its options only exist once the menu opens), which is exactly why the resolver still returns
+  // a ranked alias ladder when this comes back empty.
+  function optionTexts(el) {
+    var out = [];
+    var i;
+    if (el.tagName === 'SELECT') {
+      for (i = 0; i < el.options.length; i += 1) {
+        var text = clean(el.options[i].label || el.options[i].textContent || '');
+        if (text) out.push(text);
+      }
+      return out;
+    }
+    if (el.type === 'radio' || el.type === 'checkbox') {
+      var name = el.getAttribute('name');
+      if (!name) {
+        var own = optionLabel(el);
+        return own ? [own] : [];
+      }
+      var group = document.querySelectorAll('input[name="' + quoteAttr(name) + '"]');
+      for (i = 0; i < group.length; i += 1) {
+        var groupText = optionLabel(group[i]);
+        if (groupText) out.push(groupText);
+      }
+      return out;
+    }
+    var listId = el.getAttribute('list');
+    var list = listId ? document.getElementById(listId) : null;
+    if (list) {
+      var listOptions = list.querySelectorAll('option');
+      for (i = 0; i < listOptions.length; i += 1) {
+        var listText = clean(listOptions[i].getAttribute('value') || listOptions[i].textContent || '');
+        if (listText) out.push(listText);
+      }
+    }
+    return out;
+  }
 
   var els = Array.prototype.slice
     .call(
@@ -927,6 +1005,7 @@ const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
         ? 'textarea'
         : (el.tagName === 'SELECT' ? 'select' : (el.getAttribute('role') === 'combobox' ? 'combobox' : (el.type || 'text'))),
       maxLength: el.maxLength > 0 ? el.maxLength : null,
+      options: optionTexts(el),
     });
   }
   return out;
