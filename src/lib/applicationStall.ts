@@ -1,5 +1,6 @@
 import type { ApplicationReviewState } from './applicationReview';
 import type { CaptchaProvider, CaptchaStopStage } from './portalSubmission';
+import { withTerminalCause } from './submissionTerminalCause';
 
 export type StallSurface = 'server_run' | 'extension';
 
@@ -118,11 +119,18 @@ export function orderByStalledAt<T extends { stall?: { stalled_at: string } }>(r
  * Every writer goes through here, including the ones in routes/applications.ts that predate stalls
  * and know nothing about them. That is the point: a rule enforced at a dozen call sites is a rule
  * that holds until someone adds the thirteenth.
+ *
+ * withTerminalCause is applied here for exactly that reason and no other. A run that has stopped
+ * must carry a cause the applicant can read and a category we can count, and the version of that
+ * rule which lived at the call sites failed in prod: three owner packets reached status 'failed'
+ * with attention_reason unset. Placed AFTER settleStall so the stall bookkeeping sees the status
+ * the caller actually wrote, and so a terminal state cannot be persisted through this function
+ * without a cause regardless of what the caller passed.
  */
 export function applyReviewPatch(
   current: ApplicationReviewState,
   patch: Partial<ApplicationReviewState>,
   now: () => string = () => new Date().toISOString(),
 ): ApplicationReviewState {
-  return settleStall({ ...current, ...patch, updated_at: now() }, now);
+  return withTerminalCause(settleStall({ ...current, ...patch, updated_at: now() }, now));
 }
