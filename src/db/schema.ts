@@ -126,6 +126,19 @@ export const users = pgTable('users', {
   // declare at onboarding can switch the sponsor-only board on here, and off again. Someone who
   // did declare sees it on and locked, with the reason stated.
   sponsor_only_jobs_enabled: boolean('sponsor_only_jobs_enabled').default(false).notNull(),
+  /* Where employer mail that arrives at a Litos application alias is delivered.
+   *
+   * NULL means "use the account email", which is what every existing account gets and what the
+   * 50 alias rows already written are pointed at, so this column changes nothing until somebody
+   * sets it. It exists because the destination was previously an ACCIDENT: submissionRunner passed
+   * the login address, so a student who signs in with a school account she loses at graduation
+   * would silently lose every employer reply with it, and had no way to say otherwise.
+   *
+   * Changing it re-points FUTURE aliases and, on the next write to an existing alias, that one too
+   * (ensureApplicationEmailAlias upserts forward_to). Historical rows are deliberately left alone
+   * rather than bulk-rewritten: a thread already running to one mailbox should not silently move
+   * mid-conversation. */
+  application_email_forward_to: text('application_email_forward_to'),
 }, (t) => ({
   googleSubjectUnique: uniqueIndex('users_google_subject_unique')
     .on(t.google_subject)

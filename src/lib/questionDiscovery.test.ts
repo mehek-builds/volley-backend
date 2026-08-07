@@ -6,6 +6,7 @@ import {
   fitToBudget,
   graduationDateAnswer,
   isOpenEndedQuestion,
+  isPolarQuestion,
   isRefusedQuestion,
   normalizeDiscoveredLabel,
   normalizeReviewQuestionLabel,
@@ -477,7 +478,17 @@ test('school and degree resolve from the academic profile', () => {
   assert.equal(classifyField('What is your expected graduation year?'), 'graduation_year');
   assert.equal(classifyField('When did you graduate from High School?'), null);
   assert.deepEqual(resolveKnownAnswer('School', 'text', profile, undefined), { value: profile.school });
-  assert.deepEqual(resolveKnownAnswer('Degree', 'text', profile, undefined), { value: profile.degree });
+  // A bare "Degree" is the education section's LEVEL picker on every ATS that has one, and it is
+  // a closed list. This used to be recognised only through Greenhouse's `degree--0` handle, which
+  // normalizeDiscoveredLabel now strips as noise, so the rule moved onto the visible label. The
+  // old expectation here (the full degree sentence) is the Class A defect in miniature: a list
+  // offering "Bachelor's Degree" was asked for "Bachelor of Science in Computer Science",
+  // matched nothing, and the field came back "required and is still empty".
+  assert.deepEqual(resolveKnownAnswer('Degree', 'text', profile, undefined), { value: "Bachelor's Degree" });
+  assert.deepEqual(
+    resolveKnownAnswer('What degree are you currently pursuing?', 'text', profile, undefined),
+    { value: profile.degree },
+  );
   assert.deepEqual(resolveKnownAnswer('Discipline', 'text', profile, undefined), { value: profile.major });
   assert.deepEqual(resolveKnownAnswer('What is your expected graduation year?', 'text', { grad_year: 2028 }, undefined), { value: '2028' });
 });
@@ -1102,4 +1113,259 @@ test('long discovered labels can be capped for storage without hiding refusal ch
 
   assert.equal(normalizeReviewQuestionLabel(longSensitive).length <= REVIEW_QUESTION_TEXT_MAX_LENGTH, true);
   assert.equal(isRefusedQuestion(longSensitive), true);
+});
+
+// ---------------------------------------------------------------------------
+// Wrong-answer regressions, fixtured on the exact labels found in the owner's
+// 25 most recent prod packets (spec._review.questions, pulled 2026-08-08).
+// Each of these was SUBMITTED-READY with a factually wrong value. A blank field
+// stalls a run; a confident wrong answer goes to the employer.
+// ---------------------------------------------------------------------------
+
+const PROD_OWNER_PROFILE = {
+  full_name: 'Mehek Mandal',
+  phone: '+971 567417451',
+  address_city: 'Dubai',
+  address_state: 'Dubai',
+  address_country: 'United Arab Emirates',
+  citizenship: 'India',
+  work_authorized: true,
+  needs_sponsorship: true,
+  availability_date: 'August 6, 2026',
+  school: 'University of Southern California, Viterbi School of Engineering',
+  degree: 'Bachelor of Science in Computer Science',
+  grad_date: 'May 2028',
+  grad_year: 2028,
+  currently_enrolled: true,
+  gpa: '3.89',
+  gpa_scale: '4.0',
+  major: 'Computer Science',
+};
+
+function skipReasonOf(result: ReturnType<typeof resolveKnownAnswer>): string | null {
+  return result && 'skipReason' in result ? result.skipReason : null;
+}
+
+function refuses(label: string, inputType = 'text', profile = PROD_OWNER_PROFILE): void {
+  const result = resolveKnownAnswer(label, inputType, profile, undefined);
+  assert.ok(
+    result === null || 'skipReason' in result,
+    `expected no answer for ${JSON.stringify(label.slice(0, 70))}, got ${JSON.stringify(result)}`,
+  );
+}
+
+test('Greenhouse education "start date month/year" is not job availability (Five Rings, IMC, Tower)', () => {
+  // These went out as "August 6, 2026" - the stored availability_date - inside the education block.
+  assert.equal(classifyField('start date month* start-month--0'), 'education_start_date');
+  assert.equal(classifyField('start date year* start date year start-year--0'), 'education_start_date');
+  refuses('start date month* start-month--0');
+  refuses('start date year* start date year start-year--0', 'number');
+  assert.match(
+    skipReasonOf(resolveKnownAnswer('start date month* start-month--0', 'text', PROD_OWNER_PROFILE, undefined)) ?? '',
+    /education start date/i,
+  );
+
+  // ...and it resolves from the education history once that history carries a start date.
+  const withHistory = { ...PROD_OWNER_PROFILE, education_start_date: 'August 2024' };
+  assert.deepEqual(
+    resolveKnownAnswer('start date month* start-month--0', 'text', withHistory, undefined),
+    { value: 'August' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('start date year* start date year start-year--0', 'number', withHistory, undefined),
+    { value: '2024' },
+  );
+  // Job availability itself is untouched.
+  assert.equal(classifyField('when can you start?'), 'availability_date');
+  assert.deepEqual(
+    resolveKnownAnswer('When are you available to start?', 'text', PROD_OWNER_PROFILE, undefined),
+    { value: 'August 6, 2026' },
+  );
+});
+
+test('education end date is the graduation date, and a whole-range field needs both ends', () => {
+  assert.equal(classifyField('end date month* end-month--0'), 'education_end_date');
+  assert.deepEqual(
+    resolveKnownAnswer('end date month* end-month--0', 'text', PROD_OWNER_PROFILE, undefined),
+    { value: 'May' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('end date year* end-year--0', 'number', PROD_OWNER_PROFILE, undefined),
+    { value: '2028' },
+  );
+  // Tower's single textarea asks for both ends; without a start there is no partial answer, and
+  // it must never fall through to the school NAME the way it did in prod.
+  refuses('start month/year of university and end month/year of university', 'textarea');
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'start month/year of university and end month/year of university',
+      'textarea',
+      { ...PROD_OWNER_PROFILE, education_start_date: 'August 2024' },
+      undefined,
+    ),
+    { value: 'August 2024 to May 2028' },
+  );
+});
+
+test('a label merely containing a profile keyword is not grounds to answer it with that value', () => {
+  // The core discipline. Each label below contains a word the profile has a value for, and each
+  // one is asking for something else entirely.
+  refuses('if you applied using your personal email address, please provide your university email address'); // IMC: got the university NAME
+  refuses('when did you graduate from high school?'); // IMC: got the university NAME
+  refuses(
+    'are you or have you been entrusted with a position or function in any government, international organization '
+    + '(such as the un or world bank), or state-controlled or state-owned bank, brokerage firm, or other enterprise?',
+  ); // Tower: got "Dubai", off the word "state" in "state-owned"
+  refuses("if you selected 'other', please list your university"); // Akuna: a conditional, answered unconditionally
+  assert.equal(classifyField('please provide your university email address'), null);
+  assert.equal(classifyField('what is your university campus address?'), null);
+  assert.equal(classifyField('may we contact you by phone?'), null);
+  assert.equal(classifyField('which state-owned enterprises have you worked for?'), null);
+
+  // The bare field-name labels the fallback exists for still classify.
+  assert.equal(classifyField('School'), 'school');
+  assert.equal(classifyField('Current university'), 'school');
+  assert.equal(classifyField('Phone number'), 'phone');
+  assert.equal(classifyField('State / Province'), 'address_state');
+  assert.equal(classifyField('City'), 'address_city');
+  assert.equal(classifyField('Please re-confirm the university you currently attend'), 'school');
+});
+
+/* The gate above was written as "and the label must not contain a question mark", and a question
+ * mark is not evidence that a label is naming something other than the field. It is evidence the
+ * portal wrote the field name as a sentence, which most of them do. Measured on the tree that
+ * shipped it, every one of these returned null and left a required field EMPTY:
+ *
+ *   What is your phone number?              What university do you attend?
+ *   What state do you live in?              Which city do you live in?
+ *   In which state do you currently reside? What is your current city of residence?
+ *
+ * Phone is the one that hurts most. It is required on nearly every application form, and the
+ * `type === 'tel'` escape at the top of classifyField cannot save it on the managed path, because
+ * the runner reports every inputType as `text`. Asserted here with no type argument for exactly
+ * that reason. */
+test('a field name written as a question is still a field name', () => {
+  assert.equal(classifyField('what is your phone number?'), 'phone');
+  assert.equal(classifyField('what university do you attend?'), 'school');
+  assert.equal(classifyField('what state do you live in?'), 'address_state');
+  assert.equal(classifyField('which city do you live in?'), 'address_city');
+  assert.equal(classifyField('in which state do you currently reside?'), 'address_state');
+  assert.equal(classifyField('what is your current city of residence?'), 'address_city');
+});
+
+/* What the question mark was actually earning its keep on, and the reason it cannot simply be
+ * deleted: a POLAR question mentions the noun to ask something ABOUT it, and the stored value is
+ * not an answer to it. "May we contact you by phone?" wants a yes; the phone number is not one.
+ *
+ * The distinction is the opening word, not the punctuation. An auxiliary opens a yes/no question;
+ * what, which and where open a request for the value itself. */
+test('a yes/no question about a field is not a request for that field', () => {
+  assert.equal(classifyField('may we contact you by phone?'), null);
+  assert.equal(classifyField('do you have a mobile phone?'), null);
+  assert.equal(classifyField('do you live in new york or california?'), null);
+  assert.equal(classifyField('are you based in a state that taxes remote work?'), null);
+  assert.equal(classifyField('is your school on our partner list?'), null);
+  // isPolarQuestion is the one rule, and it needs BOTH halves: an auxiliary at the front and a
+  // question mark. Either alone would refuse a field name.
+  assert.equal(isPolarQuestion('may we contact you by phone?'), true);
+  assert.equal(isPolarQuestion('what is your phone number?'), false);
+  assert.equal(isPolarQuestion('may graduation'), false);
+  assert.equal(isPolarQuestion('Phone number'), false);
+});
+
+/* And the two defects the question-mark gate was added for, verified to be refused without it.
+ * Neither one needs it: the first has no question mark at all and is caught by the qualifier list,
+ * the second is far past the word budget. Both are asserted in the test above this block as well;
+ * repeated here so that deleting the gate a second time cannot pass unnoticed. */
+test('the two labels the question-mark gate was added for are refused without it', () => {
+  // Six words, no question mark, refused on `email` and `address` in the qualifier list.
+  assert.equal(classifyField('please provide your university email address'), null);
+  // Seventeen words, refused by the word count, with `owned` in the qualifier list as well.
+  const politicallyExposed =
+    'are you or an immediate family member a politically exposed person, or connected to a '
+    + 'state-owned bank or government body?';
+  assert.equal(classifyField(politicallyExposed), null);
+  // And refused a second time, before classification is ever consulted, by resolveKnownAnswer.
+  assert.deepEqual(
+    resolveKnownAnswer(politicallyExposed, 'text', PROD_OWNER_PROFILE, undefined),
+    { skipReason: `politically-exposed-person declaration left for you: "${politicallyExposed.slice(0, 60)}"` },
+  );
+});
+
+test('stored education facts describe the CURRENT programme only (Akuna, Five Rings)', () => {
+  // Akuna got "May 2028" - her bachelor's date - as a potential MASTER'S graduation date.
+  refuses(
+    'if you are an undergraduate considering a master’s degree following graduation, '
+    + 'when is your potential master’s graduation date?',
+  );
+  // Five Rings got her current bachelor's as the degree she "plans to pursue", immediately after
+  // she had answered that she was not planning further study.
+  refuses('if so, please specify the type of degree you plan to pursue.');
+  // The current programme still answers normally.
+  assert.deepEqual(
+    resolveKnownAnswer('what degree are you currently pursuing?', 'text', PROD_OWNER_PROFILE, undefined),
+    { value: 'Bachelor of Science in Computer Science' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('when is your anticipated graduation date - please select a graduation date range', 'text', PROD_OWNER_PROFILE, undefined),
+    { value: 'May 2028' },
+  );
+});
+
+test('a high school diploma question that asks for a month and year is not answered "Yes" (Akuna)', () => {
+  refuses(
+    'to be considered for this role, you must have earned a high school diploma (or an equivalent degree). '
+    + 'please confirm the month and year that most accurately reflects your high school (or equivalent) graduation',
+    'select',
+  );
+  // The plain confirmation variant is still a routine "Yes".
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'To be considered for this role, you must have earned a high school diploma (or an equivalent degree). Please confirm the statement below.',
+      'select',
+      PROD_OWNER_PROFILE,
+      undefined,
+    ),
+    { value: 'Yes' },
+  );
+});
+
+test('politically-exposed-person declarations are left for the applicant (Tower)', () => {
+  refuses(
+    'are you or have you been entrusted with a position or function in any government, international organization '
+    + '(such as the un or world bank), or state-controlled or state-owned bank, brokerage firm, or other enterprise?',
+  );
+  refuses(
+    'are you an immediate family member of someone holding such a position? an immediate family member is a parent, '
+    + 'sibling, spouse or domestic partner, child, or in-law.',
+  );
+  assert.match(
+    skipReasonOf(resolveKnownAnswer(
+      'are you an immediate family member of someone holding such a position? an immediate family member is a parent, '
+      + 'sibling, spouse or domestic partner, child, or in-law.',
+      'radio',
+      PROD_OWNER_PROFILE,
+      undefined,
+    )) ?? '',
+    /politically-exposed-person/i,
+  );
+});
+
+test('"authorized to work for all employers" is not answered Yes while sponsorship is needed (Tower)', () => {
+  refuses('are you currently authorized to work for all employers in the united states on a full-time basis ?');
+  // The unqualified question is still answered from the stored boolean.
+  assert.deepEqual(
+    resolveKnownAnswer('are you legally eligible to work in the united states?', 'text', PROD_OWNER_PROFILE, undefined),
+    { value: 'Yes' },
+  );
+  // And an applicant who needs no sponsorship can still claim the unrestricted form.
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'are you currently authorized to work for all employers in the united states on a full-time basis ?',
+      'text',
+      { ...PROD_OWNER_PROFILE, needs_sponsorship: false },
+      undefined,
+    ),
+    { value: 'Yes' },
+  );
 });

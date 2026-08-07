@@ -159,15 +159,25 @@ test('submission packet attaches the role-specific resume filename', async () =>
   assert.doesNotMatch(runner, /resumeName:\s*`litos-\$\{row\.id\}\.pdf`/);
 });
 
-test('submission packet uses the Litos application email alias before the account email', async () => {
+/* Replaces 'submission packet uses the Litos application email alias before the account email'.
+ *
+ * That test pinned the exact line that caused the incident: the alias was preferred over the real
+ * address unconditionally, and on 2026-08-08 the alias domain had no MX record, so every employer
+ * form got an address that cannot receive mail. Preferring the alias is still correct, but only
+ * behind the deliverability precondition, so the assertion moves with it. */
+test('submission packet only reaches for the alias through the deliverability precondition', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  assert.match(runner, /import \{ ensureApplicationEmailAlias \} from '\.\.\/lib\/applicationEmail'/);
+  assert.match(runner, /import \{ resolveApplicantEmail \} from '\.\.\/lib\/applicationEmail'/);
   const buildPacketIndex = runner.indexOf('export async function buildPacket');
-  const aliasIndex = runner.indexOf('const applicationEmail = await ensureApplicationEmailAlias', buildPacketIndex);
-  const emailIndex = runner.indexOf('const email = String(applicationEmail?.alias ?? contact.email ?? accountEmail)', buildPacketIndex);
-  assert.ok(aliasIndex > buildPacketIndex, 'buildPacket must mint or read a Litos application alias');
-  assert.ok(emailIndex > aliasIndex, 'the applicant email must prefer the Litos alias before personal email fallbacks');
-  assert.match(runner.slice(aliasIndex, emailIndex), /\.catch\(\(\) => undefined\)/, 'alias creation failure must not block fallback email submission');
+  const resolveIndex = runner.indexOf('const applicantEmail = await resolveApplicantEmail', buildPacketIndex);
+  const emailIndex = runner.indexOf('const email = applicantEmail.address.trim()', buildPacketIndex);
+  assert.ok(resolveIndex > buildPacketIndex, 'buildPacket must resolve the applicant email through the precondition');
+  assert.ok(emailIndex > resolveIndex, 'the filled email must be the resolved address');
+  // The old unconditional preference must not come back by any route.
+  assert.doesNotMatch(runner, /applicationEmail\?\.alias \?\? contact\.email/);
+  assert.doesNotMatch(runner, /ensureApplicationEmailAlias/);
+  // The choice and its reason are recorded on the review state, on both prepare paths.
+  assert.equal(runner.match(/applicant_email: packet\.applicantEmail/g)?.length, 2);
 });
 
 test('submission packet ignores stored cover-letter artifact names for outbound uploads', async () => {

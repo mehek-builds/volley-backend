@@ -25,6 +25,8 @@ import {
   blockersIncludeCaptcha,
   buildManagedCaptchaProbeActions,
   buildManagedDiscoveryActions,
+  corroborateManagedCaptchaBlockers,
+  managedCaptchaProvider,
   detectCaptchaProvider,
   captchaProviderForFamily,
   buildManagedPortalActions,
@@ -32,6 +34,7 @@ import {
   clickFinalSubmit,
   detectPortal,
   managedResultRequiresCaptchaAttention,
+  isManagedCaptchaEvidenceExtract,
   fillPortal,
   hasCoverLetterUpload,
   managedResultFilledFields,
@@ -50,6 +53,11 @@ import {
   NoSubmitControlError,
 } from '../lib/portalSubmission';
 import { applyReviewPatch, beginStall } from '../lib/applicationStall';
+import {
+  attentionCategoriesForReasons,
+  UNEXPLAINED_RUN_FAILURE_REASON,
+  type TerminalRunStatus,
+} from '../lib/submissionTerminalCause';
 import { sanitizeProviderBlockers } from '../lib/fieldLabel';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { resolveBlobUrl } from '../lib/resumeAccess';
@@ -74,6 +82,7 @@ import {
   type ApplicationProfileLike,
   type DiscoveredQuestion,
 } from '../lib/questionDiscovery';
+import { profileBackedBlockerLabels, resolveProfileField, usableOptions } from '../lib/profileFieldResolution';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import type { ApplicationReviewQuestion } from '../lib/applicationReview';
 import { jobCountry } from '../lib/jobLocation';
@@ -90,7 +99,7 @@ import {
 } from '../lib/submissionQueue';
 import { coverLetterFileNameForRole, resumeFileNameForRole } from '../lib/resumeFileName';
 import { assessAtsSubmissionChannel, tryAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
-import { ensureApplicationEmailAlias } from '../lib/applicationEmail';
+import { resolveApplicantEmail } from '../lib/applicationEmail';
 
 export type ResumeRow = typeof generated_resumes.$inferSelect;
 type StoredSpec = Record<string, unknown>;
@@ -321,12 +330,26 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
   }
   const fullName = String(contact.full_name ?? parsed.full_name ?? '').trim();
   const accountEmail = String(userRow[0]?.email ?? '').trim();
-  const applicationEmail = await ensureApplicationEmailAlias({
+  /* THE ADDRESS THE EMPLOYER WILL BE ASKED TO WRITE TO.
+   *
+   * This line used to take the minted alias first and fall through to the contact and account
+   * addresses only if there was no alias, which put a generated alias on a real employer's form on
+   * the strength of an environment variable being set. On 2026-08-08 apply.trylitos.com had no MX
+   * record, so that address could not receive
+   * mail: every confirmation and every recruiter reply bounced, and the applicant was unreachable
+   * on an application she cannot send twice.
+   *
+   * resolveApplicantEmail will not hand back an alias unless the alias domain has been MEASURED
+   * able to receive mail, and falls back to her real address otherwise. The decision, including
+   * why, is recorded on the review state by the callers of buildPacket, so nothing can tell her
+   * her replies are being tracked when they are not. */
+  const applicantEmail = await resolveApplicantEmail({
     userId: row.user_id,
     applicationId: row.id,
-    forwardTo: accountEmail,
-  }).catch(() => undefined);
-  const email = String(applicationEmail?.alias ?? contact.email ?? accountEmail).trim();
+    accountEmail,
+    contactEmail: typeof contact.email === 'string' ? contact.email : null,
+  });
+  const email = applicantEmail.address.trim();
   if (!fullName || !email) throw new Error('Full name and email are required before submission');
   const roleTitle = (row.job_context as { role?: unknown } | null)?.role;
   const base = (profileRow[0]?.base_resume_json && typeof profileRow[0].base_resume_json === 'object'
@@ -392,6 +415,9 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
       ? coverLetterFileNameForRole(fullName, roleTitle)
       : undefined,
     eeoPrefs: sanitizeEeoPrefs(app.eeo_prefs),
+    // Metadata, not a fill field: `email` above is what gets typed. Carried on the packet so the
+    // prepare paths can write which address was used, and why, onto the review state.
+    applicantEmail,
     mostRecentRole: readMostRecentRole(parsed),
     questions: refreshedQuestions.map((item) => ({
       question: item.question,
@@ -567,34 +593,98 @@ export function reconcileManagedProviderBlockers(
   });
 }
 
-export function preparationEvidenceBlockers(result: { text?: string; filledFields?: string[] }, packet: SubmissionPacket): string[] {
+/**
+ * The one sentence for a run that has no evidence it ever reached the application form.
+ *
+ * It claims only what zero evidence supports: not that the form was absent, but that Litos cannot
+ * confirm reaching it. That distinction is the point. Saying "the form did not record your email"
+ * asserts a form was filled, and the five owner packets of 2026-08-06 that said exactly that had
+ * preview screenshots of a job description page - Jump Trading's was a branded careers page whose
+ * only application control is an "Apply" button, with no form on it anywhere.
+ */
+export const FORM_NOT_REACHED_REASON =
+  'Litos could not confirm it reached this company\u2019s application form. Nothing was filled in and nothing has been sent. Open it when you have a minute and finish it off.';
+
+const REQUIRED_AND_EMPTY_BLOCKER = /^"(.+)" is required and is still empty$/;
+
+/**
+ * Whether the run has POSITIVE evidence it was looking at the application form.
+ *
+ * Positive evidence only. The absence of a filled field is not evidence of anything on its own,
+ * which is precisely how "filled nothing" got reported as "the filled form is missing an email":
+ * the old code read an empty filled_fields list and described the form it assumed was there.
+ *
+ * Each signal below is something that cannot be produced by a page with no form on it:
+ *  - a recorded filled field means a control was located and typed into;
+ *  - a provider blocker naming a specific control as required-and-still-empty means the provider
+ *    found that control (this is what makes the Nuro run of 2026-08-06 genuinely "form reached,
+ *    fields empty" while the Jump Trading run beside it was not);
+ *  - a discovered question means the discover pass enumerated real inputs;
+ *  - a non-null extract of something on the FORM means the probed element existed;
+ *  - the applicant's own email appearing in the page text means it was typed there, whatever the
+ *    provider did or did not report back.
+ *
+ * CAPTCHA EVIDENCE IS SUBTRACTED FIRST, and this is the part that has to stay. Every managed fill
+ * run appends the challenge reads to its extract list, and one of them is a reCAPTCHA anchor iframe
+ * whose selector deliberately does not exclude the badge, because the badge's own anchor is the
+ * only thing that identifies an invisible-only page. That anchor exists on a large share of
+ * employer pages, application form or not - the Akuna Greenhouse page carries one over a page this
+ * runner never filled a field on. Counting it as reach turned "we cannot confirm we reached your
+ * application form" into the three-sentence description of a form that was never opened, on every
+ * reCAPTCHA-bearing page, which is precisely the sentence the not-reached reason exists to delete.
+ *
+ * A challenge widget is evidence that a page loaded. It is not evidence of an application form.
+ */
+export function applicationFormWasReached(input: {
+  filledFields?: readonly string[];
+  providerBlockers?: readonly string[];
+  discoveredQuestionCount?: number;
+  extracted?: ReadonlyArray<{ label?: string; selector?: string; value: string | null }>;
+  text?: string;
+  email?: string;
+}): boolean {
+  if ((input.filledFields?.length ?? 0) > 0) return true;
+  if ((input.providerBlockers ?? []).some((blocker) => REQUIRED_AND_EMPTY_BLOCKER.test(blocker))) return true;
+  if ((input.discoveredQuestionCount ?? 0) > 0) return true;
+  const formExtracts = (input.extracted ?? []).filter((item) => !isManagedCaptchaEvidenceExtract(item));
+  if (formExtracts.some((item) => item.value?.trim())) return true;
+  const email = compactEvidenceText(input.email);
+  return email.length > 0 && compactEvidenceText(input.text).includes(email);
+}
+
+export function preparationEvidenceBlockers(
+  result: {
+    text?: string;
+    filledFields?: string[];
+    blockers?: readonly string[];
+    discovered?: ReadonlyArray<unknown>;
+    extracted?: ReadonlyArray<{ label?: string; selector?: string; value: string | null }>;
+  },
+  packet: SubmissionPacket,
+): string[] {
   const previewBlockers = previewContentBlockers(result.text);
   if (previewBlockers.length > 0) return previewBlockers;
+  // The abort case gets ONE honest sentence and no fabricated field list. Returning the per-field
+  // blockers here is what made those runs unreadable, and inventing a blocker list to fill the
+  // space would repeat the same lie in different words.
+  if (!applicationFormWasReached({
+    filledFields: result.filledFields,
+    providerBlockers: result.blockers,
+    discoveredQuestionCount: result.discovered?.length ?? 0,
+    extracted: result.extracted,
+    text: result.text,
+    email: packet.email,
+  })) {
+    return [FORM_NOT_REACHED_REASON];
+  }
   return filledFieldBlockers(result.filledFields, packet);
 }
 
-export function attentionCategoriesForReasons(reasons: readonly string[]): ApplicationAttentionCategory[] {
-  const categories = new Set<ApplicationAttentionCategory>();
-  for (const reason of reasons) {
-    const normalized = reason.toLowerCase();
-    if (/^captcha requires your attention$|prove you are human/.test(normalized)) {
-      categories.add('captcha');
-    } else if (/filled form did not record|preview did not include|preview looks like/.test(normalized)) {
-      categories.add('evidence_gap');
-    } else if (/transcript|upload|attach|file|document/.test(normalized)) {
-      categories.add('required_document');
-    } else if (/export control|sanctions|legally authorized|sponsorship|visa|sensitive question|work authorization/.test(normalized)) {
-      categories.add('sensitive_attestation');
-    } else if (/required.+still empty|required field|still blank/.test(normalized)) {
-      categories.add('required_field');
-    } else if (/cover letter/.test(normalized)) {
-      categories.add('cover_letter');
-    } else if (normalized.trim()) {
-      categories.add('unknown');
-    }
-  }
-  return [...categories];
-}
+// Classification now lives in lib/submissionTerminalCause so that applyReviewPatch, which is in
+// lib/ and cannot import a route module, enforces the terminal-cause invariant with the SAME
+// classifier the runner uses. Re-exported here because that is where every existing caller and
+// test reaches for it.
+export { attentionCategoriesForReasons };
 
 export function attentionBlockersForManagedResult(
   portal: SupportedPortal,
@@ -708,9 +798,13 @@ export async function discoverAndResolveQuestions(
     // keep the fallback
   }
   const questionContext = applicationContextForQuestionResolution(row, current);
+  // Tested against the RAW label on purpose: normalizeDiscoveredLabel now strips the `--0`
+  // section handle, because leaving it in the stored question text is what made every
+  // `label:has-text(...)` scope miss. The handle is still the honest signal for "this is an
+  // education-section combobox", so read it before it is stripped rather than after.
   const managedGreenhouseEducationCombobox = (field: DiscoveredQuestion): boolean =>
     portal === 'greenhouse'
-    && /\b(?:school|degree|discipline)--\d+\b/i.test(normalizeDiscoveredLabel(field.label));
+    && /\b(?:school|degree|discipline)--\d+\b/i.test(field.label);
   const portalSelectorForField = (field: DiscoveredQuestion): string | undefined => {
     if (managedGreenhouseEducationCombobox(field)) return undefined;
     if (portal === 'greenhouse' && /^combobox$/i.test(field.inputType)) return field.selector;
@@ -725,6 +819,33 @@ export async function discoverAndResolveQuestions(
     if (!label || !reviewLabel || normalizeStoredPortalQuestions([{ question: label, answer: '' }], portal).length === 0) continue;
     const existing = existingByLabel.get(reviewLabel.toLowerCase());
     const known = resolveKnownAnswer(label, field.inputType, ap, questionContext);
+    // One resolution layer for the value itself. resolveKnownAnswer still decides WHETHER the
+    // question is answerable (and owns every skip and refusal); resolveProfileField decides what
+    // the answer should LOOK LIKE for this particular control, snapping it onto the field's real
+    // option list when discovery reported one. Without this a closed list was handed the
+    // profile's own phrasing and selected nothing at all.
+    const resolvedField = known && 'value' in known
+      ? resolveProfileField(
+        { label, inputType: field.inputType, options: field.options },
+        ap,
+        questionContext,
+      )
+      : null;
+    const knownValue = resolvedField?.value ?? (known && 'value' in known ? known.value : '');
+    // "I had an answer and deliberately did not pick anything off this list."
+    //
+    // resolveProfileField reports that as matchedOption: false, and this loop used to throw the
+    // flag away, so the one case where Litos KNOWS a control will be left unfilled was the one case
+    // the applicant never heard about. The refusal itself is correct: snapping a stored answer onto
+    // a closed list it does not actually appear in is how a wrong answer gets submitted under a
+    // question with legal weight. But a select nobody chose from is a required field left empty at
+    // the portal, so it is work for her, and it has to reach her as work rather than as silence.
+    //
+    // Only when the control really had a list. matchedOption is false for every free-text field
+    // too, and those are filled with the value beside it.
+    if (resolvedField && !resolvedField.matchedOption && usableOptions(field.options).length > 0) {
+      attentionReasons.push(`none of the options match your saved answer, so this one is left for you: "${label.slice(0, 60)}"`);
+    }
     if (existing) {
       if (known && 'skipReason' in known) {
         attentionReasons.push(known.skipReason);
@@ -732,7 +853,7 @@ export async function discoverAndResolveQuestions(
         questions.push({
           ...existing,
           question: reviewLabel,
-          answer: known.value,
+          answer: knownValue,
           kind: 'required',
           required: false,
           portal_selector: portalSelectorForField(field),
@@ -748,7 +869,7 @@ export async function discoverAndResolveQuestions(
       questions.push({
         id: randomUUID(),
         question: reviewLabel,
-        answer: known.value,
+        answer: knownValue,
         kind: 'required',
         required: false,
         portal_selector: portalSelectorForField(field),
@@ -840,11 +961,12 @@ async function prepareManaged(
   packet = coverLetterOutcome.packet;
   const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
   const resolutionCurrent = { ...current, questions: storedQuestions };
+  const applicationProfile = await loadApplicationProfileLike(row.user_id);
   const { questions: discoveredQuestions, attentionReasons: discoveryAttention } = await discoverAndResolveQuestions(
     discoveryResult?.discovered ?? [],
     row,
     resolutionCurrent,
-    await loadApplicationProfileLike(row.user_id),
+    applicationProfile,
     authorization.enabled,
     portal,
   );
@@ -872,12 +994,41 @@ async function prepareManaged(
   // Sanitized at the boundary, not upstream: the managed provider scans the form in its own
   // service and returns finished sentences, so it never passes through this repo's label
   // resolution. Live QA proved that gap by showing three raw UUIDs on a real Ashby posting.
-  const blockers = attentionBlockersForManagedResult(
+  //
+  // THIS IS WHERE EVERY STALLED PACKET ACTUALLY STOPPED, measured against prod on 2026-08-08: all
+  // fourteen open stalls in the database were written below by this function, not by the submit
+  // path's probe. Each one carries `submission_error: null` and an attention_reason whose first line
+  // is the provider's own "CAPTCHA requires your attention" - the throw at the submit probe writes a
+  // submission_error and a different sentence, and neither appears on any row Litos has ever
+  // written. So the runner's CAPTCHA verdict, arriving here in result.blockers, is what stopped
+  // them, on Greenhouse pages whose only challenge is an invisible reCAPTCHA behind the badge.
+  // corroborateManagedCaptchaBlockers is the layer that asks the page rather than the provider.
+  const blockers = corroborateManagedCaptchaBlockers(
     portal,
-    sanitizeProviderBlockers(result.blockers ?? []),
+    attentionBlockersForManagedResult(
+      portal,
+      sanitizeProviderBlockers(result.blockers ?? []),
+      result,
+      packet,
+    ),
     result,
-    packet,
   );
+  // A blocker naming a field the stored profile CAN answer is a Litos defect, never work for the
+  // applicant. Twenty-five prod packets carried exactly these lines (GPA, university, education
+  // level, graduation month and year, referral source) with the resolved answer already sitting
+  // in the same row, and nothing recorded that the two facts contradicted each other. Logging it
+  // by name is what turns the next occurrence into a bug report instead of another silent stall.
+  const unattemptedProfileFields = profileBackedBlockerLabels(
+    blockers,
+    applicationProfile,
+    applicationContextForQuestionResolution(row, resolutionCurrent),
+  );
+  if (unattemptedProfileFields.length > 0) {
+    fastify.log.error(
+      { applicationId: row.id, portal, fields: unattemptedProfileFields },
+      'Profile-backed fields reported as required and still empty',
+    );
+  }
   const verificationHandoff = blockers.some((blocker) =>
     /verification code|security code|one[ -]?time code|passcode|\botp\b/i.test(blocker),
   );
@@ -885,7 +1036,16 @@ async function prepareManaged(
   // is filled and sendable without it, so it must not flip the run out of the safe path.
   const coverLetterAttention = coverLetterOutcome.coverLetterIssue ? [coverLetterOutcome.coverLetterIssue] : [];
   const filledFields = managedResultFilledFields(result);
-  const evidenceBlockers = preparationEvidenceBlockers({ ...result, filledFields }, packet);
+  // Both passes count as evidence the form was reached. The discovery pass enumerates the live
+  // inputs and probes the core fields, so a run whose fill pass came back empty can still have
+  // proven the form was there - and a run where NEITHER pass saw anything has proven the opposite.
+  const evidenceBlockers = preparationEvidenceBlockers({
+    ...result,
+    filledFields,
+    blockers: [...(result.blockers ?? []), ...(discoveryResult?.blockers ?? [])],
+    discovered: discoveryResult?.discovered ?? [],
+    extracted: [...(result.extracted ?? []), ...(discoveryResult?.extracted ?? [])],
+  }, packet);
   const attentionReasons = [...blockers, ...discoveryAttention, ...evidenceBlockers, ...coverLetterAttention];
   const attentionCategories = attentionCategoriesForReasons(attentionReasons);
   const captchaAttention = blockersIncludeCaptcha(blockers);
@@ -895,13 +1055,19 @@ async function prepareManaged(
     ...(captchaAttention
       ? beginStall(current, {
         surface: 'server_run',
-        provider: 'unknown',
+        // Read off the page's own markup rather than hard-coded. `unknown` was written on every one
+        // of the fourteen stalls in prod, including pages carrying a reCAPTCHA anchor iframe, which
+        // made the instrumentation unable to answer the single question it exists for: which
+        // providers actually gate us. A run that stops owes a reason, and "I did not look" is not one.
+        provider: managedCaptchaProvider(result, portal),
         stage: 'before_fill',
         source: 'observed',
       })
       : {}),
     submission_run_id: runId,
     filled_fields: filledFields,
+    // Which address this form was filled with, and why. See ApplicationReviewState.applicant_email.
+    ...(packet.applicantEmail ? { applicant_email: packet.applicantEmail } : {}),
     preview_screenshot_url: preview.url,
     verification: { status: verificationHandoff ? 'handoff' : 'not_needed' },
     questions: mergedQuestions,
@@ -1098,7 +1264,15 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     });
     const sanitizedBlockers = sanitizeProviderBlockers(result.blockers);
     const pageText = await page.locator('body').innerText({ timeout: 1_000 }).catch(() => '');
-    const evidenceBlockers = preparationEvidenceBlockers({ text: pageText, filledFields: result.filledFields }, packet);
+    // Same reach evidence as the managed path: the live-page question scan and the portal's own
+    // required-field blockers both prove the form was in front of us, which is what separates
+    // "reached it and left fields empty" from "never reached it".
+    const evidenceBlockers = preparationEvidenceBlockers({
+      text: pageText,
+      filledFields: result.filledFields,
+      blockers: result.blockers,
+      discovered,
+    }, packet);
     const safe = directPreparationIsSafe({
       blockerCount: sanitizedBlockers.length + evidenceBlockers.length,
       attentionCount: discoveryAttention.length,
@@ -1110,6 +1284,8 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       browser_context_id: contextId,
       browser_session_id: session.id,
       filled_fields: result.filledFields,
+      // Which address this form was filled with, and why. See ApplicationReviewState.applicant_email.
+      ...(packet.applicantEmail ? { applicant_email: packet.applicantEmail } : {}),
       preview_screenshot_url: preview.url,
       verification: {
         status: verification.status,
@@ -1178,7 +1354,11 @@ async function prepareControlled(
     const result = await fillPortal(page, 'controlled_test', packet);
     const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
     const pageText = await page.locator('body').innerText({ timeout: 1_000 }).catch(() => '');
-    const evidenceBlockers = preparationEvidenceBlockers({ text: pageText, filledFields: result.filledFields }, packet);
+    const evidenceBlockers = preparationEvidenceBlockers({
+      text: pageText,
+      filledFields: result.filledFields,
+      blockers: result.blockers,
+    }, packet);
     const safe = result.blockers.length === 0 && evidenceBlockers.length === 0;
     const review = nextReview(current, {
       ...preparedReviewPatch(authorization, safe),
@@ -1363,8 +1543,21 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
         fastify.log.warn({ applicationId: row.id, detail }, 'CAPTCHA probe failed, continuing unprobed');
         return null;
       });
+    // ONE check, named once. This used to read
+    //   managedResultRequiresCaptchaAttention(probe) && managedCaptchaVerdictIsCorroborated(portal, probe)
+    // and presented itself as probe-plus-corroboration. It was not. Both terms call
+    // readManagedCaptchaEvidence on the same probe result and short-circuit on the same invisible
+    // predicate, so on an autonomous family the second cannot disagree with the first and the
+    // conjunction is a tautology. Corroboration is a real question exactly where the two sources
+    // differ - the prepare path, which is judging the REMOTE RUNNER's blocker list against markup
+    // this repo read itself - and it is still asked there. Here there is only one source, so
+    // writing it as two invited the next reader to trust a layer that does not exist.
     if (managedResultRequiresCaptchaAttention(captchaProbe)) {
-      throw new CaptchaUnresolvedError('before_fill');
+      // The provider is passed, not defaulted. Defaulting recorded `unknown` on pages carrying a
+      // g-recaptcha-response and a reCAPTCHA anchor iframe, which is a reporting defect of its own:
+      // the stall's whole job is to say what stopped the run, and this was the one stop site in the
+      // codebase that declined to.
+      throw new CaptchaUnresolvedError('before_fill', managedCaptchaProvider(captchaProbe, portal));
     }
     const builtPacket = await buildPacket(row);
     const packet = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
@@ -1450,6 +1643,15 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
  * branch that does not outrank it inherits "the submission was attempted and we could not verify
  * it", which sends someone hunting for a receipt that cannot exist.
  */
+export type SubmissionFailureOutcome =
+  /* Requeued, not terminal: the provider was unreachable, so the run goes back to the queue and
+     the applicant is owed nothing yet. This is the ONLY arm allowed a missing reason. */
+  | { status: 'submit_requested'; attentionReason: string | undefined; attentionCategories: ApplicationAttentionCategory[] }
+  /* Terminal. `attentionReason: string` is not a style choice: it makes "a stopped run with no
+     stated cause" fail to compile here, which is the half of the invariant that catches a mistake
+     before it can ever be written, with withTerminalCause catching whatever gets past it. */
+  | { status: TerminalRunStatus; attentionReason: string; attentionCategories: ApplicationAttentionCategory[] };
+
 export function submissionFailureOutcome(input: {
   captchaStop: 'before_fill' | 'at_submit' | null;
   noSubmitControl: boolean;
@@ -1457,9 +1659,9 @@ export function submissionFailureOutcome(input: {
   externalGate: boolean;
   providerSessionFailure: boolean;
   currentAttentionReason: string | undefined;
-}): { status: ApplicationReviewState['status']; attentionReason: string | undefined } {
+}): SubmissionFailureOutcome {
   const { captchaStop, noSubmitControl, uncertainAfterClaim, externalGate, providerSessionFailure } = input;
-  const status: ApplicationReviewState['status'] = captchaStop || noSubmitControl || uncertainAfterClaim || providerSessionFailure
+  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || uncertainAfterClaim || providerSessionFailure
     ? 'needs_attention'
     : externalGate ? 'submit_requested' : 'failed';
   const attentionReason = captchaStop === 'at_submit'
@@ -1476,8 +1678,27 @@ export function submissionFailureOutcome(input: {
           ? 'Litos hit a temporary secure-browser error before it could finish this application. Nothing was sent. Try this one again in a few minutes.'
           : uncertainAfterClaim
             ? 'The final submission was attempted, but Litos could not verify the employer confirmation. Check the portal or your email before trying again.'
-          : input.currentAttentionReason ?? undefined;
-  return { status, attentionReason };
+          : input.currentAttentionReason?.trim() || undefined;
+  if (status === 'submit_requested') {
+    return { status, attentionReason, attentionCategories: attentionCategoriesForReasons(attentionReason ? [attentionReason] : []) };
+  }
+  /* THE HOLE THAT WAS HERE. This branch used to end at `input.currentAttentionReason ?? undefined`,
+     so a run that threw during PREPARE - before any blocker had been written, which is when the
+     runner throws most often - reached status 'failed' with attention_reason unset. Three owner
+     packets did exactly that on 2026-08-06: the only record of why was submission_error, holding
+     "Each selector must be a non-empty string no longer than 500 characters", which is the remote
+     runner talking to whoever maintains it and is not shown to anyone. The row read as a run that
+     had simply stopped.
+
+     The fallback is deliberately generic and says so. Guessing a cause here would mean inventing
+     one, and an invented cause is the failure this whole change exists to remove. */
+  const reason = attentionReason ?? UNEXPLAINED_RUN_FAILURE_REASON;
+  const attentionCategories = attentionCategoriesForReasons(reason.split('\n').filter((line) => line.trim()));
+  return {
+    status,
+    attentionReason: reason,
+    attentionCategories: attentionCategories.length > 0 ? attentionCategories : ['unknown'],
+  };
 }
 
 export function isProviderSessionFailureMessage(message: string): boolean {
@@ -1528,6 +1749,10 @@ async function fail(row: ResumeRow, error: unknown) {
     status: outcome.status,
     submission_error: message,
     attention_reason: outcome.attentionReason,
+    // The typed half. attention_reason is prose written for the applicant and cannot be counted;
+    // without this a 'failed' row was unqueryable as well as unreadable, so "how often does the
+    // runner break, and on what" had no answer at all.
+    attention_categories: outcome.attentionCategories.length > 0 ? outcome.attentionCategories : undefined,
   }));
 }
 

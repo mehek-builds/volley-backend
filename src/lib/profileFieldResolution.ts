@@ -1,0 +1,856 @@
+// One profile-to-question resolution layer, shared by every submission path.
+//
+// WHY THIS FILE EXISTS (measured on prod packets for the owner account, 2026-08-08).
+// Twenty-five packets reached `needs_attention` with blockers of the shape
+//   "Discipline" is required and is still empty
+//   "What is your GPA?" is required and is still empty
+//   "Which University do/did you attend?" is required and is still empty
+//   "What education level are you currently pursuing?" is required and is still empty
+//   "Graduation Month" / "Graduation Year" is required and is still empty
+//   "How did you hear about this job?" is required and is still empty
+// while the stored profile held every one of those values, and, crucially, while
+// `spec._review.questions` in the same row already carried the RESOLVED ANSWER
+// ("3.89", "Bachelor's Degree", "Computer Science", "Company website", ...).
+//
+// So the resolver was never the problem. The value was resolved and then failed to reach the
+// control, for four reasons, all of which this module addresses generically rather than with
+// another per-employer selector list:
+//
+//   1. The discovered label is a CONCATENATED BLOB, not the employer's visible label.
+//      Discovery joins label text + aria-label + placeholder + name + id, so Greenhouse
+//      education fields arrive as "degree* degree--0" and "discipline* discipline--0", and a
+//      Greenhouse array-named question arrives as "how did you first hear about five rings?* []".
+//      Every managed fill for those is scoped with `label:has-text("<that blob>")`, which cannot
+//      match a page whose label reads "Degree". normalizeDiscoveredLabel now strips those
+//      handles (see questionDiscovery.ts), which is the single highest-value part of this fix.
+//
+//   2. The discovered selector is a PER-SESSION MARKER. Discovery stamps
+//      `data-litos-discovered-N` on the element; the managed fill run is a second, stateless
+//      browser call against a freshly loaded page where that attribute does not exist.
+//      durablePortalSelector correctly refuses it, so label matching is the only path left,
+//      which makes (1) fatal rather than cosmetic.
+//
+//   3. inputType is reported as "text" for EVERY managed-discovered control, including react
+//      selects. Every branch keyed on `select`/`combobox` is therefore dead on that path.
+//      Nothing here may depend on inputType being accurate.
+//
+//   4. Nothing ever captured the field's REAL OPTION LIST, so a closed-list control was fed a
+//      free-text value that is not one of its options: the stored school is
+//      "University of Southern California, Viterbi School of Engineering" while the option
+//      reads "University of Southern California". This module takes the option list when the
+//      caller has one and snaps the answer onto an option; when it has none, it returns a
+//      ranked ladder of alias forms so the fill layer can try more than one guess.
+//
+// Design rules, so this does not decay back into per-employer patches:
+//   - Nothing in this file may reference an employer, a job board tenant, or a posting.
+//   - Every ladder is derived from the STORED VALUE plus a standard vocabulary
+//     (education levels, month names, discipline families, referral sources).
+//   - chooseClosestOption never returns an option on weak evidence. Leaving a field empty is
+//     recoverable; selecting the wrong legal answer on a real application is not.
+
+import {
+  classifyField,
+  normalizeDiscoveredLabel,
+  resolveKnownAnswer,
+  type ApplicationProfileLike,
+  type ProfileKey,
+} from './questionDiscovery';
+
+export type ProfileFieldShape = {
+  label: string;
+  inputType?: string;
+  /** The control's real option texts, when the caller could read them from the DOM. */
+  options?: readonly string[] | null;
+};
+
+export type ResolvedProfileField = {
+  /** The question intent, or null when the label resolved through a non-classified rule. */
+  key: ProfileKey | null;
+  /** The value to type or select. Equals one of `options` exactly when `matchedOption`. */
+  value: string;
+  /** Ranked alias forms, best first, for a fill layer that cannot see the option list. */
+  candidates: string[];
+  /** True when `value` was chosen from the option list the caller supplied. */
+  matchedOption: boolean;
+};
+
+/**
+ * Intents whose answer is a fact already stored on the profile. A blocker naming one of these
+ * is by definition a Litos defect rather than missing user data, which is what
+ * profileBackedBlockerLabels reports on.
+ */
+export const PROFILE_BACKED_KEYS: ReadonlySet<ProfileKey> = new Set<ProfileKey>([
+  'school',
+  'degree',
+  'major',
+  'gpa',
+  'gpa_scale',
+  'graduation_date',
+  'graduation_month',
+  'graduation_year',
+  'current_enrollment',
+  'study_year',
+  'referral_source_default',
+]);
+
+export function isProfileBackedKey(key: ProfileKey | null | undefined): boolean {
+  return !!key && PROFILE_BACKED_KEYS.has(key);
+}
+
+// ---- option comparison ----
+
+/**
+ * Comparison form for option matching. Apostrophes are DELETED rather than spaced so that
+ * "Bachelor's Degree" and "Bachelors Degree" collapse to one string: portals spell that enum
+ * both ways and they are the same answer.
+ */
+export function comparableOption(value: string): string {
+  return value
+    .replace(/[‘’‛ʼ']/g, '')
+    .replace(/[“”]/g, '"')
+    .toLowerCase()
+    .replace(/[^a-z0-9.+/]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function optionTokens(value: string): string[] {
+  return comparableOption(value).split(' ').filter(Boolean);
+}
+
+/**
+ * The "Select..." row every select carries, and nothing else.
+ *
+ * `none` and `n/a` were on this list and had to come off. They are not placeholders, they are
+ * ANSWERS, and for a whole family of required questions they are the only true one: "How many
+ * outstanding offers do you have?", "Have you previously applied here?", "Standardized test
+ * scores". Stripping them made None unselectable, so a control whose correct answer was sitting in
+ * the list came back as "required and is still empty" and the applicant was asked to finish by
+ * hand. A truthful answer must never be filtered out of its own option list.
+ */
+const PLACEHOLDER_OPTION_RE =
+  /^(?:|-+|–+|select(?:\.{3}|…)?|select one|select an option|please select|choose(?: one)?|pick one|--.*--)$/i;
+
+/** Drop the "Select..." style first entry every select carries, and de-duplicate. */
+export function usableOptions(options: readonly string[] | null | undefined): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of options ?? []) {
+    const trimmed = typeof raw === 'string' ? raw.trim() : '';
+    if (!trimmed || PLACEHOLDER_OPTION_RE.test(trimmed)) continue;
+    const key = comparableOption(trimmed);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+type NumericRange = { min: number; max: number };
+
+/**
+ * A GPA or score bucket expressed as an option. Handles "3.5 - 4.0", "3.50 to 3.74", "3.5+",
+ * "Above 3.5", "3.0 or higher", "Below 3.0", and a bare "4.0".
+ */
+export function parseNumericRange(option: string): NumericRange | null {
+  // U+2013 and U+2014 are the en and em dashes real option text uses to write a range, written as
+  // escapes so no such character appears literally in this repo.
+  const text = option.replace(/[\u2013\u2014]/g, '-').toLowerCase();
+  const numbers = [...text.matchAll(/\b(\d+(?:\.\d+)?)\b/g)].map((match) => Number(match[1]));
+  if (numbers.length === 0 || numbers.some((value) => !Number.isFinite(value))) return null;
+  if (numbers.length >= 2) {
+    const [first, second] = numbers;
+    return { min: Math.min(first, second), max: Math.max(first, second) };
+  }
+  const only = numbers[0];
+  if (/\+\s*$|\bor\s+(?:higher|above|greater|more)\b|\b(?:above|over|greater\s+than|at\s+least|minimum)\b/.test(text)) {
+    return { min: only, max: Number.POSITIVE_INFINITY };
+  }
+  if (/\bor\s+(?:lower|below|less)\b|\b(?:below|under|less\s+than|at\s+most|up\s+to)\b/.test(text)) {
+    return { min: Number.NEGATIVE_INFINITY, max: only };
+  }
+  return { min: only, max: only };
+}
+
+const MONTH_NAMES = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+// Dropped with the old optionCoversMonthYear, whose "does this option mention any month at all"
+// test it was the only user of. Interval arithmetic answers that question by construction now.
+const SEASON_MONTHS: Record<string, number[]> = {
+  winter: [12, 1, 2],
+  spring: [3, 4, 5],
+  summer: [6, 7, 8],
+  fall: [9, 10, 11],
+  autumn: [9, 10, 11],
+};
+
+function monthNumber(token: string): number | null {
+  const index = MONTH_NAMES.findIndex((name) => name.toLowerCase().startsWith(token.slice(0, 3).toLowerCase()));
+  return index >= 0 ? index + 1 : null;
+}
+
+/** Explicit month+year points mentioned by an option, as year*12+month ordinals. */
+function optionDatePoints(option: string): { points: number[]; years: number[] } {
+  const years = [...option.matchAll(/\b((?:19|20)\d{2})\b/g)].map((match) => Number(match[1]));
+  const points: number[] = [];
+  const monthYear = [
+    ...option.matchAll(
+      /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b[^0-9a-z]{0,6}\b((?:19|20)\d{2})\b/gi,
+    ),
+  ];
+  for (const match of monthYear) {
+    const month = monthNumber(match[1]);
+    if (month) points.push(Number(match[2]) * 12 + month);
+  }
+  return { points, years };
+}
+
+/**
+ * A span of calendar months an option covers, as inclusive year*12+month ordinals. An unbounded
+ * end is an infinity, which is also how "how specific is this option" gets answered below.
+ */
+export type CalendarInterval = { min: number; max: number };
+
+/**
+ * The intervals a season names, as separate runs rather than one min-to-max span.
+ *
+ * Winter is the reason. Its months are December, January and February, so collapsing them to a
+ * single min-to-max span reads "Winter 2028" as January through December 2028 and swallows every
+ * other term in the year. Contiguous runs keep it to the two ranges a person means.
+ */
+function optionSeasonIntervals(option: string): CalendarInterval[] {
+  const intervals: CalendarInterval[] = [];
+  for (const [season, months] of Object.entries(SEASON_MONTHS)) {
+    const seasonal = [...option.matchAll(new RegExp(`\\b${season}\\b[^0-9]{0,6}\\b((?:19|20)\\d{2})\\b`, 'gi'))];
+    for (const match of seasonal) {
+      const year = Number(match[1]);
+      const sorted = [...months].sort((a, b) => a - b);
+      let run: CalendarInterval | null = null;
+      for (const month of sorted) {
+        const point = year * 12 + month;
+        if (run && point === run.max + 1) run.max = point;
+        else {
+          run = { min: point, max: point };
+          intervals.push(run);
+        }
+      }
+    }
+  }
+  return intervals;
+}
+
+// The boundary qualifiers a graduation option uses to describe everything on ONE side of a date.
+//
+// Ignoring these is how "Before 2028" was reported as covering May 2028. parseNumericRange has
+// read above/below/or-higher on GPA buckets since it was written; the calendar path read the year
+// out of the option and threw the qualifier away, so all four of "Before 2028", "After 2028",
+// "2028 or earlier" and "No later than 2028" answered the same question the same way, and two of
+// those four are flatly false about a person graduating in May 2028.
+//
+// The INCLUSIVE forms are tested first because they are their own vocabulary rather than a variant
+// spelling: "2028 or earlier" contains no "before", and "no later than 2028" contains no "after".
+// Testing the strict forms first would let "on or before 2028" fall into the "before" branch and
+// lose the year it is supposed to include.
+const AT_OR_BEFORE_RE =
+  /\b(?:or\s+(?:earlier|before|sooner|prior)|no[t]?\s+later\s+than|on\s+or\s+before|up\s+to(?:\s+and\s+including)?|through|by)\b/i;
+const AT_OR_AFTER_RE =
+  /\b(?:or\s+(?:later|after|beyond)|and\s+(?:later|after|beyond)|no[t]?\s+earlier\s+than|on\s+or\s+after|onwards?)\b|\d\s*\+/i;
+const STRICTLY_BEFORE_RE = /\b(?:before|prior\s+to|earlier\s+than)\b/i;
+const STRICTLY_AFTER_RE = /\b(?:after|later\s+than|beyond)\b/i;
+
+/**
+ * Which calendar months an option covers, or an empty list when it names no date at all.
+ *
+ * Handles a plain year ("2028"), a term ("Spring 2028"), an exact month ("May 2028"), a written
+ * range ("January 2028 - June 2028", "2027 - 2029"), and the one-sided buckets a graduation select
+ * puts at each end of its list ("Before 2028", "2028 or earlier", "2029 or later", "After 2029").
+ *
+ * A qualifier is only read against a ONE-ENDED base. "January 2028 - June 2028" already states both
+ * of its ends, so a stray "from" or "through" in the label text must not reopen one of them.
+ */
+export function optionCalendarIntervals(option: string): CalendarInterval[] {
+  // U+2013 and U+2014 are the en and em dashes real option text uses to write a range, written as
+  // escapes so no such character appears literally in this repo.
+  const text = option.replace(/[\u2013\u2014]/g, '-');
+  const { points, years } = optionDatePoints(text);
+  const seasons = optionSeasonIntervals(text);
+
+  let base: CalendarInterval[];
+  let bothEndsWritten = false;
+  if (points.length >= 2) {
+    base = [{ min: Math.min(...points), max: Math.max(...points) }];
+    bothEndsWritten = true;
+  } else if (points.length === 1) {
+    base = [{ min: points[0], max: points[0] }];
+  } else if (seasons.length > 0) {
+    base = seasons;
+  } else if (years.length >= 2) {
+    base = [{ min: Math.min(...years) * 12 + 1, max: Math.max(...years) * 12 + 12 }];
+    bothEndsWritten = true;
+  } else if (years.length === 1) {
+    base = [{ min: years[0] * 12 + 1, max: years[0] * 12 + 12 }];
+  } else {
+    return [];
+  }
+
+  if (bothEndsWritten || base.length !== 1) return base;
+  const only = base[0];
+  if (AT_OR_BEFORE_RE.test(text)) return [{ min: Number.NEGATIVE_INFINITY, max: only.max }];
+  if (AT_OR_AFTER_RE.test(text)) return [{ min: only.min, max: Number.POSITIVE_INFINITY }];
+  if (STRICTLY_BEFORE_RE.test(text)) return [{ min: Number.NEGATIVE_INFINITY, max: only.min - 1 }];
+  if (STRICTLY_AFTER_RE.test(text)) return [{ min: only.max + 1, max: Number.POSITIVE_INFINITY }];
+  return base;
+}
+
+/**
+ * How many months wide the covering interval is, or null when the option does not cover the date.
+ *
+ * This is the specificity measure chooseClosestOption ranks on. A one-sided bucket is infinitely
+ * wide, a bare year is twelve, a term is three and an exact month is one, so "January 2028 - June
+ * 2028" beats "2028" beats "2028 or earlier" without any of them having to be enumerated.
+ */
+export function optionCalendarSpan(option: string, month: number, year: number): number | null {
+  const target = year * 12 + month;
+  let best: number | null = null;
+  for (const interval of optionCalendarIntervals(option)) {
+    if (target < interval.min || target > interval.max) continue;
+    const span = interval.max - interval.min;
+    if (best === null || span < best) best = span;
+  }
+  return best;
+}
+
+/**
+ * Does an option cover a graduation date? Handles a plain year ("2028"), a term ("Spring 2028"),
+ * an exact month ("May 2028"), a range ("January 2028 - June 2028", "2027 - 2028"), and the
+ * one-sided buckets ("Before 2028", "2028 or earlier").
+ */
+export function optionCoversMonthYear(option: string, month: number, year: number): boolean {
+  return optionCalendarSpan(option, month, year) !== null;
+}
+
+function numericValueOf(candidate: string): number | null {
+  const match = candidate.match(/^\s*(\d+(?:\.\d+)?)\s*(?:\/\s*\d+(?:\.\d+)?)?\s*$/);
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? value : null;
+}
+
+function monthYearOf(candidate: string): { month: number; year: number } | null {
+  const match = candidate.match(
+    /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b[^0-9a-z]{0,6}\b((?:19|20)\d{2})\b/i,
+  );
+  if (match) {
+    const month = monthNumber(match[1]);
+    if (month) return { month, year: Number(match[2]) };
+  }
+  const iso = candidate.match(/\b((?:19|20)\d{2})-(\d{2})\b/);
+  if (iso) return { month: Number(iso[2]), year: Number(iso[1]) };
+  return null;
+}
+
+type ComparableEntry = { option: string; key: string; tokens: string[] };
+
+/**
+ * Answers whose whole meaning is the word itself, so any option that adds words to them is making
+ * a different statement rather than spelling the same one out.
+ *
+ * "Yes" against "Yes - I am authorized to work in the US for any employer" is the measured case:
+ * the resolver's own answer was "I need sponsorship" and it selected the option asserting the
+ * opposite, and reported matchedOption. There is no remainder a bare polarity token can absorb, so
+ * these match exactly or not at all.
+ */
+const CLOSED_SET_ANSWER_RE =
+  /^(?:yes|no|y|n|true|false|maybe|agree|disagree|accept|decline|other|none|n\/a|na|unknown|prefer not to say|decline to self identify|i agree|i decline)$/i;
+
+/**
+ * Words an option may add to an answer without changing what the answer claims: grammatical glue,
+ * the noun for the thing being named, and the answer's own initialism in the parenthetical portals
+ * like to append ("University of Southern California (USC)").
+ *
+ * Anything else is a distinguishing word. "University of California" plus "Los Angeles" names a
+ * different university; "Yes" plus "with sponsorship" answers a different question.
+ */
+const NON_DISTINGUISHING_REMAINDER: ReadonlySet<string> = new Set([
+  'of', 'the', 'and', 'or', 'a', 'an', 'in', 'at', 'for', 'to',
+  'degree', 'degrees', 'program', 'programs', 'programme', 'programmes',
+]);
+
+/** Does the option state the answer and then keep going? */
+function optionExtendsAnswer(entry: ComparableEntry, key: string, tokens: readonly string[]): boolean {
+  if (entry.key === key) return false;
+  if (entry.key.startsWith(`${key} `) || entry.key.endsWith(` ${key}`) || entry.key.includes(` ${key} `)) return true;
+  return tokens.length > 0
+    && entry.tokens.length > tokens.length
+    && tokens.every((token) => entry.tokens.includes(token));
+}
+
+/** The words the option adds, and whether any of them changes the claim. */
+function extensionKeepsTheClaim(entry: ComparableEntry, key: string, tokens: readonly string[]): boolean {
+  if (CLOSED_SET_ANSWER_RE.test(key)) return false;
+  const own = new Set(tokens);
+  const initialism = tokens
+    .filter((token) => !NON_DISTINGUISHING_REMAINDER.has(token))
+    .map((token) => token[0])
+    .join('');
+  return entry.tokens
+    .filter((token) => !own.has(token))
+    .every((token) => NON_DISTINGUISHING_REMAINDER.has(token) || (initialism.length >= 2 && token === initialism));
+}
+
+/**
+ * The one option that states this answer and adds nothing to it, or null.
+ *
+ * REFUSES on two counts, both of which put a false statement on a real application when they were
+ * allowed through:
+ *
+ *   - SEVERAL options share the answer. Given the ladder form "University of California" and the
+ *     options "University of California, Los Angeles" and "University of California, Davis", the
+ *     old code took whichever was listed first and told two employers she went to UCLA.
+ *   - the remainder CHANGES THE CLAIM. Given the answer "Yes" - meaning "yes, I need sponsorship" -
+ *     and the sole yes-shaped option "Yes - I am authorized to work in the US for any employer",
+ *     the old code selected the sentence that says the opposite of the answer it was given.
+ *
+ * The reverse direction, where the ANSWER is longer than the option, needs none of this: an option
+ * contained inside the answer is the same claim with less detail, which is what the school ladder
+ * exists to reach. That direction is handled by the caller before this one is consulted.
+ */
+function chooseExtendingOption(
+  entries: readonly ComparableEntry[],
+  key: string,
+  tokens: readonly string[],
+): { option: string | null; ambiguous: boolean } {
+  const extending = entries.filter((entry) => optionExtendsAnswer(entry, key, tokens));
+  if (extending.length === 0) return { option: null, ambiguous: false };
+  if (extending.length > 1) return { option: null, ambiguous: true };
+  const only = extending[0];
+  return { option: extensionKeepsTheClaim(only, key, tokens) ? only.option : null, ambiguous: true };
+}
+
+/**
+ * The option that best answers with one of `candidates`, or null.
+ *
+ * Deliberately conservative and ordered by evidence strength: an exact match beats a calendar
+ * bucket beats a containment match beats a numeric bucket. A candidate shorter than three
+ * characters never matches by containment, because "BS" would otherwise select "Business".
+ *
+ * The two inexact stages both rank on how much the option is allowed to differ from the answer,
+ * because both of them used to take whatever was listed first and both put a false statement on a
+ * real application when they did: the narrowest covering calendar bucket rather than the first, and
+ * an option that states the answer and adds nothing rather than one that adds a claim to it.
+ */
+export function chooseClosestOption(
+  candidates: readonly string[],
+  rawOptions: readonly string[] | null | undefined,
+): string | null {
+  const options = usableOptions(rawOptions);
+  if (options.length === 0) return null;
+  const comparableOptions = options.map((option) => ({ option, key: comparableOption(option), tokens: optionTokens(option) }));
+
+  for (const candidate of candidates) {
+    const key = comparableOption(candidate);
+    if (!key) continue;
+    const exact = comparableOptions.find((entry) => entry.key === key);
+    if (exact) return exact.option;
+  }
+
+  // Calendar buckets are checked BEFORE generic containment, because containment on a bare year
+  // gets them wrong: given "May 2028" and the options "July 2028 - December 2028" and
+  // "January 2028 - June 2028", a substring match on "2028" picks whichever bucket is listed
+  // first, which is a 50/50 guess about the applicant's graduation. Range arithmetic is not.
+  //
+  // And among the buckets that DO cover the date, the narrowest one wins rather than the first in
+  // DOM order. A graduation select routinely opens with a catch-all - "Before 2028", "2028 or
+  // earlier" - and closes with another, so first-in-DOM-order handed the catch-all to an employer
+  // whenever the precise bucket sat further down the list.
+  for (const candidate of candidates) {
+    const point = monthYearOf(candidate);
+    if (!point) continue;
+    let best: { option: string; span: number } | null = null;
+    for (const entry of comparableOptions) {
+      const span = optionCalendarSpan(entry.option, point.month, point.year);
+      if (span === null) continue;
+      if (!best || span < best.span) best = { option: entry.option, span };
+    }
+    if (best) return best.option;
+  }
+
+  for (const candidate of candidates) {
+    const key = comparableOption(candidate);
+    if (key.length < 3) continue;
+    const tokens = optionTokens(candidate).filter((token) => token.length >= 3);
+    // The safe direction first: an option contained INSIDE the answer is the same claim with less
+    // detail, which is how "University of Southern California, Viterbi School of Engineering"
+    // reaches the option "University of Southern California".
+    const narrower = comparableOptions.find((entry) =>
+      entry.key === key
+      || key.startsWith(`${entry.key} `)
+      || key.includes(` ${entry.key} `));
+    if (narrower) return narrower.option;
+    // Then the direction that adds words to the answer, which is only allowed when exactly one
+    // option does it and the words it adds do not change what is being claimed. An ambiguous list
+    // ends the search: a lower-ranked alias must not be used to slip past a refusal made here.
+    const extending = chooseExtendingOption(comparableOptions, key, tokens);
+    if (extending.option) return extending.option;
+    if (extending.ambiguous) break;
+  }
+
+  for (const candidate of candidates) {
+    const numeric = numericValueOf(candidate);
+    if (numeric === null) continue;
+    const bucket = comparableOptions.find((entry) => {
+      const range = parseNumericRange(entry.option);
+      return !!range && numeric >= range.min && numeric <= range.max;
+    });
+    if (bucket) return bucket.option;
+  }
+
+  return null;
+}
+
+// ---- alias ladders, derived from the stored value and a standard vocabulary ----
+
+function pushUnique(out: string[], seen: Set<string>, ...values: Array<string | undefined | null>) {
+  for (const value of values) {
+    const trimmed = typeof value === 'string' ? value.trim() : '';
+    if (!trimmed) continue;
+    const key = comparableOption(trimmed);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(trimmed);
+  }
+}
+
+function ladder(...values: Array<string | undefined | null>): string[] {
+  const out: string[] = [];
+  pushUnique(out, new Set<string>(), ...values);
+  return out;
+}
+
+/**
+ * "University of Southern California, Viterbi School of Engineering" is the resume's phrasing.
+ * The option list carries the institution alone, so trailing school/college/campus clauses are
+ * dropped, and an initialism is offered last for the portals that list "USC".
+ */
+export function schoolAliasLadder(school: string | undefined): string[] {
+  const trimmed = school?.trim();
+  if (!trimmed) return [];
+  const institution = trimmed
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .find((part) => !/\b(?:school|college|campus|institute|department|division|faculty)\s+of\b/i.test(part)
+      && !/^\s*(?:school|college|campus|faculty)\b/i.test(part));
+  const words = (institution ?? trimmed).split(/\s+/).filter((word) => word.length > 2 && /^[A-Za-z]/.test(word));
+  const initialism = words.length >= 3
+    ? words
+      .filter((word) => !/^(?:of|the|and|at|for|in)$/i.test(word))
+      .map((word) => word[0].toUpperCase())
+      .join('')
+    : undefined;
+  return ladder(trimmed, institution, initialism && initialism.length >= 3 ? initialism : undefined);
+}
+
+/** The standard education-level enum a closed-list "Degree" or "Education level" field offers. */
+export function educationLevelLadder(degree: string | undefined): string[] {
+  const trimmed = degree?.trim();
+  if (!trimmed) return [];
+  if (/\bph\.?d\b|doctor of philosophy|doctorate|\bdoctoral\b/i.test(trimmed)) {
+    return ladder('Doctor of Philosophy (Ph.D.)', "Doctorate Degree", 'Doctorate', 'PhD', 'Ph.D.', trimmed);
+  }
+  if (/\bm\.?b\.?a\b/i.test(trimmed)) {
+    return ladder('MBA', "Master's Degree", 'Masters Degree', "Master's", 'Graduate Degree', trimmed);
+  }
+  if (/\bmaster|\bm\.?s\.?\b|\bm\.?a\.?\b|\bm\.?eng\b/i.test(trimmed)) {
+    return ladder("Master's Degree", 'Masters Degree', "Master's", 'Masters', 'Graduate Degree', 'Graduate', trimmed);
+  }
+  if (/\bbachelor|\bb\.?s\.?\b|\bb\.?a\.?\b|\bb\.?eng\b|\bundergrad/i.test(trimmed)) {
+    const science = /\b(?:science|b\.?s\.?|b\.?eng\b|engineering)\b/i.test(trimmed);
+    return ladder(
+      "Bachelor's Degree",
+      'Bachelors Degree',
+      "Bachelor's",
+      'Bachelors',
+      science ? 'Bachelor of Science' : 'Bachelor of Arts',
+      'Undergraduate Degree',
+      'Undergraduate',
+      trimmed,
+    );
+  }
+  if (/\bassociate/i.test(trimmed)) {
+    return ladder("Associate's Degree", 'Associates Degree', "Associate's", 'Associates', trimmed);
+  }
+  if (/\bhigh school|\bged\b|\bsecondary\b/i.test(trimmed)) {
+    return ladder('High School', 'High School Diploma', 'High School or equivalent', trimmed);
+  }
+  return ladder(trimmed);
+}
+
+const DISCIPLINE_FAMILIES: Array<{ match: RegExp; family: string[] }> = [
+  {
+    match: /\bcomputer\s+science\b|\bcompsci\b|\bcs\b/i,
+    family: ['Computer Science', 'Computer and Information Sciences', 'Computer Science and Engineering', 'Computer Engineering', 'Engineering'],
+  },
+  { match: /\bsoftware\s+engineering\b/i, family: ['Software Engineering', 'Computer Science', 'Engineering'] },
+  { match: /\bdata\s+science\b/i, family: ['Data Science', 'Statistics', 'Computer Science'] },
+  { match: /\belectrical\s+engineering\b/i, family: ['Electrical Engineering', 'Engineering'] },
+  { match: /\bmechanical\s+engineering\b/i, family: ['Mechanical Engineering', 'Engineering'] },
+  { match: /\b(?:mathematics|applied\s+math|maths?)\b/i, family: ['Mathematics', 'Mathematics and Statistics'] },
+  { match: /\bstatistics\b/i, family: ['Statistics', 'Mathematics and Statistics'] },
+  { match: /\bphysics\b/i, family: ['Physics', 'Physical Sciences'] },
+  { match: /\bfinance\b/i, family: ['Finance', 'Business Administration', 'Business'] },
+  { match: /\beconomics\b/i, family: ['Economics', 'Social Sciences'] },
+  { match: /\bbusiness\s+administration\b/i, family: ['Business Administration', 'Business'] },
+];
+
+/**
+ * Discipline fields carry a fixed taxonomy, while the resume stores a sentence
+ * ("Computer Science & Business Administration, Finance Emphasis"). Split it into its declared
+ * subjects, drop the emphasis/concentration clause, then offer the standard family names.
+ */
+export function disciplineLadder(major: string | undefined, degree?: string | undefined): string[] {
+  const source = [major, degree].map((value) => value?.trim()).find(Boolean);
+  if (!source) return [];
+  const subjects = source
+    .replace(/\b(?:bachelor|bachelors?|master|masters?|doctor|doctorate|ph\.?d)\b(?:'s)?\s+(?:of\s+)?(?:science|arts|engineering|business\s+administration)?\s*(?:degree\s*)?(?:in\s+)?/gi, ' ')
+    .split(/\s*(?:&|,|;|\/| and )\s*/i)
+    .map((part) => part.replace(/\b(?:emphasis|concentration|minor|track|specialization|focus)\b.*$/i, '').trim())
+    .filter((part) => part.length >= 3 && /[a-z]/i.test(part));
+  const families: string[] = [];
+  for (const subject of subjects) {
+    const family = DISCIPLINE_FAMILIES.find((entry) => entry.match.test(subject));
+    if (family) families.push(...family.family);
+  }
+  if (families.length === 0) {
+    const family = DISCIPLINE_FAMILIES.find((entry) => entry.match.test(source));
+    if (family) families.push(...family.family);
+  }
+  return ladder(...subjects, ...families, source);
+}
+
+export function gpaLadder(gpa: string | undefined, gpaScale?: string | undefined): string[] {
+  const trimmed = gpa?.trim();
+  if (!trimmed) return [];
+  const value = numericValueOf(trimmed);
+  const scale = gpaScale?.trim();
+  return ladder(
+    trimmed,
+    value !== null ? value.toFixed(2) : undefined,
+    value !== null ? String(Math.round(value * 10) / 10) : undefined,
+    value !== null && scale ? `${trimmed}/${scale}` : undefined,
+    value !== null && scale ? `${trimmed} / ${scale}` : undefined,
+  );
+}
+
+export function graduationMonthLadder(monthName: string | undefined): string[] {
+  const trimmed = monthName?.trim();
+  if (!trimmed) return [];
+  const index = MONTH_NAMES.findIndex((name) => name.toLowerCase() === trimmed.toLowerCase());
+  if (index < 0) return ladder(trimmed);
+  const number = index + 1;
+  return ladder(
+    MONTH_NAMES[index],
+    MONTH_NAMES[index].slice(0, 3),
+    String(number).padStart(2, '0'),
+    String(number),
+  );
+}
+
+export function graduationDateLadder(gradDate: string | undefined, gradYear: number | undefined): string[] {
+  const point = monthYearOf(gradDate ?? '') ?? (gradYear ? { month: 0, year: gradYear } : null);
+  if (!point) return ladder(gradDate);
+  const year = String(point.year);
+  if (!point.month) return ladder(gradDate, year);
+  const name = MONTH_NAMES[point.month - 1];
+  const season = point.month <= 5 ? 'Spring' : point.month <= 8 ? 'Summer' : 'Fall';
+  return ladder(
+    gradDate,
+    `${name} ${year}`,
+    `${season} ${year}`,
+    `${String(point.month).padStart(2, '0')}/${year}`,
+    `${year}-${String(point.month).padStart(2, '0')}`,
+    year,
+  );
+}
+
+/** Does the stored referral source name the employer's own site? */
+const COMPANY_SITE_SOURCE_RE =
+  /\b(?:company|corporate|employer|careers?|website|web\s*site|web\s*page|homepage|portal)\b/i;
+
+/**
+ * Referral source lists are short and closed, and every entry on one is a factual claim about how
+ * this applicant found this posting.
+ *
+ * "Job Board" used to sit on this ladder ahead of "Other", so a stored "Company website" against
+ * ["LinkedIn", "Job Board", "Employee referral", "Other"] returned Job Board: a statement about
+ * where she found the role that simply did not happen. It is gone. The synonyms that remain are
+ * all sayings of the SAME fact, and they are only offered when the stored value is that fact;
+ * for anything else the ladder runs stored-value then "Other", because "Other" is the one entry
+ * on a referral list that is true no matter how the applicant arrived.
+ *
+ * "Other" stays LAST, so it can never displace a truthful specific option.
+ */
+export function referralSourceLadder(stored: string | undefined): string[] {
+  const trimmed = stored?.trim();
+  const namesCompanySite = !trimmed || COMPANY_SITE_SOURCE_RE.test(trimmed);
+  return ladder(
+    trimmed,
+    ...(namesCompanySite
+      ? [
+        'Company Website',
+        'Company website',
+        'Company Careers Site',
+        'Careers Page',
+        'Career Site',
+        'Careers Website',
+      ]
+      : []),
+    'Other',
+  );
+}
+
+export function studyYearLadder(value: string | undefined): string[] {
+  const trimmed = value?.trim();
+  if (!trimmed) return [];
+  const ordinals: Record<string, string[]> = {
+    'first year': ['First year', '1st year', 'Year 1', 'Freshman'],
+    'second year': ['Second year', '2nd year', 'Year 2', 'Sophomore'],
+    'third year': ['Third year', '3rd year', 'Year 3', 'Junior'],
+    'fourth year': ['Fourth year', '4th year', 'Year 4', 'Senior'],
+  };
+  return ladder(trimmed, ...(ordinals[trimmed.toLowerCase()] ?? []));
+}
+
+// ---- intent and resolution ----
+
+/** The question intent for a raw discovered label, after handle stripping. */
+export function profileFieldIntent(label: string): ProfileKey | null {
+  const normalized = normalizeDiscoveredLabel(label) || label.trim();
+  if (!normalized) return null;
+  return classifyField(normalized);
+}
+
+/**
+ * The ranked alias ladder for one intent, built from the stored profile.
+ *
+ * `base` is the value resolveKnownAnswer already produced; it stays at the head, because for a
+ * free-text control the profile's own phrasing is the truest answer. Everything after it exists
+ * for closed-list controls.
+ */
+export function profileFieldCandidates(
+  key: ProfileKey | null,
+  ap: ApplicationProfileLike,
+  base: string,
+): string[] {
+  switch (key) {
+    case 'school':
+      return ladder(base, ...schoolAliasLadder(ap.school ?? base));
+    case 'degree':
+      return ladder(base, ...educationLevelLadder(ap.degree ?? base));
+    case 'major':
+      return ladder(base, ...disciplineLadder(ap.major ?? base, ap.degree));
+    case 'gpa':
+      return ladder(base, ...gpaLadder(ap.gpa ?? base, ap.gpa_scale));
+    case 'gpa_scale':
+      return ladder(base, base.replace(/\.0+$/, ''));
+    case 'graduation_month':
+      return ladder(base, ...graduationMonthLadder(base));
+    case 'graduation_year':
+      return ladder(base);
+    case 'graduation_date':
+      return ladder(base, ...graduationDateLadder(ap.grad_date ?? base, ap.grad_year));
+    case 'current_enrollment':
+      return /^yes$/i.test(base)
+        ? ladder(base, 'Yes, I am currently enrolled', 'Currently enrolled', 'Enrolled')
+        : ladder(base, 'No, I am not currently enrolled', 'Not enrolled');
+    case 'study_year':
+      return ladder(base, ...studyYearLadder(base));
+    case 'referral_source_default':
+      return ladder(base, ...referralSourceLadder(ap.referral_source_default ?? base));
+    default:
+      return ladder(base);
+  }
+}
+
+/**
+ * The alias ladder for a label plus an already-resolved answer, for callers that hold the answer
+ * but not the profile (the managed action builders). Same vocabulary, same ordering.
+ */
+export function profileAnswerAliases(label: string, answer: string): string[] {
+  const base = answer.trim();
+  if (!base) return [];
+  const key = profileFieldIntent(label);
+  if (!isProfileBackedKey(key)) return [base];
+  const synthetic: ApplicationProfileLike = {};
+  switch (key) {
+    case 'school': synthetic.school = base; break;
+    case 'degree': synthetic.degree = base; break;
+    case 'major': synthetic.major = base; break;
+    case 'gpa': synthetic.gpa = base; break;
+    case 'graduation_date': synthetic.grad_date = base; break;
+    case 'referral_source_default': synthetic.referral_source_default = base; break;
+    default: break;
+  }
+  return profileFieldCandidates(key, synthetic, base);
+}
+
+/**
+ * Resolve one discovered control against the stored profile.
+ *
+ * Returns null when the profile cannot answer it, so callers keep their existing fall-through to
+ * the essay drafter or to the human. Never returns a skipReason: sensitive and consent questions
+ * stay entirely with resolveKnownAnswer, which this delegates to first.
+ */
+export function resolveProfileField(
+  shape: ProfileFieldShape,
+  ap: ApplicationProfileLike,
+  jdText?: string,
+): ResolvedProfileField | null {
+  const label = normalizeDiscoveredLabel(shape.label);
+  if (!label) return null;
+  const known = resolveKnownAnswer(label, shape.inputType ?? 'text', ap, jdText);
+  if (!known || !('value' in known)) return null;
+  const base = known.value.trim();
+  if (!base) return null;
+  const key = profileFieldIntent(label);
+  const candidates = profileFieldCandidates(key, ap, base);
+  const matched = chooseClosestOption(candidates, shape.options);
+  return {
+    key,
+    value: matched ?? candidates[0] ?? base,
+    candidates,
+    matchedOption: matched !== null,
+  };
+}
+
+const REQUIRED_BLOCKER_RE = /^"(.+)" is required and is still empty$/;
+
+/**
+ * The blockers naming a field the resolver already has an answer for.
+ *
+ * This is the standing guard for the whole class of defect this module exists for: a value the
+ * resolver can produce must never come back as "required and is still empty". When it does, the
+ * answer existed and simply failed to reach the control, which is a Litos bug and not work for
+ * the applicant, and it needs to be visible as such instead of disappearing into an attention
+ * card that reads like a gap in her profile.
+ *
+ * Deliberately not filtered to PROFILE_BACKED_KEYS. A sponsorship answer comes from a stored
+ * boolean rather than a classified ProfileKey, and it appeared in this same failure list on
+ * eight measured packets; the honest test is "did the resolver have something to say", not
+ * "which internal key did it route through".
+ */
+export function profileBackedBlockerLabels(
+  blockers: readonly string[],
+  ap: ApplicationProfileLike,
+  jdText?: string,
+): string[] {
+  const out: string[] = [];
+  for (const blocker of blockers) {
+    const label = blocker.match(REQUIRED_BLOCKER_RE)?.[1];
+    if (!label) continue;
+    if (resolveProfileField({ label }, ap, jdText)) out.push(label);
+  }
+  return [...new Set(out)];
+}

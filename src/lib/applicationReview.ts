@@ -15,6 +15,17 @@ export type ApplicationReviewQuestion = {
 
 export type ApplicationAttentionCategory =
   | 'captcha'
+  /* The run never got to the application form at all: no field was typed, no control was located,
+   * nothing was discovered. Deliberately NOT 'evidence_gap', which means the opposite - the form
+   * was reached and the evidence of specific fields is missing. Five owner packets on 2026-08-06
+   * (Akuna x3, Jump Trading, Nuro) were filed as evidence_gap with three sentences describing a
+   * filled form, when the preview screenshots show a job description page and, for Jump Trading, a
+   * branded careers page with no form on it at all. */
+  | 'form_not_reached'
+  /* The run threw and stopped. Every terminal state owes a cause, and before this existed a run
+   * could end in status 'failed' with attention_reason unset, which is unactionable for the
+   * applicant and undebuggable for us. */
+  | 'run_failed'
   | 'required_document'
   | 'sensitive_attestation'
   | 'required_field'
@@ -206,6 +217,27 @@ export type ApplicationReviewState = {
   portal_supported?: boolean;
   submission_claimed_at?: string;
   submission_claim_id?: string;
+  /* WHICH ADDRESS THE EMPLOYER WAS GIVEN, and why that one.
+   *
+   * Litos prefers a per-application alias so replies come back through the product and can be
+   * shown next to the application. On 2026-08-08 the alias domain had no MX record, so the address
+   * on every submitted form could not receive mail at all, and nothing anywhere recorded that.
+   * The fallback to the applicant's real address is now automatic, and it is written down here
+   * because a SILENT fallback is its own defect: `tracked` false means the thread is in her own
+   * mailbox and Litos will never see it, and no surface may promise otherwise.
+   *
+   * Absent on every packet prepared before this shipped, and on packets whose run never reached a
+   * prepare step. Absent means unknown, not alias. */
+  applicant_email?: {
+    address: string;
+    source: 'litos_alias' | 'contact_email' | 'account_email';
+    /* 'deliverable' when the alias was used; otherwise the measured reason it was not, e.g.
+     * 'no_mx_record', 'domain_not_verified_in_resend', 'inbound_route_missing',
+     * 'check_unavailable'. */
+    reason: string;
+    tracked: boolean;
+    decided_at: string;
+  };
   filled_fields?: string[];
   preview_screenshot_url?: string;
   submission_authorization?: {
@@ -252,9 +284,37 @@ function overlapScore(left: string, right: string): number {
 }
 
 /**
- * Returns the exact words introduced by tailoring, compared with the closest
- * source bullet for the same experience-bank entry. The result is metadata for
- * the review UI only. Grounding is still enforced by resumeValidate.ts.
+ * The words this job's tailoring is responsible for, in the resume as rendered.
+ *
+ * TWO THINGS COUNT AS TAILORING AT THE BULLET LAYER, and for a long time this function could only
+ * see one of them.
+ *
+ * 1. REWORDING. A rendered bullet says something its source variant did not. Those words are the
+ *    diff, and finding them is what this function was originally written to do.
+ *
+ * 2. SELECTION. Measured 2026-08-08 over the 25 most recent real packets: 245 of 267 rendered
+ *    bullets are BYTE-IDENTICAL to a stored experience-bank variant, and the 22 that are not reduce
+ *    to one bullet whose only difference is an em dash written as a comma. Tailoring below the
+ *    skills line is not rewriting, it is CHOOSING which of the student's own phrasings to put on
+ *    this page, which is exactly what gapEvidence.ts means by "SELECTION, NOT INVENTION". So
+ *    rewording found nothing to report, `edited_terms` came back `[]` on all 25 - honestly - and
+ *    the green tone in the review legend ("wording Litos changed for this job") had never rendered
+ *    on a real packet. A student was shown a swatch for a colour that does not exist.
+ *
+ * WHAT MAKES A SELECTION ATTRIBUTABLE TO THIS JOB, and what stops this from fabricating one.
+ * `bullet_variants` is ordered, and its head is the student's own default phrasing: it is what the
+ * base resume renders (llm/baseResume.ts) and what the deterministic floor fills from
+ * (engine/resumePolicy.ts enforceExperienceBulletFloor). So the bullets any job would have got are
+ * `variants.slice(0, renderedCount)`. A rendered bullet sourced from OUTSIDE that prefix is one the
+ * JD reached past the default to pick, and the words that carry the difference are the ones in it
+ * that the default set never says. A bullet whose source IS in the default prefix reports nothing,
+ * because nothing about this job caused it, which is the rule "do not mark a bullet as edited when
+ * the same variant would have been chosen for any job".
+ *
+ * An entry with one variant, or one whose variants are all on the page, can produce no selection
+ * edit at all: there was no choice to make. Every reported word is a word the student wrote and the
+ * page actually shows. Grounding is still enforced by resumeValidate.ts; this is metadata for the
+ * review UI only.
  */
 export function deriveEditedTerms(
   spec: ResumeSpec,
@@ -272,19 +332,30 @@ export function deriveEditedTerms(
       ? sourceEntry.bullet_variants.filter((item): item is string => typeof item === 'string')
       : [];
 
+    // What this entry would have rendered for any job at all, and every word it would have said.
+    const defaultChoice = variants.slice(0, entry.bullets.length);
+    const defaultTerms = new Set(defaultChoice.flatMap((variant) => terms(variant)));
+    const isDefaultChoice = (variant: string) => defaultChoice.includes(variant);
+
     for (const bullet of entry.bullets) {
       const source = variants
         .map((variant) => ({ variant, score: overlapScore(bullet, variant) }))
         .sort((a, b) => b.score - a.score)[0]?.variant;
       if (!source) continue;
 
-      const sourceTerms = new Set(terms(source));
+      // Rewording: what the page says that its own source variant does not.
+      // Selection: what the page says that the default set never would have said. Only for a
+      // bullet the JD reached past the default to pick, so a default bullet reports nothing.
+      const baseline = isDefaultChoice(source)
+        ? new Set(terms(source))
+        : new Set([...terms(source)].filter((term) => defaultTerms.has(term)));
+
       for (const rendered of bullet.match(TERM_RE) ?? []) {
         const normalized = rendered.toLowerCase();
         if (
           normalized.length > 2 &&
           !STOPWORDS.has(normalized) &&
-          !sourceTerms.has(normalized)
+          !baseline.has(normalized)
         ) {
           introduced.set(normalized, rendered);
         }

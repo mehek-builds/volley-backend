@@ -21,7 +21,13 @@ import { validateResumeSpec, validatePdfLayout, pruneUngroundedContent } from '.
 import { mintDownloadToken, readDownloadToken, resolveBlobUrl } from '../lib/resumeAccess';
 import { apiBaseFor } from '../lib/apiBase';
 import { resumeGenerateBodySchema, type ResumeGenerateBody } from './resumeRequestSchema';
-import { applicationAliasFor, ensureApplicationEmailAlias, type ApplicationEmailIdentity } from '../lib/applicationEmail';
+import {
+  applicationAliasFor,
+  applicationForwardingAddress,
+  ensureApplicationEmailAlias,
+  type ApplicationEmailIdentity,
+} from '../lib/applicationEmail';
+import { applicationAliasDeliverability } from '../lib/applicationEmailDeliverability';
 import {
   resumeGenerateSuccessResponseSchema,
   resumeQualityHoldResponseSchema,
@@ -388,14 +394,37 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     }
 
     const resumeId = randomUUID();
-    const litosApplicationAlias = body.application ? applicationAliasFor(userId, resumeId) : null;
-    const applicationEmail: ApplicationEmailIdentity | null = litosApplicationAlias && body.contact.email
+    /* THE ALIAS IS PRINTED ON THE PDF, which is why the deliverability check has to run here too
+     * and not only at submission time.
+     *
+     * applicationContact below is the contact block rendered into the resume file, and that file
+     * is frozen the moment it is generated. An alias on a domain that cannot receive mail is
+     * therefore not merely a bad form field, it is a bad address baked into the document the
+     * employer keeps. The check is cached per domain with a TTL, so this costs one lookup an hour
+     * across the whole deployment rather than one per generation, and it turns itself back on
+     * without a deploy once the MX record exists. */
+    const aliasDeliverability = body.application && body.contact.email
+      ? await applicationAliasDeliverability()
+      : null;
+    const litosApplicationAlias = aliasDeliverability?.deliverable ? applicationAliasFor(userId, resumeId) : null;
+    // The stored preference, not whichever address this request happened to carry. Falls back to
+    // the contact address, which is what this line used unconditionally before.
+    const aliasForwardTo = litosApplicationAlias && body.contact.email
+      ? await applicationForwardingAddress(userId, body.contact.email)
+      : null;
+    const applicationEmail: ApplicationEmailIdentity | null = litosApplicationAlias && aliasForwardTo
       ? {
         alias: litosApplicationAlias,
-        forwards_to: body.contact.email.trim().toLowerCase(),
+        forwards_to: aliasForwardTo,
         mode: 'litos_application_alias',
       }
       : null;
+    if (body.application && body.contact.email && !applicationEmail) {
+      fastify.log.warn(
+        { reason: aliasDeliverability?.reason ?? 'alias_not_configured', domain: aliasDeliverability?.domain ?? null },
+        'application email alias skipped: the alias domain cannot receive mail, using the real address',
+      );
+    }
     const applicationContact = applicationEmail
       ? { ...body.contact, email: applicationEmail.alias }
       : body.contact;
