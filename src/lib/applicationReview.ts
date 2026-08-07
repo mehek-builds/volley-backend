@@ -252,9 +252,37 @@ function overlapScore(left: string, right: string): number {
 }
 
 /**
- * Returns the exact words introduced by tailoring, compared with the closest
- * source bullet for the same experience-bank entry. The result is metadata for
- * the review UI only. Grounding is still enforced by resumeValidate.ts.
+ * The words this job's tailoring is responsible for, in the resume as rendered.
+ *
+ * TWO THINGS COUNT AS TAILORING AT THE BULLET LAYER, and for a long time this function could only
+ * see one of them.
+ *
+ * 1. REWORDING. A rendered bullet says something its source variant did not. Those words are the
+ *    diff, and finding them is what this function was originally written to do.
+ *
+ * 2. SELECTION. Measured 2026-08-08 over the 25 most recent real packets: 245 of 267 rendered
+ *    bullets are BYTE-IDENTICAL to a stored experience-bank variant, and the 22 that are not reduce
+ *    to one bullet whose only difference is an em dash written as a comma. Tailoring below the
+ *    skills line is not rewriting, it is CHOOSING which of the student's own phrasings to put on
+ *    this page, which is exactly what gapEvidence.ts means by "SELECTION, NOT INVENTION". So
+ *    rewording found nothing to report, `edited_terms` came back `[]` on all 25 - honestly - and
+ *    the green tone in the review legend ("wording Litos changed for this job") had never rendered
+ *    on a real packet. A student was shown a swatch for a colour that does not exist.
+ *
+ * WHAT MAKES A SELECTION ATTRIBUTABLE TO THIS JOB, and what stops this from fabricating one.
+ * `bullet_variants` is ordered, and its head is the student's own default phrasing: it is what the
+ * base resume renders (llm/baseResume.ts) and what the deterministic floor fills from
+ * (engine/resumePolicy.ts enforceExperienceBulletFloor). So the bullets any job would have got are
+ * `variants.slice(0, renderedCount)`. A rendered bullet sourced from OUTSIDE that prefix is one the
+ * JD reached past the default to pick, and the words that carry the difference are the ones in it
+ * that the default set never says. A bullet whose source IS in the default prefix reports nothing,
+ * because nothing about this job caused it, which is the rule "do not mark a bullet as edited when
+ * the same variant would have been chosen for any job".
+ *
+ * An entry with one variant, or one whose variants are all on the page, can produce no selection
+ * edit at all: there was no choice to make. Every reported word is a word the student wrote and the
+ * page actually shows. Grounding is still enforced by resumeValidate.ts; this is metadata for the
+ * review UI only.
  */
 export function deriveEditedTerms(
   spec: ResumeSpec,
@@ -272,19 +300,30 @@ export function deriveEditedTerms(
       ? sourceEntry.bullet_variants.filter((item): item is string => typeof item === 'string')
       : [];
 
+    // What this entry would have rendered for any job at all, and every word it would have said.
+    const defaultChoice = variants.slice(0, entry.bullets.length);
+    const defaultTerms = new Set(defaultChoice.flatMap((variant) => terms(variant)));
+    const isDefaultChoice = (variant: string) => defaultChoice.includes(variant);
+
     for (const bullet of entry.bullets) {
       const source = variants
         .map((variant) => ({ variant, score: overlapScore(bullet, variant) }))
         .sort((a, b) => b.score - a.score)[0]?.variant;
       if (!source) continue;
 
-      const sourceTerms = new Set(terms(source));
+      // Rewording: what the page says that its own source variant does not.
+      // Selection: what the page says that the default set never would have said. Only for a
+      // bullet the JD reached past the default to pick, so a default bullet reports nothing.
+      const baseline = isDefaultChoice(source)
+        ? new Set(terms(source))
+        : new Set([...terms(source)].filter((term) => defaultTerms.has(term)));
+
       for (const rendered of bullet.match(TERM_RE) ?? []) {
         const normalized = rendered.toLowerCase();
         if (
           normalized.length > 2 &&
           !STOPWORDS.has(normalized) &&
-          !sourceTerms.has(normalized)
+          !baseline.has(normalized)
         ) {
           introduced.set(normalized, rendered);
         }

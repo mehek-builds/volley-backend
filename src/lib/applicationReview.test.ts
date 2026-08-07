@@ -48,6 +48,59 @@ describe('application review metadata', () => {
     assert.deepEqual(edited.sort(), ['automated', 'workflow']);
   });
 
+  /**
+   * Measured over the 25 most recent real packets on 2026-08-08: 245 of 267 rendered bullets are
+   * BYTE-IDENTICAL to a stored bank variant, so the rewording diff above found nothing and
+   * `edited_terms` came back `[]` on every packet - honestly. Tailoring below the skills line is
+   * variant SELECTION, and until it was reported the green "wording Litos changed for this job"
+   * tone in the review legend had never rendered on a real packet at all.
+   */
+  const selectionBank: ExperienceBankEntry[] = [
+    {
+      ...bank[0],
+      bullet_variants: [
+        'Built a client handoff tool used by 18 projects.',
+        'Shipped a Kubernetes deployment pipeline used by 18 projects.',
+      ],
+    },
+  ];
+
+  test('a bank variant the JD reached past the default to pick is the edit', () => {
+    const selected: ResumeSpec = {
+      ...spec,
+      experience: [
+        {
+          ...spec.experience[0],
+          // Verbatim variant two. Not one word of it was written for this job; CHOOSING it was.
+          bullets: ['Shipped a Kubernetes deployment pipeline used by 18 projects.'],
+        },
+      ],
+    };
+    const edited = deriveEditedTerms(selected, selectionBank).map((term) => term.toLowerCase());
+    // Only what the default bullet would never have said. "projects" and "used" are in both, so
+    // they are not attributable to this posting and must not go green.
+    assert.deepEqual(edited.sort(), ['deployment', 'kubernetes', 'pipeline', 'shipped']);
+  });
+
+  test('the variant any job would have got is not an edit', () => {
+    const defaulted: ResumeSpec = {
+      ...spec,
+      experience: [
+        { ...spec.experience[0], bullets: ['Built a client handoff tool used by 18 projects.'] },
+      ],
+    };
+    assert.deepEqual(deriveEditedTerms(defaulted, selectionBank), []);
+  });
+
+  test('an entry whose every variant is on the page made no choice to report', () => {
+    // Two variants, two bullets: nothing was left behind, so nothing is attributable to the JD.
+    const both: ResumeSpec = {
+      ...spec,
+      experience: [{ ...spec.experience[0], bullets: [...selectionBank[0].bullet_variants as string[]] }],
+    };
+    assert.deepEqual(deriveEditedTerms(both, selectionBank), []);
+  });
+
   test('reads a persisted review packet and ignores plain resume specs', () => {
     assert.equal(readApplicationReview(spec), null);
     const review = {

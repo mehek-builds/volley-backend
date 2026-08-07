@@ -660,6 +660,36 @@ function isLogisticsProseLine(line: string): boolean {
 const NON_RESUME_REQUIREMENT_LINE =
   /\b(located in|resid(e|ing) in|based in|time ?zones?|utc[+-]?\d|transparent salary|paid vacation|paid sick leave|parental leave|stock options|employment (&|and) contractor options|salary calculator|commission split|base salary|ote)\b/i;
 
+/**
+ * Lines that tell the student HOW TO APPLY or WHETHER THEY ARE ELIGIBLE, neither of which is a
+ * thing a resume can be scored against.
+ *
+ * Akuna's Python posting (packet cc9d695d) contributed twelve requirements and five of them came
+ * from three lines of this kind. Every one was `kind: 'required'` at weight 1, so they did not
+ * merely appear in amber: they took slots under EMPHASIS_LIMIT ahead of real skills, they charged
+ * the denominator, and they are the input to gap-to-bullet.
+ *
+ *   "**Resumes must be submitted in PDF format."           -> `resumes`, `pdf`
+ *   "Major GPA of 3.5 or above"                            -> `major`
+ *   "Legal authorization to work in the U.S. is required"  -> `legal`
+ *
+ * WHY THE LINE AND NOT THE WORD. Each of those four words was admitted by a different rule -
+ * `resumes` by the proper-noun rule, `pdf` by ACRONYM, `major` by the Title Case run, `legal` by
+ * SKILL_LEXICON - so removing them word by word means four separate weakenings of four rules that
+ * are each right in general. What they share is not a property of the word, it is the sentence they
+ * were standing in. The vocabulary is whole clauses for the reason FOOTER_PROSE gives: a real
+ * requirement cannot contain "must be submitted in", and a GPA threshold or a work-authorization
+ * clause states eligibility, which the application form asks about and the resume does not carry.
+ *
+ * The guard in isNonResumeRequirementLine still applies, so a line that also names experience,
+ * skills or proficiency is kept whole and none of this fires on it.
+ */
+const APPLICATION_PROCESS_LINE =
+  /\b((resumes?|cvs?|cover letters?|transcripts?|applications?|submissions?) (must|should|can|may|are to|need to) be (submitted|uploaded|sent|provided|attached|received)|please (submit|upload|attach|send|include) (your|a|an|all)|to apply,|submit(ted)? (your|a|an) (resume|cv|application) (in|via|through|to))\b/i;
+
+const ELIGIBILITY_LINE =
+  /\b((minimum|cumulative|overall|major|current|combined)? ?gpa|grade[- ]point average|authoriz(ed|ation) to work|work authoriz(ed|ation)|legally (authorized|entitled|permitted)|right to work|(visa|employment|work) sponsorship|require sponsorship|employment eligibility)\b/i;
+
 function isNonResumeRequirementLine(line: string): boolean {
   const t = headingCore(line);
   if (!t) return false;
@@ -669,7 +699,7 @@ function isNonResumeRequirementLine(line: string): boolean {
   ) {
     return false;
   }
-  return NON_RESUME_REQUIREMENT_LINE.test(t);
+  return NON_RESUME_REQUIREMENT_LINE.test(t) || APPLICATION_PROCESS_LINE.test(t) || ELIGIBILITY_LINE.test(t);
 }
 
 export interface JdSection {
@@ -1463,20 +1493,42 @@ function isHardSignal(token: string): boolean {
  * `competitive` - a long tail of ordinary nouns, which is the open set this file already refused to
  * chase once with POSITIONAL_OPENERS.
  */
-function lowercaseTokens(jdText: string): Set<string> {
-  const out = new Set<string>();
+/**
+ * THE OTHER HALF OF THE SAME EVIDENCE, and the one that makes the verb rule safe.
+ *
+ * `everCapitalized` is every token the posting writes with a leading capital anywhere. A posting
+ * that genuinely requires Python writes "Python" at least once; one that only ever writes the
+ * letters in lowercase, in verb position, is not naming a technology. Without this second set the
+ * verb rule would read "exposure to python" and "introduction to sql" as verbs and delete a real
+ * requirement, which is the trade this file refuses everywhere else.
+ */
+interface JdCasing {
+  /** Written in lowercase somewhere, so a capital elsewhere is decoration rather than a name. */
+  alsoLowercased: Set<string>;
+  /** Written with a leading capital somewhere, so the word is at least plausibly a name. */
+  everCapitalized: Set<string>;
+}
+
+function documentCasing(jdText: string): JdCasing {
+  const alsoLowercased = new Set<string>();
   for (const m of jdText.matchAll(/[a-z][a-z0-9+#./_-]*/g)) {
     const t = normalizeTerm(m[0]);
-    if (t) out.add(t);
+    if (t) alsoLowercased.add(t);
   }
-  return out;
+  const everCapitalized = new Set<string>();
+  for (const m of jdText.matchAll(/[A-Z][A-Za-z0-9+#./_-]*/g)) {
+    const t = normalizeTerm(m[0]);
+    if (t) everCapitalized.add(t);
+  }
+  return { alsoLowercased, everCapitalized };
 }
 
 function isSpecific(
   token: string,
   positionalCapital: boolean,
   nextIsCapitalized = false,
-  alsoLowercased?: Set<string>,
+  casing?: JdCasing,
+  afterVerbMarker = false,
 ): boolean {
   const t = normalizeTerm(token);
   // Single-character lexicon entries (R, C) are real languages, but only when written as a
@@ -1488,7 +1540,24 @@ function isSpecific(
   if (DOTTED_INITIALISM.test(token)) return false;
   if (isDenied(t)) return false;
   if (NON_REQUIREMENT_ACRONYMS.has(t)) return false;
-  if (inLexicon(t)) return true;
+  if (inLexicon(t)) {
+    // A LEXICON HIT USED TO END THE QUESTION HERE, and that is how "Ability to react quickly and
+    // accurately to rapidly changing market conditions" put React on a student's gap list. The
+    // lexicon says how a word CAN be spelled; it cannot say how this posting USED it.
+    //
+    // Three things have to be true at once before the posting's own usage outranks the lexicon, and
+    // all three are evidence rather than vocabulary:
+    //   - the word sits directly after an infinitive marker or a modal, so it is a verb here;
+    //   - this occurrence is written entirely in lowercase;
+    //   - the posting never writes the word with a capital ANYWHERE, so there is no occurrence
+    //     that could be the product name. This is the guard that keeps "exposure to python" and
+    //     "introduction to sql" - where the posting also writes Python or SQL properly - intact,
+    //     and it is why the rule cannot quietly delete the requirement a posting is about.
+    if (afterVerbMarker && token === token.toLowerCase() && !casing?.everCapitalized.has(t)) {
+      return false;
+    }
+    return true;
+  }
   if (ACRONYM.test(token)) return true;
   if (TECH_MARKER.test(token)) return true;
   // Proper-noun cased: product and vendor names we do not carry in the lexicon (a long tail we
@@ -1520,7 +1589,7 @@ function isSpecific(
   if (/^[A-Z][a-zA-Z]{2,}$/.test(token)) {
     // The posting spells this word lowercase somewhere else, so the capital here is decoration.
     // Applies at every position: it is evidence about the word, not about where it sits.
-    if (alsoLowercased?.has(t)) return false;
+    if (casing?.alsoLowercased.has(t)) return false;
     if (!positionalCapital) return true;
     // From a bullet-initial position the capital is grammar, so it needs more than case to count.
     // POSITIONAL_OPENERS alone was a deny-list against the open set of English verbs, and it lost:
@@ -1545,6 +1614,9 @@ interface SectionToken {
   positional: boolean;
   /** The next token is also capitalized, i.e. this is the head of a Title Case run. */
   nextIsCapitalized: boolean;
+  /** The token sits directly after an infinitive marker or a modal, so a lowercase word here is
+   *  being used as a verb. See VERB_MARKERS. */
+  afterVerbMarker: boolean;
 }
 
 /**
@@ -1649,6 +1721,61 @@ const VENDOR_SPELLINGS = new Set([
  *  because normalizeTerm turns "CI/CD" into "ci cd" and the lexicon carries ci and cd separately. */
 const SLASH_FORMS = new Set(['ci cd', 'a b', 'r d']);
 
+/**
+ * A lowercase English word glued to a dotted product name by a scrape that lost a space.
+ *
+ * Akuna's "Software Engineer Intern - C# .NET Desktop" (packet 213674e2) reached us reading
+ * "Understanding of.NET Framework and C# programming language". The token pattern admits '.' inside
+ * a token so that node.js survives, so the whole run "of.NET" arrived as one token; normalizeTerm
+ * DELETES dots, so the key was `ofnet`; and TECH_MARKER tests the RAW token, which still had its
+ * dot, so an English preposition welded to a product name was promoted to HARD SIGNAL and shown to
+ * the student in amber as the requirement "of.NET Framework". Worse than the invented requirement
+ * was the one it hid: `.NET`, the only technology in the job's title, was never extracted at all,
+ * so the requirement the posting is entirely about could not be scored, coloured, or answered.
+ *
+ * THE SHAPE IS CONCLUSIVE AND NEEDS NO WORD LIST. An all-lowercase run, a dot, then a capital is
+ * not how any technology spells itself: node.js, asp.net, scikit.learn and socket.io all continue
+ * in lowercase, and ASP.NET, U.S.C and Ph.D do not start lowercase. Only a lost space produces it.
+ * The dot stays with the RIGHT-HAND piece, so ".NET" keeps the marker that says "technical name"
+ * and displays to the student the way the employer meant to write it.
+ *
+ * Mirrored in role-quick-website's requirement-terms.ts. See tokenizerContract.ts.
+ */
+const GLUED_LOWERCASE_PREFIX = /^([a-z]+)(\.[A-Z][A-Za-z0-9+#./_-]*)$/;
+
+/**
+ * Words after which a lowercase lexicon word is a VERB rather than a technology.
+ *
+ * Akuna's Python posting (packet cc9d695d) says "Ability to react quickly and accurately to rapidly
+ * changing market conditions". `react` is in SKILL_LEXICON, isSpecific consulted inLexicon before
+ * any evidence about how the word was used, and the student was shown React in amber as a
+ * requirement their resume does not mention. The posting spelling it lowercase is the signal
+ * lowercaseTokens exists to read, but a lexicon hit short-circuited past it.
+ *
+ * THE POSITION IS THE EVIDENCE, NOT THE SPELLING ALONE, and that is deliberately narrower than
+ * "reject any lowercase lexicon word". Postings write "experience with python" and "strong sql
+ * skills" in lowercase constantly, and those are real requirements; what no posting does is name a
+ * technology directly after an infinitive marker or a modal. "Ability to react", "expected to
+ * scale", "must design" are grammar. "Proficiency in Go" and "familiarity with Rust" are not
+ * touched, because `in` and `with` are not here.
+ *
+ * An intervening -ly adverb is allowed through ("ability to quickly react") because it modifies the
+ * verb and is the only word class that routinely sits in that slot.
+ */
+const VERB_MARKERS = new Set([
+  'to',
+  'can',
+  'could',
+  'will',
+  'would',
+  'shall',
+  'should',
+  'must',
+  'may',
+  'might',
+  'cannot',
+]);
+
 
 /**
  * The spans of a section that are an ADDRESS, found from the shape of the text rather than from
@@ -1731,13 +1858,22 @@ function tokenizeSection(text: string): SectionToken[] {
       continue;
     }
 
-    const pieces =
+    const slashPieces =
       body.includes('/') && !SLASH_FORMS.has(normalizeTerm(body))
         ? body.split('/').filter(Boolean)
         : [body];
 
+    // A lost space welds an English word onto a dotted product name. Applied after the slash split
+    // so "of.NET/C#" reaches it one piece at a time, and only at the FIRST such dot, because the
+    // rest of the run belongs to the product name (".NET.Core" is one thing, not two).
+    const pieces = slashPieces.flatMap((piece) => {
+      const glued = GLUED_LOWERCASE_PREFIX.exec(piece);
+      return glued ? [glued[1], glued[2]] : [piece];
+    });
+
     let offset = start;
-    for (const piece of pieces) {
+    for (let p = 0; p < pieces.length; p++) {
+      const piece = pieces[p];
       const at = text.indexOf(piece, offset);
       const pieceStart = at === -1 ? offset : at;
       out.push({
@@ -1745,18 +1881,46 @@ function tokenizeSection(text: string): SectionToken[] {
         start: pieceStart,
         end: pieceStart + piece.length,
         // Only the first piece of a split inherits the positional flag.
-        positional: positional && piece === pieces[0],
+        positional: positional && p === 0,
         nextIsCapitalized: false,
+        afterVerbMarker: false,
       });
       offset = pieceStart + piece.length;
     }
     prevEnd = start + m[0].length - trail.length;
   }
 
-  for (let i = 0; i < out.length - 1; i++) {
-    out[i].nextIsCapitalized = /^[A-Z]/.test(out[i + 1].text);
+  for (let i = 0; i < out.length; i++) {
+    if (i < out.length - 1) out[i].nextIsCapitalized = /^[A-Z]/.test(out[i + 1].text);
+    const prev = out[i - 1];
+    const prev2 = out[i - 2];
+    out[i].afterVerbMarker =
+      isVerbMarker(prev) || (prev !== undefined && /ly$/i.test(prev.text) && isVerbMarker(prev2));
   }
   return out;
+}
+
+function isVerbMarker(token: SectionToken | undefined): boolean {
+  return token !== undefined && VERB_MARKERS.has(token.text.toLowerCase());
+}
+
+/**
+ * The tokenizer's output, as the SHARED CONTRACT the website has to match.
+ *
+ * role-quick-website's requirement-terms.ts has to cut a job description into the same pieces this
+ * file does, or a term the scorer counted will fail to highlight and the two panes will contradict
+ * the number beside them. That is not hypothetical: `normalizeTerm` and `singular` were kept
+ * byte-identical across the two repos and the TOKENIZERS around them were not, so every
+ * slash-joined requirement on the board - HTML/CSS, Python/Rust, AWS/GCP/Azure, Linux/Unix,
+ * Computer Science/Engineering - was scored on this side and left colourless on that one, 22.7% of
+ * every term-instance across 25 measured packets.
+ *
+ * The two repos deploy independently and cannot import from each other, so agreement is held by
+ * tokenizerContract.ts: one corpus of cases, duplicated byte-for-byte in both repos, asserted by a
+ * test on each side against its own tokenizer.
+ */
+export function tokenizeForMatch(text: string): Array<{ text: string; start: number; end: number }> {
+  return tokenizeSection(text).map(({ text: value, start, end }) => ({ text: value, start, end }));
 }
 
 /**
@@ -1936,13 +2100,13 @@ export function extractJdTerms(jdText: string, context?: JdContext): JdTerm[] {
         !(PLACE_SAFE_KINDS.has(t.kind) && excluded(t, places)),
     );
 
-  const lowercased = lowercaseTokens(jdText);
+  const casing = documentCasing(jdText);
   const sections = segmentJd(jdText);
   const hasPrimaryFitSection =
     sections.some((s) => PRIMARY_STATED_KINDS.has(s.kind)) || hasPrimaryFitHeading(jdText);
-  const rawTerms = strip(extractFrom(sections, lowercased));
+  const rawTerms = strip(extractFrom(sections, casing));
   if (hasPrimaryFitSection) {
-    return capToEmphasis(strip(extractFrom(sections.filter(isPrimaryFitSection), lowercased)));
+    return capToEmphasis(strip(extractFrom(sections.filter(isPrimaryFitSection), casing)));
   }
   const terms = preferStatedRequirements(rawTerms);
   if (terms.length >= MIN_SCORABLE_TERMS) return capToEmphasis(terms);
@@ -1989,7 +2153,7 @@ export function extractJdTerms(jdText: string, context?: JdContext): JdTerm[] {
           ? { ...section, kind: 'body' as SectionKind, weight: SECTION_WEIGHT.body }
           : section,
       ),
-      lowercased,
+      casing,
     ),
   );
   return capToEmphasis(salvaged.length > terms.length ? salvaged : terms);
@@ -2277,7 +2441,7 @@ function countNormalizedMentions(haystack: string, needle: string): number {
   return count;
 }
 
-function extractFrom(sections: JdSection[], alsoLowercased?: Set<string>): JdTerm[] {
+function extractFrom(sections: JdSection[], casing?: JdCasing): JdTerm[] {
   const byTerm = new Map<string, JdTerm>();
   // A character offset, not a counter over the extraction passes.
   //
@@ -2339,7 +2503,8 @@ function extractFrom(sections: JdSection[], alsoLowercased?: Set<string>): JdTer
     // Unigrams. Match on the original casing so isSpecific can see proper nouns.
     for (const tok of tokens) {
       if (isAddress(tok)) continue;
-      if (!isSpecific(tok.text, tok.positional, tok.nextIsCapitalized, alsoLowercased)) continue;
+      if (!isSpecific(tok.text, tok.positional, tok.nextIsCapitalized, casing, tok.afterVerbMarker))
+        continue;
       const term = normalizeTerm(tok.text);
       const existing = byTerm.get(term);
       // The count survives the weight upgrade below: a term named three times in prose and once
@@ -2375,8 +2540,8 @@ function extractFrom(sections: JdSection[], alsoLowercased?: Set<string>): JdTer
       if (!/^ +$/.test(gap)) continue;
       if (isAddress(a) || isAddress(b)) continue;
       if (
-        !isSpecific(a.text, a.positional, a.nextIsCapitalized, alsoLowercased) ||
-        !isSpecific(b.text, b.positional, b.nextIsCapitalized, alsoLowercased)
+        !isSpecific(a.text, a.positional, a.nextIsCapitalized, casing, a.afterVerbMarker) ||
+        !isSpecific(b.text, b.positional, b.nextIsCapitalized, casing, b.afterVerbMarker)
       ) {
         continue;
       }
