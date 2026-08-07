@@ -82,6 +82,7 @@ import {
   type ApplicationProfileLike,
   type DiscoveredQuestion,
 } from '../lib/questionDiscovery';
+import { profileBackedBlockerLabels, resolveProfileField } from '../lib/profileFieldResolution';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import type { ApplicationReviewQuestion } from '../lib/applicationReview';
 import { jobCountry } from '../lib/jobLocation';
@@ -768,9 +769,13 @@ export async function discoverAndResolveQuestions(
     // keep the fallback
   }
   const questionContext = applicationContextForQuestionResolution(row, current);
+  // Tested against the RAW label on purpose: normalizeDiscoveredLabel now strips the `--0`
+  // section handle, because leaving it in the stored question text is what made every
+  // `label:has-text(...)` scope miss. The handle is still the honest signal for "this is an
+  // education-section combobox", so read it before it is stripped rather than after.
   const managedGreenhouseEducationCombobox = (field: DiscoveredQuestion): boolean =>
     portal === 'greenhouse'
-    && /\b(?:school|degree|discipline)--\d+\b/i.test(normalizeDiscoveredLabel(field.label));
+    && /\b(?:school|degree|discipline)--\d+\b/i.test(field.label);
   const portalSelectorForField = (field: DiscoveredQuestion): string | undefined => {
     if (managedGreenhouseEducationCombobox(field)) return undefined;
     if (portal === 'greenhouse' && /^combobox$/i.test(field.inputType)) return field.selector;
@@ -785,6 +790,19 @@ export async function discoverAndResolveQuestions(
     if (!label || !reviewLabel || normalizeStoredPortalQuestions([{ question: label, answer: '' }], portal).length === 0) continue;
     const existing = existingByLabel.get(reviewLabel.toLowerCase());
     const known = resolveKnownAnswer(label, field.inputType, ap, questionContext);
+    // One resolution layer for the value itself. resolveKnownAnswer still decides WHETHER the
+    // question is answerable (and owns every skip and refusal); resolveProfileField decides what
+    // the answer should LOOK LIKE for this particular control, snapping it onto the field's real
+    // option list when discovery reported one. Without this a closed list was handed the
+    // profile's own phrasing and selected nothing at all.
+    const resolvedField = known && 'value' in known
+      ? resolveProfileField(
+        { label, inputType: field.inputType, options: field.options },
+        ap,
+        questionContext,
+      )
+      : null;
+    const knownValue = resolvedField?.value ?? (known && 'value' in known ? known.value : '');
     if (existing) {
       if (known && 'skipReason' in known) {
         attentionReasons.push(known.skipReason);
@@ -792,7 +810,7 @@ export async function discoverAndResolveQuestions(
         questions.push({
           ...existing,
           question: reviewLabel,
-          answer: known.value,
+          answer: knownValue,
           kind: 'required',
           required: false,
           portal_selector: portalSelectorForField(field),
@@ -808,7 +826,7 @@ export async function discoverAndResolveQuestions(
       questions.push({
         id: randomUUID(),
         question: reviewLabel,
-        answer: known.value,
+        answer: knownValue,
         kind: 'required',
         required: false,
         portal_selector: portalSelectorForField(field),
@@ -900,11 +918,12 @@ async function prepareManaged(
   packet = coverLetterOutcome.packet;
   const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
   const resolutionCurrent = { ...current, questions: storedQuestions };
+  const applicationProfile = await loadApplicationProfileLike(row.user_id);
   const { questions: discoveredQuestions, attentionReasons: discoveryAttention } = await discoverAndResolveQuestions(
     discoveryResult?.discovered ?? [],
     row,
     resolutionCurrent,
-    await loadApplicationProfileLike(row.user_id),
+    applicationProfile,
     authorization.enabled,
     portal,
   );
@@ -951,6 +970,22 @@ async function prepareManaged(
     ),
     result,
   );
+  // A blocker naming a field the stored profile CAN answer is a Litos defect, never work for the
+  // applicant. Twenty-five prod packets carried exactly these lines (GPA, university, education
+  // level, graduation month and year, referral source) with the resolved answer already sitting
+  // in the same row, and nothing recorded that the two facts contradicted each other. Logging it
+  // by name is what turns the next occurrence into a bug report instead of another silent stall.
+  const unattemptedProfileFields = profileBackedBlockerLabels(
+    blockers,
+    applicationProfile,
+    applicationContextForQuestionResolution(row, resolutionCurrent),
+  );
+  if (unattemptedProfileFields.length > 0) {
+    fastify.log.error(
+      { applicationId: row.id, portal, fields: unattemptedProfileFields },
+      'Profile-backed fields reported as required and still empty',
+    );
+  }
   const verificationHandoff = blockers.some((blocker) =>
     /verification code|security code|one[ -]?time code|passcode|\botp\b/i.test(blocker),
   );

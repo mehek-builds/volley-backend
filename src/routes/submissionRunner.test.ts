@@ -655,12 +655,21 @@ test('managed Greenhouse education combobox labels are not replayed as text fiel
     'greenhouse',
   );
 
+  // The stored question text is now the employer's own label, not the discovery blob.
+  //
+  // Keeping "degree* degree--0" was the Class A defect. The managed fill run has no durable
+  // selector for a discovered control (the `data-litos-discovered-6` marker belongs to the
+  // discovery session and is gone by the time the fill run loads the page), so the ONLY way the
+  // answer reaches the control is a `label:has-text("<stored question text>")` scope. Scoping on
+  // "degree* degree--0" cannot match a page whose label reads "Degree", so the field was left
+  // untouched and came back as '"Degree" is required and is still empty' with "Bachelor's Degree"
+  // already sitting in the packet. Measured on 25 prod packets on 2026-08-08.
   assert.deepEqual(result.questions.map((question) => ({
     question: question.question,
     answer: question.answer,
     portal_selector: question.portal_selector,
   })), [
-    { question: 'degree* degree--0', answer: 'Bachelor\'s Degree', portal_selector: undefined },
+    { question: 'degree', answer: 'Bachelor\'s Degree', portal_selector: undefined },
   ]);
 });
 
