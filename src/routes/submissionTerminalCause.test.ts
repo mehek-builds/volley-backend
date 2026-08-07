@@ -271,6 +271,101 @@ test('reach is decided on positive evidence only, and each signal is sufficient 
   assert.equal(applicationFormWasReached({ text: 'Email', email: 'mehek@example.com' }), false);
 });
 
+/* BLOCKER 4. A CAPTCHA widget is evidence that a page loaded, never that a form was reached.
+ *
+ * PR 360 appended the CAPTCHA evidence reads to every managed fill run and PR 359 accepted any
+ * non-empty extract as proof the form was reached, so on the merged tree the second undid the
+ * first. MANAGED_CAPTCHA_ANCHOR_SELECTOR deliberately carries no badge exclusion - the badge's own
+ * anchor is the only thing that identifies an invisible-only page - so it matches on any
+ * reCAPTCHA-bearing page including the Akuna Greenhouse page, form or no form:
+ *
+ *   applicationFormWasReached({filledFields:[], providerBlockers:[], discoveredQuestionCount:0,
+ *     extracted:[{value:null},
+ *                {value:'https://www.google.com/recaptcha/api2/anchor?k=x&size=invisible'}], ...})
+ *   -> true
+ *   preparationEvidenceBlockers(...) -> the exact three sentences PR 359 exists to delete
+ *
+ * FORM_NOT_REACHED_REASON was unreachable on the managed path for the three Akuna Class C packets.
+ */
+const RECAPTCHA_ANCHOR_EXTRACTS = [
+  { value: null },
+  { value: 'https://www.google.com/recaptcha/api2/anchor?k=x&size=invisible' },
+];
+
+test('a reCAPTCHA anchor iframe is not evidence that an application form was reached', () => {
+  assert.equal(
+    applicationFormWasReached({
+      filledFields: [],
+      providerBlockers: [],
+      discoveredQuestionCount: 0,
+      extracted: RECAPTCHA_ANCHOR_EXTRACTS,
+      text: 'Akuna Capital Quantitative Trader Intern',
+      email: packet.email,
+    }),
+    false,
+  );
+
+  const blockers = preparationEvidenceBlockers({
+    text: 'Akuna Capital Quantitative Trader Intern',
+    filledFields: [],
+    blockers: [],
+    discovered: [],
+    extracted: RECAPTCHA_ANCHOR_EXTRACTS,
+  }, packet);
+  assert.deepEqual(blockers, [FORM_NOT_REACHED_REASON]);
+  for (const sentence of blockers) {
+    assert.doesNotMatch(sentence, /did not record/, 'a form that was never opened has nothing to not record');
+  }
+});
+
+test('every labelled CAPTCHA evidence read is subtracted from reach, whatever it returned', () => {
+  for (const label of [
+    'captcha_challenge',
+    'captcha_size',
+    'captcha_invisible_sitekey',
+    'captcha_rendered_sitekey',
+    'captcha_anchor',
+    'captcha_bframe',
+  ]) {
+    assert.equal(
+      applicationFormWasReached({ extracted: [{ label, value: 'something the widget said' }] }),
+      false,
+      `${label} must not count as reach`,
+    );
+  }
+  // And an extract off the form itself still counts, which is the signal this must not cost.
+  assert.equal(applicationFormWasReached({ extracted: [{ label: 'email', value: 'mehek@example.com' }] }), true);
+});
+
+/* The label is the easy case. The subtraction also has to work when the runner echoes an extract
+ * back WITHOUT the label it was asked with, which is the reason the value-shape fallback exists at
+ * all - the Akuna reproduction did exactly that.
+ *
+ * It caught a labelless anchor URL and missed a labelless size read, because the size read is the
+ * one evidence extract whose value carries no captcha vocabulary: it comes back as the bare
+ * contents of `data-size`. Measured:
+ *
+ *   {label: undefined, selector: undefined, value: 'invisible'} -> false
+ *
+ * so a page that reported nothing but its widget's size was recorded as having reached an
+ * application form. Reporting-only, and wrong in the direction that hides a run that never opened
+ * a form. */
+test('a size read with no label is still a CAPTCHA evidence read, not a form field', () => {
+  for (const value of ['invisible', 'normal', 'compact', 'Invisible']) {
+    assert.equal(
+      applicationFormWasReached({ extracted: [{ value }] }),
+      false,
+      `a labelless "${value}" is a data-size read, not something seen on the form`,
+    );
+  }
+  // The whole value, not a substring. An application answer that merely contains the word is a
+  // real answer off a real form, and subtracting it would cost the reach signal it proves.
+  assert.equal(
+    applicationFormWasReached({ extracted: [{ value: 'I am comfortable working normal business hours' }] }),
+    true,
+  );
+});
+
 test('a broken preview still outranks the reach question', () => {
   // Knowing the page is a 404 is more useful than knowing we did not reach a form on it.
   assert.deepEqual(

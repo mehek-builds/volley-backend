@@ -328,6 +328,31 @@ test('preview evidence blocks broken pages and incomplete form fills before fina
   assert.match(runner, /if \(!applicationFormWasReached\(\{[\s\S]{0,600}return \[FORM_NOT_REACHED_REASON\];/);
 });
 
+/* The submit gate is ONE check and must not be written as two.
+ *
+ * It read `managedResultRequiresCaptchaAttention(probe) && managedCaptchaVerdictIsCorroborated(
+ * portal, probe)` and presented itself as probe-plus-corroboration. Both terms call
+ * readManagedCaptchaEvidence on the same probe result and short-circuit on the same invisible
+ * predicate, so on an autonomous family the second term cannot disagree with the first: the
+ * conjunction is a tautology, and a tautology dressed as defence in depth is worse than a single
+ * check, because the next person to touch it believes there are two.
+ *
+ * Corroboration is a genuine question exactly where two sources exist - the PREPARE path, which
+ * judges the remote runner's own blocker list against markup this repo read - and it is still asked
+ * there. This asserts the split stays that way. */
+test('the managed submit gate asks one question, and corroboration stays where two sources exist', () => {
+  const runner = routeSource('submissionRunner.ts');
+  const submitGate = runner.match(/if \(managedResultRequiresCaptchaAttention\(captchaProbe\)[\s\S]{0,200}?\{/)?.[0] ?? '';
+  assert.ok(submitGate, 'the submit path must still probe for a challenge before it clicks');
+  assert.doesNotMatch(
+    submitGate,
+    /managedCaptchaVerdictIsCorroborated/,
+    'a second term that reads the same evidence through the same predicate is not a second layer',
+  );
+  // The prepare path keeps it, wrapped around the blockers the remote runner reported.
+  assert.match(runner, /corroborateManagedCaptchaBlockers\(\s*portal,/);
+});
+
 test('the applicant is told what happened, not what the model said', () => {
   const runner = routeSource('submissionRunner.ts');
   const issue = runner.match(/coverLetterIssue: (.*)$/m)?.[1] ?? '';

@@ -118,8 +118,18 @@ function optionTokens(value: string): string[] {
   return comparableOption(value).split(' ').filter(Boolean);
 }
 
+/**
+ * The "Select..." row every select carries, and nothing else.
+ *
+ * `none` and `n/a` were on this list and had to come off. They are not placeholders, they are
+ * ANSWERS, and for a whole family of required questions they are the only true one: "How many
+ * outstanding offers do you have?", "Have you previously applied here?", "Standardized test
+ * scores". Stripping them made None unselectable, so a control whose correct answer was sitting in
+ * the list came back as "required and is still empty" and the applicant was asked to finish by
+ * hand. A truthful answer must never be filtered out of its own option list.
+ */
 const PLACEHOLDER_OPTION_RE =
-  /^(?:|-+|–+|select(?:\.{3}|…)?|select one|select an option|please select|choose(?: one)?|pick one|none|n\/a|--.*--)$/i;
+  /^(?:|-+|–+|select(?:\.{3}|…)?|select one|select an option|please select|choose(?: one)?|pick one|--.*--)$/i;
 
 /** Drop the "Select..." style first entry every select carries, and de-duplicate. */
 export function usableOptions(options: readonly string[] | null | undefined): string[] {
@@ -166,8 +176,8 @@ const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December',
 ];
-const MONTH_TOKEN_RE =
-  /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/gi;
+// Dropped with the old optionCoversMonthYear, whose "does this option mention any month at all"
+// test it was the only user of. Interval arithmetic answers that question by construction now.
 const SEASON_MONTHS: Record<string, number[]> = {
   winter: [12, 1, 2],
   spring: [3, 4, 5],
@@ -181,7 +191,7 @@ function monthNumber(token: string): number | null {
   return index >= 0 ? index + 1 : null;
 }
 
-/** Calendar points mentioned by an option, as year*12+month ordinals. */
+/** Explicit month+year points mentioned by an option, as year*12+month ordinals. */
 function optionDatePoints(option: string): { points: number[]; years: number[] } {
   const years = [...option.matchAll(/\b((?:19|20)\d{2})\b/g)].map((match) => Number(match[1]));
   const points: number[] = [];
@@ -194,40 +204,131 @@ function optionDatePoints(option: string): { points: number[]; years: number[] }
     const month = monthNumber(match[1]);
     if (month) points.push(Number(match[2]) * 12 + month);
   }
-  for (const [season, months] of Object.entries(SEASON_MONTHS)) {
-    const seasonal = [...option.matchAll(new RegExp(`\\b${season}\\b[^0-9]{0,6}\\b((?:19|20)\\d{2})\\b`, 'gi'))];
-    for (const match of seasonal) {
-      const year = Number(match[1]);
-      for (const month of months) points.push(year * 12 + month);
-    }
-  }
   return { points, years };
 }
 
 /**
+ * A span of calendar months an option covers, as inclusive year*12+month ordinals. An unbounded
+ * end is an infinity, which is also how "how specific is this option" gets answered below.
+ */
+export type CalendarInterval = { min: number; max: number };
+
+/**
+ * The intervals a season names, as separate runs rather than one min-to-max span.
+ *
+ * Winter is the reason. Its months are December, January and February, so collapsing them to a
+ * single min-to-max span reads "Winter 2028" as January through December 2028 and swallows every
+ * other term in the year. Contiguous runs keep it to the two ranges a person means.
+ */
+function optionSeasonIntervals(option: string): CalendarInterval[] {
+  const intervals: CalendarInterval[] = [];
+  for (const [season, months] of Object.entries(SEASON_MONTHS)) {
+    const seasonal = [...option.matchAll(new RegExp(`\\b${season}\\b[^0-9]{0,6}\\b((?:19|20)\\d{2})\\b`, 'gi'))];
+    for (const match of seasonal) {
+      const year = Number(match[1]);
+      const sorted = [...months].sort((a, b) => a - b);
+      let run: CalendarInterval | null = null;
+      for (const month of sorted) {
+        const point = year * 12 + month;
+        if (run && point === run.max + 1) run.max = point;
+        else {
+          run = { min: point, max: point };
+          intervals.push(run);
+        }
+      }
+    }
+  }
+  return intervals;
+}
+
+// The boundary qualifiers a graduation option uses to describe everything on ONE side of a date.
+//
+// Ignoring these is how "Before 2028" was reported as covering May 2028. parseNumericRange has
+// read above/below/or-higher on GPA buckets since it was written; the calendar path read the year
+// out of the option and threw the qualifier away, so all four of "Before 2028", "After 2028",
+// "2028 or earlier" and "No later than 2028" answered the same question the same way, and two of
+// those four are flatly false about a person graduating in May 2028.
+//
+// The INCLUSIVE forms are tested first because they are their own vocabulary rather than a variant
+// spelling: "2028 or earlier" contains no "before", and "no later than 2028" contains no "after".
+// Testing the strict forms first would let "on or before 2028" fall into the "before" branch and
+// lose the year it is supposed to include.
+const AT_OR_BEFORE_RE =
+  /\b(?:or\s+(?:earlier|before|sooner|prior)|no[t]?\s+later\s+than|on\s+or\s+before|up\s+to(?:\s+and\s+including)?|through|by)\b/i;
+const AT_OR_AFTER_RE =
+  /\b(?:or\s+(?:later|after|beyond)|and\s+(?:later|after|beyond)|no[t]?\s+earlier\s+than|on\s+or\s+after|onwards?)\b|\d\s*\+/i;
+const STRICTLY_BEFORE_RE = /\b(?:before|prior\s+to|earlier\s+than)\b/i;
+const STRICTLY_AFTER_RE = /\b(?:after|later\s+than|beyond)\b/i;
+
+/**
+ * Which calendar months an option covers, or an empty list when it names no date at all.
+ *
+ * Handles a plain year ("2028"), a term ("Spring 2028"), an exact month ("May 2028"), a written
+ * range ("January 2028 - June 2028", "2027 - 2029"), and the one-sided buckets a graduation select
+ * puts at each end of its list ("Before 2028", "2028 or earlier", "2029 or later", "After 2029").
+ *
+ * A qualifier is only read against a ONE-ENDED base. "January 2028 - June 2028" already states both
+ * of its ends, so a stray "from" or "through" in the label text must not reopen one of them.
+ */
+export function optionCalendarIntervals(option: string): CalendarInterval[] {
+  // U+2013 and U+2014 are the en and em dashes real option text uses to write a range, written as
+  // escapes so no such character appears literally in this repo.
+  const text = option.replace(/[\u2013\u2014]/g, '-');
+  const { points, years } = optionDatePoints(text);
+  const seasons = optionSeasonIntervals(text);
+
+  let base: CalendarInterval[];
+  let bothEndsWritten = false;
+  if (points.length >= 2) {
+    base = [{ min: Math.min(...points), max: Math.max(...points) }];
+    bothEndsWritten = true;
+  } else if (points.length === 1) {
+    base = [{ min: points[0], max: points[0] }];
+  } else if (seasons.length > 0) {
+    base = seasons;
+  } else if (years.length >= 2) {
+    base = [{ min: Math.min(...years) * 12 + 1, max: Math.max(...years) * 12 + 12 }];
+    bothEndsWritten = true;
+  } else if (years.length === 1) {
+    base = [{ min: years[0] * 12 + 1, max: years[0] * 12 + 12 }];
+  } else {
+    return [];
+  }
+
+  if (bothEndsWritten || base.length !== 1) return base;
+  const only = base[0];
+  if (AT_OR_BEFORE_RE.test(text)) return [{ min: Number.NEGATIVE_INFINITY, max: only.max }];
+  if (AT_OR_AFTER_RE.test(text)) return [{ min: only.min, max: Number.POSITIVE_INFINITY }];
+  if (STRICTLY_BEFORE_RE.test(text)) return [{ min: Number.NEGATIVE_INFINITY, max: only.min - 1 }];
+  if (STRICTLY_AFTER_RE.test(text)) return [{ min: only.max + 1, max: Number.POSITIVE_INFINITY }];
+  return base;
+}
+
+/**
+ * How many months wide the covering interval is, or null when the option does not cover the date.
+ *
+ * This is the specificity measure chooseClosestOption ranks on. A one-sided bucket is infinitely
+ * wide, a bare year is twelve, a term is three and an exact month is one, so "January 2028 - June
+ * 2028" beats "2028" beats "2028 or earlier" without any of them having to be enumerated.
+ */
+export function optionCalendarSpan(option: string, month: number, year: number): number | null {
+  const target = year * 12 + month;
+  let best: number | null = null;
+  for (const interval of optionCalendarIntervals(option)) {
+    if (target < interval.min || target > interval.max) continue;
+    const span = interval.max - interval.min;
+    if (best === null || span < best) best = span;
+  }
+  return best;
+}
+
+/**
  * Does an option cover a graduation date? Handles a plain year ("2028"), a term ("Spring 2028"),
- * an exact month ("May 2028"), and a range ("January 2028 - June 2028", "2027 - 2028").
+ * an exact month ("May 2028"), a range ("January 2028 - June 2028", "2027 - 2028"), and the
+ * one-sided buckets ("Before 2028", "2028 or earlier").
  */
 export function optionCoversMonthYear(option: string, month: number, year: number): boolean {
-  const target = year * 12 + month;
-  const { points, years } = optionDatePoints(option);
-  if (points.length >= 2) {
-    const min = Math.min(...points);
-    const max = Math.max(...points);
-    if (target >= min && target <= max) return true;
-  }
-  if (points.length === 1 && points[0] === target) return true;
-  const hasMonthToken = new RegExp(MONTH_TOKEN_RE.source, 'i').test(option)
-    || Object.keys(SEASON_MONTHS).some((season) => new RegExp(`\\b${season}\\b`, 'i').test(option));
-  if (!hasMonthToken && years.length > 0) {
-    if (years.length >= 2) {
-      const min = Math.min(...years);
-      const max = Math.max(...years);
-      return year >= min && year <= max;
-    }
-    return years[0] === year;
-  }
-  return false;
+  return optionCalendarSpan(option, month, year) !== null;
 }
 
 function numericValueOf(candidate: string): number | null {
@@ -250,12 +351,95 @@ function monthYearOf(candidate: string): { month: number; year: number } | null 
   return null;
 }
 
+type ComparableEntry = { option: string; key: string; tokens: string[] };
+
+/**
+ * Answers whose whole meaning is the word itself, so any option that adds words to them is making
+ * a different statement rather than spelling the same one out.
+ *
+ * "Yes" against "Yes - I am authorized to work in the US for any employer" is the measured case:
+ * the resolver's own answer was "I need sponsorship" and it selected the option asserting the
+ * opposite, and reported matchedOption. There is no remainder a bare polarity token can absorb, so
+ * these match exactly or not at all.
+ */
+const CLOSED_SET_ANSWER_RE =
+  /^(?:yes|no|y|n|true|false|maybe|agree|disagree|accept|decline|other|none|n\/a|na|unknown|prefer not to say|decline to self identify|i agree|i decline)$/i;
+
+/**
+ * Words an option may add to an answer without changing what the answer claims: grammatical glue,
+ * the noun for the thing being named, and the answer's own initialism in the parenthetical portals
+ * like to append ("University of Southern California (USC)").
+ *
+ * Anything else is a distinguishing word. "University of California" plus "Los Angeles" names a
+ * different university; "Yes" plus "with sponsorship" answers a different question.
+ */
+const NON_DISTINGUISHING_REMAINDER: ReadonlySet<string> = new Set([
+  'of', 'the', 'and', 'or', 'a', 'an', 'in', 'at', 'for', 'to',
+  'degree', 'degrees', 'program', 'programs', 'programme', 'programmes',
+]);
+
+/** Does the option state the answer and then keep going? */
+function optionExtendsAnswer(entry: ComparableEntry, key: string, tokens: readonly string[]): boolean {
+  if (entry.key === key) return false;
+  if (entry.key.startsWith(`${key} `) || entry.key.endsWith(` ${key}`) || entry.key.includes(` ${key} `)) return true;
+  return tokens.length > 0
+    && entry.tokens.length > tokens.length
+    && tokens.every((token) => entry.tokens.includes(token));
+}
+
+/** The words the option adds, and whether any of them changes the claim. */
+function extensionKeepsTheClaim(entry: ComparableEntry, key: string, tokens: readonly string[]): boolean {
+  if (CLOSED_SET_ANSWER_RE.test(key)) return false;
+  const own = new Set(tokens);
+  const initialism = tokens
+    .filter((token) => !NON_DISTINGUISHING_REMAINDER.has(token))
+    .map((token) => token[0])
+    .join('');
+  return entry.tokens
+    .filter((token) => !own.has(token))
+    .every((token) => NON_DISTINGUISHING_REMAINDER.has(token) || (initialism.length >= 2 && token === initialism));
+}
+
+/**
+ * The one option that states this answer and adds nothing to it, or null.
+ *
+ * REFUSES on two counts, both of which put a false statement on a real application when they were
+ * allowed through:
+ *
+ *   - SEVERAL options share the answer. Given the ladder form "University of California" and the
+ *     options "University of California, Los Angeles" and "University of California, Davis", the
+ *     old code took whichever was listed first and told two employers she went to UCLA.
+ *   - the remainder CHANGES THE CLAIM. Given the answer "Yes" - meaning "yes, I need sponsorship" -
+ *     and the sole yes-shaped option "Yes - I am authorized to work in the US for any employer",
+ *     the old code selected the sentence that says the opposite of the answer it was given.
+ *
+ * The reverse direction, where the ANSWER is longer than the option, needs none of this: an option
+ * contained inside the answer is the same claim with less detail, which is what the school ladder
+ * exists to reach. That direction is handled by the caller before this one is consulted.
+ */
+function chooseExtendingOption(
+  entries: readonly ComparableEntry[],
+  key: string,
+  tokens: readonly string[],
+): { option: string | null; ambiguous: boolean } {
+  const extending = entries.filter((entry) => optionExtendsAnswer(entry, key, tokens));
+  if (extending.length === 0) return { option: null, ambiguous: false };
+  if (extending.length > 1) return { option: null, ambiguous: true };
+  const only = extending[0];
+  return { option: extensionKeepsTheClaim(only, key, tokens) ? only.option : null, ambiguous: true };
+}
+
 /**
  * The option that best answers with one of `candidates`, or null.
  *
- * Deliberately conservative and ordered by evidence strength: an exact match beats a containment
- * match beats a token-subset match beats a numeric or calendar bucket. A candidate shorter than
- * three characters never matches by containment, because "BS" would otherwise select "Business".
+ * Deliberately conservative and ordered by evidence strength: an exact match beats a calendar
+ * bucket beats a containment match beats a numeric bucket. A candidate shorter than three
+ * characters never matches by containment, because "BS" would otherwise select "Business".
+ *
+ * The two inexact stages both rank on how much the option is allowed to differ from the answer,
+ * because both of them used to take whatever was listed first and both put a false statement on a
+ * real application when they did: the narrowest covering calendar bucket rather than the first, and
+ * an option that states the answer and adds nothing rather than one that adds a claim to it.
  */
 export function chooseClosestOption(
   candidates: readonly string[],
@@ -276,31 +460,41 @@ export function chooseClosestOption(
   // gets them wrong: given "May 2028" and the options "July 2028 - December 2028" and
   // "January 2028 - June 2028", a substring match on "2028" picks whichever bucket is listed
   // first, which is a 50/50 guess about the applicant's graduation. Range arithmetic is not.
+  //
+  // And among the buckets that DO cover the date, the narrowest one wins rather than the first in
+  // DOM order. A graduation select routinely opens with a catch-all - "Before 2028", "2028 or
+  // earlier" - and closes with another, so first-in-DOM-order handed the catch-all to an employer
+  // whenever the precise bucket sat further down the list.
   for (const candidate of candidates) {
     const point = monthYearOf(candidate);
     if (!point) continue;
-    const bucket = comparableOptions.find((entry) => optionCoversMonthYear(entry.option, point.month, point.year));
-    if (bucket) return bucket.option;
+    let best: { option: string; span: number } | null = null;
+    for (const entry of comparableOptions) {
+      const span = optionCalendarSpan(entry.option, point.month, point.year);
+      if (span === null) continue;
+      if (!best || span < best.span) best = { option: entry.option, span };
+    }
+    if (best) return best.option;
   }
 
   for (const candidate of candidates) {
     const key = comparableOption(candidate);
     if (key.length < 3) continue;
-    const contained = comparableOptions.find((entry) =>
+    const tokens = optionTokens(candidate).filter((token) => token.length >= 3);
+    // The safe direction first: an option contained INSIDE the answer is the same claim with less
+    // detail, which is how "University of Southern California, Viterbi School of Engineering"
+    // reaches the option "University of Southern California".
+    const narrower = comparableOptions.find((entry) =>
       entry.key === key
-      || entry.key.startsWith(`${key} `)
-      || entry.key.endsWith(` ${key}`)
-      || entry.key.includes(` ${key} `)
       || key.startsWith(`${entry.key} `)
       || key.includes(` ${entry.key} `));
-    if (contained) return contained.option;
-  }
-
-  for (const candidate of candidates) {
-    const tokens = optionTokens(candidate).filter((token) => token.length >= 3);
-    if (tokens.length === 0) continue;
-    const subset = comparableOptions.find((entry) => tokens.every((token) => entry.tokens.includes(token)));
-    if (subset) return subset.option;
+    if (narrower) return narrower.option;
+    // Then the direction that adds words to the answer, which is only allowed when exactly one
+    // option does it and the words it adds do not change what is being claimed. An ambiguous list
+    // ends the search: a lower-ranked alias must not be used to slip past a refusal made here.
+    const extending = chooseExtendingOption(comparableOptions, key, tokens);
+    if (extending.option) return extending.option;
+    if (extending.ambiguous) break;
   }
 
   for (const candidate of candidates) {
@@ -481,21 +675,38 @@ export function graduationDateLadder(gradDate: string | undefined, gradYear: num
   );
 }
 
+/** Does the stored referral source name the employer's own site? */
+const COMPANY_SITE_SOURCE_RE =
+  /\b(?:company|corporate|employer|careers?|website|web\s*site|web\s*page|homepage|portal)\b/i;
+
 /**
- * Referral source lists are short and closed. "Other" is offered LAST and only ever reached when
- * no truthful option matched, so it can never displace a real answer.
+ * Referral source lists are short and closed, and every entry on one is a factual claim about how
+ * this applicant found this posting.
+ *
+ * "Job Board" used to sit on this ladder ahead of "Other", so a stored "Company website" against
+ * ["LinkedIn", "Job Board", "Employee referral", "Other"] returned Job Board: a statement about
+ * where she found the role that simply did not happen. It is gone. The synonyms that remain are
+ * all sayings of the SAME fact, and they are only offered when the stored value is that fact;
+ * for anything else the ladder runs stored-value then "Other", because "Other" is the one entry
+ * on a referral list that is true no matter how the applicant arrived.
+ *
+ * "Other" stays LAST, so it can never displace a truthful specific option.
  */
 export function referralSourceLadder(stored: string | undefined): string[] {
   const trimmed = stored?.trim();
+  const namesCompanySite = !trimmed || COMPANY_SITE_SOURCE_RE.test(trimmed);
   return ladder(
     trimmed,
-    'Company Website',
-    'Company website',
-    'Company Careers Site',
-    'Careers Page',
-    'Career Site',
-    'Careers Website',
-    'Job Board',
+    ...(namesCompanySite
+      ? [
+        'Company Website',
+        'Company website',
+        'Company Careers Site',
+        'Careers Page',
+        'Career Site',
+        'Careers Website',
+      ]
+      : []),
     'Other',
   );
 }

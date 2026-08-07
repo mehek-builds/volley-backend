@@ -227,8 +227,8 @@ describe('stored application facts reach the control on the real employer questi
     assert.equal(classifyField(family), null);
     assert.equal(filled(self, withAddress), null);
     assert.equal(filled(family, withAddress), null);
-    assert.match(heldFor(self, withAddress), /politically exposed person question left for you/);
-    assert.match(heldFor(family, withAddress), /politically exposed person question left for you/);
+    assert.match(heldFor(self, withAddress), /politically-exposed-person declaration left for you/);
+    assert.match(heldFor(family, withAddress), /politically-exposed-person declaration left for you/);
 
     // From an explicit declaration, and the two questions keep their two separate answers.
     const declared: ApplicationProfileLike = {
