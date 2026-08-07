@@ -242,6 +242,20 @@ export function unattendedHandoffReason(portal: SupportedPortal): string | null 
 export type SubmissionPacket = {
   fullName: string;
   email: string;
+  /* WHY `email` is what it is. Metadata for the review state, never filled into a form.
+   *
+   * Litos prefers a per-application alias so employer replies come back through the product, but
+   * an alias is only used when its domain has been measured able to receive mail. When it has not,
+   * `email` is the applicant's real address and this says so, which is what stops the dashboard
+   * telling her replies are being tracked when they are not. Optional because packets built by
+   * tests and fixtures do not carry it. */
+  applicantEmail?: {
+    address: string;
+    source: 'litos_alias' | 'contact_email' | 'account_email';
+    reason: string;
+    tracked: boolean;
+    decided_at: string;
+  };
   phone?: string;
   city?: string;
   country?: string;

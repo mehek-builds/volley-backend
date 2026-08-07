@@ -3,16 +3,20 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db';
-import { application_email_aliases, application_email_messages } from '../db/schema';
+import { application_email_aliases, application_email_messages, users } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import {
   type InboundApplicationEmail,
   applicationEmailRouteLabel,
+  applicationForwardingAddress,
+  forwardingAddressWouldLoop,
   inboundWebhookSecret,
   isApplicationEmailConfigured,
+  isValidForwardingAddress,
   processInboundApplicationEmail,
   retrieveResendReceivedEmail,
 } from '../lib/applicationEmail';
+import { applicationAliasDeliverability } from '../lib/applicationEmailDeliverability';
 
 const WEBHOOK_MAX_SKEW_MS = 5 * 60 * 1000;
 
@@ -204,11 +208,53 @@ export async function applicationEmailRoutes(fastify: FastifyInstance) {
       .where(eq(application_email_aliases.user_id, userId))
       .orderBy(desc(application_email_aliases.created_at))
       .limit(50);
+    /* `configured` says an environment variable is set. `tracking_active` says employer replies
+     * will actually come back through Litos, which is the only one of the two a person cares
+     * about, and the two disagreed for the entire life of the 2026-08-08 outage. Both are sent so
+     * a client can tell "never set up" apart from "set up and broken". */
+    const deliverability = await applicationAliasDeliverability();
     return reply.send({
       configured: isApplicationEmailConfigured(),
+      tracking_active: deliverability.deliverable,
+      tracking_blocked_reason: deliverability.deliverable ? null : deliverability.reason,
       domain: applicationEmailRouteLabel(),
+      forward_to: await applicationForwardingAddress(userId),
       aliases,
     });
+  });
+
+  /* WHERE MAIL FROM AN ALIAS IS DELIVERED, as a setting the applicant owns.
+   *
+   * It was previously whatever address she happened to sign in with, chosen by one argument deep
+   * inside the submission runner. Storing it makes it hers: an account claimed with a school
+   * address that expires at graduation can point employer replies at a mailbox that will not.
+   *
+   * Only future aliases and the next write to an existing one are re-pointed. Rewriting the rows
+   * of threads already in flight would move a live conversation to a different mailbox without
+   * the employer or the applicant asking for it. */
+  fastify.put('/application-email/forwarding', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const parsed = z.object({ forward_to: z.string().trim().min(3).max(320).nullable() }).safeParse(request.body);
+    if (!parsed.success) return reply.status(400).send({ error: 'A forwarding email address is required' });
+    const userId = request.jwtPayload!.userId;
+    const requested = parsed.data.forward_to?.trim().toLowerCase() || null;
+    if (requested && !isValidForwardingAddress(requested)) {
+      return reply.status(400).send({ error: 'That does not look like an email address' });
+    }
+    // A destination on our own alias domain forwards our mail to ourselves, forever.
+    if (requested && forwardingAddressWouldLoop(requested)) {
+      return reply.status(400).send({ error: 'Choose a mailbox you can read, not a Litos application address' });
+    }
+    try {
+      await db.update(users).set({ application_email_forward_to: requested }).where(eq(users.id, userId));
+    } catch (error) {
+      // A merge is a deploy on Vercel, so this route can be live before
+      // `npm run db:application-email-forwarding` has run. Say so rather than answering 500.
+      if ((error as { code?: string } | null)?.code === '42703') {
+        return reply.status(503).send({ error: 'Forwarding preferences are not available yet' });
+      }
+      throw error;
+    }
+    return reply.send({ forward_to: await applicationForwardingAddress(userId) });
   });
 
   fastify.get('/applications/:id/email-messages', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {

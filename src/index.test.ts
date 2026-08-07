@@ -213,23 +213,33 @@ test('/health reports application email routing capability without exposing secr
     process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET = 'secret-webhook-key';
     process.env.RESEND_API_KEY = 'secret-resend-key';
     process.env.RESEND_FROM = 'ops@trylitos.com';
+    /* Kill switch on, so the probe answers without touching DNS or Resend and this test stays
+     * hermetic. The measured branches are unit-tested with injected probes in
+     * lib/applicationEmailDeliverability.test.ts; what matters here is that /health can no longer
+     * answer "healthy" from environment variables alone. */
+    process.env.LITOS_APPLICATION_EMAIL_INBOUND_ENABLED = 'false';
+    const { resetApplicationAliasDeliverabilityCache } = await import('./lib/applicationEmailDeliverability');
+    resetApplicationAliasDeliverabilityCache();
 
     const { buildApp } = await import('./index');
     const app = await buildApp();
     const res = await app.inject({ method: 'GET', url: '/health' });
     const body = res.json();
 
-    assert.deepEqual(body.application_email, {
-      domain_configured: true,
-      inbound_webhook_configured: true,
-      forwarding_configured: true,
-      enabled_aliases: body.database === 'ok' ? body.application_email.enabled_aliases : null,
-    });
+    // The three config booleans survive under their old names for existing monitors, but they no
+    // longer decide the verdict: every variable above is set and the inbox is still not working.
+    assert.equal(body.application_email.domain_configured, true);
+    assert.equal(body.application_email.inbound_webhook_configured, true);
+    assert.equal(body.application_email.forwarding_configured, true);
+    assert.equal(body.application_email.deliverable, false);
+    assert.notEqual(body.application_email.status, 'ok');
     assert.ok(!res.body.includes('secret-alias-key'));
     assert.ok(!res.body.includes('secret-webhook-key'));
     assert.ok(!res.body.includes('secret-resend-key'));
     await app.close();
+    resetApplicationAliasDeliverabilityCache();
   } finally {
+    delete process.env.LITOS_APPLICATION_EMAIL_INBOUND_ENABLED;
     if (saved.domain === undefined) delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
     else process.env.LITOS_APPLICATION_EMAIL_DOMAIN = saved.domain;
     if (saved.aliasSecret === undefined) delete process.env.LITOS_APPLICATION_EMAIL_SECRET;

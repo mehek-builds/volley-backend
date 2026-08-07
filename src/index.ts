@@ -44,6 +44,7 @@ import { resolveBuild, resolveRevision } from './lib/buildInfo';
 import { dashboardBootstrapRoutes } from './routes/dashboardBootstrap';
 import { configuredAtsSubmissionChannels } from './lib/atsSubmissionChannels';
 import { applicationEmailHealth } from './lib/applicationEmail';
+import { warmApplicationAliasDeliverability } from './lib/applicationEmailDeliverability';
 
 export interface BuildAppOptions {
   rateLimit?: RateLimitConfig;
@@ -186,22 +187,27 @@ export async function buildApp(options: BuildAppOptions = {}) {
       request.log.error({ reason: database.reason, ms: database.ms }, 'health: database unreachable');
     }
 
+    /* The fallback shape is 'degraded', never a config echo that reads as healthy.
+     *
+     * It used to answer with three environment-variable booleans, which on a probe failure printed
+     * exactly the same reassuring output as a working inbox. If we cannot measure the inbox we do
+     * not know it works, and /health has to say the thing we actually know. */
+    const applicationEmailUnavailable = (reason: string) => ({
+      status: 'degraded' as const,
+      reason,
+      deliverable: false,
+      domain: (process.env.LITOS_APPLICATION_EMAIL_DOMAIN?.trim() || null),
+      enabled_aliases: null,
+      domain_configured: Boolean(process.env.LITOS_APPLICATION_EMAIL_DOMAIN?.trim()),
+      inbound_webhook_configured: Boolean((process.env.RESEND_WEBHOOK_SECRET || process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET || process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_SECRET)?.trim()),
+      forwarding_configured: Boolean(process.env.RESEND_API_KEY?.trim() && process.env.RESEND_FROM?.trim()),
+    });
     const applicationEmail = database.status === 'ok'
       ? await applicationEmailHealth().catch((error) => {
         request.log.error({ err: error }, 'health: application email status unavailable');
-        return {
-          domain_configured: Boolean(process.env.LITOS_APPLICATION_EMAIL_DOMAIN?.trim()),
-          inbound_webhook_configured: Boolean((process.env.RESEND_WEBHOOK_SECRET || process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET || process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_SECRET)?.trim()),
-          forwarding_configured: Boolean(process.env.RESEND_API_KEY?.trim() && process.env.RESEND_FROM?.trim()),
-          enabled_aliases: null,
-        };
+        return applicationEmailUnavailable('check_unavailable');
       })
-      : {
-        domain_configured: Boolean(process.env.LITOS_APPLICATION_EMAIL_DOMAIN?.trim()),
-        inbound_webhook_configured: Boolean((process.env.RESEND_WEBHOOK_SECRET || process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET || process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_SECRET)?.trim()),
-        forwarding_configured: Boolean(process.env.RESEND_API_KEY?.trim() && process.env.RESEND_FROM?.trim()),
-        enabled_aliases: null,
-      };
+      : applicationEmailUnavailable('database_unavailable');
 
     return reply.status(healthStatusCode(database)).send({
       /* 'degraded', not 'error': the service is up and answering, and is correctly reporting that a
@@ -328,6 +334,10 @@ async function start() {
 
   try {
     await app.listen({ port, host });
+    /* Warm the alias deliverability answer once at boot so the first submission of the process
+     * does not pay for the DNS and Resend lookups. Never awaited and never fatal: a warm that
+     * fails simply leaves the cache empty and the first real caller measures it instead. */
+    warmApplicationAliasDeliverability();
     app.log.info(`Student outreach backend running on http://${host}:${port}`);
   } catch (err) {
     app.log.error(err);

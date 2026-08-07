@@ -27,8 +27,59 @@ test('application inbox schema and webhook route are registered', () => {
   assert.match(route, /x-litos-webhook-signature/);
   assert.match(route, /svix-signature/);
   assert.match(route, /\/applications\/:id\/email-messages/);
-  assert.match(service, /reply_to: input\.inbound\.from\?\.trim\(\) \|\| input\.alias/);
+  // Reply-to is the ALIAS, never the employer: a reply that leaves the applicant's own mailbox
+  // publishes the address the alias exists to keep out of the thread. See relayApplicantReply.
+  assert.match(service, /to: \[input\.forwardTo\],\s*\n\s*reply_to: input\.alias,/);
+  assert.doesNotMatch(service, /reply_to: input\.inbound\.from/);
   assert.match(service, /LITOS_APPLICATION_EMAIL_MAILBOX/);
   assert.match(service, /\$\{mailbox\.local\}\+\$\{route\}@\$\{mailbox\.domain\}/);
   assert.match(route, /applicationEmailRouteLabel\(\)/);
+});
+
+test('the alias never reaches a form or a rendered resume without the deliverability precondition', () => {
+  const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  // Both call sites go through the precondition. resume.ts matters as much as the runner: the
+  // contact block it builds is rendered INTO the PDF, so an undeliverable alias is frozen into the
+  // document the employer keeps.
+  assert.match(runner, /resolveApplicantEmail\(\{/);
+  assert.match(resumeRoute, /applicationAliasDeliverability\(\)/);
+  assert.match(resumeRoute, /aliasDeliverability\?\.deliverable \? applicationAliasFor\(userId, resumeId\) : null/);
+  assert.match(service, /if \(!check\.deliverable\) return \{ \.\.\.fallback, reason: check\.reason \}/);
+});
+
+test('the health probe measures the world instead of reading environment variables', () => {
+  assert.match(service, /export async function applicationEmailHealth/);
+  assert.match(service, /const check = await applicationAliasDeliverability\(\)/);
+  assert.match(service, /mx_hosts: check\.mx_hosts/);
+  assert.match(service, /resend_domain_status: check\.resend_domain_status/);
+  assert.match(service, /inbound_route_configured: check\.inbound_route_configured/);
+  assert.match(service, /last_inbound_message_at/);
+  // 'degraded' must be reachable and must not be the same answer as 'ok'.
+  assert.match(service, /status: check\.deliverable\s*\n\s*\? 'ok'/);
+  assert.match(service, /'degraded'/);
+});
+
+test('the reply relay exists, is outbound, and cannot loop', () => {
+  assert.match(service, /direction: 'outbound'/);
+  assert.match(service, /classification: 'applicant_reply'/);
+  // Identity: only the address the alias forwards to may relay through it.
+  assert.match(service, /if \(sender !== forwardTo\) return \{ kind: 'employer_message' \}/);
+  // Loop guards: mail from the alias is dropped, and the relay target can never be the alias or
+  // the applicant's own mailbox.
+  assert.match(service, /if \(sender === alias\) return \{ kind: 'drop', reason: 'self_addressed' \}/);
+  assert.match(service, /if \(candidate === alias \|\| candidate === forwardTo\) continue/);
+  // The employer is taken from the recorded thread, never from the reply's own headers.
+  assert.match(service, /const recipient = relayRecipientFor\(thread/);
+});
+
+test('the forwarding destination is a stored preference, not the login address', () => {
+  const schemaSource = readFileSync('src/db/schema.ts', 'utf8');
+  assert.match(schemaSource, /application_email_forward_to: text\('application_email_forward_to'\)/);
+  assert.match(service, /export async function applicationForwardingAddress/);
+  assert.match(route, /\/application-email\/forwarding/);
+  assert.match(route, /forwardingAddressWouldLoop\(requested\)/);
+  // Survives the migration not having run yet, because on Vercel a merge is a deploy.
+  assert.match(service, /'42703'/);
+  const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  assert.doesNotMatch(runner, /forwardTo: accountEmail/);
 });

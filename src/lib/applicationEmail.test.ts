@@ -4,8 +4,14 @@ import {
   applicationAliasFor,
   applicationEmailRouteLabel,
   classifyApplicationEmail,
+  forwardingAddressWouldLoop,
+  isAliasAddress,
+  relayRecipientFor,
+  resolveApplicantEmail,
   retrieveResendReceivedEmail,
+  routeInboundApplicationEmail,
 } from './applicationEmail';
+import type { AliasDeliverability } from './applicationEmailDeliverability';
 
 test('application aliases are deterministic and live on the configured domain', () => {
   const previousMailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
@@ -136,4 +142,237 @@ test('resend received email hydration fetches the full body before routing', asy
     else process.env.RESEND_API_KEY = previousKey;
     globalThis.fetch = previousFetch;
   }
+});
+
+/* ---- the deliverability precondition on the address employers are given ---- */
+
+const USER_ID = '11111111-1111-4111-8111-111111111111';
+const APPLICATION_ID = '22222222-2222-4222-8222-222222222222';
+
+function deliverability(overrides: Partial<AliasDeliverability> = {}): AliasDeliverability {
+  return {
+    deliverable: true,
+    domain: 'apply.trylitos.com',
+    reason: 'deliverable',
+    mx_hosts: ['inbound-smtp.us-east-1.amazonaws.com'],
+    resend_domain_status: 'verified',
+    inbound_route_configured: true,
+    checked_at: '2026-08-08T10:00:00.000Z',
+    ...overrides,
+  };
+}
+
+async function withAliasDomain<T>(run: () => Promise<T>): Promise<T> {
+  const saved = {
+    domain: process.env.LITOS_APPLICATION_EMAIL_DOMAIN,
+    mailbox: process.env.LITOS_APPLICATION_EMAIL_MAILBOX,
+    secret: process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET,
+  };
+  delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+  process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'apply.trylitos.com';
+  process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = 'secret';
+  try {
+    return await run();
+  } finally {
+    if (saved.domain === undefined) delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+    else process.env.LITOS_APPLICATION_EMAIL_DOMAIN = saved.domain;
+    if (saved.mailbox === undefined) delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+    else process.env.LITOS_APPLICATION_EMAIL_MAILBOX = saved.mailbox;
+    if (saved.secret === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
+    else process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = saved.secret;
+  }
+}
+
+test('the alias is used when the alias domain verifies', async () => {
+  await withAliasDomain(async () => {
+    const written: unknown[] = [];
+    const choice = await resolveApplicantEmail({
+      userId: USER_ID,
+      applicationId: APPLICATION_ID,
+      accountEmail: 'mehekmandal05@gmail.com',
+    }, {
+      deliverability: async () => deliverability(),
+      forwardingAddress: async () => 'mehekmandal05@gmail.com',
+      ensureAlias: async (input) => {
+        written.push(input);
+        return { alias: 'app-2222222222-abc@apply.trylitos.com', forwards_to: input.forwardTo!, mode: 'litos_application_alias' };
+      },
+    });
+    assert.equal(choice.address, 'app-2222222222-abc@apply.trylitos.com');
+    assert.equal(choice.source, 'litos_alias');
+    assert.equal(choice.tracked, true);
+    assert.equal(choice.reason, 'deliverable');
+    assert.equal(written.length, 1);
+  });
+});
+
+test('the real email is used when the alias domain has no MX record', async () => {
+  await withAliasDomain(async () => {
+    const choice = await resolveApplicantEmail({
+      userId: USER_ID,
+      applicationId: APPLICATION_ID,
+      accountEmail: 'mehekmandal05@gmail.com',
+    }, {
+      deliverability: async () => deliverability({ deliverable: false, reason: 'no_mx_record', mx_hosts: [], resend_domain_status: null, inbound_route_configured: false }),
+      forwardingAddress: async () => 'mehekmandal05@gmail.com',
+      ensureAlias: async () => { throw new Error('an alias must never be minted for an undeliverable domain'); },
+    });
+    assert.equal(choice.address, 'mehekmandal05@gmail.com');
+    assert.equal(choice.source, 'account_email');
+    assert.equal(choice.tracked, false);
+    assert.equal(choice.reason, 'no_mx_record');
+  });
+});
+
+test('the real email is used when the deliverability check itself throws', async () => {
+  await withAliasDomain(async () => {
+    const choice = await resolveApplicantEmail({
+      userId: USER_ID,
+      applicationId: APPLICATION_ID,
+      accountEmail: 'mehekmandal05@gmail.com',
+    }, {
+      deliverability: async () => { throw new Error('DNS is unreachable from this function'); },
+      forwardingAddress: async () => 'mehekmandal05@gmail.com',
+      ensureAlias: async () => { throw new Error('an alias must never be minted when the check failed'); },
+    });
+    assert.equal(choice.address, 'mehekmandal05@gmail.com');
+    assert.equal(choice.tracked, false);
+    assert.equal(choice.reason, 'check_unavailable');
+  });
+});
+
+test('a failed alias write falls back to the real email instead of blocking the application', async () => {
+  await withAliasDomain(async () => {
+    const choice = await resolveApplicantEmail({
+      userId: USER_ID,
+      applicationId: APPLICATION_ID,
+      accountEmail: 'mehekmandal05@gmail.com',
+    }, {
+      deliverability: async () => deliverability(),
+      forwardingAddress: async () => 'mehekmandal05@gmail.com',
+      ensureAlias: async () => { throw new Error('database unavailable'); },
+    });
+    assert.equal(choice.address, 'mehekmandal05@gmail.com');
+    assert.equal(choice.tracked, false);
+    assert.equal(choice.reason, 'alias_write_failed');
+  });
+});
+
+test('a stale alias frozen into an older packet is never reused as the real address', async () => {
+  await withAliasDomain(async () => {
+    const choice = await resolveApplicantEmail({
+      userId: USER_ID,
+      applicationId: APPLICATION_ID,
+      accountEmail: 'mehekmandal05@gmail.com',
+      // What routes/resume.ts wrote into spec._contact.email before this shipped.
+      contactEmail: 'app-3243fe5f21-30c9245c2057@apply.trylitos.com',
+    }, {
+      deliverability: async () => deliverability({ deliverable: false, reason: 'no_mx_record' }),
+      forwardingAddress: async () => 'mehekmandal05@gmail.com',
+    });
+    assert.equal(choice.address, 'mehekmandal05@gmail.com');
+    assert.equal(choice.source, 'account_email');
+    assert.equal(isAliasAddress('app-3243fe5f21-30c9245c2057@apply.trylitos.com'), true);
+  });
+});
+
+test('a real contact address on the packet still wins over the account email', async () => {
+  await withAliasDomain(async () => {
+    const choice = await resolveApplicantEmail({
+      userId: USER_ID,
+      applicationId: APPLICATION_ID,
+      accountEmail: 'mehekmandal05@gmail.com',
+      contactEmail: 'mehek@usc.edu',
+    }, {
+      deliverability: async () => deliverability({ deliverable: false, reason: 'inbound_route_missing' }),
+      forwardingAddress: async () => 'mehekmandal05@gmail.com',
+    });
+    assert.equal(choice.address, 'mehek@usc.edu');
+    assert.equal(choice.source, 'contact_email');
+    assert.equal(choice.tracked, false);
+  });
+});
+
+test('with nowhere to forward to, the alias is not minted', async () => {
+  await withAliasDomain(async () => {
+    const choice = await resolveApplicantEmail({
+      userId: USER_ID,
+      applicationId: APPLICATION_ID,
+      accountEmail: 'mehekmandal05@gmail.com',
+    }, {
+      deliverability: async () => deliverability(),
+      forwardingAddress: async () => null,
+      ensureAlias: async () => { throw new Error('an alias with no destination must never be minted'); },
+    });
+    assert.equal(choice.reason, 'no_forwarding_address');
+    assert.equal(choice.tracked, false);
+  });
+});
+
+test('a forwarding address on our own alias domain is refused', async () => {
+  await withAliasDomain(async () => {
+    assert.equal(forwardingAddressWouldLoop('app-abc@apply.trylitos.com'), true);
+    assert.equal(forwardingAddressWouldLoop('mehekmandal05@gmail.com'), false);
+  });
+});
+
+/* ---- the return leg ---- */
+
+const ALIAS = 'app-2222222222-abc@apply.trylitos.com';
+const FORWARD_TO = 'mehekmandal05@gmail.com';
+
+test('mail from the employer is forwarded in, mail from the applicant is relayed out', () => {
+  assert.deepEqual(
+    routeInboundApplicationEmail({ from: 'recruiter@akunacapital.com', alias: ALIAS, forwardTo: FORWARD_TO }),
+    { kind: 'employer_message' },
+  );
+  assert.deepEqual(
+    routeInboundApplicationEmail({ from: `Mehek <${FORWARD_TO}>`, alias: ALIAS, forwardTo: FORWARD_TO }),
+    { kind: 'applicant_reply' },
+  );
+});
+
+test('mail apparently from the alias itself is dropped, because that is what a loop looks like', () => {
+  assert.deepEqual(
+    routeInboundApplicationEmail({ from: ALIAS, alias: ALIAS, forwardTo: FORWARD_TO }),
+    { kind: 'drop', reason: 'self_addressed' },
+  );
+});
+
+test('a reply whose sender authentication explicitly failed is not relayed', () => {
+  assert.deepEqual(
+    routeInboundApplicationEmail({
+      from: FORWARD_TO,
+      alias: ALIAS,
+      forwardTo: FORWARD_TO,
+      authentication: { spf: 'pass', dkim: 'fail' },
+    }),
+    { kind: 'drop', reason: 'sender_authentication_failed' },
+  );
+  // Silence is not a pass, but it is also not a failure: relaying still proceeds and the gap is
+  // documented rather than hidden.
+  assert.deepEqual(
+    routeInboundApplicationEmail({ from: FORWARD_TO, alias: ALIAS, forwardTo: FORWARD_TO, authentication: {} }),
+    { kind: 'applicant_reply' },
+  );
+});
+
+test('the relay recipient comes from the recorded thread, newest employer first', () => {
+  const thread = [
+    { direction: 'outbound', from_email: ALIAS },
+    { direction: 'forwarded', from_email: 'recruiter@akunacapital.com' },
+    { direction: 'inbound', from_email: 'no-reply@greenhouse.io' },
+  ];
+  assert.equal(relayRecipientFor(thread, { alias: ALIAS, forwardTo: FORWARD_TO }), 'recruiter@akunacapital.com');
+});
+
+test('the relay never addresses the applicant or the alias, so it cannot loop', () => {
+  assert.equal(
+    relayRecipientFor(
+      [{ direction: 'inbound', from_email: FORWARD_TO }, { direction: 'inbound', from_email: ALIAS }],
+      { alias: ALIAS, forwardTo: FORWARD_TO },
+    ),
+    null,
+  );
+  assert.equal(relayRecipientFor([], { alias: ALIAS, forwardTo: FORWARD_TO }), null);
 });

@@ -206,6 +206,27 @@ export type ApplicationReviewState = {
   portal_supported?: boolean;
   submission_claimed_at?: string;
   submission_claim_id?: string;
+  /* WHICH ADDRESS THE EMPLOYER WAS GIVEN, and why that one.
+   *
+   * Litos prefers a per-application alias so replies come back through the product and can be
+   * shown next to the application. On 2026-08-08 the alias domain had no MX record, so the address
+   * on every submitted form could not receive mail at all, and nothing anywhere recorded that.
+   * The fallback to the applicant's real address is now automatic, and it is written down here
+   * because a SILENT fallback is its own defect: `tracked` false means the thread is in her own
+   * mailbox and Litos will never see it, and no surface may promise otherwise.
+   *
+   * Absent on every packet prepared before this shipped, and on packets whose run never reached a
+   * prepare step. Absent means unknown, not alias. */
+  applicant_email?: {
+    address: string;
+    source: 'litos_alias' | 'contact_email' | 'account_email';
+    /* 'deliverable' when the alias was used; otherwise the measured reason it was not, e.g.
+     * 'no_mx_record', 'domain_not_verified_in_resend', 'inbound_route_missing',
+     * 'check_unavailable'. */
+    reason: string;
+    tracked: boolean;
+    decided_at: string;
+  };
   filled_fields?: string[];
   preview_screenshot_url?: string;
   submission_authorization?: {
