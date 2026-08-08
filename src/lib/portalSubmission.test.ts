@@ -20,6 +20,7 @@ import {
   attachManagedFieldOptions,
   reactSelectListboxSelector,
   GREENHOUSE_OPTION_PROBE_IDS,
+  MANAGED_ACTION_LIMIT,
   MANAGED_OPTION_EXTRACT_PREFIX,
   managedResultHasCoverLetterUpload,
   portalApplicationUrl,
@@ -3474,6 +3475,68 @@ function andurilPacket(overrides: Record<string, unknown> = {}) {
     ...overrides,
   } as Parameters<typeof buildManagedPortalActions>[1];
 }
+
+/* R-101. The discovery run fits inside the runner's ceiling, on every portal and every packet.
+ *
+ * stratus-browser-cloud rejects a run of more than MANAGED_ACTION_LIMIT actions with HTTP 400
+ * TOO_MANY_ACTIONS, before it opens a browser. buildManagedPortalActions has trimmed itself for
+ * that reason since Greenhouse first needed it; buildManagedDiscoveryActions never did, and once
+ * the two option-probe rounds were added its Greenhouse list reached 145. Every managed Greenhouse
+ * discovery call was rejected from then on, so `discovered` came back empty on every real run, so
+ * no packet could carry a question record no matter what discoverAndResolveQuestions decided. DRW's
+ * Software Developer Intern packet was measured at 27 required fields and 0 questions.
+ *
+ * The failure was silent, so a count is the only thing that can catch its return. */
+const EVERY_MANAGED_PORTAL = [
+  'greenhouse', 'lever', 'ashby', 'smartrecruiters', 'workable', 'jazzhr',
+  'paylocity', 'rippling', 'breezy', 'bamboohr', 'jobvite', 'icims', 'oraclecloud', 'ultipro',
+] as const;
+
+test('the discovery run never exceeds the runner action ceiling, on any portal', () => {
+  for (const portal of EVERY_MANAGED_PORTAL) {
+    const actions = buildManagedDiscoveryActions(portal, andurilPacket());
+    assert.ok(
+      actions.length <= MANAGED_ACTION_LIMIT,
+      `${portal} discovery run is ${actions.length} actions, and the runner rejects anything over ${MANAGED_ACTION_LIMIT}`,
+    );
+  }
+});
+
+test('the trim takes fills, never the discover action or the reads it exists for', () => {
+  // The packet that produced the 145-action list: every education and location alias applies.
+  const actions = buildManagedDiscoveryActions('greenhouse', andurilPacket({
+    city: 'Dubai',
+    country: 'United Arab Emirates',
+    linkedinUrl: 'https://linkedin.com/in/mehekmandal',
+    githubUrl: 'https://github.com/mehek',
+    portfolioUrl: 'https://mehek.dev',
+    roleLocation: 'Chicago, IL',
+    currentlyEnrolled: true,
+    jdText: 'Software Developer Intern at DRW',
+  }));
+  assert.ok(actions.length <= MANAGED_ACTION_LIMIT);
+  // The one action the whole call exists to make.
+  assert.equal(actions.filter((a) => a.type === 'discover').length, 1);
+  // Both probe rounds survive intact, so the option snapping still has its lists.
+  for (const inputId of GREENHOUSE_OPTION_PROBE_IDS) {
+    for (const round of [1, 2] as const) {
+      assert.ok(actions.some((a) => a.label === `option_probe_open:${inputId}:${round}`), `${inputId} round ${round} open`);
+      assert.ok(actions.some((a) => a.label === `option_probe_close:${inputId}:${round}`), `${inputId} round ${round} close`);
+    }
+    assert.ok(actions.some((a) => a.label === `${MANAGED_OPTION_EXTRACT_PREFIX}${inputId}`), `${inputId} read`);
+  }
+  // And the evidence reads the run is judged by.
+  for (const field of ['first_name', 'last_name', 'email', 'resume']) {
+    assert.ok(actions.some((a) => a.label === `filled_field:${field}`), `${field} evidence read`);
+  }
+  assert.ok(actions.some((a) => a.label === 'cover_letter_capability'));
+  assert.ok(actions.some((a) => a.label === 'greenhouse_open_application_form'));
+  // What it gave up instead: speculative alias fills the real fill run attempts again anyway.
+  assert.ok(
+    !actions.some((a) => a.label?.startsWith('education_graduation_date_combo:8:') === true),
+    'the last graduation-date alias is the kind of thing a trim is allowed to take',
+  );
+});
 
 test('the managed discovery run reads every Greenhouse education combobox option list, twice', () => {
   const actions = buildManagedDiscoveryActions('greenhouse', andurilPacket());

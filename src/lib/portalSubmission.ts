@@ -1090,7 +1090,15 @@ const GREENHOUSE_ALIAS_SELECT_SELECTOR_LIMIT = 1;
 const QUESTION_SELECT_SELECTOR_LIMIT = 1;
 const QUESTION_COMBOBOX_SELECTOR_LIMIT = 1;
 const ASHBY_QUESTION_TEXT_SELECTOR_LIMIT = 9;
-const MANAGED_ACTION_LIMIT = 120;
+/**
+ * The runner's own ceiling, mirrored here so a run is trimmed before it is sent rather than
+ * rejected after.
+ *
+ * stratus-browser-cloud's normalizeManagedActions throws `TOO_MANY_ACTIONS` (HTTP 400) on
+ * `actions.length > 120`, BEFORE the browser opens. Nothing runs, nothing is filled, and the caller
+ * gets an error instead of a result. Keep this number equal to that one.
+ */
+export const MANAGED_ACTION_LIMIT = 120;
 const CONFIRM_AFTER_FILL_FIELDS = new Set(['school', 'degree']);
 
 function pushGreenhouseManagedPreflightActions(actions: ManagedBrowserAction[]) {
@@ -2127,6 +2135,26 @@ function trimGreenhouseManagedActionsToBudget(actions: ManagedBrowserAction[], l
   }
 }
 
+/**
+ * The actions a budget trim may never remove.
+ *
+ * Everything here is a READ, or the click that makes the read possible. The budget exists to bound
+ * how much a run tries to FILL; spending it by deleting the reads inverts the trade, because the
+ * reads are what the run is judged by and what the next step is built from.
+ *
+ * `discover` is the newest and most important entry. It is one action out of 145 on a large
+ * Greenhouse form and it is the entire reason the discovery pass is made at all: without it the
+ * applicant gets a packet with zero question records and 27 required-and-empty blockers, which is a
+ * form she cannot answer inside the product. It also sat at index 131 of 145, past the runner's own
+ * ceiling, so a tail truncation would have taken it first.
+ */
+function isProtectedManagedAction(action: ManagedBrowserAction | undefined): boolean {
+  if (!action) return false;
+  if (action.type === 'discover') return true;
+  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight)/
+    .test(action.label ?? '');
+}
+
 function truncateManagedActionsToBudget(actions: ManagedBrowserAction[], limit: number) {
   while (actions.length > limit) {
     let tailIndex = actions.length - 1;
@@ -2134,7 +2162,7 @@ function truncateManagedActionsToBudget(actions: ManagedBrowserAction[], limit: 
     // they are what the run is JUDGED by afterwards, not part of what it fills. Truncating them off
     // the tail of a large Akuna packet would silently remove the corroboration that decides whether
     // a CAPTCHA blocker is believed, on exactly the packets most likely to hit the budget.
-    while (tailIndex >= 0 && /^(?:filled_field:|captcha_)/.test(actions[tailIndex]?.label ?? '')) {
+    while (tailIndex >= 0 && isProtectedManagedAction(actions[tailIndex])) {
       tailIndex -= 1;
     }
     if (tailIndex < 0) break;
@@ -2690,6 +2718,23 @@ export function buildManagedDiscoveryActions(portal: SupportedPortal, packet: Su
     optional: true,
     timeout: MANAGED_FILL_TIMEOUT_MS,
   });
+  /* THE BUDGET, and its absence here is what made R-096 invisible on every real run.
+   *
+   * buildManagedPortalActions has trimmed itself to MANAGED_ACTION_LIMIT since Greenhouse first
+   * needed it. This builder never did, and for a while it did not have to: measured on a Greenhouse
+   * packet the list came to exactly 120 actions, one under the runner's `> 120` rejection. Adding
+   * the option probes (two rounds of open/read/close over four controls, plus the round-one pass
+   * inside pushFixedFieldActions) took it to 145. Every managed Greenhouse discovery call has since
+   * been answered with HTTP 400 TOO_MANY_ACTIONS before a browser ever opened, so `discovered` was
+   * always empty, so discoverAndResolveQuestions was always handed nothing to resolve. DRW's
+   * Software Developer Intern packet is the measured case: 27 required fields, 0 question records.
+   *
+   * Trim the fills, never the reads. The low-priority groups dropped here are speculative alias
+   * fills that buildManagedPortalActions attempts again a moment later against its own budget, so
+   * losing them costs this pass nothing; isProtectedManagedAction keeps `discover`, the option
+   * reads, the core-field extracts and the form preflight out of both trims' reach. */
+  trimGreenhouseManagedActionsToBudget(actions, MANAGED_ACTION_LIMIT);
+  if (actions.length > MANAGED_ACTION_LIMIT) truncateManagedActionsToBudget(actions, MANAGED_ACTION_LIMIT);
   return actions;
 }
 

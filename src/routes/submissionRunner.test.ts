@@ -6,6 +6,7 @@ import {
   attentionBlockersForManagedResult,
   atsApiSubmissionEnabled,
   discoverAndResolveQuestions,
+  discoveryHonestyReasons,
   isProviderSessionFailureMessage,
   preparationEvidenceBlockers,
   reconcileManagedProviderBlockers,
@@ -14,6 +15,7 @@ import {
   shouldUseLocalControlledBrowser,
   submissionFailureOutcome,
   submissionGraduationDateParts,
+  unansweredRequiredBlockerLabels,
   type ResumeRow,
 } from './submissionRunner';
 import { workEligibilityFromSponsorshipAnswer } from '../lib/applicationProfileLike';
@@ -1105,4 +1107,53 @@ test('an answer the applicant already gave survives a later run that decides it 
   assert.ok(question, 'the stored answer was dropped by the refusal branch');
   assert.equal(question.answer, 'Costa Mesa, CA');
   assert.equal(question.id, 'q-existing');
+});
+
+/* R-101, the reporting half. The DRW Software Developer Intern run of 2026-08-08 recorded
+ * `questions: 0`, twenty-seven "is required and is still empty" lines, `submission_error: null`
+ * and no stall. Every sentence in it was true and the run as a whole was not: it named twenty-seven
+ * obstacles and offered no control that could clear any of them, and said nothing about that.
+ *
+ * These pin the two admissions the run owes. */
+
+test('a required blocker with no question record is counted, even when the label was truncated', () => {
+  const blockers = [
+    '"Discipline" is required and is still empty',
+    '"Please rate your skill level in general purpose Python programming (language features, concurrency, standard library and" is required and is still empty',
+    '"Please provide a copy of your most recent transcript from your highest degree level." is required and is still empty',
+    'CAPTCHA requires your attention',
+  ];
+  const questions = [
+    { question: 'Discipline' },
+    // The provider truncated the blocker at 120 characters; the stored question is the full text.
+    { question: 'Please rate your skill level in general purpose Python programming (language features, concurrency, standard library and idioms).' },
+  ];
+  assert.deepEqual(
+    unansweredRequiredBlockerLabels(blockers, questions),
+    ['Please provide a copy of your most recent transcript from your highest degree level.'],
+  );
+});
+
+test('a short stored question never swallows a long blocker by prefix', () => {
+  // "GPA" is a prefix of nothing useful, and treating it as one would hide a real gap.
+  assert.deepEqual(
+    unansweredRequiredBlockerLabels(['"GPA and test scores" is required and is still empty'], [{ question: 'GPA' }]),
+    ['GPA and test scores'],
+  );
+});
+
+test('a run that discovered nothing and a run that could not look are different admissions', () => {
+  assert.deepEqual(discoveryHonestyReasons(undefined, []), []);
+
+  const failed = discoveryHonestyReasons('A run may contain at most 120 actions', []);
+  assert.equal(failed.length, 1);
+  assert.match(failed[0]!, /could not read the questions this form asks/);
+  assert.match(failed[0]!, /at most 120 actions/);
+
+  const unanswerable = discoveryHonestyReasons(undefined, ['Please provide a copy of your most recent transcript']);
+  assert.equal(unanswerable.length, 1);
+  assert.match(unanswerable[0]!, /^1 required field has no question you can answer in Litos/);
+
+  assert.equal(discoveryHonestyReasons('boom', ['A', 'B']).length, 2);
+  assert.match(discoveryHonestyReasons(undefined, ['A', 'B'])[0]!, /^2 required fields have/);
 });
