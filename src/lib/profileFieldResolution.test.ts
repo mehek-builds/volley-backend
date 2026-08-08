@@ -535,3 +535,49 @@ test('resolveProfileField never answers a question the resolver refuses', () => 
     null,
   );
 });
+
+/* ─── PR #361's snapping, now that the managed path can actually supply an option list ────────
+ *
+ * The verbatim discovered label and the real Greenhouse discipline taxonomy, both read on
+ * 2026-08-08: the label off the Anduril run's discovery pass, the options off the live listbox.
+ */
+test('the stored major snaps onto the Greenhouse discipline taxonomy', () => {
+  const options = [
+    'Accounting',
+    'Actuarial/Risk Analysis',
+    'Business Administration',
+    'Computer Science',
+    'Computer/Software Engineering',
+    'Finance',
+    'Mathematics',
+  ];
+  const ap: ApplicationProfileLike = {
+    major: 'Computer Science & Business Administration, Finance Emphasis',
+    degree: 'Bachelor of Science in Computer Science',
+  };
+  const snapped = resolveProfileField({ label: 'discipline', inputType: 'text', options }, ap);
+  assert.equal(snapped?.value, 'Computer Science');
+  assert.equal(snapped?.matchedOption, true);
+
+  // And the reason it never fired in production: the managed provider reports no options at all,
+  // so the same call with none returns the stored sentence, which is not on that list.
+  const unprobed = resolveProfileField({ label: 'discipline', inputType: 'text' }, ap);
+  assert.equal(unprobed?.matchedOption, false);
+  assert.equal(unprobed?.value, 'Computer Science & Business Administration, Finance Emphasis');
+});
+
+test('the referral answer snaps onto an employer-named referral list', () => {
+  // Verbatim from the Anduril form: the question names the employer, and the option list is the
+  // one the control actually offers.
+  const ap: ApplicationProfileLike = { referral_source_default: 'Company website' };
+  const snapped = resolveProfileField(
+    {
+      label: 'how did you hear about anduril?',
+      inputType: 'text',
+      options: ['Select...', 'LinkedIn', 'Company Website', 'Employee Referral', 'Other'],
+    },
+    ap,
+  );
+  assert.equal(snapped?.value, 'Company Website');
+  assert.equal(snapped?.matchedOption, true);
+});

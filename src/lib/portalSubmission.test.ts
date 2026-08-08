@@ -16,6 +16,11 @@ import {
   isChoiceQuestion,
   isPaylocityTerminalStep,
   managedResultFilledFields,
+  managedResultFieldOptions,
+  attachManagedFieldOptions,
+  reactSelectListboxSelector,
+  GREENHOUSE_OPTION_PROBE_IDS,
+  MANAGED_OPTION_EXTRACT_PREFIX,
   managedResultHasCoverLetterUpload,
   portalApplicationUrl,
   portalCanAutoSubmit,
@@ -25,6 +30,8 @@ import {
   READ_CONTROL_LABEL,
 } from './portalSubmission';
 import { POLLABLE_JOB_BOARDS } from './jobMonitor';
+import { resolveProfileField } from './profileFieldResolution';
+import type { ManagedDiscoveredQuestion } from './browserbase';
 
 function isGreenhousePreflightClick(action: { type: string; label?: string }) {
   return action.type === 'click'
@@ -35,6 +42,14 @@ function isGreenhousePreflightClick(action: { type: string; label?: string }) {
 function isGreenhouseFixedCandidatePrivacyClick(action: { type: string; label?: string }) {
   return action.type === 'click'
     && action.label === 'greenhouse_candidate_privacy_acknowledgement';
+}
+
+// Opening a react-select to READ its option list. The invariant the discovery run has to keep is
+// that it changes nothing and sends nothing, and a dropdown that is opened and then closed with
+// Escape does neither: no value is chosen and no form state moves. It is a click all the same, so
+// it is named here rather than quietly widening the "no clicks" assertion below.
+function isGreenhouseOptionProbeClick(action: { type: string; label?: string }) {
+  return action.type === 'click' && action.label?.startsWith('option_probe_open:') === true;
 }
 
 test('detects the four supported applicant portal families', () => {
@@ -58,8 +73,15 @@ test('a managed discovery run detects custom questions and cover-letter attachme
     resumeName: 'resume.pdf',
     questions: [{ question: 'Why this role?', answer: 'I enjoy systems work.' }],
   });
-  assert.equal(actions.at(-2)?.type, 'discover');
-  assert.deepEqual(actions.at(-1), {
+  // Relative order, not fixed tail positions: the second option-probe round is deliberately placed
+  // after `discover` (it needs the time that DOM walk takes), so the discover action is no longer
+  // the second-to-last entry. What matters is that discovery still scans the page and still reads
+  // the cover-letter capability, both after every fill.
+  const discoverIndex = actions.findIndex((a) => a.type === 'discover');
+  const coverLetterIndex = actions.findIndex((a) => a.label === 'cover_letter_capability');
+  assert.ok(discoverIndex >= 0);
+  assert.ok(coverLetterIndex > discoverIndex);
+  assert.deepEqual(actions[coverLetterIndex], {
     type: 'extract',
     selector: coverLetterUploadSelector('greenhouse'),
     attribute: 'type',
@@ -71,6 +93,7 @@ test('a managed discovery run detects custom questions and cover-letter attachme
   assert.equal(actions.some((a) =>
     a.type === 'click'
     && !isGreenhousePreflightClick(a)
+    && !isGreenhouseOptionProbeClick(a)
     && !isGreenhouseFixedCandidatePrivacyClick(a)), false);
   const fillSelectors = actions.filter((a) => a.type === 'fill').map((a) => a.selector);
   assert.ok(fillSelectors.some((s) => s?.includes('first_name')));
@@ -1254,10 +1277,17 @@ test('Greenhouse replays Faire option-style choices through React-select buckets
   assert.ok(actions.some((action) =>
     action.label?.startsWith('greenhouse_referral_combo_label:')
     && action.value === 'Company website'));
+  // The alias is the employer-agnostic PREFIX now, not "How did you hear about Faire?". Naming one
+  // employer is what left Anduril's "How did you hear about Anduril?" and Virtu's "How did you hear
+  // about this internship?" unanswered on real runs; :has-text() is a substring match, so the
+  // prefix scopes to all three.
   assert.ok(actions.some((action) =>
     action.label?.startsWith('greenhouse_referral_combo_label:')
-    && (action.label.includes('How did you hear about us') || action.label.includes('How did you hear about Faire'))
+    && action.label.includes('How did you hear about')
     && action.value === 'Company website'));
+  assert.equal(actions.some((action) =>
+    action.label?.startsWith('greenhouse_referral_combo_label:')
+    && /faire|about us\b|this job/i.test(action.label)), false);
   assert.equal(actions.some((action) =>
     action.label?.startsWith('greenhouse_demographic:')
     && action.label.includes('Gender')), false);
@@ -3397,4 +3427,224 @@ test('your own saved profile is not somebody else’s platform', () => {
   assert.notEqual(chooseSubmitControl(['Submit application with your saved details']), null);
   assert.equal(chooseSubmitControl(['Submit with your Handshake profile']), null);
   assert.equal(chooseSubmitControl(['Submit your saved candidate profile with Handshake']), null);
+});
+
+/* ─── the Anduril Greenhouse run of 2026-08-08 (submission_run_id 32823cf6) ───────────────────
+ *
+ * Every string below is verbatim from that run: the discovered labels as the managed provider
+ * reported them, the blocker sentences the applicant was shown, and the option texts read off the
+ * live control. The run filled 10 fields, hit no CAPTCHA, and still returned
+ *   "Discipline" is required and is still empty
+ *   "How did you hear about Anduril?" is required and is still empty
+ * with both answers already resolved in the same packet.
+ */
+
+const ANDURIL_DISCIPLINE_LABEL = 'discipline* discipline--0';
+const ANDURIL_REFERRAL_LABEL = 'how did you hear about anduril?* question_12114515007';
+// The head of the real Greenhouse discipline taxonomy, read off the live listbox. The stored major
+// ("Computer Science & Business Administration, Finance Emphasis") is not on it and never will be.
+const GREENHOUSE_DISCIPLINE_OPTIONS = [
+  'Accounting',
+  'Actuarial/Risk Analysis',
+  'Advertising',
+  'Aerospace Engineering',
+  'Business Administration',
+  'Computer Science',
+  'Computer/Software Engineering',
+  'Finance',
+  'Mathematics',
+];
+
+function andurilPacket(overrides: Record<string, unknown> = {}) {
+  return {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    phone: '+971501234567',
+    school: 'University of Southern California, Viterbi School of Engineering',
+    degree: 'Bachelor of Science in Computer Science',
+    major: 'Computer Science & Business Administration, Finance Emphasis',
+    graduationDate: 'May 2028',
+    graduationMonth: 'May',
+    graduationYear: '2028',
+    gpa: '3.89',
+    referralSourceDefault: 'Company website',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+    ...overrides,
+  } as Parameters<typeof buildManagedPortalActions>[1];
+}
+
+test('the managed discovery run reads every Greenhouse education combobox option list, twice', () => {
+  const actions = buildManagedDiscoveryActions('greenhouse', andurilPacket());
+  for (const inputId of GREENHOUSE_OPTION_PROBE_IDS) {
+    for (const round of [1, 2] as const) {
+      const open = actions.findIndex((a) => a.type === 'click' && a.label === `option_probe_open:${inputId}:${round}`);
+      const close = actions.findIndex((a) => a.type === 'press' && a.label === `option_probe_close:${inputId}:${round}`);
+      const read = actions.findIndex((a, index) =>
+        index > open && a.type === 'extract' && a.label === `${MANAGED_OPTION_EXTRACT_PREFIX}${inputId}`);
+      assert.ok(open >= 0, `${inputId} round ${round} is opened`);
+      assert.ok(read > open, `${inputId} round ${round} is read after it is opened`);
+      assert.ok(close > read, `${inputId} round ${round} is closed after it is read`);
+      assert.equal(actions[read]!.selector, reactSelectListboxSelector(inputId));
+      // No `attribute`: the provider returns innerText when none is asked for, and innerText of the
+      // listbox is the option list. Asking for an attribute would return one node's attribute value.
+      assert.equal(actions[read]!.attribute, undefined);
+      assert.equal(actions[close]!.value, 'Escape');
+      for (const index of [open, read, close]) assert.equal(actions[index]!.optional, true);
+    }
+  }
+  // Round two comes after the DOM walk, which is the only thing in the list that takes real time.
+  const discoverIndex = actions.findIndex((a) => a.type === 'discover');
+  const secondRound = actions.findIndex((a) => a.label === `option_probe_open:${GREENHOUSE_OPTION_PROBE_IDS[0]}:2`);
+  assert.ok(secondRound > discoverIndex);
+});
+
+test('the option probe runs before anything is typed into the form', () => {
+  const actions = buildManagedDiscoveryActions('greenhouse', andurilPacket());
+  const firstProbe = actions.findIndex((a) => a.label?.startsWith('option_probe_open:') === true);
+  const firstFill = actions.findIndex((a) => a.type === 'fill');
+  assert.ok(firstProbe >= 0 && firstFill > firstProbe,
+    'a react-select that has already been filled shows a FILTERED menu, so the read has to come first');
+  // The fill run does not pay for the reads again; it consumes what discovery brought back.
+  assert.equal(
+    buildManagedPortalActions('greenhouse', andurilPacket()).some((a) => a.label?.startsWith('option_probe_')),
+    false,
+  );
+});
+
+test('option lists come back keyed by control even though the provider drops the label', () => {
+  // managed-browser.js pushes `{ selector, value }` and no label at all, so the selector has to be
+  // enough on its own. Both shapes are accepted; neither may invent an entry.
+  const parsed = managedResultFieldOptions({
+    title: '', url: '', text: '',
+    extracted: [
+      { selector: reactSelectListboxSelector('discipline--0'), value: GREENHOUSE_DISCIPLINE_OPTIONS.join('\n') },
+      { selector: reactSelectListboxSelector('degree--0'), label: `${MANAGED_OPTION_EXTRACT_PREFIX}degree--0`, value: "Bachelor's Degree\nMaster's Degree" },
+      { selector: reactSelectListboxSelector('school--0'), value: '   ' },
+      { selector: '[data-sitekey]', label: 'captcha_challenge', value: '6LcSomething' },
+    ],
+  });
+  assert.deepEqual(parsed['discipline--0'], GREENHOUSE_DISCIPLINE_OPTIONS);
+  assert.deepEqual(parsed['degree--0'], ["Bachelor's Degree", "Master's Degree"]);
+  assert.equal('school--0' in parsed, false);
+  assert.equal(Object.keys(parsed).length, 2);
+});
+
+test('a probed option list reaches the control it was read from, by its own id', () => {
+  const [discipline, unrelated] = attachManagedFieldOptions(
+    [
+      { label: ANDURIL_DISCIPLINE_LABEL, selector: '[data-litos-discovered-8]', inputType: 'text' },
+      { label: 'website website question_12114508007', selector: '[data-litos-discovered-11]', inputType: 'text' },
+    ] as ManagedDiscoveredQuestion[],
+    { 'discipline--0': GREENHOUSE_DISCIPLINE_OPTIONS },
+  );
+  assert.deepEqual(discipline!.options, GREENHOUSE_DISCIPLINE_OPTIONS);
+  assert.equal(unrelated!.options, undefined);
+});
+
+test('Discipline is filled with a real option, once, when the option list was read', () => {
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    fieldOptions: { 'discipline--0': GREENHOUSE_DISCIPLINE_OPTIONS },
+  }));
+  const disciplineFills = actions.filter((a) => a.type === 'fill' && a.selector === '#discipline--0');
+  assert.deepEqual(disciplineFills.map((a) => a.value), ['Computer Science']);
+  // Exactly one attempt. Measured live on this posting: a second attempt begins by clicking the
+  // input again, which CLOSES the menu the first one opened, and a fill does not reopen it, so the
+  // retry cannot select anything and the field is left empty.
+  assert.equal(actions.filter((a) => a.type === 'click' && a.selector === '#discipline--0').length, 1);
+  // And never the stored sentence, which is what filtered the real menu down to nothing.
+  assert.equal(
+    actions.some((a) => a.value === 'Computer Science & Business Administration, Finance Emphasis'),
+    false,
+  );
+});
+
+test('with no option list read, Discipline still leads with the taxonomy name, not the resume sentence', () => {
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket());
+  const disciplineFills = actions.filter((a) => a.type === 'fill' && a.selector === '#discipline--0');
+  assert.deepEqual(disciplineFills.map((a) => a.value), ['Computer Science']);
+});
+
+test('the referral question is scoped by a prefix, so it matches the employer that asked it', () => {
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket());
+  const referral = actions.filter((a) => a.label?.startsWith('greenhouse_referral_combo_label:'));
+  assert.ok(referral.length > 0);
+  const scope = referral.find((a) => a.type === 'fill')!;
+  assert.equal(scope.value, 'Company website');
+  // Playwright's :has-text() is a case-insensitive substring match, so this scope is the one that
+  // reaches "How did you hear about Anduril?" and "How did you hear about this internship?" alike.
+  assert.ok(scope.selector?.includes('How did you hear about'), scope.selector);
+  assert.equal(referral.some((a) => /faire/i.test(a.selector ?? '')), false);
+});
+
+test('a normalized Greenhouse education label still routes to the education combobox path', () => {
+  // normalizeDiscoveredLabel strips `discipline--0` out of the stored question, and the education
+  // combobox test used to key on exactly that handle, so the reviewed-question path silently
+  // stopped running on the fields it exists for.
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    questions: [{ question: 'discipline', answer: 'Computer Science', portalSelector: '[data-litos-discovered-8]', portalInputType: 'text' }],
+  }));
+  assert.ok(actions.some((a) =>
+    a.label?.startsWith('question_combo_label:')
+    && a.label.includes('discipline')
+    && a.value === 'Computer Science'));
+});
+
+test('provider result to snapped answer, the whole chain the Anduril run was missing', () => {
+  // Exactly what the runner does: parse the discovery result's extracts, attach them to the
+  // discovered controls, then resolve. Before this chain existed, resolveProfileField was handed
+  // `options: undefined` on every managed control and PR #361's snapping could not fire at all.
+  const discovery = {
+    title: '', url: '', text: '',
+    discovered: [{ label: ANDURIL_DISCIPLINE_LABEL, selector: '[data-litos-discovered-8]', inputType: 'text', maxLength: null }] as ManagedDiscoveredQuestion[],
+    extracted: [{ selector: reactSelectListboxSelector('discipline--0'), value: GREENHOUSE_DISCIPLINE_OPTIONS.join('\n') }],
+  };
+  const [field] = attachManagedFieldOptions(discovery.discovered, managedResultFieldOptions(discovery));
+  const resolved = resolveProfileField(
+    { label: field!.label, inputType: field!.inputType, options: field!.options },
+    { major: 'Computer Science & Business Administration, Finance Emphasis', degree: 'Bachelor of Science in Computer Science' },
+  );
+  assert.equal(resolved?.value, 'Computer Science');
+  assert.equal(resolved?.matchedOption, true);
+});
+
+test('a listbox read mid-fetch contributes nothing, and never becomes an option', () => {
+  // Measured on the live Anduril posting: Degree and Discipline load their taxonomies over the
+  // network when the menu opens, and the first read comes back as the literal text "Loading...".
+  // Snapping an answer onto that one-entry list would put the placeholder into the application.
+  const parsed = managedResultFieldOptions({
+    title: '', url: '', text: '',
+    extracted: [
+      { selector: reactSelectListboxSelector('discipline--0'), value: 'Loading...' },
+      { selector: reactSelectListboxSelector('degree--0'), value: 'No options' },
+      // The second round, once the fetch has landed.
+      { selector: reactSelectListboxSelector('discipline--0'), value: GREENHOUSE_DISCIPLINE_OPTIONS.join('\n') },
+    ],
+  });
+  assert.equal('degree--0' in parsed, false);
+  assert.deepEqual(parsed['discipline--0'], GREENHOUSE_DISCIPLINE_OPTIONS);
+  // And with only the placeholder read, the fill falls back to the ladder rather than to it.
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({ fieldOptions: { 'discipline--0': ['Loading...'] } }));
+  assert.deepEqual(
+    actions.filter((a) => a.type === 'fill' && a.selector === '#discipline--0').map((a) => a.value),
+    ['Computer Science'],
+  );
+});
+
+test('a windowed option read is discarded, so a saved answer past row 100 is not called missing', () => {
+  // Greenhouse renders 100 rows into an unfiltered menu and searches the rest. Measured live:
+  // School stops at 100 and "University of Southern California" is not among them, while typing
+  // finds it. Treating that window as the list would skip the fill AND tell her the control does
+  // not offer her own university.
+  const window100 = Array.from({ length: 100 }, (_, i) => `University ${String(i).padStart(3, '0')}`);
+  const parsed = managedResultFieldOptions({
+    title: '', url: '', text: '',
+    extracted: [
+      { selector: reactSelectListboxSelector('school--0'), value: window100.join('\n') },
+      { selector: reactSelectListboxSelector('degree--0'), value: ["Bachelor's Degree", "Master's Degree", 'Technical Diploma'].join('\n') },
+    ],
+  });
+  assert.equal('school--0' in parsed, false);
+  assert.equal(parsed['degree--0']?.length, 3);
 });

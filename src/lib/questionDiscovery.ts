@@ -269,6 +269,50 @@ function politicallyExposedAnswer(
   };
 }
 
+/**
+ * A U.S. export-control eligibility question (EAR, ITAR, "U.S. person" status).
+ *
+ * Measured on the Anduril packet of 2026-08-08: 'EXPORT CONTROLS - This position requires access to
+ * information and technology that is subject to U.S. export controls...' came back required and
+ * still empty, because nothing in this file recognised it: it fell past every rule to
+ * "not a known field, not an essay: leave it alone" and no one was ever told it was waiting.
+ *
+ * It is answered from an explicit stored declaration or not at all. There is deliberately no
+ * inference here, and the profile fields that LOOK like they answer it are exactly the ones that
+ * must not: citizenship, work_authorized and needs_sponsorship each describe a different legal
+ * status, and "U.S. person" under the EAR covers permanent residents and certain protected
+ * individuals while excluding some visa holders who are fully authorized to work. Getting it wrong
+ * is a false statement to the U.S. government made in the applicant's name, so this refuses,
+ * by name, every time. Nothing is stored for it yet (it is one posting, below the two-posting bar
+ * for an onboarding question), so today this always refuses; the shape is here so that adding the
+ * stored answer later is the only change needed.
+ */
+export const EXPORT_CONTROL_QUESTION =
+  /\bexport\s+control(?:s|led)?\b|\bexport\s+administration\s+regulations?\b|\bitar\b|\bear\s?99\b|\bdeemed\s+export\b|\bu\.?\s?s\.?\s+person\s+(?:status|as\s+defined|under)\b/i;
+
+/**
+ * Databricks' sanctions checklist, which mentions export controls and is NOT this question.
+ *
+ * "Please confirm whether any of the below applies to you. Select all that apply. Note: this
+ * information will only be used to ensure compliance with U.S. sanctions and export controls." is a
+ * checkbox LIST whose true answer is "None of the above", which the applicant answers herself and
+ * portalSubmission already knows how to tick. Refusing it here would take that stored answer back
+ * out of the packet, so it keeps the path it has and only the eligibility self-declaration is
+ * refused.
+ */
+const SANCTIONS_CHECKLIST_QUESTION =
+  /\bsanctions\b[^?]{0,120}\bexport\s+controls?\b|\bselect\s+all\s+that\s+apply\b/i;
+
+export function exportControlSkipReason(label: string): string {
+  return `export-control declaration left for you: "${label.slice(0, 60)}"`;
+}
+
+function exportControlAnswer(label: string): { skipReason: string } | null {
+  if (!EXPORT_CONTROL_QUESTION.test(label)) return null;
+  if (SANCTIONS_CHECKLIST_QUESTION.test(label)) return null;
+  return { skipReason: exportControlSkipReason(label) };
+}
+
 function pronounsAnswer(label: string, ap: ApplicationProfileLike): { value: string } | { skipReason: string } | null {
   if (!PRONOUNS_QUESTION.test(label)) return null;
   if (ap.pronouns) return { value: ap.pronouns };
@@ -457,9 +501,17 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
 const RESIDENCE_QUESTION =
   /country of residence|which country|country you.{0,20}(based|resid|work from|located)|where are you based|based in which country|current country|country.{0,20}(residing|residence)|\bcountry\b/i;
 const LOCATION_COMMITMENT_STEM = /\b(?:are|can|could|do|did|will|would|should|may|might|have)\s+you\b/i;
-const LOCATION_COMMITMENT_VOCAB = /\boffice\b|in[\s-]?office|on[\s-]?site|\bonsite\b|\bhybrid\b|relocat|commut/i;
+// "in person" belongs on this list and its absence was measured, not theorised. Anduril asks
+// "Are you willing to work in-person for 12 weeks during the internship?" and, with only the
+// office/onsite/hybrid words here, that fell past every rule to the ESSAY DRAFTER: a react-select
+// with a fixed Yes/No list was handed a paragraph, so the required field stayed empty, and the
+// paragraph the model wrote mentioned Los Angeles, which is where the false grounding warning on
+// that same packet came from. Four distinct postings ask this in the owner's history (Anduril,
+// Postman, Fluency, Brex), all of them asking the same routine question the office wording already
+// answers Yes to.
+const LOCATION_COMMITMENT_VOCAB = /\boffice\b|in[\s-]?office|on[\s-]?site|\bonsite\b|in[\s-]?person|\bhybrid\b|relocat|commut/i;
 const STORED_ONSITE_COMMITMENT_QUESTION =
-  /\b(?:able|willing|available|prepared|can|could|would)\b[^?]{0,80}\b(?:office|in[\s-]?office|on[\s-]?site|onsite|hybrid)\b|\b(?:office|in[\s-]?office|on[\s-]?site|onsite|hybrid)\b[^?]{0,80}\b(?:able|willing|available|prepared|can|could|would)\b/i;
+  /\b(?:able|willing|available|prepared|can|could|would)\b[^?]{0,80}\b(?:office|in[\s-]?office|on[\s-]?site|onsite|in[\s-]?person|hybrid)\b|\b(?:office|in[\s-]?office|on[\s-]?site|onsite|in[\s-]?person|hybrid)\b[^?]{0,80}\b(?:able|willing|available|prepared|can|could|would)\b/i;
 const ONSITE_DAY_COUNT_QUESTION = /\b(?:three|four|five|3|4|5)\s+days?\b/i;
 const LOCATION_PREFERENCE_QUESTION =
   /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\blocation\b[^?]{0,120}\b(?:single|top|preferred|preference|most interested)\b/i;
@@ -1556,6 +1608,9 @@ export function resolveKnownAnswer(
    * undergraduate date. Recognising them up here means no later rule can reach them, and each one
    * returns a skipReason rather than null when nothing is stored, so the fall-through to the essay
    * drafter cannot invent an answer either. */
+  const exportControl = exportControlAnswer(label);
+  if (exportControl) return exportControl;
+
   const politicallyExposed = politicallyExposedAnswer(label, ap);
   if (politicallyExposed) return politicallyExposed;
 
