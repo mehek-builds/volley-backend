@@ -244,7 +244,7 @@ test('submission packet attaches the role-specific resume filename', async () =>
  * behind the deliverability precondition, so the assertion moves with it. */
 test('submission packet only reaches for the alias through the deliverability precondition', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  assert.match(runner, /import \{ resolveFrozenApplicantEmail \} from '\.\.\/lib\/applicationEmail'/);
+  assert.match(runner, /import \{[\s\S]*resolveFrozenApplicantEmail[\s\S]*\} from '\.\.\/lib\/applicationEmail'/);
   const buildPacketIndex = runner.indexOf('export async function buildPacket');
   const resolveIndex = runner.indexOf('const applicantEmail = await resolveFrozenApplicantEmail', buildPacketIndex);
   const emailIndex = runner.indexOf('const email = applicantEmail.address.trim()', buildPacketIndex);
@@ -255,6 +255,19 @@ test('submission packet only reaches for the alias through the deliverability pr
   assert.doesNotMatch(runner, /ensureApplicationEmailAlias/);
   // The choice and its reason are recorded on the review state, on both prepare paths.
   assert.equal(runner.match(/applicant_email: packet\.applicantEmail/g)?.length, 2);
+});
+
+test('a retired packet email releases the final claim and requires regeneration before any employer request', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const failStart = runner.indexOf('async function fail(');
+  const failEnd = runner.indexOf('export type SecurityCodeSubmissionOutcome', failStart);
+  assert.ok(failStart > 0 && failEnd > failStart);
+  const failure = runner.slice(failStart, failEnd);
+  assert.match(failure, /error instanceof ApplicantEmailRegenerationRequiredError/);
+  assert.match(failure, /regenerationRequired, uncertainAfterClaim/);
+  assert.match(failure, /submission_claimed_at: undefined/);
+  assert.match(failure, /submission_claim_id: undefined/);
+  assert.match(failure, /submission_authorization: undefined/);
 });
 
 test('submission packet ignores stored cover-letter artifact names for outbound uploads', async () => {

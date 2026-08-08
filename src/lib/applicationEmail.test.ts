@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import {
   applicationAliasFor,
   applicationEmailRouteLabel,
+  applicationEmailRouteGenerationFingerprint,
   classifyApplicationEmail,
   forwardingAddressWouldLoop,
+  forwardEmailPayload,
   ApplicantEmailRegenerationRequiredError,
   isAliasAddress,
   relayRecipientFor,
@@ -71,6 +73,62 @@ test('application aliases can route through one main mailbox', () => {
     else process.env.LITOS_APPLICATION_EMAIL_DOMAIN = previousDomain;
     if (previousSecret === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
     else process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = previousSecret;
+  }
+});
+
+test('application aliases are deterministic on an explicit Resend-managed receiving domain', () => {
+  const saved = {
+    managed: process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN,
+    domain: process.env.LITOS_APPLICATION_EMAIL_DOMAIN,
+    mailbox: process.env.LITOS_APPLICATION_EMAIL_MAILBOX,
+    secret: process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET,
+  };
+  process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN = 'litos-inbound.resend.app';
+  delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+  delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+  process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = 'managed-secret';
+  try {
+    const first = applicationAliasFor(USER_ID, APPLICATION_ID);
+    const second = applicationAliasFor(USER_ID, APPLICATION_ID);
+    assert.equal(first, second);
+    assert.match(first ?? '', /^app-2222222222-[a-f0-9]{12}@litos-inbound\.resend\.app$/);
+  } finally {
+    if (saved.managed === undefined) delete process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN;
+    else process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN = saved.managed;
+    if (saved.domain === undefined) delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+    else process.env.LITOS_APPLICATION_EMAIL_DOMAIN = saved.domain;
+    if (saved.mailbox === undefined) delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+    else process.env.LITOS_APPLICATION_EMAIL_MAILBOX = saved.mailbox;
+    if (saved.secret === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
+    else process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = saved.secret;
+  }
+});
+
+test('route generation fingerprint changes when the alias secret rotates on the same domain', () => {
+  const savedDomain = process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+  const savedMailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+  const savedManaged = process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN;
+  const savedSecret = process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
+  process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'route.example.com';
+  delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+  delete process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN;
+  try {
+    process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = 'first-secret';
+    const first = applicationEmailRouteGenerationFingerprint();
+    process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = 'second-secret';
+    const second = applicationEmailRouteGenerationFingerprint();
+    assert.match(first ?? '', /^[a-f0-9]{20}$/);
+    assert.match(second ?? '', /^[a-f0-9]{20}$/);
+    assert.notEqual(first, second);
+  } finally {
+    if (savedDomain === undefined) delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+    else process.env.LITOS_APPLICATION_EMAIL_DOMAIN = savedDomain;
+    if (savedMailbox === undefined) delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+    else process.env.LITOS_APPLICATION_EMAIL_MAILBOX = savedMailbox;
+    if (savedManaged === undefined) delete process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN;
+    else process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN = savedManaged;
+    if (savedSecret === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
+    else process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = savedSecret;
   }
 });
 
@@ -307,6 +365,11 @@ test('retired Litos alias formats stay recognizable after a provider migration',
   }
 });
 
+test('ordinary personal addresses containing app words are not treated as Litos aliases', () => {
+  assert.equal(isAliasAddress('app-support@gmail.com'), false);
+  assert.equal(isAliasAddress('mehek+app-internship@gmail.com'), false);
+});
+
 test('a real contact address on the packet still wins over the account email', async () => {
   await withAliasDomain(async () => {
     const choice = await resolveApplicantEmail({
@@ -371,13 +434,173 @@ test('an unhealthy pinned alias holds for regeneration instead of switching the 
   });
 });
 
-test('a healthy pinned alias must also be active for exactly this packet', async () => {
-  await withAliasDomain(async () => {
+test('a healthy new domain still rejects a pinned alias from the retired mailbox route', async () => {
+  const savedDomain = process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+  const savedMailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+  const savedSecret = process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
+  process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'applications.trylitos.com';
+  delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+  process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = 'migration-secret';
+  try {
+    const current = applicationAliasFor(USER_ID, APPLICATION_ID);
+    assert.ok(current);
+    const currentLocal = current.slice(0, current.indexOf('@'));
+    const retired = `applications+${currentLocal}@trylitos.com`;
+    let activeLookupCount = 0;
     await assert.rejects(
       resolveFrozenApplicantEmail({
         userId: USER_ID,
         applicationId: APPLICATION_ID,
-        spec: { _contact: { email: ALIAS } },
+        spec: {
+          _contact: { email: retired },
+          _applicant_email: {
+            address: retired,
+            source: 'litos_alias',
+            reason: 'deliverable',
+            tracked: true,
+            decided_at: '2026-08-09T00:00:00.000Z',
+          },
+        },
+      }, {
+        deliverability: async () => deliverability({ domain: 'applications.trylitos.com' }),
+        aliasActive: async () => { activeLookupCount += 1; return true; },
+      }),
+      /must be regenerated.*current inbound email route/i,
+    );
+    assert.equal(activeLookupCount, 0, 'a stale active database row must not make a retired route usable');
+  } finally {
+    if (savedDomain === undefined) delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+    else process.env.LITOS_APPLICATION_EMAIL_DOMAIN = savedDomain;
+    if (savedMailbox === undefined) delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+    else process.env.LITOS_APPLICATION_EMAIL_MAILBOX = savedMailbox;
+    if (savedSecret === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
+    else process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = savedSecret;
+  }
+});
+
+test('a pinned alias on the current healthy dedicated route passes', async () => {
+  const savedDomain = process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+  const savedMailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+  const savedSecret = process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
+  process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'applications.trylitos.com';
+  delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+  process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = 'migration-secret';
+  try {
+    const current = applicationAliasFor(USER_ID, APPLICATION_ID);
+    assert.ok(current);
+    const choice = await resolveFrozenApplicantEmail({
+      userId: USER_ID,
+      applicationId: APPLICATION_ID,
+      spec: {
+        _contact: { email: current },
+        _applicant_email: {
+          address: current,
+          source: 'litos_alias',
+          reason: 'deliverable',
+          tracked: true,
+          decided_at: '2026-08-09T00:00:00.000Z',
+        },
+      },
+    }, {
+      deliverability: async () => deliverability({ domain: 'applications.trylitos.com' }),
+      aliasActive: async ({ alias }) => alias === current,
+    });
+    assert.equal(choice.address, current);
+    assert.equal(choice.tracked, true);
+  } finally {
+    if (savedDomain === undefined) delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+    else process.env.LITOS_APPLICATION_EMAIL_DOMAIN = savedDomain;
+    if (savedMailbox === undefined) delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+    else process.env.LITOS_APPLICATION_EMAIL_MAILBOX = savedMailbox;
+    if (savedSecret === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
+    else process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = savedSecret;
+  }
+});
+
+test('managed receiving rejects an alias frozen on the previous route', async () => {
+  const saved = {
+    managed: process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN,
+    domain: process.env.LITOS_APPLICATION_EMAIL_DOMAIN,
+    mailbox: process.env.LITOS_APPLICATION_EMAIL_MAILBOX,
+    secret: process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET,
+  };
+  process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN = 'litos-inbound.resend.app';
+  delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+  delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+  process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = 'managed-secret';
+  try {
+    await assert.rejects(resolveFrozenApplicantEmail({
+      userId: USER_ID,
+      applicationId: APPLICATION_ID,
+      spec: { _contact: { email: 'app-2222222222-abcdef012345@old-route.example' } },
+    }, {
+      deliverability: async () => deliverability({ domain: 'litos-inbound.resend.app' }),
+      aliasActive: async () => true,
+    }), /current inbound email route/i);
+  } finally {
+    if (saved.managed === undefined) delete process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN;
+    else process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN = saved.managed;
+    if (saved.domain === undefined) delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+    else process.env.LITOS_APPLICATION_EMAIL_DOMAIN = saved.domain;
+    if (saved.mailbox === undefined) delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+    else process.env.LITOS_APPLICATION_EMAIL_MAILBOX = saved.mailbox;
+    if (saved.secret === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
+    else process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = saved.secret;
+  }
+});
+
+test('mailbox configuration takes precedence when validating the current pinned route', async () => {
+  const savedDomain = process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+  const savedMailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+  const savedSecret = process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
+  process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'applications.trylitos.com';
+  process.env.LITOS_APPLICATION_EMAIL_MAILBOX = 'applications@trylitos.com';
+  process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = 'migration-secret';
+  try {
+    const mailboxAlias = applicationAliasFor(USER_ID, APPLICATION_ID);
+    assert.ok(mailboxAlias?.startsWith('applications+app-'));
+    assert.ok(mailboxAlias?.endsWith('@trylitos.com'));
+    const choice = await resolveFrozenApplicantEmail({
+      userId: USER_ID,
+      applicationId: APPLICATION_ID,
+      spec: { _contact: { email: mailboxAlias } },
+    }, {
+      deliverability: async () => deliverability({ domain: 'trylitos.com' }),
+      aliasActive: async ({ alias }) => alias === mailboxAlias,
+    });
+    assert.equal(choice.address, mailboxAlias);
+
+    const dedicatedAlias = mailboxAlias!.slice(mailboxAlias!.indexOf('+') + 1).replace('@trylitos.com', '@applications.trylitos.com');
+    await assert.rejects(
+      resolveFrozenApplicantEmail({
+        userId: USER_ID,
+        applicationId: APPLICATION_ID,
+        spec: { _contact: { email: dedicatedAlias } },
+      }, {
+        deliverability: async () => deliverability({ domain: 'trylitos.com' }),
+        aliasActive: async () => true,
+      }),
+      /current inbound email route/i,
+    );
+  } finally {
+    if (savedDomain === undefined) delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+    else process.env.LITOS_APPLICATION_EMAIL_DOMAIN = savedDomain;
+    if (savedMailbox === undefined) delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+    else process.env.LITOS_APPLICATION_EMAIL_MAILBOX = savedMailbox;
+    if (savedSecret === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
+    else process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = savedSecret;
+  }
+});
+
+test('a healthy pinned alias must also be active for exactly this packet', async () => {
+  await withAliasDomain(async () => {
+    const current = applicationAliasFor(USER_ID, APPLICATION_ID);
+    assert.ok(current);
+    await assert.rejects(
+      resolveFrozenApplicantEmail({
+        userId: USER_ID,
+        applicationId: APPLICATION_ID,
+        spec: { _contact: { email: current } },
       }, {
         deliverability: async () => deliverability(),
         aliasActive: async () => false,
@@ -436,6 +659,88 @@ test('mail from the employer is forwarded in, mail from the applicant is relayed
     routeInboundApplicationEmail({ from: `Mehek <${FORWARD_TO}>`, alias: ALIAS, forwardTo: FORWARD_TO }),
     { kind: 'applicant_reply' },
   );
+});
+
+test('managed receiving forwards truthfully and never treats an applicant reply as relayable', () => {
+  const savedManaged = process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN;
+  const savedDomain = process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+  const savedMailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+  process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN = 'litos-inbound.resend.app';
+  delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+  delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+  try {
+    const alias = 'app-2222222222-abcdef012345@litos-inbound.resend.app';
+    const forwarded = forwardEmailPayload({
+      alias,
+      forwardTo: FORWARD_TO,
+      classification: 'recruiter_reply',
+      inbound: { from: 'recruiter@example.com', to: [alias], text: 'Hello' },
+    });
+    assert.equal(forwarded.reply_to, undefined);
+    assert.match(forwarded.text ?? '', /cannot send replies/i);
+    assert.doesNotMatch(forwarded.text ?? '', /Litos sends your answer/i);
+    assert.deepEqual(
+      routeInboundApplicationEmail({ from: FORWARD_TO, alias, forwardTo: FORWARD_TO }),
+      { kind: 'drop', reason: 'managed_reply_unsupported' },
+    );
+  } finally {
+    if (savedManaged === undefined) delete process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN;
+    else process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN = savedManaged;
+    if (savedDomain === undefined) delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+    else process.env.LITOS_APPLICATION_EMAIL_DOMAIN = savedDomain;
+    if (savedMailbox === undefined) delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+    else process.env.LITOS_APPLICATION_EMAIL_MAILBOX = savedMailbox;
+  }
+});
+
+test('a historical managed alias stays inbound-only after configuration switches routes', () => {
+  const savedManaged = process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN;
+  const savedDomain = process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+  const savedMailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+  delete process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN;
+  process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'applications.example.com';
+  delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+  try {
+    const alias = 'app-2222222222-abcdef012345@historical-inbox.resend.app';
+    const forwarded = forwardEmailPayload({
+      alias,
+      forwardTo: FORWARD_TO,
+      classification: 'recruiter_reply',
+      inbound: { from: 'recruiter@example.com', to: [alias], text: 'Hello' },
+    });
+    assert.equal(forwarded.reply_to, undefined);
+    assert.match(forwarded.text ?? '', /cannot send replies/i);
+    assert.doesNotMatch(forwarded.text ?? '', /Litos sends your answer/i);
+    assert.deepEqual(
+      routeInboundApplicationEmail({ from: FORWARD_TO, alias, forwardTo: FORWARD_TO }),
+      { kind: 'drop', reason: 'managed_reply_unsupported' },
+    );
+  } finally {
+    if (savedManaged === undefined) delete process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN;
+    else process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN = savedManaged;
+    if (savedDomain === undefined) delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+    else process.env.LITOS_APPLICATION_EMAIL_DOMAIN = savedDomain;
+    if (savedMailbox === undefined) delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+    else process.env.LITOS_APPLICATION_EMAIL_MAILBOX = savedMailbox;
+  }
+});
+
+test('custom receiving keeps reply-as-alias behavior unchanged', () => {
+  const savedManaged = process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN;
+  delete process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN;
+  try {
+    const forwarded = forwardEmailPayload({
+      alias: ALIAS,
+      forwardTo: FORWARD_TO,
+      classification: 'recruiter_reply',
+      inbound: { from: 'recruiter@example.com', to: [ALIAS], text: 'Hello' },
+    });
+    assert.equal(forwarded.reply_to, ALIAS);
+    assert.match(forwarded.text ?? '', /Litos sends your answer/i);
+  } finally {
+    if (savedManaged === undefined) delete process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN;
+    else process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN = savedManaged;
+  }
 });
 
 test('mail apparently from the alias itself is dropped, because that is what a loop looks like', () => {
