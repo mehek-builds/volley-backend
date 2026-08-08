@@ -97,6 +97,17 @@ export const bodySchema = z.object({
   advanced_study_plan: z.enum(['no', 'considering', 'committed']).nullable().optional(),
   attest_truthful_information: z.boolean().nullable().optional(),
   accept_privacy_notices: z.boolean().nullable().optional(),
+
+  /* ---- where she will work from ----
+   * Constrained for the same reason advanced_study_plan is: the resolver turns these into Yes and
+   * No on real employer forms, so an unrecognised string must fail the save rather than read back
+   * as "never asked" and quietly stop answering. onsite_locations is her own free text (the metro
+   * as she would type it), ordered most-preferred first, and [] is a real answer meaning "no office
+   * works for me" rather than "never asked" - which is why it is not collapsed to a null.
+   */
+  onsite_commitment: z.enum(['anywhere', 'listed_locations', 'no']).nullable().optional(),
+  onsite_locations: z.array(z.string()).nullable().optional(),
+  relocation_willingness: z.enum(['yes', 'no']).nullable().optional(),
 });
 
 /* The consent timestamp is SERVER-SET, never taken from the body, which is why it has no line

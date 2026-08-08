@@ -205,3 +205,45 @@ test('the pre-script is not joined into a board list query', () => {
   const board = readFileSync('src/routes/jobMonitor.ts', 'utf8');
   assert.doesNotMatch(board, /posting_questions/);
 });
+
+/* ---------------------------------------------------------------------------------------------
+ * AN EXISTING USER WHO HAS NOT ANSWERED IS ASKED, NEVER DEFAULTED.
+ *
+ * The migration that adds onsite_commitment is additive and nullable, so every account already on
+ * the system reads null the moment the code deploys. The failure mode this pins is the tempting
+ * one: making the new column "default to what we did before" so nothing appears to change. That
+ * would be the constant again, with a migration in front of it.
+ *
+ * Instead the resolver refuses, and the pre-script - the ask-at-Apply machinery from PR #373 -
+ * puts the question on the screen with a sentence naming it, before the run starts.
+ * ------------------------------------------------------------------------------------------- */
+test('an account with no stored onsite commitment is asked at Apply, not answered', () => {
+  // The exact Redwood Materials label, from packet 8d12aea8-8476-4f7a-860b-fa6393842df9, which was
+  // ready to send with this answered "Yes".
+  const redwood: PostingQuestion = {
+    label: 'Are you available to work from our office in San Francisco?',
+    input_type: 'select',
+    options: ['Yes', 'No'],
+    required: true,
+    max_length: null,
+  };
+  const { ask, questions } = resolvePrescript([redwood], profile, new Map(), { company: 'Redwood Materials' });
+  assert.equal(ask.length, 1);
+  assert.equal(ask[0].label, redwood.label);
+  // Blank. Not "Yes", and not a best guess off her address.
+  assert.equal(ask[0].answer, '');
+  assert.equal(questions[0].remembered, false);
+  // And she is told which question is waiting, rather than finding an empty required field later.
+  assert.ok(prescriptAskExplanation(ask[0].reason!, redwood.label).length > 20);
+
+  // Once the onboarding fact is stored it is relayed, and she is not asked again.
+  const committed = resolvePrescript([redwood], {
+    ...profile,
+    onsite_commitment: 'listed_locations',
+    onsite_locations: ['Los Angeles'],
+  }, new Map(), { company: 'Redwood Materials' });
+  assert.equal(committed.ask.length, 0);
+  // Los Angeles is on her list and San Francisco is not, so the true answer is No - which is the
+  // whole reason the column carries a list rather than a boolean.
+  assert.equal(committed.questions[0].answer, 'No');
+});
