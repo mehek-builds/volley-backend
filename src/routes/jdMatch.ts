@@ -16,6 +16,7 @@ import { buildInterviewPrep } from '../engine/interviewPrep';
 import { extractJdTerms } from '../engine/jdMatch';
 import { generated_resumes, autofill_events, monitored_jobs, career_page_sources } from '../db/schema';
 import { AUTONOMOUS_PORTAL_FAMILIES } from '../lib/portalSubmission';
+import { resolveRevision } from '../lib/buildInfo';
 import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
 import { readExperienceBank, readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
 import type { ResumeSpec } from '../llm/resumeSpec';
@@ -561,6 +562,12 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
         pipeline_stage_at: generated_resumes.pipeline_stage_at,
         status: sql<string | null>`${generated_resumes.spec}->'_review'->>'status'`,
         reviewable: sql<boolean>`${generated_resumes.spec}->'_review' is not null`,
+        /* WHICH BUILD THE STATE ON THIS CARD IS EVIDENCE ABOUT. See ApplicationReviewState.
+         * run_revision. A board reader comparing these to `revision` below can tell a packet that
+         * stopped for a reason apart from one that has not been re-run since the fix, which is the
+         * distinction a results table built off submission_status alone silently gets wrong. */
+        run_revision: sql<string | null>`${generated_resumes.spec}->'_review'->>'run_revision'`,
+        review_updated_at: sql<string | null>`${generated_resumes.spec}->'_review'->>'updated_at'`,
       })
       .from(generated_resumes)
       .where(eq(generated_resumes.user_id, userId))
@@ -572,6 +579,10 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
     return reply.status(200).send({
       stages: STAGES,
       limit: BOARD_LIMIT,
+      /* The commit serving this response, so "is this card's state current?" is answerable from one
+       * request instead of a board call plus a /health call plus the assumption that nothing
+       * deployed in between. Null when the deployment supplied no SHA; see lib/buildInfo. */
+      revision: resolveRevision().revision,
       cards: rows.map((row) => {
         const context = (row.job_context ?? {}) as { company?: string; role?: string; job_id?: string };
         return {
@@ -587,6 +598,10 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
           moved_at: row.pipeline_stage_at,
           reviewable: row.reviewable,
           submission_status: row.status,
+          // Absent on packets last written before run_revision shipped, and on any run whose
+          // deployment supplied no SHA. Null means unknown, never "current".
+          run_revision: row.run_revision,
+          review_updated_at: row.review_updated_at,
           stage: deriveStage(row.pipeline_stage, row.status),
         };
       }),
