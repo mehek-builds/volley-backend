@@ -2261,6 +2261,129 @@ test('Greenhouse school aliases drop a school-inside-the-institution, for anyone
   assert.deepEqual(schoolValuesFor('Boston College'), ['Boston College']);
 });
 
+// A Greenhouse packet big enough that the budget trim has to run, shaped like the live DRW Software
+// Developer Intern packet: many screener questions, EEO preferences and a stored referral source.
+// Those last two are what a hand-built test packet leaves out and what a real profile always
+// supplies, and they are worth 39 actions on their own.
+function overBudgetGreenhousePacket(extraQuestions: Array<{ question: string; answer: string }> = []) {
+  // Worded so each one is recognised as a React Select, because that is what makes a real screener
+  // expensive: a plain text question is one action, a combobox is five. DRW's live packet reached
+  // 231 raw actions this way, and 231 is the number that made the trim reach the education row.
+  const screeners = Array.from({ length: 24 }, (_, index) => ({
+    question: `Which team opening are you most interested in for area ${index + 1}?`,
+    answer: 'Core platform',
+  }));
+  return {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    phone: '+971501234567',
+    city: 'Dubai',
+    country: 'United Arab Emirates',
+    school: 'University of Southern California, Viterbi School of Engineering',
+    degree: 'Bachelor of Science in Computer Science',
+    graduationDate: 'May 2028',
+    graduationMonth: 'May',
+    graduationYear: '2028',
+    gpa: '3.89',
+    major: 'Computer Science & Business Administration, Finance Emphasis',
+    roleLocation: 'Chicago',
+    referralSourceDefault: 'Company website',
+    eeoPrefs: {
+      gender: 'Female',
+      race: 'Asian',
+      veteran_status: 'I am not a protected veteran',
+      disability_status: 'No, I do not have a disability',
+      sexual_orientation: 'Heterosexual',
+      transgender_status: 'No',
+    },
+    jdText: 'Software Developer Intern',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [...screeners, ...extraQuestions],
+  };
+}
+
+test('the budget may never delete the fixed education row, however large the form', () => {
+  // THE REGRESSION, measured against the live DRW packet on 2026-08-09. Its raw action list is 231
+  // actions against a 120 budget. The trim walked its priority list, reached
+  // `education_discipline_combo:` and `education_discipline_label`, and deleted both, so the run
+  // never touched the Discipline control at all and the applicant was told
+  // '"Discipline" is required and is still empty' about a field whose answer had been resolved
+  // correctly and simply never sent. Everything else on that form was fine.
+  //
+  // School, Degree, Discipline and End date month are one known block of four controls and sixteen
+  // actions, present and required on every Greenhouse board, and each has exactly one attempt. There
+  // is no budget saving worth deleting a required field's only attempt, so they are protected
+  // outright rather than merely ranked low.
+  const actions = buildManagedPortalActions('greenhouse', overBudgetGreenhousePacket() as never);
+  assert.ok(actions.length <= 120, `the budget must still be respected, got ${actions.length}`);
+  const fillFor = (selector: string) => actions
+    .filter((action) => action.type === 'fill' && action.selector === selector)
+    .map((action) => action.value);
+  assert.deepEqual(fillFor('#school--0'), ['University of Southern California']);
+  assert.deepEqual(fillFor('#degree--0'), ["Bachelor's Degree"]);
+  assert.deepEqual(fillFor('#discipline--0'), ['Computer Science'], 'Discipline is the field that was being deleted');
+  assert.deepEqual(fillFor('#end-month--0'), ['May']);
+  assert.ok(actions.some((action) => action.selector === '#end-year--0'));
+});
+
+test('a control whose label offers "Other if not listed" gets that option, last and only last', () => {
+  // Measured read-only on the live Virtu Software Engineer Internship form, 2026-08-09. Its question
+  // "Which university are you currently attending? Select "Other" if not listed" is not the
+  // Greenhouse school taxonomy: it is a curated list of fifteen schools plus "Other", and the
+  // applicant's university is genuinely absent. Every candidate matched nothing and the field came
+  // back required-and-empty on a form that had said in its own label what to do about it.
+  //
+  // "Other" is not a near-miss here, it is the accurate answer. It must still be LAST, so it can only
+  // be reached once every real value has failed to match.
+  // Deliberately a SMALL packet: this is about which values are generated, not about the budget, and
+  // an over-budget packet would trim the question away before the assertion could see it.
+  const valuesForQuestion = (question: string, answer: string, match: RegExp) => buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    school: 'University of Southern California, Viterbi School of Engineering',
+    degree: 'Bachelor of Science in Computer Science',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [{ question, answer }],
+  } as never)
+    .filter((action) => action.type === 'fill' && match.test(action.label ?? ''))
+    .map((action) => action.value);
+
+  assert.deepEqual(
+    valuesForQuestion(
+      'Which university are you currently attending? Select "Other" if not listed',
+      'University of Southern California, Viterbi School of Engineering',
+      /which university are you currently attending/i,
+    ),
+    ['University of Southern California', 'Other'],
+    'the real school is tried first and the escape hatch only after it',
+  );
+
+  // And a question that does not advertise an escape hatch never gets one, however "other" reads in
+  // its wording.
+  assert.ok(!valuesForQuestion(
+    'Do you have any other offers outstanding?',
+    'No',
+    /other offers outstanding/i,
+  ).includes('Other'));
+});
+
+test('a redundant second guess at one control is given up before the only guess at another', () => {
+  // The referral source fires at five label wordings, the graduation date at nine, the preferred
+  // location at three, because only one of each can exist on a board. That is 85 of DRW's 231
+  // actions. Before this, the trim gave up the referral question, the demographics and the education
+  // row while keeping all 45 graduation-date guesses at a control DRW does not have.
+  const actions = buildManagedPortalActions('greenhouse', overBudgetGreenhousePacket() as never);
+  const bases = actions.map((action) => (action.label ?? '').replace(/_(?:open|option_value|option|select)$/, ''));
+  const alternateReferralWordings = bases.filter((base) => /^greenhouse_referral_combo_(?:label|select):\d+:(?:How did you first hear|Where did you hear|Where have you learned|Referral source)/.test(base));
+  assert.deepEqual(alternateReferralWordings, [], 'the four alternate referral wordings go first');
+  const alternateGraduationGuesses = bases.filter((base) => /^education_graduation_date_combo:[1-9]/.test(base));
+  assert.deepEqual(alternateGraduationGuesses, [], 'so do the eight alternate graduation-date guesses');
+  // And what the freed budget bought: the education row, which used to be what paid for them.
+  assert.ok(actions.some((action) => action.selector === '#discipline--0' && action.type === 'fill'));
+});
+
 test('no managed action can burn the 30s default — every fill, upload, and question is bounded', () => {
   // Live Jump Trading retry, 2026-07-24: after the core-field fix the run cleared name/email and
   // then died on `locator.setInputFiles: Timeout 30000ms exceeded` at the resume input, because the
