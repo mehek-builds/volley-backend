@@ -1000,6 +1000,78 @@ export async function discoverAndResolveQuestions(
   return { questions, attentionReasons };
 }
 
+/**
+ * Shortest label worth comparing by prefix. Providers truncate a long blocker label, so a stored
+ * question and a blocker naming the same field agree only on their opening; below this length that
+ * agreement is a coincidence rather than a match.
+ */
+const BLOCKER_PREFIX_MATCH_MIN_LENGTH = 8;
+
+/**
+ * The required fields this run has left the applicant no way to answer.
+ *
+ * A blocker is Litos saying "the employer will not accept the form without this". A question record
+ * is Litos giving her somewhere to put the answer. When the first exists without the second, the
+ * dashboard names an obstacle and offers no control that can clear it, and the run has, until now,
+ * reported no error at all - the DRW packet carried 27 of these and called itself
+ * `needs_attention` with an empty `questions` array and `submission_error: null`.
+ *
+ * Counting them is what turns that into a sentence she can act on and an engineer can measure. It
+ * says nothing about WHY the field is unanswerable: a transcript upload she has never given Litos
+ * and a question the discovery pass simply never saw both land here, and both are honest to report.
+ */
+export function unansweredRequiredBlockerLabels(
+  blockers: readonly string[],
+  questions: readonly { question: string }[],
+): string[] {
+  const asked = questions
+    .map((item) => normalizeReviewQuestionLabel(item.question).toLowerCase())
+    .filter(Boolean);
+  const out: string[] = [];
+  for (const blocker of blockers) {
+    const label = blocker.match(REQUIRED_AND_EMPTY_BLOCKER)?.[1];
+    if (!label) continue;
+    const needle = normalizeReviewQuestionLabel(label).toLowerCase();
+    if (!needle) continue;
+    const matched = asked.some((question) => {
+      if (question === needle) return true;
+      if (question.length < BLOCKER_PREFIX_MATCH_MIN_LENGTH || needle.length < BLOCKER_PREFIX_MATCH_MIN_LENGTH) return false;
+      return question.startsWith(needle) || needle.startsWith(question);
+    });
+    if (matched) continue;
+    out.push(label);
+  }
+  return [...new Set(out)];
+}
+
+/**
+ * What the run owes the applicant about its own blind spots, in her words.
+ *
+ * Two separate admissions, and they are not the same failure. The first is "the scan did not run";
+ * the second is "the scan ran and still there are required fields you cannot answer here". A run
+ * can produce either, both, or neither.
+ */
+export function discoveryHonestyReasons(
+  discoveryFailure: string | undefined,
+  unansweredRequired: readonly string[],
+): string[] {
+  const reasons: string[] = [];
+  if (discoveryFailure) {
+    reasons.push(
+      'we could not read the questions this form asks, so anything beyond the standard fields is not '
+      + `answerable in Litos on this run (${discoveryFailure.slice(0, 200)})`,
+    );
+  }
+  if (unansweredRequired.length > 0) {
+    const named = unansweredRequired.map((label) => `"${label.slice(0, 60)}"`).join(', ');
+    reasons.push(
+      `${unansweredRequired.length} required ${unansweredRequired.length === 1 ? 'field has' : 'fields have'} `
+      + `no question you can answer in Litos: ${named.slice(0, 400)}`,
+    );
+  }
+  return reasons;
+}
+
 async function prepareManaged(
   row: ResumeRow,
   current: ApplicationReviewState,
@@ -1021,7 +1093,31 @@ async function prepareManaged(
   // stateless. Resolved through the SAME questionDiscovery.ts logic the direct-Playwright path
   // uses, so the two providers can never answer a question differently.
   const applicationUrl = portalApplicationUrl(portal, current.portal_url!);
-  const discoveryResult = await runManagedBrowser(applicationUrl, buildManagedDiscoveryActions(portal, packet)).catch(() => null);
+  /* `.catch(() => null)` used to be the whole error handling here, and it is how a total failure of
+   * the discovery pass became indistinguishable from a form that simply had no custom questions.
+   *
+   * Measured on DRW's Software Developer Intern packet, 2026-08-08: the action list was 145 long,
+   * the runner rejects anything over 120 before opening a browser, so this call returned HTTP 400
+   * and nothing at all was discovered. The run then filled the fixed fields, recorded 27 separate
+   * "is required and is still empty" blockers, wrote zero question records, and reported no error.
+   * The applicant was handed 27 named obstacles and no way to answer any of them.
+   *
+   * The budget bug is fixed in buildManagedDiscoveryActions. This is the second half: a discovery
+   * pass that fails for ANY reason now says so, in the applicant's own attention list, and the run
+   * cannot be called safe on the strength of a page it never read. */
+  // An array rather than a nullable local so the assignment inside the catch callback is visible to
+  // the code below it; TypeScript does not narrow across a closure it cannot prove ran.
+  const discoveryFailures: string[] = [];
+  const discoveryResult = await runManagedBrowser(applicationUrl, buildManagedDiscoveryActions(portal, packet))
+    .catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      discoveryFailures.push(message);
+      fastify.log.error(
+        { applicationId: row.id, portal, error: message },
+        'Question discovery pass failed, so this run cannot see the questions this form asks',
+      );
+      return null;
+    });
   // The closed lists' REAL option texts, read off the live page by the discovery pass. Without
   // these, resolveProfileField's option snapping (PR #361) is inert on this path: the managed
   // provider's discover action reports no options at all, so a control offering "Computer Science"
@@ -1122,10 +1218,38 @@ async function prepareManaged(
     discovered: discoveredFields,
     extracted: [...(result.extracted ?? []), ...(discoveryResult?.extracted ?? [])],
   }, packet);
-  const attentionReasons = [...blockers, ...discoveryAttention, ...evidenceBlockers, ...coverLetterAttention];
+  // The gap between what the employer demands and what Litos can offer her a place to type. See
+  // unansweredRequiredBlockerLabels: this is the measurement the DRW run should have carried and did
+  // not, and it is logged as an error because a non-zero count is a product defect first and the
+  // applicant's problem second.
+  const unansweredRequired = unansweredRequiredBlockerLabels(blockers, mergedQuestions);
+  if (unansweredRequired.length > 0 || discoveryFailures.length > 0) {
+    fastify.log.error({
+      applicationId: row.id,
+      portal,
+      discoveryFailure: discoveryFailures[0],
+      discoveredCount: discoveredFields.length,
+      questionCount: mergedQuestions.length,
+      unansweredRequired,
+    }, 'Required fields with no answerable question record');
+  }
+  const honestyReasons = discoveryHonestyReasons(discoveryFailures[0], unansweredRequired);
+  const attentionReasons = [
+    ...blockers,
+    ...discoveryAttention,
+    ...evidenceBlockers,
+    ...coverLetterAttention,
+    ...honestyReasons,
+  ];
   const attentionCategories = attentionCategoriesForReasons(attentionReasons);
   const captchaAttention = blockersIncludeCaptcha(blockers);
-  const safe = blockers.length === 0 && discoveryAttention.length === 0 && evidenceBlockers.length === 0;
+  // A discovery pass that never ran cannot be the basis for calling a form complete, so its failure
+  // is a gate on `safe` in its own right: without this, a page whose fixed fields all filled would
+  // still be sent while every question the employer asked went unread.
+  const safe = blockers.length === 0
+    && discoveryAttention.length === 0
+    && evidenceBlockers.length === 0
+    && discoveryFailures.length === 0;
   const review = nextReview(current, {
     ...preparedReviewPatch(authorization, safe),
     ...(captchaAttention
