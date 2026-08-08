@@ -86,8 +86,11 @@ import {
   type ApplicationProfileLike,
   type DiscoveredQuestion,
 } from '../lib/questionDiscovery';
+import { isSelfDeclarationQuestion, selfDeclarationSkipReason } from '../lib/selfDeclaration';
+import { savedAnswerFor, type AnswerReuseContext } from '../lib/answerReuse';
 import { profileBackedBlockerLabels, resolveProfileField, usableOptions } from '../lib/profileFieldResolution';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
+import { loadSavedAnswers } from '../lib/savedAnswerStore';
 import type { ApplicationReviewQuestion } from '../lib/applicationReview';
 import { jobCountry } from '../lib/jobLocation';
 import { generateStoredCoverLetter, storedCoverLetter } from '../lib/coverLetterService';
@@ -752,6 +755,13 @@ async function packetForCoverLetterCapability(
   return { packet: await buildPacket(rows[0]) };
 }
 
+/** The employer this packet is for, from job_context. Empty when the packet has no company on it. */
+export function jobContextCompany(row: ResumeRow): string {
+  const context = (row.job_context && typeof row.job_context === 'object' ? row.job_context : {}) as Record<string, unknown>;
+  const company = context.company;
+  return typeof company === 'string' ? company.trim() : '';
+}
+
 export function applicationContextForQuestionResolution(row: ResumeRow, current: ApplicationReviewState): string {
   const context = (row.job_context && typeof row.job_context === 'object' ? row.job_context : {}) as Record<string, unknown>;
   const locationValues = [
@@ -786,6 +796,13 @@ export async function discoverAndResolveQuestions(
   ap: ApplicationProfileLike,
   automaticSubmissionEnabled: boolean,
   portal: SupportedPortal,
+  /* The answers she gave once on an earlier posting, keyed by lib/answerReuse.savedAnswerKey.
+   *
+   * Optional and defaulted, so every existing caller and test keeps working with no store at all.
+   * A remembered answer is consulted only where Litos has nothing of its own, and answerReuse
+   * re-checks the reuse scope against THIS posting's employer before handing one over - see
+   * savedAnswerFor for why the read side has to check again rather than trust the write side. */
+  savedAnswers: ReadonlyMap<string, string> = new Map(),
 ): Promise<{ questions: ApplicationReviewQuestion[]; attentionReasons: string[] }> {
   const existingByLabel = new Map(
     current.questions.map((q) => [normalizeReviewQuestionLabel(q.question).toLowerCase(), q] as const),
@@ -803,6 +820,7 @@ export async function discoverAndResolveQuestions(
     // keep the fallback
   }
   const questionContext = applicationContextForQuestionResolution(row, current);
+  const reuseContext: AnswerReuseContext = { company: jobContextCompany(row) };
   // Tested against the RAW label on purpose: normalizeDiscoveredLabel now strips the `--0`
   // section handle, because leaving it in the stored question text is what made every
   // `label:has-text(...)` scope miss. The handle is still the honest signal for "this is an
@@ -859,13 +877,31 @@ export async function discoverAndResolveQuestions(
     // making them "required answer missing" would block every application on data Litos supplied.
     const fieldIsRequired = discoveredFieldIsRequired(field) && !isCoreIdentityField(label);
     const existing = existingByLabel.get(reviewLabel.toLowerCase());
-    const known = resolveKnownAnswer(label, field.inputType, ap, questionContext);
+    const profileKnown = resolveKnownAnswer(label, field.inputType, ap, questionContext);
+    /* A REMEMBERED ANSWER, and where it sits in the order.
+     *
+     * It stands in only where Litos has nothing of its own. The structured profile wins over a copy
+     * of something she typed on another employer's form, because the profile is the thing she keeps
+     * current and the copy is a snapshot. Where the profile is silent - an export-control
+     * declaration, a "rate your skill level in C++" - the remembered answer is the whole point of
+     * having asked her once, and it is her own words being replayed rather than anything inferred.
+     *
+     * Which questions may be remembered at all is answerReuse's decision, not this loop's: nothing
+     * tied to one posting ever reaches here. */
+    const remembered = savedAnswerFor(label, savedAnswers, reuseContext);
+    const known = (profileKnown && 'value' in profileKnown)
+      ? profileKnown
+      : (remembered !== undefined ? ({ value: remembered } as const) : profileKnown);
     // One resolution layer for the value itself. resolveKnownAnswer still decides WHETHER the
     // question is answerable (and owns every skip and refusal); resolveProfileField decides what
     // the answer should LOOK LIKE for this particular control, snapping it onto the field's real
     // option list when discovery reported one. Without this a closed list was handed the
     // profile's own phrasing and selected nothing at all.
-    const resolvedField = known && 'value' in known
+    //
+    // Only for a PROFILE value. A remembered answer is used verbatim: she typed it against this
+    // exact question once, and snapping her own words onto a neighbouring option would rewrite a
+    // declaration she made.
+    const resolvedField = profileKnown && 'value' in profileKnown
       ? resolveProfileField(
         { label, inputType: field.inputType, options: field.options },
         ap,
@@ -942,6 +978,22 @@ export async function discoverAndResolveQuestions(
       // Still never answered. Surfaced now, with an empty answer, when the employer requires it -
       // otherwise a required attestation is a wall: Litos will not answer it and the applicant has
       // nowhere to. An optional sensitive field is left alone exactly as before.
+      if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
+      continue;
+    }
+    /* THE DRAFTER MAY NOT WRITE A DECLARATION ABOUT HER. This is the last door, and it is the one
+     * the 600-word essay walked through: "Have you previously applied to Akuna?" is open-ended by
+     * every measure isOpenEndedQuestion applies, so it went to the model, and the model wrote a
+     * confident paragraph opening "I have not applied to Akuna in the past" with nothing on file
+     * that said so.
+     *
+     * Each specific case since has been closed where it happened, in resolveKnownAnswer, and each
+     * of those fixes only covers a label somebody had already seen go wrong. This is the general
+     * form: a question whose answer is a statement she makes about herself is never drafted, however
+     * open-ended it reads, whether or not any rule above recognised it. She is asked instead, which
+     * is what the pre-script now does before the run ever starts. */
+    if (isSelfDeclarationQuestion(label)) {
+      attentionReasons.push(selfDeclarationSkipReason(label));
       if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
       continue;
     }
@@ -1130,6 +1182,7 @@ async function prepareManaged(
   const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
   const resolutionCurrent = { ...current, questions: storedQuestions };
   const applicationProfile = await loadApplicationProfileLike(row.user_id);
+  const savedAnswers = await loadSavedAnswers(row.user_id);
   const { questions: discoveredQuestions, attentionReasons: discoveryAttention } = await discoverAndResolveQuestions(
     discoveredFields,
     row,
@@ -1137,6 +1190,7 @@ async function prepareManaged(
     applicationProfile,
     authorization.enabled,
     portal,
+    savedAnswers,
   );
   const mergedQuestions = normalizeApplicationReviewQuestions([...discoveredQuestions, ...storedQuestions]);
   packet.questions = mergedQuestions.map((q) => ({
@@ -1447,7 +1501,15 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
     const resolutionCurrent = { ...current, questions: storedQuestions };
     const { questions: discoveredQuestions, attentionReasons: discoveryAttention } =
-      await discoverAndResolveQuestions(discovered, row, resolutionCurrent, await loadApplicationProfileLike(row.user_id), authorization.enabled, portal);
+      await discoverAndResolveQuestions(
+        discovered,
+        row,
+        resolutionCurrent,
+        await loadApplicationProfileLike(row.user_id),
+        authorization.enabled,
+        portal,
+        await loadSavedAnswers(row.user_id),
+      );
     const mergedQuestions = normalizeApplicationReviewQuestions([...discoveredQuestions, ...storedQuestions]);
     packet.questions = mergedQuestions.map((q) => ({
       question: q.question,

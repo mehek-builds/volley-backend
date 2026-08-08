@@ -34,6 +34,12 @@ export const LIMITS = {
     // Keep a small retry margin above that batch while preserving the per-user abuse ceiling.
     resume: parseInt(process.env.RATE_RESUME_PER_HOUR || '40', 10),
     jobExtract: parseInt(process.env.RATE_JOB_EXTRACT_PER_HOUR || '15', 10),
+    /* The Apply-time pre-script scan (GET /postings/:jobId/questions), which is a managed browser
+       run on a cache miss. Sized against the measured behaviour it has to support: a batch of 25
+       applications in one sitting, each a first scan of a posting nobody has applied to yet, plus
+       headroom for retries. Every later apply to the same posting is a cache hit and never reaches
+       this counter. */
+    postingQuestions: parseInt(process.env.RATE_POSTING_QUESTIONS_PER_HOUR || '60', 10),
     /* The requirement breakdown, which is a Sonnet call on a cache miss. Generous because a
        student reading a day's packets opens many and the cache makes most of them free; this is
        here to stop a loop, not to ration ordinary use. */
