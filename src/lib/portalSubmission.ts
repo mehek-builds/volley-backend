@@ -6,6 +6,7 @@ import {
   isLegalConsentQuestion,
   normalizeReviewQuestionLabel,
   resolveKnownAnswer,
+  ROUTINE_APPLICANT_CONSENT_QUESTION,
   type ApplicationProfileLike,
 } from './questionDiscovery';
 import {
@@ -39,7 +40,9 @@ type PortalFamily =
   | 'jobvite'
   | 'icims'
   | 'oraclecloud'
-  | 'ultipro';
+  | 'ultipro'
+  | 'recruitee'
+  | 'teamtailor';
 type ControlledPortal =
   | 'controlled_test'
   | 'controlled_lever'
@@ -89,6 +92,7 @@ function portalFamily(portal: SupportedPortal): PortalFamily {
 // against this one by the type checker instead of by a test that someone can forget to run.
 type MultiStepFamily = 'paylocity' | 'smartrecruiters';
 type CaptchaGatedFamily = 'jazzhr' | 'bamboohr';
+type ConsentGatedFamily = 'teamtailor';
 
 const MULTI_STEP_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
   ['paylocity', 'smartrecruiters'] satisfies MultiStepFamily[],
@@ -103,6 +107,13 @@ const MULTI_STEP_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
 // has to be written down - the form LOOKS like a one-run submit and is not.
 const CAPTCHA_GATED_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
   ['jazzhr', 'bamboohr'] satisfies CaptchaGatedFamily[],
+);
+
+// Teamtailor puts an applicant privacy acknowledgement beside the send control on every live
+// tenant inspected. The checkbox is not consistently marked required in HTML, so the generic
+// readiness scan cannot prove that an unchecked control is safe. Fill the factual fields and stop.
+const CONSENT_GATED_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
+  ['teamtailor'] satisfies ConsentGatedFamily[],
 );
 
 // Portals where there is no application form to fill AT ALL until a human passes a gate that only
@@ -157,6 +168,7 @@ export function portalCanAutoSubmit(portal: SupportedPortal): boolean {
   const family = portalFamily(portal);
   return !MULTI_STEP_FAMILIES.has(family)
     && !CAPTCHA_GATED_FAMILIES.has(family)
+    && !CONSENT_GATED_FAMILIES.has(family)
     && !ACCOUNT_WALLED_FAMILIES.has(family);
 }
 
@@ -171,7 +183,7 @@ export function portalCanAutoSubmit(portal: SupportedPortal): boolean {
 // discovers the last step needs her anyway. Fewer jobs that all work beats more jobs that mostly do.
 export type AutonomousPortalFamily = Exclude<
   PortalFamily,
-  MultiStepFamily | CaptchaGatedFamily | AccountWalledFamily
+  MultiStepFamily | CaptchaGatedFamily | ConsentGatedFamily | AccountWalledFamily
 >;
 
 export const AUTONOMOUS_PORTAL_FAMILIES = [
@@ -185,6 +197,9 @@ export const AUTONOMOUS_PORTAL_FAMILIES = [
   // choice, or an account wall.
   'rippling',
   'breezy',
+  // Recruitee is a single-page form. Its optional invisible hCaptcha is handled by the shared
+  // pre-submit challenge probe, and any tenant agreement remains an empty required-field blocker.
+  'recruitee',
 ] as const satisfies readonly AutonomousPortalFamily[];
 
 export function isAutonomousPortalFamily(value: string): value is AutonomousPortalFamily {
@@ -218,6 +233,9 @@ export function portalHandoffReason(portal: SupportedPortal): string | null {
   if (CAPTCHA_GATED_FAMILIES.has(family)) {
     return 'This company’s application page asks you to prove you are human. Litos filled everything in, so all that is left is that check and the send button.';
   }
+  if (CONSENT_GATED_FAMILIES.has(family)) {
+    return 'This company asks you to confirm its applicant privacy terms before sending. Litos filled the form but left that choice and the send button to you.';
+  }
   if (MULTI_STEP_FAMILIES.has(family)) {
     return 'Litos filled in this application and stopped on the last page. That page asks you to confirm the details are true, and it can ask about your background and your right to work, so those answers need to be yours.';
   }
@@ -238,6 +256,9 @@ export function unattendedHandoffReason(portal: SupportedPortal): string | null 
   }
   if (CAPTCHA_GATED_FAMILIES.has(family)) {
     return 'This company asks you to prove you are human before it will take an application, so Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.';
+  }
+  if (CONSENT_GATED_FAMILIES.has(family)) {
+    return 'This company asks you to confirm its applicant privacy terms before it will take the application, so Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.';
   }
   if (MULTI_STEP_FAMILIES.has(family)) {
     return 'This company asks its questions over several pages, and the last one needs answers only you can give. Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.';
@@ -440,6 +461,8 @@ function receiptReference(body: string): string | undefined {
   return body.match(/(?:confirmation|reference)(?:\s*(?:id|number))?\s*[:#]\s*([A-Z0-9-]{5,})/i)?.[1]
     ?? body.match(/application\s*(?:id|number|#)\s*[:#]?\s*([A-Z0-9-]{5,})/i)?.[1];
 }
+
+const RECEIPT_PROOF_RE = /thank you|thanks for your application|application (?:has been )?(?:submitted|received)|we received your application|your application has been successfully submitted|all done![\s\S]{0,160}application|success/i;
 
 // Bounded auto-wait for every managed action. Playwright defaults to 30s, so a single selector
 // that never matches (e.g. a Greenhouse posting proxied through a branded domain whose form does
@@ -998,6 +1021,13 @@ export function isChoiceQuestion(question: string): boolean {
 
 function shouldSkipReviewedConsentQuestion(questionText: string): boolean {
   return isLegalConsentQuestion(questionText) && /demographic data survey/i.test(questionText);
+}
+
+function shouldSkipPortalConsentQuestion(family: PortalFamily, questionText: string): boolean {
+  if (family !== 'recruitee' && family !== 'teamtailor') return false;
+  return isLegalConsentQuestion(questionText)
+    || ROUTINE_APPLICANT_CONSENT_QUESTION.test(questionText)
+    || /\b(?:keep|retain|store|use)\b[\s\S]{0,120}\b(?:my|your)\s+(?:information|data)\b[\s\S]{0,120}\b(?:future|other)\s+(?:jobs?|positions?|vacancies|opportunities)\b/i.test(questionText);
 }
 
 // Whether reviewed questions may be sent to a given provider's runner.
@@ -2478,6 +2508,16 @@ const BAMBOOHR_RESUME_SELECTOR = 'input[type="file"][aria-label="file-input"]';
 // present, so the same never-matching declaration as Breezy/JazzHR applies rather than a guess.
 const BAMBOOHR_COVER_LETTER_SELECTOR = 'input[type="file"][name="bambooCoverLetterThatDoesNotExist"]';
 
+// Captured from rebuy and Optiweb Recruitee forms on 2026-08-09.
+const RECRUITEE_RESUME_SELECTOR = 'input[type="file"][name="candidate.cv"]';
+const RECRUITEE_COVER_LETTER_SELECTOR = 'input[type="file"][name="candidate.coverLetterFile"]';
+
+// Captured from Teamtailor and AICOM tenant forms on 2026-08-09.
+const TEAMTAILOR_RESUME_SELECTOR = '#upload_resume_field input[type="file"]';
+// Neither captured Teamtailor form exposed a dedicated cover-letter file input. Never let a broad
+// file selector replace the resume with the cover letter.
+const TEAMTAILOR_COVER_LETTER_SELECTOR = 'input[type="file"][name="teamtailorCoverLetterThatDoesNotExist"]';
+
 // NOT filled: input[name^="nickname_"], BambooHR's honeypot, labelled "Please leave this field
 // blank" and concealed the same zero-height-ancestor way Breezy's is.
 //
@@ -2512,6 +2552,8 @@ const COVER_LETTER_UPLOAD_SELECTORS: Record<SupportedPortal, string> = {
   controlled_breezy: BREEZY_COVER_LETTER_SELECTOR,
   bamboohr: BAMBOOHR_COVER_LETTER_SELECTOR,
   controlled_bamboohr: BAMBOOHR_COVER_LETTER_SELECTOR,
+  recruitee: RECRUITEE_COVER_LETTER_SELECTOR,
+  teamtailor: TEAMTAILOR_COVER_LETTER_SELECTOR,
   // The account-walled four never reach a form, so there is no file input of any kind to find. A
   // never-matching selector is the honest answer to "can this portal accept a cover-letter file"
   // here, and it keeps hasCoverLetterUpload() from having to special-case them.
@@ -2817,6 +2859,22 @@ function pushFixedFieldActions(
     // streetAddress.value and zip.value (the packet carries only city, so inventing them is out),
     // desiredPay (R-031 governs salary and is currency-gated, handled by the reviewed-question path),
     // and educationLevelId. All surface as required-field blockers for the human.
+  } else if (family === 'recruitee') {
+    managedFill(actions, 'input[name="candidate.name"]', packet.fullName, 'name');
+    managedFill(actions, 'input[name="candidate.email"]', packet.email, 'email');
+    managedFill(actions, 'input[name="candidate.phone"]', packet.phone, 'phone');
+    managedUpload(actions, RECRUITEE_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    managedUpload(actions, RECRUITEE_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
+    // Tenant agreements, SMS consent, and CAPTCHA controls are never mapped.
+  } else if (family === 'teamtailor') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    managedFill(actions, 'input[name="candidate[first_name]"]', parts[0], 'first_name');
+    managedFill(actions, 'input[name="candidate[last_name]"]', parts.slice(1).join(' '), 'last_name');
+    managedFill(actions, 'input[name="candidate[email]"]', packet.email, 'email');
+    managedFill(actions, 'input[name="candidate[phone]"]', packet.phone, 'phone');
+    managedUpload(actions, TEAMTAILOR_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    managedUpload(actions, TEAMTAILOR_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
+    // candidate[consent_given] and candidate[consent_given_future_jobs] stay with the applicant.
   } else {
     const parts = packet.fullName.trim().split(/\s+/);
     const firstName = parts[0] ?? '';
@@ -2942,6 +3000,7 @@ export function buildManagedPortalActions(
     const questionText = normalizeReviewQuestionLabel(item.question);
     if (!questionText) continue;
     if (shouldSkipReviewedConsentQuestion(questionText)) continue;
+    if (shouldSkipPortalConsentQuestion(portalFamily(portal), questionText)) continue;
     const rawPortalSelector = reviewQuestionPortalSelector(item);
     const portalInputType = reviewQuestionPortalInputType(item);
     const portalSelector = durablePortalSelector(rawPortalSelector);
@@ -3140,7 +3199,7 @@ export function readManagedReceipt(result: ManagedBrowserResult): {
   referenceId?: string;
 } {
   const body = result.text.replace(/\s+/g, ' ').trim();
-  if (!/thank you|application (?:has been )?(?:submitted|received)|we received your application|success/i.test(body)) {
+  if (!RECEIPT_PROOF_RE.test(body)) {
     throw new Error('The company never showed a confirmation we could check');
   }
   return { confirmationText: body.slice(0, 1000), finalUrl: result.url, referenceId: receiptReference(body) };
@@ -3186,6 +3245,10 @@ const HOSTS: Record<PortalFamily, RegExp> = {
   oraclecloud: /(^|\.)oraclecloud\.com$/i,
   // Pinned exactly. The bare ultipro.com is the employee login for UKG's HR product.
   ultipro: /^recruiting\.ultipro\.com$/i,
+  // One tenant label only. Excludes www.recruitee.com and the vendor's own non-careers services.
+  recruitee: /^(?!www\.)[^.]+\.recruitee\.com$/i,
+  // career.teamtailor.com is Teamtailor's own public tenant. Product, API, and docs hosts are out.
+  teamtailor: /^(?!(?:www|app|api|partner|docs|support)\.)[^.]+\.teamtailor\.com$/i,
 };
 
 // Host alone is not enough for a portal whose host space also serves a login page, a marketing site
@@ -3210,6 +3273,8 @@ const APPLY_PATHS: Partial<Record<PortalFamily, RegExp>> = {
   // under the sun, including ones that are somebody's payroll or ERP login.
   oraclecloud: /^\/hcmUI\/CandidateExperience\//i,
   ultipro: /^\/[^/]+\/JobBoard\//i,
+  recruitee: /^\/o\/[^/]+(?:\/c\/new)?\/?$/i,
+  teamtailor: /^\/jobs\/[^/]+(?:\/applications\/new)?\/?$/i,
 };
 
 function databricksGreenhouseJobId(url: URL): string | undefined {
@@ -3282,7 +3347,7 @@ export function detectPortal(rawUrl: string): SupportedPortal {
   // Names the platforms it can actually DO something useful on. The account-walled four are
   // recognised by the loop above and explained by portalHandoffReason, but listing them here would
   // read as a promise to fill them, which is the opposite of what recognising them is for.
-  throw new Error('Litos cannot fill in this company\u2019s application page yet. It works on Greenhouse, Lever, Ashby, SmartRecruiters, Workable, JazzHR, Paylocity, Rippling, BreezyHR and BambooHR.');
+  throw new Error('Litos cannot fill in this company\u2019s application page yet. It works on Greenhouse, Lever, Ashby, SmartRecruiters, Workable, JazzHR, Paylocity, Rippling, BreezyHR, BambooHR, Recruitee and Teamtailor.');
 }
 
 /**
@@ -3373,9 +3438,21 @@ export function greenhousePortalUrlNeedsBoardToken(rawUrl: string | undefined): 
 
 export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): string {
   if (portal === 'greenhouse') return greenhouseEmbedApplicationUrl(rawUrl) ?? rawUrl;
-  if (portal !== 'ashby') return rawUrl;
   const url = new URL(rawUrl);
-  if (!url.pathname.endsWith('/application')) url.pathname = `${url.pathname.replace(/\/$/, '')}/application`;
+  // Treat the platform's optional trailing slash as formatting, not another path segment. Without
+  // this normalization, an already-canonical form URL received the same suffix a second time.
+  if (portal === 'ashby' || portal === 'recruitee' || portal === 'teamtailor') {
+    url.pathname = url.pathname.replace(/\/$/, '');
+  }
+  if (portal === 'ashby' && !url.pathname.endsWith('/application')) {
+    url.pathname = `${url.pathname.replace(/\/$/, '')}/application`;
+  }
+  if (portal === 'recruitee' && !url.pathname.endsWith('/c/new')) {
+    url.pathname = `${url.pathname.replace(/\/$/, '')}/c/new`;
+  }
+  if (portal === 'teamtailor' && !url.pathname.endsWith('/applications/new')) {
+    url.pathname = `${url.pathname.replace(/\/$/, '')}/applications/new`;
+  }
   return url.toString();
 }
 
@@ -3485,6 +3562,7 @@ async function fillReviewedQuestions(page: Page, portal: SupportedPortal, packet
     const questionText = normalizeReviewQuestionLabel(item.question);
     if (!questionText) continue;
     if (shouldSkipReviewedConsentQuestion(questionText)) continue;
+    if (shouldSkipPortalConsentQuestion(portalFamily(portal), questionText)) continue;
     const portalSelector = durablePortalSelector(reviewQuestionPortalSelector(item));
     if (/^(?:checkbox|radio)$/i.test(reviewQuestionPortalInputType(item) ?? '')) {
       if (portalFamily(portal) === 'greenhouse') {
@@ -3701,6 +3779,20 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="linkedinUrl"]'], packet.linkedinUrl, 'linkedin', filledFields);
     await fillFirst(page, ['input[name="websiteUrl"]'], packet.portfolioUrl ?? packet.githubUrl, 'portfolio', filledFields);
     await uploadFirst(page, [BAMBOOHR_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+  } else if (family === 'recruitee') {
+    await fillFirst(page, ['input[name="candidate.name"]'], packet.fullName, 'name', filledFields);
+    await fillFirst(page, ['input[name="candidate.email"]'], packet.email, 'email', filledFields);
+    await fillFirst(page, ['input[name="candidate.phone"]'], packet.phone, 'phone', filledFields);
+    await uploadFirst(page, [RECRUITEE_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, [RECRUITEE_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+  } else if (family === 'teamtailor') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    await fillFirst(page, ['input[name="candidate[first_name]"]'], parts[0], 'first_name', filledFields);
+    await fillFirst(page, ['input[name="candidate[last_name]"]'], parts.slice(1).join(' '), 'last_name', filledFields);
+    await fillFirst(page, ['input[name="candidate[email]"]'], packet.email, 'email', filledFields);
+    await fillFirst(page, ['input[name="candidate[phone]"]'], packet.phone, 'phone', filledFields);
+    await uploadFirst(page, [TEAMTAILOR_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, [TEAMTAILOR_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
   } else {
     await fillFirst(page, ['input[name="_systemfield_name"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="_systemfield_email"]'], packet.email, 'email', filledFields);
@@ -3717,6 +3809,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
   await fillReviewedQuestions(page, portal, packet, filledFields);
 
   const blockers: string[] = [];
+  if (CONSENT_GATED_FAMILIES.has(family)) blockers.push(portalHandoffReason(portal)!);
   // String kept verbatim: it is already surfaced to applicants and matched downstream.
   if (await hasUnresolvedCaptcha(page)) {
     blockers.push(CAPTCHA_BLOCKER);
@@ -5208,7 +5301,7 @@ export async function readReceipt(page: Page): Promise<{ confirmationText: strin
    * be scraped instead of the confirmation, and a submitted application would be reported as
    * unverified. Measured before the barrier existed: 10 stale reads in 15 runs. */
   const body = (await page.locator('body').innerText()).replace(/\s+/g, ' ').trim();
-  if (!/thank you|application (?:has been )?(?:submitted|received)|we received your application|success/i.test(body)) {
+  if (!RECEIPT_PROOF_RE.test(body)) {
     throw new Error('The company never showed a confirmation we could check');
   }
   return { confirmationText: body.slice(0, 1000), finalUrl: page.url(), referenceId: receiptReference(body) };
