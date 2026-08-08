@@ -29,6 +29,7 @@ import {
   createBrowserContext,
   createBrowserSession,
   getBrowserSession,
+  HANDOFF_WINDOW_MS,
   isBrowserbaseConfigured,
   isManagedStratusProvider,
   runManagedBrowser,
@@ -1493,7 +1494,7 @@ async function prepareManaged(
     attention_categories: securityCode
       ? ['security_code' as const, ...attentionCategories.filter((category) => category !== 'security_code')]
       : attentionCategories.length > 0 ? attentionCategories : undefined,
-    handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
+    handoff_expires_at: new Date(Date.now() + HANDOFF_WINDOW_MS).toISOString(),
     submission_error: undefined,
   });
   await writeReview(row, review);
@@ -1767,7 +1768,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
           source: 'observed',
         })
         : {}),
-      handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
+      handoff_expires_at: new Date(Date.now() + HANDOFF_WINDOW_MS).toISOString(),
       submission_error: undefined,
     });
     await writeReview(row, review);
@@ -1819,7 +1820,7 @@ async function prepareControlled(
       preview_screenshot_url: `data:image/png;base64,${screenshot.toString('base64')}`,
       verification: { status: 'not_needed' },
       attention_reason: [...result.blockers, ...evidenceBlockers].join('\n') || undefined,
-      handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
+      handoff_expires_at: new Date(Date.now() + HANDOFF_WINDOW_MS).toISOString(),
       submission_error: undefined,
     });
     await writeReview(row, review);
