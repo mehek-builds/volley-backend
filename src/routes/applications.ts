@@ -11,6 +11,7 @@ import { career_page_sources, generated_resumes, monitored_jobs, profiles, users
 import {
   findPdfTextFidelityIssues,
   findPdfSafeMarginIssues,
+  hasContactRoute,
   renderResumePdf,
   validateResumeVisualLayout,
 } from '../engine/resumeRender';
@@ -242,6 +243,20 @@ export async function preSendResumeVerificationIssues(
     return ['This application is missing the saved review or contact details. Regenerate it before sending.'];
   }
 
+  /* THE PACKETS ALREADY IN THE DATABASE, which the producer fix cannot reach.
+   *
+   * 28 stored packets were generated before /resume/generate resolved the contact block against the
+   * account, and their `_contact` has neither an email nor a phone frozen into it. Nothing about
+   * this row can be repaired in place: the PDF an employer would receive was rendered at generation
+   * time and is immutable in blob storage, so the only cure is regenerating the packet.
+   *
+   * Stated as an ISSUE rather than left to renderResumePdf's throw, which the render below would
+   * otherwise hit. This function's whole contract is a list of sentences the applicant can act on;
+   * an exception escaping it turns "your application is on hold because..." into a 500. */
+  if (!hasContactRoute({ ...contact, full_name: contact.full_name })) {
+    return ['This resume was made without an email address or a phone number on it, so an employer who reads it cannot reply. Generate it again to add your contact details.'];
+  }
+
   const spec = editableResumeSpec(stored);
   if (review.role) spec.target_role = resumeSafeTargetRole(review.role);
 
@@ -457,6 +472,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       } | undefined;
       if (!review?.jd_text || !contact?.full_name) {
         return reply.status(409).send({ error: 'This older resume cannot be edited in the dashboard. Generate it again first.' });
+      }
+      /* Same refusal as the pre-send check, and for the same reason: this route re-renders the PDF
+         from the STORED contact block, so editing a bullet on one of the contactless packets would
+         write a fresh, still-contactless file over the old one. Editing cannot add an address; only
+         regenerating reads the account again. */
+      if (!hasContactRoute({ ...contact, full_name: contact.full_name })) {
+        return reply.status(409).send({ error: 'This resume was made without an email address or a phone number on it. Generate it again to add your contact details, then edit it.' });
       }
       if (resumeEditDisposition(review.status, Boolean(review.submission_claimed_at)) !== 'start') {
         return reply.status(409).send({ error: 'This resume cannot be edited while its application is active or complete' });

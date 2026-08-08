@@ -22,6 +22,7 @@ import {
   findPdfSafeMarginIssues,
   findPdfTextFidelityIssues,
   renderResumePdf,
+  ResumeContactError,
   type ContactHeader,
 } from '../engine/resumeRender';
 import { extractPdfText } from '../lib/pdfText';
@@ -154,7 +155,15 @@ export function skillsSourceFor(declared: unknown, parsed: unknown): string[] | 
  * Most of it is empty at this point in onboarding, and that is correct rather than a gap: the
  * harvest fills phone and links from the first real application. findPdfTextFidelityIssues only
  * asserts the fields that are actually present, so an empty phone is not a failure - it is a line
- * the resume does not print yet. */
+ * the resume does not print yet.
+ *
+ * TAKES THE DECRYPTED ROW NOW, not the raw one. It always read the three link columns, which are
+ * plaintext, and skipped phone, which is in ENCRYPTED_FIELDS and would have printed base64 on the
+ * PDF straight off the raw row. So the main resume never carried the phone number the account had
+ * on file, which stopped being merely a thin header the day renderResumePdf started refusing a
+ * document with no way to reply on it: an account whose only contact fact is a stored phone could
+ * otherwise not build a main resume at all. Links read identically either way, since decryptRow
+ * passes every non-encrypted column through untouched. */
 export function contactHeaderFrom(
   parsed: unknown,
   appProfile: Record<string, unknown> | undefined,
@@ -165,7 +174,7 @@ export function contactHeaderFrom(
   return {
     full_name: str(p.full_name) ?? 'Applicant',
     email: email ?? str(p.email),
-    // Links are plaintext on application_profile (not in ENCRYPTED_FIELDS), so they read directly.
+    phone: str(appProfile?.phone),
     linkedin_url: str(appProfile?.linkedin_url),
     github_url: str(appProfile?.github_url),
     portfolio_url: str(appProfile?.portfolio_url),
@@ -299,18 +308,20 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       reply.raw.write(`data: ${JSON.stringify(frame)}\n\n`);
     };
 
+    /* Decrypted ONCE for the two blocks that read it: the academic record and the contact header.
+       Both are printed on this PDF and both used to be resolved separately, the header off the raw
+       row (which is why it never carried the phone). */
+    const applicationRecord = academicRecordRowFor(appProfile, (err) =>
+      request.log.error(
+        { err, userId },
+        'application_profile could not be decrypted while building the main resume. Printing no GPA and no stored phone rather than the resume parse, which is not the source of truth for either.',
+      ),
+    );
+
     /* appProfile, not just the parse. The GPA that reaches this PDF has to be the one the student
        stated and the one autofill types, and the base resume is the document she approves before
        any of them go out. */
-    const education = educationFrom(
-      profile.parsed_json,
-      academicRecordRowFor(appProfile, (err) =>
-        request.log.error(
-          { err, userId },
-          'application_profile could not be decrypted while building the main resume. Printing no GPA rather than the resume parse, which is not the source of truth for it.',
-        ),
-      ),
-    );
+    const education = educationFrom(profile.parsed_json, applicationRecord);
     const declaredSkills = skillsSourceFor(profile.skills, profile.parsed_json);
     const targetText = targetRoleText(target, profile.parsed_json);
     const recentReview = (profile.parsed_json as {
@@ -470,7 +481,7 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
        * it passed is exactly R-017's failure mode, and a spec saved behind a check that silently
        * threw is the same lie in a different place. */
       send({ event: 'stage', stage: 'checking' });
-      const contact = contactHeaderFrom(profile.parsed_json, appProfile, email);
+      const contact = contactHeaderFrom(profile.parsed_json, applicationRecord, email);
       let ats: AtsVerdict;
       /* What the renderer actually PRINTED, which is not always what it was handed: planResumeLayout
        * trims to make one page (a third bullet, then whole entries, then coursework, then skills).
@@ -516,7 +527,13 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
         fastify.log.error({ err, userId }, 'ATS CHECK DID NOT RUN on a base resume; refusing to store it'); // vocab-allow: server log
         ats = {
           passed: false,
-          issues: ['the ATS check could not run on this resume, so it was not saved'],
+          /* The renderer's contact guard is told apart from a render fault, because the two ask
+             different things of the student. "The check could not run" is a message about us and
+             has no action in it; a missing email and phone is a fact about her profile that she,
+             and only she, can fix. Same refusal either way - the resume is still not stored. */
+          issues: [err instanceof ResumeContactError
+            ? 'this resume has no email address and no phone number on it, so an employer who reads it cannot reply. Add one to your profile and build it again'
+            : 'the ATS check could not run on this resume, so it was not saved'],
           pages: 0,
           extractable_chars: 0,
           keyword_coverage_pct: 0,
