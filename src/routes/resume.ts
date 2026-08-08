@@ -41,6 +41,7 @@ import { academicRecordRowFor } from './profile';
 import { warmRequirementCache } from '../engine/warmRequirements';
 import { postingRow, resolveJdText } from './jdMatch';
 import { baseResumeSelectionIssues } from '../llm/baseResume';
+import { leadAlignmentIssues } from '../engine/leadAlignment';
 import { deriveEditedTerms, readApplicationReview, type ApplicationReviewState } from '../lib/applicationReview';
 import { repairReviewPortalFromMonitoredJob } from '../lib/applicationPortalRepair';
 import {
@@ -654,7 +655,13 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       const result = validateResumeSpec(spec, jdText, bank, declaredSkills, education, body.role);
       const typographyIssues = findResumeTypographyIssues(spec, applicationContact);
       specIssues = [...result.issues, ...typographyIssues];
-      if (priorityEntry) specIssues.push(...baseResumeSelectionIssues(spec, [priorityEntry]));
+      /* requireFirst: false. The priority entry has to be ON the resume; which entry LEADS it is
+         decided against this posting, by leadAlignmentIssues below. See baseResumeSelectionIssues
+         for why the position half of that check belongs to the base resume and not here. */
+      if (priorityEntry) {
+        specIssues.push(...baseResumeSelectionIssues(spec, [priorityEntry], { requireFirst: false }));
+      }
+      specIssues.push(...leadAlignmentIssues(spec, jdText, { context: { company: body.company, role: body.role } }));
       specWarnings = result.warnings;
       atsCoverage = result.ats_keyword_coverage_pct;
 
@@ -756,7 +763,28 @@ export async function resumeRoutes(fastify: FastifyInstance) {
           : [],
       },
     );
-    if (priorityEntry) finalSpecValidation.issues.push(...baseResumeSelectionIssues(spec, [priorityEntry]));
+    if (priorityEntry) {
+      finalSpecValidation.issues.push(...baseResumeSelectionIssues(spec, [priorityEntry], { requireFirst: false }));
+    }
+    /* A LEAD-ALIGNMENT DEFECT IS NOT A REASON TO WITHHOLD A RESUME, and this is the one place that
+     * distinction has to be made deliberately. Every issue pushed onto finalSpecValidation 422s the
+     * request and the student's application does not go out.
+     *
+     * The issues in that list are all claims the resume MAKES: a fabricated metric, a degree she
+     * does not hold, an entry not in the bank. Shipping one of those is worse than shipping
+     * nothing. A weak justification for why one true entry precedes another true entry is not in
+     * that class - the page is accurate either way, and the worst case is the ordering this
+     * pipeline produced unconditionally before today. Blocking on it would trade a real
+     * application for a cosmetic one.
+     *
+     * So the strict citation check runs in the retry loop above, where the model gets a second
+     * attempt with the defect as feedback, and after rendering only the claim that can still be
+     * wrong is re-checked: that the entry the alignment argues for is the entry actually leading
+     * the page. That one is a genuine inconsistency in a stored record rather than a matter of
+     * judgement, and nothing between here and there is supposed to reorder entries. */
+    finalSpecValidation.issues.push(
+      ...leadAlignmentIssues(spec, jdText, { afterRender: true, context: { company: body.company, role: body.role } }),
+    );
     specWarnings = finalSpecValidation.warnings;
     atsCoverage = finalSpecValidation.ats_keyword_coverage_pct;
     if (finalSpecValidation.issues.length > 0) {
