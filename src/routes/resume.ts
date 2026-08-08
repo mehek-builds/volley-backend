@@ -566,6 +566,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     // and only genuine drift triggers a second Claude call instead of trusting the prompt alone.
     let spec: ResumeSpec | undefined;
     let specIssues: string[] = [];
+    let leadIssues: string[] = [];
     let specWarnings: ReturnType<typeof validateResumeSpec>['warnings'] = [];
     let atsCoverage = 0;
 
@@ -661,7 +662,11 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       if (priorityEntry) {
         specIssues.push(...baseResumeSelectionIssues(spec, [priorityEntry], { requireFirst: false }));
       }
-      specIssues.push(...leadAlignmentIssues(spec, jdText, { context: { company: body.company, role: body.role } }));
+      /* Kept in its own variable as well as pushed onto specIssues, because it is the only issue
+         here that can survive the loop and still ship. _quality.leadAlignmentIssues stores it so a
+         packet that went out with an unjustified lead is distinguishable from one that did not. */
+      leadIssues = leadAlignmentIssues(spec, jdText, { context: { company: body.company, role: body.role } });
+      specIssues.push(...leadIssues);
       specWarnings = result.warnings;
       atsCoverage = result.ats_keyword_coverage_pct;
 
@@ -969,6 +974,16 @@ export async function resumeRoutes(fastify: FastifyInstance) {
            the validator rejected". This is a fact about the ACCOUNT, not about the generated
            content, and a reader auditing packets needs to be able to tell those apart. */
         contactIssues,
+        /* Whether the lead entry's justification was ACCEPTED, recorded per packet so criterion 3
+           is auditable from the corpus instead of by re-running generation.
+           This is the one place a leftover lead-alignment defect survives. It deliberately does not
+           block the resume (see the note beside the final validation), and before this key it was
+           computed, used for a retry, and then dropped - so a packet that shipped with an
+           unjustified lead looked from storage exactly like one that shipped with a good one. That
+           is precisely the measurement that was missing when this criterion was first audited: the
+           only way to tell was to read 85 resumes and notice the same org at the top of 71 of them.
+           Empty means the lead is justified against a requirement this posting actually states. */
+        leadAlignmentIssues: leadIssues,
         layoutIssues,
         visualWarnings,
         atsCoverage,
