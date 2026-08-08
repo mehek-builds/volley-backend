@@ -180,7 +180,26 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
     advanced_study_plan: advancedStudyPlan(factString(appRow, 'advanced_study_plan')),
     attest_truthful_information: factBoolean(appRow, 'attest_truthful_information'),
     accept_privacy_notices: factBoolean(appRow, 'accept_privacy_notices'),
+    onsite_commitment: onsiteCommitment(factString(appRow, 'onsite_commitment')),
+    onsite_locations: factStringList(appRow, 'onsite_locations'),
+    relocation_willingness: yesNo(factString(appRow, 'relocation_willingness')),
   };
+}
+
+/** Narrows the stored text to the three commitments the resolver knows how to act on. */
+function onsiteCommitment(value: string | undefined): 'anywhere' | 'listed_locations' | 'no' | undefined {
+  return value === 'anywhere' || value === 'listed_locations' || value === 'no' ? value : undefined;
+}
+
+/**
+ * A stored yes/no declaration.
+ *
+ * Anything else, including an empty string and a stray "maybe", reads as undefined - never asked -
+ * so the resolver refuses rather than guessing which way a malformed value was meant to point.
+ */
+function yesNo(value: string | undefined): 'yes' | 'no' | undefined {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === 'yes' || normalized === 'no' ? normalized : undefined;
 }
 
 /** Narrows the stored text to the three answers the resolver knows how to act on. */

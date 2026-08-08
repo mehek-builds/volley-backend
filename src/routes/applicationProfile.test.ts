@@ -52,6 +52,9 @@ function row(over: Partial<ApplicationProfile> = {}): ApplicationProfile {
     attest_truthful_information: null,
     accept_privacy_notices: null,
     application_attestations_consented_at: null,
+    onsite_commitment: null,
+    onsite_locations: null,
+    relocation_willingness: null,
     updated_at: null,
     ...over,
   };

@@ -36,6 +36,9 @@ export const APPLICATION_FACT_COLUMNS = [
   'attest_truthful_information',
   'accept_privacy_notices',
   'application_attestations_consented_at',
+  'onsite_commitment',
+  'onsite_locations',
+  'relocation_willingness',
 ] as const;
 
 export type ApplicationFactColumn = (typeof APPLICATION_FACT_COLUMNS)[number];

@@ -508,7 +508,20 @@ export const application_profile = pgTable('application_profile', {
   // empty means "never answered", and the fill path must leave language questions alone.
   languages: jsonb('languages'),
   eeo_prefs: jsonb('eeo_prefs'), // nullable, only set if the student explicitly opts in
-  referral_source_default: text('referral_source_default').default('Company website'),
+  /* HOW SHE FOUND THE POSTING, and it is hers to say.
+   *
+   * The `.default('Company website')` that used to be here is gone. Measured on 2026-08-09: all 16
+   * production rows carry "Company website" and NOT ONE of them was typed by a person - the column
+   * default put it there, and `resolveKnownAnswer` had a second copy of the same constant as its
+   * fallback. So the most-asked question in the whole corpus (25 distinct labels, 20 employers) was
+   * answered on every application with a statement of fact nobody had made, and one that is usually
+   * false: Litos finds these postings on a monitored job board, not on the employer's own site.
+   *
+   * Null now means never asked, the resolver refuses on null, and onboarding asks for it. The
+   * migration drops the default for new rows; clearing the value on the existing 16 is a separate,
+   * explicit step in scripts/apply-onsite-commitment-schema.mjs, because it makes those accounts
+   * start being asked a question they were silently answering before. */
+  referral_source_default: text('referral_source_default'),
 
   /* ---- application facts asked once in onboarding (2026-08-08) ----
    *
@@ -630,6 +643,35 @@ export const application_profile = pgTable('application_profile', {
   // When the two booleans above were last set. Consent evidence, in the same shape users.* records
   // it for the automation permissions: a permission with no timestamp cannot be audited later.
   application_attestations_consented_at: timestamp('application_attestations_consented_at', { withTimezone: true }),
+
+  /* ---- where she will actually work from (2026-08-09) ----
+   *
+   * THE DEFECT THESE CLOSE. `resolveKnownAnswer` had `case 'onsite_commitment': return
+   * { value: 'Yes' }`, a constant with no column behind it, and a second constant beside it for
+   * the same question in prose form. A Redwood Materials packet was ready to send with "Are you
+   * available to work from our office in San Francisco?" answered YES, for an applicant with a
+   * +971 phone number who studies in Los Angeles. Same class as the Akuna exclusivity Yes, and far
+   * more frequent: 15 distinct labels across 12 employers in the stored corpus, which is six times
+   * the two-posting bar the columns above were chosen by.
+   *
+   * WHY THREE COLUMNS AND NOT A BOOLEAN. This is the one fact in the group with a LOCATION
+   * DIMENSION. "Yes to Los Angeles, no to New York" is a single coherent answer that no boolean can
+   * hold, and collapsing it either commits her to an office she will not go to or refuses one she
+   * would. And relocating is a different promise from commuting: someone who will work five days a
+   * week from an office in the city she already lives in has said nothing about moving to Seattle.
+   *
+   *   onsite_commitment      'anywhere' | 'listed_locations' | 'no'
+   *   onsite_locations       string[], her own words, ORDERED - the first entry an employer offers
+   *                          is also the answer to "what is your preferred work location?"
+   *   relocation_willingness 'yes' | 'no'
+   *
+   * null means never asked on all three, and the resolver refuses rather than defaults. An existing
+   * account that has not answered is therefore ASKED, which is the entire point: the previous
+   * behaviour and "defaulting after the migration" are the same wrong answer.
+   */
+  onsite_commitment: text('onsite_commitment'),
+  onsite_locations: jsonb('onsite_locations'),
+  relocation_willingness: text('relocation_willingness'),
 
   updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });

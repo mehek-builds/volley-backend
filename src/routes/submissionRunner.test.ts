@@ -516,7 +516,10 @@ test('select and radio discoveries resolve from stored profile without direct te
     ],
     { user_id: 'user-1' } as ResumeRow,
     current,
-    { currently_enrolled: true, grad_date: 'May 2028', grad_year: 2028 },
+    // onsite_commitment added 2026-08-09. "Are you able to work onsite 4 days a week?" used to be
+    // answered Yes off a constant with no column behind it; the profile has to declare it now, and
+    // this test is about SELECTORS, not about inventing a commitment, so it declares it.
+    { currently_enrolled: true, grad_date: 'May 2028', grad_year: 2028, onsite_commitment: 'anywhere' },
     true,
     'greenhouse',
   );

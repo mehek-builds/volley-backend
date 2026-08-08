@@ -408,12 +408,96 @@ test('citizenship is answered but never substituted for residence', () => {
   assert.deepEqual(resolved, { value: 'India' });
 });
 
-test('a routine location-commitment question is answered as an approved logistics acknowledgement', () => {
+test('a location-commitment question is answered from her stored commitment, never as routine', () => {
+  /* RENAMED AND REVERSED, 2026-08-09. It used to be called "...is answered as an approved logistics
+     acknowledgement" and it asserted exactly what this file now forbids: `{ address_city: 'Dubai' }`
+     in, `{ value: 'Yes' }` out, for a question about being in a US office three days a week.
+
+     The word doing the work in the old name was "approved". Nothing approved it. There was no
+     column, no consent and no stored value anywhere behind that Yes - just
+     `return isLocationCommitmentQuestion(label) ? { value: 'Yes' } : null`, and a comment upstream
+     calling the question "routine". A commitment about where a person will physically be for the
+     next twelve weeks is not routine, and calling it logistics does not make it less of a statement
+     she never made. It was found on a Redwood Materials packet that was ready to send with "Are you
+     available to work from our office in San Francisco?" answered Yes.
+
+     What survives from the old test is its real content: these labels must be RECOGNISED, and must
+     never fall through to the essay drafter. That is still asserted, and the answer now comes from
+     application_profile.onsite_commitment / onsite_locations. */
   const label = 'this role is in-office three days a week, can you commit to that?';
   assert.equal(classifyField(label), 'onsite_commitment');
-  assert.deepEqual(resolveKnownAnswer(label, 'select', { address_city: 'Dubai' }, undefined), { value: 'Yes' });
+
+  // Nothing stored: refused by name, and it is a skipReason rather than a null, so it cannot fall
+  // through to classifyField and come back as her home city.
+  const unasked = resolveKnownAnswer(label, 'select', { address_city: 'Dubai' }, undefined);
+  assert.ok(unasked && 'skipReason' in unasked);
+  assert.match(unasked.skipReason, /where you will work from is yours to answer/);
+
+  // Stored: relayed.
+  assert.deepEqual(
+    resolveKnownAnswer(label, 'select', { address_city: 'Dubai', onsite_commitment: 'anywhere' }, undefined),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer(label, 'select', { address_city: 'Dubai', onsite_commitment: 'no' }, undefined),
+    { value: 'No' },
+  );
+
+  // Relocation is its own commitment and its own column: agreeing to sit in an office is not
+  // agreeing to move house, so onsite_commitment alone must not answer it.
   assert.equal(classifyField('are you willing to relocate to San Francisco?'), null);
-  assert.deepEqual(resolveKnownAnswer('are you willing to relocate to San Francisco?', 'text', { address_city: 'Dubai' }, undefined), { value: 'Yes' });
+  const relocation = resolveKnownAnswer(
+    'are you willing to relocate to San Francisco?',
+    'text',
+    { address_city: 'Dubai', onsite_commitment: 'anywhere' },
+    undefined,
+  );
+  assert.ok(relocation && 'skipReason' in relocation);
+  assert.deepEqual(
+    resolveKnownAnswer('are you willing to relocate to San Francisco?', 'text', { relocation_willingness: 'no' }, undefined),
+    { value: 'No' },
+  );
+});
+
+test('the office question is answered per office, because the honest answer differs by city', () => {
+  /* THE POINT OF THE LOCATION DIMENSION. She studies in Los Angeles and lives in Dubai. "Yes" to an
+     LA office and "No" to a San Francisco one are both true, and a single boolean could carry
+     neither, which is why onsite_locations exists alongside onsite_commitment. */
+  const profile = {
+    address_city: 'Dubai',
+    onsite_commitment: 'listed_locations' as const,
+    onsite_locations: ['Los Angeles', 'New York'],
+  };
+  assert.deepEqual(
+    resolveKnownAnswer('Are you available to work from our office in Los Angeles?', 'select', profile, undefined),
+    { value: 'Yes' },
+  );
+  // The exact Redwood Materials label, from the packet this whole change came out of.
+  assert.deepEqual(
+    resolveKnownAnswer('Are you available to work from our office in San Francisco?', 'select', profile, undefined),
+    { value: 'No' },
+  );
+  // The office is taken from the posting only when the label does not name one, and only when the
+  // posting names exactly one - a two-city posting leaves the question genuinely ambiguous.
+  assert.deepEqual(
+    resolveKnownAnswer('Are you willing to work in-person for 12 weeks during the internship?', 'select', profile, 'Software Engineer Intern\nNew York, NY'),
+    { value: 'Yes' },
+  );
+  const ambiguous = resolveKnownAnswer(
+    'Are you willing to work in-person for 12 weeks during the internship?',
+    'select',
+    profile,
+    'Software Engineer Intern\nNew York, NY or San Francisco, CA',
+  );
+  assert.ok(ambiguous && 'skipReason' in ambiguous);
+  // And a listed-locations commitment with an empty list is still not an answer to any office.
+  const noList = resolveKnownAnswer(
+    'Are you available to work from our office in Los Angeles?',
+    'select',
+    { onsite_commitment: 'listed_locations' as const, onsite_locations: [] },
+    undefined,
+  );
+  assert.ok(noList && 'skipReason' in noList);
 });
 
 test('a preferred-location choice is not drafted as prose', () => {
@@ -592,15 +676,34 @@ test('live-audit profile labels beat generic wording and stay out of drafts', ()
     resolveKnownAnswer('Are you majoring in STEM (Computer Science, Electrical Engineering, Data Science, Cog Sci, Information Management/Systems, Mathematics, Machine Learning, etc.)?', 'select', profile, undefined),
     { value: 'Yes' },
   );
-  assert.deepEqual(resolveKnownAnswer('AI Policy for Interviewers', 'select', profile, undefined), {
-    value: 'Yes',
-  });
+  /* CHANGED 2026-08-09: was `{ value: 'Yes' }`, a constant with nothing stored. "AI Policy for
+     Interviewers" is acceptance of a behavioural policy binding her conduct in a live interview.
+     applicationConsentAnswer already refuses IMC's "Interview Code of Conduct" with the reasoning
+     "A behavioural policy is not a privacy notice and not a statement of truth", and two wordings
+     of one policy cannot have two answers. One company asks it, which is below the two-posting bar
+     for an onboarding column, so it becomes an ask at Apply. */
+  const aiPolicy = resolveKnownAnswer('AI Policy for Interviewers', 'select', profile, undefined);
+  assert.ok(aiPolicy && 'skipReason' in aiPolicy);
+  assert.match(aiPolicy.skipReason, /interview conduct policy/);
 });
 
-test('referral source handles first-heard wording', () => {
-  assert.deepEqual(resolveKnownAnswer('How did you first hear about Five Rings?', 'text', {}, undefined), {
-    value: 'Company website',
-  });
+test('referral source is relayed when stored and refused when it is not', () => {
+  /* CHANGED 2026-08-09. This asserted "Company website" from an EMPTY profile. That constant was
+     described elsewhere as "a deliberate product behaviour rather than stored data", and it was
+     both: deliberate, and a statement of fact about how she found the posting that she never made -
+     usually a false one, since Litos finds these on a monitored job board. Measured the same day:
+     all 16 production rows carried "Company website" purely from the column default, so there was
+     no account anywhere for which the answer was a person's choice.
+
+     It is the most-asked question in the corpus (25 distinct labels, 20 employers), which is why it
+     went to onboarding rather than to an ask at Apply. */
+  assert.deepEqual(
+    resolveKnownAnswer('How did you first hear about Five Rings?', 'text', { referral_source_default: 'LinkedIn' }, undefined),
+    { value: 'LinkedIn' },
+  );
+  const unstored = resolveKnownAnswer('How did you first hear about Five Rings?', 'text', {}, undefined);
+  assert.ok(unstored && 'skipReason' in unstored);
+  assert.match(unstored.skipReason, /how you heard about this role is yours to answer/);
 });
 
 test('stored academic and onsite facts answer repeated select-shaped live questions', () => {
@@ -624,7 +727,12 @@ test('stored academic and onsite facts answer repeated select-shaped live questi
     ),
     { value: 'Mehek' },
   );
-  assert.deepEqual(resolveKnownAnswer('Are you able to work onsite 3 days a week?', 'select', profile, undefined), { value: 'Yes' });
+  // Answered from the stored commitment now, not from a constant: the profile above declares
+  // 'anywhere', which is the only reason this is a Yes.
+  assert.deepEqual(
+    resolveKnownAnswer('Are you able to work onsite 3 days a week?', 'select', { ...profile, onsite_commitment: 'anywhere' as const }, undefined),
+    { value: 'Yes' },
+  );
   assert.deepEqual(resolveKnownAnswer('Are you currently enrolled in a degree program?', 'radio', profile, undefined), { value: 'Yes' });
   assert.deepEqual(resolveKnownAnswer('Will you be returning to a degree program after this internship?', 'select', profile, undefined), { value: 'Yes' });
   assert.deepEqual(resolveKnownAnswer('Graduation Month', 'select', profile, undefined), { value: 'May' });
@@ -671,14 +779,21 @@ test('required internship form fields resolve from profile-backed defaults inste
   assert.deepEqual(resolveKnownAnswer('Do you currently reside in San Francisco?', 'select', profile, undefined), { value: 'No' });
   assert.deepEqual(resolveKnownAnswer('Do you live in New York or California?', 'select', profile, undefined), { value: 'No' });
   assert.equal(resolveKnownAnswer('Do you live in New York or California?', 'select', {}, undefined), null);
+  /* CHANGED 2026-08-09. This asserted Yes for a profile whose address_city is Dubai. The residence
+     half of that question had already been checked and failed, so the ONLY way to reach the Yes was
+     for her not to live in Austin - and the answer it then gave was that she had confirmed plans to
+     move there. It is the office commitment wearing a residence question's clothes, and it is now
+     answered from the same stored fact. */
+  const austin = 'Are you currently residing in the greater Austin area or have confirmed plans to be in Austin for the duration of this internship?';
+  const austinUnasked = resolveKnownAnswer(austin, 'select', profile, undefined);
+  assert.ok(austinUnasked && 'skipReason' in austinUnasked);
   assert.deepEqual(
-    resolveKnownAnswer(
-      'Are you currently residing in the greater Austin area or have confirmed plans to be in Austin for the duration of this internship?',
-      'select',
-      profile,
-      undefined,
-    ),
+    resolveKnownAnswer(austin, 'select', { ...profile, onsite_commitment: 'listed_locations' as const, onsite_locations: ['Austin'] }, undefined),
     { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer(austin, 'select', { ...profile, onsite_commitment: 'listed_locations' as const, onsite_locations: ['Los Angeles'] }, undefined),
+    { value: 'No' },
   );
   assert.deepEqual(
     resolveKnownAnswer('Are you currently enrolled in a Masters or PhD program for a technical field?', 'select', profile, undefined),
@@ -693,18 +808,24 @@ test('required internship form fields resolve from profile-backed defaults inste
     ),
     { value: 'Fall 2026' },
   );
+  /* CHANGED 2026-08-09. This asserted "Fall 2026" from the JOB DESCRIPTION for "when are you able
+     to join Astranis as an intern?" - the season the POSTING is for, replayed as a statement from
+     her about when her calendar is free. The assertion directly above it stays, and is the
+     distinction: "please confirm the season you are applying for" is asking what she applied to,
+     and the posting is the authority on that. This one asks about her, and it is not. The stored
+     availability_date still answers it; nothing else does. */
+  for (const jd of ['Software Engineer- Backend Intern (Fall 2026)', undefined]) {
+    const joinDate = resolveKnownAnswer('When are you able to join Astranis as an intern? (12 week minimum)', 'text', profile, jd);
+    assert.ok(joinDate && 'skipReason' in joinDate, String(jd));
+  }
   assert.deepEqual(
     resolveKnownAnswer(
       'When are you able to join Astranis as an intern? (12 week minimum)',
       'text',
-      profile,
+      { ...profile, availability_date: 'June 1, 2026' },
       'Software Engineer- Backend Intern (Fall 2026)',
     ),
-    { value: 'Fall 2026' },
-  );
-  assert.ok(
-    resolveKnownAnswer('When are you able to join Astranis as an intern? (12 week minimum)', 'text', profile, undefined)
-    && 'skipReason' in resolveKnownAnswer('When are you able to join Astranis as an intern? (12 week minimum)', 'text', profile, undefined)!,
+    { value: 'June 1, 2026' },
   );
   const privacy = resolveKnownAnswer(
     'Please review and acknowledge Cloudflare\'s Candidate Privacy Policy (cloudflare.com/candidate-privacy-notice/).',
@@ -721,15 +842,20 @@ test('required internship form fields resolve from profile-backed defaults inste
     resolveKnownAnswer('Which categories describe you? Select all that apply to you', 'checkbox', profile, undefined),
     { value: 'Decline to self-identify' },
   );
-  assert.deepEqual(
-    resolveKnownAnswer(
-      'Are you currently bound by any agreements with a current or former employer that may restrict your ability to work for Scale AI?',
-      'select',
-      profile,
-      undefined,
-    ),
-    { value: 'No' },
+  /* CHANGED 2026-08-09: was `{ value: 'No' }`, a hardcoded legal declaration that she is under no
+     non-compete, non-solicitation or confidentiality obligation to any past employer. No column was
+     consulted and none could have been - nothing on file records her contracts. The label is
+     already named in selfDeclaration.ts's list; this constant simply ran first and short-circuited
+     it, which is the structural gap this change closes. One label, one company, so it is an ask at
+     Apply rather than an onboarding column. */
+  const restriction = resolveKnownAnswer(
+    'Are you currently bound by any agreements with a current or former employer that may restrict your ability to work for Scale AI?',
+    'select',
+    profile,
+    undefined,
   );
+  assert.ok(restriction && 'skipReason' in restriction);
+  assert.match(restriction.skipReason, /agreements with a past employer/);
 });
 
 test('Greenhouse acknowledgements: only truthfulness and privacy may be ticked, and only from a stored consent', () => {
@@ -777,7 +903,18 @@ test('Greenhouse acknowledgements: only truthfulness and privacy may be ticked, 
   assert.match(pdf.skipReason, /how your resume is submitted/);
 });
 
-test('job location preference questions use the safe posting locations context', () => {
+test('a job location preference is her stored preference, not the last city in the posting', () => {
+  /* CHANGED 2026-08-09. The old name was "...use the safe posting locations context" and the rule
+     it pinned was: take the last line of the JOB DESCRIPTION that looks like a US city and return
+     it as her preferred location. "Safe" meant well-formed, not true. Measured in production, that
+     shipped "San Francisco, CA" as the answer to Optiver's "please rank your location preference in
+     order of most to least preferred: austin, chicago, greenwich, houston, new york city" and to
+     "what is your office location preference? (note: the internship is only available in new york
+     and austin, not chicago)" - a preference she never expressed, naming an office the employer had
+     just said was not on offer.
+
+     Her stored onsite_locations ARE an ordered preference, so the first of them the employer offers
+     is an honest answer, and it is now the only one given. */
   const label = "Please choose the single location that you're the most interested in, and we will discuss more with you as you move through the process.";
   const context = [
     'Build data systems for customers.',
@@ -786,15 +923,27 @@ test('job location preference questions use the safe posting locations context',
   ].join('\n');
 
   assert.equal(classifyField(label), null);
+  const unasked = resolveKnownAnswer(label, 'select', {}, context);
+  assert.ok(unasked && 'skipReason' in unasked);
+  assert.match(unasked.skipReason, /location choice left for you/);
+
+  // Her list, in her order, matched against what this employer actually offers.
   assert.deepEqual(
-    resolveKnownAnswer(
-      label,
-      'select',
-      {},
-      context,
-    ),
-    { value: 'San Francisco, CA' },
+    resolveKnownAnswer(label, 'select', {
+      onsite_commitment: 'listed_locations',
+      onsite_locations: ['San Francisco', 'Austin'],
+    }, context),
+    { value: 'San Francisco' },
   );
+  // Optiver's list offers none of hers, so it stays hers to answer rather than borrowing a city
+  // from the posting header.
+  const noOverlap = resolveKnownAnswer(
+    'Please rank your location preference in order of most to least preferred: Austin, Chicago, Greenwich, Houston, New York City.',
+    'select',
+    { onsite_commitment: 'listed_locations', onsite_locations: ['Los Angeles'] },
+    context,
+  );
+  assert.ok(noOverlap && 'skipReason' in noOverlap);
   assert.deepEqual(resolveKnownAnswer('What is your current location?', 'text', { address_city: 'Dubai' }, context), { value: 'Dubai' });
 });
 
@@ -996,15 +1145,20 @@ test('live-audit profile fields use question shape before generic enrollment wor
       availability_term: undefined,
     }, undefined)!,
   );
-  assert.deepEqual(
-    resolveKnownAnswer(
-      '1st choice: Area of interest in Software Engineering',
-      'select',
-      profile,
-      'Engineering teams build software that handles traffic across our global network. Technologies include Go, Rust, C/C++ and Python services.',
-    ),
-    { value: 'Backend/Systems' },
+  /* CHANGED 2026-08-09: was `{ value: 'Backend/Systems' }`, produced by counting backend, frontend
+     and full-stack keywords in the EMPLOYER'S OWN job description and returning whichever the
+     employer used most. That is not a reading of a fact about her, it is a machine telling the
+     employer what the employer wants to hear - and it scored "2nd choice" identically to "1st
+     choice", because the JD is the same text both times. An area of interest is a self-assessment,
+     the same family as the skill self-ratings selfDeclaration.ts refuses, and nothing is on file. */
+  const area = resolveKnownAnswer(
+    '1st choice: Area of interest in Software Engineering',
+    'select',
+    profile,
+    'Engineering teams build software that handles traffic across our global network. Technologies include Go, Rust, C/C++ and Python services.',
   );
+  assert.ok(area && 'skipReason' in area);
+  assert.match(area.skipReason, /area of interest left for you/);
   assert.ok(
     resolveKnownAnswer('1st choice: Area of interest in Software Engineering', 'select', profile, 'Software engineering internship')
     && 'skipReason' in resolveKnownAnswer('1st choice: Area of interest in Software Engineering', 'select', profile, 'Software engineering internship')!,
@@ -1559,20 +1713,36 @@ const MEHEK: ApplicationProfileLike = {
   address_country: 'United Arab Emirates',
 };
 
-test('an in-person commitment is the routine location question it has always been', () => {
-  // '"Are you willing to work in-person for 12 weeks during the internship?" is required and is
-  // still empty'. With only office/onsite/hybrid in the vocabulary this fell all the way to the
-  // ESSAY drafter, so a react-select with a Yes/No list was handed a paragraph and stayed empty,
-  // and the paragraph is where the "Los Angeles" grounding warning on that packet came from.
+test('an in-person commitment is recognised, and is hers to make', () => {
+  /* RENAMED 2026-08-09: was "...is the routine location question it has always been", and asserted
+     Yes for MEHEK, whose address_city is Dubai and who was in none of these offices.
+
+     The half of this test that was always right is kept intact and is the reason the labels below
+     are still listed: '"Are you willing to work in-person for 12 weeks during the internship?" is
+     required and is still empty'. With only office/onsite/hybrid in the vocabulary this fell all
+     the way to the ESSAY drafter, so a react-select with a Yes/No list was handed a paragraph and
+     stayed empty, and the paragraph is where the "Los Angeles" grounding warning on that packet
+     came from. Every label here must still be RECOGNISED and must never reach the drafter.
+
+     What changed is what recognition produces. "Routine" was the error: these are commitments about
+     where she will physically be, and the answer is now relayed from what she stored or refused. */
   const label = normalizeDiscoveredLabel(ANDURIL_IN_PERSON_LABEL);
-  assert.deepEqual(resolveKnownAnswer(label, 'text', MEHEK, undefined), { value: 'Yes' });
-  // Three more postings ask the same thing in their own words.
-  for (const other of [
+  const labels = [
+    label,
     'are you able to work onsite in one of our offices, five days a week?',
     'how many days per week can you work on-site in sf, and from what date?',
     'do you currently live in, or plan to relocate to, the specified location to meet this in-office requirement?',
-  ]) {
-    assert.deepEqual(resolveKnownAnswer(other, 'text', MEHEK, undefined), { value: 'Yes' }, other);
+  ];
+  for (const other of labels) {
+    const unasked = resolveKnownAnswer(other, 'text', MEHEK, undefined);
+    // Recognised: never null, so it can never fall through to classifyField or to the drafter.
+    assert.ok(unasked && 'skipReason' in unasked, other);
+    assert.equal(isOpenEndedQuestion(other) && !('skipReason' in unasked), false, other);
+  }
+  // With the commitment stored, all four are answered without asking her again.
+  const committed = { ...MEHEK, onsite_commitment: 'anywhere' as const, relocation_willingness: 'yes' as const };
+  for (const other of labels) {
+    assert.deepEqual(resolveKnownAnswer(other, 'text', committed, undefined), { value: 'Yes' }, other);
   }
 });
 
@@ -1626,5 +1796,162 @@ test('the referral question is answered even when its label names the employer',
       { value: 'Company website' },
       raw,
     );
+  }
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * THE MEASUREMENT, TURNED INTO A TEST.
+ *
+ * Every distinct question label Litos has stored - 1924 stored questions across generated_resumes
+ * spec._review.questions, posting_questions and saved_application_answers, 495 distinct label/type
+ * pairs - was replayed through resolveKnownAnswer against an EMPTY profile on 2026-08-09. An empty
+ * profile has no stored fact behind any answer, so a `{ value }` from it is by definition an answer
+ * no column supports: a constant, or something lifted out of the job description.
+ *
+ * 101 labels came back answered. Fifty of them are below, with the number of times each was stored.
+ * The other fifty-one are EEO self-identification blocks answered "Decline to self-identify", which
+ * is the one approved constant in this file and is asserted separately underneath.
+ *
+ * Reproduce with: npx tsx scripts/_sweep-untraceable.mts
+ * --------------------------------------------------------------------------------------------- */
+const UNTRACEABLY_ANSWERED_PRODUCTION_LABELS: ReadonlyArray<readonly [string, string]> = [
+  ['how did you hear about this job?', '25x'],
+  ['how did you hear about this opportunity?', '10x'],
+  ['are you able to work in our austin office 3–5 days a week?', '9x'],
+  ['how did you hear about this internship?', '9x'],
+  ['when are you able to join astranis as an intern? (12 week minimum)', '9x'],
+  ['at astranis, we value in-person collaboration and a strong work ethic. are you comfortable with working onsite at our san francisco hq 5 days a week and commit to 55 hours per week?', '9x'],
+  ['how did you hear about astranis', '9x'],
+  ['how did you hear about us?', '7x'],
+  ['ai policy for interviewers', '7x'],
+  ['are you available to work from our office in san francisco?', '6x'],
+  ['what is your office location preference? (note: the software engineer internship is only available in new york and austin, not chicago).', '5x'],
+  ['how did you first hear about this role?', '5x'],
+  ['where have you learned about samsara? select all that apply.* []', '5x'],
+  ['how did you hear about this program?', '4x'],
+  ['1st choice: area of interest in software engineering', '4x'],
+  ['2nd choice (optional): area of interest in software engineering', '4x'],
+  ['are you able to work onsite in one of our offices, five days a week?', '3x'],
+  ['are you currently bound by any agreements with a current or former employer that may restrict your ability to work for scale ai or perform the duties of the position for which you are applying? this includes, but is not limited to, non-compete agreements, non-solicitation agreements, confidentiality or non-disclosure agreements, or any other contractual obligations that could limit your employment activities.', '3x'],
+  ['this position is hybrid and requires 4 days a week in office, including thursdays in our mountain view, ca headquarters and the remaining 3 days in either mountain view or our san francisco, ca office. are you able to meet this requirement?', '3x'],
+  ['how many days per week can you work on-site in sf, and from what date?', '3x'],
+  ['we are unable to provide relocation assistance. will you be located in the seattle area and have the ability to come into our bellevue office several days a week during the time of the internship?', '3x'],
+  ['if this job post is available in multiple cities, what is your preferred work location?', '3x'],
+  ['please rank your location preference in order of most to least preferred: austin, chicago, greenwich, houston, new york city. if you are not open to a location, do not rank it. * please rank your location preference in order of most to least preferred: austin, chicago, greenwich, houston, new york city. if you are not open to a location, do not rank it.', '3x'],
+  ['please select your current state of residence. select “not in the us” if you reside outside the united states. this information helps us understand our talent pool and ensures we provide accurate resources throughout the hiring process.', '2x'],
+  ['this role will be in-office on a hybrid schedule, can you commit to being in-office three days per week at the location where this position is posted?', '2x'],
+  ['do you currently reside in san francisco?', '2x'],
+  ['how did you hear about optiver?', '2x'],
+  ['are you willing to work four days per week in our san francisco office?', '2x'],
+  ['how did you hear about anduril?', '2x'],
+  ['what is your preferred work location?', '2x'],
+  ['Location Preference', '1x'],
+  ['how did you hear about this job? how did you hear about this job? question_66274351', '1x'],
+  ['this role is required to be based near our new york city, ny office. are you open to relocating if you\'re not currently based there?* question_66274357', '1x'],
+  ['are you currently residing in the greater austin area or have confirmed plans to be in austin for the duration of this internship?', '1x'],
+  ['how did you hear about hrt?', '1x'],
+  ['are you available to work from our office in san francisco?* question_19366889004', '1x'],
+  ['how did you hear about this opportunity?* question_31572824003', '1x'],
+  ['how did you hear about old mission? * []', '1x'],
+  ['how did you hear about beacon?', '1x'],
+  ['do you currently live in, or plan to relocate to, the specified location to meet this in-office requirement?', '1x'],
+  ['this role requires in-office work three days per week (mon, wed, thurs). do you acknowledge and agree to this requirement?', '1x'],
+  ['please choose the single location that you\'re the most interested in, and we will discuss more with you as you move through the process.', '1x'],
+  ['we will only consider you for one role/location at a time. therefore, if you are interested in multiple roles, please submit an application for your first preference only.', '1x'],
+  ['are you able and willing to work out of the san fransisco office?', '1x'],
+  ['how did you first hear about five rings?* []', '1x'],
+  ['how did you hear about dv trading?', '1x'],
+  ['are you willing to work onsite at our chicago office 5 days a week?', '1x'],
+  ['are you willing to work in-person for 12 weeks during the internship?', '1x'],
+  ['what is your top location preference?', '1x'],
+  ['how did you first hear about five rings?', '1x'],
+];
+
+test('no production question is answered from a profile with nothing stored', () => {
+  /* THE GENERAL FORM OF THE FIX, and the thing that would have caught onsite_commitment.
+   *
+   * selfDeclaration.ts was already the general predicate for this class, and onsite_commitment
+   * still slipped past it, for two reasons worth naming here so the next one does not:
+   *
+   *   1. No office, onsite or location pattern was on its list at all. The list was built from the
+   *      labels measured on the 25-packet run plus the named defects, and the comment above
+   *      LOCATION_COMMITMENT_VOCAB in questionDiscovery.ts called this question "routine".
+   *   2. Structurally, isSelfDeclarationQuestion only ever guards the DRAFTER. In the submission
+   *      runner it is consulted after resolveKnownAnswer, as the last door before the model; a
+   *      `{ value }` from resolveKnownAnswer short-circuits it and is never seen. So a predicate
+   *      that is a superset of the labels resolveKnownAnswer REFUSES has no authority whatsoever
+   *      over the labels resolveKnownAnswer ANSWERS, which is where all three constants lived.
+   *
+   * This test has authority over both, because it asks the only question that matters: with nothing
+   * on file, does a machine still produce an answer? A new constant anywhere in resolveKnownAnswer
+   * fails here without anybody having to remember to add a pattern to a list.
+   */
+  const jd = 'Redwood Materials\nSan Francisco, CA\nSummer 2026 internship, full-stack engineering.';
+  const answered: string[] = [];
+  for (const [label, seen] of UNTRACEABLY_ANSWERED_PRODUCTION_LABELS) {
+    for (const jdText of [undefined, jd]) {
+      const resolved = resolveKnownAnswer(label, 'text', {}, jdText);
+      if (resolved && 'value' in resolved) {
+        answered.push(`${seen} ${label.slice(0, 70)} -> ${resolved.value}`);
+      }
+    }
+  }
+  assert.deepEqual(answered, []);
+});
+
+test('the only constant an empty profile may produce is the EEO decline', () => {
+  /* R-018, and it is not an exception to the rule so much as the rule reaching its floor.
+   * "Decline to self-identify" is a REFUSAL TO STATE, not a statement: it is the option the
+   * employer's own form offers for exactly this, and choosing it claims nothing about her race,
+   * gender, veteran status or disability. Every other constant in this file made a claim. */
+  for (const label of [
+    'How would you describe your gender identity?',
+    'Are you Hispanic/Latino?',
+    'Do you identify as transgender?',
+    'Are you a veteran or active member of the United States Armed Forces?',
+  ]) {
+    assert.deepEqual(resolveKnownAnswer(label, 'select', {}, undefined), { value: 'Decline to self-identify' });
+  }
+  // And a stored preference still wins over the decline, which is the half that makes it a relay.
+  assert.deepEqual(
+    resolveKnownAnswer('How would you describe your gender identity?', 'select', { eeo_prefs: { gender: 'Female' } }, undefined),
+    { value: 'Female' },
+  );
+});
+
+test('the season a posting is for is read from the posting, and her calendar is not', () => {
+  /* The one JD-derived answer that stays. "Please confirm the season you are applying for" asks
+   * which posting she applied to, and the posting is the authority on that - it is a fact about the
+   * job, not a claim about her. Its neighbour, "when are you able to join Astranis as an intern?",
+   * used to be answered from the same JD season, and that one IS a claim about her: it is now
+   * refused unless availability_date is stored. The pair is the whole distinction. */
+  assert.deepEqual(
+    resolveKnownAnswer('Please confirm the season you are applying for.', 'select', {}, 'Backend Intern (Fall 2026)'),
+    { value: 'Fall 2026' },
+  );
+  const join = resolveKnownAnswer('When are you able to join us as an intern?', 'text', {}, 'Backend Intern (Fall 2026)');
+  assert.ok(join && 'skipReason' in join);
+});
+
+test('a missing fact is left blank AND raised, never filled', () => {
+  /* THE ABSOLUTE RULE, pinned end to end rather than resolver-by-resolver. For each label, with
+   * nothing stored: no value comes back, and what does come back carries a sentence naming the
+   * question, so the human is told rather than left to find an empty required field after the run.
+   *
+   * The first entry is the exact Redwood Materials label from packet
+   * 8d12aea8-8476-4f7a-860b-fa6393842df9, which was ready to send answered "Yes". */
+  for (const label of [
+    'Are you available to work from our office in San Francisco?',
+    'AI Policy for Interviewers',
+    'Are you currently bound by any agreements with a current or former employer that may restrict your ability to work for Scale AI?',
+    'How did you hear about this job?',
+    '1st choice: Area of interest in Software Engineering',
+    'What is your top location preference?',
+    'Do you currently reside in San Francisco?',
+  ]) {
+    const resolved = resolveKnownAnswer(label, 'text', {}, undefined);
+    assert.ok(resolved, `must be recognised, not dropped: ${label}`);
+    assert.ok('skipReason' in resolved, `must not be answered: ${label}`);
+    assert.ok(resolved.skipReason.trim().length > 20, `must explain itself: ${label}`);
   }
 });
