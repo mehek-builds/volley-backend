@@ -31,6 +31,12 @@ export type ManagedDiscoveredQuestion = {
   // managedResultFieldOptions, attachManagedFieldOptions). Still optional, because the direct
   // Playwright path reads options straight off the Page and an unprobed control has none.
   options?: string[] | null;
+  // Optional for the same reason as options: the managed provider does not report required-ness
+  // yet. Until it does, discoveredFieldIsRequired reads the employer's own required marker out of
+  // the raw label, which this provider DOES report, so the managed path is not left waiting on a
+  // change in another service. When stratus starts sending the flag it is believed with no further
+  // change here.
+  required?: boolean;
 };
 
 export type ManagedBrowserResult = {

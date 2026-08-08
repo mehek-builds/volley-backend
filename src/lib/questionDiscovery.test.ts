@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   classifyField,
+  discoveredFieldIsRequired,
   eeoAnswer,
+  isCoreIdentityField,
+  labelMarksRequired,
   fitToBudget,
   graduationDateAnswer,
   isOpenEndedQuestion,
@@ -1442,6 +1445,87 @@ test('"authorized to work for all employers" is not answered Yes while sponsorsh
     ),
     { value: 'Yes' },
   );
+});
+
+/* R-095/R-096 required-ness.
+ *
+ * Every label below is the VERBATIM raw string discovery returns for the live Anduril Greenhouse
+ * posting (job-boards.greenhouse.io/embed/job_app?for=andurilindustries&token=5148079007), captured
+ * by running DISCOVER_QUESTIONS_SCRIPT against that page. The asterisk is the employer's own
+ * required marker and it is the only required-ness signal the MANAGED provider reports, since it
+ * runs its own port of the discovery script and sends back no required flag. If normalization ever
+ * starts stripping the marker before these read it, or the raw shape changes, these break. */
+const ANDURIL_REQUIRED_RAW_LABELS = [
+  'Discipline* discipline--0',
+  'What is your top location preference? * question_12114511007',
+  'EXPORT CONTROLS - This position requires access to information and technology that is subject to U.S. export controls. Your responses to the questions below will be used solely to determine your eligibility under U.S. law to receive information and materials subject to U.S. export controls.* question_12114512007',
+  'How did you hear about Anduril?* question_12114515007',
+];
+
+const ANDURIL_OPTIONAL_RAW_LABELS = [
+  'Gender gender',
+  'Website Website question_12114508007',
+  'Veteran Status veteran_status',
+  'Disability Status disability_status',
+];
+
+test('the employer required marker is read off every raw Anduril label that carries one', () => {
+  for (const label of ANDURIL_REQUIRED_RAW_LABELS) {
+    assert.equal(labelMarksRequired(label), true, label.slice(0, 70));
+  }
+});
+
+test('an optional Anduril field is not promoted to required, which would block a valid submission', () => {
+  for (const label of ANDURIL_OPTIONAL_RAW_LABELS) {
+    assert.equal(labelMarksRequired(label), false, label);
+  }
+});
+
+test('the marker has to stand at a word boundary, so an asterisk inside a token is not a marker', () => {
+  assert.equal(labelMarksRequired('Rate a*b as a product'), false);
+  assert.equal(labelMarksRequired('*First Name'), true);
+  assert.equal(labelMarksRequired('First Name *'), true);
+});
+
+test('a form legend explaining the marker does not mark that field required', () => {
+  assert.equal(labelMarksRequired('* indicates a required field'), false);
+  assert.equal(labelMarksRequired('* denotes required'), false);
+});
+
+test('discoveredFieldIsRequired trusts the provider flag and falls back to the marker', () => {
+  // The direct-Playwright path reports the flag: believed even when the label carries no marker,
+  // which is the real Anduril phone field (aria-required="true", asterisk hidden behind a legend).
+  assert.equal(discoveredFieldIsRequired({ label: 'Phone', required: true }), true);
+  // The managed path reports no flag at all. The marker is what keeps it honest until it does.
+  assert.equal(discoveredFieldIsRequired({ label: 'Discipline* discipline--0' }), true);
+  assert.equal(discoveredFieldIsRequired({ label: 'Gender gender' }), false);
+  assert.equal(discoveredFieldIsRequired({ label: 'Gender gender', required: false }), false);
+});
+
+test('normalizeDiscoveredLabel strips the marker, which is why required-ness is read before it', () => {
+  // Pins the reason discoveredFieldIsRequired must see the RAW label. If this ever stops being
+  // true the fallback still works, but the comment explaining it would be a lie.
+  assert.equal(normalizeDiscoveredLabel('Discipline* discipline--0'), 'Discipline');
+  assert.equal(labelMarksRequired(normalizeDiscoveredLabel('Discipline* discipline--0')), false);
+});
+
+test('name and email are never manufactured as the applicant\'s work, since the packet fills them', () => {
+  // Verbatim raw labels from the live Anduril form. All three carry the required marker, so without
+  // this guard R-096 would have made every application on every portal stall on its own name field.
+  for (const label of ['First Name* First Name first_name', 'Last Name* Last Name last_name', 'Email* Email email']) {
+    assert.equal(labelMarksRequired(label), true, label);
+    assert.equal(isCoreIdentityField(label), true, label);
+  }
+});
+
+test('a legal or preferred name is a real question, not the name the packet already carries', () => {
+  assert.equal(isCoreIdentityField('What is your legal first name?'), false);
+  assert.equal(isCoreIdentityField('Preferred First Name'), false);
+  assert.equal(isCoreIdentityField('Maiden name'), false);
+  // ...and nothing else gets swept up by the name/email words.
+  assert.equal(isCoreIdentityField('Discipline'), false);
+  assert.equal(isCoreIdentityField('What is your top location preference?'), false);
+  assert.equal(isCoreIdentityField('High School Name & Graduation Year'), false);
 });
 
 /* ─── the Anduril Greenhouse run of 2026-08-08, verbatim ─────────────────────────────────────
