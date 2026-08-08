@@ -36,6 +36,7 @@ import { declaredSkillsList } from './profile';
 import { buildPacket, processSubmissionApplication } from './submissionRunner';
 import { refreshKnownQuestionAnswers, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
+import { rememberReusableAnswers } from '../lib/savedAnswerStore';
 import { resumeEditDisposition, submitRequestDisposition } from '../lib/submissionSafety';
 import {
   detectPortal,
@@ -71,6 +72,23 @@ const reviewBodySchema = z.object({
 const submitBodySchema = z.object({
   questions: z.array(questionSchema).max(100),
 });
+
+type StoredResumeRow = typeof generated_resumes.$inferSelect;
+
+/** The employer a packet is for, so answerReuse can hold back anything that names them. */
+function applicationCompany(row: StoredResumeRow): string {
+  const context = (row.job_context && typeof row.job_context === 'object' ? row.job_context : {}) as Record<string, unknown>;
+  return typeof context.company === 'string' ? context.company.trim() : '';
+}
+
+/** The monitored_jobs posting behind a packet, or null. Audit only on the saved-answer row. */
+function applicationJobId(row: StoredResumeRow): string | null {
+  const context = (row.job_context && typeof row.job_context === 'object' ? row.job_context : {}) as Record<string, unknown>;
+  const jobId = context.job_id;
+  return typeof jobId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(jobId)
+    ? jobId
+    : null;
+}
 const statusBodySchema = z.object({
   status: z.literal('failed'),
   error: z.string().max(2000).optional(),
@@ -633,6 +651,25 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (sensitive) {
         return reply.status(422).send({ error: `Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}` });
       }
+      /* REMEMBER THE ANSWERS THAT TRAVEL, so she is asked for each of them exactly once.
+       *
+       * Here rather than on the Apply screen, deliberately: this is the moment her answers are
+       * final and have passed every guard above, and it is the ONE path every answer takes -
+       * whether she typed it at Apply, edited it on the review screen, or corrected it after a
+       * stall. A second write path on the Apply screen would remember answers she then changed.
+       *
+       * WHICH answers is lib/answerReuse's decision and it defaults to "none": an export-control
+       * declaration and a skill self-rating are the same on every form and are kept, while
+       * "which opening would you be most interested in" is about this posting and is not. Best
+       * effort on purpose - failing to remember an answer costs her one retype on a later posting,
+       * and failing her submission over it costs her the application. */
+      void rememberReusableAnswers(
+        request.jwtPayload!.userId,
+        normalizedSubmittedQuestions.map((question) => ({ question: question.question, answer: question.answer })),
+        { company: applicationCompany(row), jobId: applicationJobId(row) },
+      ).catch((error: unknown) => {
+        fastify.log.warn({ error, applicationId: row.id }, 'could not remember the answers that carry to other postings');
+      });
       // Unsupported portals are handled here, before a browser is booked, because the answer has
       // been available since the packet was created. Without this branch the run would start, drive
       // a managed browser for minutes, and only then fail on detectPortal's throw. A client-side

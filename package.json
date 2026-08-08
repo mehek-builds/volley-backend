@@ -82,6 +82,7 @@
     "db:job-pay": "node scripts/apply-job-pay-schema.mjs",
     "db:employment-type-index": "node scripts/apply-employment-type-index.mjs",
     "db:description-digest": "node scripts/apply-description-digest.mjs",
+    "db:posting-questions": "node scripts/apply-posting-questions-schema.mjs",
     "setup:application-email-resend": "node scripts/setup-resend-application-email.mjs",
     "verify:classification": "tsx scripts/verify-classification.mts",
     "trial:submit-control": "tsx scripts/trial-submit-control.mts",

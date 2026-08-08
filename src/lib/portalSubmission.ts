@@ -2738,6 +2738,35 @@ export function buildManagedDiscoveryActions(portal: SupportedPortal, packet: Su
   return actions;
 }
 
+/**
+ * THE PRE-SCRIPT SCAN: read an employer's form without touching it.
+ *
+ * buildManagedDiscoveryActions above is a discovery pass that happens to be part of a submission:
+ * it fills the fixed fields first (name, email, phone, links, and the resume UPLOAD) because the
+ * run it belongs to is going to fill them anyway a moment later, so doing it early is free.
+ *
+ * This one is not part of a submission. It runs when Litos wants to know what a posting asks, which
+ * can be before the applicant has decided to apply to it at all, and typing her name and uploading
+ * her resume into an employer's form at that point would be doing something on her behalf that she
+ * has not asked for. Some ATSes save a partial application from exactly that.
+ *
+ * So: no fills, no upload, no submit, and no screenshot either (runManagedBrowser renders a
+ * full-page PNG by default and nothing here would look at it). What is left is the two things the
+ * scan exists for - the DOM walk, and the option probes around it, which are the reason a closed
+ * list comes back with its real choices instead of a guess. Roughly 25 actions on Greenhouse and
+ * one everywhere else, against buildManagedDiscoveryActions' 120-action budget.
+ */
+export function buildManagedPrescriptActions(portal: SupportedPortal): ManagedBrowserAction[] {
+  const actions: ManagedBrowserAction[] = [];
+  // Round one warms the async option fetches; see pushManagedReactSelectOptionProbeActions for why
+  // the read that matters is round two, after `discover` has walked the DOM.
+  pushManagedReactSelectOptionProbeActions(actions, portal, 1);
+  actions.push({ type: 'discover', optional: true, timeout: MANAGED_FILL_TIMEOUT_MS });
+  pushManagedReactSelectOptionProbeActions(actions, portal, 2);
+  if (actions.length > MANAGED_ACTION_LIMIT) truncateManagedActionsToBudget(actions, MANAGED_ACTION_LIMIT);
+  return actions;
+}
+
 export function buildManagedPortalActions(
   portal: SupportedPortal,
   packet: SubmissionPacket,

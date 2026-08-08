@@ -107,14 +107,14 @@ const NON_US_WORK_SCOPE =
 const JOB_LOCATION_SCOPE = /country\s+(?:where|in which)\s+the\s+job\s+is\s+located|country\s+where\s+the\s+role\s+is\s+located|where\s+the\s+job\s+is\s+located/i;
 const JD_US_SCOPE =
   /\b(united states|u\.s\.|usa|remote\s*\(us\)|san francisco|san mateo|mountain view|california|new york|austin|texas|washington|seattle|boston|massachusetts|chicago|illinois)\b/i;
-const ROUTINE_APPLICANT_CONSENT_QUESTION =
+export const ROUTINE_APPLICANT_CONSENT_QUESTION =
   /\b(?:consent|agree|acknowledg\w*|approve|confirm)\b[\s\S]{0,180}\b(?:process(?:ing)?|use|using|collect(?:ion)?|retain|store|privacy\s+policy|privacy\s+notice|notice\s+at\s+collection)\b[\s\S]{0,180}\b(?:personal\s+information|personal\s+data|application|applicant|candidacy|candidate|privacy\s+policy|privacy\s+notice|notice\s+at\s+collection|infrastructure|platform|data)\b|\bplease\s+review\s+and\s+acknowledg\w*\b[\s\S]{0,120}\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b|\byes,\s*i\s+consent\b/i;
 
 export const EEO_QUESTION =
   /transgender|\bgender\b|what is your sex\b|race|racial|ethnicit|ethnic\b|hispanic|latino|veteran|military|disab|sexual orientation|lgbtq|lgbtqia|communities|which categories describe you|identify with|current age|what is your age|age range|how old are you|\bage group\b/i;
-const AGE_ATTESTATION_QUESTION =
+export const AGE_ATTESTATION_QUESTION =
   /(?:\b18\+\s*(?:years?)?|\beighteen\b|\bat\s+least\s+18\b|\b18\s+years?\s+of\s+age\b|\bage\s+of\s+18\b)/i;
-const LEGAL_CONSENT_QUESTION =
+export const LEGAL_CONSENT_QUESTION =
   /candidate privacy policy|candidate-privacy-notice|privacy notice|notice at collection|review and acknowledge|information (?:i|you) have provided.*process|by selecting ["']?i agree|demographic data survey|collecting,\s*storing,\s*and processing/i;
 
 export function isLegalConsentQuestion(label: string): boolean {
@@ -288,7 +288,7 @@ function politicallyExposedAnswer(
  * stored answer later is the only change needed.
  */
 export const EXPORT_CONTROL_QUESTION =
-  /\bexport\s+control(?:s|led)?\b|\bexport\s+administration\s+regulations?\b|\bitar\b|\bear\s?99\b|\bdeemed\s+export\b|\bu\.?\s?s\.?\s+person\s+(?:status|as\s+defined|under)\b/i;
+  /\bexport\s+control(?:s|led)?\b|\bexport\s+administration\s+regulations?\b|\bexport\s+(?:regulations?|laws?|licens\w*|compliance)\b|\bitar\b|\bear\s?99\b|\bdeemed\s+export\b|\bu\.?\s?s\.?\s+person\s+(?:status|as\s+defined|under)\b/i;
 
 /**
  * Databricks' sanctions checklist, which mentions export controls and is NOT this question.
@@ -569,7 +569,7 @@ const SALARY_QUESTION = /salary|compensat|desired pay|expected pay|pay expectati
 const DOB_QUESTION = /date of birth|birth\s*date|\bdob\b/i;
 const CITIZENSHIP_QUESTION = /citizen|nationalit/i;
 const ADVANCED_DEGREE_ENROLLMENT_QUESTION = /\bcurrently\s+enrolled\b[^?]{0,80}\b(?:masters?|master's|ph\.?d|doctorate)\b|\b(?:masters?|master's|ph\.?d|doctorate)\b[^?]{0,80}\bcurrently\s+enrolled\b/i;
-const EMPLOYER_RESTRICTION_AGREEMENT_QUESTION =
+export const EMPLOYER_RESTRICTION_AGREEMENT_QUESTION =
   /\bbound\b[^?]{0,120}\bagreements?\b[^?]{0,180}\b(?:restrict|limit)\b[^?]{0,120}\b(?:ability\s+to\s+work|employment|duties)\b|\b(?:non-compete|non-solicitation|confidentiality|non-disclosure)\b[^?]{0,180}\b(?:restrict|limit|bound)\b/i;
 const CURRENT_EMPLOYER_QUESTION =
   /\bcurrent\s+employer\b|\bwhere\s+do\s+you\s+(?:currently\s+)?work\b|\bwhere\s+are\s+you\s+currently\s+(?:employed|working)\b/i;
@@ -579,7 +579,7 @@ const PRIOR_EMPLOYER_OR_PROGRAM_QUESTION =
   /\bhave\s+you\s+(?:ever\s+|previously\s+)?(?:worked|been\s+employed)\s+(?:for|by|at)\b|\bhave\s+you\s+been\s+enrolled\s+in\b[^?]{0,120}\bin\s+the\s+past\s+\d+\s+months\b/i;
 const STEM_MAJOR_QUESTION =
   /\bmajoring\s+in\s+STEM\b|\bSTEM\b[^?]{0,160}\b(?:Computer Science|Electrical Engineering|Data Science|Mathematics|Machine Learning)\b/i;
-const AI_INTERVIEW_POLICY_QUESTION =
+export const AI_INTERVIEW_POLICY_QUESTION =
   /\bAI\s+Policy\s+for\s+Interviewers\b|\bdo\s+not\s+use\s+any\s+AI\s+tools\b[^?]{0,160}\binterview\b/i;
 const INTERNSHIP_AVAILABILITY_QUESTION =
   /\b(?:are|will)\s+you\s+available\b[^?]{0,160}\b(?:internship|full-time|40\s*hours|weeks?)\b|\b(?:internship|full-time|40\s*hours|weeks?)\b[^?]{0,160}\b(?:are|will)\s+you\s+available\b/i;
@@ -589,9 +589,9 @@ const INTERNSHIP_JOIN_QUESTION =
   /\bwhen\b[^?]{0,120}\b(?:able|available|start|join)\b[^?]{0,120}\bintern\b|\bintern\b[^?]{0,120}\b(?:able|available|start|join)\b/i;
 const SOFTWARE_ENGINEERING_AREA_QUESTION =
   /\b(?:area|track|team)\s+of\s+interest\b[^?]{0,120}\bsoftware\s+engineering\b|\bsoftware\s+engineering\b[^?]{0,120}\b(?:area|track|team)\s+of\s+interest\b/i;
-const HIGH_SCHOOL_DIPLOMA_CONFIRMATION_QUESTION =
+export const HIGH_SCHOOL_DIPLOMA_CONFIRMATION_QUESTION =
   /\b(?:earned|have|hold|received|obtained)\b[^?]{0,120}\b(?:high\s+school\s+diploma|equivalent\s+degree|ged)\b|\b(?:high\s+school\s+diploma|equivalent\s+degree|ged)\b[^?]{0,120}\b(?:confirm|acknowledge|certify|required|must\s+have)\b/i;
-const OFFER_DEADLINE_QUESTION =
+export const OFFER_DEADLINE_QUESTION =
   // The third alternative was added for Five Rings' "Are you holding any outstanding offers?",
   // which has no "do you have" stem and so matched neither of the first two.
   /\b(?:offers?|offer\s+deadlines?|outstanding\s+offers?|deadlines?)\b[^?]{0,120}\b(?:aware|currently|have|should\s+we\s+know|tell\s+us|provide|share)\b|\b(?:do\s+you\s+have|currently\s+have)\b[^?]{0,120}\b(?:offers?|deadlines?)\b|\b(?:are\s+you\s+)?hold(?:ing)?\b[^?]{0,60}\b(?:outstanding\s+)?offers?\b/i;
@@ -602,11 +602,11 @@ const SAN_FRANCISCO_RESIDENCE_QUESTION = /\bcurrently\s+reside\b[^?]{0,80}\bsan\
 const CONFIRMED_PLANS_CITY_RE = /\b(?:currently\s+residing|confirmed\s+plans)\b[^?]{0,80}\b(?:greater\s+)?([a-z][a-z .'-]+?)\s+area\b|\bconfirmed\s+plans\b[^?]{0,80}\bin\s+([a-z][a-z .'-]+)\b/i;
 const LEGAL_FIRST_NAME_QUESTION =
   /\blegal\s+first\s+name\b|\bfirst\s+name\b[^?]{0,120}\blegal\b/i;
-const TOP_ROLE_PREFERENCE_ACKNOWLEDGEMENT =
+export const TOP_ROLE_PREFERENCE_ACKNOWLEDGEMENT =
   /\banswering\s+[“"]?yes[”"]?\s+below\b[^?]{0,220}\btop\s+preference\b|\btop\s+preference\b[^?]{0,220}\banswering\s+[“"]?yes[”"]?\s+below\b/i;
-const RESUME_PDF_ACKNOWLEDGEMENT =
+export const RESUME_PDF_ACKNOWLEDGEMENT =
   /\bresume\b[^?]{0,120}\bPDF\s+format\b|\bPDF\s+format\b[^?]{0,120}\bresume\b/i;
-const TRUE_COMPLETE_ACCURATE_CERTIFICATION =
+export const TRUE_COMPLETE_ACCURATE_CERTIFICATION =
   /\bcertify\b[^?]{0,220}\btrue\b[^?]{0,120}\bcomplete\b[^?]{0,120}\baccurate\b/i;
 const NY_CA_RESIDENCE_QUESTION =
   /\b(?:live|reside|located)\b[^?]{0,80}\bnew\s+york\b[^?]{0,80}\bcalifornia\b|\bnew\s+york\b[^?]{0,80}\bcalifornia\b[^?]{0,80}\b(?:live|reside|located)\b/i;
@@ -619,17 +619,17 @@ const NY_CA_RESIDENCE_QUESTION =
 // `state-owned` is a POSITIVE match here precisely because it is the phrase that caused the harm:
 // naming it means the question is recognised for what it is and short-circuited before any
 // residence rule can see the word "state" inside it.
-const POLITICALLY_EXPOSED_PERSON_QUESTION =
+export const POLITICALLY_EXPOSED_PERSON_QUESTION =
   /\bpolitically\s+exposed\b|\bentrusted\s+with\s+a\s+(?:prominent\s+)?(?:public\s+)?(?:position|function)\b|\bstate[-\s](?:owned|controlled|run)\b(?:[^?]{0,160}\b(?:bank|brokerage|enterprise)\b)?|\bsenior\s+(?:political|government)\s+figure\b|\bimmediate\s+family\s+member\s+of\s+someone\s+holding\s+such\s+a\s+position\b/i;
 // "Authorized to work for ALL employers", "without sponsorship", "without restriction": a narrower
 // claim than work_authorized records. Someone who needs sponsorship is authorized to work, but not
 // for every employer without one, so answering these "Yes" off work_authorized is a false legal
 // declaration - the exact failure R-004 was opened for.
-const UNRESTRICTED_WORK_AUTHORIZATION_QUESTION =
+export const UNRESTRICTED_WORK_AUTHORIZATION_QUESTION =
   /\ball\s+employers?\b|\bany\s+employer\b|\bwithout\s+(?:the\s+need\s+for\s+)?(?:visa\s+)?sponsorship\b|\bwithout\s+restriction\b|\bwithout\s+(?:any\s+)?(?:current\s+or\s+future\s+)?need\s+for\s+sponsorship\b/i;
 const OPTIONS_MARKET_MAKING_EXPERIENCE_QUESTION =
   /\b(?:options\s+market\s+making|market\s+making\s+trading|trading\s+firm)\b/i;
-const WORK_AUTHORIZATION_DETAIL_QUESTION =
+export const WORK_AUTHORIZATION_DETAIL_QUESTION =
   /\b(?:current\s+immigration\s+status|basis\s+of\s+your\s+current\s+work\s+authorization|when\s+does\s+it\s+expire|extension\s+options?|additional\s+detail\s+about\s+your\s+sponsorship\s+need)\b/i;
 // school/degree/grad_date describe the programme the applicant is in NOW. A question scoped to a
 // DIFFERENT or LATER programme is not answered by them, however closely the wording matches. Two
@@ -658,7 +658,7 @@ const HIGH_SCHOOL_GRADUATION_DATE_REQUEST =
 
 // "We care about addressing everyone correctly. Add your personal pronouns below to share with the
 // hiring team." Also the self-describe follow-up, which asks for the same fact in a second box.
-const PRONOUNS_QUESTION = /\bpronouns?\b/i;
+export const PRONOUNS_QUESTION = /\bpronouns?\b/i;
 
 /* POLITICALLY EXPOSED PERSON, the family half.
  *
@@ -666,12 +666,12 @@ const PRONOUNS_QUESTION = /\bpronouns?\b/i;
  * integrate/submission-flow as a refusal and is extended there rather than redeclared here. Tower
  * asks two questions and they take two answers, so the family variant needs its own pattern: it is
  * matched FIRST in politicallyExposedAnswer, because the person pattern also covers its wording. */
-const POLITICALLY_EXPOSED_FAMILY_QUESTION =
+export const POLITICALLY_EXPOSED_FAMILY_QUESTION =
   /\bimmediate\s+family\s+member\b[\s\S]{0,200}\b(?:holding\s+such|such\s+a\s+position|politically\s+exposed)\b|\b(?:close\s+associate|family\s+member)\b[\s\S]{0,160}\bpolitically\s+exposed\b/i;
 
 // Point72's "Have you served in the military?" - a required Yes/No that is not part of an EEO
 // block, and so cannot be answered with "Decline to self-identify".
-const MILITARY_SERVICE_QUESTION =
+export const MILITARY_SERVICE_QUESTION =
   /\bmilitary\b|\barmed\s+forces\b|\bveteran\b/i;
 
 // "Do you have a preferred name, other than the name indicated above?"
@@ -681,28 +681,28 @@ const PREFERRED_NAME_QUESTION =
 // Akuna's "please confirm the month and year" diploma question and IMC's "When did you graduate
 // from High School?". Distinct from every other graduation rule in this file, and checked before
 // them, so the UNIVERSITY graduation date can never be replayed as a high-school one.
-const HIGH_SCHOOL_GRADUATION_QUESTION =
+export const HIGH_SCHOOL_GRADUATION_QUESTION =
   /\bhigh\s+school\b[\s\S]{0,200}\b(?:graduat\w*|diploma|ged|month\s+and\s+year|when)\b|\b(?:graduat\w*|when|month|year)\b[\s\S]{0,120}\bhigh\s+school\b/i;
 
 // "Have you previously applied to work at Point72?" / "...with Akuna in the past?" / "...another
 // role @IMC within the last 12-18 months?". About APPLICATIONS, not employment, which is why it is
 // separate from PRIOR_EMPLOYER_OR_PROGRAM_QUESTION above.
-const PREVIOUSLY_APPLIED_QUESTION =
+export const PREVIOUSLY_APPLIED_QUESTION =
   /\b(?:have|had)\s+you\s+(?:ever\s+|previously\s+)?applied\b|\bpreviously\s+applied\b|\bapplied\s+(?:to|for|with)\b[\s\S]{0,160}\b(?:previously|before|in\s+the\s+past|within\s+the\s+last)\b/i;
 
 // Further education AFTER the current degree. Checked before every graduation-date rule so that
 // "when is your potential master's graduation date?" cannot be handed the undergraduate date -
 // which is exactly what a live Akuna packet carried, answered "May 2028".
 const ADVANCED_DEGREE_WORD = String.raw`master(?:['’]s)?|masters|m\.?s\.?|mba|ph\.?\s?d|doctorate|graduate\s+(?:school|studies|degree)`;
-const POTENTIAL_ADVANCED_GRADUATION_DATE_QUESTION = new RegExp(
+export const POTENTIAL_ADVANCED_GRADUATION_DATE_QUESTION = new RegExp(
   String.raw`\b(?:${ADVANCED_DEGREE_WORD})\b[\s\S]{0,120}\bgraduation\s+date\b|\b(?:potential|expected|anticipated)\b[\s\S]{0,80}\b(?:${ADVANCED_DEGREE_WORD})\b[\s\S]{0,80}\bgraduat\w*`,
   'i',
 );
-const FURTHER_EDUCATION_PLAN_QUESTION = new RegExp(
+export const FURTHER_EDUCATION_PLAN_QUESTION = new RegExp(
   String.raw`\b(?:considering|committed|plan(?:ning)?|intend\w*|pursuing)\b[\s\S]{0,160}\b(?:further\s+education|additional\s+degree|${ADVANCED_DEGREE_WORD})\b|\bfurther\s+education\b[\s\S]{0,160}\b(?:after|following|immediately)\b`,
   'i',
 );
-const FURTHER_EDUCATION_DEGREE_TYPE_QUESTION =
+export const FURTHER_EDUCATION_DEGREE_TYPE_QUESTION =
   /\btype\s+of\s+degree\s+you\s+(?:plan|intend|would\s+like)\s+to\s+pursue\b|\bif\s+so\b[\s\S]{0,80}\btype\s+of\s+degree\b/i;
 
 /* ---- attestations ----
@@ -715,11 +715,11 @@ const FURTHER_EDUCATION_DEGREE_TYPE_QUESTION =
 // Bare-label privacy acknowledgements. Five Rings ships "Privacy Policy Acknowledgement", IMC
 // "Privacy Statement", Point72 just "Privacy": no verb, no sentence, nothing for the prose-shaped
 // ROUTINE_APPLICANT_CONSENT_QUESTION to match, which is why all three sat empty.
-const BARE_PRIVACY_ACKNOWLEDGEMENT =
+export const BARE_PRIVACY_ACKNOWLEDGEMENT =
   /^\s*(?:candidate\s+|applicant\s+)?privacy(?:\s+(?:policy|statement|notice))?(?:\s+acknowledg\w*|\s+consent)?\s*$/i;
 // A behavioural policy is not a privacy notice and not a statement of truth. IMC's "Interview Code
 // of Conduct" was previously auto-answered "Yes" with nothing stored behind it.
-const CODE_OF_CONDUCT_ACKNOWLEDGEMENT =
+export const CODE_OF_CONDUCT_ACKNOWLEDGEMENT =
   /\bcode\s+of\s+conduct\b|\bcode\s+of\s+ethics\b|\bacceptable\s+use\s+policy\b/i;
 
 const NATIONALITY_TO_COUNTRY: Record<string, string> = {
