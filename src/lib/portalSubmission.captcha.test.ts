@@ -1316,4 +1316,32 @@ test('the readiness script reads a control where its answer actually lives', () 
   assert.match(READ_SUBMIT_READINESS_SCRIPT, /indicates\?/);
   // An error over a filled control is stale and is reported, not blocked on.
   assert.match(READ_SUBMIT_READINESS_SCRIPT, /if \(widgetHasAnswer\(widget\)\) \{ stale\.push\(text\); continue; \}/);
+
+  /* THE TWO MARKS THAT ARE NEITHER AN ATTRIBUTE NOR AN ARIA STATE, one per ATS family. Both read a
+     single control's own label; neither reads page text, which is the line an earlier gate crossed
+     when it matched "* indicates a required field" and would have refused every Greenhouse
+     submission there is. */
+  assert.match(READ_SUBMIT_READINESS_SCRIPT, /label\[class\*="_required_"\], legend\[class\*="_required_"\]/);
+  assert.match(READ_SUBMIT_READINESS_SCRIPT, /const ASTERISK_MARK = /);
+  assert.match(READ_SUBMIT_READINESS_SCRIPT, /const ASTERISK_LEGEND = /);
+  // Only the class arm may fall back to the block itself. An asterisk whose control cannot be found
+  // is not evidence that an application is incomplete.
+  assert.match(READ_SUBMIT_READINESS_SCRIPT, /noteMarkedLabel\(marker, true\)/);
+  assert.match(READ_SUBMIT_READINESS_SCRIPT, /noteMarkedLabel\(marker, false\)/);
+
+  /* Ashby renders a yes/no as a row of buttons plus a display:none mirror input, and pressing "No"
+     leaves that mirror UNCHECKED, so the mirror cannot tell "No" from unanswered. Until the pressed
+     state was read, an answered work-authorization question still blocked and the packet stayed in
+     needs_attention forever. */
+  assert.match(READ_SUBMIT_READINESS_SCRIPT, /const chosenPillOf = /);
+  assert.match(READ_SUBMIT_READINESS_SCRIPT, /_active_\|_selected_\|_checked_/);
+  // Consulted for its true only, so a block this recogniser guesses wrong about can never turn a
+  // filled control into a blocker.
+  assert.match(READ_SUBMIT_READINESS_SCRIPT, /if \(chosenPillOf\(widget\) === true\) return true;/);
+
+  /* A label that WRAPS its control carries no "for", so the byFor lookup misses and the block
+     resolves to the label itself. Greenhouse's first name, last name and resume are all built that
+     way, and all three were reported as "no label Litos can read" - a refusal the applicant cannot
+     act on, on the three most obvious fields on the form. */
+  assert.match(READ_SUBMIT_READINESS_SCRIPT, /const wrappingLabelTextOf = /);
 });
