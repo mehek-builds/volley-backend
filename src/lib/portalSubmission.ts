@@ -4476,6 +4476,178 @@ export class NoSubmitControlError extends Error {
   }
 }
 
+/* Extends NoSubmitControlError deliberately, rather than standing alone. fail() reads that type as
+   "the click PROVABLY did not happen", which is the one thing that has to be true of this: the
+   applicant must not be sent looking for a receipt that cannot exist. Everything downstream -
+   precedence against captchaStop, the attention category, the wording shown on the card - is
+   already correct for that meaning, and a new sibling type would have to re-derive all of it. */
+export class FormIncompleteError extends NoSubmitControlError {
+  readonly fields: string[];
+
+  constructor(fields: string[]) {
+    const named = fields.slice(0, 5).join('; ');
+    super(
+      `Litos did not press submit: ${fields.length} required field${fields.length === 1 ? '' : 's'} `
+      + `on the form ${fields.length === 1 ? 'is' : 'are'} still empty (${named}`
+      + `${fields.length > 5 ? `, and ${fields.length - 5} more` : ''})`,
+    );
+    this.name = 'FormIncompleteError';
+    this.fields = fields;
+  }
+}
+
+/* THE PRE-SUBMIT GATE.
+ *
+ * Read immediately before the final click, and it separates two things that look identical in a
+ * screenshot and mean opposite things.
+ *
+ *   1. A required control that is genuinely still empty. Pressing submit here either bounces off
+ *      the employer's own validation or sends an application with blank answers in the applicant's
+ *      name. An employer keeps the first application it receives, so this is not recoverable.
+ *
+ *   2. Error text left over from an EARLIER validation pass. Measured on the live Redwood Materials
+ *      Greenhouse form on 2026-08-08: one stray keystroke ran the employer's validator while the
+ *      form was half filled, six "is required" messages rendered, and NOT ONE cleared when those
+ *      fields were subsequently filled correctly - "Phone is required." was still on screen
+ *      underneath a filled phone number. Submitting that same form then passed validation with zero
+ *      errors and posted normally.
+ *
+ * So error TEXT is never on its own a reason to refuse. A message blocks only when the control it
+ * belongs to is also empty. Refusing on text alone would throw away complete, correct applications,
+ * which is the same harm as sending a broken one and considerably harder to notice.
+ *
+ * Passed to page.evaluate() as a source STRING for the same reason as DISCOVER_QUESTIONS_SCRIPT:
+ * this project's tsconfig has no "dom" lib, so a typed function here would need document,
+ * getComputedStyle and CSS typed against a lib the backend deliberately does not pull in.
+ *
+ * Kept deliberately in step with the managed runner's own gate in stratus-browser-cloud
+ * (src/managed-browser.js). Two providers that disagree about whether a form is ready to send is a
+ * worse failure than either being wrong on its own.
+ */
+export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
+  const clean = (value) => (value || '').replace(/\s+/g, ' ').trim().replace(/[\s*:]+$/, '');
+  const isVisible = (element) => {
+    if (!element) return false;
+    const rect = element.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) return false;
+    const style = getComputedStyle(element);
+    return style.display !== 'none' && style.visibility !== 'hidden';
+  };
+  // The block that owns one question: its label, its control, and its error line.
+  const widgetOf = (element) => element.closest(
+    '[class*="select__container"], .field, .field-wrapper, .file-upload, fieldset, [role="group"]'
+  ) || element.parentElement || element;
+  const labelOf = (widget, element) => {
+    const labelledBy = (widget && widget.getAttribute('aria-labelledby'))
+      || (element && element.getAttribute('aria-labelledby'));
+    const referenced = labelledBy && document.getElementById(labelledBy.split(/\s+/)[0]);
+    const byFor = element && element.id && document.querySelector('label[for="' + CSS.escape(element.id) + '"]');
+    const legend = widget && widget.querySelector('legend');
+    const own = widget && widget.querySelector('label, .label, .upload-label, legend');
+    for (const candidate of [
+      referenced && referenced.textContent,
+      byFor && byFor.textContent,
+      legend && legend.textContent,
+      own && own.textContent,
+      element && element.getAttribute('aria-label'),
+      widget && widget.getAttribute('aria-label')
+    ]) {
+      const text = clean(candidate);
+      if (!text) continue;
+      // A machine identifier is not a label. Greenhouse names custom questions with UUIDs and
+      // numeric tokens, and "question_19302464004 is required" tells the applicant nothing.
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(text)) continue;
+      if (!/[a-z]/i.test(text)) continue;
+      return text.slice(0, 120);
+    }
+    return '';
+  };
+  // Asked of the WIDGET, because on the two control families that matter the answer does not live
+  // in an input's value at all:
+  //   - a React Select renders its answer as .select__single-value text and shows
+  //     .select__placeholder when it has none, and CLEARS the combobox input's search text on
+  //     selection, so reading the input calls every answered question empty;
+  //   - Greenhouse's uploader REMOVES the file input once the upload finishes and replaces it with
+  //     a filename chip, so "no input[type=file] holding a file" is true of a widget that has
+  //     already been given one.
+  const widgetHasAnswer = (widget) => {
+    if (!widget) return false;
+    if (widget.querySelector('[class*="select__single-value"], [class*="select__multi-value__label"]')) return true;
+    if (widget.querySelector('[class*="select__placeholder"]')) return false;
+    if (widget.querySelector('.file-upload__filename, [class*="file-upload__filename"], [aria-label="Remove file" i]')) return true;
+    for (const control of widget.querySelectorAll('input, textarea, select')) {
+      if (control.type === 'hidden') continue;
+      if (control.type === 'file') {
+        if (control.files && control.files.length > 0) return true;
+        continue;
+      }
+      if (control.type === 'checkbox' || control.type === 'radio') {
+        if (control.checked) return true;
+        continue;
+      }
+      if (control.getAttribute('role') === 'combobox') continue;
+      if (clean(control.value)) return true;
+    }
+    return false;
+  };
+  const blocking = [];
+  const seen = new Set();
+  const note = (widget, element) => {
+    if (!widget || seen.has(widget)) return;
+    seen.add(widget);
+    if (!isVisible(widget)) return;
+    if (widgetHasAnswer(widget)) return;
+    const label = labelOf(widget, element);
+    blocking.push(label
+      ? '"' + label + '" is required and is still empty'
+      : 'A required field on the form has no label Litos can read, and is still empty');
+  };
+  // Native required, PLUS aria-required. React Select's input carries aria-required="true" and no
+  // required attribute at all, so a gate built only on [required] cannot see an unanswered
+  // Greenhouse screener question - which is exactly the control this gate exists to catch.
+  for (const element of document.querySelectorAll(
+    'input[required], textarea[required], select[required], [aria-required="true"]'
+  )) {
+    if (element.disabled) continue;
+    if (!isVisible(element) && !isVisible(widgetOf(element))) continue;
+    note(widgetOf(element), element);
+  }
+  const stale = [];
+  const ERROR_TEXT = /\bis required\b|\brequired field\b|\bplease (?:select|enter|complete|choose|provide)\b|\bcannot be blank\b/i;
+  // A form's own legend says "* indicates a required field", and it matches the line above. On the
+  // live Redwood form that legend was the ONLY thing an early version of this found on a completely
+  // and correctly filled application, so the gate would have refused every Greenhouse submission
+  // there is. A gate that blocks everything is not caution.
+  const LEGEND_TEXT = /\bindicates?\b|\bdenotes?\b|\bfields?\s+marked\b|\ball fields\b/i;
+  for (const element of document.querySelectorAll('*')) {
+    if (element.children.length > 0) continue;
+    const text = clean(element.textContent);
+    if (!text || text.length > 160 || !ERROR_TEXT.test(text) || LEGEND_TEXT.test(text)) continue;
+    if (!isVisible(element)) continue;
+    const widget = widgetOf(element);
+    if (!widget || widget === element) continue;
+    // A message in a block that holds no control at all is not a field error. It is a legend or a
+    // page-level notice, and attributing it to a field invents a blocker.
+    const control = widget.querySelector('input:not([type="hidden"]), textarea, select, [role="combobox"]');
+    if (!control) continue;
+    if (widgetHasAnswer(widget)) { stale.push(text); continue; }
+    // note() dedupes on the widget, so a field already reported by the scan above is not counted
+    // twice for also carrying the matching error line.
+    note(widget, control);
+  }
+  return { blocking, stale: Array.from(new Set(stale)) };
+})()`;
+
+export type SubmitReadiness = { blocking: string[]; stale: string[] };
+
+export async function readSubmitReadiness(page: Page): Promise<SubmitReadiness> {
+  const raw = await page.evaluate(READ_SUBMIT_READINESS_SCRIPT) as Partial<SubmitReadiness> | null;
+  return {
+    blocking: Array.isArray(raw?.blocking) ? raw!.blocking : [],
+    stale: Array.isArray(raw?.stale) ? raw!.stale : [],
+  };
+}
+
 /* ONE READER, USED BY BOTH PASSES.
  *
  * It was two, and the second was a strict subset of the first: selection read title and
@@ -4593,6 +4765,22 @@ export async function clickFinalSubmit(page: Page): Promise<void> {
        NOTE: this guard only covers the direct-Playwright path. The managed-Stratus path in
        submissionRunner never builds a Page, so it never reaches here. */
     const button = handles[chosen]!;
+    /* THE PRE-SUBMIT GATE, and it sits here for the same reason the captcha probe sits above: after
+       the control has been found, before anything is pressed. See READ_SUBMIT_READINESS_SCRIPT for
+       why a visible "is required" message is NOT on its own a reason to refuse.
+       FAILS CLOSED. If the readiness read itself throws - a re-render destroying the execution
+       context is the likely one - this cannot confirm the form is complete, and "we could not
+       check, so we sent it anyway" is not a defensible thing to do with a real application. The
+       cost of being wrong in this direction is a handoff card telling the applicant to finish it
+       herself, which is recoverable; the cost of being wrong in the other direction is an employer
+       holding a half-blank application she can never withdraw. */
+    const readiness = await readSubmitReadiness(page).catch(() => null);
+    if (readiness === null) {
+      throw new NoSubmitControlError(
+        'Litos could not confirm the form was complete before submitting, so it did not submit',
+      );
+    }
+    if (readiness.blocking.length > 0) throw new FormIncompleteError(readiness.blocking);
     /* Read the label again, off the same node, immediately before pressing it. The handle cannot
        drift to a different element, but the element itself can be relabelled by a re-render, and
        the cost of being wrong here is clicking a handoff on a real application. */
