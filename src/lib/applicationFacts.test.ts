@@ -2,7 +2,14 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyField, resolveKnownAnswer, type ApplicationProfileLike } from './questionDiscovery';
 import { resolveProfileField } from './profileFieldResolution';
-import { APPLICATION_FACT_COLUMNS, factBoolean, factString, factStringList, withoutFactColumns } from './applicationFacts';
+import {
+  APPLICATION_FACT_COLUMNS,
+  factBoolean,
+  factString,
+  factStringList,
+  isUndefinedColumnError,
+  withoutFactColumns,
+} from './applicationFacts';
 
 /* Does a fact answered once in onboarding actually reach the control on a real employer form?
  *
@@ -327,6 +334,31 @@ describe('the reader survives the migration not having run', () => {
   test('a write can shed the fact columns without losing the established ones', () => {
     const values = { phone: '+971500000000', pronouns: 'she/her', accept_privacy_notices: true };
     assert.deepEqual(withoutFactColumns(values), { phone: '+971500000000' });
+  });
+
+  /* THE FALLBACK ONLY FIRES IF THE ERROR IS RECOGNISED, and for the whole life of this file it was
+   * not. Drizzle does not rethrow the pg error: it wraps it in a DrizzleQueryError whose own `code`
+   * is undefined, so a test on the outer `code` never matched 42703 and selectApplicationProfileRow
+   * rethrew. Measured 2026-08-09 by pointing buildPacket at a database missing one fact column:
+   * every read of application_profile failed, which is autofill, onboarding and every in-flight
+   * submission, for as long as the deploy led the migration. */
+  test('the undefined-column check reads through the wrapper Drizzle actually throws', () => {
+    const pgError = Object.assign(new Error('column "education_start_date" does not exist'), { code: '42703' });
+    assert.equal(isUndefinedColumnError(pgError), true, 'the bare pg error');
+    assert.equal(isUndefinedColumnError(new Error('Failed query', { cause: pgError })), true, 'wrapped once');
+    assert.equal(
+      isUndefinedColumnError(new Error('outer', { cause: new Error('Failed query', { cause: pgError }) })),
+      true,
+      'wrapped twice',
+    );
+    // Everything else still throws, which is the half that keeps a real failure from being swallowed.
+    assert.equal(isUndefinedColumnError(new Error('connection terminated')), false);
+    assert.equal(isUndefinedColumnError(Object.assign(new Error('bad'), { code: '23505' })), false);
+    assert.equal(isUndefinedColumnError(undefined), false);
+    // A cause that loops back on itself must not spin.
+    const looped = new Error('a') as Error & { cause?: unknown };
+    looped.cause = looped;
+    assert.equal(isUndefinedColumnError(looped), false);
   });
 
   test('false and null are told apart in storage but treated the same by the resolver', () => {

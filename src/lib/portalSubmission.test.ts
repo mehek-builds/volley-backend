@@ -16,6 +16,8 @@ import {
   isChoiceQuestion,
   isPaylocityTerminalStep,
   managedResultFilledFields,
+  managedAnswerLossReasons,
+  ashbyControlWithinFieldPath,
   managedResultFieldOptions,
   attachManagedFieldOptions,
   reactSelectListboxSelector,
@@ -1549,15 +1551,22 @@ test('Greenhouse replays Cloudflare graduation and degree choice buckets', () =>
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('degree are you currently pursuing') && label.endsWith('Bachelor\'s')));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('are you available for a 12-week') && label.endsWith('Yes')));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('area of interest in software engineering') && label.endsWith('Backend/Systems')));
-  assert.ok(
-    actions.some((action) =>
-      action.type === 'click'
-      && action.label?.startsWith('question_checkbox:')
-      && action.label.includes('Candidate Privacy Policy')
-      && action.selector === 'label:has-text("Acknowledge/Confirm") input[type="checkbox"]'
-    ),
-    actions.map((action) => `${action.type}:${action.label}:${action.selector}:${action.value}`).join('\n'),
-  );
+  const audit = actions.map((action) => `${action.type}:${action.label}:${action.selector}:${action.value}`).join('\n');
+  const privacyClicks = actions.filter((action) =>
+    action.type === 'click'
+    && (action.label?.includes('Candidate Privacy Policy') || action.label === 'greenhouse_candidate_privacy_acknowledgement'));
+  /* THE MEASURED CLOUDFLARE DEFECT, pinned.
+   *
+   * Four separate click actions used to land on input#question_68005616[]_731478256: the blind
+   * candidate-privacy tick, the discovered id, the :left-of alternative and the name-shape
+   * alternative. Verified against the live form on 2026-08-09 - all four resolve to that one
+   * element, and clicking it four times leaves it unchecked, which is exactly what the packet's
+   * preview screenshot shows and what the employer's validator called "required and is still
+   * empty". One box, one click, alternatives inside it. */
+  assert.equal(privacyClicks.length, 1, audit);
+  assert.ok(privacyClicks[0]!.label?.startsWith('question_checkbox:'), audit);
+  assert.ok(privacyClicks[0]!.selector?.includes('label:has-text("Acknowledge/Confirm") input[type="checkbox"]'), audit);
+  assert.ok(privacyClicks[0]!.selector?.includes('input[type="checkbox"][name^="question_"][name$="[]"]'), audit);
 });
 
 test('Greenhouse replays Roblox required select buckets with exact live options', () => {
@@ -2172,15 +2181,49 @@ test('Greenhouse replays Databricks export-control checkbox answers by exact opt
 
   const checkboxClicks = actions.filter((action) => action.label?.startsWith('question_checkbox:'));
   assert.equal(actions.some((action) => action.label?.startsWith('question_choice:')), false);
-  assert.ok(checkboxClicks.some((action) => action.type === 'click' && action.selector?.includes('Please confirm whether any of the below') && action.selector?.includes('None of the above')));
-  assert.ok(checkboxClicks.some((action) => action.type === 'click' && action.selector?.includes('If you selected a response to the prior question') && action.selector?.includes('Not applicable')));
-  assert.ok(checkboxClicks.some((action) => action.type === 'click' && action.selector === 'input[name="question_35110536002[]"][value="221056618002"]'));
-  assert.ok(checkboxClicks.some((action) => action.type === 'click' && action.selector === 'input[name="question_35114221002[]"][value="221073825002"]'));
+  // ONE CLICK PER BOX. A click is a toggle, so the alternatives ride in a single comma-joined
+  // selector and the runner takes the first that resolves - the same shape managedFill has always
+  // used. Two questions here, so two clicks and no more: four clicks on one export-control box
+  // would tick it, untick it, tick it and untick it.
+  assert.equal(checkboxClicks.length, 2, `expected one click per checkbox, got ${checkboxClicks.length}`);
+  const exportControl = checkboxClicks.find((action) => action.selector?.includes('Please confirm whether any of the below'));
+  const priorQuestion = checkboxClicks.find((action) => action.selector?.includes('If you selected a response to the prior question'));
+  assert.ok(exportControl?.type === 'click' && exportControl.selector?.includes('None of the above'));
+  assert.ok(priorQuestion?.type === 'click' && priorQuestion.selector?.includes('Not applicable'));
+  // The discovered id leads each one, and the label-scoped alternatives follow it inside the same
+  // selector rather than as extra toggles.
+  assert.ok(exportControl?.selector?.startsWith('input[id="question_35110536002[]_221056618002"], '));
+  assert.ok(priorQuestion?.selector?.startsWith('input[id="question_35114221002[]_221073825002"], '));
   assert.ok(checkboxClicks.every((action) => action.optional === true));
   assert.ok(checkboxClicks.every((action) => (action.timeout ?? Infinity) < 30_000));
+  // browserbase.ts drops an optional action whose selector is over 500 characters, which would
+  // take the tick with it. The ladder is truncated to fit rather than allowed to overflow.
+  assert.ok(checkboxClicks.every((action) => (action.selector?.length ?? 0) <= 500));
 });
 
-test('Greenhouse clicks reviewed durable checkbox selectors before exact-option fallbacks', () => {
+test('Greenhouse keeps the exact option hook when there is no discovered checkbox selector', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question: 'Please confirm whether any of the below applies to you. Select all that apply. Note: This information will only be used to ensure compliance with U.S. sanctions and export controls.',
+        answer: 'None of the above',
+      },
+    ],
+  });
+
+  const checkboxClicks = actions.filter((action) => action.label?.startsWith('question_checkbox:'));
+  assert.equal(checkboxClicks.length, 1);
+  // All four alternatives fit here, so none of them is lost - including the exact name/value hook
+  // that is the last and most literal of them.
+  assert.ok(checkboxClicks[0]!.selector?.includes('input[name="question_35110536002[]"][value="221056618002"]'));
+  assert.ok(checkboxClicks[0]!.selector?.includes('label:has-text("None of the above") input[type="checkbox"]'));
+});
+
+test('Greenhouse ticks a reviewed checkbox once, with the durable selector leading', () => {
   const selector = 'input[id="question_35110536002[]_221056618002"]';
   const actions = buildManagedPortalActions('greenhouse', {
     fullName: 'Mehek Mandal',
@@ -2197,13 +2240,14 @@ test('Greenhouse clicks reviewed durable checkbox selectors before exact-option 
     ],
   });
 
-  assert.ok(actions.some((action) =>
-    action.type === 'click'
-    && action.selector === selector
-    && action.label?.startsWith('question_choice_selector:')));
-  assert.ok(actions.some((action) =>
-    action.type === 'click'
-    && action.selector === 'input[name="question_35110536002[]"][value="221056618002"]'));
+  const clicks = actions.filter((action) => action.type === 'click' && action.selector?.includes(selector));
+  assert.equal(clicks.length, 1, `a checkbox may be clicked once, got ${clicks.length}`);
+  // The id read off this very form leads, because it beats every shape-based guess after it, and
+  // the guesses are still there behind it as alternatives rather than as extra toggles.
+  assert.ok(clicks[0]!.selector?.startsWith(selector));
+  assert.ok(clicks[0]!.selector?.includes('label:has-text("None of the above") input[type="checkbox"]'));
+  assert.ok(clicks[0]!.label?.startsWith('question_checkbox:'));
+  assert.equal(actions.some((action) => action.label?.startsWith('question_choice_selector:')), false);
 });
 
 test('Greenhouse school aliases do not strip comma-separated campus names generically', () => {
@@ -3871,4 +3915,156 @@ test('a windowed option read is discarded, so a saved answer past row 100 is not
   });
   assert.equal('school--0' in parsed, false);
   assert.equal(parsed['degree--0']?.length, 3);
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * The three defects measured on the production run of 2026-08-08, each pinned against the live
+ * DOM that produced it. Read the comments before relaxing any of these: every number here was
+ * counted on a real employer's form, not reasoned about.
+ * ------------------------------------------------------------------------------------------- */
+
+test('"Expected Graduation Year" is answered with the year, not the whole date', () => {
+  // Deepgram, 2026-08-08. Discovery resolved this to "2028" and stored it on the packet; the
+  // date branch of greenhouseReviewedQuestionAnswer matched "expected graduat(ion)" first and
+  // overwrote it with packet.graduationDate, "May 2028". A month name in a year field is a wrong
+  // answer on a real application, so the narrow tests now run before the broad one.
+  const packet = {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    graduationDate: 'May 2028',
+    graduationMonth: 'May',
+    graduationYear: '2028',
+    questions: [
+      { question: 'Expected Graduation Year', answer: '2028', portalSelector: '#grad_year', portalInputType: 'text' },
+      { question: 'Graduation Month', answer: 'May', portalSelector: '#grad_month', portalInputType: 'text' },
+      { question: 'What is your graduation date?', answer: 'May 2028', portalSelector: '#grad_date', portalInputType: 'text' },
+    ],
+  };
+  const valueFor = (selector: string) => buildManagedPortalActions('greenhouse', packet)
+    .find((action) => action.type === 'fill' && action.selector === selector)?.value;
+  assert.equal(valueFor('#grad_year'), '2028');
+  assert.equal(valueFor('#grad_month'), 'May');
+  assert.equal(valueFor('#grad_date'), 'May 2028');
+});
+
+test('an Ashby field handle is descended into, because it names the wrapper', () => {
+  /* Read off the live Deepgram application form, 2026-08-09:
+   *   [data-field-path="407cc864-..."] resolves to a DIV (_fieldEntry_1e3gg_28) whose label reads
+   *   "Expected Graduation Year" and which contains exactly one input. Filling the div itself
+   *   fails with "Element is not an <input>, <textarea>, <select> or [contenteditable]".
+   * So the one action the packet produced could never have typed anything, and because a selector
+   * was present the reviewed-question loop skipped the label fallback too. */
+  const wrapper = '[data-field-path="407cc864-6d10-4427-bc5e-71598c5e593f"]';
+  const descended = ashbyControlWithinFieldPath(wrapper);
+  assert.ok(descended.startsWith(`${wrapper} input[role="combobox"]`));
+  assert.ok(descended.includes(`${wrapper} input,`));
+  assert.ok(descended.includes(`${wrapper} textarea`));
+  assert.ok(descended.includes(`${wrapper} select`));
+  // The wrapper stays as the last alternative rather than being dropped.
+  assert.ok(descended.endsWith(wrapper));
+  // Anything that is not a bare field-path selector is left exactly as it is.
+  assert.equal(ashbyControlWithinFieldPath('#question_123'), '#question_123');
+  assert.equal(
+    ashbyControlWithinFieldPath('[data-field-path="x"] input'),
+    '[data-field-path="x"] input',
+  );
+
+  const actions = buildManagedPortalActions('ashby', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    graduationYear: '2028',
+    questions: [
+      { question: 'Expected Graduation Year', answer: '2028', portalSelector: wrapper, portalInputType: 'text' },
+    ],
+  });
+  const fill = actions.find((action) => action.label === 'question:Expected Graduation Year');
+  assert.ok(fill, actions.map((action) => `${action.type}:${action.label}`).join('\n'));
+  assert.equal(fill!.value, '2028');
+  assert.ok(fill!.selector?.includes(`${wrapper} input`));
+  assert.ok((fill!.selector?.length ?? 0) <= 500);
+});
+
+test('the runner\'s own account of an answer that did not stick is passed on, and the noise is not', () => {
+  /* stratus reports one `skipped` line per optional selector that matched nothing - well over a
+   * hundred on a large Greenhouse packet - alongside a handful that mean something entirely
+   * different: Litos had an answer, tried it, and the control did not keep it. This repo read
+   * NEITHER, and wrote skipped_reasons: [] on every run, so Point72's degree question and both
+   * Virtu university questions reached the applicant as a bare "is required and is still empty". */
+  const reasons = managedAnswerLossReasons({
+    skipped: [
+      'question_combo:0:0:which university are you currently attending? select "other" if not listed: no option matched "University of Southern California", left for you to choose',
+      'question:overall gpa: value did not persist after fill',
+      'education_degree_combo:0: choice value did not persist after fill',
+      'greenhouse_known_question:Are you authorized to work in the United States?: choice option not found',
+      // Noise: an alternative that was never needed.
+      'question_combo_label:0:How did you hear about this job?: nothing matched .field-wrapper:has(label:has-text("How did you hear about this job?")) input[role="combobox"]',
+      'preferred_first_name: nothing matched input[name="preferred_first_name"]',
+    ],
+  });
+  assert.equal(reasons.length, 4, reasons.join('\n'));
+  assert.ok(reasons.some((reason) => reason.includes('which university are you currently attending')
+    && reason.includes('no option matched')));
+  assert.ok(reasons.some((reason) => reason.includes('overall gpa')));
+  assert.ok(reasons.every((reason) => !reason.includes('nothing matched')));
+  // The action-label scaffolding is stripped, so what she reads is the employer's own question.
+  assert.ok(reasons.every((reason) => !reason.includes('question_combo:')));
+  assert.ok(reasons.every((reason) => !reason.includes('education_degree_combo')));
+  assert.deepEqual(managedAnswerLossReasons({ skipped: undefined }), []);
+});
+
+test('the label\'s "Other" escape hatch reaches a question that has a durable selector', () => {
+  /* Virtu, "Which university are you currently attending? Select "Other" if not listed".
+   *
+   * Read live 2026-08-09: the control offers exactly fifteen options - Caltech, Carnegie Mellon,
+   * Georgia Tech, Harvard, Howard, Michigan, MIT, Princeton, Rice, Tufts, UChicago, UT Austin,
+   * Waterloo, Yale, Other - and the applicant's university is not among them. "Other" is the
+   * accurate answer and the label says so.
+   *
+   * The hatch was added to the LABEL-scoped combobox builder only. Once discovery started reporting
+   * a durable #question_... selector for this control, buildManagedPortalActions took the id-scoped
+   * branch and returned, so the hatch became unreachable for exactly the questions that had one.
+   * Not the action budget: for that packet the trimmed and untrimmed lists are identical here. */
+  // Verbatim from spec._review on the production packet, lowercased the way discovery stores it.
+  const question = 'which university are you currently attending? select "other" if not listed';
+  const withSelector = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    school: 'University of Southern California, Viterbi School of Engineering',
+    questions: [{
+      question,
+      answer: 'University of Southern California, Viterbi School of Engineering',
+      portalSelector: '#question_37520460002',
+      portalInputType: 'combobox',
+    }],
+  });
+  const fills = withSelector
+    .filter((action) => action.type === 'fill' && action.label?.includes('which university'))
+    .map((action) => action.value);
+  assert.ok(fills.includes('Other'), fills.join(' | '));
+  // And the real value is still tried FIRST, so the hatch can only be reached after it misses.
+  assert.ok(fills.indexOf('University of Southern California') < fills.indexOf('Other'), fills.join(' | '));
+
+  // A question with no escape hatch in its label gets none.
+  const plain = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [{
+      question: 'which university are you currently attending?',
+      answer: 'University of Southern California',
+      portalSelector: '#question_1',
+      portalInputType: 'combobox',
+    }],
+  });
+  assert.equal(
+    plain.some((action) => action.type === 'fill' && action.label?.includes('which university') && action.value === 'Other'),
+    false,
+  );
 });

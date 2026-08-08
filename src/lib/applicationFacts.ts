@@ -26,6 +26,7 @@ export const APPLICATION_FACT_COLUMNS = [
   'legal_first_name',
   'preferred_first_name',
   'high_school_grad_date',
+  'education_start_date',
   'prior_application_employers',
   'has_outstanding_offers',
   'outstanding_offer_details',
@@ -42,9 +43,29 @@ export type ApplicationFactColumn = (typeof APPLICATION_FACT_COLUMNS)[number];
 
 const FACT_COLUMN_SET: ReadonlySet<string> = new Set(APPLICATION_FACT_COLUMNS);
 
-/** Postgres `undefined_column`. The one error that means "this branch shipped before the migration". */
+/* Postgres `undefined_column`. The one error that means "this branch shipped before the migration".
+ *
+ * READ THE CAUSE CHAIN, NOT JUST THE ERROR. This used to test `error.code` alone, and against the
+ * Drizzle version this repo actually runs that is never set: a failed query arrives as a
+ * `DrizzleQueryError` whose own `code` is undefined and whose `cause` is the pg error carrying
+ * `42703`. So the fallback below could not fire, and the whole tolerance this file was written to
+ * provide - the reason a column may be added to APPLICATION_FACT_COLUMNS before its migration has
+ * run - silently did nothing.
+ *
+ * Measured 2026-08-09 against a database with the schema of the moment before the migration:
+ * `db.select().from(application_profile)` threw name "Error", constructor DrizzleQueryError, code
+ * undefined, cause.code "42703", and selectApplicationProfileRow rethrew it. Every read of the
+ * application profile - autofill, onboarding state, and buildPacket for every in-flight submission
+ * - would have failed for as long as the deploy led the migration.
+ */
 export function isUndefinedColumnError(error: unknown): boolean {
-  return (error as { code?: string } | null | undefined)?.code === '42703';
+  // Bounded: an error whose cause chains into itself must not spin here.
+  let current: unknown = error;
+  for (let depth = 0; current && depth < 5; depth += 1) {
+    if ((current as { code?: string }).code === '42703') return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
 }
 
 /** Every application_profile column except the ones the migration may not have created yet. */

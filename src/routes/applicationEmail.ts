@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { db } from '../db';
 import { application_email_aliases, application_email_messages, users } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
+import { isUndefinedColumnError } from '../lib/applicationFacts';
 import {
   type InboundApplicationEmail,
   applicationEmailRouteLabel,
@@ -249,7 +250,8 @@ export async function applicationEmailRoutes(fastify: FastifyInstance) {
     } catch (error) {
       // A merge is a deploy on Vercel, so this route can be live before
       // `npm run db:application-email-forwarding` has run. Say so rather than answering 500.
-      if ((error as { code?: string } | null)?.code === '42703') {
+      // Through the cause chain: Drizzle wraps the pg error, so the outer `code` is undefined.
+      if (isUndefinedColumnError(error)) {
         return reply.status(503).send({ error: 'Forwarding preferences are not available yet' });
       }
       throw error;

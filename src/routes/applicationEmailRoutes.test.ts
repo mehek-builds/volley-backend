@@ -78,8 +78,16 @@ test('the forwarding destination is a stored preference, not the login address',
   assert.match(service, /export async function applicationForwardingAddress/);
   assert.match(route, /\/application-email\/forwarding/);
   assert.match(route, /forwardingAddressWouldLoop\(requested\)/);
-  // Survives the migration not having run yet, because on Vercel a merge is a deploy.
-  assert.match(service, /'42703'/);
+  /* Survives the migration not having run yet, because on Vercel a merge is a deploy.
+   *
+   * Through the SHARED check, not a local `error.code === '42703'`. That literal was what this line
+   * used to pin, and it was measured on 2026-08-09 to never match: Drizzle wraps the pg error in a
+   * DrizzleQueryError whose own `code` is undefined, so the fallback could not fire and the
+   * tolerance was decorative. isUndefinedColumnError walks the cause chain. */
+  assert.match(service, /if \(isUndefinedColumnError\(error\)\) return fallback;/);
+  assert.match(route, /if \(isUndefinedColumnError\(error\)\)/);
+  assert.doesNotMatch(service, /\?\.code === '42703'/);
+  assert.doesNotMatch(route, /\?\.code === '42703'/);
   const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
   assert.doesNotMatch(runner, /forwardTo: accountEmail/);
 });

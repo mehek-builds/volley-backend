@@ -42,6 +42,7 @@ function row(over: Partial<ApplicationProfile> = {}): ApplicationProfile {
     legal_first_name: null,
     preferred_first_name: null,
     high_school_grad_date: null,
+    education_start_date: null,
     prior_application_employers: null,
     has_outstanding_offers: null,
     outstanding_offer_details: null,

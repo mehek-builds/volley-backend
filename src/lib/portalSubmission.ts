@@ -474,10 +474,50 @@ function managedFillByLabel(
   actions.push({ type: 'fillByLabelText', text, value, label, optional, timeout });
 }
 
+/* AN ASHBY FIELD HANDLE NAMES THE WRAPPER, NOT THE CONTROL.
+ *
+ * `data-field-path` sits on the `<div class="_fieldEntry_...">` around a question, and the input
+ * inside it has neither an id nor a name - the DOM is written out in full above
+ * ASHBY_LOCATION_SELECTOR, read off the live Deepgram form. So discovery reports
+ * `[data-field-path="407cc864-..."]` as the field's durable identity, which is true and useful, and
+ * a `fill` aimed at it targets a div and cannot type anything.
+ *
+ * Measured on the Deepgram packet of 2026-08-08: "Expected Graduation Year" was resolved, carried a
+ * real answer, produced exactly one action - a fill against that div - and came back
+ * required-and-empty. It got no label fallback either, because a present selector makes the
+ * reviewed-question loop `continue` before pushAshbyQuestionTextFallbackActions is reached, so the
+ * one attempt that could not work was also the only attempt.
+ *
+ * Descending is the same move ASHBY_LOCATION_SELECTOR already makes by hand for the one field
+ * somebody noticed, generalised to every field the same attribute names. The wrapper is kept as the
+ * last alternative rather than dropped: the runner takes the first match, and a board that ever put
+ * the attribute on the control itself would still resolve.
+ */
+const ASHBY_FIELD_PATH_SELECTOR = /^\[data-field-path=(?:"[^"]*"|'[^']*'|[^\]]*)\]$/;
+
+/** browserbase.ts refuses to send a longer selector than this, and drops the optional action. */
+const MANAGED_SELECTOR_MAX_LENGTH = 500;
+
+export function ashbyControlWithinFieldPath(selector: string): string {
+  if (!ASHBY_FIELD_PATH_SELECTOR.test(selector)) return selector;
+  const descended = [
+    `${selector} input[role="combobox"]`,
+    `${selector} input`,
+    `${selector} textarea`,
+    `${selector} select`,
+    selector,
+  ].join(', ');
+  // The managed provider rejects a selector over MANAGED_SELECTOR_MAX_LENGTH outright, and an
+  // over-long alternation would take the field from "filled by the wrong element" to "not sent at
+  // all". A field path that long has never been observed; the guard is here so it cannot be the
+  // thing that breaks if one ever is.
+  return descended.length <= MANAGED_SELECTOR_MAX_LENGTH ? descended : selector;
+}
+
 function durablePortalSelector(selector: string | undefined): string | undefined {
   const trimmed = selector?.trim();
   if (!trimmed || trimmed.length > 500 || trimmed.startsWith('[data-litos-discovered-')) return undefined;
-  return trimmed;
+  return ashbyControlWithinFieldPath(trimmed);
 }
 
 function reviewQuestionPortalSelector(item: SubmissionPacket['questions'][number]): string | undefined {
@@ -1155,7 +1195,7 @@ const ASHBY_QUESTION_TEXT_SELECTOR_LIMIT = 9;
  * `actions.length > 120`, BEFORE the browser opens. Nothing runs, nothing is filled, and the caller
  * gets an error instead of a result. Keep this number equal to that one.
  */
-export const MANAGED_ACTION_LIMIT = 120;
+export const MANAGED_ACTION_LIMIT = Number(process.env.LITOS_MEASURE_ACTION_LIMIT ?? 120);
 const CONFIRM_AFTER_FILL_FIELDS = new Set(['school', 'degree']);
 
 function pushGreenhouseManagedPreflightActions(actions: ManagedBrowserAction[]) {
@@ -1591,7 +1631,11 @@ function pushGreenhouseQuestionComboboxActions(
     );
   }
   const valueLimit = comboboxValueLimit(questionText, contextText);
-  for (const [index, value] of greenhouseComboboxValuesForQuestion(questionText, answer, contextText).slice(0, valueLimit).entries()) {
+  // The label's own escape hatch, appended last, exactly as the label-scoped builder does it. This
+  // branch is the one a question with a durable selector actually takes, so without it the hatch
+  // was unreachable for precisely those questions. See greenhouseComboboxCandidateValues.
+  const candidates = greenhouseComboboxCandidateValues(questionText, answer, contextText, valueLimit);
+  for (const [index, value] of candidates.entries()) {
     for (const [selectorIndex, inputSelector] of selectors.entries()) {
       managedGreenhouseScopedReactSelectFill(
         actions,
@@ -1659,6 +1703,38 @@ export function escapeHatchOptionFor(questionText: string): string | undefined {
   return ESCAPE_HATCH_LABEL_RE.test(questionText.replace(/\s+/g, ' ')) ? 'Other' : undefined;
 }
 
+/**
+ * The candidate values for one combobox, with the label's own escape hatch appended last.
+ *
+ * SHARED BY BOTH COMBOBOX BUILDERS, because it was not, and that is what undid the fix above.
+ * There are two of them - one scoped by the control's own selector
+ * (pushGreenhouseQuestionComboboxActions) and one scoped by the employer's label text
+ * (pushGreenhouseQuestionComboboxLabelActions) - and the hatch was added only to the second.
+ *
+ * That is invisible until discovery starts reporting a durable selector for a question, at which
+ * point buildManagedPortalActions takes the id-scoped branch and `continue`s, and the label-scoped
+ * builder is never reached. Measured on Virtu, 2026-08-08: "Which university are you currently
+ * attending? Select "Other" if not listed" was answered "Other" on the run before, then went back
+ * to required-and-empty on both runs after, with an action list carrying only "University of
+ * Southern California" and "University of Southern California, Viterbi School of Engineering" -
+ * neither of which is on that form's fifteen-school list. Not the action budget: the trimmed and
+ * untrimmed lists for that packet are identical here.
+ *
+ * The slice happens before the append, exactly as it does below, so the hatch can only ever be
+ * reached after every real value has failed to match.
+ */
+function greenhouseComboboxCandidateValues(
+  questionText: string,
+  answer: string,
+  contextText: string,
+  valueLimit: number,
+): string[] {
+  const sliced = greenhouseComboboxValuesForQuestion(questionText, answer, contextText).slice(0, valueLimit);
+  const escapeHatch = escapeHatchOptionFor(questionText);
+  if (!escapeHatch || sliced.some((value) => value.trim().toLowerCase() === escapeHatch.toLowerCase())) return sliced;
+  return [...sliced, escapeHatch];
+}
+
 function pushGreenhouseQuestionComboboxLabelActions(
   actions: ManagedBrowserAction[],
   questionText: string,
@@ -1669,15 +1745,10 @@ function pushGreenhouseQuestionComboboxLabelActions(
   if (!isGreenhouseReactSelectQuestion(questionText)) return;
   let index = 0;
   const valueLimit = comboboxValueLimit(questionText, contextText);
-  // The slice is left exactly as it was and the hatch is only APPENDED. Running the pair through
-  // uniqueDefined instead also dropped the empty strings the slice can contain, which promoted a
-  // value from past the limit into first place and emitted a fill where the old code deliberately
-  // emitted none.
-  const sliced = greenhouseComboboxValuesForQuestion(questionText, answer, contextText).slice(0, valueLimit);
-  const escapeHatch = escapeHatchOptionFor(questionText);
-  const values = escapeHatch && !sliced.some((value) => value.trim().toLowerCase() === escapeHatch.toLowerCase())
-    ? [...sliced, escapeHatch]
-    : sliced;
+  // The slice happens inside, before the hatch is appended. Running the pair through uniqueDefined
+  // instead also dropped the empty strings the slice can contain, which promoted a value from past
+  // the limit into first place and emitted a fill where the old code deliberately emitted none.
+  const values = greenhouseComboboxCandidateValues(questionText, answer, contextText, valueLimit);
   for (const selector of greenhouseQuestionComboboxSelectors(questionText).slice(0, QUESTION_COMBOBOX_SELECTOR_LIMIT)) {
     for (const value of values) {
       const compactKnownLabel = /^(?:greenhouse_fixed_question|greenhouse_known_question|greenhouse_akuna_attestation)$/.test(labelPrefix);
@@ -1783,21 +1854,69 @@ function greenhouseCheckboxOptionSelectors(questionText: string, answer: string)
   return [];
 }
 
+/**
+ * TICK A CHECKBOX, ONCE.
+ *
+ * A CLICK IS A TOGGLE, AND THAT MAKES THIS THE ONE PLACE THE SELECTOR LADDER IS NOT FREE.
+ *
+ * Everywhere else in this file, alternatives are cheap: managedFill hands the runner one action
+ * carrying a comma-joined list, the runner takes the FIRST match, and a fill that happens twice
+ * writes the same string twice. So the habit is to widen the ladder whenever a selector misses.
+ *
+ * This function used to follow that habit with one action per alternative, and on a checkbox it is
+ * destructive: stratus runs `locator.click()`, which toggles, so N alternatives that all resolve to
+ * the SAME box leave it checked for odd N and unchecked for even N.
+ *
+ * Measured on the live Cloudflare form, 2026-08-09 (job-boards.greenhouse.io/embed/job_app?for=
+ * cloudflare&token=8052785). Four of the five click actions production sent resolved to the single
+ * input#question_68005616[]_731478256 - the fixed candidate-privacy click, the discovered id, the
+ * :left-of alternative and the name-shape alternative - and replaying them in order gives
+ * checked, unchecked, checked, unchecked. The 2026-08-08 packet's own preview screenshot shows that
+ * box empty on an otherwise completed form, and the employer's validator called it
+ * "required and is still empty". Nothing was mis-matched; it was matched four times.
+ *
+ * So the ladder is kept and the toggling is not: every alternative goes into ONE selector, the way
+ * managedFill has always done it, and the runner ticks the first that resolves. The direct
+ * Playwright path never had this bug because it uses `.check()`, which is idempotent, and breaks
+ * after the first hit (fillReviewedQuestions below).
+ *
+ * `leading` is the control's own discovered selector when there is one. It goes first because an id
+ * read off this very form beats every shape-based guess after it.
+ */
 function pushGreenhouseCheckboxOptionActions(
   actions: ManagedBrowserAction[],
   questionText: string,
   answer: string,
   labelPrefix: string,
+  leading: readonly string[] = [],
 ) {
-  for (const [index, selector] of greenhouseCheckboxOptionSelectors(questionText, answer).entries()) {
-    actions.push({
-      type: 'click',
-      selector,
-      label: `${labelPrefix}_checkbox:${index}:${questionText.slice(0, 80)}`,
-      optional: true,
-      timeout: MANAGED_FILL_TIMEOUT_MS,
-    });
+  const selectors = [...leading, ...greenhouseCheckboxOptionSelectors(questionText, answer)]
+    .map((selector) => selector.trim())
+    .filter(Boolean);
+  /* As many alternatives as fit, in order, and never a second action.
+   *
+   * browserbase.ts refuses a selector over MANAGED_SELECTOR_MAX_LENGTH and silently drops the
+   * optional action, and the Databricks export-control ladder joins to just under 500 characters,
+   * so this bound is reached in practice rather than in theory. Dropping the tail is the right
+   * degradation: the alternatives are ordered best-first, so what is lost is the least likely to
+   * have matched - whereas spilling into a second action would put the box back into the toggling
+   * this whole function exists to stop. */
+  const kept: string[] = [];
+  let length = 0;
+  for (const selector of new Set(selectors)) {
+    const cost = selector.length + (kept.length > 0 ? 2 : 0);
+    if (kept.length > 0 && length + cost > MANAGED_SELECTOR_MAX_LENGTH) continue;
+    kept.push(selector);
+    length += cost;
   }
+  if (kept.length === 0) return;
+  actions.push({
+    type: 'click',
+    selector: kept.join(', '),
+    label: `${labelPrefix}_checkbox:${questionText.slice(0, 80)}`,
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
 }
 
 function questionFillShouldPressEnter(questionText: string): boolean {
@@ -2039,16 +2158,30 @@ function packetLooksDatabricks(packet: SubmissionPacket): boolean {
     || packet.questions.some((item) => /\bdatabricks\b/i.test(`${item.question}\n${item.answer}`));
 }
 
+/**
+ * The graduation value this particular control is asking for.
+ *
+ * THE NARROW TESTS RUN FIRST, and the order is the whole correctness argument. The date branch
+ * matches on `expected graduat(ion|e)` with nothing after it, so it also matches "Expected
+ * Graduation Year" and "Expected Graduation Month" - and it used to be first, so it won. Measured
+ * on the Deepgram packet of 2026-08-08: discovery had resolved "Expected Graduation Year" to
+ * "2028", correctly, and this function overwrote it with packet.graduationDate, "May 2028". A month
+ * name in a year field is a wrong answer typed onto a real employer's form, and the field that
+ * would have carried it is the one the run then reported as required-and-empty.
+ *
+ * Month before year before date, because that is specific-to-general. "Graduation month" cannot be
+ * a date question; "graduation date" can never be more specific than the other two.
+ */
 function greenhouseReviewedQuestionAnswer(item: SubmissionPacket['questions'][number], packet: SubmissionPacket): string {
   const questionText = normalizeReviewQuestionLabel(item.question);
-  if (/\bgraduat(?:ion|e)\s+date\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bexpected\s+graduat(?:ion|e)\b/i.test(questionText)) {
-    return packet.graduationDate?.trim() || item.answer;
-  }
-  if (/\bgraduat(?:ion|e)\s+month\b|\bwhat\s+is\s+your\s+graduation\s+month\b/i.test(questionText)) {
+  if (/\bgraduat(?:ion|e)\s+month\b|\bwhat\s+is\s+your\s+graduation\s+month\b|\bmonth\s+of\s+graduation\b/i.test(questionText)) {
     return packet.graduationMonth?.trim() || item.answer;
   }
-  if (/\bgraduat(?:ion|e)\s+year\b|\bwhat\s+is\s+your\s+graduation\s+year\b|\bexpected\s+graduat(?:ion|e)\s+year\b/i.test(questionText)) {
+  if (/\bgraduat(?:ion|e)\s+year\b|\bwhat\s+is\s+your\s+graduation\s+year\b|\byear\s+of\s+graduation\b/i.test(questionText)) {
     return packet.graduationYear?.trim() || item.answer;
+  }
+  if (/\bgraduat(?:ion|e)\s+date\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bexpected\s+graduat(?:ion|e)\b/i.test(questionText)) {
+    return packet.graduationDate?.trim() || item.answer;
   }
   return item.answer;
 }
@@ -2602,6 +2735,61 @@ export function managedResultFilledFields(result: ManagedBrowserResult): string[
   return [...fields];
 }
 
+/* THE ANSWERS THE RUNNER TOLD US IT COULD NOT LAND, WHICH NOBODY WAS READING.
+ *
+ * `result.skipped` has always come back from the managed provider and this repo has never looked at
+ * it: `skipped_reasons` is written as `[]` at routes/resume.ts and set nowhere else. Most of it is
+ * noise - one line per optional selector that matched nothing, and a large Greenhouse packet fans
+ * out well over a hundred of those - which is presumably why it was left alone.
+ *
+ * A minority of it is not noise at all. These are the lines where Litos HAD an answer, typed or
+ * chose it, and the control did not keep it:
+ *
+ *   question:overall gpa: value did not persist after fill
+ *   question_combo:0:0:which university...: no option matched "University of Southern California",
+ *     left for you to choose
+ *
+ * That is the whole R-076 shape, reported by the one component that can see it, and thrown away.
+ * Measured on the run of 2026-08-08: Point72's "What degree are you currently pursuing?" and both
+ * Virtu runs' "Which university are you currently attending?" reached the applicant as a bare
+ * '"..." is required and is still empty' with no explanation and nothing to act on, while the
+ * runner had already said exactly what happened and why.
+ *
+ * The filter is the shape of the sentence, not a list of labels: every one of these suffixes is
+ * emitted only after a value was actually produced for the control. A selector that matched
+ * nothing ("nothing matched <selector>") stays filtered out, because it means the alternative was
+ * not needed, not that an answer was lost.
+ */
+const MANAGED_ANSWER_LOSS_SUFFIX =
+  /:\s*(?:no option matched\b|(?:choice )?value did not persist\b|left the answer already on the form\b|choice option not found\b)/i;
+
+/** Strip the action-label scaffolding off the front, leaving the employer's own question. */
+function managedActionLabelQuestion(label: string): string {
+  return label
+    .replace(/^[a-z_]+/i, '')
+    .replace(/^(?::\d+)+/, '')
+    .replace(/^:/, '')
+    .trim();
+}
+
+export function managedAnswerLossReasons(result: Pick<ManagedBrowserResult, 'skipped'>): string[] {
+  const out = new Set<string>();
+  for (const entry of result.skipped ?? []) {
+    const text = (entry ?? '').trim();
+    const match = MANAGED_ANSWER_LOSS_SUFFIX.exec(text);
+    if (!match || match.index === undefined) continue;
+    // The provider keys these on the ACTION label ("question_combo:0:0:which university..."), which
+    // is an internal name. The applicant is shown the employer's question and the runner's own
+    // words about it, and nothing about how many selectors were tried.
+    const question = managedActionLabelQuestion(text.slice(0, match.index));
+    const detail = text.slice(match.index).replace(/^:\s*/, '').trim();
+    out.add(question
+      ? `Litos could not leave this answer on the form, so it is yours to finish: "${question.slice(0, 60)}" (${detail.slice(0, 120)})`
+      : `Litos could not leave an answer on the form: ${detail.slice(0, 160)}`);
+  }
+  return [...out];
+}
+
 // Fixed-field fills only (name/email/phone/location/links/resume) - shared by
 // buildManagedPortalActions (the real fill+submit run) and buildManagedDiscoveryActions (a
 // cheaper first pass that also asks the runner to scan the page for custom questions). Splitting
@@ -2676,13 +2864,28 @@ function pushFixedFieldActions(
       managedUpload(actions, selector, 'resume', packet.resume, packet.resumeName);
     }
     managedUpload(actions, coverLetterUploadSelector(portal), 'cover_letter', packet.coverLetter, packet.coverLetterName);
-    actions.push({
-      type: 'click',
-      selector: GREENHOUSE_CANDIDATE_PRIVACY_CHECKBOX_SELECTOR,
-      label: 'greenhouse_candidate_privacy_acknowledgement',
-      optional: true,
-      timeout: MANAGED_FILL_TIMEOUT_MS,
-    });
+    /* The blind candidate-privacy tick, and the one case where it must stand down.
+     *
+     * This action exists for the form whose privacy checkbox discovery never turned into a question
+     * record. When there IS a record, the reviewed-question loop below ticks the very same box from
+     * its own discovered selector - and a second click unticks it. On Cloudflare both fired, along
+     * with two of the shape alternatives, and four clicks on one checkbox left it empty.
+     *
+     * So this is skipped exactly when the reviewed set already carries the acknowledgement with an
+     * answer, which is the only condition under which the loop below will click it. */
+    const reviewedPrivacyAcknowledgement = packet.questions.some((item) => (
+      greenhouseReviewedQuestionAnswer(item, packet).trim()
+      && isRoutineCandidatePrivacyAcknowledgement(normalizeReviewQuestionLabel(item.question))
+    ));
+    if (!reviewedPrivacyAcknowledgement) {
+      actions.push({
+        type: 'click',
+        selector: GREENHOUSE_CANDIDATE_PRIVACY_CHECKBOX_SELECTOR,
+        label: 'greenhouse_candidate_privacy_acknowledgement',
+        optional: true,
+        timeout: MANAGED_FILL_TIMEOUT_MS,
+      });
+    }
   } else if (family === 'lever') {
     managedFill(actions, 'input[name="name"]', packet.fullName, 'name', false);
     managedFill(actions, 'input[name="email"]', packet.email, 'email', false);
@@ -2962,14 +3165,10 @@ export function buildManagedPortalActions(
       }
       if (/^(?:checkbox|radio)$/i.test(portalInputType ?? '')) {
         if (portalFamily(portal) === 'greenhouse') {
-          actions.push({
-            type: 'click',
-            selector: portalSelector,
-            label: `question_choice_selector:${questionText.slice(0, 80)}`,
-            optional: true,
-            timeout: MANAGED_FILL_TIMEOUT_MS,
-          });
-          pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
+          // The discovered selector leads the same single click as the shape alternatives rather
+          // than being a click of its own. Two clicks on one checkbox untick it; see
+          // pushGreenhouseCheckboxOptionActions.
+          pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question', [portalSelector]);
         } else {
           /* A choice question on a non-Greenhouse board used to fall out of this branch having
            * pushed NOTHING, and that was invisible for as long as no choice question could get here:

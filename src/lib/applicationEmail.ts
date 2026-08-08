@@ -3,6 +3,7 @@ import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { db } from '../db';
 import { application_email_aliases, application_email_messages, generated_resumes, users } from '../db/schema';
 import { readApplicationReview } from './applicationReview';
+import { isUndefinedColumnError } from './applicationFacts';
 import {
   type AliasDeliverability,
   type AliasDeliverabilityReason,
@@ -161,7 +162,10 @@ export async function applicationForwardingAddress(
     if (preferred) return preferred;
     return row?.account?.trim().toLowerCase() || fallback;
   } catch (error) {
-    if ((error as { code?: string } | null)?.code === '42703') return fallback;
+    // Through the cause chain, because Drizzle wraps the pg error and the code is not on the
+    // outside. See isUndefinedColumnError, where testing the outer `code` alone was measured to
+    // never match and to defeat the whole fallback.
+    if (isUndefinedColumnError(error)) return fallback;
     throw error;
   }
 }
