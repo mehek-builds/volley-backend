@@ -948,6 +948,95 @@ export const monitored_jobs = pgTable('monitored_jobs', {
   typePostedIdx: index('monitored_jobs_type_posted_idx').on(t.is_active, t.employment_type, t.posted_at),
 }));
 
+// ---- posting_questions ----
+/* THE PRE-SCRIPT: what one posting's application form asks, discovered once and shared by everyone.
+ *
+ * Litos owns the board, so it can know a posting's questions before anybody clicks Apply. This is
+ * where that knowledge lives. One row per monitored_jobs posting, holding the FORM'S INVENTORY and
+ * nothing about any applicant: the employer's question text, the control shape, its option list
+ * when it has a closed one, and whether the employer marks it required.
+ *
+ * USER-INDEPENDENT ON PURPOSE, and that split is the whole design. The expensive half of answering
+ * a form is looking at it, and the form is the same form for every applicant. The cheap half is
+ * deciding which questions a particular profile already answers, and that is a pure function
+ * (resolveKnownAnswer) run per applicant at Apply time over the rows below. So the browser cost is
+ * paid once per posting and amortised over every applicant and every retry, while the answers stay
+ * per-person and never touch this table.
+ *
+ * WHY THIS IS NOT POPULATED EAGERLY, which was the first thing considered and is the wrong answer.
+ * There are 22,644 active postings. A discovery pass is a managed browser run against a live
+ * employer page. The submission cron is a Vercel Hobby daily job with maxDuration 300s, so at the
+ * ~15s a page load and DOM walk actually take, an eager sweep clears about 20 postings a day and
+ * needs roughly three years to cover the board once - by which time every row it started with has
+ * gone inactive. That is not an expense to weigh, it is a plan that does not terminate. Two thirds
+ * of the board would also never be applied to, and Neon's free tier has a 5 GB monthly transfer
+ * ceiling that a much smaller read already exhausted once (docs/incidents/2026-08-04).
+ *
+ * So this table is filled LAZILY, one posting at a time, at the moment somebody applies to it, and
+ * then kept. The read is one row of a few kilobytes on the Apply path only; it is deliberately not
+ * joined into any board list query, because 50 rows of question JSON per board page is a transfer
+ * regression on the surface that is loaded most and needs it least.
+ */
+export const posting_questions = pgTable('posting_questions', {
+  job_id: uuid('job_id').primaryKey().references(() => monitored_jobs.id, { onDelete: 'cascade' }),
+  // The URL that was actually scanned. Stored rather than re-derived: monitored_jobs.apply_url can
+  // be rewritten by a later poll, and a question set discovered against a different URL than the
+  // one on file today is a stale scan, not a valid one.
+  apply_url: text('apply_url').notNull(),
+  // The detected SupportedPortal at scan time, e.g. 'greenhouse'. Null when detection failed.
+  portal: text('portal'),
+  /* PostingQuestion[]: { label, input_type, options, required, max_length }.
+   *
+   * The employer's own words, normalized only by normalizeReviewQuestionLabel. No answers, no
+   * per-user classification, no skip reasons: every one of those depends on who is applying, and
+   * baking one applicant's verdict into a shared row is how a cache becomes a wrong answer. */
+  questions: jsonb('questions').notNull(),
+  /* 'ok' | 'form_not_reached' | 'failed'. A scan that found nothing is a RESULT and is stored as
+   * one, so the next applicant on the same posting does not pay for the same empty browser run.
+   * It is stored with a shorter life than a good scan (see postingQuestions.ts), because
+   * "we could not reach the form" is usually about the moment rather than the posting. */
+  discovery_status: text('discovery_status').notNull(),
+  discovered_at: timestamp('discovered_at', { withTimezone: true }).defaultNow().notNull(),
+  // How many times this posting has been scanned. Purely an operational counter: it is the number
+  // that says whether the cache is working, and it costs one integer.
+  scan_count: integer('scan_count').default(1).notNull(),
+}, (t) => ({
+  discoveredAtIdx: index('posting_questions_discovered_at_idx').on(t.discovered_at),
+}));
+
+// ---- saved_application_answers ----
+/* The answers she gave once and should never be asked for again.
+ *
+ * The same idea as PR #366's onboarding facts, for the questions that could not be foreseen. Those
+ * became typed columns on application_profile because they were measured across many postings and
+ * each one has its own resolution rule. This is the open-ended half: an export-control declaration,
+ * a "rate your skill level in C++", a standardized test score. There is no way to enumerate them in
+ * advance, so they are stored by the question's own text.
+ *
+ * WHAT MUST NOT LAND HERE is the reason lib/answerReuse.ts exists rather than a `insert every
+ * answer` line at the end of submit-request. "Which opening would you be most interested in?" has
+ * an answer, and that answer is about one posting; carrying it to the next employer would be Litos
+ * making a statement she never made. answerReuseScope decides, defaults to posting-specific, and is
+ * consulted on the write AND on the read.
+ */
+export const saved_application_answers = pgTable('saved_application_answers', {
+  user_id: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  // savedAnswerKey(label): the case-folded, punctuation-stripped question text. `+` and `#` survive
+  // it, because C, C++ and C# are three skills and three answers.
+  question_key: text('question_key').notNull(),
+  // The label as the employer wrote it, kept for display and for audit. The key is lossy on
+  // purpose; this is what she is shown when she edits a remembered answer.
+  question: text('question').notNull(),
+  answer: text('answer').notNull(),
+  // The posting she first answered it on. Audit only, and nullable because an answer may arrive
+  // from an application with no board posting behind it (the extension, a hand-typed link).
+  first_answered_job_id: uuid('first_answered_job_id'),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.user_id, t.question_key] }),
+}));
+
 // ---- ats_adapters ----
 // Health tracking for the per-ATS field-mapping adapters (Section 7 of PRD-v2). Populated
 // by a scheduled spot-check (src/routes/adapterHealth.ts), not written to by the extension
@@ -1019,6 +1108,10 @@ export type CareerPageSource = typeof career_page_sources.$inferSelect;
 export type NewCareerPageSource = typeof career_page_sources.$inferInsert;
 export type MonitoredJob = typeof monitored_jobs.$inferSelect;
 export type NewMonitoredJob = typeof monitored_jobs.$inferInsert;
+export type PostingQuestionsRow = typeof posting_questions.$inferSelect;
+export type NewPostingQuestionsRow = typeof posting_questions.$inferInsert;
+export type SavedApplicationAnswer = typeof saved_application_answers.$inferSelect;
+export type NewSavedApplicationAnswer = typeof saved_application_answers.$inferInsert;
 export type AtsAdapter = typeof ats_adapters.$inferSelect;
 export type AutofillEvent = typeof autofill_events.$inferSelect;
 export type NewAutofillEvent = typeof autofill_events.$inferInsert;

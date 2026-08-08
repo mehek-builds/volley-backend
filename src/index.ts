@@ -33,6 +33,7 @@ import { applicationRoutes } from './routes/applications';
 import { submissionRunnerRoutes } from './routes/submissionRunner';
 import { captchaStallRoutes } from './routes/captchaStalls';
 import { jobExtractRoutes } from './routes/jobExtract';
+import { postingQuestionsRoutes } from './routes/postingQuestions';
 import { jobMonitorRoutes } from './routes/jobMonitor';
 import { coverLetterRoutes } from './routes/coverLetter';
 import { emailConnectionRoutes } from './routes/emailConnections';
@@ -300,6 +301,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await fastify.register(applicationRoutes);
   await fastify.register(submissionRunnerRoutes);
   await fastify.register(jobExtractRoutes);
+  await fastify.register(postingQuestionsRoutes);
   await fastify.register(jobMonitorRoutes);
   await fastify.register(coverLetterRoutes);
   await fastify.register(emailConnectionRoutes);
