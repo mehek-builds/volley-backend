@@ -1643,6 +1643,16 @@ export interface JdTerm {
    *  EMPHASIS_LIMIT. Only used for ranking, never for scoring. */
   mentions?: number;
   /**
+   * On a MATCHED term only: the string on the resume that covered this requirement, when it is not
+   * the requirement's own words.
+   *
+   * Written by scoreJdMatch, never by the extractor, because it is a fact about the pair rather
+   * than about the posting. It exists so the review screen can anchor the mark: see resumeSatisfies.
+   * It is never an input to scoring and never widens what counts as a match; it only reports which
+   * of the already-permitted spellings did.
+   */
+  satisfied_by?: string;
+  /**
    * First appearance in the document among SCORED sections, as an offset. The last emphasis
    * tiebreak in capToEmphasis; ranking only, never scoring.
    *
@@ -3324,10 +3334,18 @@ const SAME_CAPABILITY_TERMS = new Map<string, string[]>([
  * keeps the score from charging a student for wording differences while still refusing loose
  * hypernyms such as "machine learning" satisfying "PyTorch".
  */
-function resumeSatisfies(resumeText: string, term: JdTerm): boolean {
-  if (term.alternatives) return term.alternatives.some((t) => resumeCovers(resumeText, t));
-  if (resumeCovers(resumeText, term.term)) return true;
-  return (SAME_CAPABILITY_TERMS.get(normalizeTerm(term.term)) ?? []).some((t) => resumeCovers(resumeText, t));
+/* IT RETURNS THE STRING THAT COVERED IT, not just a yes, because the review screen has to be able
+ * to POINT at it. Blue means "asked for by this job, and on your resume", and when the credit comes
+ * from an alternative the resume never writes the requirement's own words: a posting asking for
+ * `frontend` is satisfied by a resume that says React, and the resume pane had nothing to mark.
+ * Measured over the 85 production packets on 2026-08-09 that was 8 blue marks with no anchor, on 8
+ * packets, and after the other anchoring fixes it was the ONLY remaining case. Naming the covering
+ * string lets the pane mark React and keep the hover link pointing at the requirement `frontend`,
+ * which is the question the student came to the screen with. */
+function resumeSatisfies(resumeText: string, term: JdTerm): string | undefined {
+  if (term.alternatives) return term.alternatives.find((t) => resumeCovers(resumeText, t));
+  if (resumeCovers(resumeText, term.term)) return term.term;
+  return (SAME_CAPABILITY_TERMS.get(normalizeTerm(term.term)) ?? []).find((t) => resumeCovers(resumeText, t));
 }
 
 export function resumeCovers(resumeText: string, term: string): boolean {
@@ -3395,10 +3413,11 @@ export function scoreJdMatch(
   for (const t of terms) {
     total += t.weight;
     if (t.kind === 'required') requiredTotal += 1;
-    if (resumeSatisfies(resumeText, t)) {
+    const covered = resumeSatisfies(resumeText, t);
+    if (covered !== undefined) {
       got += t.weight;
       if (t.kind === 'required') requiredGot += 1;
-      matched.push(t);
+      matched.push(covered === t.term ? t : { ...t, satisfied_by: covered });
     } else {
       missing.push(t);
     }

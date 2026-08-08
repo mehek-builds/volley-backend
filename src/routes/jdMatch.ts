@@ -417,7 +417,9 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
       term_count: result.term_count,
       min_scorable_terms: MIN_SCORABLE_TERMS,
       // Display strings, not match keys: the student should see "CI/CD", not "ci cd".
-      matched: result.matched.map((t) => ({ term: t.term, display: t.display, weight: t.weight })),
+      /* `satisfied_by` rides with the matched terms so the review screen can put the blue mark on
+         the words the resume actually uses. See resumeSatisfies in engine/jdMatch.ts. */
+      matched: result.matched.map((t) => ({ term: t.term, display: t.display, weight: t.weight, satisfied_by: t.satisfied_by })),
       missing: result.missing.map((t) => ({ term: t.term, display: t.display, weight: t.weight })),
     });
   });
