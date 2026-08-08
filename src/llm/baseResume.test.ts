@@ -175,6 +175,61 @@ describe('base resume priority selection', () => {
     );
   });
 
+  /* THE SPLIT BETWEEN INCLUSION AND POSITION, pinned from both sides.
+   *
+   * `priorities` is ranked by recency, so the position half of this check was a recency rule: it
+   * failed any tailored packet whose lead entry was chosen against the posting, which made "the top
+   * experience is aligned for their role" unreachable no matter what the prompt asked for. The
+   * tailored path now passes requireFirst: false and hands ordering to leadAlignmentIssues.
+   *
+   * The safety question that gated that change is the third test here. Relaxing POSITION must not
+   * quietly relax INCLUSION, because inclusion is the half that protects a real user: it is what
+   * keeps the current role on the page for someone whose onboarding selection is live. This
+   * applicant's selected_entry_id is stale and absent from her bank, so priorityEntry resolves to
+   * null and she exercises none of it - which is exactly why it needs a test rather than a
+   * measurement. */
+  const priorityOf = (over: Partial<ExperienceBankEntry>) => bankEntry(over);
+  const specWithExperience = (orgs: Array<{ org: string; title: string; date_range: string }>) => ({
+    ...SPEC,
+    education_position: 'top' as const,
+    experience: orgs.map((o) => ({ ...SPEC.experience[0], type: 'job' as const, ...o, bullets: ['Built a thing'] })),
+  });
+
+  test('the base resume still requires the priority entry to lead, with no posting to rank against', () => {
+    const current = priorityOf({ org: 'Current Lab', title: 'Engineer', date_range: '2026 - Present' });
+    const issues = baseResumeSelectionIssues(
+      specWithExperience([
+        { org: 'Older Firm', title: 'Analyst', date_range: '2023' },
+        { org: 'Current Lab', title: 'Engineer', date_range: '2026 - Present' },
+      ]),
+      [current],
+    );
+    assert.deepEqual(issues, ['required priority entry is not first: Engineer at Current Lab']);
+  });
+
+  test('a tailored resume may lead with a different entry, as long as the priority entry is on it', () => {
+    const current = priorityOf({ org: 'Current Lab', title: 'Engineer', date_range: '2026 - Present' });
+    const issues = baseResumeSelectionIssues(
+      specWithExperience([
+        { org: 'Older Firm', title: 'Analyst', date_range: '2023' },
+        { org: 'Current Lab', title: 'Engineer', date_range: '2026 - Present' },
+      ]),
+      [current],
+      { requireFirst: false },
+    );
+    assert.deepEqual(issues, []);
+  });
+
+  test('relaxing position does NOT relax inclusion: a dropped priority entry still fails', () => {
+    const current = priorityOf({ org: 'Current Lab', title: 'Engineer', date_range: '2026 - Present' });
+    const issues = baseResumeSelectionIssues(
+      specWithExperience([{ org: 'Older Firm', title: 'Analyst', date_range: '2023' }]),
+      [current],
+      { requireFirst: false },
+    );
+    assert.deepEqual(issues, ['required current or role-defining entry missing: Engineer at Current Lab']);
+  });
+
   test('role-defining work is protected alongside the most recent general role', () => {
     const admin = bankEntry({ id: 'admin', org: 'Engineering Office', title: 'Administrator', date_range: '2019 - 2022' });
     const nursing = bankEntry({ id: 'nursing', type: 'project', org: 'Clinical Nursing Study', title: 'Nursing Researcher', date_range: '2018' });

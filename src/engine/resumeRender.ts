@@ -689,8 +689,14 @@ function removeBullet(
 }
 
 function removeLowestEntry(spec: ResumeSpec, jdText: string, omissions: string[]): ResumeSpec {
-  // The first entry is the upload's reviewed recent experience. It is a resume invariant, not a
-  // relevance candidate, so one-page fitting may remove only entries after it.
+  /* One-page fitting may remove only entries after the first. The BEHAVIOUR is unchanged; the
+     reason it used to give was "the first entry is the upload's reviewed recent experience, a
+     resume invariant", and that is no longer what index 0 is. The lead entry is now chosen against
+     the posting and justified in spec.lead_alignment (engine/leadAlignment.ts), so it is the single
+     most relevant entry on the page rather than the most recent one. Which makes it the LAST thing
+     a fit pass should drop, not something exempt from relevance: dropping it would delete the
+     evidence the resume is ordered around and leave the stored justification pointing at an entry
+     that is no longer there. */
   let index = 1;
   for (let i = 2; i < spec.experience.length; i += 1) {
     if (entryValue(spec.experience[i], jdText) < entryValue(spec.experience[index], jdText)) index = i;
@@ -842,6 +848,8 @@ export function planResumeLayout(
       spec = removeBullet(spec, excessBullet, omissions);
     }
     if (spec.experience.length > RESUME_CONTENT_LIMITS.maxEntries) {
+      // Same rule as removeLowestEntry, for the same reason: the lead entry keeps its position
+      // because it is the posting-aligned one, and only the tail is re-ranked and trimmed.
       const first = spec.experience[0];
       const ranked = spec.experience.slice(1)
         .map((entry) => ({ entry, score: entryValue(entry, jdText) }))

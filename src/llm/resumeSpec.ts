@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { ExperienceBankEntry } from '../db/schema';
 import { extractJdSignals } from '../engine/jdSignals';
+import { leadRequirementCandidates, type LeadAlignment } from '../engine/leadAlignment';
 import { RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
 import { STRONG_VERBS } from '../engine/resumeValidate';
 
@@ -44,6 +45,12 @@ export interface ResumeSpec {
   // is what this said and what the prompt asked for - with no skills source in the system, that
   // instruction was an invitation to keyword-stuff, and the model took it (R-015).
   skills: string[];
+  /* Why the FIRST experience entry leads this resume, cited against the posting. Metadata, not
+     content: no renderer reads it and resumeSpecText excludes it, so it reaches neither the page
+     nor the match score. See engine/leadAlignment.ts for what it is checked against and why the
+     ordering is decided this way rather than by a relevance score. Optional, and absent on every
+     spec generated before 2026-08-09. */
+  lead_alignment?: LeadAlignment | null;
   // Rendered-term -> the DECLARED skill it renames. RENAMING IS CURRENTLY DISABLED IN THE PROMPT;
   // this field and the validator support for it are retained deliberately, because the plumbing is
   // right and only the model's judgement was not. See the DISABLED note below before re-enabling.
@@ -87,6 +94,7 @@ Return ONLY valid JSON with no explanation or markdown wrapping, matching this e
   "target_role": string,
   "school": string, "degree": string, "grad_date": string, "coursework": string,
   "education_position": "top" | "after_experience",
+  "lead_alignment": {"entry_org": string, "requirement": string, "evidence": string},
   "experience": [{"type": "job" | "project" | "leadership", "org": string, "title": string, "date_range": string, "bullets": [string]}],
   "skills": [string],
   "skill_source": {string: string}
@@ -110,6 +118,31 @@ Rules:
 - Follow the JD's priority order: the earliest clearly stated responsibilities and requirements get
   the strongest supported evidence first. Order entries and bullets so a recruiter can compare the
   resume with the posting from top to bottom.
+- THE FIRST ENTRY IS A DECISION, NOT A DATE. Choose it by asking one question: which entry's own
+  bullets prove the most important thing THIS posting asks for? Recency does not decide it, and
+  neither does which entry is on the base resume first. The applicant's newest role is often the
+  wrong answer - a product management posting is led by the entry whose bullets define product
+  requirements and ship to users, even when a more recent engineering role exists, and an
+  infrastructure posting is led by the infrastructure work even when it is older. Reverse
+  chronological order is a habit, not a rule; break it whenever a different entry proves more.
+- "lead_alignment": EMIT THIS KEY FIRST, BEFORE "experience", and mean it. It is the ordering
+  decision itself, not a note about a decision already made. Pick the requirement and the entry
+  here, then write "experience" with that entry in position one. Writing the resume first and this
+  field afterwards produces a justification retro-fitted to whatever came out on top, which is the
+  failure this field exists to prevent. Three fields:
+  - "entry_org": the org of your FIRST experience entry, copied exactly from it.
+  - "requirement": the one entry from THE POSTING'S PRIMARY ASKS list below that this entry proves,
+    copied from that list character for character. Not a paraphrase, not a different line from
+    elsewhere in the posting, and not a requirement you have written yourself. Those asks are the
+    posting's own priority order, so proving a line near the top of the list is worth more than
+    proving one near the bottom.
+  - "evidence": the bullet from that first entry, copied EXACTLY as you wrote it in "experience",
+    that proves the quoted requirement.
+  Work in this order: read the primary asks, decide which entry proves the most important one it
+  can, put that entry first, then write the citation. If your first entry proves NONE of the listed
+  asks, that is the answer to the ordering question, not a reason to reach further down the posting
+  for a line it happens to satisfy. Change the order rather than stretching the citation: a
+  requirement paired with a bullet that does not address it is worse than no justification.
 - Use the JD extraction summary as the priority map. Hard requirements outrank preferences.
   Preferences outrank general responsibilities. Action verbs are writing guidance, not candidate
   evidence. Tools and skills may appear only when the applicant's source already supports them.
@@ -184,6 +217,19 @@ export function normalizeSpec(raw: unknown): ResumeSpec {
     }
     return Object.keys(out).length ? out : undefined;
   };
+  /* Null rather than a half-built object when any of the three fields is missing or mistyped. A
+     partial citation cannot be checked - an evidence bullet with no requirement beside it proves
+     nothing - and leadAlignmentIssues already reports absence clearly. Fabricating the missing
+     halves here would turn a model that skipped the field into a model that appeared to answer. */
+  const leadAlignment = (v: unknown): LeadAlignment | null => {
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+    const a = v as Record<string, unknown>;
+    const entry_org = str(a.entry_org).trim();
+    const requirement = str(a.requirement).trim();
+    const evidence = str(a.evidence).trim();
+    if (!entry_org || !requirement || !evidence) return null;
+    return { entry_org, requirement, evidence };
+  };
   return {
     target_role: str(o.target_role),
     school: str(o.school),
@@ -194,6 +240,7 @@ export function normalizeSpec(raw: unknown): ResumeSpec {
     coursework: str(o.coursework),
     education_position: o.education_position === 'after_experience' ? 'after_experience' : 'top',
     experience,
+    lead_alignment: leadAlignment(o.lead_alignment),
     skills: strArr(o.skills),
     skill_source: strMap(o.skill_source),
   };
@@ -252,11 +299,26 @@ How to use it:
 - When you do swap, take the replacement from the experience bank below - the bank holds everything
   the applicant has done, including work the base resume left off.
 - Re-order entries and bullets so the strongest evidence for THIS job reads first, even when the
-  set of entries does not change.
+  set of entries does not change. The base resume's ORDER carries no authority: it was built with
+  no posting in front of it, so it leads with current work by default. Its WORDING is authoritative;
+  its sequence is a starting point you are expected to change.
 - Never invent. Everything must still trace to the bank or to the base resume above.`
     : '';
+  /* INCLUSION, NOT POSITION - and the difference is the whole of criterion 3.
+   *
+   * This block used to read "Include this entry in the FIRST position on every resume. It may not
+   * be swapped out for job-description fit", and routes/resume.ts failed the packet outright when
+   * the entry was not first. The entry it names is whatever `selectRecentExperience` found to have
+   * the latest end date, so that instruction said, in as many words, that the lead experience is
+   * decided by recency and that the posting may not change it. No amount of "most relevant first"
+   * elsewhere in this prompt can outrank a rule that explicit.
+   *
+   * The concern behind it is real but it is a different concern: a resume that OMITS the
+   * applicant's current role reads as a gap or as out of date, and the /start impact step spends
+   * the applicant's time getting that entry's bullets right. Both are answered by the entry being
+   * ON the page. Neither requires it to be at the top of a posting it does not fit. */
   const priorityBlock = priorityEntry
-    ? `\n\nREQUIRED PRIORITY EXPERIENCE. Include this entry in the FIRST position on every resume. It may not be swapped out for job-description fit. Use only its grounded bank evidence. If the bank holds fewer than three bullets because the applicant explicitly continued with sparse evidence, include every grounded bullet and invent nothing:\n${JSON.stringify(priorityEntry)}`
+    ? `\n\nREQUIRED EXPERIENCE. This entry must APPEAR on every resume: leaving the applicant's current or most recent work off reads as a gap. Its POSITION is not fixed - order it against this posting like any other entry, and lead with it only when it proves what this posting asks for. Use only its grounded bank evidence. If the bank holds fewer than three bullets because the applicant explicitly continued with sparse evidence, include every grounded bullet and invent nothing:\n${JSON.stringify(priorityEntry)}`
     : '';
 
   const feedbackBlock = feedback?.length
@@ -276,7 +338,17 @@ How to use it:
     ? `\n\nSkills list (the applicant's own skills - the ONLY skills that may appear in "skills"):\n${JSON.stringify(skills)}`
     : `\n\nSkills list: none provided. Use only skills clearly evidenced by a bullet you selected, and do not add skills from the job description.`;
   const jdSignals = extractJdSignals(jdText, { company, role });
-  const contextBlock = `Job: ${role} at ${company}\n\nJD extraction summary (use this to rank evidence; never use it as evidence that the applicant has a skill):\n${JSON.stringify(jdSignals)}\n\nJob description:\n${jdText}\n\nEducation source (copy facts exactly; this is the only authority for school, degree, graduation date, enrollment, and coursework):\n${JSON.stringify(education)}${skillsBlock}${baseBlock}${priorityBlock}\n\nExperience bank:\n${JSON.stringify(bank)}`;
+  /* The closed list `lead_alignment.requirement` must be drawn from, rendered numbered so the
+     posting's priority order is visible rather than implied. Built by the SAME function the
+     validator calls with the same (jdText, company, role), which is what makes the list the model
+     is shown and the list it is judged against one list. Empty for a posting that states no
+     readable asks; leadAlignmentIssues falls back to the whole JD in that case, so an unparseable
+     posting relaxes the check instead of failing every packet against it. */
+  const primaryAsks = leadRequirementCandidates(jdText, { company, role });
+  const asksBlock = primaryAsks.length
+    ? `\n\nTHE POSTING'S PRIMARY ASKS, in the posting's own priority order. "lead_alignment.requirement" MUST be one of these lines, copied exactly:\n${primaryAsks.map((ask, i) => `${i + 1}. ${ask}`).join('\n')}`
+    : '';
+  const contextBlock = `Job: ${role} at ${company}\n\nJD extraction summary (use this to rank evidence; never use it as evidence that the applicant has a skill):\n${JSON.stringify(jdSignals)}${asksBlock}\n\nJob description:\n${jdText}\n\nEducation source (copy facts exactly; this is the only authority for school, degree, graduation date, enrollment, and coursework):\n${JSON.stringify(education)}${skillsBlock}${baseBlock}${priorityBlock}\n\nExperience bank:\n${JSON.stringify(bank)}`;
   const response = await client.messages.create(
     {
       model: 'claude-sonnet-5',
@@ -288,9 +360,19 @@ How to use it:
       // healthy model. It is also INTERMITTENT, since how long the model thinks varies per JD, so it
       // surfaces as a flaky endpoint rather than an obvious bug. Caught when the skills
       // select/translate rules made the prompt richer and pushed a working call over the line.
-      // 8192 leaves roughly 3x headroom over the largest spec observed (~2.2k output tokens). We
+      // 8192 left roughly 3x headroom over the largest spec observed (~2.2k output tokens). We
       // only pay for what is generated, so a higher ceiling costs nothing on a normal call.
-      max_tokens: 8192,
+      //
+      // RAISED TO 16384 ON 2026-08-09, and by the same mechanism the comment above describes: the
+      // lead_alignment rules made the prompt richer and pushed a working call over the line. It
+      // reproduced immediately on the Databricks Product Management packet, on the FEEDBACK retry,
+      // where the model has to reconsider its ordering rather than emit the obvious subset - the
+      // response truncated after 3548 characters of JSON. That is the worst case to truncate on,
+      // because the retry is the attempt carrying the fix. Choosing which entry leads is real
+      // reasoning and it is now being asked for explicitly, so this call thinks about as hard as
+      // the base build does, and it gets the base build's ceiling (baseResume.ts, same value, same
+      // argument).
+      max_tokens: 16384,
       system: [
         { type: 'text', text: RESUME_SYSTEM_PROMPT },
         { type: 'text', text: contextBlock, cache_control: { type: 'ephemeral' } },
