@@ -505,6 +505,9 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         decided_at: new Date().toISOString(),
       }
       : null;
+    if (bank.length === 0) {
+      return reply.status(400).send({ error: 'Nothing saved about your work yet. Finish setting up first.' });
+    }
 
     // NULL is normal and must stay non-fatal: accounts created before the base-resume step exists,
     // and anyone who skipped it, generate exactly as they did before.
