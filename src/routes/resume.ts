@@ -4,7 +4,7 @@ import { eq, desc, and, inArray, sql } from 'drizzle-orm';
 import { createHash, randomUUID } from 'node:crypto';
 import { put } from '@vercel/blob';
 import { db } from '../db/index';
-import { profiles, generated_resumes, autofill_events, application_profile, monitored_jobs, career_page_sources } from '../db/schema';
+import { profiles, generated_resumes, autofill_events, application_profile, monitored_jobs, career_page_sources, users } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
 import { allowHourly, claimCounterSlot, getCount, getEntitlements, LIMITS, monthPeriod, quotaExceededPayload, rateLimitedReply, releaseCounterSlot } from '../middleware/quota';
@@ -25,6 +25,7 @@ import {
   applicationAliasFor,
   applicationForwardingAddress,
   ensureApplicationEmailAlias,
+  type ApplicantEmailChoice,
   type ApplicationEmailIdentity,
 } from '../lib/applicationEmail';
 import { applicationAliasDeliverability } from '../lib/applicationEmailDeliverability';
@@ -404,14 +405,19 @@ export async function resumeRoutes(fastify: FastifyInstance) {
      * employer keeps. The check is cached per domain with a TTL, so this costs one lookup an hour
      * across the whole deployment rather than one per generation, and it turns itself back on
      * without a deploy once the MX record exists. */
-    const aliasDeliverability = body.application && body.contact.email
-      ? await applicationAliasDeliverability()
-      : null;
+    const [aliasDeliverability, accountRows] = await Promise.all([
+      body.application ? applicationAliasDeliverability() : Promise.resolve(null),
+      body.application
+        ? db.select({ email: users.email }).from(users).where(eq(users.id, userId)).limit(1)
+        : Promise.resolve([] as Array<{ email: string }>),
+    ]);
+    const accountEmail = accountRows[0]?.email?.trim().toLowerCase() ?? '';
+    const realApplicantEmail = body.contact.email?.trim().toLowerCase() || accountEmail || null;
     const litosApplicationAlias = aliasDeliverability?.deliverable ? applicationAliasFor(userId, resumeId) : null;
     // The stored preference, not whichever address this request happened to carry. Falls back to
     // the contact address, which is what this line used unconditionally before.
-    const aliasForwardTo = litosApplicationAlias && body.contact.email
-      ? await applicationForwardingAddress(userId, body.contact.email)
+    const aliasForwardTo = litosApplicationAlias && realApplicantEmail
+      ? await applicationForwardingAddress(userId, realApplicantEmail)
       : null;
     const applicationEmail: ApplicationEmailIdentity | null = litosApplicationAlias && aliasForwardTo
       ? {
@@ -420,7 +426,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         mode: 'litos_application_alias',
       }
       : null;
-    if (body.application && body.contact.email && !applicationEmail) {
+    if (body.application && realApplicantEmail && !applicationEmail) {
       fastify.log.warn(
         { reason: aliasDeliverability?.reason ?? 'alias_not_configured', domain: aliasDeliverability?.domain ?? null },
         'application email alias skipped: the alias domain cannot receive mail, using the real address',
@@ -428,7 +434,16 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     }
     const applicationContact = applicationEmail
       ? { ...body.contact, email: applicationEmail.alias }
-      : body.contact;
+      : { ...body.contact, email: realApplicantEmail ?? undefined };
+    const pinnedApplicantEmail: ApplicantEmailChoice | null = body.application && applicationContact.email
+      ? {
+        address: applicationContact.email,
+        source: applicationEmail ? 'litos_alias' : body.contact.email ? 'contact_email' : 'account_email',
+        reason: applicationEmail ? 'deliverable' : aliasDeliverability?.reason ?? 'alias_unavailable',
+        tracked: Boolean(applicationEmail),
+        decided_at: new Date().toISOString(),
+      }
+      : null;
 
     // These reads are independent. Starting them together removes one database round trip from
     // every generation while preserving readExperienceBank's load-bearing row ordering (R-022).
@@ -850,6 +865,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         portal_supported: canonicalApplicationPortalSupported,
       } : {}),
       status: body.application ? 'ready_to_submit' as const : 'resume_ready' as const,
+      ...(pinnedApplicantEmail ? { applicant_email: pinnedApplicantEmail } : {}),
       edited_terms: deriveEditedTerms(spec, bank),
       questions: [],
       skipped_reasons: [],
@@ -864,6 +880,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     const storedSpec = {
       ...spec,
       _contact: applicationContact,
+      ...(pinnedApplicantEmail ? { _applicant_email: pinnedApplicantEmail } : {}),
       ...(applicationEmail ? { _application_email: applicationEmail } : {}),
       _review: applicationReview,
       _quality: {
@@ -905,6 +922,12 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       persisted = true;
     } catch (err) {
       fastify.log.error(err);
+      if (body.application) {
+        return reply.status(500).send({
+          error: 'Litos could not save one email across this application. Nothing was prepared for submission. Try again.',
+          code: 'application_identity_persistence_failed',
+        });
+      }
       // The file is already generated and returned below; failing to log it for audit
       // shouldn't block the student from getting their resume.
     }

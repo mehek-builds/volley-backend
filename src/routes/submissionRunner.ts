@@ -14,6 +14,7 @@ import {
 } from '../lib/applicationReview';
 import {
   connectToSession,
+  continueManagedBrowser,
   createBrowserContext,
   createBrowserSession,
   getBrowserSession,
@@ -68,7 +69,12 @@ import { readExperienceBank } from '../db/experienceBank';
 import { declaredSkillsList } from './profile';
 import { applicantGroundingFacts, draftApplicationAnswer, type ApplicantGroundingFacts } from '../llm/applicationAnswer';
 import { isBillingOrAuthFailure } from './resume';
-import { completeEmailVerificationIfPresent, type BrowserVerificationResult } from '../lib/browserVerification';
+import {
+  completeEmailVerificationIfPresent,
+  managedResultNeedsEmailVerification,
+  prepareManagedEmailVerification,
+  type BrowserVerificationResult,
+} from '../lib/browserVerification';
 import {
   discoverPageQuestions,
   discoveredFieldIsRequired,
@@ -107,7 +113,8 @@ import {
 } from '../lib/submissionQueue';
 import { coverLetterFileNameForRole, resumeFileNameForRole } from '../lib/resumeFileName';
 import { assessAtsSubmissionChannel, tryAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
-import { resolveApplicantEmail } from '../lib/applicationEmail';
+import { readPinnedApplicantEmail } from '../lib/applicationEmail';
+import { resolveFrozenApplicantEmail } from '../lib/applicationEmail';
 
 export type ResumeRow = typeof generated_resumes.$inferSelect;
 type StoredSpec = Record<string, unknown>;
@@ -348,15 +355,14 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
    * mail: every confirmation and every recruiter reply bounced, and the applicant was unreachable
    * on an application she cannot send twice.
    *
-   * resolveApplicantEmail will not hand back an alias unless the alias domain has been MEASURED
-   * able to receive mail, and falls back to her real address otherwise. The decision, including
-   * why, is recorded on the review state by the callers of buildPacket, so nothing can tell her
-   * her replies are being tracked when they are not. */
-  const applicantEmail = await resolveApplicantEmail({
+   * resolveFrozenApplicantEmail keeps the address written into this packet fixed. It refuses a
+   * pinned alias that is no longer receivable instead of silently typing a different address into
+   * the employer form than the one printed in the PDF. */
+  const applicantEmail = await resolveFrozenApplicantEmail({
     userId: row.user_id,
     applicationId: row.id,
+    spec: stored,
     accountEmail,
-    contactEmail: typeof contact.email === 'string' ? contact.email : null,
   });
   const email = applicantEmail.address.trim();
   if (!fullName || !email) throw new Error('Full name and email are required before submission');
@@ -1357,6 +1363,7 @@ async function prepareManaged(
 
 async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = false) {
   const stored = row.spec as StoredSpec;
+  const verificationRecipient = readPinnedApplicantEmail(stored)?.address;
   let current = readApplicationReview(stored);
   if (!current) throw new Error('We do not have a link to the company application page');
   current = await repairReviewPortalFromMonitoredJob(row, current);
@@ -1490,6 +1497,8 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       portalUrl,
       requestedAt: verificationRequestedAt,
       permissionGranted: verificationSettings?.enabled === true,
+      expectedRecipient: verificationRecipient,
+      applicationId: row.id,
     });
     const coverLetterSupported = await hasCoverLetterUpload(page, portal);
     const { packet, coverLetterIssue } = await packetForCoverLetterCapability(row, coverLetterSupported, fastify);
@@ -1525,6 +1534,8 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       portalUrl,
       requestedAt: verificationRequestedAt,
       permissionGranted: verificationSettings?.enabled === true,
+      expectedRecipient: verificationRecipient,
+      applicationId: row.id,
     });
     if (postFillVerification.status !== 'not_needed') verification = postFillVerification;
     // Re-scan only after a successful verification so an empty OTP field reported during the
@@ -1836,13 +1847,107 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
     }
     const builtPacket = await buildPacket(row);
     const packet = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
-    const result = await runManagedBrowser(applicationUrl, buildManagedPortalActions(portal, packet, true));
-    const receipt = readManagedReceipt(result);
-    if (!result.screenshot) throw new Error('Stratus managed browser did not return a receipt screenshot');
+    const verificationRequestedAt = new Date();
+    const result = await runManagedBrowser(
+      applicationUrl,
+      buildManagedPortalActions(portal, packet, true),
+      { requestContinuation: true, continuationTtlSeconds: 120 },
+    );
+    let receiptResult = result;
+    let verification: ApplicationReviewState['verification'] = { status: 'not_needed' };
+    if (managedResultNeedsEmailVerification(result)) {
+      const requestedAt = verificationRequestedAt.toISOString();
+      const continuationExpiresAt = result.continuationExpiresAt;
+      const continuationToken = result.continuationToken;
+      const [verificationSettings] = await db.select({ enabled: users.automatic_verification_enabled })
+        .from(users).where(eq(users.id, row.user_id)).limit(1);
+      const continuationIsLive = typeof continuationToken === 'string'
+        && typeof continuationExpiresAt === 'string'
+        && Date.parse(continuationExpiresAt) > Date.now();
+      if (!continuationIsLive || verificationSettings?.enabled !== true) {
+        await writeReview(row, nextReview(claimedReview, {
+          status: 'needs_attention',
+          verification: { status: 'verification_pending', requested_at: requestedAt, retry_count: 0 },
+          attention_reason: verificationSettings?.enabled === true
+            ? 'The employer sent an email verification code, but the secure browser continuation expired. Open this application to finish verification.'
+            : 'The employer sent an email verification code. Open this application to finish verification.',
+          submission_error: undefined,
+        }));
+        return;
+      }
+
+      // The capability is opaque, project-bound and expires within two minutes. Persist it only
+      // while this worker polls the inbox address that was pinned into this exact application
+      // packet. No URL is accepted by the continuation API, so this cannot silently reopen a fresh
+      // page and mistake a different session for the one that requested the code.
+      await writeReview(row, nextReview(claimedReview, {
+        verification: {
+          status: 'searching',
+          requested_at: requestedAt,
+          retry_count: 0,
+          continuation_token: continuationToken,
+          continuation_expires_at: continuationExpiresAt,
+        },
+        attention_reason: undefined,
+        submission_error: undefined,
+      }));
+      const prepared = await prepareManagedEmailVerification({
+        result,
+        userId: row.user_id,
+        portalUrl: applicationUrl,
+        requestedAt: verificationRequestedAt,
+        permissionGranted: true,
+        expectedRecipient: packet.email,
+        applicationId: row.id,
+        attempts: 10,
+        delayMs: 3_000,
+      });
+      if (prepared.status !== 'ready' || Date.parse(continuationExpiresAt) <= Date.now()) {
+        await writeReview(row, nextReview(claimedReview, {
+          status: 'needs_attention',
+          verification: { status: 'verification_pending', requested_at: requestedAt, retry_count: 1 },
+          attention_reason: 'The employer sent an email verification code, but Litos could not match it to this application before the secure session expired. Open this application to finish verification.',
+          submission_error: undefined,
+        }));
+        return;
+      }
+      try {
+        // Exactly one continuation call. If this click has an uncertain outcome, this function does
+        // not retry it and does not fall back to result.url. The single-use token is considered
+        // consumed whether the response succeeds or fails.
+        receiptResult = await continueManagedBrowser(continuationToken, prepared.actions);
+      } catch (error) {
+        await writeReview(row, nextReview(claimedReview, {
+          status: 'needs_attention',
+          verification: { status: 'verification_pending', requested_at: requestedAt, retry_count: 1 },
+          attention_reason: 'Litos entered the employer verification step, but could not prove the final result. Open this application to confirm it before trying anything again.',
+          submission_error: error instanceof Error ? error.message.slice(0, 500) : 'Managed verification continuation failed',
+        }));
+        return;
+      }
+      if (managedResultNeedsEmailVerification(receiptResult)) {
+        await writeReview(row, nextReview(claimedReview, {
+          status: 'needs_attention',
+          verification: { status: 'verification_pending', requested_at: requestedAt, retry_count: 1 },
+          attention_reason: 'The employer did not accept the verification code. Open this application to finish verification.',
+          submission_error: undefined,
+        }));
+        return;
+      }
+      verification = {
+        status: 'completed',
+        provider: prepared.provider,
+        requested_at: requestedAt,
+        retry_count: 1,
+        completed_at: new Date().toISOString(),
+      };
+    }
+    const receipt = readManagedReceipt(receiptResult);
+    if (!receiptResult.screenshot) throw new Error('Stratus managed browser did not return a receipt screenshot');
     const capturedAt = new Date().toISOString();
     const blob = await put(
       `users/${row.user_id}/submission-runs/${claimedReview.submission_run_id}/receipt.png`,
-      Buffer.from(result.screenshot, 'base64'),
+      Buffer.from(receiptResult.screenshot, 'base64'),
       // A receipt is the proof an application was actually submitted, so a collision here would
       // fail the run at the worst possible moment: after the employer already has it.
       { access: 'public', contentType: 'image/png', addRandomSuffix: true },
@@ -1851,6 +1956,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
       status: 'submitted',
       submitted_at: capturedAt,
       submission_error: undefined,
+      verification,
       receipt: {
         confirmation_text: receipt.confirmationText,
         final_url: receipt.finalUrl,

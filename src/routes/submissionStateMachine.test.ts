@@ -167,9 +167,9 @@ test('submission packet attaches the role-specific resume filename', async () =>
  * behind the deliverability precondition, so the assertion moves with it. */
 test('submission packet only reaches for the alias through the deliverability precondition', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  assert.match(runner, /import \{ resolveApplicantEmail \} from '\.\.\/lib\/applicationEmail'/);
+  assert.match(runner, /import \{ resolveFrozenApplicantEmail \} from '\.\.\/lib\/applicationEmail'/);
   const buildPacketIndex = runner.indexOf('export async function buildPacket');
-  const resolveIndex = runner.indexOf('const applicantEmail = await resolveApplicantEmail', buildPacketIndex);
+  const resolveIndex = runner.indexOf('const applicantEmail = await resolveFrozenApplicantEmail', buildPacketIndex);
   const emailIndex = runner.indexOf('const email = applicantEmail.address.trim()', buildPacketIndex);
   assert.ok(resolveIndex > buildPacketIndex, 'buildPacket must resolve the applicant email through the precondition');
   assert.ok(emailIndex > resolveIndex, 'the filled email must be the resolved address');

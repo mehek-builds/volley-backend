@@ -255,9 +255,16 @@ export type ApplicationReviewState = {
     consent_version?: string;
   };
   verification?: {
-    status: 'not_needed' | 'searching' | 'completed' | 'handoff';
+    status: 'not_needed' | 'searching' | 'verification_pending' | 'completed' | 'handoff';
     provider?: 'gmail' | 'outlook';
+    requested_at?: string;
+    retry_count?: number;
     completed_at?: string;
+    /* Opaque, project-bound Stratus capability. It is written only while the submission worker is
+     * polling the pinned applicant inbox, expires within two minutes, and is cleared before every
+     * terminal state. It contains no browser or sandbox identifier. */
+    continuation_token?: string;
+    continuation_expires_at?: string;
   };
   receipt?: {
     confirmation_text: string;

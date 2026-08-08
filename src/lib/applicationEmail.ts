@@ -7,6 +7,7 @@ import {
   type AliasDeliverability,
   type AliasDeliverabilityReason,
   applicationAliasDeliverability,
+  applicationEmailForwardingConfigured,
   aliasDomain,
   inboundRouteConfigured,
   inboundWebhookEndpoint,
@@ -190,6 +191,115 @@ export type ApplicantEmailChoice = {
   decided_at: string;
 };
 
+export class ApplicantEmailRegenerationRequiredError extends Error {
+  readonly code = 'applicant_email_regeneration_required';
+
+  constructor(reason: string) {
+    super(`This application must be regenerated before submission: ${reason}`);
+    this.name = 'ApplicantEmailRegenerationRequiredError';
+  }
+}
+
+type StoredApplicantEmailSpec = {
+  _applicant_email?: unknown;
+  _application_email?: unknown;
+  _contact?: unknown;
+};
+
+function applicantEmailChoice(value: unknown): ApplicantEmailChoice | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const address = normalizedAddress(record.address);
+  const source = record.source;
+  if (!address || (source !== 'litos_alias' && source !== 'contact_email' && source !== 'account_email')) return null;
+  return {
+    address,
+    source,
+    reason: typeof record.reason === 'string' && record.reason ? record.reason as ApplicantEmailChoice['reason'] : 'alias_unavailable',
+    tracked: record.tracked === true,
+    decided_at: typeof record.decided_at === 'string' && record.decided_at ? record.decided_at : new Date(0).toISOString(),
+  };
+}
+
+/** Reads the immutable email decision written when a packet and its PDF were generated. */
+export function readPinnedApplicantEmail(spec: unknown): ApplicantEmailChoice | null {
+  if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return null;
+  return applicantEmailChoice((spec as StoredApplicantEmailSpec)._applicant_email);
+}
+
+export type FrozenApplicantEmailDeps = {
+  deliverability?: () => Promise<AliasDeliverability>;
+  aliasActive?: (input: { userId: string; applicationId: string; alias: string }) => Promise<boolean>;
+};
+
+async function activeAliasForApplication(input: { userId: string; applicationId: string; alias: string }): Promise<boolean> {
+  const [row] = await db.select({ alias: application_email_aliases.alias })
+    .from(application_email_aliases)
+    .where(and(
+      eq(application_email_aliases.alias, input.alias),
+      eq(application_email_aliases.user_id, input.userId),
+      eq(application_email_aliases.generated_resume_id, input.applicationId),
+      eq(application_email_aliases.status, 'active'),
+    ))
+    .limit(1);
+  return Boolean(row);
+}
+
+/**
+ * Resolves the form email without ever changing the address printed in the frozen PDF.
+ *
+ * New packets carry `_applicant_email`. Legacy packets are recovered from `_contact.email`,
+ * which was the exact value rendered into their PDF. A pinned alias that is no longer receivable
+ * is a regeneration hold. Falling back to a personal address at submit time would make the PDF
+ * and employer form disagree, and would also hide that employer replies cannot arrive.
+ */
+export async function resolveFrozenApplicantEmail(input: {
+  userId: string;
+  applicationId: string;
+  spec: unknown;
+  accountEmail?: string | null;
+}, deps: FrozenApplicantEmailDeps = {}): Promise<ApplicantEmailChoice> {
+  const stored = input.spec && typeof input.spec === 'object' && !Array.isArray(input.spec)
+    ? input.spec as StoredApplicantEmailSpec
+    : {};
+  let pinned = readPinnedApplicantEmail(stored);
+
+  if (!pinned) {
+    const contact = stored._contact && typeof stored._contact === 'object' && !Array.isArray(stored._contact)
+      ? normalizedAddress((stored._contact as Record<string, unknown>).email)
+      : null;
+    const legacyIdentity = stored._application_email && typeof stored._application_email === 'object' && !Array.isArray(stored._application_email)
+      ? normalizedAddress((stored._application_email as Record<string, unknown>).alias)
+      : null;
+    const address = contact ?? legacyIdentity ?? normalizedAddress(input.accountEmail);
+    if (!address) throw new ApplicantEmailRegenerationRequiredError('no applicant email is stored');
+    const alias = isAliasAddress(address);
+    pinned = {
+      address,
+      source: alias ? 'litos_alias' : contact ? 'contact_email' : 'account_email',
+      reason: alias ? 'deliverable' : 'alias_unavailable',
+      tracked: alias,
+      decided_at: new Date(0).toISOString(),
+    };
+  }
+
+  if (pinned.source !== 'litos_alias' && !isAliasAddress(pinned.address)) return pinned;
+
+  const deliverability = await (deps.deliverability ?? applicationAliasDeliverability)().catch(() => null);
+  if (!deliverability?.deliverable) {
+    throw new ApplicantEmailRegenerationRequiredError(
+      `the pinned Litos email is not receivable (${deliverability?.reason ?? 'deliverability_check_failed'})`,
+    );
+  }
+  const active = await (deps.aliasActive ?? activeAliasForApplication)({
+    userId: input.userId,
+    applicationId: input.applicationId,
+    alias: pinned.address,
+  }).catch(() => false);
+  if (!active) throw new ApplicantEmailRegenerationRequiredError('the pinned Litos email is not active for this packet');
+  return { ...pinned, source: 'litos_alias', reason: 'deliverable', tracked: true };
+}
+
 function normalizedAddress(value: unknown): string | null {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim().toLowerCase();
@@ -200,7 +310,13 @@ function normalizedAddress(value: unknown): string | null {
 export function isAliasAddress(value: string | null | undefined): boolean {
   const domain = aliasDomain();
   const address = value?.trim().toLowerCase();
-  if (!domain || !address) return false;
+  if (!address) return false;
+  // Packets outlive email-provider migrations. Recognize both historical Litos formats even when
+  // today's environment points at a different domain, otherwise an old dead alias is mistaken for
+  // a personal address and silently submitted again.
+  if (/^app-[a-z0-9-]+@apply\.trylitos\.com$/.test(address)) return true;
+  if (/^applications\+app-[a-z0-9-]+@trylitos\.com$/.test(address)) return true;
+  if (!domain) return false;
   if (address.endsWith(`@${domain}`)) return true;
   const mailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX?.trim().toLowerCase();
   if (!mailbox) return false;
@@ -244,7 +360,10 @@ export async function resolveApplicantEmail(input: {
     domain: null,
     reason: 'check_unavailable',
     mx_hosts: [],
+    mx_provider: 'unknown',
+    mx_provider_agrees: false,
     resend_domain_status: null,
+    resend_receiving_status: null,
     inbound_route_configured: false,
     checked_at: decidedAt,
   }));
@@ -733,7 +852,10 @@ export type ApplicationEmailHealth = {
   // Measured against the world.
   deliverable: boolean;
   mx_hosts: string[];
+  mx_provider: AliasDeliverability['mx_provider'];
+  mx_provider_agrees: boolean;
   resend_domain_status: string | null;
+  resend_receiving_status: string | null;
   inbound_route_configured: boolean;
   last_inbound_message_at: string | null;
   last_inbound_message_age_seconds: number | null;
@@ -792,7 +914,10 @@ export async function applicationEmailHealth(): Promise<ApplicationEmailHealth> 
     domain: check.domain,
     deliverable: check.deliverable,
     mx_hosts: check.mx_hosts,
+    mx_provider: check.mx_provider,
+    mx_provider_agrees: check.mx_provider_agrees,
     resend_domain_status: check.resend_domain_status,
+    resend_receiving_status: check.resend_receiving_status,
     inbound_route_configured: check.inbound_route_configured,
     last_inbound_message_at: lastIso,
     last_inbound_message_age_seconds: lastIso
@@ -801,7 +926,7 @@ export async function applicationEmailHealth(): Promise<ApplicationEmailHealth> 
     enabled_aliases: aliasCount,
     domain_configured: Boolean((configuredDomain() || configuredMailbox()) && applicationAliasSecret()),
     inbound_webhook_configured: Boolean(inboundWebhookSecret()),
-    forwarding_configured: Boolean(process.env.RESEND_API_KEY?.trim() && process.env.RESEND_FROM?.trim()),
+    forwarding_configured: applicationEmailForwardingConfigured(),
     checked_at: check.checked_at,
     ...(check.detail ? { detail: check.detail } : {}),
   };

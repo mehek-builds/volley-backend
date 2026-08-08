@@ -21,6 +21,14 @@ test('rejects text with multiple different verification codes', () => {
   );
 });
 
+test('extracts a contextual Greenhouse alphanumeric code but rejects ordinary nearby words', () => {
+  assert.equal(
+    extractCodeFromVerificationText('Enter this security code to continue: HJJ53KPD'),
+    'HJJ53KPD',
+  );
+  assert.equal(extractCodeFromVerificationText('Your application for ENGINEER was received.'), null);
+});
+
 test('accepts recent Gmail messages only from the portal sender allowlist', () => {
   const requestedAt = new Date('2026-07-25T10:00:00.000Z');
   const match = extractVerificationCode([{
@@ -46,6 +54,39 @@ test('accepts recent Gmail messages only from the portal sender allowlist', () =
   });
 });
 
+test('matches a code only to the applicant email pinned into this application', () => {
+  const requestedAt = new Date('2026-07-25T10:00:00.000Z');
+  const payloads = [{
+    provider: 'gmail' as const,
+    data: {
+      messages: [{
+        payload: {
+          headers: [
+            { name: 'Subject', value: 'Your Greenhouse verification code' },
+            { name: 'From', value: 'Greenhouse <no-reply@greenhouse.io>' },
+            { name: 'To', value: 'applications+app-123@trylitos.com' },
+            { name: 'Authentication-Results', value: 'spf=pass dkim=pass dmarc=pass' },
+            { name: 'Date', value: '2026-07-25T10:00:20.000Z' },
+          ],
+          body: { data: Buffer.from('Use verification code 482913 to continue.').toString('base64url') },
+        },
+      }],
+    },
+  }];
+  assert.equal(extractVerificationCode(
+    payloads,
+    'https://boards.greenhouse.io/acme/jobs/123',
+    requestedAt,
+    'applications+app-other@trylitos.com',
+  ), null);
+  assert.equal(extractVerificationCode(
+    payloads,
+    'https://boards.greenhouse.io/acme/jobs/123',
+    requestedAt,
+    'applications+app-123@trylitos.com',
+  )?.code, '482913');
+});
+
 test('rejects a fresh code from a lookalike sender', () => {
   const match = extractVerificationCode([{
     provider: 'outlook',
@@ -59,6 +100,26 @@ test('rejects a fresh code from a lookalike sender', () => {
     },
   }], 'https://boards.greenhouse.io/acme/jobs/123', new Date('2026-07-25T10:00:00.000Z'));
   assert.equal(match, null);
+});
+
+test('accepts Greenhouse codes from the observed regional mail domain', () => {
+  const match = extractVerificationCode([{
+    provider: 'gmail',
+    data: {
+      messages: [{
+        subject: 'Your security code is HJJ53KPD',
+        from: 'Greenhouse <no-reply@us.greenhouse-mail.io>',
+        receivedAt: '2026-07-25T10:00:20.000Z',
+        text: 'Use verification code HJJ53KPD to continue.',
+      }],
+    },
+  }], 'https://job-boards.greenhouse.io/acme/jobs/123', new Date('2026-07-25T10:00:00.000Z'));
+  assert.deepEqual(match, {
+    code: 'HJJ53KPD',
+    provider: 'gmail',
+    receivedAt: '2026-07-25T10:00:20.000Z',
+    senderDomain: 'us.greenhouse-mail.io',
+  });
 });
 
 test('rejects codes that predate the active browser request', () => {
@@ -87,6 +148,8 @@ test('queries only read tools and tolerates an unconnected provider', async () =
         messages: [{
           subject: 'Your Ashby verification code',
           from: 'verify@ashbyhq.com',
+          to: 'app-2222222222-test@apply.trylitos.com',
+          authenticationResults: 'spf=pass dkim=pass dmarc=pass',
           internalDate: '1784973620000',
           text: 'Your one-time code is 482913.',
         }],
@@ -97,13 +160,55 @@ test('queries only read tools and tolerates an unconnected provider', async () =
     userId: 'user-123',
     portalUrl: 'https://jobs.ashbyhq.com/acme/123',
     requestedAt: new Date('2026-07-25T10:00:00.000Z'),
+    expectedRecipient: 'app-2222222222-test@apply.trylitos.com',
+    applicationId: '22222222-2222-4222-8222-222222222222',
     executor,
   });
   assert.equal(match?.code, '482913');
   assert.deepEqual(calls.map(({ tool }) => tool).sort(), ['GMAIL_FETCH_EMAILS', 'OUTLOOK_SEARCH_MESSAGES']);
   assert.deepEqual(calls.find(({ tool }) => tool === 'OUTLOOK_SEARCH_MESSAGES')?.arguments, {
-    query: '"verification code" OR "security code" OR passcode OR OTP',
+    query: 'to:app-2222222222-test@apply.trylitos.com AND ("verification code" OR "security code" OR passcode OR OTP)',
     size: 5,
     enable_top_results: false,
   });
+});
+
+test('recipient correlation rejects another application code and ambiguous codes', () => {
+  const requestedAt = new Date('2026-07-25T10:00:00.000Z');
+  const message = (to: string, code: string, seconds: number) => ({
+    subject: 'Your Greenhouse security code',
+    from: 'Greenhouse <no-reply@us.greenhouse-mail.io>',
+    to,
+    authenticationResults: 'spf=pass dkim=pass dmarc=pass',
+    receivedAt: `2026-07-25T10:00:${String(seconds).padStart(2, '0')}.000Z`,
+    text: `Use security code ${code} to continue.`,
+  });
+  const expected = 'app-2222222222-target@apply.trylitos.com';
+  const other = 'app-3333333333-other@apply.trylitos.com';
+  const isolated = extractVerificationCode([{
+    provider: 'gmail',
+    data: { messages: [message(other, 'AB12CD34', 10), message(expected, 'EF56GH78', 20)] },
+  }], 'https://job-boards.greenhouse.io/acme/jobs/123', requestedAt, expected, '22222222-2222-4222-8222-222222222222');
+  assert.equal(isolated?.code, 'EF56GH78');
+
+  const ambiguous = extractVerificationCode([{
+    provider: 'gmail',
+    data: { messages: [message(expected, 'AB12CD34', 10), message(expected, 'EF56GH78', 20)] },
+  }], 'https://job-boards.greenhouse.io/acme/jobs/123', requestedAt, expected, '22222222-2222-4222-8222-222222222222');
+  assert.equal(ambiguous, null);
+});
+
+test('correlated lookup fails closed without authenticated sender metadata', () => {
+  const match = extractVerificationCode([{
+    provider: 'gmail',
+    data: { messages: [{
+      subject: 'Your Greenhouse security code',
+      from: 'Greenhouse <no-reply@us.greenhouse-mail.io>',
+      to: 'app-2222222222-target@apply.trylitos.com',
+      receivedAt: '2026-07-25T10:00:20.000Z',
+      text: 'Use security code EF56GH78 to continue.',
+    }] },
+  }], 'https://job-boards.greenhouse.io/acme/jobs/123', new Date('2026-07-25T10:00:00.000Z'),
+  'app-2222222222-target@apply.trylitos.com', '22222222-2222-4222-8222-222222222222');
+  assert.equal(match, null);
 });

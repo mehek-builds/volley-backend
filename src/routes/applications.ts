@@ -648,7 +648,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         });
       }
       const sensitive = sensitiveQuestionFor(normalizedSubmittedQuestions, sensitiveProfile, current.jd_text);
-      if (sensitive) {
+      // A supported portal needs the browser run to discover and surface the live form's
+      // declarations. Blocking that run on the pre-run snapshot creates a deadlock: the question
+      // cannot be answered until the form has been inspected, but inspection never starts. The
+      // unsupported path below has no intervening fill and emails the employer immediately, so it
+      // remains a send gate here. Final approval and direct browser submission retain their own
+      // post-discovery gates.
+      if (current.portal_url && !isPortalSupported(current.portal_url) && sensitive) {
         return reply.status(422).send({ error: `Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}` });
       }
       /* REMEMBER THE ANSWERS THAT TRAVEL, so she is asked for each of them exactly once.

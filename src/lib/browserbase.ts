@@ -49,6 +49,8 @@ export type ManagedBrowserResult = {
   skipped?: string[];
   discovered?: ManagedDiscoveredQuestion[];
   extracted?: Array<{ selector: string; label?: string; value: string | null }>;
+  continuationToken?: string;
+  continuationExpiresAt?: string;
 };
 
 type ManagedBrowserError = string | { message?: string; code?: string };
@@ -214,7 +216,12 @@ export function isManagedStratusProvider(): boolean {
 export async function runManagedBrowser(
   portalUrl: string,
   actions: ManagedBrowserAction[],
-  options: { screenshot?: boolean } = {},
+  options: {
+    screenshot?: boolean;
+    requestContinuation?: boolean;
+    continuationCheckpoint?: boolean;
+    continuationTtlSeconds?: number;
+  } = {},
 ): Promise<ManagedBrowserResult> {
   const baseUrl = process.env.STRATUS_BASE_URL?.replace(/\/$/, '');
   const apiKey = process.env.STRATUS_API_KEY?.trim();
@@ -237,6 +244,46 @@ export async function runManagedBrowser(
       screenshot: options.screenshot ?? true,
       fullPage: true,
       waitUntil: 'domcontentloaded',
+      ...(options.requestContinuation ? {
+        requestContinuation: true,
+        continuationCheckpoint: options.continuationCheckpoint === true,
+        continuationTtlSeconds: Math.min(Math.max(options.continuationTtlSeconds ?? 120, 15), 120),
+      } : {}),
+    }),
+  });
+  const payload = await response.json().catch(() => ({})) as { run?: ManagedBrowserResult; error?: ManagedBrowserError };
+  if (!response.ok || !payload.run) {
+    throw new Error(managedBrowserErrorMessage(payload.error, response.status, outboundActions));
+  }
+  return payload.run;
+}
+
+export async function continueManagedBrowser(
+  continuationToken: string,
+  actions: ManagedBrowserAction[],
+  options: { screenshot?: boolean } = {},
+): Promise<ManagedBrowserResult> {
+  const baseUrl = process.env.STRATUS_BASE_URL?.replace(/\/$/, '');
+  const apiKey = process.env.STRATUS_API_KEY?.trim();
+  if (!baseUrl) throw new Error('Stratus managed browser is not configured');
+  const authorization = !apiKey && process.env.VERCEL_ENV === 'production'
+    ? `Bearer ${await getVercelOidcToken()}`
+    : undefined;
+  if (!apiKey && !authorization) throw new Error('Stratus managed browser is not configured');
+  if (!/^[A-Za-z0-9_-]{32,200}$/.test(continuationToken)) throw new Error('Managed Stratus continuation token is invalid');
+  const outboundActions = normalizeStratusActions(actions);
+  const response = await fetch(`${baseUrl}/api/run`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(apiKey ? { 'X-Stratus-API-Key': apiKey } : {}),
+      ...(authorization ? { Authorization: authorization } : {}),
+    },
+    body: JSON.stringify({
+      continuationToken,
+      actions: outboundActions,
+      screenshot: options.screenshot ?? true,
+      fullPage: true,
     }),
   });
   const payload = await response.json().catch(() => ({})) as { run?: ManagedBrowserResult; error?: ManagedBrowserError };
