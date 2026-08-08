@@ -5,9 +5,12 @@ import {
   applicationEmailRouteLabel,
   classifyApplicationEmail,
   forwardingAddressWouldLoop,
+  ApplicantEmailRegenerationRequiredError,
   isAliasAddress,
   relayRecipientFor,
   resolveApplicantEmail,
+  resolveFrozenApplicantEmail,
+  readPinnedApplicantEmail,
   retrieveResendReceivedEmail,
   routeInboundApplicationEmail,
 } from './applicationEmail';
@@ -39,6 +42,12 @@ test('application aliases are deterministic and live on the configured domain', 
     if (previousSecret === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
     else process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = previousSecret;
   }
+});
+
+test('applicant email regeneration errors use current user-facing vocabulary', () => {
+  const error = new ApplicantEmailRegenerationRequiredError('the saved address is unavailable');
+  assert.match(error.message, /^This application must be regenerated/);
+  assert.doesNotMatch(error.message, /application packet/i);
 });
 
 test('application aliases can route through one main mailbox', () => {
@@ -118,6 +127,7 @@ test('resend received email hydration fetches the full body before routing', asy
     globalThis.fetch = (async (url, init) => {
       assert.equal(String(url), 'https://api.resend.com/emails/receiving/email_123');
       assert.equal((init?.headers as Record<string, string>).Authorization, 'Bearer re_test');
+      assert.equal((init?.headers as Record<string, string>)['User-Agent'], 'Litos/1.0');
       return new Response(JSON.stringify({
         id: 'email_123',
         to: ['app-abc@apply.litos.test'],
@@ -127,6 +137,7 @@ test('resend received email hydration fetches the full body before routing', asy
         text: 'Can you schedule a call?',
         html: '<p>Can you schedule a call?</p>',
         message_id: '<message@example.com>',
+        headers: { 'authentication-results': 'mx.resend.com; spf=pass dkim=pass dmarc=pass' },
       }), { status: 200, headers: { 'content-type': 'application/json' } });
     }) as typeof fetch;
     const hydrated = await retrieveResendReceivedEmail({
@@ -137,6 +148,7 @@ test('resend received email hydration fetches the full body before routing', asy
     assert.equal(hydrated.from, 'recruiter@example.com');
     assert.equal(hydrated.text, 'Can you schedule a call?');
     assert.deepEqual(hydrated.to, ['app-abc@apply.litos.test']);
+    assert.deepEqual(hydrated.authentication, { spf: 'pass', dkim: 'pass', dmarc: 'pass' });
   } finally {
     if (previousKey === undefined) delete process.env.RESEND_API_KEY;
     else process.env.RESEND_API_KEY = previousKey;
@@ -155,7 +167,10 @@ function deliverability(overrides: Partial<AliasDeliverability> = {}): AliasDeli
     domain: 'apply.trylitos.com',
     reason: 'deliverable',
     mx_hosts: ['inbound-smtp.us-east-1.amazonaws.com'],
+    mx_provider: 'resend',
+    mx_provider_agrees: true,
     resend_domain_status: 'verified',
+    resend_receiving_status: 'enabled',
     inbound_route_configured: true,
     checked_at: '2026-08-08T10:00:00.000Z',
     ...overrides,
@@ -276,6 +291,22 @@ test('a stale alias frozen into an older packet is never reused as the real addr
   });
 });
 
+test('retired Litos alias formats stay recognizable after a provider migration', () => {
+  const previousDomain = process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+  const previousMailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+  process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'new-mail.example';
+  delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+  try {
+    assert.equal(isAliasAddress('app-3243fe5f21-30c9245c2057@apply.trylitos.com'), true);
+    assert.equal(isAliasAddress('applications+app-3243fe5f21-30c9245c2057@trylitos.com'), true);
+  } finally {
+    if (previousDomain === undefined) delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+    else process.env.LITOS_APPLICATION_EMAIL_DOMAIN = previousDomain;
+    if (previousMailbox === undefined) delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+    else process.env.LITOS_APPLICATION_EMAIL_MAILBOX = previousMailbox;
+  }
+});
+
 test('a real contact address on the packet still wins over the account email', async () => {
   await withAliasDomain(async () => {
     const choice = await resolveApplicantEmail({
@@ -291,6 +322,81 @@ test('a real contact address on the packet still wins over the account email', a
     assert.equal(choice.source, 'contact_email');
     assert.equal(choice.tracked, false);
   });
+});
+
+test('a frozen real applicant email never changes when aliases later become healthy', async () => {
+  const pinned = {
+    address: 'mehek@usc.edu',
+    source: 'contact_email' as const,
+    reason: 'no_mx_record' as const,
+    tracked: false,
+    decided_at: '2026-08-09T00:00:00.000Z',
+  };
+  const choice = await resolveFrozenApplicantEmail({
+    userId: USER_ID,
+    applicationId: APPLICATION_ID,
+    accountEmail: 'mehekmandal05@gmail.com',
+    spec: { _contact: { email: pinned.address }, _applicant_email: pinned },
+  }, {
+    deliverability: async () => deliverability(),
+    aliasActive: async () => true,
+  });
+  assert.deepEqual(choice, pinned);
+  assert.deepEqual(readPinnedApplicantEmail({ _applicant_email: pinned }), pinned);
+});
+
+test('an unhealthy pinned alias holds for regeneration instead of switching the form email', async () => {
+  await withAliasDomain(async () => {
+    await assert.rejects(
+      resolveFrozenApplicantEmail({
+        userId: USER_ID,
+        applicationId: APPLICATION_ID,
+        accountEmail: 'mehekmandal05@gmail.com',
+        spec: {
+          _contact: { email: ALIAS },
+          _applicant_email: {
+            address: ALIAS,
+            source: 'litos_alias',
+            reason: 'deliverable',
+            tracked: true,
+            decided_at: '2026-08-09T00:00:00.000Z',
+          },
+        },
+      }, {
+        deliverability: async () => deliverability({ deliverable: false, reason: 'no_mx_record' }),
+        aliasActive: async () => true,
+      }),
+      /must be regenerated.*not receivable/i,
+    );
+  });
+});
+
+test('a healthy pinned alias must also be active for exactly this packet', async () => {
+  await withAliasDomain(async () => {
+    await assert.rejects(
+      resolveFrozenApplicantEmail({
+        userId: USER_ID,
+        applicationId: APPLICATION_ID,
+        spec: { _contact: { email: ALIAS } },
+      }, {
+        deliverability: async () => deliverability(),
+        aliasActive: async () => false,
+      }),
+      /not active for this packet/i,
+    );
+  });
+});
+
+test('legacy packets preserve the real email printed in their PDF', async () => {
+  const choice = await resolveFrozenApplicantEmail({
+    userId: USER_ID,
+    applicationId: APPLICATION_ID,
+    accountEmail: 'account@example.com',
+    spec: { _contact: { email: 'printed@example.com' } },
+  });
+  assert.equal(choice.address, 'printed@example.com');
+  assert.equal(choice.source, 'contact_email');
+  assert.equal(choice.tracked, false);
 });
 
 test('with nowhere to forward to, the alias is not minted', async () => {

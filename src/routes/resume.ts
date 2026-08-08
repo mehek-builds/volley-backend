@@ -4,7 +4,7 @@ import { eq, desc, and, inArray, sql } from 'drizzle-orm';
 import { createHash, randomUUID } from 'node:crypto';
 import { put } from '@vercel/blob';
 import { db } from '../db/index';
-import { profiles, generated_resumes, autofill_events, application_profile, monitored_jobs, career_page_sources } from '../db/schema';
+import { profiles, generated_resumes, autofill_events, application_profile, monitored_jobs, career_page_sources, users } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
 import { allowHourly, claimCounterSlot, getCount, getEntitlements, LIMITS, monthPeriod, quotaExceededPayload, rateLimitedReply, releaseCounterSlot } from '../middleware/quota';
@@ -26,6 +26,7 @@ import {
   applicationAliasFor,
   applicationForwardingAddress,
   ensureApplicationEmailAlias,
+  type ApplicantEmailChoice,
   type ApplicationEmailIdentity,
 } from '../lib/applicationEmail';
 import { applicationAliasDeliverability } from '../lib/applicationEmailDeliverability';
@@ -495,6 +496,15 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     const applicationContact = applicationEmail
       ? { ...contactOfRecord, email: applicationEmail.alias }
       : contactOfRecord;
+    const pinnedApplicantEmail: ApplicantEmailChoice | null = body.application && applicationContact.email
+      ? {
+        address: applicationContact.email,
+        source: applicationEmail ? 'litos_alias' : body.contact.email ? 'contact_email' : 'account_email',
+        reason: applicationEmail ? 'deliverable' : aliasDeliverability?.reason ?? 'alias_unavailable',
+        tracked: Boolean(applicationEmail),
+        decided_at: new Date().toISOString(),
+      }
+      : null;
     if (bank.length === 0) {
       return reply.status(400).send({ error: 'Nothing saved about your work yet. Finish setting up first.' });
     }
@@ -907,6 +917,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         portal_supported: canonicalApplicationPortalSupported,
       } : {}),
       status: body.application ? 'ready_to_submit' as const : 'resume_ready' as const,
+      ...(pinnedApplicantEmail ? { applicant_email: pinnedApplicantEmail } : {}),
       edited_terms: deriveEditedTerms(spec, bank),
       questions: [],
       skipped_reasons: [],
@@ -921,6 +932,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     const storedSpec = {
       ...spec,
       _contact: applicationContact,
+      ...(pinnedApplicantEmail ? { _applicant_email: pinnedApplicantEmail } : {}),
       ...(applicationEmail ? { _application_email: applicationEmail } : {}),
       _review: applicationReview,
       _quality: {
@@ -966,6 +978,12 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       persisted = true;
     } catch (err) {
       fastify.log.error(err);
+      if (body.application) {
+        return reply.status(500).send({
+          error: 'Litos could not save one email across this application. Nothing was prepared for submission. Try again.',
+          code: 'application_identity_persistence_failed',
+        });
+      }
       // The file is already generated and returned below; failing to log it for audit
       // shouldn't block the student from getting their resume.
     }

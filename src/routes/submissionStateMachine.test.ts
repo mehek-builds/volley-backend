@@ -166,7 +166,7 @@ test('ATS API channel runs after final claim and before browser submission', asy
   const repairIndex = runner.indexOf('review = await repairReviewPortalFromMonitoredJob(row, review);', helperIndex);
   const atsIndex = runner.indexOf('const atsResult = await tryAtsSubmissionChannel', helperIndex);
   const authCheckIndex = runner.indexOf('if (!await authorizationValidAtClick(row, review))', helperIndex);
-  const claimIndex = runner.indexOf('const claimedRow = await claimSubmission(row)');
+  const claimIndex = runner.indexOf('const claimedRow = await claimSubmission(row, options.claimAlreadyHeld)');
   const claimedRepairIndex = runner.indexOf('claimedReview = await repairReviewPortalFromMonitoredJob(row, claimedReview);', claimIndex);
   const detectIndex = runner.indexOf('const claimedPortal = detectPortal(claimedReview.portal_url!);', claimIndex);
   const callIndex = runner.indexOf('if (await submitViaAtsSubmissionChannel(row, claimedReview, fastify)) return;');
@@ -244,9 +244,9 @@ test('submission packet attaches the role-specific resume filename', async () =>
  * behind the deliverability precondition, so the assertion moves with it. */
 test('submission packet only reaches for the alias through the deliverability precondition', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  assert.match(runner, /import \{ resolveApplicantEmail \} from '\.\.\/lib\/applicationEmail'/);
+  assert.match(runner, /import \{ resolveFrozenApplicantEmail \} from '\.\.\/lib\/applicationEmail'/);
   const buildPacketIndex = runner.indexOf('export async function buildPacket');
-  const resolveIndex = runner.indexOf('const applicantEmail = await resolveApplicantEmail', buildPacketIndex);
+  const resolveIndex = runner.indexOf('const applicantEmail = await resolveFrozenApplicantEmail', buildPacketIndex);
   const emailIndex = runner.indexOf('const email = applicantEmail.address.trim()', buildPacketIndex);
   assert.ok(resolveIndex > buildPacketIndex, 'buildPacket must resolve the applicant email through the precondition');
   assert.ok(emailIndex > resolveIndex, 'the filled email must be the resolved address');

@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applicationAliasDeliverability,
+  classifyAliasMxProvider,
   inboundRouteConfigured,
+  mxRoutesToResend,
   resendDomainIsVerified,
   resetApplicationAliasDeliverabilityCache,
 } from './applicationEmailDeliverability';
@@ -15,11 +17,13 @@ async function withAliasEnv<T>(run: () => Promise<T>): Promise<T> {
     mailbox: process.env.LITOS_APPLICATION_EMAIL_MAILBOX,
     enabled: process.env.LITOS_APPLICATION_EMAIL_INBOUND_ENABLED,
     key: process.env.RESEND_API_KEY,
+    from: process.env.RESEND_FROM,
   };
   delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
   delete process.env.LITOS_APPLICATION_EMAIL_INBOUND_ENABLED;
   process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'apply.trylitos.com';
   process.env.RESEND_API_KEY = 're_test';
+  process.env.RESEND_FROM = 'Litos <applications@trylitos.com>';
   resetApplicationAliasDeliverabilityCache();
   try {
     return await run();
@@ -33,12 +37,18 @@ async function withAliasEnv<T>(run: () => Promise<T>): Promise<T> {
     else process.env.LITOS_APPLICATION_EMAIL_INBOUND_ENABLED = saved.enabled;
     if (saved.key === undefined) delete process.env.RESEND_API_KEY;
     else process.env.RESEND_API_KEY = saved.key;
+    if (saved.from === undefined) delete process.env.RESEND_FROM;
+    else process.env.RESEND_FROM = saved.from;
   }
 }
 
 const healthyProbes = {
   resolveMx: async () => [{ exchange: 'inbound-smtp.us-east-1.amazonaws.com', priority: 10 }],
-  resendDomains: async () => [{ name: 'apply.trylitos.com', status: 'verified' }],
+  resendDomains: async () => [{
+    name: 'apply.trylitos.com',
+    status: 'verified',
+    capabilities: { receiving: 'enabled' },
+  }],
   resendWebhooks: async () => [{ endpoint: ENDPOINT, events: ['email.received'] }],
 };
 
@@ -49,6 +59,16 @@ test('a domain with MX, Resend verification and an inbound route is deliverable'
     assert.equal(result.reason, 'deliverable');
     assert.deepEqual(result.mx_hosts, ['inbound-smtp.us-east-1.amazonaws.com']);
     assert.equal(result.inbound_route_configured, true);
+  });
+});
+
+test('healthy inbound with forwarding disabled cannot issue a tracked alias', async () => {
+  await withAliasEnv(async () => {
+    assert.equal((await applicationAliasDeliverability(healthyProbes)).deliverable, true);
+    delete process.env.RESEND_FROM;
+    const result = await applicationAliasDeliverability(healthyProbes);
+    assert.equal(result.deliverable, false);
+    assert.equal(result.reason, 'forwarding_not_configured');
   });
 });
 
@@ -94,11 +114,65 @@ test('MX alone is not enough: the domain must be verified in Resend', async () =
   });
 });
 
+test('Google Workspace MX is reported as a provider mismatch before any Resend API outage', async () => {
+  await withAliasEnv(async () => {
+    const result = await applicationAliasDeliverability({
+      ...healthyProbes,
+      resolveMx: async () => [
+        { exchange: 'aspmx.l.google.com', priority: 1 },
+        { exchange: 'alt1.aspmx.l.google.com', priority: 5 },
+      ],
+      resendDomains: async () => { throw new Error('this provider call must not hide the topology mismatch'); },
+    });
+    assert.equal(result.deliverable, false);
+    assert.equal(result.reason, 'mx_provider_mismatch');
+    assert.equal(result.mx_provider, 'google_workspace');
+    assert.equal(result.mx_provider_agrees, false);
+    assert.match(result.detail ?? '', /dedicated Resend receiving subdomain/);
+    assert.doesNotMatch(result.detail ?? '', /this provider call/);
+  });
+});
+
+test('a Resend MX that loses priority to another provider is not a valid inbound route', async () => {
+  const records = [
+    { exchange: 'aspmx.l.google.com', priority: 1 },
+    { exchange: 'inbound-smtp.us-east-1.amazonaws.com', priority: 10 },
+  ];
+  assert.equal(classifyAliasMxProvider(records), 'mixed');
+  assert.equal(mxRoutesToResend(records), false);
+});
+
+test('a dedicated subdomain whose best MX routes to Resend satisfies the provider contract', async () => {
+  const records = [{ exchange: 'inbound-smtp.eu-west-1.amazonaws.com', priority: 10 }];
+  assert.equal(classifyAliasMxProvider(records), 'resend');
+  assert.equal(mxRoutesToResend(records), true);
+});
+
+test('verified sending without Resend receiving enabled fails closed', async () => {
+  await withAliasEnv(async () => {
+    const result = await applicationAliasDeliverability({
+      ...healthyProbes,
+      resendDomains: async () => [{
+        name: 'apply.trylitos.com',
+        status: 'verified',
+        capabilities: { sending: 'enabled', receiving: 'disabled' },
+      }],
+    });
+    assert.equal(result.deliverable, false);
+    assert.equal(result.reason, 'receiving_not_enabled_in_resend');
+    assert.equal(result.resend_receiving_status, 'disabled');
+  });
+});
+
 test('a verified parent domain never vouches for the receiving subdomain', async () => {
   await withAliasEnv(async () => {
     const result = await applicationAliasDeliverability({
       ...healthyProbes,
-      resendDomains: async () => [{ name: 'trylitos.com', status: 'verified' }],
+      resendDomains: async () => [{
+        name: 'trylitos.com',
+        status: 'verified',
+        capabilities: { receiving: 'enabled' },
+      }],
     });
     assert.equal(result.deliverable, false);
     assert.equal(result.reason, 'domain_not_verified_in_resend');

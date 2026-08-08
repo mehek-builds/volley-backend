@@ -7,13 +7,23 @@ const indexRoute = readFileSync('src/index.ts', 'utf8');
 const schema = readFileSync('src/db/schema.ts', 'utf8');
 const route = readFileSync('src/routes/applicationEmail.ts', 'utf8');
 const service = readFileSync('src/lib/applicationEmail.ts', 'utf8');
+const applicationsRoute = readFileSync('src/routes/applications.ts', 'utf8');
 
 test('application packet generation uses the Litos alias as the employer-facing email', () => {
   assert.match(resumeRoute, /applicationAliasFor\(userId, resumeId\)/);
   assert.match(resumeRoute, /applicationContact = applicationEmail[\s\S]*email: applicationEmail\.alias/);
   assert.match(resumeRoute, /_contact: applicationContact/);
+  assert.match(resumeRoute, /_applicant_email: pinnedApplicantEmail/);
   assert.match(resumeRoute, /_application_email: applicationEmail/);
   assert.match(resumeRoute, /ensureApplicationEmailAlias/);
+  assert.match(resumeRoute, /applicant_email: pinnedApplicantEmail/);
+  assert.match(resumeRoute, /address: applicationContact\.email/);
+  assert.match(resumeRoute, /if \(body\.application\) \{[\s\S]*application_identity_persistence_failed/);
+});
+
+test('dashboard resume edits preserve both immutable application email keys', () => {
+  assert.match(applicationsRoute, /'_applicant_email' in stored \? \{ _applicant_email: stored\._applicant_email \} : \{\}/);
+  assert.match(applicationsRoute, /'_application_email' in stored \? \{ _application_email: stored\._application_email \} : \{\}/);
 });
 
 test('application inbox schema and webhook route are registered', () => {
@@ -41,7 +51,7 @@ test('the alias never reaches a form or a rendered resume without the deliverabi
   // Both call sites go through the precondition. resume.ts matters as much as the runner: the
   // contact block it builds is rendered INTO the PDF, so an undeliverable alias is frozen into the
   // document the employer keeps.
-  assert.match(runner, /resolveApplicantEmail\(\{/);
+  assert.match(runner, /resolveFrozenApplicantEmail\(\{/);
   assert.match(resumeRoute, /applicationAliasDeliverability\(\)/);
   assert.match(resumeRoute, /aliasDeliverability\?\.deliverable \? applicationAliasFor\(userId, resumeId\) : null/);
   assert.match(service, /if \(!check\.deliverable\) return \{ \.\.\.fallback, reason: check\.reason \}/);

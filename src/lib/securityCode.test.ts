@@ -280,7 +280,7 @@ test('the duplicate gate refuses without demoting a security-code packet either'
   const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
   const start = source.indexOf("if (duplicate.kind === 'duplicate')");
   assert.ok(start > 0, 'the duplicate gate must still be there');
-  const gate = source.slice(start, source.indexOf('const claimedRow = await claimSubmission(row);', start));
+  const gate = source.slice(start, source.indexOf('const claimedRow = await claimSubmission', start));
   assert.match(gate, /finishingSecurityCode \? 'awaiting_security_code' : 'needs_attention'/);
   assert.match(gate, /Boolean\(options\.securityCode\) && Boolean\(current\.security_code\)/);
   // The duplicate finding is still reported. Refusing quietly would be its own defect.
@@ -302,4 +302,62 @@ test('nothing but the code endpoint can move a packet out of the waiting state',
   assert.doesNotMatch(restartFn, /awaiting_security_code/);
   // And the only route that names the state is the code one.
   assert.match(source, /'\/applications\/:id\/security-code'/);
+});
+
+test('a security-code challenge is persisted before any receipt is parsed', async () => {
+  const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const managedStart = source.indexOf('const challenge = readManagedSecurityCodeChallenge(receiptResult);');
+  assert.ok(managedStart > 0, 'the managed result must inspect the challenge');
+  const challengeBranch = source.indexOf('if (challenge)', managedStart);
+  const awaitingWrite = source.indexOf("status: 'awaiting_security_code'", challengeBranch);
+  const receiptRead = source.indexOf('const receipt = readManagedReceipt(receiptResult);', managedStart);
+  assert.ok(challengeBranch > managedStart);
+  assert.ok(awaitingWrite > challengeBranch);
+  assert.ok(receiptRead > awaitingWrite, 'receipt parsing must happen only after the challenge branch returns');
+});
+
+test('manual code continuation atomically claims the waiting application', async () => {
+  const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const helperStart = source.indexOf('async function claimSecurityCodeSubmission(');
+  const helperEnd = source.indexOf('async function claimPreparation(', helperStart);
+  assert.ok(helperStart > 0 && helperEnd > helperStart);
+  const helper = source.slice(helperStart, helperEnd);
+  assert.match(helper, /status: 'submitting'/);
+  assert.match(helper, /submission_claimed_at: new Date\(\)\.toISOString\(\)/);
+  assert.match(helper, /submission_claim_id: randomUUID\(\)/);
+  assert.match(helper, /->>'status' = 'awaiting_security_code'/);
+  assert.match(helper, /->>'submission_claimed_at' is null/);
+  assert.match(helper, /\.returning\(\)/);
+
+  const finishStart = source.indexOf('export async function finishSecurityCodeSubmission(');
+  const finishEnd = source.indexOf('\n}', source.indexOf("return { kind: 'done', review", finishStart)) + 2;
+  const finish = source.slice(finishStart, finishEnd);
+  assert.match(finish, /const activeRow = await claimSecurityCodeSubmission\(row, current\)/);
+  assert.match(finish, /if \(!activeRow\)/);
+  assert.match(finish, /claimAlreadyHeld: true/);
+  assert.doesNotMatch(finish, /submission_claimed_at: undefined/);
+  assert.doesNotMatch(finish, /await writeReview\(row, requested\)/);
+});
+
+test('an already-held claim cannot bypass the submit claim checks unless it is complete', async () => {
+  const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const validatorStart = source.indexOf('export function submissionClaimIsHeld(');
+  const validatorEnd = source.indexOf('async function claimSecurityCodeSubmission(', validatorStart);
+  assert.ok(validatorStart > 0 && validatorEnd > validatorStart);
+  const validator = source.slice(validatorStart, validatorEnd);
+  assert.match(validator, /review\?\.status === 'submitting'/);
+  assert.match(validator, /review\.submission_claimed_at\.trim\(\)\.length > 0/);
+  assert.match(validator, /review\.submission_claim_id\.trim\(\)\.length > 0/);
+
+  const claimHelper = source.slice(
+    source.indexOf('async function claimSubmission('),
+    source.indexOf('async function claimSecurityCodeSubmission('),
+  );
+  assert.match(claimHelper, /if \(alreadyHeld\) return submissionClaimIsHeld\(current\) \? row : null/);
+  const claimUse = source.slice(
+    source.indexOf('const claimedRow = await claimSubmission'),
+    source.indexOf('let claimedReview = readApplicationReview', source.indexOf('const claimedRow = await claimSubmission')),
+  );
+  assert.match(claimUse, /claimSubmission\(row, options\.claimAlreadyHeld\)/);
+  assert.match(claimUse, /if \(!claimedRow\) return/);
 });

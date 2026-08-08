@@ -56,6 +56,8 @@ export type ManagedBrowserResult = {
   skipped?: string[];
   discovered?: ManagedDiscoveredQuestion[];
   extracted?: Array<{ selector: string; label?: string; value: string | null }>;
+  continuationToken?: string;
+  continuationExpiresAt?: string;
   /* The human check the page is holding the application behind, read off the CONTROL by the runner
    * at zero action cost. Greenhouse emails an 8-character code and renders a code field, and files
    * nothing until that code is entered and the form is sent again. See lib/securityCode.ts.
@@ -241,11 +243,13 @@ export function isManagedStratusProvider(): boolean {
 export async function runManagedBrowser(
   portalUrl: string,
   actions: ManagedBrowserAction[],
-  // `allowSubmit` defaults to false at the runner, and the default is the safety property: a run
-  // that does not ask for it cannot submit a form, whatever its action list turns out to do on a
-  // live page. Only the two authorized paths pass true. See the guard in stratus-browser-cloud's
-  // SANDBOX_RUNNER, and the three packets of 2026-08-08 that a fill run submitted.
-  options: { screenshot?: boolean; allowSubmit?: boolean } = {},
+  options: {
+    screenshot?: boolean;
+    allowSubmit?: boolean;
+    requestContinuation?: boolean;
+    continuationCheckpoint?: boolean;
+    continuationTtlSeconds?: number;
+  } = {},
 ): Promise<ManagedBrowserResult> {
   const baseUrl = process.env.STRATUS_BASE_URL?.replace(/\/$/, '');
   const apiKey = process.env.STRATUS_API_KEY?.trim();
@@ -269,6 +273,46 @@ export async function runManagedBrowser(
       allowSubmit: options.allowSubmit === true,
       fullPage: true,
       waitUntil: 'domcontentloaded',
+      ...(options.requestContinuation ? {
+        requestContinuation: true,
+        continuationCheckpoint: options.continuationCheckpoint === true,
+        continuationTtlSeconds: Math.min(Math.max(options.continuationTtlSeconds ?? 120, 15), 120),
+      } : {}),
+    }),
+  });
+  const payload = await response.json().catch(() => ({})) as { run?: ManagedBrowserResult; error?: ManagedBrowserError };
+  if (!response.ok || !payload.run) {
+    throw new Error(managedBrowserErrorMessage(payload.error, response.status, outboundActions));
+  }
+  return payload.run;
+}
+
+export async function continueManagedBrowser(
+  continuationToken: string,
+  actions: ManagedBrowserAction[],
+  options: { screenshot?: boolean } = {},
+): Promise<ManagedBrowserResult> {
+  const baseUrl = process.env.STRATUS_BASE_URL?.replace(/\/$/, '');
+  const apiKey = process.env.STRATUS_API_KEY?.trim();
+  if (!baseUrl) throw new Error('Stratus managed browser is not configured');
+  const authorization = !apiKey && process.env.VERCEL_ENV === 'production'
+    ? `Bearer ${await getVercelOidcToken()}`
+    : undefined;
+  if (!apiKey && !authorization) throw new Error('Stratus managed browser is not configured');
+  if (!/^[A-Za-z0-9_-]{32,200}$/.test(continuationToken)) throw new Error('Managed Stratus continuation token is invalid');
+  const outboundActions = normalizeStratusActions(actions);
+  const response = await fetch(`${baseUrl}/api/run`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(apiKey ? { 'X-Stratus-API-Key': apiKey } : {}),
+      ...(authorization ? { Authorization: authorization } : {}),
+    },
+    body: JSON.stringify({
+      continuationToken,
+      actions: outboundActions,
+      screenshot: options.screenshot ?? true,
+      fullPage: true,
     }),
   });
   const payload = await response.json().catch(() => ({})) as { run?: ManagedBrowserResult; error?: ManagedBrowserError };
