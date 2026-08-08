@@ -753,16 +753,44 @@ function uniqueDefined(values: Array<string | undefined>): string[] {
   return out;
 }
 
+/**
+ * A trailing clause that names a unit INSIDE an institution rather than part of the institution's
+ * own name. "Viterbi School of Engineering", "Tandon School of Engineering", "College of Letters and
+ * Science", "Department of Physics".
+ *
+ * The distinction is the whole difficulty, and a bare comma split gets it wrong: in "University of
+ * Southern California, Viterbi School of Engineering" the tail is a sub-unit and dropping it is
+ * required, while in "University of California, Berkeley" the tail is the institution and dropping
+ * it names a DIFFERENT school. Requiring the tail to say what kind of unit it is separates the two
+ * without naming either of them.
+ */
+const SCHOOL_SUBUNIT_TAIL_RE = /\b(?:school|college|faculty|department|division|institute|campus\s+of)\b/i;
+
+/**
+ * School values for the education row, best first.
+ *
+ * An ATS school taxonomy lists INSTITUTIONS, and a resume writes the institution followed by the
+ * school inside it. Searching an institution list for the whole phrase returns nothing, exactly as
+ * searching a discipline list for a whole major sentence does, so the institution has to lead.
+ *
+ * This used to be a literal test for "University of Southern California", which is the one school
+ * the one person testing it attends. The sub-unit rule is the same fix with no name in it: it
+ * produces the identical value for USC and does the same job for every other applicant. The full
+ * stored phrasing stays on the ladder behind it, so a board that really does list the sub-unit, or a
+ * free-text control, can still reach it.
+ */
 function greenhouseSchoolAliases(school: string | undefined): string[] {
   const trimmed = school?.trim();
   if (!trimmed) return [];
-  const uscAlias = /\bUniversity of Southern California\b/i.test(trimmed)
-    ? 'University of Southern California'
-    : undefined;
-  if (uscAlias) return [uscAlias];
-  return uniqueDefined([
-    trimmed,
-  ]);
+  const parts = trimmed.split(',').map((part) => part.trim()).filter(Boolean);
+  let institution = parts;
+  // From the END, because "University of California, Berkeley, College of Engineering" has one of
+  // each and only the last clause may go.
+  while (institution.length > 1 && SCHOOL_SUBUNIT_TAIL_RE.test(institution[institution.length - 1]!)) {
+    institution = institution.slice(0, -1);
+  }
+  const shortened = institution.length < parts.length ? institution.join(', ') : undefined;
+  return uniqueDefined([shortened, trimmed]);
 }
 
 function greenhouseDegreeAliases(degree: string | undefined): string[] {
