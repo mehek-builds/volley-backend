@@ -1330,9 +1330,27 @@ describe('a posting does not ask for its own address', () => {
 
   test('the real requirements survive', () => {
     const keys = extractJdTerms(JD, CONTEXT).map((t) => t.term);
-    for (const real of ['python', 'machine learning', 'etl', 'streaming']) {
+    for (const real of ['python', 'machine learning', 'etl']) {
       assert.ok(keys.includes(real), `"${real}" is a real requirement`);
     }
+  });
+
+  /* `streaming` WAS IN THE LIST ABOVE AND IS NOT A REQUIREMENT, which this suite said in one place
+   * and denied in another. The sentence it comes from is "We're hiring across all of our teams,
+   * including AI Platform, Genie, Machine Learning, Unity Catalog, Databricks SQL, ETL, Streaming,
+   * and EDA", and the heading test at the top of this file calls that sentence, verbatim, "the
+   * sentence naming the TEAMS Databricks hires across" and its contents "the team-roster nouns".
+   * Both statements were true of the code and only one of them can be true of the product. See
+   * rosterSpans: a name written inside the employer's own org roster is a team, not a requirement,
+   * wherever else in the file it happens to be asserted about. */
+  test('a name written inside the employer\'s own team roster is not a requirement', () => {
+    const keys = extractJdTerms(JD, CONTEXT).map((t) => t.term);
+    for (const roster of ['streaming', 'genie', 'unity catalog']) {
+      assert.ok(!keys.includes(roster), `"${roster}" is a team Databricks hires across`);
+    }
+    // The lexicon skills inside the same roster are spared, the same guard addressSpans and
+    // companyBrandTokens both use, so removing the roster cannot cost a real requirement.
+    assert.ok(keys.includes('machine learning') && keys.includes('etl'), 'lexicon skills survive it');
   });
 
   /**
@@ -1654,23 +1672,35 @@ describe('the requirement denominator excludes prose and branding, not requireme
     assert.ok(keys.includes('python'));
   });
 
+  /* ASSERTED OUTSIDE THE ROSTER SENTENCE, which is not a weakening of the property but the only
+   * place it can now be read. DATABRICKS_JD spells "Databricks SQL" inside "we're hiring across all
+   * of our teams, including ...", and rosterSpans removes every non-lexicon name in that list
+   * whatever the job row says, so the roster answers this question before the branding rule is
+   * reached and the test would pass or fail for the wrong reason. The same phrase in ordinary prose
+   * isolates the rule this test is about. */
   test('the branding rule is driven by job_context and never guessed from the prose', () => {
-    const keys = extractJdTerms(DATABRICKS_JD, { location: DATABRICKS_CONTEXT.location }).map((t) => t.term);
+    const jd = 'You will build dashboards on Databricks SQL and prototype ideas with customers using Python.';
+    const keys = extractJdTerms(jd, { location: DATABRICKS_CONTEXT.location }).map((t) => t.term);
     assert.ok(keys.includes('databricks sql'), 'with no company on the row there is nothing to strip');
+    const stripped = extractJdTerms(jd, DATABRICKS_CONTEXT).map((t) => t.term);
+    assert.ok(!stripped.includes('databricks sql'), 'named on the row, it is branding again');
   });
 
   /**
-   * THE RESIDUAL, stated rather than hidden.
+   * THE RESIDUAL, stated rather than hidden, and NARROWED rather than closed.
    *
-   * The same posting lists "Genie" and "Unity Catalog", which are also Databricks products, and both
-   * still land in the denominator. Neither is spelled with the company name, so nothing the posting
-   * or the job row said separates them from "Snowflake" or "Airflow" - bare proper nouns in body
-   * prose that ARE real requirements on other postings. A rule broad enough to catch them would be a
-   * guess at which capitalized words are products, and guessing wrong here deletes a requirement and
-   * inflates the score, which ISSUE-014 established is the worse failure. Left in on purpose.
+   * This used to be asserted on "Genie" and "Unity Catalog" in DATABRICKS_JD. Both are gone now, and
+   * not because anything guesses that they are products: they are written inside "we're hiring
+   * across all of our teams, including ...", and rosterSpans reads the ENUMERATION rather than the
+   * words. The residual the old comment describes is real and survives wherever the employer names
+   * a product in ordinary prose. Nothing the posting or the job row says separates a bare "Genie"
+   * from a bare "Snowflake", and a rule broad enough to catch it would be a guess at which
+   * capitalized words are products - which deletes a requirement and inflates the score, the failure
+   * ISSUE-014 established is the worse one. Left in on purpose.
    */
-  test('product names not spelled with the company name are a known residual', () => {
-    const keys = extractJdTerms(DATABRICKS_JD, DATABRICKS_CONTEXT).map((t) => t.term);
+  test('a product name in ordinary prose is still a known residual', () => {
+    const jd = 'You will ship features on Genie and Unity Catalog with our customers, using Python.';
+    const keys = extractJdTerms(jd, DATABRICKS_CONTEXT).map((t) => t.term);
     assert.ok(keys.includes('genie'), 'documented residual: a bare product name is not separable from a bare skill');
     assert.ok(keys.includes('unity catalog'), 'documented residual, same reason');
   });
@@ -3167,5 +3197,269 @@ describe('ISSUE-027: an address is not a requirement, wherever it is written', (
     const keys = extractJdTerms(jd, { company: 'Acme', role: 'Engineer' }).map((t) => t.term);
     assert.ok(keys.includes('java'), 'Java the language outranks Java the island');
     assert.ok(keys.includes('oracle'), 'Oracle the database outranks Oracle, Arizona');
+  });
+});
+
+/**
+ * ISSUE-047. The colour-coding audit over all 85 production packets, 2026-08-09.
+ *
+ * The product contract the review screen makes is one sentence: "every single colour that is linked
+ * up there should be supported by something on the job description". Measured against the live
+ * engine, 128 of 853 coloured term-instances (15.0%) were not supported by anything a resume could
+ * carry - they were geography, section headings, perk labels, the employer's own team and product
+ * names, and in one case an English idiom read as a web framework. 43 of the 83 scorable packets
+ * carried at least one and 16 had a third or more of their colours on non-requirements.
+ *
+ * Every fixture below is a real posting from that corpus, cut to the sentence that produced the
+ * defect. The packet id is named so the measurement can be repeated.
+ */
+describe('a colour on the review screen is supported by something the posting asked for', () => {
+  describe('geography is not a requirement, wherever the posting writes it', () => {
+    // Flow Traders, packet b43dbe37. Its nine "requirements" were `Amsterdam, APAC, Europe, Excel,
+    // Hong Kong, Internet, Law, NYC, York` and the student was shown 0% against an office directory.
+    const OFFICES =
+      'Requirements\n' +
+      'Proficiency in Excel and an affinity for scientific programming or Python\n' +
+      'A similar program is offered in our Amsterdam and Hong Kong offices for students studying ' +
+      'or living in Europe and APAC.\n' +
+      'With offices in Boca Raton, London and Singapore.\n';
+
+    test('an office list in prose contributes no requirements', () => {
+      const keys = extractJdTerms(OFFICES, { company: 'Flow Traders', role: 'Trading Intern' }).map(
+        (t) => t.term,
+      );
+      for (const place of ['amsterdam', 'hong kong', 'europe', 'apac', 'boca raton', 'london', 'singapore']) {
+        assert.ok(!keys.includes(place), `"${place}" is an office, not a thing to have done`);
+      }
+    });
+
+    test('the requirements written beside the office list are untouched', () => {
+      const keys = extractJdTerms(OFFICES, { company: 'Flow Traders', role: 'Trading Intern' }).map(
+        (t) => t.term,
+      );
+      assert.ok(keys.includes('excel') && keys.includes('python'), 'the real asks survive');
+    });
+
+    test('a place name that is also a real skill is still a real skill', () => {
+      // The guard that makes the enumeration safe, and the reason the list carries no Mobile,
+      // Reading, Split, Cork, Bath or Phoenix. See PLACE_NAMES.
+      const keys = extractJdTerms(
+        'Requirements\n- Strong Java and Oracle experience across our Singapore desk\n',
+        { company: 'Acme', role: 'Engineer' },
+      ).map((t) => t.term);
+      assert.ok(keys.includes('java'), 'Java the language outranks Java the island');
+      assert.ok(keys.includes('oracle'), 'Oracle the database outranks Oracle, Arizona');
+      assert.ok(!keys.includes('singapore'), 'the office still goes');
+    });
+  });
+
+  describe('a legal notice is not a requirement, and its state name is not a skill', () => {
+    // DRW, packets 8f4e617b / f4780b38 / c1a8628b / d937a5ce. `California` was scored as a MET
+    // requirement on all four, matched against the school line "University of Southern California,
+    // Viterbi School of Engineering": geography credited as satisfied and painted BLUE in the
+    // resume pane, which is the one direction that both inflates the score and cannot be acted on.
+    const NOTICE =
+      'Requirements\n- Exhibit excellent software development skills in C++, Python, or Java\n' +
+      'California residents, please review the California Privacy Notice for information about ' +
+      'certain legal rights at https://drw.com/california-privacy-notice.\n';
+
+    test('a privacy notice contributes nothing, including its state', () => {
+      const keys = extractJdTerms(NOTICE, { company: 'DRW', role: 'Software Developer Intern' }).map(
+        (t) => t.term,
+      );
+      assert.ok(!keys.includes('california'), 'the state in a privacy notice is not a requirement');
+      assert.ok(!keys.includes('legal'), 'nor is "certain legal rights"');
+      assert.ok(keys.includes('python') && keys.includes('c++'), 'the requirements bullet is untouched');
+    });
+
+    test('California is never scored as met against the school on the resume', () => {
+      // The N2 regression in one assertion. The resume text is Mehek's real education line.
+      const result = scoreJdMatch(
+        'University of Southern California, Viterbi School of Engineering. Bachelor of Science in ' +
+          'Computer Science. Built services in Python and C++.',
+        NOTICE,
+        { company: 'DRW', role: 'Software Developer Intern' },
+      );
+      assert.ok(
+        !result.matched.some((t) => t.term === 'california'),
+        'a posting cannot ask for a word that happens to be in your university name',
+      );
+    });
+
+    test('a statute citation is a footer even when it talks about experience', () => {
+      // Akuna, packet cc9d695d. `base salary` was already footer vocabulary and never fired, because
+      // the same sentence says "the candidate's experience, qualifications, and skill set" and the
+      // guard in isNonResumeRequirementLine spares any line that does.
+      const keys = extractJdTerms(
+        'Requirements\n- Strong Python and C++\n' +
+          'In accordance with the Illinois Equal Pay Act, the minimum annualized base salary starts ' +
+          "at $145,000. Exact compensation offered may vary based on the candidate's experience, " +
+          'qualifications, and skill set.\n',
+        { company: 'Akuna', role: 'Software Engineer Intern' },
+      ).map((t) => t.term);
+      assert.ok(!keys.includes('illinois'), 'the state naming the statute is not a requirement');
+      assert.ok(keys.includes('python'), 'the requirements bullet is untouched');
+    });
+  });
+
+  describe("a section's own structure is not one of its requirements", () => {
+    test('an unrecognised heading contributes no terms', () => {
+      // Point72 (90062b81) writes "Job Description" and "Desirable Candidates"; Virtu (e9671d7f)
+      // writes "THE PROCESS". None classifies, so each was appended to the section as content and
+      // read by the proper-noun rule as the strongest shape it knows.
+      const keys = extractJdTerms(
+        'Job Description\nWe build trading systems.\nDesirable Candidates\nStrong Python and SQL.\n',
+        { company: 'Point72', role: 'Quantitative Developer Intern' },
+      ).map((t) => t.term);
+      assert.ok(!keys.includes('description'), 'a heading names the section, not the job');
+      assert.ok(!keys.includes('desirable'), 'same');
+      assert.ok(keys.includes('python') && keys.includes('sql'), 'the content under it survives');
+    });
+
+    test('a perk label contributes no terms, and its paragraph is left alone', () => {
+      // DRW again, four packets: `community`, `education`, `housing` and `mentorship` were all
+      // `kind: required` at weight 1, on a student's gap list.
+      const keys = extractJdTerms(
+        'Requirements\n- Strong Python\n' +
+          "Mentorship: You'll build a professional relationship with an experienced mentor.\n" +
+          'Housing: DRW provides fully furnished apartments close to the office.\n',
+        { company: 'DRW', role: 'Software Developer Intern' },
+      ).map((t) => t.term);
+      for (const perk of ['mentorship', 'housing']) {
+        assert.ok(!keys.includes(perk), `"${perk}" is a perk label, not a requirement`);
+      }
+    });
+
+    test('a label carrying a real skill is not touched at all', () => {
+      // The guard. A scraped posting whose bullet markers were lost writes its requirements in
+      // exactly this shape, so hard signal anywhere on the line spares the whole line.
+      const keys = extractJdTerms(
+        'Python: three years of production experience.\nEmbedded Software Engineering Intern\n',
+        { company: 'Redwood Materials', role: 'Engineer' },
+      ).map((t) => t.term);
+      assert.ok(keys.includes('python'), 'a label that IS a skill stays a skill');
+      assert.ok(keys.includes('embedded'), 'and so does a heading-shaped line that names one');
+    });
+  });
+
+  describe("the employer's own org chart is not a list of requirements", () => {
+    test('a cross-functional team roster contributes no team names', () => {
+      // Roblox, packets 9f1138c0 and b1c2ad7f: 6 of its 12 terms were team names. Brex (43767e5f)
+      // is the same sentence one word shorter.
+      const keys = extractJdTerms(
+        'Partner closely with cross-functional teams, including Design, Product, Data, QA, and ' +
+          'DevOps, to deliver cohesive products and features. You will write Python and C++ daily.\n',
+        { company: 'Roblox', role: 'Software Engineer Intern' },
+      ).map((t) => t.term);
+      for (const team of ['design', 'product', 'discovery']) {
+        assert.ok(!keys.includes(team), `"${team}" is a team in that sentence, not a requirement`);
+      }
+      assert.ok(keys.includes('python'), 'the stated requirements survive');
+    });
+
+    test('the same words ARE requirements when the posting asks for them somewhere else', () => {
+      // The counterexample that decides whether this rule may ship. `design` and `product` are the
+      // requirement on a design or a product posting, and a deny-list on either would delete it
+      // from every one of them. A span silences only the occurrence inside the roster, so an
+      // occurrence anywhere else is extracted exactly as before.
+      const keys = extractJdTerms(
+        'Partner closely with cross-functional teams, including Design, Product, and Data. ' +
+          'You will own Product Management for the platform and build Design Systems in Python.\n',
+        { company: 'Roblox', role: 'Product Manager' },
+      ).map((t) => t.term);
+      assert.ok(keys.includes('product management'), 'the stated requirement is not touched');
+      assert.ok(keys.includes('design systems'), 'nor is this one');
+    });
+
+    test("a product named after the employer's own name is that employer's product", () => {
+      // Point72, packets 90062b81 and 908efd63: `internal alpha`, `alpha capture` and `iac` are one
+      // internal product counted three times, and `IAC` is hard signal so it took a reserved slot.
+      const keys = extractJdTerms(
+        'Point72 Internal Alpha Capture (IAC) is developing scalable quantitative equity trading ' +
+          'signals. You will need strong programming experience in Python and SQL.\n',
+        { company: 'Point72', role: 'Quantitative Developer Intern' },
+      ).map((t) => t.term);
+      for (const own of ['internal alpha', 'alpha capture', 'iac']) {
+        assert.ok(!keys.includes(own), `"${own}" is Point72's own product`);
+      }
+      assert.ok(keys.includes('python') && keys.includes('sql'), 'the real asks survive');
+    });
+  });
+
+  describe('a requirement bullet that lost its bullet is not a heading', () => {
+    test('the heading keyword has to sit before the first comma', () => {
+      // Flow Traders, packet b43dbe37. "Class of 2028, preferred" and "Excellent mental math,
+      // quantitative and analytical skills" both classified, and each opened a section that ran to
+      // the end of the document over the salary paragraph and the office list.
+      const kinds = segmentJd(
+        'What You Will Do\nLearn from industry leaders\nClass of 2028, preferred\n' +
+          'Excellent mental math, quantitative and analytical skills\nProficiency in Excel\n',
+      ).map((s) => s.kind);
+      assert.deepEqual(kinds, ['responsibilities'], 'neither bullet opens a section');
+    });
+
+    test('a real heading that happens to contain a comma still classifies', () => {
+      // The one-condition version of this rule - "a heading contains no comma" - was measured over
+      // the same 85 packets and took Cloudflare's two packets from 22 and 23 to ZERO. Both of these
+      // are real requirements headings from that corpus.
+      for (const heading of ['Minimum Skills, Knowledge & Capabilities:', 'Desirable Skills, Knowledge and Experience']) {
+        const [first] = segmentJd(`${heading}\n- Kafka and Python\n`);
+        assert.ok(
+          first.kind === 'required' || first.kind === 'preferred',
+          `"${heading}" is a requirements heading`,
+        );
+      }
+    });
+  });
+
+  describe('a lexicon word the posting used as plain English is plain English', () => {
+    test('"the rails for viable solution space" is not Ruby on Rails', () => {
+      // Databricks, packets cd4d316d / 7030b54f / a82d860a. `rails` was the ONLY amber on the whole
+      // packet: the single gap Litos reported was a framework the posting never mentions.
+      const keys = extractJdTerms(
+        'What we look for:\nDeeply understand the customer problem space and establish the rails ' +
+          'for viable solution space\nFirst hand experience with SQL and/or Python\n',
+        { company: 'Databricks', role: 'Product Management Intern' },
+      ).map((t) => t.term);
+      assert.ok(!keys.includes('rails'), 'the English idiom is not a web framework');
+      assert.ok(keys.includes('sql') && keys.includes('python'), 'the real asks survive');
+    });
+
+    test('a posting that actually requires Rails keeps it', () => {
+      // The third condition doing its work: the posting writes the word with a capital, so there is
+      // an occurrence that IS the product name and the usage rule declines to act. This is the same
+      // guard that keeps "exposure to python" intact and it is why the rule cannot quietly delete
+      // the requirement a posting is about.
+      const keys = extractJdTerms(
+        'Requirements\n- Three years of Ruby on Rails\n- Comfortable with the Rails asset pipeline\n',
+        { company: 'Acme', role: 'Engineer' },
+      ).map((t) => t.term);
+      assert.ok(keys.includes('rails'), 'a capitalized occurrence is the product name');
+    });
+  });
+
+  test('an arrow is a bullet, so the word after it is grammar', () => {
+    // Scale AI, packets 31528fd9 and 9eb46e4e. Its bullets are written with "→", which was not in
+    // the decoration class, so the first word of every bullet read as a mid-sentence capital.
+    // `Comfortable` and `Currently` are both already in POSITIONAL_OPENERS precisely so they cannot
+    // become requirements; the glyph is what stopped that list from ever being consulted.
+    const keys = extractJdTerms(
+      '→ Comfortable with Python and/or JavaScript\n→ Currently enrolled in an undergraduate program\n',
+      { company: 'Scale AI', role: 'AI Builder Intern' },
+    ).map((t) => t.term);
+    assert.ok(!keys.includes('comfortable') && !keys.includes('currently'), 'a bullet opener is grammar');
+    assert.ok(keys.includes('python') && keys.includes('javascript'), 'the requirements survive');
+  });
+
+  test('a sentence connective is not a requirement', () => {
+    // Akuna, packet cc9d695d. `However` opens a sentence, so it is positional, and the proper-noun
+    // rule admits a positional capital whose next token is also capitalized - which "AI" is.
+    const keys = extractJdTerms(
+      'Requirements\n- Strong Python\nWe encourage employees to leverage AI in their daily work. ' +
+        'However, AI assistance is not permitted during interviews.\n',
+      { company: 'Akuna', role: 'Software Engineer Intern' },
+    ).map((t) => t.term);
+    assert.ok(!keys.includes('however'), 'a conjunctive adverb is grammar in any position');
+    assert.ok(keys.includes('python') && keys.includes('ai'), 'the real terms survive');
   });
 });
