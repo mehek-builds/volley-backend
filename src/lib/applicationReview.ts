@@ -187,7 +187,15 @@ export type ApplicationReviewState = {
     surface: 'server_run' | 'extension';
     provider: 'recaptcha_v2' | 'recaptcha_v3' | 'hcaptcha' | 'turnstile' | 'arkose' | 'unknown';
     /* 'before_fill' means nothing was filled and the form is still blank. Governs which sentence
-     * the applicant gets, and stops the queue promising a filled form that does not exist. */
+     * the applicant gets, and stops the queue promising a filled form that does not exist.
+     *
+     * THE TEST IS WHAT THE RUN ACTUALLY DID, not where in the code the write happens. A stall
+     * written during prepare is 'at_submit' whenever that prepare filled the form and captured the
+     * preview, on either browser provider, because by then the applicant has a screenshot of her own
+     * filled application. 'before_fill' is for the stops that never touched the page: the
+     * pre-browser gate on CAPTCHA-gated families, and the submit path's probe. Getting this
+     * backwards is not a cosmetic mislabel - it is what puts "nothing is filled in yet" in the nudge
+     * email about a form Litos completed and showed her. */
     stage: 'before_fill' | 'at_submit';
     /* Whether the provider was seen on a live page or inferred from the portal family. An inferred
      * label must never be counted as evidence a family really uses that provider. */

@@ -907,3 +907,46 @@ test('prepare() stops account-walled portals before it opens any browser', async
     );
   }
 });
+
+// ─── Which stage a prepare-time stall records ─────────────────────────────────
+//
+// SOURCE-LEVEL for the same reason as the test above: prepareManaged is not exported and needs a
+// database, a blob store and a managed browser provider. What it pins is a literal, which is the one
+// thing a grep can check as well as a behavioural test could.
+//
+// prepareManaged wrote 'before_fill' from the day it shipped, and nothing caught it because nothing
+// asserted it: every stage test in the suite passes the stage in by hand. Measured against prod on
+// 2026-08-08, the fourteen open stalls this function wrote carried 5 to 15 filled fields each, which
+// is what makes stallNudge render "Nothing is filled in yet" about a form Litos had filled and
+// screenshotted for them. Undelivered so far only because the nudge endpoint has no scheduler. The
+// stall is written AFTER the fill run and after the preview is captured - the same shape the direct
+// path in prepare() already records as 'at_submit'.
+test('a managed prepare stall records at_submit, because the fill already happened', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const source = readFileSync(join(__dirname, 'submissionRunner.ts'), 'utf8');
+  const start = source.indexOf('async function prepareManaged(');
+  assert.ok(start > 0, 'prepareManaged() must exist');
+  // The end marker is asserted, not assumed. indexOf returns -1 when prepareManaged is the last
+  // async function in the file, and slice(start, -1) would then run to the end of the file - so the
+  // ordering checks below would happily match the submit path's own beginStall and pass for the
+  // wrong function.
+  const end = source.indexOf('\nasync function ', start + 10);
+  assert.ok(end > start, 'prepareManaged() must be followed by another async function');
+  const body = source.slice(start, end);
+
+  // The fill, the screenshot upload and the field list all precede the stall. That ordering is what
+  // makes 'at_submit' the true label, so it is asserted rather than assumed: if a later change moves
+  // the stall above the fill run, this test should fail loudly instead of leaving a stale stage.
+  const stallAt = body.indexOf('beginStall(');
+  assert.ok(stallAt > 0, 'prepareManaged() must open a stall when it stops on a challenge');
+  for (const earlier of ['buildManagedPortalActions(', 'submission-runs/', 'managedResultFilledFields(']) {
+    const at = body.indexOf(earlier);
+    assert.ok(at > 0 && at < stallAt, `${earlier} must run before the stall is written`);
+  }
+
+  const stallBlock = body.slice(stallAt, body.indexOf('}', body.indexOf('source:', stallAt)));
+  assert.match(stallBlock, /stage: 'at_submit'/,
+    'a stall written after the form was filled and screenshotted must not claim the form is blank');
+  assert.doesNotMatch(stallBlock, /stage: 'before_fill'/);
+});

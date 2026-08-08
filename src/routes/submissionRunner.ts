@@ -1062,7 +1062,20 @@ async function prepareManaged(
         // made the instrumentation unable to answer the single question it exists for: which
         // providers actually gate us. A run that stops owes a reason, and "I did not look" is not one.
         provider: managedCaptchaProvider(result, portal),
-        stage: 'before_fill',
+        /* 'at_submit', because by the time this line runs THE FILL ALREADY HAPPENED. The managed run
+           above filled the form and returned the preview screenshot; filled_fields below is written
+           off that same result. Measured against prod on 2026-08-08, the fourteen open stalls this
+           site wrote carry between 5 and 15 filled fields each, and every one of them was labelled
+           'before_fill'. That is the sentence stallNudge renders as "Nothing is filled in yet" about
+           a form Litos had completed and screenshotted for them: the exact mistake the stage field
+           exists to prevent, pointed the other way round. Latent rather than delivered so far, and
+           only because /internal/captcha-stall-nudge has no scheduler in vercel.json or in Actions.
+           A label that is wrong until someone wires up the cron is still wrong.
+           The direct Playwright path in prepare() draws it the same way, for the identical
+           fill-then-observe shape - it records 'at_submit' from prepare too. 'before_fill' still
+           belongs to the two sites that genuinely stop before touching the form: the pre-browser
+           family gate in prepare(), and the submit path's CAPTCHA probe. */
+        stage: 'at_submit',
         source: 'observed',
       })
       : {}),

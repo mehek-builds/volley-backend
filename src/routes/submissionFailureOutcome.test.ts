@@ -35,6 +35,25 @@ test('no-submit-control outranks uncertainty, and captcha outranks both', () => 
   );
 });
 
+/* THE TWO STAGES ARE THE WHOLE POINT of carrying a stage at all, and neither sentence had a test.
+   That gap is how prepareManaged shipped writing 'before_fill' on a path that fills the form first:
+   nothing in the suite ever tied a stage to the words it produces, so a wrong stage read as a
+   silent relabel rather than as a promise to an applicant. These pin the promise, not the prose. */
+test('the two captcha stages promise different things about the form', () => {
+  const atSubmit = submissionFailureOutcome({ ...base, captchaStop: 'at_submit' }).attentionReason!;
+  const beforeFill = submissionFailureOutcome({ ...base, captchaStop: 'before_fill' }).attentionReason!;
+
+  assert.match(atSubmit, /filled everything in/, 'the form is filled and one check remains');
+  assert.doesNotMatch(atSubmit, /will fill it in for you/,
+    'never offer to do work that is already done');
+
+  assert.match(beforeFill, /will fill it in for you/, 'nothing was filled, so Litos still owes it');
+  assert.doesNotMatch(beforeFill, /filled everything in/,
+    'the sentence a filled-form stage must never inherit: the page it sends her to is blank');
+
+  assert.equal(submissionFailureOutcome({ ...base, captchaStop: 'before_fill' }).status, 'needs_attention');
+});
+
 test('an uncertain run still says so, because there it is the truth', () => {
   const out = submissionFailureOutcome(base);
   assert.equal(out.status, 'needs_attention');
