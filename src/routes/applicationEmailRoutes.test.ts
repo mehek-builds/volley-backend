@@ -39,11 +39,12 @@ test('application inbox schema and webhook route are registered', () => {
   assert.match(route, /\/applications\/:id\/email-messages/);
   // Reply-to is the ALIAS, never the employer: a reply that leaves the applicant's own mailbox
   // publishes the address the alias exists to keep out of the thread. See relayApplicantReply.
-  assert.match(service, /to: \[input\.forwardTo\],\s*\n\s*reply_to: input\.alias,/);
+  assert.match(service, /to: \[input\.forwardTo\],[\s\S]*\{ reply_to: input\.alias \}/);
   assert.doesNotMatch(service, /reply_to: input\.inbound\.from/);
   assert.match(service, /LITOS_APPLICATION_EMAIL_MAILBOX/);
   assert.match(service, /\$\{mailbox\.local\}\+\$\{route\}@\$\{mailbox\.domain\}/);
   assert.match(route, /applicationEmailRouteLabel\(\)/);
+  assert.match(route, /route_generation_fingerprint: applicationEmailRouteGenerationFingerprint\(\)/);
 });
 
 test('the alias never reaches a form or a rendered resume without the deliverability precondition', () => {
@@ -80,6 +81,19 @@ test('the reply relay exists, is outbound, and cannot loop', () => {
   assert.match(service, /if \(candidate === alias \|\| candidate === forwardTo\) continue/);
   // The employer is taken from the recorded thread, never from the reply's own headers.
   assert.match(service, /const recipient = relayRecipientFor\(thread/);
+});
+
+test('managed receiving rejects applicant replies before any relay ledger insert, claim, or send', () => {
+  const processor = service.slice(
+    service.indexOf('export async function processInboundApplicationEmail'),
+    service.indexOf('export async function applicationEmailHealth'),
+  );
+  const drop = processor.indexOf("if (route.kind === 'drop')");
+  const relay = processor.indexOf('return relayApplicantReply');
+  assert.ok(drop >= 0);
+  assert.ok(relay > drop);
+  assert.match(service, /if \(aliasUsesManagedReceiving\(alias\)\) return \{ kind: 'drop', reason: 'managed_reply_unsupported' \}/);
+  assert.match(service, /return \/\^\[a-z0-9\].*\\\.resend\\\.app\$\/i\.test\(domain\)/);
 });
 
 test('the forwarding destination is a stored preference, not the login address', () => {

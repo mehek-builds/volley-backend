@@ -66,6 +66,7 @@ function authenticationFromHeaders(headers: Record<string, string> | undefined):
 }
 
 function configuredMailbox(): { local: string; domain: string; address: string } | null {
+  if (process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN?.trim()) return null;
   const mailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX?.trim().toLowerCase();
   const match = mailbox?.match(/^([^@\s]+)@([a-z0-9.-]+\.[a-z]{2,})$/i);
   if (!match) return null;
@@ -76,6 +77,7 @@ function configuredMailbox(): { local: string; domain: string; address: string }
 }
 
 function configuredDomain(): string | null {
+  if (process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN?.trim()) return aliasDomain();
   const domain = process.env.LITOS_APPLICATION_EMAIL_DOMAIN?.trim().toLowerCase();
   return domain && /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(domain) ? domain : null;
 }
@@ -104,6 +106,13 @@ export function applicationEmailRouteLabel(): string | null {
 
 function digest(value: string, length = 10): string {
   return createHash('sha256').update(value).digest('hex').slice(0, length);
+}
+
+export function applicationEmailRouteGenerationFingerprint(): string | null {
+  const secret = applicationAliasSecret();
+  const route = applicationEmailRouteLabel();
+  if (!secret || !route) return null;
+  return digest(`application-email-route-v1:${route}:${secret}`, 20);
 }
 
 export function applicationAliasFor(userId: string, applicationId: string): string | null {
@@ -299,6 +308,12 @@ export async function resolveFrozenApplicantEmail(input: {
       `the pinned Litos email is not receivable (${deliverability?.reason ?? 'deliverability_check_failed'})`,
     );
   }
+  const currentAlias = applicationAliasFor(input.userId, input.applicationId);
+  if (!currentAlias || pinned.address !== currentAlias) {
+    throw new ApplicantEmailRegenerationRequiredError(
+      'the pinned Litos email does not match the current inbound email route',
+    );
+  }
   const active = await (deps.aliasActive ?? activeAliasForApplication)({
     userId: input.userId,
     applicationId: input.applicationId,
@@ -314,22 +329,18 @@ function normalizedAddress(value: unknown): string | null {
   return trimmed && isValidForwardingAddress(trimmed) ? trimmed : null;
 }
 
-/** True for any address on the alias domain, including one stored on an older packet. */
+/** True for an address shaped like a Litos alias, including one stored on an older route. */
 export function isAliasAddress(value: string | null | undefined): boolean {
-  const domain = aliasDomain();
   const address = value?.trim().toLowerCase();
   if (!address) return false;
-  // Packets outlive email-provider migrations. Recognize both historical Litos formats even when
-  // today's environment points at a different domain, otherwise an old dead alias is mistaken for
-  // a personal address and silently submitted again.
-  if (/^app-[a-z0-9-]+@apply\.trylitos\.com$/.test(address)) return true;
-  if (/^applications\+app-[a-z0-9-]+@trylitos\.com$/.test(address)) return true;
-  if (!domain) return false;
-  if (address.endsWith(`@${domain}`)) return true;
-  const mailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX?.trim().toLowerCase();
-  if (!mailbox) return false;
-  const [local, mailboxDomain] = mailbox.split('@');
-  return address.startsWith(`${local}+`) && address.endsWith(`@${mailboxDomain}`);
+  const separator = address.lastIndexOf('@');
+  const local = separator > 0 ? address.slice(0, separator) : '';
+  // Packets outlive provider and domain migrations. Recognize both supported alias shapes without
+  // naming a retired domain, otherwise a dead alias becomes a personal address after configuration
+  // changes and can silently reach an employer again.
+  if (/^app-[a-f0-9]{10}-[a-f0-9]{12}$/.test(local)) return true;
+  if (/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+\+app-[a-f0-9]{10}-[a-f0-9]{12}$/.test(local)) return true;
+  return false;
 }
 
 export type ResolveApplicantEmailDeps = {
@@ -440,7 +451,16 @@ function inboundBodyText(inbound: InboundApplicationEmail): string {
  *
  * The employer's address is still printed in the body, so she can always see who she is talking to
  * and can go around Litos on purpose if she wants to. */
-function forwardEmailPayload(input: {
+export function aliasUsesManagedReceiving(alias: string): boolean {
+  const normalized = normalizedAddress(alias);
+  const domain = normalized?.slice(normalized.lastIndexOf('@') + 1) ?? '';
+  // Resend-managed receiving aliases are permanently inbound-only. Infer that capability from the
+  // strict provider domain shape rather than today's environment, because packets and active alias
+  // rows can outlive a route migration.
+  return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.resend\.app$/i.test(domain);
+}
+
+export function forwardEmailPayload(input: {
   alias: string;
   forwardTo: string;
   inbound: InboundApplicationEmail;
@@ -449,16 +469,20 @@ function forwardEmailPayload(input: {
   const subject = input.inbound.subject?.trim() || '(no subject)';
   const from = input.inbound.from?.trim() || 'unknown sender';
   const bodyText = inboundBodyText(input.inbound);
+  const managedReceiving = aliasUsesManagedReceiving(input.alias);
+  const replyInstruction = managedReceiving
+    ? `This Litos receiving address cannot send replies. Contact ${from} directly from your own mailbox.`
+    : `Reply to this message and Litos sends your answer to ${from} from your application address.`;
   return {
     from: emailSender(),
     to: [input.forwardTo],
-    reply_to: input.alias,
+    ...(managedReceiving ? {} : { reply_to: input.alias }),
     subject: `[Litos] ${subject}`,
     text: [
       `Litos received this application email at ${input.alias}.`,
       `From: ${from}`,
       `Classification: ${input.classification}`,
-      `Reply to this message and Litos sends your answer to ${from} from your application address.`,
+      replyInstruction,
       ``,
       bodyText,
     ].join('\n'),
@@ -466,7 +490,7 @@ function forwardEmailPayload(input: {
       `<p>Litos received this application email at ${escapeHtml(input.alias)}.</p>`,
       `<p><strong>From:</strong> ${escapeHtml(from)}</p>`,
       `<p><strong>Classification:</strong> ${escapeHtml(input.classification)}</p>`,
-      `<p>Reply to this message and Litos sends your answer to ${escapeHtml(from)} from your application address.</p>`,
+      `<p>${escapeHtml(replyInstruction)}</p>`,
       `<p>${escapeHtml(bodyText || 'No plain-text body was provided.').replace(/\n/g, '<br>')}</p>`,
     ].join(''),
   };
@@ -500,7 +524,7 @@ export function relayEmailPayload(input: {
 export type InboundRoute =
   | { kind: 'employer_message' }
   | { kind: 'applicant_reply' }
-  | { kind: 'drop'; reason: 'self_addressed' | 'sender_authentication_failed' };
+  | { kind: 'drop'; reason: 'self_addressed' | 'sender_authentication_failed' | 'managed_reply_unsupported' };
 
 /* WHO SENT IT decides which direction this message is going, and it is decided here rather than
  * from the words in it.
@@ -528,6 +552,7 @@ export function routeInboundApplicationEmail(input: {
   const sender = from.match(/<([^>]+)>/)?.[1]?.trim().toLowerCase() ?? from;
   if (sender === alias) return { kind: 'drop', reason: 'self_addressed' };
   if (sender !== forwardTo) return { kind: 'employer_message' };
+  if (aliasUsesManagedReceiving(alias)) return { kind: 'drop', reason: 'managed_reply_unsupported' };
   if (senderAuthenticationFailed(input.authentication)) {
     return { kind: 'drop', reason: 'sender_authentication_failed' };
   }

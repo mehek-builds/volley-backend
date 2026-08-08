@@ -60,6 +60,14 @@ test('an uncertain run still says so, because there it is the truth', () => {
   assert.match(out.attentionReason!, /could not verify the employer confirmation/);
 });
 
+test('an email-route migration requires regeneration before uncertainty and says no request was sent', () => {
+  const out = submissionFailureOutcome({ ...base, regenerationRequired: true });
+  assert.equal(out.status, 'needs_attention');
+  assert.match(out.attentionReason, /must be regenerated/i);
+  assert.match(out.attentionReason, /nothing was sent to the employer/i);
+  assert.doesNotMatch(out.attentionReason, /could not verify/i);
+});
+
 test('the no-submit-control message names no cause, because it has four', () => {
   /* Multi-step first page, a page that renders nothing headless, a control relabelled mid-run, and
      a click that timed out before dispatching. Naming one would be false most of the time. */

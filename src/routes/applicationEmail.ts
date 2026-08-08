@@ -8,6 +8,7 @@ import { requireAuth } from '../middleware/auth';
 import {
   type InboundApplicationEmail,
   applicationEmailRouteLabel,
+  applicationEmailRouteGenerationFingerprint,
   applicationForwardingAddress,
   forwardingAddressWouldLoop,
   inboundWebhookSecret,
@@ -224,6 +225,7 @@ export async function applicationEmailRoutes(fastify: FastifyInstance) {
       tracking_active: deliverability.deliverable,
       tracking_blocked_reason: deliverability.deliverable ? null : deliverability.reason,
       domain: applicationEmailRouteLabel(),
+      route_generation_fingerprint: applicationEmailRouteGenerationFingerprint(),
       forward_to: await applicationForwardingAddress(userId),
       aliases,
     });

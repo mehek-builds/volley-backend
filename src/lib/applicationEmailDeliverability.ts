@@ -36,6 +36,8 @@ export type AliasDeliverabilityReason =
   | 'mx_provider_mismatch'
   | 'domain_not_verified_in_resend'
   | 'receiving_not_enabled_in_resend'
+  | 'managed_receiving_proof_missing'
+  | 'managed_receiving_proof_mismatch'
   | 'inbound_route_missing'
   | 'forwarding_not_configured'
   | 'check_unavailable';
@@ -62,11 +64,13 @@ export type ResendDomainRecord = {
   capabilities?: { receiving?: string; sending?: string };
 };
 export type ResendWebhookRecord = { endpoint?: string; events?: string[]; status?: string };
+export type ResendReceivedEmailRecord = { id?: string; to?: string[] | string };
 
 export type DeliverabilityProbes = {
   resolveMx?: (domain: string) => Promise<Array<{ exchange: string; priority: number }>>;
   resendDomains?: () => Promise<ResendDomainRecord[]>;
   resendWebhooks?: () => Promise<ResendWebhookRecord[]>;
+  resendReceivedEmail?: (id: string) => Promise<ResendReceivedEmailRecord>;
   now?: () => number;
 };
 
@@ -102,8 +106,30 @@ function configuredAliasDomain(): string | null {
   return domain && /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(domain) ? domain : null;
 }
 
+const RESEND_MANAGED_RECEIVING_DOMAIN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.resend\.app$/i;
+
+export function configuredResendManagedReceivingDomain(): string | null {
+  const domain = process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN?.trim().toLowerCase();
+  return domain && RESEND_MANAGED_RECEIVING_DOMAIN.test(domain) ? domain : null;
+}
+
+function managedReceivingModeRequested(): boolean {
+  return Boolean(process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN?.trim());
+}
+
+function customAliasRouteRequested(): boolean {
+  return Boolean(
+    process.env.LITOS_APPLICATION_EMAIL_MAILBOX?.trim()
+      || process.env.LITOS_APPLICATION_EMAIL_DOMAIN?.trim(),
+  );
+}
+
 /** The domain employers would actually send to, whichever alias shape is configured. */
 export function aliasDomain(): string | null {
+  if (managedReceivingModeRequested()) {
+    if (customAliasRouteRequested()) return null;
+    return configuredResendManagedReceivingDomain();
+  }
   return configuredMailboxDomain() ?? configuredAliasDomain();
 }
 
@@ -164,12 +190,27 @@ async function resendGet<T>(path: string): Promise<T[]> {
   return Array.isArray(body?.data) ? body.data : [];
 }
 
+async function resendGetOne<T>(path: string, errorLabel: string): Promise<T> {
+  const key = process.env.RESEND_API_KEY?.trim();
+  if (!key) throw new Error('RESEND_API_KEY is not set');
+  const response = await fetch(`https://api.resend.com${path}`, {
+    headers: { Authorization: `Bearer ${key}` },
+    signal: AbortSignal.timeout(RESEND_TIMEOUT_MS),
+  });
+  if (!response.ok) throw new Error(`Resend ${errorLabel} answered ${response.status}`);
+  return response.json() as Promise<T>;
+}
+
 export function listResendDomains(): Promise<ResendDomainRecord[]> {
   return resendGet<ResendDomainRecord>('/domains');
 }
 
 export function listResendWebhooks(): Promise<ResendWebhookRecord[]> {
   return resendGet<ResendWebhookRecord>('/webhooks');
+}
+
+export function retrieveResendReceivedEmail(id: string): Promise<ResendReceivedEmailRecord> {
+  return resendGetOne<ResendReceivedEmailRecord>(`/emails/receiving/${encodeURIComponent(id)}`, 'received-email lookup');
 }
 
 export function resendDomainStatus(domains: readonly ResendDomainRecord[], domain: string): string | null {
@@ -253,6 +294,34 @@ async function probe(probes: DeliverabilityProbes): Promise<AliasDeliverability>
   if (!domain) return { ...base, reason: 'alias_not_configured' };
   if (inboundAliasDisabled()) return { ...base, reason: 'inbound_disabled' };
   if (!applicationEmailForwardingConfigured()) return { ...base, reason: 'forwarding_not_configured' };
+
+  if (configuredResendManagedReceivingDomain() === domain) {
+    const canaryId = process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID?.trim();
+    if (!canaryId) return { ...base, reason: 'managed_receiving_proof_missing' };
+    try {
+      const retrieve = probes.resendReceivedEmail ?? retrieveResendReceivedEmail;
+      const canary = await retrieve(canaryId);
+      const recipients = (Array.isArray(canary.to) ? canary.to : [canary.to])
+        .filter((value): value is string => typeof value === 'string')
+        .map((value) => value.trim().toLowerCase());
+      const recipientMatches = recipients.some((address) => address.endsWith(`@${domain}`)
+        && address.slice(0, -(domain.length + 1)).length > 0);
+      if (canary.id !== canaryId || !recipientMatches) {
+        return { ...base, reason: 'managed_receiving_proof_mismatch' };
+      }
+    } catch (error) {
+      return { ...base, reason: 'check_unavailable', detail: describeManagedProofError(error, canaryId) };
+    }
+
+    try {
+      const webhooks = await (probes.resendWebhooks ?? listResendWebhooks)();
+      const routed = inboundRouteConfigured(webhooks, inboundWebhookEndpoint());
+      if (!routed) return { ...base, reason: 'inbound_route_missing' };
+      return { ...base, deliverable: true, reason: 'deliverable', inbound_route_configured: true };
+    } catch (error) {
+      return { ...base, reason: 'check_unavailable', detail: describeManagedProofError(error, canaryId) };
+    }
+  }
 
   let mxRecords: Array<{ exchange: string; priority: number }>;
   let mxHosts: string[];
@@ -366,6 +435,15 @@ function describe(error: unknown): string {
   return String(error instanceof Error ? error.message : error).slice(0, 200);
 }
 
+function describeManagedProofError(error: unknown, canaryId: string): string {
+  const raw = String(error instanceof Error ? error.message : error);
+  const encoded = encodeURIComponent(canaryId);
+  return raw
+    .replaceAll(canaryId, '[redacted]')
+    .replaceAll(encoded, '[redacted]')
+    .slice(0, 200);
+}
+
 /**
  * Cached, de-duplicated, and it never throws. A caller that cannot reach DNS or Resend gets
  * `deliverable: false` with a reason, which is the same answer it would get from a domain that
@@ -376,7 +454,10 @@ export async function applicationAliasDeliverability(
 ): Promise<AliasDeliverability> {
   const now = probes.now?.() ?? Date.now();
   const domain = aliasDomain();
-  const configSignature = `${domain ?? ''}|${inboundAliasDisabled()}|${applicationEmailForwardingConfigured()}`;
+  const managedCanaryId = process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID?.trim();
+  const configSignature = `${domain ?? ''}|${inboundAliasDisabled()}|${applicationEmailForwardingConfigured()}`
+    + `|${process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN?.trim().toLowerCase() ?? ''}`
+    + `|${process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID?.trim() ?? ''}`;
   if (cached && cached.domain === domain && cached.configSignature === configSignature && cached.expiresAt > now) return cached.value;
   if (inFlight) return inFlight;
   inFlight = probe(probes)
@@ -384,7 +465,7 @@ export async function applicationAliasDeliverability(
       deliverable: false,
       domain,
       reason: 'check_unavailable',
-      detail: describe(error),
+      detail: managedCanaryId ? describeManagedProofError(error, managedCanaryId) : describe(error),
       mx_hosts: [],
       mx_provider: 'unknown',
       mx_provider_agrees: false,
