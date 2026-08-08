@@ -2223,6 +2223,44 @@ test('Greenhouse school aliases do not strip comma-separated campus names generi
   assert.deepEqual(schoolValues, ['University of California, Berkeley']);
 });
 
+test('Greenhouse school aliases drop a school-inside-the-institution, for anyone, not just USC', () => {
+  // An ATS school list holds INSTITUTIONS, so "University of Southern California, Viterbi School of
+  // Engineering" matches nothing and the field came back required-and-empty. This used to be fixed
+  // by testing for the literal string "University of Southern California", which is the one school
+  // the one person testing it attends. The rule is now what the tail SAYS it is: a clause naming a
+  // school, college, faculty or department is a unit inside the institution and comes off; a campus
+  // name is part of the institution and stays (see the test above - dropping ", Berkeley" would
+  // name a different university).
+  const schoolValuesFor = (school: string) => buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    school,
+    degree: 'Bachelor of Science in Computer Science',
+    major: 'Computer Science',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  })
+    .filter((action) => action.type === 'fill' && action.selector === '#school--0')
+    .map((action) => action.value);
+
+  assert.deepEqual(
+    schoolValuesFor('University of Southern California, Viterbi School of Engineering'),
+    ['University of Southern California'],
+  );
+  assert.deepEqual(
+    schoolValuesFor('New York University, Tandon School of Engineering'),
+    ['New York University'],
+  );
+  // One of each. Only the last clause may go.
+  assert.deepEqual(
+    schoolValuesFor('University of California, Berkeley, College of Engineering'),
+    ['University of California, Berkeley'],
+  );
+  // A plain institution is left exactly as stored.
+  assert.deepEqual(schoolValuesFor('Boston College'), ['Boston College']);
+});
+
 test('no managed action can burn the 30s default — every fill, upload, and question is bounded', () => {
   // Live Jump Trading retry, 2026-07-24: after the core-field fix the run cleared name/email and
   // then died on `locator.setInputFiles: Timeout 30000ms exceeded` at the resume input, because the
