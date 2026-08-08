@@ -127,6 +127,7 @@ test('resend received email hydration fetches the full body before routing', asy
     globalThis.fetch = (async (url, init) => {
       assert.equal(String(url), 'https://api.resend.com/emails/receiving/email_123');
       assert.equal((init?.headers as Record<string, string>).Authorization, 'Bearer re_test');
+      assert.equal((init?.headers as Record<string, string>)['User-Agent'], 'Litos/1.0');
       return new Response(JSON.stringify({
         id: 'email_123',
         to: ['app-abc@apply.litos.test'],
@@ -136,6 +137,7 @@ test('resend received email hydration fetches the full body before routing', asy
         text: 'Can you schedule a call?',
         html: '<p>Can you schedule a call?</p>',
         message_id: '<message@example.com>',
+        headers: { 'authentication-results': 'mx.resend.com; spf=pass dkim=pass dmarc=pass' },
       }), { status: 200, headers: { 'content-type': 'application/json' } });
     }) as typeof fetch;
     const hydrated = await retrieveResendReceivedEmail({
@@ -146,6 +148,7 @@ test('resend received email hydration fetches the full body before routing', asy
     assert.equal(hydrated.from, 'recruiter@example.com');
     assert.equal(hydrated.text, 'Can you schedule a call?');
     assert.deepEqual(hydrated.to, ['app-abc@apply.litos.test']);
+    assert.deepEqual(hydrated.authentication, { spf: 'pass', dkim: 'pass', dmarc: 'pass' });
   } finally {
     if (previousKey === undefined) delete process.env.RESEND_API_KEY;
     else process.env.RESEND_API_KEY = previousKey;

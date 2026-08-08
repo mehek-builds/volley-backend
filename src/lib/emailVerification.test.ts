@@ -2,10 +2,55 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   extractCodeFromVerificationText,
+  extractLitosVerificationCode,
   extractVerificationCode,
   findComposioVerificationCode,
   type EmailToolExecutor,
 } from './emailVerification';
+
+test('extracts only an authenticated code from the exact Litos application alias', () => {
+  const requestedAt = new Date('2026-07-25T10:00:00.000Z');
+  const row = (code: string, authentication: Record<string, string> | undefined) => ({
+    from_email: 'Greenhouse <no-reply@us.greenhouse-mail.io>',
+    to_email: 'app-2222222222-target@apply.trylitos.com',
+    subject: 'Your Greenhouse security code',
+    text: `Use security code ${code} to continue.`,
+    html: null,
+    received_at: new Date('2026-07-25T10:00:20.000Z'),
+    raw_json: { authentication },
+  });
+  assert.equal(extractLitosVerificationCode(
+    [row('EF56GH78', { spf: 'pass', dkim: 'pass', dmarc: 'pass' })],
+    'https://job-boards.greenhouse.io/acme/jobs/123',
+    requestedAt,
+    'app-2222222222-target@apply.trylitos.com',
+  )?.code, 'EF56GH78');
+  assert.equal(extractLitosVerificationCode(
+    [row('EF56GH78', undefined)],
+    'https://job-boards.greenhouse.io/acme/jobs/123',
+    requestedAt,
+    'app-2222222222-target@apply.trylitos.com',
+  ), null);
+});
+
+test('rejects ambiguous codes recorded against one Litos application alias', () => {
+  const requestedAt = new Date('2026-07-25T10:00:00.000Z');
+  const row = (code: string, seconds: number) => ({
+    from_email: 'Greenhouse <no-reply@us.greenhouse-mail.io>',
+    to_email: 'app-2222222222-target@apply.trylitos.com',
+    subject: 'Your Greenhouse security code',
+    text: `Use security code ${code} to continue.`,
+    html: null,
+    received_at: new Date(`2026-07-25T10:00:${seconds}.000Z`),
+    raw_json: { authentication: { spf: 'pass', dkim: 'pass' } },
+  });
+  assert.equal(extractLitosVerificationCode(
+    [row('AB12CD34', 10), row('EF56GH78', 20)],
+    'https://job-boards.greenhouse.io/acme/jobs/123',
+    requestedAt,
+    'app-2222222222-target@apply.trylitos.com',
+  ), null);
+});
 
 test('extracts one context-bound numeric code without returning unrelated numbers', () => {
   assert.equal(

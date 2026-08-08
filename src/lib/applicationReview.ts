@@ -279,7 +279,7 @@ export type ApplicationReviewState = {
   };
   verification?: {
     status: 'not_needed' | 'searching' | 'verification_pending' | 'completed' | 'handoff';
-    provider?: 'gmail' | 'outlook';
+    provider?: 'gmail' | 'outlook' | 'litos';
     requested_at?: string;
     retry_count?: number;
     completed_at?: string;

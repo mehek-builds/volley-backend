@@ -16,7 +16,7 @@ const SAFE_CONTINUE_BUTTON = /^(?:verify|verify code|confirm|confirm code|contin
 
 export type BrowserVerificationResult = {
   status: 'not_needed' | 'completed' | 'handoff';
-  provider?: 'gmail' | 'outlook';
+  provider?: 'gmail' | 'outlook' | 'litos';
 };
 
 async function visibleOtpFields(page: Page): Promise<Locator[]> {

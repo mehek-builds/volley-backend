@@ -1,4 +1,7 @@
 import { composioRequest } from './composioApi';
+import { and, desc, eq, gte, lte } from 'drizzle-orm';
+import { db } from '../db';
+import { application_email_messages } from '../db/schema';
 
 const CODE_CONTEXT = /\b(?:verification|security|authentication|confirmation|one[ -]?time|passcode|otp)\b/i;
 // Most providers send a 4 to 8 digit code. Greenhouse currently sends an 8-character
@@ -17,7 +20,7 @@ const PORTAL_SENDER_DOMAINS: Array<{ portal: RegExp; senders: string[] }> = [
   { portal: /(?:^|\.)(?:myworkdayjobs|workday)\.com$/i, senders: ['workday.com', 'myworkday.com', 'myworkdayjobs.com'] },
 ];
 
-type EmailProvider = 'gmail' | 'outlook';
+type EmailProvider = 'gmail' | 'outlook' | 'litos';
 
 type EmailMessage = {
   provider: EmailProvider;
@@ -254,7 +257,79 @@ export function extractVerificationCode(
 }
 
 export function isAutomaticEmailVerificationConfigured(): boolean {
-  return Boolean(process.env.COMPOSIO_API_KEY?.trim());
+  return Boolean(process.env.COMPOSIO_API_KEY?.trim() || process.env.LITOS_APPLICATION_EMAIL_DOMAIN?.trim());
+}
+
+type LitosVerificationRow = {
+  from_email: string | null;
+  to_email: string | null;
+  subject: string | null;
+  text: string | null;
+  html: string | null;
+  received_at: Date | null;
+  raw_json: unknown;
+};
+
+export function extractLitosVerificationCode(
+  rows: LitosVerificationRow[],
+  portalUrl: string,
+  requestedAt: Date,
+  expectedRecipient: string,
+): VerificationCodeMatch | null {
+  const payload = rows.map((row) => {
+    const raw = asRecord(row.raw_json);
+    const authentication = asRecord(raw?.authentication);
+    const authenticationResults = authentication
+      ? Object.entries(authentication).map(([name, verdict]) => `${name}=${String(verdict)}`).join(' ')
+      : '';
+    return {
+      subject: row.subject ?? '',
+      from: row.from_email ?? '',
+      to: row.to_email ?? '',
+      text: `${row.text ?? ''}\n${row.html ?? ''}`,
+      received_at: row.received_at?.toISOString() ?? '',
+      authenticationResults,
+    };
+  });
+  return extractVerificationCode(
+    [{ provider: 'litos', data: payload }],
+    portalUrl,
+    requestedAt,
+    expectedRecipient,
+  );
+}
+
+async function findLitosVerificationCode(options: {
+  userId: string;
+  portalUrl: string;
+  requestedAt: Date;
+  expectedRecipient: string;
+  applicationId?: string;
+}): Promise<VerificationCodeMatch | null> {
+  const recipient = options.expectedRecipient.trim().toLowerCase();
+  if (!recipient) return null;
+  if (options.applicationId) {
+    const packetPrefix = options.applicationId.replace(/-/g, '').slice(0, 10).toLowerCase();
+    if (!recipient.includes(packetPrefix)) return null;
+  }
+  const earliest = new Date(options.requestedAt.getTime() - CLOCK_SKEW_MS);
+  const latest = new Date(options.requestedAt.getTime() + MAX_CODE_AGE_MS);
+  const rows = await db.select({
+    from_email: application_email_messages.from_email,
+    to_email: application_email_messages.to_email,
+    subject: application_email_messages.subject,
+    text: application_email_messages.text,
+    html: application_email_messages.html,
+    received_at: application_email_messages.received_at,
+    raw_json: application_email_messages.raw_json,
+  }).from(application_email_messages).where(and(
+    eq(application_email_messages.user_id, options.userId),
+    eq(application_email_messages.alias, recipient),
+    eq(application_email_messages.generated_resume_id, options.applicationId ?? ''),
+    gte(application_email_messages.received_at, earliest),
+    lte(application_email_messages.received_at, latest),
+  )).orderBy(desc(application_email_messages.received_at)).limit(10);
+  return extractLitosVerificationCode(rows, options.portalUrl, options.requestedAt, recipient);
 }
 
 function defaultExecutor(): EmailToolExecutor {
@@ -278,8 +353,16 @@ export async function findComposioVerificationCode(options: {
   applicationId?: string;
   executor?: EmailToolExecutor;
 }): Promise<VerificationCodeMatch | null> {
-  if (!options.executor && !isAutomaticEmailVerificationConfigured()) return null;
   if (!options.expectedRecipient?.trim()) return null;
+  const litosMatch = await findLitosVerificationCode({
+    userId: options.userId,
+    portalUrl: options.portalUrl,
+    requestedAt: options.requestedAt,
+    expectedRecipient: options.expectedRecipient,
+    applicationId: options.applicationId,
+  }).catch(() => null);
+  if (litosMatch) return litosMatch;
+  if (!options.executor && !process.env.COMPOSIO_API_KEY?.trim()) return null;
   const execute = options.executor ?? defaultExecutor();
   const after = new Date(options.requestedAt.getTime() - CLOCK_SKEW_MS);
   const recipientQuery = options.expectedRecipient?.trim() ? ` to:${options.expectedRecipient.trim()}` : '';

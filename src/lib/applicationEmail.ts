@@ -55,7 +55,15 @@ type ResendReceivedEmail = {
   html?: string | null;
   text?: string | null;
   message_id?: string;
+  headers?: Record<string, string>;
 };
+
+function authenticationFromHeaders(headers: Record<string, string> | undefined): InboundApplicationEmail['authentication'] {
+  const value = Object.entries(headers ?? {}).find(([name]) => name.toLowerCase() === 'authentication-results')?.[1] ?? '';
+  const verdict = (mechanism: 'spf' | 'dkim' | 'dmarc') => value.match(new RegExp(`\\b${mechanism}=([a-z]+)`, 'i'))?.[1]?.toLowerCase();
+  const authentication = { spf: verdict('spf'), dkim: verdict('dkim'), dmarc: verdict('dmarc') };
+  return Object.values(authentication).some(Boolean) ? authentication : undefined;
+}
 
 function configuredMailbox(): { local: string; domain: string; address: string } | null {
   const mailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX?.trim().toLowerCase();
@@ -579,7 +587,7 @@ export async function retrieveResendReceivedEmail(input: {
   const key = process.env.RESEND_API_KEY?.trim();
   if (!key) throw new Error('RESEND_API_KEY is required to read received email content');
   const response = await fetch(`https://api.resend.com/emails/receiving/${encodeURIComponent(input.emailId)}`, {
-    headers: { Authorization: `Bearer ${key}` },
+    headers: { Authorization: `Bearer ${key}`, 'User-Agent': 'Litos/1.0' },
   });
   if (!response.ok) {
     throw new Error(`Resend received email lookup failed with ${response.status}`);
@@ -594,12 +602,14 @@ export async function retrieveResendReceivedEmail(input: {
     text: body.text ?? input.fallback.text,
     html: body.html ?? input.fallback.html,
     receivedAt: body.created_at ? new Date(body.created_at) : input.fallback.receivedAt,
+    authentication: authenticationFromHeaders(body.headers),
     raw: {
       provider: 'resend',
       email_id: body.id || input.emailId,
       message_id: body.message_id,
       to: body.to,
       subject: body.subject,
+      authentication: authenticationFromHeaders(body.headers),
     },
   };
 }
@@ -786,7 +796,10 @@ export async function processInboundApplicationEmail(input: InboundApplicationEm
     text: input.text,
     html: input.html,
     classification,
-    raw_json: input.raw as Record<string, unknown> | undefined,
+    raw_json: {
+      payload: input.raw as Record<string, unknown> | undefined,
+      authentication: input.authentication,
+    },
     received_at: receivedAt,
   }).onConflictDoNothing({ target: application_email_messages.dedupe_key }).returning({
     id: application_email_messages.id,
