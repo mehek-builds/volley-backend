@@ -1046,6 +1046,79 @@ roadmap metric dashboard experimentation prd frontend backend`
     .filter(Boolean),
 );
 
+/**
+ * MULTI-WORD REQUIREMENTS THAT NO SINGLE WORD OF IS A REQUIREMENT.
+ *
+ * This list is matched against the NORMALIZED section text, so it is the only extraction path in
+ * this file that does not care how the posting cased the phrase. Everything else does, and that is
+ * the defect the second block below was added for.
+ *
+ * WHY A SEPARATE LIST AT ALL, restated because the reason is easy to lose: a bigram forms only from
+ * two tokens that are EACH independently specific (see the bigram pass in extractFrom, and the
+ * GRANULARITY note at SKILL_LEXICON). `machine` is not a requirement, `learning` is not a
+ * requirement, and neither is in SKILL_LEXICON - so "machine learning" can only be reached through
+ * the proper-noun rule at isSpecific, which needs a Title Case run. A posting that writes
+ * "Machine Learning" is extracted; a posting that writes "machine learning" is not.
+ *
+ * THAT IS A RULE ABOUT TYPOGRAPHY, NOT ABOUT THE JOB, and measured against production packets on
+ * 2026-08-08 it was costing whole postings rather than single terms. Two of the twenty-five most
+ * recent packets on the owner account refused to score with
+ * "This posting does not list enough specific requirements to score against":
+ *
+ *   Deepgram, "Software Engineering- Internship", 4,624 chars. segmentJd finds both blocks
+ *   correctly - "Minimum Skills, Knowledge & Capabilities:" as required, "Preferred Qualifications:"
+ *   as preferred - and the required block yields `ai` and `automations`. The preferred block yields
+ *   NOTHING, because every requirement in it is a sentence-case phrase: "a degree in computer
+ *   science", "exposure to machine learning, real-time systems, or audio/speech processing",
+ *   "self-study, open source, or your own projects". Two terms, floor is four, refuse.
+ *
+ *   Truveta, "Software Engineering Intern", 4,110 chars. Same shape. Its Preferred Qualifications
+ *   block yields `java`, `python` and `c#` off the one comma-list bullet, and loses "computer
+ *   science" out of "bachelors' or masters' in engineering, computer science or STEM related
+ *   field". Three terms, floor is four, refuse.
+ *
+ * NEITHER WAS AN EXTRACTION FAILURE UPSTREAM and neither was caused by the requirement-narrowing in
+ * isSpecific, which is the first thing to suspect and the wrong thing. Verified by mutation: forcing
+ * the `afterVerbMarker` guard to never fire changes the extracted set on neither posting by a single
+ * term, because the words it would have re-admitted are not in SKILL_LEXICON in the first place. The
+ * narrowing is not loosened here and must not be: see the noise cases pinned in
+ * packetQualityAudit.test.ts, which live in the same file as the recall cases for exactly that
+ * reason.
+ *
+ * AN ENUMERATION, NOT A SHAPE RULE, on the same argument SKILL_LEXICON and VENDOR_SPELLINGS make. A
+ * rule of the form "admit a bigram whose head noun is one of {science, learning, systems,
+ * processing}" reaches "related field", "market conditions" and "changing conditions" on the same
+ * postings. There is no property of the two words that separates "machine learning" from "market
+ * conditions" - only knowledge of which pairs name one thing a resume can carry.
+ *
+ * WHAT MAY BE ADDED. An entry has to name ONE concept that (a) a resume writes as those exact words,
+ * and (b) is meaningless as any one of its words alone. "computer science" qualifies; "software
+ * engineering" is deliberately ABSENT because on a software posting it is the role's own name, and
+ * roleReferenceTokens only strips role words from `body` and `responsibilities` sections, so under a
+ * Requirements heading it would be a free slot every SWE resume matches. "time management",
+ * "written communication" and their neighbours are absent for a different reason: BOILERPLATE
+ * already refuses `communication`, `presentation` and `detail oriented` as unigrams, and admitting
+ * the phrase would reintroduce as a bigram exactly what that list removes as a unigram.
+ *
+ * MEASURED over the 800 most recently seen active postings on the production board, 2026-08-08,
+ * scored against a real CS base resume. Refusals 141 -> 131, mean terms per posting 9.27 -> 9.33,
+ * extracted set changed on 150 of the 800. TEN POSTINGS FLIP FROM REFUSING TO SCORING AND NONE FLIP
+ * THE OTHER WAY, which is the property that matters: this pass can only add terms, so it cannot
+ * push a posting under the floor.
+ *
+ * WHAT IT COSTS, because the denominator is capped and a new term takes a slot from an old one.
+ * `gcp` leaves the final twelve on 15 postings, `pytorch`, `tensorflow` and `kafka` on 4 each,
+ * `python`, `sql` and `azure` on 3. Every one of those is a Databricks posting whose twelve are
+ * already all real cloud and data skills, and what displaces them is `data engineering` or `data
+ * science` off the same posting - a trade between two true statements about the job, which is what
+ * EMPHASIS_LIMIT says this file is always making.
+ *
+ * THE OTHER MOVEMENT IS STRICTLY A GAIN and is worth reading as the shape of the fix. Samsara's
+ * "Enterprise Core Sales Engineer" asks for a degree in Computer Science, Electrical Engineering or
+ * Mechanical Engineering. Before, the Title Case run gave it `mechanical engineering` and a bare
+ * `science`; now it names `computer science` and `electrical engineering`, and the orphan `science`
+ * is gone - the subsumption pass deletes it once the phrase that contains it exists.
+ */
 const PHRASE_LEXICON = new Set(
   `product management
 product manager
@@ -1064,7 +1137,32 @@ product requirement document
 product requirements document
 ab testing
 a b testing
-conversion funnel`
+conversion funnel
+computer science
+computer engineering
+electrical engineering
+data science
+data engineering
+data structures
+machine learning
+deep learning
+reinforcement learning
+neural network
+neural networks
+computer vision
+natural language processing
+speech recognition
+speech processing
+signal processing
+information retrieval
+distributed systems
+operating systems
+embedded systems
+real time systems
+object oriented programming
+version control
+unit testing
+open source`
     .split(/\n/)
     .map((s) => normalizeTerm(s))
     .filter(Boolean),
@@ -2441,6 +2539,33 @@ function countNormalizedMentions(haystack: string, needle: string): number {
   return count;
 }
 
+/**
+ * The posting's OWN spelling of a PHRASE_LEXICON hit, for display.
+ *
+ * The phrase pass matches on normalized text, so all it holds afterwards is the normalized key, and
+ * before this it used that key as the display string. That was invisible while the list was
+ * seventeen product-management phrases and became visible the moment it carried "computer science":
+ * the overwhelming majority of postings write "Computer Science", and the review pane would have
+ * started rendering their own requirement back at them in lowercase. The unigram and bigram passes
+ * both display the token verbatim; this is that same rule for the one pass that could not.
+ *
+ * The separator is `[^A-Za-z0-9]{1,3}` rather than a space because normalizeTerm folds hyphens,
+ * slashes and apostrophes into the gap: "real-time systems" and "audio/speech processing" both key
+ * as spaces and both should display as written. It is length-bounded so the match cannot run across
+ * a sentence boundary and return a span the posting never wrote as one phrase.
+ *
+ * Returns undefined when the phrase cannot be located in the raw text - the normalized form can
+ * differ enough (a stripped apostrophe inside a word) that the reverse search misses - and the
+ * caller keeps the normalized key. Display only; nothing downstream matches on it.
+ */
+function verbatimSpelling(sectionText: string, term: string): string | undefined {
+  const pattern = term
+    .split(' ')
+    .map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('[^A-Za-z0-9]{1,3}');
+  return new RegExp(`(?<![A-Za-z0-9])${pattern}(?![A-Za-z0-9])`, 'i').exec(sectionText)?.[0];
+}
+
 function extractFrom(sections: JdSection[], casing?: JdCasing): JdTerm[] {
   const byTerm = new Map<string, JdTerm>();
   // A character offset, not a counter over the extraction passes.
@@ -2488,7 +2613,8 @@ function extractFrom(sections: JdSection[], casing?: JdCasing): JdTerm[] {
       if (!existing || section.weight > existing.weight) {
         byTerm.set(term, {
           term,
-          display: term.toUpperCase() === 'PRD' ? 'PRD' : term,
+          display:
+            term.toUpperCase() === 'PRD' ? 'PRD' : (verbatimSpelling(sectionText, term) ?? term),
           weight: section.weight,
           kind: section.kind,
           signal: true,
@@ -2550,6 +2676,22 @@ function extractFrom(sections: JdSection[], casing?: JdCasing): JdTerm[] {
       // missing, named on its own.
       if (inLexicon(normalizeTerm(a.text)) && inLexicon(normalizeTerm(b.text))) continue;
       const term = `${normalizeTerm(a.text)} ${normalizeTerm(b.text)}`;
+      // THE PHRASE PASS ALREADY COUNTED THIS SECTION, so counting it again here is not a second
+      // mention, it is the same mention read twice. The two passes overlap on exactly the phrases
+      // the posting writes in Title Case: "Machine Learning" is a PHRASE_LEXICON hit AND a pair of
+      // independently specific tokens, so it left this loop with mentions = 2 per occurrence.
+      //
+      // That is not cosmetic, because mentions is the emphasis tiebreak in capToEmphasis and the
+      // denominator is capped at EMPHASIS_LIMIT. Measured over the 800 most recently seen active
+      // postings, the doubled count evicted real stated skills to make room for the phrase that
+      // outranked them on a number that was wrong: `gcp` off 19 postings, `pytorch`, `tensorflow`
+      // and `kafka` off 4 each, `python`, `sql` and `azure` off 3. Deduplicating here takes all of
+      // those back and keeps the phrase.
+      //
+      // Safe in one direction only, and this is the direction: the phrase pass runs FIRST and over
+      // the SAME section, so if the term is in PHRASE_LEXICON the entry already exists at this
+      // section's weight. There is nothing for this loop to add.
+      if (PHRASE_LEXICON.has(term)) continue;
       const existing = byTerm.get(term);
       const mentions = (existing?.mentions ?? 0) + 1;
       if (!existing || section.weight > existing.weight) {

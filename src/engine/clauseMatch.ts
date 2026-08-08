@@ -130,6 +130,29 @@ const FIELD_SYNONYMS: Record<string, RegExp> = {
   law: /\b(law|juris)\b/i,
 };
 
+/**
+ * The same fields as above, spelled the way extractJdTerms KEYS them, for the routing exclusion in
+ * matchClause step 1. See the long note there for why this exists at all.
+ *
+ * TWO LISTS AND NOT ONE, because the two answer different questions. FIELD_SYNONYMS is matched
+ * against the CLAUSE and is deliberately loose - `/\bengineering\b/` has to reach "electrical
+ * engineering", "a degree in engineering" and "engineering or a related field" alike. This is
+ * matched against a single extracted TERM and has to be exact, or the loose form would also drop
+ * `data engineering` and `signal processing` out of a clause that meant them as skills.
+ *
+ * Every entry here is a PHRASE_LEXICON entry that names a course of study. `statistics` and
+ * `mathematics` are NOT here: `statistics` is a SKILL_LEXICON unigram and has always been signal, so
+ * "Bachelor's in statistics" has always routed to the terms branch, and changing that today would be
+ * an unrelated behaviour change smuggled in under a fix.
+ */
+const DEGREE_FIELDS = new Set([
+  'computer science',
+  'computer engineering',
+  'electrical engineering',
+  'data science',
+  'data engineering',
+]);
+
 const MONTHS = 'jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec';
 
 /** A point in academic time. Spring/H1 sorts before Fall/H2, so ordering is comparison. */
@@ -264,7 +287,32 @@ export function matchClause(
   }
 
   // 1. Named technologies, when the clause names any. Most literal, so it goes first.
-  const terms = extractJdTerms(text, context).filter((t) => t.signal);
+  //
+  // A DEGREE FIELD IS NOT A NAMED TECHNOLOGY, and the exclusion is here rather than in the ordering
+  // because the ordering is right: a clause that genuinely names a tool should be answered by the
+  // tool, whatever else it says.
+  //
+  // This branch never used to see a field, and it did so by accident rather than by rule. "Computer
+  // Science" reached extractJdTerms as an ordinary Title Case bigram, and a bigram's `signal` is
+  // `isHardSignal(a) || isHardSignal(b)` - neither `computer` nor `science` is a lexicon skill, an
+  // acronym or a technical marker - so the `.signal` filter above dropped it before it could route
+  // anything. On 2026-08-08 the same phrases became curated PHRASE_LEXICON entries (see the note
+  // there: postings that write their requirements in sentence case were refusing to score at all),
+  // and PHRASE_LEXICON entries are signal by construction. That is correct for the scorer and wrong
+  // here: it sent "Pursuing a bachelor's in computer science graduating in Fall 2027 or Spring 2028"
+  // down the terms branch, so the graduation window stopped being deferred to the judge and started
+  // being answered by whether the resume contains the words "computer science".
+  //
+  // ONLY INSIDE A DEGREE CLAUSE. "Strong fundamentals in computer science" names no degree and is a
+  // requirement this branch should answer; "a BS in computer science" is a field, and 2b already has
+  // FIELD_SYNONYMS for reading it against the student's parsed degree and school.
+  //
+  // ONLY WHEN NOTHING ELSE IS NAMED, so the exclusion cannot swallow a real tool: "Bachelor's in
+  // computer science with strong Python" keeps `python`, stays here, and is answered literally.
+  const signalTerms = extractJdTerms(text, context).filter((t) => t.signal);
+  const terms = DEGREE_CLAUSE.test(text)
+    ? signalTerms.filter((t) => !DEGREE_FIELDS.has(t.term))
+    : signalTerms;
   if (terms.length > 0) {
     const covered = terms.filter((t) => resumeCovers(facts.resumeText, t.term));
     // "SQL and/or Python" and "Java or Kotlin" are satisfied by one. An unqualified list is not.
