@@ -81,6 +81,12 @@ test('fills one character into each split verification control', async () => {
 
 test('managed verification recognizes the email-code page without confusing a receipt', () => {
   assert.equal(managedResultNeedsEmailVerification({
+    title: 'Continue',
+    url: 'https://job-boards.greenhouse.io/acme/jobs/123',
+    text: 'Check your inbox',
+    humanVerification: { kind: 'security_code', fieldCount: 8, sentTo: 'applicant@example.com' },
+  }), true);
+  assert.equal(managedResultNeedsEmailVerification({
     title: 'Verify your application',
     url: 'https://job-boards.greenhouse.io/verify/abc',
     text: 'Enter the security code sent to your email to continue.',

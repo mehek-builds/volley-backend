@@ -294,6 +294,19 @@ describe('every path that can write status submitted is behind the guard', () =>
     const applications = await readFile('src/routes/applications.ts', 'utf8');
     const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
     assert.match(applications, /applyReviewPatch\(current, \{\s*\n\s*status: 'needs_attention',\s*\n\s*attention_reason: verdict\.reason/);
-    assert.match(runner, /nextReview\(current, \{\s*\n\s*status: 'needs_attention',\s*\n\s*attention_reason: duplicate\.reason/);
+    /* The runner's arm asserts the PROPERTIES rather than one literal spelling of them, because the
+       status is no longer a constant there. A packet finishing a security-code submission has
+       already had its form accepted by the employer once and is waiting on the emailed code;
+       demoting that to needs_attention would say nothing was sent, and would hand it back to
+       submitRequestDisposition as re-runnable. So the refusal stands and the status it lands in
+       depends on the packet. What this test exists to protect is unchanged and still checked: the
+       write goes through the shared merge, and it carries duplicate.reason. */
+    const gateAt = runner.indexOf("if (duplicate.kind === 'duplicate')");
+    assert.ok(gateAt > 0, 'the duplicate gate must still be in the runner');
+    const gate = runner.slice(gateAt, runner.indexOf('const claimedRow = await claimSubmission(row);', gateAt));
+    assert.match(gate, /nextReview\(current, \{/);
+    assert.match(gate, /duplicate\.reason/);
+    assert.match(gate, /attention_categories:[\s\S]{0,120}'duplicate_application'/);
+    assert.match(gate, /'needs_attention'/);
   });
 });

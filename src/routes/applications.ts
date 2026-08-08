@@ -34,7 +34,7 @@ import { mintDownloadToken } from '../lib/resumeAccess';
 import { normalizeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import { requireAuth } from '../middleware/auth';
 import { declaredSkillsList } from './profile';
-import { buildPacket, processSubmissionApplication } from './submissionRunner';
+import { buildPacket, finishSecurityCodeSubmission, processSubmissionApplication } from './submissionRunner';
 import { refreshKnownQuestionAnswers, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { rememberReusableAnswers } from '../lib/savedAnswerStore';
@@ -1240,6 +1240,59 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         review: readApplicationReview(responseRow.spec) ?? processed ?? next,
         cover_letter: storedCoverLetter(responseRow),
       });
+    },
+  );
+
+  /* The only door into an application the employer is holding behind an emailed security code.
+   *
+   * Everything else refuses that state: submitRequestDisposition returns 'reject' for it, so the
+   * ordinary submit-request path, the cron queue and the resume-edit path all decline to touch a
+   * packet that has already been sent to an employer once. This route exists because supplying the
+   * code is the one action that can legitimately move it, and because the applicant supplying a code
+   * out of her own mailbox IS the approval - the same per-application authorization the approve
+   * route writes, from the same person, about the same application.
+   *
+   * IDEMPOTENT BY THE CODE, not by a request id. finishSecurityCodeSubmission fingerprints the code
+   * against the application and answers a repeat from the stored attempt without making a run, so a
+   * double-click, a retried request or a refreshed tab cannot put a second application in front of
+   * an employer. That matters beyond tidiness: some boards cap re-applications, and Deepgram's form
+   * says candidates may not apply more than twice in any 60-day span. */
+  fastify.post(
+    '/applications/:id/security-code',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      const body = request.body as { code?: unknown } | undefined;
+      const outcome = await finishSecurityCodeSubmission(row.id, body?.code, fastify);
+      if (outcome.kind === 'not_found') {
+        return reply.status(404).send({ error: 'That application is not available' });
+      }
+      if (outcome.kind === 'not_awaiting') {
+        // 409 and not 400: nothing is wrong with the request, the packet has simply moved on. The
+        // status travels back so the dashboard can re-render rather than guess.
+        return reply.status(409).send({
+          error: 'This application is not waiting on a security code',
+          status: outcome.status,
+        });
+      }
+      if (outcome.kind === 'invalid_code') {
+        return reply.status(400).send({
+          error: 'That does not look like the code from the email. Enter the characters exactly as they appear.',
+          code: 'INVALID_SECURITY_CODE',
+        });
+      }
+      if (outcome.kind === 'already_attempted') {
+        // NOT an error, and deliberately not a re-run. Litos already tried this exact code and it
+        // says what happened, which is the whole point of remembering the fingerprint.
+        return reply.status(200).send({
+          application_id: row.id,
+          already_attempted: true,
+          outcome: outcome.outcome,
+          review: outcome.review,
+        });
+      }
+      return reply.status(200).send({ application_id: row.id, review: outcome.review });
     },
   );
 

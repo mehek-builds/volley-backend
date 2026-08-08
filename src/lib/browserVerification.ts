@@ -95,6 +95,7 @@ const MANAGED_VERIFICATION_SINGLE_SELECTOR = [
 const MANAGED_VERIFICATION_PAGE = /(?:enter|type|provide|sent|email|check)[\s\S]{0,100}(?:verification|security|authentication|confirmation|one[ -]?time|passcode|otp)[\s\S]{0,40}code|(?:verification|security|authentication|confirmation|one[ -]?time|passcode|otp)[\s\S]{0,40}code[\s\S]{0,100}(?:sent|email|inbox|continue)/i;
 
 export function managedResultNeedsEmailVerification(result: ManagedBrowserResult): boolean {
+  if (result.humanVerification?.kind === 'security_code') return true;
   return MANAGED_VERIFICATION_PAGE.test([
     result.title,
     result.text,

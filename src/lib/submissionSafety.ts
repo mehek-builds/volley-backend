@@ -61,6 +61,17 @@ export function submitRequestDisposition(
   submissionWasClaimed = false,
 ): 'start' | 'in_flight' | 'submitted' | 'reject' {
   if (status === 'submitted') return 'submitted';
+  // A SECOND SUBMIT IS THE ONE THING THIS STATE MUST NOT ALLOW. The form has already been sent to
+  // the employer once and is waiting on an emailed code; re-running the ordinary path would fill and
+  // send it again, which issues a fresh code, invalidates the one the applicant is holding, and on
+  // any board that caps re-applications spends one of her attempts. Some do: Deepgram's form says
+  // candidates may not apply more than twice in any 60-day span.
+  //
+  // Written as an explicit branch rather than left to the `return 'reject'` at the bottom. The
+  // fall-through would give the same answer today and says nothing about why, and the two lists
+  // below are exactly the kind of thing a later change adds a status to without noticing what it
+  // has just made re-runnable. Only the code-supplying endpoint may move this state forward.
+  if (status === 'awaiting_security_code') return 'reject';
   if (status === 'submit_requested' && !submissionWasClaimed) return 'start';
   if (['submit_requested', 'preparing', 'filling', 'submitting'].includes(status)) return 'in_flight';
   // needs_attention covers two materially different states. Before the final click it is safe to

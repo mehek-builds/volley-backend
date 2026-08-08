@@ -24,6 +24,8 @@ test('managed verification resumes once by token, never by URL, then verifies th
   const managed = runner.slice(firstSubmit, end);
   assert.match(managed, /requestContinuation: true/);
   assert.match(managed, /continuationTtlSeconds: 120/);
+  assert.match(managed, /allowSubmit: true/);
+  assert.match(managed, /readManagedSecurityCodeChallenge\(receiptResult\)/);
   assert.match(managed, /continuation_token: continuationToken/);
   assert.match(managed, /expectedRecipient: packet\.email/);
   assert.equal((managed.match(/continueManagedBrowser\(/g) ?? []).length, 1);

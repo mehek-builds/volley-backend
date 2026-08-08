@@ -13,6 +13,13 @@ export type ManagedBrowserAction = {
   timeout?: number;
   attribute?: string;
   file?: { name: string; mimeType: string; base64: string };
+  /* The emailed code that finishes a Greenhouse submit, carried on the submit click itself.
+   *
+   * On the click, and not as its own action, because the control it types into does not exist until
+   * that click has happened - and because MANAGED_ACTION_LIMIT is 120, a real Greenhouse packet
+   * already reconstructs to exactly 120, and an action added here would displace a field fill. The
+   * runner does click, type, click and reports the outcome in securityCodeAttempt. */
+  securityCode?: string;
 };
 
 // One entry per text-shaped custom question the 'discover' action found on the live page.
@@ -51,6 +58,26 @@ export type ManagedBrowserResult = {
   extracted?: Array<{ selector: string; label?: string; value: string | null }>;
   continuationToken?: string;
   continuationExpiresAt?: string;
+  /* The human check the page is holding the application behind, read off the CONTROL by the runner
+   * at zero action cost. Greenhouse emails an 8-character code and renders a code field, and files
+   * nothing until that code is entered and the form is sent again. See lib/securityCode.ts.
+   *
+   * Absent on a runner deployed before this shipped, which is the ordinary case during a rollout,
+   * and absent means "not observed" and never "not present" - so nothing downstream may read its
+   * absence as proof a form has no challenge. */
+  humanVerification?: { kind: 'security_code'; fieldCount: number; sentTo: string | null; label?: string | null } | null;
+  /* What happened to a code this run was given, or null when it was given none. */
+  securityCodeAttempt?: {
+    supplied: boolean;
+    entered: boolean;
+    resubmitted?: boolean;
+    outcome: 'accepted' | 'rejected' | 'no_control' | 'not_entered';
+  } | null;
+  /* How many form submissions the runner's guard stopped. Zero on a run that was allowed to submit,
+   * because the guard is not installed there. NON-ZERO ON A FILL RUN IS A DEFECT REPORT: something
+   * in the action list tried to send a real application to a real employer with no authorization
+   * behind it, which is exactly what happened to three packets on 2026-08-08. */
+  blockedSubmits?: number;
 };
 
 type ManagedBrowserError = string | { message?: string; code?: string };
@@ -218,6 +245,7 @@ export async function runManagedBrowser(
   actions: ManagedBrowserAction[],
   options: {
     screenshot?: boolean;
+    allowSubmit?: boolean;
     requestContinuation?: boolean;
     continuationCheckpoint?: boolean;
     continuationTtlSeconds?: number;
@@ -242,6 +270,7 @@ export async function runManagedBrowser(
       url: portalUrl,
       actions: outboundActions,
       screenshot: options.screenshot ?? true,
+      allowSubmit: options.allowSubmit === true,
       fullPage: true,
       waitUntil: 'domcontentloaded',
       ...(options.requestContinuation ? {

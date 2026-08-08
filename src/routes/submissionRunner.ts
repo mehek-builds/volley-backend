@@ -11,7 +11,18 @@ import {
   readApplicationReview,
   type ApplicationAttentionCategory,
   type ApplicationReviewState,
+  type SecurityCodeAttempt,
 } from '../lib/applicationReview';
+import {
+  beginSecurityCodeState,
+  findSecurityCodeAttempt,
+  normalizeSecurityCode,
+  readManagedSecurityCodeChallenge,
+  securityCodeAttentionReason,
+  securityCodeFingerprint,
+  withSecurityCode,
+  withSecurityCodeAttempt,
+} from '../lib/securityCode';
 import {
   connectToSession,
   continueManagedBrowser,
@@ -1351,8 +1362,53 @@ async function prepareManaged(
     && evidenceBlockers.length === 0
     && discoveryFailures.length === 0
     && unansweredRequiredQuestions.length === 0;
+  /* A FILL RUN THAT FOUND A SECURITY-CODE SCREEN HAS SUBMITTED THIS APPLICATION.
+   *
+   * Measured 2026-08-08: three Greenhouse packets (Redwood Materials, Scale AI, Cresta) came out of
+   * this exact function at 'ready_for_final_approval', and the applicant's mailbox held a Greenhouse
+   * security-code email timestamped to the minute of each run. submission_claimed_at,
+   * submission_authorization and browser_session_id were all null on all three, so submit() never
+   * ran: the fill run itself put an application in front of an employer.
+   *
+   * Two things follow, and the order matters. First, this state OUTRANKS the prepared status, which
+   * would otherwise offer her a green "Send it" button over a form the employer has already seen -
+   * pressing it issues another code and files nothing. Second, submit_was_authorized: false records
+   * that no authorization existed, because that is a Litos defect and not a fact about the employer,
+   * and it needs to be countable rather than reconstructed from timestamps a year from now.
+   *
+   * The runner's own submit guard is what should keep this branch cold; blockedSubmits says whether
+   * it ever fired. This branch stays regardless: the guard cannot see a page that posts from its own
+   * click handler, and a state Litos cannot describe is the failure this whole change is about. */
+  const challenge = readManagedSecurityCodeChallenge(result);
+  if (result.blockedSubmits) {
+    fastify.log.error(
+      { applicationId: row.id, portal, blockedSubmits: result.blockedSubmits },
+      'A fill run attempted to submit the employer form and was stopped',
+    );
+  }
+  const securityCode = challenge
+    ? beginSecurityCodeState({
+      challenge,
+      attemptedAt: new Date().toISOString(),
+      authorized: false,
+      existing: current.security_code,
+    })
+    : null;
+  if (securityCode) {
+    fastify.log.error(
+      { applicationId: row.id, portal, sentTo: securityCode.sent_to, digits: securityCode.digits },
+      'A fill run reached an emailed security-code screen, so this application was submitted without authorization',
+    );
+  }
   const review = nextReview(current, {
     ...preparedReviewPatch(authorization, safe),
+    ...(securityCode
+      ? {
+        status: 'awaiting_security_code' as const,
+        security_code: securityCode,
+        submission_attempted_at: securityCode.requested_at,
+      }
+      : {}),
     ...(captchaAttention
       ? beginStall(current, {
         surface: 'server_run',
@@ -1386,8 +1442,17 @@ async function prepareManaged(
     verification: { status: verificationHandoff ? 'handoff' : 'not_needed' },
     questions: mergedQuestions,
     cover_letter_supported: coverLetterSupported,
-    attention_reason: attentionReasons.join('\n') || undefined,
-    attention_categories: attentionCategories.length > 0 ? attentionCategories : undefined,
+    // The security-code sentence LEADS when there is one, and it leads because it is the only line
+    // here that says an application has already reached the employer. The blockers below it are
+    // still worth reading - they describe the form that was sent - but a list of empty fields shown
+    // above "this was submitted" reads as a form that was not.
+    attention_reason: [
+      ...(securityCode ? [securityCodeAttentionReason(securityCode)] : []),
+      ...attentionReasons,
+    ].join('\n') || undefined,
+    attention_categories: securityCode
+      ? ['security_code' as const, ...attentionCategories.filter((category) => category !== 'security_code')]
+      : attentionCategories.length > 0 ? attentionCategories : undefined,
     handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
     submission_error: undefined,
   });
@@ -1796,7 +1861,15 @@ async function submitViaAtsSubmissionChannel(
   return false;
 }
 
-async function submit(row: ResumeRow, fastify: FastifyInstance) {
+// `securityCode` is the emailed code that finishes a Greenhouse submit, and it is a PARAMETER rather
+// than a stored field on purpose: it is a live credential to a real employer's form, and the review
+// object it would have to live in is unvalidated JSON that is serialized to the dashboard and the
+// extension. Only its salted digest is ever written down, and only to make the endpoint idempotent.
+//
+// Threaded through submit() rather than given its own run, so the finishing path inherits every
+// guard this one already has: the authorization check, the claim, the daily cap, the portal gates,
+// the ATS channel and the CAPTCHA probe. A parallel path would inherit none of them.
+async function submit(row: ResumeRow, fastify: FastifyInstance, options: { securityCode?: string } = {}) {
   const current = readApplicationReview(row.spec);
   if (!current?.submission_run_id || !current.portal_url) throw new Error('The prepared run is missing');
   const authorization = await standingAuthorization(row.user_id);
@@ -1845,10 +1918,24 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
       { applicationId: row.id, duplicateOf: duplicate.match.application_id, basis: duplicate.match.basis },
       'Submission refused: this user already applied to this posting',
     );
+    /* Refuse, but do not DEMOTE a packet the employer already holds.
+     *
+     * Same hazard as the blank-required gate below, and it has to be answered the same way or the
+     * two drift. A packet finishing a security-code submission has already had its form accepted
+     * once and is waiting on the emailed code; needs_attention says nothing was sent, and
+     * submitRequestDisposition treats needs_attention as re-runnable, so demoting here would reopen
+     * the ordinary submit path on an application that is already with the employer. The refusal
+     * itself stands - if another packet for this posting really did go out, this one must not follow
+     * it - and both facts are told to the applicant, hers first. */
+    const finishingSecurityCode = Boolean(options.securityCode) && Boolean(current.security_code);
     await writeReview(row, nextReview(current, {
-      status: 'needs_attention',
-      attention_reason: duplicate.reason,
-      attention_categories: ['duplicate_application'],
+      status: finishingSecurityCode ? 'awaiting_security_code' : 'needs_attention',
+      attention_reason: finishingSecurityCode
+        ? `${securityCodeAttentionReason(current.security_code!)}\n${duplicate.reason}`
+        : duplicate.reason,
+      attention_categories: finishingSecurityCode
+        ? ['security_code', 'duplicate_application']
+        : ['duplicate_application'],
       submission_authorization: undefined,
       submission_claimed_at: undefined,
       submission_claim_id: undefined,
@@ -1888,11 +1975,36 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
       { applicationId: row.id, fields: unansweredRequired },
       'Submission withheld at the click: required questions are still unanswered',
     );
+    /* THE ONE PACKET THIS GATE MUST NOT DEMOTE.
+     *
+     * A packet finishing a security-code submission has ALREADY reached the employer: the form went
+     * in, the employer emailed a code, and this call exists to send it back. needs_attention says
+     * the opposite of all three - "this was not sent" is false, and submitRequestDisposition treats
+     * needs_attention as re-runnable, so demoting here would reopen the ordinary submit path on an
+     * application an employer already holds. That is the exact failure the awaiting_security_code
+     * status was introduced to close.
+     *
+     * The refusal itself is right and stands: refilling a form with a blank required answer sends a
+     * worse application than the one already in, and the runner's own pre-submit gate would withhold
+     * the click anyway. Only the state it lands in changes. Keyed on options.securityCode rather
+     * than on the status, because finishSecurityCodeSubmission has already moved the packet to
+     * 'submitting' by the time it gets here - the request is the only thing that still knows.
+     *
+     * The security-code sentence LEADS, for the same reason it leads in prepareManaged: it is the
+     * only line that says an application has already gone to the employer. */
+    const finishingSecurityCode = Boolean(options.securityCode) && Boolean(claimedReview.security_code);
+    const requiredSentence = `${unansweredRequired.length} required `
+      + `${unansweredRequired.length === 1 ? 'question is' : 'questions are'} still unanswered, so this was not sent: `
+      + `${unansweredRequired.map((label) => `"${label.slice(0, 60)}"`).join(', ').slice(0, 400)}`;
     await writeReview(row, nextReview(claimedReview, {
-      status: 'needs_attention',
-      attention_reason: `${unansweredRequired.length} required `
-        + `${unansweredRequired.length === 1 ? 'question is' : 'questions are'} still unanswered, so this was not sent: `
-        + `${unansweredRequired.map((label) => `"${label.slice(0, 60)}"`).join(', ').slice(0, 400)}`,
+      status: finishingSecurityCode ? 'awaiting_security_code' : 'needs_attention',
+      attention_reason: finishingSecurityCode
+        ? `${securityCodeAttentionReason(claimedReview.security_code!)}\n${unansweredRequired.length} required `
+          + `${unansweredRequired.length === 1 ? 'question is' : 'questions are'} still unanswered on the form, `
+          + `so Litos did not send it again: `
+          + `${unansweredRequired.map((label) => `"${label.slice(0, 60)}"`).join(', ').slice(0, 400)}`
+        : requiredSentence,
+      ...(finishingSecurityCode ? { attention_categories: ['security_code' as const] } : {}),
       submission_claimed_at: undefined,
       submission_claim_id: undefined,
     }));
@@ -1986,14 +2098,21 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
     const builtPacket = await buildPacket(row);
     const packet = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
     const verificationRequestedAt = new Date();
+    const initialActions = options.securityCode
+      ? withSecurityCode(buildManagedPortalActions(portal, packet, true), options.securityCode)
+      : buildManagedPortalActions(portal, packet, true);
     const result = await runManagedBrowser(
       applicationUrl,
-      buildManagedPortalActions(portal, packet, true),
-      { requestContinuation: true, continuationTtlSeconds: 120 },
+      initialActions,
+      {
+        allowSubmit: true,
+        ...(!options.securityCode ? { requestContinuation: true, continuationTtlSeconds: 120 } : {}),
+      },
     );
     let receiptResult = result;
     let verification: ApplicationReviewState['verification'] = { status: 'not_needed' };
-    if (managedResultNeedsEmailVerification(result)) {
+    const initialChallenge = readManagedSecurityCodeChallenge(result);
+    if (!options.securityCode && initialChallenge && managedResultNeedsEmailVerification(result)) {
       const requestedAt = verificationRequestedAt.toISOString();
       const continuationExpiresAt = result.continuationExpiresAt;
       const continuationToken = result.continuationToken;
@@ -2002,83 +2121,61 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
       const continuationIsLive = typeof continuationToken === 'string'
         && typeof continuationExpiresAt === 'string'
         && Date.parse(continuationExpiresAt) > Date.now();
-      if (!continuationIsLive || verificationSettings?.enabled !== true) {
+      if (continuationIsLive && verificationSettings?.enabled === true) {
+        // The capability is opaque, project-bound and expires within two minutes. Persist it only
+        // while this worker polls the email address pinned into this exact packet.
         await writeReview(row, nextReview(claimedReview, {
-          status: 'needs_attention',
-          verification: { status: 'verification_pending', requested_at: requestedAt, retry_count: 0 },
-          attention_reason: verificationSettings?.enabled === true
-            ? 'The employer sent an email verification code, but the secure browser continuation expired. Open this application to finish verification.'
-            : 'The employer sent an email verification code. Open this application to finish verification.',
+          verification: {
+            status: 'searching',
+            requested_at: requestedAt,
+            retry_count: 0,
+            continuation_token: continuationToken,
+            continuation_expires_at: continuationExpiresAt,
+          },
+          attention_reason: undefined,
           submission_error: undefined,
         }));
-        return;
+        const prepared = await prepareManagedEmailVerification({
+          result,
+          userId: row.user_id,
+          portalUrl: applicationUrl,
+          requestedAt: verificationRequestedAt,
+          permissionGranted: true,
+          expectedRecipient: packet.email,
+          applicationId: row.id,
+          attempts: 10,
+          delayMs: 3_000,
+        });
+        if (prepared.status === 'ready' && Date.parse(continuationExpiresAt) > Date.now()) {
+          try {
+            // Exactly one continuation call. An uncertain click is never retried.
+            receiptResult = await continueManagedBrowser(continuationToken, prepared.actions);
+          } catch (error) {
+            await writeReview(row, nextReview(claimedReview, {
+              status: 'needs_attention',
+              verification: { status: 'verification_pending', requested_at: requestedAt, retry_count: 1 },
+              attention_reason: 'Litos entered the employer verification step, but could not prove the final result. Check the employer portal before trying anything again.',
+              submission_error: error instanceof Error ? error.message.slice(0, 500) : 'Managed verification continuation failed',
+            }));
+            return;
+          }
+          if (!readManagedSecurityCodeChallenge(receiptResult)) {
+            verification = {
+              status: 'completed',
+              provider: prepared.provider,
+              requested_at: requestedAt,
+              retry_count: 1,
+              completed_at: new Date().toISOString(),
+            };
+          } else {
+            verification = { status: 'verification_pending', requested_at: requestedAt, retry_count: 1 };
+          }
+        } else {
+          verification = { status: 'verification_pending', requested_at: requestedAt, retry_count: 0 };
+        }
+      } else {
+        verification = { status: 'verification_pending', requested_at: requestedAt, retry_count: 0 };
       }
-
-      // The capability is opaque, project-bound and expires within two minutes. Persist it only
-      // while this worker polls the inbox address that was pinned into this exact application
-      // packet. No URL is accepted by the continuation API, so this cannot silently reopen a fresh
-      // page and mistake a different session for the one that requested the code.
-      await writeReview(row, nextReview(claimedReview, {
-        verification: {
-          status: 'searching',
-          requested_at: requestedAt,
-          retry_count: 0,
-          continuation_token: continuationToken,
-          continuation_expires_at: continuationExpiresAt,
-        },
-        attention_reason: undefined,
-        submission_error: undefined,
-      }));
-      const prepared = await prepareManagedEmailVerification({
-        result,
-        userId: row.user_id,
-        portalUrl: applicationUrl,
-        requestedAt: verificationRequestedAt,
-        permissionGranted: true,
-        expectedRecipient: packet.email,
-        applicationId: row.id,
-        attempts: 10,
-        delayMs: 3_000,
-      });
-      if (prepared.status !== 'ready' || Date.parse(continuationExpiresAt) <= Date.now()) {
-        await writeReview(row, nextReview(claimedReview, {
-          status: 'needs_attention',
-          verification: { status: 'verification_pending', requested_at: requestedAt, retry_count: 1 },
-          attention_reason: 'The employer sent an email verification code, but Litos could not match it to this application before the secure session expired. Open this application to finish verification.',
-          submission_error: undefined,
-        }));
-        return;
-      }
-      try {
-        // Exactly one continuation call. If this click has an uncertain outcome, this function does
-        // not retry it and does not fall back to result.url. The single-use token is considered
-        // consumed whether the response succeeds or fails.
-        receiptResult = await continueManagedBrowser(continuationToken, prepared.actions);
-      } catch (error) {
-        await writeReview(row, nextReview(claimedReview, {
-          status: 'needs_attention',
-          verification: { status: 'verification_pending', requested_at: requestedAt, retry_count: 1 },
-          attention_reason: 'Litos entered the employer verification step, but could not prove the final result. Open this application to confirm it before trying anything again.',
-          submission_error: error instanceof Error ? error.message.slice(0, 500) : 'Managed verification continuation failed',
-        }));
-        return;
-      }
-      if (managedResultNeedsEmailVerification(receiptResult)) {
-        await writeReview(row, nextReview(claimedReview, {
-          status: 'needs_attention',
-          verification: { status: 'verification_pending', requested_at: requestedAt, retry_count: 1 },
-          attention_reason: 'The employer did not accept the verification code. Open this application to finish verification.',
-          submission_error: undefined,
-        }));
-        return;
-      }
-      verification = {
-        status: 'completed',
-        provider: prepared.provider,
-        requested_at: requestedAt,
-        retry_count: 1,
-        completed_at: new Date().toISOString(),
-      };
     }
     const receipt = readManagedReceipt(receiptResult);
     if (!receiptResult.screenshot) throw new Error('Stratus managed browser did not return a receipt screenshot');
@@ -2090,11 +2187,77 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
       // fail the run at the worst possible moment: after the employer already has it.
       { access: 'public', contentType: 'image/png', addRandomSuffix: true },
     );
+    /* THE SUBMIT LANDED AND THE EMPLOYER ASKED FOR A CODE, so this is not 'submitted'.
+     *
+     * Read off the control the runner found, never off the page's text: readManagedReceipt scrapes
+     * a confirmation SENTENCE, and a Greenhouse page that has just refused an application still
+     * carries plenty of encouraging prose. Recording a receipt here would mean telling the applicant
+     * an application was filed while the employer holds nothing, which is the single worst thing
+     * this system can say.
+     *
+     * The screenshot is kept either way. It is the evidence of what was actually on screen, and it
+     * is what makes the next state debuggable rather than a claim. */
+    const challenge = readManagedSecurityCodeChallenge(receiptResult);
+    if (challenge) {
+      const securityCode = beginSecurityCodeState({
+        challenge,
+        attemptedAt: capturedAt,
+        authorized: true,
+        existing: claimedReview.security_code,
+      });
+      const attempted = options.securityCode
+        ? withSecurityCodeAttempt(securityCode, {
+          at: capturedAt,
+          fingerprint: securityCodeFingerprint(row.id, options.securityCode),
+          // The runner says what happened to the code it was given, and it says it by re-reading the
+          // control after the resubmit. 'rejected' when it typed the code and the challenge was
+          // still there; the other two mean Litos could not get the code into the page at all, which
+          // is a defect of ours and must never be reported to her as a wrong code.
+          outcome: receiptResult.securityCodeAttempt?.outcome === 'rejected' ? 'rejected'
+            : receiptResult.securityCodeAttempt?.outcome === 'no_control' ? 'no_control'
+              : 'not_entered',
+        })
+        : securityCode;
+      await writeReview(row, nextReview(claimedReview, {
+        status: 'awaiting_security_code',
+        security_code: attempted,
+        submission_attempted_at: capturedAt,
+        preview_screenshot_url: blob.url,
+        submission_error: undefined,
+        attention_reason: securityCodeAttentionReason(attempted),
+        attention_categories: ['security_code'],
+        // Cleared so the packet is not left looking mid-flight. The claim is what blocks a re-run
+        // through the ordinary path, and it is not needed for that here: submitRequestDisposition
+        // rejects this status outright, claim or no claim.
+        submission_claimed_at: undefined,
+        submission_claim_id: undefined,
+      }));
+      fastify.log.warn({
+        applicationId: row.id,
+        sentTo: attempted.sent_to,
+        digits: attempted.digits,
+        codeSupplied: Boolean(options.securityCode),
+        codeOutcome: receiptResult.securityCodeAttempt?.outcome ?? null,
+      }, 'Employer is holding this application behind an emailed security code');
+      return;
+    }
     await writeReview(row, nextReview(claimedReview, {
       status: 'submitted',
       submitted_at: capturedAt,
       submission_error: undefined,
       verification,
+      // Present only when a code finished this one, and it is the fact that makes the receipt
+      // legible: this application was sent, refused, and completed with a code the applicant read
+      // out of her own mailbox.
+      ...(options.securityCode && claimedReview.security_code
+        ? {
+          security_code: withSecurityCodeAttempt(claimedReview.security_code, {
+            at: capturedAt,
+            fingerprint: securityCodeFingerprint(row.id, options.securityCode),
+            outcome: 'accepted',
+          }),
+        }
+        : {}),
       receipt: {
         confirmation_text: receipt.confirmationText,
         final_url: receipt.finalUrl,
@@ -2273,6 +2436,105 @@ async function fail(row: ResumeRow, error: unknown) {
     // runner break, and on what" had no answer at all.
     attention_categories: outcome.attentionCategories.length > 0 ? outcome.attentionCategories : undefined,
   }));
+}
+
+export type SecurityCodeSubmissionOutcome =
+  | { kind: 'not_found' }
+  /* The packet is not waiting on a code. Covers the ordinary races - it was finished in another tab,
+   * or the state moved on - and is deliberately distinct from a rejected code. */
+  | { kind: 'not_awaiting'; status: ApplicationReviewState['status'] }
+  | { kind: 'invalid_code' }
+  /* This exact code was already tried. The stored outcome is returned and NO RUN IS MADE, which is
+   * the whole idempotency guarantee: a double-click, a retried request or a refreshed page cannot
+   * put a second application in front of an employer. */
+  | { kind: 'already_attempted'; outcome: SecurityCodeAttempt['outcome']; review: ApplicationReviewState }
+  | { kind: 'done'; review: ApplicationReviewState };
+
+/**
+ * Finish an application the employer is holding behind an emailed security code.
+ *
+ * It moves the packet back onto the ordinary submit path with a per-application authorization - the
+ * applicant supplying a code IS the approval, and it is the same shape of authorization the approve
+ * route writes - and then runs submit() with the code in hand. Everything downstream is the plumbing
+ * that already exists.
+ *
+ * WHAT THIS CANNOT PROMISE, and it is written here rather than discovered later. The managed runner
+ * is stateless and one-shot: a finishing run loads the form fresh, fills it, and submits, and only
+ * then does the code control exist to type into. That first submit is what re-presents the
+ * challenge, and whether Greenhouse re-issues a code at that point or keeps the outstanding one
+ * valid decides whether the code she supplied is still the right one. Both are plausible and the
+ * question has not been answered against a live posting. So every attempt is recorded with its
+ * outcome, 'rejected' is reported as rejected rather than dressed up, and the sentence she gets then
+ * tells her to use the newest email. The first real use of this endpoint is the measurement.
+ *
+ * A stateful browser session - Browserbase contexts, which this repo already has plumbing for -
+ * would remove the question entirely by keeping the pending submit alive between the two halves.
+ * That is the fix if the measurement comes back badly, and it is a bigger change than this one.
+ */
+export async function finishSecurityCodeSubmission(
+  applicationId: string,
+  rawCode: unknown,
+  fastify: FastifyInstance,
+): Promise<SecurityCodeSubmissionOutcome> {
+  const rows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, applicationId)).limit(1);
+  const row = rows[0];
+  if (!row) return { kind: 'not_found' };
+  const current = readApplicationReview(row.spec);
+  if (!current) return { kind: 'not_found' };
+  if (current.status !== 'awaiting_security_code' || !current.security_code) {
+    return { kind: 'not_awaiting', status: current.status };
+  }
+  const code = normalizeSecurityCode(rawCode, current.security_code.digits);
+  if (!code) return { kind: 'invalid_code' };
+  const fingerprint = securityCodeFingerprint(row.id, code);
+  const seen = findSecurityCodeAttempt(current.security_code, fingerprint);
+  if (seen) return { kind: 'already_attempted', outcome: seen.outcome, review: current };
+
+  // Onto the submit path. per_application_approval is the same source the approve route writes, and
+  // it is the honest one here: the applicant produced a code out of her own mailbox for this one
+  // application, which is a decision about this application and not a standing setting.
+  //
+  // The claim is cleared so claimSubmission can take a fresh one. That is safe precisely because
+  // this endpoint is the only door into this state - submitRequestDisposition rejects
+  // 'awaiting_security_code' outright - and the fingerprint check above has already refused a repeat
+  // of this exact code.
+  const requested = nextReview(current, {
+    status: 'submitting',
+    submission_authorization: {
+      source: 'per_application_approval',
+      authorized_at: new Date().toISOString(),
+    },
+    submission_claimed_at: undefined,
+    submission_claim_id: undefined,
+    submission_error: undefined,
+  });
+  await writeReview(row, requested);
+  const claimedRows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, applicationId)).limit(1);
+  const activeRow = claimedRows[0] ?? row;
+  try {
+    await submit(activeRow, fastify, { securityCode: code });
+  } catch (error) {
+    fastify.log.error({ error, applicationId }, 'Security-code submission failed');
+    await fail(activeRow, error);
+  }
+  const refreshed = await db.select().from(generated_resumes).where(eq(generated_resumes.id, applicationId)).limit(1);
+  const review = refreshed[0] ? readApplicationReview(refreshed[0].spec) : null;
+  if (!review) return { kind: 'not_found' };
+  // A run that ended somewhere other than the two expected states still owes an attempt record, or
+  // the same code could be replayed against the employer a moment later. fail() has already written
+  // the cause; this only makes sure the fingerprint is remembered.
+  if (review.status !== 'submitted' && review.status !== 'awaiting_security_code' && review.security_code) {
+    const recorded = nextReview(review, {
+      security_code: withSecurityCodeAttempt(review.security_code, {
+        at: new Date().toISOString(),
+        fingerprint,
+        outcome: 'error',
+      }),
+    });
+    await writeReview(refreshed[0], recorded);
+    return { kind: 'done', review: recorded };
+  }
+  return { kind: 'done', review };
 }
 
 // `unattended` is the CRON path saying "nobody is watching this run", and it is deliberately not
