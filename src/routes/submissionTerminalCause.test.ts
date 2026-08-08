@@ -68,7 +68,7 @@ async function reviewStatusUnion(): Promise<ApplicationReviewState['status'][]> 
   return statuses as ApplicationReviewState['status'][];
 }
 
-test('every terminal status in the union is classified, and only those two are', async () => {
+test('every terminal status in the union is classified, and only those are', async () => {
   const statuses = await reviewStatusUnion();
   const terminal = statuses.filter((status) => isTerminalRunStatus(status));
   assert.deepEqual(terminal.sort(), [...TERMINAL_RUN_STATUSES].sort());

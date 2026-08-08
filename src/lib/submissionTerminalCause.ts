@@ -6,13 +6,19 @@ import type { ApplicationAttentionCategory, ApplicationReviewState } from './app
  * Everything else in the status union is a stage the pipeline is still moving through
  * ('preparing', 'filling', 'submitting'), a stage waiting on a decision that is not a failure
  * ('ready_for_final_approval'), or a success carrying its own evidence ('submitted' carries a
- * receipt). These two are the ones where the run is over and the applicant is left holding it.
+ * receipt). These are the ones where the run is over and the applicant is left holding it.
+ *
+ * 'awaiting_security_code' belongs here even though nothing failed. The run is over, an application
+ * has reached the employer, and it will not be filed until a human does something. That is exactly
+ * the condition this list encodes, and putting it here is what forces it through withTerminalCause
+ * and guarantees it can never be persisted as a bare status with no sentence attached - which is
+ * precisely how the three measured packets were stored.
  *
  * Kept as a value, not just a type, because the test enumerates it against the status union in
  * applicationReview.ts: a status added later is either classified here on purpose or the
  * enumeration fails.
  */
-export const TERMINAL_RUN_STATUSES = ['needs_attention', 'failed'] as const;
+export const TERMINAL_RUN_STATUSES = ['needs_attention', 'failed', 'awaiting_security_code'] as const;
 
 export type TerminalRunStatus = typeof TERMINAL_RUN_STATUSES[number];
 
@@ -46,11 +52,32 @@ export const UNEXPLAINED_RUN_FAILURE_REASON =
 export const UNEXPLAINED_ATTENTION_REASON =
   'Litos stopped on this application and could not describe what it stopped on, so nothing has been sent. Open it when you have a minute and finish it off.';
 
+/**
+ * The last-resort sentence for a security-code state whose details did not survive.
+ *
+ * It has its own fallback because the other two both say some version of "nothing has been sent",
+ * and here that is FALSE: the employer has already received a submission. A generic sentence is
+ * recoverable; a generic sentence that contradicts the state is not.
+ */
+export const UNEXPLAINED_SECURITY_CODE_REASON =
+  'Litos submitted this application and the employer asked for a security code by email before it will file it. Litos could not read which address it went to. Check your inbox for the code and enter it here, and Litos will finish sending this one.';
+
 export function attentionCategoriesForReasons(reasons: readonly string[]): ApplicationAttentionCategory[] {
   const categories = new Set<ApplicationAttentionCategory>();
   for (const reason of reasons) {
     const normalized = reason.toLowerCase();
-    if (/^captcha requires your attention$|prove you are human/.test(normalized)) {
+    /* FIRST, and it has to be: this is the one state that has already reached an employer, and it
+     * must not be reclassified as one that has not.
+     *
+     * Matched on the CLAUSE, not on the bare phrase "security code". Both sentences that produce
+     * this category are written in securityCode.ts and in this file, and both contain one of these
+     * two. A bare /security code/ would also fire on an employer's own field label arriving through
+     * a blocker line - "\"Security code\" is required and is still empty" is exactly the shape the
+     * runner's required-field scan emits - and that would label a form Litos merely failed to fill
+     * as an application already sitting with an employer. */
+    if (/security code was emailed|asked for a security code by email/.test(normalized)) {
+      categories.add('security_code');
+    } else if (/^captcha requires your attention$|prove you are human/.test(normalized)) {
       categories.add('captcha');
     } else if (/you have already applied to/.test(normalized)) {
       // Ahead of run_failed and of the generic arm on purpose. A refused duplicate is not a
@@ -102,7 +129,11 @@ export function withTerminalCause(review: ApplicationReviewState): ApplicationRe
     ? review.attention_reason
     : review.status === 'failed'
       ? UNEXPLAINED_RUN_FAILURE_REASON
-      : UNEXPLAINED_ATTENTION_REASON;
+      : review.status === 'awaiting_security_code'
+        // Never the generic attention sentence for this one. That sentence ends "nothing has been
+        // sent", and on a packet in this state an employer already holds a submission.
+        ? UNEXPLAINED_SECURITY_CODE_REASON
+        : UNEXPLAINED_ATTENTION_REASON;
   const derived = attentionCategoriesForReasons(reason.split('\n').filter((line) => line.trim()));
   const categories = review.attention_categories?.length
     ? review.attention_categories

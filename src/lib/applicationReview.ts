@@ -15,6 +15,13 @@ export type ApplicationReviewQuestion = {
 
 export type ApplicationAttentionCategory =
   | 'captcha'
+  /* The employer emailed a security code and will not file the application until it is entered and
+   * the form is submitted again. Distinct from 'captcha' on purpose: a CAPTCHA is a widget on the
+   * page and the applicant has to go and solve it there, while this is an email round trip that
+   * Litos can finish for her the moment she types eight characters. Three packets on 2026-08-08
+   * (Redwood Materials, Scale AI, Cresta) sat in this state wearing 'ready_for_final_approval' and
+   * no category at all. */
+  | 'security_code'
   /* The run never got to the application form at all: no field was typed, no control was located,
    * nothing was discovered. Deliberately NOT 'evidence_gap', which means the opposite - the form
    * was reached and the evidence of specific fields is missing. Five owner packets on 2026-08-06
@@ -137,6 +144,36 @@ function preferredPortalSelector(existing: string | undefined, next: string | un
   return existing;
 }
 
+/* One attempt at the emailed code, and what the page did with it.
+ *
+ * The code is never stored, only a salted digest of it (securityCodeFingerprint). That digest is
+ * what makes the endpoint idempotent: the same code supplied twice is recognised and answered from
+ * here rather than driving a second run at a live employer's form. */
+export type SecurityCodeAttempt = {
+  at: string;
+  fingerprint: string;
+  /* 'accepted' - the challenge was gone after the resubmit, which is the only thing that counts as
+   *   accepted, and it is read off the control rather than off any success message.
+   * 'rejected' - the code was typed, the form was sent again, and the challenge was still there.
+   * 'not_entered' / 'no_control' - the run could not put the code into the page at all, which is a
+   *   Litos defect and not the applicant's mistake, and must not be reported to her as a bad code.
+   * 'error' - the run threw. */
+  outcome: 'accepted' | 'rejected' | 'not_entered' | 'no_control' | 'error';
+};
+
+export type SecurityCodeState = {
+  /* How many characters the CONTROL asked for. 0 means the page did not say. */
+  digits: number;
+  /* The address the employer said it sent the code to, read from inside the control's own group. */
+  sent_to?: string;
+  /* When the submit that triggered this happened. */
+  requested_at: string;
+  /* Whether that submit came from the authorized path. False is a defect report; see
+   * beginSecurityCodeState. */
+  submit_was_authorized: boolean;
+  attempts?: SecurityCodeAttempt[];
+};
+
 export type ApplicationReviewState = {
   jd_text: string;
   role?: string;
@@ -151,6 +188,23 @@ export type ApplicationReviewState = {
     | 'filling'
     | 'needs_attention'
     | 'ready_for_final_approval'
+    /* SUBMITTED ONCE, NOT FILED, WAITING ON AN EMAILED CODE.
+     *
+     * Its own status rather than a flavour of needs_attention, because the two safety questions
+     * have opposite answers here. needs_attention before a click is re-runnable, and this must
+     * never be: the form has already been sent to the employer once. needs_attention is also
+     * offered as "open the portal and finish it yourself", and this needs the opposite - Litos can
+     * finish it, it just needs eight characters out of her mailbox.
+     *
+     * And emphatically not the ready-for-final-approval status above, which is what all three
+     * measured packets were wearing on 2026-08-08 while the employer had already received a
+     * submission and was waiting on a code. That status renders a green "Send it" button, and
+     * pressing it submits again with no code: another code email, and still nothing filed.
+     *
+     * (Status names are spelled out rather than quoted in this block on purpose:
+     * submissionTerminalCause.test.ts parses this union out of the source by scanning for quoted
+     * lowercase tokens, so a quoted name in a comment reads as a member of the union.) */
+    | 'awaiting_security_code'
     | 'submitting'
     | 'submission_claimed'
     | 'submitted'
@@ -232,6 +286,15 @@ export type ApplicationReviewState = {
      * it again every day forever. */
     nudged_at?: string;
   };
+  /* WHEN A SUBMIT PROVABLY REACHED THE EMPLOYER, whoever made it and whether or not it was allowed.
+   *
+   * Deliberately separate from submitted_at, which means "filed, and here is the receipt", and from
+   * submission_claimed_at, which means "a claim was taken immediately before a click we authorized".
+   * Neither could describe the three packets of 2026-08-08: all three had every one of those fields
+   * null, and all three had a Greenhouse security-code email timestamped to the minute of the run.
+   * An application had reached an employer and no field in this object could say so. */
+  submission_attempted_at?: string;
+  security_code?: SecurityCodeState;
   handoff_expires_at?: string;
   final_approved_at?: string;
   cover_letter_supported?: boolean;
