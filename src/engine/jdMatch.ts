@@ -305,7 +305,7 @@ const HEADING_PATTERNS: Array<{ kind: SectionKind; re: RegExp }> = [
   //                           the section at the tag would zero real content on a third of them.
   //                           They are harmless where they are (matching nothing, they close
   //                           nothing) and they need a rule about their SHAPE, not this list.
-  { kind: 'noise', re: new RegExp(String.raw`^about\b(?!\s+${SECOND_PERSON_SUBJECT}\b)|^disclosures:?$|^apply\??$|\b(who (we are|are we)|our (story|mission|values|culture)|benefits|perks|what else|what we('?ll)? offer|what we pay|compensation|salary|pay range|hourly rate|pay rate|stipend|total rewards|pay transparency|equal opportunity|eeo|diversity|accommodation|privacy|how to apply|why (join|us)|interview process|hiring process|selection process|background check|employment verification)\b`, 'i') },
+  { kind: 'noise', re: new RegExp(String.raw`^about\b(?!\s+${SECOND_PERSON_SUBJECT}\b)|^disclosures:?$|^the process:?$|^apply\??$|\b(who (we are|are we)|our (story|mission|values|culture)|benefits|perks|what else|what we('?ll)? offer|what we pay|compensation|salary|pay range|hourly rate|pay rate|stipend|total rewards|pay transparency|equal opportunity|eeo|diversity|accommodation|privacy|how to apply|why (join|us)|interview process|hiring process|selection process|background check|employment verification)\b`, 'i') },
   { kind: 'preferred', re: /\b(preferred|nice[- ]to[- ]have|bonus|plus(es)?|desired|good to have|additional qualifications)\b/i },
   // `what we('?re)? look(ing)? for` and `(your|the) impact`, not the tighter `what we're looking
   // for` / `your impact` they replaced. Databricks' "Product Management Intern (Summer 2027)"
@@ -370,7 +370,7 @@ function headingCore(line: string): string {
 function isHeadingLine(line: string): boolean {
   const t = headingCore(line);
   if (!t || t.length > 60) return false;
-  if (/^[-*•·]/.test(t)) return false; // a bullet is content, never a heading
+  if (/^[-*•·▪▫‣◦●○–—→⇒»›✓✔]/.test(t)) return false; // a bullet is content, never a heading
   const words = t.split(/\s+/).length;
   if (words > 7) return false;
   return t.endsWith(':') || /^[A-Z][^.!?]*$/.test(t) || t === t.toUpperCase();
@@ -442,8 +442,45 @@ function looksLikeStatedSubHeading(heading: string): boolean {
   return SUBHEADING_VERBS.has(words[0]) || SUBHEADING_WORK_NOUNS.has(words[words.length - 1]);
 }
 
+/**
+ * A HEADING NAMES ITS SECTION BEFORE THE FIRST COMMA, and a line that only reaches the vocabulary
+ * after one is a requirement bullet that lost its bullet marker in the scrape.
+ *
+ * Flow Traders' "Quantitative Trading Intern" (packet b43dbe37) is what this is for. Its bullets
+ * arrive with the markers stripped, so each is a short capitalized line with no full stop, which is
+ * every shape test isHeadingLine has, and two of them carry heading vocabulary:
+ *
+ *   Class of 2028, preferred
+ *   Excellent mental math, quantitative and analytical skills
+ *
+ * Both classified - one `preferred`, one `required` - and each OPENED a section that ran to the end
+ * of the document, over the salary paragraph, the office list and the unsolicited-resume notice.
+ * All nine of that packet's requirements came from below them: `Amsterdam, APAC, Europe, Excel,
+ * Hong Kong, Internet, Law, NYC, York`, and the student was shown 0% against an office directory.
+ *
+ * THE ONE-CONDITION VERSION - "a heading contains no comma" - WAS MEASURED AND IS WRONG. Over the
+ * 85 production packets Deepgram writes "Minimum Skills, Knowledge & Capabilities:" and Cloudflare
+ * writes "Desirable Skills, Knowledge and Experience", both genuine requirements headings. Refusing
+ * them left those blocks unweighted and took Cloudflare's two packets from 22 and 23 to ZERO, with
+ * `athenian` and `journalism` restored to the denominator. A comma is not the signal.
+ *
+ * WHERE the vocabulary sits relative to the comma is. A heading states what the section is and then
+ * elaborates: `Minimum Skills`, `Desirable Skills`, `Qualifications`, all before the first comma. A
+ * bullet is a sentence, and its heading-shaped word lands wherever the sentence puts it: `skills` is
+ * the last word of "Excellent mental math, quantitative and analytical skills", and `preferred` is
+ * a qualifier tacked onto the end of "Class of 2028". Testing the head of the line rather than the
+ * whole of it is the smallest rule that separates the two, and it costs the four real headings in
+ * the corpus nothing.
+ *
+ * A line with no comma is unaffected, which is nearly all of them.
+ */
+function headingSubject(line: string): string {
+  const full = headingCore(line);
+  return full.includes(',') ? full.slice(0, full.indexOf(',')) : full;
+}
+
 function classifyHeading(line: string): SectionKind | undefined {
-  const t = headingCore(line);
+  const t = headingSubject(line);
   for (const { kind, re } of HEADING_PATTERNS) {
     if (!re.test(t)) continue;
     // A footer heading names the footer. A requirements sub-heading names work about it, and
@@ -687,12 +724,47 @@ const NON_RESUME_REQUIREMENT_LINE =
 const APPLICATION_PROCESS_LINE =
   /\b((resumes?|cvs?|cover letters?|transcripts?|applications?|submissions?) (must|should|can|may|are to|need to) be (submitted|uploaded|sent|provided|attached|received)|please (submit|upload|attach|send|include) (your|a|an|all)|to apply,|submit(ted)? (your|a|an) (resume|cv|application) (in|via|through|to))\b/i;
 
+/* THE THREE ADDITIONS ARE THE SAME CLAUSE FAMILY as the ones above and were found the same way,
+ * on the 85 production packets. Astranis states eligibility as "U.S. Citizenship, Lawful Permanent
+ * Residency, or Refugee/Asylee Status Required" and contributed `status` to two packets; Jump
+ * Trading writes "INTERNATIONAL STUDENTS are encouraged to apply. We accept students eligible for
+ * CPT/OPT and we sponsor work visas for full-time positions" and contributed `international` and
+ * `cpt`. Neither sentence is a thing a resume can be scored against, and neither was reachable by
+ * the existing vocabulary. `sponsorship` was here; "we sponsor work visas" is the verb form. */
 const ELIGIBILITY_LINE =
-  /\b((minimum|cumulative|overall|major|current|combined)? ?gpa|grade[- ]point average|authoriz(ed|ation) to work|work authoriz(ed|ation)|legally (authorized|entitled|permitted)|right to work|(visa|employment|work) sponsorship|require sponsorship|employment eligibility)\b/i;
+  /\b((minimum|cumulative|overall|major|current|combined)? ?gpa|grade[- ]point average|authoriz(ed|ation) to work|work authoriz(ed|ation)|legally (authorized|entitled|permitted)|right to work|(visa|employment|work) sponsorship|require sponsorship|employment eligibility|(lawful )?permanent residen(cy|t)|refugee|asylee|sponsors? work visas?)\b/i;
+
+/**
+ * A LEGAL NOTICE OR A STATUTE CITATION, checked AHEAD of the experience guard below because that
+ * guard is what these two sentences hide behind.
+ *
+ * The guard spares any line naming experience, skills, knowledge or ability, which is right in
+ * general and exactly wrong here: a compensation disclosure explains itself in those words.
+ *
+ *   Akuna  "In accordance with the Illinois Equal Pay Act, the minimum annualized base salary
+ *           starts at $145,000. Exact compensation offered may vary based on many factors
+ *           including ... the candidate's experience, qualifications, and skill set."
+ *   DRW    "California residents, please review the California Privacy Notice for information
+ *           about certain legal rights at https://drw.com/california-privacy-notice."
+ *
+ * `base salary` is already in NON_RESUME_REQUIREMENT_LINE and never fired on the first, because
+ * `experience` and `skill` are in the same sentence. The second reaches no pattern at all. Between
+ * them they put `illinois`, `california` and `legal` into the denominators of five packets, and
+ * `california` was scored as a MET requirement on four of them, matched against the school line
+ * "University of Southern California" - geography credited as a satisfied requirement and painted
+ * blue in the resume pane.
+ *
+ * EVERY ENTRY IS A WHOLE CLAUSE, on the standard FOOTER_PROSE sets for rules with no shape guard:
+ * a requirement bullet cannot contain "privacy notice" or "in accordance with the ... Act". Footer
+ * WORDS are not admissible here and none is listed.
+ */
+const LEGAL_NOTICE_LINE =
+  /\b(privacy notice|equal pay act|(salary|pay) transparency (act|law)|in accordance with the [^.]{0,40}\b(act|law)s?\b|does not accept unsolicited)\b/i;
 
 function isNonResumeRequirementLine(line: string): boolean {
   const t = headingCore(line);
   if (!t) return false;
+  if (LEGAL_NOTICE_LINE.test(t)) return true;
   if (
     /\b(experience|skills?|proficiency|fluency|knowledge|background|ability|track record|familiarity)\b/i.test(t) &&
     !/\b(located in|resid(e|ing) in|time ?zones?|utc[+-]?\d)\b/i.test(t)
@@ -1317,6 +1389,7 @@ whether expect actual additionally president stem gpa opt person excels
 federal municipal county province
 department departments
 learn transparency hourly
+act acts statute ordinance pay total package cpt
 `
     .split(/\s+/)
     .filter(Boolean),
@@ -1332,12 +1405,113 @@ learn transparency hourly
  * JD that names examples has one. Fixing it in the stopword list rather than in TECH_MARKER is the
  * narrow move: the marker rule is what admits node.js, C# and CI/CD, and weakening it to spot Latin
  * abbreviations would cost far more than this enumeration of the two that actually occur. */
+/* THE SENTENCE CONNECTIVES ON THE LAST LINE are here for the same reason `etc`, `eg` and `ie` are,
+ * one clause up: a word that joins two sentences is exactly as much of a requirement as an
+ * abbreviation for "and so on" is.
+ *
+ * They reach the term set through the PROPER-NOUN rule rather than through TECH_MARKER, and the
+ * route is worth stating because it is not the obvious one. A connective opens a sentence, so
+ * tokenizeSection marks it `positional`, and the positional branch of isSpecific admits a
+ * capitalized word whose NEXT token is also capitalized. Akuna's Python posting (packet cc9d695d)
+ * writes "...leverage AI in their daily work. However, AI assistance is not permitted during
+ * interviews", and `AI` is capitalized, so `However` cleared the Title Case run test and was shown
+ * to a student in amber as a requirement their resume does not mention.
+ *
+ * Neither POSITIONAL_OPENERS nor a shape rule is the right home. POSITIONAL_OPENERS is scoped to
+ * bullet-initial position and these words are wrong ANYWHERE, mid-sentence included; and no
+ * property of the token separates "However" from "Redux" except knowing what the word means, which
+ * is the argument SKILL_LEXICON and BOILERPLATE both make for enumerating. The set is closed and
+ * tiny: English has a few dozen conjunctive adverbs and none of them is a technology. */
 const GENERIC_STOPWORDS = new Set(
   `the and for with you your our are will from that this have their they who whom able use used
 per via etc eg ie a an of to in on at by as is be we it its or if not but all any more most than then
 what when where how why which while into out up down over under about after before during through
 been was were has had do does did been being also may might could each both few own same so too
-very just now here there these those them he she his her him us me my mine i`
+very just now here there these those them he she his her him us me my mine i
+however furthermore moreover therefore nevertheless nonetheless meanwhile otherwise
+likewise similarly consequently accordingly regardless besides instead thus hence`
+    .split(/\s+/)
+    .filter(Boolean),
+);
+
+/**
+ * Place names, which are never a thing to have done.
+ *
+ * WHY THIS EXISTS ALONGSIDE locationTokens AND addressSpans, both of which already remove geography.
+ * Each of those is driven by evidence the posting supplied about ITSELF: locationTokens reads the
+ * job row's location field, and addressSpans reads text WRITTEN as an address ("Bellevue, WA").
+ * Neither can reach a place the posting merely mentions in prose, and prose is where most of the
+ * geography on this board actually lives. Measured over the 85 production packets on 2026-08-09:
+ *
+ *   Flow Traders   "A similar program is offered in our Amsterdam and Hong Kong offices for
+ *                  students studying or living in Europe and APAC"
+ *   Five Rings     "With offices in New York, Boca Raton, London and Amsterdam"
+ *   Junior AI      "a profitable bootstrapped company of about 28 people across London and New York"
+ *   Akuna          "In accordance with the Illinois Equal Pay Act, the minimum annualized base
+ *                  salary starts at $145,000"
+ *   DRW            "California residents, please review the California Privacy Notice"
+ *
+ * The Flow Traders packet is the one that forced this. Its whole geography sits at `kind: required`,
+ * because a requirements bullet that lost its bullet marker in scraping ("Excellent mental math,
+ * quantitative and analytical skills") reads as a heading and opens a section that runs to the end
+ * of the document. PLACE_SAFE_KINDS confines the location exclusion to `body` prose on purpose, so
+ * the posting's OWN city was not removed either: the student was shown a 0% match whose entire gap
+ * list was `Amsterdam, APAC, Europe, Excel, Hong Kong, Internet, Law, NYC, York`.
+ *
+ * AN ENUMERATION, NOT A SHAPE RULE, and the reason is the one PLACE_SAFE_KINDS states at length:
+ * place names collide with real requirements constantly. Mobile, Reading, Split, Cork, Bath, Salem
+ * and Phoenix are all real cities AND all real things a posting can require, and deleting one of
+ * those is WORSE than leaving the geography in, because a requirement the student lacks vanishing
+ * from the denominator inflates the score and vanishes from the list they are supposed to act on.
+ * So this list carries only names with no skill, product or discipline sense, every collision above
+ * is DELIBERATELY ABSENT, and it is consulted behind the same lexicon guard locationTokens,
+ * companyBrandTokens and addressSpans all use.
+ *
+ * COMPONENT WORDS ARE LISTED SEPARATELY from the multi-word names ("hong", "kong", "san",
+ * "francisco", "boca", "raton") because that is the layer this rule acts at. A bigram only forms
+ * from two tokens that are EACH independently specific, so blocking the parts is what stops
+ * `hong kong` and `san francisco` from ever being built; blocking only the joined form would leave
+ * both halves in the denominator on their own.
+ *
+ * US STATE NAMES ARE DELIBERATELY ABSENT, and so is any city that jdMatch.test.ts already uses to
+ * pin a property. The states are covered from the posting's own evidence three ways over -
+ * locationTokens reads the job row, addressSpans reads "<Title Case>, <state>" out of the prose, and
+ * cities.ts holds the code/name mapping - and the COLLISIONS table in that suite pins that a stated
+ * requirement naming a state survives whatever the location column says. An enumeration here would
+ * override that pin globally rather than adding to it. `California` on DRW's four packets and
+ * `Illinois` on Akuna's, the only two state names this corpus produced, are removed at the line
+ * layer instead, by LEGAL_NOTICE_LINE: both occur inside a statute citation or a privacy notice,
+ * which is a sentence no requirement can be, and that is the narrower place to act.
+ *
+ * IT IS THE COMMON CASES, NOT AN EXHAUSTIVE GAZETTEER, for the reason WEB_ADDRESS gives about its
+ * own suffix list. Everything missed is one nuisance term in one posting's denominator; anything
+ * wrongly added would be a real requirement deleted from every posting that states it. Add a name
+ * only after checking it against the corpus, never on the intuition that it "is obviously a city".
+ */
+const PLACE_NAMES = new Set(
+  `apac emea latam europe european asia asian africa oceania scandinavia benelux
+usa america american canada mexico brazil argentina chile colombia peru
+britain england scotland wales ireland france germany spain portugal italy netherlands belgium
+denmark sweden norway finland iceland poland czechia austria switzerland greece
+india china japan korea taiwan singapore malaysia indonesia philippines vietnam thailand
+australia zealand israel emirates arabia qatar kuwait bahrain egypt nigeria kenya
+york nyc brooklyn manhattan queens bronx boston cambridge chicago evanston seattle redmond
+sunnyvale cupertino mountainview palo alto mateo jose diego francisco angeles sacramento oakland
+berkeley pasadena irvine anaheim denver boulder austin dallas houston antonio atlanta miami orlando
+tampa boca raton city philadelphia pittsburgh baltimore charlotte raleigh durham nashville memphis louisville
+minneapolis milwaukee detroit cleveland columbus cincinnati indianapolis omaha wichita tucson
+toronto ottawa vancouver montreal calgary waterloo
+london manchester edinburgh glasgow dublin belfast amsterdam rotterdam eindhoven brussels antwerp
+paris lyon marseille berlin munich hamburg frankfurt stuttgart zurich geneva basel vienna prague
+warsaw krakow budapest bucharest stockholm gothenburg copenhagen oslo helsinki tallinn vilnius riga
+madrid barcelona valencia lisbon porto milan rome turin naples athens istanbul
+tokyo osaka kyoto yokohama seoul busan beijing shanghai shenzhen guangzhou hangzhou taipei
+hong kong singapore bangkok jakarta manila hanoi
+bengaluru bangalore mumbai delhi noida gurgaon gurugram hyderabad chennai kolkata ahmedabad
+sydney melbourne brisbane perth auckland wellington
+aviv jerusalem haifa dubai abu dhabi riyadh doha cairo nairobi lagos accra johannesburg
+sao paulo janeiro bogota santiago lima buenos aires
+san las los saint`
     .split(/\s+/)
     .filter(Boolean),
 );
@@ -1379,7 +1553,8 @@ const NON_REQUIREMENT_ACRONYMS = new Set(
   `usd cad eur gbp aud inr chf jpy sgd aed
 pto ote rsu esop hsa fsa hra cobra fmla pfl ltd std
 ms bs ba bsc msc beng meng
-eeo ada faq tbd asap eod eta hq`
+eeo ada faq tbd asap eod eta hq
+et pt ct mt est edt cst cdt mst mdt pst pdt gmt`
     .split(/\s+/)
     .filter(Boolean),
 );
@@ -1467,6 +1642,16 @@ export interface JdTerm {
   /** How many times the posting names this term. Emphasis, in the employer's own hand: see
    *  EMPHASIS_LIMIT. Only used for ranking, never for scoring. */
   mentions?: number;
+  /**
+   * On a MATCHED term only: the string on the resume that covered this requirement, when it is not
+   * the requirement's own words.
+   *
+   * Written by scoreJdMatch, never by the extractor, because it is a fact about the pair rather
+   * than about the posting. It exists so the review screen can anchor the mark: see resumeSatisfies.
+   * It is never an input to scoring and never widens what counts as a match; it only reports which
+   * of the already-permitted spellings did.
+   */
+  satisfied_by?: string;
   /**
    * First appearance in the document among SCORED sections, as an offset. The last emphasis
    * tiebreak in capToEmphasis; ranking only, never scoring.
@@ -1638,6 +1823,9 @@ function isSpecific(
   if (DOTTED_INITIALISM.test(token)) return false;
   if (isDenied(t)) return false;
   if (NON_REQUIREMENT_ACRONYMS.has(t)) return false;
+  // A place is not a thing to have done. Behind the lexicon guard for the "Java, Indonesia" reason
+  // locationTokens and addressSpans both give: a name that is also a real skill stays a real skill.
+  if (PLACE_NAMES.has(t) && !inLexicon(t)) return false;
   if (inLexicon(t)) {
     // A LEXICON HIT USED TO END THE QUESTION HERE, and that is how "Ability to react quickly and
     // accurately to rapidly changing market conditions" put React on a student's gap list. The
@@ -1872,6 +2060,22 @@ const VERB_MARKERS = new Set([
   'may',
   'might',
   'cannot',
+  // A DETERMINER MARKS THE SAME THING FROM THE OTHER SIDE: the word after it is being used as a
+  // common noun, not named as a product. Databricks' "Product Management Intern (Summer 2027)"
+  // (packets cd4d316d, 7030b54f, a82d860a) writes "Deeply understand customer problem space and
+  // establish the rails for viable solution space", and `rails` is in SKILL_LEXICON, so the ONLY
+  // amber on that whole packet was Ruby on Rails - a framework the posting never mentions - shown
+  // to a student as the single thing standing between them and the job. `rails` occurs exactly once
+  // in that document and it is the English idiom.
+  //
+  // This is the same defect as `react` from "Ability to react quickly", which this list was written
+  // for, and it is guarded by the same three conditions rather than by the marker alone: the
+  // occurrence must be entirely lowercase AND the posting must never write the word with a capital
+  // anywhere. "Experience with the Python standard library" and "the AWS console" are untouched,
+  // because a posting that requires either writes it capitalized. See isSpecific.
+  'the',
+  'a',
+  'an',
 ]);
 
 
@@ -1934,6 +2138,201 @@ function inAddress(spans: Array<[number, number]>, start: number, end: number): 
   return spans.some(([a, b]) => start >= a && end <= b);
 }
 
+/** Does any token on this line reach the term set as a lexicon skill, an acronym or a marked
+ *  technical name? The guard in front of every structural rule below. */
+function carriesHardSignal(text: string): boolean {
+  for (const m of text.matchAll(/[A-Za-z][A-Za-z0-9+#./_-]*/g)) {
+    // ALL-CAPS PROSE IS NOT AN ACRONYM, and without this line the guard defeats itself on exactly
+    // the headings it is meant to catch. ACRONYM is "2-5 capital letters", so in Virtu's all-caps
+    // heading "THE PROCESS" the word `THE` reads as hard signal, the line is spared, and `process`
+    // goes into the denominator. A token the extractor would refuse anyway cannot be the evidence
+    // that keeps a line, so the deny-lists are consulted here exactly as isSpecific consults them.
+    if (isDenied(normalizeTerm(m[0]))) continue;
+    if (isHardSignal(m[0])) return true;
+  }
+  return false;
+}
+
+/**
+ * The spans of a section that are its own STRUCTURE: a heading nobody classified, or the label on
+ * the front of a labelled paragraph.
+ *
+ * segmentJd already CONSUMES every heading it recognises, so "Requirements" and "What you'll do"
+ * never reach the extractor at all. A heading it does NOT recognise is a different story: the line
+ * falls through the whole classifier and is appended to the current section as content, and the
+ * proper-noun rule then reads it exactly as it was meant to be read - a short capitalized phrase
+ * that is nowhere else in the posting - and calls it a requirement. Measured over the 85 production
+ * packets on 2026-08-09:
+ *
+ *   Point72   "Job Description" and "Desirable Candidates"   -> `description`, `desirable`
+ *   Virtu     "THE PROCESS"                                  -> `process`
+ *   Jump      "Also Helpful, but Not Required:"              -> `helpful`
+ *
+ * The LABELLED-PARAGRAPH half is the same defect wearing inlineLabel's shape. That function reads
+ * `Label: <paragraph>` and re-weights the paragraph when the label classifies; when it does not, the
+ * whole line including the label stays where it is, and the label is a capitalized word standing
+ * alone in front of a colon, which is the strongest proper-noun shape there is. DRW's "Software
+ * Developer Intern" carries its perks that way, one label per line:
+ *
+ *   Community: Throughout the summer, we host a variety of educational, social...
+ *   Education: As technology continues to drive the trading industry forward...
+ *   Housing: DRW provides fully furnished apartments located close to the office...
+ *   Mentorship: You'll build a professional relationship with an experienced mentor...
+ *
+ * All four were `kind: required` at weight 1, on a student's gap list, four packets over. The
+ * SKILL_LEXICON note already names `mentorship` - "Mentorship: you'll build a relationship with a
+ * mentor" - as a PERK it refused to admit as a skill; this is the same sentence arriving by the
+ * other door.
+ *
+ * THE GUARD IS HARD SIGNAL, AND IT IS WHAT KEEPS THIS FROM DELETING REQUIREMENTS. A scraped posting
+ * whose bullet markers were lost writes its requirements as short capitalized lines, which is the
+ * same shape as an unrecognised heading and cannot be told from one by position. So a line, or a
+ * label, containing a lexicon skill, an acronym or a technical marker is left entirely alone:
+ * "Python", "C++ / Java", "AWS and Terraform", "Embedded Software Engineering Intern" are all
+ * untouched. What is dropped is the residue - a capitalized phrase with no technical content
+ * whatsoever - which is what a section heading and a perk label both are.
+ *
+ * ONLY THE LABEL IS DROPPED, never the paragraph after it, for the reason inlineLabel gives about
+ * the other direction: the paragraph genuinely belongs to the label and may say something real.
+ *
+ * THE COST IS NAMED RATHER THAN HIDDEN. A heading-shaped line that IS the only place a posting
+ * writes a non-technical requirement - a bare "Machine Learning" heading on a posting that never
+ * says ML again - loses that phrase. Nothing of that shape occurs in the 85-packet corpus, so the
+ * honest bound is "not measured to cost anything", not "cannot".
+ */
+function structuralSpans(text: string): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  let at = 0;
+  for (const line of text.split('\n')) {
+    const start = at;
+    at += line.length + 1;
+    if (!line.trim()) continue;
+    // A bullet is content. Both halves of this rule refuse them outright, the same way inlineLabel
+    // does and for the reason it records: "- Benefits: describe the benefits of our platform" is a
+    // real requirements bullet, and the shape guards would not save it.
+    if (/^\s*[-*•·▪▫‣◦●○–—→⇒»›✓✔]/.test(line)) continue;
+
+    if (isHeadingLine(line) && !classifyHeading(line) && !carriesHardSignal(line)) {
+      out.push([start, start + line.length]);
+      continue;
+    }
+
+    const colon = line.indexOf(':');
+    if (colon < 1) continue;
+    const label = line.slice(0, colon);
+    // isHeadingLine's own budget, not the wider noise one, for the reason inlineLabel states: a long
+    // run of words before a colon is a sentence with a colon in it, not a label.
+    if (label.trim().length > 40 || label.trim().split(/\s+/).length > 6) continue;
+    if (!/^\s*[A-Z]/.test(label)) continue;
+    if (!line.slice(colon + 1).trim()) continue;
+    if (classifyHeading(label) || carriesHardSignal(label)) continue;
+    out.push([start, start + colon]);
+  }
+  return out;
+}
+
+/**
+ * The span of a sentence that lists the EMPLOYER'S OWN ORG CHART.
+ *
+ * Roblox's "[Summer 2027] Software Engineer Intern" (packets 9f1138c0 and b1c2ad7f) is half noise
+ * and all of it comes from two sentences:
+ *
+ *   "Engage in our team matching process, learning about teams across Roblox, including Infra,
+ *    Engine, Search and Discovery, Foundational AI, and Economy..."
+ *   "Partner closely with cross-functional teams, including Design, Product, Data, QA, and DevOps,
+ *    to deliver cohesive products and features."
+ *
+ * `Infra`, `Engine`, `Search`, `Discovery`, `Design` and `Product` are the names of Roblox teams.
+ * Not one is reachable by selfReferenceTokens, roleReferenceTokens, locationTokens or
+ * companyBrandTokens, because none of them IS the company, the role or an office; they are ordinary
+ * capitalized nouns, which is exactly what the proper-noun rule is built to admit. The employer is
+ * telling the student who they would sit next to, and the student was charged for not having it.
+ *
+ * THE DISCRIMINATOR IS THE OCCURRENCE, NOT THE WORD, which is the same argument addressSpans makes
+ * and the reason this is safe where a deny-list on `design` and `product` would be catastrophic.
+ * Those two words ARE the requirement on a design or a product posting. What is dropped here is a
+ * name written inside a roster: an org noun ("teams", "functions", "partners", "organizations"),
+ * then an enumeration marker ("including", "across", "such as"), then a run of Title Case items
+ * separated by commas and conjunctions. A Product Management posting that also writes "product
+ * roadmap" or "product management" anywhere else keeps the term from THAT occurrence, because terms
+ * are built per occurrence and a span only silences the occurrence inside it.
+ *
+ * THE ENUMERATION IS CONSUMED ITEM BY ITEM rather than run to the end of the clause. Ending the span
+ * at the sentence would swallow whatever follows the list ("...and Economy, sharing your preferences
+ * so we can help connect your career with your curiosity"), which on another posting could be a real
+ * requirement. The run stops at the first thing that is not a Title Case item or a separator, so on
+ * Brex's "cross-functional teams-including Engineering, Legal, Compliance, and Design-on key
+ * decisions" it ends at `Design` and never reaches "key decisions".
+ *
+ * A LEXICON SKILL INSIDE THE ROSTER IS STILL KEPT, the same guard addressSpans, locationTokens and
+ * companyBrandTokens all use and for the same reason: `QA` and `DevOps` are Roblox team names in
+ * that sentence AND real requirements on half the board, and deleting a real requirement to remove
+ * a nuisance is the trade PLACE_SAFE_KINDS exists to refuse.
+ */
+const ORG_ROSTER = new RegExp(
+  // The gap between the org noun and the enumeration marker is GREEDY, so when a sentence carries
+  // two markers the LAST one wins. Roblox writes "teams across Roblox, including Infra, Engine..."
+  // and a lazy gap stopped at `across`, which put the company name itself at the head of the
+  // enumeration and ended the run one item later at the dash before `including`.
+  String.raw`\b(?:teams?|orgs?|organizations?|organisations?|departments?|functions?|groups?|pods?|disciplines?|partners?|business units?)\b[^.\n]{0,40}\b(?:including|includes?|across|such as|like|spanning)\b` +
+    // TWO ITEMS MINIMUM, which is what makes a roster a roster and is also what disambiguates the
+    // sentence above. "Engage in our team matching process, learning about teams across Roblox,
+    // including Infra, Engine..." carries `team` 39 characters before `across`, so the greedy gap
+    // reaches that pair first and enumerates the single item `Roblox`. Requiring two items rejects
+    // it, and the engine backtracks onto the `teams ... including` pair that names the real roster.
+    String.raw`(?:[\s,;&/]*(?:and|or)?[\s,;&/]*[A-Z][A-Za-z0-9&+]*(?:[ ][A-Z][A-Za-z0-9&+]*){0,3}){2,}`,
+  'g',
+);
+
+function rosterSpans(text: string): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  for (const m of text.matchAll(ORG_ROSTER)) {
+    const start = m.index ?? 0;
+    out.push([start, start + m[0].length]);
+  }
+  return out;
+}
+
+/**
+ * The span of a product or team the employer named AFTER ITS OWN NAME.
+ *
+ * companyBrandTokens already says why a phrase carrying the employer's name is that employer's
+ * branding rather than a requirement, and drops "Databricks SQL" on that argument. It can only see
+ * a phrase one of whose WORDS is the company name, so the commoner spelling walks past it: the
+ * company name, then the product name in Title Case beside it. Point72's "Quantitative Developer
+ * Intern" (packets 90062b81 and 908efd63) writes
+ *
+ *   "Point72 Internal Alpha Capture (IAC) is developing scalable quantitative equity trading
+ *    signals..."
+ *
+ * and the extractor took `internal alpha`, `alpha capture` and `iac` out of it: one internal product,
+ * counted three times, in the denominator of a student who could not possibly have used it, and
+ * `IAC` marked hard signal by ACRONYM so it took a reserved slot ahead of a real skill.
+ *
+ * THE PARENTHETICAL ACRONYM IS PART OF THE SAME SPAN because it is part of the same act: writing
+ * "(IAC)" directly after the run is the employer DEFINING their own abbreviation, so it can only
+ * ever name the thing the run named.
+ *
+ * Bounded at four words, and lexicon skills inside are spared, both for the reason companyBrandTokens
+ * gives: a company word that is also a real skill must not delete real requirements through every
+ * phrase it appears in.
+ */
+function brandRunSpans(text: string, company: string | null | undefined): Array<[number, number]> {
+  const name = (company ?? '').trim();
+  if (name.length < 2) return [];
+  const pattern = new RegExp(
+    String.raw`\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, String.raw`\s+`)}(?:'s|’s)?` +
+      String.raw`(?:[ ][A-Z][A-Za-z0-9&+]*){1,4}(?:[ ]?\([A-Z]{2,6}\))?`,
+    'gi',
+  );
+  const out: Array<[number, number]> = [];
+  for (const m of text.matchAll(pattern)) {
+    const start = m.index ?? 0;
+    out.push([start, start + m[0].length]);
+  }
+  return out;
+}
+
 function tokenizeSection(text: string): SectionToken[] {
   const raw = [...text.matchAll(/[A-Za-z][A-Za-z0-9+#./_-]*/g)];
   const out: SectionToken[] = [];
@@ -1943,9 +2342,21 @@ function tokenizeSection(text: string): SectionToken[] {
     const start = m.index ?? 0;
     const gap = text.slice(prevEnd, start);
     // A newline followed only by bullet/number decoration, or the very start, or a sentence end.
+    //
+    // THE GLYPH CLASS IS WIDER THAN `-*•·`, and every character past those four was found in a real
+    // posting rather than guessed at. Scale AI's "AI Builder Intern" (packet 31528fd9) writes its
+    // requirements bullets with an arrow: "→ Comfortable with Python and/or JavaScript" and
+    // "→ Currently enrolled in an undergraduate or graduate program". An arrow is not in the class,
+    // so the first word of every bullet was NOT positional, so the proper-noun rule read a plain
+    // mid-sentence capital and admitted it: `Comfortable` and `Currently` went into the denominator
+    // as requirements, both of them words POSITIONAL_OPENERS already lists precisely so they cannot.
+    //
+    // The `positional` flag is a BACKEND-ONLY concept and does not touch the shared tokenizer
+    // contract: the website's tokenizeForMatch produces token text and offsets, which this does not
+    // change. tokenizerContract.ts stays green.
     const positional =
       out.length === 0 ||
-      /[\n\r][\s]*[-*•·]?[\s]*(\d+[.)])?[\s]*$/.test(gap) ||
+      /[\n\r][\s]*[-*•·▪▫‣◦●○–—→⇒»›✓✔]?[\s]*(\d+[.)])?[\s]*$/.test(gap) ||
       /[.!?:;]["'’)\]]*\s*$/.test(gap);
 
     let body = m[0];
@@ -2034,11 +2445,17 @@ export function tokenizeForMatch(text: string): Array<{ text: string; start: num
  * exact exclusion rather than a guess. The rest is a short list of the categories that recur:
  * seasons (from "Summer 2027"), and country and work-authorization phrasing.
  */
+/* THE LEGAL-ENTITY SUFFIXES on the last line are the employer's own name whatever the employer is
+ * called, so they belong here rather than in companyBrandTokens, which can only remove the words the
+ * job row happens to spell. Akuna's Python posting (packet cc9d695d) writes "Akuna Capital LLC is an
+ * Equal Opportunity Employer": the row says "Akuna", so `akuna` went and `llc` stayed, marked hard
+ * signal by ACRONYM and shown to a student as a requirement. */
 const SELF_REFERENCE = new Set(
   `summer spring fall winter autumn
 united states usa canada remote hybrid onsite
 intern internship co-op coop apprentice apprenticeship
-candidate applicant university college student undergraduate`
+candidate applicant university college student undergraduate
+inc llc ltd llp lp plc gmbh corp corporation incorporated holdings`
     .split(/\s+/)
     .filter(Boolean),
 );
@@ -2202,9 +2619,9 @@ export function extractJdTerms(jdText: string, context?: JdContext): JdTerm[] {
   const sections = segmentJd(jdText);
   const hasPrimaryFitSection =
     sections.some((s) => PRIMARY_STATED_KINDS.has(s.kind)) || hasPrimaryFitHeading(jdText);
-  const rawTerms = strip(extractFrom(sections, casing));
+  const rawTerms = strip(extractFrom(sections, casing, context?.company));
   if (hasPrimaryFitSection) {
-    return capToEmphasis(strip(extractFrom(sections.filter(isPrimaryFitSection), casing)));
+    return capToEmphasis(strip(extractFrom(sections.filter(isPrimaryFitSection), casing, context?.company)));
   }
   const terms = preferStatedRequirements(rawTerms);
   if (terms.length >= MIN_SCORABLE_TERMS) return capToEmphasis(terms);
@@ -2252,6 +2669,7 @@ export function extractJdTerms(jdText: string, context?: JdContext): JdTerm[] {
           : section,
       ),
       casing,
+      context?.company,
     ),
   );
   return capToEmphasis(salvaged.length > terms.length ? salvaged : terms);
@@ -2273,7 +2691,12 @@ function isPrimaryFitSection(section: JdSection): boolean {
 
 function hasPrimaryFitHeading(jdText: string): boolean {
   for (const line of jdText.split(/\r?\n/)) {
-    const core = headingCore(line);
+    // headingSubject, not headingCore, for the reason classifyHeading gives: a heading names its
+    // section before the first comma. Read the whole line here and Flow Traders' bullet "Class of
+    // 2028, preferred" answers yes, which sends extractJdTerms down the primary-fit branch looking
+    // for a section that classifyHeading has already, correctly, declined to open. The posting then
+    // extracts NOTHING and refuses to score. The two tests have to read the same string.
+    const core = headingSubject(line);
     if (isHeadingLine(line) && PRIMARY_FIT_HEADING_PATTERN.test(core)) return true;
     const inline = inlineLabel(line);
     if (inline && PRIMARY_STATED_KINDS.has(inline.kind)) return true;
@@ -2566,7 +2989,7 @@ function verbatimSpelling(sectionText: string, term: string): string | undefined
   return new RegExp(`(?<![A-Za-z0-9])${pattern}(?![A-Za-z0-9])`, 'i').exec(sectionText)?.[0];
 }
 
-function extractFrom(sections: JdSection[], casing?: JdCasing): JdTerm[] {
+function extractFrom(sections: JdSection[], casing?: JdCasing, company?: string): JdTerm[] {
   const byTerm = new Map<string, JdTerm>();
   // A character offset, not a counter over the extraction passes.
   //
@@ -2598,11 +3021,20 @@ function extractFrom(sections: JdSection[], casing?: JdCasing): JdTerm[] {
     const tokens = tokenizeSection(sectionText);
     // Computed once per section rather than per token: the scan is linear and the spans are
     // reused by both the unigram and the bigram pass below.
-    const spans = addressSpans(sectionText);
-    // A token written inside an address is that address, not a requirement. A lexicon skill is
-    // spared for the "Java, Indonesia" case: see addressSpans.
-    const isAddress = (tok: SectionToken) =>
-      inAddress(spans, tok.start, tok.end) && !inLexicon(normalizeTerm(tok.text));
+    // Four span rules, computed once per section and reused by the unigram and the bigram pass.
+    // An address, the employer's own org roster and a product named after the employer's own name
+    // all SPARE a lexicon skill, for the reason addressSpans states: deleting a real requirement to
+    // remove a nuisance is the trade PLACE_SAFE_KINDS exists to refuse. A structural span does not
+    // need the same guard because its own rule already declines any line carrying hard signal.
+    const spans = [
+      ...addressSpans(sectionText),
+      ...rosterSpans(sectionText),
+      ...brandRunSpans(sectionText, company),
+    ];
+    const structural = structuralSpans(sectionText);
+    const isExcluded = (tok: SectionToken) =>
+      inAddress(structural, tok.start, tok.end) ||
+      (inAddress(spans, tok.start, tok.end) && !inLexicon(normalizeTerm(tok.text)));
 
     const normalizedSection = ` ${normalizeTerm(sectionText)} `;
     for (const term of PHRASE_LEXICON) {
@@ -2628,7 +3060,7 @@ function extractFrom(sections: JdSection[], casing?: JdCasing): JdTerm[] {
 
     // Unigrams. Match on the original casing so isSpecific can see proper nouns.
     for (const tok of tokens) {
-      if (isAddress(tok)) continue;
+      if (isExcluded(tok)) continue;
       if (!isSpecific(tok.text, tok.positional, tok.nextIsCapitalized, casing, tok.afterVerbMarker))
         continue;
       const term = normalizeTerm(tok.text);
@@ -2664,7 +3096,7 @@ function extractFrom(sections: JdSection[], casing?: JdCasing): JdTerm[] {
       const b = tokens[i + 1];
       const gap = sectionText.slice(a.end, b.start);
       if (!/^ +$/.test(gap)) continue;
-      if (isAddress(a) || isAddress(b)) continue;
+      if (isExcluded(a) || isExcluded(b)) continue;
       if (
         !isSpecific(a.text, a.positional, a.nextIsCapitalized, casing, a.afterVerbMarker) ||
         !isSpecific(b.text, b.positional, b.nextIsCapitalized, casing, b.afterVerbMarker)
@@ -2902,10 +3334,18 @@ const SAME_CAPABILITY_TERMS = new Map<string, string[]>([
  * keeps the score from charging a student for wording differences while still refusing loose
  * hypernyms such as "machine learning" satisfying "PyTorch".
  */
-function resumeSatisfies(resumeText: string, term: JdTerm): boolean {
-  if (term.alternatives) return term.alternatives.some((t) => resumeCovers(resumeText, t));
-  if (resumeCovers(resumeText, term.term)) return true;
-  return (SAME_CAPABILITY_TERMS.get(normalizeTerm(term.term)) ?? []).some((t) => resumeCovers(resumeText, t));
+/* IT RETURNS THE STRING THAT COVERED IT, not just a yes, because the review screen has to be able
+ * to POINT at it. Blue means "asked for by this job, and on your resume", and when the credit comes
+ * from an alternative the resume never writes the requirement's own words: a posting asking for
+ * `frontend` is satisfied by a resume that says React, and the resume pane had nothing to mark.
+ * Measured over the 85 production packets on 2026-08-09 that was 8 blue marks with no anchor, on 8
+ * packets, and after the other anchoring fixes it was the ONLY remaining case. Naming the covering
+ * string lets the pane mark React and keep the hover link pointing at the requirement `frontend`,
+ * which is the question the student came to the screen with. */
+function resumeSatisfies(resumeText: string, term: JdTerm): string | undefined {
+  if (term.alternatives) return term.alternatives.find((t) => resumeCovers(resumeText, t));
+  if (resumeCovers(resumeText, term.term)) return term.term;
+  return (SAME_CAPABILITY_TERMS.get(normalizeTerm(term.term)) ?? []).find((t) => resumeCovers(resumeText, t));
 }
 
 export function resumeCovers(resumeText: string, term: string): boolean {
@@ -2973,10 +3413,11 @@ export function scoreJdMatch(
   for (const t of terms) {
     total += t.weight;
     if (t.kind === 'required') requiredTotal += 1;
-    if (resumeSatisfies(resumeText, t)) {
+    const covered = resumeSatisfies(resumeText, t);
+    if (covered !== undefined) {
       got += t.weight;
       if (t.kind === 'required') requiredGot += 1;
-      matched.push(t);
+      matched.push(covered === t.term ? t : { ...t, satisfied_by: covered });
     } else {
       missing.push(t);
     }
