@@ -1313,6 +1313,26 @@ function programmingLanguageAnswer(label: string, ap: ApplicationProfileLike): {
 export type DiscoveredQuestion = {
   label: string;
   selector: string;
+  /**
+   * A selector that still resolves on a LATER page load, when the discovery marker no longer does.
+   *
+   * `selector` above is `[data-litos-discovered-N]`, an attribute discovery writes into the page it
+   * is looking at. The managed fill run is a SECOND, stateless browser call against a freshly loaded
+   * form where that attribute has never existed, so durablePortalSelector refuses it - correctly -
+   * and every managed-discovered question is actually filled by matching the employer's label text.
+   * See profileFieldResolution.ts, point 2, which names that fallback as the thing that makes the
+   * label problems fatal rather than cosmetic.
+   *
+   * This is the element's own identity instead - its id, its name attribute, or the ATS's per-field
+   * handle (Ashby's `data-field-path`) - read at discovery time and still true at fill time. Where it
+   * is present the fill is one action against one control rather than a fan-out of speculative
+   * label-scoped selectors, so it SPENDS LESS of the action budget rather than more: measured on the
+   * Deepgram packet, the managed prepare list falls from 76 actions to 20.
+   *
+   * Optional: a control with no id, no name and no ATS handle has no durable identity to report, and
+   * the label fallback remains for it.
+   */
+  durableSelector?: string | null;
   inputType: string;
   maxLength: number | null;
   /**
