@@ -20,6 +20,7 @@ import {
   resolveKnownAnswer,
   sensitiveQuestionRequiresAttention,
   WORK_ELIGIBILITY_QUESTION,
+  type ApplicationProfileLike,
 } from './questionDiscovery';
 
 // R-004 originally refused every work-eligibility question after one false legal declaration
@@ -1525,4 +1526,105 @@ test('a legal or preferred name is a real question, not the name the packet alre
   assert.equal(isCoreIdentityField('Discipline'), false);
   assert.equal(isCoreIdentityField('What is your top location preference?'), false);
   assert.equal(isCoreIdentityField('High School Name & Graduation Year'), false);
+});
+
+/* ─── the Anduril Greenhouse run of 2026-08-08, verbatim ─────────────────────────────────────
+ *
+ * Labels exactly as the managed discovery pass reported them (lowercased, with Greenhouse's own
+ * handles concatenated on), and the blocker sentences the applicant was shown for each.
+ */
+
+const ANDURIL_IN_PERSON_LABEL =
+  'are you willing to work in-person for 12 weeks during the internship? * question_12114510007';
+const ANDURIL_EXPORT_CONTROL_LABEL =
+  'export controls - this position requires access to information and technology that is subject to u.s. export controls. '
+  + 'your responses to the questions below will be used solely to determine your eligibility under u.s. law to receive '
+  + 'information and materials subject to u.s. export controls.* question_12114512007';
+const ANDURIL_REFERRAL_LABEL = 'how did you hear about anduril?* question_12114515007';
+
+const MEHEK: ApplicationProfileLike = {
+  school: 'University of Southern California, Viterbi School of Engineering',
+  degree: 'Bachelor of Science in Computer Science',
+  major: 'Computer Science & Business Administration, Finance Emphasis',
+  gpa: '3.89',
+  gpa_scale: '4.0',
+  grad_date: 'May 2028',
+  grad_year: 2028,
+  currently_enrolled: true,
+  referral_source_default: 'Company website',
+  citizenship: 'Indian',
+  work_authorized: true,
+  needs_sponsorship: true,
+  address_city: 'Dubai',
+  address_country: 'United Arab Emirates',
+};
+
+test('an in-person commitment is the routine location question it has always been', () => {
+  // '"Are you willing to work in-person for 12 weeks during the internship?" is required and is
+  // still empty'. With only office/onsite/hybrid in the vocabulary this fell all the way to the
+  // ESSAY drafter, so a react-select with a Yes/No list was handed a paragraph and stayed empty,
+  // and the paragraph is where the "Los Angeles" grounding warning on that packet came from.
+  const label = normalizeDiscoveredLabel(ANDURIL_IN_PERSON_LABEL);
+  assert.deepEqual(resolveKnownAnswer(label, 'text', MEHEK, undefined), { value: 'Yes' });
+  // Three more postings ask the same thing in their own words.
+  for (const other of [
+    'are you able to work onsite in one of our offices, five days a week?',
+    'how many days per week can you work on-site in sf, and from what date?',
+    'do you currently live in, or plan to relocate to, the specified location to meet this in-office requirement?',
+  ]) {
+    assert.deepEqual(resolveKnownAnswer(other, 'text', MEHEK, undefined), { value: 'Yes' }, other);
+  }
+});
+
+test('an export-control eligibility declaration is refused by name, never inferred', () => {
+  // '"EXPORT CONTROLS - This position requires access to information and technology that is subject
+  // to U.S. export controls. Y" is required and is still empty'. Nothing recognised it, so it was
+  // silently skipped and the applicant was never told it was waiting for her.
+  const label = normalizeDiscoveredLabel(ANDURIL_EXPORT_CONTROL_LABEL);
+  const answer = resolveKnownAnswer(label, 'text', MEHEK, undefined);
+  assert.ok(answer && 'skipReason' in answer);
+  assert.match(answer.skipReason, /^export-control declaration left for you: /);
+
+  // The three fields that look like they answer it are the three that must not. A U.S.-person
+  // determination is a legal self-declaration; citizenship, work authorization and sponsorship each
+  // describe something else, and a wrong answer here is a false statement in her name.
+  for (const profile of [
+    { citizenship: 'American', work_authorized: true, needs_sponsorship: false },
+    { citizenship: 'Indian', work_authorized: false, needs_sponsorship: true },
+    {},
+  ] as ApplicationProfileLike[]) {
+    const result = resolveKnownAnswer(label, 'text', profile, 'Anduril Industries, Costa Mesa, CA');
+    assert.ok(result && 'skipReason' in result, JSON.stringify(profile));
+  }
+});
+
+test('the export-control refusal leaves the sanctions checklist alone', () => {
+  // Databricks' "select all that apply" list mentions export controls and is a different question:
+  // its true answer, "None of the above", is one the applicant stores and Litos already ticks.
+  assert.equal(
+    resolveKnownAnswer(
+      'Please confirm whether any of the below applies to you. Select all that apply. Note: This information will only be '
+      + 'used to ensure compliance with U.S. sanctions and export controls.',
+      'checkbox',
+      MEHEK,
+      undefined,
+    ),
+    null,
+  );
+});
+
+test('the referral question is answered even when its label names the employer', () => {
+  // '"How did you hear about Anduril?" is required and is still empty', with
+  // application_profile.referral_source_default = "Company website" in the same row.
+  for (const raw of [
+    ANDURIL_REFERRAL_LABEL,
+    'how did you hear about this internship?* question_1',
+    'how did you hear about this job?* question_2',
+  ]) {
+    assert.deepEqual(
+      resolveKnownAnswer(normalizeDiscoveredLabel(raw), 'text', MEHEK, undefined),
+      { value: 'Company website' },
+      raw,
+    );
+  }
 });

@@ -23,9 +23,13 @@ export type ManagedDiscoveredQuestion = {
   selector: string;
   inputType: string;
   maxLength: number | null;
-  // Optional because the managed provider does not report option lists yet. When it starts to,
-  // the resolver snaps the answer onto a real option with no further change here; until then it
-  // falls back to the ranked alias ladder in profileFieldResolution.ts.
+  // The managed provider's `discover` action does not report option lists and, as of 2026-08-08,
+  // shows no sign of learning to: it enumerates text-shaped inputs and returns four fields per
+  // control. Waiting for it was measured as the reason PR #361's option snapping never fired in
+  // production. So this is filled in by THIS repo instead, from the discovery pass's own option
+  // extracts (portalSubmission.ts: pushManagedReactSelectOptionProbeActions,
+  // managedResultFieldOptions, attachManagedFieldOptions). Still optional, because the direct
+  // Playwright path reads options straight off the Page and an unprobed control has none.
   options?: string[] | null;
   // Optional for the same reason as options: the managed provider does not report required-ness
   // yet. Until it does, discoveredFieldIsRequired reads the employer's own required marker out of

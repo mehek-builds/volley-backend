@@ -8,7 +8,12 @@ import {
   resolveKnownAnswer,
   type ApplicationProfileLike,
 } from './questionDiscovery';
-import { profileAnswerAliases, resolveProfileField } from './profileFieldResolution';
+import {
+  chooseClosestOption,
+  disciplineLadder,
+  profileAnswerAliases,
+  resolveProfileField,
+} from './profileFieldResolution';
 import type { Locator } from 'playwright-core';
 
 // Portal field ids legitimately contain CSS-syntax characters (Greenhouse uses UUIDs, others use
@@ -274,6 +279,15 @@ export type SubmissionPacket = {
   roleLocation?: string;
   roleLocations?: string[];
   referralSourceDefault?: string;
+  /**
+   * The REAL option texts of the closed-list controls on this posting, keyed by the control's own
+   * id, as read off the live page by the discovery pass (pushManagedReactSelectOptionProbeActions).
+   *
+   * Absent when the page was never probed, which is not the same as "the control has no options":
+   * every consumer here must fall back to its alias ladder rather than treat an unprobed control as
+   * free text.
+   */
+  fieldOptions?: Record<string, string[]>;
   applicationProfile?: ApplicationProfileLike;
   jdText?: string;
   resume: Buffer;
@@ -505,12 +519,186 @@ function managedGreenhouseReactSelectFill(
     timeout,
   });
   actions.push({ type: 'fill', selector, value, label, optional, timeout });
+  // Enter FIRST, then the option click as the fallback. The click was the only selector here and it
+  // never once landed: the runner tests an optional action's selector with `locator.count()`, which
+  // does not auto-wait, and react-select has not re-rendered its filtered menu by the time that
+  // snapshot is taken. Measured on the live Anduril posting: all four education option clicks came
+  // back "MISSING" and every education field stayed empty, while `#country` on the same page was
+  // selected correctly by managedComboboxFill, which uses exactly this Enter.
+  //
+  // Enter is dispatched as its own action, so the round trip that carries it is itself the settle
+  // the click never had, and react-select consumes it against the focused option. Before the click
+  // rather than after, so a successful selection is never followed by an Enter on a closed select.
+  actions.push({ type: 'press', selector, value: 'Enter', label: `${label}_select`, optional, timeout });
   actions.push({
     type: 'click',
     selector: `#react-select-${inputId}-option-0`,
     label: `${label}_option`,
     optional,
     timeout,
+  });
+}
+
+/* ─── reading a closed list's REAL options on the managed path ────────────────────────────────
+ *
+ * PR #361 shipped option snapping and it has never once fired in production, because the managed
+ * provider's `discover` action reports only label/selector/inputType/maxLength: `options` is
+ * undefined on every managed-discovered control, so chooseClosestOption is handed an empty list and
+ * returns null. Measured on the Anduril Greenhouse run of 2026-08-08: "Discipline" came back
+ * '"Discipline" is required and is still empty' while the packet held the answer.
+ *
+ * The provider cannot be asked for option lists, but it does not have to be. `extract` already
+ * reads arbitrary DOM (that is how the CAPTCHA evidence reads work), and with no `attribute` it
+ * returns the element's innerText. A react-select renders its whole option list into
+ * `#react-select-<inputId>-listbox` once the control is open, so three actions per control (open,
+ * extract the listbox, close) return the list as newline-separated text. Measured live against the
+ * Anduril posting: 100 discipline options came back this way.
+ *
+ * These ids are Greenhouse's own and are identical on every Greenhouse board, so this is an
+ * ATS-family read and not another per-employer selector list.
+ */
+export const GREENHOUSE_OPTION_PROBE_IDS = ['school--0', 'degree--0', 'discipline--0', 'end-month--0'] as const;
+
+/** Prefix on the extract label that marks an option-list read, so the parser cannot confuse it. */
+export const MANAGED_OPTION_EXTRACT_PREFIX = 'options:';
+
+export function reactSelectListboxSelector(inputId: string): string {
+  return `[id="react-select-${quoteAttr(inputId)}-listbox"]`;
+}
+
+function optionProbeIdForSelector(selector: string | undefined): string | undefined {
+  // Matched on the SELECTOR as well as the label because the provider echoes `{selector, value}`
+  // and drops `label` entirely (managed-browser.js), so the selector is the only key that is
+  // guaranteed to come back.
+  return selector?.match(/^\[id="react-select-(.+)-listbox"\]$/)?.[1];
+}
+
+/**
+ * TWO ROUNDS, and the second one is the one that reads.
+ *
+ * School and End date month hold their options in the page and come back on the first open.
+ * Degree and Discipline load theirs over the network when the menu opens, and the runner has no
+ * wait primitive: every action is instantaneous, an optional `waitForSelector` is skipped by the
+ * runner's own "missing selector" pre-check before it can wait for anything, and `click`'s
+ * networkidle wait returns immediately because the fetch has not started yet. Measured: the first
+ * open reads back the literal text "Loading...".
+ *
+ * The second open reads the real list, because the first one warmed the fetch. Measured on the same
+ * posting: round one "Loading...", round two 100 discipline options. So round one exists to make
+ * round two work, and it is placed early while round two comes after the `discover` action, which
+ * walks the whole DOM and is the longest-running thing in the list.
+ *
+ * A round that comes back "Loading..." contributes nothing (see managedResultFieldOptions), so the
+ * worst case is the behaviour that existed before any of this: no option list, and the alias ladder
+ * decides. It can never snap an answer onto a placeholder.
+ */
+export function pushManagedReactSelectOptionProbeActions(
+  actions: ManagedBrowserAction[],
+  portal: SupportedPortal,
+  round: 1 | 2 = 1,
+) {
+  if (portalFamily(portal) !== 'greenhouse') return;
+  for (const inputId of GREENHOUSE_OPTION_PROBE_IDS) {
+    const selector = `[id="${quoteAttr(inputId)}"]`;
+    actions.push({
+      type: 'click',
+      selector,
+      label: `option_probe_open:${inputId}:${round}`,
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
+    actions.push({
+      type: 'extract',
+      selector: reactSelectListboxSelector(inputId),
+      label: `${MANAGED_OPTION_EXTRACT_PREFIX}${inputId}`,
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
+    // Escape rather than a second click: clicking an open react-select closes it, but clicking a
+    // CLOSED one opens it again, and the probe must leave the control exactly as it found it.
+    actions.push({
+      type: 'press',
+      selector,
+      value: 'Escape',
+      label: `option_probe_close:${inputId}:${round}`,
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
+  }
+}
+
+/**
+ * A listbox that is not an option list: the async loader's placeholder, the empty-search message,
+ * and the prompts an async select shows before anything is typed.
+ *
+ * This is load-bearing rather than tidy-up. Without it a control read mid-fetch contributes the
+ * single "option" `Loading...`, chooseClosestOption is handed a one-entry list, and the closest
+ * thing to a stored answer on that list is the placeholder itself.
+ */
+const NON_OPTION_LISTBOX_LINE =
+  /^(?:loading(?:\.{3}|…)?|no options?|no results?(?: found)?|type to search|start typing|searching(?:\.{3}|…)?)$/i;
+
+/**
+ * How many rows Greenhouse's select renders into an unfiltered menu. A read this long is a WINDOW
+ * over the list, not the list.
+ *
+ * Measured on the live Anduril posting: School stops after 100 rows and is searchable past them
+ * (typing "University of Southern" returns 8 entries that were nowhere in the first 100); the
+ * Discipline menu also stops at exactly 100, ending on "European Studies", which is plainly not the
+ * end of a discipline taxonomy. Degree returns 22 and End date month returns 12, and those really
+ * are the whole list.
+ *
+ * A windowed read must be discarded rather than used, because it cannot answer the question the
+ * caller asks of an option list. "The stored answer is not on this list" and "the stored answer is
+ * past row 100" look identical, and acting on the first would both skip a correct fill and tell the
+ * applicant her saved answer is not offered, on a control that offers it.
+ */
+const MANAGED_OPTION_LISTBOX_RENDER_CAP = 100;
+
+/** The option lists the probe brought back, keyed by the control's own id. */
+export function managedResultFieldOptions(result: ManagedBrowserResult | null | undefined): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const item of result?.extracted ?? []) {
+    const labelled = typeof item?.label === 'string' && item.label.startsWith(MANAGED_OPTION_EXTRACT_PREFIX)
+      ? item.label.slice(MANAGED_OPTION_EXTRACT_PREFIX.length)
+      : undefined;
+    const inputId = labelled || optionProbeIdForSelector(item?.selector);
+    if (!inputId) continue;
+    const text = managedExtractedValue(item?.value);
+    if (!text) continue;
+    const options = text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !NON_OPTION_LISTBOX_LINE.test(line));
+    if (options.length === 0 || options.length >= MANAGED_OPTION_LISTBOX_RENDER_CAP) continue;
+    const seen = new Set(out[inputId] ?? []);
+    for (const option of options) {
+      if (seen.has(option)) continue;
+      seen.add(option);
+      out[inputId] = [...(out[inputId] ?? []), option];
+    }
+  }
+  return out;
+}
+
+/**
+ * Put the probed option lists onto the discovered questions, so resolveProfileField can snap.
+ *
+ * Matched by the control id appearing in the RAW discovered label. Managed discovery concatenates
+ * label + aria-label + placeholder + name + id, so the discipline control arrives as
+ * "discipline* discipline--0" and carries its own id; nothing else has to be threaded through.
+ */
+export function attachManagedFieldOptions<T extends { label: string; options?: string[] | null }>(
+  discovered: readonly T[],
+  optionsByInputId: Record<string, string[]>,
+): T[] {
+  const entries = Object.entries(optionsByInputId).filter(([, options]) => options.length > 0);
+  if (entries.length === 0) return [...discovered];
+  return discovered.map((field) => {
+    if (field.options && field.options.length > 0) return field;
+    const label = (field.label ?? '').toLowerCase();
+    const match = entries.find(([inputId]) => label.includes(inputId.toLowerCase()));
+    return match ? { ...field, options: match[1] } : field;
   });
 }
 
@@ -593,30 +781,61 @@ function greenhouseDegreeAliases(degree: string | undefined): string[] {
   return uniqueDefined([level, bachelorScience, trimmed]).slice(0, 1);
 }
 
+/**
+ * Discipline values for the education row, best first.
+ *
+ * The stored major led this list and that is what got typed into Greenhouse's Discipline control:
+ * "Computer Science & Business Administration, Finance Emphasis" is a sentence, the control holds a
+ * hundred-entry taxonomy, and searching it for that sentence returns nothing. disciplineLadder is
+ * the shared vocabulary written for exactly this (it splits the declared subjects off the emphasis
+ * clause and offers the standard family names), so its head is "Computer Science" and the stored
+ * phrasing falls to the back where a free-text control can still reach it.
+ */
 function greenhouseDisciplineAliases(packet: SubmissionPacket): string[] {
-  const major = packet.major?.trim();
-  const degree = packet.degree?.trim();
-  const inferred = degree?.match(/computer science/i)?.[0] ?? degree?.match(/\bfinance\b/i)?.[0];
-  return uniqueDefined([
-    major,
-    inferred,
-    major && /\bcs\b/i.test(major) ? 'Computer Science' : undefined,
-  ]);
+  return uniqueDefined(disciplineLadder(packet.major, packet.degree));
+}
+
+/**
+ * The ONE value to type into a react-select, given what the control actually offers.
+ *
+ * Two measurements, both taken live against the Anduril Greenhouse posting on 2026-08-08, decide
+ * the shape of this:
+ *
+ *  1. When the probe read the control's real options, snapping onto one of them is the whole job.
+ *     The stored major is "Computer Science & Business Administration, Finance Emphasis"; the
+ *     control offers "Computer Science". Typing the stored phrasing filters the menu to nothing.
+ *
+ *  2. There is no such thing as a SECOND attempt at a react-select on this path, so the ladder can
+ *     never be walked. Every attempt begins by clicking the input; on an already-open menu that
+ *     click CLOSES it, and a subsequent fill does not reopen it. The two-alias sequence that ran in
+ *     production (full major, then "Computer Science") was measured leaving the field empty, while
+ *     a single pass with the right value selects it. So a second alias is not a fallback, it is a
+ *     guarantee of failure, and one attempt is strictly better than two.
+ */
+function greenhouseReactSelectValue(
+  packet: SubmissionPacket,
+  inputId: string,
+  ladder: readonly string[],
+): string | undefined {
+  const snapped = chooseClosestOption(ladder, packet.fieldOptions?.[inputId]);
+  return snapped ?? ladder.find((value) => value.trim().length > 0);
 }
 
 function pushGreenhouseEducationComboboxActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
-  const schoolAliases = greenhouseSchoolAliases(packet.school);
-  for (const [index, value] of schoolAliases.entries()) {
-    managedGreenhouseReactSelectFill(actions, 'school--0', value, `education_school_combo:${index}`);
+  const fields: Array<{ inputId: string; ladder: string[]; label: string }> = [
+    { inputId: 'school--0', ladder: greenhouseSchoolAliases(packet.school), label: 'education_school_combo:0' },
+    { inputId: 'degree--0', ladder: greenhouseDegreeAliases(packet.degree), label: 'education_degree_combo:0' },
+    { inputId: 'discipline--0', ladder: greenhouseDisciplineAliases(packet), label: 'education_discipline_combo:0' },
+    { inputId: 'end-month--0', ladder: packet.graduationMonth ? [packet.graduationMonth] : [], label: 'education_end_month_combo' },
+  ];
+  for (const field of fields) {
+    managedGreenhouseReactSelectFill(
+      actions,
+      field.inputId,
+      greenhouseReactSelectValue(packet, field.inputId, field.ladder),
+      field.label,
+    );
   }
-  const degreeAliases = greenhouseDegreeAliases(packet.degree);
-  for (const [index, value] of degreeAliases.entries()) {
-    managedGreenhouseReactSelectFill(actions, 'degree--0', value, `education_degree_combo:${index}`);
-  }
-  for (const [index, value] of greenhouseDisciplineAliases(packet).entries()) {
-    managedGreenhouseReactSelectFill(actions, 'discipline--0', value, `education_discipline_combo:${index}`);
-  }
-  managedGreenhouseReactSelectFill(actions, 'end-month--0', packet.graduationMonth, 'education_end_month_combo');
   managedFill(actions, '#end-year--0', packet.graduationYear, 'education_end_year_field');
 }
 
@@ -1268,8 +1487,19 @@ function isGreenhouseRuntimeSelectReplayQuestion(question: string): boolean {
   return /\b(?:how\s+did\s+you\s+hear|where\s+have\s+you\s+learned|gender|race|ethnicit|veteran|disability|processing\s+of\s+personal\s+data)\b/i.test(question);
 }
 
+/**
+ * A Greenhouse education-row combobox: School, Degree, Discipline.
+ *
+ * The `--0` handle was the only test here, and PR #361 removed the very thing it keys on:
+ * normalizeDiscoveredLabel now strips `discipline--0` out of the stored question text (that strip
+ * is correct, it is what makes `label:has-text(...)` match the employer's own label). The
+ * consequence was silent: the stored question reads "discipline", this returned false, and the
+ * reviewed-question education path stopped running on exactly the fields it exists for. So the
+ * NORMALIZED spellings are tested too.
+ */
 function isGreenhouseEducationComboboxQuestion(question: string): boolean {
-  return /\b(?:school|degree|discipline)--\d+\b/i.test(question);
+  return /\b(?:school|degree|discipline)--\d+\b/i.test(question)
+    || /^(?:school|degree|discipline)\b[\s*:]*$/i.test(question.trim());
 }
 
 function isRoutineCandidatePrivacyAcknowledgement(question: string): boolean {
@@ -1381,19 +1611,38 @@ function pushGreenhouseDemographicComboboxLabelActions(
   }
 }
 
+/**
+ * The referral-source label, in the only form that survives contact with a real employer.
+ *
+ * This list used to name the employer: "How did you hear about Faire?", "How did you hear about
+ * us?", "How did you hear about this job?", "Referral source". Every Greenhouse customer writes its
+ * OWN name into that question, so the list answered exactly one company. Measured on the Anduril
+ * run of 2026-08-08: the employer asks "How did you hear about Anduril?", nothing here matched it,
+ * and the field came back required-and-empty with "Company website" already resolved in the packet.
+ * Virtu's "How did you hear about this internship?" missed for the same reason.
+ *
+ * The question's OWN label does get its own action group elsewhere, and that is not a safety net:
+ * `question_combo_label:.*how did you hear` is on GREENHOUSE_LOW_PRIORITY_ACTION_GROUPS, so it is
+ * the first thing dropped when the action list exceeds its budget, which the Anduril packet did
+ * (it built exactly 120 actions).
+ *
+ * These are PREFIXES, not whole labels. Playwright's `:has-text()` is a case-insensitive substring
+ * match, so "How did you hear about" scopes to "How did you hear about Anduril?" and to every other
+ * employer's spelling of it. Verified against the live Anduril DOM: the field-wrapper scope built
+ * from this prefix resolves to the referral combobox and to nothing else on the page.
+ */
+const GREENHOUSE_REFERRAL_LABEL_PREFIXES = [
+  'How did you hear about',
+  'How did you first hear about',
+  'Where did you hear about',
+  'Where have you learned about',
+  'Referral source',
+] as const;
+
 function pushGreenhouseReferralSourceAliases(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
   const value = packet.referralSourceDefault?.trim();
   if (!value) return;
-  const aliases = [
-    'How did you hear about Faire?',
-    'How did you hear about Faire',
-    'How did you hear about us?',
-    'How did you hear about us',
-    'How did you hear about this job?',
-    'How did you hear about this job',
-    'Referral source',
-  ];
-  for (const alias of aliases) {
+  for (const alias of GREENHOUSE_REFERRAL_LABEL_PREFIXES) {
     pushGreenhouseQuestionComboboxLabelActions(actions, alias, value, 'greenhouse_referral');
   }
 }
@@ -2177,7 +2426,12 @@ export function managedResultFilledFields(result: ManagedBrowserResult): string[
 // cheaper first pass that also asks the runner to scan the page for custom questions). Splitting
 // this out is what let R-055's discovery step reuse every portal's already-verified selectors
 // instead of a third copy of them.
-function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: SupportedPortal, packet: SubmissionPacket) {
+function pushFixedFieldActions(
+  actions: ManagedBrowserAction[],
+  portal: SupportedPortal,
+  packet: SubmissionPacket,
+  options: { probeOptions?: boolean } = {},
+) {
   const family = portalFamily(portal);
   // Nothing to fill, so nothing is pushed. Returning an EMPTY action list rather than attempting the
   // fills and letting them miss is deliberate: a run that fills nothing and says so is honest, while
@@ -2186,6 +2440,9 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
   if (ACCOUNT_WALLED_FAMILIES.has(family)) return;
   if (family === 'greenhouse') {
     pushGreenhouseManagedPreflightActions(actions);
+    // After the preflight, because on a JD page the application form (and every combobox on it)
+    // only exists once "Apply for this job" has been clicked.
+    if (options.probeOptions) pushManagedReactSelectOptionProbeActions(actions, portal);
     const parts = packet.fullName.trim().split(/\s+/);
     // optional (managedFill default) + bounded, not required: a branded-redirect Greenhouse customer
     // (Jump Trading serves its posting through www.jumptrading.com with a different form DOM) has
@@ -2216,7 +2473,16 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
       managedFillByLabel(actions, 'Graduation Month', packet.graduationMonth, 'education_graduation_month');
       managedFillByLabel(actions, 'Graduation Year', packet.graduationYear, 'education_graduation_year');
       managedFillByLabel(actions, 'What is your expected graduation year?', packet.graduationYear, 'education_expected_graduation_year');
-      managedFillByLabel(actions, 'Discipline', packet.major, 'education_discipline_label');
+      // Same value the id-scoped fill uses, for the same reason: this lands in the SAME react-select
+      // (fillByLabelText resolves the label's container to its one input), so handing it the stored
+      // sentence leaves unmatched search text sitting in a control that was about to be filled
+      // correctly.
+      managedFillByLabel(
+        actions,
+        'Discipline',
+        greenhouseReactSelectValue(packet, 'discipline--0', greenhouseDisciplineAliases(packet)),
+        'education_discipline_label',
+      );
     }
     pushGreenhouseFixedQuestionComboboxActions(actions, packet);
     if (!packetLooksAkuna(packet)) pushGreenhouseGraduationDateComboboxActions(actions, packet);
@@ -2405,9 +2671,17 @@ function pushFixedFieldActions(actions: ManagedBrowserAction[], portal: Supporte
 // path's only way to see the live DOM mid-run, since /api/run is otherwise stateless.
 export function buildManagedDiscoveryActions(portal: SupportedPortal, packet: SubmissionPacket): ManagedBrowserAction[] {
   const actions: ManagedBrowserAction[] = [];
-  pushFixedFieldActions(actions, portal, packet);
+  // probeOptions: read every closed list's real options BEFORE anything is typed. A react-select
+  // that has already been filled shows a FILTERED menu, so probing after the fills would read back
+  // whatever the search text left standing instead of the employer's actual list, which is the one
+  // thing this read exists to get. Discovery only: the fill run consumes the result, it does not
+  // need to take the reads again.
+  pushFixedFieldActions(actions, portal, packet, { probeOptions: true });
   pushManagedCoreFieldExtractActions(actions, portal);
   actions.push({ type: 'discover', optional: true, timeout: MANAGED_FILL_TIMEOUT_MS });
+  // Round two, after `discover` has walked the whole DOM: the controls whose option lists load over
+  // the network read back "Loading..." on the first open and their real list on the second.
+  pushManagedReactSelectOptionProbeActions(actions, portal, 2);
   actions.push({
     type: 'extract',
     selector: coverLetterUploadSelector(portal),
