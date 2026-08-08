@@ -97,7 +97,8 @@ import { generateStoredCoverLetter, storedCoverLetter } from '../lib/coverLetter
 import { repairReviewPortalFromMonitoredJob } from '../lib/applicationPortalRepair';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
 import { mayClickFinalSubmit, preparedSubmissionStatus } from '../lib/submissionAuthorization';
-import { directPreparationIsSafe } from '../lib/submissionSafety';
+import { blankRequiredQuestionLabels, directPreparationIsSafe } from '../lib/submissionSafety';
+import { resolveRevision } from '../lib/buildInfo';
 import {
   autoRunShouldPrepare,
   dailySubmissionCap,
@@ -121,8 +122,19 @@ type StandingAuthorization = {
 // Thin wrapper. The merge and the stall bookkeeping live in applicationStall.ts so that
 // routes/applications.ts, which writes _review directly and knows nothing about stalls, goes
 // through exactly the same code.
+//
+// THE RUN'S REVISION IS STAMPED HERE, next to updated_at and for the same reason applyReviewPatch
+// writes updated_at rather than trusting each caller to: this is the one function every review the
+// runner produces passes through, and a rule enforced at a dozen call sites is a rule that holds
+// until someone adds the thirteenth. Only the RUNNER stamps it. A review edit or a stage change
+// writes review state without learning anything new about the form, and stamping those would make a
+// packet look freshly tested when all that happened was somebody renamed a question.
+//
+// Cleared, not preserved, when the environment supplies no SHA. run_revision means "the build whose
+// run produced this", and carrying a previous deployment's SHA through a run that happened on an
+// unidentifiable build would be a confident wrong answer where absent is the honest one.
 function nextReview(current: ApplicationReviewState, patch: Partial<ApplicationReviewState>): ApplicationReviewState {
-  return applyReviewPatch(current, patch);
+  return applyReviewPatch(current, { ...patch, run_revision: resolveRevision().revision ?? undefined });
 }
 
 export function atsApiSubmissionEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -1300,10 +1312,21 @@ async function prepareManaged(
   // A discovery pass that never ran cannot be the basis for calling a form complete, so its failure
   // is a gate on `safe` in its own right: without this, a page whose fixed fields all filled would
   // still be sent while every question the employer asked went unread.
+  //
+  // The blank-required term is the half of the pre-submit gate that had to MOVE rather than be
+  // deleted. Refusing the run in front of the browser was a deadlock (see
+  // blankRequiredQuestionLabels); refusing the SEND after the run is not, because by this line the
+  // run has happened and mergedQuestions is the freshly discovered truth about this form rather
+  // than a pre-run snapshot. Standing consent turns `safe` straight into 'submitting' in the same
+  // call, so this is the only thing between an unanswered required question and a click on this
+  // path. Not safe means ready_for_final_approval, where she is shown the blank question and can
+  // answer it - which is exactly the loop the run gate had no exit from.
+  const unansweredRequiredQuestions = blankRequiredQuestionLabels(mergedQuestions);
   const safe = blockers.length === 0
     && discoveryAttention.length === 0
     && evidenceBlockers.length === 0
-    && discoveryFailures.length === 0;
+    && discoveryFailures.length === 0
+    && unansweredRequiredQuestions.length === 0;
   const review = nextReview(current, {
     ...preparedReviewPatch(authorization, safe),
     ...(captchaAttention
@@ -1548,9 +1571,12 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       blockers: result.blockers,
       discovered,
     }, packet);
+    // Same reasoning as the managed path above: the required-answer check moved off the run and on
+    // to the send, and this is the direct-Playwright path's send decision.
     const safe = directPreparationIsSafe({
       blockerCount: sanitizedBlockers.length + evidenceBlockers.length,
       attentionCount: discoveryAttention.length,
+      unansweredRequiredCount: blankRequiredQuestionLabels(mergedQuestions).length,
       verificationStatus: verification.status,
     });
     const review = nextReview(current, {

@@ -37,7 +37,7 @@ import { buildPacket, processSubmissionApplication } from './submissionRunner';
 import { refreshKnownQuestionAnswers, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { rememberReusableAnswers } from '../lib/savedAnswerStore';
-import { resumeEditDisposition, submitRequestDisposition } from '../lib/submissionSafety';
+import { blankRequiredQuestionLabels, preparedRunCanRestart, resumeEditDisposition, submitRequestDisposition } from '../lib/submissionSafety';
 import {
   detectPortal,
   isPortalSupported,
@@ -71,6 +71,13 @@ const reviewBodySchema = z.object({
 });
 const submitBodySchema = z.object({
   questions: z.array(questionSchema).max(100),
+  /* "Throw away the form you already filled and fill it again."
+   *
+   * Only ever consulted for a packet at ready_for_final_approval that has not been claimed - see
+   * preparedRunCanRestart for why that is the only state where discarding a prepared run is safe.
+   * Optional and default-false, so a client that never sends it behaves exactly as before and a
+   * replayed POST still gets its 409 rather than silently discarding a filled form. */
+  restart: z.boolean().optional(),
 });
 
 type StoredResumeRow = typeof generated_resumes.$inferSelect;
@@ -612,8 +619,35 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (disposition === 'in_flight') {
         return reply.status(202).send({ application_id: row.id, review: current, cover_letter: storedCoverLetter(row) });
       }
-      if (disposition === 'reject') {
-        return reply.status(409).send({ error: 'This application cannot start another submission run from its current state' });
+      /* THE 409, AND THE DOOR OUT OF IT.
+       *
+       * 'reject' is right for a packet that has already reached the employer, and right by default
+       * for one sitting at ready_for_final_approval: it is waiting on the applicant to look at a
+       * filled form, not on more filling, and a replayed POST must not throw that away underneath
+       * her. But "by default" is doing real work in that sentence. When the code that filled the
+       * form has since changed, the stored review is evidence about a build that is no longer
+       * running, and before this the only way to refresh it was to submit a full resume edit -
+       * re-rendering the PDF and re-running every layout validation - to change nothing about the
+       * resume. R-066 makes applications write-once with no delete, so there was no other way out
+       * at all. Four of 25 packets were stuck exactly here on 2026-08-08.
+       *
+       * So restarting is possible and has to be ASKED FOR by name. The response says so, and names
+       * the build the stale review came from, so the caller can decide rather than guess. */
+      const restartable = preparedRunCanRestart(current.status, Boolean(current.submission_claimed_at));
+      if (disposition === 'reject' && !(restartable && parsed.data.restart === true)) {
+        return reply.status(409).send(restartable
+          ? {
+            error: 'This application is already filled and waiting for you to look it over. '
+              + 'Ask again with restart to discard that filled form and fill it again.',
+            code: 'PREPARED_RUN_RESTARTABLE',
+            restartable: true,
+            run_revision: current.run_revision ?? null,
+          }
+          : {
+            error: 'This application cannot start another submission run from its current state',
+            code: 'SUBMISSION_RUN_NOT_RESTARTABLE',
+            restartable: false,
+          });
       }
       // Guarded here as well as on extension-start, and not because this route is unattended today.
       // The dashboard now refuses to send a drifted packet, but a frontend check is not an
@@ -632,8 +666,30 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         current.jd_text,
       );
       const normalizedSubmittedQuestions = mergeSubmittedApplicationReviewQuestions(current.questions, submittedQuestions);
-      if (normalizedSubmittedQuestions.some((question) => question.required && !question.answer.trim())) {
-        return reply.status(422).send({ error: 'Answer every required question before submitting.' });
+      /* THE REQUIRED-ANSWER GATE, ON THE SEND AND NOT ON THE RUN.
+       *
+       * This route has two outcomes and they need opposite treatment. On a supported portal it
+       * books a browser and the run FILLS the form, which is the only way a discovered question ever
+       * gets answered - so refusing it here for a blank required answer is a closed loop: blank
+       * blocks the run, and only the run can un-blank it. Measured on prod on 2026-08-08, this exact
+       * check refused 15 of 25 packets, none of them opened a browser, and their untouched
+       * attention_reason then reported an earlier build's results as if they were the current one.
+       * The Greenhouse Discipline fix in bd1bab3 had been live for an hour and had never run once.
+       *
+       * On an UNSUPPORTED portal there is no run. The branch further down emails the packet to the
+       * employer inside this same request, and that is a send, so the check stays in front of it.
+       *
+       * Nothing is weakened by the move. What used to be checked here is now checked at every point
+       * that can actually reach an employer: the runner's direct-send decision, POST
+       * /submission/approve, and clickFinalSubmit's read of the live form - and those see the
+       * questions the run discovered rather than this pre-run snapshot of them. */
+      const sendsWithoutAnotherRun = Boolean(current.portal_url) && !isPortalSupported(current.portal_url!);
+      const blankRequired = blankRequiredQuestionLabels(normalizedSubmittedQuestions);
+      if (sendsWithoutAnotherRun && blankRequired.length > 0) {
+        return reply.status(422).send({
+          error: 'Answer every required question before submitting.',
+          questions: blankRequired,
+        });
       }
       const submitEducationIssues = packetEducationDrift(stored, submitProfileRows[0]?.parsed_json);
       if (submitEducationIssues.length > 0) {
