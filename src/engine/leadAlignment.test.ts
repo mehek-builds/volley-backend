@@ -246,3 +246,14 @@ test('sharedCitationTerms ignores the words every posting and every bullet share
   assert.deepEqual(sharedCitationTerms('Strong experience with the team', 'Worked with our team'), []);
   assert.ok(sharedCitationTerms('Define product requirements', 'defined product requirements in Figma').length >= 2);
 });
+
+/* The short words this domain runs on. A four-character floor dropped all of these and reported
+   real citations as arbitrary; see citationTerms for the packet it was measured on. */
+test('three-letter technical terms and "end" still count as shared', () => {
+  assert.deepEqual(
+    sharedCitationTerms('Own a scoped project end to end', 'Shipped a consumer app end-to-end in 8 weeks'),
+    ['end'],
+  );
+  assert.deepEqual(sharedCitationTerms('Experience with SQL', 'Wrote SQL against a warehouse'), ['sql']);
+  assert.deepEqual(sharedCitationTerms('GPU programming', 'Profiled GPU kernels'), ['gpu']);
+});

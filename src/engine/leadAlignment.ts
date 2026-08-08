@@ -98,7 +98,14 @@ function citationTerms(text: string): Set<string> {
     const stem = raw
       .replace(/(?:ing|ed|es|s)$/, '')
       .replace(/([a-z])\1$/, '$1');
-    if (stem.length >= 4) terms.add(stem);
+    /* THREE, not four. A four-character floor silently deleted the shortest and most load-bearing
+       words in this domain: gpu, sql, api, aws, git, and "end". Measured on the Redwood Materials
+       packet, the ask "You'll own a scoped project end to end" and the bullet "Shipped consumer
+       mobile app end-to-end; designed feature set and UX in Figma" were reported as having nothing
+       in common, because the only word they share is three letters long. That is a false
+       accusation of an arbitrary pairing against a citation that is exactly right.
+       Two stays out: it is where the initialisms stop and the prepositions start. */
+    if (stem.length >= 3) terms.add(stem);
   }
   return terms;
 }
