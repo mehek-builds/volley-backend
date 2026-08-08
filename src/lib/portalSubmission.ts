@@ -1081,6 +1081,35 @@ const CONTROLLED_SMARTRECRUITERS_EMAIL_SELECTOR = '[id="email-input"]';
 const CONTROLLED_SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR = '[id="confirm-email-input"]';
 const CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR = '[id="linkedin-input"]';
 const CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR = '[id="website-input"]';
+/* THE ASHBY LOCATION CONTROL, and why the obvious selector matches nothing.
+ *
+ * `input[name="_systemfield_location"]` was the only selector here, on both the managed and the
+ * direct path, and on today's Ashby it matches ZERO elements. Read off the live Deepgram form on
+ * 2026-08-09, the whole control is:
+ *
+ *   <div class="_fieldEntry_..." data-field-path="_systemfield_location">
+ *     <label class="_heading_... _required_..." for="_systemfield_location">Current Location</label>
+ *     <div class="_inputContainer_...">
+ *       <input class="_input_..." placeholder="Start typing..." aria-autocomplete="list"
+ *              aria-expanded="false" aria-haspopup="listbox" role="combobox" value="">
+ *
+ * The label's `for` still names `_systemfield_location`, which is why the name looks current, but the
+ * input it points at has NEITHER an id NOR a name. So the fill was optional, matched nothing, was
+ * skipped, and "location" never appeared in filled_fields - which is exactly what production packet
+ * 245c827a shows, with the field left showing its "Start typing..." placeholder on the preview the
+ * applicant was offered as a finished application.
+ *
+ * The entry's `data-field-path` is Ashby's own per-question attribute and is the durable hook. The
+ * legacy name is kept AFTER it rather than dropped: a board serving an older bundle still renders it,
+ * and the list costs nothing extra, because managedFill pushes ONE action for the whole thing and the
+ * runner takes the first match.
+ *
+ * The runner recognises role="combobox" and drives the typeahead through fillCustomChoice rather than
+ * typing into it, which matters here: a location typeahead that is typed at but never picked from
+ * leaves the employer's own value empty while looking answered.
+ */
+const ASHBY_LOCATION_SELECTOR =
+  '[data-field-path="_systemfield_location"] input[role="combobox"], [data-field-path="_systemfield_location"] input, input[name="_systemfield_location"]';
 const ASHBY_RESUME_SELECTOR = 'input#_systemfield_resume[type="file"], input[type="file"][name="_systemfield_resume"], input[type="file"][name*="resume" i]';
 const ASHBY_COVER_LETTER_SELECTOR = 'input#cover_letter[type="file"], input[type="file"][id*="cover" i], input[type="file"][name*="cover" i], input[type="file"][aria-label*="cover" i]';
 
@@ -1605,6 +1634,31 @@ function pushGreenhouseQuestionSelectActions(
   }
 }
 
+/**
+ * The option a control's OWN LABEL tells you to pick when your real answer is not on its list.
+ *
+ * Measured on the live Virtu Software Engineer Internship form, 2026-08-09, read-only. Its question
+ * "Which university are you currently attending? Select "Other" if not listed" is not the Greenhouse
+ * school taxonomy at all: it is a curated list of fifteen schools (Caltech, Carnegie Mellon, Georgia
+ * Tech, Harvard, Howard, Michigan, MIT, Princeton, Rice, Tufts, UChicago, UT Austin, Waterloo, Yale)
+ * plus "Other". The applicant's university is genuinely absent, so every candidate value matched
+ * nothing and the field came back required-and-empty on a form that had told us what to do about it.
+ *
+ * "Other" here is not a near-miss and not a guess. It is the accurate answer, and it is the answer
+ * the employer asked for in the label. The rule is therefore narrow on purpose: the escape hatch is
+ * offered ONLY when the label advertises it in so many words, and it is always the LAST candidate,
+ * so it can only be reached after every real value has failed to match. The runner will not undo an
+ * earlier correct choice to try it, and will not select it unless the control really offers it.
+ *
+ * No employer is named. Any board whose label says "if not listed" gets the same treatment.
+ */
+const ESCAPE_HATCH_LABEL_RE =
+  /\b(?:select|choose|pick|use|enter)\b[^.?!]{0,40}["'“”]?\bother\b["'“”]?[^.?!]{0,40}\b(?:if\s+(?:it\s+is\s+|its\s+|your\s+\w+\s+is\s+)?not\s+(?:listed|shown|available|an\s+option|on\s+(?:the|this)\s+list)|if\s+not\s+found)/i;
+
+export function escapeHatchOptionFor(questionText: string): string | undefined {
+  return ESCAPE_HATCH_LABEL_RE.test(questionText.replace(/\s+/g, ' ')) ? 'Other' : undefined;
+}
+
 function pushGreenhouseQuestionComboboxLabelActions(
   actions: ManagedBrowserAction[],
   questionText: string,
@@ -1615,7 +1669,15 @@ function pushGreenhouseQuestionComboboxLabelActions(
   if (!isGreenhouseReactSelectQuestion(questionText)) return;
   let index = 0;
   const valueLimit = comboboxValueLimit(questionText, contextText);
-  const values = greenhouseComboboxValuesForQuestion(questionText, answer, contextText).slice(0, valueLimit);
+  // The slice is left exactly as it was and the hatch is only APPENDED. Running the pair through
+  // uniqueDefined instead also dropped the empty strings the slice can contain, which promoted a
+  // value from past the limit into first place and emitted a fill where the old code deliberately
+  // emitted none.
+  const sliced = greenhouseComboboxValuesForQuestion(questionText, answer, contextText).slice(0, valueLimit);
+  const escapeHatch = escapeHatchOptionFor(questionText);
+  const values = escapeHatch && !sliced.some((value) => value.trim().toLowerCase() === escapeHatch.toLowerCase())
+    ? [...sliced, escapeHatch]
+    : sliced;
   for (const selector of greenhouseQuestionComboboxSelectors(questionText).slice(0, QUESTION_COMBOBOX_SELECTOR_LIMIT)) {
     for (const value of values) {
       const compactKnownLabel = /^(?:greenhouse_fixed_question|greenhouse_known_question|greenhouse_akuna_attestation)$/.test(labelPrefix);
@@ -2123,20 +2185,68 @@ function managedActionLabelBase(action: ManagedBrowserAction): string | undefine
   return action.label?.replace(/_(?:open|option_value|option|select)$/, '');
 }
 
+/**
+ * Speculative REPEAT attempts at one control, past the first.
+ *
+ * Three families guess at a single question by firing at several possible label wordings, because
+ * only one of them exists on any given board. Measured on the live DRW packet: the referral source
+ * costs 25 actions across five wordings, the graduation date 45 across three wordings times three
+ * date formats, and the preferred location 15 across three wordings. That is 85 of 231 actions, and
+ * at most 5, 5 and 5 of them can ever do anything.
+ *
+ * They come off FIRST, ahead of everything else, because the ordering principle of the list below is
+ * to give up a redundant attempt at a control before the only attempt at another one. Before this,
+ * DRW gave up the referral question, the demographics and the discipline row while keeping all 45
+ * graduation-date guesses at a control that board does not have.
+ */
+const GREENHOUSE_REDUNDANT_ATTEMPT_GROUPS = [
+  /^greenhouse_referral_combo_(?:label|select):\d+:(?:How did you first hear about|Where did you hear about|Where have you learned about|Referral source)/,
+  /^education_graduation_date_combo:[1-9]/,
+  /^preferred_location_combo:[1-9]:/,
+] as const;
+
+/**
+ * Ordered most disposable first. The trim walks it, removing one label group at a time, and stops
+ * the moment the list is inside the budget.
+ *
+ * TWO THINGS ARE DELIBERATELY ABSENT and were removed on 2026-08-09, measured against the live DRW
+ * Software Developer Intern packet, whose raw action list is 231 actions against a 120 budget:
+ * `education_discipline_combo:` and `education_discipline_label`. The trim reached both, so the
+ * Discipline control was never touched by the run at all, and the applicant got
+ * '"Discipline" is required and is still empty' on a form where the answer was resolved correctly
+ * and simply never sent. The four fixed education comboboxes are now protected outright (see
+ * isProtectedManagedAction): they are a known, always-required, sixteen-action block on every
+ * Greenhouse board, and no budget saving is worth deleting a required field's only attempt.
+ *
+ * The referral pattern below also USED to read `question_combo_label:.*how did you hear`, which had
+ * not matched anything since those actions were relabelled `greenhouse_referral_combo_label`. So the
+ * single largest disposable group on the form, 25 actions, was unreachable while a required field
+ * was being deleted two groups later.
+ *
+ * `options market making` is named alongside its Akuna siblings for a different reason, and it is a
+ * mask rather than a fix. greenhouseAkunaRequiredQuestionAliases refuses to turn a free-text answer
+ * into a Yes/No attestation, but the GENERIC combobox path has no such guard and renders
+ * "I don't have prior experience at an options market making firm." as the option "No". That is true
+ * of origin/main too; it was invisible only because this trim happened to reach those actions on the
+ * one packet large enough to trigger it. Freeing budget made it visible, so it is named here to keep
+ * the behaviour where it was rather than change it as a side effect of a budget fix. The real
+ * question, whether the generic path should ever answer a prior-experience declaration, belongs with
+ * the self-declaration work in lib/selfDeclaration.ts and not inside a budget change.
+ */
 const GREENHOUSE_LOW_PRIORITY_ACTION_GROUPS = [
+  ...GREENHOUSE_REDUNDANT_ATTEMPT_GROUPS,
   /^greenhouse_demographic/,
   /^preferred_(?:first|last)_name$/,
   /^question_select:/,
   /^greenhouse_known_question:/,
-  /^question_combo_label:.*(?:by submitting this application|which university|what education level|graduation month|graduation year|what is your gpa|have you ever applied|have you applied to this role|how did you hear|offer deadlines|disclaimer: akuna|visa sponsorship|live in new york|resume must|if you selected ['"]?other['"]?)/,
+  /^(?:question|greenhouse_referral)_combo_label:.*(?:by submitting this application|which university|what education level|graduation month|graduation year|what is your gpa|have you ever applied|have you applied to this role|how did you hear|offer deadlines|disclaimer: akuna|visa sponsorship|live in new york|resume must|options market making|if you selected ['"]?other['"]?)/i,
   /^question_combo_label:.*undergraduate.*master/,
   /^question:.*(?:legal first name|preferred name)/,
   /^question:(?:If yes|How familiar|Do you currently reside|Are you currently enrolled in a Masters|Do you identify as LGBTQIA|Which category best describes you|Gender Identity|Veteran Status)/,
   /^question_combo_label:.*If you answered.*current immigration status/,
   /^preferred_location_combo:[12]:/,
   /^education_graduation_date_combo:/,
-  /^(?:graduation_date|graduation_date_label|graduation_date_expected|education_end_month|education_end_year|education_graduation_month|education_expected_graduation_year|education_discipline_label|gpa_question)$/,
-  /^education_discipline_combo:/,
+  /^(?:graduation_date|graduation_date_label|graduation_date_expected|education_end_month|education_end_year|education_graduation_month|education_expected_graduation_year|gpa_question)$/,
   /^first_name_label$/,
   /^education_degree_combo:2$/,
   /^education_degree_combo:1$/,
@@ -2147,7 +2257,9 @@ function trimGreenhouseManagedActionsToBudget(actions: ManagedBrowserAction[], l
     while (actions.length > limit) {
       let removableBase: string | undefined;
       for (let index = actions.length - 1; index >= 0; index -= 1) {
-        const base = managedActionLabelBase(actions[index]!);
+        const action = actions[index]!;
+        if (isProtectedManagedAction(action)) continue;
+        const base = managedActionLabelBase(action);
         if (!base || !pattern.test(base)) continue;
         removableBase = base;
         break;
@@ -2175,12 +2287,25 @@ function trimGreenhouseManagedActionsToBudget(actions: ManagedBrowserAction[], l
  * applicant gets a packet with zero question records and 27 required-and-empty blockers, which is a
  * form she cannot answer inside the product. It also sat at index 131 of 145, past the runner's own
  * ceiling, so a tail truncation would have taken it first.
+ *
+ * The fixed education row joined it on 2026-08-09, and it is the only entry here that FILLS rather
+ * than reads. School, Degree, Discipline and End date month are one known block of four controls and
+ * sixteen actions, present and required on every Greenhouse board, and each has exactly one attempt.
+ * Measured on the live DRW packet: the raw list is 231 actions against a 120 budget, the trim
+ * reached Discipline, and the applicant was told '"Discipline" is required and is still empty' about
+ * a control the run had been forbidden to touch. There is no budget saving worth that, and the
+ * sixteen actions are a fixed cost that does not grow with the form.
  */
+const GREENHOUSE_FIXED_EDUCATION_ACTION_RE =
+  /^education_(?:school|degree|discipline|end_month)_combo(?:$|[:_])|^education_end_year_field$/;
+
 function isProtectedManagedAction(action: ManagedBrowserAction | undefined): boolean {
   if (!action) return false;
   if (action.type === 'discover') return true;
+  const label = action.label ?? '';
+  if (GREENHOUSE_FIXED_EDUCATION_ACTION_RE.test(label)) return true;
   return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight)/
-    .test(action.label ?? '');
+    .test(label);
 }
 
 function truncateManagedActionsToBudget(actions: ManagedBrowserAction[], limit: number) {
@@ -2701,7 +2826,7 @@ function pushFixedFieldActions(
     pushScopedQuestionChoiceActions(actions, 'Last Name / Surname', lastName, 'ashby_last_name', { includeSelectFallbacks: false });
     managedFill(actions, 'input[name="_systemfield_email"]', packet.email, 'email', false);
     managedFill(actions, ASHBY_PHONE_SELECTOR, phoneForPortalField(portal, packet.phone), 'phone');
-    managedFill(actions, 'input[name="_systemfield_location"]', packet.city, 'location');
+    managedFill(actions, ASHBY_LOCATION_SELECTOR, packet.city, 'location');
     // LinkedIn/GitHub/portfolio, previously missing entirely from this branch: the packet carries
     // them (confirmed live on a real account via GET /profile/application) and the Lever branch
     // fills its equivalents, but Ashby was silently dropping them, surfacing as a "'LinkedIn
@@ -2845,6 +2970,21 @@ export function buildManagedPortalActions(
             timeout: MANAGED_FILL_TIMEOUT_MS,
           });
           pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
+        } else {
+          /* A choice question on a non-Greenhouse board used to fall out of this branch having
+           * pushed NOTHING, and that was invisible for as long as no choice question could get here:
+           * portalSelectorForField withheld a selector for every shape except text, so this arm was
+           * unreachable. Discovery now reports a DURABLE selector for choice controls too, so the
+           * arm has to exist or a question that has just become fillable would silently stop being
+           * attempted at all.
+           *
+           * fillByLabelText, not a click on the selector. A durable selector on Ashby's yes/no
+           * resolves to the display:none mirror input, and clicking that neither drives React nor
+           * says which of Yes and No was meant; the runner's scoped choice handling reads the
+           * question's own container and presses the matching option pill, which is the only thing
+           * that works there. One action, and the same one the no-selector path below would spend.
+           */
+          pushScopedQuestionChoiceActions(actions, questionText, answer, 'question', { includeSelectFallbacks: false });
         }
         continue;
       }
@@ -3565,7 +3705,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="_systemfield_name"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="_systemfield_email"]'], packet.email, 'email', filledFields);
     await fillFirst(page, ASHBY_PHONE_SELECTOR.split(', '), phoneForPortalField(portal, packet.phone), 'phone', filledFields);
-    await fillFirst(page, ['input[name="_systemfield_location"]'], packet.city, 'location', filledFields);
+    await fillComboboxFirst(page, ASHBY_LOCATION_SELECTOR.split(', '), packet.city, 'location', filledFields);
     // See ASHBY_*_SELECTOR: these were missing from the direct path too, so a real Ashby run
     // reported LinkedIn as an empty required field even though the packet had it.
     await fillFirst(page, ASHBY_LINKEDIN_SELECTOR.split(', '), packet.linkedinUrl, 'linkedin', filledFields);

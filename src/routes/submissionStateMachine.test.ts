@@ -60,6 +60,72 @@ test('submit-request starts a fresh run instead of carrying stale run artifacts'
   assert.match(route, /const next = freshSubmitRequestReview\(current, normalizedSubmittedQuestions\)/);
 });
 
+/* R-095's gate, put on the transition it belongs to.
+ *
+ * A fill run is what ANSWERS a discovered question, so a blank required answer must never stop the
+ * run. On 2026-08-08 it did: 15 of 25 packets were refused 422 by submit-request, never opened a
+ * browser, and kept reporting an earlier build's attention_reason as though it described the
+ * current one. The check belongs on every transition that reaches an employer and on none that
+ * merely books a browser. */
+test('a blank required answer stops the send and never the fill run', async () => {
+  const route = await readFile('src/routes/applications.ts', 'utf8');
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+
+  const submitStart = route.indexOf("'/applications/:id/submit-request'");
+  const submitEnd = route.indexOf("'/applications/:id/submission/channels'", submitStart);
+  assert.ok(submitStart >= 0 && submitEnd > submitStart, 'could not bound submit-request');
+  const submitRequest = route.slice(submitStart, submitEnd);
+
+  // The run gate is gone: no unconditional required-and-blank refusal in front of the browser.
+  assert.doesNotMatch(
+    submitRequest,
+    /if \(normalizedSubmittedQuestions\.some\(\(question\) => question\.required && !question\.answer\.trim\(\)\)\)/,
+  );
+  // What remains is scoped to the ONE outcome of this route that sends with no run in between:
+  // the unsupported-portal email fallback.
+  assert.match(submitRequest, /const sendsWithoutAnotherRun = Boolean\(current\.portal_url\) && !isPortalSupported\(current\.portal_url!\)/);
+  assert.match(submitRequest, /if \(sendsWithoutAnotherRun && blankRequired\.length > 0\)/);
+  assert.match(submitRequest, /Answer every required question before submitting\./);
+
+  // The send gates all still refuse. Final approval, the runner's direct-send decision on both
+  // browser paths, and clickFinalSubmit's own read of the live form.
+  const approve = route.slice(
+    route.indexOf("'/applications/:id/submission/approve'"),
+    route.indexOf("'/applications/:id/status'", route.indexOf("'/applications/:id/submission/approve'")),
+  );
+  assert.match(approve, /A required application answer is still blank\./);
+  assert.match(runner, /&& unansweredRequiredQuestions\.length === 0/);
+  assert.match(runner, /unansweredRequiredCount: blankRequiredQuestionLabels\(mergedQuestions\)\.length/);
+  const portal = await readFile('src/lib/portalSubmission.ts', 'utf8');
+  assert.match(portal, /if \(readiness\.blocking\.length > 0\) throw new FormIncompleteError\(readiness\.blocking\)/);
+});
+
+/* A packet frozen against an old build must have a way back. R-066 makes applications write-once
+   with no delete, so without this the only exit was a full resume edit that changed nothing. */
+test('a filled but unclaimed packet can be restarted, and only when asked by name', async () => {
+  const route = await readFile('src/routes/applications.ts', 'utf8');
+  assert.match(route, /restart: z\.boolean\(\)\.optional\(\)/);
+  assert.match(route, /const restartable = preparedRunCanRestart\(current\.status, Boolean\(current\.submission_claimed_at\)\)/);
+  assert.match(route, /if \(disposition === 'reject' && !\(restartable && parsed\.data\.restart === true\)\)/);
+  assert.match(route, /code: 'PREPARED_RUN_RESTARTABLE'/);
+  // A restart must not carry the previous run's filled form, preview or approval forward.
+  assert.match(route, /const next = freshSubmitRequestReview\(current, normalizedSubmittedQuestions\)/);
+});
+
+/* Staleness has to be readable, or a results table silently measures the wrong build. */
+test('every review the runner writes records the build that produced it', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  assert.match(runner, /import \{ resolveRevision \} from '\.\.\/lib\/buildInfo'/);
+  // Stamped inside the shared merge, not at the call sites, for the same reason updated_at is.
+  assert.match(
+    runner,
+    /function nextReview\([\s\S]{0,200}applyReviewPatch\(current, \{ \.\.\.patch, run_revision: resolveRevision\(\)\.revision \?\? undefined \}\)/,
+  );
+  const board = await readFile('src/routes/jdMatch.ts', 'utf8');
+  assert.match(board, /run_revision: sql<string \| null>/);
+  assert.match(board, /revision: resolveRevision\(\)\.revision,/);
+});
+
 test('ATS API channel can prepare without opening a CAPTCHA-prone browser path only when posting is explicitly enabled', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
   assert.match(runner, /import \{ assessAtsSubmissionChannel, tryAtsSubmissionChannel \} from '\.\.\/lib\/atsSubmissionChannels'/);
@@ -71,7 +137,18 @@ test('ATS API channel can prepare without opening a CAPTCHA-prone browser path o
   assert.ok(atsAssessmentIndex > prepareIndex, 'prepare must assess employer-authorized API channels only after the explicit posting gate');
   assert.ok(localControlledIndex > atsAssessmentIndex, 'API-capable employers must skip browser preparation');
   assert.ok(accountGateIndex > atsAssessmentIndex, 'API-capable employers must skip CAPTCHA and account-wall preparation gates');
-  assert.match(runner.slice(atsAssessmentIndex, localControlledIndex), /preparedReviewPatch\(authorization, true\)/);
+  /* This asserted the literal `preparedReviewPatch(authorization, true)`. What it is protecting is
+     that an API-capable employer prepares WITHOUT a browser, and that is still exactly what happens.
+     The literal itself was a hole: no browser means no blockers and no live form, so `true` was an
+     honest statement about the form and a false one about the packet - with standing consent it
+     becomes 'submitting' in the same call, and nothing on that path had ever read the question list.
+     `safe` is now the one thing this branch can actually know, which is whether a required question
+     is still unanswered. */
+  assert.match(
+    runner.slice(atsAssessmentIndex, localControlledIndex),
+    /preparedReviewPatch\(authorization, atsUnansweredRequired\.length === 0\)/,
+  );
+  assert.match(runner.slice(atsAssessmentIndex, localControlledIndex), /blankRequiredQuestionLabels\(current\.questions\)/);
   assert.match(runner.slice(atsAssessmentIndex, localControlledIndex), /browser_context_id: undefined/);
   assert.match(runner.slice(atsAssessmentIndex, localControlledIndex), /browser_session_id: undefined/);
 });

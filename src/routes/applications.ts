@@ -11,6 +11,7 @@ import { career_page_sources, generated_resumes, monitored_jobs, profiles, users
 import {
   findPdfTextFidelityIssues,
   findPdfSafeMarginIssues,
+  hasContactRoute,
   renderResumePdf,
   validateResumeVisualLayout,
 } from '../engine/resumeRender';
@@ -37,7 +38,7 @@ import { buildPacket, processSubmissionApplication } from './submissionRunner';
 import { refreshKnownQuestionAnswers, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { rememberReusableAnswers } from '../lib/savedAnswerStore';
-import { resumeEditDisposition, submitRequestDisposition } from '../lib/submissionSafety';
+import { blankRequiredQuestionLabels, preparedRunCanRestart, resumeEditDisposition, submitRequestDisposition } from '../lib/submissionSafety';
 import {
   detectPortal,
   isPortalSupported,
@@ -52,6 +53,11 @@ import {
 import { resumeFileNameForRole } from '../lib/resumeFileName';
 import { sendUnsupportedPortalApplicationEmail } from '../lib/unsupportedPortalEmailFallback';
 import { assessAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
+import {
+  duplicateApplicationResponse,
+  duplicateApplicationVerdict,
+  type DuplicateApplicationVerdict,
+} from '../lib/duplicateApplication';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
 const questionSchema = z.object({
@@ -71,6 +77,13 @@ const reviewBodySchema = z.object({
 });
 const submitBodySchema = z.object({
   questions: z.array(questionSchema).max(100),
+  /* "Throw away the form you already filled and fill it again."
+   *
+   * Only ever consulted for a packet at ready_for_final_approval that has not been claimed - see
+   * preparedRunCanRestart for why that is the only state where discarding a prepared run is safe.
+   * Optional and default-false, so a client that never sends it behaves exactly as before and a
+   * replayed POST still gets its 409 rather than silently discarding a filled form. */
+  restart: z.boolean().optional(),
 });
 
 type StoredResumeRow = typeof generated_resumes.$inferSelect;
@@ -235,6 +248,20 @@ export async function preSendResumeVerificationIssues(
     return ['This application is missing the saved review or contact details. Regenerate it before sending.'];
   }
 
+  /* THE PACKETS ALREADY IN THE DATABASE, which the producer fix cannot reach.
+   *
+   * 28 stored packets were generated before /resume/generate resolved the contact block against the
+   * account, and their `_contact` has neither an email nor a phone frozen into it. Nothing about
+   * this row can be repaired in place: the PDF an employer would receive was rendered at generation
+   * time and is immutable in blob storage, so the only cure is regenerating the packet.
+   *
+   * Stated as an ISSUE rather than left to renderResumePdf's throw, which the render below would
+   * otherwise hit. This function's whole contract is a list of sentences the applicant can act on;
+   * an exception escaping it turns "your application is on hold because..." into a 500. */
+  if (!hasContactRoute({ ...contact, full_name: contact.full_name })) {
+    return ['This resume was made without an email address or a phone number on it, so an employer who reads it cannot reply. Generate it again to add your contact details.'];
+  }
+
   const spec = editableResumeSpec(stored);
   if (review.role) spec.target_role = resumeSafeTargetRole(review.role);
 
@@ -297,6 +324,57 @@ function sensitiveQuestionFor(
     .find((question) => sensitiveQuestionRequiresAttention(question.question, question.answer, 'text', profile, jdText));
 }
 
+/* THE DUPLICATE GATE as the routes see it.
+ *
+ * Two things happen on a refusal and both of them matter. The HTTP body answers the caller that is
+ * standing there, and the review is written to needs_attention with the same sentence so the
+ * Tracker says the same thing to someone who comes back later and never saw the response. A
+ * refusal that only exists in a 409 is invisible five minutes afterwards.
+ *
+ * Written through applyReviewPatch, never by spread, so the terminal-cause invariant holds and the
+ * category travels with the prose.
+ */
+async function refuseDuplicateApplication(
+  row: StoredResumeRow,
+  current: ApplicationReviewState,
+  userId: string,
+  log: FastifyInstance['log'],
+): Promise<DuplicateApplicationVerdict> {
+  const verdict = await duplicateApplicationVerdict({
+    userId,
+    applicationId: row.id,
+    jobContext: row.job_context,
+    portalUrl: current.portal_url,
+  });
+  if (verdict.kind === 'unidentifiable') {
+    log.warn(
+      { applicationId: row.id },
+      'duplicate guard abstained: no shared posting key with any submitted application',
+    );
+    return verdict;
+  }
+  if (verdict.kind !== 'duplicate') return verdict;
+  const now = new Date().toISOString();
+  const refused = applyReviewPatch(current, {
+    status: 'needs_attention',
+    attention_reason: verdict.reason,
+    attention_categories: ['duplicate_application'],
+    submission_error: undefined,
+  }, () => now);
+  await db.update(generated_resumes)
+    .set({ spec: reviewSpec(refused) })
+    .where(and(
+      eq(generated_resumes.id, row.id),
+      eq(generated_resumes.user_id, userId),
+      sql`${generated_resumes.spec}->'_review'->>'status' = ${current.status}`,
+    ));
+  log.info(
+    { applicationId: row.id, duplicateOf: verdict.match.application_id, basis: verdict.match.basis },
+    'Submission refused: this user already applied to this posting',
+  );
+  return verdict;
+}
+
 export async function applicationRoutes(fastify: FastifyInstance) {
   fastify.post(
     '/applications/:id/submission/extension-start',
@@ -307,6 +385,22 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const params = paramsSchema.safeParse(request.params);
       if (!params.success) return reply.status(400).send({ error: 'Invalid application id' });
       const userId = request.jwtPayload!.userId;
+      /* THE DUPLICATE GATE for the extension path, and it is the only one of the five that never
+       * touches submissionRunner.submit: the extension does the filling and the clicking in the
+       * applicant's own browser, and this route is the moment Litos authorizes it to. Refusing at
+       * extension-outcome would be refusing to record a send that already happened.
+       *
+       * Ahead of the transaction, not inside it, so the read is not competing with the advisory
+       * lock the claim takes. Nothing is claimed yet at this point, so there is nothing to undo. */
+      const [precheckRow] = await db.select().from(generated_resumes).where(and(
+        eq(generated_resumes.id, params.data.id),
+        eq(generated_resumes.user_id, userId),
+      )).limit(1);
+      const precheckReview = precheckRow ? readApplicationReview(precheckRow.spec) : null;
+      if (precheckRow && precheckReview && precheckReview.status !== 'submitted') {
+        const verdict = await refuseDuplicateApplication(precheckRow, precheckReview, userId, fastify.log);
+        if (verdict.kind === 'duplicate') return reply.status(409).send(duplicateApplicationResponse(verdict));
+      }
       const result = await db.transaction(async (tx) => {
         await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${userId}))`);
         const rows = await tx.select().from(generated_resumes).where(and(
@@ -345,6 +439,19 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         const refreshedQuestions = refreshKnownQuestionAnswers(current.questions, sensitiveProfile, current.jd_text);
         const sensitive = sensitiveQuestionFor(refreshedQuestions, sensitiveProfile, current.jd_text);
         if (sensitive) return { kind: 'sensitive_question' as const, question: sensitive.question };
+        /* THE FIFTH SEND SITE, and the one blankRequiredQuestionLabels' own list did not name.
+         *
+         * This route hands the packet to the extension, which fills the employer's form and presses
+         * Submit in the applicant's own browser. Nothing between here and that click reads the
+         * answers again: extension-outcome only records what happened. So this is a send, and it has
+         * never carried a required-answer check of any kind - a packet with a required question
+         * Litos could not answer went out through it in silence.
+         *
+         * Beside the sensitive-question refusal because they are the same kind of stop and must not
+         * drift apart, and BEFORE the tx.update below, so the claim is never taken for a submission
+         * that is not allowed to proceed. */
+        const unansweredRequired = blankRequiredQuestionLabels(refreshedQuestions);
+        if (unansweredRequired.length > 0) return { kind: 'required_answer_missing' as const, questions: unansweredRequired };
         if (!withinDailyCap(countRows[0]?.total ?? 0, dailySubmissionCap())) return { kind: 'cap' as const };
         const now = new Date().toISOString();
         const claimId = randomUUID();
@@ -381,6 +488,14 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (result.kind === 'education_drift') return reply.status(422).send(educationDriftResponse(result.issues));
       if (result.kind === 'sensitive_question') {
         return reply.status(422).send({ error: `Sensitive question requires your attention: ${result.question.slice(0, 120)}` });
+      }
+      if (result.kind === 'required_answer_missing') {
+        // Same body shape as the unsupported-portal email refusal below, so a client can handle one
+        // "you still owe an answer" response rather than two that differ only in wording.
+        return reply.status(422).send({
+          error: 'Answer every required question before submitting.',
+          questions: result.questions,
+        });
       }
       if (result.kind === 'cap') return reply.status(429).send({ error: 'Daily automatic submission safety limit reached' });
       if (result.kind === 'changed') return reply.status(409).send({ error: 'The application state changed before the extension could reserve it' });
@@ -450,6 +565,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       } | undefined;
       if (!review?.jd_text || !contact?.full_name) {
         return reply.status(409).send({ error: 'This older resume cannot be edited in the dashboard. Generate it again first.' });
+      }
+      /* Same refusal as the pre-send check, and for the same reason: this route re-renders the PDF
+         from the STORED contact block, so editing a bullet on one of the contactless packets would
+         write a fresh, still-contactless file over the old one. Editing cannot add an address; only
+         regenerating reads the account again. */
+      if (!hasContactRoute({ ...contact, full_name: contact.full_name })) {
+        return reply.status(409).send({ error: 'This resume was made without an email address or a phone number on it. Generate it again to add your contact details, then edit it.' });
       }
       if (resumeEditDisposition(review.status, Boolean(review.submission_claimed_at)) !== 'start') {
         return reply.status(409).send({ error: 'This resume cannot be edited while its application is active or complete' });
@@ -612,8 +734,60 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (disposition === 'in_flight') {
         return reply.status(202).send({ application_id: row.id, review: current, cover_letter: storedCoverLetter(row) });
       }
-      if (disposition === 'reject') {
-        return reply.status(409).send({ error: 'This application cannot start another submission run from its current state' });
+      /* THE 409, AND THE DOOR OUT OF IT.
+       *
+       * 'reject' is right for a packet that has already reached the employer, and right by default
+       * for one sitting at ready_for_final_approval: it is waiting on the applicant to look at a
+       * filled form, not on more filling, and a replayed POST must not throw that away underneath
+       * her. But "by default" is doing real work in that sentence. When the code that filled the
+       * form has since changed, the stored review is evidence about a build that is no longer
+       * running, and before this the only way to refresh it was to submit a full resume edit -
+       * re-rendering the PDF and re-running every layout validation - to change nothing about the
+       * resume. R-066 makes applications write-once with no delete, so there was no other way out
+       * at all. Four of 25 packets were stuck exactly here on 2026-08-08.
+       *
+       * So restarting is possible and has to be ASKED FOR by name. The response says so, and names
+       * the build the stale review came from, so the caller can decide rather than guess. */
+      const restartable = preparedRunCanRestart(current.status, Boolean(current.submission_claimed_at));
+      if (disposition === 'reject' && !(restartable && parsed.data.restart === true)) {
+        return reply.status(409).send(restartable
+          ? {
+            error: 'This application is already filled and waiting for you to look it over. '
+              + 'Ask again with restart to discard that filled form and fill it again.',
+            code: 'PREPARED_RUN_RESTARTABLE',
+            restartable: true,
+            run_revision: current.run_revision ?? null,
+          }
+          : {
+            error: 'This application cannot start another submission run from its current state',
+            code: 'SUBMISSION_RUN_NOT_RESTARTABLE',
+            restartable: false,
+          });
+      }
+      /* THE DUPLICATE GATE for everything this route can reach.
+       *
+       * This route forks below into two sends: the unsupported-portal EMAIL FALLBACK, which
+       * reaches the employer inside this same request, and the managed browser run. The browser
+       * run is guarded again inside submissionRunner.submit, and that repetition is deliberate
+       * rather than redundant, because standing consent reaches submit without ever coming through
+       * here. The check sits here as well so the email fallback is covered and so a duplicate
+       * costs no browser minutes.
+       *
+       * After repairReviewPortalFromMonitoredJob, because the posting key is read off portal_url
+       * and the repair is what fills it in on a packet that lost it.
+       *
+       * Ahead of the required-answer, education-drift and sensitive-question gates on purpose. All
+       * three ask the applicant to go fix something; this one is telling her there is nothing to
+       * fix, and asking her to correct answers on a form that will never be sent wastes her time
+       * and reads as though the send is still available. */
+      const duplicateVerdict = await refuseDuplicateApplication(
+        row,
+        current,
+        request.jwtPayload!.userId,
+        fastify.log,
+      );
+      if (duplicateVerdict.kind === 'duplicate') {
+        return reply.status(409).send(duplicateApplicationResponse(duplicateVerdict));
       }
       // Guarded here as well as on extension-start, and not because this route is unattended today.
       // The dashboard now refuses to send a drifted packet, but a frontend check is not an
@@ -632,8 +806,30 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         current.jd_text,
       );
       const normalizedSubmittedQuestions = mergeSubmittedApplicationReviewQuestions(current.questions, submittedQuestions);
-      if (normalizedSubmittedQuestions.some((question) => question.required && !question.answer.trim())) {
-        return reply.status(422).send({ error: 'Answer every required question before submitting.' });
+      /* THE REQUIRED-ANSWER GATE, ON THE SEND AND NOT ON THE RUN.
+       *
+       * This route has two outcomes and they need opposite treatment. On a supported portal it
+       * books a browser and the run FILLS the form, which is the only way a discovered question ever
+       * gets answered - so refusing it here for a blank required answer is a closed loop: blank
+       * blocks the run, and only the run can un-blank it. Measured on prod on 2026-08-08, this exact
+       * check refused 15 of 25 packets, none of them opened a browser, and their untouched
+       * attention_reason then reported an earlier build's results as if they were the current one.
+       * The Greenhouse Discipline fix in bd1bab3 had been live for an hour and had never run once.
+       *
+       * On an UNSUPPORTED portal there is no run. The branch further down emails the packet to the
+       * employer inside this same request, and that is a send, so the check stays in front of it.
+       *
+       * Nothing is weakened by the move. What used to be checked here is now checked at every point
+       * that can actually reach an employer: the runner's direct-send decision, POST
+       * /submission/approve, and clickFinalSubmit's read of the live form - and those see the
+       * questions the run discovered rather than this pre-run snapshot of them. */
+      const sendsWithoutAnotherRun = Boolean(current.portal_url) && !isPortalSupported(current.portal_url!);
+      const blankRequired = blankRequiredQuestionLabels(normalizedSubmittedQuestions);
+      if (sendsWithoutAnotherRun && blankRequired.length > 0) {
+        return reply.status(422).send({
+          error: 'Answer every required question before submitting.',
+          questions: blankRequired,
+        });
       }
       const submitEducationIssues = packetEducationDrift(stored, submitProfileRows[0]?.parsed_json);
       if (submitEducationIssues.length > 0) {
@@ -955,6 +1151,21 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       }
       if (current.handoff_expires_at && Date.parse(current.handoff_expires_at) < Date.now()) {
         return reply.status(409).send({ error: 'That took too long and timed out. Start the application again.' });
+      }
+      /* THE DUPLICATE GATE at the moment she presses send.
+       *
+       * submissionRunner.submit checks this too and would stop the click either way, but a 202
+       * followed by a silent flip to needs_attention is not an answer to somebody who just pressed
+       * a button. She asked a direct question and gets a direct refusal, with the same sentence the
+       * Tracker will show. */
+      const approvalDuplicate = await refuseDuplicateApplication(
+        row,
+        current,
+        request.jwtPayload!.userId,
+        fastify.log,
+      );
+      if (approvalDuplicate.kind === 'duplicate') {
+        return reply.status(409).send(duplicateApplicationResponse(approvalDuplicate));
       }
       const sensitiveProfile = await loadSensitiveQuestionProfile(request.jwtPayload!.userId);
       const approvalReview: ApplicationReviewState = {

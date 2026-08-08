@@ -104,6 +104,60 @@ function contactLine(contact: ContactHeader): string {
     .join(' | ');
 }
 
+/**
+ * A resume the employer who reads it cannot answer.
+ *
+ * Thrown, not collected into an issues array, because every other post-render check answers the
+ * question "is this document good enough to send" and this one answers "is this a document at all".
+ * A named class rather than a bare Error so the routes can tell it apart from a render fault and
+ * say something the applicant can act on, instead of "the check could not run".
+ */
+export class ResumeContactError extends Error {
+  constructor() {
+    super('This resume has no email address and no phone number on it, so an employer who reads it has no way to reply');
+    this.name = 'ResumeContactError';
+  }
+}
+
+/**
+ * Whether the header carries a way to REACH the applicant, which links are not.
+ *
+ * Measured 2026-08-09 on production: 28 of one account's 85 packets had `_contact.email` and
+ * `_contact.phone` both null, so the whole block under the name collapsed to a LinkedIn URL. A
+ * profile page is a place to look someone up, not an address a recruiter replies to, and 26 of
+ * those 28 had already been typed into a live employer form before anyone noticed. So links are
+ * deliberately NOT counted here: the bar is a route back, not a non-empty line.
+ *
+ * Trimmed rather than truthiness-checked, because the contact block is assembled from stored jsonb
+ * and a whitespace-only string is what an "email: ''" round trip produces.
+ */
+export function hasContactRoute(contact: ContactHeader): boolean {
+  return Boolean(contact.email?.trim() || contact.phone?.trim());
+}
+
+/**
+ * The same rule as an ISSUE STRING, for the quality block every packet stores.
+ *
+ * spec._quality already records specIssues, layoutIssues, visualWarnings, groundingRemoved,
+ * atsCoverage and the whole visualLayout. On Virtu packet 80aeba93, which has no email and no
+ * phone, every one of those arrays is empty: the quality system measures density, section order,
+ * keyword coverage and grounding, and had nothing whatsoever to say about whether the resume can be
+ * replied to. The most basic property a resume has was the one property nothing asserted.
+ *
+ * visualLayout.sectionOrder is not a substitute and never was. It reads ["HEADER","EDUCATION",
+ * "EXPERIENCE","SKILLS"] on that same packet, because HEADER is present whenever the NAME is drawn.
+ * A header is a name and a way to answer it; the section-order check cannot see the difference, so
+ * the difference has to be checked here.
+ *
+ * Returns an array rather than a boolean so it can be spread into the existing issue lists and
+ * stored alongside them, in the same shape the rest of the quality block already uses.
+ */
+export function resumeContactIssues(contact: ContactHeader): string[] {
+  return hasContactRoute(contact)
+    ? []
+    : ['the resume has no email address and no phone number, so an employer who reads it cannot reply'];
+}
+
 function normalizedPdfText(value: string): string {
   return value.normalize('NFC').replace(/\s+/g, ' ').trim();
 }
@@ -1013,6 +1067,15 @@ export async function renderResumePdf(
   sparse: boolean;
   layout: ResumeVisualLayout;
 }> {
+  /* THE GUARD, BEFORE A SINGLE BYTE IS DRAWN, and in the renderer rather than in any one route.
+   *
+   * Four call sites produce an employer-facing PDF (resume.ts generation, applications.ts edit and
+   * pre-send verification, baseResume.ts's ATS gate). A check at the producer alone fixes the path
+   * it is written on and leaves the next one to be discovered from an employer, which is how this
+   * defect reached 28 packets. This is the one function that turns a spec into a document, so it is
+   * the one place where "uncontactable" can be made unrepresentable rather than merely unlikely. */
+  if (!hasContactRoute(contact)) throw new ResumeContactError();
+
   const plan = planResumeLayout(rawSpec, contact, jdText);
   const { design, spec } = plan;
   const width = usableWidth(design);

@@ -103,7 +103,8 @@ import { generateStoredCoverLetter, storedCoverLetter } from '../lib/coverLetter
 import { repairReviewPortalFromMonitoredJob } from '../lib/applicationPortalRepair';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
 import { mayClickFinalSubmit, preparedSubmissionStatus } from '../lib/submissionAuthorization';
-import { directPreparationIsSafe } from '../lib/submissionSafety';
+import { blankRequiredQuestionLabels, directPreparationIsSafe } from '../lib/submissionSafety';
+import { resolveRevision } from '../lib/buildInfo';
 import {
   autoRunShouldPrepare,
   dailySubmissionCap,
@@ -113,8 +114,8 @@ import {
 } from '../lib/submissionQueue';
 import { coverLetterFileNameForRole, resumeFileNameForRole } from '../lib/resumeFileName';
 import { assessAtsSubmissionChannel, tryAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
-import { readPinnedApplicantEmail } from '../lib/applicationEmail';
-import { resolveFrozenApplicantEmail } from '../lib/applicationEmail';
+import { duplicateApplicationVerdict } from '../lib/duplicateApplication';
+import { readPinnedApplicantEmail, resolveFrozenApplicantEmail } from '../lib/applicationEmail';
 
 export type ResumeRow = typeof generated_resumes.$inferSelect;
 type StoredSpec = Record<string, unknown>;
@@ -128,8 +129,19 @@ type StandingAuthorization = {
 // Thin wrapper. The merge and the stall bookkeeping live in applicationStall.ts so that
 // routes/applications.ts, which writes _review directly and knows nothing about stalls, goes
 // through exactly the same code.
+//
+// THE RUN'S REVISION IS STAMPED HERE, next to updated_at and for the same reason applyReviewPatch
+// writes updated_at rather than trusting each caller to: this is the one function every review the
+// runner produces passes through, and a rule enforced at a dozen call sites is a rule that holds
+// until someone adds the thirteenth. Only the RUNNER stamps it. A review edit or a stage change
+// writes review state without learning anything new about the form, and stamping those would make a
+// packet look freshly tested when all that happened was somebody renamed a question.
+//
+// Cleared, not preserved, when the environment supplies no SHA. run_revision means "the build whose
+// run produced this", and carrying a previous deployment's SHA through a run that happened on an
+// unidentifiable build would be a confident wrong answer where absent is the honest one.
 function nextReview(current: ApplicationReviewState, patch: Partial<ApplicationReviewState>): ApplicationReviewState {
-  return applyReviewPatch(current, patch);
+  return applyReviewPatch(current, { ...patch, run_revision: resolveRevision().revision ?? undefined });
 }
 
 export function atsApiSubmissionEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -836,6 +848,23 @@ export async function discoverAndResolveQuestions(
     && /\b(?:school|degree|discipline)--\d+\b/i.test(field.label);
   const portalSelectorForField = (field: DiscoveredQuestion): string | undefined => {
     if (managedGreenhouseEducationCombobox(field)) return undefined;
+    /* A DURABLE SELECTOR BEATS THE MARKER, on every control shape.
+     *
+     * Everything below hands back `field.selector`, which is the `[data-litos-discovered-N]` marker
+     * stamped on the element by the DISCOVERY page load. durablePortalSelector refuses that marker at
+     * fill time - rightly, because the fill run is a separate stateless call against a page where the
+     * attribute does not exist - so every one of these questions is really filled by matching the
+     * employer's label text, and whether that lands is decided by a hand-maintained regex.
+     * profileFieldResolution.ts has argued for reporting a real selector instead since it was
+     * written; this is that. An id, a name, or an ATS field handle survives the reload.
+     *
+     * Returned for CHOICE shapes too, unlike the marker. A durable selector on a radio, checkbox or
+     * select is not a promise that a text fill will work on it - portal_input_type travels beside it
+     * and buildManagedPortalActions dispatches on that. The marker was withheld from those shapes
+     * because it resolved to nothing useful, not because a real selector would be wrong.
+     */
+    const durable = field.durableSelector?.trim();
+    if (durable) return durable;
     if (portal === 'greenhouse' && /^combobox$/i.test(field.inputType)) return field.selector;
     return /^(?:text|email|tel|url|number|date|textarea)?$/i.test(field.inputType)
       ? field.selector
@@ -1306,10 +1335,21 @@ async function prepareManaged(
   // A discovery pass that never ran cannot be the basis for calling a form complete, so its failure
   // is a gate on `safe` in its own right: without this, a page whose fixed fields all filled would
   // still be sent while every question the employer asked went unread.
+  //
+  // The blank-required term is the half of the pre-submit gate that had to MOVE rather than be
+  // deleted. Refusing the run in front of the browser was a deadlock (see
+  // blankRequiredQuestionLabels); refusing the SEND after the run is not, because by this line the
+  // run has happened and mergedQuestions is the freshly discovered truth about this form rather
+  // than a pre-run snapshot. Standing consent turns `safe` straight into 'submitting' in the same
+  // call, so this is the only thing between an unanswered required question and a click on this
+  // path. Not safe means ready_for_final_approval, where she is shown the blank question and can
+  // answer it - which is exactly the loop the run gate had no exit from.
+  const unansweredRequiredQuestions = blankRequiredQuestionLabels(mergedQuestions);
   const safe = blockers.length === 0
     && discoveryAttention.length === 0
     && evidenceBlockers.length === 0
-    && discoveryFailures.length === 0;
+    && discoveryFailures.length === 0
+    && unansweredRequiredQuestions.length === 0;
   const review = nextReview(current, {
     ...preparedReviewPatch(authorization, safe),
     ...(captchaAttention
@@ -1413,16 +1453,33 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
   assertControlledPortalEnabled(portal);
   const atsAssessment = atsApiSubmissionEnabled() ? assessAtsSubmissionChannel(portalUrl) : null;
   if (atsAssessment?.status === 'available') {
+    /* The one preparation that reads no form at all, so `safe` cannot be a literal.
+     *
+     * This branch opens no browser, computes no blockers and never sees the employer's page: it
+     * decides the posting can be submitted through an employer-authorized API and hands off. `true`
+     * was therefore the honest answer about the FORM and the wrong answer about the PACKET - with
+     * standing consent it turns straight into 'submitting' and submit() posts the application, and
+     * nothing between here and there had ever read the question list. Latent today because
+     * atsApiSubmissionEnabled() gates the branch, and the shape is what bites the day that flag goes
+     * on. submit() refuses at the click as well; this is what stops the packet being DESCRIBED as
+     * ready in the first place. */
+    const atsUnansweredRequired = blankRequiredQuestionLabels(current.questions);
     await writeReview(row, nextReview(current, {
-      ...preparedReviewPatch(authorization, true),
+      ...preparedReviewPatch(authorization, atsUnansweredRequired.length === 0),
+      ...(atsUnansweredRequired.length > 0
+        ? {
+          attention_reason: `${atsUnansweredRequired.length} required `
+            + `${atsUnansweredRequired.length === 1 ? 'question is' : 'questions are'} still unanswered: `
+            + `${atsUnansweredRequired.map((label) => `"${label.slice(0, 60)}"`).join(', ').slice(0, 400)}`,
+        }
+        : {}),
       submission_run_id: runId,
       browser_context_id: undefined,
       browser_session_id: undefined,
-      attention_reason: undefined,
       submission_error: undefined,
     }));
     fastify.log.info(
-      { applicationId: row.id, provider: atsAssessment.provider },
+      { applicationId: row.id, provider: atsAssessment.provider, unansweredRequired: atsUnansweredRequired.length },
       'Application prepared for employer-authorized ATS API submission',
     );
     return;
@@ -1559,9 +1616,12 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       blockers: result.blockers,
       discovered,
     }, packet);
+    // Same reasoning as the managed path above: the required-answer check moved off the run and on
+    // to the send, and this is the direct-Playwright path's send decision.
     const safe = directPreparationIsSafe({
       blockerCount: sanitizedBlockers.length + evidenceBlockers.length,
       attentionCount: discoveryAttention.length,
+      unansweredRequiredCount: blankRequiredQuestionLabels(mergedQuestions).length,
       verificationStatus: verification.status,
     });
     const review = nextReview(current, {
@@ -1754,12 +1814,89 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
     }
     throw new Error('Submission authorization is missing');
   }
+  /* THE DUPLICATE GATE, and it is here because here is where three of the five send paths meet.
+   *
+   * submit() is reached by POST /submission/approve, by standing consent (prepare writes
+   * 'submitting' and the cron picks it up, never touching the approve route), and it contains the
+   * ATS API channel. The other two are guarded at their own doors: POST /submit-request for the
+   * unsupported-portal email fallback, and POST /submission/extension-start for the extension.
+   *
+   * BEFORE claimSubmission, not after. The claim is the last honest marker of "this one may
+   * already be out there" and it is what the daily cap counts; taking one for an application that
+   * is about to be refused would spend a cap slot on a send that never happens.
+   *
+   * A read failure does NOT open the gate. The whole point is that a duplicate cannot be
+   * withdrawn, so an unreadable database is a reason to stop rather than a reason to proceed. */
+  const duplicate = await duplicateApplicationVerdict({
+    userId: row.user_id,
+    applicationId: row.id,
+    jobContext: row.job_context,
+    portalUrl: current.portal_url,
+  });
+  if (duplicate.kind === 'unidentifiable') {
+    fastify.log.warn(
+      { applicationId: row.id },
+      'duplicate guard abstained: no shared posting key with any submitted application',
+    );
+  }
+  if (duplicate.kind === 'duplicate') {
+    fastify.log.info(
+      { applicationId: row.id, duplicateOf: duplicate.match.application_id, basis: duplicate.match.basis },
+      'Submission refused: this user already applied to this posting',
+    );
+    await writeReview(row, nextReview(current, {
+      status: 'needs_attention',
+      attention_reason: duplicate.reason,
+      attention_categories: ['duplicate_application'],
+      submission_authorization: undefined,
+      submission_claimed_at: undefined,
+      submission_claim_id: undefined,
+    }));
+    return;
+  }
   const claimedRow = await claimSubmission(row);
   if (!claimedRow) return;
   row = claimedRow;
   let claimedReview = readApplicationReview(row.spec);
   if (!claimedReview) return;
   claimedReview = await repairReviewPortalFromMonitoredJob(row, claimedReview);
+  /* THE LAST PLACE THIS CAN BE ASKED, and the only one that covers every path to 'submitted'.
+   *
+   * blankRequiredQuestionLabels already gates the two PREPARE decisions and the approve route, and
+   * between them those cover standing consent and the applicant pressing send. They do not cover
+   * everything that gets here:
+   *
+   *   - the ATS API channel prepares with `safe` as a LITERAL true (see the atsAssessment branch in
+   *     prepare): no browser, no blockers, no question list consulted, straight to
+   *     ready_for_final_approval or to 'submitting'. submitViaAtsSubmissionChannel below then posts
+   *     the application to the employer's API. Nothing on that path had ever read the questions;
+   *   - the controlled-browser path, which returns before either provider block;
+   *   - and any packet whose stored questions changed between the prepare that judged it and this
+   *     click. The approve route re-reads them, the standing-consent path does not.
+   *
+   * Below claimSubmission so it reads the review as it stands at the moment of the click, and above
+   * every send so it gates the decision rather than one implementation of it.
+   *
+   * needs_attention, not a throw: nothing has been sent, the applicant can answer the question and
+   * run it again, and 'failed' would say the opposite of what happened. The claim is released for
+   * the same reason - the packet is waiting on her, not in flight.
+   */
+  const unansweredRequired = blankRequiredQuestionLabels(claimedReview.questions);
+  if (unansweredRequired.length > 0) {
+    fastify.log.error(
+      { applicationId: row.id, fields: unansweredRequired },
+      'Submission withheld at the click: required questions are still unanswered',
+    );
+    await writeReview(row, nextReview(claimedReview, {
+      status: 'needs_attention',
+      attention_reason: `${unansweredRequired.length} required `
+        + `${unansweredRequired.length === 1 ? 'question is' : 'questions are'} still unanswered, so this was not sent: `
+        + `${unansweredRequired.map((label) => `"${label.slice(0, 60)}"`).join(', ').slice(0, 400)}`,
+      submission_claimed_at: undefined,
+      submission_claim_id: undefined,
+    }));
+    return;
+  }
   const claimedPortal = detectPortal(claimedReview.portal_url!);
   assertControlledPortalEnabled(claimedPortal);
   if (shouldUseLocalControlledBrowser(claimedPortal)) {

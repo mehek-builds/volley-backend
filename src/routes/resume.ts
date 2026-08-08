@@ -14,6 +14,7 @@ import {
   findPdfSafeMarginIssues,
   findResumeTypographyIssues,
   renderResumePdf,
+  resumeContactIssues,
   validateResumeVisualLayout,
   type ResumeVisualLayout,
 } from '../engine/resumeRender';
@@ -55,6 +56,7 @@ import { monitoredDescriptionHash, monitoredJdAgrees } from '../lib/monitoredPor
 import { refreshKnownQuestionAnswers, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
+import { resumeContactOfRecord } from '../lib/resumeContactOfRecord';
 
 const MAX_SPEC_ATTEMPTS = 2; // 1 initial pass + 1 feedback-driven retry, per PRD-v2 Section 6.4's
 // "automated quality gate" - bounded so a stubborn JD can't loop the endpoint indefinitely.
@@ -396,6 +398,70 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     }
 
     const resumeId = randomUUID();
+
+    // These reads are independent. Starting them together removes one database round trip from
+    // every generation while preserving readExperienceBank's load-bearing row ordering (R-022).
+    /* application_profile joins the pair because it, not the parse, is the source of truth for the
+       GPA the rendered PDF prints (see educationFrom) AND for the phone the contact line prints
+       (see contactOfRecord below). Read in the same batch rather than after the bank check, so the
+       authoritative academic record costs no wall clock on the happy path.
+
+       HOISTED ABOVE THE ALIAS BLOCK, which used to sit here. The alias decision keys off "does this
+       packet have an email at all", and that question cannot be answered before the account's own
+       address has been merged in. Asking it of the raw request is what let a caller with an empty
+       body.contact.email skip the alias AND ship a packet with no address of any kind. */
+    const [bank, profileRows, applicationRow] = await Promise.all([
+      readExperienceBankOrSeedFromBaseResume(userId),
+      db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1),
+      // Tolerant read, see lib/applicationFacts.ts.
+      selectApplicationProfileRow(userId),
+    ]);
+    // Kept immediately after its read, where it has always been. Everything below spends something
+    // (a scrypt-backed decrypt, then an MX lookup for the alias) on an account that cannot generate.
+    if (bank.length === 0) {
+      return reply.status(400).send({ error: 'Nothing saved about your work yet. Finish setting up first.' });
+    }
+
+    /* Decrypted ONCE for the two things on this request that read it: the academic record the
+       education block prints, and the phone the contact line prints. Both used to decrypt their own
+       copy (one inline here, none at all for the phone), and decryptField is scrypt-backed work. */
+    const applicationRecord = academicRecordRowFor(applicationRow, (err) =>
+      request.log.error(
+        { err, userId },
+        'application_profile could not be decrypted while generating a tailored resume. Printing no GPA and no stored phone rather than the resume parse, which is not the source of truth for either.',
+      ),
+    );
+
+    /* THE CONTACT BLOCK, RESOLVED AGAINST THE ACCOUNT, not taken from the caller as gospel.
+       See lib/resumeContactOfRecord.ts for the 28 production packets that made this necessary. */
+    const contactOfRecord = resumeContactOfRecord({
+      requested: body.contact,
+      accountEmail: request.jwtPayload!.email,
+      profile: applicationRecord,
+    });
+
+    /* REFUSED HERE, BEFORE THE MODEL CALL, rather than left to the renderer's own guard.
+     *
+     * renderResumePdf throws ResumeContactError on the same condition and that throw is the
+     * backstop, but reaching it costs a Claude call, a PDF render and a text extraction first, and
+     * answers the applicant with a 500 instead of a sentence. Nothing below this line can add an
+     * email or a phone, so this is the earliest honest place to stop.
+     *
+     * NOTHING IS INVENTED to get past it. There is no third source to try: the login email and the
+     * stored phone are the only two facts the account has, and a resume that prints a guess is
+     * worse than a resume that is not made. */
+    if (resumeContactIssues(contactOfRecord).length > 0) {
+      return reply.status(422).send(resumeQualityHoldResponseSchema.parse({
+        error: 'Litos did not make this resume because it has no way for an employer to reach you.',
+        code: 'resume_quality_hold',
+        quality: {
+          ready_to_attach: false,
+          issues: ['Add an email address or a phone number to your profile. A LinkedIn or GitHub link is somewhere to look you up, not somewhere to reply to you.'],
+          warnings: [],
+        },
+      }));
+    }
+
     /* THE ALIAS IS PRINTED ON THE PDF, which is why the deliverability check has to run here too
      * and not only at submission time.
      *
@@ -405,19 +471,14 @@ export async function resumeRoutes(fastify: FastifyInstance) {
      * employer keeps. The check is cached per domain with a TTL, so this costs one lookup an hour
      * across the whole deployment rather than one per generation, and it turns itself back on
      * without a deploy once the MX record exists. */
-    const [aliasDeliverability, accountRows] = await Promise.all([
-      body.application ? applicationAliasDeliverability() : Promise.resolve(null),
-      body.application
-        ? db.select({ email: users.email }).from(users).where(eq(users.id, userId)).limit(1)
-        : Promise.resolve([] as Array<{ email: string }>),
-    ]);
-    const accountEmail = accountRows[0]?.email?.trim().toLowerCase() ?? '';
-    const realApplicantEmail = body.contact.email?.trim().toLowerCase() || accountEmail || null;
+    const aliasDeliverability = body.application && contactOfRecord.email
+      ? await applicationAliasDeliverability()
+      : null;
     const litosApplicationAlias = aliasDeliverability?.deliverable ? applicationAliasFor(userId, resumeId) : null;
     // The stored preference, not whichever address this request happened to carry. Falls back to
     // the contact address, which is what this line used unconditionally before.
-    const aliasForwardTo = litosApplicationAlias && realApplicantEmail
-      ? await applicationForwardingAddress(userId, realApplicantEmail)
+    const aliasForwardTo = litosApplicationAlias && contactOfRecord.email
+      ? await applicationForwardingAddress(userId, contactOfRecord.email)
       : null;
     const applicationEmail: ApplicationEmailIdentity | null = litosApplicationAlias && aliasForwardTo
       ? {
@@ -426,15 +487,15 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         mode: 'litos_application_alias',
       }
       : null;
-    if (body.application && realApplicantEmail && !applicationEmail) {
+    if (body.application && contactOfRecord.email && !applicationEmail) {
       fastify.log.warn(
         { reason: aliasDeliverability?.reason ?? 'alias_not_configured', domain: aliasDeliverability?.domain ?? null },
         'application email alias skipped: the alias domain cannot receive mail, using the real address',
       );
     }
     const applicationContact = applicationEmail
-      ? { ...body.contact, email: applicationEmail.alias }
-      : { ...body.contact, email: realApplicantEmail ?? undefined };
+      ? { ...contactOfRecord, email: applicationEmail.alias }
+      : contactOfRecord;
     const pinnedApplicantEmail: ApplicantEmailChoice | null = body.application && applicationContact.email
       ? {
         address: applicationContact.email,
@@ -444,21 +505,6 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         decided_at: new Date().toISOString(),
       }
       : null;
-
-    // These reads are independent. Starting them together removes one database round trip from
-    // every generation while preserving readExperienceBank's load-bearing row ordering (R-022).
-    /* application_profile joins the pair because it, not the parse, is the source of truth for the
-       GPA the rendered PDF prints (see educationFrom). Read in the same batch rather than after the
-       bank check, so the authoritative academic record costs no wall clock on the happy path. */
-    const [bank, profileRows, applicationRow] = await Promise.all([
-      readExperienceBankOrSeedFromBaseResume(userId),
-      db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1),
-      // Tolerant read, see lib/applicationFacts.ts.
-      selectApplicationProfileRow(userId),
-    ]);
-    if (bank.length === 0) {
-      return reply.status(400).send({ error: 'Nothing saved about your work yet. Finish setting up first.' });
-    }
 
     // NULL is normal and must stay non-fatal: accounts created before the base-resume step exists,
     // and anyone who skipped it, generate exactly as they did before.
@@ -487,15 +533,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
        parse while every other employer-facing surface read application_profile. */
     const education: CandidateEducation = mergeEducationFallback(
       mergeEducationFallback(
-        educationFrom(
-          parsed,
-          academicRecordRowFor(applicationRow, (err) =>
-            request.log.error(
-              { err, userId },
-              'application_profile could not be decrypted while generating a tailored resume. Printing no GPA rather than the resume parse, which is not the source of truth for it.',
-            ),
-          ),
-        ),
+        educationFrom(parsed, applicationRecord),
         baseSpec,
       ),
       body.profile_education,
@@ -736,7 +774,18 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       }));
     }
 
-    let layoutIssues: string[] = [...visualIssues];
+    /* THE VERDICT ON THE DOCUMENT THAT ACTUALLY EXISTS, recorded rather than merely implied.
+     *
+     * Computed on applicationContact, which is what was rendered and what gets stored as _contact,
+     * so it also covers the alias substitution above rather than only the block resolved before it.
+     * The refusal near the top of this handler and renderResumePdf's throw both already stand
+     * between here and a contactless PDF, so this array is empty on every packet the fixed code
+     * writes. That is the point: on Virtu packet 80aeba93 every quality array was empty too, and an
+     * empty array meant "nothing was checked" rather than "the check passed". Storing the verdict
+     * is what makes those two states distinguishable on the row itself. */
+    const contactIssues = resumeContactIssues(applicationContact);
+
+    let layoutIssues: string[] = [...contactIssues, ...visualIssues];
     try {
       const parsedPdf = await extractPdfText(pdfBuffer);
       layoutIssues.push(...validatePdfLayout(parsedPdf.text, parsedPdf.numpages).issues);
@@ -885,6 +934,10 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       _review: applicationReview,
       _quality: {
         specIssues: [],
+        /* Its own key rather than folded into specIssues, which means "the model wrote something
+           the validator rejected". This is a fact about the ACCOUNT, not about the generated
+           content, and a reader auditing packets needs to be able to tell those apart. */
+        contactIssues,
         layoutIssues,
         visualWarnings,
         atsCoverage,

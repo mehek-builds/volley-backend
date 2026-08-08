@@ -26,6 +26,11 @@ export type ApplicationAttentionCategory =
    * could end in status 'failed' with attention_reason unset, which is unactionable for the
    * applicant and undebuggable for us. */
   | 'run_failed'
+  /* This user has already sent an application to this posting, and Litos refused to send a second.
+   * Deliberately NOT 'run_failed': nothing broke. Twelve packets existed for one Akuna posting on
+   * 2026-08-06, and had any of them reached the send they would all have gone, against an employer
+   * whose own form carries a season-long exclusivity acknowledgement. */
+  | 'duplicate_application'
   | 'required_document'
   | 'sensitive_attestation'
   | 'required_field'
@@ -154,6 +159,24 @@ export type ApplicationReviewState = {
   questions: ApplicationReviewQuestion[];
   skipped_reasons: string[];
   updated_at: string;
+  /* WHICH BUILD WROTE THIS REVIEW, so a reader can tell "this stopped for a reason" apart from
+   * "this has not been tried since the fix".
+   *
+   * updated_at alone cannot make that distinction. A packet whose run was REFUSED keeps the
+   * attention_reason, the filled_fields and the blocker sentences of the last run that actually
+   * happened, and nothing on the row says which code produced them. On 2026-08-08 that produced an
+   * identical results distribution reported twice from two different builds, and very nearly the
+   * conclusion that a shipped fix had failed when it had never executed.
+   *
+   * Written by the runner on every review it writes (see nextReview in submissionRunner.ts), which
+   * is the only writer whose output is evidence ABOUT a build. Compare it to the `revision` field of
+   * GET /health, or to the board's own `revision`, both of which come from lib/buildInfo: equal
+   * means this review is evidence about the code running now, different means it is evidence about
+   * an older one and the packet has to be re-run before its findings mean anything.
+   *
+   * Absent on every packet written before this shipped, and on any deployment that supplied no SHA
+   * at all (see resolveRevision). Absent means unknown, never "current". */
+  run_revision?: string;
   submitted_at?: string;
   submission_error?: string;
   submission_run_id?: string;

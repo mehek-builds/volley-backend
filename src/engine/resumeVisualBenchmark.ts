@@ -141,7 +141,10 @@ function makeEntry(
 }
 
 function contactFor(config: BenchmarkConfig): ContactHeader {
-  if (config.contact === 'minimal') return { full_name: 'Alex Rivera' };
+  /* The shortest header the layout has to survive, which is a NAME PLUS ONE ROUTE BACK and no
+     longer a bare name. renderResumePdf refuses a document with neither an email nor a phone on it,
+     so a bare name is not a thin resume to measure, it is a resume that cannot exist. */
+  if (config.contact === 'minimal') return { full_name: 'Alex Rivera', email: 'alex@example.com' };
   if (config.contact === 'long') {
     return {
       full_name: 'Alexandra Gabrielle Rivera-Montgomery',
