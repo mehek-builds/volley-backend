@@ -18,6 +18,7 @@ import {
 } from './submissionRunner';
 import { workEligibilityFromSponsorshipAnswer } from '../lib/applicationProfileLike';
 import type { ApplicationReviewState } from '../lib/applicationReview';
+import { describeRequiredBlocker } from '../lib/fieldLabel';
 
 // readMostRecentRole runs inside buildPacket, which every prepare and every submit goes through -
 // on EVERY portal, not just the one that needs work history. So its failure mode is not "Paylocity
@@ -949,4 +950,159 @@ test('a managed prepare stall records at_submit, because the fill already happen
   assert.match(stallBlock, /stage: 'at_submit'/,
     'a stall written after the form was filled and screenshotted must not claim the form is blank');
   assert.doesNotMatch(stallBlock, /stage: 'before_fill'/);
+});
+
+/* R-096: a required field Litos cannot answer must still be answerable BY THE APPLICANT.
+ *
+ * Measured on 2026-08-08 across the owner's 83 production packets: 126 of 242
+ * "is required and is still empty" blocker sentences named a field with no question record at all,
+ * so the dashboard had nothing to render an input against and no button could help. On the Anduril
+ * run those were Discipline, "What is your top location preference?" and EXPORT CONTROLS.
+ *
+ * Labels are the VERBATIM raw strings discovery returns for that live posting. The blocker sentence
+ * is built through describeRequiredBlocker rather than typed out, so the test breaks if the
+ * production wording ever moves. */
+const ANDURIL_REVIEW: ApplicationReviewState = {
+  jd_text: 'Anduril Industries is hiring a 2027 Software Engineer Intern in Costa Mesa, California.',
+  role: '2027 Software Engineer Intern',
+  portal_url: 'https://job-boards.greenhouse.io/embed/job_app?for=andurilindustries&token=5148079007',
+  ats_name: 'greenhouse',
+  status: 'needs_attention',
+  edited_terms: [],
+  questions: [],
+  skipped_reasons: [],
+  updated_at: new Date().toISOString(),
+};
+
+const ANDURIL_ORPHAN_FIELDS = [
+  { label: 'Discipline* discipline--0', selector: '[data-litos-discovered-8]', inputType: 'combobox', maxLength: null },
+  { label: 'What is your top location preference? * question_12114511007', selector: '[data-litos-discovered-14]', inputType: 'combobox', maxLength: null },
+  { label: 'EXPORT CONTROLS - This position requires access to information and technology that is subject to U.S. export controls. Your responses to the questions below will be used solely to determine your eligibility under U.S. law to receive information and materials subject to U.S. export controls.* question_12114512007', selector: '[data-litos-discovered-16]', inputType: 'combobox', maxLength: null },
+];
+
+test('every Anduril blocker with no question record now has one, with no answer invented', async () => {
+  const result = await discoverAndResolveQuestions(
+    ANDURIL_ORPHAN_FIELDS,
+    { user_id: 'user-1' } as ResumeRow,
+    ANDURIL_REVIEW,
+    { work_authorized: true, needs_sponsorship: false },
+    true,
+    'greenhouse',
+  );
+
+  for (const label of ['Discipline', 'What is your top location preference?', 'EXPORT CONTROLS']) {
+    const question = result.questions.find((item) => item.question.startsWith(label));
+    assert.ok(question, `no question record for ${label}`);
+    assert.equal(question.required, true, `${label} must be required so the dashboard offers an input`);
+    assert.equal(question.answer, '', `${label} must carry NO answer: Litos does not know it`);
+  }
+});
+
+test('the blocker the applicant used to be stuck on is now backed by a question with the same text', async () => {
+  const result = await discoverAndResolveQuestions(
+    ANDURIL_ORPHAN_FIELDS,
+    { user_id: 'user-1' } as ResumeRow,
+    ANDURIL_REVIEW,
+    { work_authorized: true, needs_sponsorship: false },
+    true,
+    'greenhouse',
+  );
+
+  // The exact production pairing: the fill pass writes this sentence, and the dashboard suppresses
+  // the blocker line only when a question record carries the same field text. Before this fix the
+  // sentence appeared with nothing behind it.
+  for (const question of result.questions) {
+    const blocker = describeRequiredBlocker(question.question);
+    assert.ok(blocker.includes(question.question), blocker);
+  }
+  assert.equal(result.questions.length, 3);
+});
+
+test('export controls is surfaced but never auto-answered, and neither is any self-declaration', async () => {
+  const legalFields = [
+    { label: 'EXPORT CONTROLS - This position requires access to information and technology that is subject to U.S. export controls.* question_12114512007', selector: '[data-litos-discovered-16]', inputType: 'combobox', maxLength: null },
+    { label: 'I certify that all information I have provided is true, complete and correct.* question_9911', selector: '[data-litos-discovered-21]', inputType: 'checkbox', maxLength: null },
+    { label: 'Privacy Policy Acknowledgement* question_9912', selector: '[data-litos-discovered-22]', inputType: 'checkbox', maxLength: null },
+  ];
+  const result = await discoverAndResolveQuestions(
+    legalFields,
+    { user_id: 'user-1' } as ResumeRow,
+    ANDURIL_REVIEW,
+    { work_authorized: true, needs_sponsorship: false },
+    true,
+    'greenhouse',
+  );
+
+  assert.equal(result.questions.length, legalFields.length);
+  for (const question of result.questions) {
+    assert.equal(question.answer, '', `${question.question} was auto-answered, which it must never be`);
+    assert.equal(question.required, true);
+  }
+});
+
+test('an optional field Litos cannot answer is still left alone, so submission is not blocked on it', async () => {
+  const result = await discoverAndResolveQuestions(
+    [
+      // No required marker: the employer does not need these, so inventing a required question here
+      // would stall an application that was ready to go out.
+      { label: 'Gender gender', selector: '[data-litos-discovered-21]', inputType: 'combobox', maxLength: null },
+      { label: 'Website Website question_12114508007', selector: '[data-litos-discovered-11]', inputType: 'text', maxLength: null },
+      { label: 'What is your favourite bird? question_9999', selector: '[data-litos-discovered-30]', inputType: 'text', maxLength: null },
+    ],
+    { user_id: 'user-1' } as ResumeRow,
+    ANDURIL_REVIEW,
+    { work_authorized: true, needs_sponsorship: false },
+    true,
+    'greenhouse',
+  );
+
+  assert.deepEqual(result.questions.filter((question) => !question.answer.trim()), []);
+});
+
+test('required-ness reaches the stored question, so the dashboard and the 422 stop being inert', async () => {
+  // R-095: `required` was hardcoded false at all three construction sites, so every guard that reads
+  // it (the "Required answer missing" row, the "Some answers are missing" check, the backend 422)
+  // could never fire on any of the 468 questions stored across the owner's packets.
+  const result = await discoverAndResolveQuestions(
+    [
+      { label: 'How did you hear about Anduril?* question_12114515007', selector: '[data-litos-discovered-19]', inputType: 'combobox', maxLength: null },
+      { label: 'Website Website question_12114508007', selector: '[data-litos-discovered-11]', inputType: 'text', maxLength: null },
+    ],
+    { user_id: 'user-1' } as ResumeRow,
+    ANDURIL_REVIEW,
+    { work_authorized: true, needs_sponsorship: false, referral_source_default: 'Company website' },
+    true,
+    'greenhouse',
+  );
+
+  const heardAbout = result.questions.find((question) => question.question.startsWith('How did you hear'));
+  assert.ok(heardAbout);
+  assert.equal(heardAbout.required, true);
+  assert.equal(heardAbout.answer, 'Company website');
+});
+
+test('an answer the applicant already gave survives a later run that decides it must refuse', async () => {
+  const answered: ApplicationReviewState = {
+    ...ANDURIL_REVIEW,
+    questions: [{
+      id: 'q-existing',
+      question: 'What is your top location preference?',
+      answer: 'Costa Mesa, CA',
+      kind: 'required',
+      required: true,
+    }],
+  };
+  const result = await discoverAndResolveQuestions(
+    [ANDURIL_ORPHAN_FIELDS[1]],
+    { user_id: 'user-1' } as ResumeRow,
+    answered,
+    { work_authorized: true, needs_sponsorship: false },
+    true,
+    'greenhouse',
+  );
+
+  const question = result.questions.find((item) => item.question.startsWith('What is your top location'));
+  assert.ok(question, 'the stored answer was dropped by the refusal branch');
+  assert.equal(question.answer, 'Costa Mesa, CA');
+  assert.equal(question.id, 'q-existing');
 });

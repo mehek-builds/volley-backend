@@ -69,6 +69,8 @@ import { isBillingOrAuthFailure } from './resume';
 import { completeEmailVerificationIfPresent, type BrowserVerificationResult } from '../lib/browserVerification';
 import {
   discoverPageQuestions,
+  discoveredFieldIsRequired,
+  isCoreIdentityField,
   isOpenEndedQuestion,
   isRefusedQuestion,
   normalizeDiscoveredLabel,
@@ -815,10 +817,46 @@ export async function discoverAndResolveQuestions(
       : undefined;
   };
 
+  /* R-096. A required field the applicant is the only one who can answer.
+   *
+   * This loop used to record a question ONLY when Litos had produced an answer for it, and drop the
+   * field otherwise - by `continue` on a refusal, on a skip, and, at the end, on anything that was
+   * neither a known field nor an essay. The fill pass then met the same control, found it required
+   * and empty, and wrote '"Discipline" is required and is still empty' into attention_reason. So the
+   * dashboard named a field it had no input for, and the applicant could not answer it inside the
+   * product no matter which button she pressed. 126 of 242 blocker sentences across the owner's 83
+   * packets named a field with no question record at all.
+   *
+   * The record carries NO answer, and that is the point. Discovery reaches here precisely when
+   * profile resolution, the refusals, and the drafter have all declined, and the refusals are load
+   * bearing: legal attestations, export controls, and every self-declaration must stay unanswered
+   * until the applicant answers them herself. Surfacing the field is what makes that refusal
+   * actionable instead of terminal. */
+  const unansweredRequiredQuestion = (
+    field: DiscoveredQuestion,
+    reviewLabel: string,
+    existing: ApplicationReviewQuestion | undefined,
+  ): ApplicationReviewQuestion => ({
+    id: existing?.id ?? randomUUID(),
+    question: reviewLabel,
+    // Whatever the applicant has already typed survives; Litos never overwrites her answer with a
+    // blank just because it has since decided it cannot answer the question itself.
+    answer: existing?.answer ?? '',
+    kind: 'required',
+    required: true,
+    portal_selector: portalSelectorForField(field),
+    portal_input_type: field.inputType,
+  });
+
   for (const field of discovered) {
     const label = normalizeDiscoveredLabel(field.label);
     const reviewLabel = normalizeReviewQuestionLabel(field.label);
     if (!label || !reviewLabel || normalizeStoredPortalQuestions([{ question: label, answer: '' }], portal).length === 0) continue;
+    // Read from the RAW label, so it has to happen before the normalized label is used anywhere:
+    // normalizeDiscoveredLabel strips the employer's `*` required marker along with the handles.
+    // Name and email are excluded: the fixed-field pass has already typed them into the page, and
+    // making them "required answer missing" would block every application on data Litos supplied.
+    const fieldIsRequired = discoveredFieldIsRequired(field) && !isCoreIdentityField(label);
     const existing = existingByLabel.get(reviewLabel.toLowerCase());
     const known = resolveKnownAnswer(label, field.inputType, ap, questionContext);
     // One resolution layer for the value itself. resolveKnownAnswer still decides WHETHER the
@@ -851,18 +889,30 @@ export async function discoverAndResolveQuestions(
     if (existing) {
       if (known && 'skipReason' in known) {
         attentionReasons.push(known.skipReason);
+        // Litos declined, so the question belongs to the applicant. Keeping the record (with her own
+        // answer if she has already given one) is what lets her give it; dropping it here is how a
+        // stored answer used to be thrown away by a later run that had decided to refuse.
+        if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
       } else if (known && 'value' in known) {
         questions.push({
           ...existing,
           question: reviewLabel,
           answer: knownValue,
           kind: 'required',
-          required: false,
+          required: fieldIsRequired,
           portal_selector: portalSelectorForField(field),
           portal_input_type: field.inputType,
         });
       } else if (existing.answer.trim()) {
-        questions.push({ ...existing, question: reviewLabel, portal_selector: portalSelectorForField(field), portal_input_type: field.inputType });
+        questions.push({
+          ...existing,
+          question: reviewLabel,
+          required: existing.required || fieldIsRequired,
+          portal_selector: portalSelectorForField(field),
+          portal_input_type: field.inputType,
+        });
+      } else if (fieldIsRequired) {
+        questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
       }
       continue; // already answered by the client or a prior run
     }
@@ -873,7 +923,7 @@ export async function discoverAndResolveQuestions(
         question: reviewLabel,
         answer: knownValue,
         kind: 'required',
-        required: false,
+        required: fieldIsRequired,
         portal_selector: portalSelectorForField(field),
         portal_input_type: field.inputType,
       });
@@ -881,15 +931,27 @@ export async function discoverAndResolveQuestions(
     }
     if (known && 'skipReason' in known) {
       attentionReasons.push(known.skipReason);
+      if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
       continue;
     }
     if (isRefusedQuestion(label)) {
       attentionReasons.push(WORK_ELIGIBILITY_QUESTION.test(label)
         ? workEligibilitySkipReason(label)
         : `sensitive question left for you: "${label.slice(0, 60)}"`);
-      continue; // EEO/SSN/etc: never answered, never surfaced as a field to fill
+      // Still never answered. Surfaced now, with an empty answer, when the employer requires it -
+      // otherwise a required attestation is a wall: Litos will not answer it and the applicant has
+      // nowhere to. An optional sensitive field is left alone exactly as before.
+      if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
+      continue;
     }
-    if (!isOpenEndedQuestion(label)) continue; // not a known field, not an essay: leave it alone
+    if (!isOpenEndedQuestion(label)) {
+      // The single biggest source of unanswerable blockers. "Discipline", "Graduation Month",
+      // "EXPORT CONTROLS - ...": not a field Litos knows, not an essay it can draft, and until now
+      // dropped without even an attention reason. Required means the employer will not accept the
+      // form without it, so it is the applicant's to answer and she has to be able to see it.
+      if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
+      continue;
+    }
 
     // Open-ended answers remain grounded by draftApplicationAnswer. Standing consent authorizes
     // those grounded drafts to proceed; without it, the existing per-application review remains.
@@ -904,6 +966,7 @@ export async function discoverAndResolveQuestions(
       }
       if (bank.length === 0) {
         attentionReasons.push(`open-ended question left for you (no experience bank on file): "${label.slice(0, 60)}"`);
+        if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
         continue;
       }
       const { answer, warnings } = await draftApplicationAnswer(
@@ -918,9 +981,10 @@ export async function discoverAndResolveQuestions(
       const fitted = answer ? fitToBudget(answer, field.maxLength ?? 100_000) : null;
       if (!fitted) {
         attentionReasons.push(`open-ended question left for you (could not draft a confident answer): "${label.slice(0, 60)}"`);
+        if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
         continue;
       }
-      questions.push({ id: randomUUID(), question: reviewLabel, answer: fitted, kind: 'essay', required: false, portal_selector: field.selector, portal_input_type: field.inputType });
+      questions.push({ id: randomUUID(), question: reviewLabel, answer: fitted, kind: 'essay', required: fieldIsRequired, portal_selector: field.selector, portal_input_type: field.inputType });
       if (warnings.length > 0) {
         attentionReasons.push(`drafted answer needs your review: ${warnings.join('; ').slice(0, 300)}`);
       }
@@ -930,6 +994,7 @@ export async function discoverAndResolveQuestions(
     } catch (error) {
       if (isBillingOrAuthFailure(error)) throw error; // this is a real outage, not a per-field skip
       attentionReasons.push(`open-ended question left for you (draft generation failed): "${label.slice(0, 60)}"`);
+      if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
     }
   }
 

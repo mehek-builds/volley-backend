@@ -1273,9 +1273,82 @@ export type DiscoveredQuestion = {
    * back to a ranked alias ladder in that case.
    */
   options?: string[] | null;
+  /**
+   * Whether the employer marks this field as required.
+   *
+   * R-095/R-096: nothing used to carry this. The fill pass decided required-ness from the live DOM
+   * (`input[required], textarea[required], select[required]` in fillPortal) while discovery decided
+   * only "can Litos answer this", so the two passes could never agree about the same field: the fill
+   * said '"Discipline" is required and is still empty' and discovery had already thrown the field
+   * away without writing a question for it. One missing signal, two defects.
+   *
+   * Optional because the managed provider runs its own port of the discovery script and does not
+   * report this yet. That is covered rather than waited on: `discoveredFieldIsRequired` falls back
+   * to the employer's own required marker in the RAW label, which both providers do report.
+   */
+  required?: boolean;
 };
 
 export const REVIEW_QUESTION_TEXT_MAX_LENGTH = 500;
+
+/**
+ * The employer's own required marker, read off the RAW discovered label.
+ *
+ * Read the RAW label, never the normalized one: normalizeDiscoveredLabel exists to produce the
+ * employer's clean question text and strips the marker along with the handles, so by the time a
+ * label is fit to store, the evidence is gone. Same reason managedGreenhouseEducationCombobox in
+ * submissionRunner.ts reads the raw label for its `--0` handles.
+ *
+ * Greenhouse renders a required field as `<label>Discipline<span aria-hidden="true">*</span></label>`
+ * and discovery concatenates the label text with the control's name and id, so the raw label really
+ * reads "Discipline* discipline--0" for a required field and "Gender gender" for an optional one.
+ * Both providers report that string, which is what makes this the one required-ness signal that
+ * works on the managed path today.
+ *
+ * Deliberately narrow. The asterisk has to stand at a word boundary, so a marker ("Name*",
+ * "internship? *", "*First Name") counts and an asterisk inside a token does not.
+ */
+export function labelMarksRequired(rawLabel: string): boolean {
+  const label = rawLabel ?? '';
+  if (!label) return false;
+  // A legend rather than a marker: some boards print "* indicates a required field" into a label
+  // block, and reading that as "this field is required" would mark the whole form required.
+  if (/\*\s*(?:indicates|denotes|means|=)\b/i.test(label)) return false;
+  return /\*(?:\s|$)/.test(label) || /(?:^|\s)\*/.test(label);
+}
+
+/**
+ * One answer to "does the employer require this field", from whichever evidence the provider gave.
+ *
+ * The DOM flag is the stronger signal and the only one the direct-Playwright path needs; the label
+ * marker is what keeps the managed path honest until stratus-browser-cloud reports the flag too.
+ */
+export function discoveredFieldIsRequired(field: Pick<DiscoveredQuestion, 'label' | 'required'>): boolean {
+  return field.required === true || labelMarksRequired(field.label);
+}
+
+/**
+ * The applicant's name and email, which every family's fixed-field pass fills from the packet
+ * before discovery ever runs.
+ *
+ * These are required on essentially every form, so R-096 would otherwise turn all three into
+ * "required answer missing" rows and block a submission on data Litos has already typed into the
+ * page. isFixedPortalProfileField cannot be widened to cover them, because it DROPS a label from
+ * the question list outright and its own comment warns that listing a field there which is not
+ * really filled is the harmful direction. This is the narrower claim: not "never a question", only
+ * "never manufactured as work for the applicant".
+ *
+ * "Legal first name" and "Preferred first name" are excluded deliberately. They are separate
+ * questions an employer asks precisely because the answer may differ from the name on the resume,
+ * and if one is required and unanswerable it is genuinely the applicant's to answer.
+ */
+export function isCoreIdentityField(label: string): boolean {
+  const l = (label ?? '').toLowerCase();
+  if (!l) return false;
+  if (/\b(?:legal|preferred|maiden|previous|former|nick)\b/.test(l)) return false;
+  if (/\b(?:first|last|given|family|sur|full)\s*name\b|^name\b|\bname\s*\*/.test(l)) return true;
+  return /\be-?mail\b/.test(l);
+}
 
 const INLINE_UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
 const GREENHOUSE_QUESTION_HANDLE_RE = /\bquestion_\d+\b/gi;
@@ -1453,6 +1526,35 @@ const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
     var fallback = block ? block.querySelector('label, legend, .question, h3, h4') : null;
     return ((fallback && fallback.textContent) || '').trim();
   }
+  // Does the employer require this control? Three shapes, because one of them alone misses the
+  // react-select comboboxes that carry Greenhouse's hardest questions.
+  //
+  //  1. the plain HTML flag, which is what fillPortal's blocker locator looks for;
+  //  2. aria-required, which the same boards set on the visible combobox input;
+  //  3. Greenhouse's hidden proxy: a react-select renders no required control of its own, so the
+  //     board drops an <input required aria-hidden="true" tabindex="-1"> beside it purely to make
+  //     native validation fire. That input is the ONLY DOM-level required evidence for a
+  //     "Discipline" or an "EXPORT CONTROLS" select, and it is not the element we discovered.
+  //
+  // The ancestor walk STOPS at the field's own wrapper, and that bound is the whole difference
+  // between this working and this being harmful. Measured against the live Anduril form: an
+  // unbounded six-level walk reported the optional "Website", "LinkedIn Profile" and "Phone" as
+  // required, because six levels up is a section holding several fields and it borrowed the
+  // required proxy belonging to a neighbour. Marking an optional field required blocks a
+  // submission that should have gone out, so the walk climbs only while the ancestor still
+  // describes ONE control, which it stops doing the moment a second <label> comes into view.
+  function isRequiredField(el) {
+    if (el.required === true) return true;
+    if ((el.getAttribute('aria-required') || '').toLowerCase() === 'true') return true;
+    var node = el.parentElement;
+    for (var depth = 0; node && depth < 6; depth += 1) {
+      if (node.querySelectorAll('label').length > 1) return false;
+      var proxy = node.querySelector('input[required][aria-hidden="true"][tabindex="-1"]');
+      if (proxy && proxy !== el) return true;
+      node = node.parentElement;
+    }
+    return false;
+  }
   function optionLabel(input) {
     var labelEl = (input.labels && input.labels[0])
       || (input.id ? document.querySelector('label[for="' + CSS.escape(input.id) + '"]') : null);
@@ -1530,6 +1632,7 @@ const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
         : (el.tagName === 'SELECT' ? 'select' : (el.getAttribute('role') === 'combobox' ? 'combobox' : (el.type || 'text'))),
       maxLength: el.maxLength > 0 ? el.maxLength : null,
       options: optionTexts(el),
+      required: isRequiredField(el),
     });
   }
   return out;

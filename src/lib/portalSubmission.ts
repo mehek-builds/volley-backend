@@ -1725,6 +1725,12 @@ function pushGreenhouseKnownQuestionAliases(
     : packet.questions;
   for (const item of items) {
     const answer = greenhouseReviewedQuestionAnswer(item, packet);
+    // An unanswered question drives no action. R-096 makes a required field the applicant has not
+    // answered yet a real question record, and greenhouseKnownQuestionAliases has one branch keyed
+    // on the QUESTION rather than the answer ("Yes, I consent"), which would otherwise have clicked
+    // a consent control on behalf of someone who has consented to nothing. Every other fill path
+    // already stops on a blank; this was the one that did not.
+    if (!answer.trim()) continue;
     const akunaAliases = greenhouseAkunaRequiredQuestionAliases(item.question, answer);
     const aliases = mode === 'akunaRequired'
       ? akunaAliases
