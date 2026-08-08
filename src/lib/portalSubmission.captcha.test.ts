@@ -17,6 +17,8 @@ import {
   detectCaptchaProvider,
   isCaptchaGatedFamily,
   clickFinalSubmit,
+  FormIncompleteError,
+  READ_SUBMIT_READINESS_SCRIPT,
   hasUnresolvedCaptcha,
   managedCaptchaProvider,
   managedCaptchaVerdictIsCorroborated,
@@ -295,6 +297,9 @@ test('the final click guard does not click while any widget is unresolved', asyn
       if (selector === SUBMIT_CANDIDATE_SELECTOR) return button;
       return challengeLocator;
     },
+    /* The pre-submit gate reads the page before the click; a clean read keeps each test about the
+       thing it is actually testing. The gate has its own tests below. */
+    evaluate: async () => ({ blocking: [], stale: [] }),
     waitForNavigation: async () => undefined,
     waitForLoadState: async () => undefined,
     waitForTimeout: async () => undefined,
@@ -311,6 +316,9 @@ test('the final click still happens on a page with no challenge', async () => {
     locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
       ? button
       : { count: async () => 0, nth: () => ({}) }),
+    /* The pre-submit gate reads the page before the click; a clean read keeps each test about the
+       thing it is actually testing. The gate has its own tests below. */
+    evaluate: async () => ({ blocking: [], stale: [] }),
     waitForNavigation: async () => undefined,
     waitForLoadState: async () => undefined,
     waitForTimeout: async () => undefined,
@@ -920,6 +928,12 @@ test('the submit guard carries the provider it saw while the page was open', asy
       };
     },
 
+    /* The pre-submit gate reads the page before the click; a clean read keeps each test about the
+
+       thing it is actually testing. The gate has its own tests below. */
+
+    evaluate: async () => ({ blocking: [], stale: [] }),
+
     waitForNavigation: async () => undefined,
     waitForLoadState: async () => undefined,
     waitForTimeout: async () => undefined,
@@ -966,6 +980,9 @@ test('the control that gets pressed is the one that was chosen, not an ordinal',
     locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
       ? buttons
       : { count: async () => 0, nth: () => ({}) }),
+    /* The pre-submit gate reads the page before the click; a clean read keeps each test about the
+       thing it is actually testing. The gate has its own tests below. */
+    evaluate: async () => ({ blocking: [], stale: [] }),
     waitForNavigation: async () => undefined,
     waitForLoadState: async () => undefined,
     waitForTimeout: async () => undefined,
@@ -983,6 +1000,9 @@ test('a page offering only handoffs reports that nothing was sent', async () => 
     locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
       ? buttons
       : { count: async () => 0, nth: () => ({}) }),
+    /* The pre-submit gate reads the page before the click; a clean read keeps each test about the
+       thing it is actually testing. The gate has its own tests below. */
+    evaluate: async () => ({ blocking: [], stale: [] }),
     waitForNavigation: async () => undefined,
     waitForLoadState: async () => undefined,
     waitForTimeout: async () => undefined,
@@ -1020,6 +1040,9 @@ test('a click that times out reports that nothing was sent', async () => {
     locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
       ? buttons
       : { count: async () => 0, nth: () => ({}) }),
+    /* The pre-submit gate reads the page before the click; a clean read keeps each test about the
+       thing it is actually testing. The gate has its own tests below. */
+    evaluate: async () => ({ blocking: [], stale: [] }),
     waitForNavigation: async () => undefined,
     waitForLoadState: async () => undefined,
     waitForTimeout: async () => undefined,
@@ -1033,6 +1056,9 @@ test('a pre-click failure is not reported as a submission that may have happened
     locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
       ? { elementHandles: async () => { throw new Error('Execution context was destroyed'); } }
       : { count: async () => 0, nth: () => ({}) }),
+    /* The pre-submit gate reads the page before the click; a clean read keeps each test about the
+       thing it is actually testing. The gate has its own tests below. */
+    evaluate: async () => ({ blocking: [], stale: [] }),
     waitForNavigation: async () => undefined,
     waitForLoadState: async () => undefined,
     waitForTimeout: async () => undefined,
@@ -1068,6 +1094,9 @@ test('a control relabelled between choosing it and pressing it is not pressed', 
     locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
       ? buttons
       : { count: async () => 0, nth: () => ({}) }),
+    /* The pre-submit gate reads the page before the click; a clean read keeps each test about the
+       thing it is actually testing. The gate has its own tests below. */
+    evaluate: async () => ({ blocking: [], stale: [] }),
     waitForNavigation: async () => undefined,
     waitForLoadState: async () => undefined,
     waitForTimeout: async () => undefined,
@@ -1103,6 +1132,9 @@ test('the navigation barrier is armed before the click, not after it', async () 
     locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
       ? buttons
       : { count: async () => 0, nth: () => ({}) }),
+    /* The pre-submit gate reads the page before the click, and deliberately does NOT appear in
+       `order`: it is inspection, and the ordering this test pins is barrier-then-dispatch. */
+    evaluate: async () => ({ blocking: [], stale: [] }),
     waitForNavigation: async () => { order.push('waitForNavigation'); },
     waitForLoadState: async () => { order.push('waitForLoadState'); },
     waitForTimeout: async () => undefined,
@@ -1137,10 +1169,151 @@ test('a detached element is pre-dispatch too, and says nothing was sent', async 
     locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
       ? buttons
       : { count: async () => 0, nth: () => ({}) }),
+    /* The pre-submit gate reads the page before the click; a clean read keeps each test about the
+       thing it is actually testing. The gate has its own tests below. */
+    evaluate: async () => ({ blocking: [], stale: [] }),
     waitForNavigation: async () => undefined,
     waitForLoadState: async () => undefined,
     waitForTimeout: async () => undefined,
   } as unknown as Page;
 
   await assert.rejects(clickFinalSubmit(page), NoSubmitControlError);
+});
+
+/* ---- the pre-submit required-field gate ----
+ *
+ * The Redwood Materials incident, 2026-08-08. A packet reached ready_for_final_approval with every
+ * question answered, and its preview screenshot showed the correctly filled form under five red
+ * "is required" messages. Measured against the live form, the messages were STALE: a stray
+ * keystroke had run the employer's validator mid-fill, and Greenhouse never clears those messages
+ * once rendered - "Phone is required." stayed on screen underneath a filled phone number.
+ * Submitting the completed form passed validation with zero errors.
+ *
+ * So the gate has to be right in BOTH directions. Refusing on stale text throws away complete
+ * applications; trusting a form that is genuinely half empty sends one an employer keeps forever.
+ */
+
+function gatedPage(readiness: unknown, onClick: () => void) {
+  return {
+    locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
+      ? submitButtonLocator(onClick)
+      : { count: async () => 0, nth: () => ({}) }),
+    evaluate: async () => readiness,
+    waitForNavigation: async () => undefined,
+    waitForLoadState: async () => undefined,
+    waitForTimeout: async () => undefined,
+  } as unknown as Page;
+}
+
+test('submit is not pressed while a required field is still empty', async () => {
+  let clicks = 0;
+  const page = gatedPage({
+    blocking: ['"Resume/CV" is required and is still empty', '"Are you currently enrolled in a degree program?" is required and is still empty'],
+    stale: [],
+  }, () => { clicks += 1; });
+
+  await assert.rejects(clickFinalSubmit(page), FormIncompleteError);
+  assert.equal(clicks, 0);
+});
+
+test('the refusal names the fields, and reads as a click that provably did not happen', async () => {
+  // FormIncompleteError extends NoSubmitControlError precisely so fail() keeps saying "nothing was
+  // sent" rather than "check the portal or your email" for a run that pressed nothing.
+  const error = new FormIncompleteError(['"Resume/CV" is required and is still empty']);
+  assert.ok(error instanceof NoSubmitControlError);
+  assert.match(error.message, /did not press submit/);
+  assert.match(error.message, /Resume\/CV/);
+  assert.deepEqual(error.fields, ['"Resume/CV" is required and is still empty']);
+  // Six empty fields must not produce a six-line sentence; the count carries the rest.
+  const many = new FormIncompleteError(['a', 'b', 'c', 'd', 'e', 'f']);
+  assert.match(many.message, /6 required fields/);
+  assert.match(many.message, /and 1 more/);
+});
+
+test('stale validation text over a filled form does not stop the submit', async () => {
+  /* THE REGRESSION THAT MATTERS MOST. The Redwood form carried five "is required" messages while
+     being complete and submittable. A gate that refuses on error text would have thrown that
+     application away, which is the same harm as sending a broken one and much harder to notice. */
+  let clicks = 0;
+  const page = gatedPage({
+    blocking: [],
+    stale: ['Phone is required.', 'Resume/CV is required.', 'This field is required.'],
+  }, () => { clicks += 1; });
+
+  await clickFinalSubmit(page);
+  assert.equal(clicks, 1);
+});
+
+test('a readiness read that throws stops the submit rather than guessing', async () => {
+  // Fails closed. A handoff card is recoverable; an employer holding a half-blank application in
+  // the applicant's name is not.
+  let clicks = 0;
+  const page = {
+    locator: (selector: string) => (selector === SUBMIT_CANDIDATE_SELECTOR
+      ? submitButtonLocator(() => { clicks += 1; })
+      : { count: async () => 0, nth: () => ({}) }),
+    evaluate: async () => { throw new Error('Execution context was destroyed'); },
+    waitForNavigation: async () => undefined,
+    waitForLoadState: async () => undefined,
+    waitForTimeout: async () => undefined,
+  } as unknown as Page;
+
+  await assert.rejects(clickFinalSubmit(page), (error: unknown) => {
+    assert.ok(error instanceof NoSubmitControlError);
+    assert.match((error as Error).message, /could not confirm the form was complete/);
+    return true;
+  });
+  assert.equal(clicks, 0);
+});
+
+test('a captcha still outranks an incomplete form', async () => {
+  /* Precedence, and it is the same reason the captcha probe sits above the no-control throw: a
+     challenge routinely suppresses the form, so the fields read empty BECAUSE of the challenge.
+     Reporting "seven fields are empty" there hides the one thing the applicant can act on. */
+  let clicks = 0;
+  const responseLocator = { count: async () => 1, nth: () => ({ inputValue: async () => '' }) };
+  const challengeLocator = {
+    count: async () => 1,
+    nth: () => ({
+      isVisible: async () => true,
+      evaluate: async (fn: (el: unknown, arg: string) => boolean, arg: string) => fn(stubElement({}), arg),
+    }),
+  };
+  const page = {
+    locator: (selector: string) => {
+      if (selector === CAPTCHA_RESPONSE_SELECTOR) return responseLocator;
+      if (selector === SUBMIT_CANDIDATE_SELECTOR) return submitButtonLocator(() => { clicks += 1; });
+      return challengeLocator;
+    },
+    evaluate: async () => ({ blocking: ['"Resume/CV" is required and is still empty'], stale: [] }),
+    waitForNavigation: async () => undefined,
+    waitForLoadState: async () => undefined,
+    waitForTimeout: async () => undefined,
+  } as unknown as Page;
+
+  await assert.rejects(clickFinalSubmit(page), CaptchaUnresolvedError);
+  assert.equal(clicks, 0);
+});
+
+test('the readiness script reads a control where its answer actually lives', () => {
+  /* The script is a source string evaluated in the live page (this project has no "dom" lib), so
+     these pin the properties that were MEASURED on the live Redwood Materials form and that an
+     ordinary value-check gets wrong. The behaviour itself is covered end to end by the identical
+     gate in stratus-browser-cloud, verified live against that posting in both directions. */
+  // React Select clears the combobox input's search text on selection, so the answer is only in the
+  // rendered value. Reading the input would call every answered question empty.
+  assert.match(READ_SUBMIT_READINESS_SCRIPT, /select__single-value/);
+  assert.match(READ_SUBMIT_READINESS_SCRIPT, /select__placeholder/);
+  assert.match(READ_SUBMIT_READINESS_SCRIPT, /getAttribute\('role'\) === 'combobox'\) continue;/);
+  // Greenhouse removes the file input once the upload finishes and leaves a filename chip.
+  assert.match(READ_SUBMIT_READINESS_SCRIPT, /file-upload__filename/);
+  // React Select's input carries aria-required and no required attribute, so [required] alone
+  // cannot see an unanswered Greenhouse screener question.
+  assert.match(READ_SUBMIT_READINESS_SCRIPT, /\[aria-required="true"\]/);
+  // The form's own legend is not an error, and it was the only thing an early version of this found
+  // on a complete application.
+  assert.match(READ_SUBMIT_READINESS_SCRIPT, /const LEGEND_TEXT = /);
+  assert.match(READ_SUBMIT_READINESS_SCRIPT, /indicates\?/);
+  // An error over a filled control is stale and is reported, not blocked on.
+  assert.match(READ_SUBMIT_READINESS_SCRIPT, /if \(widgetHasAnswer\(widget\)\) \{ stale\.push\(text\); continue; \}/);
 });
