@@ -232,7 +232,7 @@ describe('every path that can write status submitted is behind the guard', () =>
     assert.ok(submitAt > 0, 'submit() moved; the guard has to move with it');
     const body = source.slice(submitAt);
     const guardAt = body.indexOf('duplicateApplicationVerdict');
-    const claimAt = body.indexOf('await claimSubmission(row)');
+    const claimAt = body.indexOf('await claimSubmission(row, options.claimAlreadyHeld)');
     assert.ok(guardAt > 0, 'submit() does not consult the duplicate guard');
     assert.ok(
       guardAt < claimAt,

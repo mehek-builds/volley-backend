@@ -257,3 +257,35 @@ test('correlated lookup fails closed without authenticated sender metadata', () 
   'app-2222222222-target@apply.trylitos.com', '22222222-2222-4222-8222-222222222222');
   assert.equal(match, null);
 });
+
+test('rejects a spoofed allowlisted From address when authentication is not aligned', () => {
+  const match = extractVerificationCode([{
+    provider: 'gmail',
+    data: { messages: [{
+      subject: 'Your Greenhouse security code',
+      from: 'Greenhouse <no-reply@us.greenhouse-mail.io>',
+      to: 'app-2222222222-target@apply.trylitos.com',
+      authenticationResults: 'spf=pass smtp.mailfrom=attacker.example dkim=pass header.d=attacker.example',
+      receivedAt: '2026-07-25T10:00:20.000Z',
+      text: 'Use security code EF56GH78 to continue.',
+    }] },
+  }], 'https://job-boards.greenhouse.io/acme/jobs/123', new Date('2026-07-25T10:00:00.000Z'),
+  'app-2222222222-target@apply.trylitos.com', '22222222-2222-4222-8222-222222222222');
+  assert.equal(match, null);
+});
+
+test('accepts an aligned authenticated identity when DMARC metadata is unavailable', () => {
+  const match = extractVerificationCode([{
+    provider: 'gmail',
+    data: { messages: [{
+      subject: 'Your Greenhouse security code',
+      from: 'Greenhouse <no-reply@us.greenhouse-mail.io>',
+      to: 'app-2222222222-target@apply.trylitos.com',
+      authenticationResults: 'dkim=pass header.d=us.greenhouse-mail.io',
+      receivedAt: '2026-07-25T10:00:20.000Z',
+      text: 'Use security code EF56GH78 to continue.',
+    }] },
+  }], 'https://job-boards.greenhouse.io/acme/jobs/123', new Date('2026-07-25T10:00:00.000Z'),
+  'app-2222222222-target@apply.trylitos.com', '22222222-2222-4222-8222-222222222222');
+  assert.equal(match?.code, 'EF56GH78');
+});

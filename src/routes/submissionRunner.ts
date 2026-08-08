@@ -221,8 +221,9 @@ async function countSubmissionsClaimedToday(userId: string): Promise<number> {
   return counted?.total ?? 0;
 }
 
-async function claimSubmission(row: ResumeRow): Promise<ResumeRow | null> {
+async function claimSubmission(row: ResumeRow, alreadyHeld = false): Promise<ResumeRow | null> {
   const current = readApplicationReview(row.spec);
+  if (alreadyHeld) return submissionClaimIsHeld(current) ? row : null;
   if (!current || current.status !== 'submitting' || current.submission_claimed_at) return null;
   const claimed = nextReview(current, {
     submission_claimed_at: new Date().toISOString(),
@@ -235,6 +236,42 @@ async function claimSubmission(row: ResumeRow): Promise<ResumeRow | null> {
     .where(and(
       eq(generated_resumes.id, row.id),
       sql`${generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
+      sql`${generated_resumes.spec}->'_review'->>'submission_claimed_at' is null`,
+    ))
+    .returning();
+  return rows[0] ?? null;
+}
+
+export function submissionClaimIsHeld(review: ApplicationReviewState | null | undefined): boolean {
+  return review?.status === 'submitting'
+    && typeof review.submission_claimed_at === 'string'
+    && review.submission_claimed_at.trim().length > 0
+    && typeof review.submission_claim_id === 'string'
+    && review.submission_claim_id.trim().length > 0;
+}
+
+async function claimSecurityCodeSubmission(
+  row: ResumeRow,
+  current: ApplicationReviewState,
+): Promise<ResumeRow | null> {
+  if (current.status !== 'awaiting_security_code' || !current.security_code) return null;
+  const requested = nextReview(current, {
+    status: 'submitting',
+    submission_authorization: {
+      source: 'per_application_approval',
+      authorized_at: new Date().toISOString(),
+    },
+    submission_claimed_at: new Date().toISOString(),
+    submission_claim_id: randomUUID(),
+    submission_error: undefined,
+  });
+  const rows = await db.update(generated_resumes)
+    .set({
+      spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(requested)}::jsonb, true)`,
+    })
+    .where(and(
+      eq(generated_resumes.id, row.id),
+      sql`${generated_resumes.spec}->'_review'->>'status' = 'awaiting_security_code'`,
       sql`${generated_resumes.spec}->'_review'->>'submission_claimed_at' is null`,
     ))
     .returning();
@@ -1869,7 +1906,10 @@ async function submitViaAtsSubmissionChannel(
 // Threaded through submit() rather than given its own run, so the finishing path inherits every
 // guard this one already has: the authorization check, the claim, the daily cap, the portal gates,
 // the ATS channel and the CAPTCHA probe. A parallel path would inherit none of them.
-async function submit(row: ResumeRow, fastify: FastifyInstance, options: { securityCode?: string } = {}) {
+async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
+  securityCode?: string;
+  claimAlreadyHeld?: boolean;
+} = {}) {
   const current = readApplicationReview(row.spec);
   if (!current?.submission_run_id || !current.portal_url) throw new Error('The prepared run is missing');
   const authorization = await standingAuthorization(row.user_id);
@@ -1942,7 +1982,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: { secur
     }));
     return;
   }
-  const claimedRow = await claimSubmission(row);
+  const claimedRow = await claimSubmission(row, options.claimAlreadyHeld);
   if (!claimedRow) return;
   row = claimedRow;
   let claimedReview = readApplicationReview(row.spec);
@@ -2122,15 +2162,13 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: { secur
         && typeof continuationExpiresAt === 'string'
         && Date.parse(continuationExpiresAt) > Date.now();
       if (continuationIsLive && verificationSettings?.enabled === true) {
-        // The capability is opaque, project-bound and expires within two minutes. Persist it only
-        // while this worker polls the email address pinned into this exact packet.
+        // The continuation capability stays call-local. Persisting it would turn the review JSON,
+        // which is returned to dashboard and extension clients, into a browser-session credential.
         await writeReview(row, nextReview(claimedReview, {
           verification: {
             status: 'searching',
             requested_at: requestedAt,
             retry_count: 0,
-            continuation_token: continuationToken,
-            continuation_expires_at: continuationExpiresAt,
           },
           attention_reason: undefined,
           submission_error: undefined,
@@ -2177,7 +2215,6 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: { secur
         verification = { status: 'verification_pending', requested_at: requestedAt, retry_count: 0 };
       }
     }
-    const receipt = readManagedReceipt(receiptResult);
     if (!receiptResult.screenshot) throw new Error('Stratus managed browser did not return a receipt screenshot');
     const capturedAt = new Date().toISOString();
     const blob = await put(
@@ -2241,6 +2278,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: { secur
       }, 'Employer is holding this application behind an emailed security code');
       return;
     }
+    const receipt = readManagedReceipt(receiptResult);
     await writeReview(row, nextReview(claimedReview, {
       status: 'submitted',
       submitted_at: capturedAt,
@@ -2429,6 +2467,14 @@ async function fail(row: ResumeRow, error: unknown) {
       })
       : {}),
     status: outcome.status,
+    ...(current.verification?.status === 'searching'
+      ? {
+        verification: {
+          ...current.verification,
+          status: 'verification_pending' as const,
+        },
+      }
+      : {}),
     submission_error: message,
     attention_reason: outcome.attentionReason,
     // The typed half. attention_reason is prose written for the applicant and cannot be counted;
@@ -2494,25 +2540,19 @@ export async function finishSecurityCodeSubmission(
   // it is the honest one here: the applicant produced a code out of her own mailbox for this one
   // application, which is a decision about this application and not a standing setting.
   //
-  // The claim is cleared so claimSubmission can take a fresh one. That is safe precisely because
-  // this endpoint is the only door into this state - submitRequestDisposition rejects
-  // 'awaiting_security_code' outright - and the fingerprint check above has already refused a repeat
-  // of this exact code.
-  const requested = nextReview(current, {
-    status: 'submitting',
-    submission_authorization: {
-      source: 'per_application_approval',
-      authorized_at: new Date().toISOString(),
-    },
-    submission_claimed_at: undefined,
-    submission_claim_id: undefined,
-    submission_error: undefined,
-  });
-  await writeReview(row, requested);
-  const claimedRows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, applicationId)).limit(1);
-  const activeRow = claimedRows[0] ?? row;
+  // Take the claim in the same conditional update that leaves the waiting state. Two requests can
+  // read the same code state, but only one can change that state and receive the claimed row. The
+  // loser never starts a browser and never clears the winner's claim.
+  const activeRow = await claimSecurityCodeSubmission(row, current);
+  if (!activeRow) {
+    const latestRows = await db.select().from(generated_resumes)
+      .where(eq(generated_resumes.id, applicationId)).limit(1);
+    const latest = latestRows[0] ? readApplicationReview(latestRows[0].spec) : null;
+    if (!latest) return { kind: 'not_found' };
+    return { kind: 'not_awaiting', status: latest.status };
+  }
   try {
-    await submit(activeRow, fastify, { securityCode: code });
+    await submit(activeRow, fastify, { securityCode: code, claimAlreadyHeld: true });
   } catch (error) {
     fastify.log.error({ error, applicationId }, 'Security-code submission failed');
     await fail(activeRow, error);

@@ -644,6 +644,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const updatedSpec = {
         ...rendered.spec,
         _contact: contact,
+        ...('_applicant_email' in stored ? { _applicant_email: stored._applicant_email } : {}),
+        ...('_application_email' in stored ? { _application_email: stored._application_email } : {}),
         // Through settleStall like every other writer: this route can run on an application that is
       // waiting on a challenge, and abandoning that wait has to close it rather than carry an open
       // stall into a status the queue no longer looks at.

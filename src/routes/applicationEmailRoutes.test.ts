@@ -7,6 +7,7 @@ const indexRoute = readFileSync('src/index.ts', 'utf8');
 const schema = readFileSync('src/db/schema.ts', 'utf8');
 const route = readFileSync('src/routes/applicationEmail.ts', 'utf8');
 const service = readFileSync('src/lib/applicationEmail.ts', 'utf8');
+const applicationsRoute = readFileSync('src/routes/applications.ts', 'utf8');
 
 test('application packet generation uses the Litos alias as the employer-facing email', () => {
   assert.match(resumeRoute, /applicationAliasFor\(userId, resumeId\)/);
@@ -18,6 +19,11 @@ test('application packet generation uses the Litos alias as the employer-facing 
   assert.match(resumeRoute, /applicant_email: pinnedApplicantEmail/);
   assert.match(resumeRoute, /address: applicationContact\.email/);
   assert.match(resumeRoute, /if \(body\.application\) \{[\s\S]*application_identity_persistence_failed/);
+});
+
+test('dashboard resume edits preserve both immutable application email keys', () => {
+  assert.match(applicationsRoute, /'_applicant_email' in stored \? \{ _applicant_email: stored\._applicant_email \} : \{\}/);
+  assert.match(applicationsRoute, /'_application_email' in stored \? \{ _application_email: stored\._application_email \} : \{\}/);
 });
 
 test('application inbox schema and webhook route are registered', () => {

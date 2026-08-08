@@ -101,11 +101,20 @@ function recipientAddresses(record: Record<string, unknown>): string[] {
     .map((match) => match[0].toLowerCase());
 }
 
-function authenticatedSender(record: Record<string, unknown>): boolean {
+function authenticatedSender(record: Record<string, unknown>, sender: string): boolean {
   const authentication = firstString(record, ['authenticationResults', 'authentication_results'])
     || headerValue(record, 'Authentication-Results');
-  return /\b(?:spf|dkim|dmarc)=pass\b/i.test(authentication)
-    && !/\b(?:spf|dkim|dmarc)=fail\b/i.test(authentication);
+  if (/\bdmarc=pass\b/i.test(authentication) && !/\bdmarc=fail\b/i.test(authentication)) return true;
+  const fromDomain = senderDomain(sender);
+  if (!fromDomain) return false;
+  const aligned = (identity: string | undefined) => Boolean(identity)
+    && (allowedSender(fromDomain, [identity!]) || allowedSender(identity!, [fromDomain]));
+  const dkimIdentity = authentication.match(/\bheader\.d=([a-z0-9.-]+)/i)?.[1]
+    ?? authentication.match(/\bdkim=pass\b[^;\r\n]*\bd=([a-z0-9.-]+)/i)?.[1];
+  if (/\bdkim=pass\b/i.test(authentication) && aligned(dkimIdentity)) return true;
+  const spfIdentity = authentication.match(/\bsmtp\.mailfrom=([^\s;@]+@)?([a-z0-9.-]+)/i)?.[2]
+    ?? authentication.match(/\bspf=pass\b[^;\r\n]*\bmailfrom=([^\s;@]+@)?([a-z0-9.-]+)/i)?.[2];
+  return /\bspf=pass\b/i.test(authentication) && aligned(spfIdentity);
 }
 
 function receivedDate(record: Record<string, unknown>): Date | null {
@@ -160,7 +169,7 @@ function messagesFromPayload(value: unknown, provider: EmailProvider): EmailMess
         receivedAt: receivedDate(record),
         text: bodyText(record),
         recipients: recipientAddresses(record),
-        senderAuthenticated: authenticatedSender(record),
+        senderAuthenticated: authenticatedSender(record, sender),
       });
     }
     for (const nested of Object.values(record)) visit(nested);

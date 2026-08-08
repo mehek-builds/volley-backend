@@ -166,7 +166,7 @@ test('ATS API channel runs after final claim and before browser submission', asy
   const repairIndex = runner.indexOf('review = await repairReviewPortalFromMonitoredJob(row, review);', helperIndex);
   const atsIndex = runner.indexOf('const atsResult = await tryAtsSubmissionChannel', helperIndex);
   const authCheckIndex = runner.indexOf('if (!await authorizationValidAtClick(row, review))', helperIndex);
-  const claimIndex = runner.indexOf('const claimedRow = await claimSubmission(row)');
+  const claimIndex = runner.indexOf('const claimedRow = await claimSubmission(row, options.claimAlreadyHeld)');
   const claimedRepairIndex = runner.indexOf('claimedReview = await repairReviewPortalFromMonitoredJob(row, claimedReview);', claimIndex);
   const detectIndex = runner.indexOf('const claimedPortal = detectPortal(claimedReview.portal_url!);', claimIndex);
   const callIndex = runner.indexOf('if (await submitViaAtsSubmissionChannel(row, claimedReview, fastify)) return;');
