@@ -121,8 +121,8 @@ Rules:
 - THE FIRST ENTRY IS A DECISION, NOT A DATE. Choose it by asking one question: which entry's own
   bullets prove the most important thing THIS posting asks for? Recency does not decide it, and
   neither does which entry is on the base resume first. The applicant's newest role is often the
-  wrong answer - a product management posting is led by the work where she defined product
-  requirements and shipped to users, even when a more recent engineering role exists, and an
+  wrong answer - a product management posting is led by the entry whose bullets define product
+  requirements and ship to users, even when a more recent engineering role exists, and an
   infrastructure posting is led by the infrastructure work even when it is older. Reverse
   chronological order is a habit, not a rule; break it whenever a different entry proves more.
 - "lead_alignment": EMIT THIS KEY FIRST, BEFORE "experience", and mean it. It is the ordering
