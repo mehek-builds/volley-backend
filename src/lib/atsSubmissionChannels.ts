@@ -216,7 +216,9 @@ export function leverPostingFromUrl(rawUrl: string | undefined): { site: string;
   return parts[0] && parts[1] ? { site: parts[0], postingId: parts[1] } : null;
 }
 
-function genericKnownPosting(rawUrl: string | undefined): PostingRef | null {
+/* Exported for lib/duplicateApplication, which needs the same "which posting is this URL" reading
+ * to decide whether two packets are the same posting. Nothing else about it changed. */
+export function genericKnownPosting(rawUrl: string | undefined): PostingRef | null {
   const url = parsedHttpsUrl(rawUrl);
   if (!url) return null;
   const host = url.hostname.toLowerCase();

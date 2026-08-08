@@ -108,6 +108,7 @@ import {
 } from '../lib/submissionQueue';
 import { coverLetterFileNameForRole, resumeFileNameForRole } from '../lib/resumeFileName';
 import { assessAtsSubmissionChannel, tryAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
+import { duplicateApplicationVerdict } from '../lib/duplicateApplication';
 import { resolveApplicantEmail } from '../lib/applicationEmail';
 
 export type ResumeRow = typeof generated_resumes.$inferSelect;
@@ -1802,6 +1803,46 @@ async function submit(row: ResumeRow, fastify: FastifyInstance) {
       return;
     }
     throw new Error('Submission authorization is missing');
+  }
+  /* THE DUPLICATE GATE, and it is here because here is where three of the five send paths meet.
+   *
+   * submit() is reached by POST /submission/approve, by standing consent (prepare writes
+   * 'submitting' and the cron picks it up, never touching the approve route), and it contains the
+   * ATS API channel. The other two are guarded at their own doors: POST /submit-request for the
+   * unsupported-portal email fallback, and POST /submission/extension-start for the extension.
+   *
+   * BEFORE claimSubmission, not after. The claim is the last honest marker of "this one may
+   * already be out there" and it is what the daily cap counts; taking one for an application that
+   * is about to be refused would spend a cap slot on a send that never happens.
+   *
+   * A read failure does NOT open the gate. The whole point is that a duplicate cannot be
+   * withdrawn, so an unreadable database is a reason to stop rather than a reason to proceed. */
+  const duplicate = await duplicateApplicationVerdict({
+    userId: row.user_id,
+    applicationId: row.id,
+    jobContext: row.job_context,
+    portalUrl: current.portal_url,
+  });
+  if (duplicate.kind === 'unidentifiable') {
+    fastify.log.warn(
+      { applicationId: row.id },
+      'duplicate guard abstained: no shared posting key with any submitted application',
+    );
+  }
+  if (duplicate.kind === 'duplicate') {
+    fastify.log.info(
+      { applicationId: row.id, duplicateOf: duplicate.match.application_id, basis: duplicate.match.basis },
+      'Submission refused: this user already applied to this posting',
+    );
+    await writeReview(row, nextReview(current, {
+      status: 'needs_attention',
+      attention_reason: duplicate.reason,
+      attention_categories: ['duplicate_application'],
+      submission_authorization: undefined,
+      submission_claimed_at: undefined,
+      submission_claim_id: undefined,
+    }));
+    return;
   }
   const claimedRow = await claimSubmission(row);
   if (!claimedRow) return;

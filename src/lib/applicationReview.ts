@@ -26,6 +26,11 @@ export type ApplicationAttentionCategory =
    * could end in status 'failed' with attention_reason unset, which is unactionable for the
    * applicant and undebuggable for us. */
   | 'run_failed'
+  /* This user has already sent an application to this posting, and Litos refused to send a second.
+   * Deliberately NOT 'run_failed': nothing broke. Twelve packets existed for one Akuna posting on
+   * 2026-08-06, and had any of them reached the send they would all have gone, against an employer
+   * whose own form carries a season-long exclusivity acknowledgement. */
+  | 'duplicate_application'
   | 'required_document'
   | 'sensitive_attestation'
   | 'required_field'

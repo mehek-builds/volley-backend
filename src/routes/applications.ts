@@ -53,6 +53,11 @@ import {
 import { resumeFileNameForRole } from '../lib/resumeFileName';
 import { sendUnsupportedPortalApplicationEmail } from '../lib/unsupportedPortalEmailFallback';
 import { assessAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
+import {
+  duplicateApplicationResponse,
+  duplicateApplicationVerdict,
+  type DuplicateApplicationVerdict,
+} from '../lib/duplicateApplication';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
 const questionSchema = z.object({
@@ -319,6 +324,57 @@ function sensitiveQuestionFor(
     .find((question) => sensitiveQuestionRequiresAttention(question.question, question.answer, 'text', profile, jdText));
 }
 
+/* THE DUPLICATE GATE as the routes see it.
+ *
+ * Two things happen on a refusal and both of them matter. The HTTP body answers the caller that is
+ * standing there, and the review is written to needs_attention with the same sentence so the
+ * Tracker says the same thing to someone who comes back later and never saw the response. A
+ * refusal that only exists in a 409 is invisible five minutes afterwards.
+ *
+ * Written through applyReviewPatch, never by spread, so the terminal-cause invariant holds and the
+ * category travels with the prose.
+ */
+async function refuseDuplicateApplication(
+  row: StoredResumeRow,
+  current: ApplicationReviewState,
+  userId: string,
+  log: FastifyInstance['log'],
+): Promise<DuplicateApplicationVerdict> {
+  const verdict = await duplicateApplicationVerdict({
+    userId,
+    applicationId: row.id,
+    jobContext: row.job_context,
+    portalUrl: current.portal_url,
+  });
+  if (verdict.kind === 'unidentifiable') {
+    log.warn(
+      { applicationId: row.id },
+      'duplicate guard abstained: no shared posting key with any submitted application',
+    );
+    return verdict;
+  }
+  if (verdict.kind !== 'duplicate') return verdict;
+  const now = new Date().toISOString();
+  const refused = applyReviewPatch(current, {
+    status: 'needs_attention',
+    attention_reason: verdict.reason,
+    attention_categories: ['duplicate_application'],
+    submission_error: undefined,
+  }, () => now);
+  await db.update(generated_resumes)
+    .set({ spec: reviewSpec(refused) })
+    .where(and(
+      eq(generated_resumes.id, row.id),
+      eq(generated_resumes.user_id, userId),
+      sql`${generated_resumes.spec}->'_review'->>'status' = ${current.status}`,
+    ));
+  log.info(
+    { applicationId: row.id, duplicateOf: verdict.match.application_id, basis: verdict.match.basis },
+    'Submission refused: this user already applied to this posting',
+  );
+  return verdict;
+}
+
 export async function applicationRoutes(fastify: FastifyInstance) {
   fastify.post(
     '/applications/:id/submission/extension-start',
@@ -329,6 +385,22 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const params = paramsSchema.safeParse(request.params);
       if (!params.success) return reply.status(400).send({ error: 'Invalid application id' });
       const userId = request.jwtPayload!.userId;
+      /* THE DUPLICATE GATE for the extension path, and it is the only one of the five that never
+       * touches submissionRunner.submit: the extension does the filling and the clicking in the
+       * applicant's own browser, and this route is the moment Litos authorizes it to. Refusing at
+       * extension-outcome would be refusing to record a send that already happened.
+       *
+       * Ahead of the transaction, not inside it, so the read is not competing with the advisory
+       * lock the claim takes. Nothing is claimed yet at this point, so there is nothing to undo. */
+      const [precheckRow] = await db.select().from(generated_resumes).where(and(
+        eq(generated_resumes.id, params.data.id),
+        eq(generated_resumes.user_id, userId),
+      )).limit(1);
+      const precheckReview = precheckRow ? readApplicationReview(precheckRow.spec) : null;
+      if (precheckRow && precheckReview && precheckReview.status !== 'submitted') {
+        const verdict = await refuseDuplicateApplication(precheckRow, precheckReview, userId, fastify.log);
+        if (verdict.kind === 'duplicate') return reply.status(409).send(duplicateApplicationResponse(verdict));
+      }
       const result = await db.transaction(async (tx) => {
         await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${userId}))`);
         const rows = await tx.select().from(generated_resumes).where(and(
@@ -692,6 +764,31 @@ export async function applicationRoutes(fastify: FastifyInstance) {
             restartable: false,
           });
       }
+      /* THE DUPLICATE GATE for everything this route can reach.
+       *
+       * This route forks below into two sends: the unsupported-portal EMAIL FALLBACK, which
+       * reaches the employer inside this same request, and the managed browser run. The browser
+       * run is guarded again inside submissionRunner.submit, and that repetition is deliberate
+       * rather than redundant, because standing consent reaches submit without ever coming through
+       * here. The check sits here as well so the email fallback is covered and so a duplicate
+       * costs no browser minutes.
+       *
+       * After repairReviewPortalFromMonitoredJob, because the posting key is read off portal_url
+       * and the repair is what fills it in on a packet that lost it.
+       *
+       * Ahead of the required-answer, education-drift and sensitive-question gates on purpose. All
+       * three ask the applicant to go fix something; this one is telling her there is nothing to
+       * fix, and asking her to correct answers on a form that will never be sent wastes her time
+       * and reads as though the send is still available. */
+      const duplicateVerdict = await refuseDuplicateApplication(
+        row,
+        current,
+        request.jwtPayload!.userId,
+        fastify.log,
+      );
+      if (duplicateVerdict.kind === 'duplicate') {
+        return reply.status(409).send(duplicateApplicationResponse(duplicateVerdict));
+      }
       // Guarded here as well as on extension-start, and not because this route is unattended today.
       // The dashboard now refuses to send a drifted packet, but a frontend check is not an
       // enforcement point: this audit exists because a client-side assumption turned out to be
@@ -1048,6 +1145,21 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       }
       if (current.handoff_expires_at && Date.parse(current.handoff_expires_at) < Date.now()) {
         return reply.status(409).send({ error: 'That took too long and timed out. Start the application again.' });
+      }
+      /* THE DUPLICATE GATE at the moment she presses send.
+       *
+       * submissionRunner.submit checks this too and would stop the click either way, but a 202
+       * followed by a silent flip to needs_attention is not an answer to somebody who just pressed
+       * a button. She asked a direct question and gets a direct refusal, with the same sentence the
+       * Tracker will show. */
+      const approvalDuplicate = await refuseDuplicateApplication(
+        row,
+        current,
+        request.jwtPayload!.userId,
+        fastify.log,
+      );
+      if (approvalDuplicate.kind === 'duplicate') {
+        return reply.status(409).send(duplicateApplicationResponse(approvalDuplicate));
       }
       const sensitiveProfile = await loadSensitiveQuestionProfile(request.jwtPayload!.userId);
       const approvalReview: ApplicationReviewState = {

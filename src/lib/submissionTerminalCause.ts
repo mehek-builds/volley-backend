@@ -52,6 +52,11 @@ export function attentionCategoriesForReasons(reasons: readonly string[]): Appli
     const normalized = reason.toLowerCase();
     if (/^captcha requires your attention$|prove you are human/.test(normalized)) {
       categories.add('captcha');
+    } else if (/you have already applied to/.test(normalized)) {
+      // Ahead of run_failed and of the generic arm on purpose. A refused duplicate is not a
+      // breakage, and filing it as one would put it in the "Litos broke, try again" bucket that
+      // the applicant is meant to retry. This is the one stop she must not retry.
+      categories.add('duplicate_application');
     } else if (/could not confirm it reached|never reached the application form/.test(normalized)) {
       // Ahead of evidence_gap on purpose. Both sentences mention the form; only one of them is
       // claiming the form was filled, and confusing the two is the defect this branch names.
