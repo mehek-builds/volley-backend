@@ -137,7 +137,18 @@ test('ATS API channel can prepare without opening a CAPTCHA-prone browser path o
   assert.ok(atsAssessmentIndex > prepareIndex, 'prepare must assess employer-authorized API channels only after the explicit posting gate');
   assert.ok(localControlledIndex > atsAssessmentIndex, 'API-capable employers must skip browser preparation');
   assert.ok(accountGateIndex > atsAssessmentIndex, 'API-capable employers must skip CAPTCHA and account-wall preparation gates');
-  assert.match(runner.slice(atsAssessmentIndex, localControlledIndex), /preparedReviewPatch\(authorization, true\)/);
+  /* This asserted the literal `preparedReviewPatch(authorization, true)`. What it is protecting is
+     that an API-capable employer prepares WITHOUT a browser, and that is still exactly what happens.
+     The literal itself was a hole: no browser means no blockers and no live form, so `true` was an
+     honest statement about the form and a false one about the packet - with standing consent it
+     becomes 'submitting' in the same call, and nothing on that path had ever read the question list.
+     `safe` is now the one thing this branch can actually know, which is whether a required question
+     is still unanswered. */
+  assert.match(
+    runner.slice(atsAssessmentIndex, localControlledIndex),
+    /preparedReviewPatch\(authorization, atsUnansweredRequired\.length === 0\)/,
+  );
+  assert.match(runner.slice(atsAssessmentIndex, localControlledIndex), /blankRequiredQuestionLabels\(current\.questions\)/);
   assert.match(runner.slice(atsAssessmentIndex, localControlledIndex), /browser_context_id: undefined/);
   assert.match(runner.slice(atsAssessmentIndex, localControlledIndex), /browser_session_id: undefined/);
 });

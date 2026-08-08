@@ -1081,6 +1081,35 @@ const CONTROLLED_SMARTRECRUITERS_EMAIL_SELECTOR = '[id="email-input"]';
 const CONTROLLED_SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR = '[id="confirm-email-input"]';
 const CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR = '[id="linkedin-input"]';
 const CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR = '[id="website-input"]';
+/* THE ASHBY LOCATION CONTROL, and why the obvious selector matches nothing.
+ *
+ * `input[name="_systemfield_location"]` was the only selector here, on both the managed and the
+ * direct path, and on today's Ashby it matches ZERO elements. Read off the live Deepgram form on
+ * 2026-08-09, the whole control is:
+ *
+ *   <div class="_fieldEntry_..." data-field-path="_systemfield_location">
+ *     <label class="_heading_... _required_..." for="_systemfield_location">Current Location</label>
+ *     <div class="_inputContainer_...">
+ *       <input class="_input_..." placeholder="Start typing..." aria-autocomplete="list"
+ *              aria-expanded="false" aria-haspopup="listbox" role="combobox" value="">
+ *
+ * The label's `for` still names `_systemfield_location`, which is why the name looks current, but the
+ * input it points at has NEITHER an id NOR a name. So the fill was optional, matched nothing, was
+ * skipped, and "location" never appeared in filled_fields - which is exactly what production packet
+ * 245c827a shows, with the field left showing its "Start typing..." placeholder on the preview the
+ * applicant was offered as a finished application.
+ *
+ * The entry's `data-field-path` is Ashby's own per-question attribute and is the durable hook. The
+ * legacy name is kept AFTER it rather than dropped: a board serving an older bundle still renders it,
+ * and the list costs nothing extra, because managedFill pushes ONE action for the whole thing and the
+ * runner takes the first match.
+ *
+ * The runner recognises role="combobox" and drives the typeahead through fillCustomChoice rather than
+ * typing into it, which matters here: a location typeahead that is typed at but never picked from
+ * leaves the employer's own value empty while looking answered.
+ */
+const ASHBY_LOCATION_SELECTOR =
+  '[data-field-path="_systemfield_location"] input[role="combobox"], [data-field-path="_systemfield_location"] input, input[name="_systemfield_location"]';
 const ASHBY_RESUME_SELECTOR = 'input#_systemfield_resume[type="file"], input[type="file"][name="_systemfield_resume"], input[type="file"][name*="resume" i]';
 const ASHBY_COVER_LETTER_SELECTOR = 'input#cover_letter[type="file"], input[type="file"][id*="cover" i], input[type="file"][name*="cover" i], input[type="file"][aria-label*="cover" i]';
 
@@ -2797,7 +2826,7 @@ function pushFixedFieldActions(
     pushScopedQuestionChoiceActions(actions, 'Last Name / Surname', lastName, 'ashby_last_name', { includeSelectFallbacks: false });
     managedFill(actions, 'input[name="_systemfield_email"]', packet.email, 'email', false);
     managedFill(actions, ASHBY_PHONE_SELECTOR, phoneForPortalField(portal, packet.phone), 'phone');
-    managedFill(actions, 'input[name="_systemfield_location"]', packet.city, 'location');
+    managedFill(actions, ASHBY_LOCATION_SELECTOR, packet.city, 'location');
     // LinkedIn/GitHub/portfolio, previously missing entirely from this branch: the packet carries
     // them (confirmed live on a real account via GET /profile/application) and the Lever branch
     // fills its equivalents, but Ashby was silently dropping them, surfacing as a "'LinkedIn
@@ -2941,6 +2970,21 @@ export function buildManagedPortalActions(
             timeout: MANAGED_FILL_TIMEOUT_MS,
           });
           pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
+        } else {
+          /* A choice question on a non-Greenhouse board used to fall out of this branch having
+           * pushed NOTHING, and that was invisible for as long as no choice question could get here:
+           * portalSelectorForField withheld a selector for every shape except text, so this arm was
+           * unreachable. Discovery now reports a DURABLE selector for choice controls too, so the
+           * arm has to exist or a question that has just become fillable would silently stop being
+           * attempted at all.
+           *
+           * fillByLabelText, not a click on the selector. A durable selector on Ashby's yes/no
+           * resolves to the display:none mirror input, and clicking that neither drives React nor
+           * says which of Yes and No was meant; the runner's scoped choice handling reads the
+           * question's own container and presses the matching option pill, which is the only thing
+           * that works there. One action, and the same one the no-selector path below would spend.
+           */
+          pushScopedQuestionChoiceActions(actions, questionText, answer, 'question', { includeSelectFallbacks: false });
         }
         continue;
       }
@@ -3661,7 +3705,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="_systemfield_name"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="_systemfield_email"]'], packet.email, 'email', filledFields);
     await fillFirst(page, ASHBY_PHONE_SELECTOR.split(', '), phoneForPortalField(portal, packet.phone), 'phone', filledFields);
-    await fillFirst(page, ['input[name="_systemfield_location"]'], packet.city, 'location', filledFields);
+    await fillComboboxFirst(page, ASHBY_LOCATION_SELECTOR.split(', '), packet.city, 'location', filledFields);
     // See ASHBY_*_SELECTOR: these were missing from the direct path too, so a real Ashby run
     // reported LinkedIn as an empty required field even though the packet had it.
     await fillFirst(page, ASHBY_LINKEDIN_SELECTOR.split(', '), packet.linkedinUrl, 'linkedin', filledFields);

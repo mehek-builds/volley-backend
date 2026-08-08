@@ -367,6 +367,19 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         const refreshedQuestions = refreshKnownQuestionAnswers(current.questions, sensitiveProfile, current.jd_text);
         const sensitive = sensitiveQuestionFor(refreshedQuestions, sensitiveProfile, current.jd_text);
         if (sensitive) return { kind: 'sensitive_question' as const, question: sensitive.question };
+        /* THE FIFTH SEND SITE, and the one blankRequiredQuestionLabels' own list did not name.
+         *
+         * This route hands the packet to the extension, which fills the employer's form and presses
+         * Submit in the applicant's own browser. Nothing between here and that click reads the
+         * answers again: extension-outcome only records what happened. So this is a send, and it has
+         * never carried a required-answer check of any kind - a packet with a required question
+         * Litos could not answer went out through it in silence.
+         *
+         * Beside the sensitive-question refusal because they are the same kind of stop and must not
+         * drift apart, and BEFORE the tx.update below, so the claim is never taken for a submission
+         * that is not allowed to proceed. */
+        const unansweredRequired = blankRequiredQuestionLabels(refreshedQuestions);
+        if (unansweredRequired.length > 0) return { kind: 'required_answer_missing' as const, questions: unansweredRequired };
         if (!withinDailyCap(countRows[0]?.total ?? 0, dailySubmissionCap())) return { kind: 'cap' as const };
         const now = new Date().toISOString();
         const claimId = randomUUID();
@@ -403,6 +416,14 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (result.kind === 'education_drift') return reply.status(422).send(educationDriftResponse(result.issues));
       if (result.kind === 'sensitive_question') {
         return reply.status(422).send({ error: `Sensitive question requires your attention: ${result.question.slice(0, 120)}` });
+      }
+      if (result.kind === 'required_answer_missing') {
+        // Same body shape as the unsupported-portal email refusal below, so a client can handle one
+        // "you still owe an answer" response rather than two that differ only in wording.
+        return reply.status(422).send({
+          error: 'Answer every required question before submitting.',
+          questions: result.questions,
+        });
       }
       if (result.kind === 'cap') return reply.status(429).send({ error: 'Daily automatic submission safety limit reached' });
       if (result.kind === 'changed') return reply.status(409).send({ error: 'The application state changed before the extension could reserve it' });
