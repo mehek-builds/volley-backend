@@ -30,6 +30,8 @@ import {
   detectCaptchaProvider,
   captchaProviderForFamily,
   buildManagedPortalActions,
+  attachManagedFieldOptions,
+  managedResultFieldOptions,
   CaptchaUnresolvedError,
   clickFinalSubmit,
   detectPortal,
@@ -64,7 +66,7 @@ import { resolveBlobUrl } from '../lib/resumeAccess';
 import { decryptRow } from './applicationProfile';
 import { readExperienceBank } from '../db/experienceBank';
 import { declaredSkillsList } from './profile';
-import { draftApplicationAnswer } from '../llm/applicationAnswer';
+import { applicantGroundingFacts, draftApplicationAnswer, type ApplicantGroundingFacts } from '../llm/applicationAnswer';
 import { isBillingOrAuthFailure } from './resume';
 import { completeEmailVerificationIfPresent, type BrowserVerificationResult } from '../lib/browserVerification';
 import {
@@ -791,8 +793,7 @@ export async function discoverAndResolveQuestions(
 
   let bank: Awaited<ReturnType<typeof readExperienceBank>> | null = null;
   let declaredSkills: string[] = [];
-  let school: string | undefined;
-  let gradYear: number | undefined;
+  let groundingFacts: ApplicantGroundingFacts = {};
   let company = 'this company';
   try {
     company = new URL(current.portal_url!).hostname.replace(/^www\./, '').split('.')[0];
@@ -897,9 +898,7 @@ export async function discoverAndResolveQuestions(
       if (bank === null) {
         bank = await readExperienceBank(row.user_id);
         const [profileRow] = await db.select().from(profiles).where(eq(profiles.user_id, row.user_id)).limit(1);
-        const parsedProfile = profileRow?.parsed_json as { school?: string; grad_year?: number } | undefined;
-        school = parsedProfile?.school;
-        gradYear = parsedProfile?.grad_year;
+        groundingFacts = applicantGroundingFacts(profileRow?.parsed_json, ap);
         declaredSkills = declaredSkillsList(profileRow?.skills);
       }
       if (bank.length === 0) {
@@ -912,7 +911,7 @@ export async function discoverAndResolveQuestions(
         current.role ?? 'this role',
         current.jd_text,
         bank,
-        { school, grad_year: gradYear },
+        groundingFacts,
         declaredSkills,
       );
       const fitted = answer ? fitToBudget(answer, field.maxLength ?? 100_000) : null;
@@ -958,6 +957,12 @@ async function prepareManaged(
   // uses, so the two providers can never answer a question differently.
   const applicationUrl = portalApplicationUrl(portal, current.portal_url!);
   const discoveryResult = await runManagedBrowser(applicationUrl, buildManagedDiscoveryActions(portal, packet)).catch(() => null);
+  // The closed lists' REAL option texts, read off the live page by the discovery pass. Without
+  // these, resolveProfileField's option snapping (PR #361) is inert on this path: the managed
+  // provider's discover action reports no options at all, so a control offering "Computer Science"
+  // was handed the stored major, matched nothing, and came back required-and-empty.
+  const fieldOptions = managedResultFieldOptions(discoveryResult);
+  const discoveredFields = attachManagedFieldOptions(discoveryResult?.discovered ?? [], fieldOptions);
   const coverLetterSupported = managedResultHasCoverLetterUpload(discoveryResult, portal);
   const coverLetterOutcome = await packetForCoverLetterCapability(row, coverLetterSupported, fastify);
   packet = coverLetterOutcome.packet;
@@ -965,7 +970,7 @@ async function prepareManaged(
   const resolutionCurrent = { ...current, questions: storedQuestions };
   const applicationProfile = await loadApplicationProfileLike(row.user_id);
   const { questions: discoveredQuestions, attentionReasons: discoveryAttention } = await discoverAndResolveQuestions(
-    discoveryResult?.discovered ?? [],
+    discoveredFields,
     row,
     resolutionCurrent,
     applicationProfile,
@@ -979,6 +984,10 @@ async function prepareManaged(
     portalSelector: q.portal_selector,
     portalInputType: q.portal_input_type,
   }));
+  // The fill run gets the same option lists, so the fixed education comboboxes type an exact option
+  // instead of the profile's own phrasing. It only ever gets ONE attempt at a react-select (a second
+  // click closes the menu the first one opened), so the first value has to be the right one.
+  packet.fieldOptions = fieldOptions;
 
   const result = await runManagedBrowser(applicationUrl, buildManagedPortalActions(portal, packet));
   if (!result.screenshot) throw new Error('Stratus managed browser did not return a preview screenshot');
@@ -1045,7 +1054,7 @@ async function prepareManaged(
     ...result,
     filledFields,
     blockers: [...(result.blockers ?? []), ...(discoveryResult?.blockers ?? [])],
-    discovered: discoveryResult?.discovered ?? [],
+    discovered: discoveredFields,
     extracted: [...(result.extracted ?? []), ...(discoveryResult?.extracted ?? [])],
   }, packet);
   const attentionReasons = [...blockers, ...discoveryAttention, ...evidenceBlockers, ...coverLetterAttention];

@@ -7,7 +7,10 @@ import {
   rankingRuleText,
   thinRankingWarning,
   draftApplicationAnswer,
+  applicantGroundingFacts,
+  groundingFactsText,
 } from './applicationAnswer';
+import { ungroundedProperNouns, wordSet } from '../engine/grounding';
 
 // R-029 regression coverage. Live on Replit (2026-07-17): asked "Please tell us about your
 // submitted project" on a form whose Project URL was empty and unfillable, the drafter wrote
@@ -216,4 +219,65 @@ test('the prompt requires naming real roles when the history does exist', () => 
 test('the prompt still forbids inventing a positive to look stronger', () => {
   const flat = SYSTEM_PROMPT.replace(/\s+/g, ' ');
   assert.match(flat, /the negative is always safe, a fabricated positive never is/i);
+});
+
+/* ─── the grounding corpus is the applicant's whole stored background, not just her school ───
+ *
+ * Measured on the Anduril packet of 2026-08-08 (submission_run_id 32823cf6). The drafted answer to
+ * "Are you willing to work in-person for 12 weeks during the internship?" mentioned Los Angeles and
+ * came back with, verbatim:
+ *   drafted answer needs your review: Names/orgs not found in your background or the job post
+ *   (verify): Los Angeles
+ * profiles.parsed_json.school_location is "Los Angeles, CA". The corpus only ever held
+ * `education.school`, so a place named in her own profile was reported to her as unverifiable.
+ */
+describe('the grounding corpus holds every stored fact, so the applicant is not warned about her own', () => {
+  const parsedJson = {
+    school: 'University of Southern California, Viterbi School of Engineering',
+    school_location: 'Los Angeles, CA',
+    degree: 'Bachelor of Science in Computer Science',
+    major: 'Computer Science & Business Administration, Finance Emphasis',
+    grad_year: 2028,
+  };
+
+  test('school_location is read out of parsed_json and into the facts', () => {
+    const facts = applicantGroundingFacts(parsedJson, { address_city: 'Dubai', address_country: 'United Arab Emirates' });
+    assert.equal(facts.school_location, 'Los Angeles, CA');
+    assert.equal(facts.residence, 'Dubai, United Arab Emirates');
+    assert.equal(facts.grad_year, 2028);
+  });
+
+  test('"Los Angeles" is no longer an unverifiable name', () => {
+    const facts = applicantGroundingFacts(parsedJson, null);
+    const corpus = wordSet(`${groundingFactsText(facts)} Anduril Industries 2027 Software Engineer Intern`);
+    assert.deepEqual(
+      ungroundedProperNouns(
+        'I am fully willing to work in person for the full twelve weeks. I already commute to campus in Los Angeles.',
+        corpus,
+      ),
+      [],
+    );
+  });
+
+  test('the old corpus is what produced the warning, so this stays a regression and not a coincidence', () => {
+    const schoolOnly = wordSet('University of Southern California, Viterbi School of Engineering Anduril Industries');
+    assert.deepEqual(
+      ungroundedProperNouns('I already commute to campus in Los Angeles.', schoolOnly),
+      ['Los Angeles'],
+    );
+  });
+
+  test('a name that really is nowhere in her material is still flagged', () => {
+    const facts = applicantGroundingFacts(parsedJson, null);
+    const corpus = wordSet(`${groundingFactsText(facts)} Anduril Industries`);
+    assert.deepEqual(
+      ungroundedProperNouns('I led delivery at Northwind Logistics.', corpus),
+      ['Northwind Logistics'],
+    );
+  });
+
+  test('nothing derived joins the corpus: an empty profile contributes nothing', () => {
+    assert.equal(groundingFactsText(applicantGroundingFacts(undefined, null)).trim(), '');
+    assert.equal(applicantGroundingFacts({ school_location: '   ' }, null).school_location, undefined);
+  });
 });

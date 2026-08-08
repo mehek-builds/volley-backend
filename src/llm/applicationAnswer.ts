@@ -153,12 +153,38 @@ export function thinRankingWarning(ranking: RankingGrounding): string | null {
   return `Ranking ask names ${ranking.items.length} items but your declared skills cover ${ranking.held.length} (${ranking.held.join(', ')}); the draft omits: ${ranking.unheld.join(', ')}.`;
 }
 
+/**
+ * The applicant's own stored background, as the grounding check must see it.
+ *
+ * This used to be `{ school, grad_year }`, and the corpus built from it therefore held the name of
+ * the university and nothing else about where the applicant actually is. Measured on the Anduril
+ * packet of 2026-08-08: `profiles.parsed_json.school_location` is "Los Angeles, CA", the draft
+ * said Los Angeles, and the applicant was told
+ *   "Names/orgs not found in your background or the job post (verify): Los Angeles"
+ * about a place named in her own profile. The corpus was wrong, not the answer.
+ *
+ * Every field here is a fact the applicant stored herself, so any of them may legitimately appear
+ * in a drafted answer. Nothing derived and nothing inferred goes on this list: the corpus is what
+ * decides whether a name is a fabrication, so widening it with anything Litos guessed would make
+ * the check endorse Litos's own guesses.
+ */
+export type ApplicantGroundingFacts = {
+  school?: string;
+  grad_year?: number;
+  /** profiles.parsed_json.school_location, e.g. "Los Angeles, CA". */
+  school_location?: string;
+  degree?: string;
+  major?: string;
+  /** Where the applicant lives, from application_profile (city, state, country). */
+  residence?: string;
+};
+
 function buildContextBlock(
   company: string,
   role: string,
   jdText: string,
   bank: ExperienceBankEntry[],
-  education: { school?: string; grad_year?: number },
+  education: ApplicantGroundingFacts,
   declaredSkills: string[],
 ): string {
   // The declared list rides the cached prefix like the bank: per-applicant, not per-question, so it
@@ -168,7 +194,64 @@ function buildContextBlock(
   const skillsBlock = declaredSkills.length
     ? `\n\nDeclared skills (the applicant's own list, the only skills you may claim or rank):\n${JSON.stringify(declaredSkills)}`
     : '';
-  return `Role: ${role} at ${company}\n\nJob description:\n${jdText.slice(0, 6000)}\n\nEducation: ${education.school ?? ''}${education.grad_year ? `, class of ${education.grad_year}` : ''}${skillsBlock}\n\nExperience bank:\n${JSON.stringify(bank)}`;
+  const educationLine = [
+    education.degree,
+    education.major ? `in ${education.major}` : '',
+    education.school,
+    education.school_location ? `(${education.school_location})` : '',
+    education.grad_year ? `, class of ${education.grad_year}` : '',
+  ].filter((part) => part && part.trim().length > 0).join(' ').replace(/\s+,/g, ',').trim();
+  const residenceLine = education.residence ? `\n\nApplicant is based in: ${education.residence}` : '';
+  return `Role: ${role} at ${company}\n\nJob description:\n${jdText.slice(0, 6000)}\n\nEducation: ${educationLine}${residenceLine}${skillsBlock}\n\nExperience bank:\n${JSON.stringify(bank)}`;
+}
+
+/**
+ * Build the grounding facts from the two places the applicant's own data actually lives.
+ *
+ * One function rather than a literal at each call site, because the two call sites are the
+ * dashboard runner and the extension's /application/answer route, and the corpus they ground
+ * against has to be the same set of facts or the same draft gets a warning on one surface and not
+ * the other. Fields are read defensively: parsed_json is model output stored as jsonb, so anything
+ * in it may be missing or the wrong type.
+ */
+export function applicantGroundingFacts(
+  parsedJson: unknown,
+  profile?: {
+    address_city?: string;
+    address_state?: string;
+    address_country?: string;
+    school?: string;
+    degree?: string;
+    major?: string;
+  } | null,
+): ApplicantGroundingFacts {
+  const parsed = (parsedJson && typeof parsedJson === 'object' ? parsedJson : {}) as Record<string, unknown>;
+  const str = (value: unknown): string | undefined =>
+    (typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined);
+  const residence = [profile?.address_city, profile?.address_state, profile?.address_country]
+    .map((part) => str(part))
+    .filter(Boolean)
+    .join(', ');
+  return {
+    school: str(parsed.school) ?? str(profile?.school),
+    grad_year: typeof parsed.grad_year === 'number' ? parsed.grad_year : undefined,
+    school_location: str(parsed.school_location),
+    degree: str(parsed.degree) ?? str(profile?.degree),
+    major: str(parsed.major) ?? str(profile?.major),
+    residence: residence || undefined,
+  };
+}
+
+/** Every stored fact the grounding corpus is allowed to treat as the applicant's own material. */
+export function groundingFactsText(education: ApplicantGroundingFacts): string {
+  return [
+    education.school,
+    education.school_location,
+    education.degree,
+    education.major,
+    education.residence,
+    education.grad_year ? String(education.grad_year) : '',
+  ].filter((value) => typeof value === 'string' && value.trim().length > 0).join(' ');
 }
 
 export async function draftApplicationAnswer(
@@ -177,7 +260,7 @@ export async function draftApplicationAnswer(
   role: string,
   jdText: string,
   bank: ExperienceBankEntry[],
-  education: { school?: string; grad_year?: number },
+  education: ApplicantGroundingFacts,
   // The applicant's declared skills (profiles.skills, R-015's authority). Empty/undefined means
   // "never declared", which disables the deterministic ranking check (R-042) but must never be
   // read as "holds no skills" - the same NULL-vs-[] semantics the list carries everywhere else.
@@ -230,7 +313,10 @@ export async function draftApplicationAnswer(
   }
 
   // Grounding source = the applicant's real material only: experience bank text + the JD (facts
-  // about the company are allowed only if the JD states them) + their school.
+  // about the company are allowed only if the JD states them) + every academic and location fact
+  // she has stored. That last part is the whole of groundingFactsText and it is not decoration:
+  // with only `school` in the corpus, a draft naming the city her university is in was reported to
+  // her as an unverifiable name.
   const bankCorpus = bank
     .map((e) => {
       const variants = Array.isArray(e.bullet_variants) ? (e.bullet_variants as string[]) : [];
@@ -238,7 +324,7 @@ export async function draftApplicationAnswer(
       return [e.org, e.title ?? '', e.date_range ?? '', ...variants, ...tags].join(' ');
     })
     .join(' ');
-  const corpusText = `${bankCorpus} ${jdText} ${education.school ?? ''}`;
+  const corpusText = `${bankCorpus} ${jdText} ${groundingFactsText(education)}`;
   const sourceSignatures = numberSignatures(corpusText);
   const corpusWords = wordSet(corpusText);
 

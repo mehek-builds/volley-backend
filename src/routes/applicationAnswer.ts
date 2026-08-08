@@ -5,7 +5,8 @@ import { db } from '../db/index';
 import { profiles } from '../db/schema';
 import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
 import { requireAuth } from '../middleware/auth';
-import { draftApplicationAnswer } from '../llm/applicationAnswer';
+import { applicantGroundingFacts, draftApplicationAnswer } from '../llm/applicationAnswer';
+import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { declaredSkillsList } from './profile';
 import { isBillingOrAuthFailure, LLM_BILLING_LOG, LLM_BILLING_PAYLOAD } from './resume';
 
@@ -35,17 +36,22 @@ export async function applicationAnswerRoutes(fastify: FastifyInstance) {
       return reply.status(400).send({ error: 'Nothing saved about your work yet. Finish setting up first.' });
     }
     const profileRows = await db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1);
-    const parsedProfile = profileRows[0]?.parsed_json as { school?: string; grad_year?: number } | undefined;
+    // The same corpus the dashboard runner grounds against, built by the same function. When this
+    // route carried only { school, grad_year }, a draft naming the city of the applicant's own
+    // university was returned with a "names not found in your background" warning attached.
+    const groundingFacts = applicantGroundingFacts(
+      profileRows[0]?.parsed_json,
+      await loadApplicationProfileLike(userId),
+    );
     // The declared skills list (profiles.skills, R-015's authority) rides along for the R-042
     // ranking grounding: a "rank these languages" ask may rank only the intersection of the
     // question's own items and this list. [] means "never declared" and disables the check.
     const declaredSkills = declaredSkillsList(profileRows[0]?.skills);
 
     try {
-      const { answer, warnings } = await draftApplicationAnswer(question, company, role, jd_text, bank, {
-        school: parsedProfile?.school,
-        grad_year: parsedProfile?.grad_year,
-      }, declaredSkills);
+      const { answer, warnings } = await draftApplicationAnswer(
+        question, company, role, jd_text, bank, groundingFacts, declaredSkills,
+      );
       if (!answer) return reply.status(502).send({ error: 'Empty draft returned' });
       return reply.status(200).send({ answer, warnings, grounded: warnings.length === 0 });
     } catch (err) {
