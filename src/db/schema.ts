@@ -565,6 +565,10 @@ export const application_profile = pgTable('application_profile', {
   // Free text month-and-year like grad_date, e.g. "June 2024", because that is what the forms ask
   // for and a full ISO date would be a precision the student does not have to hand.
   high_school_grad_date: text('high_school_grad_date'),
+  // When the current programme started. Stored as free text month-and-year, e.g. "August 2024",
+  // because employer education blocks ask for the month and year separately. It cannot be derived
+  // safely from high_school_grad_date or the programme graduation date. Null means never asked.
+  education_start_date: text('education_start_date'),
   /* "Have you previously applied to work at Point72?" / "...with Akuna in the past?" / "...another
    * role @IMC within the last 12-18 months?" - 4 postings, 3 companies.
    *
