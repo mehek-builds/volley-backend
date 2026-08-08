@@ -22,6 +22,7 @@ const ALL_STATUSES = [
   'filling',
   'needs_attention',
   'ready_for_final_approval',
+  'awaiting_security_code',
   'submitting',
   'submission_claimed',
   'submitted',

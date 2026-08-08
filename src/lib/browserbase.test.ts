@@ -135,6 +135,11 @@ test('managed Stratus posts bounded actions to the private production run endpoi
     url: 'https://portal.example/apply',
     actions: [{ type: 'fill', selector: '#email', value: 'person@example.com' }],
     screenshot: true,
+    // A caller that says nothing gets a run that CANNOT submit. Asserted on the wire, not on the
+    // option object, because the default has to survive the serialization to be worth anything, and
+    // because this is the line that would have stopped a fill run putting three real applications in
+    // front of three real employers on 2026-08-08.
+    allowSubmit: false,
     fullPage: true,
     waitUntil: 'domcontentloaded',
   });
