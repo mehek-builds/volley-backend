@@ -115,7 +115,8 @@ import {
 import { coverLetterFileNameForRole, resumeFileNameForRole } from '../lib/resumeFileName';
 import { assessAtsSubmissionChannel, tryAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
 import { duplicateApplicationVerdict } from '../lib/duplicateApplication';
-import { readPinnedApplicantEmail, resolveFrozenApplicantEmail } from '../lib/applicationEmail';
+import { readPinnedApplicantEmail } from '../lib/applicationEmail';
+import { resolveFrozenApplicantEmail } from '../lib/applicationEmail';
 
 export type ResumeRow = typeof generated_resumes.$inferSelect;
 type StoredSpec = Record<string, unknown>;
