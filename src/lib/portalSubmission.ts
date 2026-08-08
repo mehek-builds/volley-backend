@@ -2533,6 +2533,31 @@ export function managedResultHasCoverLetterUpload(result: ManagedBrowserResult |
   )) === true;
 }
 
+/* A required-field blocker that names the cover letter.
+ *
+ * The blocker sentences are built by describeRequiredBlocker (fieldLabel.ts) as
+ * '"Cover Letter" is required and is still empty', and by sanitizeProviderBlockers from whatever a
+ * provider hands back in the '<label> is required' shape. Both spellings are matched, and both are
+ * anchored on the required wording rather than on the words "cover letter" alone: a Greenhouse form
+ * whose page text says "Cover letter is optional" must not be read as requiring one, and neither
+ * must an attention line that merely mentions the letter, such as "We could not write your cover
+ * letter for this one, so it is not attached."
+ */
+const COVER_LETTER_REQUIRED_BLOCKER =
+  /\bcover\s*letter\b[^\n]{0,60}?\bis\s+required\b|\bis\s+required\b[^\n]{0,60}?\bcover\s*letter\b/i;
+
+/**
+ * Did this run's own required-field scan say the employer requires a cover letter?
+ *
+ * The scan runs against a form whose cover-letter control is empty (buildPacket attaches a letter
+ * only once it is approved, and an unapproved draft is never sent), so a required control is always
+ * in a position to be reported. See ApplicationReviewState.cover_letter_required for why absence is
+ * read as "optional" rather than as "unknown".
+ */
+export function blockersRequireCoverLetter(blockers: readonly string[] | undefined): boolean {
+  return (blockers ?? []).some((blocker) => COVER_LETTER_REQUIRED_BLOCKER.test(blocker ?? ''));
+}
+
 export async function hasCoverLetterUpload(page: Page, portal: SupportedPortal): Promise<boolean> {
   if ((await page.locator(coverLetterUploadSelector(portal)).count()) > 0) return true;
   const labelled = page.getByLabel(/cover\s*letter/i);

@@ -112,3 +112,63 @@ test('the default is posting-specific, so an unrecognised question is asked agai
   assert.equal(answerReuseScope(''), 'posting_specific');
   assert.equal(reusableAnswersToStore([{ question: 'Anything at all', answer: 'something' }]).length, 0);
 });
+
+/* ---------------------------------------------------------------------------------------------
+ * THE ONSITE COMMITMENT, in both directions.
+ *
+ * Together AI packet 5b52aba8-124c-4688-8b9c-a7a49d20467b and Redwood Materials packet
+ * 8d12aea8-8476-4f7a-860b-fa6393842df9 were both at the send gate on 2026-08-08 with these
+ * answered "Yes" from a constant in resolveKnownAnswer, for an applicant who lives in Dubai and
+ * studies in Los Angeles. The guard that stopped them is right and stays. This is the other half of
+ * the handoff: an answer she gives once must not be asked for a seventh time.
+ *
+ * The line is whether the LABEL says where. It does for these two, and it does not for Anduril's.
+ * ------------------------------------------------------------------------------------------- */
+const TOGETHER_ONSITE = 'Are you willing to work four days per week in our San Francisco office?';
+const REDWOOD_ONSITE = 'Are you available to work from our office in San Francisco?';
+const ANDURIL_ONSITE = 'Are you willing to work in-person for 12 weeks during the internship?';
+
+test('an onsite commitment that names the office is a fact about her and carries', () => {
+  assert.equal(answerReuseScope(TOGETHER_ONSITE, { company: 'Together AI' }), 'reusable');
+  assert.equal(answerReuseScope(REDWOOD_ONSITE, { company: 'Redwood Materials' }), 'reusable');
+  // The day-count variant, which is the same commitment counted differently.
+  assert.equal(answerReuseScope('Are you able to work onsite in our New York office 3 days a week?', {}), 'reusable');
+  // Relocation needs no place: application_profile.relocation_willingness is a plain yes/no because
+  // the willingness itself is the stable fact, wherever the employer happens to be.
+  assert.equal(answerReuseScope('Are you willing to relocate?', {}), 'reusable');
+  assert.equal(answerReuseScope('Are you willing to relocate to Austin?', {}), 'reusable');
+});
+
+test('an onsite commitment with no place in it is asked again at the next employer', () => {
+  /* Anduril's. "In-person for 12 weeks" means Costa Mesa on Anduril's form and somewhere else on
+   * Postman's, and the label cannot tell them apart. A "Yes" replayed here is Litos making a
+   * commitment she never made, which is the whole harm this module exists to prevent, so the tie
+   * goes to asking her. */
+  assert.equal(answerReuseScope(ANDURIL_ONSITE, { company: 'Anduril' }), 'posting_specific');
+  assert.equal(answerReuseScope('Are you able to work onsite four days a week?', {}), 'posting_specific');
+});
+
+test('choosing among an employer’s own offices is still posting-specific', () => {
+  // Committing to sit in an office and picking which of THIS employer's offices are on offer are
+  // different questions, and the posting-scoped veto has to keep winning over the onsite rule.
+  assert.equal(answerReuseScope('What is your preferred work location?', {}), 'posting_specific');
+  assert.equal(answerReuseScope('Which office location would you like to work from?', {}), 'posting_specific');
+  assert.equal(answerReuseScope('Are you willing to work from this office?', {}), 'posting_specific');
+});
+
+test('the onsite answer is written to the store and read back at the next employer', () => {
+  const stored = reusableAnswersToStore(
+    [
+      { question: REDWOOD_ONSITE, answer: 'No' },
+      { question: ANDURIL_ONSITE, answer: 'Yes' },
+    ],
+    { company: 'Redwood Materials' },
+  );
+  assert.deepEqual(stored.map((item) => item.question), [REDWOOD_ONSITE]);
+
+  const saved = new Map(stored.map((item) => [item.key, item.answer]));
+  // A different employer asking the same question about the same city gets her answer.
+  assert.equal(savedAnswerFor(REDWOOD_ONSITE, saved, { company: 'Databricks' }), 'No');
+  // And the placeless one was never stored, so there is nothing to replay.
+  assert.equal(savedAnswerFor(ANDURIL_ONSITE, saved, { company: 'Postman' }), undefined);
+});

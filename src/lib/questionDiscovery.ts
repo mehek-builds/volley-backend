@@ -521,7 +521,7 @@ const OFFICE_METRO_ALIASES: ReadonlyArray<readonly [string, RegExp]> = [
 ];
 
 /** Every office metro this text names, canonicalised. Order follows OFFICE_METRO_ALIASES. */
-function officeMetrosNamedIn(text: string | undefined): string[] {
+export function officeMetrosNamedIn(text: string | undefined): string[] {
   const value = text ?? '';
   if (!value.trim()) return [];
   return OFFICE_METRO_ALIASES.filter(([, pattern]) => pattern.test(value)).map(([metro]) => metro);
@@ -547,7 +547,7 @@ function committedMetros(ap: ApplicationProfileLike): string[] {
   return [...out];
 }
 
-const RELOCATION_QUESTION = /\brelocat\w*\b|\bwilling\s+to\s+move\b|\bplan\s+to\s+move\b/i;
+export const RELOCATION_QUESTION = /\brelocat\w*\b|\bwilling\s+to\s+move\b|\bplan\s+to\s+move\b/i;
 
 export function onsiteCommitmentSkipReason(label: string): string {
   return `where you will work from is yours to answer: "${label.slice(0, 60)}"`;

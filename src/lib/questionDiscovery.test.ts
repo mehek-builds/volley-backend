@@ -459,6 +459,47 @@ test('a location-commitment question is answered from her stored commitment, nev
   );
 });
 
+/* THE TOGETHER AI LABEL, which is the day-count shape rather than the bare one.
+ *
+ * Packet 5b52aba8-124c-4688-8b9c-a7a49d20467b sat at the send gate on 2026-08-08 with "are you
+ * willing to work four days per week in our san francisco office?" answered Yes, alongside the
+ * Redwood packet covered above. A boolean column would have been wrong for one of the two: her
+ * honest answer to San Francisco and her honest answer to Los Angeles are different answers, and
+ * the number of days is a second dimension on top of that.
+ */
+test('the four-days-per-week shape is the same commitment and is answered the same way', () => {
+  const together = 'are you willing to work four days per week in our san francisco office?';
+  assert.equal(classifyField(together), 'onsite_commitment');
+
+  // Nothing stored: refused by name, and not guessed from her address.
+  const unasked = resolveKnownAnswer(together, 'select', { address_city: 'Dubai' }, undefined);
+  assert.ok(unasked && 'skipReason' in unasked);
+  assert.match(unasked.skipReason, /where you will work from is yours to answer/);
+
+  // Stored, and San Francisco is not on her list, so the true answer is No.
+  assert.deepEqual(
+    resolveKnownAnswer(together, 'select', {
+      onsite_commitment: 'listed_locations' as const,
+      onsite_locations: ['Los Angeles'],
+    }, undefined),
+    { value: 'No' },
+  );
+  // Stored, and it is. Her list is free text she typed, so it is canonicalised through the same
+  // alias table the label goes through and matched by metro rather than by string.
+  assert.deepEqual(
+    resolveKnownAnswer(together, 'select', {
+      onsite_commitment: 'listed_locations' as const,
+      onsite_locations: ['san francisco, ca'],
+    }, undefined),
+    { value: 'Yes' },
+  );
+  // And a blanket commitment answers it without needing the city at all.
+  assert.deepEqual(
+    resolveKnownAnswer(together, 'select', { onsite_commitment: 'anywhere' as const }, undefined),
+    { value: 'Yes' },
+  );
+});
+
 test('the office question is answered per office, because the honest answer differs by city', () => {
   /* THE POINT OF THE LOCATION DIMENSION. She studies in Los Angeles and lives in Dubai. "Yes" to an
      LA office and "No" to a San Francisco one are both true, and a single boolean could carry

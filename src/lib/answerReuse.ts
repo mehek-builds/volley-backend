@@ -23,7 +23,12 @@
  */
 
 import { normalizeReviewQuestionLabel } from './questionDiscovery';
-import { PREVIOUSLY_APPLIED_QUESTION } from './questionDiscovery';
+import {
+  isLocationCommitmentQuestion,
+  officeMetrosNamedIn,
+  PREVIOUSLY_APPLIED_QUESTION,
+  RELOCATION_QUESTION,
+} from './questionDiscovery';
 import { isSelfDeclarationQuestion } from './selfDeclaration';
 
 export type AnswerReuseScope = 'reusable' | 'posting_specific';
@@ -61,6 +66,37 @@ const POSTING_SCOPED_QUESTION = new RegExp(
   ].join('|'),
   'i',
 );
+
+/**
+ * THE ONSITE COMMITMENT, and the one thing that decides whether her answer travels: does the label
+ * say WHERE.
+ *
+ * "Are you willing to work four days per week in our San Francisco office?" (Together AI) and "Are
+ * you available to work from our office in San Francisco?" (Redwood Materials) are questions about
+ * HER. Whether she will sit in an office in San Francisco is a fact about her life, it is the same
+ * fact at the next employer with an office in San Francisco, and the ask-at-Apply step exists to
+ * stop asking. Six distinct postings ask this in her history - Anduril, Postman, Fluency, Brex,
+ * Together AI, Redwood - which is three times the two-posting bar.
+ *
+ * But "Are you willing to work in-person for 12 weeks during the internship?" (Anduril) is not the
+ * same question at two employers, and it reads as though it were. It names no place, so what she
+ * agreed to is wherever THAT posting's office is; replaying a Costa Mesa "Yes" onto a New York
+ * posting is Litos making a commitment she never made, which is the harm the whole module is
+ * pointed at. A label with no place in it is therefore posting-specific, and she is asked again.
+ *
+ * Relocation is always reusable and needs no place: application_profile.relocation_willingness is a
+ * plain yes/no for exactly that reason, so "are you willing to relocate?" and "are you willing to
+ * relocate to Austin?" are both settled by the same stable fact.
+ *
+ * This sits BELOW the three vetoes on purpose. "Which office location do you prefer?" and "what is
+ * your preferred work location?" reach POSTING_SCOPED_QUESTION first and stay posting-specific:
+ * choosing among an employer's own offices is a different question from committing to sit in one.
+ */
+function onsiteCommitmentReuseScope(label: string): AnswerReuseScope | null {
+  if (!isLocationCommitmentQuestion(label)) return null;
+  if (RELOCATION_QUESTION.test(label)) return 'reusable';
+  return officeMetrosNamedIn(label).length > 0 ? 'reusable' : 'posting_specific';
+}
 
 /** SAT, ACT, GRE: a number the applicant holds, identical on every form that asks. */
 const STANDARDIZED_TEST_SCORE_QUESTION =
@@ -121,6 +157,10 @@ export function answerReuseScope(label: string, context: AnswerReuseContext = {}
    * last month, which is a false statement about her own record - the exact class of harm that a
    * drafted 600-word essay opening "I have not applied to Akuna in the past" already caused once. */
   if (PREVIOUSLY_APPLIED_QUESTION.test(value)) return 'posting_specific';
+
+  // The onsite commitment decides itself, in both directions. See onsiteCommitmentReuseScope.
+  const onsite = onsiteCommitmentReuseScope(value);
+  if (onsite) return onsite;
 
   // The positive test. A declaration about the applicant travels; nothing else does.
   if (isSelfDeclarationQuestion(value)) return 'reusable';
