@@ -28,6 +28,7 @@ import {
   securityCodeContinuationActions,
   securityCodeFingerprint,
   withSecurityCodeAttempt,
+  withSecurityCodeAttempts,
 } from '../lib/securityCode';
 import { storeFilledPreviewScreenshot, storeReceiptScreenshot } from '../lib/receiptScreenshot';
 import {
@@ -2516,10 +2517,36 @@ async function submitViaAtsSubmissionChannel(
   return false;
 }
 
-// `securityCode` is the emailed code that finishes a Greenhouse submit, and it is a PARAMETER rather
-// than a stored field on purpose: it is a live credential to a real employer's form, and the review
-// object it would have to live in is unvalidated JSON that is serialized to the dashboard and the
-// extension. Only its salted digest is ever written down, and only to make the endpoint idempotent.
+/**
+ * HOW LONG THE CHALLENGED PAGE IS HELD OPEN, and how long the mailbox is read for inside it.
+ *
+ * The window is the runner's continuation TTL, and since the runner started counting it from the
+ * moment the challenge appears rather than from the fork, it is a budget for THIS - reading a code
+ * and coming back - rather than whatever a hundred-action form fill happened to leave over. 180
+ * seconds against a mailbox read that finishes in a few is deliberately generous: the cost of it
+ * being too short is a resend, and a resend costs the applicant another email and invalidates the
+ * code Litos is holding.
+ *
+ * The read itself is bounded so the whole submit still fits inside one 300 second invocation, which
+ * also has to pay for the CAPTCHA probe, the packet build, the fill run and the continuation. 15
+ * passes three seconds apart is about 45 seconds of waiting plus the searches themselves. The
+ * measured gap between a Greenhouse send and its code is seconds, not minutes; this is sized for a
+ * slow mailbox rather than for a slow reader.
+ */
+const SECURITY_CODE_CONTINUATION_TTL_SECONDS = 180;
+const SECURITY_CODE_MAILBOX_ATTEMPTS = 15;
+const SECURITY_CODE_MAILBOX_DELAY_MS = 3_000;
+
+// `securityCode` is the code the applicant pasted in, and it is a PARAMETER rather than a stored
+// field on purpose: it is a live credential to a real employer's form, and the review object it
+// would have to live in is unvalidated JSON that is serialized to the dashboard and the extension.
+// Only its salted digest is ever written down, and only to make the endpoint idempotent.
+//
+// IT IS NO LONGER THE CODE THAT GETS TYPED. Greenhouse issues a new code on every send and a code
+// control only exists on a page that has just been sent, so a code that arrives from outside a run
+// is dead before that run can reach a field to put it in. What it still does is authorize one more
+// attempt and, through its fingerprint, stop the same dead code authorizing a second. The code that
+// is actually entered is read from the mailbox inside the run, on the page that asked for it.
 //
 // Threaded through submit() rather than given its own run, so the finishing path inherits every
 // guard this one already has: the authorization check, the claim, the daily cap, the portal gates,
@@ -2780,7 +2807,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     const result = await runManagedBrowser(
       applicationUrl,
       initialActions,
-      { allowSubmit: true, requestContinuation: true, continuationTtlSeconds: 120 },
+      { allowSubmit: true, requestContinuation: true, continuationTtlSeconds: SECURITY_CODE_CONTINUATION_TTL_SECONDS },
     );
     // Required-field confirmation is a barrier inside the same remote action list, immediately
     // before submit. Require its per-field proof as well: an older runner that ignores or does not
@@ -2789,61 +2816,50 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     let receiptResult = result;
     let verification: ApplicationReviewState['verification'] = { status: 'not_needed' };
     const initialChallenge = readManagedSecurityCodeChallenge(result);
-    /* THE SECOND HALF, WITH A CODE THE APPLICANT READ OUT OF HER OWN MAILBOX.
+    /* THE SECOND HALF HAPPENS ON THE PAGE THE FIRST HALF PRODUCED, and there is now only one way in.
      *
-     * One continuation, one action, and that action types the code into the control the submit above
-     * just rendered and then presses the form's own submit once. It is the identical remote path the
-     * automatic verification below takes; the only difference is where the code came from, and a
-     * code from a person deserves no weaker proof than one from a mailbox scrape, so the same
-     * required-field confirmation is demanded of it.
+     * WHAT WAS MEASURED, on a live Cresta application on 2026-08-09. Greenhouse emailed this
+     * applicant three security codes:
      *
-     * Ordered ABOVE the automatic branch on purpose. A supplied code is an explicit instruction
-     * about this one application, and racing it against a mailbox search would mean two codes
-     * competing for one form. */
+     *     20:24:03  LSlOXjvZ   issued by the first submit
+     *     21:13:07  LH0Yjubx   issued by approve/submit
+     *     21:13:53  yFxeFpSl   issued by the code attempt itself, 46 seconds later
+     *
+     * Each one invalidates its predecessor. And a code control only exists on a page that has just
+     * been sent: on first paint a Greenhouse application form has no code field at all. Put those
+     * two facts together and a code that arrives from outside the run is unusable BY CONSTRUCTION -
+     * the run has to send the form to reach a field to type it into, and that send replaces it. The
+     * old shape did exactly that and then typed the dead code, so every attempt was one generation
+     * stale, and the packet's own attention_reason told her, honestly and uselessly, to "use the
+     * newest email".
+     *
+     * So there is one branch, not two. The run that raises the challenge is the run that answers it:
+     * it holds its page open, reads the code its own submit caused out of the connected mailbox, and
+     * types it into the control that is still standing in front of it. No second send, and therefore
+     * nothing to go stale.
+     *
+     * THE WAIT IS BOUNDED AND SHORT BECAUSE THE READER IS NOT A PERSON. A held browser session is a
+     * bad place to wait for a human to open an email; it is a fine place to wait a minute for a
+     * mailbox fetch. The window it waits inside is the runner's continuation TTL, which now starts
+     * when the challenge appears rather than when the sandbox was forked, so this budget is real
+     * rather than whatever the form fill happened to leave behind.
+     *
+     * A CODE SHE SUPPLIED IS STILL WORTH SOMETHING, just not what it used to be. It is her
+     * instruction to try this application again, and its fingerprint is what stops the same dead
+     * code triggering send after send - each of which costs her another email. It is recorded as
+     * 'superseded' and it is never typed. */
+    const codeAttempts: SecurityCodeAttempt[] = [];
     if (options.securityCode && initialChallenge) {
-      const continuationToken = result.continuationToken;
-      const continuationExpiresAt = result.continuationExpiresAt;
-      const continuationIsLive = typeof continuationToken === 'string'
-        && typeof continuationExpiresAt === 'string'
-        && Date.parse(continuationExpiresAt) > Date.now();
-      const codeActions = securityCodeContinuationActions(initialActions, options.securityCode);
-      if (continuationIsLive && codeActions) {
-        try {
-          receiptResult = await continueManagedBrowser(continuationToken, codeActions);
-          assertManagedRequiredFieldsConfirmed(receiptResult, 'verification');
-        } catch (error) {
-          /* The code went nowhere and the employer is still holding the application behind the same
-           * check, so the packet goes back to waiting rather than to a dead end. The attempt is
-           * recorded either way: the fingerprint is what stops this exact code being replayed. */
-          await writeReview(row, nextReview(claimedReview, {
-            status: 'awaiting_security_code',
-            security_code: withSecurityCodeAttempt(
-              beginSecurityCodeState({
-                challenge: initialChallenge,
-                attemptedAt: new Date().toISOString(),
-                authorized: true,
-                existing: claimedReview.security_code,
-              }),
-              {
-                at: new Date().toISOString(),
-                fingerprint: securityCodeFingerprint(row.id, options.securityCode),
-                outcome: 'not_entered',
-              },
-            ),
-            submission_error: error instanceof Error ? error.message.slice(0, 500) : 'Security-code continuation failed',
-            attention_reason: 'Litos sent this application again and the employer asked for the '
-              + 'security code as before, but the secure browser failed before the code could be '
-              + 'entered. Nothing about the application changed. Use the newest code in your mailbox '
-              + 'and Litos will try again.',
-            attention_categories: ['security_code'],
-            submission_claimed_at: undefined,
-            submission_claim_id: undefined,
-          }));
-          return;
-        }
-      }
+      codeAttempts.push({
+        at: new Date().toISOString(),
+        fingerprint: securityCodeFingerprint(row.id, options.securityCode),
+        outcome: 'superseded',
+      });
     }
-    if (!options.securityCode && initialChallenge && managedResultNeedsEmailVerification(result)) {
+    // The code this run actually typed, and the only kind there is: one read in-session, from the
+    // window opened by this run's own submit. Null until a mailbox read produces one.
+    let enteredCode: string | null = null;
+    if (initialChallenge && managedResultNeedsEmailVerification(result)) {
       const requestedAt = verificationRequestedAt.toISOString();
       const continuationExpiresAt = result.continuationExpiresAt;
       const continuationToken = result.continuationToken;
@@ -2880,20 +2896,53 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           permissionGranted: true,
           expectedRecipient: packet.email,
           applicationId: row.id,
-          attempts: 10,
-          delayMs: 3_000,
+          attempts: SECURITY_CODE_MAILBOX_ATTEMPTS,
+          delayMs: SECURITY_CODE_MAILBOX_DELAY_MS,
         });
         if (prepared.status === 'ready' && Date.parse(continuationExpiresAt) > Date.now()) {
+          /* THE PACKET'S OWN SUBMIT ACTION, CARRYING THE CODE, and it is one action rather than ten.
+           *
+           * securityCodeContinuationActions derives the terminal atomic submit from the list this
+           * run already sent, so the selector, chooser policy, contract version and retry budget are
+           * the ones the runner validates field by field - and the runner types the code into the
+           * eight-box widget itself, at zero extra action cost. The generic ten-action list stays as
+           * the fallback for a packet with no atomic submit to derive from, which is the same
+           * upstream gate portalCanAutoSubmit already applies. */
+          enteredCode = prepared.code;
+          const codeActions = securityCodeContinuationActions(initialActions, prepared.code) ?? prepared.actions;
           try {
             // Exactly one continuation call. An uncertain click is never retried.
-            receiptResult = await continueManagedBrowser(continuationToken, prepared.actions);
+            receiptResult = await continueManagedBrowser(continuationToken, codeActions);
             // A continuation has its own physical submit. Its v2 action must confirm the active
             // verification form and own that click atomically, just like the initial application
             // send. The first receipt cannot authorize a later DOM or a replaced submit node.
             assertManagedRequiredFieldsConfirmed(receiptResult, 'verification');
           } catch (error) {
+            /* AN UNCERTAIN CLICK IS NEVER RETRIED, and that outranks landing somewhere friendlier.
+             *
+             * A throw here can come from either side of the physical submit: the call itself can
+             * fail before anything is clicked, and the confirmation assertion above runs after the
+             * continuation has already returned, which means after a click may have landed. Nothing
+             * available here separates those two, so the packet must not go back to a state that
+             * invites another send. Some boards cap re-applications outright - Deepgram's form says
+             * candidates may not apply more than twice in 60 days - and a duplicate filed because
+             * Litos could not read its own outcome is worse than a packet that asks for a person.
+             *
+             * The attempt is still recorded, because the fingerprint is what stops the same code
+             * being spent again, and 'error' is the honest outcome for a code whose fate is unknown.
+             * needs_attention is not a dead end: it carries the portal and the receipt screenshot,
+             * which is exactly what someone finishing this by hand needs. */
+            const failedAt = new Date().toISOString();
             await writeReview(row, nextReview(claimedReview, {
               status: 'needs_attention',
+              ...(claimedReview.security_code
+                ? {
+                  security_code: withSecurityCodeAttempts(claimedReview.security_code, [
+                    ...codeAttempts,
+                    { at: failedAt, fingerprint: securityCodeFingerprint(row.id, prepared.code), outcome: 'error' },
+                  ]),
+                }
+                : {}),
               verification: { status: 'verification_pending', requested_at: requestedAt, retry_count: 1 },
               attention_reason: 'Litos entered the employer verification step, but could not prove the final result. Check the employer portal before trying anything again.',
               submission_error: error instanceof Error ? error.message.slice(0, 500) : 'Managed verification continuation failed',
@@ -2906,7 +2955,6 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
               provider: prepared.provider,
               requested_at: requestedAt,
               retry_count: 1,
-              completed_at: new Date().toISOString(),
               ...continuationEvidence,
               continuation_resumed: true,
             };
@@ -2950,19 +2998,21 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         authorized: true,
         existing: claimedReview.security_code,
       });
-      const attempted = options.securityCode
-        ? withSecurityCodeAttempt(securityCode, {
+      const attempted = withSecurityCodeAttempts(securityCode, [
+        ...codeAttempts,
+        // The runner says what happened to the code IT typed, and it says it by re-reading the
+        // control after the resubmit. 'rejected' when it typed the code and the challenge was still
+        // there; the other two mean Litos could not get the code into the page at all, which is a
+        // defect of ours and must never be reported to her as a wrong code. Recorded only when a
+        // code was actually typed, which now means only when this run read one in-session.
+        ...(enteredCode ? [{
           at: capturedAt,
-          fingerprint: securityCodeFingerprint(row.id, options.securityCode),
-          // The runner says what happened to the code it was given, and it says it by re-reading the
-          // control after the resubmit. 'rejected' when it typed the code and the challenge was
-          // still there; the other two mean Litos could not get the code into the page at all, which
-          // is a defect of ours and must never be reported to her as a wrong code.
-          outcome: receiptResult.securityCodeAttempt?.outcome === 'rejected' ? 'rejected'
+          fingerprint: securityCodeFingerprint(row.id, enteredCode),
+          outcome: (receiptResult.securityCodeAttempt?.outcome === 'rejected' ? 'rejected'
             : receiptResult.securityCodeAttempt?.outcome === 'no_control' ? 'no_control'
-              : 'not_entered',
-        })
-        : securityCode;
+              : 'not_entered') as SecurityCodeAttempt['outcome'],
+        }] : []),
+      ]);
       await writeReview(row, nextReview(claimedReview, {
         status: 'awaiting_security_code',
         security_code: attempted,
@@ -2982,6 +3032,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         sentTo: attempted.sent_to,
         digits: attempted.digits,
         codeSupplied: Boolean(options.securityCode),
+        codeReadInSession: Boolean(enteredCode),
         codeOutcome: receiptResult.securityCodeAttempt?.outcome ?? null,
       }, 'Employer is holding this application behind an emailed security code');
       return;
@@ -3054,7 +3105,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
      *
      * Anything short of both is 'unverified', which is a state with a next step, rather than
      * 'submitted', which is a claim. */
-    if (options.securityCode) {
+    if (enteredCode) {
       const codeOutcome = receiptResult.securityCodeAttempt?.outcome ?? null;
       if (codeOutcome !== 'accepted' || verdict.kind !== 'confirmed') {
         fastify.log.warn(
@@ -3069,14 +3120,17 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           }),
           ...(claimedReview.security_code
             ? {
-              security_code: withSecurityCodeAttempt(claimedReview.security_code, {
-                at: capturedAt,
-                fingerprint: securityCodeFingerprint(row.id, options.securityCode),
-                outcome: codeOutcome === 'rejected' ? 'rejected'
-                  : codeOutcome === 'no_control' ? 'no_control'
-                    : codeOutcome === 'accepted' ? 'error'
-                      : 'not_entered',
-              }),
+              security_code: withSecurityCodeAttempts(claimedReview.security_code, [
+                ...codeAttempts,
+                {
+                  at: capturedAt,
+                  fingerprint: securityCodeFingerprint(row.id, enteredCode),
+                  outcome: codeOutcome === 'rejected' ? 'rejected'
+                    : codeOutcome === 'no_control' ? 'no_control'
+                      : codeOutcome === 'accepted' ? 'error'
+                        : 'not_entered',
+                },
+              ]),
             }
             : {}),
         }));
@@ -3100,15 +3154,18 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       submission_error: undefined,
       verification,
       // Present only when a code finished this one, and it is the fact that makes the receipt
-      // legible: this application was sent, refused, and completed with a code the applicant read
-      // out of her own mailbox.
-      ...(options.securityCode && claimedReview.security_code
+      // legible: this application was sent, refused, and completed with the code the same run read
+      // out of the mailbox while holding the challenged page open.
+      ...(claimedReview.security_code && (enteredCode || codeAttempts.length > 0)
         ? {
-          security_code: withSecurityCodeAttempt(claimedReview.security_code, {
-            at: capturedAt,
-            fingerprint: securityCodeFingerprint(row.id, options.securityCode),
-            outcome: 'accepted',
-          }),
+          security_code: withSecurityCodeAttempts(claimedReview.security_code, [
+            ...codeAttempts,
+            ...(enteredCode ? [{
+              at: capturedAt,
+              fingerprint: securityCodeFingerprint(row.id, enteredCode),
+              outcome: 'accepted' as const,
+            }] : []),
+          ]),
         }
         : {}),
       receipt: {
@@ -3408,21 +3465,28 @@ export type SecurityCodeSubmissionOutcome =
  *
  * It moves the packet back onto the ordinary submit path with a per-application authorization - the
  * applicant supplying a code IS the approval, and it is the same shape of authorization the approve
- * route writes - and then runs submit() with the code in hand. Everything downstream is the plumbing
- * that already exists.
+ * route writes - and then runs submit(). Everything downstream is the plumbing that already exists.
  *
- * WHAT THIS CANNOT PROMISE, and it is written here rather than discovered later. The managed runner
- * is stateless and one-shot: a finishing run loads the form fresh, fills it, and submits, and only
- * then does the code control exist to type into. That first submit is what re-presents the
- * challenge, and whether Greenhouse re-issues a code at that point or keeps the outstanding one
- * valid decides whether the code she supplied is still the right one. Both are plausible and the
- * question has not been answered against a live posting. So every attempt is recorded with its
- * outcome, 'rejected' is reported as rejected rather than dressed up, and the sentence she gets then
- * tells her to use the newest email. The first real use of this endpoint is the measurement.
+ * THE QUESTION THIS USED TO LEAVE OPEN IS ANSWERED, AND THE ANSWER BREAKS THE OLD DESIGN. The note
+ * here previously said that whether Greenhouse re-issues a code on the finishing run's own submit
+ * "has not been answered against a live posting", and that the first real use would be the
+ * measurement. It was measured, on a live Cresta application on 2026-08-09: three codes to one
+ * mailbox at 20:24:03, 21:13:07 and 21:13:53, each send issuing a new one and invalidating the
+ * last. Since a code control only exists on a page that has just been sent, and this endpoint must
+ * send to reach one, the code she pasted is dead before it can be typed - every time, not
+ * sometimes. No amount of care in the typing can win that; the loop is structural.
  *
- * A stateful browser session - Browserbase contexts, which this repo already has plumbing for -
- * would remove the question entirely by keeping the pending submit alive between the two halves.
- * That is the fix if the measurement comes back badly, and it is a bigger change than this one.
+ * SO THE CODE SHE SUPPLIES IS NOT THE CODE THAT IS TYPED. It authorizes one more attempt, and its
+ * fingerprint stops the same dead code authorizing a second - which matters, because every attempt
+ * sends the form again and every send emails her another code. What gets typed is read from her
+ * connected mailbox inside the run, on the page that asked for it, while that page is still open.
+ * The attempt is recorded as 'superseded' rather than as a wrong code, because it was never wrong.
+ *
+ * WHICH MEANS THE HAPPY PATH DOES NOT COME THROUGH HERE AT ALL. When automatic verification is on
+ * and the mailbox is connected, the run that raises the challenge finishes it in the same breath and
+ * this endpoint is never reached. It exists for the case where that read failed, and the honest
+ * thing it can offer is another attempt with a fresh in-session read - not a promise to use the
+ * string she typed.
  */
 export async function finishSecurityCodeSubmission(
   applicationId: string,

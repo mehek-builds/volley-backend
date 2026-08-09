@@ -23,23 +23,25 @@ test('managed verification resumes once by token, never by URL, then verifies th
   const end = runner.indexOf("if (!claimedReview.browser_session_id)", firstSubmit);
   const managed = runner.slice(firstSubmit, end);
   assert.match(managed, /requestContinuation: true/);
-  assert.match(managed, /continuationTtlSeconds: 120/);
+  assert.match(managed, /continuationTtlSeconds: SECURITY_CODE_CONTINUATION_TTL_SECONDS/);
   assert.match(managed, /allowSubmit: true/);
   assert.match(managed, /readManagedSecurityCodeChallenge\(receiptResult\)/);
   assert.doesNotMatch(managed, /continuation_token:/);
   assert.doesNotMatch(managed, /continuation_expires_at:/);
   assert.match(managed, /expectedRecipient: packet\.email/);
-  /* TWO RESUME SITES, AND AT MOST ONE OF THEM CAN RUN. There is the mailbox-scraped code, below,
-     and the code the applicant supplied herself, above it. They are guarded by opposite tests on
-     the same value, so no run can reach both, and a run still resumes at most once. The count is
-     asserted with the guards rather than left at one, because "one call site" stopped being the
-     thing that made this safe the moment a second, mutually exclusive one was correct to have. */
-  assert.equal((managed.match(/continueManagedBrowser\(/g) ?? []).length, 2);
-  assert.match(managed, /if \(options\.securityCode && initialChallenge\) \{/);
-  assert.match(managed, /if \(!options\.securityCode && initialChallenge && managedResultNeedsEmailVerification\(result\)\) \{/);
+  /* ONE RESUME SITE. There used to be two, mutually exclusive: one for a code scraped from the
+     mailbox and one for a code the applicant supplied. The second is gone, because a code that
+     arrives from outside a run cannot be typed by that run - Greenhouse issues a new code on every
+     send and Litos has to send the form to reach a code field at all, measured as three codes to
+     one mailbox on a live Cresta application on 2026-08-09. Back to one call site, and the count is
+     the assertion again: a second one would mean a second submit had crept back in. */
+  assert.equal((managed.match(/continueManagedBrowser\(/g) ?? []).length, 1);
+  // The supplied code is fingerprinted as superseded and never handed to an action list.
+  assert.match(managed, /outcome: 'superseded'/);
+  assert.doesNotMatch(managed, /securityCodeContinuationActions\([^)]*options\.securityCode/);
+  assert.match(managed, /if \(initialChallenge && managedResultNeedsEmailVerification\(result\)\) \{/);
   assert.doesNotMatch(managed, /runManagedBrowser\(result\.url/);
   assert.match(managed, /receiptResult = await continueManagedBrowser\(continuationToken, codeActions\)/);
-  assert.match(managed, /receiptResult = await continueManagedBrowser\(continuationToken, prepared\.actions\)/);
   assert.match(managed, /readManagedReceipt\(receiptResult\)/);
   const terminalVerification = managed.slice(managed.indexOf("verification = {\n        status: 'completed'"));
   assert.doesNotMatch(terminalVerification, /continuation_token:/);
@@ -47,7 +49,7 @@ test('managed verification resumes once by token, never by URL, then verifies th
 
 test('uncertain continuation outcome is handed off without a retry or URL reopen', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  const call = runner.indexOf('receiptResult = await continueManagedBrowser(continuationToken, prepared.actions)');
+  const call = runner.indexOf('receiptResult = await continueManagedBrowser(continuationToken, codeActions)');
   const receipt = runner.indexOf('const receipt = readManagedReceipt', call);
   const continuation = runner.slice(call, receipt);
   assert.match(continuation, /catch \(error\)/);
