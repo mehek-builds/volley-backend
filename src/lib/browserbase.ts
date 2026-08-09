@@ -121,13 +121,13 @@ export type ManagedBrowserResult = {
     requiredControls: Array<{
       selector: string;
       label: string | null;
-      fieldType: 'text' | 'date' | 'select' | 'react-select' | 'radio' | 'checkbox' | 'custom';
+      fieldType: 'text' | 'date' | 'select' | 'react-select' | 'radio' | 'checkbox' | 'file' | 'custom';
       matchCount: 1;
     }>;
     attempts: Array<{
       selector: string;
       label: string | null;
-      fieldType: 'text' | 'date' | 'select' | 'react-select' | 'radio' | 'checkbox' | 'custom';
+      fieldType: 'text' | 'date' | 'select' | 'react-select' | 'radio' | 'checkbox' | 'file' | 'custom';
       outcome: 'already_committed' | 'confirmed' | 'failed';
       attemptCount: 1 | 2;
       reason?: string;
@@ -174,10 +174,7 @@ function stratusAction(action: ManagedBrowserAction): ManagedBrowserAction {
     if (action.maxRetries !== 0 && action.maxRetries !== 1) {
       throw new Error('Managed required-field confirmation maxRetries must be 0 or 1');
     }
-    return {
-      ...action,
-      selector: action.selector?.trim() || 'form',
-    };
+    return action;
   }
   return action;
 }

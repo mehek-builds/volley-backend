@@ -1753,6 +1753,7 @@ const ASHBY_QUESTION_TEXT_SELECTOR_LIMIT = 9;
  * gets an error instead of a result. Keep this number equal to that one.
  */
 export const MANAGED_ACTION_LIMIT = Number(process.env.LITOS_MEASURE_ACTION_LIMIT ?? 120);
+export const MANAGED_FINAL_SUBMIT_SELECTOR = 'button[type="submit"], input[type="submit"]';
 const CONFIRM_AFTER_FILL_FIELDS = new Set(['school', 'degree']);
 
 function pushGreenhouseManagedPreflightActions(actions: ManagedBrowserAction[]) {
@@ -4317,14 +4318,18 @@ export function buildManagedPortalActions(
   if (canAppendSubmit) {
     actions.push({
       type: 'confirmRequired',
-      selector: 'form',
+      // The runner resolves this with the same final-control chooser as the following click, then
+      // scans only that control's closest form. A page may put newsletter, search or login forms
+      // before the application. Scanning `form` or `form:first` could confirm the unrelated one and
+      // submit a stale application form unchecked.
+      selector: MANAGED_FINAL_SUBMIT_SELECTOR,
       label: 'required_field_confirmation',
       optional: false,
       timeout: MANAGED_FILL_TIMEOUT_MS,
       maxRetries: 1,
       contractVersion: 1,
     });
-    actions.push({ type: 'click', selector: 'button[type="submit"], input[type="submit"]' });
+    actions.push({ type: 'click', selector: MANAGED_FINAL_SUBMIT_SELECTOR });
   }
   return actions;
 }
@@ -6376,7 +6381,7 @@ export class ManagedRequiredFieldConfirmationError extends NoSubmitControlError 
 }
 
 const REQUIRED_CONFIRMATION_FIELD_TYPES = new Set([
-  'text', 'date', 'select', 'react-select', 'radio', 'checkbox', 'custom',
+  'text', 'date', 'select', 'react-select', 'radio', 'checkbox', 'file', 'custom',
 ]);
 const REQUIRED_CONFIRMATION_OUTCOMES = new Set(['already_committed', 'confirmed', 'failed']);
 
@@ -6416,7 +6421,7 @@ export function isDurableRequiredControlSelector(value: unknown): value is strin
 type RequiredControlProof = {
   selector: string;
   label: string | null;
-  fieldType: 'text' | 'date' | 'select' | 'react-select' | 'radio' | 'checkbox' | 'custom';
+  fieldType: 'text' | 'date' | 'select' | 'react-select' | 'radio' | 'checkbox' | 'file' | 'custom';
   matchCount?: 1;
 };
 

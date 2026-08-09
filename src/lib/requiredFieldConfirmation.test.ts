@@ -7,6 +7,7 @@ import {
   AUTONOMOUS_PORTAL_FAMILIES,
   buildManagedPortalActions,
   MANAGED_ACTION_LIMIT,
+  MANAGED_FINAL_SUBMIT_SELECTOR,
   ManagedActionBudgetError,
   ManagedRequiredFieldConfirmationError,
   type SubmissionPacket,
@@ -47,7 +48,7 @@ test('every autonomous managed submit reserves a mandatory confirmation barrier 
     assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `${family} exceeded the managed action limit`);
     assert.deepEqual(actions.at(-2), {
       type: 'confirmRequired',
-      selector: 'form',
+      selector: MANAGED_FINAL_SUBMIT_SELECTOR,
       label: 'required_field_confirmation',
       optional: false,
       timeout: 10_000,
@@ -58,14 +59,40 @@ test('every autonomous managed submit reserves a mandatory confirmation barrier 
   }
 });
 
+test('confirmation is bound to the exact final-submit chooser instead of the first form on the page', () => {
+  const actions = buildManagedPortalActions('lever', packet, true);
+  const confirmation = actions.at(-2);
+  const submit = actions.at(-1);
+  assert.equal(confirmation?.type, 'confirmRequired');
+  assert.equal(confirmation?.selector, MANAGED_FINAL_SUBMIT_SELECTOR);
+  assert.equal(submit?.type, 'click');
+  assert.equal(submit?.selector, confirmation?.selector);
+  assert.notEqual(confirmation?.selector, 'form');
+
+  // Fixture shape: form[0] is an unrelated newsletter with no required controls. The application
+  // form selected through its final submit still owns this stale required error and must block.
+  assert.throws(() => assertManagedRequiredFieldsConfirmed(proof([{
+    selector: 'input[name="application_email"]',
+    label: 'Application email',
+    fieldType: 'text',
+    outcome: 'failed',
+    attemptCount: 2,
+    reason: 'This requires an answer',
+  }], {
+    status: 'blocked',
+    retries: 1,
+    unresolved: ['Application email'],
+  })));
+});
+
 test('prepare runs do not commit required fields or expose a submit action', () => {
   const actions = buildManagedPortalActions('greenhouse', packet, false);
   assert.equal(actions.some((action) => action.type === 'confirmRequired'), false);
   assert.equal(actions.some((action) => action.type === 'click' && action.selector?.includes('button[type="submit"]')), false);
 });
 
-test('confirmation proof covers text, date, native select, React select, radio, checkbox and custom controls', () => {
-  const fieldTypes = ['text', 'date', 'select', 'react-select', 'radio', 'checkbox', 'custom'] as const;
+test('confirmation proof covers text, date, native select, React select, radio, checkbox, file and custom controls', () => {
+  const fieldTypes = ['text', 'date', 'select', 'react-select', 'radio', 'checkbox', 'file', 'custom'] as const;
   const attempts = fieldTypes.map((fieldType, index) => {
     const outcome: 'already_committed' | 'confirmed' = index === 0 ? 'already_committed' : 'confirmed';
     return {
@@ -77,6 +104,16 @@ test('confirmation proof covers text, date, native select, React select, radio, 
     };
   });
   assert.doesNotThrow(() => assertManagedRequiredFieldsConfirmed(proof(attempts, { retries: 1 })));
+});
+
+test('email, phone, number and textarea normalize to text while a required resume remains file', () => {
+  assert.doesNotThrow(() => assertManagedRequiredFieldsConfirmed(proof([
+    { selector: 'input[name="email"]', label: 'Email', fieldType: 'text', outcome: 'confirmed' },
+    { selector: 'input[name="phone"]', label: 'Phone', fieldType: 'text', outcome: 'confirmed' },
+    { selector: 'input[name="years_experience"]', label: 'Years experience', fieldType: 'text', outcome: 'confirmed' },
+    { selector: 'textarea[name="statement"]', label: 'Statement', fieldType: 'text', outcome: 'confirmed' },
+    { selector: 'input[name="resume"]', label: 'Resume', fieldType: 'file', outcome: 'already_committed' },
+  ])));
 });
 
 test('Lever and Workable keep every fixed core field or block before confirmation and submit', () => {
@@ -237,7 +274,7 @@ test('managed wire contract sends one bounded confirmation action with its durab
   try {
     await runManagedBrowser('https://portal.example/apply', [{
       type: 'confirmRequired',
-      selector: 'form[data-application-form]',
+      selector: MANAGED_FINAL_SUBMIT_SELECTOR,
       label: 'required_field_confirmation',
       optional: false,
       maxRetries: 1,
@@ -245,7 +282,7 @@ test('managed wire contract sends one bounded confirmation action with its durab
     }], { allowSubmit: true });
     assert.deepEqual(body.actions, [{
       type: 'confirmRequired',
-      selector: 'form[data-application-form]',
+      selector: MANAGED_FINAL_SUBMIT_SELECTOR,
       label: 'required_field_confirmation',
       optional: false,
       maxRetries: 1,
@@ -274,12 +311,12 @@ test('managed wire contract rejects missing versions and unbounded retry counts 
   try {
     await assert.rejects(() => runManagedBrowser('https://portal.example/apply', [{
       type: 'confirmRequired',
-      selector: 'form[data-application-form]',
+      selector: MANAGED_FINAL_SUBMIT_SELECTOR,
       maxRetries: 1,
     }]), /contract version/);
     await assert.rejects(() => runManagedBrowser('https://portal.example/apply', [{
       type: 'confirmRequired',
-      selector: 'form[data-application-form]',
+      selector: MANAGED_FINAL_SUBMIT_SELECTOR,
       contractVersion: 1,
       maxRetries: 2,
     }]), /maxRetries/);
