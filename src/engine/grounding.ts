@@ -112,6 +112,160 @@ export function ungroundedNumbers(generated: string, sourceSignatures: Set<strin
   return out;
 }
 
+/* A QUANTIFIED RESULT THAT TWO DIFFERENT ORGS BOTH CLAIM BELONGS TO NEITHER.
+ *
+ * The Truveta packet (fbc1d407) said of Traeco "cut agent response latency from 2.3s to 0.1s" and,
+ * three sentences later, said of Tonee "authoring a specification that reduced latency from 2.3s to
+ * 0.1s". Identical numbers, two unrelated projects, so at most one can be true and a reader who
+ * notices discounts the whole letter.
+ *
+ * The generator did not invent this. Her experience bank holds the SAME figure under both orgs, so
+ * every number in that letter passed ungroundedNumbers honestly. The bank is where the defect lives.
+ * These helpers are the deterministic containment: while the source disagrees with itself about who
+ * a figure belongs to, no drafter may attribute it to anyone.
+ *
+ * WHY TWO SHARED NUMBERS AND NOT ONE. Numbers repeat innocently across a real career: her bank has
+ * "$14K from 7 sponsors" at Spark SC and a "14-point NPS increase" at Cinematica Labs, "24 pods" at
+ * Cinematica and "24 participants" at Einstein Bros, "50+ interviews" at both SoFi and Traeco. One
+ * number in common is a coincidence and blocking it would strip true claims out of good letters. Two
+ * or more numbers in common between the same two orgs is a copied claim: measured against her real
+ * bank on 2026-08-09, the >=2 threshold flags exactly the Tonee/Traeco pair and nothing else.
+ *
+ * The comparison runs on signatures, so "40K" under one org still collides with "40,000" under
+ * another, but uniqueness is counted on the raw token so a decimal below 1 (which always carries
+ * both its own form and a "d:" proportion signature) cannot reach the threshold by itself.
+ */
+export type AttributedMetrics = { org: string; text: string };
+
+function normalizedOrg(org: string): string {
+  return org.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+// raw metric token -> its signatures, per normalized org.
+function metricsByOrg(sources: AttributedMetrics[]): Map<string, Map<string, string[]>> {
+  const byOrg = new Map<string, Map<string, string[]>>();
+  for (const source of sources) {
+    const key = normalizedOrg(source.org ?? '');
+    if (!key) continue;
+    const tokens = byOrg.get(key) ?? new Map<string, string[]>();
+    for (const raw of metricTokens(source.text ?? '')) {
+      const sigs = signaturesOf(raw);
+      if (sigs.length > 0) tokens.set(sigs[0], sigs);
+    }
+    byOrg.set(key, tokens);
+  }
+  return byOrg;
+}
+
+/**
+ * Figures that more than one org in the source claims, so none of them may be attributed.
+ * `labels` is for prompt and operator text; `signatures` is what a generated draft is checked against.
+ */
+export function contestedMetrics(sources: AttributedMetrics[]): { labels: string[]; signatures: Set<string> } {
+  const byOrg = metricsByOrg(sources);
+  const orgs = [...byOrg.keys()];
+  const labels = new Set<string>();
+  const signatures = new Set<string>();
+  for (let i = 0; i < orgs.length; i += 1) {
+    for (let j = i + 1; j < orgs.length; j += 1) {
+      const left = byOrg.get(orgs[i])!;
+      const right = byOrg.get(orgs[j])!;
+      const shared: Array<[string, string[]]> = [];
+      for (const [token, sigs] of left) {
+        const collides = [...right.values()].some((other) => sigs.some((sig) => other.includes(sig)));
+        if (collides) shared.push([token, sigs]);
+      }
+      if (shared.length < 2) continue;
+      for (const [token, sigs] of shared) {
+        labels.add(token);
+        for (const sig of sigs) signatures.add(sig);
+      }
+    }
+  }
+  return { labels: [...labels].sort(), signatures };
+}
+
+/** The metric numbers in `generated` that match a contested signature. Empty = nothing contested is claimed. */
+export function contestedMetricsUsed(generated: string, signatures: Set<string>): string[] {
+  if (signatures.size === 0) return [];
+  const out = new Set<string>();
+  for (const raw of metricTokens(generated)) {
+    if (signaturesOf(raw).some((sig) => signatures.has(sig))) out.add(raw.trim());
+  }
+  return [...out];
+}
+
+/* A PROMISE IS NOT A FACT, AND PROSE IS NOT THE PLACE TO MAKE ONE.
+ *
+ * The same Truveta packet wrote "I am based in Los Angeles but able to work from the Greater Seattle
+ * area for this internship". She lives in Dubai and is enrolled in Los Angeles, and she never said
+ * either half of that sentence. Truveta's form asks whether the applicant will be in the Seattle
+ * area and can come into the Bellevue office; the letter answered that question in prose, as a
+ * promise, where nothing could check it.
+ *
+ * This is the same defect resolveKnownAnswer shed when `case 'onsite_commitment': return { value:
+ * 'Yes' }` was deleted, one layer further out. The rule that replaced it is the rule here: Litos may
+ * REPORT a fact on file and may never MAKE a commitment on her behalf. Where she lives, where she
+ * will sit, when she is free, how long she will stay, and what she will not do elsewhere are all
+ * commitments.
+ *
+ * SO THE COVER LETTER NEVER MAKES ONE, whatever the posting asks. There is no "backed by a stored
+ * fact" branch here on purpose: the columns that hold those declarations (address_city,
+ * onsite_commitment, onsite_locations, relocation_willingness) are not in the drafter's candidate
+ * source at all, and even if they were, a structured question with a reviewable answer is the right
+ * surface for them and questionDiscovery.ts already owns it. When a posting genuinely needs the
+ * statement, leaving it out surfaces the question to a human, which is the outcome the resolver
+ * already produces. Silence is safer than an invented promise.
+ *
+ * Deliberately narrow. Every pattern needs a first-person forward-looking frame or a word that has
+ * no other business in a cover letter, so a past-tense achievement ("conducted 47 user interviews in
+ * person") and a stored fact ("an expected graduation date of May 2028") both pass untouched.
+ * Measured over all 136 stored letters on 2026-08-09: 8 flagged, every one a genuine promise.
+ */
+const COMMITMENT_CLAIM_RES: RegExp[] = [
+  // Where she lives. "I am based in Los Angeles", "I'm currently located in ...".
+  /\bi(?:'m| am)\s+(?:currently\s+)?(?:based|located|living|residing|situated)\b/i,
+  // Moving house, in any form.
+  /\brelocat(?:e|es|ed|ing|ion)\b/i,
+  // Willingness to be somewhere or to begin. "able to work from the Greater Seattle area".
+  /\b(?:able|available|willing|happy|prepared|ready|open)\s+to\s+(?:work|be|commute|travel|relocate|move|come|report|attend|start|begin|join|split|spend)\b/i,
+  // Being in an office. "the flexibility to work in-office in the Greater Seattle area".
+  /\b(?:work|works|working|be|being|sit|sitting)\s+(?:on[\s-]?site|onsite|in[\s-]?person|in[\s-]?office|in the office|from the office)\b/i,
+  /\bcommut(?:e|es|ing)\b/i,
+  /* When she is free and for how long. "I'm available for a 12-14 week internship in Austin".
+   * "available for" needs a TERM after it, not just an article: "I made the results available for
+   * the whole team" is a past-tense achievement and reads identically up to the object. */
+  /\bavailable\s+(?:to\s+start\b|from\s+\w+\s+\d|beginning\b|for\s+(?:an?\s+|the\s+|either\s+|both\s+)?(?:\d|(?:fall|spring|summer|winter|full[\s-]?time|part[\s-]?time|twelve|eleven|ten|nine|eight|seven|six|\w+[\s-]week|week|month|internship|term|semester|quarter|co-?op)\b))/i,
+  // Hours or duration promised. "can commit to full-time hours in office in Austin".
+  /\b(?:can|could|will|would|able to|happy to)\s+commit\b|\bi\s+commit\s+to\b/i,
+  // A start date.
+  /\bstart\s+date\b|\bi\s+(?:can|could|will|would)\s+start\b/i,
+  // Exclusivity and non-competes.
+  /\bexclusiv(?:e|ely|ity)\b|\bnon[\s-]?compete\b|\bno other (?:offers|applications|companies)\b/i,
+];
+
+/**
+ * Sentences in `text` that promise something on the candidate's behalf rather than report a fact.
+ * Empty result = the draft makes no commitment. Returned as whole sentences so the operator (and the
+ * regeneration feedback) can see exactly which line has to go.
+ */
+export function unsupportedCommitments(text: string): string[] {
+  const sentences = (text ?? '')
+    /* The next character has to look like a sentence opening, or "I'm a U.S. citizen and available
+     * for a twelve-week internship this fall" breaks after "U.S." and the operator is handed a
+     * fragment starting mid-clause. A lowercase word after a period is an abbreviation, not a new
+     * sentence. Two real sentences that fail to split are harmless here: the pair is returned
+     * together and the promise is still shown. */
+    .split(/(?<=[.!?])\s+(?=["'([]?[A-Z0-9])/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+  const found: string[] = [];
+  for (const sentence of sentences) {
+    if (COMMITMENT_CLAIM_RES.some((re) => re.test(sentence))) found.push(sentence);
+  }
+  return found;
+}
+
 // Replace em/en dashes with a comma (or fold into adjacent sentence punctuation) so drafted text
 // never ships a dash. Global hard rule = zero em dashes, and essay warnings aren't surfaced by the
 // extension, so the answer path strips rather than only warns.

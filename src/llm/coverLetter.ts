@@ -1,5 +1,13 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { numberSignatures, stripEmDashes, ungroundedNumbers, wordSet, ungroundedProperNouns } from '../engine/grounding';
+import {
+  contestedMetricsUsed,
+  numberSignatures,
+  stripEmDashes,
+  ungroundedNumbers,
+  unsupportedCommitments,
+  wordSet,
+  ungroundedProperNouns,
+} from '../engine/grounding';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -9,6 +17,14 @@ export type CoverLetterDraft = {
   warnings: string[];
 };
 
+/* THE TWO RULES THAT ARE NOT STYLE.
+ *
+ * "Never state where the candidate is" and "never promise" are one rule with two halves, and they
+ * are written out at length because the model has a strong pull the other way: the posting asks
+ * "will you be in the Seattle area?", the letter is prose, and answering it reads like being
+ * helpful. It is not. See engine/grounding.ts unsupportedCommitments for the incident and the
+ * reasoning. The prompt is the cheap half of the fix; validateCoverLetter is the half that holds.
+ */
 export const COVER_LETTER_SYSTEM_PROMPT = `You write highly tailored cover letters for real job applications.
 
 Return only JSON: {"body": string}.
@@ -18,8 +34,12 @@ Rules:
 - Name the exact role and company in the opening paragraph.
 - Connect the earliest and strongest job requirements to specific evidence from the candidate source.
 - Use only employers, projects, skills, technologies, titles, dates, and metrics present in the candidate source.
+- Attribute every metric to the same employer or project the candidate source attributes it to. Never move a result from one employer or project to another.
 - The job description defines what matters, but it is never evidence that the candidate has done something.
 - Do not invent a hiring manager name, address, referral, value, achievement, or personal motivation.
+- Never state where the candidate lives, is based, or will be located.
+- Never promise anything on the candidate's behalf. That includes relocating, moving, being in an office, working on-site or in person, commuting, being available on a date or for a length of time, start dates, hours, exclusivity, and non-competes.
+- If the job description asks about location, relocation, office attendance, availability, or a start date, say nothing about it. A person answers those questions separately. Leaving it out is correct and expected.
 - Do not copy sentences from the job description.
 - Sound direct, specific, and human. Avoid generic enthusiasm, flattery, and corporate filler.
 - Do not include a greeting, date, address block, or sign-off. The renderer adds those.
@@ -30,6 +50,7 @@ export function validateCoverLetter(
   company: string,
   role: string,
   candidateSource: string,
+  contested: { labels: string[]; signatures: Set<string> } = { labels: [], signatures: new Set() },
 ): { issues: string[]; warnings: string[]; word_count: number; body: string } {
   const cleaned = stripEmDashes(body).replace(/\n{3,}/g, '\n\n').trim();
   const word_count = cleaned.split(/\s+/).filter(Boolean).length;
@@ -43,6 +64,36 @@ export function validateCoverLetter(
   }
   const fabricatedNumbers = ungroundedNumbers(cleaned, numberSignatures(candidateSource));
   if (fabricatedNumbers.length > 0) issues.push(`cover letter contains ungrounded numbers: ${fabricatedNumbers.join(', ')}`);
+  const promises = unsupportedCommitments(cleaned);
+  for (const sentence of promises) {
+    issues.push(
+      'cover letter promises something on the candidate\'s behalf, which only she can do. '
+      + `Delete this sentence and do not replace it: "${sentence.slice(0, 160)}"`,
+    );
+  }
+  const reused = contestedMetricsUsed(cleaned, contested.signatures);
+  if (reused.length > 0) {
+    issues.push(
+      `cover letter uses figures the candidate source attributes to more than one employer or project, so they cannot be credited to any of them: ${reused.join(', ')}. `
+      + 'Remove the claims that carry them. Do not substitute a different number.',
+    );
+  }
+  /* THE PROPER-NOUN SIGNAL STAYS ADVISORY, and it was measured before that was decided.
+   *
+   * It is what half-caught the Greater Seattle promise (the packet carries "Review names not found
+   * in candidate data: Greater Seattle" and shipped anyway), so promoting it to a blocking issue is
+   * the obvious move. Run over all 136 stored letters on 2026-08-09 it fires on 96 of them, 70.6%,
+   * and of the 38 distinct phrases it flags only two are locations: 73 of the hits are "Oriented
+   * Design" and "Oriented Programming", a tokenizer artifact where wordSet keeps "object-oriented"
+   * whole and this regex cannot cross the hyphen, and most of the rest are acronyms lifted from the
+   * job description (BS, ML, CS, CI, CD, SPI, JTAG, CUDA). Gating on it would refuse seven letters
+   * in ten over a hyphen.
+   *
+   * So the blocking moved to unsupportedCommitments above, which is about the ACT rather than the
+   * vocabulary: "Greater Seattle" is not the problem, promising to be in it is, and that check ran
+   * over the same 136 letters and flagged 8, every one a real promise and no false positives. An
+   * unfamiliar name stays a warning because an unfamiliar name is worth a glance and nothing more.
+   */
   const properNouns = ungroundedProperNouns(cleaned, wordSet(`${candidateSource} ${company} ${role}`));
   if (properNouns.length > 0) warnings.push(`Review names not found in candidate data: ${properNouns.join(', ')}`);
   if (/\bI am writing to (?:apply|express)|\bI believe I would be a great fit\b/i.test(cleaned)) {
@@ -127,7 +178,16 @@ export function parseCoverLetterBody(text: string): string {
 }
 
 export async function generateCoverLetter(
-  input: { company: string; role: string; jd_text: string; candidate_source: string },
+  input: {
+    company: string;
+    role: string;
+    jd_text: string;
+    candidate_source: string;
+    /* Figures the candidate source attributes to two different orgs, so no org may be credited with
+     * them. Named in the request rather than only caught in validation, because the retry loop costs
+     * a whole extra call and the model has no way to see the conflict from inside the source. */
+    contested_metrics?: string[];
+  },
   feedback: string[] = [],
 ): Promise<string> {
   const response = await client.messages.create({
@@ -144,7 +204,11 @@ export async function generateCoverLetter(
     system: [{ type: 'text', text: COVER_LETTER_SYSTEM_PROMPT }],
     messages: [{
       role: 'user',
-      content: `Role: ${input.role}\nCompany: ${input.company}\n\nJob description:\n${input.jd_text}\n\nCandidate source, the only authority for candidate claims:\n${input.candidate_source}${feedback.length ? `\n\nFix these validation issues:\n${feedback.map((item) => `- ${item}`).join('\n')}` : ''}`,
+      content: `Role: ${input.role}\nCompany: ${input.company}\n\nJob description:\n${input.jd_text}\n\nCandidate source, the only authority for candidate claims:\n${input.candidate_source}${
+        input.contested_metrics?.length
+          ? `\n\nThese figures appear under more than one employer or project in the candidate source, so which one they belong to is not established: ${input.contested_metrics.join(', ')}. Do not use any of them, and do not use any claim built on them. Do not substitute a different number.`
+          : ''
+      }${feedback.length ? `\n\nFix these validation issues:\n${feedback.map((item) => `- ${item}`).join('\n')}` : ''}`,
     }],
   });
   const block = response.content.find((item) => item.type === 'text');

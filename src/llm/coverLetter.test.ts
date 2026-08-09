@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import test, { mock } from 'node:test';
 import Anthropic from '@anthropic-ai/sdk';
-import { escapeRawControlCharacters, generateCoverLetter, parseCoverLetterBody, validateCoverLetter } from './coverLetter';
+import {
+  COVER_LETTER_SYSTEM_PROMPT,
+  escapeRawControlCharacters,
+  generateCoverLetter,
+  parseCoverLetterBody,
+  validateCoverLetter,
+} from './coverLetter';
 
 // generateCoverLetter builds its own module-private Anthropic client, so there is no seam to inject
 // a fake through. `create` lives on the shared Messages prototype rather than on the instance, so
@@ -134,4 +140,156 @@ test('cover-letter validation blocks fabricated candidate metrics', () => {
   const body = `I am applying for the Software Engineer role at Acme. ${'My work at Acme Labs used Python to build reliable systems. '.repeat(25)}I increased revenue by 82%.`;
   const result = validateCoverLetter(body, 'Acme', 'Software Engineer', source);
   assert.ok(result.issues.some((item) => item.includes('82%')));
+});
+
+/* ================================================================================================
+ * PACKET fbc1d407-67bf-43d0-8897-640af434d15a. truveta, Software Engineering Intern, 2026-08-09.
+ *
+ * Generated, validated, and stored in production carrying two defects at once: a promise she never
+ * made, and one quantified result credited to two unrelated projects. Both are pinned here against
+ * the letter exactly as it shipped, so a regression has to reproduce the real thing to pass.
+ * ============================================================================================== */
+
+const TRUVETA_LETTER = 'I am applying for the Software Engineering Intern role at Truveta. As a Computer Science and '
+  + 'Business Administration student at USC with a 3.89 GPA, I have spent the past year building technical projects with '
+  + 'Python, TypeScript, and REST APIs while working directly with LangChain and the OpenAI API, and I want to bring that '
+  + 'combination of engineering and problem-solving to a team focused on real-world health data. At Traeco, an AI agent '
+  + 'cost infrastructure project, I built LLM-agent cost infrastructure using LangChain and the OpenAI API, and '
+  + 'instrumented evaluation harnesses that cut agent response latency from 2.3s to 0.1s. I also structured an ambiguous, '
+  + 'fast-moving market into testable hypotheses through 50+ customer discovery interviews, which reshaped the product '
+  + 'roadmap. Separately, as founder of Tonee, an AI texting tone detector, I shipped a consumer mobile app end-to-end, '
+  + 'defining the feature set and UX in Figma and evaluating three technical architectures for mobile performance before '
+  + 'authoring a specification that reduced latency from 2.3s to 0.1s. That work required the kind of collaborative, '
+  + "deadline-driven execution Truveta's internship calls for, since I coordinated design, product, and technical "
+  + 'tradeoffs on a compressed timeline while analyzing over 8,300 behavioral data points to raise model-driven feature '
+  + 'accuracy from 78% to 89%. My Program Management internship at Cinematica Labs gave me experience working in a '
+  + 'structured technical environment: I built a threshold-based alerting system across 96 mentor-founder pairs from 8 '
+  + 'dropout indicators, which recovered 9 of 14 at-risk relationships, and analyzed 183 program surveys using RICE '
+  + 'prioritization to help ship three initiatives. That project depended on clear written communication with '
+  + 'stakeholders and disciplined time management across concurrent workstreams, both of which carried into my PRD and '
+  + 'A/B testing work at SoFi. I am based in Los Angeles but able to work from the Greater Seattle area for this '
+  + 'internship, and I am currently enrolled in my undergraduate program with an expected graduation date of May 2028. '
+  + "I would welcome the chance to apply my Python and product engineering background to Truveta's work on health data "
+  + 'infrastructure.';
+
+// Every number the letter uses, so ungroundedNumbers stays silent and the assertions below are
+// about the new checks rather than about arithmetic.
+const TRUVETA_SOURCE = JSON.stringify({
+  education: { gpa: '3.89', school: 'USC', graduation: 'May 2028' },
+  experience_bank: [
+    {
+      org: 'Traeco - AI Agent Cost Infrastructure',
+      bullets: [
+        'Built LLM-agent cost infrastructure with LangChain and the OpenAI API, instrumenting evaluation harnesses that cut agent response latency from 2.3s to 0.1s.',
+        'Structured an ambiguous market into testable hypotheses through 50+ customer discovery interviews.',
+      ],
+    },
+    {
+      org: 'Tonee - AI Texting Tone Detector',
+      bullets: [
+        'Evaluated 3 technical architectures for mobile performance; authored specification reducing latency from 2.3s to 0.1s.',
+        'Analyzed 8,300+ behavioral data points, increasing model-driven feature accuracy from 78% to 89%.',
+      ],
+    },
+    {
+      org: 'Cinematica Labs',
+      bullets: [
+        'Built threshold alerting across 96 pairs from 8 dropout indicators, recovering 9 of 14 at-risk relationships.',
+        'Analyzed 183 program surveys using RICE prioritization.',
+      ],
+    },
+  ],
+});
+
+const TRUVETA_CONTESTED = { labels: ['0.1', '2.3'], signatures: new Set(['0.1', 'd:0.1', '2.3']) };
+
+test('the Greater Seattle promise is an issue, not a warning', () => {
+  const result = validateCoverLetter(TRUVETA_LETTER, 'Truveta', 'Software Engineering Intern', TRUVETA_SOURCE);
+
+  /* The whole of defect 1. The letter DID come back with a signal: the stored packet carries
+   * "Review names not found in candidate data: Greater Seattle". A warning is written into the
+   * artifact and the letter is persisted anyway, so the signal annotated a promise instead of
+   * stopping it. The assertion that matters is which list it lands in. */
+  const promise = result.issues.find((issue) => issue.includes('promises something'));
+  assert.ok(promise, `expected a blocking issue, got issues=${JSON.stringify(result.issues)}`);
+  assert.match(promise!, /I am based in Los Angeles but able to work from the Greater Seattle area/);
+  assert.equal(result.warnings.some((warning) => warning.includes('promises something')), false);
+});
+
+test('the letter with the promise deleted is accepted, and nothing is written in its place', () => {
+  // Silence is the correct output. Truveta's form still asks where she will be; that question
+  // surfaces to a human through the resolver, which is the only surface that can check the answer.
+  const withoutPromise = TRUVETA_LETTER.replace(
+    'I am based in Los Angeles but able to work from the Greater Seattle area for this '
+    + 'internship, and I am currently enrolled in my undergraduate program with an expected graduation date of May 2028. ',
+    'I am currently enrolled in my undergraduate program with an expected graduation date of May 2028. ',
+  );
+  assert.notEqual(withoutPromise, TRUVETA_LETTER);
+  const result = validateCoverLetter(withoutPromise, 'Truveta', 'Software Engineering Intern', TRUVETA_SOURCE);
+  assert.deepEqual(result.issues.filter((issue) => issue.includes('promises something')), []);
+});
+
+test('one latency figure credited to both Traeco and Tonee is an issue', () => {
+  const result = validateCoverLetter(
+    TRUVETA_LETTER,
+    'Truveta',
+    'Software Engineering Intern',
+    TRUVETA_SOURCE,
+    TRUVETA_CONTESTED,
+  );
+
+  /* Defect 2, and note what does NOT catch it: both figures are in her experience bank, under both
+   * orgs, so ungroundedNumbers passes them honestly. The duplication is in her data. This check is
+   * the containment, and it refuses the figure for BOTH projects rather than guessing an owner. */
+  const reused = result.issues.find((issue) => issue.includes('more than one employer or project'));
+  assert.ok(reused, `expected a contested-metric issue, got issues=${JSON.stringify(result.issues)}`);
+  assert.match(reused!, /2\.3/);
+  assert.match(reused!, /0\.1/);
+  assert.match(reused!, /Do not substitute a different number/);
+  assert.equal(result.issues.some((issue) => issue.includes('ungrounded numbers')), false);
+});
+
+test('with nothing contested the same letter keeps its metrics', () => {
+  // The check must cost nothing when the source attributes cleanly, or it would strip true numbers
+  // out of every letter written from a healthy bank.
+  const result = validateCoverLetter(TRUVETA_LETTER, 'Truveta', 'Software Engineering Intern', TRUVETA_SOURCE);
+  assert.deepEqual(result.issues.filter((issue) => issue.includes('more than one employer')), []);
+});
+
+test('contested figures are named in the request, not only caught after the fact', async (t) => {
+  t.after(() => mock.restoreAll());
+  const calls = stubClaude({
+    content: [{ type: 'text', text: '{"body":"Paragraph one.\\n\\nParagraph two."}' }],
+    stop_reason: 'end_turn',
+  });
+
+  await generateCoverLetter({ ...COVER_LETTER_INPUT, contested_metrics: ['0.1', '2.3'] });
+  const content = (calls[0].messages as Array<{ content: string }>)[0].content;
+  assert.match(content, /appear under more than one employer or project/);
+  assert.match(content, /0\.1, 2\.3/);
+  assert.match(content, /Do not substitute a different number/);
+});
+
+test('a clean source adds no contested-metric instruction to the request', async (t) => {
+  t.after(() => mock.restoreAll());
+  const calls = stubClaude({
+    content: [{ type: 'text', text: '{"body":"Paragraph one.\\n\\nParagraph two."}' }],
+    stop_reason: 'end_turn',
+  });
+
+  await generateCoverLetter(COVER_LETTER_INPUT);
+  const content = (calls[0].messages as Array<{ content: string }>)[0].content;
+  assert.equal(content.includes('appear under more than one employer'), false);
+});
+
+test('the prompt forbids stating a location and forbids promising', () => {
+  /* Pinned because the prompt is the cheap half of the fix and the half most likely to be lost to a
+   * later edit that shortens the rule list. The validator would still refuse the letter, but every
+   * refusal costs a regeneration round trip, and two of those in a row fails the packet outright. */
+  assert.match(COVER_LETTER_SYSTEM_PROMPT, /Never state where the candidate lives, is based, or will be located/);
+  assert.match(COVER_LETTER_SYSTEM_PROMPT, /Never promise anything on the candidate's behalf/);
+  assert.match(COVER_LETTER_SYSTEM_PROMPT, /relocating/);
+  assert.match(COVER_LETTER_SYSTEM_PROMPT, /start dates/);
+  assert.match(COVER_LETTER_SYSTEM_PROMPT, /say nothing about it/);
+  assert.match(COVER_LETTER_SYSTEM_PROMPT, /Never move a result from one employer or project to another/);
 });
