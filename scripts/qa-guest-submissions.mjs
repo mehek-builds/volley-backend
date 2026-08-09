@@ -13,6 +13,7 @@ import {
   assertControlledSecurityCodeTarget,
   controlledEmailCaptureTarget,
   controlledReceiptCaptureTarget,
+  controlledScreenshotForRun,
   controlledManagedReceivingProof,
   controlledQaPacketSpec,
   managedApplicationAlias,
@@ -466,8 +467,12 @@ try {
     assert.ok(prepared.review.filled_fields.includes('last_name'));
     assert.ok(prepared.review.filled_fields.includes('email'));
     assert.ok(prepared.review.filled_fields.includes('resume'));
-    const capturedPreview = capturedScreenshots.find((entry) => entry.kind === 'filled_preview'
-      && entry.url === prepared.review.preview_screenshot_url);
+    const capturedPreview = controlledScreenshotForRun(capturedScreenshots, {
+      kind: 'filled_preview',
+      userId,
+      submissionRunId: prepared.review.submission_run_id,
+      url: prepared.review.preview_screenshot_url,
+    });
     assert.ok(capturedPreview, 'controlled local screenshot adapter did not capture the filled preview');
     assert.ok(capturedPreview.bytes >= 8, 'controlled local screenshot adapter captured an empty filled preview');
     assert.match(capturedPreview.sha256, /^[a-f0-9]{64}$/);
@@ -514,8 +519,12 @@ try {
 
     assert.match(finalState.review.receipt.confirmation_text, /thank you|received/i);
     assert.match(finalState.review.receipt.reference_id, /^LITOS-QA-/);
-    const capturedReceipt = capturedScreenshots.find((entry) => entry.kind === 'submission_receipt'
-      && entry.url === finalState.review.receipt.screenshot_url);
+    const capturedReceipt = controlledScreenshotForRun(capturedScreenshots, {
+      kind: 'submission_receipt',
+      userId,
+      submissionRunId: finalState.review.submission_run_id,
+      url: finalState.review.receipt.screenshot_url,
+    });
     assert.ok(capturedReceipt, 'controlled local receipt adapter did not capture the submission screenshot');
     assert.ok(capturedReceipt.bytes >= 8, 'controlled local receipt adapter captured an empty screenshot');
     assert.match(capturedReceipt.sha256, /^[a-f0-9]{64}$/);
@@ -552,10 +561,12 @@ try {
       receipt_source: finalState.review.receipt?.source ?? null,
       preview_capture_source: capturedPreview.source,
       preview_capture_kind: capturedPreview.kind,
+      preview_capture_object_key: capturedPreview.object_key,
       preview_capture_bytes: capturedPreview.bytes,
       preview_capture_sha256: capturedPreview.sha256,
       receipt_capture_source: capturedReceipt.source,
       receipt_capture_kind: capturedReceipt.kind,
+      receipt_capture_object_key: capturedReceipt.object_key,
       receipt_capture_bytes: capturedReceipt.bytes,
       receipt_capture_sha256: capturedReceipt.sha256,
       email_message_received: Boolean(inboundEvidence),

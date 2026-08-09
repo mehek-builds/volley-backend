@@ -174,6 +174,19 @@ export function controlledReceiptCaptureTarget(rawUrl, token) {
   return target;
 }
 
+export function controlledScreenshotObjectKey(kind, userId, submissionRunId) {
+  const filename = kind === 'filled_preview' ? 'filled' : kind === 'submission_receipt' ? 'receipt' : null;
+  if (!filename || !/^[A-Za-z0-9_-]+$/.test(userId ?? '') || !/^[A-Za-z0-9_-]+$/.test(submissionRunId ?? '')) {
+    throw new Error('Controlled screenshot evidence requires a valid kind, user, and submission run');
+  }
+  return `users/${userId}/submission-runs/${submissionRunId}/${filename}.png`;
+}
+
+export function controlledScreenshotForRun(captures, { kind, userId, submissionRunId, url }) {
+  const objectKey = controlledScreenshotObjectKey(kind, userId, submissionRunId);
+  return captures.find((entry) => entry.kind === kind && entry.object_key === objectKey && entry.url === url);
+}
+
 export function controlledDatabaseTarget(databaseUrl) {
   let target;
   try {
