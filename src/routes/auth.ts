@@ -11,6 +11,7 @@ import { PRODUCT_LINKS, PRODUCT_NAME } from '../lib/product';
 import { emailSender, sendEmail } from '../lib/email';
 import { requireAuth, type JWTPayload } from '../middleware/auth';
 import { withReadOnlyRetry } from '../db/readOnlyRetry';
+import { reportAccountCreated, reportSessionStarted } from '../lib/serverAnalytics';
 import {
   hashPassword,
   normalizePassword,
@@ -346,6 +347,8 @@ export async function authRoutes(fastify: FastifyInstance) {
           authMethod: 'guest',
           sessionVersion: active.session_version,
         });
+        // An existing guest key returning: a session, not a new account.
+        reportSessionStarted(active.id, 'guest', fastify.log);
         return reply.status(200).send({
           token,
           is_guest: true,
@@ -377,6 +380,19 @@ export async function authRoutes(fastify: FastifyInstance) {
       const guest = created[0]
         ?? (await db.select().from(users).where(eq(users.guest_key_hash, keyHash)).limit(1))[0];
       if (!guest) throw new Error('Guest creation did not return a user');
+
+      /* Report from the server, because the browser demonstrably does not.
+       *
+       * The site fires its own guest event and it has never arrived: eighteen
+       * guest accounts since 31 July, zero guest sign-ins in PostHog, and five
+       * of seven sampled creations had no PostHog traffic at all within three
+       * minutes either side. See src/lib/serverAnalytics.ts.
+       *
+       * `created[0]` is only populated on a real insert. onConflictDoNothing
+       * leaves it empty when the key already existed, in which case this is a
+       * returning guest and calling it a new account would inflate signups. */
+      if (created[0]) reportAccountCreated(guest.id, 'guest', fastify.log);
+      else reportSessionStarted(guest.id, 'guest', fastify.log);
 
       const token = await signSessionToken(guest.id, {
         isGuest: true,
