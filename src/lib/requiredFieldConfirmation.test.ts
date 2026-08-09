@@ -520,9 +520,25 @@ test('managed wire contract rejects missing versions and unbounded retry counts 
 
 test('submission runner requires confirmation proof before any receipt can be recorded', () => {
   const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
-  const barrier = source.indexOf("assertManagedRequiredFieldsConfirmed(result, options.securityCode ? 'verification' : 'application')");
+  /* The first managed run is ALWAYS an application submit, including on a run that is finishing a
+     security-code challenge. It used to be declared 'verification' whenever a code was in hand, and
+     that declaration was the shape of the defect: a verification submit types the code before it
+     clicks, and on a page that has not been submitted yet there is no code control to type into. */
+  const barrier = source.indexOf("assertManagedRequiredFieldsConfirmed(result, 'application')");
   const receipt = source.indexOf("const receipt = verdict.kind === 'confirmed'", barrier);
   assert.ok(barrier >= 0);
+  assert.ok(receipt > barrier);
+});
+
+test('a supplied security code is entered by a continuation that proves its own submit', () => {
+  const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const branch = source.indexOf('if (options.securityCode && initialChallenge) {');
+  assert.ok(branch >= 0, 'the supplied-code continuation must be its own branch');
+  const continuation = source.indexOf('receiptResult = await continueManagedBrowser(continuationToken, codeActions)', branch);
+  const barrier = source.indexOf("assertManagedRequiredFieldsConfirmed(receiptResult, 'verification')", continuation);
+  const receipt = source.indexOf("const receipt = verdict.kind === 'confirmed'", continuation);
+  assert.ok(continuation > branch);
+  assert.ok(barrier > continuation, 'the code submit owes the same per-field proof as any other');
   assert.ok(receipt > barrier);
 });
 

@@ -25,8 +25,8 @@ import {
   normalizeSecurityCode,
   readManagedSecurityCodeChallenge,
   securityCodeAttentionReason,
+  securityCodeContinuationActions,
   securityCodeFingerprint,
-  withSecurityCode,
   withSecurityCodeAttempt,
 } from '../lib/securityCode';
 import { storeFilledPreviewScreenshot, storeReceiptScreenshot } from '../lib/receiptScreenshot';
@@ -2770,24 +2770,79 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     const builtPacket = await buildPacket(row, packetUsesControlledResumeFixture(portal));
     const packet = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
     const verificationRequestedAt = new Date();
-    const initialActions = options.securityCode
-      ? withSecurityCode(buildManagedPortalActions(portal, packet, true), options.securityCode)
-      : buildManagedPortalActions(portal, packet, true);
+    /* THE FIRST HALF IS THE SAME RUN WHETHER OR NOT A CODE IS IN HAND, and that is the fix.
+     *
+     * The managed runner is stateless and one-shot: every run loads the form fresh, and on first
+     * paint a Greenhouse application form carries no security-code control, because Greenhouse only
+     * renders one after a submit has been refused. So a code cannot be attached to this list. It is
+     * attached to the CONTINUATION below, which runs on the very DOM this submit produced. */
+    const initialActions = buildManagedPortalActions(portal, packet, true);
     const result = await runManagedBrowser(
       applicationUrl,
       initialActions,
-      {
-        allowSubmit: true,
-        ...(!options.securityCode ? { requestContinuation: true, continuationTtlSeconds: 120 } : {}),
-      },
+      { allowSubmit: true, requestContinuation: true, continuationTtlSeconds: 120 },
     );
     // Required-field confirmation is a barrier inside the same remote action list, immediately
     // before submit. Require its per-field proof as well: an older runner that ignores or does not
     // understand the protocol must not be allowed to turn a silent fill into a submitted state.
-    assertManagedRequiredFieldsConfirmed(result, options.securityCode ? 'verification' : 'application');
+    assertManagedRequiredFieldsConfirmed(result, 'application');
     let receiptResult = result;
     let verification: ApplicationReviewState['verification'] = { status: 'not_needed' };
     const initialChallenge = readManagedSecurityCodeChallenge(result);
+    /* THE SECOND HALF, WITH A CODE THE APPLICANT READ OUT OF HER OWN MAILBOX.
+     *
+     * One continuation, one action, and that action types the code into the control the submit above
+     * just rendered and then presses the form's own submit once. It is the identical remote path the
+     * automatic verification below takes; the only difference is where the code came from, and a
+     * code from a person deserves no weaker proof than one from a mailbox scrape, so the same
+     * required-field confirmation is demanded of it.
+     *
+     * Ordered ABOVE the automatic branch on purpose. A supplied code is an explicit instruction
+     * about this one application, and racing it against a mailbox search would mean two codes
+     * competing for one form. */
+    if (options.securityCode && initialChallenge) {
+      const continuationToken = result.continuationToken;
+      const continuationExpiresAt = result.continuationExpiresAt;
+      const continuationIsLive = typeof continuationToken === 'string'
+        && typeof continuationExpiresAt === 'string'
+        && Date.parse(continuationExpiresAt) > Date.now();
+      const codeActions = securityCodeContinuationActions(initialActions, options.securityCode);
+      if (continuationIsLive && codeActions) {
+        try {
+          receiptResult = await continueManagedBrowser(continuationToken, codeActions);
+          assertManagedRequiredFieldsConfirmed(receiptResult, 'verification');
+        } catch (error) {
+          /* The code went nowhere and the employer is still holding the application behind the same
+           * check, so the packet goes back to waiting rather than to a dead end. The attempt is
+           * recorded either way: the fingerprint is what stops this exact code being replayed. */
+          await writeReview(row, nextReview(claimedReview, {
+            status: 'awaiting_security_code',
+            security_code: withSecurityCodeAttempt(
+              beginSecurityCodeState({
+                challenge: initialChallenge,
+                attemptedAt: new Date().toISOString(),
+                authorized: true,
+                existing: claimedReview.security_code,
+              }),
+              {
+                at: new Date().toISOString(),
+                fingerprint: securityCodeFingerprint(row.id, options.securityCode),
+                outcome: 'not_entered',
+              },
+            ),
+            submission_error: error instanceof Error ? error.message.slice(0, 500) : 'Security-code continuation failed',
+            attention_reason: 'Litos sent this application again and the employer asked for the '
+              + 'security code as before, but the secure browser failed before the code could be '
+              + 'entered. Nothing about the application changed. Use the newest code in your mailbox '
+              + 'and Litos will try again.',
+            attention_categories: ['security_code'],
+            submission_claimed_at: undefined,
+            submission_claim_id: undefined,
+          }));
+          return;
+        }
+      }
+    }
     if (!options.securityCode && initialChallenge && managedResultNeedsEmailVerification(result)) {
       const requestedAt = verificationRequestedAt.toISOString();
       const continuationExpiresAt = result.continuationExpiresAt;
@@ -2986,6 +3041,47 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         previewUrl: blob.url,
       })));
       return;
+    }
+    /* A CODE RUN OWES TWO PROOFS, AND "NO ERROR VISIBLE" IS NEITHER OF THEM.
+     *
+     * The challenge branch above has already returned, so by here the code control is gone from the
+     * page. Gone is not filed. Greenhouse unmounts the whole application form and navigates to its
+     * confirmation route on success, and it also unmounts the code control when it re-renders the
+     * form for any other reason, so the disappearance on its own distinguishes nothing. The two
+     * facts that do are the runner's own reading of what it did with the code, and the page's own
+     * confirmation state - and this used to demand neither, writing outcome 'accepted' onto the
+     * attempt as a literal regardless of what the runner reported.
+     *
+     * Anything short of both is 'unverified', which is a state with a next step, rather than
+     * 'submitted', which is a claim. */
+    if (options.securityCode) {
+      const codeOutcome = receiptResult.securityCodeAttempt?.outcome ?? null;
+      if (codeOutcome !== 'accepted' || verdict.kind !== 'confirmed') {
+        fastify.log.warn(
+          { applicationId: row.id, codeOutcome, verdict: verdict.kind },
+          'Security-code submission could not be proved, recording it as unverified',
+        );
+        await writeReview(row, nextReview(claimedReview, {
+          ...unverifiedSubmissionPatch(claimedReview, {
+            at: capturedAt,
+            cause: 'no_confirmation_state',
+            previewUrl: blob.url,
+          }),
+          ...(claimedReview.security_code
+            ? {
+              security_code: withSecurityCodeAttempt(claimedReview.security_code, {
+                at: capturedAt,
+                fingerprint: securityCodeFingerprint(row.id, options.securityCode),
+                outcome: codeOutcome === 'rejected' ? 'rejected'
+                  : codeOutcome === 'no_control' ? 'no_control'
+                    : codeOutcome === 'accepted' ? 'error'
+                      : 'not_entered',
+              }),
+            }
+            : {}),
+        }));
+        return;
+      }
     }
     /* 'unreported' means a runner older than submitOutcome, and it keeps the previous behaviour
        exactly: scrape the body, and throw if there is nothing to scrape. Only 'confirmed' skips the
