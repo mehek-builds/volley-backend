@@ -310,7 +310,7 @@ test('a security-code challenge is persisted before any receipt is parsed', asyn
   assert.ok(managedStart > 0, 'the managed result must inspect the challenge');
   const challengeBranch = source.indexOf('if (challenge)', managedStart);
   const awaitingWrite = source.indexOf("status: 'awaiting_security_code'", challengeBranch);
-  const receiptRead = source.indexOf('const receipt = readManagedReceipt(receiptResult);', managedStart);
+  const receiptRead = source.indexOf('readManagedReceipt(receiptResult)', managedStart);
   assert.ok(challengeBranch > managedStart);
   assert.ok(awaitingWrite > challengeBranch);
   assert.ok(receiptRead > awaitingWrite, 'receipt parsing must happen only after the challenge branch returns');

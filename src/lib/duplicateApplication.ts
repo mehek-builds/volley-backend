@@ -109,6 +109,14 @@ export type DuplicateApplicationMatch = {
   role: string;
   submitted_at?: string;
   basis: PostingIdentityBasis;
+  /* HOW SURE THE GUARD IS THAT THE EMPLOYER HAS THE EARLIER ONE.
+   *
+   * 'submitted' is a receipt. 'unverified' is Skydio packet 13bccb2d: Litos pressed Send, the run
+   * was cut off, and nobody knows. The guard refuses in BOTH cases, because a second application
+   * cannot be withdrawn and "probably not" is not a good enough reason to risk one - but the two
+   * owe the applicant different sentences, and telling her she has already applied when nobody
+   * knows that is the kind of false certainty this codebase keeps having to delete. */
+  certainty: 'submitted' | 'unverified';
 };
 
 const DATE_FORMAT = new Intl.DateTimeFormat('en-GB', {
@@ -136,6 +144,20 @@ export function duplicateApplicationReason(match: DuplicateApplicationMatch): st
   const role = match.role.trim() || 'this role';
   const company = match.company.trim();
   const at = company ? ` at ${company}` : '';
+  /* THE UNVERIFIED TWIN. Refused for the same reason and with none of the same certainty.
+   *
+   * Before this the guard could not see these rows at all: it selects on status 'submitted' or
+   * pipeline_stage 'applied', and a cut-off submit has neither. So a second application to the same
+   * posting sailed through a guard whose whole job is to stop exactly that, and the applicant would
+   * have found out from the employer. Now it is stopped, and the sentence sends her to the one
+   * action that unblocks both packets rather than leaving her to guess. */
+  if (match.certainty === 'unverified') {
+    return `Not sent: Litos already pressed Send on ${role}${at} and could not confirm what came back, `
+      + 'so the employer may already have that application. Sending this one could make it two, and an '
+      + 'application cannot be taken back once it is in. Open that earlier application in your Tracker, '
+      + 'check the employer\u2019s page, and tell Litos whether it is there. If it is not, Litos will '
+      + 'send it for you.';
+  }
   return `Not sent: you have already applied to ${role}${at}, ${submittedOn(match.submitted_at)}. `
     + 'Employers cap re-applications to the same posting and count a second one against you, and an '
     + 'application cannot be taken back once it is in. Nothing has been sent this time. '
@@ -147,6 +169,9 @@ export type SubmittedTwinRow = {
   job_context: unknown;
   portal_url: string | null;
   submitted_at: string | null;
+  /* When a submit on this row was pressed and lost, and nobody has looked yet. Null on every row
+   * that is either cleanly submitted or cleanly not. */
+  unverified_at?: string | null;
 };
 
 /**
@@ -171,12 +196,22 @@ async function submittedApplications(userId: string, excludeId: string): Promise
       job_context: generated_resumes.job_context,
       portal_url: sql<string | null>`${generated_resumes.spec}->'_review'->>'portal_url'`,
       submitted_at: sql<string | null>`${generated_resumes.spec}->'_review'->>'submitted_at'`,
+      /* THE ROWS THE GUARD USED TO BE BLIND TO. A submit that was pressed and lost has no
+         submitted_at and no 'applied' stage, so it matched neither arm below and a second
+         application to the same posting was let straight through. Unresolved only: once the
+         applicant has said 'not_sent' the employer provably does not have it and it stops being a
+         reason to refuse anything. */
+      unverified_at: sql<string | null>`case when ${generated_resumes.spec}->'_review'->'unverified_submission'->>'resolution' is null
+        then ${generated_resumes.spec}->'_review'->'unverified_submission'->>'at' end`,
     })
     .from(generated_resumes)
     .where(and(
       eq(generated_resumes.user_id, userId),
       ne(generated_resumes.id, excludeId),
-      sql`(${generated_resumes.spec}->'_review'->>'status' = 'submitted' or ${generated_resumes.pipeline_stage} = 'applied')`,
+      sql`(${generated_resumes.spec}->'_review'->>'status' = 'submitted'
+        or ${generated_resumes.pipeline_stage} = 'applied'
+        or (${generated_resumes.spec}->'_review'->'unverified_submission' is not null
+          and ${generated_resumes.spec}->'_review'->'unverified_submission'->>'resolution' is null))`,
     ));
   return rows;
 }
@@ -236,12 +271,17 @@ export function duplicateAmong(
     if (!verdict.same) continue;
     const { company, role } = companyRoleOf(row.job_context);
     const mineNames = companyRoleOf(input.jobContext);
+    /* A row can be both: submitted earlier AND carrying an unresolved record from a later attempt.
+       Submitted wins, because a receipt is certainty and the sentence for certainty is the stronger
+       and simpler of the two. */
+    const certainty = row.submitted_at || !row.unverified_at ? 'submitted' as const : 'unverified' as const;
     const match: DuplicateApplicationMatch = {
       application_id: row.id,
       company: company || mineNames.company,
       role: role || mineNames.role,
       submitted_at: row.submitted_at ?? undefined,
       basis: verdict.basis,
+      certainty,
     };
     return { kind: 'duplicate', match, reason: duplicateApplicationReason(match) };
   }

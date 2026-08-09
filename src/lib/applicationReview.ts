@@ -40,6 +40,11 @@ export type ApplicationAttentionCategory =
    * 2026-08-06, and had any of them reached the send they would all have gone, against an employer
    * whose own form carries a season-long exclusivity acknowledgement. */
   | 'duplicate_application'
+  /* Litos pressed submit, or may have, and cannot say what came back. Its own category rather than
+   * 'unknown' because it is the one attention state whose next step is a person LOOKING at
+   * something rather than a person fixing something, and because a state this expensive to be in
+   * has to be countable. */
+  | 'unverified_submission'
   | 'required_document'
   | 'sensitive_attestation'
   | 'required_field'
@@ -441,6 +446,36 @@ export type ApplicationReviewState = {
     captured_at: string;
     reference_id?: string;
     source?: 'managed_browser' | 'chrome_extension' | 'email_fallback' | 'ats_api' | 'attended_handoff';
+  };
+  /* A SUBMIT WHOSE OUTCOME IS GENUINELY UNKNOWN, RECORDED AS A FACT RATHER THAN AS A SENTENCE.
+   *
+   * Skydio packet 13bccb2d, 2026-08-09. The run was killed mid-submit, so `submitted_at` was null,
+   * `receipt` was null, `submission_attempted_at` was null, and the only trace of the whole episode
+   * was one line of prose in attention_reason. Nothing on the row could be queried, counted, or
+   * acted on, and the packet's status - needs_attention AFTER a claim - is one submitRequestDisposition
+   * refuses to re-run. So the applicant was told to check the portal and try again, and the system
+   * she was talking to had already decided she could not.
+   *
+   * This is the missing fact and the way out of it. `resolution` is the applicant's answer after she
+   * has looked, and it is the only thing that can move the packet: nothing here is ever decided by
+   * guessing on her behalf.
+   *
+   *   undefined  - not looked at yet. The packet is waiting on a person, which is the truth.
+   *   'sent'     - she found the application in the employer's portal or her mailbox. Recorded as
+   *                submitted with the source named, so the receipt never claims Litos verified it.
+   *   'not_sent' - she looked and it is not there. The claim is released and one re-run is allowed,
+   *                which is the case that was previously a dead end.
+   */
+  unverified_submission?: {
+    /* When the run that may have submitted stopped. */
+    at: string;
+    /* Why the outcome could not be established, in machine-readable form. */
+    cause: 'run_timed_out' | 'no_confirmation_state' | 'provider_error';
+    /* Where she has to look. Carried here so the message and the link cannot drift apart. */
+    portal_url?: string;
+    submission_run_id?: string;
+    resolution?: 'sent' | 'not_sent';
+    resolved_at?: string;
   };
 };
 
