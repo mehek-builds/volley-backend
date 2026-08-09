@@ -64,9 +64,11 @@ type ControlledPortal =
   | 'controlled_rippling'
   | 'controlled_breezy'
   | 'controlled_bamboohr';
-export type SupportedPortal = PortalFamily | ControlledPortal;
+type ManualPortal = 'manual_recruitee';
+export type SupportedPortal = PortalFamily | ControlledPortal | ManualPortal;
 
 function portalFamily(portal: SupportedPortal): PortalFamily {
+  if (portal === 'manual_recruitee') return 'recruitee';
   if (portal === 'controlled_test') return 'greenhouse';
   if (portal === 'controlled_lever') return 'lever';
   if (portal === 'controlled_ashby') return 'ashby';
@@ -186,6 +188,7 @@ export function captchaProviderForFamily(portal: SupportedPortal): CaptchaProvid
 }
 
 export function portalCanAutoSubmit(portal: SupportedPortal): boolean {
+  if (portal === 'manual_recruitee') return false;
   const family = portalFamily(portal);
   if (['zoho_recruit', 'bullhorn', 'sap_successfactors', 'oracle_taleo', 'adp_recruiting', 'jazzhr'].includes(family)) {
     return browserApplicationCapability(family).programmaticSubmit;
@@ -271,6 +274,9 @@ const ACCOUNT_WALLED_REASONS: Record<AccountWalledFamily, string> = {
 
 export function portalHandoffReason(portal: SupportedPortal): string | null {
   const family = portalFamily(portal);
+  if (portal === 'manual_recruitee') {
+    return 'Litos filled this Recruitee application, but this tenant uses an inline form whose final controls have not been validated for automatic submission. Review the form and send it yourself.';
+  }
   // Checked FIRST. An account-walled portal never reached a form, so telling the student "Litos
   // filled everything in" (which both sentences below do) would be a plain lie about work that
   // never happened, and she would go looking for filled fields that are not there.
@@ -310,6 +316,9 @@ export function portalHandoffReason(portal: SupportedPortal): string | null {
 // not match what they were told and costs them the trust to believe the next message.
 export function unattendedHandoffReason(portal: SupportedPortal): string | null {
   const family = portalFamily(portal);
+  if (portal === 'manual_recruitee') {
+    return 'This Recruitee tenant uses an inline application whose final controls need review. Open it when you have a minute and Litos will fill it in for you.';
+  }
   if (ACCOUNT_WALLED_FAMILIES.has(family)) {
     return ACCOUNT_WALLED_REASONS[family as AccountWalledFamily];
   }
@@ -2783,6 +2792,7 @@ const COVER_LETTER_UPLOAD_SELECTORS: Record<SupportedPortal, string> = {
   bamboohr: BAMBOOHR_COVER_LETTER_SELECTOR,
   controlled_bamboohr: BAMBOOHR_COVER_LETTER_SELECTOR,
   recruitee: RECRUITEE_COVER_LETTER_SELECTOR,
+  manual_recruitee: RECRUITEE_COVER_LETTER_SELECTOR,
   teamtailor: TEAMTAILOR_COVER_LETTER_SELECTOR,
   personio: PERSONIO_COVER_LETTER_SELECTOR,
   pinpoint: PINPOINT_COVER_LETTER_SELECTOR,
@@ -3616,7 +3626,7 @@ const HOSTS: Record<PortalFamily, RegExp> = {
   sap_successfactors: /^career\d+\.successfactors\.(?:com|eu)$/i,
   oracle_taleo: /^(?:fa007|aa270)\.taleo\.net$/i,
   adp_recruiting: /^myjobs\.adp\.com$/i,
-  avature: /^(?:maximus|sandboxxerox)\.avature\.net$/i,
+  avature: /^(?:(?:maximus|sandboxxerox)\.avature\.net|jobs\.ea\.com)$/i,
 };
 
 // Host alone is not enough for a portal whose host space also serves a login page, a marketing site
@@ -3672,6 +3682,31 @@ function hasComeetApplicationToken(url: URL): boolean {
 
 function isExactResearchedBatchIdentity(portal: PortalFamily, url: URL): boolean {
   const host = url.hostname.toLowerCase();
+  if (portal === 'recruitee'
+    && /^\/o\/software-engineer-intern(?:\/c\/new)?\/?$/.test(url.pathname)) return false;
+  if (portal === 'teamtailor'
+    && /^\/jobs\/7847431-software-engineering-intern-web-scraping-data-acquisition(?:\/applications\/new)?\/?$/.test(url.pathname)
+    && host !== 'flanks.teamtailor.com') return false;
+  if (portal === 'teamtailor' && host === 'flanks.teamtailor.com') {
+    return /^\/jobs\/7847431-software-engineering-intern-web-scraping-data-acquisition(?:\/applications\/new)?\/?$/.test(url.pathname)
+      && !url.search && !url.hash;
+  }
+  if (portal === 'personio') {
+    const isReservedArteusJob = /^\/job\/2521967(?:\/apply)?\/?$/.test(url.pathname);
+    if (isReservedArteusJob) {
+      if (host !== 'arteus-energy.jobs.personio.de' || url.pathname !== '/job/2521967' || url.hash) return false;
+      const applyValues = url.searchParams.getAll('apply');
+      const languageValues = url.searchParams.getAll('language');
+      const queryKeys = [...url.searchParams.keys()];
+      return applyValues.length === 1
+        && applyValues[0] === ''
+        && languageValues.length === 1
+        && languageValues[0] === 'de'
+        && queryKeys.length === 2
+        && queryKeys.every((key) => key === 'apply' || key === 'language');
+    }
+    if (host === 'arteus-energy.jobs.personio.de') return false;
+  }
   if (portal === 'bamboohr') {
     return (host === 'mpathic2.bamboohr.com' && /^\/careers\/99\/?$/.test(url.pathname))
       || (host === 'prentkeromich.bamboohr.com' && /^\/careers\/480\/?$/.test(url.pathname));
@@ -3683,11 +3718,18 @@ function isExactResearchedBatchIdentity(portal: PortalFamily, url: URL): boolean
         && /^\/hcmUI\/CandidateExperience\/en\/sites\/CX_1\/job\/2850\/?$/i.test(url.pathname));
   }
   if (portal === 'ultipro') {
-    const identity = `${url.pathname}?opportunityId=${url.searchParams.get('opportunityId') ?? ''}`;
+    const opportunityIds = url.searchParams.getAll('opportunityId');
+    if (opportunityIds.length !== 1) return false;
+    const identity = `${url.pathname}?opportunityId=${opportunityIds[0]}`;
     return identity === '/WIN1014WINDQ/JobBoard/08eb8299-5b26-4208-adb7-897aa42c6959/OpportunityDetail?opportunityId=f6cd56f9-5b2f-4b53-9e86-2553b54524f9'
-      || identity === '/LIT1004LDAC/JobBoard/30702fd2-636e-4886-b1ce-4fc3b07e37ec/OpportunityDetail?opportunityId=4fc30c2a-e2b3-42e0-bcaf-7805f741c04a';
+      || identity === '/LIT1004LDAC/JobBoard/30702fd2-636e-4886-b1ce-4fc3b07e37ec/OpportunityDetail?opportunityId=4fc30c2a-e2b3-42e0-bcaf-7805f741c04a'
+      || identity === '/cov1003covcu/JobBoard/24b0bccd-d0f2-4641-a5f2-6ca809c72521/OpportunityDetail?opportunityId=954bed4e-7b77-4abd-ac78-add89ee3c71e';
   }
   if (portal === 'avature') {
+    if (host === 'jobs.ea.com') {
+      return url.searchParams.getAll('jobId').length === 0
+        && /^\/en_US\/careers\/JobDetail\/Software-Engineer-Intern\/214956\/?$/.test(url.pathname);
+    }
     if (host === 'maximus.avature.net') return /^\/careers\/Job-Application\/?$/i.test(url.pathname);
     if (host !== 'sandboxxerox.avature.net') return false;
     if (/^\/en_US\/careers\/JobDetail\/2nd-Line-Technical-Analyst\/44460\/?$/i.test(url.pathname)) return true;
@@ -3749,6 +3791,12 @@ export function detectPortal(rawUrl: string): SupportedPortal {
     return 'controlled_test';
   }
   if (url.protocol !== 'https:') throw new Error('That application page is not a secure link');
+  if (url.hostname.toLowerCase() === 'whitecoatglobal1.recruitee.com') {
+    if (/^\/o\/software-engineer-intern(?:\/c\/new)?\/?$/.test(url.pathname) && !url.search && !url.hash) {
+      return 'manual_recruitee';
+    }
+    throw new Error('Litos cannot fill in this company\u2019s application page yet.');
+  }
   // Databricks hosts Greenhouse applications behind a company-owned wrapper URL. Keep this pinned to
   // the known careers path plus numeric Greenhouse job id so unrelated company pages with `gh_jid`
   // query strings do not become supported by accident.
@@ -3907,9 +3955,17 @@ export function canonicalSupportedPortalUrl(rawUrl: string | undefined, atsName?
     }
     if (family === 'personio') {
       const url = new URL(portalApplicationUrl(portal, rawUrl));
+      if (url.hostname.toLowerCase() === 'arteus-energy.jobs.personio.de') return url.toString();
       const language = url.searchParams.get('language');
       url.search = '';
       if (language && /^[a-z]{2}$/i.test(language)) url.searchParams.set('language', language.toLowerCase());
+      return url.toString();
+    }
+    if (family === 'recruitee' || family === 'teamtailor') {
+      const url = new URL(portalApplicationUrl(portal, rawUrl));
+      url.search = '';
+      url.hash = '';
+      url.pathname = url.pathname.replace(/\/$/, '');
       return url.toString();
     }
     if (family === 'pinpoint') {
@@ -3986,7 +4042,8 @@ export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): s
   if (family === 'recruitee' && !url.pathname.endsWith('/c/new')) {
     url.pathname = `${url.pathname.replace(/\/$/, '')}/c/new`;
   }
-  if (family === 'personio' && !url.pathname.endsWith('/apply')) {
+  if (family === 'personio' && url.hostname.toLowerCase() !== 'arteus-energy.jobs.personio.de'
+    && !url.pathname.endsWith('/apply')) {
     url.pathname = `${url.pathname.replace(/\/$/, '')}/apply`;
   }
   if ((family === 'teamtailor' || family === 'pinpoint') && !url.pathname.endsWith('/applications/new')) {

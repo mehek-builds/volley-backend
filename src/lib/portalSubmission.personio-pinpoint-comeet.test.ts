@@ -52,6 +52,39 @@ test('canonicalizes Personio and Pinpoint posting URLs to their application form
   );
 });
 
+test('uses Personio query application state and keeps legacy path inputs compatible', () => {
+  const live = 'https://arteus-energy.jobs.personio.de/job/2521967?apply=&language=de';
+  assert.equal(detectPortal(live), 'personio');
+  assert.equal(canonicalSupportedPortalUrl(live), live);
+  assert.equal(
+    detectPortal('https://arteus-energy.jobs.personio.de/job/2521967?language=de&apply='),
+    'personio',
+  );
+  assert.equal(
+    portalApplicationUrl('personio', 'https://matrix42.jobs.personio.com/job/2663722/apply?language=DE'),
+    'https://matrix42.jobs.personio.com/job/2663722/apply?language=DE',
+  );
+  for (const url of [
+    'https://other.jobs.personio.de/job/2521967?apply=&language=de',
+    'https://other.jobs.personio.de/job/2521967?language=de&apply=',
+    'https://other.jobs.personio.de/job/2521967/apply?language=de',
+    'https://other.jobs.personio.de/job/2521967?language=de&apply=&apply=',
+    'https://arteus-energy.jobs.personio.de/job/2521968?apply=&language=de',
+    'https://arteus-energy.jobs.personio.de/job/2521967?apply=1&language=de',
+    'https://arteus-energy.jobs.personio.de/job/2521967?apply=&apply=&language=de',
+    'https://arteus-energy.jobs.personio.de/job/2521967?apply=&language=de&language=de',
+    'https://arteus-energy.jobs.personio.de/job/2521967?apply=&language=de&source=test',
+    'https://arteus-energy.jobs.personio.de/job/2521967?apply=&language=de#apply',
+    'https://arteus-energy.jobs.personio.de/job/2521967?apply=&language=en',
+    'https://arteus-energy.jobs.personio.de/job/2521967%2Fapply?apply=&language=de',
+    'https://arteus-energy.jobs.personio.de/job/2521967/apply?language=de',
+    'https://arteus-energy.jobs.personio.de/jobs/2521967?apply=',
+    'https://arteus-energy.jobs.personio.de/job/not-a-number?apply=',
+    'https://jobs.personio.de/job/2521967?apply=',
+    'https://arteus-energy.personio.de/job/2521967?apply=',
+  ]) assert.throws(() => detectPortal(url), url);
+});
+
 test('requires a nonempty opaque Comeet iframe token and preserves it byte-for-byte', () => {
   const wrapper = 'https://www.comeet.com/jobs/gett/A0.002/application-security-lead/46.A6A';
   assert.equal(canonicalSupportedPortalUrl(wrapper, 'comeet'), undefined);
