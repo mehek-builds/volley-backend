@@ -139,14 +139,26 @@ test('a declaration is asked even when a stored profile column could have answer
   assert.equal(ask[0].answer, '');
 });
 
-test('an answer she gave once comes back filled, and is not asked again', () => {
-  const label = 'Please rate your skill level in C++';
-  const saved = new Map([[savedAnswerKey(label), 'Advanced']]);
+test('a narrowly factual standardized score she gave once comes back filled', () => {
+  const label = 'What was your SAT score?';
+  const saved = new Map([[savedAnswerKey(label), '1510']]);
   const { ask, questions } = resolvePrescript([question({ label })], profile, saved, { company: 'Jane Street' });
   assert.equal(ask.length, 0);
-  assert.equal(questions[0].answer, 'Advanced');
+  assert.equal(questions[0].answer, '1510');
   assert.equal(questions[0].remembered, true);
   assert.equal(questions[0].reusable, true);
+});
+
+test('a remembered standardized score is asked again when the current closed options changed', () => {
+  const label = 'What was your SAT score?';
+  const saved = new Map([[savedAnswerKey(label), '1510']]);
+  const { ask, questions } = resolvePrescript([
+    question({ label, input_type: 'select', options: ['1200-1399', '1400-1499', '1500-1600'] }),
+  ], profile, saved, { company: 'Jane Street' });
+  assert.equal(ask.length, 1);
+  assert.equal(questions[0].answer, '');
+  assert.equal(questions[0].remembered, false);
+  assert.equal(questions[0].reason, 'choice_for_you');
 });
 
 test('a posting-specific answer she gave elsewhere is never carried in', () => {
@@ -236,14 +248,13 @@ test('an account with no stored onsite commitment is asked at Apply, not answere
   // And she is told which question is waiting, rather than finding an empty required field later.
   assert.ok(prescriptAskExplanation(ask[0].reason!, redwood.label).length > 20);
 
-  // Once the onboarding fact is stored it is relayed, and she is not asked again.
+  // A legacy broad location preference still lacks the exact location and cadence scope.
   const committed = resolvePrescript([redwood], {
     ...profile,
     onsite_commitment: 'listed_locations',
     onsite_locations: ['Los Angeles'],
   }, new Map(), { company: 'Redwood Materials' });
-  assert.equal(committed.ask.length, 0);
-  // Los Angeles is on her list and San Francisco is not, so the true answer is No - which is the
-  // whole reason the column carries a list rather than a boolean.
-  assert.equal(committed.questions[0].answer, 'No');
+  assert.equal(committed.ask.length, 1);
+  assert.equal(committed.questions[0].answer, '');
+  assert.equal(committed.questions[0].remembered, false);
 });

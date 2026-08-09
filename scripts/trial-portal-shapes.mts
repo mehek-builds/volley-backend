@@ -354,6 +354,46 @@ const CASES: Case[] = [
       };
     },
   },
+  {
+    id: 'cover-letter-attach',
+    defect: '11. a cover letter that is written and never attached',
+    engine: 'managed',
+    async run(ctx) {
+      /* Both uploads, because the two ways to fail here are opposite. Cresta packet
+         8142004c-3358-4538-8778-16df5e31c5bb attached nothing, and the shape next door to that is a
+         selector loose enough to put the letter into the wrong control. A run that only checked the
+         cover letter would call the second one a pass.
+
+         The verdict is read off the FIXTURE, not off filledFields: the runner pushes an upload's
+         label the moment setInputFiles returns, so its own report cannot distinguish "the file is
+         in the control" from "the call did not throw". */
+      const run = await ctx.managed(
+        'cover-letter-attach',
+        uploadActions(packetFor({
+          coverLetter: Buffer.from('%PDF-1.4\n% Litos controlled cover letter fixture\n%%EOF\n'),
+          coverLetterName: 'cover.pdf',
+        })),
+        [
+          ['cover', 'data-litos-qa-cover-file'],
+          ['resume', 'data-litos-qa-resume-file'],
+          ['extra', 'data-litos-qa-extra-file'],
+        ],
+      );
+      const attached = run.state.cover === 'cover.pdf';
+      const resumeIntact = run.state.resume === 'resume.pdf';
+      // The letter must not land in "Additional documents". Null means the decoy was never touched.
+      const misfiled = Boolean(run.state.extra);
+      return {
+        pass: attached && resumeIntact && !misfiled,
+        detail:
+          `cover letter control holds ${JSON.stringify(run.state.cover)} (wanted "cover.pdf"); `
+          + `resume control holds ${JSON.stringify(run.state.resume)}; `
+          + `decoy "Additional documents" holds ${JSON.stringify(run.state.extra)}`
+          + `${misfiled ? ' (THE LETTER WENT TO THE WRONG CONTROL)' : ''}; `
+          + `filled=${JSON.stringify(run.filledFields)} skipped=${JSON.stringify(run.skipped)}`,
+      };
+    },
+  },
 ];
 
 /* ─── action lists, taken from the real builder rather than typed here ───────────────────────── */
@@ -379,6 +419,20 @@ const schoolActions = (school: string) =>
   actionsMatching('education_school_combo', packetFor({ school }));
 const graduationYearActions = (year: string) =>
   actionsMatching('education_end_year_field', packetFor({ graduationYear: year }));
+
+/* Both file uploads, in the order the production builder emits them. Not filtered to the cover
+   letter alone: the misfiling failure - the letter landing in the resume control, or the resume in
+   the cover-letter control - is only visible when both documents are in flight, and it is the
+   failure a selector widened to fix the missing attachment would produce. */
+function uploadActions(packet: SubmissionPacket): ManagedBrowserAction[] {
+  const all = buildManagedPortalActions('controlled_test', packet);
+  const picked = all.filter((action) => action.type === 'upload');
+  const labels = picked.map((action) => action.label);
+  if (!labels.includes('resume') || !labels.includes('cover_letter')) {
+    throw new Error(`the production builder emitted ${JSON.stringify(labels)}, not a resume and a cover letter`);
+  }
+  return picked;
+}
 
 /* ─── the managed engine: the real SANDBOX_RUNNER, not a copy of it ─────────────────────────── */
 
@@ -433,7 +487,34 @@ function runManagedLocally(url: string, actions: ManagedBrowserAction[]): Sandbo
   if (run.status !== 0) {
     throw new Error(`managed runner exited ${run.status}: ${(run.stderr || '').split('\n')[0]}`);
   }
-  return JSON.parse(readFileSync(join(dir, 'stratus-result.json'), 'utf8')) as SandboxResult;
+  return readSandboxResult(dir);
+}
+
+/**
+ * THE RUNNER WRITES ONE FILE PER PHASE, AND THIS READ HAD NOT NOTICED.
+ *
+ * `managed-browser.js` used to write a single `stratus-result.json`. The emailed-security-code work
+ * made a run two-phased and it now writes `stratus-result-<phase>.json`: phase 0 is the ordinary
+ * run, phase 1 is the continuation that types the code and resubmits. Production already reads it
+ * that way (`managed-browser.js:1821` and `:1875`).
+ *
+ * The trial did not, so against the runner's real `origin/main` every managed case threw ENOENT and
+ * the score collapsed from 9 of 12 to 4 of 12 while looking like a product regression. It only kept
+ * working at all because the shared checkout it defaults to was several merges behind, which is the
+ * second time that stale checkout has produced a wrong measurement in one day.
+ *
+ * Phase 1 wins when it exists, because a continuation is the later and truer account of the run.
+ * The unsuffixed name is still accepted so the trial can be pointed at an older runner without
+ * silently reporting every case as broken, which is the failure this comment exists to prevent.
+ */
+function readSandboxResult(dir: string): SandboxResult {
+  for (const name of ['stratus-result-1.json', 'stratus-result-0.json', 'stratus-result.json']) {
+    const path = join(dir, name);
+    if (existsSync(path)) return JSON.parse(readFileSync(path, 'utf8')) as SandboxResult;
+  }
+  throw new Error(
+    'the managed runner wrote no result file; expected stratus-result-1.json, stratus-result-0.json or stratus-result.json',
+  );
 }
 
 /* ─── driver ────────────────────────────────────────────────────────────────────────────────── */

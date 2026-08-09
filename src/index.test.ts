@@ -202,13 +202,21 @@ test('/health reports ATS API submission capability without exposing secrets', a
 test('/health reports application email routing capability without exposing secrets', async () => {
   const saved = {
     domain: process.env.LITOS_APPLICATION_EMAIL_DOMAIN,
+    mailbox: process.env.LITOS_APPLICATION_EMAIL_MAILBOX,
+    managedDomain: process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN,
+    managedCanary: process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN,
+    routeMode: process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE,
     aliasSecret: process.env.LITOS_APPLICATION_EMAIL_SECRET,
     inboundSecret: process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET,
     resendKey: process.env.RESEND_API_KEY,
     resendFrom: process.env.RESEND_FROM,
   };
   try {
-    process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'apply.trylitos.com';
+    process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE = 'managed_resend';
+    process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN = 'litos-inbound.resend.app';
+    process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN = 'secretcanarytoken0123456789abcdef012345';
+    process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'legacy-domain.example';
+    process.env.LITOS_APPLICATION_EMAIL_MAILBOX = 'legacy-mailbox@example.com';
     process.env.LITOS_APPLICATION_EMAIL_SECRET = 'secret-alias-key';
     process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET = 'secret-webhook-key';
     process.env.RESEND_API_KEY = 'secret-resend-key';
@@ -231,17 +239,34 @@ test('/health reports application email routing capability without exposing secr
     assert.equal(body.application_email.domain_configured, true);
     assert.equal(body.application_email.inbound_webhook_configured, true);
     assert.equal(body.application_email.forwarding_configured, true);
+    assert.equal(body.application_email.route_mode, 'managed_resend');
+    assert.equal(body.application_email.route_mode_explicit, true);
+    assert.equal(body.application_email.invalid_route_mode_present, false);
+    assert.equal(body.application_email.ignored_legacy_domain_present, true);
+    assert.equal(body.application_email.ignored_legacy_mailbox_present, true);
+    assert.equal(body.application_email.domain, 'litos-inbound.resend.app');
     assert.equal(body.application_email.deliverable, false);
     assert.notEqual(body.application_email.status, 'ok');
     assert.ok(!res.body.includes('secret-alias-key'));
     assert.ok(!res.body.includes('secret-webhook-key'));
     assert.ok(!res.body.includes('secret-resend-key'));
+    assert.ok(!res.body.includes('secretcanarytoken0123456789abcdef012345'));
+    assert.ok(!res.body.includes('legacy-domain.example'));
+    assert.ok(!res.body.includes('legacy-mailbox@example.com'));
     await app.close();
     resetApplicationAliasDeliverabilityCache();
   } finally {
     delete process.env.LITOS_APPLICATION_EMAIL_INBOUND_ENABLED;
     if (saved.domain === undefined) delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
     else process.env.LITOS_APPLICATION_EMAIL_DOMAIN = saved.domain;
+    if (saved.mailbox === undefined) delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+    else process.env.LITOS_APPLICATION_EMAIL_MAILBOX = saved.mailbox;
+    if (saved.managedDomain === undefined) delete process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN;
+    else process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN = saved.managedDomain;
+    if (saved.managedCanary === undefined) delete process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN;
+    else process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN = saved.managedCanary;
+    if (saved.routeMode === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE;
+    else process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE = saved.routeMode;
     if (saved.aliasSecret === undefined) delete process.env.LITOS_APPLICATION_EMAIL_SECRET;
     else process.env.LITOS_APPLICATION_EMAIL_SECRET = saved.aliasSecret;
     if (saved.inboundSecret === undefined) delete process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET;

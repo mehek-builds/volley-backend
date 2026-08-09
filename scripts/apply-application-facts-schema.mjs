@@ -7,6 +7,7 @@
  * owner account, against spec._review.questions and spec._review.attention_reason. Each row below
  * is "distinct job postings the field would unblock" / "distinct companies":
  *
+ *   university start month and year .................... 7 postings / 4 companies  (added 2026-08-09)
  *   outstanding offers or deadlines .................... 5 postings / 5 companies
  *   attestation + privacy acknowledgement checkboxes ... 5 postings / 4 companies
  *   previously applied to this employer ................ 4 postings / 3 companies
@@ -39,6 +40,7 @@ const COLUMNS = {
   legal_first_name: 'text',
   preferred_first_name: 'text',
   high_school_grad_date: 'text',
+  education_start_date: 'text',
   prior_application_employers: 'jsonb',
   has_outstanding_offers: 'boolean',
   outstanding_offer_details: 'text',

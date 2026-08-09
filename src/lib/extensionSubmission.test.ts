@@ -30,6 +30,10 @@ test('only confirmed outcomes become submitted with a Chrome extension receipt',
   assert.equal(confirmed.receipt?.source, 'chrome_extension');
   assert.equal(extensionOutcomePatch('unknown', '2026-07-30T01:00:00.000Z', { finalUrl: 'https://jobs.example' }).status, 'needs_attention');
   assert.equal(extensionOutcomePatch('failed', '2026-07-30T01:00:00.000Z', { finalUrl: 'https://jobs.example' }).status, 'failed');
+  const cancelled = extensionOutcomePatch('cancelled', '2026-07-30T01:00:00.000Z', { finalUrl: 'https://jobs.example' });
+  assert.equal(cancelled.status, 'ready_to_submit');
+  assert.equal(cancelled.submission_claim_id, undefined);
+  assert.equal(cancelled.submission_claimed_at, undefined);
 });
 
 test('extension receipt links cannot execute or open local files', () => {

@@ -7,6 +7,7 @@ const indexRoute = readFileSync('src/index.ts', 'utf8');
 const schema = readFileSync('src/db/schema.ts', 'utf8');
 const route = readFileSync('src/routes/applicationEmail.ts', 'utf8');
 const service = readFileSync('src/lib/applicationEmail.ts', 'utf8');
+const routeSelector = readFileSync('src/lib/applicationEmailRoute.ts', 'utf8');
 const applicationsRoute = readFileSync('src/routes/applications.ts', 'utf8');
 
 test('application packet generation uses the Litos alias as the employer-facing email', () => {
@@ -29,6 +30,7 @@ test('dashboard resume edits preserve both immutable application email keys', ()
 test('application inbox schema and webhook route are registered', () => {
   assert.match(schema, /application_email_aliases/);
   assert.match(schema, /application_email_messages/);
+  assert.match(schema, /application_email_receiving_proofs/);
   assert.match(indexRoute, /applicationEmailRoutes/);
   assert.match(route, /\/webhooks\/application-email\/inbound/);
   assert.match(route, /inboundSecretMatches/);
@@ -41,10 +43,27 @@ test('application inbox schema and webhook route are registered', () => {
   // publishes the address the alias exists to keep out of the thread. See relayApplicantReply.
   assert.match(service, /to: \[input\.forwardTo\],[\s\S]*\{ reply_to: input\.alias \}/);
   assert.doesNotMatch(service, /reply_to: input\.inbound\.from/);
-  assert.match(service, /LITOS_APPLICATION_EMAIL_MAILBOX/);
+  assert.match(routeSelector, /LITOS_APPLICATION_EMAIL_MAILBOX/);
+  assert.match(routeSelector, /LITOS_APPLICATION_EMAIL_ROUTE_MODE/);
   assert.match(service, /\$\{mailbox\.local\}\+\$\{route\}@\$\{mailbox\.domain\}/);
   assert.match(route, /applicationEmailRouteLabel\(\)/);
   assert.match(route, /route_generation_fingerprint: applicationEmailRouteGenerationFingerprint\(\)/);
+});
+
+test('signed managed canary proof is accepted before provider content retrieval and alias routing', () => {
+  const webhook = route.slice(route.indexOf("fastify.post('/webhooks/application-email/inbound'"));
+  const endpointMatch = webhook.indexOf('signedWebhookRequestMatchesConfiguredEndpoint(request)');
+  const proof = webhook.indexOf('acceptSignedManagedReceivingCanary(event)');
+  const retrieveAndNormalize = webhook.indexOf('inboundEmailFromWebhookBody(request.body)');
+  const aliasRoute = webhook.indexOf('processInboundApplicationEmail(inbound)');
+  assert.ok(proof >= 0);
+  assert.ok(endpointMatch >= 0 && endpointMatch < proof);
+  assert.ok(retrieveAndNormalize > proof);
+  assert.ok(aliasRoute > retrieveAndNormalize);
+  assert.match(webhook, /signedByResend = resendProofSignatureMatches\(request\)/);
+  assert.match(route, /resendProofSignatureMatches[\s\S]*process\.env\.RESEND_WEBHOOK_SECRET/);
+  assert.match(webhook, /receiving_proof: 'verified'/);
+  assert.doesNotMatch(webhook, /receiving_proof:[\s\S]{0,80}(emailId|recipient|fingerprint)/);
 });
 
 test('the alias never reaches a form or a rendered resume without the deliverability precondition', () => {
@@ -102,8 +121,16 @@ test('the forwarding destination is a stored preference, not the login address',
   assert.match(service, /export async function applicationForwardingAddress/);
   assert.match(route, /\/application-email\/forwarding/);
   assert.match(route, /forwardingAddressWouldLoop\(requested\)/);
-  // Survives the migration not having run yet, because on Vercel a merge is a deploy.
-  assert.match(service, /'42703'/);
+  /* Survives the migration not having run yet, because on Vercel a merge is a deploy.
+   *
+   * Through the SHARED check, not a local `error.code === '42703'`. That literal was what this line
+   * used to pin, and it was measured on 2026-08-09 to never match: Drizzle wraps the pg error in a
+   * DrizzleQueryError whose own `code` is undefined, so the fallback could not fire and the
+   * tolerance was decorative. isUndefinedColumnError walks the cause chain. */
+  assert.match(service, /if \(isUndefinedColumnError\(error\)\) return fallback;/);
+  assert.match(route, /if \(isUndefinedColumnError\(error\)\)/);
+  assert.doesNotMatch(service, /\?\.code === '42703'/);
+  assert.doesNotMatch(route, /\?\.code === '42703'/);
   const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
   assert.doesNotMatch(runner, /forwardTo: accountEmail/);
 });

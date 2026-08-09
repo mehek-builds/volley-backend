@@ -132,6 +132,40 @@ test('route generation fingerprint changes when the alias secret rotates on the 
   }
 });
 
+test('route generation fingerprint changes when the selected route mode changes', () => {
+  const saved = {
+    mode: process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE,
+    managed: process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN,
+    domain: process.env.LITOS_APPLICATION_EMAIL_DOMAIN,
+    mailbox: process.env.LITOS_APPLICATION_EMAIL_MAILBOX,
+    secret: process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET,
+  };
+  process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN = 'same.resend.app';
+  process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'same.resend.app';
+  delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+  process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = 'same-secret';
+  try {
+    process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE = 'managed_resend';
+    const managed = applicationEmailRouteGenerationFingerprint();
+    process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE = 'custom_domain';
+    const custom = applicationEmailRouteGenerationFingerprint();
+    assert.match(managed ?? '', /^[a-f0-9]{20}$/);
+    assert.match(custom ?? '', /^[a-f0-9]{20}$/);
+    assert.notEqual(managed, custom);
+  } finally {
+    if (saved.mode === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE;
+    else process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE = saved.mode;
+    if (saved.managed === undefined) delete process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN;
+    else process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN = saved.managed;
+    if (saved.domain === undefined) delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+    else process.env.LITOS_APPLICATION_EMAIL_DOMAIN = saved.domain;
+    if (saved.mailbox === undefined) delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+    else process.env.LITOS_APPLICATION_EMAIL_MAILBOX = saved.mailbox;
+    if (saved.secret === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
+    else process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = saved.secret;
+  }
+});
+
 test('application aliases are disabled until a real secret is configured', () => {
   const previousMailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
   const previousDomain = process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
@@ -523,10 +557,12 @@ test('managed receiving rejects an alias frozen on the previous route', async ()
     domain: process.env.LITOS_APPLICATION_EMAIL_DOMAIN,
     mailbox: process.env.LITOS_APPLICATION_EMAIL_MAILBOX,
     secret: process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET,
+    mode: process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE,
   };
+  process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE = 'managed_resend';
   process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN = 'litos-inbound.resend.app';
-  delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
-  delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+  process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'rollback.example';
+  process.env.LITOS_APPLICATION_EMAIL_MAILBOX = 'rollback@mailbox.example';
   process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = 'managed-secret';
   try {
     await assert.rejects(resolveFrozenApplicantEmail({
@@ -546,6 +582,8 @@ test('managed receiving rejects an alias frozen on the previous route', async ()
     else process.env.LITOS_APPLICATION_EMAIL_MAILBOX = saved.mailbox;
     if (saved.secret === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
     else process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = saved.secret;
+    if (saved.mode === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE;
+    else process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE = saved.mode;
   }
 });
 
@@ -662,12 +700,14 @@ test('mail from the employer is forwarded in, mail from the applicant is relayed
 });
 
 test('managed receiving forwards truthfully and never treats an applicant reply as relayable', () => {
+  const savedMode = process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE;
   const savedManaged = process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN;
   const savedDomain = process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
   const savedMailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+  process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE = 'managed_resend';
   process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN = 'litos-inbound.resend.app';
-  delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
-  delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+  process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'rollback.example';
+  process.env.LITOS_APPLICATION_EMAIL_MAILBOX = 'rollback@mailbox.example';
   try {
     const alias = 'app-2222222222-abcdef012345@litos-inbound.resend.app';
     const forwarded = forwardEmailPayload({
@@ -690,6 +730,8 @@ test('managed receiving forwards truthfully and never treats an applicant reply 
     else process.env.LITOS_APPLICATION_EMAIL_DOMAIN = savedDomain;
     if (savedMailbox === undefined) delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
     else process.env.LITOS_APPLICATION_EMAIL_MAILBOX = savedMailbox;
+    if (savedMode === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE;
+    else process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE = savedMode;
   }
 });
 

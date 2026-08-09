@@ -100,10 +100,20 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
     };
     return str('current_employer') ?? experienceEmployer(parsed, currentExperience) ?? experienceEmployer(base, currentExperience);
   };
-  // When the applicant STARTED their current programme. Employer education blocks ask for this and
-  // it must never be answered from availability_date. Only the parsed education history can supply
-  // it; today no parse produces one, so the resolver refuses the field rather than guessing.
+  /* When the applicant STARTED their current programme. Employer education blocks ask for this and
+   * it must never be answered from availability_date.
+   *
+   * The DECLARED fact wins, and it is read first. Routing this to the parsed education history was
+   * correct as far as it went and answered nothing: measured on the owner's production profile on
+   * 2026-08-09, parsed_json carries no `education` array at all and no education_start_date, so the
+   * resolver refused the field on every run and "Start date month" led the 2026-08-08 blockers with
+   * 7 of the 22 stops. It is now an onboarding fact (application_profile.education_start_date), for
+   * the reason written against that column: nothing on file can derive it without inventing it.
+   *
+   * The parse remains underneath. A resume that does carry a start date should not need asking. */
   const educationStartDate = (): string | undefined => {
+    const declared = factString(appRow, 'education_start_date');
+    if (declared) return declared;
     const direct = academicStr('education_start_date');
     if (direct) return direct;
     for (const source of [parsed, base]) {

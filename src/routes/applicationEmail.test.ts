@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import type { FastifyRequest } from 'fastify';
+import {
+  inboundSecretMatches,
+  resendProofSignatureMatches,
+  signedResendCanaryEvent,
+  signedWebhookRequestMatchesConfiguredEndpoint,
+  svixSignatureMatches,
+} from './applicationEmail';
 
 test('inbound application email route scans all recipient fields', async () => {
   const route = await readFile('src/routes/applicationEmail.ts', 'utf8');
@@ -29,4 +38,155 @@ test('inbound application email route can accept envelope-only recipient payload
   const route = await readFile('src/routes/applicationEmail.ts', 'utf8');
   assert.match(route, /to:[\s\S]{0,180}\.optional\(\)/);
   assert.match(route, /\.refine\(\(value\) => allRecipients\(value\)\.length > 0/);
+});
+
+test('managed canary proof accepts only a fresh valid Resend Svix signature', () => {
+  const body = Buffer.from(JSON.stringify({
+    type: 'email.received',
+    data: { email_id: 'signed-id', to: ['hidden@managed.resend.app'] },
+  }));
+  const secretBytes = Buffer.from('test-webhook-signing-secret');
+  const secret = `whsec_${secretBytes.toString('base64')}`;
+  const id = 'msg_signature_id';
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const signature = createHmac('sha256', secretBytes)
+    .update(`${id}.${timestamp}.${body.toString('utf8')}`)
+    .digest('base64');
+  const request = {
+    body,
+    headers: {
+      'svix-id': id,
+      'svix-timestamp': timestamp,
+      'svix-signature': `v1,${signature}`,
+    },
+  } as unknown as FastifyRequest;
+  assert.equal(svixSignatureMatches(request, secret), true);
+  assert.equal(svixSignatureMatches({
+    ...request,
+    headers: { ...request.headers, 'svix-signature': 'v1,invalid' },
+  } as FastifyRequest, secret), false);
+  assert.equal(svixSignatureMatches({
+    ...request,
+    headers: { ...request.headers, 'svix-timestamp': String(Math.floor(Date.now() / 1000) - 601) },
+  } as FastifyRequest, secret), false);
+  assert.equal(svixSignatureMatches({ body, headers: {} } as unknown as FastifyRequest, secret), false);
+});
+
+test('signed Resend canary parsing uses only the signed envelope and rejects other event shapes', () => {
+  const event = signedResendCanaryEvent(Buffer.from(JSON.stringify({
+    type: 'email.received',
+    data: {
+      email_id: 'received-id',
+      to: ['Exact@Managed.Resend.App'],
+      body: 'must never be needed for proof',
+      headers: { authorization: 'must never be stored' },
+    },
+  })));
+  assert.deepEqual(event, { emailId: 'received-id', recipients: ['Exact@Managed.Resend.App'] });
+  assert.equal(signedResendCanaryEvent({ type: 'email.sent', data: { email_id: 'x', to: ['a@b.com'] } }), null);
+  assert.equal(signedResendCanaryEvent(Buffer.from('not-json')), null);
+});
+
+test('signed canary route proof requires the exact configured public host protocol and path', () => {
+  const name = 'LITOS_APPLICATION_EMAIL_WEBHOOK_URL';
+  const saved = process.env[name];
+  process.env[name] = 'https://student-outreach-backend.vercel.app/webhooks/application-email/inbound/';
+  const request = (overrides: Partial<FastifyRequest> = {}) => ({
+    headers: {
+      host: 'internal.vercel.invalid',
+      'x-forwarded-host': 'student-outreach-backend.vercel.app',
+      'x-forwarded-proto': 'https',
+    },
+    protocol: 'http',
+    url: '/webhooks/application-email/inbound',
+    ...overrides,
+  } as unknown as FastifyRequest);
+  try {
+    assert.equal(signedWebhookRequestMatchesConfiguredEndpoint(request()), true);
+    assert.equal(signedWebhookRequestMatchesConfiguredEndpoint(request({
+      headers: { 'x-forwarded-host': 'attacker.example', 'x-forwarded-proto': 'https' },
+    })), false);
+    assert.equal(signedWebhookRequestMatchesConfiguredEndpoint(request({
+      headers: { 'x-forwarded-host': 'student-outreach-backend.vercel.app', 'x-forwarded-proto': 'http' },
+    })), false);
+    assert.equal(signedWebhookRequestMatchesConfiguredEndpoint(request({
+      url: '/application-email/inbound',
+    })), false);
+    process.env[name] = 'https://student-outreach-backend.vercel.app/other';
+    assert.equal(signedWebhookRequestMatchesConfiguredEndpoint(request()), false);
+  } finally {
+    if (saved === undefined) delete process.env[name];
+    else process.env[name] = saved;
+  }
+});
+
+test('managed proof trusts only RESEND_WEBHOOK_SECRET while compatibility auth remains unchanged', () => {
+  const names = [
+    'RESEND_WEBHOOK_SECRET',
+    'LITOS_INBOUND_EMAIL_WEBHOOK_SECRET',
+    'LITOS_APPLICATION_EMAIL_WEBHOOK_SECRET',
+  ] as const;
+  const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  const body = Buffer.from(JSON.stringify({
+    type: 'email.received',
+    data: { email_id: 'isolated-proof-id', to: ['hidden@managed.resend.app'] },
+  }));
+  const id = 'msg_trust_isolation';
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const svixRequest = (signingBytes: Buffer) => {
+    const signature = createHmac('sha256', signingBytes)
+      .update(`${id}.${timestamp}.${body.toString('utf8')}`)
+      .digest('base64');
+    return {
+      body,
+      headers: {
+        'svix-id': id,
+        'svix-timestamp': timestamp,
+        'svix-signature': `v1,${signature}`,
+      },
+    } as unknown as FastifyRequest;
+  };
+  try {
+    for (const name of names) delete process.env[name];
+    const legacy = 'legacy-compatibility-secret';
+    process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET = legacy;
+
+    // A valid Svix-shaped signature made with the legacy secret can still authenticate through
+    // the compatibility chain, but it must never reach the managed proof trust boundary.
+    const legacySvixRequest = svixRequest(Buffer.from(legacy, 'base64'));
+    assert.equal(inboundSecretMatches(legacySvixRequest), true);
+    assert.equal(resendProofSignatureMatches(legacySvixRequest), false);
+
+    process.env.RESEND_WEBHOOK_SECRET = `whsec_${Buffer.from('different-resend-secret').toString('base64')}`;
+    // Existing compatibility auth gives the configured Resend secret precedence, so a wrong
+    // nonempty Resend secret also fails ordinary auth rather than falling through silently.
+    assert.equal(inboundSecretMatches(legacySvixRequest), false);
+    assert.equal(resendProofSignatureMatches(legacySvixRequest), false);
+
+    const resendBytes = 'exact-resend-secret';
+    process.env.RESEND_WEBHOOK_SECRET = `whsec_${Buffer.from(resendBytes).toString('base64')}`;
+    assert.equal(resendProofSignatureMatches(svixRequest(Buffer.from(resendBytes))), true);
+
+    // The original X-Litos compatibility HMAC remains accepted for ordinary inbound routing.
+    delete process.env.RESEND_WEBHOOK_SECRET;
+    const legacyTimestamp = String(Date.now());
+    const legacySignature = createHmac('sha256', legacy)
+      .update(`${legacyTimestamp}.${body.toString('utf8')}`)
+      .digest('hex');
+    const compatibilityRequest = {
+      body,
+      headers: {
+        'x-litos-webhook-timestamp': legacyTimestamp,
+        'x-litos-webhook-signature': legacySignature,
+      },
+    } as unknown as FastifyRequest;
+    assert.equal(inboundSecretMatches(compatibilityRequest), true);
+    assert.equal(resendProofSignatureMatches(compatibilityRequest), false);
+  } finally {
+    for (const name of names) {
+      const value = saved[name];
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
 });

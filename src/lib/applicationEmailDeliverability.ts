@@ -1,4 +1,15 @@
 import { promises as dnsPromises } from 'dns';
+import {
+  DEFAULT_INBOUND_WEBHOOK_URL,
+  applicationEmailWebhookEndpoint,
+  applicationEmailRouteSelection,
+  configuredResendManagedReceivingDomain,
+} from './applicationEmailRoute';
+import {
+  configuredManagedReceivingCanaryRecipient,
+  managedReceivingProofRouteFingerprint,
+  recentManagedReceivingProof,
+} from './applicationEmailReceivingProof';
 
 /* CAN THE ALIAS DOMAIN ACTUALLY RECEIVE MAIL, measured rather than assumed.
  *
@@ -64,15 +75,21 @@ export type ResendDomainRecord = {
   capabilities?: { receiving?: string; sending?: string };
 };
 export type ResendWebhookRecord = { endpoint?: string; events?: string[]; status?: string };
-export type ResendReceivedEmailRecord = { id?: string; to?: string[] | string };
 
 export type DeliverabilityProbes = {
   resolveMx?: (domain: string) => Promise<Array<{ exchange: string; priority: number }>>;
   resendDomains?: () => Promise<ResendDomainRecord[]>;
   resendWebhooks?: () => Promise<ResendWebhookRecord[]>;
-  resendReceivedEmail?: (id: string) => Promise<ResendReceivedEmailRecord>;
+  managedReceivingProof?: () => Promise<boolean>;
   now?: () => number;
 };
+
+export class ResendApiHttpError extends Error {
+  constructor(readonly path: string, readonly status: number) {
+    super(`Resend ${path} answered ${status}`);
+    this.name = 'ResendApiHttpError';
+  }
+}
 
 // One hour on a good result, five minutes on a bad one. The asymmetry is the point: a working
 // inbox does not stop working every few minutes, but a broken one is expected to be repaired, and
@@ -83,7 +100,7 @@ const UNDELIVERABLE_TTL_MS = 5 * 60 * 1000;
 const DNS_TIMEOUT_MS = 3_000;
 const RESEND_TIMEOUT_MS = 5_000;
 
-export const DEFAULT_INBOUND_WEBHOOK_URL = 'https://student-outreach-backend.vercel.app/webhooks/application-email/inbound';
+export { DEFAULT_INBOUND_WEBHOOK_URL } from './applicationEmailRoute';
 
 type CacheEntry = { domain: string | null; configSignature: string; expiresAt: number; value: AliasDeliverability };
 
@@ -95,42 +112,9 @@ export function resetApplicationAliasDeliverabilityCache(): void {
   inFlight = null;
 }
 
-function configuredMailboxDomain(): string | null {
-  const mailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX?.trim().toLowerCase();
-  const match = mailbox?.match(/^[^@\s]+@([a-z0-9.-]+\.[a-z]{2,})$/i);
-  return match ? match[1] : null;
-}
-
-function configuredAliasDomain(): string | null {
-  const domain = process.env.LITOS_APPLICATION_EMAIL_DOMAIN?.trim().toLowerCase();
-  return domain && /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(domain) ? domain : null;
-}
-
-const RESEND_MANAGED_RECEIVING_DOMAIN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.resend\.app$/i;
-
-export function configuredResendManagedReceivingDomain(): string | null {
-  const domain = process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN?.trim().toLowerCase();
-  return domain && RESEND_MANAGED_RECEIVING_DOMAIN.test(domain) ? domain : null;
-}
-
-function managedReceivingModeRequested(): boolean {
-  return Boolean(process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN?.trim());
-}
-
-function customAliasRouteRequested(): boolean {
-  return Boolean(
-    process.env.LITOS_APPLICATION_EMAIL_MAILBOX?.trim()
-      || process.env.LITOS_APPLICATION_EMAIL_DOMAIN?.trim(),
-  );
-}
-
 /** The domain employers would actually send to, whichever alias shape is configured. */
 export function aliasDomain(): string | null {
-  if (managedReceivingModeRequested()) {
-    if (customAliasRouteRequested()) return null;
-    return configuredResendManagedReceivingDomain();
-  }
-  return configuredMailboxDomain() ?? configuredAliasDomain();
+  return applicationEmailRouteSelection().domain;
 }
 
 /* The explicit configuration signal, and it can only ever say NO.
@@ -155,7 +139,7 @@ export function applicationEmailForwardingConfigured(): boolean {
 }
 
 export function inboundWebhookEndpoint(): string {
-  return process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_URL?.trim() || DEFAULT_INBOUND_WEBHOOK_URL;
+  return applicationEmailWebhookEndpoint();
 }
 
 function withTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
@@ -184,21 +168,10 @@ async function resendGet<T>(path: string): Promise<T[]> {
     headers: { Authorization: `Bearer ${key}` },
     signal: AbortSignal.timeout(RESEND_TIMEOUT_MS),
   });
-  if (!response.ok) throw new Error(`Resend ${path} answered ${response.status}`);
+  if (!response.ok) throw new ResendApiHttpError(path, response.status);
   const body = await response.json() as { data?: T[] } | T[];
   if (Array.isArray(body)) return body;
   return Array.isArray(body?.data) ? body.data : [];
-}
-
-async function resendGetOne<T>(path: string, errorLabel: string): Promise<T> {
-  const key = process.env.RESEND_API_KEY?.trim();
-  if (!key) throw new Error('RESEND_API_KEY is not set');
-  const response = await fetch(`https://api.resend.com${path}`, {
-    headers: { Authorization: `Bearer ${key}` },
-    signal: AbortSignal.timeout(RESEND_TIMEOUT_MS),
-  });
-  if (!response.ok) throw new Error(`Resend ${errorLabel} answered ${response.status}`);
-  return response.json() as Promise<T>;
 }
 
 export function listResendDomains(): Promise<ResendDomainRecord[]> {
@@ -207,10 +180,6 @@ export function listResendDomains(): Promise<ResendDomainRecord[]> {
 
 export function listResendWebhooks(): Promise<ResendWebhookRecord[]> {
   return resendGet<ResendWebhookRecord>('/webhooks');
-}
-
-export function retrieveResendReceivedEmail(id: string): Promise<ResendReceivedEmailRecord> {
-  return resendGetOne<ResendReceivedEmailRecord>(`/emails/receiving/${encodeURIComponent(id)}`, 'received-email lookup');
 }
 
 export function resendDomainStatus(domains: readonly ResendDomainRecord[], domain: string): string | null {
@@ -296,21 +265,15 @@ async function probe(probes: DeliverabilityProbes): Promise<AliasDeliverability>
   if (!applicationEmailForwardingConfigured()) return { ...base, reason: 'forwarding_not_configured' };
 
   if (configuredResendManagedReceivingDomain() === domain) {
-    const canaryId = process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID?.trim();
-    if (!canaryId) return { ...base, reason: 'managed_receiving_proof_missing' };
+    const canaryRecipient = configuredManagedReceivingCanaryRecipient();
+    const proofFingerprint = managedReceivingProofRouteFingerprint();
+    if (!canaryRecipient || !proofFingerprint) return { ...base, reason: 'managed_receiving_proof_missing' };
     try {
-      const retrieve = probes.resendReceivedEmail ?? retrieveResendReceivedEmail;
-      const canary = await retrieve(canaryId);
-      const recipients = (Array.isArray(canary.to) ? canary.to : [canary.to])
-        .filter((value): value is string => typeof value === 'string')
-        .map((value) => value.trim().toLowerCase());
-      const recipientMatches = recipients.some((address) => address.endsWith(`@${domain}`)
-        && address.slice(0, -(domain.length + 1)).length > 0);
-      if (canary.id !== canaryId || !recipientMatches) {
-        return { ...base, reason: 'managed_receiving_proof_mismatch' };
-      }
+      const proved = await (probes.managedReceivingProof
+        ?? (() => recentManagedReceivingProof({ now: new Date(probes.now?.() ?? Date.now()) })))();
+      if (!proved) return { ...base, reason: 'managed_receiving_proof_mismatch' };
     } catch (error) {
-      return { ...base, reason: 'check_unavailable', detail: describeManagedProofError(error, canaryId) };
+      return { ...base, reason: 'check_unavailable', detail: describeManagedProofError(error) };
     }
 
     try {
@@ -319,7 +282,21 @@ async function probe(probes: DeliverabilityProbes): Promise<AliasDeliverability>
       if (!routed) return { ...base, reason: 'inbound_route_missing' };
       return { ...base, deliverable: true, reason: 'deliverable', inbound_route_configured: true };
     } catch (error) {
-      return { ...base, reason: 'check_unavailable', detail: describeManagedProofError(error, canaryId) };
+      // A 401/403 says only that this sending key cannot inspect webhook administration. The fresh
+      // durable proof already establishes that Resend delivered `email.received` to the exact URL
+      // using the exact signing secret. Other failures remain unknown and therefore fail closed.
+      if (error instanceof ResendApiHttpError
+        && error.path === '/webhooks'
+        && (error.status === 401 || error.status === 403)) {
+        return {
+          ...base,
+          deliverable: true,
+          reason: 'deliverable',
+          inbound_route_configured: true,
+          detail: 'Webhook listing is unauthorized; using fresh signed route evidence',
+        };
+      }
+      return { ...base, reason: 'check_unavailable', detail: describeManagedProofError(error) };
     }
   }
 
@@ -435,13 +412,17 @@ function describe(error: unknown): string {
   return String(error instanceof Error ? error.message : error).slice(0, 200);
 }
 
-function describeManagedProofError(error: unknown, canaryId: string): string {
+function describeManagedProofError(error: unknown): string {
   const raw = String(error instanceof Error ? error.message : error);
-  const encoded = encodeURIComponent(canaryId);
-  return raw
-    .replaceAll(canaryId, '[redacted]')
-    .replaceAll(encoded, '[redacted]')
-    .slice(0, 200);
+  const secrets = [
+    process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN?.trim(),
+    process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID?.trim(),
+    configuredManagedReceivingCanaryRecipient(),
+  ].filter((value): value is string => Boolean(value)).sort((left, right) => right.length - left.length);
+  return secrets.reduce(
+    (value, secret) => value.replaceAll(secret, '[redacted]').replaceAll(encodeURIComponent(secret), '[redacted]'),
+    raw,
+  ).slice(0, 200);
 }
 
 /**
@@ -454,10 +435,10 @@ export async function applicationAliasDeliverability(
 ): Promise<AliasDeliverability> {
   const now = probes.now?.() ?? Date.now();
   const domain = aliasDomain();
-  const managedCanaryId = process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID?.trim();
   const configSignature = `${domain ?? ''}|${inboundAliasDisabled()}|${applicationEmailForwardingConfigured()}`
+    + `|${process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE?.trim().toLowerCase() ?? ''}`
     + `|${process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN?.trim().toLowerCase() ?? ''}`
-    + `|${process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID?.trim() ?? ''}`;
+    + `|${managedReceivingProofRouteFingerprint() ?? ''}`;
   if (cached && cached.domain === domain && cached.configSignature === configSignature && cached.expiresAt > now) return cached.value;
   if (inFlight) return inFlight;
   inFlight = probe(probes)
@@ -465,7 +446,7 @@ export async function applicationAliasDeliverability(
       deliverable: false,
       domain,
       reason: 'check_unavailable',
-      detail: managedCanaryId ? describeManagedProofError(error, managedCanaryId) : describe(error),
+      detail: configuredResendManagedReceivingDomain() ? describeManagedProofError(error) : describe(error),
       mx_hosts: [],
       mx_provider: 'unknown',
       mx_provider_agrees: false,

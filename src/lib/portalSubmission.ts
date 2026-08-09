@@ -6,6 +6,7 @@ import {
   isLegalConsentQuestion,
   normalizeReviewQuestionLabel,
   resolveKnownAnswer,
+  ROUTINE_APPLICANT_CONSENT_QUESTION,
   type ApplicationProfileLike,
 } from './questionDiscovery';
 import {
@@ -15,6 +16,7 @@ import {
   resolveProfileField,
 } from './profileFieldResolution';
 import type { Locator } from 'playwright-core';
+import { browserApplicationCapability } from './browserApplicationCapabilities';
 
 // Portal field ids legitimately contain CSS-syntax characters (Greenhouse uses UUIDs, others use
 // dots and colons), so they are matched with the [id="..."] attribute form rather than #id. Inside
@@ -39,7 +41,18 @@ type PortalFamily =
   | 'jobvite'
   | 'icims'
   | 'oraclecloud'
-  | 'ultipro';
+  | 'ultipro'
+  | 'recruitee'
+  | 'teamtailor'
+  | 'personio'
+  | 'pinpoint'
+  | 'comeet'
+  | 'zoho_recruit'
+  | 'bullhorn'
+  | 'sap_successfactors'
+  | 'oracle_taleo'
+  | 'adp_recruiting'
+  | 'avature';
 type ControlledPortal =
   | 'controlled_test'
   | 'controlled_lever'
@@ -51,9 +64,11 @@ type ControlledPortal =
   | 'controlled_rippling'
   | 'controlled_breezy'
   | 'controlled_bamboohr';
-export type SupportedPortal = PortalFamily | ControlledPortal;
+type ManualPortal = 'manual_recruitee';
+export type SupportedPortal = PortalFamily | ControlledPortal | ManualPortal;
 
 function portalFamily(portal: SupportedPortal): PortalFamily {
+  if (portal === 'manual_recruitee') return 'recruitee';
   if (portal === 'controlled_test') return 'greenhouse';
   if (portal === 'controlled_lever') return 'lever';
   if (portal === 'controlled_ashby') return 'ashby';
@@ -88,7 +103,8 @@ function portalFamily(portal: SupportedPortal): PortalFamily {
 // compile time and not only at runtime. That is what lets the jobs board's own union be checked
 // against this one by the type checker instead of by a test that someone can forget to run.
 type MultiStepFamily = 'paylocity' | 'smartrecruiters';
-type CaptchaGatedFamily = 'jazzhr' | 'bamboohr';
+type CaptchaGatedFamily = 'jazzhr' | 'bamboohr' | 'comeet';
+type ConsentGatedFamily = 'teamtailor';
 
 const MULTI_STEP_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
   ['paylocity', 'smartrecruiters'] satisfies MultiStepFamily[],
@@ -102,7 +118,25 @@ const MULTI_STEP_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
 // loaded. BambooHR's fields are otherwise clean and fully fillable, which is exactly why the ceiling
 // has to be written down - the form LOOKS like a one-run submit and is not.
 const CAPTCHA_GATED_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
-  ['jazzhr', 'bamboohr'] satisfies CaptchaGatedFamily[],
+  ['jazzhr', 'bamboohr', 'comeet'] satisfies CaptchaGatedFamily[],
+);
+
+// These forms are fillable, but their final action belongs to the applicant. Personio tenants can
+// mark fields required without the native required attribute, so the shared readiness reader cannot
+// prove the form complete. Pinpoint puts a required privacy-processing consent directly before
+// submit. Both were confirmed on two unrelated public tenants on 2026-08-09. Keeping them out of
+// autonomous submission also keeps them out of polling through AUTONOMOUS_PORTAL_FAMILIES.
+type ManualFinalReviewFamily = 'personio' | 'pinpoint';
+
+const MANUAL_FINAL_REVIEW_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
+  ['personio', 'pinpoint'] satisfies ManualFinalReviewFamily[],
+);
+
+// Teamtailor puts an applicant privacy acknowledgement beside the send control on every live
+// tenant inspected. The checkbox is not consistently marked required in HTML, so the generic
+// readiness scan cannot prove that an unchecked control is safe. Fill the factual fields and stop.
+const CONSENT_GATED_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
+  ['teamtailor'] satisfies ConsentGatedFamily[],
 );
 
 // Portals where there is no application form to fill AT ALL until a human passes a gate that only
@@ -129,10 +163,10 @@ const CAPTCHA_GATED_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
 // Being in this set is NOT a claim the platform is unsupportable forever. It is a claim that today
 // Litos can recognise the page and explain it, which is worth more to a job seeker than a fill that
 // silently does nothing.
-type AccountWalledFamily = 'jobvite' | 'icims' | 'oraclecloud' | 'ultipro';
+type AccountWalledFamily = 'jobvite' | 'icims' | 'oraclecloud' | 'ultipro' | 'sap_successfactors' | 'oracle_taleo' | 'adp_recruiting' | 'avature';
 
 const ACCOUNT_WALLED_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
-  ['jobvite', 'icims', 'oraclecloud', 'ultipro'] satisfies AccountWalledFamily[],
+  ['jobvite', 'icims', 'oraclecloud', 'ultipro', 'sap_successfactors', 'oracle_taleo', 'adp_recruiting', 'avature'] satisfies AccountWalledFamily[],
 );
 
 export function isAccountWalledFamily(portal: SupportedPortal): boolean {
@@ -154,10 +188,30 @@ export function captchaProviderForFamily(portal: SupportedPortal): CaptchaProvid
 }
 
 export function portalCanAutoSubmit(portal: SupportedPortal): boolean {
+  if (portal === 'manual_recruitee') return false;
   const family = portalFamily(portal);
+  if (['zoho_recruit', 'bullhorn', 'sap_successfactors', 'oracle_taleo', 'adp_recruiting', 'jazzhr'].includes(family)) {
+    return browserApplicationCapability(family).programmaticSubmit;
+  }
   return !MULTI_STEP_FAMILIES.has(family)
     && !CAPTCHA_GATED_FAMILIES.has(family)
+    && !CONSENT_GATED_FAMILIES.has(family)
+    && !MANUAL_FINAL_REVIEW_FAMILIES.has(family)
     && !ACCOUNT_WALLED_FAMILIES.has(family);
+}
+
+export type ManagedPortalReceiptCapability = 'confirmation_possible' | 'unavailable_before_handoff';
+
+/**
+ * Whether the unattended backend path can honestly attempt to read an employer confirmation.
+ *
+ * This is deliberately derived from the same deny lists as submission. SmartRecruiters stops on
+ * its multi-step flow, while Jobvite and iCIMS stop before the application form opens. None of the
+ * three can produce a backend receipt because the backend is forbidden from performing the action
+ * that could create one. A later attended browser confirmation is a different channel.
+ */
+export function managedPortalReceiptCapability(portal: SupportedPortal): ManagedPortalReceiptCapability {
+  return portalCanAutoSubmit(portal) ? 'confirmation_possible' : 'unavailable_before_handoff';
 }
 
 // The portal families Litos can carry all the way to a confirmation on its own.
@@ -171,7 +225,7 @@ export function portalCanAutoSubmit(portal: SupportedPortal): boolean {
 // discovers the last step needs her anyway. Fewer jobs that all work beats more jobs that mostly do.
 export type AutonomousPortalFamily = Exclude<
   PortalFamily,
-  MultiStepFamily | CaptchaGatedFamily | AccountWalledFamily
+  MultiStepFamily | CaptchaGatedFamily | ConsentGatedFamily | ManualFinalReviewFamily | AccountWalledFamily
 >;
 
 export const AUTONOMOUS_PORTAL_FAMILIES = [
@@ -185,6 +239,9 @@ export const AUTONOMOUS_PORTAL_FAMILIES = [
   // choice, or an account wall.
   'rippling',
   'breezy',
+  // Recruitee is a single-page form. Its optional invisible hCaptcha is handled by the shared
+  // pre-submit challenge probe, and any tenant agreement remains an empty required-field blocker.
+  'recruitee',
 ] as const satisfies readonly AutonomousPortalFamily[];
 
 export function isAutonomousPortalFamily(value: string): value is AutonomousPortalFamily {
@@ -204,11 +261,22 @@ const ACCOUNT_WALLED_REASONS: Record<AccountWalledFamily, string> = {
   oraclecloud:
     'This company emails you a code and asks you to agree to their terms before the application form opens. Both of those need you, so Litos stops here.',
   ultipro:
-    'Litos can find this job but cannot read this company’s application form yet. Everything you need is ready to paste in, so open the page and apply there.',
+    'This company requires an applicant account or asks you to make an AI-scoring consent choice before the application form opens. Litos leaves both to you.',
+  sap_successfactors:
+    'This company asks you to sign in or create a SuccessFactors account before the application form opens. Litos leaves that account and every later legal choice to you.',
+  oracle_taleo:
+    'This Taleo application asks you to accept the employer legal notice before any application fields open. Litos leaves that decision and the later account flow to you.',
+  adp_recruiting:
+    'This ADP Recruiting application requires an account before any application fields open. Litos leaves the account and every later legal choice to you.',
+  avature:
+    'This company routes the application through an Avature login or tenant-specific resume intake. Litos leaves that account and every later choice to you.',
 };
 
 export function portalHandoffReason(portal: SupportedPortal): string | null {
   const family = portalFamily(portal);
+  if (portal === 'manual_recruitee') {
+    return 'Litos filled this Recruitee application, but this tenant uses an inline form whose final controls have not been validated for automatic submission. Review the form and send it yourself.';
+  }
   // Checked FIRST. An account-walled portal never reached a form, so telling the student "Litos
   // filled everything in" (which both sentences below do) would be a plain lie about work that
   // never happened, and she would go looking for filled fields that are not there.
@@ -218,8 +286,23 @@ export function portalHandoffReason(portal: SupportedPortal): string | null {
   if (CAPTCHA_GATED_FAMILIES.has(family)) {
     return 'This company’s application page asks you to prove you are human. Litos filled everything in, so all that is left is that check and the send button.';
   }
+  if (CONSENT_GATED_FAMILIES.has(family)) {
+    return 'This company asks you to confirm its applicant privacy terms before sending. Litos filled the form but left that choice and the send button to you.';
+  }
   if (MULTI_STEP_FAMILIES.has(family)) {
     return 'Litos filled in this application and stopped on the last page. That page asks you to confirm the details are true, and it can ask about your background and your right to work, so those answers need to be yours.';
+  }
+  if (family === 'personio') {
+    return 'Litos filled this Personio application, but Personio does not expose every required field to the final safety check. Review the form and send it yourself.';
+  }
+  if (family === 'pinpoint') {
+    return 'Litos filled this Pinpoint application and left the privacy-processing choice for you. Review the notice, make your choice, and send it yourself.';
+  }
+  if (family === 'zoho_recruit') {
+    return 'Litos filled the public Zoho Recruit form but left every privacy, retention, race and gender question, statement you must swear to, CAPTCHA and send control to you.';
+  }
+  if (family === 'bullhorn') {
+    return 'Litos filled the Bullhorn form but left every legal choice and the send button to you because each company can customize this portal.';
   }
   return null;
 }
@@ -233,14 +316,26 @@ export function portalHandoffReason(portal: SupportedPortal): string | null {
 // not match what they were told and costs them the trust to believe the next message.
 export function unattendedHandoffReason(portal: SupportedPortal): string | null {
   const family = portalFamily(portal);
+  if (portal === 'manual_recruitee') {
+    return 'This Recruitee tenant uses an inline application whose final controls need review. Open it when you have a minute and Litos will fill it in for you.';
+  }
   if (ACCOUNT_WALLED_FAMILIES.has(family)) {
     return ACCOUNT_WALLED_REASONS[family as AccountWalledFamily];
   }
   if (CAPTCHA_GATED_FAMILIES.has(family)) {
     return 'This company asks you to prove you are human before it will take an application, so Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.';
   }
+  if (CONSENT_GATED_FAMILIES.has(family)) {
+    return 'This company asks you to confirm its applicant privacy terms before it will take the application, so Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.';
+  }
   if (MULTI_STEP_FAMILIES.has(family)) {
     return 'This company asks its questions over several pages, and the last one needs answers only you can give. Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.';
+  }
+  if (MANUAL_FINAL_REVIEW_FAMILIES.has(family)) {
+    return 'This company requires a final review on its application page, so Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.';
+  }
+  if (family === 'zoho_recruit' || family === 'bullhorn') {
+    return 'This company uses a customizable application form whose final legal controls need you, so Litos cannot send it while you are away. Open it and Litos will fill the factual fields.';
   }
   return null;
 }
@@ -441,6 +536,8 @@ function receiptReference(body: string): string | undefined {
     ?? body.match(/application\s*(?:id|number|#)\s*[:#]?\s*([A-Z0-9-]{5,})/i)?.[1];
 }
 
+const RECEIPT_PROOF_RE = /thank you|thanks for your application|application (?:has been )?(?:submitted|received)|we received your application|your application has been successfully submitted|all done![\s\S]{0,160}application|success/i;
+
 // Bounded auto-wait for every managed action. Playwright defaults to 30s, so a single selector
 // that never matches (e.g. a Greenhouse posting proxied through a branded domain whose form does
 // not use the classic `job_application[...]` field names) used to burn the full 30s per action and
@@ -474,10 +571,50 @@ function managedFillByLabel(
   actions.push({ type: 'fillByLabelText', text, value, label, optional, timeout });
 }
 
+/* AN ASHBY FIELD HANDLE NAMES THE WRAPPER, NOT THE CONTROL.
+ *
+ * `data-field-path` sits on the `<div class="_fieldEntry_...">` around a question, and the input
+ * inside it has neither an id nor a name - the DOM is written out in full above
+ * ASHBY_LOCATION_SELECTOR, read off the live Deepgram form. So discovery reports
+ * `[data-field-path="407cc864-..."]` as the field's durable identity, which is true and useful, and
+ * a `fill` aimed at it targets a div and cannot type anything.
+ *
+ * Measured on the Deepgram packet of 2026-08-08: "Expected Graduation Year" was resolved, carried a
+ * real answer, produced exactly one action - a fill against that div - and came back
+ * required-and-empty. It got no label fallback either, because a present selector makes the
+ * reviewed-question loop `continue` before pushAshbyQuestionTextFallbackActions is reached, so the
+ * one attempt that could not work was also the only attempt.
+ *
+ * Descending is the same move ASHBY_LOCATION_SELECTOR already makes by hand for the one field
+ * somebody noticed, generalised to every field the same attribute names. The wrapper is kept as the
+ * last alternative rather than dropped: the runner takes the first match, and a board that ever put
+ * the attribute on the control itself would still resolve.
+ */
+const ASHBY_FIELD_PATH_SELECTOR = /^\[data-field-path=(?:"[^"]*"|'[^']*'|[^\]]*)\]$/;
+
+/** browserbase.ts refuses to send a longer selector than this, and drops the optional action. */
+const MANAGED_SELECTOR_MAX_LENGTH = 500;
+
+export function ashbyControlWithinFieldPath(selector: string): string {
+  if (!ASHBY_FIELD_PATH_SELECTOR.test(selector)) return selector;
+  const descended = [
+    `${selector} input[role="combobox"]`,
+    `${selector} input`,
+    `${selector} textarea`,
+    `${selector} select`,
+    selector,
+  ].join(', ');
+  // The managed provider rejects a selector over MANAGED_SELECTOR_MAX_LENGTH outright, and an
+  // over-long alternation would take the field from "filled by the wrong element" to "not sent at
+  // all". A field path that long has never been observed; the guard is here so it cannot be the
+  // thing that breaks if one ever is.
+  return descended.length <= MANAGED_SELECTOR_MAX_LENGTH ? descended : selector;
+}
+
 function durablePortalSelector(selector: string | undefined): string | undefined {
   const trimmed = selector?.trim();
   if (!trimmed || trimmed.length > 500 || trimmed.startsWith('[data-litos-discovered-')) return undefined;
-  return trimmed;
+  return ashbyControlWithinFieldPath(trimmed);
 }
 
 function reviewQuestionPortalSelector(item: SubmissionPacket['questions'][number]): string | undefined {
@@ -1000,6 +1137,33 @@ function shouldSkipReviewedConsentQuestion(questionText: string): boolean {
   return isLegalConsentQuestion(questionText) && /demographic data survey/i.test(questionText);
 }
 
+function shouldSkipPortalConsentQuestion(family: PortalFamily, questionText: string): boolean {
+  if (family === 'zoho_recruit' || family === 'bullhorn') {
+    return isLegalConsentQuestion(questionText)
+      || ROUTINE_APPLICANT_CONSENT_QUESTION.test(questionText)
+      || /\b(?:privacy|retain|retention|store|sensitive|race|ethnicity|gender|sex|age|religion|religious|marital|pregnan(?:cy|t)|national\s+origin|genetic\s+(?:data|information)|disab(?:ility|led)|veteran|eeo|equal employment|attest|certif(?:y|ication)|acknowledg(?:e|ment)|captcha)\b/i.test(questionText);
+  }
+  if (family !== 'recruitee' && family !== 'teamtailor') return false;
+  return isLegalConsentQuestion(questionText)
+    || ROUTINE_APPLICANT_CONSENT_QUESTION.test(questionText)
+    || /\b(?:keep|retain|store|use)\b[\s\S]{0,120}\b(?:my|your)\s+(?:information|data)\b[\s\S]{0,120}\b(?:future|other)\s+(?:jobs?|positions?|vacancies|opportunities)\b/i.test(questionText);
+}
+
+function reviewedQuestionSafetyContext(
+  item: SubmissionPacket['questions'][number],
+  packet: SubmissionPacket,
+): string {
+  const selector = reviewQuestionPortalSelector(item) ?? '';
+  const inputType = reviewQuestionPortalInputType(item) ?? '';
+  const atsIdentity = item.atsApiField ?? '';
+  const selectorId = selector.match(/\[id=["']([^"']+)["']\]/i)?.[1];
+  const options = [
+    ...(packet.fieldOptions?.[selector] ?? []),
+    ...(selectorId ? packet.fieldOptions?.[selectorId] ?? [] : []),
+  ];
+  return [item.question, selector, inputType, atsIdentity, ...options].join(' ');
+}
+
 // Whether reviewed questions may be sent to a given provider's runner.
 //
 // Both providers now can. This was briefly false for 'managed' as a containment measure: that
@@ -1048,8 +1212,6 @@ const GREENHOUSE_PHONE_SELECTOR =
   `#phone, input[name="job_application[phone]"], ${SEMANTIC_PHONE_SELECTOR}`;
 const GREENHOUSE_RESUME_SELECTOR =
   '#resume, input[type="file"][name="job_application[resume]"], input[type="file"][id*="resume" i], input[type="file"][name*="resume" i], input[type="file"][aria-label*="resume" i], label:has-text("Resume") input[type="file"]';
-const GREENHOUSE_CANDIDATE_PRIVACY_CHECKBOX_SELECTOR =
-  'input[type="checkbox"][required][description*="Candidate Privacy Policy" i], input[type="checkbox"][required][description*="Candidate Privacy Notice" i], input[type="checkbox"][required][description*="Applicant Privacy Policy" i], input[type="checkbox"][required][description*="Applicant Privacy Notice" i]';
 const ASHBY_PHONE_SELECTOR =
   `#phone, input[name="phone"], input[name="_systemfield_phone"], ${SEMANTIC_PHONE_SELECTOR}`;
 
@@ -1068,7 +1230,7 @@ const ASHBY_PHONE_SELECTOR =
 // needs_attention/blocked rather than a false "submitted" - the same safe-degradation behavior
 // as every other blocker on this path, never a silent partial success.
 const SMARTRECRUITERS_RESUME_SELECTOR = 'spl-dropzone[data-test="resume-upload"] input[type="file"]';
-const SMARTRECRUITERS_PHONE_SELECTOR = '[aria-label="Phone number"]';
+const SMARTRECRUITERS_PHONE_SELECTOR = 'spl-phone-field input[aria-label="Phone number"]';
 const SMARTRECRUITERS_FIRST_NAME_SELECTOR = 'spl-input#first-name-input input';
 const SMARTRECRUITERS_LAST_NAME_SELECTOR = 'spl-input#last-name-input input';
 const SMARTRECRUITERS_EMAIL_SELECTOR = 'spl-input#email-input input';
@@ -1079,6 +1241,9 @@ const CONTROLLED_SMARTRECRUITERS_FIRST_NAME_SELECTOR = '[id="first-name-input"]'
 const CONTROLLED_SMARTRECRUITERS_LAST_NAME_SELECTOR = '[id="last-name-input"]';
 const CONTROLLED_SMARTRECRUITERS_EMAIL_SELECTOR = '[id="email-input"]';
 const CONTROLLED_SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR = '[id="confirm-email-input"]';
+// The controlled QA fixture is ordinary light DOM. Keep its compatibility selector isolated from
+// the live adapter so it can never broaden a real SmartRecruiters page-wide phone match.
+const CONTROLLED_SMARTRECRUITERS_PHONE_SELECTOR = '[aria-label="Phone number"]';
 const CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR = '[id="linkedin-input"]';
 const CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR = '[id="website-input"]';
 /* THE ASHBY LOCATION CONTROL, and why the obvious selector matches nothing.
@@ -1155,7 +1320,7 @@ const ASHBY_QUESTION_TEXT_SELECTOR_LIMIT = 9;
  * `actions.length > 120`, BEFORE the browser opens. Nothing runs, nothing is filled, and the caller
  * gets an error instead of a result. Keep this number equal to that one.
  */
-export const MANAGED_ACTION_LIMIT = 120;
+export const MANAGED_ACTION_LIMIT = Number(process.env.LITOS_MEASURE_ACTION_LIMIT ?? 120);
 const CONFIRM_AFTER_FILL_FIELDS = new Set(['school', 'degree']);
 
 function pushGreenhouseManagedPreflightActions(actions: ManagedBrowserAction[]) {
@@ -1591,7 +1756,11 @@ function pushGreenhouseQuestionComboboxActions(
     );
   }
   const valueLimit = comboboxValueLimit(questionText, contextText);
-  for (const [index, value] of greenhouseComboboxValuesForQuestion(questionText, answer, contextText).slice(0, valueLimit).entries()) {
+  // The label's own escape hatch, appended last, exactly as the label-scoped builder does it. This
+  // branch is the one a question with a durable selector actually takes, so without it the hatch
+  // was unreachable for precisely those questions. See greenhouseComboboxCandidateValues.
+  const candidates = greenhouseComboboxCandidateValues(questionText, answer, contextText, valueLimit);
+  for (const [index, value] of candidates.entries()) {
     for (const [selectorIndex, inputSelector] of selectors.entries()) {
       managedGreenhouseScopedReactSelectFill(
         actions,
@@ -1659,6 +1828,38 @@ export function escapeHatchOptionFor(questionText: string): string | undefined {
   return ESCAPE_HATCH_LABEL_RE.test(questionText.replace(/\s+/g, ' ')) ? 'Other' : undefined;
 }
 
+/**
+ * The candidate values for one combobox, with the label's own escape hatch appended last.
+ *
+ * SHARED BY BOTH COMBOBOX BUILDERS, because it was not, and that is what undid the fix above.
+ * There are two of them - one scoped by the control's own selector
+ * (pushGreenhouseQuestionComboboxActions) and one scoped by the employer's label text
+ * (pushGreenhouseQuestionComboboxLabelActions) - and the hatch was added only to the second.
+ *
+ * That is invisible until discovery starts reporting a durable selector for a question, at which
+ * point buildManagedPortalActions takes the id-scoped branch and `continue`s, and the label-scoped
+ * builder is never reached. Measured on Virtu, 2026-08-08: "Which university are you currently
+ * attending? Select "Other" if not listed" was answered "Other" on the run before, then went back
+ * to required-and-empty on both runs after, with an action list carrying only "University of
+ * Southern California" and "University of Southern California, Viterbi School of Engineering" -
+ * neither of which is on that form's fifteen-school list. Not the action budget: the trimmed and
+ * untrimmed lists for that packet are identical here.
+ *
+ * The slice happens before the append, exactly as it does below, so the hatch can only ever be
+ * reached after every real value has failed to match.
+ */
+function greenhouseComboboxCandidateValues(
+  questionText: string,
+  answer: string,
+  contextText: string,
+  valueLimit: number,
+): string[] {
+  const sliced = greenhouseComboboxValuesForQuestion(questionText, answer, contextText).slice(0, valueLimit);
+  const escapeHatch = escapeHatchOptionFor(questionText);
+  if (!escapeHatch || sliced.some((value) => value.trim().toLowerCase() === escapeHatch.toLowerCase())) return sliced;
+  return [...sliced, escapeHatch];
+}
+
 function pushGreenhouseQuestionComboboxLabelActions(
   actions: ManagedBrowserAction[],
   questionText: string,
@@ -1669,15 +1870,10 @@ function pushGreenhouseQuestionComboboxLabelActions(
   if (!isGreenhouseReactSelectQuestion(questionText)) return;
   let index = 0;
   const valueLimit = comboboxValueLimit(questionText, contextText);
-  // The slice is left exactly as it was and the hatch is only APPENDED. Running the pair through
-  // uniqueDefined instead also dropped the empty strings the slice can contain, which promoted a
-  // value from past the limit into first place and emitted a fill where the old code deliberately
-  // emitted none.
-  const sliced = greenhouseComboboxValuesForQuestion(questionText, answer, contextText).slice(0, valueLimit);
-  const escapeHatch = escapeHatchOptionFor(questionText);
-  const values = escapeHatch && !sliced.some((value) => value.trim().toLowerCase() === escapeHatch.toLowerCase())
-    ? [...sliced, escapeHatch]
-    : sliced;
+  // The slice happens inside, before the hatch is appended. Running the pair through uniqueDefined
+  // instead also dropped the empty strings the slice can contain, which promoted a value from past
+  // the limit into first place and emitted a fill where the old code deliberately emitted none.
+  const values = greenhouseComboboxCandidateValues(questionText, answer, contextText, valueLimit);
   for (const selector of greenhouseQuestionComboboxSelectors(questionText).slice(0, QUESTION_COMBOBOX_SELECTOR_LIMIT)) {
     for (const value of values) {
       const compactKnownLabel = /^(?:greenhouse_fixed_question|greenhouse_known_question|greenhouse_akuna_attestation)$/.test(labelPrefix);
@@ -1783,21 +1979,69 @@ function greenhouseCheckboxOptionSelectors(questionText: string, answer: string)
   return [];
 }
 
+/**
+ * TICK A CHECKBOX, ONCE.
+ *
+ * A CLICK IS A TOGGLE, AND THAT MAKES THIS THE ONE PLACE THE SELECTOR LADDER IS NOT FREE.
+ *
+ * Everywhere else in this file, alternatives are cheap: managedFill hands the runner one action
+ * carrying a comma-joined list, the runner takes the FIRST match, and a fill that happens twice
+ * writes the same string twice. So the habit is to widen the ladder whenever a selector misses.
+ *
+ * This function used to follow that habit with one action per alternative, and on a checkbox it is
+ * destructive: stratus runs `locator.click()`, which toggles, so N alternatives that all resolve to
+ * the SAME box leave it checked for odd N and unchecked for even N.
+ *
+ * Measured on the live Cloudflare form, 2026-08-09 (job-boards.greenhouse.io/embed/job_app?for=
+ * cloudflare&token=8052785). Four of the five click actions production sent resolved to the single
+ * input#question_68005616[]_731478256 - the fixed candidate-privacy click, the discovered id, the
+ * :left-of alternative and the name-shape alternative - and replaying them in order gives
+ * checked, unchecked, checked, unchecked. The 2026-08-08 packet's own preview screenshot shows that
+ * box empty on an otherwise completed form, and the employer's validator called it
+ * "required and is still empty". Nothing was mis-matched; it was matched four times.
+ *
+ * So the ladder is kept and the toggling is not: every alternative goes into ONE selector, the way
+ * managedFill has always done it, and the runner ticks the first that resolves. The direct
+ * Playwright path never had this bug because it uses `.check()`, which is idempotent, and breaks
+ * after the first hit (fillReviewedQuestions below).
+ *
+ * `leading` is the control's own discovered selector when there is one. It goes first because an id
+ * read off this very form beats every shape-based guess after it.
+ */
 function pushGreenhouseCheckboxOptionActions(
   actions: ManagedBrowserAction[],
   questionText: string,
   answer: string,
   labelPrefix: string,
+  leading: readonly string[] = [],
 ) {
-  for (const [index, selector] of greenhouseCheckboxOptionSelectors(questionText, answer).entries()) {
-    actions.push({
-      type: 'click',
-      selector,
-      label: `${labelPrefix}_checkbox:${index}:${questionText.slice(0, 80)}`,
-      optional: true,
-      timeout: MANAGED_FILL_TIMEOUT_MS,
-    });
+  const selectors = [...leading, ...greenhouseCheckboxOptionSelectors(questionText, answer)]
+    .map((selector) => selector.trim())
+    .filter(Boolean);
+  /* As many alternatives as fit, in order, and never a second action.
+   *
+   * browserbase.ts refuses a selector over MANAGED_SELECTOR_MAX_LENGTH and silently drops the
+   * optional action, and the Databricks export-control ladder joins to just under 500 characters,
+   * so this bound is reached in practice rather than in theory. Dropping the tail is the right
+   * degradation: the alternatives are ordered best-first, so what is lost is the least likely to
+   * have matched - whereas spilling into a second action would put the box back into the toggling
+   * this whole function exists to stop. */
+  const kept: string[] = [];
+  let length = 0;
+  for (const selector of new Set(selectors)) {
+    const cost = selector.length + (kept.length > 0 ? 2 : 0);
+    if (kept.length > 0 && length + cost > MANAGED_SELECTOR_MAX_LENGTH) continue;
+    kept.push(selector);
+    length += cost;
   }
+  if (kept.length === 0) return;
+  actions.push({
+    type: 'click',
+    selector: kept.join(', '),
+    label: `${labelPrefix}_checkbox:${questionText.slice(0, 80)}`,
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
 }
 
 function questionFillShouldPressEnter(questionText: string): boolean {
@@ -2018,17 +2262,6 @@ function pushGreenhouseAkunaSafeTextActions(actions: ManagedBrowserAction[], pac
   }
 }
 
-function pushGreenhouseAkunaFixedAttestationActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
-  if (!packetLooksAkuna(packet)) return;
-  const packetQuestionContext = packet.jdText ?? packet.questions.map((item) => item.question).join('\n');
-  for (const label of [
-    'I certify that all information I have provided',
-    'resume must be submitted in PDF format',
-  ]) {
-    pushGreenhouseQuestionComboboxLabelActions(actions, label, 'Yes', 'greenhouse_akuna_attestation', packetQuestionContext);
-  }
-}
-
 function packetLooksAkuna(packet: SubmissionPacket): boolean {
   return /\bakuna\b/i.test(packet.jdText ?? '')
     || packet.questions.some((item) => /\bakuna\b/i.test(item.question));
@@ -2039,16 +2272,30 @@ function packetLooksDatabricks(packet: SubmissionPacket): boolean {
     || packet.questions.some((item) => /\bdatabricks\b/i.test(`${item.question}\n${item.answer}`));
 }
 
+/**
+ * The graduation value this particular control is asking for.
+ *
+ * THE NARROW TESTS RUN FIRST, and the order is the whole correctness argument. The date branch
+ * matches on `expected graduat(ion|e)` with nothing after it, so it also matches "Expected
+ * Graduation Year" and "Expected Graduation Month" - and it used to be first, so it won. Measured
+ * on the Deepgram packet of 2026-08-08: discovery had resolved "Expected Graduation Year" to
+ * "2028", correctly, and this function overwrote it with packet.graduationDate, "May 2028". A month
+ * name in a year field is a wrong answer typed onto a real employer's form, and the field that
+ * would have carried it is the one the run then reported as required-and-empty.
+ *
+ * Month before year before date, because that is specific-to-general. "Graduation month" cannot be
+ * a date question; "graduation date" can never be more specific than the other two.
+ */
 function greenhouseReviewedQuestionAnswer(item: SubmissionPacket['questions'][number], packet: SubmissionPacket): string {
   const questionText = normalizeReviewQuestionLabel(item.question);
-  if (/\bgraduat(?:ion|e)\s+date\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bexpected\s+graduat(?:ion|e)\b/i.test(questionText)) {
-    return packet.graduationDate?.trim() || item.answer;
-  }
-  if (/\bgraduat(?:ion|e)\s+month\b|\bwhat\s+is\s+your\s+graduation\s+month\b/i.test(questionText)) {
+  if (/\bgraduat(?:ion|e)\s+month\b|\bwhat\s+is\s+your\s+graduation\s+month\b|\bmonth\s+of\s+graduation\b/i.test(questionText)) {
     return packet.graduationMonth?.trim() || item.answer;
   }
-  if (/\bgraduat(?:ion|e)\s+year\b|\bwhat\s+is\s+your\s+graduation\s+year\b|\bexpected\s+graduat(?:ion|e)\s+year\b/i.test(questionText)) {
+  if (/\bgraduat(?:ion|e)\s+year\b|\bwhat\s+is\s+your\s+graduation\s+year\b|\byear\s+of\s+graduation\b/i.test(questionText)) {
     return packet.graduationYear?.trim() || item.answer;
+  }
+  if (/\bgraduat(?:ion|e)\s+date\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bexpected\s+graduat(?:ion|e)\b/i.test(questionText)) {
+    return packet.graduationDate?.trim() || item.answer;
   }
   return item.answer;
 }
@@ -2478,6 +2725,38 @@ const BAMBOOHR_RESUME_SELECTOR = 'input[type="file"][aria-label="file-input"]';
 // present, so the same never-matching declaration as Breezy/JazzHR applies rather than a guess.
 const BAMBOOHR_COVER_LETTER_SELECTOR = 'input[type="file"][name="bambooCoverLetterThatDoesNotExist"]';
 
+// Captured from rebuy and Optiweb Recruitee forms on 2026-08-09.
+const RECRUITEE_RESUME_SELECTOR = 'input[type="file"][name="candidate.cv"]';
+const RECRUITEE_COVER_LETTER_SELECTOR = 'input[type="file"][name="candidate.coverLetterFile"]';
+
+// Captured from Teamtailor and AICOM tenant forms on 2026-08-09.
+const TEAMTAILOR_RESUME_SELECTOR = '#upload_resume_field input[type="file"]';
+// Neither captured Teamtailor form exposed a dedicated cover-letter file input. Never let a broad
+// file selector replace the resume with the cover letter.
+const TEAMTAILOR_COVER_LETTER_SELECTOR = 'input[type="file"][name="teamtailorCoverLetterThatDoesNotExist"]';
+
+// Personio, Pinpoint, and Comeet were captured on two unrelated live tenants per family on
+// 2026-08-09. Only stable platform-owned names and ids are used here. None of the three is allowed
+// to auto-submit: Personio does not expose requiredness as native HTML, Pinpoint requires a privacy
+// processing choice, and Comeet renders reCAPTCHA on both captured forms.
+const PERSONIO_RESUME_SELECTOR = 'input[type="file"][name="documents.cv"]';
+const PERSONIO_COVER_LETTER_SELECTOR = 'input[type="file"][name="documents.cover-letter"]';
+const PINPOINT_RESUME_SELECTOR = 'input[type="file"][name="application_form[application][cv]"]';
+const PINPOINT_COVER_LETTER_SELECTOR = 'input[type="file"][name="application_form[application][cover_letter]"]';
+const COMEET_RESUME_SELECTOR = 'input[type="file"][name="cv"]';
+const COMEET_COVER_LETTER_SELECTOR = 'input[type="file"][name="coverLetter"]';
+
+// Zoho Recruit renders the application inside the public detail route. Field ids are tenant data,
+// while the Candidate API names and the resume attachment marker are stable across the two live
+// tenants inspected. Consent, retention, EEO and CAPTCHA controls are deliberately absent.
+const ZOHO_RECRUIT_RESUME_SELECTOR = 'input[type="file"][name*="Resume" i], input[type="file"][data-zcqa*="resume" i]';
+const ZOHO_RECRUIT_COVER_LETTER_SELECTOR = 'input[type="file"][name="zohoCoverLetterThatDoesNotExist"]';
+
+// Bullhorn OSCP is self-hosted but its stock Angular form uses these form-control names. There is
+// only one stock file input and app.json names it resume. Custom legal controls are never mapped.
+const BULLHORN_RESUME_SELECTOR = 'input[type="file"][formcontrolname="resume"], input[type="file"][name="resume"]';
+const BULLHORN_COVER_LETTER_SELECTOR = 'input[type="file"][name="bullhornCoverLetterThatDoesNotExist"]';
+
 // NOT filled: input[name^="nickname_"], BambooHR's honeypot, labelled "Please leave this field
 // blank" and concealed the same zero-height-ancestor way Breezy's is.
 //
@@ -2512,7 +2791,19 @@ const COVER_LETTER_UPLOAD_SELECTORS: Record<SupportedPortal, string> = {
   controlled_breezy: BREEZY_COVER_LETTER_SELECTOR,
   bamboohr: BAMBOOHR_COVER_LETTER_SELECTOR,
   controlled_bamboohr: BAMBOOHR_COVER_LETTER_SELECTOR,
-  // The account-walled four never reach a form, so there is no file input of any kind to find. A
+  recruitee: RECRUITEE_COVER_LETTER_SELECTOR,
+  manual_recruitee: RECRUITEE_COVER_LETTER_SELECTOR,
+  teamtailor: TEAMTAILOR_COVER_LETTER_SELECTOR,
+  personio: PERSONIO_COVER_LETTER_SELECTOR,
+  pinpoint: PINPOINT_COVER_LETTER_SELECTOR,
+  comeet: COMEET_COVER_LETTER_SELECTOR,
+  zoho_recruit: ZOHO_RECRUIT_COVER_LETTER_SELECTOR,
+  bullhorn: BULLHORN_COVER_LETTER_SELECTOR,
+  sap_successfactors: 'input[type="file"][name="noFormReachableWithoutSuccessFactorsAccount"]',
+  oracle_taleo: 'input[type="file"][name="noFormReachableWithoutTaleoLegalAcceptance"]',
+  adp_recruiting: 'input[type="file"][name="noFormReachableWithoutAdpAccount"]',
+  avature: 'input[type="file"][name="noFormReachableWithoutAvatureAccount"]',
+  // These account-walled families never reach a safe form, so there is no file input to claim. A
   // never-matching selector is the honest answer to "can this portal accept a cover-letter file"
   // here, and it keeps hasCoverLetterUpload() from having to special-case them.
   jobvite: 'input[type="file"][name="noFormReachableWithoutConsent"]',
@@ -2627,6 +2918,61 @@ export function managedResultFilledFields(result: ManagedBrowserResult): string[
   return [...fields];
 }
 
+/* THE ANSWERS THE RUNNER TOLD US IT COULD NOT LAND, WHICH NOBODY WAS READING.
+ *
+ * `result.skipped` has always come back from the managed provider and this repo has never looked at
+ * it: `skipped_reasons` is written as `[]` at routes/resume.ts and set nowhere else. Most of it is
+ * noise - one line per optional selector that matched nothing, and a large Greenhouse packet fans
+ * out well over a hundred of those - which is presumably why it was left alone.
+ *
+ * A minority of it is not noise at all. These are the lines where Litos HAD an answer, typed or
+ * chose it, and the control did not keep it:
+ *
+ *   question:overall gpa: value did not persist after fill
+ *   question_combo:0:0:which university...: no option matched "University of Southern California",
+ *     left for you to choose
+ *
+ * That is the whole R-076 shape, reported by the one component that can see it, and thrown away.
+ * Measured on the run of 2026-08-08: Point72's "What degree are you currently pursuing?" and both
+ * Virtu runs' "Which university are you currently attending?" reached the applicant as a bare
+ * '"..." is required and is still empty' with no explanation and nothing to act on, while the
+ * runner had already said exactly what happened and why.
+ *
+ * The filter is the shape of the sentence, not a list of labels: every one of these suffixes is
+ * emitted only after a value was actually produced for the control. A selector that matched
+ * nothing ("nothing matched <selector>") stays filtered out, because it means the alternative was
+ * not needed, not that an answer was lost.
+ */
+const MANAGED_ANSWER_LOSS_SUFFIX =
+  /:\s*(?:no option matched\b|(?:choice )?value did not persist\b|left the answer already on the form\b|choice option not found\b)/i;
+
+/** Strip the action-label scaffolding off the front, leaving the employer's own question. */
+function managedActionLabelQuestion(label: string): string {
+  return label
+    .replace(/^[a-z_]+/i, '')
+    .replace(/^(?::\d+)+/, '')
+    .replace(/^:/, '')
+    .trim();
+}
+
+export function managedAnswerLossReasons(result: Pick<ManagedBrowserResult, 'skipped'>): string[] {
+  const out = new Set<string>();
+  for (const entry of result.skipped ?? []) {
+    const text = (entry ?? '').trim();
+    const match = MANAGED_ANSWER_LOSS_SUFFIX.exec(text);
+    if (!match || match.index === undefined) continue;
+    // The provider keys these on the ACTION label ("question_combo:0:0:which university..."), which
+    // is an internal name. The applicant is shown the employer's question and the runner's own
+    // words about it, and nothing about how many selectors were tried.
+    const question = managedActionLabelQuestion(text.slice(0, match.index));
+    const detail = text.slice(match.index).replace(/^:\s*/, '').trim();
+    out.add(question
+      ? `Litos could not leave this answer on the form, so it is yours to finish: "${question.slice(0, 60)}" (${detail.slice(0, 120)})`
+      : `Litos could not leave an answer on the form: ${detail.slice(0, 160)}`);
+  }
+  return [...out];
+}
+
 // Fixed-field fills only (name/email/phone/location/links/resume) - shared by
 // buildManagedPortalActions (the real fill+submit run) and buildManagedDiscoveryActions (a
 // cheaper first pass that also asks the runner to scan the page for custom questions). Splitting
@@ -2701,13 +3047,6 @@ function pushFixedFieldActions(
       managedUpload(actions, selector, 'resume', packet.resume, packet.resumeName);
     }
     managedUpload(actions, coverLetterUploadSelector(portal), 'cover_letter', packet.coverLetter, packet.coverLetterName);
-    actions.push({
-      type: 'click',
-      selector: GREENHOUSE_CANDIDATE_PRIVACY_CHECKBOX_SELECTOR,
-      label: 'greenhouse_candidate_privacy_acknowledgement',
-      optional: true,
-      timeout: MANAGED_FILL_TIMEOUT_MS,
-    });
   } else if (family === 'lever') {
     managedFill(actions, 'input[name="name"]', packet.fullName, 'name', false);
     managedFill(actions, 'input[name="email"]', packet.email, 'email', false);
@@ -2737,7 +3076,7 @@ function pushFixedFieldActions(
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_LAST_NAME_SELECTOR : SMARTRECRUITERS_LAST_NAME_SELECTOR, parts.slice(1).join(' '), 'last_name');
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_EMAIL_SELECTOR : SMARTRECRUITERS_EMAIL_SELECTOR, packet.email, 'email');
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR : SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR, packet.email, 'confirm_email');
-    managedFill(actions, SMARTRECRUITERS_PHONE_SELECTOR, phoneForPortalField(portal, packet.phone), 'phone');
+    managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_PHONE_SELECTOR : SMARTRECRUITERS_PHONE_SELECTOR, phoneForPortalField(portal, packet.phone), 'phone');
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR : SMARTRECRUITERS_LINKEDIN_SELECTOR, packet.linkedinUrl, 'linkedin');
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR : SMARTRECRUITERS_WEBSITE_SELECTOR, packet.portfolioUrl ?? packet.githubUrl, 'portfolio');
     managedUpload(actions, SMARTRECRUITERS_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
@@ -2842,6 +3181,76 @@ function pushFixedFieldActions(
     // streetAddress.value and zip.value (the packet carries only city, so inventing them is out),
     // desiredPay (R-031 governs salary and is currency-gated, handled by the reviewed-question path),
     // and educationLevelId. All surface as required-field blockers for the human.
+  } else if (family === 'recruitee') {
+    managedFill(actions, 'input[name="candidate.name"]', packet.fullName, 'name');
+    managedFill(actions, 'input[name="candidate.email"]', packet.email, 'email');
+    managedFill(actions, 'input[name="candidate.phone"]', packet.phone, 'phone');
+    managedUpload(actions, RECRUITEE_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    managedUpload(actions, RECRUITEE_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
+    // Tenant agreements, SMS consent, and CAPTCHA controls are never mapped.
+  } else if (family === 'teamtailor') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    managedFill(actions, 'input[name="candidate[first_name]"]', parts[0], 'first_name');
+    managedFill(actions, 'input[name="candidate[last_name]"]', parts.slice(1).join(' '), 'last_name');
+    managedFill(actions, 'input[name="candidate[email]"]', packet.email, 'email');
+    managedFill(actions, 'input[name="candidate[phone]"]', packet.phone, 'phone');
+    managedUpload(actions, TEAMTAILOR_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    managedUpload(actions, TEAMTAILOR_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
+    // candidate[consent_given] and candidate[consent_given_future_jobs] stay with the applicant.
+  } else if (family === 'personio') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    managedFill(actions, 'input[name="first_name"]', parts[0], 'first_name');
+    managedFill(actions, 'input[name="last_name"]', parts.slice(1).join(' '), 'last_name');
+    managedFill(actions, 'input[name="email"]', packet.email, 'email');
+    managedFill(actions, 'input[name="phone"]', packet.phone, 'phone');
+    managedFill(actions, 'input[name="location"]', packet.city, 'location');
+    managedFill(actions, 'input[name="public_profile"]', packet.linkedinUrl ?? packet.portfolioUrl, 'public_profile');
+    managedUpload(actions, PERSONIO_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    managedUpload(actions, PERSONIO_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
+    // Do not touch salary_expectations, available_from, or custom_attribute_* fields. Their labels
+    // and answer semantics are tenant-defined and the discovery/review path owns them.
+  } else if (family === 'pinpoint') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    managedFill(actions, 'input[name="application_form[application][first_name]"]', parts[0], 'first_name');
+    managedFill(actions, 'input[name="application_form[application][last_name]"]', parts.slice(1).join(' '), 'last_name');
+    managedFill(actions, 'input[name="application_form[application][email]"]', packet.email, 'email');
+    managedFill(actions, 'input[name="application_form[application][phone]"]', packet.phone, 'phone');
+    managedFill(actions, 'input[name="application_form[application][town]"]', packet.city, 'location');
+    managedFill(actions, 'input[name="application_form[application][linkedin_url]"][type="text"]', packet.linkedinUrl, 'linkedin');
+    managedUpload(actions, PINPOINT_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    managedUpload(actions, PINPOINT_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
+    // application[process_information] is the required privacy-processing consent. It is never
+    // checked here, even when a reviewed question happens to contain affirmative wording.
+  } else if (family === 'comeet') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    managedFill(actions, 'input[name="firstName"]', parts[0], 'first_name');
+    managedFill(actions, 'input[name="lastName"]', parts.slice(1).join(' '), 'last_name');
+    managedFill(actions, 'input[name="email"]', packet.email, 'email');
+    managedFill(actions, 'input[name="phone"]', packet.phone, 'phone');
+    managedFill(actions, 'input[name="websiteUrl"]', packet.portfolioUrl ?? packet.linkedinUrl ?? packet.githubUrl, 'portfolio');
+    managedUpload(actions, COMEET_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    managedUpload(actions, COMEET_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
+    // The phone-country combobox, personal note, and tenant questions stay in the generic reviewed
+    // question path. Both captured tenants render g-recaptcha-response, so submit stays gated.
+  } else if (family === 'zoho_recruit') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    managedFill(actions, 'input[name="First_Name"], input[name="firstName"]', parts[0], 'first_name');
+    managedFill(actions, 'input[name="Last_Name"], input[name="lastName"]', parts.slice(1).join(' '), 'last_name');
+    managedFill(actions, 'input[name="Email"], input[name="email"]', packet.email, 'email');
+    managedFill(actions, 'input[name="Phone"], input[name="phone"]', packet.phone, 'phone');
+    managedUpload(actions, ZOHO_RECRUIT_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    // Candidate consent, retention, EEO, attestations and CAPTCHA are tenant-configurable and stay
+    // untouched even when they look like ordinary required controls.
+  } else if (family === 'bullhorn') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    managedFill(actions, 'input[formcontrolname="firstName"], input[name="firstName"]', parts[0], 'first_name');
+    managedFill(actions, 'input[formcontrolname="lastName"], input[name="lastName"]', parts.slice(1).join(' '), 'last_name');
+    managedFill(actions, 'input[formcontrolname="email"], input[name="email"]', packet.email, 'email');
+    managedFill(actions, 'input[formcontrolname="phone"], input[name="phone"]', packet.phone, 'phone');
+    managedUpload(actions, BULLHORN_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    // OSCP may be changed by each employer. Never map a custom control from one tenant onto another.
+  } else if (family === 'sap_successfactors') {
+    // The public job page transitions into an account wall. No identity or credential is entered.
   } else {
     const parts = packet.fullName.trim().split(/\s+/);
     const firstName = parts[0] ?? '';
@@ -2950,23 +3359,37 @@ export function buildManagedPortalActions(
   packet: SubmissionPacket,
   submit = false,
 ): ManagedBrowserAction[] {
+  const family = portalFamily(portal);
+  // A packet is untrusted input at this boundary. Account-walled portals have no application form,
+  // so even a reviewed question carrying a malicious selector must not create an action against the
+  // login, CAPTCHA, or privacy gate that happens to be on screen.
+  if (ACCOUNT_WALLED_FAMILIES.has(family)) return [];
   const actions: ManagedBrowserAction[] = [];
   pushFixedFieldActions(actions, portal, packet);
-  if (portalFamily(portal) === 'greenhouse') {
+  // These three integrations are structurally fixed-field-only. SuccessFactors has no reachable
+  // form at all, while Zoho Recruit and Bullhorn have only the exact identity and resume controls
+  // mapped above. A stale or malicious reviewed-question packet must never widen that surface.
+  if (family === 'sap_successfactors') return actions;
+  // SmartRecruiters capability also ends after the exact captured first-page controls. Returning
+  // here is stronger than filtering legal-looking questions: no packet selector or input type can
+  // widen the adapter into later tenant-specific steps.
+  if (family === 'smartrecruiters' || family === 'jazzhr' || family === 'bamboohr') return actions;
+  const mayReplayReviewedQuestions = family !== 'zoho_recruit' && family !== 'bullhorn';
+  if (family === 'greenhouse') {
     pushGreenhouseAkunaSafeTextActions(actions, packet);
-    pushGreenhouseAkunaFixedAttestationActions(actions, packet);
     pushGreenhouseKnownQuestionAliases(actions, packet, 'akunaRequired');
   }
   // Reviewed questions include stored attestations and EEO decline-style answers when present.
   // The managed runner scopes every choice match to this question's container and verifies text
   // values after filling, so a missing or unaccepted value returns as a blocker instead of being
   // reported as completed.
-  for (const item of canFillReviewedQuestions('managed') ? packet.questions : []) {
+  for (const item of canFillReviewedQuestions('managed') && mayReplayReviewedQuestions ? packet.questions : []) {
     const answer = greenhouseReviewedQuestionAnswer(item, packet);
     if (!answer.trim()) continue;
     const questionText = normalizeReviewQuestionLabel(item.question);
     if (!questionText) continue;
     if (shouldSkipReviewedConsentQuestion(questionText)) continue;
+    if (shouldSkipPortalConsentQuestion(portalFamily(portal), reviewedQuestionSafetyContext(item, packet))) continue;
     const rawPortalSelector = reviewQuestionPortalSelector(item);
     const portalInputType = reviewQuestionPortalInputType(item);
     const portalSelector = durablePortalSelector(rawPortalSelector);
@@ -2987,14 +3410,10 @@ export function buildManagedPortalActions(
       }
       if (/^(?:checkbox|radio)$/i.test(portalInputType ?? '')) {
         if (portalFamily(portal) === 'greenhouse') {
-          actions.push({
-            type: 'click',
-            selector: portalSelector,
-            label: `question_choice_selector:${questionText.slice(0, 80)}`,
-            optional: true,
-            timeout: MANAGED_FILL_TIMEOUT_MS,
-          });
-          pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
+          // The discovered selector leads the same single click as the shape alternatives rather
+          // than being a click of its own. Two clicks on one checkbox untick it; see
+          // pushGreenhouseCheckboxOptionActions.
+          pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question', [portalSelector]);
         } else {
           /* A choice question on a non-Greenhouse board used to fall out of this branch having
            * pushed NOTHING, and that was invisible for as long as no choice question could get here:
@@ -3165,7 +3584,7 @@ export function readManagedReceipt(result: ManagedBrowserResult): {
   referenceId?: string;
 } {
   const body = result.text.replace(/\s+/g, ' ').trim();
-  if (!/thank you|application (?:has been )?(?:submitted|received)|we received your application|success/i.test(body)) {
+  if (!RECEIPT_PROOF_RE.test(body)) {
     throw new Error('The company never showed a confirmation we could check');
   }
   return { confirmationText: body.slice(0, 1000), finalUrl: result.url, referenceId: receiptReference(body) };
@@ -3175,14 +3594,16 @@ const HOSTS: Record<PortalFamily, RegExp> = {
   greenhouse: /(^|\.)greenhouse\.io$/i,
   lever: /(^|\.)lever\.co$/i,
   ashby: /(^|\.)ashbyhq\.com$/i,
-  smartrecruiters: /(^|\.)smartrecruiters\.com$/i,
+  // The public posting and one-click form both live on this exact host. API, vendor marketing,
+  // authentication, and customer product hosts must never inherit application capability.
+  smartrecruiters: /^jobs\.smartrecruiters\.com$/i,
   // apply.* only. A bare workable.com match also claimed www.workable.com, which is the vendor's
   // marketing site, so a mistyped portal_url became a "supported portal" and got a fill run against
   // a page with no application on it.
   workable: /^apply\.workable\.com$/i,
-  // Every JazzHR tenant is its own subdomain of applytojob.com (ticketmanager.applytojob.com, ...),
-  // so the leading (^|\.) form matches the tenant without an allowlist of employers.
-  jazzhr: /(^|\.)applytojob\.com$/i,
+  // Only the two tenants inspected live are trusted. The shared applytojob.com suffix is not proof
+  // that an arbitrary subdomain exposes the same application controls.
+  jazzhr: /^(?:utilidata|foundationai)\.applytojob\.com$/i,
   // Tenant subdomains are arbitrary (2000recruiting.paylocity.com), so the host cannot be pinned the
   // way Workable's can - but it MUST exclude access.paylocity.com, which is Paylocity's employee
   // login. Litos filling an identity into a credential form is not a thing that should be reachable
@@ -3199,18 +3620,38 @@ const HOSTS: Record<PortalFamily, RegExp> = {
   // Same shape: tenant subdomains, and www.bamboohr.com is the marketing site. Note BambooHR's OWN
   // careers page runs on Greenhouse and lives at www.bamboohr.com/careers/application, which the
   // numeric-id path check below excludes without needing to special-case the host.
-  bamboohr: /(^|\.)bamboohr\.com$/i,
+  bamboohr: /^(?:mpathic2|prentkeromich)\.bamboohr\.com$/i,
   // jobs.* only. The bare jobvite.com is the vendor's marketing site.
   jobvite: /^jobs\.jobvite\.com$/i,
-  // Tenant subdomains (careers-uci, jobs-express). www.icims.com and community.icims.com are the
-  // vendor's own site and its documentation; the /jobs/ path check excludes both.
-  icims: /(^|\.)icims\.com$/i,
+  // One tenant label only. Excludes vendor marketing, community, login, and API hosts before the
+  // path rule is even considered. Real tenants include jobs-express and externalhourly-omnihotels.
+  icims: /^(?!(?:www|community|login|api)\.)[a-z0-9-]+\.icims\.com$/i,
   // The widest host space of any portal here BY FAR - oraclecloud.com hosts every Oracle Cloud
   // application there is, not just recruiting. The path check is doing the real work, and this entry
   // would be actively dangerous without it.
-  oraclecloud: /(^|\.)oraclecloud\.com$/i,
+  oraclecloud: /^(?:iawmqy\.fa\.ocs\.oraclecloud\.com|fa-etxx-saasfaprod1\.fa\.ocs\.oraclecloud\.com|enterpriseplatform\.dell\.com)$/i,
   // Pinned exactly. The bare ultipro.com is the employee login for UKG's HR product.
   ultipro: /^recruiting\.ultipro\.com$/i,
+  // One tenant label only. Excludes www.recruitee.com and the vendor's own non-careers services.
+  recruitee: /^(?!www\.)[^.]+\.recruitee\.com$/i,
+  // career.teamtailor.com is Teamtailor's own public tenant. Product, API, and docs hosts are out.
+  teamtailor: /^(?!(?:www|app|api|partner|docs|support)\.)[^.]+\.teamtailor\.com$/i,
+  // Personio tenants use {tenant}.jobs.personio.de or .com. Requiring the jobs label prevents a
+  // company or employee product on another Personio host from being mistaken for an application.
+  personio: /^[a-z0-9-]+\.jobs\.personio\.(?:de|com)$/i,
+  pinpoint: /^(?!www\.)[a-z0-9-]+\.pinpointhq\.com$/i,
+  // The public www.comeet.com posting is only a wrapper. The actual form is a token-bearing iframe
+  // on www.comeet.co, and that token cannot be derived from the posting URL. Only the real form URL
+  // is supported so the backend never promises a fill it cannot reach.
+  comeet: /^www\.comeet\.co$/i,
+  zoho_recruit: /^[^.]+\.zohorecruit\.(?:com|eu|in)$/i,
+  // Bullhorn's OSCP is intentionally self-hosted. Only exact tenants inspected live are claimed;
+  // no arbitrary marketing domain becomes a supported ATS because it happens to link to Bullhorn.
+  bullhorn: /^(?:www\.serverlogic\.com|www\.staffingsolutionsenterprises\.com)$/i,
+  sap_successfactors: /^career\d+\.successfactors\.(?:com|eu)$/i,
+  oracle_taleo: /^(?:fa007|aa270)\.taleo\.net$/i,
+  adp_recruiting: /^myjobs\.adp\.com$/i,
+  avature: /^(?:(?:maximus|sandboxxerox)\.avature\.net|jobs\.ea\.com)$/i,
 };
 
 // Host alone is not enough for a portal whose host space also serves a login page, a marketing site
@@ -3221,6 +3662,10 @@ const HOSTS: Record<PortalFamily, RegExp> = {
 // A family absent from this map is matched on host alone, which is the old behaviour for the
 // portals that were already here.
 const APPLY_PATHS: Partial<Record<PortalFamily, RegExp>> = {
+  // Either a public posting or the separate one-click form. No API, company-listing, or account
+  // route on the same host is allowed through.
+  smartrecruiters: /^\/(?:[a-z0-9._-]+\/\d{6,}(?:-[^/]+)?|oneclick-ui\/company\/[a-z0-9._-]+\/publication\/[0-9a-f-]{36})\/?$/i,
+  jazzhr: /^\/apply\/jobs\/details\/[A-Za-z0-9]{10}\/?$/,
   // access.paylocity.com is an employee login on the same host space. Litos filling an identity into
   // a credential form is not a thing that should be reachable from a bad URL.
   paylocity: /^\/recruiting\/jobs\/(apply|details)\//i,
@@ -3228,14 +3673,95 @@ const APPLY_PATHS: Partial<Record<PortalFamily, RegExp>> = {
   breezy: /^\/p\//i,
   // Numeric job id. Excludes www.bamboohr.com/careers/application (their own Greenhouse-backed
   // careers page) and the /careers/{department}-team marketing routes, without an ad-hoc host rule.
-  bamboohr: /^\/careers\/\d+/i,
-  jobvite: /^\/[^/]+\/job\//i,
-  icims: /^\/jobs\//i,
+  bamboohr: /^\/careers\/\d+\/?$/i,
+  jobvite: /^\/[a-z0-9._-]+\/job\/[a-z0-9]+(?:\/apply)?\/?$/i,
+  icims: /^\/jobs\/\d+\/[a-z0-9%._~-]+\/(?:job|login)\/?$/i,
   // The one that matters most. Without it this family would claim every Oracle Cloud application
   // under the sun, including ones that are somebody's payroll or ERP login.
-  oraclecloud: /^\/hcmUI\/CandidateExperience\//i,
-  ultipro: /^\/[^/]+\/JobBoard\//i,
+  oraclecloud: /^\/hcmUI\/CandidateExperience\/(?:[a-z]{2}\/)?sites\/[a-z0-9_-]+\/(?:job|opportunity)\/\d+\/?$/i,
+  ultipro: /^\/[a-z0-9._-]+\/JobBoard\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/OpportunityDetail\/?$/i,
+  recruitee: /^\/o\/[^/]+(?:\/c\/new)?\/?$/i,
+  teamtailor: /^\/jobs\/[^/]+(?:\/applications\/new)?\/?$/i,
+  personio: /^\/job\/\d+(?:\/apply)?\/?$/i,
+  pinpoint: /^\/(?:[a-z]{2}\/)?postings\/[0-9a-f-]+(?:\/applications\/new)?\/?$/i,
+  comeet: /^\/jobs\/[A-Z0-9.]+\/[A-Z0-9.-]+\/apply\/?$/i,
+  zoho_recruit: /^\/jobs\/Careers\/\d+\/[^/]+\/?$/i,
+  bullhorn: /^\/wp-content\/plugins\/bullhorn-oscp\/?$/i,
+  sap_successfactors: /^\/(?:sfcareer\/jobreqcareer|career|portalcareer)\/?$/i,
+  oracle_taleo: /^\/careersection\/ex\/jobdetail\.ftl$/i,
+  adp_recruiting: /^\/(?:guitarcenterexternal|kaisercareers)\/cx\/job-details\/?$/i,
+  avature: /^\/(?:[a-z]{2}_[a-z]{2}\/)?careers\/(?:JobDetail(?:\/[^/]+\/\d+)?|Job-Application|Login)\/?$/i,
 };
+
+function isSmartRecruitersOneClickUrl(url: URL): boolean {
+  return url.hostname.toLowerCase() === 'jobs.smartrecruiters.com'
+    && /^\/oneclick-ui\/company\/[a-z0-9._-]+\/publication\/[0-9a-f-]{36}\/?$/i.test(url.pathname);
+}
+
+// Comeet's public .com job page is only a wrapper. The real .co application URL is usable only
+// with the opaque token issued into its iframe query string. Inspect the raw query so validation
+// never decodes, trims, re-encodes, or otherwise changes token bytes.
+function hasComeetApplicationToken(url: URL): boolean {
+  return /(?:^\?|&)token=[^&]+(?:&|$)/.test(url.search);
+}
+
+function isExactResearchedBatchIdentity(portal: PortalFamily, url: URL): boolean {
+  const host = url.hostname.toLowerCase();
+  if (portal === 'recruitee'
+    && /^\/o\/software-engineer-intern(?:\/c\/new)?\/?$/.test(url.pathname)) return false;
+  if (portal === 'teamtailor'
+    && /^\/jobs\/7847431-software-engineering-intern-web-scraping-data-acquisition(?:\/applications\/new)?\/?$/.test(url.pathname)
+    && host !== 'flanks.teamtailor.com') return false;
+  if (portal === 'teamtailor' && host === 'flanks.teamtailor.com') {
+    return /^\/jobs\/7847431-software-engineering-intern-web-scraping-data-acquisition(?:\/applications\/new)?\/?$/.test(url.pathname)
+      && !url.search && !url.hash;
+  }
+  if (portal === 'personio') {
+    const isReservedArteusJob = /^\/job\/2521967(?:\/apply)?\/?$/.test(url.pathname);
+    if (isReservedArteusJob) {
+      if (host !== 'arteus-energy.jobs.personio.de' || url.pathname !== '/job/2521967' || url.hash) return false;
+      const applyValues = url.searchParams.getAll('apply');
+      const languageValues = url.searchParams.getAll('language');
+      const queryKeys = [...url.searchParams.keys()];
+      return applyValues.length === 1
+        && applyValues[0] === ''
+        && languageValues.length === 1
+        && languageValues[0] === 'de'
+        && queryKeys.length === 2
+        && queryKeys.every((key) => key === 'apply' || key === 'language');
+    }
+    if (host === 'arteus-energy.jobs.personio.de') return false;
+  }
+  if (portal === 'bamboohr') {
+    return (host === 'mpathic2.bamboohr.com' && /^\/careers\/99\/?$/.test(url.pathname))
+      || (host === 'prentkeromich.bamboohr.com' && /^\/careers\/480\/?$/.test(url.pathname));
+  }
+  if (portal === 'oraclecloud') {
+    return ((host === 'enterpriseplatform.dell.com' || host === 'iawmqy.fa.ocs.oraclecloud.com')
+        && /^\/hcmUI\/CandidateExperience\/en\/sites\/careers\/job\/295586\/?$/i.test(url.pathname))
+      || (host === 'fa-etxx-saasfaprod1.fa.ocs.oraclecloud.com'
+        && /^\/hcmUI\/CandidateExperience\/en\/sites\/CX_1\/job\/2850\/?$/i.test(url.pathname));
+  }
+  if (portal === 'ultipro') {
+    const opportunityIds = url.searchParams.getAll('opportunityId');
+    if (opportunityIds.length !== 1) return false;
+    const identity = `${url.pathname}?opportunityId=${opportunityIds[0]}`;
+    return identity === '/WIN1014WINDQ/JobBoard/08eb8299-5b26-4208-adb7-897aa42c6959/OpportunityDetail?opportunityId=f6cd56f9-5b2f-4b53-9e86-2553b54524f9'
+      || identity === '/LIT1004LDAC/JobBoard/30702fd2-636e-4886-b1ce-4fc3b07e37ec/OpportunityDetail?opportunityId=4fc30c2a-e2b3-42e0-bcaf-7805f741c04a'
+      || identity === '/cov1003covcu/JobBoard/24b0bccd-d0f2-4641-a5f2-6ca809c72521/OpportunityDetail?opportunityId=954bed4e-7b77-4abd-ac78-add89ee3c71e';
+  }
+  if (portal === 'avature') {
+    if (host === 'jobs.ea.com') {
+      return url.searchParams.getAll('jobId').length === 0
+        && /^\/en_US\/careers\/JobDetail\/Software-Engineer-Intern\/214956\/?$/.test(url.pathname);
+    }
+    if (host === 'maximus.avature.net') return /^\/careers\/Job-Application\/?$/i.test(url.pathname);
+    if (host !== 'sandboxxerox.avature.net') return false;
+    if (/^\/en_US\/careers\/JobDetail\/2nd-Line-Technical-Analyst\/44460\/?$/i.test(url.pathname)) return true;
+    return /^\/en_US\/careers\/Login\/?$/i.test(url.pathname) && url.searchParams.get('jobId') === '44460';
+  }
+  return true;
+}
 
 function databricksGreenhouseJobId(url: URL): string | undefined {
   if (!/^(?:www\.)?databricks\.com$/i.test(url.hostname)) return undefined;
@@ -3290,24 +3816,52 @@ export function detectPortal(rawUrl: string): SupportedPortal {
     return 'controlled_test';
   }
   if (url.protocol !== 'https:') throw new Error('That application page is not a secure link');
+  if (url.hostname.toLowerCase() === 'whitecoatglobal1.recruitee.com') {
+    if (/^\/o\/software-engineer-intern(?:\/c\/new)?\/?$/.test(url.pathname) && !url.search && !url.hash) {
+      return 'manual_recruitee';
+    }
+    throw new Error('Litos cannot fill in this company\u2019s application page yet.');
+  }
   // Databricks hosts Greenhouse applications behind a company-owned wrapper URL. Keep this pinned to
   // the known careers path plus numeric Greenhouse job id so unrelated company pages with `gh_jid`
   // query strings do not become supported by accident.
   if (databricksGreenhouseJobId(url)) {
     return 'greenhouse';
   }
+  const bullhornHash = url.hash.match(/^#\/jobs\/(\d+)(?:\/apply)?\/?$/i);
+  const isBullhornTenant = HOSTS.bullhorn.test(url.hostname);
+  if (isBullhornTenant && APPLY_PATHS.bullhorn!.test(url.pathname) && bullhornHash) return 'bullhorn';
   for (const [portal, host] of Object.entries(HOSTS)) {
+    if (portal === 'bullhorn') continue;
     if (!host.test(url.hostname)) continue;
     // See APPLY_PATHS. A family listed there must match its path too, because its host space also
     // serves logins, marketing pages, or in Oracle's case entire unrelated products.
     const applyPath = APPLY_PATHS[portal as PortalFamily];
     if (applyPath && !applyPath.test(url.pathname)) continue;
+    if (portal === 'comeet' && !hasComeetApplicationToken(url)) continue;
+    if (portal === 'sap_successfactors') {
+      const jobId = url.searchParams.get('jobId') ?? url.searchParams.get('career_job_req_id') ?? url.searchParams.get('job_application');
+      const tenant = url.searchParams.get('company');
+      if (!jobId || !/^\d+$/.test(jobId) || !tenant || !/^[A-Za-z0-9_-]+$/.test(tenant)) continue;
+    }
+    if (portal === 'oracle_taleo' && !/^\d+$/.test(url.searchParams.get('job') ?? '')) continue;
+    if (portal === 'adp_recruiting' && !/^\d+$/.test(url.searchParams.get('reqId') ?? '')) continue;
+    if (portal === 'ultipro') {
+      const opportunityId = url.searchParams.get('opportunityId');
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(opportunityId ?? '')) continue;
+    }
+    if (portal === 'avature') {
+      const hasPathJobId = /\/JobDetail\/[^/]+\/\d+\/?$/i.test(url.pathname);
+      const queryJobId = url.searchParams.get('jobId');
+      if (/\/(?:JobDetail|Login)\/?$/i.test(url.pathname) && !hasPathJobId && !/^\d+$/.test(queryJobId ?? '')) continue;
+    }
+    if (!isExactResearchedBatchIdentity(portal as PortalFamily, url)) continue;
     return portal as SupportedPortal;
   }
   // Names the platforms it can actually DO something useful on. The account-walled four are
   // recognised by the loop above and explained by portalHandoffReason, but listing them here would
   // read as a promise to fill them, which is the opposite of what recognising them is for.
-  throw new Error('Litos cannot fill in this company\u2019s application page yet. It works on Greenhouse, Lever, Ashby, SmartRecruiters, Workable, JazzHR, Paylocity, Rippling, BreezyHR and BambooHR.');
+  throw new Error('Litos cannot fill in this company\u2019s application page yet. It works on Greenhouse, Lever, Ashby, SmartRecruiters, Workable, JazzHR, Paylocity, Rippling, BreezyHR, BambooHR, Recruitee, Teamtailor, Personio, Pinpoint and Comeet.');
 }
 
 /**
@@ -3345,10 +3899,108 @@ export function canonicalSupportedPortalUrl(rawUrl: string | undefined, atsName?
     if (url.protocol !== 'https:') return undefined;
     const greenhouseJobId = databricksGreenhouseJobId(url);
     if (greenhouseJobId) return `https://boards.greenhouse.io/embed/job_app?token=${greenhouseJobId}`;
+    const portal = detectPortal(rawUrl);
+    if (portal === 'zoho_recruit') {
+      url.search = '';
+      url.hash = '';
+      url.pathname = url.pathname.replace(/\/$/, '');
+      return url.toString();
+    }
+    if (portal === 'bullhorn') {
+      const jobId = url.hash.match(/^#\/jobs\/(\d+)/i)?.[1];
+      if (!jobId) return undefined;
+      url.search = '';
+      url.hash = `#/jobs/${jobId}`;
+      url.pathname = '/wp-content/plugins/bullhorn-oscp/';
+      return url.toString();
+    }
+    if (portal === 'sap_successfactors') {
+      const jobId = url.searchParams.get('jobId') ?? url.searchParams.get('career_job_req_id') ?? url.searchParams.get('job_application');
+      const company = url.searchParams.get('company');
+      if (!jobId || !company) return undefined;
+      return `https://${url.hostname}/sfcareer/jobreqcareer?jobId=${encodeURIComponent(jobId)}&company=${encodeURIComponent(company)}`;
+    }
+    if (portal === 'oracle_taleo') {
+      const job = url.searchParams.get('job');
+      if (!job) return undefined;
+      return `https://${url.hostname}${url.pathname}?job=${job}&lang=en`;
+    }
+    if (portal === 'adp_recruiting') {
+      const reqId = url.searchParams.get('reqId');
+      if (!reqId) return undefined;
+      return `https://${url.hostname}${url.pathname.replace(/\/$/, '')}?reqId=${reqId}`;
+    }
+    if (portalFamily(portal) === 'jazzhr') {
+      url.search = '';
+      url.hash = '';
+      url.pathname = url.pathname.replace(/\/$/, '');
+      return url.toString();
+    }
+    if (portal === 'bamboohr' || portal === 'oraclecloud' || portal === 'avature') {
+      const jobId = portal === 'avature' ? url.searchParams.get('jobId') : null;
+      url.search = '';
+      url.hash = '';
+      url.pathname = url.pathname.replace(/\/$/, '');
+      if (portal === 'avature' && jobId && /^\d+$/.test(jobId) && !/\/JobDetail\/[^/]+\/\d+$/i.test(url.pathname)) {
+        url.searchParams.set('jobId', jobId);
+      }
+      return url.toString();
+    }
+    if (portal === 'ultipro') {
+      const opportunityId = url.searchParams.get('opportunityId');
+      url.search = '';
+      url.hash = '';
+      url.pathname = url.pathname.replace(/\/$/, '');
+      if (opportunityId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(opportunityId)) url.searchParams.set('opportunityId', opportunityId);
+      return url.toString();
+    }
   } catch {
     return undefined;
   }
-  if (isPortalSupported(rawUrl)) return rawUrl;
+  if (isPortalSupported(rawUrl)) {
+    const portal = detectPortal(rawUrl);
+    const family = portalFamily(portal);
+    if (family === 'smartrecruiters' || family === 'jobvite' || family === 'icims') {
+      const url = new URL(portalApplicationUrl(portal, rawUrl));
+      url.hash = '';
+      if (family === 'smartrecruiters' && isSmartRecruitersOneClickUrl(url)) {
+        const company = url.pathname.split('/')[3] ?? '';
+        const dcrCompany = url.searchParams.get('dcr_ci') ?? '';
+        url.search = '';
+        // dcr_ci is the only observed form query parameter and is tenant identity, not tracking.
+        // Keep it only when it agrees with the company already pinned in the path.
+        if (dcrCompany && dcrCompany.toLowerCase() === company.toLowerCase()) {
+          url.searchParams.set('dcr_ci', company);
+        }
+      } else {
+        url.search = '';
+      }
+      url.pathname = url.pathname.replace(/\/$/, '');
+      return url.toString();
+    }
+    if (family === 'personio') {
+      const url = new URL(portalApplicationUrl(portal, rawUrl));
+      if (url.hostname.toLowerCase() === 'arteus-energy.jobs.personio.de') return url.toString();
+      const language = url.searchParams.get('language');
+      url.search = '';
+      if (language && /^[a-z]{2}$/i.test(language)) url.searchParams.set('language', language.toLowerCase());
+      return url.toString();
+    }
+    if (family === 'recruitee' || family === 'teamtailor') {
+      const url = new URL(portalApplicationUrl(portal, rawUrl));
+      url.search = '';
+      url.hash = '';
+      url.pathname = url.pathname.replace(/\/$/, '');
+      return url.toString();
+    }
+    if (family === 'pinpoint') {
+      const url = new URL(portalApplicationUrl(portal, rawUrl));
+      url.search = '';
+      url.hash = '';
+      return url.toString();
+    }
+    return rawUrl;
+  }
   return undefined;
 }
 
@@ -3398,9 +4050,36 @@ export function greenhousePortalUrlNeedsBoardToken(rawUrl: string | undefined): 
 
 export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): string {
   if (portal === 'greenhouse') return greenhouseEmbedApplicationUrl(rawUrl) ?? rawUrl;
-  if (portal !== 'ashby') return rawUrl;
   const url = new URL(rawUrl);
-  if (!url.pathname.endsWith('/application')) url.pathname = `${url.pathname.replace(/\/$/, '')}/application`;
+  if (portal === 'zoho_recruit' || portal === 'bullhorn' || portal === 'sap_successfactors') {
+    return canonicalSupportedPortalUrl(rawUrl, portal) ?? rawUrl;
+  }
+  // Treat the platform's optional trailing slash as formatting, not another path segment. Without
+  // this normalization, an already-canonical form URL received the same suffix a second time.
+  const family = portalFamily(portal);
+  if (family === 'ashby' || family === 'recruitee' || family === 'teamtailor'
+    || family === 'personio' || family === 'pinpoint') {
+    url.pathname = url.pathname.replace(/\/$/, '');
+  }
+  if (family === 'ashby' && !url.pathname.endsWith('/application')) {
+    url.pathname = `${url.pathname.replace(/\/$/, '')}/application`;
+  }
+  if (family === 'recruitee' && !url.pathname.endsWith('/c/new')) {
+    url.pathname = `${url.pathname.replace(/\/$/, '')}/c/new`;
+  }
+  if (family === 'personio' && url.hostname.toLowerCase() !== 'arteus-energy.jobs.personio.de'
+    && !url.pathname.endsWith('/apply')) {
+    url.pathname = `${url.pathname.replace(/\/$/, '')}/apply`;
+  }
+  if ((family === 'teamtailor' || family === 'pinpoint') && !url.pathname.endsWith('/applications/new')) {
+    url.pathname = `${url.pathname.replace(/\/$/, '')}/applications/new`;
+  }
+  if (family === 'jobvite' && !url.pathname.endsWith('/apply')) {
+    url.pathname = `${url.pathname.replace(/\/$/, '')}/apply`;
+  }
+  if (family === 'icims' && /\/job\/?$/i.test(url.pathname)) {
+    url.pathname = url.pathname.replace(/\/job\/?$/i, '/login');
+  }
   return url.toString();
 }
 
@@ -3411,7 +4090,8 @@ export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): s
 // Ashby's /application suffix. It has to be found on the live page. Confirmed live, 2026-07-24, on
 // a real Western Digital posting. A no-op on every other portal, and a no-op on SmartRecruiters
 // once already on the form (the selector simply won't match).
-const SMARTRECRUITERS_APPLY_LINK_SELECTOR = 'a[href*="oneclick-ui"], a[href*="/apply"]';
+const SMARTRECRUITERS_APPLY_LINK_SELECTOR =
+  'a[href^="/oneclick-ui/company/"][href*="/publication/"], a[href^="https://jobs.smartrecruiters.com/oneclick-ui/company/"][href*="/publication/"]';
 
 export async function navigateToApplicationForm(page: Page, portal: SupportedPortal): Promise<void> {
   if (portal !== 'smartrecruiters') return;
@@ -3419,7 +4099,11 @@ export async function navigateToApplicationForm(page: Page, portal: SupportedPor
   if ((await link.count()) === 0) return; // already on the form, or the link isn't there this time
   const href = await link.getAttribute('href');
   if (!href) return;
-  await page.goto(new URL(href, page.url()).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  const destination = new URL(href, page.url()).toString();
+  // The selector is narrow, and this validation is the second boundary. It prevents a tenant DOM
+  // change from turning a similarly named link into an arbitrary navigation in a managed run.
+  if (detectPortal(destination) !== 'smartrecruiters' || !isSmartRecruitersOneClickUrl(new URL(destination))) return;
+  await page.goto(destination, { waitUntil: 'domcontentloaded', timeout: 30_000 });
 }
 
 async function fillFirst(page: Page, selectors: string[], value: string | undefined, label: string, out: string[]) {
@@ -3510,6 +4194,7 @@ async function fillReviewedQuestions(page: Page, portal: SupportedPortal, packet
     const questionText = normalizeReviewQuestionLabel(item.question);
     if (!questionText) continue;
     if (shouldSkipReviewedConsentQuestion(questionText)) continue;
+    if (shouldSkipPortalConsentQuestion(portalFamily(portal), reviewedQuestionSafetyContext(item, packet))) continue;
     const portalSelector = durablePortalSelector(reviewQuestionPortalSelector(item));
     if (/^(?:checkbox|radio)$/i.test(reviewQuestionPortalInputType(item) ?? '')) {
       if (portalFamily(portal) === 'greenhouse') {
@@ -3621,6 +4306,20 @@ async function fillResolvedRequiredField(
   }
 }
 
+export function portalMayResolveUnknownRequired(portal: SupportedPortal): boolean {
+  const family = portalFamily(portal);
+  return family !== 'zoho_recruit' && family !== 'bullhorn' && family !== 'jazzhr'
+    && family !== 'oracle_taleo' && family !== 'adp_recruiting' && family !== 'bamboohr';
+}
+
+export function portalUnknownRequiredBlocker(
+  portal: SupportedPortal,
+  label: string,
+  type: string | null = null,
+): string | null {
+  return portalMayResolveUnknownRequired(portal) ? null : describeRequiredBlocker(label, { type });
+}
+
 export async function fillPortal(page: Page, portal: SupportedPortal, packet: SubmissionPacket): Promise<FillResult> {
   const filledFields: string[] = [];
   const family = portalFamily(portal);
@@ -3658,10 +4357,16 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_LAST_NAME_SELECTOR : SMARTRECRUITERS_LAST_NAME_SELECTOR], parts.slice(1).join(' '), 'last_name', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_EMAIL_SELECTOR : SMARTRECRUITERS_EMAIL_SELECTOR], packet.email, 'email', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR : SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR], packet.email, 'confirm_email', filledFields);
-    await fillFirst(page, [SMARTRECRUITERS_PHONE_SELECTOR], phoneForPortalField(portal, packet.phone), 'phone', filledFields);
+    await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_PHONE_SELECTOR : SMARTRECRUITERS_PHONE_SELECTOR], phoneForPortalField(portal, packet.phone), 'phone', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR : SMARTRECRUITERS_LINKEDIN_SELECTOR], packet.linkedinUrl, 'linkedin', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR : SMARTRECRUITERS_WEBSITE_SELECTOR], packet.portfolioUrl ?? packet.githubUrl, 'portfolio', filledFields);
     await uploadFirst(page, [SMARTRECRUITERS_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    // The direct Playwright path has its own reviewed-question and required-field writers below.
+    // Stop before both. SmartRecruiters is proven only for these exact first-page selectors, and a
+    // packet selector or generic required field must never expand that trust boundary.
+    const blockers = [portalHandoffReason(portal)!];
+    if (await hasUnresolvedCaptcha(page)) blockers.push(CAPTCHA_BLOCKER);
+    return { filledFields, blockers };
   } else if (family === 'workable') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, ['input[name="firstname"]'], parts[0], 'first_name', filledFields);
@@ -3680,6 +4385,9 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="resumator-city-value"]'], packet.city, 'location', filledFields);
     await fillFirst(page, ['input[name="resumator-linkedin-value"]'], packet.linkedinUrl, 'linkedin', filledFields);
     await uploadFirst(page, [JAZZHR_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    const blockers = [portalHandoffReason(portal)!];
+    if (await hasUnresolvedCaptcha(page)) blockers.push(CAPTCHA_BLOCKER);
+    return { filledFields, blockers };
   } else if (family === 'paylocity') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, [paylocityId('info.firstName')], parts[0], 'first_name', filledFields);
@@ -3726,6 +4434,65 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="linkedinUrl"]'], packet.linkedinUrl, 'linkedin', filledFields);
     await fillFirst(page, ['input[name="websiteUrl"]'], packet.portfolioUrl ?? packet.githubUrl, 'portfolio', filledFields);
     await uploadFirst(page, [BAMBOOHR_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+  } else if (family === 'recruitee') {
+    await fillFirst(page, ['input[name="candidate.name"]'], packet.fullName, 'name', filledFields);
+    await fillFirst(page, ['input[name="candidate.email"]'], packet.email, 'email', filledFields);
+    await fillFirst(page, ['input[name="candidate.phone"]'], packet.phone, 'phone', filledFields);
+    await uploadFirst(page, [RECRUITEE_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, [RECRUITEE_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+  } else if (family === 'teamtailor') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    await fillFirst(page, ['input[name="candidate[first_name]"]'], parts[0], 'first_name', filledFields);
+    await fillFirst(page, ['input[name="candidate[last_name]"]'], parts.slice(1).join(' '), 'last_name', filledFields);
+    await fillFirst(page, ['input[name="candidate[email]"]'], packet.email, 'email', filledFields);
+    await fillFirst(page, ['input[name="candidate[phone]"]'], packet.phone, 'phone', filledFields);
+    await uploadFirst(page, [TEAMTAILOR_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, [TEAMTAILOR_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+  } else if (family === 'personio') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    await fillFirst(page, ['input[name="first_name"]'], parts[0], 'first_name', filledFields);
+    await fillFirst(page, ['input[name="last_name"]'], parts.slice(1).join(' '), 'last_name', filledFields);
+    await fillFirst(page, ['input[name="email"]'], packet.email, 'email', filledFields);
+    await fillFirst(page, ['input[name="phone"]'], packet.phone, 'phone', filledFields);
+    await fillFirst(page, ['input[name="location"]'], packet.city, 'location', filledFields);
+    await fillFirst(page, ['input[name="public_profile"]'], packet.linkedinUrl ?? packet.portfolioUrl, 'public_profile', filledFields);
+    await uploadFirst(page, [PERSONIO_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, [PERSONIO_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+  } else if (family === 'pinpoint') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    await fillFirst(page, ['input[name="application_form[application][first_name]"]'], parts[0], 'first_name', filledFields);
+    await fillFirst(page, ['input[name="application_form[application][last_name]"]'], parts.slice(1).join(' '), 'last_name', filledFields);
+    await fillFirst(page, ['input[name="application_form[application][email]"]'], packet.email, 'email', filledFields);
+    await fillFirst(page, ['input[name="application_form[application][phone]"]'], packet.phone, 'phone', filledFields);
+    await fillFirst(page, ['input[name="application_form[application][town]"]'], packet.city, 'location', filledFields);
+    await fillFirst(page, ['input[name="application_form[application][linkedin_url]"][type="text"]'], packet.linkedinUrl, 'linkedin', filledFields);
+    await uploadFirst(page, [PINPOINT_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, [PINPOINT_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+  } else if (family === 'comeet') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    await fillFirst(page, ['input[name="firstName"]'], parts[0], 'first_name', filledFields);
+    await fillFirst(page, ['input[name="lastName"]'], parts.slice(1).join(' '), 'last_name', filledFields);
+    await fillFirst(page, ['input[name="email"]'], packet.email, 'email', filledFields);
+    await fillFirst(page, ['input[name="phone"]'], packet.phone, 'phone', filledFields);
+    await fillFirst(page, ['input[name="websiteUrl"]'], packet.portfolioUrl ?? packet.linkedinUrl ?? packet.githubUrl, 'portfolio', filledFields);
+    await uploadFirst(page, [COMEET_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, [COMEET_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+  } else if (family === 'zoho_recruit') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    await fillFirst(page, ['input[name="First_Name"]', 'input[name="firstName"]'], parts[0], 'first_name', filledFields);
+    await fillFirst(page, ['input[name="Last_Name"]', 'input[name="lastName"]'], parts.slice(1).join(' '), 'last_name', filledFields);
+    await fillFirst(page, ['input[name="Email"]', 'input[name="email"]'], packet.email, 'email', filledFields);
+    await fillFirst(page, ['input[name="Phone"]', 'input[name="phone"]'], packet.phone, 'phone', filledFields);
+    await uploadFirst(page, ZOHO_RECRUIT_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields);
+  } else if (family === 'bullhorn') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    await fillFirst(page, ['input[formcontrolname="firstName"]', 'input[name="firstName"]'], parts[0], 'first_name', filledFields);
+    await fillFirst(page, ['input[formcontrolname="lastName"]', 'input[name="lastName"]'], parts.slice(1).join(' '), 'last_name', filledFields);
+    await fillFirst(page, ['input[formcontrolname="email"]', 'input[name="email"]'], packet.email, 'email', filledFields);
+    await fillFirst(page, ['input[formcontrolname="phone"]', 'input[name="phone"]'], packet.phone, 'phone', filledFields);
+    await uploadFirst(page, BULLHORN_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields);
+  } else if (family === 'sap_successfactors') {
+    // The public job page transitions into an account wall. No identity or credential is entered.
   } else {
     await fillFirst(page, ['input[name="_systemfield_name"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="_systemfield_email"]'], packet.email, 'email', filledFields);
@@ -3739,9 +4506,14 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await uploadFirst(page, ASHBY_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields);
     await uploadFirst(page, ASHBY_COVER_LETTER_SELECTOR.split(', '), packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
   }
-  await fillReviewedQuestions(page, portal, packet, filledFields);
+  if (family !== 'zoho_recruit' && family !== 'bullhorn' && family !== 'bamboohr') {
+    await fillReviewedQuestions(page, portal, packet, filledFields);
+  }
 
   const blockers: string[] = [];
+  if (CONSENT_GATED_FAMILIES.has(family) || ACCOUNT_WALLED_FAMILIES.has(family) || family === 'zoho_recruit' || family === 'bullhorn') {
+    blockers.push(portalHandoffReason(portal)!);
+  }
   // String kept verbatim: it is already surfaced to applicants and matched downstream.
   if (await hasUnresolvedCaptcha(page)) {
     blockers.push(CAPTCHA_BLOCKER);
@@ -3762,7 +4534,13 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     }
 
     const label = await resolveFieldLabel(page, field);
-    if (label && await fillResolvedRequiredField(field, label, packet, filledFields)) continue;
+    const forcedBlocker = label ? portalUnknownRequiredBlocker(portal, label, type) : null;
+    if (forcedBlocker) {
+      labelledBlockers.push(forcedBlocker);
+      continue;
+    }
+    const mayResolveUnknownRequired = portalMayResolveUnknownRequired(portal);
+    if (mayResolveUnknownRequired && label && await fillResolvedRequiredField(field, label, packet, filledFields)) continue;
     if (label) labelledBlockers.push(describeRequiredBlocker(label, { type }));
     else unlabelledCount += 1;
   }
@@ -5233,7 +6011,7 @@ export async function readReceipt(page: Page): Promise<{ confirmationText: strin
    * be scraped instead of the confirmation, and a submitted application would be reported as
    * unverified. Measured before the barrier existed: 10 stale reads in 15 runs. */
   const body = (await page.locator('body').innerText()).replace(/\s+/g, ' ').trim();
-  if (!/thank you|application (?:has been )?(?:submitted|received)|we received your application|success/i.test(body)) {
+  if (!RECEIPT_PROOF_RE.test(body)) {
     throw new Error('The company never showed a confirmation we could check');
   }
   return { confirmationText: body.slice(0, 1000), finalUrl: page.url(), referenceId: receiptReference(body) };

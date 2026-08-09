@@ -1,11 +1,10 @@
 /**
  * WHICH ANSWERS MAY BE CARRIED TO THE NEXT POSTING, AND WHICH MAY NEVER BE.
  *
- * The ask-at-Apply step is only worth having if it stops asking. An export-control declaration and
- * a "rate your skill level in C++" are the same answer on every form that asks them, and asking for
- * them a fourteenth time is the product failing at its own job. So an answer she gives once is
- * remembered, exactly the way PR #366's onboarding facts are, and offered back the next time a
- * posting asks the same thing.
+ * The ask-at-Apply step may remember only narrow, immutable factual values whose meaning does not
+ * depend on the employer, posting, policy version or option list. A prior answer is not authority
+ * merely because the applicant once typed it. Legal status, intentions, self-ratings and agreements
+ * can change or can mean something different on the next form.
  *
  * THE LINE, and it is drawn one way on purpose. "Based on the team descriptions above, which
  * opening would you be most interested in contributing to?" is a real question with a real answer,
@@ -13,8 +12,8 @@
  * making a statement she never made, which is the same harm as inventing one - the only difference
  * is that the words were hers originally. So:
  *
- *   POSTING-SPECIFIC IS THE DEFAULT. An answer is reused only when it clears a positive test for
- *   being a fact about the applicant, AND nothing in the label ties it to this posting.
+ *   POSTING-SPECIFIC IS THE DEFAULT. An answer is reused only when it clears a narrow positive
+ *   whitelist for an immutable factual class, AND nothing in the label ties it to this posting.
  *
  * The asymmetry is deliberate and is the whole safety argument. Failing to reuse a reusable answer
  * costs her one more box to type in, on a screen built for typing in boxes. Reusing a
@@ -23,12 +22,7 @@
  */
 
 import { normalizeReviewQuestionLabel } from './questionDiscovery';
-import {
-  isLocationCommitmentQuestion,
-  officeMetrosNamedIn,
-  PREVIOUSLY_APPLIED_QUESTION,
-  RELOCATION_QUESTION,
-} from './questionDiscovery';
+import { isLocationCommitmentQuestion, PREVIOUSLY_APPLIED_QUESTION } from './questionDiscovery';
 import { isSelfDeclarationQuestion } from './selfDeclaration';
 
 export type AnswerReuseScope = 'reusable' | 'posting_specific';
@@ -67,40 +61,89 @@ const POSTING_SCOPED_QUESTION = new RegExp(
   'i',
 );
 
-/**
- * THE ONSITE COMMITMENT, and the one thing that decides whether her answer travels: does the label
- * say WHERE.
+/* ---- THE ONSITE COMMITMENT, and the one thing that decides whether her answer travels ----
+ *
+ * Does the label say WHERE.
  *
  * "Are you willing to work four days per week in our San Francisco office?" (Together AI) and "Are
  * you available to work from our office in San Francisco?" (Redwood Materials) are questions about
  * HER. Whether she will sit in an office in San Francisco is a fact about her life, it is the same
  * fact at the next employer with an office in San Francisco, and the ask-at-Apply step exists to
- * stop asking. Six distinct postings ask this in her history - Anduril, Postman, Fluency, Brex,
- * Together AI, Redwood - which is three times the two-posting bar.
+ * stop asking. Six distinct postings ask this in her history: Anduril, Postman, Fluency, Brex,
+ * Together AI, Redwood, which is three times the two-posting bar.
  *
- * But "Are you willing to work in-person for 12 weeks during the internship?" (Anduril) is not the
- * same question at two employers, and it reads as though it were. It names no place, so what she
- * agreed to is wherever THAT posting's office is; replaying a Costa Mesa "Yes" onto a New York
- * posting is Litos making a commitment she never made, which is the harm the whole module is
- * pointed at. A label with no place in it is therefore posting-specific, and she is asked again.
+ * WHY THIS IS ON THE WHITELIST AT ALL, given that the whitelist is otherwise one class wide. The
+ * hardening above holds an answer back whenever its meaning can drift between forms: a policy
+ * version, an option taxonomy, a legal status. A named metro is the opposite shape. The stored key
+ * is the normalized label, so a replay happens only when the next employer asks the SAME question,
+ * and that question already carries its own scope in its own words: the city, and the cadence when
+ * it names one. Nothing is composed and nothing is inferred; the only variable left is which
+ * employer is asking, and where she is willing to sit is not a fact about the employer.
  *
- * Relocation is always reusable and needs no place: application_profile.relocation_willingness is a
- * plain yes/no for exactly that reason, so "are you willing to relocate?" and "are you willing to
- * relocate to Austin?" are both settled by the same stable fact.
+ * It is also why the placeless case is NOT handled here. "Are you willing to work in-person for 12
+ * weeks during the internship?" (Anduril) names no place, so what she agreed to is wherever THAT
+ * posting's office is, and replaying a Costa Mesa "Yes" onto a New York posting is Litos making a
+ * commitment she never made. That case simply falls through to the posting-specific default below,
+ * which is where every unproven class already lands, so there is no second rule to keep in step.
+ *
+ * Relocation needs no place: application_profile.relocation_willingness is a plain yes/no for
+ * exactly that reason, so "are you willing to relocate?" and "are you willing to relocate to
+ * Austin?" are both settled by the same stable fact.
  *
  * This sits BELOW the three vetoes on purpose. "Which office location do you prefer?" and "what is
  * your preferred work location?" reach POSTING_SCOPED_QUESTION first and stay posting-specific:
  * choosing among an employer's own offices is a different question from committing to sit in one.
  */
+
+/** Canonical metro -> the spellings employers actually type for it. */
+const OFFICE_METRO_ALIASES: ReadonlyArray<readonly [string, RegExp]> = [
+  ['San Francisco', /\bsan\s+franc?[si]sco\b|\bsan\s+fran\b|\bsf\s+(?:office|bay)\b|\bin\s+sf\b|\bsf\s+hq\b/i],
+  ['New York', /\bnew\s+york(?:\s+city)?\b|\bnyc\b|\bmanhattan\b/i],
+  ['Los Angeles', /\blos\s+angeles\b|\bla\s+office\b|\bculver\s+city\b|\bsanta\s+monica\b/i],
+  ['Austin', /\baustin\b/i],
+  ['Chicago', /\bchicago\b/i],
+  ['Seattle', /\bseattle\b|\bbellevue\b/i],
+  ['Boston', /\bboston\b|\bcambridge,\s*ma\b/i],
+  ['Mountain View', /\bmountain\s+view\b/i],
+  ['Palo Alto', /\bpalo\s+alto\b/i],
+  ['San Mateo', /\bsan\s+mateo\b/i],
+  ['Greenwich', /\bgreenwich\b/i],
+  ['Houston', /\bhouston\b/i],
+  ['Denver', /\bdenver\b/i],
+  ['Atlanta', /\batlanta\b/i],
+  ['Washington DC', /\bwashington,?\s*d\.?c\.?\b|\barlington,\s*va\b/i],
+  ['London', /\blondon\b/i],
+  ['Dubai', /\bdubai\b/i],
+  ['Singapore', /\bsingapore\b/i],
+  ['Amsterdam', /\bamsterdam\b/i],
+  ['Sydney', /\bsydney\b/i],
+  ['Toronto', /\btoronto\b/i],
+  ['Bengaluru', /\bbengaluru\b|\bbangalore\b/i],
+];
+
+/** Does this label name an office metro at all? */
+function labelNamesOfficeMetro(label: string): boolean {
+  return OFFICE_METRO_ALIASES.some(([, pattern]) => pattern.test(label));
+}
+
+const RELOCATION_QUESTION = /\brelocat\w*\b|\bwilling\s+to\s+move\b|\bplan\s+to\s+move\b/i;
+
+/**
+ * 'reusable' for the onsite commitments that carry their own scope, and null for everything else,
+ * INCLUDING a placeless onsite label. Null means "this rule has nothing to say", and the caller's
+ * default then holds the answer back, which is the same refusal the placeless case needs.
+ */
 function onsiteCommitmentReuseScope(label: string): AnswerReuseScope | null {
   if (!isLocationCommitmentQuestion(label)) return null;
   if (RELOCATION_QUESTION.test(label)) return 'reusable';
-  return officeMetrosNamedIn(label).length > 0 ? 'reusable' : 'posting_specific';
+  return labelNamesOfficeMetro(label) ? 'reusable' : null;
 }
 
-/** SAT, ACT, GRE: a number the applicant holds, identical on every form that asks. */
+/** Exact standardized-test scores, alongside the placed onsite commitment above. */
 const STANDARDIZED_TEST_SCORE_QUESTION =
   /\b(?:sat|act|gre|gmat|lsat|toefl|ielts)\b[^?]{0,60}\bscores?\b|\bstandardi[sz]ed\s+test\s+scores?\b|\bscores?\b[^?]{0,40}\b(?:sat|act|gre|gmat)\b/i;
+const STANDARDIZED_TEST_SCORE_OPTION_QUESTION =
+  /\b(?:range|band|bracket|select|choose|which\s+of|below|above|greater|less|at\s+least|at\s+most)\b/i;
 
 const COMPANY_SUFFIX_WORDS = new Set([
   'inc', 'inc.', 'llc', 'ltd', 'limited', 'corp', 'corporation', 'co', 'company', 'group',
@@ -158,13 +201,22 @@ export function answerReuseScope(label: string, context: AnswerReuseContext = {}
    * drafted 600-word essay opening "I have not applied to Akuna in the past" already caused once. */
   if (PREVIOUSLY_APPLIED_QUESTION.test(value)) return 'posting_specific';
 
-  // The onsite commitment decides itself, in both directions. See onsiteCommitmentReuseScope.
+  /* Positive test 1: an onsite commitment whose label names the place it is about. It runs before
+   * the self-declaration line because that line refuses, and a placed onsite commitment is the one
+   * declaration whose scope is written into the question itself. A placeless one returns null here
+   * and is refused below with everything else. See onsiteCommitmentReuseScope. */
   const onsite = onsiteCommitmentReuseScope(value);
   if (onsite) return onsite;
 
-  // The positive test. A declaration about the applicant travels; nothing else does.
-  if (isSelfDeclarationQuestion(value)) return 'reusable';
-  if (STANDARDIZED_TEST_SCORE_QUESTION.test(value)) return 'reusable';
+  // Self-declarations never cross posting boundaries. This includes legal/export-control status,
+  // sponsorship, military history, policies, attestations, intentions and skill self-ratings.
+  if (isSelfDeclarationQuestion(value)) return 'posting_specific';
+
+  // Positive test 2. Only an exact standardized score travels. A range or select prompt has an
+  // employer-specific option taxonomy, so replaying the old option text is unsafe.
+  if (STANDARDIZED_TEST_SCORE_QUESTION.test(value) && !STANDARDIZED_TEST_SCORE_OPTION_QUESTION.test(value)) {
+    return 'reusable';
+  }
 
   return 'posting_specific';
 }
@@ -233,10 +285,18 @@ export function savedAnswerFor(
   label: string,
   saved: ReadonlyMap<string, string>,
   context: AnswerReuseContext = {},
+  options: readonly string[] | null = null,
 ): string | undefined {
   const question = (label ?? '').trim();
   if (!question) return undefined;
   if (answerReuseScope(question, context) !== 'reusable') return undefined;
   const value = saved.get(savedAnswerKey(question));
-  return value && value.trim() ? value : undefined;
+  if (!value?.trim()) return undefined;
+  const usableOptions = (options ?? []).filter((option) => option.trim());
+  if (usableOptions.length === 0) return value;
+  // A stable factual value may travel, but a closed control is a new factual claim about which of
+  // this employer's choices applies. Replay only when the current form contains the exact stored
+  // value. Range and band options must never receive a numeric score merely because the label stayed
+  // unchanged between postings.
+  return usableOptions.find((option) => option.trim() === value.trim());
 }
