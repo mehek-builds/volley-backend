@@ -3,6 +3,7 @@ import type { ManagedBrowserAction, ManagedBrowserResult } from './browserbase';
 import { describeRequiredBlocker, describeUnlabelledBlockers, humanFieldLabel } from './fieldLabel';
 import {
   classifyField,
+  discoveredFieldIsRequired,
   isLegalConsentQuestion,
   normalizeReviewQuestionLabel,
   resolveKnownAnswer,
@@ -871,10 +872,11 @@ function optionProbeIdForSelector(selector: string | undefined): string | undefi
 export function pushManagedReactSelectOptionProbeActions(
   actions: ManagedBrowserAction[],
   portal: SupportedPortal,
-  round: 1 | 2 = 1,
+  round: 1 | 2 | 3 = 1,
+  inputIds: readonly string[] = GREENHOUSE_OPTION_PROBE_IDS,
 ) {
   if (portalFamily(portal) !== 'greenhouse') return;
-  for (const inputId of GREENHOUSE_OPTION_PROBE_IDS) {
+  for (const inputId of inputIds) {
     const selector = `[id="${quoteAttr(inputId)}"]`;
     actions.push({
       type: 'click',
@@ -964,7 +966,7 @@ export function managedResultFieldOptions(result: ManagedBrowserResult | null | 
  * label + aria-label + placeholder + name + id, so the discipline control arrives as
  * "discipline* discipline--0" and carries its own id; nothing else has to be threaded through.
  */
-export function attachManagedFieldOptions<T extends { label: string; options?: string[] | null }>(
+export function attachManagedFieldOptions<T extends { label: string; selector?: string; options?: string[] | null }>(
   discovered: readonly T[],
   optionsByInputId: Record<string, string[]>,
 ): T[] {
@@ -972,10 +974,183 @@ export function attachManagedFieldOptions<T extends { label: string; options?: s
   if (entries.length === 0) return [...discovered];
   return discovered.map((field) => {
     if (field.options && field.options.length > 0) return field;
+    // The control's own id, from its selector when the provider gave an id selector and from the
+    // raw label otherwise. Matching on the label alone was enough while only the four education
+    // controls were probed, because their handles land inside the label ("discipline* discipline--0").
+    // A custom Greenhouse question arrives as `#question_37228964002` with the handle in the
+    // SELECTOR, so a label-only match would drop every list this pass now reads.
+    const controlId = managedOptionProbeControlId(field);
+    if (controlId) {
+      const exact = entries.find(([inputId]) => inputId === controlId);
+      if (exact) return { ...field, options: exact[1] };
+    }
     const label = (field.label ?? '').toLowerCase();
     const match = entries.find(([inputId]) => label.includes(inputId.toLowerCase()));
     return match ? { ...field, options: match[1] } : field;
   });
+}
+
+/* ─── the SAME read, on every closed control the page actually has ─────────────────────────────
+ *
+ * GREENHOUSE_OPTION_PROBE_IDS is a list of four, and it is four because those are the ids Greenhouse
+ * itself owns and so are knowable before the page is read. Every OTHER closed control on a Greenhouse
+ * form is a custom question whose id the employer's own configuration decides
+ * (`question_37228964002`), and nothing can name those in advance. So they arrived at the fill with
+ * `options: undefined`, resolveProfileField had nothing to snap to, and a blind alias ladder decided.
+ *
+ * Measured on the owner's 2026-08-08 run, against the live forms on 2026-08-09: the answer the ladder
+ * guessed was not on the employer's list in nine separate places. Virtu's "Overall GPA" offers
+ * "4.0-5.0 / 3.5-3.9 / 3.0-3.4 / below 3.0 / I'd rather not disclose" and was sent "3.89". DRW's
+ * "How did you hear about this job?" offers "DRW Careers Page" among sixteen and was sent "Company
+ * website", which is on no employer's list anywhere. Point72's degree control offers
+ * "Bachelors / Masters / PhD" and was sent "Bachelor of Science in Computer Science".
+ *
+ * The matcher was never the gap. The gap is that the list never reached it. This is the plumbing:
+ * the same three actions (open, extract the listbox, close) pointed at the ids the DISCOVERY pass
+ * just read off the live page, instead of at four ids compiled into this file.
+ *
+ * WHY IT IS A SEPARATE CALL and not more actions on the discovery pass. buildManagedDiscoveryActions
+ * already trims itself to land under MANAGED_ACTION_LIMIT on a real Greenhouse packet, and the
+ * runner answers anything over that ceiling with HTTP 400 before a browser opens. There is no room
+ * there. There is also no information there: the ids being probed here are the discovery pass's own
+ * output, so this read cannot be built until that pass has returned. A third call gets its own
+ * budget for the same reason it gets its own ids.
+ *
+ * IT IS READ-ONLY, and that is not incidental. No fill, no upload, no submit, no screenshot: opening
+ * a react-select and pressing Escape leaves the control exactly as it was found, which is what makes
+ * it safe to run against an employer's form on an application the applicant has not yet approved.
+ */
+
+/** Open, read, close. Three actions is the whole cost of one control's option list. */
+export const MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL = 3;
+
+/**
+ * Greenhouse's structural controls, which this pass deliberately does not spend actions on.
+ *
+ * `country` and `candidate-location` belong to the fixed-field pass, which fills them from the
+ * packet by typing and selecting. Measured on all five forms probed on 2026-08-09: `country` renders
+ * 244 rows, which managedResultFieldOptions discards at the render cap anyway, and
+ * `candidate-location` renders nothing at all until something is typed. Six actions for two reads
+ * that cannot be used.
+ */
+const MANAGED_OPTION_PROBE_SKIP_IDS = new Set<string>(['country', 'candidate-location']);
+
+/** `#question_37228964002` or `[id="school--0"]`, and nothing that is not a plain id selector. */
+function controlIdFromDiscoveredSelector(selector: string | undefined | null): string | undefined {
+  const trimmed = (selector ?? '').trim();
+  if (!trimmed) return undefined;
+  // Rejects the escaped array-name selectors Greenhouse gives checkbox groups
+  // (`#question_67998838\[\]_731437070`): a checkbox group has no listbox, so probing it would spend
+  // three actions to read nothing.
+  return trimmed.match(/^#([A-Za-z][A-Za-z0-9_-]*)$/)?.[1]
+    ?? trimmed.match(/^\[id="([A-Za-z][A-Za-z0-9_-]*)"\]$/)?.[1];
+}
+
+// The handles managed discovery concatenates onto the visible label, in the order they are trusted.
+// Same shapes normalizeDiscoveredLabel strips out to recover the employer's question text, read here
+// for the opposite purpose: the handle IS the control id.
+const LABEL_SECTION_HANDLE_RE = /\b([a-z][a-z0-9]*(?:[-_][a-z0-9]+)*--\d+)\b/i;
+const LABEL_QUESTION_HANDLE_RE = /\b(question_\d+)\b(?!\s*\[)/i;
+// Greenhouse's demographic controls carry a bare numeric id ("how would you describe your gender
+// identity? 4001608008") and reach discovery as `[data-litos-discovered-21]`, so the label is the
+// only place their id appears. Six digits minimum, and only at the very end, so a year inside a
+// question ("ready for full-time employment in 2028?") is never mistaken for a handle.
+const LABEL_TRAILING_NUMERIC_HANDLE_RE = /(?:^|\s)(\d{6,})\s*$/;
+
+/**
+ * The id of the control a discovered field stands for, or undefined when it cannot be named.
+ *
+ * Selector first, because it is the provider's own handle on the element and cannot be confused with
+ * question text. The label is the fallback for controls the provider addressed by data attribute.
+ */
+export function managedOptionProbeControlId(
+  field: { label?: string | null; selector?: string | null },
+): string | undefined {
+  const fromSelector = controlIdFromDiscoveredSelector(field.selector);
+  if (fromSelector) return fromSelector;
+  const label = (field.label ?? '').trim();
+  if (!label) return undefined;
+  return label.match(LABEL_SECTION_HANDLE_RE)?.[1]
+    ?? label.match(LABEL_QUESTION_HANDLE_RE)?.[1]
+    ?? label.match(LABEL_TRAILING_NUMERIC_HANDLE_RE)?.[1];
+}
+
+/**
+ * Which controls this pass should read, in the order a budget cut should keep.
+ *
+ * Required first: a required control whose list was never read is the one that ends the run with
+ * '"Overall GPA" is required and is still empty'. An optional one costs the applicant nothing.
+ *
+ * Anything the discovery pass already read is skipped rather than read again, so the four education
+ * controls (which need two rounds because their taxonomies load over the network) stay where the
+ * warming round already exists and this pass spends nothing on them.
+ */
+export function managedOptionProbeTargets(
+  portal: SupportedPortal,
+  discovered: readonly { label: string; selector?: string; options?: string[] | null; required?: boolean }[],
+  alreadyRead: Record<string, string[]> = {},
+): string[] {
+  if (portalFamily(portal) !== 'greenhouse') return [];
+  const seen = new Set<string>(GREENHOUSE_OPTION_PROBE_IDS);
+  for (const [inputId, options] of Object.entries(alreadyRead)) {
+    if (options.length > 0) seen.add(inputId);
+  }
+  const required: string[] = [];
+  const optional: string[] = [];
+  for (const field of discovered) {
+    if (field.options && field.options.length > 0) continue;
+    const controlId = managedOptionProbeControlId(field);
+    if (!controlId || seen.has(controlId) || MANAGED_OPTION_PROBE_SKIP_IDS.has(controlId)) continue;
+    seen.add(controlId);
+    (discoveredFieldIsRequired(field) ? required : optional).push(controlId);
+  }
+  return [...required, ...optional].slice(0, Math.floor(MANAGED_ACTION_LIMIT / MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL));
+}
+
+/**
+ * The third managed call's whole action list, or an empty list when there is nothing to read.
+ *
+ * An empty list means the caller skips the call entirely rather than opening a browser to do
+ * nothing, which is the case on every non-Greenhouse family and on a Greenhouse form whose only
+ * closed controls are the four the discovery pass already covers.
+ *
+ * ONE ROUND, and that is measured rather than assumed. The two-round shape exists because Greenhouse
+ * fetches the school, degree and discipline taxonomies over the network when the menu first opens,
+ * so the first read comes back "Loading...". Every custom question's options ship inside the page:
+ * probed live on 2026-08-09 across DRW, IMC, Point72, Five Rings and Virtu, all 60 custom and
+ * demographic controls returned their full list on the FIRST open. A round that did come back
+ * "Loading..." contributes nothing (managedResultFieldOptions drops it) and the alias ladder decides,
+ * which is exactly the behaviour that existed before this pass.
+ */
+export function buildManagedDiscoveredOptionProbeActions(
+  portal: SupportedPortal,
+  discovered: readonly { label: string; selector?: string; options?: string[] | null; required?: boolean }[],
+  alreadyRead: Record<string, string[]> = {},
+): ManagedBrowserAction[] {
+  const targets = managedOptionProbeTargets(portal, discovered, alreadyRead);
+  if (targets.length === 0) return [];
+  const actions: ManagedBrowserAction[] = [];
+  pushManagedReactSelectOptionProbeActions(actions, portal, 3, targets);
+  if (actions.length > MANAGED_ACTION_LIMIT) truncateManagedActionsToBudget(actions, MANAGED_ACTION_LIMIT);
+  return actions;
+}
+
+/**
+ * Two passes' option reads, as one map.
+ *
+ * Later wins on a key neither pass should produce twice; the guard exists so a control read by both
+ * cannot end up with the earlier, possibly mid-fetch, list.
+ */
+export function mergeManagedFieldOptions(
+  ...maps: ReadonlyArray<Record<string, string[]> | null | undefined>
+): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const map of maps) {
+    for (const [inputId, options] of Object.entries(map ?? {})) {
+      if (options.length > 0) out[inputId] = options;
+    }
+  }
+  return out;
 }
 
 function managedGreenhouseScopedReactSelectFill(
@@ -3298,6 +3473,47 @@ export function managedAnswerLossReasons(result: Pick<ManagedBrowserResult, 'ski
       : `Litos could not leave an answer on the form: ${detail.slice(0, 160)}`);
   }
   return [...out];
+}
+
+/**
+ * THE FILLS THAT WERE SENT AND CAME BACK SAYING NOTHING AT ALL.
+ *
+ * A fill either lands, in which case its label appears in `result.filledFields`, or it does not, in
+ * which case the runner says why and managedAnswerLossReasons turns that into a sentence. There is a
+ * third outcome and until now it was invisible: the action is in the list the runner accepted, the
+ * run demonstrably continued past it, and the result mentions it in neither place.
+ *
+ * Measured on DRW's Software Developer Intern packet, 2026-08-08. `question:legal first name` is a
+ * single non-speculative fill of "Mehek" into `#question_67998823`, a plain visible textarea, at
+ * index 55 of a 120-action list whose last provider-reported fill sits at index 100. The applicant
+ * was told '"Legal First Name" is required and is still empty' and nothing else. Deepgram's
+ * "Expected Graduation Year" came back the same way on the same run.
+ *
+ * This does not repair the fill. It ends the ambiguity: silence about a value Litos actually typed
+ * is recorded as a defect in Litos rather than read as success. A speculative alias fill is excluded
+ * because silence there is the normal case - the ladder tries several selectors expecting most to
+ * match nothing - so only labels the caller names as single-attempt are considered.
+ */
+export function managedUnreportedFillLabels(
+  actions: readonly ManagedBrowserAction[],
+  result: Pick<ManagedBrowserResult, 'filledFields' | 'skipped'>,
+): string[] {
+  const filled = new Set(result.filledFields ?? []);
+  const skipped = (result.skipped ?? []).map((entry) => (entry ?? '').trim()).filter(Boolean);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const action of actions) {
+    if (action.type !== 'fill' && action.type !== 'select') continue;
+    const label = action.label;
+    // `question:<label>` is the single durable-selector attempt discovery produced for one control.
+    // Everything else with a value is an alias ladder, where a miss is expected and reported.
+    if (!label || !label.startsWith('question:') || !action.value?.trim()) continue;
+    if (filled.has(label) || seen.has(label)) continue;
+    if (skipped.some((entry) => entry.startsWith(label))) continue;
+    seen.add(label);
+    out.push(label);
+  }
+  return out;
 }
 
 // Fixed-field fills only (name/email/phone/location/links/resume) - shared by

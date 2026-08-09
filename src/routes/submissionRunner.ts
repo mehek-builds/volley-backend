@@ -45,6 +45,10 @@ import {
   captchaProviderForFamily,
   buildManagedPortalActions,
   attachManagedFieldOptions,
+  buildManagedDiscoveredOptionProbeActions,
+  managedOptionProbeTargets,
+  managedUnreportedFillLabels,
+  mergeManagedFieldOptions,
   managedResultFieldOptions,
   CaptchaUnresolvedError,
   clickFinalSubmit,
@@ -1414,7 +1418,51 @@ async function prepareManaged(
   // these, resolveProfileField's option snapping (PR #361) is inert on this path: the managed
   // provider's discover action reports no options at all, so a control offering "Computer Science"
   // was handed the stored major, matched nothing, and came back required-and-empty.
-  const fieldOptions = managedResultFieldOptions(discoveryResult);
+  const discoveryFieldOptions = managedResultFieldOptions(discoveryResult);
+  /* THE THIRD CALL, and the reason the option snapping finally reaches a custom question.
+   *
+   * The discovery pass probes four ids compiled into this repo, because those four are Greenhouse's
+   * own and are knowable before any page is read. Every other closed control on a Greenhouse form is
+   * an employer-configured question whose id only the live page knows, so every one of them reached
+   * resolveProfileField with `options: undefined` and was answered by a blind alias ladder. Measured
+   * on the owner's run of 2026-08-08 and re-read off the live forms on 2026-08-09: nine required
+   * controls across DRW, IMC, Point72, Five Rings and Virtu were sent an answer the employer does
+   * not offer, including "3.89" into a control whose choices are GPA bands and "Company website"
+   * into a list whose closest entry is "DRW Careers Page".
+   *
+   * It cannot be folded into the discovery pass. That pass already trims itself to land under the
+   * runner's 120-action ceiling, and the ids this reads are its own output, so there is neither room
+   * nor information until it has returned.
+   *
+   * Read-only: open the control, read the listbox, press Escape. Nothing is typed, nothing is
+   * uploaded, nothing is sent, and the control is left as it was found. A failure here is not a
+   * failure of the run - the option list is absent exactly as it was before this existed, and the
+   * alias ladder decides - so it is logged rather than added to discoveryFailures, which exists for
+   * the stronger claim that the run never saw the form's questions at all. */
+  const optionProbeActions = buildManagedDiscoveredOptionProbeActions(
+    portal,
+    discoveryResult?.discovered ?? [],
+    discoveryFieldOptions,
+  );
+  const optionProbeResult = optionProbeActions.length > 0
+    ? await runManagedBrowser(applicationUrl, optionProbeActions, { screenshot: false })
+      .catch((error: unknown) => {
+        fastify.log.error(
+          {
+            applicationId: row.id,
+            portal,
+            error: describeDiscoveryFailure(error),
+            controls: managedOptionProbeTargets(portal, discoveryResult?.discovered ?? [], discoveryFieldOptions),
+          },
+          'Option probe pass failed, so the closed controls on this form fall back to the alias ladder',
+        );
+        return null;
+      })
+    : null;
+  const fieldOptions = mergeManagedFieldOptions(
+    discoveryFieldOptions,
+    managedResultFieldOptions(optionProbeResult),
+  );
   const discoveredFields = attachManagedFieldOptions(discoveryResult?.discovered ?? [], fieldOptions);
   const coverLetterSupported = managedResultHasCoverLetterUpload(discoveryResult, portal);
   const coverLetterOutcome = await packetForCoverLetterCapability(row, coverLetterSupported, fastify);
@@ -1448,8 +1496,24 @@ async function prepareManaged(
   // click closes the menu the first one opened), so the first value has to be the right one.
   packet.fieldOptions = fieldOptions;
 
-  const result = await runManagedBrowser(applicationUrl, buildManagedPortalActions(portal, packet));
+  const fillActions = buildManagedPortalActions(portal, packet);
+  const result = await runManagedBrowser(applicationUrl, fillActions);
   if (!result.screenshot) throw new Error('Stratus managed browser did not return a preview screenshot');
+  /* A value Litos typed that the run then said nothing whatsoever about.
+   *
+   * Not a blocker and not shown to the applicant: the required-field check below already tells her
+   * the control is empty. This is the line that says the emptiness is Litos's fault rather than
+   * hers, and it exists because without it the case is unobservable. Measured on DRW, 2026-08-08:
+   * `question:legal first name` was a single fill of "Mehek" into a plain visible textarea, sat at
+   * index 55 of an accepted 120-action list, the run reported fills as late as index 100, and the
+   * result named it in neither filledFields nor skipped. */
+  const unreportedFills = managedUnreportedFillLabels(fillActions, result);
+  if (unreportedFills.length > 0) {
+    fastify.log.error(
+      { applicationId: row.id, portal, fields: unreportedFills },
+      'Answers were typed into the form and the run reported neither a fill nor a reason for them',
+    );
+  }
   const preview = await put(
     `users/${row.user_id}/submission-runs/${runId}/filled.png`,
     Buffer.from(result.screenshot, 'base64'),

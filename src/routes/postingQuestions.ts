@@ -24,7 +24,9 @@ import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
 import { isBrowserbaseConfigured, isManagedStratusProvider, runManagedBrowser } from '../lib/browserbase';
 import {
   attachManagedFieldOptions,
+  buildManagedDiscoveredOptionProbeActions,
   buildManagedPrescriptActions,
+  mergeManagedFieldOptions,
   canonicalMonitoredPortalUrl,
   detectPortal,
   managedResultFieldOptions,
@@ -156,9 +158,21 @@ export async function scanPostingQuestions(
   const portal = target.portal;
   if (!portal) return { questions: [], status: 'failed' };
   const result = await runManagedBrowser(target.applyUrl, buildManagedPrescriptActions(portal), { screenshot: false });
+  const scanFieldOptions = managedResultFieldOptions(result);
+  /* A second read, for the closed controls the scan could not name in advance.
+   *
+   * buildManagedPrescriptActions probes the four ids Greenhouse owns. An employer's own questions
+   * carry ids only the live page knows, so their option lists can only be read after the DOM walk
+   * has reported them. Read-only exactly like the pass above: open, read the listbox, Escape, and
+   * skipped entirely when there is nothing left to read. A failure leaves the stored scan saying
+   * what it said before, which is a control with no options rather than a wrong list. */
+  const probeActions = buildManagedDiscoveredOptionProbeActions(portal, result.discovered ?? [], scanFieldOptions);
+  const probeResult = probeActions.length > 0
+    ? await runManagedBrowser(target.applyUrl, probeActions, { screenshot: false }).catch(() => null)
+    : null;
   const discovered = attachManagedFieldOptions(
     (result.discovered ?? []) as DiscoveredQuestion[],
-    managedResultFieldOptions(result),
+    mergeManagedFieldOptions(scanFieldOptions, managedResultFieldOptions(probeResult)),
   );
   const questions = postingQuestionsFromDiscovered(discovered);
   // Zero controls is not "this form has no questions". It is a page this run could not read, and

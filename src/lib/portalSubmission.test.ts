@@ -23,6 +23,13 @@ import {
   ashbyControlWithinFieldPath,
   managedResultFieldOptions,
   attachManagedFieldOptions,
+  buildManagedDiscoveredOptionProbeActions,
+  escapeHatchOptionFor,
+  managedOptionProbeControlId,
+  managedOptionProbeTargets,
+  managedUnreportedFillLabels,
+  mergeManagedFieldOptions,
+  MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL,
   reactSelectListboxSelector,
   GREENHOUSE_OPTION_PROBE_IDS,
   MANAGED_ACTION_LIMIT,
@@ -4226,6 +4233,223 @@ test('a windowed option read is discarded, so a saved answer past row 100 is not
   });
   assert.equal('school--0' in parsed, false);
   assert.equal(parsed['degree--0']?.length, 3);
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * THE OPTION PROBE ON CONTROLS THIS REPO CANNOT NAME IN ADVANCE.
+ *
+ * Every option list quoted below was read off the live employer form on 2026-08-09, read-only, by
+ * opening each react-select and extracting `#react-select-<inputId>-listbox`. Do not "correct" one
+ * of these lists to something more sensible; they are what the employer offers.
+ * ------------------------------------------------------------------------------------------- */
+
+// Virtu, "Which university are you currently attending? Select "Other" if not listed". Fifteen
+// entries, and the applicant's university is not one of them.
+const VIRTU_UNIVERSITY_OPTIONS = [
+  'Caltech', 'Carnegie Mellon', 'Georgia Tech', 'Harvard', 'Howard', 'Michigan', 'MIT', 'Princeton',
+  'Rice', 'Tufts', 'UChicago', 'UT Austin', 'Waterloo', 'Yale', 'Other',
+];
+// Virtu, "Overall GPA". The stored answer is "3.89" and no control on that form accepts a number.
+const VIRTU_GPA_OPTIONS = ['4.0-5.0', '3.5-3.9', '3.0-3.4', 'below 3.0', "I'd rather not disclose"];
+// Point72, "What degree are you currently pursuing?". Three words, none of them the stored degree.
+const POINT72_DEGREE_OPTIONS = ['Bachelors', 'Masters', 'PhD'];
+// IMC, "When did you graduate from High School?". The stored answer is "May 2023".
+const IMC_HIGH_SCHOOL_OPTIONS = ['Before 2021', '2021', '2022', '2023', '2024', '2025', '2026'];
+
+test('the control id comes off the selector first and the label second', () => {
+  // A custom Greenhouse question reaches discovery with its id in the SELECTOR.
+  assert.equal(managedOptionProbeControlId({ label: 'Overall GPA*', selector: '#question_37228964002' }), 'question_37228964002');
+  assert.equal(managedOptionProbeControlId({ label: 'School*', selector: '[id="school--0"]' }), 'school--0');
+  // A demographic control reaches it as a data attribute, with the id left in the raw label. This is
+  // the shape prod stored for Five Rings and IMC.
+  assert.equal(
+    managedOptionProbeControlId({ label: 'how would you describe your gender identity? 4001608008', selector: '[data-litos-discovered-21]' }),
+    '4001608008',
+  );
+  assert.equal(managedOptionProbeControlId({ label: 'discipline* discipline--0', selector: '[data-litos-discovered-8]' }), 'discipline--0');
+  assert.equal(managedOptionProbeControlId({ label: 'website website question_12114508007', selector: '[data-litos-discovered-11]' }), 'question_12114508007');
+  // A checkbox GROUP has no listbox, and its selector is the escaped array name. Three actions spent
+  // on it read nothing.
+  assert.equal(managedOptionProbeControlId({ label: 'In which settings have you used C++?', selector: '#question_67998838\\[\\]_731437070' }), undefined);
+  // A year inside a question is not a handle. Measured on Virtu: "Will you be ready for full-time
+  // employment in 2028?".
+  assert.equal(managedOptionProbeControlId({ label: 'Will you be ready for full-time employment in 2028?', selector: '[data-litos-discovered-4]' }), undefined);
+  assert.equal(managedOptionProbeControlId({ label: '', selector: '' }), undefined);
+});
+
+test('the probe reads the controls discovery found, and never the four it already read', () => {
+  const discovered = [
+    { label: 'Overall GPA*', selector: '#question_37228964002', required: true },
+    { label: 'Discipline*', selector: '#discipline--0', required: true },
+    { label: 'School*', selector: '#school--0', required: true },
+    { label: 'Country*', selector: '#country', required: true },
+    { label: 'Location (City)*', selector: '#candidate-location', required: true },
+    { label: 'How would you describe your gender identity? 4001608008', selector: '[data-litos-discovered-21]' },
+    { label: 'Are you interested in our Women\'s Winternship program?*', selector: '#question_37228970002', required: true },
+  ];
+  const targets = managedOptionProbeTargets('greenhouse', discovered);
+  // The education controls are the discovery pass's job, because their taxonomies load over the
+  // network and need the warming round that lives there.
+  assert.equal(targets.includes('school--0'), false);
+  assert.equal(targets.includes('discipline--0'), false);
+  // Structural controls the fixed-field pass owns. Country renders 244 rows (discarded at the render
+  // cap) and the city control renders nothing until something is typed.
+  assert.equal(targets.includes('country'), false);
+  assert.equal(targets.includes('candidate-location'), false);
+  // Required first, so a budget cut can only ever take an optional one.
+  assert.deepEqual(targets, ['question_37228964002', 'question_37228970002', '4001608008']);
+  // And a list already read is not read again.
+  assert.deepEqual(
+    managedOptionProbeTargets('greenhouse', discovered, { question_37228964002: VIRTU_GPA_OPTIONS }),
+    ['question_37228970002', '4001608008'],
+  );
+  // Not a Greenhouse form, no react-select listbox convention to read.
+  assert.deepEqual(managedOptionProbeTargets('lever', discovered), []);
+});
+
+test('the probe pass opens, reads and closes each control, and cannot exceed the runner ceiling', () => {
+  const discovered = Array.from({ length: 60 }, (_, i) => ({
+    label: `Question ${i}*`,
+    selector: `#question_9${String(i).padStart(6, '0')}`,
+    required: true,
+  }));
+  const actions = buildManagedDiscoveredOptionProbeActions('greenhouse', discovered);
+  assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `${actions.length} actions is over the runner's ceiling`);
+  assert.equal(actions.length % MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL, 0);
+  // Nothing is typed, uploaded or sent. The whole pass is open / read / Escape.
+  assert.deepEqual([...new Set(actions.map((a) => a.type))], ['click', 'extract', 'press']);
+  assert.equal(actions.every((a) => a.optional === true), true);
+  const first = 'question_9000000';
+  const open = actions.findIndex((a) => a.label === `option_probe_open:${first}:3`);
+  const read = actions.findIndex((a) => a.label === `${MANAGED_OPTION_EXTRACT_PREFIX}${first}`);
+  const close = actions.findIndex((a) => a.label === `option_probe_close:${first}:3`);
+  assert.ok(open >= 0 && read === open + 1 && close === open + 2);
+  assert.equal(actions[read]!.selector, reactSelectListboxSelector(first));
+  assert.equal(actions[read]!.attribute, undefined);
+  assert.equal(actions[close]!.value, 'Escape');
+  // No targets, no call. The caller checks for an empty list rather than opening a browser to do
+  // nothing on every Lever and Ashby posting.
+  assert.deepEqual(buildManagedDiscoveredOptionProbeActions('lever', discovered), []);
+  assert.deepEqual(buildManagedDiscoveredOptionProbeActions('greenhouse', []), []);
+});
+
+test('a real Greenhouse form fits the probe pass with room to spare', () => {
+  // DRW's Software Developer Intern form, counted live on 2026-08-09: 31 react-selects, of which 25
+  // are left for this pass once the four education controls and the two structural ones are removed.
+  // This is the largest form in the owner's 25-application run, so 75 is close to the worst case.
+  const drw = [
+    ...['school--0', 'degree--0', 'discipline--0', 'start-month--0', 'end-month--0', 'country', 'candidate-location']
+      .map((id) => ({ label: `${id}*`, selector: `#${id}`, required: true })),
+    ...Array.from({ length: 24 }, (_, i) => ({ label: `Q${i}*`, selector: `#question_679988${String(i + 20).padStart(2, '0')}`, required: true })),
+  ];
+  const actions = buildManagedDiscoveredOptionProbeActions('greenhouse', drw);
+  assert.equal(actions.length, 25 * MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL);
+  assert.ok(actions.length < MANAGED_ACTION_LIMIT);
+});
+
+test('two passes of reads become one map, and an empty read never overwrites a real list', () => {
+  const merged = mergeManagedFieldOptions(
+    { 'discipline--0': ['Computer Science'], 'degree--0': ["Bachelor's Degree"] },
+    { question_37228964002: VIRTU_GPA_OPTIONS, 'degree--0': [] },
+    null,
+  );
+  assert.deepEqual(merged['degree--0'], ["Bachelor's Degree"]);
+  assert.deepEqual(merged['question_37228964002'], VIRTU_GPA_OPTIONS);
+  assert.equal(Object.keys(merged).length, 3);
+});
+
+test('the probed list reaches the control by its selector, not only by its label', () => {
+  // attachManagedFieldOptions used to match only on the id appearing INSIDE the raw label, which is
+  // true of the four education controls ("discipline* discipline--0") and of nothing else. A custom
+  // question carries its id in the selector, so a label-only match dropped every list this pass
+  // reads and the whole chain would have been inert again.
+  const [gpa, university] = attachManagedFieldOptions(
+    [
+      { label: 'Overall GPA*', selector: '#question_37228964002', inputType: 'text' },
+      { label: 'Which university are you currently attending? Select "Other" if not listed*', selector: '#question_37228963002', inputType: 'text' },
+    ] as ManagedDiscoveredQuestion[],
+    { question_37228964002: VIRTU_GPA_OPTIONS, question_37228963002: VIRTU_UNIVERSITY_OPTIONS },
+  );
+  assert.deepEqual(gpa!.options, VIRTU_GPA_OPTIONS);
+  assert.deepEqual(university!.options, VIRTU_UNIVERSITY_OPTIONS);
+});
+
+test('the five answers the blind alias ladder got wrong, resolved against the employer\'s own list', () => {
+  // Each of these came back '"..." is required and is still empty' on 2026-08-08 with the answer
+  // already resolved in the packet, because the control reached resolveProfileField with no options.
+  const profile = {
+    school: 'University of Southern California, Viterbi School of Engineering',
+    degree: 'Bachelor of Science in Computer Science',
+    major: 'Computer Science & Business Administration, Finance Emphasis',
+    gpa: '3.89',
+    gpa_scale: '4.0',
+    grad_date: 'May 2028',
+    grad_year: 2028,
+    high_school_grad_date: 'May 2023',
+  };
+  const resolve = (label: string, options: string[]) =>
+    resolveProfileField({ label, inputType: 'text', options }, profile);
+
+  const gpa = resolve('Overall GPA*', VIRTU_GPA_OPTIONS);
+  assert.equal(gpa?.value, '3.5-3.9');
+  assert.equal(gpa?.matchedOption, true);
+
+  const degree = resolve('What degree are you currently pursuing? *', POINT72_DEGREE_OPTIONS);
+  assert.equal(degree?.value, 'Bachelors');
+  assert.equal(degree?.matchedOption, true);
+
+  const highSchool = resolve('When did you graduate from High School?*', IMC_HIGH_SCHOOL_OPTIONS);
+  assert.equal(highSchool?.value, '2023');
+  assert.equal(highSchool?.matchedOption, true);
+
+  // IMC's GPA control is banded to one decimal place rather than in halves.
+  const imcGpa = resolve('What is your GPA?*', ['Below 3.2', '3.21 - 3.3', '3.31 - 3.4', '3.41 - 3.5', '3.51 - 3.6', '3.61 - 3.7', '3.71 - 3.8', '3.81 - 3.9', '3.91 - 4.0', 'Above 4.0']);
+  assert.equal(imcGpa?.value, '3.81 - 3.9');
+  assert.equal(imcGpa?.matchedOption, true);
+
+  // Five Rings bands the same number differently again, and the same stored "3.89" answers both.
+  const fiveRingsGpa = resolve('Please indicate your overall GPA.*', ['< 3.0', '3.0 - 3.4', '3.5 - 3.9', '4.0 - 4.4', '4.5 - 5.0', 'First-Class Honours', 'Upper Second-Class Honours', 'Lower Second-Class Honours', 'Third-Class Honours', 'Other / Not Applicable']);
+  assert.equal(fiveRingsGpa?.value, '3.5 - 3.9');
+  assert.equal(fiveRingsGpa?.matchedOption, true);
+});
+
+test('a university the employer does not offer is reported as unmatched, not snapped to a near miss', () => {
+  // Virtu's list is fifteen named schools and "Other"; USC is genuinely absent. The honest outcome
+  // is matchedOption:false - and the fill run's own escape hatch, which fires on the label's
+  // "Select "Other" if not listed", is what puts the correct answer on the form.
+  const resolved = resolveProfileField(
+    { label: 'Which university are you currently attending? Select "Other" if not listed*', inputType: 'text', options: VIRTU_UNIVERSITY_OPTIONS },
+    { school: 'University of Southern California, Viterbi School of Engineering' },
+  );
+  assert.equal(resolved?.matchedOption, false);
+  // And emphatically not one of the fourteen other universities.
+  assert.equal(VIRTU_UNIVERSITY_OPTIONS.filter((o) => o !== 'Other').includes(resolved?.value ?? ''), false);
+  assert.equal(escapeHatchOptionFor('Which university are you currently attending? Select "Other" if not listed*'), 'Other');
+});
+
+test('a value that was typed and never spoken of again is named as a defect', () => {
+  // DRW, 2026-08-08. `question:legal first name` is one fill of "Mehek" into a plain visible
+  // textarea, and the run reported it in neither filledFields nor skipped. Silence about a value
+  // Litos actually typed reads exactly like success, and did.
+  const actions = [
+    { type: 'fill', selector: '#question_67998823', value: 'Mehek', label: 'question:legal first name' },
+    { type: 'fill', selector: '#question_67998825', value: 'https://www.linkedin.com/in/mehekmandal/', label: 'question:linkedin profile' },
+    { type: 'fill', selector: '#question_37228964002', value: '3.5-3.9', label: 'question:overall gpa' },
+    // An alias ladder: several selectors, most expected to match nothing. Silence here is normal and
+    // must not be reported, or a large Greenhouse packet reports a hundred non-defects.
+    { type: 'fill', value: 'May 2028', label: 'graduation_date_expected' },
+    { type: 'fill', selector: '#x', label: 'question:blank answer', value: '  ' },
+  ] as Parameters<typeof managedUnreportedFillLabels>[0];
+  const unreported = managedUnreportedFillLabels(actions, {
+    filledFields: ['question:linkedin profile'],
+    skipped: ['question:overall gpa: value did not persist after fill'],
+  });
+  assert.deepEqual(unreported, ['question:legal first name']);
+  // A run that reports everything reports no defect.
+  assert.deepEqual(
+    managedUnreportedFillLabels(actions, { filledFields: ['question:linkedin profile', 'question:legal first name', 'question:overall gpa'], skipped: [] }),
+    [],
+  );
 });
 
 /* ---------------------------------------------------------------------------------------------
