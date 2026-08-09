@@ -187,6 +187,10 @@ test('Class A: visa sponsorship comes from the stored boolean (Akuna x7, Virtu)'
   assert.equal(answer(label, ['Yes', 'No']), 'Yes');
   assert.equal(
     answer('Do you now, or will you in the future, need sponsorship from an employer in order to obtain, extend or renew your author', ['Yes', 'No']),
+    null,
+  );
+  assert.equal(
+    answer('Do you now, or will you in the future, need sponsorship from an employer to work in the United States?', ['Yes', 'No']),
     'Yes',
   );
   assert.equal(answer(label, ['Yes', 'No'], { ...STORED_PROFILE, needs_sponsorship: false }), 'No');

@@ -1,11 +1,10 @@
 /**
  * WHICH ANSWERS MAY BE CARRIED TO THE NEXT POSTING, AND WHICH MAY NEVER BE.
  *
- * The ask-at-Apply step is only worth having if it stops asking. An export-control declaration and
- * a "rate your skill level in C++" are the same answer on every form that asks them, and asking for
- * them a fourteenth time is the product failing at its own job. So an answer she gives once is
- * remembered, exactly the way PR #366's onboarding facts are, and offered back the next time a
- * posting asks the same thing.
+ * The ask-at-Apply step may remember only narrow, immutable factual values whose meaning does not
+ * depend on the employer, posting, policy version or option list. A prior answer is not authority
+ * merely because the applicant once typed it. Legal status, intentions, self-ratings and agreements
+ * can change or can mean something different on the next form.
  *
  * THE LINE, and it is drawn one way on purpose. "Based on the team descriptions above, which
  * opening would you be most interested in contributing to?" is a real question with a real answer,
@@ -13,8 +12,8 @@
  * making a statement she never made, which is the same harm as inventing one - the only difference
  * is that the words were hers originally. So:
  *
- *   POSTING-SPECIFIC IS THE DEFAULT. An answer is reused only when it clears a positive test for
- *   being a fact about the applicant, AND nothing in the label ties it to this posting.
+ *   POSTING-SPECIFIC IS THE DEFAULT. An answer is reused only when it clears a narrow positive
+ *   whitelist for an immutable factual class, AND nothing in the label ties it to this posting.
  *
  * The asymmetry is deliberate and is the whole safety argument. Failing to reuse a reusable answer
  * costs her one more box to type in, on a screen built for typing in boxes. Reusing a
@@ -62,9 +61,11 @@ const POSTING_SCOPED_QUESTION = new RegExp(
   'i',
 );
 
-/** SAT, ACT, GRE: a number the applicant holds, identical on every form that asks. */
+/** Exact standardized-test scores are the sole proven reusable class today. */
 const STANDARDIZED_TEST_SCORE_QUESTION =
   /\b(?:sat|act|gre|gmat|lsat|toefl|ielts)\b[^?]{0,60}\bscores?\b|\bstandardi[sz]ed\s+test\s+scores?\b|\bscores?\b[^?]{0,40}\b(?:sat|act|gre|gmat)\b/i;
+const STANDARDIZED_TEST_SCORE_OPTION_QUESTION =
+  /\b(?:range|band|bracket|select|choose|which\s+of|below|above|greater|less|at\s+least|at\s+most)\b/i;
 
 const COMPANY_SUFFIX_WORDS = new Set([
   'inc', 'inc.', 'llc', 'ltd', 'limited', 'corp', 'corporation', 'co', 'company', 'group',
@@ -122,9 +123,15 @@ export function answerReuseScope(label: string, context: AnswerReuseContext = {}
    * drafted 600-word essay opening "I have not applied to Akuna in the past" already caused once. */
   if (PREVIOUSLY_APPLIED_QUESTION.test(value)) return 'posting_specific';
 
-  // The positive test. A declaration about the applicant travels; nothing else does.
-  if (isSelfDeclarationQuestion(value)) return 'reusable';
-  if (STANDARDIZED_TEST_SCORE_QUESTION.test(value)) return 'reusable';
+  // Self-declarations never cross posting boundaries. This includes legal/export-control status,
+  // sponsorship, military history, policies, attestations, intentions and skill self-ratings.
+  if (isSelfDeclarationQuestion(value)) return 'posting_specific';
+
+  // The single positive test. Only an exact standardized score travels. A range or select prompt
+  // has an employer-specific option taxonomy, so replaying the old option text is unsafe.
+  if (STANDARDIZED_TEST_SCORE_QUESTION.test(value) && !STANDARDIZED_TEST_SCORE_OPTION_QUESTION.test(value)) {
+    return 'reusable';
+  }
 
   return 'posting_specific';
 }
@@ -193,10 +200,18 @@ export function savedAnswerFor(
   label: string,
   saved: ReadonlyMap<string, string>,
   context: AnswerReuseContext = {},
+  options: readonly string[] | null = null,
 ): string | undefined {
   const question = (label ?? '').trim();
   if (!question) return undefined;
   if (answerReuseScope(question, context) !== 'reusable') return undefined;
   const value = saved.get(savedAnswerKey(question));
-  return value && value.trim() ? value : undefined;
+  if (!value?.trim()) return undefined;
+  const usableOptions = (options ?? []).filter((option) => option.trim());
+  if (usableOptions.length === 0) return value;
+  // A stable factual value may travel, but a closed control is a new factual claim about which of
+  // this employer's choices applies. Replay only when the current form contains the exact stored
+  // value. Range and band options must never receive a numeric score merely because the label stayed
+  // unchanged between postings.
+  return usableOptions.find((option) => option.trim() === value.trim());
 }

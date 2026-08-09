@@ -277,19 +277,21 @@ describe('stored application facts reach the control on the real employer questi
     assert.match(heldFor(plan, undergraduate), /further-education question left for you/);
   });
 
-  test('truthfulness certification: Akuna 2 postings, and only from the stored consent', () => {
+  test('truthfulness certification remains scoped to the exact application', () => {
     const label = 'i certify that all information i have provided in order to apply for this position with akuna is true, complete, and accurate.';
-    assert.equal(filled(label, { attest_truthful_information: true }, { inputType: 'checkbox', options: YES_NO }), 'Yes');
+    assert.equal(filled(label, { attest_truthful_information: true }, { inputType: 'checkbox', options: YES_NO }), null);
+    assert.match(heldFor(label, { attest_truthful_information: true }), /certification that your information is true/);
     assert.equal(filled(label, {}), null);
     assert.match(heldFor(label, {}), /certification that your information is true/);
     // Explicitly declined reads the same as never asked: not ticked.
     assert.equal(filled(label, { attest_truthful_information: false }), null);
   });
 
-  test('privacy acknowledgements: Five Rings, IMC, Point72, and only from the stored consent', () => {
+  test('privacy acknowledgements remain scoped to each employer notice', () => {
     const labels = ['privacy policy acknowledgement', 'privacy statement', 'privacy'];
     for (const label of labels) {
-      assert.equal(filled(label, { accept_privacy_notices: true }, { inputType: 'checkbox', options: YES_NO }), 'Yes', label);
+      assert.equal(filled(label, { accept_privacy_notices: true }, { inputType: 'checkbox', options: YES_NO }), null, label);
+      assert.match(heldFor(label, { accept_privacy_notices: true }, 'checkbox'), /privacy notice/, label);
       assert.equal(filled(label, {}), null, label);
       assert.match(heldFor(label, {}, 'checkbox'), /privacy notice/, label);
     }

@@ -1203,8 +1203,6 @@ const GREENHOUSE_PHONE_SELECTOR =
   `#phone, input[name="job_application[phone]"], ${SEMANTIC_PHONE_SELECTOR}`;
 const GREENHOUSE_RESUME_SELECTOR =
   '#resume, input[type="file"][name="job_application[resume]"], input[type="file"][id*="resume" i], input[type="file"][name*="resume" i], input[type="file"][aria-label*="resume" i], label:has-text("Resume") input[type="file"]';
-const GREENHOUSE_CANDIDATE_PRIVACY_CHECKBOX_SELECTOR =
-  'input[type="checkbox"][required][description*="Candidate Privacy Policy" i], input[type="checkbox"][required][description*="Candidate Privacy Notice" i], input[type="checkbox"][required][description*="Applicant Privacy Policy" i], input[type="checkbox"][required][description*="Applicant Privacy Notice" i]';
 const ASHBY_PHONE_SELECTOR =
   `#phone, input[name="phone"], input[name="_systemfield_phone"], ${SEMANTIC_PHONE_SELECTOR}`;
 
@@ -2255,17 +2253,6 @@ function pushGreenhouseAkunaSafeTextActions(actions: ManagedBrowserAction[], pac
   }
 }
 
-function pushGreenhouseAkunaFixedAttestationActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
-  if (!packetLooksAkuna(packet)) return;
-  const packetQuestionContext = packet.jdText ?? packet.questions.map((item) => item.question).join('\n');
-  for (const label of [
-    'I certify that all information I have provided',
-    'resume must be submitted in PDF format',
-  ]) {
-    pushGreenhouseQuestionComboboxLabelActions(actions, label, 'Yes', 'greenhouse_akuna_attestation', packetQuestionContext);
-  }
-}
-
 function packetLooksAkuna(packet: SubmissionPacket): boolean {
   return /\bakuna\b/i.test(packet.jdText ?? '')
     || packet.questions.some((item) => /\bakuna\b/i.test(item.question));
@@ -3025,28 +3012,6 @@ function pushFixedFieldActions(
       managedUpload(actions, selector, 'resume', packet.resume, packet.resumeName);
     }
     managedUpload(actions, coverLetterUploadSelector(portal), 'cover_letter', packet.coverLetter, packet.coverLetterName);
-    /* The blind candidate-privacy tick, and the one case where it must stand down.
-     *
-     * This action exists for the form whose privacy checkbox discovery never turned into a question
-     * record. When there IS a record, the reviewed-question loop below ticks the very same box from
-     * its own discovered selector - and a second click unticks it. On Cloudflare both fired, along
-     * with two of the shape alternatives, and four clicks on one checkbox left it empty.
-     *
-     * So this is skipped exactly when the reviewed set already carries the acknowledgement with an
-     * answer, which is the only condition under which the loop below will click it. */
-    const reviewedPrivacyAcknowledgement = packet.questions.some((item) => (
-      greenhouseReviewedQuestionAnswer(item, packet).trim()
-      && isRoutineCandidatePrivacyAcknowledgement(normalizeReviewQuestionLabel(item.question))
-    ));
-    if (!reviewedPrivacyAcknowledgement) {
-      actions.push({
-        type: 'click',
-        selector: GREENHOUSE_CANDIDATE_PRIVACY_CHECKBOX_SELECTOR,
-        label: 'greenhouse_candidate_privacy_acknowledgement',
-        optional: true,
-        timeout: MANAGED_FILL_TIMEOUT_MS,
-      });
-    }
   } else if (family === 'lever') {
     managedFill(actions, 'input[name="name"]', packet.fullName, 'name', false);
     managedFill(actions, 'input[name="email"]', packet.email, 'email', false);
@@ -3377,7 +3342,6 @@ export function buildManagedPortalActions(
   const mayReplayReviewedQuestions = family !== 'zoho_recruit' && family !== 'bullhorn';
   if (family === 'greenhouse') {
     pushGreenhouseAkunaSafeTextActions(actions, packet);
-    pushGreenhouseAkunaFixedAttestationActions(actions, packet);
     pushGreenhouseKnownQuestionAliases(actions, packet, 'akunaRequired');
   }
   // Reviewed questions include stored attestations and EEO decline-style answers when present.

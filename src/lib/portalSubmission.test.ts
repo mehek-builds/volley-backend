@@ -1849,8 +1849,6 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
   assert.ok(knownComboFills.some((action) => action.selector?.includes('Do you now, or will you in the future, require visa sponsorship')));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('current immigration status') && action.value === 'F-1 CPT'));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('live in New York or California')));
-  assert.ok(comboFills.some((action) => action.selector?.includes('I certify that all information I have provided') && action.value === 'Yes'));
-  assert.ok(comboFills.some((action) => action.selector?.includes('resume must be submitted in PDF format') && action.value === 'Yes'));
   assert.equal(actions.some((action) => action.type === 'fillByLabelText' && action.label === 'gpa'), false);
   assert.equal(actions.some((action) => action.type === 'fillByLabelText' && action.label === 'gpa_question'), false);
   const topPreferenceIndex = actions.findIndex((action) => action.type === 'fill' && action.selector?.includes('this role is my top preference'));
@@ -1902,7 +1900,7 @@ test('Greenhouse promotes canonical Akuna prior-application no answers into earl
   assert.ok(actions.length <= 100, `expected at most 100 actions, got ${actions.length}`);
 });
 
-test('Greenhouse fills fixed Akuna attestations even when discovery misses them', () => {
+test('Greenhouse never invents Akuna attestations when discovery misses them', () => {
   const actions = buildManagedPortalActions('greenhouse', {
     fullName: 'Mehek Mandal',
     email: 'mehekmandal05@gmail.com',
@@ -1913,8 +1911,9 @@ test('Greenhouse fills fixed Akuna attestations even when discovery misses them'
   });
 
   const fills = actions.filter((action) => action.type === 'fill' && action.label?.startsWith('greenhouse_akuna_attestation_combo_label:'));
-  assert.ok(fills.some((action) => action.selector?.includes('I certify that all information I have provided') && action.value === 'Yes'));
-  assert.ok(fills.some((action) => action.selector?.includes('resume must be submitted in PDF format') && action.value === 'Yes'));
+  assert.equal(fills.length, 0);
+  assert.equal(actions.some((action) => action.selector?.includes('I certify that all information I have provided')), false);
+  assert.equal(actions.some((action) => action.selector?.includes('resume must be submitted in PDF format')), false);
   assert.ok(actions.length <= 100, `expected at most 100 actions, got ${actions.length}`);
 });
 
@@ -2493,7 +2492,7 @@ test('Greenhouse managed actions never include demographic data consent', () => 
   assert.equal(actions.some((action) => action.label === 'greenhouse_demographic_data_consent'), false);
 });
 
-test('Greenhouse managed actions acknowledge required Candidate Privacy checkboxes discovered only on the live form', () => {
+test('Greenhouse managed actions never acknowledge a Candidate Privacy notice without its exact reviewed answer', () => {
   const actions = buildManagedPortalActions('greenhouse', {
     fullName: 'Taylor Example',
     email: 'taylor@example.com',
@@ -2502,13 +2501,8 @@ test('Greenhouse managed actions acknowledge required Candidate Privacy checkbox
     questions: [],
   });
 
-  assert.ok(actions.some((action) =>
-    action.type === 'click'
-    && action.label === 'greenhouse_candidate_privacy_acknowledgement'
-    && action.selector?.includes('[description*="Candidate Privacy Policy" i]')
-    && action.optional === true
-    && (action.timeout ?? Infinity) < 30_000),
-  );
+  assert.equal(actions.some((action) => action.label === 'greenhouse_candidate_privacy_acknowledgement'), false);
+  assert.equal(actions.some((action) => action.selector?.includes('Candidate Privacy Policy')), false);
   assert.equal(actions.some((action) => action.label === 'greenhouse_demographic_data_consent_checkbox'), false);
 });
 

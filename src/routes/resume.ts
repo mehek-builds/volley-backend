@@ -174,7 +174,7 @@ function refreshedHistorySpec(spec: unknown, profile: ApplicationProfileLike): u
     ...(spec as Record<string, unknown>),
     _review: {
       ...review,
-      questions: refreshKnownQuestionAnswers(review.questions, profile, review.jd_text),
+      questions: refreshKnownQuestionAnswers(review.questions, profile, review.jd_text, review.questions_reviewed_at),
     },
   };
 }

@@ -199,7 +199,7 @@ test('extension-start refuses a drifted packet before it reserves the submission
 
 test('extension-start refuses sensitive questions before it reserves the submission', () => {
   const handler = slice(routes, "'/applications/:id/submission/extension-start'", "'/applications/:id/submission/extension-outcome'");
-  assert.match(handler, /const refreshedQuestions = refreshKnownQuestionAnswers\(current\.questions, sensitiveProfile, current\.jd_text\)/);
+  assert.match(handler, /const refreshedQuestions = refreshKnownQuestionAnswers\([\s\S]{0,180}current\.questions_reviewed_at/);
   assert.match(handler, /sensitiveQuestionFor\(refreshedQuestions/);
   assert.match(handler, /kind: 'sensitive_question'/);
   assert.match(handler, /result\.kind === 'sensitive_question'/);
@@ -235,7 +235,7 @@ test('submit-request revalidates resume content and PDF layout before the browse
 
 test('final approval revalidates the full packet before it clicks submit', () => {
   const handler = slice(routes, "'/applications/:id/submission/approve'", "'/applications/:id/status'");
-  assert.match(handler, /questions: refreshKnownQuestionAnswers\(current\.questions, sensitiveProfile, current\.jd_text\)/);
+  assert.match(handler, /questions: refreshKnownQuestionAnswers\([\s\S]{0,180}current\.questions_reviewed_at/);
   assert.match(handler, /approvalReview\.preview_screenshot_url/);
   assert.match(handler, /approvalReview\.filled_fields/);
   assert.match(handler, /finalApprovalFieldIssues\(approvalReview, approvalReview\.cover_letter_supported === true && Boolean\(coverLetter\)\)/);

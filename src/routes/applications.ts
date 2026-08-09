@@ -439,7 +439,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         const educationIssues = packetEducationDrift(row.spec, profileRows[0]?.parsed_json);
         if (educationIssues.length > 0) return { kind: 'education_drift' as const, issues: educationIssues };
         const sensitiveProfile = await loadSensitiveQuestionProfile(userId);
-        const refreshedQuestions = refreshKnownQuestionAnswers(current.questions, sensitiveProfile, current.jd_text);
+        const refreshedQuestions = refreshKnownQuestionAnswers(
+          current.questions,
+          sensitiveProfile,
+          current.jd_text,
+          current.questions_reviewed_at,
+        );
         const sensitive = sensitiveQuestionFor(refreshedQuestions, sensitiveProfile, current.jd_text);
         if (sensitive) return { kind: 'sensitive_question' as const, question: sensitive.question };
         /* THE FIFTH SEND SITE, and the one blankRequiredQuestionLabels' own list did not name.
@@ -805,12 +810,18 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           .from(profiles).where(eq(profiles.user_id, request.jwtPayload!.userId)).limit(1),
         loadSensitiveQuestionProfile(request.jwtPayload!.userId),
       ]);
-      const submittedQuestions = refreshKnownQuestionAnswers(
-        parsed.data.questions as ApplicationReviewQuestion[],
+      const submittedQuestions = parsed.data.questions as ApplicationReviewQuestion[];
+      const mergedSubmittedQuestions = mergeSubmittedApplicationReviewQuestions(
+        current.questions,
+        submittedQuestions,
+        current.questions_reviewed_at,
+      );
+      const normalizedSubmittedQuestions = refreshKnownQuestionAnswers(
+        mergedSubmittedQuestions,
         sensitiveProfile,
         current.jd_text,
+        current.questions_reviewed_at,
       );
-      const normalizedSubmittedQuestions = mergeSubmittedApplicationReviewQuestions(current.questions, submittedQuestions);
       /* THE REQUIRED-ANSWER GATE, ON THE SEND AND NOT ON THE RUN.
        *
        * This route has two outcomes and they need opposite treatment. On a supported portal it
@@ -1047,7 +1058,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const profile = await loadSensitiveQuestionProfile(request.jwtPayload!.userId);
       review = {
         ...review,
-        questions: refreshKnownQuestionAnswers(review.questions, profile, review.jd_text),
+        questions: refreshKnownQuestionAnswers(
+          review.questions,
+          profile,
+          review.jd_text,
+          review.questions_reviewed_at,
+        ),
       };
       let handoff_url: string | undefined;
       if (review.status === 'needs_attention' && review.browser_session_id) {
@@ -1195,7 +1211,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const sensitiveProfile = await loadSensitiveQuestionProfile(request.jwtPayload!.userId);
       const approvalReview: ApplicationReviewState = {
         ...current,
-        questions: refreshKnownQuestionAnswers(current.questions, sensitiveProfile, current.jd_text),
+        questions: refreshKnownQuestionAnswers(
+          current.questions,
+          sensitiveProfile,
+          current.jd_text,
+          current.questions_reviewed_at,
+        ),
       };
       const approvalIssues: string[] = [];
       if (approvalReview.portal_url && !isPortalSupported(approvalReview.portal_url)) {
