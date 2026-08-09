@@ -6,6 +6,7 @@ import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
 import { readApplicationReview } from './applicationReview';
 import { renderCoverLetterPdf } from './coverLetterPdf';
 import { generateCoverLetter, validateCoverLetter } from '../llm/coverLetter';
+import { contestedMetrics } from '../engine/grounding';
 import { resolveBlobUrl } from './resumeAccess';
 import { coverLetterFileNameForRole } from './resumeFileName';
 
@@ -37,18 +38,31 @@ export function canGenerateCoverLetter(supported: boolean | undefined, capabilit
   return capabilityConfirmed || supported === true;
 }
 
+/* The drafter's source, plus the figures that source cannot attribute.
+ *
+ * contestedMetrics runs on the experience bank rather than on the serialized source, because the
+ * question it answers is "which ORG does this number belong to" and the serialized blob has thrown
+ * that structure away. The bank is also the right authority: selected_resume is derived from it, so
+ * a figure duplicated in the bank is duplicated everywhere downstream, and de-duplicating at the
+ * bank catches it once. See engine/grounding.ts for why the defect is in her data, not here.
+ */
 async function candidateContext(row: ApplicationRow) {
   const [bank, profileRows] = await Promise.all([
     readExperienceBankOrSeedFromBaseResume(row.user_id),
     db.select().from(profiles).where(eq(profiles.user_id, row.user_id)).limit(1),
   ]);
   const stored = row.spec as StoredSpec;
-  return JSON.stringify({
+  const source = JSON.stringify({
     education: profileRows[0]?.parsed_json ?? {},
     declared_skills: profileRows[0]?.skills ?? [],
     selected_resume: Object.fromEntries(Object.entries(stored).filter(([key]) => !key.startsWith('_'))),
     experience_bank: bank,
   });
+  const contested = contestedMetrics(bank.map((entry) => ({
+    org: entry.org,
+    text: (entry.bullet_variants as string[] | null ?? []).join(' \n '),
+  })));
+  return { source, contested };
 }
 
 async function persistCoverLetter(
@@ -110,30 +124,49 @@ export async function generateStoredCoverLetter(row: ApplicationRow, force = fal
   }
   const existing = storedCoverLetter(row);
   if (existing && !force) return { cover_letter: existing, blob_url: undefined };
-  const source = await candidateContext(row);
+  const { source, contested } = await candidateContext(row);
   let body = '';
   let validation = { issues: ['not generated'], warnings: [] as string[], word_count: 0, body: '' };
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    body = await generateCoverLetter({ company: job.company, role: job.role, jd_text: review.jd_text, candidate_source: source }, validation.issues);
-    validation = validateCoverLetter(body, job.company, job.role, source);
+    body = await generateCoverLetter({
+      company: job.company,
+      role: job.role,
+      jd_text: review.jd_text,
+      candidate_source: source,
+      contested_metrics: contested.labels,
+    }, validation.issues);
+    validation = validateCoverLetter(body, job.company, job.role, source, contested);
     if (validation.issues.length === 0) break;
   }
   if (validation.issues.length > 0) {
-    const error = new Error('Some lines in the cover letter are not backed by your real work.') as Error & { issues?: string[] };
+    const error = new Error(
+      'Some lines in the cover letter are not backed by your real work, or promise something only you can promise.',
+    ) as Error & { issues?: string[] };
     error.issues = validation.issues;
     throw error;
   }
   return persistCoverLetter(row, validation.body, validation.warnings, validation.word_count, false);
 }
 
+/* The hand-edited letter is validated by exactly the same rules, on purpose.
+ *
+ * The argument for relaxing the commitment check here is real: a sentence Mehek typed is her promise
+ * and not Litos inventing one. It is refused anyway, because the gate is about the ARTIFACT, not the
+ * author. A cover letter is prose stapled to an application; nothing downstream can read a promise
+ * out of it, reconcile it with the columns she actually maintains, or show it back to her when the
+ * next employer asks the same thing. A structured question can do all three. So the answer to "I do
+ * want to say I can be in Seattle" is to say it where it is checkable, not in a PDF. The refusal
+ * comes back with the offending sentence in `issues`, so the fix is visible and one edit away, and
+ * this matches how ungroundedNumbers has always treated this path.
+ */
 export async function saveStoredCoverLetter(row: ApplicationRow, body: string) {
   const review = readApplicationReview(row.spec);
   const job = row.job_context as { company?: string; role?: string };
   if (!job.company || !job.role || review?.cover_letter_supported !== true) {
     throw new Error('This company’s application page has nowhere to attach a cover letter');
   }
-  const source = await candidateContext(row);
-  const validation = validateCoverLetter(body, job.company, job.role, source);
+  const { source, contested } = await candidateContext(row);
+  const validation = validateCoverLetter(body, job.company, job.role, source, contested);
   if (validation.issues.length > 0) {
     const error = new Error('Fix the cover letter before saving.') as Error & { issues?: string[] };
     error.issues = validation.issues;
