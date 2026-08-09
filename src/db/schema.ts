@@ -825,6 +825,23 @@ export const application_email_messages = pgTable('application_email_messages', 
     .where(sql`${t.provider_message_id} is not null`),
 }));
 
+// ---- application_email_receiving_proofs ----
+// A provider-key-independent proof that Resend delivered one exact, operator-configured canary to
+// the selected managed receiving route. The webhook handler writes only hashes and routing facts:
+// never the canary recipient, provider payload, message body, headers, or signing secrets.
+export const application_email_receiving_proofs = pgTable('application_email_receiving_proofs', {
+  provider_message_hash: text('provider_message_hash').primaryKey(),
+  route_fingerprint: text('route_fingerprint').notNull(),
+  proof_version: integer('proof_version').notNull(),
+  domain: text('domain').notNull(),
+  verified_at: timestamp('verified_at', { withTimezone: true }).notNull(),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  routeFingerprintUnique: uniqueIndex('application_email_receiving_proofs_route_fingerprint_unique')
+    .on(t.route_fingerprint),
+  verifiedAtIdx: index('application_email_receiving_proofs_verified_at_idx').on(t.verified_at),
+}));
+
 // ---- career_page_sources ----
 // Operator-managed company career boards. The polling worker reads the public ATS APIs rather
 // than scraping job aggregators, so Litos can show first-party postings with a stable apply URL.

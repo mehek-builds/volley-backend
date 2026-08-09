@@ -18,7 +18,14 @@ import {
   processInboundApplicationEmail,
   retrieveResendReceivedEmail,
 } from '../lib/applicationEmail';
-import { applicationAliasDeliverability } from '../lib/applicationEmailDeliverability';
+import {
+  applicationAliasDeliverability,
+  resetApplicationAliasDeliverabilityCache,
+} from '../lib/applicationEmailDeliverability';
+import {
+  acceptSignedManagedReceivingCanary,
+  type SignedResendCanaryEvent,
+} from '../lib/applicationEmailReceivingProof';
 
 const WEBHOOK_MAX_SKEW_MS = 5 * 60 * 1000;
 
@@ -70,7 +77,7 @@ function svixSecretBytes(secret: string): Buffer {
   return Buffer.from(value, 'base64');
 }
 
-function svixSignatureMatches(request: FastifyRequest, secret: string): boolean {
+export function svixSignatureMatches(request: FastifyRequest, secret: string): boolean {
   const idHeader = request.headers['svix-id'];
   const timestampHeader = request.headers['svix-timestamp'];
   const signatureHeader = request.headers['svix-signature'];
@@ -89,7 +96,7 @@ function svixSignatureMatches(request: FastifyRequest, secret: string): boolean 
     .some((part) => part.startsWith('v1,') && safeEqual(part.slice(3), expected));
 }
 
-function inboundSecretMatches(request: FastifyRequest): boolean {
+export function inboundSecretMatches(request: FastifyRequest): boolean {
   const secret = inboundWebhookSecret();
   if (secret && svixSignatureMatches(request, secret)) return true;
   const timestampHeader = request.headers['x-litos-webhook-timestamp'];
@@ -103,6 +110,14 @@ function inboundSecretMatches(request: FastifyRequest): boolean {
     .update(`${timestamp}.${rawPayload(request.body)}`)
     .digest('hex');
   return safeEqual(provided, expected);
+}
+
+/** Canary proof has one trust root: Resend's own webhook signing secret. Compatibility secrets
+ * may authorize ordinary inbound test-provider routing, but can never establish provider-bound
+ * managed receiving proof, even when presented in Svix-shaped headers. */
+export function resendProofSignatureMatches(request: FastifyRequest): boolean {
+  const secret = process.env.RESEND_WEBHOOK_SECRET?.trim();
+  return Boolean(secret && svixSignatureMatches(request, secret));
 }
 
 const directInboundBodySchema = z.object({
@@ -137,6 +152,21 @@ const resendReceivedBodySchema = z.object({
     message_id: z.string().max(500).optional(),
   }).passthrough(),
 }).passthrough();
+
+export function signedResendCanaryEvent(body: unknown): SignedResendCanaryEvent | null {
+  let parsed: unknown;
+  try {
+    parsed = parsedJsonBody(body);
+  } catch {
+    return null;
+  }
+  const resend = resendReceivedBodySchema.safeParse(parsed);
+  if (!resend.success) return null;
+  return {
+    emailId: resend.data.data.email_id,
+    recipients: resend.data.data.to,
+  };
+}
 
 function unauthorized(reply: FastifyReply) {
   return reply.status(401).send({ error: 'Invalid inbound email webhook secret' });
@@ -298,8 +328,33 @@ export async function applicationEmailRoutes(fastify: FastifyInstance) {
   });
 
   fastify.post('/webhooks/application-email/inbound', async (request: FastifyRequest, reply: FastifyReply) => {
-    if (!inboundSecretMatches(request)) {
+    const signedByResend = resendProofSignatureMatches(request);
+    if (!signedByResend && !inboundSecretMatches(request)) {
       return unauthorized(reply);
+    }
+
+    /* Provider-key-independent receiving proof. This runs only for a fresh, cryptographically
+     * verified Resend webhook and before ordinary alias lookup or the provider content GET. The
+     * exact canary is intentionally not an application alias, so routing first would discard the
+     * only account-bound evidence the provider can deliver without Receiving read scope. */
+    if (signedByResend) {
+      const event = signedResendCanaryEvent(request.body);
+      if (event) {
+        try {
+          const canary = await acceptSignedManagedReceivingCanary(event);
+          if (canary.kind === 'accepted') {
+            // A new proof must be visible immediately rather than after the five-minute negative
+            // deliverability cache expires. The response contains no proof or recipient identity.
+            resetApplicationAliasDeliverabilityCache();
+            return reply.status(202).send({ accepted: true, receiving_proof: 'verified' });
+          }
+          if (canary.kind === 'rejected') {
+            return reply.status(400).send({ error: 'Invalid receiving proof' });
+          }
+        } catch {
+          return reply.status(503).send({ error: 'Receiving proof is unavailable' });
+        }
+      }
     }
 
     const inbound = await inboundEmailFromWebhookBody(request.body);

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   applicationAliasDeliverability,
   classifyAliasMxProvider,
@@ -20,10 +21,13 @@ async function withAliasEnv<T>(run: () => Promise<T>): Promise<T> {
     from: process.env.RESEND_FROM,
     managedDomain: process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN,
     canaryId: process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID,
+    canaryToken: process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN,
+    aliasSecret: process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET,
     routeMode: process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE,
   };
   delete process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN;
   delete process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID;
+  delete process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN;
   delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
   delete process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE;
   delete process.env.LITOS_APPLICATION_EMAIL_INBOUND_ENABLED;
@@ -49,6 +53,10 @@ async function withAliasEnv<T>(run: () => Promise<T>): Promise<T> {
     else process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN = saved.managedDomain;
     if (saved.canaryId === undefined) delete process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID;
     else process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID = saved.canaryId;
+    if (saved.canaryToken === undefined) delete process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN;
+    else process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN = saved.canaryToken;
+    if (saved.aliasSecret === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
+    else process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = saved.aliasSecret;
     if (saved.routeMode === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE;
     else process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE = saved.routeMode;
   }
@@ -59,17 +67,15 @@ async function withManagedAliasEnv<T>(run: () => Promise<T>): Promise<T> {
     delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
     delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
     process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN = 'litos-inbound.resend.app';
-    process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID = 'received-canary-1';
+    process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN = 'abcdefghijklmnopqrstuvwxyz0123456789abcdef';
+    process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = 'managed-alias-secret';
     resetApplicationAliasDeliverabilityCache();
     return run();
   });
 }
 
 const healthyManagedProbes = {
-  resendReceivedEmail: async () => ({
-    id: 'received-canary-1',
-    to: ['canary@litos-inbound.resend.app'],
-  }),
+  managedReceivingProof: async () => true,
   resendWebhooks: async () => [{ endpoint: ENDPOINT, events: ['email.received'], status: 'enabled' }],
 };
 
@@ -93,7 +99,7 @@ test('a domain with MX, Resend verification and an inbound route is deliverable'
   });
 });
 
-test('managed receiving succeeds only from account-scoped canary proof and the exact active webhook', async () => {
+test('managed receiving succeeds only from durable signed-webhook proof and the exact active webhook', async () => {
   await withManagedAliasEnv(async () => {
     const result = await applicationAliasDeliverability({
       ...healthyManagedProbes,
@@ -130,7 +136,7 @@ test('invalid route mode remains unconfigured and performs no provider checks', 
     process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE = 'managed';
     resetApplicationAliasDeliverabilityCache();
     const result = await applicationAliasDeliverability({
-      resendReceivedEmail: async () => { throw new Error('invalid mode must not retrieve a canary'); },
+      managedReceivingProof: async () => { throw new Error('invalid mode must not read proof'); },
       resendWebhooks: async () => { throw new Error('invalid mode must not list webhooks'); },
     });
     assert.equal(result.deliverable, false);
@@ -139,78 +145,53 @@ test('invalid route mode remains unconfigured and performs no provider checks', 
   });
 });
 
-test('managed receiving fails closed when its canary proof is missing', async () => {
+test('managed receiving fails closed when its canary configuration is missing', async () => {
   await withManagedAliasEnv(async () => {
-    delete process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID;
+    delete process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN;
     resetApplicationAliasDeliverabilityCache();
     const result = await applicationAliasDeliverability({
-      resendReceivedEmail: async () => { throw new Error('must not retrieve without an id'); },
+      managedReceivingProof: async () => { throw new Error('must not read proof without a token'); },
     });
     assert.equal(result.deliverable, false);
     assert.equal(result.reason, 'managed_receiving_proof_missing');
   });
 });
 
-test('managed receiving rejects a canary from a different ID or account', async () => {
+test('managed receiving rejects absent or stale durable proof', async () => {
   await withManagedAliasEnv(async () => {
-    const wrongId = await applicationAliasDeliverability({
+    const missing = await applicationAliasDeliverability({
       ...healthyManagedProbes,
-      resendReceivedEmail: async () => ({
-        id: 'received-from-another-team',
-        to: ['canary@litos-inbound.resend.app'],
-      }),
+      managedReceivingProof: async () => false,
     });
-    assert.equal(wrongId.reason, 'managed_receiving_proof_mismatch');
-
-    resetApplicationAliasDeliverabilityCache();
-    const wrongTeam = await applicationAliasDeliverability({
-      ...healthyManagedProbes,
-      resendReceivedEmail: async () => { throw new Error('Resend received-email lookup answered 404'); },
-    });
-    assert.equal(wrongTeam.reason, 'check_unavailable');
-    assert.match(wrongTeam.detail ?? '', /404/);
+    assert.equal(missing.reason, 'managed_receiving_proof_mismatch');
   });
 });
 
-test('managed receiving fails closed when the configured API key is unauthorized', async () => {
+test('managed receiving uses signed-webhook proof without a received-email provider lookup', async () => {
   await withManagedAliasEnv(async () => {
-    const result = await applicationAliasDeliverability({
-      ...healthyManagedProbes,
-      resendReceivedEmail: async (id) => { throw new Error(`Resend /emails/receiving/${id} answered 401`); },
-    });
-    assert.equal(result.deliverable, false);
-    assert.equal(result.reason, 'check_unavailable');
-    assert.match(result.detail ?? '', /401/);
-    assert.doesNotMatch(result.detail ?? '', /received-canary-1/);
+    const result = await applicationAliasDeliverability(healthyManagedProbes);
+    assert.equal(result.deliverable, true);
+    assert.equal(result.reason, 'deliverable');
+    const source = readFileSync('src/lib/applicationEmailDeliverability.ts', 'utf8');
+    assert.doesNotMatch(source, /emails\/receiving/);
   });
 });
 
-test('managed receiving redacts its proof ID from provider and not-found errors', async () => {
+test('managed receiving redacts its canary token and recipient from durable-store errors', async () => {
   await withManagedAliasEnv(async () => {
-    for (const message of [
-      'provider failure while reading received-canary-1',
-      'Resend /emails/receiving/received-canary-1 answered 404',
-    ]) {
+    const token = process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN!;
+    const recipient = `litos-proof-${token}@litos-inbound.resend.app`;
+    for (const message of [`store failure ${token}`, `store failure ${recipient}`]) {
       resetApplicationAliasDeliverabilityCache();
       const result = await applicationAliasDeliverability({
         ...healthyManagedProbes,
-        resendReceivedEmail: async () => { throw new Error(message); },
+        managedReceivingProof: async () => { throw new Error(message); },
       });
       assert.equal(result.reason, 'check_unavailable');
-      assert.doesNotMatch(result.detail ?? '', /received-canary-1/);
-      assert.match(result.detail ?? '', /\[redacted\]|provider failure|404/);
+      assert.doesNotMatch(result.detail ?? '', new RegExp(token));
+      assert.doesNotMatch(result.detail ?? '', /litos-proof-/);
+      assert.match(result.detail ?? '', /\[redacted\]/);
     }
-  });
-});
-
-test('managed receiving rejects canary mail delivered to another domain', async () => {
-  await withManagedAliasEnv(async () => {
-    const result = await applicationAliasDeliverability({
-      ...healthyManagedProbes,
-      resendReceivedEmail: async () => ({ id: 'received-canary-1', to: ['canary@other.resend.app'] }),
-    });
-    assert.equal(result.deliverable, false);
-    assert.equal(result.reason, 'managed_receiving_proof_mismatch');
   });
 });
 

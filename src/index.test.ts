@@ -204,7 +204,7 @@ test('/health reports application email routing capability without exposing secr
     domain: process.env.LITOS_APPLICATION_EMAIL_DOMAIN,
     mailbox: process.env.LITOS_APPLICATION_EMAIL_MAILBOX,
     managedDomain: process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN,
-    managedCanary: process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID,
+    managedCanary: process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN,
     routeMode: process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE,
     aliasSecret: process.env.LITOS_APPLICATION_EMAIL_SECRET,
     inboundSecret: process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET,
@@ -214,7 +214,7 @@ test('/health reports application email routing capability without exposing secr
   try {
     process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE = 'managed_resend';
     process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN = 'litos-inbound.resend.app';
-    process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID = 'secret-canary-id';
+    process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN = 'secretcanarytoken0123456789abcdef012345';
     process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'legacy-domain.example';
     process.env.LITOS_APPLICATION_EMAIL_MAILBOX = 'legacy-mailbox@example.com';
     process.env.LITOS_APPLICATION_EMAIL_SECRET = 'secret-alias-key';
@@ -250,7 +250,7 @@ test('/health reports application email routing capability without exposing secr
     assert.ok(!res.body.includes('secret-alias-key'));
     assert.ok(!res.body.includes('secret-webhook-key'));
     assert.ok(!res.body.includes('secret-resend-key'));
-    assert.ok(!res.body.includes('secret-canary-id'));
+    assert.ok(!res.body.includes('secretcanarytoken0123456789abcdef012345'));
     assert.ok(!res.body.includes('legacy-domain.example'));
     assert.ok(!res.body.includes('legacy-mailbox@example.com'));
     await app.close();
@@ -263,8 +263,8 @@ test('/health reports application email routing capability without exposing secr
     else process.env.LITOS_APPLICATION_EMAIL_MAILBOX = saved.mailbox;
     if (saved.managedDomain === undefined) delete process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN;
     else process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN = saved.managedDomain;
-    if (saved.managedCanary === undefined) delete process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID;
-    else process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID = saved.managedCanary;
+    if (saved.managedCanary === undefined) delete process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN;
+    else process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN = saved.managedCanary;
     if (saved.routeMode === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE;
     else process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE = saved.routeMode;
     if (saved.aliasSecret === undefined) delete process.env.LITOS_APPLICATION_EMAIL_SECRET;
