@@ -40,6 +40,15 @@ export const APPLICATION_FACT_COLUMNS = [
   'onsite_commitment',
   'onsite_locations',
   'relocation_willingness',
+  // The scoped, expiring availability window. Added by
+  // scripts/apply-availability-window-schema.mjs, which has NOT been run against production at the
+  // time this landed - which is exactly the case this list exists for: until it has, every read
+  // below falls back and every one of these reads undefined, which the resolver treats as "never
+  // asked" and answers by leaving the employer's question for the student.
+  'availability_window_start',
+  'availability_window_end',
+  'availability_cycle',
+  'availability_valid_through',
 ] as const;
 
 export type ApplicationFactColumn = (typeof APPLICATION_FACT_COLUMNS)[number];
