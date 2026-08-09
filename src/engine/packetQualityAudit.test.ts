@@ -132,6 +132,44 @@ describe('packet audit: amber on words the posting never asked for', () => {
   });
 });
 
+describe('packet audit: generic company prose does not displace real posting requirements', () => {
+  test('Cloudflare mission prose does not make "Internet" a resume requirement', () => {
+    const jd = `About Us
+At Cloudflare, we are on a mission to help build a better Internet.
+Fundamental to our mission is protecting the free and open Internet.
+
+Desirable Skills, Knowledge and Experience
+Technologies include: Typescript/Javascript, Go, Rust, C/C++ and Python.
+`;
+    const extracted = terms(jd, { company: 'Cloudflare', role: 'Software Engineer Intern' });
+    assert.ok(!extracted.includes('internet'), 'company mission prose reached the colored requirements');
+    for (const technology of ['typescript', 'javascript', 'rust', 'c++', 'python']) {
+      assert.ok(extracted.includes(technology), `the concrete requirement "${technology}" was lost`);
+    }
+  });
+
+  test('Flow Traders keeps Excel when the employer explicitly requires proficiency in it', () => {
+    const jd = `What You Need to Succeed
+Excellent mental math, quantitative and analytical skills
+Proficiency in Excel and an affinity for scientific programming or development languages
+`;
+    assert.ok(
+      terms(jd, { company: 'Flow Traders', role: 'Quantitative Trading Intern' }).includes('excel'),
+      'an explicit Excel proficiency requirement must remain colorable',
+    );
+  });
+
+  test('hyphenated requirement phrases stay normalized and preserve the posting spelling', () => {
+    const jd = `Preferred Qualifications
+Hands-on exposure to real-time systems and open-source contributions.
+`;
+    const extracted = extractJdTerms(jd, { company: 'Deepgram', role: 'Software Engineer Intern' });
+    const byTerm = new Map(extracted.map((term) => [term.term, term.display]));
+    assert.equal(byTerm.get('real time systems'), 'real-time systems');
+    assert.equal(byTerm.get('open source'), 'open-source');
+  });
+});
+
 
 /**
  * THE OTHER DIRECTION, AND IT IS THE SAME FILE ON PURPOSE.

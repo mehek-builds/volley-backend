@@ -1354,7 +1354,14 @@ open source`
  * THE COST IS THE JOB-TITLE SENSE, and it is real but not ours to keep: "Associate Product
  * Manager" and "Sales Associate" are titles, and `position`, `role`, `roles`, `job` and `jobs` are
  * already in this list for exactly that reason. Measured over 500 live postings, `associate`
- * reaches the final capped denominator on 9 of them and not one is a skill. */
+ * reaches the final capped denominator on 9 of them and not one is a skill.
+ *
+ * `internet` is company and product context, not a resume capability. Cloudflare's Software
+ * Engineer Intern posting repeats the capitalized word throughout its mission, network overview,
+ * and product history. Because it never writes the word in lowercase, the casing heuristic treated
+ * it as a proper name and painted it as a requirement even though the actual technology list is
+ * TypeScript, JavaScript, Go, Rust, C/C++, and Python. Refusing the generic medium here preserves
+ * those concrete skills and keeps "Internet" out of both the score and the gap-to-bullet input. */
 const BOILERPLATE = new Set(
   `passionate passion obsess obsessed driven motivated enthusiastic energetic dynamic exciting
 opportunity opportunities candidate candidates applicant applicants position role roles job jobs
@@ -1390,6 +1397,7 @@ federal municipal county province
 department departments
 learn transparency hourly
 act acts statute ordinance pay total package cpt
+internet
 `
     .split(/\s+/)
     .filter(Boolean),
