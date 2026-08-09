@@ -23,6 +23,7 @@
 
 import { normalizeReviewQuestionLabel } from './questionDiscovery';
 import { isLocationCommitmentQuestion, PREVIOUSLY_APPLIED_QUESTION } from './questionDiscovery';
+import { labelNamesOfficeMetro } from './officeMetros';
 import { isSelfDeclarationQuestion } from './selfDeclaration';
 
 export type AnswerReuseScope = 'reusable' | 'posting_specific';
@@ -95,36 +96,9 @@ const POSTING_SCOPED_QUESTION = new RegExp(
  * choosing among an employer's own offices is a different question from committing to sit in one.
  */
 
-/** Canonical metro -> the spellings employers actually type for it. */
-const OFFICE_METRO_ALIASES: ReadonlyArray<readonly [string, RegExp]> = [
-  ['San Francisco', /\bsan\s+franc?[si]sco\b|\bsan\s+fran\b|\bsf\s+(?:office|bay)\b|\bin\s+sf\b|\bsf\s+hq\b/i],
-  ['New York', /\bnew\s+york(?:\s+city)?\b|\bnyc\b|\bmanhattan\b/i],
-  ['Los Angeles', /\blos\s+angeles\b|\bla\s+office\b|\bculver\s+city\b|\bsanta\s+monica\b/i],
-  ['Austin', /\baustin\b/i],
-  ['Chicago', /\bchicago\b/i],
-  ['Seattle', /\bseattle\b|\bbellevue\b/i],
-  ['Boston', /\bboston\b|\bcambridge,\s*ma\b/i],
-  ['Mountain View', /\bmountain\s+view\b/i],
-  ['Palo Alto', /\bpalo\s+alto\b/i],
-  ['San Mateo', /\bsan\s+mateo\b/i],
-  ['Greenwich', /\bgreenwich\b/i],
-  ['Houston', /\bhouston\b/i],
-  ['Denver', /\bdenver\b/i],
-  ['Atlanta', /\batlanta\b/i],
-  ['Washington DC', /\bwashington,?\s*d\.?c\.?\b|\barlington,\s*va\b/i],
-  ['London', /\blondon\b/i],
-  ['Dubai', /\bdubai\b/i],
-  ['Singapore', /\bsingapore\b/i],
-  ['Amsterdam', /\bamsterdam\b/i],
-  ['Sydney', /\bsydney\b/i],
-  ['Toronto', /\btoronto\b/i],
-  ['Bengaluru', /\bbengaluru\b|\bbangalore\b/i],
-];
-
-/** Does this label name an office metro at all? */
-function labelNamesOfficeMetro(label: string): boolean {
-  return OFFICE_METRO_ALIASES.some(([, pattern]) => pattern.test(label));
-}
+/* The metro table lives in officeMetros.ts, shared with the resolver. Two copies of "does this
+ * label name an office" would let one file treat a label as placed while the other treats it as
+ * placeless, and those two readings disagree about whether an answer may travel. */
 
 const RELOCATION_QUESTION = /\brelocat\w*\b|\bwilling\s+to\s+move\b|\bplan\s+to\s+move\b/i;
 
