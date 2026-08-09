@@ -187,7 +187,7 @@ describe('the verdict over a set of already-submitted applications', () => {
 
   test('a missing submitted_at degrades to "earlier" rather than an Invalid Date', () => {
     const reason = duplicateApplicationReason({
-      application_id: 'x', company: 'Akuna', role: AKUNA_ROLE, basis: 'job_id',
+      application_id: 'x', company: 'Akuna', role: AKUNA_ROLE, basis: 'job_id', certainty: 'submitted',
     });
     assert.match(reason, /applied to .* at Akuna, earlier\./);
     assert.doesNotMatch(reason, /Invalid Date|NaN|undefined/);
@@ -209,14 +209,14 @@ describe('the verdict over a set of already-submitted applications', () => {
 describe('the refusal is a legible terminal cause, not a generic failure', () => {
   test('the sentence classifies as duplicate_application and nothing else', () => {
     const reason = duplicateApplicationReason({
-      application_id: 'x', company: 'Akuna', role: AKUNA_ROLE, submitted_at: '2026-08-06T08:48:16.764Z', basis: 'ats_posting',
+      application_id: 'x', company: 'Akuna', role: AKUNA_ROLE, submitted_at: '2026-08-06T08:48:16.764Z', basis: 'ats_posting', certainty: 'submitted',
     });
     assert.deepEqual(attentionCategoriesForReasons([reason]), ['duplicate_application']);
   });
 
   test('it is not swept into run_failed, which is the bucket the applicant is told to retry', () => {
     const reason = duplicateApplicationReason({
-      application_id: 'x', company: 'Akuna', role: AKUNA_ROLE, basis: 'job_id',
+      application_id: 'x', company: 'Akuna', role: AKUNA_ROLE, basis: 'job_id', certainty: 'submitted',
     });
     assert.equal(attentionCategoriesForReasons([reason]).includes('run_failed'), false);
     assert.equal(attentionCategoriesForReasons([reason]).includes('unknown'), false);

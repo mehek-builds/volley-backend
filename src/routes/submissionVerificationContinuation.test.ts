@@ -33,7 +33,7 @@ test('managed verification resumes once by token, never by URL, then verifies th
   assert.doesNotMatch(managed, /runManagedBrowser\(result\.url/);
   assert.doesNotMatch(managed, /continueManagedBrowser\([^,]+,[^)]*\).*continueManagedBrowser/s);
   assert.match(managed, /receiptResult = await continueManagedBrowser\(continuationToken, prepared\.actions\)/);
-  assert.match(managed, /const receipt = readManagedReceipt\(receiptResult\)/);
+  assert.match(managed, /readManagedReceipt\(receiptResult\)/);
   const terminalVerification = managed.slice(managed.indexOf("verification = {\n        status: 'completed'"));
   assert.doesNotMatch(terminalVerification, /continuation_token:/);
 });

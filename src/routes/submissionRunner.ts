@@ -75,6 +75,11 @@ import {
   ManagedActionBudgetError,
   NoSubmitControlError,
 } from '../lib/portalSubmission';
+import {
+  isManagedRunTimeout,
+  managedSubmitVerdict,
+  unverifiedSubmissionReason,
+} from '../lib/managedSubmitOutcome';
 import { applyReviewPatch, beginStall } from '../lib/applicationStall';
 import {
   attentionCategoriesForReasons,
@@ -2623,7 +2628,52 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       }, 'Employer is holding this application behind an emailed security code');
       return;
     }
-    const receipt = readManagedReceipt(receiptResult);
+    /* THE RUN'S OWN READING OF THE PAGE WINS, and there are three answers rather than two.
+     *
+     * Until this, the only question asked here was "does the body text match RECEIPT_PROOF_RE", and
+     * a miss threw into fail(), which reported the submit as unverifiable with a sentence that led
+     * nowhere. Skydio packet 13bccb2d never even got that far, but the same code path is what would
+     * have handled it had the run survived. The runner now reports what the ATS rendered.
+     *
+     * 'refused' is the arm that did not exist at all. An employer that says out loud that it could
+     * not take the application is the cheapest possible thing to be certain about, and it was being
+     * folded into the same "we cannot tell" bucket as a run that died mid-click.
+     */
+    const verdict = managedSubmitVerdict(receiptResult);
+    if (verdict.kind === 'refused') {
+      await writeReview(row, nextReview(claimedReview, {
+        status: 'needs_attention',
+        submission_attempted_at: capturedAt,
+        preview_screenshot_url: blob.url,
+        submission_error: undefined,
+        attention_reason: 'The employer refused this application at the last step and said: '
+          + `“${verdict.message.slice(0, 300)}”. Nothing was filed, so there is no confirmation to look for. `
+          + 'Litos will not send it again until this is sorted out.',
+        attention_categories: ['unknown'],
+        submission_claimed_at: undefined,
+        submission_claim_id: undefined,
+      }));
+      return;
+    }
+    if (verdict.kind === 'unverified') {
+      await writeReview(row, nextReview(claimedReview, unverifiedSubmissionPatch(claimedReview, {
+        at: capturedAt,
+        cause: 'no_confirmation_state',
+        previewUrl: blob.url,
+      })));
+      return;
+    }
+    /* 'unreported' means a runner older than submitOutcome, and it keeps the previous behaviour
+       exactly: scrape the body, and throw if there is nothing to scrape. Only 'confirmed' skips the
+       scrape, because on that arm the page said so itself. */
+    const scraped = (() => {
+      try { return readManagedReceipt(receiptResult); } catch { return null; }
+    })();
+    const receipt = verdict.kind === 'confirmed'
+      // The employer's own confirmation sentence, and the reference id the scrape can still find in
+      // the body when there is one. The scrape is now enrichment; it is no longer the proof.
+      ? { confirmationText: verdict.confirmationText, finalUrl: receiptResult.url, referenceId: scraped?.referenceId }
+      : readManagedReceipt(receiptResult);
     await writeReview(row, nextReview(claimedReview, {
       status: 'submitted',
       submitted_at: capturedAt,
@@ -2780,6 +2830,50 @@ export function submissionFailureOutcome(input: {
   };
 }
 
+/* THE PATCH FOR "LITOS DOES NOT KNOW", IN ONE PLACE.
+ *
+ * Two call sites reach it - a run that finished and could not read a confirmation, and a run that
+ * was cut off mid-submit - and they must write the same shape or the resolution route has two
+ * states to handle instead of one.
+ *
+ * Three things are written that the Skydio packet did not have.
+ *
+ *   submission_attempted_at. The click happened, or may have. That is the fact every downstream
+ *   reader needs and nothing on the row was carrying it.
+ *
+ *   unverified_submission. The structured half: when, why, and where to look. The row can now be
+ *   found by a query rather than by grepping prose, and the resolution route has something to
+ *   resolve.
+ *
+ *   The CLAIM IS KEPT. Deliberately. The claim is what stops the ordinary path re-running and
+ *   sending a second application to an employer who may already have the first, and that protection
+ *   is exactly right here. What was wrong before was not the lock, it was that there was no key: the
+ *   applicant is now asked a question whose answer unlocks it, instead of being told to try again by
+ *   a system that would refuse her.
+ */
+function unverifiedSubmissionPatch(
+  review: ApplicationReviewState,
+  input: { at: string; cause: NonNullable<ApplicationReviewState['unverified_submission']>['cause']; previewUrl?: string },
+): Partial<ApplicationReviewState> {
+  return {
+    status: 'needs_attention',
+    submission_attempted_at: input.at,
+    ...(input.previewUrl ? { preview_screenshot_url: input.previewUrl } : {}),
+    unverified_submission: {
+      at: input.at,
+      cause: input.cause,
+      ...(review.portal_url ? { portal_url: review.portal_url } : {}),
+      ...(review.submission_run_id ? { submission_run_id: review.submission_run_id } : {}),
+    },
+    attention_reason: unverifiedSubmissionReason({
+      atsName: review.ats_name,
+      portalUrl: review.portal_url,
+      cause: input.cause,
+    }),
+    attention_categories: ['unverified_submission'],
+  };
+}
+
 export function isProviderSessionFailureMessage(message: string): boolean {
   return /sandbox stream was closed|not accepting commands/i.test(message);
 }
@@ -2792,6 +2886,24 @@ async function fail(row: ResumeRow, error: unknown) {
   const externalGate = /browserbase|stratus managed browser is not configured|secure browser provider is not configured/i.test(message);
   const providerSessionFailure = isProviderSessionFailureMessage(message);
   const uncertainAfterClaim = Boolean(current.submission_claimed_at);
+
+  /* A RUN THAT WAS CUT OFF WHILE IT MAY HAVE BEEN SUBMITTING, which is the Skydio case exactly.
+   *
+   * Ranked above every other arm below, and above the generic uncertainAfterClaim sentence, because
+   * it is the only one that knows both halves: the claim was taken so a submit was authorized and
+   * in progress, AND the run died without reporting what it did. Everything else either knows
+   * nothing was sent or knows what stopped it.
+   *
+   * Written here rather than routed through submissionFailureOutcome because this arm writes STATE,
+   * not just a sentence - submission_attempted_at and the unverified_submission record are what
+   * make the state resolvable instead of terminal. */
+  if (uncertainAfterClaim && isManagedRunTimeout(message)) {
+    await writeReview(latestRows[0], nextReview(current, unverifiedSubmissionPatch(current, {
+      at: new Date().toISOString(),
+      cause: 'run_timed_out',
+    })));
+    return;
+  }
 
   // Takes precedence over uncertainAfterClaim, and that precedence is the whole point. The claim is
   // taken at the top of the run, so by the time clickFinalSubmit refuses to press the button this is
