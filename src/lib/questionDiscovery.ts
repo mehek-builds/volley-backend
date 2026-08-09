@@ -1465,6 +1465,9 @@ const GOVERNMENT_EMPLOYMENT_RELATIONSHIP =
 const GOVERNMENT_WORK_SUBJECT =
   /\bprojects?\b|\bcontracts?\b|\bcontractors?\b|\bfunctions?\b|\bdisciplines?\b|\bgovernment\s+relations\b/i;
 
+const FOREIGN_GOVERNMENT_SCOPE =
+  /\bforeign\b|\bnon[-\s]?(?:u\.?\s*s\.?|us|united\s+states)\b|\boutside(?:\s+of)?\s+(?:the\s+)?(?:u\.?\s*s\.?|us|united\s+states)\b/i;
+
 /* Labels that name a government and are still not "were you employed by one". Everything here is
  * either a real corpus label (relatives, PEP, export control) or a shape whose answer is a legal
  * status rather than a history (authorization, eligibility, sponsorship, clearance, citizenship).
@@ -1478,6 +1481,7 @@ export function isGovernmentEmploymentQuestion(label: string): boolean {
   const value = label ?? '';
   if (!GOVERNMENT_EMPLOYMENT_RELATIONSHIP.test(value)) return false;
   if (GOVERNMENT_WORK_SUBJECT.test(value)) return false;
+  if (FOREIGN_GOVERNMENT_SCOPE.test(value)) return false;
   if (NOT_HER_GOVERNMENT_EMPLOYMENT.test(value)) return false;
   const target = governmentEmploymentTarget(value);
   if (!target) return false;
@@ -1505,18 +1509,26 @@ function registerGovernmentEmployer(
 }
 
 registerGovernmentEmployer('Department of Energy', 'federal', [
+  'DOE',
+  'US DOE',
+  'U.S. DOE',
+  'United States DOE',
   'U.S. Department of Energy',
   'United States Department of Energy',
 ]);
 registerGovernmentEmployer('Department of Justice', 'federal', [
+  'DOJ',
+  'US DOJ',
+  'U.S. DOJ',
+  'United States DOJ',
   'U.S. Department of Justice',
   'United States Department of Justice',
 ]);
 registerGovernmentEmployer('Government Accountability Office', 'federal', []);
 registerGovernmentEmployer('City of Los Angeles', 'local', []);
 registerGovernmentEmployer('Office of Congressman Ted Lieu', 'federal', []);
-registerGovernmentEmployer('United States Senate', 'federal', ['U.S. Senate']);
-registerGovernmentEmployer('Federal Aviation Administration', 'federal', []);
+registerGovernmentEmployer('United States Senate', 'federal', ['US Senate', 'U.S. Senate']);
+registerGovernmentEmployer('Federal Aviation Administration', 'federal', ['FAA']);
 registerGovernmentEmployer('National Aeronautics and Space Administration', 'federal', ['NASA']);
 
 type GovernmentEmploymentTarget =
@@ -1524,8 +1536,22 @@ type GovernmentEmploymentTarget =
   | { kind: 'level'; level: GovernmentLevel }
   | { kind: 'named'; identity: string };
 
-function targetFromGovernmentPhrase(raw: string): GovernmentEmploymentTarget {
-  const identity = normalizeIdentity(raw.replace(/^(?:a|an|any|the)\s+/i, ''));
+function targetFromGovernmentPhrase(raw: string): GovernmentEmploymentTarget | null {
+  let phrase = raw.trim().replace(/[.,;:]+$/g, '');
+  const parenthetical = phrase.match(/^(.+?)\s*\(([^()]*)\)\s*$/);
+  if (parenthetical) {
+    const primary = parenthetical[1].trim();
+    const detail = parenthetical[2].trim();
+    if (/^(?:e\.?g\.?|for\s+example|including|such\s+as)\b/i.test(detail)) {
+      phrase = primary;
+    } else {
+      const primaryEmployer = VETTED_GOVERNMENT_EMPLOYERS.get(normalizeIdentity(primary));
+      const detailedEmployer = VETTED_GOVERNMENT_EMPLOYERS.get(normalizeIdentity(detail));
+      if (!primaryEmployer || !detailedEmployer || primaryEmployer.canonical !== detailedEmployer.canonical) return null;
+      return { kind: 'named', identity: normalizeIdentity(primary) };
+    }
+  }
+  const identity = normalizeIdentity(phrase.replace(/^(?:a|an|any|the)\s+/i, ''));
   if (/^(?:(?:u s|us|united states) )?(?:federal )?government$/.test(identity)
     || /^(?:(?:u s|us|united states) )?federal (?:agency|agencies)$/.test(identity)) {
     return { kind: 'level', level: 'federal' };
@@ -1538,18 +1564,24 @@ function targetFromGovernmentPhrase(raw: string): GovernmentEmploymentTarget {
   return { kind: 'named', identity };
 }
 
+function governmentRelationPhrase(label: string): string | null {
+  const relation = label.match(/\bwork(?:ed|ing|s)?\b[^?]{0,60}\bfor\s+(?:the\s+)?([^?\n]{1,160})/i)
+    ?? label.match(/\bemploy(?:ed|ment)\b[^?]{0,60}\b(?:by|with)\s+(?:the\s+)?([^?\n]{1,160})/i);
+  return relation?.[1]?.trim() ?? null;
+}
+
 /** What employer or government level the question itself names. */
 function governmentEmploymentTarget(label: string): GovernmentEmploymentTarget | null {
-  const relation = label.match(/\bwork(?:ed|ing|s)?\b[^?]{0,60}\bfor\s+(?:the\s+)?([^?(\n]{1,120})/i)
-    ?? label.match(/\bemploy(?:ed|ment)\b[^?]{0,60}\b(?:by|with)\s+(?:the\s+)?([^?(\n]{1,120})/i);
-  if (relation?.[1]) return targetFromGovernmentPhrase(relation[1].trim());
+  const relation = governmentRelationPhrase(label);
+  if (relation) return targetFromGovernmentPhrase(relation);
   if (/\bwork(?:ed|ing|s)?\b[^?]{0,40}\bin\b[^?]{0,30}\b(?:public[-\s]sector|civil\s+service)\b/i.test(label)) {
     return { kind: 'any' };
   }
   if (/\b(?:prior|previous|past|current)\b[^?]{0,40}\bgovernment(?:al)?\s+employment\b/i.test(label)) {
-    return /\b(?:u\.?\s*s\.?|united\s+states|federal)\b/i.test(label)
-      ? { kind: 'level', level: 'federal' }
-      : { kind: 'any' };
+    if (/\b(?:u\.?\s*s\.?|united\s+states|federal)\b/i.test(label)) return { kind: 'level', level: 'federal' };
+    if (/\bstate\b/i.test(label)) return { kind: 'level', level: 'state' };
+    if (/\b(?:local|municipal|city|county)\b/i.test(label)) return { kind: 'level', level: 'local' };
+    return { kind: 'any' };
   }
   if (/\bgovernment(?:al)?\s+employee\b/i.test(label)) {
     if (/\bfederal\b/i.test(label)) return { kind: 'level', level: 'federal' };
@@ -1558,6 +1590,13 @@ function governmentEmploymentTarget(label: string): GovernmentEmploymentTarget |
     return { kind: 'any' };
   }
   return null;
+}
+
+function governmentLabelNamesKnownEmployer(label: string): boolean {
+  const phrase = governmentRelationPhrase(label);
+  if (!phrase) return false;
+  const primary = phrase.replace(/\s*\([^()]*\)\s*$/, '').trim();
+  return VETTED_GOVERNMENT_EMPLOYERS.has(normalizeIdentity(primary));
 }
 
 function governmentEmployerMatchesTarget(
@@ -1600,7 +1639,8 @@ function governmentEmploymentAnswer(
   ap: ApplicationProfileLike,
 ): { value: string } | { skipReason: string } | null {
   if (!isGovernmentEmploymentQuestion(label)) {
-    if (GOVERNMENT_EMPLOYER_SCOPE.test(label) && !NOT_HER_GOVERNMENT_EMPLOYMENT.test(label)) {
+    if ((GOVERNMENT_EMPLOYER_SCOPE.test(label) || governmentLabelNamesKnownEmployer(label))
+      && !NOT_HER_GOVERNMENT_EMPLOYMENT.test(label)) {
       return {
         skipReason: governmentEmploymentSkipReason(
           label,

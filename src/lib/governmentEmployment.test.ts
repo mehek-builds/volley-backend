@@ -180,7 +180,6 @@ describe('prior government employment, answered from the experience bank', () =>
       'Have you ever worked for Government Employees Insurance Company (GEICO)?',
       'Have you worked for Government Brands LLC?',
     ]) {
-      assert.ok(isGovernmentEmploymentQuestion(label), label);
       assert.equal(answer(label, nasa), 'SKIP', label);
     }
     for (const label of [
@@ -250,6 +249,72 @@ describe('prior government employment, answered from the experience bank', () =>
     }
   });
 
+  test('prior government employment preserves explicit level and foreign scope', () => {
+    const nasa: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
+    };
+    for (const label of [
+      'Prior state government employment?',
+      'Prior local government employment?',
+      'Prior city government employment?',
+      'Prior municipal government employment?',
+      'Prior county government employment?',
+      'Prior foreign government employment?',
+      'Prior non-US government employment?',
+      'Prior non-U.S. government employment?',
+      'Prior government employment outside the US?',
+    ]) {
+      assert.equal(answer(label, nasa), 'SKIP', label);
+    }
+    const local: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'City of Los Angeles', title: 'Analyst' }],
+    };
+    for (const label of [
+      'Prior local government employment?',
+      'Prior city government employment?',
+      'Prior municipal government employment?',
+      'Prior county government employment?',
+    ]) {
+      assert.equal(answer(label, local), 'VALUE Yes', label);
+    }
+    assert.equal(answer('Prior government employment?', nasa), 'VALUE Yes');
+  });
+
+  test('parenthetical employer disambiguation must resolve to the same canonical identity', () => {
+    const nasa: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
+    };
+    assert.equal(answer('Have you worked for NASA (National Auto Sport Association)?', nasa), 'SKIP');
+    assert.equal(
+      answer('Have you worked for NASA (National Aeronautics and Space Administration)?', nasa),
+      'VALUE Yes',
+    );
+    assert.equal(
+      answer('Prior government employment?', {
+        experience_bank: [{ type: 'job', org: 'NASA (National Auto Sport Association)' }],
+      }),
+      'SKIP',
+    );
+  });
+
+  test('canonical federal aliases resolve directly and at send-time', () => {
+    const cases = [
+      ['Have you worked for US DOE?', 'U.S. Department of Energy'],
+      ['Have you worked for United States DOJ?', 'DOJ'],
+      ['Have you worked for U.S. Senate?', 'US Senate'],
+      ['Have you worked for FAA?', 'Federal Aviation Administration'],
+    ] as const;
+    for (const [question, org] of cases) {
+      const profile: ApplicationProfileLike = { experience_bank: [{ type: 'job', org }] };
+      assert.equal(answer(question, profile), 'VALUE Yes', question);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question, answer: '' }], profile, undefined),
+        [{ question, answer: 'Yes' }],
+        question,
+      );
+    }
+  });
+
   test('send-time refresh removes a stale Yes from every government adjacency', () => {
     const nasa: ApplicationProfileLike = {
       experience_bank: [{ type: 'job', org: 'National Aeronautics and Space Administration', title: 'Research Intern' }],
@@ -268,6 +333,16 @@ describe('prior government employment, answered from the experience bank', () =>
       'Have you worked for local government?',
       'Have you previously served in the US government?',
       'Have you previously served as a congressional staffer?',
+      'Prior state government employment?',
+      'Prior local government employment?',
+      'Prior city government employment?',
+      'Prior municipal government employment?',
+      'Prior county government employment?',
+      'Prior foreign government employment?',
+      'Prior non-US government employment?',
+      'Prior non-U.S. government employment?',
+      'Prior government employment outside the US?',
+      'Have you worked for NASA (National Auto Sport Association)?',
     ].map((question) => ({ question, answer: 'Yes' }));
 
     assert.deepEqual(
