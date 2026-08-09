@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHmac } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import {
   assertDisposableDatabaseMarker,
   assertControlledManagedReceivingProofRow,
@@ -93,6 +94,20 @@ test('receipt screenshots use only an authenticated write-only loopback capture 
     () => controlledReceiptCaptureTarget('http://127.0.0.1:4318/receipts', ''),
     /Provisioning blocker/,
   );
+});
+
+test('both filled preview writes use the controlled screenshot adapter and carry distinct harness evidence', async () => {
+  const runnerSource = await readFile(new URL('../src/routes/submissionRunner.ts', import.meta.url), 'utf8');
+  const rawFilledWrites = runnerSource.match(/await put\([\s\S]{0,200}filled\.png/g) ?? [];
+  const previewAdapterWrites = runnerSource.match(/await storeFilledPreviewScreenshot\(/g) ?? [];
+  assert.equal(rawFilledWrites.length, 0, 'submission runner still writes a filled preview directly to Blob');
+  assert.equal(previewAdapterWrites.length, 2, 'managed and direct preparation paths must both use the adapter');
+
+  const harnessSource = await readFile(new URL('./qa-guest-submissions.mjs', import.meta.url), 'utf8');
+  assert.match(harnessSource, /entry\.kind === 'filled_preview'/);
+  assert.match(harnessSource, /entry\.kind === 'submission_receipt'/);
+  assert.match(harnessSource, /preview_capture_sha256: capturedPreview\.sha256/);
+  assert.match(harnessSource, /receipt_capture_sha256: capturedReceipt\.sha256/);
 });
 
 test('database safety rejects remote, shared, and unmarked targets', () => {

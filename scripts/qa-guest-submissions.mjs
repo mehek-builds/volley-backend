@@ -89,7 +89,8 @@ if (securityCodeMode) {
 }
 
 const capturedEmails = [];
-const capturedReceipts = [];
+const capturedScreenshots = [];
+const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const captureServer = securityCodeMode ? createServer((request, response) => {
   if (request.method !== 'POST' || request.url !== emailCaptureTarget.pathname
     || request.headers['x-litos-qa-capture-token'] !== process.env.LITOS_QA_EMAIL_CAPTURE_TOKEN) {
@@ -122,8 +123,10 @@ const receiptCaptureServer = securityCodeMode ? createServer((request, response)
   }
   const objectKey = request.headers['x-litos-qa-receipt-key'];
   const claimedDigest = request.headers['x-litos-qa-receipt-sha256'];
-  if (typeof objectKey !== 'string'
-    || !/^users\/[A-Za-z0-9_-]+\/submission-runs\/[A-Za-z0-9_-]+\/receipt\.png$/.test(objectKey)
+  const kind = request.headers['x-litos-qa-screenshot-kind'];
+  const filename = kind === 'filled_preview' ? 'filled' : kind === 'submission_receipt' ? 'receipt' : null;
+  if (!filename || typeof objectKey !== 'string'
+    || !new RegExp(`^users/[A-Za-z0-9_-]+/submission-runs/[A-Za-z0-9_-]+/${filename}\\.png$`).test(objectKey)
     || typeof claimedDigest !== 'string' || !/^[a-f0-9]{64}$/.test(claimedDigest)) {
     response.writeHead(400).end();
     return;
@@ -131,6 +134,7 @@ const receiptCaptureServer = securityCodeMode ? createServer((request, response)
   const hash = createHash('sha256');
   let bytes = 0;
   let rejected = false;
+  let leadingBytes = Buffer.alloc(0);
   request.on('data', (chunk) => {
     bytes += chunk.length;
     if (bytes > 20 * 1024 * 1024) {
@@ -138,10 +142,13 @@ const receiptCaptureServer = securityCodeMode ? createServer((request, response)
       request.destroy();
       return;
     }
+    if (leadingBytes.length < pngSignature.length) {
+      leadingBytes = Buffer.concat([leadingBytes, chunk]).subarray(0, pngSignature.length);
+    }
     hash.update(chunk);
   });
   request.on('end', () => {
-    if (rejected || bytes < 8) {
+    if (rejected || !leadingBytes.equals(pngSignature)) {
       response.writeHead(400).end();
       return;
     }
@@ -152,15 +159,16 @@ const receiptCaptureServer = securityCodeMode ? createServer((request, response)
     }
     const evidence = {
       source: 'controlled_qa_loopback',
-      url: `urn:litos:qa-receipt:${sha256}`,
+      url: `urn:litos:qa-screenshot:${kind}:${sha256}`,
+      kind,
       bytes,
       sha256,
       object_key: objectKey,
     };
     // Keep only proof metadata. The PNG is never persisted and there is deliberately no read route.
-    capturedReceipts.push(evidence);
+    capturedScreenshots.push(evidence);
     response.writeHead(200, { 'Content-Type': 'application/json' });
-    response.end(JSON.stringify({ source: evidence.source, url: evidence.url, bytes, sha256 }));
+    response.end(JSON.stringify(evidence));
   });
 }) : null;
 if (captureServer) {
@@ -458,6 +466,11 @@ try {
     assert.ok(prepared.review.filled_fields.includes('last_name'));
     assert.ok(prepared.review.filled_fields.includes('email'));
     assert.ok(prepared.review.filled_fields.includes('resume'));
+    const capturedPreview = capturedScreenshots.find((entry) => entry.kind === 'filled_preview'
+      && entry.url === prepared.review.preview_screenshot_url);
+    assert.ok(capturedPreview, 'controlled local screenshot adapter did not capture the filled preview');
+    assert.ok(capturedPreview.bytes >= 8, 'controlled local screenshot adapter captured an empty filled preview');
+    assert.match(capturedPreview.sha256, /^[a-f0-9]{64}$/);
     if (securityCodeMode) {
       assert.equal(prepared.review.verification?.status, 'completed');
       assert.equal(prepared.review.verification?.runner, 'stratus-managed');
@@ -501,7 +514,8 @@ try {
 
     assert.match(finalState.review.receipt.confirmation_text, /thank you|received/i);
     assert.match(finalState.review.receipt.reference_id, /^LITOS-QA-/);
-    const capturedReceipt = capturedReceipts.find((entry) => entry.url === finalState.review.receipt.screenshot_url);
+    const capturedReceipt = capturedScreenshots.find((entry) => entry.kind === 'submission_receipt'
+      && entry.url === finalState.review.receipt.screenshot_url);
     assert.ok(capturedReceipt, 'controlled local receipt adapter did not capture the submission screenshot');
     assert.ok(capturedReceipt.bytes >= 8, 'controlled local receipt adapter captured an empty screenshot');
     assert.match(capturedReceipt.sha256, /^[a-f0-9]{64}$/);
@@ -536,7 +550,12 @@ try {
       continuation_fingerprint: finalState.review.verification?.continuation_fingerprint ?? null,
       continuation_resumed: finalState.review.verification?.continuation_resumed ?? false,
       receipt_source: finalState.review.receipt?.source ?? null,
+      preview_capture_source: capturedPreview.source,
+      preview_capture_kind: capturedPreview.kind,
+      preview_capture_bytes: capturedPreview.bytes,
+      preview_capture_sha256: capturedPreview.sha256,
       receipt_capture_source: capturedReceipt.source,
+      receipt_capture_kind: capturedReceipt.kind,
       receipt_capture_bytes: capturedReceipt.bytes,
       receipt_capture_sha256: capturedReceipt.sha256,
       email_message_received: Boolean(inboundEvidence),

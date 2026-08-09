@@ -5,9 +5,12 @@ const RECEIPT_CAPTURE_PATH = '/receipts';
 const MAX_RECEIPT_BYTES = 20 * 1024 * 1024;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
+export type SubmissionScreenshotKind = 'filled_preview' | 'submission_receipt';
+
 export type ReceiptScreenshotEvidence = {
   url: string;
   source: 'vercel_blob' | 'controlled_qa_loopback';
+  kind: SubmissionScreenshotKind;
   bytes: number;
   sha256: string;
 };
@@ -44,7 +47,7 @@ function receiptCaptureTarget(): { url: string; token: string } | null {
   return { url: target.toString(), token };
 }
 
-function receiptBytes(body: Buffer): { bytes: number; sha256: string } {
+function screenshotBytes(body: Buffer): { bytes: number; sha256: string } {
   if (body.length < PNG_SIGNATURE.length || body.length > MAX_RECEIPT_BYTES
     || !body.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
     throw new Error('Receipt screenshot must be a non-empty PNG no larger than 20 MiB');
@@ -52,15 +55,21 @@ function receiptBytes(body: Buffer): { bytes: number; sha256: string } {
   return { bytes: body.length, sha256: createHash('sha256').update(body).digest('hex') };
 }
 
-export async function storeReceiptScreenshot(
+function objectKeyPattern(kind: SubmissionScreenshotKind): RegExp {
+  const filename = kind === 'filled_preview' ? 'filled' : 'receipt';
+  return new RegExp(`^users/[A-Za-z0-9_-]+/submission-runs/[A-Za-z0-9_-]+/${filename}\\.png$`);
+}
+
+export async function storeSubmissionScreenshot(
+  kind: SubmissionScreenshotKind,
   objectKey: string,
   body: Buffer,
   dependencies: { fetchImpl?: typeof fetch; blobPut?: BlobPut } = {},
 ): Promise<ReceiptScreenshotEvidence> {
-  if (!/^users\/[A-Za-z0-9_-]+\/submission-runs\/[A-Za-z0-9_-]+\/receipt\.png$/.test(objectKey)) {
-    throw new Error('Receipt screenshot object key is invalid');
+  if (!objectKeyPattern(kind).test(objectKey)) {
+    throw new Error(`${kind === 'filled_preview' ? 'Filled preview' : 'Receipt'} screenshot object key is invalid`);
   }
-  const expected = receiptBytes(body);
+  const expected = screenshotBytes(body);
   const capture = receiptCaptureTarget();
   if (!capture) {
     const blobPut = dependencies.blobPut ?? (put as BlobPut);
@@ -72,7 +81,7 @@ export async function storeReceiptScreenshot(
     if (typeof blob?.url !== 'string' || !/^https:\/\//.test(blob.url)) {
       throw new Error('Vercel Blob did not return a valid HTTPS receipt URL');
     }
-    return { url: blob.url, source: 'vercel_blob', ...expected };
+    return { url: blob.url, source: 'vercel_blob', kind, ...expected };
   }
 
   const response = await (dependencies.fetchImpl ?? fetch)(capture.url, {
@@ -85,6 +94,7 @@ export async function storeReceiptScreenshot(
       'X-Litos-QA-Receipt-Token': capture.token,
       'X-Litos-QA-Receipt-Key': objectKey,
       'X-Litos-QA-Receipt-SHA256': expected.sha256,
+      'X-Litos-QA-Screenshot-Kind': kind,
     },
     body: Uint8Array.from(body).buffer,
   });
@@ -93,10 +103,27 @@ export async function storeReceiptScreenshot(
     throw new Error(`Controlled QA receipt capture ${response.status}: ${detail}`);
   }
   const result = await response.json().catch(() => null) as Record<string, unknown> | null;
-  const expectedUrl = `urn:litos:qa-receipt:${expected.sha256}`;
+  const expectedUrl = `urn:litos:qa-screenshot:${kind}:${expected.sha256}`;
   if (result?.source !== 'controlled_qa_loopback' || result.url !== expectedUrl
+    || result.kind !== kind || result.object_key !== objectKey
     || result.bytes !== expected.bytes || result.sha256 !== expected.sha256) {
     throw new Error('Controlled QA receipt capture returned malformed or mismatched evidence');
   }
-  return { url: expectedUrl, source: 'controlled_qa_loopback', ...expected };
+  return { url: expectedUrl, source: 'controlled_qa_loopback', kind, ...expected };
+}
+
+export function storeFilledPreviewScreenshot(
+  objectKey: string,
+  body: Buffer,
+  dependencies: { fetchImpl?: typeof fetch; blobPut?: BlobPut } = {},
+): Promise<ReceiptScreenshotEvidence> {
+  return storeSubmissionScreenshot('filled_preview', objectKey, body, dependencies);
+}
+
+export function storeReceiptScreenshot(
+  objectKey: string,
+  body: Buffer,
+  dependencies: { fetchImpl?: typeof fetch; blobPut?: BlobPut } = {},
+): Promise<ReceiptScreenshotEvidence> {
+  return storeSubmissionScreenshot('submission_receipt', objectKey, body, dependencies);
 }
