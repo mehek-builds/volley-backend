@@ -1,7 +1,7 @@
 import type { Page } from 'playwright-core';
 import { isOpaqueIdentifier, tidyLabel } from './fieldLabel';
 import { officeMetrosNamed } from './officeMetros';
-import { jobCountry } from './jobLocation';
+import { jobCountrySignals } from './jobLocation';
 import type { SupportedPortal } from './portalSubmission';
 import {
   resolveSalary,
@@ -692,6 +692,48 @@ function isRemoteWorkQuestion(label: string): boolean {
   return REMOTE_WORK_QUESTION.test(label) && !ONSITE_PRESENCE_WORD.test(label);
 }
 
+function uniqueLocationCaptures(label: string, patterns: readonly RegExp[]): string[] {
+  const captures: string[] = [];
+  for (const pattern of patterns) {
+    for (const match of label.matchAll(pattern)) {
+      const value = match[1]
+        ?.trim()
+        .replace(/^(?:our|the|an?)\s+/i, '')
+        .replace(/\s+(?:for|five|four|three|two|one|\d+)\s+(?:days?|weeks?|months?|years?)\b.*$/i, '')
+        .trim();
+      if (!value || /^(?:our|the|an?|office|site|workplace|headquarters|hq)$/i.test(value)) continue;
+      if (!captures.some((entry) => entry.toLowerCase() === value.toLowerCase())) captures.push(value);
+    }
+  }
+  return captures;
+}
+
+/** A location must be attached to the work or office syntax in the question. A country word in
+ * customer, travel, or compliance prose is not a work location. Office-specific syntax wins over
+ * the broader fallback so "from our office in Chicago" is one place, not two captures. */
+function explicitWorkLocations(label: string): string[] {
+  const officeLocations = uniqueLocationCaptures(label, [
+    /\b(?:office|site|workplace|headquarters|hq)\s+(?:is\s+)?(?:located\s+|based\s+)?(?:in|at|near)\s+([^?;.]{1,80})/gi,
+    /\b(?:from|in|at|near)\s+(?:(?:our|the|an?)\s+)?([^?;.]{1,80}?)\s+(?:office|site|workplace|headquarters|hq)\b/gi,
+  ]);
+  if (officeLocations.length > 0) return officeLocations;
+  return uniqueLocationCaptures(label, [
+    /\b(?:onsite|on[\s-]?site|in[\s-]?person)\s+(?:in|at|from|near)\s+([^?;.]{1,80})/gi,
+    /\b(?:work|working|based|located)\s+(?:onsite\s+|on[\s-]?site\s+)?(?:in|at|from|near)\s+([^?;.]{1,80})/gi,
+  ]);
+}
+
+function isSingleUnambiguousUsLocation(locations: readonly string[]): boolean {
+  if (locations.length !== 1) return false;
+  const location = locations[0];
+  /* Even two US offices are not a single commitment target. More importantly, this prevents an
+   * unknown foreign place joined to "US" from becoming Yes merely because the finite country
+   * vocabulary has not learned that place yet. */
+  if (/\b(?:or|and)\b|[;/|]/i.test(location)) return false;
+  const signals = jobCountrySignals(location);
+  return signals.us && !signals.non_us;
+}
+
 /* A location question that wants a NUMBER, A DATE OR A LIST rather than a yes or a no.
  *
  * isLocationCommitmentQuestion only asks whether the label has a "can you ... office" shape, and
@@ -742,11 +784,9 @@ function onsiteCommitmentAnswer(
      * Evidence can come from the question itself, or from the structured job locations frozen
      * into the resolution context by applicationContextForQuestionResolution. Arbitrary prose in
      * the JD does not count: a description can mention customers, offices, or travel worldwide. */
-    const labelScope = jobCountry(label);
-    if (labelScope === 'us') return { value: 'Yes' };
-    if (labelScope === 'non_us') return held;
+    if (isSingleUnambiguousUsLocation(explicitWorkLocations(label))) return { value: 'Yes' };
     const frozenLocations = frozenJobLocationsFromContext(jdText);
-    if (frozenLocations.length > 0 && frozenLocations.every((location) => jobCountry(location) === 'us')) {
+    if (isSingleUnambiguousUsLocation(frozenLocations)) {
       return { value: 'Yes' };
     }
     return held;
@@ -1278,25 +1318,28 @@ export function isGovernmentEmploymentQuestion(label: string): boolean {
   return !NOT_HER_GOVERNMENT_EMPLOYMENT.test(value);
 }
 
-/* An organisation whose NAME says it is a government employer. A hit here is decisive and flips
- * the answer to Yes, so nothing ambiguous belongs in it: two- and three-letter initialisms that
- * double as ordinary words ("VA", "DOE", "SEC", "DOT") are deliberately absent, because a company
- * called Doe Labs must not be read as the Department of Energy. */
-const GOVERNMENT_EMPLOYER_NAME = new RegExp([
-  /\bgovernment\b|\bcivil\s+service\b/,
-  /* Up to two words may sit between the qualifier and the institution word: "Federal Aviation
-   * Administration", "United States Patent and Trademark Office". A bare "federal" is NOT enough
-   * on its own, because Federal Express is a courier. */
-  /\b(?:u\.?s\.?|united\s+states|federal)\s+(?:\w+\s+){0,2}(?:department|dept\.?|agency|bureau|commission|administration|government)\b/,
-  /\b(?:department|dept\.?|ministry)\s+of\s+(?:the\s+)?(?:state|defen[cs]e|justice|energy|education|labor|labour|transportation|treasury|commerce|agriculture|health|homeland|veterans?\s+affairs|interior|housing)\b/,
-  /\b(?:city|county|state|commonwealth|town|village|borough)\s+of\s+\w/,
-  /\b(?:mayor|governor|senator|congressman|congresswoman|representative)'?s?\s+office\b/,
-  /\boffice\s+of\s+(?:the\s+)?(?:congress\w+|senator|representative|mayor|governor|attorney\s+general)\b/,
-  /\bu\.?s\.?\s+(?:senate|house\s+of\s+representatives|congress|army|navy|air\s+force|marine\s+corps|coast\s+guard|space\s+force|embassy|mint|postal\s+service)\b/,
-  /\bcongressional\s+(?:office|staff\w*|committee)\b|\bhouse\s+of\s+representatives\b|\bunited\s+states\s+senate\b/,
-  /\bnational\s+aeronautics\s+and\s+space\b|\bnasa\b|\bdarpa\b|\busaid\b|\buspto\b|\bnational\s+laborator(?:y|ies)\b/,
-  /\bnational\s+guard\b|\bpeace\s+corps\b|\barmed\s+forces\b/,
+/* A decisive positive requires a canonical government employer identity in the ORGANISATION field.
+ * Every arm is anchored to the complete value. A title never participates, and contractor,
+ * consultant, hackathon, and Space Apps labels are rejected before matching. */
+const GOVERNMENT_EMPLOYER_ORG_EXCLUSION =
+  /\b(?:contractor|consultant|consulting|hackathon|space\s+apps)\b/i;
+
+const EXACT_GOVERNMENT_EMPLOYER_ORG = new RegExp([
+  /^(?:u\.?s\.?|united\s+states|federal)\s+(?:[a-z][\w'-]*\s+){0,3}(?:department|agency|bureau|commission|administration|government)$/,
+  /^(?:u\.?s\.?\s+)?(?:department|dept\.?)\s+of\s+(?:the\s+)?(?:state|defen[cs]e|justice|energy|education|labor|labour|transportation|treasury|commerce|agriculture|health(?:\s+and\s+human\s+services)?|homeland\s+security|veterans?\s+affairs|interior|housing(?:\s+and\s+urban\s+development)?)$/,
+  /^(?:city|county|state|commonwealth|town|village|borough)\s+of\s+[a-z][\w'.-]*(?:\s+[a-z][\w'.-]*)*$/,
+  /^office\s+of\s+(?:the\s+)?(?:congressman|congresswoman|representative|senator|mayor|governor|attorney\s+general)(?:\s+[a-z][\w'.-]*)*$/,
+  /^(?:mayor|governor|senator|congressman|congresswoman|representative)'?s?\s+office$/,
+  /^(?:u\.?s\.?|united\s+states)\s+(?:senate|house\s+of\s+representatives|congress|army|navy|air\s+force|marine\s+corps|coast\s+guard|space\s+force|embassy|mint|postal\s+service)$/,
+  /^government\s+accountability\s+office$/,
+  /^(?:national\s+aeronautics\s+and\s+space\s+administration|nasa|defense\s+advanced\s+research\s+projects\s+agency|darpa|united\s+states\s+agency\s+for\s+international\s+development|usaid|united\s+states\s+patent\s+and\s+trademark\s+office|uspto|peace\s+corps)$/,
 ].map((part) => part.source).join('|'), 'i');
+
+function isExactGovernmentEmployerOrg(org: string): boolean {
+  const value = org.trim().replace(/\s+/g, ' ');
+  return !GOVERNMENT_EMPLOYER_ORG_EXCLUSION.test(value)
+    && EXACT_GOVERNMENT_EMPLOYER_ORG.test(value);
+}
 
 /* The second tier, and the reason this arm is a check rather than a lookup: an organisation whose
  * name COULD be public and cannot be settled from the name alone. A hit holds the question for the
@@ -1357,9 +1400,9 @@ function governmentEmploymentAnswer(
     return { skipReason: governmentEmploymentSkipReason(label, 'your military service is on file and this question does not fit it') };
   }
 
-  const named = bank.flatMap((entry) => [entry.org, entry.title ?? ''].map((part) => part.trim()).filter(Boolean));
-  if (named.some((name) => GOVERNMENT_EMPLOYER_NAME.test(name))) return { value: 'Yes' };
-  if (named.some((name) => MAYBE_GOVERNMENT_EMPLOYER_NAME.test(name))) {
+  const namedOrganisations = bank.map((entry) => entry.org.trim()).filter(Boolean);
+  if (namedOrganisations.some(isExactGovernmentEmployerOrg)) return { value: 'Yes' };
+  if (namedOrganisations.some((name) => MAYBE_GOVERNMENT_EMPLOYER_NAME.test(name))) {
     return { skipReason: governmentEmploymentSkipReason(label, 'one of your organisations may be a public body') };
   }
   return { skipReason: governmentEmploymentSkipReason(label, 'your employment record does not prove a complete history') };

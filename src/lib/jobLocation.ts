@@ -22,6 +22,8 @@
  */
 
 export type JobCountry = 'us' | 'non_us' | 'unknown';
+export type JobCountrySignals = { us: boolean; non_us: boolean };
+type JobCountrySignalDetails = { strongUs: boolean; weakUs: boolean; nonUs: boolean };
 
 const US_STATE_CODES = new Set([
   'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'FL', 'GA', 'HI', 'ID', 'IL', 'IN', 'IA', 'KS',
@@ -122,7 +124,22 @@ function normalise(location: string): string {
  * first.
  */
 export function jobCountry(location: string | null | undefined): JobCountry {
-  if (!location || !location.trim()) return 'unknown';
+  const signals = jobCountrySignalDetails(location);
+  if (signals.strongUs) return 'us';
+  if (signals.nonUs) return 'non_us';
+  if (signals.weakUs) return 'us';
+  return 'unknown';
+}
+
+/** Country signals without the US-wins-ties policy used by job discovery. A legal or location
+ * commitment needs to see both sides of a mixed string and refuse it, not collapse the tie. */
+export function jobCountrySignals(location: string | null | undefined): JobCountrySignals {
+  const signals = jobCountrySignalDetails(location);
+  return { us: signals.strongUs || signals.weakUs, non_us: signals.nonUs };
+}
+
+function jobCountrySignalDetails(location: string | null | undefined): JobCountrySignalDetails {
+  if (!location || !location.trim()) return { strongUs: false, weakUs: false, nonUs: false };
   const text = normalise(location);
 
   // 1. Unambiguous US: the country, a full state name, or a city that is only ever American.
@@ -131,26 +148,21 @@ export function jobCountry(location: string | null | undefined): JobCountry {
     || / US /.test(text)
     || US_STATE_NAMES.some((name) => text.includes(` ${name} `))
     || US_CITIES.some((city) => text.includes(` ${city.replace(/[^A-Z0-9]+/g, ' ')} `));
-  if (strongUs) return 'us';
-
-  // 2. A named foreign country or city. Beats a two-letter code, which is what "Amsterdam, NH" and
-  //    "IN - Bengaluru" need.
-  if (NON_US.some((name) => text.includes(` ${name.replace(/[^A-Z0-9]+/g, ' ')} `))) return 'non_us';
+  const namedNonUs = NON_US.some((name) => text.includes(` ${name.replace(/[^A-Z0-9]+/g, ' ')} `));
 
   /* 3. "City, ST" and nothing else. The comma is what makes it a state rather than a country code
         or an English word: "Austin, TX" qualifies, "IN - Bengaluru" does not. */
   const upper = location.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
   const afterComma = upper.match(/,\s*([A-Z]{2})\b/g) ?? [];
-  if (afterComma.some((match) => US_STATE_CODES.has(match.replace(/[^A-Z]/g, '')))) return 'us';
+  const stateCodeUs = afterComma.some((match) => US_STATE_CODES.has(match.replace(/[^A-Z]/g, '')));
 
   /* A code at the very END, which is how "Remote - FL" and "Remote - TX" are written.
      IT HAS TO BE ITS OWN TOKEN. Without the separator this matched the last two letters of any
      word: "GEORGIA" ends in IA and became Iowa, and so would "Austria", "Slovakia" and "Somalia"
      the moment one of them was missing from the foreign list. */
   const trailing = upper.trim().match(/(?:^|[\s,\-/;])([A-Z]{2})$/);
-  if (trailing && US_STATE_CODES.has(trailing[1])) return 'us';
-
-  return 'unknown';
+  const trailingCodeUs = !!trailing && US_STATE_CODES.has(trailing[1]);
+  return { strongUs, weakUs: stateCodeUs || trailingCodeUs, nonUs: namedNonUs };
 }
 
 /**

@@ -62,7 +62,6 @@ describe('prior government employment, answered from the experience bank', () =>
       'Government Accountability Office',
       'City of Los Angeles',
       'Office of Congressman Ted Lieu',
-      'NASA Jet Propulsion Laboratory',
       'United States Senate',
       'Department of Justice',
     ]) {
@@ -70,11 +69,23 @@ describe('prior government employment, answered from the experience bank', () =>
     }
   });
 
-  test('a government TITLE at a differently-named employer also flips it', () => {
-    // "Congressional staffer" is one of the examples Skydio's own gloss lists, and the org it sits
-    // under need not say "government" anywhere.
-    const withTitle = { experience_bank: [...(BANK ?? []), { type: 'job' as const, org: 'Ted Lieu for Congress', title: 'Congressional Staffer' }] };
-    assert.equal(answer(SKYDIO, withTitle), 'VALUE Yes');
+  test('titles and government-adjacent organisation names never become employer evidence', () => {
+    for (const entry of [
+      { type: 'job' as const, org: 'Acme', title: 'NASA Contractor' },
+      { type: 'job' as const, org: 'NASA Space Apps Hackathon', title: 'Project Lead' },
+      { type: 'job' as const, org: 'Booz Allen Hamilton', title: 'Federal Government Consultant' },
+      { type: 'job' as const, org: 'Ted Lieu for Congress', title: 'Congressional Staffer' },
+      { type: 'job' as const, org: 'NASA Jet Propulsion Laboratory', title: 'Research Intern' },
+    ]) {
+      assert.equal(answer(SKYDIO, { experience_bank: [...(BANK ?? []), entry] }), 'SKIP', entry.org);
+    }
+  });
+
+  test('an exact Department of Energy employment row is decisive', () => {
+    const profile = {
+      experience_bank: [{ type: 'job', org: 'Department of Energy', title: 'Policy Analyst' }],
+    } satisfies ApplicationProfileLike;
+    assert.equal(answer(SKYDIO, profile), 'VALUE Yes');
   });
 
   test('an organisation that MIGHT be public holds the question instead of answering it', () => {

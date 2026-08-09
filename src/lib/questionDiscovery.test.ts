@@ -896,6 +896,36 @@ test('the standing onsite preference is scoped to the US and says nothing about 
     'Work with customers in the United States and Europe. The role is based in Paris, France.',
   );
   assert.ok(arbitraryJdMention && 'skipReason' in arbitraryJdMention);
+  for (const label of [
+    'Can you work from our Paris or US office?',
+    'Can you work onsite supporting United States customers?',
+    'Can you work onsite supporting United States customers from our Paris office?',
+  ]) {
+    const held = resolveKnownAnswer(label, 'select', committed, undefined);
+    assert.ok(held && 'skipReason' in held, label);
+  }
+  for (const locations of [
+    ['Paris, France'],
+    ['Paris, France', 'San Francisco, CA'],
+    ['San Francisco, CA', 'New York, NY'],
+  ]) {
+    const held = resolveKnownAnswer(
+      'Can you commit to working in-person five days per week?',
+      'select',
+      committed,
+      frozenJobLocationContext(locations),
+    );
+    assert.ok(held && 'skipReason' in held, locations.join(' | '));
+  }
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Can you commit to working in-person five days per week?',
+      'select',
+      committed,
+      frozenJobLocationContext(['San Francisco, CA']),
+    ),
+    { value: 'Yes' },
+  );
   // The US metros on the same list are answered.
   for (const label of [
     'Are you available to work from our office in Chicago?',
