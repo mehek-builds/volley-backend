@@ -45,6 +45,19 @@ test('managed verification resumes once by token, never by URL, then verifies th
   assert.doesNotMatch(terminalVerification, /continuation_token:/);
 });
 
+test('managed alias permission is independent from connected-inbox consent and personal email is not', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const firstSubmit = runner.indexOf('buildManagedPortalActions(portal, packet, true)');
+  const end = runner.indexOf("if (!claimedReview.browser_session_id)", firstSubmit);
+  const managed = runner.slice(firstSubmit, end);
+  assert.match(managed, /resolveVerificationEmailRoute\(\{[\s\S]*userId: row\.user_id,[\s\S]*applicationId: row\.id,[\s\S]*expectedRecipient: packet\.email/);
+  assert.match(
+    managed,
+    /verificationRoute === 'application_alias'\s*\|\| \(verificationRoute === 'personal_address' && verificationSettings\?\.enabled === true\)/,
+  );
+  assert.match(managed, /if \(continuationIsLive && verificationAllowed\)/);
+});
+
 test('uncertain continuation outcome is handed off without a retry or URL reopen', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
   const call = runner.indexOf('receiptResult = await continueManagedBrowser(continuationToken, prepared.actions)');

@@ -1395,13 +1395,6 @@ export async function applicationRoutes(fastify: FastifyInstance) {
   registerWorkdayVerificationRoute(fastify, {
     requireAuth,
     ownedApplication: ownedResume,
-    automaticVerificationEnabled: async (userId) => {
-      const [settings] = await db.select({ enabled: users.automatic_verification_enabled })
-        .from(users)
-        .where(eq(users.id, userId))
-        .limit(1);
-      return settings?.enabled === true;
-    },
     resolveActiveAlias: resolveFrozenApplicantEmail,
     findCode: findComposioVerificationCode,
   });
