@@ -1458,7 +1458,7 @@ const GOVERNMENT_EMPLOYER_SCOPE =
 
 /** The label must state the relationship between the applicant and a government employer. */
 const GOVERNMENT_EMPLOYMENT_RELATIONSHIP =
-  /\b(?:prior|previous|past|current)\b[^?]{0,40}\bgovernment(?:al)?\s+employment\b|\bemploy(?:ed|ment)\b[^?]{0,60}\b(?:by|with)\b|\bwork(?:ed|ing|s)?\b[^?]{0,60}\bfor\b|\bwork(?:ed|ing|s)?\b[^?]{0,40}\bin\b[^?]{0,30}\b(?:public[-\s]sector|civil\s+service)\b|\b(?:are|were|been)\s+you\b[^?]{0,40}\bgovernment(?:al)?\s+employee\b/i;
+  /\b(?:prior|previous|past|current)\b[^?]{0,40}\bgovernment(?:al)?\s+employment\b|\bemploy(?:ed|ment)\b[^?]{0,60}\b(?:by|with)\b|\bwork(?:ed|ing|s)?\b[^?]{0,60}\bfor\b|\bwork(?:ed|ing|s)?\b[^?]{0,40}\bin\b[^?]{0,30}\b(?:public[-\s]sector|civil\s+service)\b|\b(?:are|were)\s+you\b[^?]{0,80}\bemployee\b|\bhave\s+you\b[^?]{0,40}\bbeen\b[^?]{0,40}\bemployee\b/i;
 
 /* These words make the government reference the subject matter of work, not the employer. A
  * vetted government job elsewhere in the bank cannot answer any of them. */
@@ -1551,7 +1551,7 @@ const GOVERNMENT_SCOPE_PARSERS: readonly {
     target: { kind: 'level', level: 'federal' },
   },
   {
-    pattern: /^(?:u s|us|united states)(?: federal)? government (?:agency|agencies)$/,
+    pattern: /^(?:(?:u s|us|united states)(?: federal)?|federal) government (?:agency|agencies)$/,
     target: { kind: 'level', level: 'federal' },
   },
   { pattern: /^state (?:government|agency|agencies)$/, target: { kind: 'level', level: 'state' } },
@@ -1579,7 +1579,10 @@ function targetFromGovernmentPhrase(raw: string): GovernmentEmploymentTarget | n
   if (parenthetical) {
     const primary = parenthetical[1].trim();
     const detail = parenthetical[2].trim();
-    if (/^(?:e\.?g\.?|for\s+example|including|such\s+as)\b/i.test(detail)) {
+    if (/^(?:e\.?\s*g\.?|for\s+example|including|such\s+as)(?:\s|$)/i.test(detail)) {
+      const illustration = detail.replace(/^(?:e\.?\s*g\.?|for\s+example|including|such\s+as)[\s,:-]*/i, '');
+      const safeTokens = /^(?:(?:u\.?\s*s\.?|us|united\s+states|federal|state|local|municipal|city|county|government(?:al)?|agenc(?:y|ies)|public|sector|civil|service|and|or|the|a|an|any)[\s,;/]*)+$/i;
+      if (!illustration || !safeTokens.test(illustration)) return null;
       phrase = primary;
     } else {
       const primaryEmployer = VETTED_GOVERNMENT_EMPLOYERS.get(normalizeIdentity(primary));
@@ -1624,8 +1627,63 @@ const GOVERNMENT_EMPLOYMENT_LABEL_PARSERS: readonly {
     scopeGroup: 1,
   },
   {
+    pattern: /^were\s+you\s+(?:(?:ever|previously)\s+)?(?:an?\s+)?(.+?)\s+employee$/i,
+    scopeGroup: 1,
+  },
+  {
+    pattern: /^have\s+you\s+(?:(?:ever|previously)\s+)?been\s+(?:an?\s+)?(.+?)\s+employee$/i,
+    scopeGroup: 1,
+  },
+  {
+    pattern: /^were\s+you\s+(?:(?:ever|previously)\s+)?(?:an?\s+)?employee\s+(?:of|for|with)\s+(?:the\s+)?(.+)$/i,
+    scopeGroup: 1,
+  },
+  {
+    pattern: /^have\s+you\s+(?:(?:ever|previously)\s+)?been\s+(?:an?\s+)?employee\s+(?:of|for|with)\s+(?:the\s+)?(.+)$/i,
+    scopeGroup: 1,
+  },
+  {
+    pattern: /^are\s+you\s+(?:an?\s+)?former\s+(.+?)\s+employee$/i,
+    scopeGroup: 1,
+  },
+  {
+    pattern: /^are\s+you\s+(?:an?\s+)?former\s+employee\s+(?:of|for|with)\s+(?:the\s+)?(.+)$/i,
+    scopeGroup: 1,
+  },
+  {
     pattern: /^have\s+you\s+(?:(?:ever|previously)\s+)?worked\s+in\s+(the\s+)?(public[-\s]sector|civil\s+service)$/i,
     scopeGroup: 2,
+  },
+];
+
+const CURRENT_GOVERNMENT_EMPLOYMENT_LABEL_PARSERS: readonly {
+  pattern: RegExp;
+  scopeGroup: number;
+}[] = [
+  { pattern: /^current\s+(.+?)\s+employment$/i, scopeGroup: 1 },
+  {
+    pattern: /^are\s+you\s+currently\s+employed\s+(?:by|with)\s+(?:the\s+)?(.+)$/i,
+    scopeGroup: 1,
+  },
+  {
+    pattern: /^do\s+you\s+currently\s+work\s+for\s+(?:the\s+)?(.+)$/i,
+    scopeGroup: 1,
+  },
+  {
+    pattern: /^are\s+you\s+currently\s+(?:an?\s+)?(.+?)\s+employee$/i,
+    scopeGroup: 1,
+  },
+  {
+    pattern: /^are\s+you\s+currently\s+(?:an?\s+)?employee\s+(?:of|for|with)\s+(?:the\s+)?(.+)$/i,
+    scopeGroup: 1,
+  },
+  {
+    pattern: /^are\s+you\s+(?:an?\s+)?current\s+(.+?)\s+employee$/i,
+    scopeGroup: 1,
+  },
+  {
+    pattern: /^are\s+you\s+(?:an?\s+)?current\s+employee\s+(?:of|for|with)\s+(?:the\s+)?(.+)$/i,
+    scopeGroup: 1,
   },
 ];
 
@@ -1633,8 +1691,19 @@ function normalizedGovernmentEmploymentLabel(label: string): string {
   return label.trim().replace(/\s+/g, ' ').replace(/[?.!]+$/g, '').trim();
 }
 
+function currentGovernmentEmploymentTarget(label: string): GovernmentEmploymentTarget | null {
+  const value = normalizedGovernmentEmploymentLabel(label);
+  for (const parser of CURRENT_GOVERNMENT_EMPLOYMENT_LABEL_PARSERS) {
+    const match = value.match(parser.pattern);
+    if (match) return targetFromGovernmentPhrase(match[parser.scopeGroup]);
+  }
+  return null;
+}
+
 /** What employer or government level the question itself names. */
 function governmentEmploymentTarget(label: string): GovernmentEmploymentTarget | null {
+  const current = currentGovernmentEmploymentTarget(label);
+  if (current) return current;
   const value = normalizedGovernmentEmploymentLabel(label);
   for (const parser of GOVERNMENT_EMPLOYMENT_LABEL_PARSERS) {
     const match = value.match(parser.pattern);
@@ -1700,6 +1769,20 @@ function governmentEmploymentAnswer(
       };
     }
     return null;
+  }
+
+  const currentTarget = currentGovernmentEmploymentTarget(label);
+  if (currentTarget) {
+    const currentEmployer = ap.current_employer
+      ? VETTED_GOVERNMENT_EMPLOYERS.get(normalizeIdentity(ap.current_employer))
+      : undefined;
+    if (currentEmployer && governmentEmployerMatchesTarget(currentEmployer, currentTarget)) return { value: 'Yes' };
+    return {
+      skipReason: governmentEmploymentSkipReason(
+        label,
+        'your exact current government employer is not on file or does not match this question',
+      ),
+    };
   }
 
   const recorded = ap.experience_bank?.filter((entry) => entry?.org?.trim());

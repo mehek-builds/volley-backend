@@ -300,6 +300,35 @@ describe('prior government employment, answered from the experience bank', () =>
     );
   });
 
+  test('parenthetical examples fail closed when they carry limits or unparsed qualifiers', () => {
+    const nasa: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
+    };
+    const labels = [
+      'Have you worked for government (e.g. federal government only)?',
+      'Have you worked for government (e.g. non-federal government)?',
+      'Have you worked for government (e.g. excluding local government)?',
+      'Have you worked for government (e.g. other than state government)?',
+      'Have you worked for government (e.g. internships)?',
+      'Have you worked for government (e.g. permanent roles)?',
+      'Have you worked for government (e.g. within the last 5 years)?',
+    ];
+    for (const label of labels) {
+      assert.equal(isGovernmentEmploymentQuestion(label), false, label);
+      const resolved = resolveKnownAnswer(label, 'checkbox', nasa, undefined);
+      assert.ok(resolved && 'skipReason' in resolved, label);
+    }
+    assert.deepEqual(
+      refreshKnownQuestionAnswers(
+        labels.map((question) => ({ question, answer: 'Yes' })),
+        nasa,
+        undefined,
+      ),
+      labels.map((question) => ({ question, answer: '' })),
+    );
+    assert.equal(answer('Have you worked for government (e.g. federal, state, or local government agencies)?', nasa), 'VALUE Yes');
+  });
+
   test('canonical federal aliases resolve directly and at send-time', () => {
     const cases = [
       ['Have you worked for US DOE?', 'U.S. Department of Energy'],
@@ -424,8 +453,11 @@ describe('prior government employment, answered from the experience bank', () =>
       'Are you currently a government employee?',
       SKYDIO_GLOSS,
     ];
+    for (const label of labels.slice(0, -1)) {
+      assert.equal(isGovernmentEmploymentQuestion(label), true, label);
+    }
+    assert.equal(isGovernmentEmploymentQuestion(SKYDIO_GLOSS), false);
     for (const label of labels) {
-      assert.equal(isGovernmentEmploymentQuestion(label), false, label);
       const resolved = resolveKnownAnswer(label, 'checkbox', nasa, undefined);
       assert.ok(resolved && 'skipReason' in resolved, label);
     }
@@ -437,6 +469,60 @@ describe('prior government employment, answered from the experience bank', () =>
       ),
       labels.map((question) => ({ question, answer: '' })),
     );
+  });
+
+  test('current government employment uses only the exact authoritative current employer', () => {
+    const federal: ApplicationProfileLike = { current_employer: 'NASA' };
+    const local: ApplicationProfileLike = { current_employer: 'City of Los Angeles' };
+    const cases: [string, ApplicationProfileLike][] = [
+      ['Current federal government employment?', federal],
+      ['Are you currently employed by a U.S. government agency?', federal],
+      ['Do you currently work for NASA?', federal],
+      ['Are you currently a local government employee?', local],
+      ['Are you currently an employee of local government?', local],
+      ['Are you a current federal government employee?', federal],
+      ['Are you a current employee of local government?', local],
+    ];
+    for (const [label, profile] of cases) {
+      assert.equal(answer(label, profile), 'VALUE Yes', label);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: '' }], profile, undefined),
+        [{ question: label, answer: 'Yes' }],
+      );
+    }
+    assert.equal(answer('Are you currently employed by local government?', federal), 'SKIP');
+    assert.equal(answer('Are you currently employed by the federal government?', local), 'SKIP');
+    assert.deepEqual(
+      refreshKnownQuestionAnswers(
+        [{ question: 'Are you currently employed by local government?', answer: 'Yes' }],
+        federal,
+        undefined,
+      ),
+      [{ question: 'Are you currently employed by local government?', answer: '' }],
+    );
+  });
+
+  test('past employee noun and federal government agency forms are exact positives', () => {
+    const federal: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
+    };
+    const labels = [
+      'Were you a federal government employee?',
+      'Have you ever been a U.S. government employee?',
+      'Were you an employee of the federal government?',
+      'Have you previously been an employee of a federal government agency?',
+      'Are you a former federal government employee?',
+      'Are you a former employee of the federal government?',
+      'Have you worked for a federal government agency?',
+      'Have you been employed by a United States federal government agency?',
+    ];
+    for (const label of labels) {
+      assert.equal(answer(label, federal), 'VALUE Yes', label);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: '' }], federal, undefined),
+        [{ question: label, answer: 'Yes' }],
+      );
+    }
   });
 
   test('the parser rejects material instructions anywhere outside the complete question', () => {
