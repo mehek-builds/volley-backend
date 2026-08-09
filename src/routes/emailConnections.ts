@@ -8,9 +8,9 @@ import {
   createEmailConnectionLink,
   disconnectEmailProvider,
   getEmailConnectionStates,
-  hasActiveEmailConnection,
   isComposioConfigured,
 } from '../lib/composioConnections';
+import { verificationEmailSource } from '../lib/verificationEmailSource';
 
 const providerParams = z.object({ provider: z.enum(['gmail', 'outlook']) });
 
@@ -41,8 +41,8 @@ export async function emailConnectionRoutes(fastify: FastifyInstance) {
     if (!parsed.success) return reply.status(400).send({ error: 'Unsupported email provider' });
     const userId = request.jwtPayload!.userId;
     const removed = await disconnectEmailProvider(userId, parsed.data.provider);
-    const anotherInboxIsConnected = await hasActiveEmailConnection(userId).catch(() => false);
-    if (!anotherInboxIsConnected) {
+    const anotherVerificationSource = await verificationEmailSource(userId);
+    if (!anotherVerificationSource) {
       await db.update(users).set({
         automatic_verification_enabled: false,
         automatic_verification_consented_at: null,

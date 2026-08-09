@@ -16,8 +16,9 @@ import { ENCRYPTED_FIELDS } from './applicationProfile';
 import { AUTOMATIC_CAPTCHA_CONSENT_VERSION, AUTOMATIC_SUBMISSION_CONSENT_VERSION, automationConsentValues, captchaResumeGranted } from '../lib/automationConsent';
 import { standingConsentEligibility, mayChangeStandingConsent } from '../engine/standingConsent';
 import { generated_resumes } from '../db/schema';
-import { hasActiveEmailConnection, isComposioConfigured } from '../lib/composioConnections';
+import { isComposioConfigured } from '../lib/composioConnections';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
+import { verificationEmailSource } from '../lib/verificationEmailSource';
 
 /**
  * How many submissions has this student personally approved AND seen reach the employer?
@@ -51,13 +52,11 @@ async function verificationConnectionProblem(
   settings: { automatic_verification_enabled?: boolean },
 ): Promise<{ status: 409 | 503; error: string } | null> {
   if (settings.automatic_verification_enabled !== true) return null;
+  if (await verificationEmailSource(userId)) return null;
   if (!isComposioConfigured()) {
-    return { status: 503, error: 'Email connections are not configured yet' };
+    return { status: 503, error: 'The Litos application inbox is unavailable and email connections are not configured yet' };
   }
-  if (!await hasActiveEmailConnection(userId)) {
-    return { status: 409, error: 'Connect Gmail or Outlook before turning on email verification' };
-  }
-  return null;
+  return { status: 409, error: 'Connect Gmail or Outlook, or wait until the Litos application inbox is available' };
 }
 
 async function reviewedSubmitCount(userId: string): Promise<number> {
