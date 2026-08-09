@@ -4752,9 +4752,19 @@ test('the probe can name Greenhouse\'s own self-identification controls', () => 
   // And the probe pass therefore reads them.
   assert.deepEqual(
     managedOptionProbeTargets('greenhouse', [
-      { label: 'are you hispanic/latino? hispanic_ethnicity', selector: '[data-litos-discovered-14]' },
-      { label: 'disability status disability_status', selector: '[data-litos-discovered-16]' },
-    ]),
+      {
+        label: 'are you hispanic/latino? hispanic_ethnicity',
+        selector: '[data-litos-discovered-14]',
+        inputType: 'text',
+        role: 'combobox',
+      },
+      {
+        label: 'disability status disability_status',
+        selector: '[data-litos-discovered-16]',
+        inputType: 'text',
+        role: 'combobox',
+      },
+    ], {}, true),
     ['hispanic_ethnicity', 'disability_status'],
   );
 });
