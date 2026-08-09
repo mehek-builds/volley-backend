@@ -16,6 +16,7 @@ import {
   resolveProfileField,
 } from './profileFieldResolution';
 import type { Locator } from 'playwright-core';
+import { browserApplicationCapability } from './browserApplicationCapabilities';
 
 // Portal field ids legitimately contain CSS-syntax characters (Greenhouse uses UUIDs, others use
 // dots and colons), so they are matched with the [id="..."] attribute form rather than #id. Inside
@@ -45,7 +46,10 @@ type PortalFamily =
   | 'teamtailor'
   | 'personio'
   | 'pinpoint'
-  | 'comeet';
+  | 'comeet'
+  | 'zoho_recruit'
+  | 'bullhorn'
+  | 'sap_successfactors';
 type ControlledPortal =
   | 'controlled_test'
   | 'controlled_lever'
@@ -154,10 +158,10 @@ const CONSENT_GATED_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
 // Being in this set is NOT a claim the platform is unsupportable forever. It is a claim that today
 // Litos can recognise the page and explain it, which is worth more to a job seeker than a fill that
 // silently does nothing.
-type AccountWalledFamily = 'jobvite' | 'icims' | 'oraclecloud' | 'ultipro';
+type AccountWalledFamily = 'jobvite' | 'icims' | 'oraclecloud' | 'ultipro' | 'sap_successfactors';
 
 const ACCOUNT_WALLED_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
-  ['jobvite', 'icims', 'oraclecloud', 'ultipro'] satisfies AccountWalledFamily[],
+  ['jobvite', 'icims', 'oraclecloud', 'ultipro', 'sap_successfactors'] satisfies AccountWalledFamily[],
 );
 
 export function isAccountWalledFamily(portal: SupportedPortal): boolean {
@@ -180,6 +184,9 @@ export function captchaProviderForFamily(portal: SupportedPortal): CaptchaProvid
 
 export function portalCanAutoSubmit(portal: SupportedPortal): boolean {
   const family = portalFamily(portal);
+  if (['zoho_recruit', 'bullhorn', 'sap_successfactors'].includes(family)) {
+    return browserApplicationCapability(family).programmaticSubmit;
+  }
   return !MULTI_STEP_FAMILIES.has(family)
     && !CAPTCHA_GATED_FAMILIES.has(family)
     && !CONSENT_GATED_FAMILIES.has(family)
@@ -235,6 +242,8 @@ const ACCOUNT_WALLED_REASONS: Record<AccountWalledFamily, string> = {
     'This company emails you a code and asks you to agree to their terms before the application form opens. Both of those need you, so Litos stops here.',
   ultipro:
     'Litos can find this job but cannot read this company’s application form yet. Everything you need is ready to paste in, so open the page and apply there.',
+  sap_successfactors:
+    'This company asks you to sign in or create a SuccessFactors account before the application form opens. Litos leaves that account and every later legal choice to you.',
 };
 
 export function portalHandoffReason(portal: SupportedPortal): string | null {
@@ -259,6 +268,12 @@ export function portalHandoffReason(portal: SupportedPortal): string | null {
   }
   if (family === 'pinpoint') {
     return 'Litos filled this Pinpoint application and left the privacy-processing choice for you. Review the notice, make your choice, and send it yourself.';
+  }
+  if (family === 'zoho_recruit') {
+    return 'Litos filled the public Zoho Recruit form but left every privacy, retention, race and gender question, statement you must swear to, CAPTCHA and send control to you.';
+  }
+  if (family === 'bullhorn') {
+    return 'Litos filled the Bullhorn form but left every legal choice and the send button to you because each company can customize this portal.';
   }
   return null;
 }
@@ -286,6 +301,9 @@ export function unattendedHandoffReason(portal: SupportedPortal): string | null 
   }
   if (MANUAL_FINAL_REVIEW_FAMILIES.has(family)) {
     return 'This company requires a final review on its application page, so Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.';
+  }
+  if (family === 'zoho_recruit' || family === 'bullhorn') {
+    return 'This company uses a customizable application form whose final legal controls need you, so Litos cannot send it while you are away. Open it and Litos will fill the factual fields.';
   }
   return null;
 }
@@ -1088,10 +1106,30 @@ function shouldSkipReviewedConsentQuestion(questionText: string): boolean {
 }
 
 function shouldSkipPortalConsentQuestion(family: PortalFamily, questionText: string): boolean {
+  if (family === 'zoho_recruit' || family === 'bullhorn') {
+    return isLegalConsentQuestion(questionText)
+      || ROUTINE_APPLICANT_CONSENT_QUESTION.test(questionText)
+      || /\b(?:privacy|retain|retention|store|sensitive|race|ethnicity|gender|sex|age|religion|religious|marital|pregnan(?:cy|t)|national\s+origin|genetic\s+(?:data|information)|disab(?:ility|led)|veteran|eeo|equal employment|attest|certif(?:y|ication)|acknowledg(?:e|ment)|captcha)\b/i.test(questionText);
+  }
   if (family !== 'recruitee' && family !== 'teamtailor') return false;
   return isLegalConsentQuestion(questionText)
     || ROUTINE_APPLICANT_CONSENT_QUESTION.test(questionText)
     || /\b(?:keep|retain|store|use)\b[\s\S]{0,120}\b(?:my|your)\s+(?:information|data)\b[\s\S]{0,120}\b(?:future|other)\s+(?:jobs?|positions?|vacancies|opportunities)\b/i.test(questionText);
+}
+
+function reviewedQuestionSafetyContext(
+  item: SubmissionPacket['questions'][number],
+  packet: SubmissionPacket,
+): string {
+  const selector = reviewQuestionPortalSelector(item) ?? '';
+  const inputType = reviewQuestionPortalInputType(item) ?? '';
+  const atsIdentity = item.atsApiField ?? '';
+  const selectorId = selector.match(/\[id=["']([^"']+)["']\]/i)?.[1];
+  const options = [
+    ...(packet.fieldOptions?.[selector] ?? []),
+    ...(selectorId ? packet.fieldOptions?.[selectorId] ?? [] : []),
+  ];
+  return [item.question, selector, inputType, atsIdentity, ...options].join(' ');
 }
 
 // Whether reviewed questions may be sent to a given provider's runner.
@@ -2686,6 +2724,17 @@ const PINPOINT_COVER_LETTER_SELECTOR = 'input[type="file"][name="application_for
 const COMEET_RESUME_SELECTOR = 'input[type="file"][name="cv"]';
 const COMEET_COVER_LETTER_SELECTOR = 'input[type="file"][name="coverLetter"]';
 
+// Zoho Recruit renders the application inside the public detail route. Field ids are tenant data,
+// while the Candidate API names and the resume attachment marker are stable across the two live
+// tenants inspected. Consent, retention, EEO and CAPTCHA controls are deliberately absent.
+const ZOHO_RECRUIT_RESUME_SELECTOR = 'input[type="file"][name*="Resume" i], input[type="file"][data-zcqa*="resume" i]';
+const ZOHO_RECRUIT_COVER_LETTER_SELECTOR = 'input[type="file"][name="zohoCoverLetterThatDoesNotExist"]';
+
+// Bullhorn OSCP is self-hosted but its stock Angular form uses these form-control names. There is
+// only one stock file input and app.json names it resume. Custom legal controls are never mapped.
+const BULLHORN_RESUME_SELECTOR = 'input[type="file"][formcontrolname="resume"], input[type="file"][name="resume"]';
+const BULLHORN_COVER_LETTER_SELECTOR = 'input[type="file"][name="bullhornCoverLetterThatDoesNotExist"]';
+
 // NOT filled: input[name^="nickname_"], BambooHR's honeypot, labelled "Please leave this field
 // blank" and concealed the same zero-height-ancestor way Breezy's is.
 //
@@ -2725,6 +2774,9 @@ const COVER_LETTER_UPLOAD_SELECTORS: Record<SupportedPortal, string> = {
   personio: PERSONIO_COVER_LETTER_SELECTOR,
   pinpoint: PINPOINT_COVER_LETTER_SELECTOR,
   comeet: COMEET_COVER_LETTER_SELECTOR,
+  zoho_recruit: ZOHO_RECRUIT_COVER_LETTER_SELECTOR,
+  bullhorn: BULLHORN_COVER_LETTER_SELECTOR,
+  sap_successfactors: 'input[type="file"][name="noFormReachableWithoutSuccessFactorsAccount"]',
   // The account-walled four never reach a form, so there is no file input of any kind to find. A
   // never-matching selector is the honest answer to "can this portal accept a cover-letter file"
   // here, and it keeps hasCoverLetterUpload() from having to special-case them.
@@ -3151,6 +3203,25 @@ function pushFixedFieldActions(
     managedUpload(actions, COMEET_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
     // The phone-country combobox, personal note, and tenant questions stay in the generic reviewed
     // question path. Both captured tenants render g-recaptcha-response, so submit stays gated.
+  } else if (family === 'zoho_recruit') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    managedFill(actions, 'input[name="First_Name"], input[name="firstName"]', parts[0], 'first_name');
+    managedFill(actions, 'input[name="Last_Name"], input[name="lastName"]', parts.slice(1).join(' '), 'last_name');
+    managedFill(actions, 'input[name="Email"], input[name="email"]', packet.email, 'email');
+    managedFill(actions, 'input[name="Phone"], input[name="phone"]', packet.phone, 'phone');
+    managedUpload(actions, ZOHO_RECRUIT_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    // Candidate consent, retention, EEO, attestations and CAPTCHA are tenant-configurable and stay
+    // untouched even when they look like ordinary required controls.
+  } else if (family === 'bullhorn') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    managedFill(actions, 'input[formcontrolname="firstName"], input[name="firstName"]', parts[0], 'first_name');
+    managedFill(actions, 'input[formcontrolname="lastName"], input[name="lastName"]', parts.slice(1).join(' '), 'last_name');
+    managedFill(actions, 'input[formcontrolname="email"], input[name="email"]', packet.email, 'email');
+    managedFill(actions, 'input[formcontrolname="phone"], input[name="phone"]', packet.phone, 'phone');
+    managedUpload(actions, BULLHORN_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    // OSCP may be changed by each employer. Never map a custom control from one tenant onto another.
+  } else if (family === 'sap_successfactors') {
+    // The public job page transitions into an account wall. No identity or credential is entered.
   } else {
     const parts = packet.fullName.trim().split(/\s+/);
     const firstName = parts[0] ?? '';
@@ -3261,7 +3332,13 @@ export function buildManagedPortalActions(
 ): ManagedBrowserAction[] {
   const actions: ManagedBrowserAction[] = [];
   pushFixedFieldActions(actions, portal, packet);
-  if (portalFamily(portal) === 'greenhouse') {
+  const family = portalFamily(portal);
+  // These three integrations are structurally fixed-field-only. SuccessFactors has no reachable
+  // form at all, while Zoho Recruit and Bullhorn have only the exact identity and resume controls
+  // mapped above. A stale or malicious reviewed-question packet must never widen that surface.
+  if (family === 'sap_successfactors') return actions;
+  const mayReplayReviewedQuestions = family !== 'zoho_recruit' && family !== 'bullhorn';
+  if (family === 'greenhouse') {
     pushGreenhouseAkunaSafeTextActions(actions, packet);
     pushGreenhouseAkunaFixedAttestationActions(actions, packet);
     pushGreenhouseKnownQuestionAliases(actions, packet, 'akunaRequired');
@@ -3270,13 +3347,13 @@ export function buildManagedPortalActions(
   // The managed runner scopes every choice match to this question's container and verifies text
   // values after filling, so a missing or unaccepted value returns as a blocker instead of being
   // reported as completed.
-  for (const item of canFillReviewedQuestions('managed') ? packet.questions : []) {
+  for (const item of canFillReviewedQuestions('managed') && mayReplayReviewedQuestions ? packet.questions : []) {
     const answer = greenhouseReviewedQuestionAnswer(item, packet);
     if (!answer.trim()) continue;
     const questionText = normalizeReviewQuestionLabel(item.question);
     if (!questionText) continue;
     if (shouldSkipReviewedConsentQuestion(questionText)) continue;
-    if (shouldSkipPortalConsentQuestion(portalFamily(portal), questionText)) continue;
+    if (shouldSkipPortalConsentQuestion(portalFamily(portal), reviewedQuestionSafetyContext(item, packet))) continue;
     const rawPortalSelector = reviewQuestionPortalSelector(item);
     const portalInputType = reviewQuestionPortalInputType(item);
     const portalSelector = durablePortalSelector(rawPortalSelector);
@@ -3529,6 +3606,11 @@ const HOSTS: Record<PortalFamily, RegExp> = {
   // on www.comeet.co, and that token cannot be derived from the posting URL. Only the real form URL
   // is supported so the backend never promises a fill it cannot reach.
   comeet: /^www\.comeet\.co$/i,
+  zoho_recruit: /^[^.]+\.zohorecruit\.(?:com|eu|in)$/i,
+  // Bullhorn's OSCP is intentionally self-hosted. Only exact tenants inspected live are claimed;
+  // no arbitrary marketing domain becomes a supported ATS because it happens to link to Bullhorn.
+  bullhorn: /^(?:www\.serverlogic\.com|www\.staffingsolutionsenterprises\.com)$/i,
+  sap_successfactors: /^career\d+\.successfactors\.(?:com|eu)$/i,
 };
 
 // Host alone is not enough for a portal whose host space also serves a login page, a marketing site
@@ -3558,6 +3640,9 @@ const APPLY_PATHS: Partial<Record<PortalFamily, RegExp>> = {
   personio: /^\/job\/\d+(?:\/apply)?\/?$/i,
   pinpoint: /^\/(?:[a-z]{2}\/)?postings\/[0-9a-f-]+(?:\/applications\/new)?\/?$/i,
   comeet: /^\/jobs\/[A-Z0-9.]+\/[A-Z0-9.-]+\/apply\/?$/i,
+  zoho_recruit: /^\/jobs\/Careers\/\d+\/[^/]+\/?$/i,
+  bullhorn: /^\/wp-content\/plugins\/bullhorn-oscp\/?$/i,
+  sap_successfactors: /^\/(?:sfcareer\/jobreqcareer|career|portalcareer)\/?$/i,
 };
 
 // Comeet's public .com job page is only a wrapper. The real .co application URL is usable only
@@ -3626,13 +3711,22 @@ export function detectPortal(rawUrl: string): SupportedPortal {
   if (databricksGreenhouseJobId(url)) {
     return 'greenhouse';
   }
+  const bullhornHash = url.hash.match(/^#\/jobs\/(\d+)(?:\/apply)?\/?$/i);
+  const isBullhornTenant = HOSTS.bullhorn.test(url.hostname);
+  if (isBullhornTenant && APPLY_PATHS.bullhorn!.test(url.pathname) && bullhornHash) return 'bullhorn';
   for (const [portal, host] of Object.entries(HOSTS)) {
+    if (portal === 'bullhorn') continue;
     if (!host.test(url.hostname)) continue;
     // See APPLY_PATHS. A family listed there must match its path too, because its host space also
     // serves logins, marketing pages, or in Oracle's case entire unrelated products.
     const applyPath = APPLY_PATHS[portal as PortalFamily];
     if (applyPath && !applyPath.test(url.pathname)) continue;
     if (portal === 'comeet' && !hasComeetApplicationToken(url)) continue;
+    if (portal === 'sap_successfactors') {
+      const jobId = url.searchParams.get('jobId') ?? url.searchParams.get('career_job_req_id') ?? url.searchParams.get('job_application');
+      const tenant = url.searchParams.get('company');
+      if (!jobId || !/^\d+$/.test(jobId) || !tenant || !/^[A-Za-z0-9_-]+$/.test(tenant)) continue;
+    }
     return portal as SupportedPortal;
   }
   // Names the platforms it can actually DO something useful on. The account-walled four are
@@ -3676,6 +3770,27 @@ export function canonicalSupportedPortalUrl(rawUrl: string | undefined, atsName?
     if (url.protocol !== 'https:') return undefined;
     const greenhouseJobId = databricksGreenhouseJobId(url);
     if (greenhouseJobId) return `https://boards.greenhouse.io/embed/job_app?token=${greenhouseJobId}`;
+    const portal = detectPortal(rawUrl);
+    if (portal === 'zoho_recruit') {
+      url.search = '';
+      url.hash = '';
+      url.pathname = url.pathname.replace(/\/$/, '');
+      return url.toString();
+    }
+    if (portal === 'bullhorn') {
+      const jobId = url.hash.match(/^#\/jobs\/(\d+)/i)?.[1];
+      if (!jobId) return undefined;
+      url.search = '';
+      url.hash = `#/jobs/${jobId}`;
+      url.pathname = '/wp-content/plugins/bullhorn-oscp/';
+      return url.toString();
+    }
+    if (portal === 'sap_successfactors') {
+      const jobId = url.searchParams.get('jobId') ?? url.searchParams.get('career_job_req_id') ?? url.searchParams.get('job_application');
+      const company = url.searchParams.get('company');
+      if (!jobId || !company) return undefined;
+      return `https://${url.hostname}/sfcareer/jobreqcareer?jobId=${encodeURIComponent(jobId)}&company=${encodeURIComponent(company)}`;
+    }
   } catch {
     return undefined;
   }
@@ -3747,6 +3862,9 @@ export function greenhousePortalUrlNeedsBoardToken(rawUrl: string | undefined): 
 export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): string {
   if (portal === 'greenhouse') return greenhouseEmbedApplicationUrl(rawUrl) ?? rawUrl;
   const url = new URL(rawUrl);
+  if (portal === 'zoho_recruit' || portal === 'bullhorn' || portal === 'sap_successfactors') {
+    return canonicalSupportedPortalUrl(rawUrl, portal) ?? rawUrl;
+  }
   // Treat the platform's optional trailing slash as formatting, not another path segment. Without
   // this normalization, an already-canonical form URL received the same suffix a second time.
   const family = portalFamily(portal);
@@ -3875,7 +3993,7 @@ async function fillReviewedQuestions(page: Page, portal: SupportedPortal, packet
     const questionText = normalizeReviewQuestionLabel(item.question);
     if (!questionText) continue;
     if (shouldSkipReviewedConsentQuestion(questionText)) continue;
-    if (shouldSkipPortalConsentQuestion(portalFamily(portal), questionText)) continue;
+    if (shouldSkipPortalConsentQuestion(portalFamily(portal), reviewedQuestionSafetyContext(item, packet))) continue;
     const portalSelector = durablePortalSelector(reviewQuestionPortalSelector(item));
     if (/^(?:checkbox|radio)$/i.test(reviewQuestionPortalInputType(item) ?? '')) {
       if (portalFamily(portal) === 'greenhouse') {
@@ -3985,6 +4103,19 @@ async function fillResolvedRequiredField(
   } catch {
     return false;
   }
+}
+
+export function portalMayResolveUnknownRequired(portal: SupportedPortal): boolean {
+  const family = portalFamily(portal);
+  return family !== 'zoho_recruit' && family !== 'bullhorn';
+}
+
+export function portalUnknownRequiredBlocker(
+  portal: SupportedPortal,
+  label: string,
+  type: string | null = null,
+): string | null {
+  return portalMayResolveUnknownRequired(portal) ? null : describeRequiredBlocker(label, { type });
 }
 
 export async function fillPortal(page: Page, portal: SupportedPortal, packet: SubmissionPacket): Promise<FillResult> {
@@ -4135,6 +4266,22 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="websiteUrl"]'], packet.portfolioUrl ?? packet.linkedinUrl ?? packet.githubUrl, 'portfolio', filledFields);
     await uploadFirst(page, [COMEET_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
     await uploadFirst(page, [COMEET_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+  } else if (family === 'zoho_recruit') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    await fillFirst(page, ['input[name="First_Name"]', 'input[name="firstName"]'], parts[0], 'first_name', filledFields);
+    await fillFirst(page, ['input[name="Last_Name"]', 'input[name="lastName"]'], parts.slice(1).join(' '), 'last_name', filledFields);
+    await fillFirst(page, ['input[name="Email"]', 'input[name="email"]'], packet.email, 'email', filledFields);
+    await fillFirst(page, ['input[name="Phone"]', 'input[name="phone"]'], packet.phone, 'phone', filledFields);
+    await uploadFirst(page, ZOHO_RECRUIT_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields);
+  } else if (family === 'bullhorn') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    await fillFirst(page, ['input[formcontrolname="firstName"]', 'input[name="firstName"]'], parts[0], 'first_name', filledFields);
+    await fillFirst(page, ['input[formcontrolname="lastName"]', 'input[name="lastName"]'], parts.slice(1).join(' '), 'last_name', filledFields);
+    await fillFirst(page, ['input[formcontrolname="email"]', 'input[name="email"]'], packet.email, 'email', filledFields);
+    await fillFirst(page, ['input[formcontrolname="phone"]', 'input[name="phone"]'], packet.phone, 'phone', filledFields);
+    await uploadFirst(page, BULLHORN_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields);
+  } else if (family === 'sap_successfactors') {
+    // The public job page transitions into an account wall. No identity or credential is entered.
   } else {
     await fillFirst(page, ['input[name="_systemfield_name"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="_systemfield_email"]'], packet.email, 'email', filledFields);
@@ -4148,10 +4295,14 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await uploadFirst(page, ASHBY_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields);
     await uploadFirst(page, ASHBY_COVER_LETTER_SELECTOR.split(', '), packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
   }
-  await fillReviewedQuestions(page, portal, packet, filledFields);
+  if (family !== 'zoho_recruit' && family !== 'bullhorn') {
+    await fillReviewedQuestions(page, portal, packet, filledFields);
+  }
 
   const blockers: string[] = [];
-  if (CONSENT_GATED_FAMILIES.has(family)) blockers.push(portalHandoffReason(portal)!);
+  if (CONSENT_GATED_FAMILIES.has(family) || ACCOUNT_WALLED_FAMILIES.has(family) || family === 'zoho_recruit' || family === 'bullhorn') {
+    blockers.push(portalHandoffReason(portal)!);
+  }
   // String kept verbatim: it is already surfaced to applicants and matched downstream.
   if (await hasUnresolvedCaptcha(page)) {
     blockers.push(CAPTCHA_BLOCKER);
@@ -4172,7 +4323,13 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     }
 
     const label = await resolveFieldLabel(page, field);
-    if (label && await fillResolvedRequiredField(field, label, packet, filledFields)) continue;
+    const forcedBlocker = label ? portalUnknownRequiredBlocker(portal, label, type) : null;
+    if (forcedBlocker) {
+      labelledBlockers.push(forcedBlocker);
+      continue;
+    }
+    const mayResolveUnknownRequired = portalMayResolveUnknownRequired(portal);
+    if (mayResolveUnknownRequired && label && await fillResolvedRequiredField(field, label, packet, filledFields)) continue;
     if (label) labelledBlockers.push(describeRequiredBlocker(label, { type }));
     else unlabelledCount += 1;
   }
