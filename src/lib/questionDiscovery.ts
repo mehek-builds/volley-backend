@@ -1456,9 +1456,19 @@ export const MILITARY_SERVICE_QUESTION =
 const GOVERNMENT_EMPLOYER_SCOPE =
   /\bgovernment(?:al)?\b|\bpublic[-\s]sector\b|\bcivil\s+service\b|\bcongressional\s+staffer\b|\b(?:state|federal)\s+(?:or\s+\w+\s+)?agenc(?:y|ies)\b/i;
 
-/** The question has to be about being EMPLOYED, not merely about a government existing. */
-const GOVERNMENT_EMPLOYMENT_PREDICATE =
-  /\bemploy(?:ed|ee|er|ment)\b|\bwork(?:ed|ing|s)?\b|\bserved?\b|\bstaffer\b|\bheld\s+a\s+(?:position|role|job|post)\b/i;
+/** The label must state the relationship between the applicant and a government employer. */
+const GOVERNMENT_EMPLOYMENT_RELATIONSHIP =
+  /\b(?:prior|previous|past|current)\b[^?]{0,40}\bgovernment(?:al)?\s+employment\b|\bemploy(?:ed|ment)\b[^?]{0,60}\b(?:by|with)\b|\bwork(?:ed|ing|s)?\b[^?]{0,60}\bfor\b|\bwork(?:ed|ing|s)?\b[^?]{0,40}\bin\b[^?]{0,30}\b(?:public[-\s]sector|civil\s+service)\b|\b(?:are|were|been)\s+you\b[^?]{0,40}\bgovernment(?:al)?\s+employee\b/i;
+
+/* These words make the government reference the subject matter of work, not the employer. A
+ * vetted government job elsewhere in the bank cannot answer any of them. */
+const GOVERNMENT_WORK_SUBJECT =
+  /\bprojects?\b|\bcontracts?\b|\bcontractors?\b|\bfunctions?\b|\bdisciplines?\b|\bgovernment\s+relations\b/i;
+
+/* A private entity may contain "Government" in its legal name. That is a named-employer question,
+ * not the broad government-employment family, so it must reach the exact employer resolver. */
+const NAMED_PRIVATE_ENTITY_DESIGNATOR =
+  /\b(?:company|co\.?|llc|ltd\.?|limited|inc\.?|incorporated|corp\.?|corporation|plc|insurance\s+company)\b/i;
 
 /* Labels that name a government and are still not "were you employed by one". Everything here is
  * either a real corpus label (relatives, PEP, export control) or a shape whose answer is a legal
@@ -1472,7 +1482,9 @@ const NOT_HER_GOVERNMENT_EMPLOYMENT =
 export function isGovernmentEmploymentQuestion(label: string): boolean {
   const value = label ?? '';
   if (!GOVERNMENT_EMPLOYER_SCOPE.test(value)) return false;
-  if (!GOVERNMENT_EMPLOYMENT_PREDICATE.test(value)) return false;
+  if (!GOVERNMENT_EMPLOYMENT_RELATIONSHIP.test(value)) return false;
+  if (GOVERNMENT_WORK_SUBJECT.test(value)) return false;
+  if (NAMED_PRIVATE_ENTITY_DESIGNATOR.test(value)) return false;
   return !NOT_HER_GOVERNMENT_EMPLOYMENT.test(value);
 }
 
@@ -1529,7 +1541,17 @@ function governmentEmploymentAnswer(
   label: string,
   ap: ApplicationProfileLike,
 ): { value: string } | { skipReason: string } | null {
-  if (!isGovernmentEmploymentQuestion(label)) return null;
+  if (!isGovernmentEmploymentQuestion(label)) {
+    if (GOVERNMENT_EMPLOYER_SCOPE.test(label) && GOVERNMENT_WORK_SUBJECT.test(label)) {
+      return {
+        skipReason: governmentEmploymentSkipReason(
+          label,
+          'the question is about government-related work, not employment by a government employer',
+        ),
+      };
+    }
+    return null;
+  }
 
   const recorded = ap.experience_bank?.filter((entry) => entry?.org?.trim());
   /* An empty bank is "she never told us", not "she never worked anywhere". Nothing is derivable

@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   isGovernmentEmploymentQuestion,
+  refreshKnownQuestionAnswers,
   resolveKnownAnswer,
   type ApplicationProfileLike,
 } from './questionDiscovery';
@@ -169,6 +170,46 @@ describe('prior government employment, answered from the experience bank', () =>
       assert.ok(isGovernmentEmploymentQuestion(label), label);
       assert.equal(answer(label, { experience_bank: BANK }), 'SKIP', label);
     }
+  });
+
+  test('government words do not turn named companies or work subjects into government employers', () => {
+    const nasa: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
+    };
+    for (const label of [
+      'Have you ever worked for Government Employees Insurance Company (GEICO)?',
+      'Have you worked for Government Brands LLC?',
+      'Have you worked on government projects?',
+      'Have you supported a government contractor?',
+      'Have you worked on federal government contracts?',
+      'Describe your government relations experience.',
+      'Which government function have you worked in?',
+      'Is government your professional discipline?',
+    ]) {
+      assert.equal(isGovernmentEmploymentQuestion(label), false, label);
+      assert.equal(answer(label, nasa), 'SKIP', label);
+    }
+  });
+
+  test('send-time refresh removes a stale Yes from every government adjacency', () => {
+    const nasa: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'National Aeronautics and Space Administration', title: 'Research Intern' }],
+    };
+    const questions = [
+      'Have you ever worked for Government Employees Insurance Company (GEICO)?',
+      'Have you worked for Government Brands LLC?',
+      'Have you worked on government projects?',
+      'Have you supported a government contractor?',
+      'Have you worked on federal government contracts?',
+      'Describe your government relations experience.',
+      'Which government function have you worked in?',
+      'Is government your professional discipline?',
+    ].map((question) => ({ question, answer: 'Yes' }));
+
+    assert.deepEqual(
+      refreshKnownQuestionAnswers(questions, nasa, undefined),
+      questions.map((question) => ({ ...question, answer: '' })),
+    );
   });
 });
 
