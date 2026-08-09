@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { browserSessionBody, continueManagedBrowser, isBrowserbaseConfigured, runManagedBrowser } from './browserbase';
+import {
+  browserSessionBody,
+  continueManagedBrowser,
+  isBrowserbaseConfigured,
+  managedContinuationFingerprint,
+  runManagedBrowser,
+} from './browserbase';
 import { buildManagedDiscoveryActions, buildManagedPortalActions } from './portalSubmission';
 
 function assertStratusSafeActions(actions: Array<Record<string, unknown>>) {
@@ -25,6 +31,14 @@ test('Browserbase configuration requires only the current API key', () => {
   else process.env.BROWSERBASE_API_KEY = previousKey;
   if (previousProject === undefined) delete process.env.BROWSERBASE_PROJECT_ID;
   else process.env.BROWSERBASE_PROJECT_ID = previousProject;
+});
+
+test('managed continuation evidence is stable, bounded, and rejects invalid tokens', () => {
+  const token = 'A'.repeat(43);
+  assert.match(managedContinuationFingerprint(token), /^[a-f0-9]{24}$/);
+  assert.equal(managedContinuationFingerprint(token), managedContinuationFingerprint(token));
+  assert.notEqual(managedContinuationFingerprint(token), managedContinuationFingerprint('B'.repeat(43)));
+  assert.throws(() => managedContinuationFingerprint('too-short'), /continuation token is invalid/);
 });
 
 test('session body disables CAPTCHA solving and restricts navigation to the portal host', () => {
@@ -85,15 +99,20 @@ test('Stratus configuration accepts its provider-specific API key', () => {
   else process.env.BROWSER_API_KEY = previousBrowserKey;
 });
 
-test('managed Stratus requires its production URL and private API key', () => {
+test('managed Stratus accepts a short-lived OIDC token without production environment secrets', () => {
   const previousProvider = process.env.BROWSER_PROVIDER;
   const previousStratusKey = process.env.STRATUS_API_KEY;
   const previousStratusUrl = process.env.STRATUS_BASE_URL;
   const previousVercelEnv = process.env.VERCEL_ENV;
+  const previousOidcToken = process.env.VERCEL_OIDC_TOKEN;
   process.env.BROWSER_PROVIDER = 'stratus-managed';
   delete process.env.STRATUS_API_KEY;
   process.env.STRATUS_BASE_URL = 'https://stratus-browser-cloud.vercel.app';
+  delete process.env.VERCEL_OIDC_TOKEN;
   assert.equal(isBrowserbaseConfigured(), false);
+  process.env.VERCEL_OIDC_TOKEN = 'header.payload.signature';
+  assert.equal(isBrowserbaseConfigured(), true);
+  delete process.env.VERCEL_OIDC_TOKEN;
   process.env.VERCEL_ENV = 'production';
   assert.equal(isBrowserbaseConfigured(), true);
   delete process.env.VERCEL_ENV;
@@ -107,6 +126,8 @@ test('managed Stratus requires its production URL and private API key', () => {
   else process.env.STRATUS_BASE_URL = previousStratusUrl;
   if (previousVercelEnv === undefined) delete process.env.VERCEL_ENV;
   else process.env.VERCEL_ENV = previousVercelEnv;
+  if (previousOidcToken === undefined) delete process.env.VERCEL_OIDC_TOKEN;
+  else process.env.VERCEL_OIDC_TOKEN = previousOidcToken;
 });
 
 test('managed Stratus posts bounded actions to the private production run endpoint', async () => {

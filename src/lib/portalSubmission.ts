@@ -18,6 +18,7 @@ import {
 } from './profileFieldResolution';
 import type { Locator } from 'playwright-core';
 import { browserApplicationCapability } from './browserApplicationCapabilities';
+import { isControlledTestPortalUrl } from './controlledTestPortal';
 
 // Portal field ids legitimately contain CSS-syntax characters (Greenhouse uses UUIDs, others use
 // dots and colons), so they are matched with the [id="..."] attribute form rather than #id. Inside
@@ -4382,12 +4383,7 @@ function greenhouseEmbedApplicationUrl(rawUrl: string): string | undefined {
 
 export function detectPortal(rawUrl: string): SupportedPortal {
   const url = new URL(rawUrl);
-  if (
-    process.env.LITOS_ENABLE_TEST_PORTAL === 'true' &&
-    (url.hostname === 'trylitos.com' || url.hostname === 'www.trylitos.com' || url.hostname === 'localhost') &&
-    url.pathname.startsWith('/qa/portal-submission') &&
-    (url.protocol === 'https:' || (url.protocol === 'http:' && url.hostname === 'localhost'))
-  ) {
+  if (isControlledTestPortalUrl(rawUrl)) {
     const pathBoard = url.pathname.split('/').filter(Boolean)[2];
     const board = (url.searchParams.get('board') ?? pathBoard)?.toLowerCase();
     if (board === 'lever') return 'controlled_lever';

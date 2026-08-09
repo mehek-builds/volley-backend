@@ -2,6 +2,7 @@ import { composioRequest } from './composioApi';
 import { and, desc, eq, gte, lte } from 'drizzle-orm';
 import { db } from '../db';
 import { application_email_messages } from '../db/schema';
+import { isControlledTestPortalUrl } from './controlledTestPortal';
 
 const CODE_CONTEXT = /\b(?:verification|security|authentication|confirmation|one[ -]?time|passcode|otp)\b/i;
 // Most providers send a 4 to 8 digit code. Greenhouse currently sends an 8-character
@@ -185,11 +186,16 @@ function senderDomain(sender: string): string {
 }
 
 function expectedSenderDomains(portalUrl: string): string[] {
-  let host = '';
+  let parsed: URL;
   try {
-    host = new URL(portalUrl).hostname.toLowerCase();
+    parsed = new URL(portalUrl);
   } catch {
     return [];
+  }
+  const host = parsed.hostname.toLowerCase();
+  const controlledQaPortal = isControlledTestPortalUrl(portalUrl);
+  if (controlledQaPortal && parsed.searchParams.get('board')?.toLowerCase() === 'greenhouse') {
+    return PORTAL_SENDER_DOMAINS[0].senders;
   }
   const configured = PORTAL_SENDER_DOMAINS.find(({ portal }) => portal.test(host));
   return configured?.senders ?? [host];

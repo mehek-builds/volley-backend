@@ -49,6 +49,21 @@ export type OutboundEmail = {
   }>;
 };
 
+export function controlledQaEmailCapture(): { url: string; token: string } | null {
+  if (process.env.NODE_ENV === 'production' || process.env.LITOS_QA_EMAIL_CAPTURE_ENABLED !== 'true') return null;
+  const rawUrl = process.env.LITOS_QA_EMAIL_CAPTURE_URL?.trim();
+  const token = process.env.LITOS_QA_EMAIL_CAPTURE_TOKEN?.trim();
+  if (!rawUrl || !token || !/^[A-Za-z0-9_-]{32,128}$/.test(token)) return null;
+  try {
+    const target = new URL(rawUrl);
+    if (target.protocol !== 'http:' || target.hostname !== '127.0.0.1' || !target.port
+      || target.pathname !== '/emails' || target.search || target.hash || target.username || target.password) return null;
+    return { url: target.toString(), token };
+  } catch {
+    return null;
+  }
+}
+
 /* Returns Resend's message id, which is the only proof the send was accepted.
    Resend can answer 200 with a body that has no id when something is wrong
    upstream, so a missing id is treated as a failure rather than a success: a
@@ -57,13 +72,17 @@ export async function sendEmail(
   payload: OutboundEmail,
   fetchImpl: typeof fetch = fetch,
 ): Promise<string> {
-  const res = await fetchImpl('https://api.resend.com/emails', {
+  const capture = controlledQaEmailCapture();
+  const endpoint = capture?.url ?? 'https://api.resend.com/emails';
+  const res = await fetchImpl(endpoint, {
     method: 'POST',
     // Bound the wait so a hung Resend cannot hold the request open indefinitely; the
     // caller treats a throw here as "email unavailable" and answers 503.
     signal: AbortSignal.timeout(10000),
     headers: {
-      Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+      ...(capture
+        ? { 'X-Litos-QA-Capture-Token': capture.token }
+        : { Authorization: `Bearer ${process.env.RESEND_API_KEY}` }),
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(payload),
@@ -71,12 +90,12 @@ export async function sendEmail(
 
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
-    throw new Error(`Resend API ${res.status}: ${text}`);
+    throw new Error(`${capture ? 'Controlled QA email capture' : 'Resend API'} ${res.status}: ${text}`);
   }
 
   const result = (await res.json().catch(() => null)) as { id?: unknown } | null;
   if (typeof result?.id !== 'string' || result.id.length === 0) {
-    throw new Error('Resend API accepted the request without returning an email id');
+    throw new Error(`${capture ? 'Controlled QA email capture' : 'Resend API'} accepted the request without returning an email id`);
   }
   return result.id;
 }

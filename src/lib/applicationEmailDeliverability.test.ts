@@ -27,6 +27,10 @@ async function withAliasEnv<T>(run: () => Promise<T>): Promise<T> {
     routeMode: process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE,
     webhookUrl: process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_URL,
     resendWebhookSecret: process.env.RESEND_WEBHOOK_SECRET,
+    nodeEnv: process.env.NODE_ENV,
+    captureEnabled: process.env.LITOS_QA_EMAIL_CAPTURE_ENABLED,
+    captureUrl: process.env.LITOS_QA_EMAIL_CAPTURE_URL,
+    captureToken: process.env.LITOS_QA_EMAIL_CAPTURE_TOKEN,
   };
   delete process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN;
   delete process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID;
@@ -34,6 +38,9 @@ async function withAliasEnv<T>(run: () => Promise<T>): Promise<T> {
   delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
   delete process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE;
   delete process.env.LITOS_APPLICATION_EMAIL_INBOUND_ENABLED;
+  delete process.env.LITOS_QA_EMAIL_CAPTURE_ENABLED;
+  delete process.env.LITOS_QA_EMAIL_CAPTURE_URL;
+  delete process.env.LITOS_QA_EMAIL_CAPTURE_TOKEN;
   process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'apply.trylitos.com';
   process.env.RESEND_API_KEY = 're_test';
   process.env.RESEND_FROM = 'Litos <applications@trylitos.com>';
@@ -66,6 +73,14 @@ async function withAliasEnv<T>(run: () => Promise<T>): Promise<T> {
     else process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_URL = saved.webhookUrl;
     if (saved.resendWebhookSecret === undefined) delete process.env.RESEND_WEBHOOK_SECRET;
     else process.env.RESEND_WEBHOOK_SECRET = saved.resendWebhookSecret;
+    if (saved.nodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = saved.nodeEnv;
+    if (saved.captureEnabled === undefined) delete process.env.LITOS_QA_EMAIL_CAPTURE_ENABLED;
+    else process.env.LITOS_QA_EMAIL_CAPTURE_ENABLED = saved.captureEnabled;
+    if (saved.captureUrl === undefined) delete process.env.LITOS_QA_EMAIL_CAPTURE_URL;
+    else process.env.LITOS_QA_EMAIL_CAPTURE_URL = saved.captureUrl;
+    if (saved.captureToken === undefined) delete process.env.LITOS_QA_EMAIL_CAPTURE_TOKEN;
+    else process.env.LITOS_QA_EMAIL_CAPTURE_TOKEN = saved.captureToken;
   }
 }
 
@@ -121,6 +136,33 @@ test('managed receiving treats fresh exact signed-webhook proof as time-bounded 
     assert.equal(result.inbound_route_configured, true);
     assert.deepEqual(result.mx_hosts, []);
     assert.equal(result.resend_domain_status, null);
+  });
+});
+
+test('controlled QA capture proves forwarding without contacting Resend and is disabled in production', async () => {
+  await withManagedAliasEnv(async () => {
+    delete process.env.RESEND_API_KEY;
+    process.env.NODE_ENV = 'test';
+    process.env.LITOS_QA_EMAIL_CAPTURE_ENABLED = 'true';
+    process.env.LITOS_QA_EMAIL_CAPTURE_URL = 'http://127.0.0.1:4317/emails';
+    process.env.LITOS_QA_EMAIL_CAPTURE_TOKEN = '0123456789abcdef0123456789abcdef';
+    resetApplicationAliasDeliverabilityCache();
+    const result = await applicationAliasDeliverability({
+      managedReceivingProof: async () => true,
+      resendWebhooks: async () => { throw new Error('controlled adapter must not contact Resend'); },
+    });
+    assert.equal(result.deliverable, true);
+    assert.equal(result.inbound_route_configured, true);
+    assert.match(result.detail ?? '', /Controlled local QA adapter/);
+
+    process.env.NODE_ENV = 'production';
+    resetApplicationAliasDeliverabilityCache();
+    const production = await applicationAliasDeliverability({
+      managedReceivingProof: async () => true,
+      resendWebhooks: async () => { throw new Error('no provider credential'); },
+    });
+    assert.equal(production.deliverable, false);
+    assert.equal(production.reason, 'forwarding_not_configured');
   });
 });
 

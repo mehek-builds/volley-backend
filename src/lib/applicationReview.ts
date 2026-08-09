@@ -430,6 +430,9 @@ export type ApplicationReviewState = {
     requested_at?: string;
     retry_count?: number;
     completed_at?: string;
+    runner?: 'stratus-managed';
+    continuation_fingerprint?: string;
+    continuation_resumed?: boolean;
   };
   receipt?: {
     confirmation_text: string;

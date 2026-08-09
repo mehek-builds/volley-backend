@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { applyResumePolicy } from './resumePolicy';
-import { leadAlignmentIssues, leadRequirementCandidates, foldForCitation, sharedCitationTerms } from './leadAlignment';
+import {
+  leadAlignmentIssues,
+  leadRequirementCandidates,
+  foldForCitation,
+  selectJdAlignedLead,
+  sharedCitationTerms,
+} from './leadAlignment';
+import { monitoredDescriptionHash } from '../lib/monitoredPortalRepair';
 import { normalizeSpec, type ResumeSpec } from '../llm/resumeSpec';
 
 const JD = `Product Management Intern
@@ -37,7 +44,10 @@ const TRAECO = {
   ],
 };
 
-function spec(partial: Partial<ResumeSpec>): ResumeSpec {
+function spec(partial: Partial<ResumeSpec>, jdText = JD): ResumeSpec {
+  const alignment = partial.lead_alignment
+    ? { ...partial.lead_alignment, jd_hash: partial.lead_alignment.jd_hash ?? monitoredDescriptionHash(jdText) }
+    : partial.lead_alignment;
   return normalizeSpec({
     target_role: 'Product Management Intern',
     school: 'USC',
@@ -47,6 +57,7 @@ function spec(partial: Partial<ResumeSpec>): ResumeSpec {
     experience: [TONEE, TRAECO],
     skills: ['Figma'],
     ...partial,
+    lead_alignment: alignment,
   });
 }
 
@@ -67,8 +78,114 @@ test('a missing justification is reported so the retry loop can ask for one', ()
   assert.match(issues[0], /lead_alignment is missing/);
 });
 
-test('a single-entry resume has no ordering decision to defend', () => {
-  assert.deepEqual(leadAlignmentIssues(spec({ experience: [TONEE] }), JD), []);
+test('a single-entry resume still needs evidence for why it leads this job', () => {
+  assert.match(leadAlignmentIssues(spec({ experience: [TONEE] }), JD)[0], /lead_alignment is missing/);
+});
+
+test('deterministic selection leads a frontend role with frontend work instead of LLM infrastructure', () => {
+  const frontend = {
+    type: 'job' as const,
+    org: 'Storefront Studio',
+    title: 'Frontend Engineer',
+    date_range: '2025',
+    bullets: [
+      'Built responsive React and TypeScript interfaces for a consumer web application used by 4,000 customers.',
+      'Improved browser rendering performance and accessibility across mobile layouts.',
+      'Partnered with designers to ship reusable UI components.',
+    ],
+  };
+  const jd = `Frontend Engineer
+
+Responsibilities:
+- Build responsive React and TypeScript interfaces for consumer web applications
+- Improve browser performance and accessible UI components
+
+Requirements:
+- Experience shipping frontend products to customers`;
+  const selected = selectJdAlignedLead(spec({ experience: [TRAECO, frontend] }), jd, {
+    company: 'Acme', role: 'Frontend Engineer',
+  });
+  assert.deepEqual(selected.issues, []);
+  assert.equal(selected.spec.experience[0]?.org, 'Storefront Studio');
+  assert.equal(selected.spec.lead_alignment?.evidence, frontend.bullets[0]);
+  assert.equal(selected.spec.lead_alignment?.jd_hash, monitoredDescriptionHash(jd));
+  assert.ok(selected.supported_terms.includes('react'));
+  assert.ok(selected.supported_terms.includes('typescript'));
+  assert.equal(selected.spec.school, 'USC');
+  assert.equal(selected.spec.degree, 'BS');
+  assert.equal(selected.spec.grad_date, 'May 2027');
+});
+
+test('deterministic selection leads a quant-trading role with trading evidence instead of product work', () => {
+  const quant = {
+    type: 'job' as const,
+    org: 'Market Lab',
+    title: 'Quantitative Researcher',
+    date_range: '2024',
+    bullets: [
+      'Researched quantitative trading strategies in Python using market data and backtested risk signals.',
+      'Analyzed order-book behavior and presented trading recommendations.',
+      'Built statistical models for portfolio risk.',
+    ],
+  };
+  const jd = `Quantitative Trading Intern
+
+What you will do:
+- Research quantitative trading strategies using market data
+- Analyze risk and collaborate with traders
+
+Requirements:
+- Python experience for quantitative analysis`;
+  const selected = selectJdAlignedLead(spec({ experience: [TONEE, quant] }), jd, {
+    company: 'Trading Firm', role: 'Quantitative Trading Intern',
+  });
+  assert.deepEqual(selected.issues, []);
+  assert.equal(selected.spec.experience[0]?.org, 'Market Lab');
+  assert.equal(selected.spec.lead_alignment?.requirement, 'Research quantitative trading strategies using market data');
+  assert.equal(selected.spec.lead_alignment?.evidence, quant.bullets[0]);
+});
+
+test('selection ignores an unsupported generic-keyword overlap and fails closed', () => {
+  const generic = {
+    ...TRAECO,
+    bullets: [
+      'Built software systems for an engineering team.',
+      'Developed technology solutions for internal projects.',
+      'Created tools used across applications.',
+    ],
+  };
+  const jd = `Hardware Design Intern
+
+Responsibilities:
+- Build software systems for engineering projects
+
+Requirements:
+- Experience with PCB layout and circuit simulation`;
+  const selected = selectJdAlignedLead(spec({ experience: [generic] }), jd, {
+    company: 'Circuits Inc', role: 'Hardware Design Intern',
+  });
+  assert.equal(selected.spec.lead_alignment, null);
+  assert.match(selected.issues[0], /no selected bullet shares supported domain evidence/);
+  assert.deepEqual(selected.supported_terms, []);
+});
+
+test('a citation bound to a different frozen JD is rejected', () => {
+  const selected = selectJdAlignedLead(spec({ experience: [TRAECO, TONEE] }), JD, {
+    company: 'Acme', role: 'Product Management Intern',
+  }).spec;
+  assert.ok(selected.lead_alignment?.jd_hash);
+  const issues = leadAlignmentIssues(selected, `${JD}\n- Extra requirement`, {
+    context: { company: 'Acme', role: 'Product Management Intern' },
+  });
+  assert.ok(issues.some((issue) => /jd_hash does not match/.test(issue)));
+});
+
+test('a citation with no frozen-JD binding is rejected', () => {
+  const selected = selectJdAlignedLead(spec({ experience: [TRAECO, TONEE] }), JD, {
+    company: 'Acme', role: 'Product Management Intern',
+  }).spec;
+  const withoutHash = { ...selected, lead_alignment: { ...selected.lead_alignment!, jd_hash: undefined } };
+  assert.ok(leadAlignmentIssues(withoutHash, JD).some((issue) => /jd_hash is missing/.test(issue)));
 });
 
 /* THE NO-FABRICATION PINS.
@@ -143,7 +260,7 @@ test('a posting that yields no asks falls back to quoting the job description', 
       requirement: 'Engineer wanted',
       evidence: TONEE.bullets[0],
     },
-  });
+  }, thin);
   assert.match(leadAlignmentIssues(s, thin)[0], /does not address/);
   assert.ok(!leadAlignmentIssues(s, thin).some((i) => /not in the job description/.test(i)));
 });
@@ -200,8 +317,7 @@ test('justifying a different entry than the one that leads is reported alone, no
   assert.match(issues[0], /but the first entry is "Traeco/);
 });
 
-test('after rendering, only the entry the alignment argues for is re-checked', () => {
-  // One-page fitting may have dropped the cited bullet. That must not withhold the resume.
+test('after rendering, trimming the sole cited evidence remains a blocking defect', () => {
   const trimmed = spec({
     experience: [{ ...TONEE, bullets: TONEE.bullets.slice(1) }, TRAECO],
     lead_alignment: {
@@ -211,7 +327,7 @@ test('after rendering, only the entry the alignment argues for is re-checked', (
     },
   });
   assert.equal(leadAlignmentIssues(trimmed, JD).length, 1);
-  assert.deepEqual(leadAlignmentIssues(trimmed, JD, { afterRender: true }), []);
+  assert.match(leadAlignmentIssues(trimmed, JD, { afterRender: true })[0], /evidence is not one of the bullets/);
 });
 
 /* applyResumePolicy runs normalizeDashesForPrint over every field of the spec, so a requirement
@@ -227,7 +343,7 @@ test('a requirement quoted from a posting written with em dashes survives the po
         requirement: 'Experience shipping a consumer product — end to end — to real users',
         evidence: TONEE.bullets[0],
       },
-    }),
+    }, dashJd),
     { school: 'USC', degree: 'BS', grad_date: 'May 2027', currently_enrolled: true },
     [],
     dashJd,

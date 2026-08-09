@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { put } from '@vercel/blob';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, eq, sql } from 'drizzle-orm';
@@ -17,6 +18,7 @@ import {
 } from '../engine/resumeRender';
 import { pruneUngroundedSkills, validatePdfLayout, validateResumeSpec } from '../engine/resumeValidate';
 import { resumeSafeTargetRole } from '../engine/resumePolicy';
+import { leadAlignmentIssues, selectJdAlignedLead } from '../engine/leadAlignment';
 import {
   applyApplicationReviewEdit,
   deriveEditedTerms,
@@ -92,6 +94,11 @@ const submitBodySchema = z.object({
 });
 
 type StoredResumeRow = typeof generated_resumes.$inferSelect;
+
+/** Semantic equality for the packet version that passed an out-of-transaction verification. */
+export function sameApplicationPacketSpec(validated: unknown, current: unknown): boolean {
+  return isDeepStrictEqual(validated, current);
+}
 
 /** The employer a packet is for, so answerReuse can hold back anything that names them. */
 function applicationCompany(row: StoredResumeRow): string {
@@ -223,6 +230,14 @@ function editableResumeSpec(value: unknown): ResumeSpec {
   return spec;
 }
 
+export function applicationLeadAlignmentIssues(stored: StoredSpec, company?: string): string[] {
+  const review = readApplicationReview(stored);
+  if (!review?.jd_text) return ['This application has no frozen job description for its lead-experience citation.'];
+  return leadAlignmentIssues(editableResumeSpec(stored), review.jd_text, {
+    context: { company, role: review.role },
+  });
+}
+
 /**
  * Preserve the same explicit sparse-source decision that certified the generated resume.
  *
@@ -246,6 +261,7 @@ export function allowedSparseEntriesForApplicationEdit(
 export async function preSendResumeVerificationIssues(
   userId: string,
   stored: StoredSpec,
+  company?: string,
 ): Promise<string[]> {
   const review = readApplicationReview(stored);
   const contact = stored._contact as StoredContact | undefined;
@@ -270,6 +286,9 @@ export async function preSendResumeVerificationIssues(
   const spec = editableResumeSpec(stored);
   if (review.role) spec.target_role = resumeSafeTargetRole(review.role);
 
+  const alignmentIssues = applicationLeadAlignmentIssues(stored, company);
+  if (alignmentIssues.length > 0) return alignmentIssues;
+
   const bank = await readExperienceBankOrSeedFromBaseResume(userId);
   const profileRows = await db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1);
   const parsed = profileRows[0]?.parsed_json as ParsedProfileForResume | undefined;
@@ -290,6 +309,7 @@ export async function preSendResumeVerificationIssues(
   const visual = validateResumeVisualLayout(rendered.layout);
   const parsedPdf = await extractPdfText(rendered.buffer);
   return [
+    ...leadAlignmentIssues(rendered.spec, review.jd_text, { context: { company, role: review.role } }),
     ...visual.issues,
     ...validatePdfLayout(parsedPdf.text, parsedPdf.numpages).issues,
     ...findPdfSafeMarginIssues(parsedPdf.pages, rendered.layout),
@@ -376,8 +396,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
        * applicant's own browser, and this route is the moment Litos authorizes it to. Refusing at
        * extension-outcome would be refusing to record a send that already happened.
        *
-       * Ahead of the transaction, not inside it, so the read is not competing with the advisory
-       * lock the claim takes. Nothing is claimed yet at this point, so there is nothing to undo. */
+       * The expensive PDF verification runs ahead of the transaction. The transaction below then
+       * requires the row to be the same JSON value before it authorizes the extension,
+       * and the conditional update repeats that predicate. This binds the verification to the exact
+       * packet version that receives the claim. */
       const [precheckRow] = await db.select().from(generated_resumes).where(and(
         eq(generated_resumes.id, params.data.id),
         eq(generated_resumes.user_id, userId),
@@ -386,6 +408,18 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (precheckRow && precheckReview && precheckReview.status !== 'submitted') {
         const verdict = await refuseDuplicateApplication(precheckRow, precheckReview, userId, fastify.log);
         if (verdict.kind === 'duplicate') return reply.status(409).send(duplicateApplicationResponse(verdict));
+        const resumeIssues = await preSendResumeVerificationIssues(
+          userId,
+          precheckRow.spec as StoredSpec,
+          applicationCompany(precheckRow),
+        );
+        if (resumeIssues.length > 0) {
+          return reply.status(422).send({
+            error: 'Verify the resume before sending. The current packet is not ready for extension submission.',
+            code: 'PRE_SEND_VERIFICATION_FAILED',
+            issues: resumeIssues,
+          });
+        }
       }
       const result = await db.transaction(async (tx) => {
         await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${userId}))`);
@@ -395,6 +429,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         )).limit(1);
         const row = rows[0];
         if (!row) return { kind: 'not_found' as const };
+        if (!precheckRow || !sameApplicationPacketSpec(row.spec, precheckRow.spec)) {
+          return { kind: 'changed' as const };
+        }
         const current = readApplicationReview(row.spec);
         if (!current) return { kind: 'no_review' as const };
         const startOfDay = new Date();
@@ -465,6 +502,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         const updated = await tx.update(generated_resumes).set({ spec: reviewSpec(next) }).where(and(
           eq(generated_resumes.id, row.id),
           eq(generated_resumes.user_id, userId),
+          sql`${generated_resumes.spec} = ${JSON.stringify(precheckRow.spec)}::jsonb`,
           sql`${generated_resumes.spec}->'_review'->>'status' = ${current.status}`,
           sql`${generated_resumes.spec}->'_review'->>'submission_claimed_at' is null`,
         )).returning({ id: generated_resumes.id });
@@ -593,6 +631,11 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const declaredSkills = declaredSkillsList(profileRows[0]?.skills);
       const grounded = pruneUngroundedSkills(edited, bank, declaredSkills);
       edited = grounded.spec;
+      const selectedLead = selectJdAlignedLead(edited, review.jd_text, {
+        company: applicationCompany(row),
+        role: review.role,
+      });
+      edited = selectedLead.spec;
       const validation = validateResumeSpec(
         edited,
         review.jd_text,
@@ -604,6 +647,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           allowedSingleBulletEntries: allowedSparseEntriesForApplicationEdit(parsed, bank),
         },
       );
+      const editedLeadIssues = selectedLead.issues.length > 0
+        ? selectedLead.issues
+        : leadAlignmentIssues(edited, review.jd_text, {
+          context: { company: applicationCompany(row), role: review.role },
+        });
+      validation.issues.push(...editedLeadIssues);
       if (validation.issues.length > 0) {
         return reply.status(422).send({
           error: 'Fix the flagged resume content before continuing.',
@@ -615,6 +664,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const visual = validateResumeVisualLayout(rendered.layout);
       const parsedPdf = await extractPdfText(rendered.buffer);
       const pdfIssues = [
+        ...leadAlignmentIssues(rendered.spec, review.jd_text, {
+          context: { company: applicationCompany(row), role: review.role },
+        }),
         ...visual.issues,
         ...validatePdfLayout(parsedPdf.text, parsedPdf.numpages).issues,
         ...findPdfSafeMarginIssues(parsedPdf.pages, rendered.layout),
@@ -834,7 +886,11 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (submitEducationIssues.length > 0) {
         return reply.status(422).send(educationDriftResponse(submitEducationIssues));
       }
-      const preSendIssues = await preSendResumeVerificationIssues(request.jwtPayload!.userId, stored);
+      const preSendIssues = await preSendResumeVerificationIssues(
+        request.jwtPayload!.userId,
+        stored,
+        applicationCompany(row),
+      );
       if (preSendIssues.length > 0) {
         return reply.status(422).send({
           error: 'Verify the resume before sending. The current packet is not ready for submission.',
@@ -891,6 +947,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           .set({ spec: reviewSpec(pending) })
           .where(and(
             eq(generated_resumes.id, row.id),
+            eq(generated_resumes.user_id, request.jwtPayload!.userId),
+            sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
             sql`${generated_resumes.spec}->'_review'->>'status' = ${current.status}`,
           ))
           .returning();
@@ -1224,7 +1282,11 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (sensitive) {
         approvalIssues.push(`Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}`);
       }
-      approvalIssues.push(...await preSendResumeVerificationIssues(request.jwtPayload!.userId, stored));
+      approvalIssues.push(...await preSendResumeVerificationIssues(
+        request.jwtPayload!.userId,
+        stored,
+        applicationCompany(row),
+      ));
       if (approvalIssues.length > 0) {
         return reply.status(422).send({
           error: 'Verify the complete application before sending. The current packet is not ready for final approval.',

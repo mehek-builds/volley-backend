@@ -33,6 +33,39 @@ test('extracts only an authenticated code from the exact Litos application alias
   ), null);
 });
 
+test('the local controlled Greenhouse portal accepts only the Greenhouse sender family', () => {
+  const previous = process.env.LITOS_ENABLE_TEST_PORTAL;
+  process.env.LITOS_ENABLE_TEST_PORTAL = 'true';
+  const row = (from: string) => ({
+    from_email: from,
+    to_email: 'app-2222222222-target@litos-qa.resend.app',
+    subject: 'Your Greenhouse security code',
+    text: 'Use security code EF56GH78 to continue.',
+    html: null,
+    received_at: new Date('2026-07-25T10:00:20.000Z'),
+    raw_json: { authentication: { spf: 'pass', dkim: 'pass', dmarc: 'pass' } },
+  });
+  const portal = 'http://localhost:3300/qa/portal-submission?board=greenhouse&shape=security-code&case=run-1';
+  const requestedAt = new Date('2026-07-25T10:00:00.000Z');
+  try {
+    assert.equal(extractLitosVerificationCode(
+      [row('Greenhouse <no-reply@greenhouse.io>')],
+      portal,
+      requestedAt,
+      'app-2222222222-target@litos-qa.resend.app',
+    )?.code, 'EF56GH78');
+    assert.equal(extractLitosVerificationCode(
+      [row('Lookalike <no-reply@greenhouse.example>')],
+      portal,
+      requestedAt,
+      'app-2222222222-target@litos-qa.resend.app',
+    ), null);
+  } finally {
+    if (previous === undefined) delete process.env.LITOS_ENABLE_TEST_PORTAL;
+    else process.env.LITOS_ENABLE_TEST_PORTAL = previous;
+  }
+});
+
 test('rejects ambiguous codes recorded against one Litos application alias', () => {
   const requestedAt = new Date('2026-07-25T10:00:00.000Z');
   const row = (code: string, seconds: number) => ({
