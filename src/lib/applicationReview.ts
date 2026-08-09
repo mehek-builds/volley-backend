@@ -262,6 +262,20 @@ export type ApplicationReviewState = {
   questions: ApplicationReviewQuestion[];
   questions_reviewed_at?: string;
   skipped_reasons: string[];
+  /* THE RAW PROVIDER TEXT FOR THE ANSWERS NOBODY ACCOUNTED FOR, and nothing else raw.
+   *
+   * skipped_reasons is the sanitized, human-facing set. It was the ONLY thing this row kept, and
+   * that is why three separate rounds of investigation each had to re-derive what the managed
+   * provider had actually said about a lost value: the sanitizer had already thrown the evidence
+   * away by the time anything was written down. Storing the whole of `result.skipped` was never the
+   * answer either, since a large Greenhouse packet emits well over a hundred lines of "this
+   * optional selector matched nothing".
+   *
+   * So this keeps the provider's own words for exactly the labels where Litos typed a value, the
+   * form did not keep it, and the run offered no explanation. That is a set of size zero or one on
+   * a healthy run. Diagnostic, never displayed: managedUnexplainedAnswerReasons writes the sentence
+   * she reads. See R-122. */
+  unexplained_fills?: { label: string; question: string; raw: string[] }[];
   updated_at: string;
   /* WHICH BUILD WROTE THIS REVIEW, so a reader can tell "this stopped for a reason" apart from
    * "this has not been tried since the fix".

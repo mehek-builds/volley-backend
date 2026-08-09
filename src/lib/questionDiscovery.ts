@@ -1,6 +1,6 @@
 import type { Page } from 'playwright-core';
 import { isOpaqueIdentifier, tidyLabel } from './fieldLabel';
-import type { JobCountry } from './jobLocation';
+import { jobCountry, type JobCountry } from './jobLocation';
 import { officeMetrosNamed } from './officeMetros';
 import type { SupportedPortal } from './portalSubmission';
 import {
@@ -801,18 +801,57 @@ type WorkplaceLocationParse = {
   invalid: boolean;
 };
 
-function parseCapturedWorkplaceLocations(captures: readonly string[]): WorkplaceLocationParse {
+/**
+ * Which country a single workplace string is in, or undefined for "we cannot tell".
+ *
+ * THE TABLE IS THE ONLY AUTHORITY FOR PROSE, and that is the whole of the `structured` flag. These
+ * strings come from two very different places. One is a phrase cut out of a question a recruiter
+ * typed, where "in support of United States customers" is not a place at all; the finite table
+ * refuses it by not containing it, and a test pins exactly that label. The other is the posting's
+ * own structured location field, which the ATS writes as `City, State, Country`.
+ *
+ * jobCountry is the repo's existing, already-vetted classifier for that second shape, and it is
+ * reached for only there. "Atlanta, Georgia, United States" missed a table keyed on "Atlanta" and
+ * "Atlanta, GA", and "Reston, Virginia" was not in it at any spelling, so six US cities on one
+ * Anduril posting read as six unknown places. It preserves the property the table was built for:
+ * an unrecognised place comes back 'unknown', NOT American, so absence of evidence stays absence of
+ * evidence rather than becoming a Yes the way "no foreign city found" once did for Paris.
+ */
+function vettedWorkplaceCountry(cleaned: string, structured: boolean): VettedWorkplaceCountry | undefined {
+  const table = VETTED_WORKPLACE_LOCATIONS.get(normalizeIdentity(cleaned));
+  if (table) return table;
+  if (!structured) return undefined;
+  /* AND IT HAS TO LOOK LIKE A PLACE. The comma is the whole test, and it is doing real work: an ATS
+   * writes "Boise, ID" or "Atlanta, Georgia, United States", while "US market" is a phrase that
+   * happens to contain a country token. jobCountry reads the second as American, which is right
+   * about the words and wrong about whether they name an office, so a structured entry with no
+   * region component is left unrecognised and the question stays hers. */
+  if (!cleaned.includes(',')) return undefined;
+  const classified = jobCountry(cleaned);
+  if (classified === 'us') return 'US';
+  if (classified === 'non_us') return 'other';
+  return undefined;
+}
+
+function parseCapturedWorkplaceLocations(
+  captures: readonly string[],
+  structured = false,
+): WorkplaceLocationParse {
   const countries: VettedWorkplaceCountry[] = [];
   let invalid = false;
   for (const capture of captures) {
-    const parts = capture.split(/\s*(?:\bor\b|\band\b|&|\/|\|)\s*/i).filter(Boolean);
+    /* The semicolon is here because a posting's own location field uses it as the list separator:
+     * `job_context.location` on Anduril's 2027 intern posting is one string joining six US cities
+     * with "; ". Without it the whole string was looked up as a single key, missed, and set
+     * `invalid`, so a posting that is unambiguously American read as one unknown place. */
+    const parts = capture.split(/\s*(?:;|\bor\b|\band\b|&|\/|\|)\s*/i).filter(Boolean);
     for (const part of parts) {
       const cleaned = part
         .replace(/^(?:either\s+)?(?:our|the|an?)\s+/i, '')
         .replace(/\s+(?:offices?|sites?|workplaces?|headquarters|hq)$/i, '')
         .trim();
       if (!cleaned || /^(?:(?:one|any|either|all|some)\s+of(?:\s+(?:our|the))?)$/i.test(cleaned)) continue;
-      const country = VETTED_WORKPLACE_LOCATIONS.get(normalizeIdentity(cleaned));
+      const country = vettedWorkplaceCountry(cleaned, structured);
       if (country) countries.push(country);
       else invalid = true;
     }
@@ -841,8 +880,26 @@ function isSingleVettedUsLocation(parsed: WorkplaceLocationParse): boolean {
     && parsed.countries.length === 1 && parsed.countries[0] === 'US';
 }
 
+/**
+ * Every place this posting could put her, and all of them American.
+ *
+ * Used ONLY for the frozen job locations, never for places named in a question. The distinction is
+ * the one 'anywhere' actually makes: it is a MAXIMAL commitment scoped to the United States, so a
+ * posting offering six US offices is covered by it exactly as fully as a posting offering one, and
+ * which of the six she ends up in does not have to be decided to answer "will you work in person".
+ * Requiring a single location here refused Anduril's 2027 intern posting, whose six offices are in
+ * Georgia, Massachusetts, California, Virginia and Washington.
+ *
+ * A question that NAMES two places is different and keeps isSingleVettedUsLocation: it may be
+ * asking her to pick one, and picking is hers.
+ */
+function isAllVettedUsLocations(parsed: WorkplaceLocationParse): boolean {
+  return parsed.sawExplicitSyntax && !parsed.invalid
+    && parsed.countries.length > 0 && parsed.countries.every((country) => country === 'US');
+}
+
 function frozenWorkplaceLocationParse(locations: readonly string[]): WorkplaceLocationParse {
-  return parseCapturedWorkplaceLocations(locations);
+  return parseCapturedWorkplaceLocations(locations, true);
 }
 
 /* A location question that wants a NUMBER, A DATE OR A LIST rather than a yes or a no.
@@ -900,7 +957,7 @@ function onsiteCommitmentAnswer(
       return isSingleVettedUsLocation(labelLocations) ? { value: 'Yes' } : held;
     }
     const frozenLocations = frozenJobLocationsFromContext(jdText);
-    if (isSingleVettedUsLocation(frozenWorkplaceLocationParse(frozenLocations))) {
+    if (isAllVettedUsLocations(frozenWorkplaceLocationParse(frozenLocations))) {
       return { value: 'Yes' };
     }
     return held;
@@ -972,6 +1029,26 @@ export function isRefusedQuestion(label: string): boolean {
  * first token would hand the employer the exact name she came here to correct. Nothing is invented
  * either - with an empty profile this returns undefined and the question is left alone.
  */
+/**
+ * Her surname, taken from the stored full name.
+ *
+ * SPLITTING A STORED NAME IS NOT AN INFERENCE. composedLegalName already relies on exactly this
+ * reading, and has since it shipped: it keeps "everything after the first token" of the parsed full
+ * name as the surname and puts the stored legal first name in front of it. This returns that same
+ * remainder on its own, so "Legal First Name" and "Legal Last Name" on one form cannot disagree
+ * about which part of "Mehek Mandal" is which.
+ *
+ * Undefined on a single-token name. A person with one recorded name has no surname to hand over,
+ * and repeating the given name into a surname field would be a statement about her that nothing on
+ * file supports.
+ */
+function legalSurname(ap: ApplicationProfileLike): string | undefined {
+  const fullName = ap.full_name?.trim().replace(/\s+/g, ' ');
+  if (!fullName) return undefined;
+  const parts = fullName.split(' ');
+  return parts.length > 1 ? parts.slice(1).join(' ') : undefined;
+}
+
 function composedLegalName(ap: ApplicationProfileLike): string | undefined {
   const fullName = ap.full_name?.trim().replace(/\s+/g, ' ');
   const legalFirst = ap.legal_first_name?.trim().replace(/\s+/g, ' ');
@@ -1311,6 +1388,18 @@ const LEGAL_FIRST_NAME_QUESTION =
  * and none of the six legal-first-name or legal-last-name labels satisfies it. */
 const LEGAL_FULL_NAME_QUESTION =
   /\b(?:full\s+)?legal\s+name\b|\blegal\s+full\s+name\b/i;
+/* The other half of DRW's pair, and the comment above named it three weeks before it was written.
+ *
+ * "none of the six legal-first-name or legal-last-name labels satisfies it" was recorded as proof
+ * that LEGAL_FULL_NAME_QUESTION stayed narrow. It was also true of every other pattern in this
+ * file: `classifyField('legal last name')` was null and resolveKnownAnswer returned null, so DRW's
+ * `"Legal Last Name"` got no answer and no action at all while "Legal First Name" beside it filled.
+ *
+ * Requires the word "legal". A bare "Last Name" is the fixed identity control every portal adapter
+ * already types into, and claiming it here would put a custom question in front of a field that is
+ * not one. */
+const LEGAL_LAST_NAME_QUESTION =
+  /\blegal\s+(?:last|family|sur)\s*name\b|\b(?:last|family|sur)\s*name\b[^?]{0,120}\blegal\b/i;
 export const TOP_ROLE_PREFERENCE_ACKNOWLEDGEMENT =
   /\banswering\s+[“"]?yes[”"]?\s+below\b[^?]{0,220}\btop\s+preference\b|\btop\s+preference\b[^?]{0,220}\banswering\s+[“"]?yes[”"]?\s+below\b/i;
 export const RESUME_PDF_ACKNOWLEDGEMENT =
@@ -1781,6 +1870,10 @@ function eeoPreferenceForLabel(label: string, prefs: Record<string, string> | nu
 
 // Ported from isOpenEndedQuestion (R-033): does the label read like a prompt for prose, not a
 // field being named? Callers must ALSO check classifyField/isRefusedQuestion before drafting.
+/** An explicit invitation to write prose, which turns a yes/no stem into a real essay prompt. */
+const ELABORATION_REQUEST =
+  /\b(?:explain|describe|elaborat\w+|tell\s+(?:us|me)|why\b|in\s+your\s+own\s+words|provide\s+(?:detail|context)|share\s+(?:more|any))/i;
+
 export function isOpenEndedQuestion(label: string): boolean {
   const l = (label ?? '').trim().toLowerCase();
   if (!l) return false;
@@ -1789,6 +1882,18 @@ export function isOpenEndedQuestion(label: string): boolean {
     /\b(why\b|describ\w+|explain\w*|tell (?:us|me)\b|share\b|elaborat\w+|discuss\b|sentences?\b|paragraphs?\b|in your own words|what interest\w*|what excit\w*|what motivat\w*|what makes\b|how (?:did|do|would|have) you|brief note\b|note on\b|you (?:most )?enjoy\b)/.test(l)
   )
     return true;
+  /* A YES/NO QUESTION IS NOT AN ESSAY PROMPT, however long it runs.
+   *
+   * This guard sits in front of the length catch-all below and nowhere else, so every label the
+   * cue list above already recognised as prose keeps its answer, including "can you commit to a 12
+   * week internship? please explain any constraints".
+   *
+   * Virtu, both 2026-08-09 packets: "Will you be ready for full-time employment in 2028?" is 49
+   * characters and carries a question mark, so it reached the drafter, which answered a yes/no
+   * question with 186 and 374 characters of prose about her graduation year. Both were typed at a
+   * closed control and came back "no option matched". A wrong-shaped answer landing on a real
+   * employer's form is worse than a blank one: a blank is visibly unfinished, and this is not. */
+  if (isPolarQuestion(l) && !ELABORATION_REQUEST.test(l)) return false;
   return l.includes('?') && l.length >= 40;
 }
 
@@ -2189,6 +2294,19 @@ function priorEmployerAnswer(label: string, ap: ApplicationProfileLike): { value
    * Cost Infrastructure" while the form says "Traeco", and an exact match answers "No" to an
    * employer she is currently at. employerMatchesTarget is anchored at the first token precisely
    * so that "Tone" still cannot match "Tonee". */
+  /* STILL "Yes" OR SILENCE, NEVER "No", and this was re-tested on 2026-08-09 rather than assumed.
+   *
+   * Redwood Materials' "Have you ever worked for Redwood Materials?" is refused while the profile
+   * holds an employment record that plainly does not contain Redwood, and returning "No" from that
+   * record was tried here and reverted. The record is NOT EXHAUSTIVE and was measured not to be:
+   * `employer_history` is scraped out of parsed_json.experience and held 4 of the owner's 9
+   * organisations, so the same reasoning that produces "No" about Redwood produces "No" about a
+   * company she works at today. governmentEmployment.test.ts pins all three cases.
+   *
+   * `prior_application_employers` does not rescue it either. That column is a list of employers she
+   * has APPLIED to, which she maintains and where `[]` does mean none. This question is about
+   * having been EMPLOYED, and answering one from the other would be a statement about her work
+   * history built out of her application history. */
   const knownMatch = history.some((employer) => employerMatchesTarget(employer, target));
   return knownMatch ? { value: 'Yes' } : null;
 }
@@ -2790,6 +2908,11 @@ export function resolveKnownAnswer(
     // parsed full name is the WRONG answer, and it is the one we would otherwise give.
     const firstName = ap.legal_first_name ?? ap.full_name?.trim().split(/\s+/)[0];
     return firstName ? { value: firstName } : null;
+  }
+
+  if (LEGAL_LAST_NAME_QUESTION.test(label)) {
+    const surname = legalSurname(ap);
+    return surname ? { value: surname } : null;
   }
 
   // Checked AFTER the legal-first-name arm, though neither pattern can reach the other's labels.
