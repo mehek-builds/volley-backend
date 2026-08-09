@@ -902,11 +902,15 @@ test('the standing onsite preference is scoped to the US and says nothing about 
     'Can you work onsite supporting United States customers from our Paris office?',
     'Can you work onsite in support of United States customers?',
     'Can you work onsite in compliance with US law?',
+    'Can you work onsite in alignment with US policy?',
+    'Can you work onsite in the US market?',
     'Can you work from our San Francisco office or Paris office?',
     'Can you work from our San Francisco office and Paris office?',
+    'Can you work from our San Francisco office & Paris office?',
     'Can you work from our San Francisco / Paris office?',
     'Can you work from our San Francisco or Paris offices?',
     'Can you work from either our San Francisco office or our New York office?',
+    'Can you work onsite in Boise?',
   ]) {
     const held = resolveKnownAnswer(label, 'select', committed, undefined);
     assert.ok(held && 'skipReason' in held, label);
@@ -934,6 +938,8 @@ test('the standing onsite preference is scoped to the US and says nothing about 
     ['Paris, France'],
     ['Paris, France', 'San Francisco, CA'],
     ['San Francisco, CA', 'New York, NY'],
+    ['Boise, ID'],
+    ['US market'],
   ]) {
     const held = resolveKnownAnswer(
       'Can you commit to working in-person five days per week?',

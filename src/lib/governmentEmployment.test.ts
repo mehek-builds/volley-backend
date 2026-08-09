@@ -88,6 +88,22 @@ describe('prior government employment, answered from the experience bank', () =>
     assert.equal(answer(SKYDIO, profile), 'VALUE Yes');
   });
 
+  test('only vetted canonical government identities are decisive', () => {
+    for (const org of ['NASA', 'National Aeronautics and Space Administration']) {
+      assert.equal(answer(SKYDIO, { experience_bank: [{ type: 'job', org }] }), 'VALUE Yes', org);
+    }
+    for (const org of [
+      'Federal Marketing Agency',
+      'United States Talent Agency',
+      'State of Play',
+      'City of Angels',
+      'NASA Space Apps Hackathon',
+      'Department of Energy Contractor',
+    ]) {
+      assert.equal(answer(SKYDIO, { experience_bank: [{ type: 'job', org }] }), 'SKIP', org);
+    }
+  });
+
   test('an organisation that MIGHT be public holds the question instead of answering it', () => {
     // Both measured in production banks on 2026-08-09. Neither is settleable from the name, and a
     // wrong "No" here is a false statement about federal service, so neither gets one.

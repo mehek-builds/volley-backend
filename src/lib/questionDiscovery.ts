@@ -1,7 +1,6 @@
 import type { Page } from 'playwright-core';
 import { isOpaqueIdentifier, tidyLabel } from './fieldLabel';
 import { officeMetrosNamed } from './officeMetros';
-import { jobCountrySignals } from './jobLocation';
 import type { SupportedPortal } from './portalSubmission';
 import {
   resolveSalary,
@@ -710,55 +709,102 @@ function uniqueLocationCaptures(label: string, patterns: readonly RegExp[]): str
 
 const LOCATION_NOUN = /\b(?:offices?|sites?|workplaces?|headquarters|hq)\b/i;
 
-function isSemanticNonLocationPhrase(value: string): boolean {
-  /* "onsite in support of US customers" and "onsite in compliance with US law" have the same
-   * preposition as a location but name a purpose or rule. They must not become country evidence. */
-  if (/^(?:support|service|aid|furtherance|pursuit|compliance|accordance|connection|relation|response|respect|reference|line|keeping|partnership|collaboration|coordination)\b/i.test(value)) {
-    return true;
-  }
-  if (/\b(?:customers?|clients?|laws?|regulations?|compliance|support|services?)\b/i.test(value)) {
-    return true;
-  }
-  return false;
+type VettedWorkplaceCountry = 'US' | 'other';
+
+function normalizeIdentity(value: string): string {
+  return value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-function validFallbackLocationPhrase(value: string): boolean {
-  if (isSemanticNonLocationPhrase(value)) return false;
-  if (LOCATION_NOUN.test(value)) return false;
-  return value.split(/\s+/).length <= 10;
+const VETTED_WORKPLACE_LOCATIONS = new Map<string, VettedWorkplaceCountry>();
+
+function registerWorkplace(country: VettedWorkplaceCountry, aliases: readonly string[]): void {
+  for (const alias of aliases) VETTED_WORKPLACE_LOCATIONS.set(normalizeIdentity(alias), country);
+}
+
+registerWorkplace('US', ['United States', 'United States of America', 'US', 'U.S.', 'USA', 'U.S.A.']);
+registerWorkplace('US', ['San Francisco', 'San Francisco, CA', 'SF', 'San Fran']);
+registerWorkplace('US', ['New York', 'New York, NY', 'New York City', 'NYC', 'Manhattan']);
+registerWorkplace('US', ['Chicago', 'Chicago, IL']);
+registerWorkplace('US', ['Los Angeles', 'Los Angeles, CA', 'Culver City', 'Santa Monica']);
+registerWorkplace('US', ['Austin', 'Austin, TX']);
+registerWorkplace('US', ['Seattle', 'Seattle, WA', 'Bellevue', 'Bellevue, WA']);
+registerWorkplace('US', ['Boston', 'Boston, MA', 'Cambridge, MA']);
+registerWorkplace('US', ['Mountain View', 'Mountain View, CA']);
+registerWorkplace('US', ['Palo Alto', 'Palo Alto, CA']);
+registerWorkplace('US', ['San Mateo', 'San Mateo, CA']);
+registerWorkplace('US', ['Greenwich', 'Greenwich, CT']);
+registerWorkplace('US', ['Houston', 'Houston, TX']);
+registerWorkplace('US', ['Denver', 'Denver, CO']);
+registerWorkplace('US', ['Atlanta', 'Atlanta, GA']);
+registerWorkplace('US', ['Costa Mesa', 'Costa Mesa, CA', 'Irvine', 'Irvine, CA']);
+registerWorkplace('US', ['Washington DC', 'Washington, DC', 'Arlington, VA']);
+registerWorkplace('other', ['Paris', 'Paris, France']);
+registerWorkplace('other', ['London', 'London, UK', 'London, United Kingdom']);
+registerWorkplace('other', ['Amsterdam', 'Amsterdam, Netherlands']);
+registerWorkplace('other', ['Hong Kong']);
+registerWorkplace('other', ['Sydney', 'Sydney, Australia']);
+registerWorkplace('other', ['Toronto', 'Toronto, Canada']);
+registerWorkplace('other', ['Dubai', 'Dubai, UAE', 'Dubai, United Arab Emirates']);
+registerWorkplace('other', ['Singapore']);
+registerWorkplace('other', ['Bengaluru', 'Bangalore', 'Bengaluru, India']);
+registerWorkplace('other', ['Mumbai', 'Mumbai, India']);
+registerWorkplace('other', ['Zug', 'Zurich', 'Zurich, Switzerland']);
+
+type WorkplaceLocationParse = {
+  sawExplicitSyntax: boolean;
+  countries: VettedWorkplaceCountry[];
+  invalid: boolean;
+};
+
+function parseCapturedWorkplaceLocations(captures: readonly string[]): WorkplaceLocationParse {
+  const countries: VettedWorkplaceCountry[] = [];
+  let invalid = false;
+  for (const capture of captures) {
+    const parts = capture.split(/\s*(?:\bor\b|\band\b|&|\/|\|)\s*/i).filter(Boolean);
+    for (const part of parts) {
+      const cleaned = part
+        .replace(/^(?:either\s+)?(?:our|the|an?)\s+/i, '')
+        .replace(/\s+(?:offices?|sites?|workplaces?|headquarters|hq)$/i, '')
+        .trim();
+      if (!cleaned || /^(?:(?:one|any|either|all|some)\s+of(?:\s+(?:our|the))?)$/i.test(cleaned)) continue;
+      const country = VETTED_WORKPLACE_LOCATIONS.get(normalizeIdentity(cleaned));
+      if (country) countries.push(country);
+      else invalid = true;
+    }
+  }
+  return { sawExplicitSyntax: captures.length > 0, countries, invalid };
 }
 
 /** A location must be attached to the work or office syntax in the question. A country word in
  * customer, travel, or compliance prose is not a work location. Office-specific syntax wins over
  * the broader fallback so "from our office in Chicago" is one place, not two captures. */
-function explicitWorkLocations(label: string): string[] {
+function explicitWorkLocations(label: string): WorkplaceLocationParse {
   const officeLocations = uniqueLocationCaptures(label, [
     /\b(?:offices?|sites?|workplaces?|headquarters|hq)\s+(?:is\s+|are\s+)?(?:located\s+|based\s+)?(?:in|at|near)\s+([^?;.]{1,80})/gi,
-    /(?:[,:]|\b(?:from|in|at|near|or|and|between)\b)\s*(?:(?:our|the|an?)\s+)?([^?;.]{1,80}?)\s+(?:offices?|sites?|workplaces?|headquarters|hq)\b/gi,
+    /(?:[,:&/|]|\b(?:from|in|at|near|or|and|between)\b)\s*(?:(?:our|the|an?)\s+)?([^?;.]{1,80}?)\s+(?:offices?|sites?|workplaces?|headquarters|hq)\b/gi,
   ]);
   const fallbackCaptures = uniqueLocationCaptures(label, [
     /\b(?:onsite|on[\s-]?site|in[\s-]?person)\s+(?:in|at|from|near)\s+([^?;.]{1,80})/gi,
     /\b(?:work|working|based|located)\s+(?:onsite\s+|on[\s-]?site\s+)?(?:in|at|from|near)\s+([^?;.]{1,80})/gi,
   ]);
-  const fallbackLocations = fallbackCaptures.filter(validFallbackLocationPhrase);
-  if (officeLocations.length === 0 && fallbackLocations.length === 0
-      && fallbackCaptures.some(isSemanticNonLocationPhrase)) {
-    return ['[semantic prose, not a work location]'];
-  }
-  const locations = [...officeLocations, ...fallbackLocations];
-  return locations.filter((value, index) => locations
-    .findIndex((entry) => entry.toLowerCase() === value.toLowerCase()) === index);
+  const fallbackLocations = fallbackCaptures.filter((value) => !LOCATION_NOUN.test(value));
+  return parseCapturedWorkplaceLocations([...officeLocations, ...fallbackLocations]);
 }
 
-function isSingleUnambiguousUsLocation(locations: readonly string[]): boolean {
-  if (locations.length !== 1) return false;
-  const location = locations[0];
-  /* Even two US offices are not a single commitment target. More importantly, this prevents an
-   * unknown foreign place joined to "US" from becoming Yes merely because the finite country
-   * vocabulary has not learned that place yet. */
-  if (/\b(?:or|and)\b|[;/|]/i.test(location)) return false;
-  const signals = jobCountrySignals(location);
-  return signals.us && !signals.non_us;
+function isSingleVettedUsLocation(parsed: WorkplaceLocationParse): boolean {
+  return parsed.sawExplicitSyntax && !parsed.invalid
+    && parsed.countries.length === 1 && parsed.countries[0] === 'US';
+}
+
+function frozenWorkplaceLocationParse(locations: readonly string[]): WorkplaceLocationParse {
+  return parseCapturedWorkplaceLocations(locations);
 }
 
 /* A location question that wants a NUMBER, A DATE OR A LIST rather than a yes or a no.
@@ -812,11 +858,11 @@ function onsiteCommitmentAnswer(
      * into the resolution context by applicationContextForQuestionResolution. Arbitrary prose in
      * the JD does not count: a description can mention customers, offices, or travel worldwide. */
     const labelLocations = explicitWorkLocations(label);
-    if (labelLocations.length > 0) {
-      return isSingleUnambiguousUsLocation(labelLocations) ? { value: 'Yes' } : held;
+    if (labelLocations.sawExplicitSyntax) {
+      return isSingleVettedUsLocation(labelLocations) ? { value: 'Yes' } : held;
     }
     const frozenLocations = frozenJobLocationsFromContext(jdText);
-    if (isSingleUnambiguousUsLocation(frozenLocations)) {
+    if (isSingleVettedUsLocation(frozenWorkplaceLocationParse(frozenLocations))) {
       return { value: 'Yes' };
     }
     return held;
@@ -1348,36 +1394,29 @@ export function isGovernmentEmploymentQuestion(label: string): boolean {
   return !NOT_HER_GOVERNMENT_EMPLOYMENT.test(value);
 }
 
-/* A decisive positive requires a canonical government employer identity in the ORGANISATION field.
- * Every arm is anchored to the complete value. A title never participates, and contractor,
- * consultant, hackathon, and Space Apps labels are rejected before matching. */
-const GOVERNMENT_EMPLOYER_ORG_EXCLUSION =
-  /\b(?:contractor|consultant|consulting|hackathon|space\s+apps)\b/i;
-
-const EXACT_GOVERNMENT_EMPLOYER_ORG = new RegExp([
-  /^(?:u\.?s\.?|united\s+states|federal)\s+(?:[a-z][\w'-]*\s+){0,3}(?:department|agency|bureau|commission|administration|government)$/,
-  /^(?:u\.?s\.?\s+)?(?:department|dept\.?)\s+of\s+(?:the\s+)?(?:state|defen[cs]e|justice|energy|education|labor|labour|transportation|treasury|commerce|agriculture|health(?:\s+and\s+human\s+services)?|homeland\s+security|veterans?\s+affairs|interior|housing(?:\s+and\s+urban\s+development)?)$/,
-  /^(?:city|county|state|commonwealth|town|village|borough)\s+of\s+[a-z][\w'.-]*(?:\s+[a-z][\w'.-]*)*$/,
-  /^office\s+of\s+(?:the\s+)?(?:congressman|congresswoman|representative|senator|mayor|governor|attorney\s+general)(?:\s+[a-z][\w'.-]*)*$/,
-  /^(?:mayor|governor|senator|congressman|congresswoman|representative)'?s?\s+office$/,
-  /^(?:u\.?s\.?|united\s+states)\s+(?:senate|house\s+of\s+representatives|congress|army|navy|air\s+force|marine\s+corps|coast\s+guard|space\s+force|embassy|mint|postal\s+service)$/,
-  /^government\s+accountability\s+office$/,
-  /^(?:national\s+aeronautics\s+and\s+space\s+administration|nasa|defense\s+advanced\s+research\s+projects\s+agency|darpa|united\s+states\s+agency\s+for\s+international\s+development|usaid|united\s+states\s+patent\s+and\s+trademark\s+office|uspto|peace\s+corps)$/,
-].map((part) => part.source).join('|'), 'i');
+/* Closed registry of identities whose employer status has been vetted. This is intentionally not a
+ * pattern language. A plausible-looking new organisation stays held until it is added here or a
+ * future experience-bank row carries structured government-employer provenance. */
+const VETTED_GOVERNMENT_EMPLOYER_IDENTITIES = new Set([
+  'department of energy',
+  'u s department of energy',
+  'united states department of energy',
+  'department of justice',
+  'u s department of justice',
+  'united states department of justice',
+  'government accountability office',
+  'city of los angeles',
+  'office of congressman ted lieu',
+  'united states senate',
+  'u s senate',
+  'federal aviation administration',
+  'national aeronautics and space administration',
+  'nasa',
+]);
 
 function isExactGovernmentEmployerOrg(org: string): boolean {
-  const value = org.trim().replace(/\s+/g, ' ');
-  return !GOVERNMENT_EMPLOYER_ORG_EXCLUSION.test(value)
-    && EXACT_GOVERNMENT_EMPLOYER_ORG.test(value);
+  return VETTED_GOVERNMENT_EMPLOYER_IDENTITIES.has(normalizeIdentity(org));
 }
-
-/* The second tier, and the reason this arm is a check rather than a lookup: an organisation whose
- * name COULD be public and cannot be settled from the name alone. A hit holds the question for the
- * applicant instead of answering it either way. Measured against the four other production banks
- * on 2026-08-09, this is what catches "WORLD BANK" and "XYZ PUBLIC CHARTER SCHOOLS" - two orgs a
- * bare name match would have shrugged past on its way to printing "No". */
-const MAYBE_GOVERNMENT_EMPLOYER_NAME =
-  /\bpublic\b|\bstate\b|\bfederal\b|\bnational\b|\bmunicipal\w*\b|\bauthority\b|\bcouncil\b|\bbureau\b|\bagency\b|\bcommission\b|\badministration\b|\bministr\w*\b|\bdepartment\b|\bcongress\w*\b|\bsenate\b|\bembassy\b|\bconsulate\b|\bworld\s+bank\b|\bunited\s+nations\b|\b(?:unicef|unesco|imf|nato)\b|\bpolice\b|\bdefen[cs]e\b|\bmilitary\b|\barmy\b|\bnavy\b|\bair\s+force\b|\bcoast\s+guard\b|\bnational\s+guard\b|\bpeace\s+corps\b|\bcourt\b|\bschool\s+district\b|\bveterans?\b|\bnasa\b|\bnoaa\b|\busaid\b|\busda\b|\bdarpa\b|\bnist\b|\bnih\b|\bcdc\b|\bfda\b|\bepa\b|\bfaa\b|\bfbi\b|\bcia\b|\bnsa\b|\birs\b|\bdhs\b|\btsa\b|\bfema\b|\buspto\b|\busps\b/i;
 
 /**
  * Whether a stored military-service answer says she served.
@@ -1432,9 +1471,6 @@ function governmentEmploymentAnswer(
 
   const namedOrganisations = bank.map((entry) => entry.org.trim()).filter(Boolean);
   if (namedOrganisations.some(isExactGovernmentEmployerOrg)) return { value: 'Yes' };
-  if (namedOrganisations.some((name) => MAYBE_GOVERNMENT_EMPLOYER_NAME.test(name))) {
-    return { skipReason: governmentEmploymentSkipReason(label, 'one of your organisations may be a public body') };
-  }
   return { skipReason: governmentEmploymentSkipReason(label, 'your employment record does not prove a complete history') };
 }
 

@@ -22,7 +22,6 @@
  */
 
 export type JobCountry = 'us' | 'non_us' | 'unknown';
-export type JobCountrySignals = { us: boolean; non_us: boolean };
 type JobCountrySignalDetails = { strongUs: boolean; weakUs: boolean; nonUs: boolean };
 
 const US_STATE_CODES = new Set([
@@ -129,13 +128,6 @@ export function jobCountry(location: string | null | undefined): JobCountry {
   if (signals.nonUs) return 'non_us';
   if (signals.weakUs) return 'us';
   return 'unknown';
-}
-
-/** Country signals without the US-wins-ties policy used by job discovery. A legal or location
- * commitment needs to see both sides of a mixed string and refuse it, not collapse the tie. */
-export function jobCountrySignals(location: string | null | undefined): JobCountrySignals {
-  const signals = jobCountrySignalDetails(location);
-  return { us: signals.strongUs || signals.weakUs, non_us: signals.nonUs };
 }
 
 function jobCountrySignalDetails(location: string | null | undefined): JobCountrySignalDetails {

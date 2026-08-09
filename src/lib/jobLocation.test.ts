@@ -4,7 +4,6 @@ import {
   countryFromPortal,
   employerEvidenceApplies,
   jobCountry,
-  jobCountrySignals,
   resolveJobCountry,
 } from './jobLocation';
 
@@ -79,12 +78,6 @@ test('US WINS A GENUINE TIE, because an American hire can take the role', () => 
   assert.equal(jobCountry('Remote - US or London'), 'us');
   assert.equal(jobCountry('New York / Dublin'), 'us');
   assert.equal(jobCountry('San Francisco, CA; London, UK'), 'us');
-});
-
-test('country signals preserve both sides for commitment decisions', () => {
-  assert.deepEqual(jobCountrySignals('San Francisco, CA'), { us: true, non_us: false });
-  assert.deepEqual(jobCountrySignals('Paris, France'), { us: false, non_us: true });
-  assert.deepEqual(jobCountrySignals('Paris or US'), { us: true, non_us: true });
 });
 
 test('a foreign city is not turned American by a state abbreviation inside a word', () => {
