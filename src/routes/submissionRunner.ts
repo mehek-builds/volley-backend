@@ -1013,8 +1013,9 @@ async function packetForCoverLetterCapability(
   row: ResumeRow,
   supported: boolean,
   fastify: FastifyInstance,
+  controlledTest: boolean,
 ): Promise<{ packet: SubmissionPacket; coverLetterIssue?: string }> {
-  if (!supported) return { packet: omitCoverLetter(await buildPacket(row)) };
+  if (!supported) return { packet: omitCoverLetter(await buildPacket(row, controlledTest)) };
   if (!storedCoverLetter(row)) {
     try {
       await generateStoredCoverLetter(row, false, true);
@@ -1022,7 +1023,7 @@ async function packetForCoverLetterCapability(
       // Raw message to the log, fixed sentence to the applicant. See the note above the function.
       fastify.log.warn({ error, applicationId: row.id }, 'Cover letter generation failed, continuing without it');
       return {
-        packet: omitCoverLetter(await buildPacket(row)),
+        packet: omitCoverLetter(await buildPacket(row, controlledTest)),
         coverLetterIssue: 'We could not write your cover letter for this one, so it is not attached. Everything else is filled in, and you can write or retry a cover letter from your dashboard.',
       };
     }
@@ -1039,11 +1040,14 @@ async function packetForCoverLetterCapability(
      sentence, because "we could not write it" and "we wrote it and could not attach it" are
      different facts and the second one is ours to fix rather than hers to retry. */
   try {
-    return { packet: await buildPacket(rows[0]) };
+    return { packet: await buildPacket(rows[0], controlledTest) };
   } catch (error) {
     fastify.log.warn({ error, applicationId: row.id }, 'Cover letter file could not be attached, continuing without it');
     return {
-      packet: omitCoverLetter(await buildPacket({ ...rows[0], spec: strippedCoverLetterSpec(rows[0].spec) })),
+      packet: omitCoverLetter(await buildPacket(
+        { ...rows[0], spec: strippedCoverLetterSpec(rows[0].spec) },
+        controlledTest,
+      )),
       coverLetterIssue: 'Your cover letter is written but we could not attach the file to this form. Everything else is filled in. Open the application and send it again, and if it keeps happening the cover letter is the part to retry.',
     };
   }
@@ -1670,7 +1674,12 @@ async function prepareManaged(
       return !controlId || !optionProbe.failedIds.has(controlId);
     });
   const coverLetterSupported = managedResultHasCoverLetterUpload(discoveryResult, portal);
-  const coverLetterOutcome = await packetForCoverLetterCapability(row, coverLetterSupported, fastify);
+  const coverLetterOutcome = await packetForCoverLetterCapability(
+    row,
+    coverLetterSupported,
+    fastify,
+    packetUsesControlledResumeFixture(portal),
+  );
   packet = coverLetterOutcome.packet;
   const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
   const resolutionCurrent = { ...current, questions: storedQuestions };
@@ -2210,7 +2219,12 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       applicationId: row.id,
     });
     const coverLetterSupported = await hasCoverLetterUpload(page, portal);
-    const { packet, coverLetterIssue } = await packetForCoverLetterCapability(row, coverLetterSupported, fastify);
+    const { packet, coverLetterIssue } = await packetForCoverLetterCapability(
+      row,
+      coverLetterSupported,
+      fastify,
+      packetUsesControlledResumeFixture(portal),
+    );
     const coverLetterAttention = coverLetterIssue ? [coverLetterIssue] : [];
 
     // R-055: discover and resolve the posting's own custom questions before filling, so a
