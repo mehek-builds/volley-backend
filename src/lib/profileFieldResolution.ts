@@ -940,7 +940,18 @@ export function profileFieldCandidates(
     case 'graduation_month':
       return ladder(base, ...graduationMonthLadder(base));
     case 'graduation_year':
-      return ladder(base);
+      /* The same ladder graduation_date gets, and for the reason resolveKnownAnswer's
+       * graduationYearFieldAnswer now needs it: `base` is "May 2028" whenever the profile states a
+       * month, because a date picker cannot be driven by a bare year. The ladder is what keeps that
+       * from costing anything on a CLOSED list - graduationDateLadder ends with the bare year, and
+       * chooseClosestOption runs its exact-match pass over every candidate before any inexact
+       * stage, so a select offering "2028" still selects "2028" rather than falling through to a
+       * calendar bucket. When the profile holds no month the ladder collapses to [year], which is
+       * exactly what this case returned before.
+       *
+       * Only the ladder, never the head: `base` stays first, so a free-text control still gets the
+       * resolver's own answer. */
+      return ladder(base, ...graduationDateLadder(ap.grad_date ?? base, ap.grad_year));
     case 'graduation_date':
       return ladder(base, ...graduationDateLadder(ap.grad_date ?? base, ap.grad_year));
     case 'current_enrollment':
