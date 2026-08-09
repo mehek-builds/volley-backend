@@ -514,13 +514,139 @@ function countryForPhoneField(phone: string | undefined, fallbackCountry: string
   return dialCode ? DIAL_CODE_COUNTRY_LABELS[dialCode] : fallbackCountry;
 }
 
-function phoneForPortalField(portal: SupportedPortal, phone: string | undefined): string | undefined {
-  const family = portalFamily(portal);
-  if (family === 'rippling') {
+/* THE DIAL CODE THAT WAS WRITTEN TWICE.
+ *
+ * Cresta's live Greenhouse form showed "Phone number is too short" under "+971 567417451" while the
+ * country control beside it already read +971, and the application could not be submitted. This
+ * function stripped the dial code for Rippling and for nothing else, which was never the rule: it
+ * was the one board where the rule had been noticed.
+ *
+ * The rule, stated generally: when the phone field has a SEPARATE control that is already showing
+ * THIS number's own dial code, the field takes the national number and the dial code does not go in
+ * it. Both halves are load-bearing, and the second half is the whole guard against the mirror-image
+ * defect. A number written without its country onto a form that carries no country anywhere is
+ * worse than one a validator rejects out loud, because it produces a phone number the employer
+ * cannot dial and nothing on the page says so. So: no control, a control showing a different
+ * country, or a control showing no dial code at all, and the full international number goes in
+ * unchanged.
+ *
+ * `dialCodesOnForm` is what the field's own group was MEASURED to be showing, never what the board
+ * is assumed to render. The DOM read that produces it is READ_FIELD_GROUP_DIAL_CODES_SCRIPT, used
+ * by fillPhoneField on the direct path and reimplemented as `separateDialCodesFor` inside the
+ * managed runner, which is a standalone script and cannot import this module. Passing it as an
+ * argument is what keeps the DECISION in one place and testable without a browser.
+ *
+ * Rippling keeps a fallback rather than the rule: buildManagedPortalActions has no live DOM, so on
+ * that path there is no page to ask, and Rippling's widget was measured to carry its own country
+ * selector.
+ */
+export function phoneForPortalField(
+  portal: SupportedPortal,
+  phone: string | undefined,
+  dialCodesOnForm?: string[],
+): string | undefined {
+  if (dialCodesOnForm && dialCodesOnForm.length > 0) {
+    const trimmed = (phone ?? '').trim();
+    // No leading '+' means there is no dial code in the field to remove and no claim to act on.
+    const digits = trimmed.startsWith('+') ? trimmed.replace(/\D/g, '') : '';
+    const dialCode = dialCodesOnForm
+      .map((code) => code.replace(/\D/g, ''))
+      // `digits.length > code.length` and not `>=`: a value that is nothing BUT its dial code would
+      // otherwise be stripped to an empty field, which is a worse answer than an odd one.
+      .filter((code) => code.length > 0 && digits.length > code.length && digits.startsWith(code))
+      // Longest first, so a control offering both '+1' and '+971' never lets '+1' eat the longer code.
+      .sort((a, b) => b.length - a.length)[0];
+    if (dialCode) return digits.slice(dialCode.length);
+    // Read literally: the number does not start with any code this form is showing, so nothing about
+    // it has been written twice and removing digits would corrupt a number that is currently
+    // correct. A wrong country selection is the applicant's to see and fix; a truncated number
+    // would hide it.
+    return phone;
+  }
+  if (portalFamily(portal) === 'rippling') {
     return nationalPhoneForCountryCodeField(phone);
   }
   return phone;
 }
+
+/* WHAT THE FIELD'S OWN GROUP IS SHOWING, asked of the page rather than assumed from the board.
+ *
+ * Returns every dial code visible on a country-shaped control that shares this phone field's
+ * nearest group. Narrow on purpose, in three ways, because every one of them is a way the
+ * mirror-image defect could get in:
+ *
+ *   1. The element has to look like a phone field at all. A broad match would let this rewrite an
+ *      unrelated numeric answer that happened to sit beside something with a plus sign in it.
+ *   2. Only a dial code counts, spelled as a dial code ("+971"). A control showing the country NAME
+ *      alone is not read as one - Greenhouse's classic '#country' combobox holds "United Arab
+ *      Emirates" and no employer's validator objects to the full number beside it.
+ *   3. The walk stops at the field's own group, and never crosses a form, section or body boundary.
+ *      A dial code found past that is some other field's country.
+ *
+ * KEPT AS TEXT, like READ_SUBMIT_READINESS_SCRIPT, and for a measured reason rather than a stylistic
+ * one. Playwright ships a callback to the browser by calling toString() on it, so whatever the
+ * compiler left in the source goes to the page. Written as an ordinary TypeScript callback and run
+ * under tsx, esbuild's keepNames wraps every named inner arrow in a `__name(...)` call that exists
+ * only in the bundle, and the page throws `ReferenceError: __name is not defined`. The throw was
+ * swallowed by the caller's catch, every form came back as a form with no country control, and the
+ * fix looked like it had simply not worked. Measured 2026-08-09 against the portal-shapes trial.
+ * Text is untouchable by a bundler, which is the property this needs.
+ */
+const READ_FIELD_GROUP_DIAL_CODES_SCRIPT = String.raw`(element) => {
+  const attr = (name) => element.getAttribute(name) || '';
+  const type = attr('type').toLowerCase();
+  const hint = (
+    attr('name') + ' ' + attr('id') + ' ' + attr('aria-label') + ' '
+    + attr('placeholder') + ' ' + attr('autocomplete')
+  ).toLowerCase();
+  if (type !== 'tel' && !/phone|mobile|(^|[^a-z])tel([^a-z]|$)/.test(hint)) return [];
+  const dialCodesIn = (control) => {
+    if (control === element || control.contains(element) || element.contains(control)) return [];
+    let text = '';
+    if (control.tagName === 'SELECT') {
+      const selected = control.selectedOptions && control.selectedOptions[0];
+      text = String(control.value || '') + ' ' + (selected ? String(selected.textContent || '') : '');
+    } else {
+      text = String(control.getAttribute('aria-label') || '') + ' '
+        + String(control.value || '') + ' ' + String(control.textContent || '');
+    }
+    const found = [];
+    const pattern = /\+\s?(\d{1,4})/g;
+    let match = pattern.exec(text);
+    while (match) { found.push(match[1]); match = pattern.exec(text); }
+    return found;
+  };
+  let node = element.parentElement;
+  for (
+    let depth = 0;
+    node && depth < 4 && !/^(?:BODY|FORM|MAIN|SECTION|ARTICLE|HTML)$/.test(node.tagName);
+    depth += 1
+  ) {
+    const found = [];
+    const controls = node.querySelectorAll(
+      'select, [class*="select__single-value"], [class*="PhoneInputCountry"], [class*="iti__selected"], [role="combobox"], button'
+    );
+    for (let i = 0; i < controls.length; i += 1) {
+      const codes = dialCodesIn(controls[i]);
+      for (let j = 0; j < codes.length; j += 1) found.push(codes[j]);
+    }
+    // First group outwards that holds a dial code wins. Walking on past it is how an unrelated
+    // number elsewhere on the page gets read as this field's country.
+    if (found.length > 0) return found;
+    node = node.parentElement;
+  }
+  return [];
+}`;
+
+/* Locator.evaluate hands a STRING to the page as an expression and returns whatever it evaluates
+ * to, which for a function-shaped string is the function object itself: it is never called, and the
+ * result is undefined. page.evaluate(string, elementHandle) does the same. So the text above is
+ * wrapped back into a real function here, once, at module scope. new Function compiles it in Node
+ * with no bundler in the path, and Playwright then serialises that function normally. */
+const readFieldGroupDialCodes = new Function(
+  'element',
+  'return (' + READ_FIELD_GROUP_DIAL_CODES_SCRIPT + ')(element);',
+) as (element: SVGElement | HTMLElement) => string[];
 
 function greenhouseLocationSearch(packet: SubmissionPacket): string | undefined {
   if (!packet.city) return undefined;
@@ -4106,6 +4232,33 @@ export async function navigateToApplicationForm(page: Page, portal: SupportedPor
   await page.goto(destination, { waitUntil: 'domcontentloaded', timeout: 30_000 });
 }
 
+/* The phone field is the one field whose value cannot be decided before the page is in front of us.
+ * Everything else is a straight fillFirst; this one has to find the control first, ask the control's
+ * own group what dial code it is already showing, and only then work out what to write. Hence a
+ * writer of its own rather than a value computed at the call site. */
+async function fillPhoneField(
+  page: Page,
+  selectors: string[],
+  portal: SupportedPortal,
+  phone: string | undefined,
+  label: string,
+  out: string[],
+) {
+  if (!phone) return;
+  for (const selector of selectors) {
+    const field = page.locator(selector).first();
+    if ((await field.count()) === 0 || !(await field.isVisible().catch(() => false))) continue;
+    // A page that will not answer is treated as a page with no country control, which is the answer
+    // that leaves the number whole.
+    const dialCodes = await field.evaluate(readFieldGroupDialCodes).catch(() => [] as string[]);
+    const value = phoneForPortalField(portal, phone, dialCodes);
+    if (!value) return;
+    await field.fill(value);
+    out.push(label);
+    return;
+  }
+}
+
 async function fillFirst(page: Page, selectors: string[], value: string | undefined, label: string, out: string[]) {
   if (!value) return;
   for (const selector of selectors) {
@@ -4336,7 +4489,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, GREENHOUSE_LAST_NAME_SELECTOR.split(', '), parts.slice(1).join(' '), 'last_name', filledFields);
     await fillFirst(page, GREENHOUSE_EMAIL_SELECTOR.split(', '), packet.email, 'email', filledFields);
     await fillComboboxFirst(page, ['#country'], countryForPhoneField(packet.phone, packet.country), 'phone_country', filledFields);
-    await fillFirst(page, GREENHOUSE_PHONE_SELECTOR.split(', '), phoneForPortalField(portal, packet.phone), 'phone', filledFields);
+    await fillPhoneField(page, GREENHOUSE_PHONE_SELECTOR.split(', '), portal, packet.phone, 'phone', filledFields);
     await fillComboboxFirst(page, ['#candidate-location', 'input[autocomplete="address-level2"]'], greenhouseLocationSearch(packet), 'location', filledFields);
     await uploadFirst(page, GREENHOUSE_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields);
     await uploadFirst(page, ['input#cover_letter[type="file"]', 'input[type="file"][name*="cover_letter" i]'], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
@@ -4357,7 +4510,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_LAST_NAME_SELECTOR : SMARTRECRUITERS_LAST_NAME_SELECTOR], parts.slice(1).join(' '), 'last_name', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_EMAIL_SELECTOR : SMARTRECRUITERS_EMAIL_SELECTOR], packet.email, 'email', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR : SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR], packet.email, 'confirm_email', filledFields);
-    await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_PHONE_SELECTOR : SMARTRECRUITERS_PHONE_SELECTOR], phoneForPortalField(portal, packet.phone), 'phone', filledFields);
+    await fillPhoneField(page, [controlled ? CONTROLLED_SMARTRECRUITERS_PHONE_SELECTOR : SMARTRECRUITERS_PHONE_SELECTOR], portal, packet.phone, 'phone', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR : SMARTRECRUITERS_LINKEDIN_SELECTOR], packet.linkedinUrl, 'linkedin', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR : SMARTRECRUITERS_WEBSITE_SELECTOR], packet.portfolioUrl ?? packet.githubUrl, 'portfolio', filledFields);
     await uploadFirst(page, [SMARTRECRUITERS_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
@@ -4403,7 +4556,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['[data-testid="input-first_name"]'], parts[0], 'first_name', filledFields);
     await fillFirst(page, ['[data-testid="input-last_name"]'], parts.slice(1).join(' '), 'last_name', filledFields);
     await fillFirst(page, ['[data-testid="input-email"]'], packet.email, 'email', filledFields);
-    await fillFirst(page, ['[data-testid="input-phone_number"]'], phoneForPortalField(portal, packet.phone), 'phone', filledFields);
+    await fillPhoneField(page, ['[data-testid="input-phone_number"]'], portal, packet.phone, 'phone', filledFields);
     await uploadFirst(page, [RIPPLING_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
     await uploadFirst(page, [RIPPLING_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
   } else if (family === 'breezy') {
@@ -4496,7 +4649,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
   } else {
     await fillFirst(page, ['input[name="_systemfield_name"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="_systemfield_email"]'], packet.email, 'email', filledFields);
-    await fillFirst(page, ASHBY_PHONE_SELECTOR.split(', '), phoneForPortalField(portal, packet.phone), 'phone', filledFields);
+    await fillPhoneField(page, ASHBY_PHONE_SELECTOR.split(', '), portal, packet.phone, 'phone', filledFields);
     await fillComboboxFirst(page, ASHBY_LOCATION_SELECTOR.split(', '), packet.city, 'location', filledFields);
     // See ASHBY_*_SELECTOR: these were missing from the direct path too, so a real Ashby run
     // reported LinkedIn as an empty required field even though the packet had it.
