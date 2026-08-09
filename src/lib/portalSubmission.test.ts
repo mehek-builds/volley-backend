@@ -34,6 +34,8 @@ import {
   GREENHOUSE_OPTION_PROBE_IDS,
   MANAGED_ACTION_LIMIT,
   ManagedActionBudgetError,
+  budgetDroppedReviewedQuestions,
+  reviewedQuestionsWithoutActions,
   PORTAL_FAMILIES,
   MANAGED_OPTION_EXTRACT_PREFIX,
   managedResultHasCoverLetterUpload,
@@ -3972,21 +3974,137 @@ test('the fill run never exceeds the runner action ceiling, on any portal at any
       })),
     });
     for (const portal of EVERY_MANAGED_PORTAL) {
-      for (const submit of [false, true]) {
-        try {
-          const actions = buildManagedPortalActions(portal, packet, submit);
-          assert.ok(
-            actions.length <= MANAGED_ACTION_LIMIT,
-            `${portal} ${submit ? 'submit' : 'prepare'} run with ${questionCount} questions is ${actions.length} actions, and the runner rejects anything over ${MANAGED_ACTION_LIMIT}`,
-          );
-        } catch (error) {
-          assert.ok(error instanceof ManagedActionBudgetError, `${portal} returned an unexpected budget failure`);
-          assert.equal(error.submitActionAppended, false);
-          assert.match(error.blocker, /did not press submit/i);
-        }
+      /* PREPARE MAY NOT THROW, asserted separately from submit rather than allowing either outcome
+         on both. The looser version of this test accepted a budget error from either path, so it
+         would have stayed green through a prepare run that stopped dead - which is the behaviour
+         that costs the applicant her fixed fields, her preview and her evidence reads on exactly the
+         packets big enough to need them. A prepare run has no submit button to withhold, so there is
+         nothing for it to protect by refusing. */
+      const prepared = buildManagedPortalActions(portal, packet, false);
+      assert.ok(
+        prepared.length <= MANAGED_ACTION_LIMIT,
+        `${portal} prepare run with ${questionCount} questions is ${prepared.length} actions, and the runner rejects anything over ${MANAGED_ACTION_LIMIT}`,
+      );
+
+      // Submit is the path that may stop, because it is the one that can send.
+      try {
+        const actions = buildManagedPortalActions(portal, packet, true);
+        assert.ok(
+          actions.length <= MANAGED_ACTION_LIMIT,
+          `${portal} submit run with ${questionCount} questions is ${actions.length} actions, and the runner rejects anything over ${MANAGED_ACTION_LIMIT}`,
+        );
+      } catch (error) {
+        assert.ok(error instanceof ManagedActionBudgetError, `${portal} returned an unexpected budget failure`);
+        assert.equal(error.submitActionAppended, false);
+        assert.match(error.blocker, /did not press submit/i);
       }
     }
   }
+});
+
+/* WHAT PREPARE GIVES UP INSTEAD OF STOPPING, and the fact that it says so.
+ *
+ * The submit path refuses a packet whose reviewed questions cannot all fit, because sending an
+ * application with an answer quietly missing from it is the failure this budget exists to prevent.
+ * Prepare cannot send anything, so refusing there costs the applicant everything the run would have
+ * given her - the fixed fields, the preview, the evidence reads - and protects nothing.
+ *
+ * So prepare drops questions. That is only acceptable while every dropped question is named, which
+ * is what these assertions are for: the count that fits, the count that did not, and the guarantee
+ * that the two together account for every question in the packet. A version of this that trimmed
+ * quietly would pass a ceiling test and be the exact bug the ceiling test was written to catch.
+ */
+test('a prepare run too big to hold every question drops them visibly rather than stopping', () => {
+  const questionCount = 200;
+  const packet = andurilPacket({
+    questions: Array.from({ length: questionCount }, (_, index) => ({
+      question: `Screener question number ${index + 1}: do you have experience with distributed systems?`,
+      answer: index % 2 === 0 ? 'Yes' : 'No',
+    })),
+  });
+
+  // Submit stops, because it is the path that could send an application missing an answer.
+  assert.throws(
+    () => buildManagedPortalActions('greenhouse', packet, true),
+    (error: unknown) => error instanceof ManagedActionBudgetError && error.submitActionAppended === false,
+  );
+
+  // Prepare does not, and still fits: an over-budget list is rejected by the runner with HTTP 400
+  // before a browser opens, so "does not throw" would otherwise have become "does not run".
+  const actions = buildManagedPortalActions('greenhouse', packet, false);
+  assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `prepare returned ${actions.length} actions`);
+
+  // And every question it could not attempt is named.
+  const unattempted = reviewedQuestionsWithoutActions(packet, actions);
+  assert.ok(unattempted.length > 0, 'a 200-question packet cannot fit, so something must be reported');
+  for (const question of unattempted) {
+    assert.ok(
+      !actions.some((action) => (action.label ?? '').includes(question.slice(0, 60))),
+      `"${question}" was reported as unattempted but has an action`,
+    );
+  }
+  // Nothing is lost between the two counts: what fits plus what did not is the whole packet.
+  const attempted = new Set(
+    actions.flatMap((action) => {
+      const match = /^question(?:_[a-z_]+)?:(?:\d+:)*(Screener question number \d+)/.exec(action.label ?? '');
+      return match ? [match[1]!] : [];
+    }),
+  );
+  assert.equal(attempted.size + unattempted.length, questionCount);
+});
+
+test('a packet that fits reports nothing unattempted, so the signal means something', () => {
+  // The other half. A reporter that always returns something is as useless as one that never does.
+  const packet = andurilPacket({
+    questions: Array.from({ length: 6 }, (_, index) => ({
+      question: `Screener question number ${index + 1}: do you have experience with distributed systems?`,
+      answer: index % 2 === 0 ? 'Yes' : 'No',
+    })),
+  });
+  for (const portal of EVERY_MANAGED_PORTAL) {
+    const actions = buildManagedPortalActions(portal, packet, false);
+    assert.deepEqual(
+      budgetDroppedReviewedQuestions(packet, actions),
+      [],
+      `${portal} reported a budget drop on a packet that comfortably fits`,
+    );
+  }
+});
+
+/* THE SCOPE GAP IS NOT A BUDGET DROP, and conflating them would have been expensive.
+ *
+ * Thirteen families never attempt a reviewed question at any size - the multi-step ones fill page
+ * one and stop, several newer adapters carry fixed fields only. reviewedQuestionsWithoutActions
+ * reports every question on those, correctly and uselessly: it is answering "what has no action",
+ * and the answer is "all of them, and it always was". Feeding that into the send gate would have
+ * marked every SmartRecruiters, JazzHR, BambooHR, Jobvite, iCIMS, Oracle Cloud, UltiPro, Zoho,
+ * Bullhorn, SuccessFactors, Taleo, ADP and Avature packet permanently unsendable over a scope limit
+ * that predates this budget entirely.
+ *
+ * Both directions are pinned, because a discriminator that never fires is the same bug as one that
+ * always does. */
+test('a family that never fills questions is not reported as a budget drop', () => {
+  const small = andurilPacket({
+    questions: Array.from({ length: 6 }, (_, index) => ({
+      question: `Screener question number ${index + 1}: do you have experience with distributed systems?`,
+      answer: 'Yes',
+    })),
+  });
+  const scopeLimited = buildManagedPortalActions('smartrecruiters', small, false);
+  // It genuinely attempts none of them, so the raw reporter says so...
+  assert.equal(reviewedQuestionsWithoutActions(small, scopeLimited).length, 6);
+  // ...and the budget reporter does not, because nothing here was dropped to make room.
+  assert.deepEqual(budgetDroppedReviewedQuestions(small, scopeLimited), []);
+
+  // While a family that DOES fill questions and then runs out of room reports the ones it lost.
+  const huge = andurilPacket({
+    questions: Array.from({ length: 200 }, (_, index) => ({
+      question: `Screener question number ${index + 1}: do you have experience with distributed systems?`,
+      answer: 'Yes',
+    })),
+  });
+  const dropped = budgetDroppedReviewedQuestions(huge, buildManagedPortalActions('greenhouse', huge, false));
+  assert.ok(dropped.length > 0, 'a 200-question Greenhouse packet must report the questions it lost');
 });
 
 function selectHeavyGreenhousePacket(questionCount: number) {
@@ -4060,43 +4178,83 @@ test('Greenhouse select-heavy prepare and submit keep one complete fill chain pe
   }
 });
 
-test('Greenhouse select-heavy prepare and submit block before submit when safe chains cannot fit', () => {
+test('Greenhouse select-heavy submit blocks before submit when safe chains cannot fit', () => {
+  /* SUBMIT ONLY. This test asserted the same throw for prepare, and that was the behaviour until the
+     prepare path stopped stopping: a prepare run cannot press the button, so refusing there bought
+     nothing and cost the applicant the fixed fields, the preview and the evidence reads on the one
+     packet shape big enough to need them. The refusal that matters - never send an application with
+     an answer missing from it - is the submit half, and it is unchanged. What prepare does instead
+     is asserted directly below. */
   const packet = selectHeavyGreenhousePacket(20);
-  for (const submit of [false, true]) {
-    assert.throws(
-      () => buildManagedPortalActions('greenhouse', packet, submit),
-      (error: unknown) => {
-        assert.ok(error instanceof ManagedActionBudgetError);
-        assert.equal(error.code, 'MANAGED_ACTION_BUDGET');
-        assert.equal(error.submitActionAppended, false);
-        assert.equal(error.blocker, error.message);
-        assert.match(error.message, /20 reviewed questions/);
-        return true;
-      },
+  assert.throws(
+    () => buildManagedPortalActions('greenhouse', packet, true),
+    (error: unknown) => {
+      assert.ok(error instanceof ManagedActionBudgetError);
+      assert.equal(error.code, 'MANAGED_ACTION_BUDGET');
+      assert.equal(error.submitActionAppended, false);
+      assert.equal(error.blocker, error.message);
+      assert.match(error.message, /20 reviewed questions/);
+      return true;
+    },
+  );
+});
+
+test('Greenhouse select-heavy prepare fills what fits, keeps the core fields, and names the rest', () => {
+  const packet = selectHeavyGreenhousePacket(20);
+  const actions = buildManagedPortalActions('greenhouse', packet, false);
+  // Fits, because an over-budget list is rejected by the runner before a browser opens.
+  assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `prepare returned ${actions.length} actions`);
+  // The fixed application fields survive the extra pass that gives up questions.
+  assertGreenhouseCoreApplicationActions(actions);
+  // And the questions it could not hold are named rather than dropped quietly.
+  const dropped = budgetDroppedReviewedQuestions(packet, actions);
+  assert.ok(dropped.length > 0, 'twenty select-heavy questions cannot fit, so some must be reported');
+  for (const question of packet.questions) {
+    const attempted = viableReviewedQuestionAttempt(actions, question.question);
+    const reported = dropped.some((text) => question.question.toLowerCase().startsWith(text.toLowerCase().slice(0, 40)));
+    assert.ok(
+      attempted || reported,
+      `"${question.question}" was neither attempted nor reported as dropped`,
     );
   }
 });
 
-test('Greenhouse 16 to 18 question boundaries preserve core fields or block before submit', () => {
+test('Greenhouse 16 to 18 question boundaries preserve core fields on both paths', () => {
+  /* The boundary where select-heavy questions stop fitting. The core application fields survive it
+     on both paths, and that is the assertion this test exists for.
+     What differs either side of the boundary is only what happens to the QUESTIONS: submit refuses
+     the run, prepare gives some up and names them. Neither is allowed to cost a fixed field. */
   for (const questionCount of [16, 17, 18]) {
     const packet = selectHeavyGreenhousePacket(questionCount);
-    for (const submit of [false, true]) {
-      try {
-        const actions = buildManagedPortalActions('greenhouse', packet, submit);
-        assert.ok(actions.length <= MANAGED_ACTION_LIMIT);
-        assertGreenhouseCoreApplicationActions(actions);
-        for (const item of packet.questions) {
-          assert.ok(
-            viableReviewedQuestionAttempt(actions, item.question),
-            `${questionCount}-question ${submit ? 'submit' : 'prepare'} lost ${item.question}`,
-          );
-        }
-        if (submit) assert.equal(actions.at(-1)?.type, 'click');
-      } catch (error) {
-        assert.ok(error instanceof ManagedActionBudgetError);
-        assert.equal(error.submitActionAppended, false);
-        assert.match(error.blocker, /did not press submit/i);
+
+    const prepared = buildManagedPortalActions('greenhouse', packet, false);
+    assert.ok(prepared.length <= MANAGED_ACTION_LIMIT);
+    assertGreenhouseCoreApplicationActions(prepared);
+    const dropped = budgetDroppedReviewedQuestions(packet, prepared);
+    for (const item of packet.questions) {
+      const attempted = viableReviewedQuestionAttempt(prepared, item.question);
+      const reported = dropped.some((text) => item.question.toLowerCase().startsWith(text.toLowerCase().slice(0, 40)));
+      assert.ok(
+        attempted || reported,
+        `${questionCount}-question prepare lost ${item.question} without reporting it`,
+      );
+    }
+
+    try {
+      const actions = buildManagedPortalActions('greenhouse', packet, true);
+      assert.ok(actions.length <= MANAGED_ACTION_LIMIT);
+      assertGreenhouseCoreApplicationActions(actions);
+      for (const item of packet.questions) {
+        assert.ok(
+          viableReviewedQuestionAttempt(actions, item.question),
+          `${questionCount}-question submit lost ${item.question}`,
+        );
       }
+      assert.equal(actions.at(-1)?.type, 'click');
+    } catch (error) {
+      assert.ok(error instanceof ManagedActionBudgetError);
+      assert.equal(error.submitActionAppended, false);
+      assert.match(error.blocker, /did not press submit/i);
     }
   }
 });

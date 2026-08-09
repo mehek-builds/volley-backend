@@ -3130,6 +3130,73 @@ function reviewedQuestionActionProtection(
   return { actionBases: protectedBases, questionCount };
 }
 
+/**
+ * The reviewed questions this action list will not attempt at all.
+ *
+ * Asked of the FINISHED list rather than inferred from the budget arithmetic, because the arithmetic
+ * is exactly what keeps being wrong: every silent-drop failure in this module's history looked
+ * correct in the code that produced it and only showed up as a question the applicant was told was
+ * required and empty on a form Litos had been told to fill.
+ *
+ * A question is counted as attempted if any action carries its label, whichever branch produced it -
+ * the scoped fillByLabelText, a combobox chain, a checkbox click, a direct selector fill. The
+ * filters match reviewedQuestionActionProtection deliberately: a question with no answer, no usable
+ * label, or a skipped consent question was never going to get an action and is not a shortfall.
+ *
+ * The prepare path is the caller that needs this. It takes a trimmed list instead of throwing (see
+ * the budget block in buildManagedPortalActions), so this is what keeps that trade visible.
+ */
+export function reviewedQuestionsWithoutActions(
+  packet: SubmissionPacket,
+  actions: readonly ManagedBrowserAction[],
+): string[] {
+  const attempted = new Set<string>();
+  for (const action of actions) {
+    const base = managedActionLabelBase(action);
+    if (base?.startsWith('question')) attempted.add(base);
+  }
+  const missing: string[] = [];
+  for (const item of packet.questions) {
+    if (!greenhouseReviewedQuestionAnswer(item, packet).trim()) continue;
+    const questionText = normalizeReviewQuestionLabel(item.question);
+    if (!questionText || shouldSkipReviewedConsentQuestion(questionText)) continue;
+    const suffix = questionText.slice(0, 80);
+    const hit = [...attempted].some((base) => base === `question:${suffix}` || base.endsWith(`:${suffix}`));
+    if (!hit && !missing.includes(questionText)) missing.push(questionText);
+  }
+  return missing;
+}
+
+/**
+ * The reviewed questions the BUDGET dropped, which is not the same set as the ones with no action.
+ *
+ * Thirteen of the twenty-five families never attempt a reviewed question at any size: the multi-step
+ * ones fill page one and stop, and several of the newer adapters carry fixed fields only. On those,
+ * reviewedQuestionsWithoutActions correctly returns every question in the packet, and a caller that
+ * fed that straight into a send gate would mark every SmartRecruiters, JazzHR, BambooHR, Jobvite,
+ * iCIMS, Oracle Cloud, UltiPro, Zoho, Bullhorn, SuccessFactors, Taleo, ADP and Avature packet
+ * permanently unsendable over a scope limit that predates the budget and has nothing to do with it.
+ *
+ * The two cases separate cleanly on one question: did this run attempt ANY of them? A budget that
+ * ran out drops a tail and keeps the rest - the core fields are protected and cost far less than the
+ * ceiling, so a family that fills questions at all always gets some of them in. A family that fills
+ * none of them attempts exactly zero, at every packet size. So zero attempted means a scope limit,
+ * and some attempted means the ones missing were dropped to make room.
+ *
+ * Kept here rather than in the caller because it is the distinction a caller is most likely to get
+ * wrong, and getting it wrong is silent in both directions: too eager and every unsupported family
+ * stops sending, too lax and a dropped answer goes out unremarked.
+ */
+export function budgetDroppedReviewedQuestions(
+  packet: SubmissionPacket,
+  actions: readonly ManagedBrowserAction[],
+): string[] {
+  const missing = reviewedQuestionsWithoutActions(packet, actions);
+  if (missing.length === 0) return [];
+  const attemptedAny = actions.some((action) => managedActionLabelBase(action)?.startsWith('question'));
+  return attemptedAny ? missing : [];
+}
+
 // ─── Workable (apply.workable.com) ────────────────────────────────────────────
 // Read off a live Suade posting, 2026-07-28 (apply.workable.com/suade/j/9C43981D17/apply). Plain
 // HTML, single step, stable `name` attributes - the simplest of the three added that day.
@@ -4170,10 +4237,8 @@ export function buildManagedPortalActions(
   // that puts an exactly-full list one over the ceiling.
   const actionLimit = canAppendSubmit ? familyActionLimit - 1 : familyActionLimit;
   const questionProtection = reviewedQuestionActionProtection(actions, packet);
-  const protectedActionBases = new Set([
-    ...coreActionProtection(actions, portal),
-    ...questionProtection.actionBases,
-  ]);
+  const coreProtection = coreActionProtection(actions, portal);
+  const protectedActionBases = new Set([...coreProtection, ...questionProtection.actionBases]);
   if (portalFamily(portal) === 'greenhouse') {
     trimGreenhouseManagedActionsToBudget(actions, actionLimit, protectedActionBases);
   }
@@ -4181,8 +4246,35 @@ export function buildManagedPortalActions(
   if (actions.length > actionLimit) {
     truncateManagedActionsToBudget(actions, actionLimit, protectedActionBases);
   }
+  /* WHAT HAPPENS WHEN EVEN THE PROTECTED MINIMUM DOES NOT FIT, and the two answers differ by
+   * whether this run can press the button.
+   *
+   * A SUBMIT run stops. What the stop protects against is sending an application with an answer
+   * silently dropped out of it, and there is no version of that trade worth making automatically.
+   *
+   * A PREPARE run cannot send anything: it fills what it can, screenshots the result, and hands the
+   * packet back for a human to look at. Stopping there would trade a partly filled form she can see
+   * and finish for a dead packet, and would throw away the fixed fields, the preview and the
+   * evidence reads with it, on exactly the packets most likely to need them. So it gives up whole
+   * questions instead, dropping the protection that the submit path refuses to drop.
+   *
+   * It must still FIT. Returning the over-budget list instead of trimming it is the original bug of
+   * this whole line of work wearing a different hat: the runner answers anything over the ceiling
+   * with HTTP 400 before a browser opens, so "prepare does not throw" would have become "prepare
+   * does not run". Measured on a 200-question packet, this is the difference between a 231-action
+   * list the runner rejects outright and a 120-action list that fills what it can.
+   *
+   * The core fields stay protected through this last pass, so what comes off is reviewed questions
+   * and nothing else. And it is not quiet: reviewedQuestionsWithoutActions reads the finished list,
+   * prepareManaged puts every dropped question in the applicant's attention list and refuses to call
+   * the packet safe, so the answer is still never traded away behind her back. It is traded visibly,
+   * one step earlier, where she can do something about it.
+   */
   if (actions.length > actionLimit) {
-    throw new ManagedActionBudgetError(portal, familyActionLimit, questionProtection.questionCount);
+    if (canAppendSubmit) {
+      throw new ManagedActionBudgetError(portal, familyActionLimit, questionProtection.questionCount);
+    }
+    truncateManagedActionsToBudget(actions, actionLimit, coreProtection);
   }
 
   if (canAppendSubmit) {
