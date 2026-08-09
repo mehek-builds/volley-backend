@@ -3961,7 +3961,14 @@ test('the discovery run never exceeds the runner action ceiling, on any portal',
  * is a trim, never a higher MAX_ACTIONS: the last time a list was allowed to grow past the runner's
  * ceiling it rejected every managed run for weeks with nobody seeing it. */
 test('the fill run never exceeds the runner action ceiling, on any portal at any question count', () => {
-  for (const questionCount of [0, 8, 30, 120]) {
+  /* 400 is here for the protected FLOOR, not for realism. The trims skip protected actions and the
+     final truncation stops when only protected ones remain, so if that floor could itself exceed the
+     ceiling, prepare would return an over-budget list and the runner would answer HTTP 400 - the
+     original failure of this whole line of work, reached by a different route. The floor is fixed
+     cost (core fills, evidence reads, option probes) and does not grow with the question count, so
+     the way to demonstrate that is to push the question count far past anything real and show the
+     list still lands inside the ceiling. */
+  for (const questionCount of [0, 8, 30, 120, 400]) {
     const packet = andurilPacket({
       city: 'Los Angeles',
       country: 'United States',
@@ -4105,6 +4112,45 @@ test('a family that never fills questions is not reported as a budget drop', () 
   });
   const dropped = budgetDroppedReviewedQuestions(huge, buildManagedPortalActions('greenhouse', huge, false));
   assert.ok(dropped.length > 0, 'a 200-question Greenhouse packet must report the questions it lost');
+});
+
+/* THE COUPLING THAT MAKES THE SUPPRESSION ABOVE SAFE, which nothing else records.
+ *
+ * budgetDroppedReviewedQuestions stays silent for a family that attempts no reviewed question at
+ * all, because reporting every question on those would mark each of their packets permanently
+ * unsendable over a scope limit that predates the budget. That silence is only harmless while none
+ * of them can send by itself: an answered question that is never typed, on a family that then
+ * auto-submits under standing consent, is an application going to an employer with an answer
+ * missing and nothing anywhere saying so.
+ *
+ * Today that holds - all thirteen are multi-step or CAPTCHA-gated, and portalCanAutoSubmit refuses
+ * every one - so the suppression is safe by luck rather than by construction. This is the assertion
+ * that turns it into construction. If a future adapter learns to fill questions, this passes
+ * unchanged; if one of these families is granted auto-submit while still filling none, this fails
+ * and names the exact combination that would let an answer go missing quietly.
+ */
+test('a family that never fills reviewed questions is never allowed to submit by itself', () => {
+  const packet = andurilPacket({
+    questions: Array.from({ length: 4 }, (_, index) => ({
+      question: `Screener question number ${index + 1}: do you have experience with distributed systems?`,
+      answer: 'Yes',
+    })),
+  });
+  const silent: string[] = [];
+  for (const portal of EVERY_MANAGED_PORTAL) {
+    const actions = buildManagedPortalActions(portal, packet, false);
+    const attemptsAny = actions.some((action) => (action.label ?? '').startsWith('question'));
+    if (attemptsAny) continue;
+    silent.push(portal);
+    assert.equal(
+      portalCanAutoSubmit(portal),
+      false,
+      `${portal} attempts none of the reviewed questions AND can auto-submit, so a stored answer `
+      + 'would reach the employer missing with nothing reported',
+    );
+  }
+  // The set is not empty, so the assertion above is actually exercised rather than vacuous.
+  assert.ok(silent.length > 0, 'expected some families to fill no reviewed questions');
 });
 
 function selectHeavyGreenhousePacket(questionCount: number) {
