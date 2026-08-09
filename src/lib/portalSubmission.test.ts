@@ -4931,6 +4931,74 @@ test('option probing batches whole controls and explicitly fails beyond its glob
   assert.match(analysis.failures.find((failure) => failure.controlId === overflowId)?.reason ?? '', /exceeded the bounded/);
 });
 
+test('two windowed school reads produce no USC fill or Enter in the final action list', () => {
+  const school = [{ label: 'School* school--0', selector: '#school--0', inputType: 'combobox', required: true }];
+  const window100 = Array.from({ length: 100 }, (_, index) => `University ${index}`).join('\n');
+  const analysis = managedOptionProbeAnalysis('greenhouse', school, {}, [{
+    title: '', url: '', text: '',
+    extracted: [
+      { selector: '[id="school--0"]:is([role="combobox"],[aria-haspopup="listbox"])', value: 'school--0' },
+      { selector: reactSelectListboxSelector('school--0'), value: window100 },
+      { selector: reactSelectListboxSelector('school--0'), value: window100 },
+    ],
+  }]);
+  assert.equal(analysis.failedIds.has('school--0'), true);
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    failedFields: [{ controlId: 'school--0', label: 'School* school--0', selector: '#school--0', inputType: 'combobox' }],
+  }));
+  const schoolActions = actions.filter((action) => action.selector === '#school--0'
+    || action.label?.startsWith('education_school_combo'));
+  assert.deepEqual(schoolActions, []);
+  assert.equal(actions.some((action) => action.selector === '#school--0' && action.value === 'Enter'), false);
+  assert.equal(actions.some((action) => /University of Southern California/.test(action.value ?? '')), false);
+});
+
+test('a stale stored Overall GPA answer cannot produce a final action after probe failure', () => {
+  const failedId = 'question_37228964002';
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    failedFields: [{ controlId: failedId, label: 'Overall GPA*', selector: `#${failedId}`, inputType: 'select-one' }],
+    questions: [{
+      question: 'Overall GPA',
+      answer: '3.89',
+      portalSelector: `#${failedId}`,
+      portalInputType: 'select-one',
+    }],
+  }));
+  const staleGpaActions = actions.filter((action) => action.value === '3.89');
+  assert.deepEqual(staleGpaActions, []);
+  assert.equal(actions.some((action) => action.selector?.includes(failedId)), false);
+});
+
+test('a referral probe 503 suppresses every final referral action for that control', () => {
+  const failedId = 'question_33333333';
+  const discovered = [{
+    label: 'How did you hear about this job?*',
+    selector: `#${failedId}`,
+    inputType: 'select-one',
+    required: true,
+  }];
+  const analysis = managedOptionProbeAnalysis('greenhouse', discovered, {}, [], [{
+    controlIds: [failedId],
+    reason: 'Stratus managed browser request failed with status 503',
+  }]);
+  assert.equal(analysis.failedIds.has(failedId), true);
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    failedFields: discovered.map((field) => ({ controlId: failedId, ...field })),
+    questions: [{
+      question: 'How did you hear about this job?',
+      answer: 'Job board',
+      portalSelector: `#${failedId}`,
+      portalInputType: 'select-one',
+    }],
+  }));
+  const referralActions = actions.filter((action) => action.label?.startsWith('greenhouse_referral')
+    || /how did you hear/i.test(action.label ?? '')
+    || action.selector?.includes(failedId));
+  assert.deepEqual(referralActions, []);
+  assert.ok(actions.some((action) => action.label?.startsWith('education_degree_combo')),
+    'only the failed referral channel is suppressed; unrelated exact channels remain');
+});
+
 test('two passes of reads become one map, and an empty read never overwrites a real list', () => {
   const merged = mergeManagedFieldOptions(
     { 'discipline--0': ['Computer Science'], 'degree--0': ["Bachelor's Degree"] },

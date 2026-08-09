@@ -395,6 +395,13 @@ export type SubmissionPacket = {
    * free text.
    */
   fieldOptions?: Record<string, string[]>;
+  /** Closed controls whose live option evidence failed. No action builder may guess at these. */
+  failedFields?: Array<{
+    controlId: string;
+    label: string;
+    selector?: string;
+    inputType?: string;
+  }>;
   applicationProfile?: ApplicationProfileLike;
   jdText?: string;
   resume: Buffer;
@@ -1537,6 +1544,77 @@ function greenhouseReactSelectValue(
   return snapped ?? ladder.find((value) => value.trim().length > 0);
 }
 
+function normalizedFailedFieldLabel(value: string): string {
+  return normalizeReviewQuestionLabel(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function packetControlFailed(packet: SubmissionPacket, controlId: string): boolean {
+  return packet.failedFields?.some((field) => field.controlId === controlId) === true;
+}
+
+function packetLabelFailed(packet: SubmissionPacket, label: string): boolean {
+  const expected = normalizedFailedFieldLabel(label);
+  if (!expected) return false;
+  return packet.failedFields?.some((field) => {
+    const failed = normalizedFailedFieldLabel(field.label);
+    if (!failed) return false;
+    const sameClosedFamily = [
+      /\bgpa\b|grade point|grade average/,
+      /\bdegree\b|education level/,
+      /\bschool\b|\buniversity\b/,
+      /graduat(?:e|ion).*\byear\b|\byear\b.*graduat/,
+      /graduat(?:e|ion).*\bmonth\b|\bmonth\b.*graduat/,
+    ].some((pattern) => pattern.test(expected) && pattern.test(failed));
+    return failed === expected
+      || sameClosedFamily
+      || (expected.length >= 3 && new RegExp(`\\b${expected.replace(/\s+/g, '\\s+')}\\b`, 'i').test(failed))
+      || (failed.length >= 3 && new RegExp(`\\b${failed.replace(/\s+/g, '\\s+')}\\b`, 'i').test(expected));
+  }) === true;
+}
+
+function packetQuestionFailed(packet: SubmissionPacket, item: SubmissionPacket['questions'][number]): boolean {
+  const selector = reviewQuestionPortalSelector(item);
+  const selectorId = selector?.match(/^#([A-Za-z0-9][A-Za-z0-9_-]*)$/)?.[1]
+    ?? selector?.match(/^\[id=["']([A-Za-z0-9][A-Za-z0-9_-]*)["']\]$/)?.[1];
+  return Boolean(selectorId && packetControlFailed(packet, selectorId))
+    || packetLabelFailed(packet, item.question);
+}
+
+function packetHasFailedReferralField(packet: SubmissionPacket): boolean {
+  return packet.failedFields?.some((field) => isReferralSourceQuestion(field.label)) === true;
+}
+
+function managedActionTargetsFailedField(action: ManagedBrowserAction, packet: SubmissionPacket): boolean {
+  if (!packet.failedFields?.length) return false;
+  if (action.text && packetLabelFailed(packet, action.text)) return true;
+  if (packetHasFailedReferralField(packet) && action.label?.startsWith('greenhouse_referral')) return true;
+  const fixedEducation: Array<[string, RegExp]> = [
+    ['school--0', /^education_school/],
+    ['degree--0', /^education_degree/],
+    ['discipline--0', /^education_discipline/],
+    ['end-month--0', /^education_(?:end_month|graduation_month)/],
+    ['end-year--0', /^education_(?:end_year|graduation_year|expected_graduation_year)/],
+  ];
+  if (fixedEducation.some(([id, label]) => packetControlFailed(packet, id) && label.test(action.label ?? ''))) return true;
+  const selector = action.selector ?? '';
+  return packet.failedFields.some((field) => {
+    if (field.selector && selector === field.selector) return true;
+    const escapedId = field.controlId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(?:#${escapedId}(?![A-Za-z0-9_-])|\\[id=["']${escapedId}["']\\])`).test(selector);
+  });
+}
+
+function managedFillByLabelUnlessFailed(
+  actions: ManagedBrowserAction[],
+  packet: SubmissionPacket,
+  text: string,
+  value: string | undefined,
+  label: string,
+) {
+  if (packetLabelFailed(packet, text)) return;
+  managedFillByLabel(actions, text, value, label);
+}
+
 /** The four fixed education controls, the value each will be given, and the label it reports under. */
 function greenhouseEducationComboboxFields(
   packet: SubmissionPacket,
@@ -1631,9 +1709,12 @@ function pushGreenhouseEducationTaxonomyWarmActions(
 function pushGreenhouseEducationComboboxActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
   const fields = greenhouseEducationComboboxFields(packet);
   for (const field of fields) {
+    if (packetControlFailed(packet, field.inputId)) continue;
     managedGreenhouseReactSelectFill(actions, field.inputId, field.value, field.label);
   }
-  managedFill(actions, '#end-year--0', packet.graduationYear, 'education_end_year_field');
+  if (!packetControlFailed(packet, 'end-year--0')) {
+    managedFill(actions, '#end-year--0', packet.graduationYear, 'education_end_year_field');
+  }
 }
 
 function pushGreenhouseGraduationDateComboboxActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
@@ -1650,6 +1731,7 @@ function pushGreenhouseGraduationDateComboboxActions(actions: ManagedBrowserActi
   const selectorLimit = databricks ? 3 : QUESTION_COMBOBOX_SELECTOR_LIMIT;
   const labelPrefix = databricks ? 'databricks_graduation_date_combo' : 'education_graduation_date_combo';
   for (const label of labels) {
+    if (packetLabelFailed(packet, label)) continue;
     for (const value of values) {
       for (const selector of greenhouseQuestionComboboxSelectors(label).slice(0, selectorLimit)) {
         managedGreenhouseScopedReactSelectFill(
@@ -1675,6 +1757,7 @@ function pushGreenhouseFixedQuestionComboboxActions(actions: ManagedBrowserActio
     { label: 'What is your GPA?', value: packet.gpa },
   ];
   for (const item of fixedQuestions) {
+    if (packetLabelFailed(packet, item.label)) continue;
     pushGreenhouseQuestionComboboxLabelActions(actions, item.label, item.value ?? '', 'greenhouse_fixed_question', packet.jdText);
   }
 }
@@ -1701,6 +1784,7 @@ function pushGreenhousePreferredLocationFallbackActions(actions: ManagedBrowserA
   ];
   let index = 0;
   for (const label of labels) {
+    if (packetLabelFailed(packet, label)) continue;
     for (const selector of greenhouseQuestionComboboxSelectors(label).slice(0, QUESTION_COMBOBOX_SELECTOR_LIMIT)) {
       managedGreenhouseScopedReactSelectFill(
         actions,
@@ -2612,6 +2696,7 @@ const GREENHOUSE_REFERRAL_LABEL_PREFIXES = [
 ] as const;
 
 function pushGreenhouseReferralSourceAliases(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
+  if (packetHasFailedReferralField(packet)) return;
   const value = packet.referralSourceDefault?.trim();
   if (!value) return;
   for (const alias of GREENHOUSE_REFERRAL_LABEL_PREFIXES) {
@@ -2935,6 +3020,7 @@ function greenhouseAkunaRequiredAliasPriority(alias: string): number {
 function pushGreenhouseAkunaSafeTextActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
   if (!packetLooksAkuna(packet)) return;
   for (const item of packet.questions) {
+    if (packetQuestionFailed(packet, item)) continue;
     const questionText = normalizeReviewQuestionLabel(item.question);
     const value = item.answer.trim();
     if (!questionText || !value) continue;
@@ -3009,6 +3095,7 @@ function pushGreenhouseKnownQuestionAliases(
     })
     : packet.questions;
   for (const item of items) {
+    if (packetQuestionFailed(packet, item)) continue;
     const answer = greenhouseReviewedQuestionAnswer(item, packet);
     // An unanswered question drives no action. R-096 makes a required field the applicant has not
     // answered yet a real question record, and greenhouseKnownQuestionAliases has one branch keyed
@@ -3103,6 +3190,7 @@ function pushGreenhouseDemographicAliases(actions: ManagedBrowserAction[], packe
     if (!value) continue;
     if (packetHasGreenhouseReviewedDemographicAnswer(packet, item.key)) continue;
     for (const alias of item.aliases) {
+      if (packetLabelFailed(packet, alias)) continue;
       actions.push({
         type: 'fillByLabelText',
         text: alias,
@@ -4013,35 +4101,37 @@ function pushFixedFieldActions(
     managedComboboxFill(actions, '#candidate-location, input[autocomplete="address-level2"]', greenhouseLocationSearch(packet), 'location');
     if (!packetLooksAkuna(packet)) {
       pushGreenhouseEducationComboboxActions(actions, packet);
-      managedFillByLabel(actions, 'What is your graduation date?', packet.graduationDate, 'graduation_date');
-      managedFillByLabel(actions, 'Graduation Date', packet.graduationDate, 'graduation_date_label');
-      managedFillByLabel(actions, 'Expected Graduation Date', packet.graduationDate, 'graduation_date_expected');
+      managedFillByLabelUnlessFailed(actions, packet, 'What is your graduation date?', packet.graduationDate, 'graduation_date');
+      managedFillByLabelUnlessFailed(actions, packet, 'Graduation Date', packet.graduationDate, 'graduation_date_label');
+      managedFillByLabelUnlessFailed(actions, packet, 'Expected Graduation Date', packet.graduationDate, 'graduation_date_expected');
     }
     if (packetLooksDatabricks(packet)) {
-      managedFillByLabel(actions, 'What is your graduation date?', packet.graduationDate, 'databricks_graduation_date');
+      managedFillByLabelUnlessFailed(actions, packet, 'What is your graduation date?', packet.graduationDate, 'databricks_graduation_date');
     }
     if (!packetLooksAkuna(packet)) {
-      managedFillByLabel(actions, 'End date month', packet.graduationMonth, 'education_end_month');
-      managedFillByLabel(actions, 'End date year', packet.graduationYear, 'education_end_year');
-      managedFillByLabel(actions, 'Graduation Month', packet.graduationMonth, 'education_graduation_month');
-      managedFillByLabel(actions, 'Graduation Year', packet.graduationYear, 'education_graduation_year');
-      managedFillByLabel(actions, 'What is your expected graduation year?', packet.graduationYear, 'education_expected_graduation_year');
+      managedFillByLabelUnlessFailed(actions, packet, 'End date month', packet.graduationMonth, 'education_end_month');
+      managedFillByLabelUnlessFailed(actions, packet, 'End date year', packet.graduationYear, 'education_end_year');
+      managedFillByLabelUnlessFailed(actions, packet, 'Graduation Month', packet.graduationMonth, 'education_graduation_month');
+      managedFillByLabelUnlessFailed(actions, packet, 'Graduation Year', packet.graduationYear, 'education_graduation_year');
+      managedFillByLabelUnlessFailed(actions, packet, 'What is your expected graduation year?', packet.graduationYear, 'education_expected_graduation_year');
       // Same value the id-scoped fill uses, for the same reason: this lands in the SAME react-select
       // (fillByLabelText resolves the label's container to its one input), so handing it the stored
       // sentence leaves unmatched search text sitting in a control that was about to be filled
       // correctly.
-      managedFillByLabel(
-        actions,
-        'Discipline',
-        greenhouseReactSelectValue(packet, 'discipline--0', greenhouseDisciplineAliases(packet)),
-        'education_discipline_label',
-      );
+      if (!packetControlFailed(packet, 'discipline--0') && !packetLabelFailed(packet, 'Discipline')) {
+        managedFillByLabel(
+          actions,
+          'Discipline',
+          greenhouseReactSelectValue(packet, 'discipline--0', greenhouseDisciplineAliases(packet)),
+          'education_discipline_label',
+        );
+      }
     }
     pushGreenhouseFixedQuestionComboboxActions(actions, packet);
     if (!packetLooksAkuna(packet)) pushGreenhouseGraduationDateComboboxActions(actions, packet);
     if (!packetLooksAkuna(packet)) {
-      managedFillByLabel(actions, 'GPA', packet.gpa, 'gpa');
-      managedFillByLabel(actions, 'What is your GPA?', packet.gpa, 'gpa_question');
+      managedFillByLabelUnlessFailed(actions, packet, 'GPA', packet.gpa, 'gpa');
+      managedFillByLabelUnlessFailed(actions, packet, 'What is your GPA?', packet.gpa, 'gpa_question');
     }
     pushGreenhousePreferredLocationFallbackActions(actions, packet);
     for (const selector of greenhouseCoreFieldEvidenceSelectors('resume')) {
@@ -4386,6 +4476,7 @@ export function buildManagedPortalActions(
   // values after filling, so a missing or unaccepted value returns as a blocker instead of being
   // reported as completed.
   for (const item of canFillReviewedQuestions('managed') && mayReplayReviewedQuestions ? packet.questions : []) {
+    if (packetQuestionFailed(packet, item)) continue;
     const answer = greenhouseReviewedQuestionAnswer(item, packet);
     if (!answer.trim()) continue;
     const questionText = normalizeReviewQuestionLabel(item.question);
@@ -4551,6 +4642,13 @@ export function buildManagedPortalActions(
   // a run that explicitly asked not to submit, and captured the preview of step 4 - so the student
   // was shown an empty attestation page as the evidence of what she was approving.
   if (submit && portalFamily(portal) === 'paylocity') pushPaylocityTraversal(actions, packet);
+
+  // Last-line invariant. Builder-specific guards above keep the intent legible; this exact-id and
+  // exact-label filter ensures a newly added fallback cannot silently bypass them later.
+  if (packet.failedFields?.length) {
+    const allowed = actions.filter((action) => !managedActionTargetsFailedField(action, packet));
+    actions.splice(0, actions.length, ...allowed);
+  }
 
   /* THE BUDGET. Applied to every family, not just Greenhouse - see
    * trimSpeculativeManagedActionsToBudget for the measurement that made that necessary, and for why

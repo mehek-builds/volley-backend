@@ -1361,11 +1361,19 @@ export function mergeDiscoveredPortalQuestions(
   discovered: readonly ApplicationReviewQuestion[],
   stored: readonly ApplicationReviewQuestion[],
   invalidatedQuestionKeys: readonly string[],
+  invalidatedFieldIds: ReadonlySet<string> = new Set(),
 ): ApplicationReviewQuestion[] {
   const invalidated = new Set(invalidatedQuestionKeys);
   return normalizeApplicationReviewQuestions([
     ...discovered,
-    ...stored.filter((question) => !invalidated.has(normalizeReviewQuestionLabel(question.question).toLowerCase())),
+    ...stored.filter((question) => {
+      if (invalidated.has(normalizeReviewQuestionLabel(question.question).toLowerCase())) return false;
+      const controlId = managedOptionProbeControlId({
+        label: question.question,
+        selector: question.portal_selector,
+      });
+      return !controlId || !invalidatedFieldIds.has(controlId);
+    }),
   ]);
 }
 
@@ -1573,6 +1581,11 @@ async function prepareManaged(
     );
   }
   const fieldOptions = optionProbe.options;
+  const failedFields = (discoveryResult?.discovered ?? []).flatMap((field) => {
+    const controlId = managedOptionProbeControlId(field);
+    if (!controlId || !optionProbe.failedIds.has(controlId)) return [];
+    return [{ controlId, label: field.label, selector: field.selector, inputType: field.inputType }];
+  });
   const discoveredFields = attachManagedFieldOptions(discoveryResult?.discovered ?? [], fieldOptions)
     .filter((field) => {
       const controlId = managedOptionProbeControlId(field);
@@ -1601,7 +1614,13 @@ async function prepareManaged(
     portal,
     savedAnswers,
   );
-  const mergedQuestions = mergeDiscoveredPortalQuestions(discoveredQuestions, storedQuestions, invalidatedQuestionKeys);
+  const failedQuestionKeys = failedFields.map((field) => normalizeReviewQuestionLabel(field.label).toLowerCase());
+  const mergedQuestions = mergeDiscoveredPortalQuestions(
+    discoveredQuestions,
+    storedQuestions,
+    [...invalidatedQuestionKeys, ...failedQuestionKeys],
+    optionProbe.failedIds,
+  );
   packet.questions = mergedQuestions.map((q) => ({
     question: q.question,
     answer: q.answer,
@@ -1612,6 +1631,7 @@ async function prepareManaged(
   // instead of the profile's own phrasing. It only ever gets ONE attempt at a react-select (a second
   // click closes the menu the first one opened), so the first value has to be the right one.
   packet.fieldOptions = fieldOptions;
+  packet.failedFields = failedFields;
 
   const fillActions = buildManagedPortalActions(portal, packet);
   /* Which reviewed questions this run will not even attempt.

@@ -1233,6 +1233,25 @@ test('a remembered exact score does not survive changed closed-list options in d
   )[0]?.answer, '');
 });
 
+test('a failed live GPA selector cannot be restored from a stale stored question', () => {
+  const failedId = 'question_37228964002';
+  const merged = mergeDiscoveredPortalQuestions(
+    [],
+    [{
+      id: 'stale-gpa',
+      question: 'Overall GPA',
+      answer: '3.89',
+      kind: 'required',
+      required: true,
+      portal_selector: `#${failedId}`,
+      portal_input_type: 'select-one',
+    }],
+    [],
+    new Set([failedId]),
+  );
+  assert.deepEqual(merged, []);
+});
+
 /* R-101, the reporting half. The DRW Software Developer Intern run of 2026-08-08 recorded
  * `questions: 0`, twenty-seven "is required and is still empty" lines, `submission_error: null`
  * and no stall. Every sentence in it was true and the run as a whole was not: it named twenty-seven
