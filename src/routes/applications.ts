@@ -58,6 +58,9 @@ import {
   duplicateApplicationVerdict,
   type DuplicateApplicationVerdict,
 } from '../lib/duplicateApplication';
+import { resolveFrozenApplicantEmail } from '../lib/applicationEmail';
+import { findComposioVerificationCode } from '../lib/emailVerification';
+import { registerWorkdayVerificationRoute } from './workdayVerification';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
 const questionSchema = z.object({
@@ -112,7 +115,7 @@ const extensionStartBodySchema = z.object({
 const extensionReceiptUrlSchema = z.string().url().max(4000).refine(isSafeExtensionReceiptUrl, 'Confirmation URL must use HTTPS');
 const extensionOutcomeBodySchema = z.object({
   claim_id: z.string().uuid(),
-  outcome: z.enum(['confirmed', 'failed', 'unknown']),
+  outcome: z.enum(['confirmed', 'failed', 'unknown', 'cancelled']),
   confirmation_text: z.string().max(2000).optional(),
   final_url: extensionReceiptUrlSchema,
 });
@@ -1264,6 +1267,20 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       });
     },
   );
+
+  registerWorkdayVerificationRoute(fastify, {
+    requireAuth,
+    ownedApplication: ownedResume,
+    automaticVerificationEnabled: async (userId) => {
+      const [settings] = await db.select({ enabled: users.automatic_verification_enabled })
+        .from(users)
+        .where(eq(users.id, userId))
+        .limit(1);
+      return settings?.enabled === true;
+    },
+    resolveActiveAlias: resolveFrozenApplicantEmail,
+    findCode: findComposioVerificationCode,
+  });
 
   /* The only door into an application the employer is holding behind an emailed security code.
    *
