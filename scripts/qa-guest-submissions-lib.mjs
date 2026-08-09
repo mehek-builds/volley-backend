@@ -78,6 +78,14 @@ export function managedApplicationAlias({ aliasSecret, domain, userId, applicati
   return `app-${packet}-${token}@${domain.trim().toLowerCase()}`;
 }
 
+export function controlledForwardedEmailForRun(messages, { subject, to, alias }) {
+  return messages.find((message) => message.subject === subject
+    && Array.isArray(message.to)
+    && message.to.includes(to)
+    && typeof message.html === 'string'
+    && message.html.includes(alias));
+}
+
 export function signedInboundRequest(payload, secret, timestamp = Date.now()) {
   if (!secret?.trim()) throw new Error('An inbound application-email webhook secret is required');
   const body = JSON.stringify(payload);

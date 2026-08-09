@@ -5,51 +5,39 @@ import { application_email_messages } from '../db/schema';
 import { isControlledTestPortalUrl } from './controlledTestPortal';
 
 const CODE_CONTEXT = /\b(?:verification|security|authentication|confirmation|one[ -]?time|passcode|otp)\b/i;
-/**
- * WHAT A CODE LOOKS LIKE, AND THE TWO THIRDS OF GREENHOUSE'S CODES THAT USED TO BE INVISIBLE.
- *
- * The previous rule required an 8-character alphanumeric candidate to contain at least one letter
- * AND at least one digit. Greenhouse's codes are not built that way. Four real ones, three of them
- * read out of this applicant's own mailbox on 2026-08-09 and one printed in Greenhouse's own
- * support copy:
- *
- *     LSlOXjvZ    no digit    -> missed
- *     LH0Yjubx    has a 0     -> found
- *     yFxeFpSl    no digit    -> missed
- *     TPHJrFMJ    no digit    -> missed
- *
- * So automatic retrieval could read one code in four, and every miss became a packet parked on
- * 'awaiting_security_code' asking a person for something Litos had already been emailed. That is
- * not a rare edge: it is the ordinary case, and it is why the automated half of this feature has
- * never visibly worked.
- *
- * THE SIGNATURE IS INTERNAL CASE, NOT DIGITS. A random 8-character alphanumeric string mixes case
- * in the middle of itself. Ordinary English words do not: 'Security' is eight characters with a
- * capital, and its only capital is the first letter, so requiring an uppercase that FOLLOWS a
- * lowercase excludes it and every other capitalised word. The old letter-plus-digit rule is kept
- * alongside it rather than replaced, because it is what recognises codes from every other board.
- *
- * The `i` flag is gone deliberately. It made `[A-Z]` mean `[A-Za-z]`, which is exactly the
- * distinction this now turns on, so the classes are spelled out and the flag cannot quietly erase
- * them again. Every candidate still has to sit within 100 characters of verification language, and
- * an ambiguous message still yields nothing rather than a guess.
- */
-const CODE_PATTERN = /(?<![A-Za-z0-9])((?=[A-Za-z0-9]{8}(?![A-Za-z0-9]))(?:(?=[A-Za-z0-9]{0,7}[A-Za-z])(?=[A-Za-z0-9]{0,7}[0-9])|(?=[A-Za-z0-9]*[a-z][A-Za-z0-9]*[A-Z]))[A-Za-z0-9]{8}|[0-9]{4,8})(?![A-Za-z0-9])/g;
-/**
- * THE SENTENCE THAT HANDS OVER A CODE, used only to break a tie.
- *
- * Widening the shape above widens what can be mistaken for a code: 'McDonald' is eight characters
- * with an internal capital. The existing rule for that is to return nothing when more than one
- * candidate is in play, which is safe and is kept - but on Greenhouse it would fail closed on the
- * ordinary case rather than the odd one, because the code arrives inside a sentence that also names
- * the employer.
- *
- * So a candidate introduced by an explicit hand-over wins. Greenhouse's own wording is "Copy and
- * paste this code into the security code field on your application: TPHJrFMJ."; the other forms are
- * the ones every board writes. This never invents a candidate the shape rule did not already
- * accept, and when more than one candidate is introduced this way it still refuses to choose.
- */
-const CODE_LEAD = /(?:\bcode\s*(?:is|:)|paste\s+(?:this|the)\s+code\b[^:\n]{0,80}:|\b(?:security|verification|confirmation|authentication|one[ -]?time|passcode|otp)\s+code\b[^:\n]{0,40}:)\s*$/i;
+// Most providers send a 4 to 8 digit code. Greenhouse currently sends an 8-character
+// alphanumeric code, so support that shape without treating ordinary words as credentials. An
+// alphanumeric candidate must contain at least one letter and one digit and still has to appear
+// near verification language below.
+const CODE_PATTERN = /(?<![A-Z0-9])((?=[A-Z0-9]{8}(?![A-Z0-9]))(?=[A-Z0-9]{0,7}[A-Z])(?=[A-Z0-9]{0,7}\d)[A-Z0-9]{8}|\d{4,8})(?![A-Z0-9])/gi;
+/* Greenhouse also issues letter-only, case-sensitive 8-character codes. Treating every 8-letter
+ * word as a credential would turn ordinary email prose into a submit capability, so this format is
+ * accepted only where the message grammar explicitly identifies the token as a code. */
+const CONTEXTUAL_ALPHA_CODE_PATTERNS = [
+  /\b(?:verification|security|authentication|confirmation|one[ -]?time)\s+code\s*(?:is|[:=-])\s*([A-Za-z]{8})\b/gi,
+  /\b(?:passcode|otp)\s*(?:is|[:=-])\s*([A-Za-z]{8})\b/gi,
+  /\b(?:enter|type|use|provide)\s+(?:this\s+|the\s+|your\s+)?(?:verification|security|authentication|confirmation|one[ -]?time)\s+code\s+([A-Za-z]{8})\b/gi,
+  /* THE SENTENCE GREENHOUSE ACTUALLY WRITES, which none of the three above matches.
+   *
+   * Measured against the real emails, not against a paraphrase. Greenhouse's body is:
+   *
+   *     "Copy and paste this code into the security code field on your application: TPHJrFMJ.
+   *      After you enter the code, resubmit your application."
+   *
+   * Every pattern above wants the token to follow the word "code" either immediately or after an
+   * "is"/":"; here twenty-eight characters of instruction sit in between, so all three miss, and the
+   * three codes on record from this applicant's mailbox on 2026-08-09 - LSlOXjvZ, yFxeFpSl, and the
+   * TPHJrFMJ in Greenhouse's own support copy - were unreadable. Automatic retrieval cannot work on
+   * a Greenhouse board without this, and the held-session design that reads a code in the seconds
+   * after a submit has nothing to read.
+   *
+   * The colon is what makes it a hand-over rather than prose: a clause that names a code and then
+   * ends in a colon is introducing one. Bounded to a single line and 80 characters so it cannot
+   * reach across a paragraph, and the token still has to survive isGreenhouseLetterCode's
+   * lower-to-upper test, which is what keeps 'Thursday' and 'Required' out.
+   */
+  /\bcode\b[^:\n]{0,80}:\s*([A-Za-z]{8})\b/gi,
+];
 const MAX_CODE_AGE_MS = 10 * 60_000;
 const CLOCK_SKEW_MS = 30_000;
 
@@ -241,6 +229,18 @@ function expectedSenderDomains(portalUrl: string): string[] {
   return configured?.senders ?? [host];
 }
 
+function isGreenhouseVerificationPortal(portalUrl: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(portalUrl);
+  } catch {
+    return false;
+  }
+  if (PORTAL_SENDER_DOMAINS[0].portal.test(parsed.hostname.toLowerCase())) return true;
+  return isControlledTestPortalUrl(portalUrl)
+    && parsed.searchParams.get('board')?.toLowerCase() === 'greenhouse';
+}
+
 function allowedSender(actual: string, allowed: string[]): boolean {
   return allowed.some((domain) => actual === domain || actual.endsWith(`.${domain}`));
 }
@@ -256,22 +256,27 @@ function stripMarkup(value: string): string {
     .trim();
 }
 
-export function extractCodeFromVerificationText(value: string): string | null {
+function isGreenhouseLetterCode(value: string): boolean {
+  // Greenhouse's observed letter-only value is mixed case in a non-word casing pattern. Requiring
+  // a lower-to-upper transition rejects ordinary sentence words such as Required and Password.
+  return /^[A-Za-z]{8}$/.test(value) && /[a-z][A-Z]/.test(value);
+}
+
+export function extractCodeFromVerificationText(value: string, allowGreenhouseLetterCode = false): string | null {
   const text = stripMarkup(value);
   const candidates = new Set<string>();
-  const introduced = new Set<string>();
   for (const match of text.matchAll(CODE_PATTERN)) {
-    const at = match.index ?? 0;
-    const start = Math.max(0, at - 100);
-    const end = Math.min(text.length, at + match[0].length + 100);
-    if (!CODE_CONTEXT.test(text.slice(start, end))) continue;
-    candidates.add(match[1]);
-    if (CODE_LEAD.test(text.slice(start, at))) introduced.add(match[1]);
+    const start = Math.max(0, (match.index ?? 0) - 100);
+    const end = Math.min(text.length, (match.index ?? 0) + match[0].length + 100);
+    if (CODE_CONTEXT.test(text.slice(start, end))) candidates.add(match[1]);
   }
-  // A code the message hands over by name beats one that merely happens to be shaped like one.
-  // Ties still refuse: two hand-overs, or two bare candidates and no hand-over, is a message this
-  // cannot read, and reading it wrongly would type someone else's string into an employer's form.
-  if (introduced.size === 1) return [...introduced][0];
+  if (allowGreenhouseLetterCode) {
+    for (const pattern of CONTEXTUAL_ALPHA_CODE_PATTERNS) {
+      for (const match of text.matchAll(pattern)) {
+        if (isGreenhouseLetterCode(match[1])) candidates.add(match[1]);
+      }
+    }
+  }
   return candidates.size === 1 ? [...candidates][0] : null;
 }
 
@@ -303,7 +308,10 @@ export function extractVerificationCode(
       if (received < earliest || received > latest) return [];
       const domain = senderDomain(message.sender);
       if (!domain || !allowedSender(domain, allowedDomains)) return [];
-      const code = extractCodeFromVerificationText(`${message.subject}\n${message.text}`);
+      const code = extractCodeFromVerificationText(
+        `${message.subject}\n${message.text}`,
+        isGreenhouseVerificationPortal(portalUrl),
+      );
       return code ? [{ message, code, domain }] : [];
     })
     .sort((left, right) => right.message.receivedAt!.getTime() - left.message.receivedAt!.getTime());

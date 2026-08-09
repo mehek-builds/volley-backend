@@ -13,6 +13,7 @@ import {
   controlledScreenshotObjectKey,
   controlledDatabaseTarget,
   controlledManagedReceivingProof,
+  controlledForwardedEmailForRun,
   controlledQaPacketSpec,
   controlledPortalBinding,
   managedApplicationAlias,
@@ -21,6 +22,25 @@ import {
   securityCodePortalUrl,
   signedInboundRequest,
 } from './qa-guest-submissions-lib.mjs';
+
+test('sequential forwarding evidence is bound to the current application alias', () => {
+  const subject = '[Litos] Your Greenhouse application security code';
+  const to = 'qa-recipient@example.test';
+  const messages = [
+    { subject, to: [to], html: '<p>Received at app-first@litos-qa.resend.app.</p>' },
+    { subject, to: [to], html: '<p>Received at app-second@litos-qa.resend.app.</p>' },
+  ];
+  assert.equal(controlledForwardedEmailForRun(messages, {
+    subject,
+    to,
+    alias: 'app-second@litos-qa.resend.app',
+  }), messages[1]);
+  assert.equal(controlledForwardedEmailForRun(messages, {
+    subject,
+    to,
+    alias: 'app-missing@litos-qa.resend.app',
+  }), undefined);
+});
 import { applicationLeadAlignmentIssues } from '../src/routes/applications.ts';
 
 const marker = 'controlled_database_marker_123456';

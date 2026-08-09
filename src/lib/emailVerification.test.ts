@@ -107,44 +107,105 @@ test('extracts a contextual Greenhouse alphanumeric code but rejects ordinary ne
   assert.equal(extractCodeFromVerificationText('Your application for ENGINEER was received.'), null);
 });
 
-/* THE CODES GREENHOUSE ACTUALLY SENDS, three of which used to be invisible.
+test('extracts case-sensitive letter-only Greenhouse codes only from explicit code grammar', () => {
+  assert.equal(
+    extractCodeFromVerificationText('Your security code is TPHJrFMJ. It expires soon.'),
+    null,
+  );
+  assert.equal(
+    extractCodeFromVerificationText('Enter this security code TPHJrFMJ to continue.', true),
+    'TPHJrFMJ',
+  );
+  assert.equal(extractCodeFromVerificationText('Your security code is REQUIRED before continuing.', true), null);
+  assert.equal(extractCodeFromVerificationText('Your security code is PASSWORD before continuing.', true), null);
+  assert.equal(extractCodeFromVerificationText('Use this security code CONTINUE to continue.', true), null);
+  assert.equal(extractCodeFromVerificationText('Your security code is XXUYBKOD.', true), null);
+  assert.equal(
+    extractCodeFromVerificationText('Your old security code is AB12CD34. Your new security code is TPHJrFMJ.', true),
+    null,
+  );
+});
+
+/* THE SENTENCE GREENHOUSE REALLY SENDS, as opposed to a paraphrase of it.
  *
- * The shape rule required an 8-character candidate to hold at least one letter AND at least one
- * digit. Real Greenhouse codes are not built that way. These four are the ones on record: three read
- * out of this applicant's own mailbox on 2026-08-09 during a live Cresta application, and one from
- * Greenhouse's own support copy. Only LH0Yjubx has a digit in it.
+ * Every case in the test above is a synthetic wording, and the letter-code grammar was written to
+ * match those rather than the live email. Against the real body it matched nothing:
  *
- * That is not a rare edge. It means automatic retrieval could read roughly one code in four, so
- * three applications in four parked on 'awaiting_security_code' asking a person for something Litos
- * had already been emailed - and asking for it in a form that could never be used, because the
- * employer replaces the code on the next send. It is the reason the automated half of this feature
- * has never visibly worked, and every other fix in the held-session path is worthless without it.
+ *   "Copy and paste this code into the security code field on your application: LSlOXjvZ.
+ *    After you enter the code, resubmit your application."
+ *
+ * Twenty-eight characters of instruction sit between "code" and the token, so all three original
+ * patterns miss. LSlOXjvZ and yFxeFpSl were read out of this applicant's mailbox on 2026-08-09
+ * during a live Cresta application and neither was readable; TPHJrFMJ is Greenhouse's own support
+ * copy and it was not readable either. Nothing downstream can work without this: the held-session
+ * design finishes an application by reading the code its own submit caused, and there was no
+ * Greenhouse code it could read.
  */
-test('reads the mixed-case, digitless codes Greenhouse really sends', () => {
-  const email = (code: string) => 'Hi Mehek,\n\nCopy and paste this code into the security code field '
+test('reads the codes out of the sentence Greenhouse actually writes', () => {
+  const body = (code: string) => 'Hi Mehek,\n\nCopy and paste this code into the security code field '
     + `on your application: ${code}. After you enter the code, resubmit your application.`;
-  for (const code of ['LSlOXjvZ', 'LH0Yjubx', 'yFxeFpSl', 'TPHJrFMJ']) {
-    assert.equal(extractCodeFromVerificationText(email(code)), code, code);
+  for (const code of ['LSlOXjvZ', 'yFxeFpSl', 'TPHJrFMJ']) {
+    assert.equal(extractCodeFromVerificationText(body(code), true), code, code);
+  }
+  // The digit-bearing shape was already readable, and stays readable through the same sentence.
+  assert.equal(extractCodeFromVerificationText(body('LH0Yjubx'), true), 'LH0Yjubx');
+  // Still gated on the portal: an unflagged board gets no letter-only code out of the same words.
+  assert.equal(extractCodeFromVerificationText(body('LSlOXjvZ')), null);
+  // And still gated on the casing test, so an ordinary capitalised word after a colon is not a code.
+  assert.equal(extractCodeFromVerificationText(
+    'Your security code is on its way for application: Thursday morning.', true,
+  ), null);
+});
+
+test('matches a mixed-case Greenhouse code only inside its authenticated application alias', () => {
+  const requestedAt = new Date('2026-08-09T20:43:18.000Z');
+  const row = {
+    from_email: 'no-reply@greenhouse.io',
+    to_email: 'app-405b84f7ae-target@litos-qa.resend.app',
+    subject: 'Your Greenhouse application security code',
+    text: 'Your security code is TPHJrFMJ. It expires soon.',
+    html: '<p>Your security code is <strong>TPHJrFMJ</strong>. It expires soon.</p>',
+    received_at: new Date('2026-08-09T20:43:27.471Z'),
+    raw_json: { authentication: { spf: 'pass', dkim: 'pass', dmarc: 'pass' } },
+  };
+  const portal = 'http://localhost:3300/qa/portal-submission?board=greenhouse&shape=security-code&case=email-2';
+  const previous = process.env.LITOS_ENABLE_TEST_PORTAL;
+  process.env.LITOS_ENABLE_TEST_PORTAL = 'true';
+  try {
+    assert.equal(extractLitosVerificationCode(
+      [row],
+      portal,
+      requestedAt,
+      'app-405b84f7ae-target@litos-qa.resend.app',
+    )?.code, 'TPHJrFMJ');
+    assert.equal(extractLitosVerificationCode(
+      [{ ...row, raw_json: {} }],
+      portal,
+      requestedAt,
+      'app-405b84f7ae-target@litos-qa.resend.app',
+    ), null);
+  } finally {
+    if (previous === undefined) delete process.env.LITOS_ENABLE_TEST_PORTAL;
+    else process.env.LITOS_ENABLE_TEST_PORTAL = previous;
   }
 });
 
-test('an eight-letter word is not a code, and internal capitals alone do not make one', () => {
-  // 'Security' is eight letters with a capital, and its only capital is the first: a capitalised
-  // word is not a random string. The rule is an uppercase that FOLLOWS a lowercase.
-  assert.equal(extractCodeFromVerificationText('Your security code request was received. Security matters.'), null);
-  // Two shaped candidates and no hand-over sentence is a message this cannot read, and it says so
-  // rather than choosing. Widening the shape widened this risk, and the refusal is what bounds it.
-  assert.equal(extractCodeFromVerificationText('security code McDonald and also iPhoneXs'), null);
-});
-
-test('a code the message hands over by name wins over one that merely looks like a code', () => {
-  assert.equal(
-    extractCodeFromVerificationText(
-      'Copy and paste this code into the security code field on your application: yFxeFpSl. '
-      + 'Sent on behalf of McDonald Corp.',
-    ),
-    'yFxeFpSl',
-  );
+test('letter-only code parsing is confined to Greenhouse portals', () => {
+  const requestedAt = new Date('2026-08-09T20:43:18.000Z');
+  const message = {
+    subject: 'Your security code',
+    from: 'no-reply@lever.co',
+    to: 'applicant@example.com',
+    receivedAt: '2026-08-09T20:43:27.471Z',
+    authenticationResults: 'spf=pass smtp.mailfrom=lever.co',
+    text: 'Your security code is TPHJrFMJ.',
+  };
+  assert.equal(extractVerificationCode(
+    [{ provider: 'gmail', data: { messages: [message] } }],
+    'https://jobs.lever.co/acme/123',
+    requestedAt,
+    'applicant@example.com',
+  ), null);
 });
 
 test('accepts recent Gmail messages only from the portal sender allowlist', () => {
