@@ -323,26 +323,34 @@ test('rejects insecure and lookalike portal URLs', () => {
 });
 
 test('controlled portal is gated by an explicit server flag', () => {
-  const previous = process.env.LITOS_ENABLE_TEST_PORTAL;
-  delete process.env.LITOS_ENABLE_TEST_PORTAL;
-  assert.throws(() => detectPortal('https://trylitos.com/qa/portal-submission'), /cannot fill in/);
-  process.env.LITOS_ENABLE_TEST_PORTAL = 'true';
-  assert.equal(detectPortal('https://trylitos.com/qa/portal-submission'), 'controlled_test');
-  assert.equal(detectPortal('http://localhost:3000/qa/portal-submission'), 'controlled_test');
-  assert.equal(detectPortal('https://trylitos.com/qa/portal-submission?board=lever'), 'controlled_lever');
-  assert.equal(detectPortal('https://trylitos.com/qa/portal-submission?board=ashby'), 'controlled_ashby');
-  assert.equal(
-    detectPortal('https://trylitos.com/qa/portal-submission?board=smartrecruiters'),
-    'controlled_smartrecruiters',
-  );
-  assert.equal(detectPortal('https://trylitos.com/qa/portal-submission/lever/lever-02'), 'controlled_lever');
-  assert.equal(detectPortal('https://trylitos.com/qa/portal-submission/ashby/ashby-03'), 'controlled_ashby');
-  assert.equal(
-    detectPortal('https://trylitos.com/qa/portal-submission/smartrecruiters/smartrecruiters-04'),
-    'controlled_smartrecruiters',
-  );
-  if (previous === undefined) delete process.env.LITOS_ENABLE_TEST_PORTAL;
-  else process.env.LITOS_ENABLE_TEST_PORTAL = previous;
+  const previous = {
+    enabled: process.env.LITOS_ENABLE_TEST_PORTAL,
+    nodeEnv: process.env.NODE_ENV,
+  };
+  try {
+    process.env.NODE_ENV = 'test';
+    delete process.env.LITOS_ENABLE_TEST_PORTAL;
+    assert.throws(() => detectPortal('http://localhost:3000/qa/portal-submission'), /secure link|cannot fill in/);
+    process.env.LITOS_ENABLE_TEST_PORTAL = 'true';
+    assert.equal(detectPortal('http://localhost:3000/qa/portal-submission'), 'controlled_test');
+    assert.equal(detectPortal('http://localhost:3000/qa/portal-submission?board=lever'), 'controlled_lever');
+    assert.equal(detectPortal('http://localhost:3000/qa/portal-submission?board=ashby'), 'controlled_ashby');
+    assert.equal(
+      detectPortal('http://localhost:3000/qa/portal-submission?board=smartrecruiters'),
+      'controlled_smartrecruiters',
+    );
+    assert.equal(detectPortal('http://localhost:3000/qa/portal-submission/lever/lever-02'), 'controlled_lever');
+    assert.equal(detectPortal('http://localhost:3000/qa/portal-submission/ashby/ashby-03'), 'controlled_ashby');
+    assert.equal(
+      detectPortal('http://localhost:3000/qa/portal-submission/smartrecruiters/smartrecruiters-04'),
+      'controlled_smartrecruiters',
+    );
+  } finally {
+    if (previous.enabled === undefined) delete process.env.LITOS_ENABLE_TEST_PORTAL;
+    else process.env.LITOS_ENABLE_TEST_PORTAL = previous.enabled;
+    if (previous.nodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previous.nodeEnv;
+  }
 });
 
 test('a signed non-production portal tunnel reaches the controlled adapter and nothing else does', () => {
@@ -2829,14 +2837,23 @@ test('direct required-field fallback treats unchecked required choices as empty'
 });
 
 test('the QA harness routes to each new controlled adapter, by query param and by path', () => {
-  const previous = process.env.LITOS_ENABLE_TEST_PORTAL;
-  process.env.LITOS_ENABLE_TEST_PORTAL = 'true';
-  for (const board of ['workable', 'jazzhr', 'paylocity'] as const) {
-    assert.equal(detectPortal(`https://trylitos.com/qa/portal-submission?board=${board}`), `controlled_${board}`);
-    assert.equal(detectPortal(`https://trylitos.com/qa/portal-submission/${board}/${board}-01`), `controlled_${board}`);
+  const previous = {
+    enabled: process.env.LITOS_ENABLE_TEST_PORTAL,
+    nodeEnv: process.env.NODE_ENV,
+  };
+  try {
+    process.env.NODE_ENV = 'test';
+    process.env.LITOS_ENABLE_TEST_PORTAL = 'true';
+    for (const board of ['workable', 'jazzhr', 'paylocity'] as const) {
+      assert.equal(detectPortal(`http://localhost:3000/qa/portal-submission?board=${board}`), `controlled_${board}`);
+      assert.equal(detectPortal(`http://localhost:3000/qa/portal-submission/${board}/${board}-01`), `controlled_${board}`);
+    }
+  } finally {
+    if (previous.enabled === undefined) delete process.env.LITOS_ENABLE_TEST_PORTAL;
+    else process.env.LITOS_ENABLE_TEST_PORTAL = previous.enabled;
+    if (previous.nodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previous.nodeEnv;
   }
-  if (previous === undefined) delete process.env.LITOS_ENABLE_TEST_PORTAL;
-  else process.env.LITOS_ENABLE_TEST_PORTAL = previous;
 });
 
 test('the new host rules reject marketing sites and the Paylocity employee login', () => {
@@ -3374,14 +3391,23 @@ test('Greenhouse managed actions stay inside the Stratus action budget on Nuro-s
 });
 
 test('the QA harness routes to the three new controlled adapters, by query param and by path', () => {
-  const previous = process.env.LITOS_ENABLE_TEST_PORTAL;
-  process.env.LITOS_ENABLE_TEST_PORTAL = 'true';
-  for (const board of ['rippling', 'breezy', 'bamboohr'] as const) {
-    assert.equal(detectPortal(`https://trylitos.com/qa/portal-submission?board=${board}`), `controlled_${board}`);
-    assert.equal(detectPortal(`https://trylitos.com/qa/portal-submission/${board}/${board}-01`), `controlled_${board}`);
+  const previous = {
+    enabled: process.env.LITOS_ENABLE_TEST_PORTAL,
+    nodeEnv: process.env.NODE_ENV,
+  };
+  try {
+    process.env.NODE_ENV = 'test';
+    process.env.LITOS_ENABLE_TEST_PORTAL = 'true';
+    for (const board of ['rippling', 'breezy', 'bamboohr'] as const) {
+      assert.equal(detectPortal(`http://localhost:3000/qa/portal-submission?board=${board}`), `controlled_${board}`);
+      assert.equal(detectPortal(`http://localhost:3000/qa/portal-submission/${board}/${board}-01`), `controlled_${board}`);
+    }
+  } finally {
+    if (previous.enabled === undefined) delete process.env.LITOS_ENABLE_TEST_PORTAL;
+    else process.env.LITOS_ENABLE_TEST_PORTAL = previous.enabled;
+    if (previous.nodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previous.nodeEnv;
   }
-  if (previous === undefined) delete process.env.LITOS_ENABLE_TEST_PORTAL;
-  else process.env.LITOS_ENABLE_TEST_PORTAL = previous;
 });
 
 test('the three new controlled variants exercise their live family’s selectors exactly', () => {
