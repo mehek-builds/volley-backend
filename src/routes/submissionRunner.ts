@@ -51,6 +51,7 @@ import {
   detectCaptchaProvider,
   captchaProviderForFamily,
   buildManagedPortalActions,
+  budgetDroppedReviewedQuestions,
   attachManagedFieldOptions,
   buildManagedDiscoveredOptionProbeActions,
   managedOptionProbeTargets,
@@ -1589,6 +1590,23 @@ async function prepareManaged(
   packet.fieldOptions = fieldOptions;
 
   const fillActions = buildManagedPortalActions(portal, packet);
+  /* Which reviewed questions this run will not even attempt.
+   *
+   * On a form small enough to fit the runner's action ceiling this is empty and costs nothing. On
+   * one that does not fit, the builder trims rather than throwing - a prepare run cannot press
+   * submit, so there is no send to protect and a partly filled form she can finish beats a dead
+   * packet - and this is what stops that trade being made behind her back. Read off the finished
+   * action list rather than predicted from the budget, because every silent drop this module has
+   * shipped looked correct in the arithmetic that produced it. */
+  const unattemptedQuestions = budgetDroppedReviewedQuestions(packet, fillActions);
+  if (unattemptedQuestions.length > 0) {
+    fastify.log.error({
+      applicationId: row.id,
+      portal,
+      actionCount: fillActions.length,
+      unattemptedQuestions,
+    }, 'The action budget could not hold every reviewed question, so some were not attempted');
+  }
   const result = await runManagedBrowser(applicationUrl, fillActions);
   if (!result.screenshot) throw new Error('Stratus managed browser did not return a preview screenshot');
   /* A value Litos typed that the run then said nothing whatsoever about.
@@ -1704,12 +1722,31 @@ async function prepareManaged(
   const answerLossReasons = managedAnswerLossReasons({
     skipped: [...(result.skipped ?? []), ...(discoveryResult?.skipped ?? [])],
   });
+  /* The questions the action budget could not hold, in her words.
+   *
+   * Unlike answerLossReasons directly above, this DOES gate the send, and the difference is which
+   * way the uncertainty runs. A value that did not stick is a value Litos tried to type and the page
+   * did not keep; if that control was required, the employer's own blocker already says so. A
+   * question with no action was never typed at all, on a form Litos was handed an answer for, and
+   * nothing else in this function will notice: it is not in filled_fields, it produces no provider
+   * blocker unless the employer happens to mark it required, and the preview screenshot shows a
+   * blank that looks like every other optional blank. Sending that under standing consent is the
+   * silent drop this whole budget exists to prevent, one layer up. */
+  const budgetShortfallReasons = unattemptedQuestions.length > 0
+    ? [
+      `This application asks more questions than Litos can fill in one pass, so ${unattemptedQuestions.length} `
+      + `of them ${unattemptedQuestions.length === 1 ? 'was' : 'were'} left untouched and nothing has been sent: `
+      + `${unattemptedQuestions.map((q) => `"${q.slice(0, 60)}"`).join(', ').slice(0, 400)}. `
+      + 'Open it when you have a minute and finish those by hand.',
+    ]
+    : [];
   const attentionReasons = [
     ...blockers,
     ...discoveryAttention,
     ...evidenceBlockers,
     ...coverLetterAttention,
     ...answerLossReasons,
+    ...budgetShortfallReasons,
     ...honestyReasons,
   ];
   const attentionCategories = attentionCategoriesForReasons(attentionReasons);
@@ -1732,6 +1769,10 @@ async function prepareManaged(
     && evidenceBlockers.length === 0
     && discoveryFailures.length === 0
     && coverLetterAttention.length === 0
+    // A question the run never attempted is an answer she gave Litos and Litos did not use. The
+    // submit path refuses outright rather than trade one away; this is the same refusal on the path
+    // that has no submit button to withhold, and it is what makes the trim above safe to allow.
+    && unattemptedQuestions.length === 0
     && unansweredRequiredQuestions.length === 0;
   /* A FILL RUN THAT FOUND A SECURITY-CODE SCREEN HAS SUBMITTED THIS APPLICATION.
    *

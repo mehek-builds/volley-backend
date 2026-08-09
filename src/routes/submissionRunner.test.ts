@@ -1306,6 +1306,40 @@ test('a scan that threw with no message is still a failure, not a silent success
   assert.doesNotMatch(runner, /attentionCount:[^\n]*honestyReasons\.length/);
 });
 
+/* A QUESTION THE BUDGET DROPPED MAY NOT BE SENT OVER.
+ *
+ * buildManagedPortalActions used to refuse a prepare run whose reviewed questions could not all fit,
+ * which cost the applicant the fixed fields, the preview and the evidence reads on the packets most
+ * likely to need them. It now trims instead - a prepare run has no submit button to withhold - and
+ * that trade is only acceptable while every dropped question is surfaced and blocks the send.
+ *
+ * Without the gate the failure is completely silent: a dropped question is not in filled_fields, it
+ * produces no provider blocker unless the employer happens to mark it required, and on the preview
+ * screenshot it is a blank that looks like every other optional blank. Standing consent then turns
+ * `safe` into a click in the same call, and an answer she gave Litos goes to the employer missing.
+ *
+ * Asserted against the source for the same reason as the test below: prepareManaged needs a remote
+ * runner, a database and blob storage, so the wiring is what can be pinned here. Mutation-checked -
+ * removing the gate leaves every behavioural test in the suite green. */
+test('a question the action budget dropped blocks the send and is named to the applicant', () => {
+  const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+
+  // Computed from the finished action list, through the helper that separates a budget drop from a
+  // family that never fills questions at all. The undiscriminating helper here would mark every
+  // SmartRecruiters, JazzHR and BambooHR packet unsendable over a pre-existing scope limit.
+  assert.match(runner, /budgetDroppedReviewedQuestions\(packet, fillActions\)/);
+  assert.doesNotMatch(runner, /reviewedQuestionsWithoutActions\(packet, fillActions\)/);
+
+  // It reaches her attention list...
+  assert.match(runner, /\.\.\.budgetShortfallReasons/);
+  assert.match(runner, /left untouched and nothing has been sent/);
+  // ...and it gates the send, not just the display.
+  assert.match(runner, /&& unattemptedQuestions\.length === 0/);
+  // Logged as an error too: a run that cannot hold the questions it was given is a product defect
+  // before it is the applicant's problem.
+  assert.match(runner, /The action budget could not hold every reviewed question/);
+});
+
 /* NEITHER prepare path may throw the question scan's failure away.
  *
  * prepareManaged learned this on 2026-08-08, from a DRW packet whose discovery call was rejected
