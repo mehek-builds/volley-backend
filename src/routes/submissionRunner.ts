@@ -67,6 +67,7 @@ import {
   readReceipt,
   type SubmissionPacket,
   type SupportedPortal,
+  ManagedActionBudgetError,
   NoSubmitControlError,
 } from '../lib/portalSubmission';
 import { applyReviewPatch, beginStall } from '../lib/applicationStall';
@@ -2579,13 +2580,17 @@ export function submissionFailureOutcome(input: {
   captchaStop: 'before_fill' | 'at_submit' | null;
   noSubmitControl: boolean;
   regenerationRequired?: boolean;
+  /* The applicant-facing sentence from a ManagedActionBudgetError, or null. A string rather than a
+     boolean because the error composes its own reason from the portal and the question count, and
+     re-deriving it here would be a second place to keep that wording correct. */
+  actionBudgetStop?: string | null;
   uncertainAfterClaim: boolean;
   externalGate: boolean;
   providerSessionFailure: boolean;
   currentAttentionReason: string | undefined;
 }): SubmissionFailureOutcome {
-  const { captchaStop, noSubmitControl, regenerationRequired, uncertainAfterClaim, externalGate, providerSessionFailure } = input;
-  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || regenerationRequired || uncertainAfterClaim || providerSessionFailure
+  const { captchaStop, noSubmitControl, regenerationRequired, actionBudgetStop, uncertainAfterClaim, externalGate, providerSessionFailure } = input;
+  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || regenerationRequired || actionBudgetStop || uncertainAfterClaim || providerSessionFailure
     ? 'needs_attention'
     : externalGate ? 'submit_requested' : 'failed';
   const attentionReason = captchaStop === 'at_submit'
@@ -2594,6 +2599,12 @@ export function submissionFailureOutcome(input: {
       ? 'This company asks you to prove you are human before it will take an application, so Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.'
       : regenerationRequired
         ? 'This application must be regenerated before submission because its stored Litos email no longer matches the active inbound email route. Nothing was sent to the employer.'
+      : actionBudgetStop
+        /* Ranked above uncertainAfterClaim for the same reason as its two neighbours: the throw
+           happens before the browser is driven, so nothing was sent and there is no confirmation to
+           hunt for. The error's own sentence is used verbatim - it already names the portal and the
+           question count, which is what makes this one actionable rather than mysterious. */
+        ? `${actionBudgetStop} Nothing was sent. Remove or answer fewer optional questions on this application, then try again.`
       : noSubmitControl
         /* CAUSE-NEUTRAL. NoSubmitControlError is thrown for a multi-step first page, a page that
            renders nothing in a headless browser, a control relabelled mid-run, and a click that
@@ -2658,9 +2669,18 @@ async function fail(row: ResumeRow, error: unknown) {
      the routine outcome on a multi-step first page, not an edge case. */
   const noSubmitControl = error instanceof NoSubmitControlError;
   const regenerationRequired = error instanceof ApplicantEmailRegenerationRequiredError;
+  /* The third member of the same family as the two branches above, and it arrives with proof.
+     buildManagedPortalActions throws this while ASSEMBLING the action list, before runManagedBrowser
+     is called at all, and it records submitActionAppended: false to say so. So the click provably
+     did not happen and nothing reached the employer - the one thing uncertainAfterClaim's "the
+     submission was attempted, check the portal or your email" must never be said about. The claim is
+     taken at the top of the run, so without this the budget stop inherits that sentence AND leaves
+     the packet at needs_attention-after-claim, which submitRequestDisposition refuses to re-run: an
+     application permanently stuck behind a receipt that cannot exist. */
+  const actionBudgetStop = error instanceof ManagedActionBudgetError ? error.blocker : null;
 
   const outcome = submissionFailureOutcome({
-    captchaStop, noSubmitControl, regenerationRequired, uncertainAfterClaim, externalGate, providerSessionFailure,
+    captchaStop, noSubmitControl, regenerationRequired, actionBudgetStop, uncertainAfterClaim, externalGate, providerSessionFailure,
     currentAttentionReason: current.attention_reason,
   });
 
