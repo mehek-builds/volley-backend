@@ -316,6 +316,21 @@ test('a security-code challenge is persisted before any receipt is parsed', asyn
   assert.ok(receiptRead > awaitingWrite, 'receipt parsing must happen only after the challenge branch returns');
 });
 
+test('automatic verification records one remote managed continuation without exposing its token', async () => {
+  const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const start = source.indexOf('const continuationEvidence = continuationIsLive');
+  const end = source.indexOf('if (!receiptResult.screenshot)', start);
+  assert.ok(start > 0 && end > start);
+  const continuation = source.slice(start, end);
+  assert.match(continuation, /runner: 'stratus-managed'/);
+  assert.match(continuation, /managedContinuationFingerprint\(continuationToken\)/);
+  assert.match(continuation, /receiptResult = await continueManagedBrowser\(continuationToken, prepared.actions\)/);
+  assert.match(continuation, /continuation_resumed: true/);
+  assert.doesNotMatch(continuation, /continuation_token:/i);
+  const receipt = source.slice(end, source.indexOf("fastify.log.info({ applicationId: row.id }", end));
+  assert.match(receipt, /source: 'managed_browser'/);
+});
+
 test('manual code continuation atomically claims the waiting application', async () => {
   const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
   const helperStart = source.indexOf('async function claimSecurityCodeSubmission(');

@@ -10,6 +10,7 @@ import {
   managedReceivingProofRouteFingerprint,
   recentManagedReceivingProof,
 } from './applicationEmailReceivingProof';
+import { controlledQaEmailCapture } from './email';
 
 /* CAN THE ALIAS DOMAIN ACTUALLY RECEIVE MAIL, measured rather than assumed.
  *
@@ -130,6 +131,7 @@ export function inboundAliasDisabled(): boolean {
 }
 
 export function applicationEmailForwardingConfigured(): boolean {
+  if (controlledQaEmailCapture()) return true;
   const key = process.env.RESEND_API_KEY?.trim();
   const sender = process.env.RESEND_FROM?.trim();
   if (!key || !sender) return false;
@@ -274,6 +276,16 @@ async function probe(probes: DeliverabilityProbes): Promise<AliasDeliverability>
       if (!proved) return { ...base, reason: 'managed_receiving_proof_mismatch' };
     } catch (error) {
       return { ...base, reason: 'check_unavailable', detail: describeManagedProofError(error) };
+    }
+
+    if (controlledQaEmailCapture()) {
+      return {
+        ...base,
+        deliverable: true,
+        reason: 'deliverable',
+        inbound_route_configured: true,
+        detail: 'Controlled local QA adapter with fresh signed route evidence',
+      };
     }
 
     try {

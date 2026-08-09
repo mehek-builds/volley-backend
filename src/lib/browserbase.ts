@@ -1,5 +1,6 @@
 import { chromium, type Browser, type Page } from 'playwright-core';
 import { getVercelOidcToken } from '@vercel/oidc';
+import { createHash } from 'node:crypto';
 
 export type BrowserProvider = 'browserbase' | 'stratus' | 'stratus-managed';
 
@@ -226,7 +227,9 @@ export function isBrowserbaseConfigured(): boolean {
   if (provider === 'stratus-managed') {
     return Boolean(
       process.env.STRATUS_BASE_URL?.trim()
-      && (process.env.STRATUS_API_KEY?.trim() || process.env.VERCEL_ENV === 'production'),
+      && (process.env.STRATUS_API_KEY?.trim()
+        || process.env.VERCEL_OIDC_TOKEN?.trim()
+        || process.env.VERCEL_ENV === 'production'),
     );
   }
   return Boolean(process.env.BROWSER_API_KEY
@@ -235,6 +238,11 @@ export function isBrowserbaseConfigured(): boolean {
 
 export function isManagedStratusProvider(): boolean {
   return process.env.BROWSER_PROVIDER === 'stratus-managed';
+}
+
+export function managedContinuationFingerprint(token: string): string {
+  if (!/^[A-Za-z0-9_-]{32,200}$/.test(token)) throw new Error('Managed Stratus continuation token is invalid');
+  return createHash('sha256').update(`stratus-managed-continuation-v1:${token}`).digest('hex').slice(0, 24);
 }
 
 // `screenshot` defaults to true because every existing caller wants the receipt image. The CAPTCHA
@@ -254,7 +262,7 @@ export async function runManagedBrowser(
   const baseUrl = process.env.STRATUS_BASE_URL?.replace(/\/$/, '');
   const apiKey = process.env.STRATUS_API_KEY?.trim();
   if (!baseUrl) throw new Error('Stratus managed browser is not configured');
-  const authorization = !apiKey && process.env.VERCEL_ENV === 'production'
+  const authorization = !apiKey && (process.env.VERCEL_OIDC_TOKEN?.trim() || process.env.VERCEL_ENV === 'production')
     ? `Bearer ${await getVercelOidcToken()}`
     : undefined;
   if (!apiKey && !authorization) throw new Error('Stratus managed browser is not configured');
@@ -295,7 +303,7 @@ export async function continueManagedBrowser(
   const baseUrl = process.env.STRATUS_BASE_URL?.replace(/\/$/, '');
   const apiKey = process.env.STRATUS_API_KEY?.trim();
   if (!baseUrl) throw new Error('Stratus managed browser is not configured');
-  const authorization = !apiKey && process.env.VERCEL_ENV === 'production'
+  const authorization = !apiKey && (process.env.VERCEL_OIDC_TOKEN?.trim() || process.env.VERCEL_ENV === 'production')
     ? `Bearer ${await getVercelOidcToken()}`
     : undefined;
   if (!apiKey && !authorization) throw new Error('Stratus managed browser is not configured');
