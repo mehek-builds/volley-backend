@@ -111,6 +111,19 @@ export const bodySchema = z.object({
   onsite_commitment: z.enum(['anywhere', 'listed_locations', 'no']).nullable().optional(),
   onsite_locations: z.array(z.string()).nullable().optional(),
   relocation_willingness: z.enum(['yes', 'no']).nullable().optional(),
+
+  /* ---- when the internship can run: the scoped, expiring window ----
+   *
+   * SHAPE-CHECKED HERE, MEANING-CHECKED IN lib/availabilityWindow.ts. The two dates and the expiry
+   * must be ISO YYYY-MM-DD and the cycle must be a season and a year, because a value that does not
+   * parse is indistinguishable from "never asked" once it reaches the resolver - it would save with
+   * a 200 and then silently stop answering, which is the worst of the three outcomes. Rejecting the
+   * save is how the student finds out. Everything about whether the window is coherent, still live,
+   * and about THIS posting stays in one place downstream. */
+  availability_window_start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+  availability_window_end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+  availability_cycle: z.string().regex(/^(?:Spring|Summer|Fall|Winter) (?:20)\d{2}$/).nullable().optional(),
+  availability_valid_through: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
 });
 
 /* The consent timestamp is SERVER-SET, never taken from the body, which is why it has no line

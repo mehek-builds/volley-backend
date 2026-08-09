@@ -208,6 +208,17 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
     onsite_commitment: onsiteCommitment(factString(appRow, 'onsite_commitment')),
     onsite_locations: factStringList(appRow, 'onsite_locations'),
     relocation_willingness: yesNo(factString(appRow, 'relocation_willingness')),
+
+    /* The scoped availability window, read raw and passed through unvalidated ON PURPOSE. Whether
+     * these four amount to a declaration that may answer a given posting is one decision and it
+     * lives in one place, lib/availabilityWindow.ts, next to the reasoning for every rejection.
+     * Narrowing here as well would put half the rule in a loader, which is how the two copies of
+     * the classification regexes drifted. A missing column reads undefined, and undefined is
+     * "never asked", which the resolver answers by leaving the question for the student. */
+    availability_window_start: factString(appRow, 'availability_window_start'),
+    availability_window_end: factString(appRow, 'availability_window_end'),
+    availability_cycle: factString(appRow, 'availability_cycle'),
+    availability_valid_through: factString(appRow, 'availability_valid_through'),
   };
 }
 
