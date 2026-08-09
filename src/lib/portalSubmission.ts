@@ -646,7 +646,7 @@ const READ_FIELD_GROUP_DIAL_CODES_SCRIPT = String.raw`(element) => {
 const readFieldGroupDialCodes = new Function(
   'element',
   'return (' + READ_FIELD_GROUP_DIAL_CODES_SCRIPT + ')(element);',
-) as (element: SVGElement | HTMLElement) => string[];
+) as (element: unknown) => string[];
 
 function greenhouseLocationSearch(packet: SubmissionPacket): string | undefined {
   if (!packet.city) return undefined;
