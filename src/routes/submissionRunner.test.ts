@@ -1333,7 +1333,22 @@ test('neither prepare path can call a form safe on the strength of a scan that f
   // Both scans record what went wrong rather than returning an empty result that says nothing,
   // and both normalize the thrown value so an empty Error message cannot become an empty record.
   assert.equal(runner.match(/discoveryFailures\.push\(message\)/g)?.length, 2);
-  assert.equal(runner.match(/describeDiscoveryFailure\(error\)/g)?.length, 2);
+  /* THREE normalizers, TWO of which can hold the send, and the difference is the point.
+   *
+   * The third is the option-probe pass: a read-only third managed call that opens each closed
+   * control the discovery pass found and reads its real option list. It normalizes its error for the
+   * same reason the other two do - an empty `new Error()` message logs as nothing - but it must NOT
+   * push into discoveryFailures. A failed option read leaves the form exactly as legible as it was
+   * before that pass existed: the control has no options, and the alias ladder answers it. Holding
+   * the send on that would turn a degraded read into a stopped application.
+   *
+   * The count above is the assertion that matters and is deliberately still 2. */
+  assert.equal(runner.match(/describeDiscoveryFailure\(error\)/g)?.length, 3);
+  assert.doesNotMatch(
+    runner,
+    /Option probe pass failed[\s\S]{0,400}discoveryFailures\.push/,
+    'a missing option list degrades to the alias ladder; it is not evidence the form was never read',
+  );
   assert.equal(
     runner.match(/'Question discovery pass failed, so this run cannot see the questions this form asks'/g)?.length,
     2,
