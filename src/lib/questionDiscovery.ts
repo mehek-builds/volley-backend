@@ -1550,8 +1550,15 @@ const GOVERNMENT_SCOPE_PARSERS: readonly {
     pattern: /^(?:(?:u s|us|united states) )?federal (?:agency|agencies)$/,
     target: { kind: 'level', level: 'federal' },
   },
+  {
+    pattern: /^(?:u s|us|united states)(?: federal)? government (?:agency|agencies)$/,
+    target: { kind: 'level', level: 'federal' },
+  },
   { pattern: /^state (?:government|agency|agencies)$/, target: { kind: 'level', level: 'state' } },
-  { pattern: /^(?:local|municipal|city|county) government$/, target: { kind: 'level', level: 'local' } },
+  {
+    pattern: /^(?:local|municipal|city|county) government(?: (?:agency|agencies))?$/,
+    target: { kind: 'level', level: 'local' },
+  },
   {
     pattern: /^(?:government(?:al)?|government (?:agency|agencies)|public sector|civil service)$/,
     target: { kind: 'any' },
@@ -1591,31 +1598,47 @@ function governmentRelationPhrase(label: string): string | null {
   return relation?.[1]?.trim() ?? null;
 }
 
-function isScopeTerminator(value: string): boolean {
-  return /^[\s.,;:!]*$/.test(value);
+/* Each row owns the entire normalized label. No search-style parser is used here: instructions or
+ * qualifications on either side of a valid-looking question make every row miss and therefore
+ * hold the answer. Present-tense/current-status forms are deliberately absent because the resume
+ * bank records employers, not whether the employment is current. */
+const GOVERNMENT_EMPLOYMENT_LABEL_PARSERS: readonly {
+  pattern: RegExp;
+  scopeGroup: number;
+}[] = [
+  { pattern: /^(?:prior|previous|past)\s+(.+?)\s+employment$/i, scopeGroup: 1 },
+  {
+    pattern: /^have\s+you\s+(?:(?:ever|previously)\s+)?worked\s+for\s+(?:the\s+)?(.+)$/i,
+    scopeGroup: 1,
+  },
+  {
+    pattern: /^did\s+you\s+(?:(?:ever|previously)\s+)?work\s+for\s+(?:the\s+)?(.+)$/i,
+    scopeGroup: 1,
+  },
+  {
+    pattern: /^have\s+you\s+(?:(?:ever|previously)\s+)?been\s+employed\s+(?:by|with)\s+(?:the\s+)?(.+)$/i,
+    scopeGroup: 1,
+  },
+  {
+    pattern: /^were\s+you\s+(?:(?:ever|previously)\s+)?employed\s+(?:by|with)\s+(?:the\s+)?(.+)$/i,
+    scopeGroup: 1,
+  },
+  {
+    pattern: /^have\s+you\s+(?:(?:ever|previously)\s+)?worked\s+in\s+(the\s+)?(public[-\s]sector|civil\s+service)$/i,
+    scopeGroup: 2,
+  },
+];
+
+function normalizedGovernmentEmploymentLabel(label: string): string {
+  return label.trim().replace(/\s+/g, ' ').replace(/[?.!]+$/g, '').trim();
 }
 
 /** What employer or government level the question itself names. */
 function governmentEmploymentTarget(label: string): GovernmentEmploymentTarget | null {
-  const relation = governmentRelationPhrase(label);
-  if (relation) return targetFromGovernmentPhrase(relation);
-  if (/\bwork(?:ed|ing|s)?\b[^?]{0,40}\bin\b[^?]{0,30}\b(?:public[-\s]sector|civil\s+service)\b/i.test(label)) {
-    return { kind: 'any' };
-  }
-  const employment = label.match(
-    /\b(?:prior|previous|past|current)\b\s+([^?\n]{1,80}?)\s+employment\b([^?\n]*)/i,
-  );
-  if (employment) {
-    if (!isScopeTerminator(employment[2])) return null;
-    return targetFromGovernmentPhrase(employment[1]);
-  }
-  const employee = label.match(
-    /\b(?:are|were|been)\s+you\b\s+([^?\n]{1,80}?)\s+employee\b([^?\n]*)/i,
-  );
-  if (employee) {
-    if (!isScopeTerminator(employee[2])) return null;
-    const scope = employee[1].replace(/^(?:(?:ever|previously|currently|formerly|a|an)\s+)+/i, '');
-    return targetFromGovernmentPhrase(scope);
+  const value = normalizedGovernmentEmploymentLabel(label);
+  for (const parser of GOVERNMENT_EMPLOYMENT_LABEL_PARSERS) {
+    const match = value.match(parser.pattern);
+    if (match) return targetFromGovernmentPhrase(match[parser.scopeGroup]);
   }
   return null;
 }

@@ -148,16 +148,19 @@ describe('prior government employment, answered from the experience bank', () =>
     assert.equal(answer(SKYDIO, notAVeteran), 'SKIP');
   });
 
-  test('Skydio\'s gloss is answered from the bank, not from the EEO block', () => {
+  test('Skydio\'s dated current-or-recent gloss holds when the bank has no dates', () => {
     /* Before this arm existed the bare word "military" inside the gloss put the whole question
      * through EEO_QUESTION, and an employment-history question came back
-     * "Decline to self-identify". Verified against the real resolver on 2026-08-09. */
-    assert.ok(isGovernmentEmploymentQuestion(SKYDIO_GLOSS));
+     * "Decline to self-identify". The bank also has no dates, so it cannot prove either current
+     * employment or employment within the stated ten-year window. */
+    assert.equal(isGovernmentEmploymentQuestion(SKYDIO_GLOSS), false);
     assert.equal(answer(SKYDIO_GLOSS, { experience_bank: BANK }), 'SKIP');
-    assert.equal(
-      answer(SKYDIO_GLOSS, { experience_bank: [...(BANK ?? []), { type: 'job', org: 'Federal Aviation Administration' }] }),
-      'VALUE Yes',
-    );
+    const withFederal = {
+      experience_bank: [...(BANK ?? []), { type: 'job' as const, org: 'Federal Aviation Administration' }],
+    };
+    assert.equal(answer(SKYDIO_GLOSS, withFederal), 'SKIP');
+    const resolved = resolveKnownAnswer(SKYDIO_GLOSS, 'checkbox', withFederal, undefined);
+    assert.ok(resolved && 'skipReason' in resolved);
   });
 
   test('the other wordings of the same question are recognised', () => {
@@ -408,6 +411,94 @@ describe('prior government employment, answered from the experience bank', () =>
       ),
       labels.map((question) => ({ question, answer: '' })),
     );
+  });
+
+  test('current-status questions hold because employer rows do not prove current employment', () => {
+    const nasa: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
+    };
+    const labels = [
+      'Current government employment?',
+      'Are you currently employed by the federal government?',
+      'Do you currently work for the U.S. government?',
+      'Are you currently a government employee?',
+      SKYDIO_GLOSS,
+    ];
+    for (const label of labels) {
+      assert.equal(isGovernmentEmploymentQuestion(label), false, label);
+      const resolved = resolveKnownAnswer(label, 'checkbox', nasa, undefined);
+      assert.ok(resolved && 'skipReason' in resolved, label);
+    }
+    assert.deepEqual(
+      refreshKnownQuestionAnswers(
+        labels.map((question) => ({ question, answer: 'Yes' })),
+        nasa,
+        undefined,
+      ),
+      labels.map((question) => ({ question, answer: '' })),
+    );
+  });
+
+  test('the parser rejects material instructions anywhere outside the complete question', () => {
+    const nasa: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
+    };
+    const labels = [
+      'Exclude internships: Have you worked for the U.S. government?',
+      'Do not include internships. Have you worked for the U.S. government?',
+      'Other than internships, have you worked for the U.S. government?',
+      'Except internships, have you worked for the U.S. government?',
+      'Have you worked for the U.S. government? Exclude internships.',
+      'Have you worked for the U.S. government? Do not include internships.',
+      'Have you worked for the U.S. government, other than internships?',
+      'Have you worked for the U.S. government, except internships?',
+    ];
+    for (const label of labels) {
+      assert.equal(isGovernmentEmploymentQuestion(label), false, label);
+      const resolved = resolveKnownAnswer(label, 'checkbox', nasa, undefined);
+      assert.ok(resolved && 'skipReason' in resolved, label);
+    }
+    assert.deepEqual(
+      refreshKnownQuestionAnswers(
+        labels.map((question) => ({ question, answer: 'Yes' })),
+        nasa,
+        undefined,
+      ),
+      labels.map((question) => ({ question, answer: '' })),
+    );
+  });
+
+  test('U.S. and local government agency grammars bind to the correct level', () => {
+    const federal: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
+    };
+    const local: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'City of Los Angeles', title: 'Analyst' }],
+    };
+    const federalLabels = [
+      'Have you worked for a U.S. government agency?',
+      'Have you ever been employed by a US government agency?',
+    ];
+    const localLabels = [
+      'Have you worked for a local government agency?',
+      'Have you ever been employed by a local government agency?',
+    ];
+    for (const label of federalLabels) {
+      assert.equal(answer(label, federal), 'VALUE Yes', label);
+      assert.equal(answer(label, local), 'SKIP', label);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: '' }], federal, undefined),
+        [{ question: label, answer: 'Yes' }],
+      );
+    }
+    for (const label of localLabels) {
+      assert.equal(answer(label, local), 'VALUE Yes', label);
+      assert.equal(answer(label, federal), 'SKIP', label);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: '' }], local, undefined),
+        [{ question: label, answer: 'Yes' }],
+      );
+    }
   });
 
   test('send-time refresh removes a stale Yes from every government adjacency', () => {
