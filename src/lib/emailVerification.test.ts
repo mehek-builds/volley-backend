@@ -5,8 +5,126 @@ import {
   extractLitosVerificationCode,
   extractVerificationCode,
   findComposioVerificationCode,
+  resolveVerificationEmailRoute,
   type EmailToolExecutor,
 } from './emailVerification';
+
+const EXACT_APPLICATION_ID = '22222222-2222-4222-8222-222222222222';
+const EXACT_USER_ID = 'user-123';
+const EXACT_ALIAS = 'app-2222222222-abcdef123456@litos-qa.resend.app';
+
+test('grants alias-only verification only for the healthy exact active application and user route', async () => {
+  const calls: Array<{ userId: string; applicationId: string; alias: string }> = [];
+  const route = await resolveVerificationEmailRoute({
+    userId: EXACT_USER_ID,
+    applicationId: EXACT_APPLICATION_ID,
+    expectedRecipient: EXACT_ALIAS,
+  }, {
+    currentAlias: (userId, applicationId) => {
+      assert.equal(userId, EXACT_USER_ID);
+      assert.equal(applicationId, EXACT_APPLICATION_ID);
+      return EXACT_ALIAS;
+    },
+    deliverability: async () => ({ deliverable: true }) as never,
+    activeAlias: async (input) => { calls.push(input); return true; },
+  });
+  assert.equal(route, 'application_alias');
+  assert.deepEqual(calls, [{ userId: EXACT_USER_ID, applicationId: EXACT_APPLICATION_ID, alias: EXACT_ALIAS }]);
+});
+
+test('fails closed for a stale route, unhealthy route, inactive alias, or missing application binding', async () => {
+  const input = {
+    userId: EXACT_USER_ID,
+    applicationId: EXACT_APPLICATION_ID,
+    expectedRecipient: EXACT_ALIAS,
+  };
+  const healthy = async () => ({ deliverable: true }) as never;
+  assert.equal(await resolveVerificationEmailRoute(input, {
+    currentAlias: () => 'app-2222222222-fedcba654321@litos-qa.resend.app',
+    deliverability: healthy,
+    activeAlias: async () => true,
+  }), 'invalid_alias');
+  assert.equal(await resolveVerificationEmailRoute(input, {
+    currentAlias: () => EXACT_ALIAS,
+    deliverability: async () => ({ deliverable: false }) as never,
+    activeAlias: async () => true,
+  }), 'invalid_alias');
+  assert.equal(await resolveVerificationEmailRoute(input, {
+    currentAlias: () => EXACT_ALIAS,
+    deliverability: healthy,
+    activeAlias: async () => false,
+  }), 'invalid_alias');
+  assert.equal(await resolveVerificationEmailRoute({
+    userId: EXACT_USER_ID,
+    expectedRecipient: EXACT_ALIAS,
+  }, {
+    currentAlias: () => EXACT_ALIAS,
+    deliverability: healthy,
+    activeAlias: async () => true,
+  }), 'invalid_alias');
+});
+
+test('rejects an exact active custom-domain alias even when generic deliverability is green', async () => {
+  const customAlias = 'app-2222222222-abcdef123456@apply.trylitos.com';
+  let healthChecks = 0;
+  let activeChecks = 0;
+  const route = await resolveVerificationEmailRoute({
+    userId: EXACT_USER_ID,
+    applicationId: EXACT_APPLICATION_ID,
+    expectedRecipient: customAlias,
+  }, {
+    currentAlias: () => customAlias,
+    deliverability: async () => {
+      healthChecks += 1;
+      return { deliverable: true } as never;
+    },
+    activeAlias: async () => {
+      activeChecks += 1;
+      return true;
+    },
+  });
+  assert.equal(route, 'invalid_alias');
+  assert.equal(healthChecks, 0);
+  assert.equal(activeChecks, 0);
+});
+
+test('an exact active alias miss never calls the connected-inbox executor', async () => {
+  let executorCalls = 0;
+  const executor: EmailToolExecutor = async () => {
+    executorCalls += 1;
+    throw new Error('poison executor must never run for an alias');
+  };
+  const match = await findComposioVerificationCode({
+    userId: EXACT_USER_ID,
+    portalUrl: 'https://job-boards.greenhouse.io/acme/jobs/123',
+    requestedAt: new Date('2026-07-25T10:00:00.000Z'),
+    expectedRecipient: EXACT_ALIAS,
+    applicationId: EXACT_APPLICATION_ID,
+    executor,
+    resolveRoute: async () => 'application_alias',
+    findAliasCode: async () => null,
+  });
+  assert.equal(match, null);
+  assert.equal(executorCalls, 0);
+});
+
+test('an invalid Litos alias never falls through to the connected-inbox executor', async () => {
+  let executorCalls = 0;
+  const match = await findComposioVerificationCode({
+    userId: EXACT_USER_ID,
+    portalUrl: 'https://job-boards.greenhouse.io/acme/jobs/123',
+    requestedAt: new Date('2026-07-25T10:00:00.000Z'),
+    expectedRecipient: EXACT_ALIAS,
+    applicationId: EXACT_APPLICATION_ID,
+    executor: async () => {
+      executorCalls += 1;
+      throw new Error('poison executor must never run for an alias');
+    },
+    resolveRoute: async () => 'invalid_alias',
+  });
+  assert.equal(match, null);
+  assert.equal(executorCalls, 0);
+});
 
 test('extracts only an authenticated code from the exact Litos application alias', () => {
   const requestedAt = new Date('2026-07-25T10:00:00.000Z');
@@ -327,7 +445,7 @@ test('queries only read tools and tolerates an unconnected provider', async () =
         messages: [{
           subject: 'Your Ashby verification code',
           from: 'verify@ashbyhq.com',
-          to: 'app-2222222222-test@apply.trylitos.com',
+          to: 'applicant@example.com',
           authenticationResults: 'spf=pass dkim=pass dmarc=pass',
           internalDate: '1784973620000',
           text: 'Your one-time code is 482913.',
@@ -339,14 +457,15 @@ test('queries only read tools and tolerates an unconnected provider', async () =
     userId: 'user-123',
     portalUrl: 'https://jobs.ashbyhq.com/acme/123',
     requestedAt: new Date('2026-07-25T10:00:00.000Z'),
-    expectedRecipient: 'app-2222222222-test@apply.trylitos.com',
+    expectedRecipient: 'applicant@example.com',
     applicationId: '22222222-2222-4222-8222-222222222222',
     executor,
+    resolveRoute: async () => 'personal_address',
   });
   assert.equal(match?.code, '482913');
   assert.deepEqual(calls.map(({ tool }) => tool).sort(), ['GMAIL_FETCH_EMAILS', 'OUTLOOK_SEARCH_MESSAGES']);
   assert.deepEqual(calls.find(({ tool }) => tool === 'OUTLOOK_SEARCH_MESSAGES')?.arguments, {
-    query: 'to:app-2222222222-test@apply.trylitos.com AND ("verification code" OR "security code" OR passcode OR OTP)',
+    query: 'to:applicant@example.com AND ("verification code" OR "security code" OR passcode OR OTP)',
     size: 5,
     enable_top_results: false,
   });

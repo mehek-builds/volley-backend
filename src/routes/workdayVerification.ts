@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest, preHandlerHookHandler } from 'fastify';
 import { z } from 'zod';
 import { readApplicationReview } from '../lib/applicationReview';
-import { readPinnedApplicantEmail } from '../lib/applicationEmail';
+import { aliasUsesManagedReceiving, readPinnedApplicantEmail } from '../lib/applicationEmail';
 
 const bodySchema = z.object({ requested_at: z.string().datetime() });
 
@@ -10,7 +10,6 @@ export type WorkdayVerificationApplication = { id: string; spec: unknown };
 export type WorkdayVerificationDependencies = {
   requireAuth: preHandlerHookHandler;
   ownedApplication: (request: FastifyRequest, reply: FastifyReply) => Promise<WorkdayVerificationApplication | null>;
-  automaticVerificationEnabled: (userId: string) => Promise<boolean>;
   resolveActiveAlias: (input: { userId: string; applicationId: string; spec: unknown }) => Promise<{ address: string }>;
   findCode: (input: {
     userId: string;
@@ -39,8 +38,9 @@ export function registerWorkdayVerificationRoute(
         return reply.status(409).send({ error: 'This application is not on a Workday tenant' });
       }
       const pinned = readPinnedApplicantEmail(row.spec);
-      if (!pinned?.address || pinned.source !== 'litos_alias' || pinned.tracked !== true) {
-        return reply.status(409).send({ error: 'This packet does not have a pinned Litos application alias' });
+      if (!pinned?.address || pinned.source !== 'litos_alias' || pinned.tracked !== true
+        || !aliasUsesManagedReceiving(pinned.address)) {
+        return reply.status(409).send({ error: 'This packet does not have a pinned managed Litos application alias' });
       }
       const userId = request.jwtPayload!.userId;
       let activeAlias: { address: string };
@@ -82,8 +82,9 @@ export function registerWorkdayVerificationRoute(
         return reply.status(400).send({ error: 'The verification request is no longer current' });
       }
       const pinned = readPinnedApplicantEmail(row.spec);
-      if (!pinned?.address || pinned.source !== 'litos_alias' || pinned.tracked !== true) {
-        return reply.status(409).send({ error: 'This packet does not have a pinned Litos application alias' });
+      if (!pinned?.address || pinned.source !== 'litos_alias' || pinned.tracked !== true
+        || !aliasUsesManagedReceiving(pinned.address)) {
+        return reply.status(409).send({ error: 'This packet does not have a pinned managed Litos application alias' });
       }
       const userId = request.jwtPayload!.userId;
       let activeAlias: { address: string };
@@ -94,9 +95,6 @@ export function registerWorkdayVerificationRoute(
       }
       if (activeAlias.address.trim().toLowerCase() !== pinned.address.trim().toLowerCase()) {
         return reply.status(409).send({ error: 'This packet no longer has its exact active Litos application alias' });
-      }
-      if (!await deps.automaticVerificationEnabled(userId)) {
-        return reply.status(403).send({ error: 'Automatic email verification is not enabled for this account' });
       }
       const match = await deps.findCode({
         userId,

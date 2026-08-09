@@ -5,7 +5,7 @@ import { registerWorkdayVerificationRoute, type WorkdayVerificationDependencies 
 
 const APPLICATION_ID = '11111111-1111-4111-8111-111111111111';
 const USER_ID = '22222222-2222-4222-8222-222222222222';
-const ALIAS = 'packet@apply.example.com';
+const ALIAS = 'app-1111111111-abcdef123456@litos-test.resend.app';
 
 function spec(input: { portalUrl?: string; source?: 'litos_alias' | 'contact_email'; tracked?: boolean } = {}) {
   return {
@@ -35,7 +35,6 @@ async function harness(overrides: Partial<WorkdayVerificationDependencies> = {})
       };
     },
     ownedApplication: async () => ({ id: APPLICATION_ID, spec: spec() }),
-    automaticVerificationEnabled: async () => true,
     resolveActiveAlias: async () => ({ address: ALIAS }),
     findCode: async (input) => { calls.push(input); return { code: '482913', provider: 'composio' }; },
     ...overrides,
@@ -93,11 +92,11 @@ test('Workday verification requires an owned application', async () => {
   await fastify.close();
 });
 
-test('Workday verification requires standing automatic-verification consent', async () => {
-  const { fastify, calls } = await harness({ automaticVerificationEnabled: async () => false });
+test('Workday alias verification does not require connected-inbox consent', async () => {
+  const { fastify, calls } = await harness();
   const response = await request(fastify);
-  assert.equal(response.statusCode, 403);
-  assert.equal(calls.length, 0);
+  assert.equal(response.statusCode, 200);
+  assert.equal(calls.length, 1);
   await fastify.close();
 });
 
@@ -119,6 +118,26 @@ test('Workday verification uses only the exact current active Litos alias recipi
 test('Workday verification refuses a tracked fallback address that is not source=litos_alias', async () => {
   const { fastify, calls } = await harness({
     ownedApplication: async () => ({ id: APPLICATION_ID, spec: spec({ source: 'contact_email', tracked: true }) }),
+  });
+  assert.equal((await request(fastify)).statusCode, 409);
+  assert.equal(calls.length, 0);
+  await fastify.close();
+});
+
+test('Workday verification refuses a custom-domain Litos alias without reading either inbox', async () => {
+  const customAlias = 'app-1111111111-abcdef123456@apply.trylitos.com';
+  const { fastify, calls } = await harness({
+    ownedApplication: async () => ({
+      id: APPLICATION_ID,
+      spec: {
+        ...spec(),
+        _applicant_email: {
+          ...spec()._applicant_email,
+          address: customAlias,
+        },
+      },
+    }),
+    resolveActiveAlias: async () => ({ address: customAlias }),
   });
   assert.equal((await request(fastify)).statusCode, 409);
   assert.equal(calls.length, 0);

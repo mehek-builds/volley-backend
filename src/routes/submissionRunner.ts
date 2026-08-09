@@ -162,6 +162,7 @@ import {
   readPinnedApplicantEmail,
   resolveFrozenApplicantEmail,
 } from '../lib/applicationEmail';
+import { resolveVerificationEmailRoute } from '../lib/emailVerification';
 import { leadAlignmentIssues } from '../engine/leadAlignment';
 import { normalizeSpec } from '../llm/resumeSpec';
 
@@ -2210,12 +2211,19 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     await navigateToApplicationForm(page, portal); // no-op except SmartRecruiters's JD-page/form-page split
     const [verificationSettings] = await db.select({ enabled: users.automatic_verification_enabled })
       .from(users).where(eq(users.id, row.user_id)).limit(1);
+    const verificationRoute = await resolveVerificationEmailRoute({
+      userId: row.user_id,
+      applicationId: row.id,
+      expectedRecipient: verificationRecipient,
+    });
+    const verificationAllowed = verificationRoute === 'application_alias'
+      || (verificationRoute === 'personal_address' && verificationSettings?.enabled === true);
     let verification: BrowserVerificationResult = await completeEmailVerificationIfPresent({
       page,
       userId: row.user_id,
       portalUrl,
       requestedAt: verificationRequestedAt,
-      permissionGranted: verificationSettings?.enabled === true,
+      permissionGranted: verificationAllowed,
       expectedRecipient: verificationRecipient,
       applicationId: row.id,
     });
@@ -2285,7 +2293,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       userId: row.user_id,
       portalUrl,
       requestedAt: verificationRequestedAt,
-      permissionGranted: verificationSettings?.enabled === true,
+      permissionGranted: verificationAllowed,
       expectedRecipient: verificationRecipient,
       applicationId: row.id,
     });
@@ -2865,6 +2873,13 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       const continuationToken = result.continuationToken;
       const [verificationSettings] = await db.select({ enabled: users.automatic_verification_enabled })
         .from(users).where(eq(users.id, row.user_id)).limit(1);
+      const verificationRoute = await resolveVerificationEmailRoute({
+        userId: row.user_id,
+        applicationId: row.id,
+        expectedRecipient: packet.email,
+      });
+      const verificationAllowed = verificationRoute === 'application_alias'
+        || (verificationRoute === 'personal_address' && verificationSettings?.enabled === true);
       const continuationIsLive = typeof continuationToken === 'string'
         && typeof continuationExpiresAt === 'string'
         && Date.parse(continuationExpiresAt) > Date.now();
@@ -2875,7 +2890,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           continuation_resumed: false,
         }
         : {};
-      if (continuationIsLive && verificationSettings?.enabled === true) {
+      if (continuationIsLive && verificationAllowed) {
         // The continuation capability stays call-local. Persisting it would turn the review JSON,
         // which is returned to dashboard and extension clients, into a browser-session credential.
         await writeReview(row, nextReview(claimedReview, {
