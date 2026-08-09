@@ -265,7 +265,12 @@ test('a retired packet email releases the final claim and requires regeneration 
   assert.ok(failStart > 0 && failEnd > failStart);
   const failure = runner.slice(failStart, failEnd);
   assert.match(failure, /error instanceof ApplicantEmailRegenerationRequiredError/);
-  assert.match(failure, /regenerationRequired, uncertainAfterClaim/);
+  /* Both terms are forwarded, asserted independently rather than as one adjacent string. The
+     literal `regenerationRequired, uncertainAfterClaim` broke the moment a third stop reason was
+     inserted between them, which is a correct change failing a test that was pinning punctuation
+     rather than behaviour. What matters here is that regeneration reaches the classifier at all. */
+  assert.match(failure, /submissionFailureOutcome\(\{[\s\S]*?\bregenerationRequired\b[\s\S]*?\}\)/);
+  assert.match(failure, /submissionFailureOutcome\(\{[\s\S]*?\buncertainAfterClaim\b[\s\S]*?\}\)/);
   assert.match(failure, /submission_claimed_at: undefined/);
   assert.match(failure, /submission_claim_id: undefined/);
   assert.match(failure, /submission_authorization: undefined/);

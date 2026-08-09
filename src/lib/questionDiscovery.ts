@@ -40,6 +40,18 @@ export type ApplicationProfileLike = StoredSalaryProfile & {
   current_employer?: string;
   most_recent_employer?: string;
   employer_history?: string[];
+  /**
+   * The applicant's experience bank: every organisation and title she has told Litos about, in the
+   * record she authored herself. Distinct from `employer_history`, which is scraped out of
+   * `parsed_json.experience` and is a strict subset - measured on the owner account on 2026-08-09,
+   * the parse held 4 organisations and the bank held 9.
+   *
+   * It is here so that a question about her employment history can be answered by CHECKING it. The
+   * only claim this shape can support is one that survives reading every entry, which is why the
+   * arm that uses it refuses on an absent or empty bank: `undefined` is "she never told us" and
+   * `[]` is a bank with nothing in it, and neither of those is "she never worked for anyone".
+   */
+  experience_bank?: { org: string; title?: string }[];
   school?: string;
   degree?: string;
   /**
@@ -1140,6 +1152,147 @@ export const POLITICALLY_EXPOSED_FAMILY_QUESTION =
 export const MILITARY_SERVICE_QUESTION =
   /\bmilitary\b|\barmed\s+forces\b|\bveteran\b/i;
 
+/* ---------------------------------------------------------------------------------------------
+ * "Prior US Government Employment?" - Skydio, on Ashby, and the one blocker between that packet
+ * and the first end-to-end submission.
+ *
+ * MEASURED before the pattern was written, with scripts/_corpus-labels.mts over the 507 distinct
+ * labels Litos has stored (2026-08-09). Four of them name a government and exactly one asks
+ * whether the APPLICANT was employed by one:
+ *
+ *   [1x] prior us government employment?                                        <- this family
+ *   [4x] astranis complies with u.s. government space technology export regulations, therefore
+ *        will you state which of the following applies to you                   <- export control
+ *   [1x] are you or have you been entrusted with a position or function in any government,
+ *        international organization ...                                         <- PEP
+ *   [3x] do you have any close friends or relatives who are public officers? ... their government
+ *        agency                                                                 <- someone else
+ *
+ * The other three already have rules of their own, and each is excluded below by the words that
+ * make it somebody else's question rather than by its position in this file, so a reordering
+ * cannot silently hand them to this arm.
+ *
+ * THE CLEARANCE FAMILY IS NOT THIS FAMILY and is deliberately untouched. The corpus holds two
+ * clearance labels - "if you have held a u.s. security clearance in the past, what clearance level
+ * have you held?" and Astranis's "u.s. person status and/or u.s. clearance eligibility ... are you
+ * eligible to meet this requirement?". Neither says "government", the first is not an employment
+ * fact and the second is a self-declaration about eligibility, so neither is answerable from a
+ * list of employers. Both stay refused, and "clearance", "eligib" and "authori[sz]" are excluded
+ * below so that a future widening of the scope pattern cannot reach them either.
+ */
+const GOVERNMENT_EMPLOYER_SCOPE =
+  /\bgovernment(?:al)?\b|\bpublic[-\s]sector\b|\bcivil\s+service\b|\bcongressional\s+staffer\b|\b(?:state|federal)\s+(?:or\s+\w+\s+)?agenc(?:y|ies)\b/i;
+
+/** The question has to be about being EMPLOYED, not merely about a government existing. */
+const GOVERNMENT_EMPLOYMENT_PREDICATE =
+  /\bemploy(?:ed|ee|er|ment)\b|\bwork(?:ed|ing|s)?\b|\bserved?\b|\bstaffer\b|\bheld\s+a\s+(?:position|role|job|post)\b/i;
+
+/* Labels that name a government and are still not "were you employed by one". Everything here is
+ * either a real corpus label (relatives, PEP, export control) or a shape whose answer is a legal
+ * status rather than a history (authorization, eligibility, sponsorship, clearance, citizenship).
+ * A status question answered from an employer list would be a false legal declaration, which is
+ * the exact failure R-004 shipped once already. */
+const NOT_HER_GOVERNMENT_EMPLOYMENT =
+  /\b(?:friends?|relatives?|family|spouse|parents?)\b|\bentrusted\s+with\b|\bpolitically\s+exposed\b|\bexport[-\s]control\w*\b|\bexport\s+regulations?\b|\bclearance\b|\bcomplies\s+with\b|\bauthori[sz]\w*\b|\beligib\w*\b|\bsponsor\w*\b|\bcitizen\w*\b/i;
+
+/** Whether this label asks whether the applicant has been employed by a government. */
+export function isGovernmentEmploymentQuestion(label: string): boolean {
+  const value = label ?? '';
+  if (!GOVERNMENT_EMPLOYER_SCOPE.test(value)) return false;
+  if (!GOVERNMENT_EMPLOYMENT_PREDICATE.test(value)) return false;
+  return !NOT_HER_GOVERNMENT_EMPLOYMENT.test(value);
+}
+
+/* An organisation whose NAME says it is a government employer. A hit here is decisive and flips
+ * the answer to Yes, so nothing ambiguous belongs in it: two- and three-letter initialisms that
+ * double as ordinary words ("VA", "DOE", "SEC", "DOT") are deliberately absent, because a company
+ * called Doe Labs must not be read as the Department of Energy. */
+const GOVERNMENT_EMPLOYER_NAME = new RegExp([
+  /\bgovernment\b|\bcivil\s+service\b/,
+  /* Up to two words may sit between the qualifier and the institution word: "Federal Aviation
+   * Administration", "United States Patent and Trademark Office". A bare "federal" is NOT enough
+   * on its own, because Federal Express is a courier. */
+  /\b(?:u\.?s\.?|united\s+states|federal)\s+(?:\w+\s+){0,2}(?:department|dept\.?|agency|bureau|commission|administration|government)\b/,
+  /\b(?:department|dept\.?|ministry)\s+of\s+(?:the\s+)?(?:state|defen[cs]e|justice|energy|education|labor|labour|transportation|treasury|commerce|agriculture|health|homeland|veterans?\s+affairs|interior|housing)\b/,
+  /\b(?:city|county|state|commonwealth|town|village|borough)\s+of\s+\w/,
+  /\b(?:mayor|governor|senator|congressman|congresswoman|representative)'?s?\s+office\b/,
+  /\boffice\s+of\s+(?:the\s+)?(?:congress\w+|senator|representative|mayor|governor|attorney\s+general)\b/,
+  /\bu\.?s\.?\s+(?:senate|house\s+of\s+representatives|congress|army|navy|air\s+force|marine\s+corps|coast\s+guard|space\s+force|embassy|mint|postal\s+service)\b/,
+  /\bcongressional\s+(?:office|staff\w*|committee)\b|\bhouse\s+of\s+representatives\b|\bunited\s+states\s+senate\b/,
+  /\bnational\s+aeronautics\s+and\s+space\b|\bnasa\b|\bdarpa\b|\busaid\b|\buspto\b|\bnational\s+laborator(?:y|ies)\b/,
+  /\bnational\s+guard\b|\bpeace\s+corps\b|\barmed\s+forces\b/,
+].map((part) => part.source).join('|'), 'i');
+
+/* The second tier, and the reason this arm is a check rather than a lookup: an organisation whose
+ * name COULD be public and cannot be settled from the name alone. A hit holds the question for the
+ * applicant instead of answering it either way. Measured against the four other production banks
+ * on 2026-08-09, this is what catches "WORLD BANK" and "XYZ PUBLIC CHARTER SCHOOLS" - two orgs a
+ * bare name match would have shrugged past on its way to printing "No". */
+const MAYBE_GOVERNMENT_EMPLOYER_NAME =
+  /\bpublic\b|\bstate\b|\bfederal\b|\bnational\b|\bmunicipal\w*\b|\bauthority\b|\bcouncil\b|\bbureau\b|\bagency\b|\bcommission\b|\badministration\b|\bministr\w*\b|\bdepartment\b|\bcongress\w*\b|\bsenate\b|\bembassy\b|\bconsulate\b|\bworld\s+bank\b|\bunited\s+nations\b|\b(?:unicef|unesco|imf|nato)\b|\bpolice\b|\bdefen[cs]e\b|\bmilitary\b|\barmy\b|\bnavy\b|\bair\s+force\b|\bcoast\s+guard\b|\bnational\s+guard\b|\bpeace\s+corps\b|\bcourt\b|\bschool\s+district\b|\bveterans?\b|\bnasa\b|\bnoaa\b|\busaid\b|\busda\b|\bdarpa\b|\bnist\b|\bnih\b|\bcdc\b|\bfda\b|\bepa\b|\bfaa\b|\bfbi\b|\bcia\b|\bnsa\b|\birs\b|\bdhs\b|\btsa\b|\bfema\b|\buspto\b|\busps\b/i;
+
+/**
+ * Whether a stored military-service answer says she served.
+ *
+ * Anything that is not a recognisable negative counts as affirmative, because this is used only to
+ * HOLD an answer, never to produce one, and the safe direction of a misread is silence.
+ */
+function militaryServiceIsAffirmative(stored: string | undefined): boolean {
+  const value = stored?.trim().toLowerCase();
+  if (!value) return false;
+  if (/^(?:no\b|none\b|n\/a\b)/.test(value)) return false;
+  if (/\bnot\s+a\s+(?:protected\s+)?veteran\b|\b(?:have\s+not|never)\s+served\b|\bno,\s|\bdecline\b|\bdo\s+not\s+wish\b/.test(value)) return false;
+  return true;
+}
+
+export function governmentEmploymentSkipReason(label: string, because: string): string {
+  return `prior government employment left for you, because ${because}: "${label.slice(0, 60)}"`;
+}
+
+/**
+ * "Prior US Government Employment?" answered by READING the experience bank.
+ *
+ * The negative this returns is derived, and the distinction is the whole point of the arm. The
+ * canon rule it implements is the applicant's own: application questions about her history are
+ * answered from her record, and absence on that record is itself the answer. What makes that rule
+ * safe rather than a laundered constant is that the record is actually consulted - every entry is
+ * read, tested against what the question asks about, and "No" is what is left when nothing
+ * matched. Put a government employer in the bank and this returns Yes without another line of
+ * code, which is the property the test pins.
+ *
+ * A hardcoded "No" would pass the same production packet today and would be a lie the first time a
+ * student with a summer at a federal agency installed Litos.
+ */
+function governmentEmploymentAnswer(
+  label: string,
+  ap: ApplicationProfileLike,
+): { value: string } | { skipReason: string } | null {
+  if (!isGovernmentEmploymentQuestion(label)) return null;
+
+  const bank = ap.experience_bank?.filter((entry) => entry?.org?.trim());
+  /* An empty bank is "she never told us", not "she never worked anywhere". Nothing is derivable
+   * from a record that does not exist, so this refuses rather than reporting the negative - which
+   * is also what keeps the empty-profile sweep at the number it was. */
+  if (!bank?.length) {
+    return { skipReason: governmentEmploymentSkipReason(label, 'your experience is not on file') };
+  }
+
+  /* A stored military record outranks the bank in one direction only. The armed forces are
+   * government service and a resume rarely lists them beside internships, so an affirmative here
+   * makes "No" false; but the column does not record WHOSE armed forces, so it cannot make "Yes"
+   * true either. Hold it and say so. */
+  if (militaryServiceIsAffirmative(ap.military_service)) {
+    return { skipReason: governmentEmploymentSkipReason(label, 'your military service is on file and this question does not fit it') };
+  }
+
+  const named = bank.flatMap((entry) => [entry.org, entry.title ?? ''].map((part) => part.trim()).filter(Boolean));
+  if (named.some((name) => GOVERNMENT_EMPLOYER_NAME.test(name))) return { value: 'Yes' };
+  if (named.some((name) => MAYBE_GOVERNMENT_EMPLOYER_NAME.test(name))) {
+    return { skipReason: governmentEmploymentSkipReason(label, 'one of your organisations may be a public body') };
+  }
+  return { value: 'No' };
+}
+
 // "Do you have a preferred name, other than the name indicated above?"
 const PREFERRED_NAME_QUESTION =
   /\bpreferred\s+(?:first\s+)?name\b|\bname\s+you\s+(?:go\s+by|prefer\s+to\s+be\s+called)\b/i;
@@ -1649,9 +1802,27 @@ function isSinglePlainEmployerTarget(value: string): boolean {
   return !/\b(?:or|and|affiliates?|subsidiar(?:y|ies)|parents?|partner(?:s|ships?)?|group|division|business\s+unit|portfolio\s+compan(?:y|ies))\b/i.test(value);
 }
 
+/**
+ * Every organisation the applicant has declared, from both records that hold one.
+ *
+ * `employer_history` alone was the sibling of the bug this branch is about. It is scraped out of
+ * `parsed_json.experience`, and on the owner's production profile on 2026-08-09 it held 4 of her 9
+ * organisations - Traeco, Spark SC and Venture Capital Academy were in the experience bank and not
+ * in the parse. "Have you ever worked for Traeco?" therefore answered "No" from a record that was
+ * missing the entry that made it Yes, which is the same failure as a hardcoded negative wearing a
+ * lookup as a disguise. The bank is the record she authored, so it is unioned in here.
+ */
+function declaredEmployers(ap: ApplicationProfileLike): string[] {
+  const declared = [
+    ...(ap.employer_history ?? []),
+    ...(ap.experience_bank ?? []).map((entry) => entry.org),
+  ];
+  return declared.map(normalizeEmployerName).filter(Boolean);
+}
+
 function priorEmployerAnswer(label: string, ap: ApplicationProfileLike): { value: string } | null {
-  const history = ap.employer_history?.map(normalizeEmployerName).filter(Boolean);
-  if (!history?.length) return null;
+  const history = declaredEmployers(ap);
+  if (!history.length) return null;
   const match = label.match(/\bworked\s+(?:for|by|at)\s+([^?]+)/i);
   const rawPhrase = match?.[1]?.trim();
   if (!rawPhrase || !isSinglePlainEmployerTarget(rawPhrase)) return null;
@@ -1662,7 +1833,12 @@ function priorEmployerAnswer(label: string, ap: ApplicationProfileLike): { value
   if (!rawTarget || /\b(?:any|a|an|the|company|organization|employer|program)\b/i.test(rawTarget)) return null;
   const target = normalizeEmployerName(rawTarget);
   if (!target || target.length < 5) return null;
-  const knownMatch = history.some((employer) => employer === target);
+  /* Token-prefix, via the helper the sibling question already uses, rather than string equality.
+   * Equality was the other half of the same false negative: a bank entry reads "Traeco - AI Agent
+   * Cost Infrastructure" while the form says "Traeco", and an exact match answers "No" to an
+   * employer she is currently at. employerMatchesTarget is anchored at the first token precisely
+   * so that "Tone" still cannot match "Tonee". */
+  const knownMatch = history.some((employer) => employerMatchesTarget(employer, target));
   return { value: knownMatch ? 'Yes' : 'No' };
 }
 
@@ -2212,6 +2388,17 @@ export function resolveKnownAnswer(
 
   const politicallyExposed = politicallyExposedAnswer(label, ap);
   if (politicallyExposed) return politicallyExposed;
+
+  /* Up here for the same reason as the two above it, and AFTER them on purpose: the PEP question
+   * and Astranis's export-control paragraph both contain the word "government", and both are
+   * already answered by their own rule, so they must reach it first. What is up here is the other
+   * direction. Skydio's gloss reads "...worked for the US government (e.g. congressional staffer,
+   * member of military, state, or federal agencies)?", and before this arm existed the bare word
+   * "military" in that gloss put it through EEO_QUESTION, which answered an employment-history
+   * question with "Decline to self-identify". Verified against the real resolver on 2026-08-09,
+   * and it is what makes the placement a safety property rather than a preference. */
+  const governmentEmployment = governmentEmploymentAnswer(label, ap);
+  if (governmentEmployment) return governmentEmployment;
 
   const pronouns = pronounsAnswer(label, ap);
   if (pronouns) return pronouns;

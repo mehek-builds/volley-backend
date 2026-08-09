@@ -132,6 +132,85 @@ describe('packet audit: amber on words the posting never asked for', () => {
   });
 });
 
+describe('packet audit: generic company prose does not displace real posting requirements', () => {
+  test('Cloudflare company history after Bonus Points does not make "Internet" a requirement', () => {
+    // Exact production section shape from packet e515deb8. Before the fix, the question-mark
+    // heading did not close Bonus Points, so everything below it inherited preferred weight.
+    const jd = `About Us
+At Cloudflare, we are on a mission to help build a better Internet.
+
+Responsibilities
+Ship and deliver projects over 12-14 weeks with autonomy and support.
+
+Desirable Skills, Knowledge and Experience
+Currently pursuing a degree or program in Computer Science, Engineering, Mathematics, Statistics or relevant field to the role.
+Demonstrated critical thinking skills and drive to learn and adapt new technologies.
+
+Bonus Points
+Demonstrated passion for software development, such as personal projects, open-source contributions, or experience with our developer platform using Cloudflare for Students.
+
+What Makes Cloudflare Special?
+Fundamental to our mission to help build a better Internet is protecting the free and open Internet.
+Project Galileo supports journalism and civil society organizations.
+We released 1.1.1.1 to help fix the foundation of the Internet with a public DNS resolver.
+`;
+    const extracted = terms(jd, { company: 'Cloudflare', role: 'Software Engineer Intern' });
+    assert.ok(!extracted.includes('internet'), 'company mission prose reached the colored requirements');
+    assert.ok(extracted.includes('open source'), 'the actual Bonus Points requirement was lost');
+    assert.ok(extracted.includes('computer science'), 'the stated candidate-fit section was lost');
+  });
+
+  test('an explicit Internet networking requirement remains colorable', () => {
+    const jd = `Requirements
+Deep knowledge of Internet protocols and TCP/IP
+Experience with DNS, Linux, Python, and network security
+`;
+    const extracted = terms(jd, { company: 'Acme Networks', role: 'Network Engineer' });
+    assert.ok(extracted.includes('internet'), 'Internet was globally denied instead of scoped to the footer');
+    assert.ok(extracted.includes('dns') && extracted.includes('linux') && extracted.includes('python'));
+  });
+
+  test('Cloudflare branded footer stays excluded when the posting has no primary fit section', () => {
+    // This shape exercises the fallback salvage path. Before the footer marker was carried onto
+    // the branded section, its longer company-history text outweighed the short role prose and was
+    // re-read as body even though the heading boundary had classified it as noise.
+    const jd = `About the Role
+Help the engineering team ship reliable customer-facing software.
+
+What Makes Cloudflare Special?
+Fundamental to our mission to help build a better Internet is protecting the free and open Internet.
+Project Galileo supports journalism and civil society organizations around the world.
+We released 1.1.1.1 to help fix the foundation of the Internet with a public DNS resolver.
+Cloudflare protects Internet applications without requiring customers to add hardware or install software.
+`;
+    const extracted = terms(jd, { company: 'Cloudflare', role: 'Software Engineer Intern' });
+    for (const leaked of ['internet', 'dns', 'journalism', 'project galileo']) {
+      assert.ok(!extracted.includes(leaked), `${leaked} was salvaged from the branded company footer`);
+    }
+  });
+
+  test('Flow Traders keeps Excel when the employer explicitly requires proficiency in it', () => {
+    const jd = `What You Need to Succeed
+Excellent mental math, quantitative and analytical skills
+Proficiency in Excel and an affinity for scientific programming or development languages
+`;
+    assert.ok(
+      terms(jd, { company: 'Flow Traders', role: 'Quantitative Trading Intern' }).includes('excel'),
+      'an explicit Excel proficiency requirement must remain colorable',
+    );
+  });
+
+  test('hyphenated requirement phrases stay normalized and preserve the posting spelling', () => {
+    const jd = `Preferred Qualifications
+Hands-on exposure to real-time systems and open-source contributions.
+`;
+    const extracted = extractJdTerms(jd, { company: 'Deepgram', role: 'Software Engineer Intern' });
+    const byTerm = new Map(extracted.map((term) => [term.term, term.display]));
+    assert.equal(byTerm.get('real time systems'), 'real-time systems');
+    assert.equal(byTerm.get('open source'), 'open-source');
+  });
+});
+
 
 /**
  * THE OTHER DIRECTION, AND IT IS THE SAME FILE ON PURPOSE.
