@@ -802,48 +802,19 @@ type WorkplaceLocationParse = {
 };
 
 /**
- * Which country a single workplace string is in, or undefined for "we cannot tell".
+ * Resolve workplace strings only through the closed registry above.
  *
- * THE TABLE IS THE ONLY AUTHORITY FOR PROSE, and that is the whole of the `structured` flag. These
- * strings come from two very different places. One is a phrase cut out of a question a recruiter
- * typed, where "in support of United States customers" is not a place at all; the finite table
- * refuses it by not containing it, and a test pins exactly that label. The other is the posting's
- * own structured location field, which the ATS writes as `City, State, Country`.
- *
- * jobCountry is the repo's existing, already-vetted classifier for that second shape, and it is
- * reached for only there. "Atlanta, Georgia, United States" missed a table keyed on "Atlanta" and
- * "Atlanta, GA", and "Reston, Virginia" was not in it at any spelling, so six US cities on one
- * Anduril posting read as six unknown places. It preserves the property the table was built for:
- * an unrecognised place comes back 'unknown', NOT American, so absence of evidence stays absence of
- * evidence rather than becoming a Yes the way "no foreign city found" once did for Paris.
+ * The same rule applies to question prose and frozen posting fields. A country token, state code,
+ * or city-shaped string is not enough on its own: unknown places hold the question. This keeps
+ * customer, compliance, and market prose from becoming a workplace, and it keeps additions to a
+ * broad country classifier from silently widening a legal commitment.
  */
-function vettedWorkplaceCountry(cleaned: string, structured: boolean): VettedWorkplaceCountry | undefined {
-  const table = VETTED_WORKPLACE_LOCATIONS.get(normalizeIdentity(cleaned));
-  if (table) return table;
-  if (!structured) return undefined;
-  /* AND IT HAS TO LOOK LIKE A PLACE. The comma is the whole test, and it is doing real work: an ATS
-   * writes "Boise, ID" or "Atlanta, Georgia, United States", while "US market" is a phrase that
-   * happens to contain a country token. jobCountry reads the second as American, which is right
-   * about the words and wrong about whether they name an office, so a structured entry with no
-   * region component is left unrecognised and the question stays hers. */
-  if (!cleaned.includes(',')) return undefined;
-  const classified = jobCountry(cleaned);
-  if (classified === 'us') return 'US';
-  if (classified === 'non_us') return 'other';
-  return undefined;
-}
-
-function parseCapturedWorkplaceLocations(
-  captures: readonly string[],
-  structured = false,
-): WorkplaceLocationParse {
+function parseCapturedWorkplaceLocations(captures: readonly string[]): WorkplaceLocationParse {
   const countries: VettedWorkplaceCountry[] = [];
   let invalid = false;
   for (const capture of captures) {
-    /* The semicolon is here because a posting's own location field uses it as the list separator:
-     * `job_context.location` on Anduril's 2027 intern posting is one string joining six US cities
-     * with "; ". Without it the whole string was looked up as a single key, missed, and set
-     * `invalid`, so a posting that is unambiguously American read as one unknown place. */
+    /* A posting may join several workplaces in one field. Splitting preserves the multiplicity so
+     * the single-workplace gate below can hold it instead of treating the joined value as one. */
     const parts = capture.split(/\s*(?:;|\bor\b|\band\b|&|\/|\|)\s*/i).filter(Boolean);
     for (const part of parts) {
       const cleaned = part
@@ -851,7 +822,7 @@ function parseCapturedWorkplaceLocations(
         .replace(/\s+(?:offices?|sites?|workplaces?|headquarters|hq)$/i, '')
         .trim();
       if (!cleaned || /^(?:(?:one|any|either|all|some)\s+of(?:\s+(?:our|the))?)$/i.test(cleaned)) continue;
-      const country = vettedWorkplaceCountry(cleaned, structured);
+      const country = VETTED_WORKPLACE_LOCATIONS.get(normalizeIdentity(cleaned));
       if (country) countries.push(country);
       else invalid = true;
     }
@@ -880,26 +851,8 @@ function isSingleVettedUsLocation(parsed: WorkplaceLocationParse): boolean {
     && parsed.countries.length === 1 && parsed.countries[0] === 'US';
 }
 
-/**
- * Every place this posting could put her, and all of them American.
- *
- * Used ONLY for the frozen job locations, never for places named in a question. The distinction is
- * the one 'anywhere' actually makes: it is a MAXIMAL commitment scoped to the United States, so a
- * posting offering six US offices is covered by it exactly as fully as a posting offering one, and
- * which of the six she ends up in does not have to be decided to answer "will you work in person".
- * Requiring a single location here refused Anduril's 2027 intern posting, whose six offices are in
- * Georgia, Massachusetts, California, Virginia and Washington.
- *
- * A question that NAMES two places is different and keeps isSingleVettedUsLocation: it may be
- * asking her to pick one, and picking is hers.
- */
-function isAllVettedUsLocations(parsed: WorkplaceLocationParse): boolean {
-  return parsed.sawExplicitSyntax && !parsed.invalid
-    && parsed.countries.length > 0 && parsed.countries.every((country) => country === 'US');
-}
-
 function frozenWorkplaceLocationParse(locations: readonly string[]): WorkplaceLocationParse {
-  return parseCapturedWorkplaceLocations(locations, true);
+  return parseCapturedWorkplaceLocations(locations);
 }
 
 /* A location question that wants a NUMBER, A DATE OR A LIST rather than a yes or a no.
@@ -957,7 +910,7 @@ function onsiteCommitmentAnswer(
       return isSingleVettedUsLocation(labelLocations) ? { value: 'Yes' } : held;
     }
     const frozenLocations = frozenJobLocationsFromContext(jdText);
-    if (isAllVettedUsLocations(frozenWorkplaceLocationParse(frozenLocations))) {
+    if (isSingleVettedUsLocation(frozenWorkplaceLocationParse(frozenLocations))) {
       return { value: 'Yes' };
     }
     return held;
