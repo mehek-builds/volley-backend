@@ -378,10 +378,40 @@ function majorFromAcademicProfile(major: string | undefined, degree: string | un
   return cleaned || trimmed;
 }
 
+/**
+ * The blob key of the cover letter this packet should carry, or null when there is nothing to carry.
+ *
+ * THE ONE CONDITION THAT KEPT EVERY COVER LETTER OFF EVERY FORM. This used to also require
+ * `_cover_letter.approved_at` to be a string, and that single term is why no application Litos has
+ * ever filled reached an employer with a cover letter attached. Measured against prod on
+ * 2026-08-09: of the 112 packets whose form HAS a cover-letter control and which hold a written
+ * letter, 111 recorded no cover-letter upload in filled_fields, and exactly one had `approved_at`
+ * set at all.
+ *
+ * The requirement was circular, and the circle closed on the applicant. `approved_at` is written in
+ * exactly one place, approvedReviewSpec in routes/applications.ts, on the FINAL APPROVE. Final
+ * approve refuses (422, FINAL_APPROVAL_VERIFICATION_FAILED) unless filled_fields already records a
+ * cover entry. filled_fields can only record one if the fill run carried the file. The fill run
+ * could only carry the file once `approved_at` was set. So the only route to an attached cover
+ * letter ran through an approval that could not be granted until the cover letter was attached.
+ * Cresta packet 8142004c-3358-4538-8778-16df5e31c5bb sat in exactly that state: a complete
+ * 294-word letter, a live 3121-byte PDF in blob storage, and a Send button that returned 422.
+ *
+ * Attaching is now decided by the same fact the product promises on the pre-fill screen: the form
+ * has somewhere to put a cover letter and the applicant has one. WHETHER to attach is not this
+ * function's question and never was - every caller already gates on `cover_letter_supported`
+ * through omitCoverLetter, which is the honest reading of "does this form have a slot".
+ */
+export function coverLetterObjectKeyToAttach(spec: unknown): string | null {
+  const stored = (spec && typeof spec === 'object' ? spec : {}) as Record<string, unknown>;
+  const meta = (stored._cover_letter ?? {}) as Record<string, unknown>;
+  const key = typeof meta.object_key === 'string' ? meta.object_key.trim() : '';
+  return key || null;
+}
+
 export async function buildPacket(row: ResumeRow, controlledTest = false): Promise<SubmissionPacket> {
   const stored = row.spec as StoredSpec;
   const contact = (stored._contact ?? {}) as Record<string, unknown>;
-  const coverLetterMeta = (stored._cover_letter ?? {}) as Record<string, unknown>;
   const [userRow, appRow, profileRow] = await Promise.all([
     db.select().from(users).where(eq(users.id, row.user_id)).limit(1),
     // Tolerant read, see lib/applicationFacts.ts.
@@ -403,8 +433,9 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     resume = Buffer.from(await response.arrayBuffer());
   }
   let coverLetter: Buffer | undefined;
-  if (typeof coverLetterMeta.object_key === 'string' && typeof coverLetterMeta.approved_at === 'string') {
-    const coverLetterUrl = await resolveBlobUrl(coverLetterMeta.object_key);
+  const coverLetterKey = coverLetterObjectKeyToAttach(stored);
+  if (coverLetterKey) {
+    const coverLetterUrl = await resolveBlobUrl(coverLetterKey);
     if (!coverLetterUrl) throw new Error('Generated cover letter file is unavailable');
     const coverLetterResponse = await fetch(coverLetterUrl);
     if (!coverLetterResponse.ok) throw new Error('Generated cover letter file could not be downloaded');
@@ -786,12 +817,18 @@ export function attentionBlockersForManagedResult(
  * no retry and no way to tell. Reproduced in prod on a Greenhouse posting on 2026-08-04, where a
  * cover letter that had merely failed to PARSE aborted a submission that was otherwise fine.
  *
- * Degrading is safe here, and not just tolerable: the generated letter is written unapproved
- * (approved=false), and buildPacket only ATTACHES a cover letter once approved_at is set. So a
- * failure at this step costs the applicant nothing they were about to send - it only means the
- * draft is not waiting for them on the approval screen. They can still write or retry one from the
- * dashboard. Losing the whole submission to protect an artifact the packet would not have carried
- * is strictly worse than continuing without it.
+ * Degrading beats aborting: losing a whole filled application to protect one attachment is the
+ * worse trade, and the applicant can still write or retry a letter from her dashboard.
+ *
+ * WHAT THIS PARAGRAPH USED TO SAY, and why it is worth keeping the correction visible: "the
+ * generated letter is written unapproved (approved=false), and buildPacket only ATTACHES a cover
+ * letter once approved_at is set. So a failure at this step costs the applicant nothing they were
+ * about to send." Both sentences were true and the conclusion was wrong. It cost her the send
+ * itself: on a form with a cover-letter control, /submission/approve refuses with 422 whenever the
+ * portal supports a letter and the packet has none recorded, so a degrade here produced a packet
+ * that read `ready_for_final_approval` and could never be sent. That is why `coverLetterIssue` now
+ * gates `safe` at both call sites rather than only being displayed. See coverLetterObjectKeyToAttach
+ * for the approved_at term itself, which is gone.
  *
  * The reason is returned rather than swallowed so the caller can put it in front of the applicant
  * as an attention reason. A silent degrade would be its own version of this bug.
@@ -824,7 +861,31 @@ async function packetForCoverLetterCapability(
   }
   const rows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, row.id)).limit(1);
   if (!rows[0]) throw new Error('This application went missing while we wrote the cover letter');
-  return { packet: await buildPacket(rows[0]) };
+  /* The SECOND way this step can fail, and it only became reachable when the approved_at term came
+     out of coverLetterObjectKeyToAttach. buildPacket now goes to blob storage for the letter on
+     every supported form, and it throws when the object key resolves to nothing or the fetch is not
+     ok. Before, that block was entered on approximately no run, so the throw was theoretical; now it
+     sits on the hot path of every Greenhouse prepare, and an unhandled throw here would abort a
+     filled application over a missing attachment - the exact failure the paragraph above this
+     function exists to prevent, reintroduced one line lower down. Same degrade, same shape, its own
+     sentence, because "we could not write it" and "we wrote it and could not attach it" are
+     different facts and the second one is ours to fix rather than hers to retry. */
+  try {
+    return { packet: await buildPacket(rows[0]) };
+  } catch (error) {
+    fastify.log.warn({ error, applicationId: row.id }, 'Cover letter file could not be attached, continuing without it');
+    return {
+      packet: omitCoverLetter(await buildPacket({ ...rows[0], spec: strippedCoverLetterSpec(rows[0].spec) })),
+      coverLetterIssue: 'Your cover letter is written but we could not attach the file to this form. Everything else is filled in. Open the application and send it again, and if it keeps happening the cover letter is the part to retry.',
+    };
+  }
+}
+
+/** The same spec with the cover letter artifact removed, so a rebuild cannot re-enter the fetch. */
+function strippedCoverLetterSpec(spec: unknown): Record<string, unknown> {
+  const stored = { ...((spec && typeof spec === 'object' ? spec : {}) as Record<string, unknown>) };
+  delete stored._cover_letter;
+  return stored;
 }
 
 /** The employer this packet is for, from job_context. Empty when the packet has no company on it. */
@@ -1347,8 +1408,14 @@ async function prepareManaged(
   const verificationHandoff = blockers.some((blocker) =>
     /verification code|security code|one[ -]?time code|passcode|\botp\b/i.test(blocker),
   );
-  // A missing cover letter is worth telling the applicant about, but it is not a blocker: the form
-  // is filled and sendable without it, so it must not flip the run out of the safe path.
+  /* A MISSING COVER LETTER IS A BLOCKER ON A FORM THAT ASKS FOR ONE. This line used to read "worth
+     telling the applicant about, but it is not a blocker: the form is filled and sendable without
+     it", and it is not sendable without it. /submission/approve refuses a packet with 422 when
+     cover_letter_supported is true and no cover letter is recorded, so leaving `safe` alone here
+     produced the one outcome that is worse than either honest answer: a packet described to her as
+     ready, with a Send button that cannot work. It reaches `safe` below rather than only
+     attention_reason. This branch is only ever populated when the form HAS a cover-letter control,
+     because packetForCoverLetterCapability returns no issue when `supported` is false. */
   const coverLetterAttention = coverLetterOutcome.coverLetterIssue ? [coverLetterOutcome.coverLetterIssue] : [];
   const filledFields = managedResultFilledFields(result);
   // Both passes count as evidence the form was reached. The discovery pass enumerates the live
@@ -1414,6 +1481,7 @@ async function prepareManaged(
     && discoveryAttention.length === 0
     && evidenceBlockers.length === 0
     && discoveryFailures.length === 0
+    && coverLetterAttention.length === 0
     && unansweredRequiredQuestions.length === 0;
   /* A FILL RUN THAT FOUND A SECURITY-CODE SCREEN HAS SUBMITTED THIS APPLICATION.
    *
@@ -1742,7 +1810,12 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     // to the send, and this is the direct-Playwright path's send decision.
     const safe = directPreparationIsSafe({
       blockerCount: sanitizedBlockers.length + evidenceBlockers.length,
-      attentionCount: discoveryAttention.length,
+      // coverLetterAttention counts here for the same reason it gates `safe` on the managed path:
+      // on a form with a cover-letter control, a packet with no cover letter recorded is one that
+      // /submission/approve will refuse with 422, so calling it ready is a promise the send cannot
+      // keep. Folded into attentionCount rather than blockerCount because it is our failure to
+      // report, not a field the employer's page left empty.
+      attentionCount: discoveryAttention.length + coverLetterAttention.length,
       unansweredRequiredCount: blankRequiredQuestionLabels(mergedQuestions).length,
       verificationStatus: verification.status,
     });
