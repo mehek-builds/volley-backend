@@ -2022,7 +2022,7 @@ function greenhouseComboboxCandidateValues(
   referralEvidence?: ReferralSourceEvidence,
 ): string[] {
   const values = greenhouseComboboxValuesForQuestion(questionText, answer, contextText, referralEvidence);
-  const sliced = isReferralSourceQuestion(questionText) ? values : values.slice(0, valueLimit);
+  const sliced = values.slice(0, valueLimit);
   const escapeHatch = escapeHatchOptionFor(questionText);
   if (!escapeHatch || sliced.some((value) => value.trim().toLowerCase() === escapeHatch.toLowerCase())) return sliced;
   return [...sliced, escapeHatch];

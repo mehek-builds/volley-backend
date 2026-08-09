@@ -188,10 +188,10 @@ test('Class A: how did you hear about this job requires packet-specific evidence
     answer('How did you first hear about Five Rings?', ['University event', 'Careers Page', 'Referral'], evidenced),
     'Careers Page',
   );
-  // "Other" is truthful and is the LAST resort, never something that displaces a real option.
+  // No same-channel option means review, never a generic value that can overwrite the truth.
   assert.equal(
     answer('How did you hear about this internship?', ['LinkedIn', 'Employee referral', 'Other'], evidenced),
-    'Other',
+    null,
   );
 });
 
@@ -395,26 +395,22 @@ test('a truncated school name never picks a campus it cannot distinguish', () =>
   );
 });
 
-/* BOTH EXTRAS, because each one puts a false statement on a form.
- *
- * referralSourceLadder listed 'Job Board' ahead of 'Other', so a stored "Company website" against
- * ['LinkedIn','Job Board','Employee referral','Other'] returned Job Board: a claim about how she
- * found the role that did not happen. "Other" is true however she arrived. */
+/* Every candidate is the same acquisition fact. A generic fallback can overwrite an earlier exact
+ * managed selection, so a closed list with no same-channel option returns for review. */
 test('a referral source never claims a channel the applicant did not use', () => {
   assert.equal(
     answer('How did you hear about this job?', ['LinkedIn', 'Job Board', 'Employee referral', 'Other']),
     null,
   );
-  assert.deepEqual(referralSourceLadder('Company website').at(-1), 'Other');
+  assert.deepEqual(referralSourceLadder('Company website'), []);
   assert.equal(referralSourceLadder('Company website').includes('Job Board'), false);
-  // A stored value that is NOT the company's own site does not get the company-site synonyms
-  // offered on its behalf either. Stored value, then Other, and nothing invented in between.
-  assert.deepEqual(referralSourceLadder('LinkedIn'), ['LinkedIn', 'Other']);
+  // A user-declared source gets only its exact channel, and no invented alternative.
+  assert.deepEqual(referralSourceLadder('LinkedIn'), ['LinkedIn']);
   assert.equal(
     chooseClosestOption(referralSourceLadder('LinkedIn'), ['Company Website', 'Job Board', 'Other']),
-    'Other',
+    null,
   );
-  // The truthful specific option still beats Other whenever it is on the list.
+  // The truthful specific option is still selected whenever it is on the list.
   assert.equal(
     answer(
       'How did you hear about this job?',

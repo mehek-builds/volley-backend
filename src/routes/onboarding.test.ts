@@ -18,6 +18,7 @@ describe('onboarding gaps: languages', () => {
       'languages',
       'desired_salary',
       'desired_salary_currency',
+      'referral_source_default',
     ]);
   });
 
