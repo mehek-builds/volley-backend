@@ -833,7 +833,13 @@ export function segmentJd(jdText: string, context?: JdContext): JdSection[] {
   for (const line of lines) {
     if (isCompanySpecialFooterHeading(line, context?.company)) {
       if (current.text.trim()) sections.push(current);
-      current = { kind: 'noise', weight: SECTION_WEIGHT.noise, text: '', heading: headingCore(line) };
+      current = {
+        kind: 'noise',
+        weight: SECTION_WEIGHT.noise,
+        text: '',
+        heading: headingCore(line),
+        footer: true,
+      };
       continue;
     }
     if (isHeadingLine(line)) {

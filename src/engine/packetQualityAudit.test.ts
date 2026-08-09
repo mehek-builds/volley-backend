@@ -170,6 +170,25 @@ Experience with DNS, Linux, Python, and network security
     assert.ok(extracted.includes('dns') && extracted.includes('linux') && extracted.includes('python'));
   });
 
+  test('Cloudflare branded footer stays excluded when the posting has no primary fit section', () => {
+    // This shape exercises the fallback salvage path. Before the footer marker was carried onto
+    // the branded section, its longer company-history text outweighed the short role prose and was
+    // re-read as body even though the heading boundary had classified it as noise.
+    const jd = `About the Role
+Help the engineering team ship reliable customer-facing software.
+
+What Makes Cloudflare Special?
+Fundamental to our mission to help build a better Internet is protecting the free and open Internet.
+Project Galileo supports journalism and civil society organizations around the world.
+We released 1.1.1.1 to help fix the foundation of the Internet with a public DNS resolver.
+Cloudflare protects Internet applications without requiring customers to add hardware or install software.
+`;
+    const extracted = terms(jd, { company: 'Cloudflare', role: 'Software Engineer Intern' });
+    for (const leaked of ['internet', 'dns', 'journalism', 'project galileo']) {
+      assert.ok(!extracted.includes(leaked), `${leaked} was salvaged from the branded company footer`);
+    }
+  });
+
   test('Flow Traders keeps Excel when the employer explicitly requires proficiency in it', () => {
     const jd = `What You Need to Succeed
 Excellent mental math, quantitative and analytical skills
