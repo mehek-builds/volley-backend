@@ -1063,6 +1063,35 @@ const LABEL_QUESTION_HANDLE_RE = /\b(question_\d+)\b(?!\s*\[)/i;
 // only place their id appears. Six digits minimum, and only at the very end, so a year inside a
 // question ("ready for full-time employment in 2028?") is never mistaken for a handle.
 const LABEL_TRAILING_NUMERIC_HANDLE_RE = /(?:^|\s)(\d{6,})\s*$/;
+/* Greenhouse's OWN four self-identification controls, which carry a NAMED id rather than a numeric
+ * one and so were the one closed-control shape #428's plumbing could not name.
+ *
+ * They reach discovery as `[data-litos-discovered-14]` with the id concatenated onto the visible
+ * question ("are you hispanic/latino? hispanic_ethnicity"), which is neither a `question_<digits>`
+ * handle nor a six-digit one, so managedOptionProbeControlId returned undefined and the probe pass
+ * skipped all four. Measured on the live Flow Traders form, 2026-08-09, these are the lists that
+ * were therefore never read:
+ *
+ *   gender             Male / Female / Decline To Self Identify
+ *   hispanic_ethnicity Yes / No / Decline To Self Identify
+ *   veteran_status     I am not a protected veteran / I identify as one or more ... / I don't wish to answer
+ *   disability_status  Yes, I have a disability, or have had one in the past / No, I do not ... /
+ *                      I do not want to answer
+ *
+ * The stored decline answer is "Decline to self-identify", and against those lists it is on two of
+ * the four and on neither of the other two. Both production runs of 2026-08-09 reported exactly
+ * that: `"are you hispanic/latino? hispanic_ethnicity" (no option matched "Decline to
+ * self-identify")` and the same line for disability status. With the list read, the existing
+ * snapping picks the employer's own wording and nothing in the matcher has to be loosened.
+ *
+ * An explicit set of four rather than a trailing-snake_case pattern: these four ids are Greenhouse's
+ * and identical on every Greenhouse board, so this stays an ATS-family fact. A general pattern would
+ * read the last word of any question that happens to end in an underscored token as a control id. */
+const GREENHOUSE_DEMOGRAPHIC_CONTROL_IDS = ['gender', 'hispanic_ethnicity', 'veteran_status', 'disability_status', 'race'] as const;
+const LABEL_TRAILING_DEMOGRAPHIC_HANDLE_RE = new RegExp(
+  `(?:^|\\s)(${GREENHOUSE_DEMOGRAPHIC_CONTROL_IDS.join('|')})\\s*$`,
+  'i',
+);
 
 /**
  * The id of the control a discovered field stands for, or undefined when it cannot be named.
@@ -1079,7 +1108,8 @@ export function managedOptionProbeControlId(
   if (!label) return undefined;
   return label.match(LABEL_SECTION_HANDLE_RE)?.[1]
     ?? label.match(LABEL_QUESTION_HANDLE_RE)?.[1]
-    ?? label.match(LABEL_TRAILING_NUMERIC_HANDLE_RE)?.[1];
+    ?? label.match(LABEL_TRAILING_NUMERIC_HANDLE_RE)?.[1]
+    ?? label.match(LABEL_TRAILING_DEMOGRAPHIC_HANDLE_RE)?.[1]?.toLowerCase();
 }
 
 /**
@@ -1307,20 +1337,101 @@ function greenhouseReactSelectValue(
   return snapped ?? ladder.find((value) => value.trim().length > 0);
 }
 
-function pushGreenhouseEducationComboboxActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
+/** The four fixed education controls, the value each will be given, and the label it reports under. */
+function greenhouseEducationComboboxFields(
+  packet: SubmissionPacket,
+): Array<{ inputId: string; value: string | undefined; label: string }> {
   const fields: Array<{ inputId: string; ladder: string[]; label: string }> = [
     { inputId: 'school--0', ladder: greenhouseSchoolAliases(packet.school), label: 'education_school_combo:0' },
     { inputId: 'degree--0', ladder: greenhouseDegreeAliases(packet.degree), label: 'education_degree_combo:0' },
     { inputId: 'discipline--0', ladder: greenhouseDisciplineAliases(packet), label: 'education_discipline_combo:0' },
     { inputId: 'end-month--0', ladder: packet.graduationMonth ? [packet.graduationMonth] : [], label: 'education_end_month_combo' },
   ];
+  return fields.map((field) => ({
+    inputId: field.inputId,
+    value: greenhouseReactSelectValue(packet, field.inputId, field.ladder),
+    label: field.label,
+  }));
+}
+
+/**
+ * The three education controls whose menu is FETCHED when it first opens, rather than shipped with
+ * the page. End date month is not one of them: its twelve rows are in the document.
+ */
+const GREENHOUSE_ASYNC_TAXONOMY_IDS = ['school--0', 'degree--0', 'discipline--0'] as const;
+
+/** Open, close. Two actions is the whole cost of starting one taxonomy's fetch. */
+export const MANAGED_TAXONOMY_WARM_ACTIONS_PER_CONTROL = 2;
+
+/* ─── THE WARMING ROUND THE FILL RUN NEVER HAD ────────────────────────────────────────────────
+ *
+ * School, Degree and Discipline hold Greenhouse's own taxonomies, and a react-select fetches those
+ * over the network the first time its menu is opened. Every consumer of that fact has been written
+ * twice already: pushManagedReactSelectOptionProbeActions runs a whole round whose only purpose is
+ * to make the NEXT round read a real list, and the runner allows a bounded 1200ms after it opens a
+ * control and another 1200ms after it types into one.
+ *
+ * The discovery pass gets that warming for free, because buildManagedDiscoveryActions asks for
+ * `probeOptions` and the round-one probes are pushed AHEAD of the education fills. The fill run
+ * asks for no probe - it consumes the discovery pass's reads instead - so its education fill is the
+ * first thing on a fresh page to touch those controls, and it is racing a network fetch with 1200ms
+ * of headroom and nothing spent in front of it.
+ *
+ * Measured on the live Flow Traders Greenhouse form on 2026-08-09, timing the two waits the runner
+ * actually depends on:
+ *
+ *              open menu     type the answer, wait for its row
+ *   cold       school 330ms   584ms
+ *              degree 680ms   965ms      <- against a 1200ms allowance
+ *   warmed     school   0ms   568ms
+ *              degree  26ms   603ms
+ *
+ * 965ms of 1200ms from a fast connection is not a margin, it is a coin toss, and it is the whole
+ * explanation for '"School" is required and is still empty' arriving with the answer resolved
+ * correctly in the packet and the runner reporting `no option matched "University of Southern
+ * California"`. The list the matcher was handed was the one the page had rendered so far.
+ *
+ * So the fill run opens those three controls and presses Escape, once, immediately after the form
+ * is ready - before the name, email, phone, location and resume actions, which are what turns two
+ * actions of warming into a second of real elapsed time. Escape rather than a second click, for the
+ * reason pushManagedReactSelectOptionProbeActions gives: clicking an open react-select closes it,
+ * clicking a closed one opens it, and the warm-up must leave every control exactly as it found it.
+ *
+ * Only the controls this packet is actually going to fill, so a form with no discipline control or
+ * an applicant with no stored degree pays nothing for it.
+ */
+function pushGreenhouseEducationTaxonomyWarmActions(
+  actions: ManagedBrowserAction[],
+  portal: SupportedPortal,
+  packet: SubmissionPacket,
+) {
+  if (portalFamily(portal) !== 'greenhouse' || packetLooksAkuna(packet)) return;
+  const willFill = new Map(greenhouseEducationComboboxFields(packet).map((field) => [field.inputId, field.value]));
+  for (const inputId of GREENHOUSE_ASYNC_TAXONOMY_IDS) {
+    if (!willFill.get(inputId)) continue;
+    const selector = `[id="${quoteAttr(inputId)}"]`;
+    actions.push({
+      type: 'click',
+      selector,
+      label: `education_taxonomy_warm:${inputId}`,
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
+    actions.push({
+      type: 'press',
+      selector,
+      value: 'Escape',
+      label: `education_taxonomy_warm_close:${inputId}`,
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
+  }
+}
+
+function pushGreenhouseEducationComboboxActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
+  const fields = greenhouseEducationComboboxFields(packet);
   for (const field of fields) {
-    managedGreenhouseReactSelectFill(
-      actions,
-      field.inputId,
-      greenhouseReactSelectValue(packet, field.inputId, field.ladder),
-      field.label,
-    );
+    managedGreenhouseReactSelectFill(actions, field.inputId, field.value, field.label);
   }
   managedFill(actions, '#end-year--0', packet.graduationYear, 'education_end_year_field');
 }
@@ -2910,9 +3021,14 @@ function trimGreenhouseManagedActionsToBudget(
  * reached Discipline, and the applicant was told '"Discipline" is required and is still empty' about
  * a control the run had been forbidden to touch. There is no budget saving worth that, and the
  * sixteen actions are a fixed cost that does not grow with the form.
+ *
+ * The taxonomy warm-up joined them on 2026-08-09 and belongs to the same block for the same reason.
+ * Two actions per control that make the four fills able to land at all: dropping the warm-up to save
+ * budget deletes the education row just as surely as dropping the fills, only less visibly, because
+ * the fills then run and report `no option matched` on an answer that was correct.
  */
 const GREENHOUSE_FIXED_EDUCATION_ACTION_RE =
-  /^education_(?:school|degree|discipline|end_month)_combo(?:$|[:_])|^education_end_year_field$/;
+  /^education_(?:school|degree|discipline|end_month)_combo(?:$|[:_])|^education_end_year_field$|^education_taxonomy_warm/;
 
 function isProtectedManagedAction(
   action: ManagedBrowserAction | undefined,
@@ -3588,6 +3704,8 @@ function pushFixedFieldActions(
     // After the preflight, because on a JD page the application form (and every combobox on it)
     // only exists once "Apply for this job" has been clicked.
     if (options.probeOptions) pushManagedReactSelectOptionProbeActions(actions, portal);
+    // The same warming, for the run that has no probe to do it. See the comment on the function.
+    else pushGreenhouseEducationTaxonomyWarmActions(actions, portal, packet);
     const parts = packet.fullName.trim().split(/\s+/);
     // optional (managedFill default) + bounded, not required: a branded-redirect Greenhouse customer
     // (Jump Trading serves its posting through www.jumptrading.com with a different form DOM) has
