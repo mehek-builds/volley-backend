@@ -76,6 +76,7 @@
     "db:pipeline-stage": "node scripts/apply-pipeline-stage-schema.mjs",
     "db:application-email": "node scripts/apply-application-email-schema.mjs",
     "db:application-email-forwarding": "node scripts/apply-application-email-forwarding-schema.mjs",
+    "db:application-email-receiving-proof": "node scripts/apply-application-email-receiving-proof-schema.mjs",
     "db:application-facts": "node scripts/apply-application-facts-schema.mjs",
     "logo:check": "node --import tsx scripts/check-logo-coverage.mjs",
     "logo:resolve": "node --import tsx scripts/resolve-company-domains.mjs",
