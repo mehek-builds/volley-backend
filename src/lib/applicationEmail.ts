@@ -15,6 +15,7 @@ import {
   listResendWebhooks,
 } from './applicationEmailDeliverability';
 import { emailSender, sendEmail, type OutboundEmail } from './email';
+import { applicationEmailRouteSelection, type ApplicationEmailRouteMode } from './applicationEmailRoute';
 
 export type ApplicationEmailIdentity = {
   alias: string;
@@ -67,20 +68,12 @@ function authenticationFromHeaders(headers: Record<string, string> | undefined):
 }
 
 function configuredMailbox(): { local: string; domain: string; address: string } | null {
-  if (process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN?.trim()) return null;
-  const mailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX?.trim().toLowerCase();
-  const match = mailbox?.match(/^([^@\s]+)@([a-z0-9.-]+\.[a-z]{2,})$/i);
-  if (!match) return null;
-  const local = match[1];
-  const domain = match[2];
-  if (!/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+$/i.test(local)) return null;
-  return { local, domain, address: `${local}@${domain}` };
+  return applicationEmailRouteSelection().mailbox;
 }
 
 function configuredDomain(): string | null {
-  if (process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN?.trim()) return aliasDomain();
-  const domain = process.env.LITOS_APPLICATION_EMAIL_DOMAIN?.trim().toLowerCase();
-  return domain && /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(domain) ? domain : null;
+  const selection = applicationEmailRouteSelection();
+  return selection.mailbox ? null : selection.domain;
 }
 
 export function applicationAliasSecret(): string | null {
@@ -102,7 +95,7 @@ export function isApplicationEmailConfigured(): boolean {
 }
 
 export function applicationEmailRouteLabel(): string | null {
-  return configuredMailbox()?.address || configuredDomain();
+  return applicationEmailRouteSelection().route_label;
 }
 
 function digest(value: string, length = 10): string {
@@ -113,7 +106,8 @@ export function applicationEmailRouteGenerationFingerprint(): string | null {
   const secret = applicationAliasSecret();
   const route = applicationEmailRouteLabel();
   if (!secret || !route) return null;
-  return digest(`application-email-route-v1:${route}:${secret}`, 20);
+  const mode = applicationEmailRouteSelection().mode;
+  return digest(`application-email-route-v2:${mode}:${route}:${secret}`, 20);
 }
 
 export function applicationAliasFor(userId: string, applicationId: string): string | null {
@@ -890,6 +884,11 @@ export async function processInboundApplicationEmail(input: InboundApplicationEm
 export type ApplicationEmailHealth = {
   status: 'ok' | 'degraded' | 'not_configured';
   reason: AliasDeliverabilityReason;
+  route_mode: ApplicationEmailRouteMode | null;
+  route_mode_explicit: boolean;
+  invalid_route_mode_present: boolean;
+  ignored_legacy_domain_present: boolean;
+  ignored_legacy_mailbox_present: boolean;
   domain: string | null;
   // Measured against the world.
   deliverable: boolean;
@@ -929,6 +928,7 @@ export type ApplicationEmailHealth = {
  * degrade to null rather than propagating. */
 export async function applicationEmailHealth(): Promise<ApplicationEmailHealth> {
   const check = await applicationAliasDeliverability();
+  const route = applicationEmailRouteSelection();
   const [aliasCount, lastInbound] = await Promise.all([
     db
       .select({ count: sql<number>`count(*)::int` })
@@ -951,8 +951,15 @@ export async function applicationEmailHealth(): Promise<ApplicationEmailHealth> 
     // to be loud and distinct from 'ok'.
     status: check.deliverable
       ? 'ok'
-      : (check.reason === 'alias_not_configured' || check.reason === 'inbound_disabled' ? 'not_configured' : 'degraded'),
+      : (check.reason === 'inbound_disabled' || (check.reason === 'alias_not_configured' && !route.explicit)
+        ? 'not_configured'
+        : 'degraded'),
     reason: check.reason,
+    route_mode: route.mode,
+    route_mode_explicit: route.explicit,
+    invalid_route_mode_present: route.invalid_mode_present,
+    ignored_legacy_domain_present: route.ignored_legacy_domain_present,
+    ignored_legacy_mailbox_present: route.ignored_legacy_mailbox_present,
     domain: check.domain,
     deliverable: check.deliverable,
     mx_hosts: check.mx_hosts,
