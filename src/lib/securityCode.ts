@@ -121,13 +121,21 @@ export function findSecurityCodeAttempt(
 /**
  * Hand a code to the atomic confirmation and submit action the list already ends with.
  *
+ * THE CODE CONTROL HAS TO ALREADY BE ON THE PAGE WHEN THIS LIST RUNS. The runner's atomic action
+ * types the code FIRST and clicks once, in that order, because clicking a verification form before
+ * the code is in it resubmits empty and rotates the code. So this is the action list for a run that
+ * is already standing on the challenge DOM, which in practice means a continuation of the run that
+ * raised it. Handing it to a list that begins with a fresh page load is what packet
+ * 9810bdcf-fc3d-44bb-a8cb-b09c51aaf131 did on 2026-08-09: on first paint a Greenhouse application
+ * form has no code control at all, the runner reported 'no_control' and threw 'Security code was not
+ * entered before atomic verification', and nothing was typed and nothing was sent.
+ * securityCodeContinuationActions below is the shape that gets used against a live employer.
+ *
  * ZERO EXTRA ACTIONS, and that is not tidiness. MANAGED_ACTION_LIMIT is 120; a reconstruction of a
  * real Greenhouse packet's action list came to exactly 120 with trimGreenhouseManagedActionsToBudget
  * having already shaved preferred_first_name and preferred_last_name off the end. Every action added
  * to a submit run displaces a field the applicant expects filled. The code cannot be queued as its
- * own top-level action anyway. The runner enters the supplied code first, then performs exactly one
- * fresh verification confirmation pass and one physical click. This action is never permitted to
- * click an application form first, and the list stays the length it already was.
+ * own top-level action anyway.
  *
  * Returns the list unchanged when it does not end in an atomic submit, rather than appending one. A
  * caller that has no atomic submit has been gated somewhere upstream (portalCanAutoSubmit, the
@@ -145,6 +153,31 @@ export function withSecurityCode(
   last.securityCode = code;
   last.submitKind = 'verification';
   return next;
+}
+
+/**
+ * The whole action list for the second half of a security-code submission: one atomic action,
+ * carrying the code, run as a continuation of the browser that is already looking at the challenge.
+ *
+ * IT IS THE PACKET'S OWN SUBMIT ACTION, not a second copy of one. buildManagedPortalActions ends in
+ * an atomic submit whose selector, chooser policy, contract version and retry budget the runner
+ * validates field by field and rejects outright on any mismatch. Writing those out again here would
+ * be a fifth place they have to agree, and the runner's answer to a disagreement is to refuse the
+ * whole run - so the list is derived from the one production already built.
+ *
+ * Returns null when the packet's list does not end in an atomic submit. That is the same upstream
+ * gate withSecurityCode respects: a packet Litos may not auto-submit does not become submittable by
+ * arriving here with a code in hand.
+ */
+export function securityCodeContinuationActions(
+  actions: readonly ManagedBrowserAction[],
+  code: string,
+): ManagedBrowserAction[] | null {
+  const last = actions[actions.length - 1];
+  if (!last || last.type !== 'confirmAndSubmit' || last.contractVersion !== 2 || last.submitKind !== 'application') {
+    return null;
+  }
+  return withSecurityCode([last], code);
 }
 
 /**

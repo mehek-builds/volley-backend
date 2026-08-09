@@ -29,9 +29,16 @@ test('managed verification resumes once by token, never by URL, then verifies th
   assert.doesNotMatch(managed, /continuation_token:/);
   assert.doesNotMatch(managed, /continuation_expires_at:/);
   assert.match(managed, /expectedRecipient: packet\.email/);
-  assert.equal((managed.match(/continueManagedBrowser\(/g) ?? []).length, 1);
+  /* TWO RESUME SITES, AND AT MOST ONE OF THEM CAN RUN. There is the mailbox-scraped code, below,
+     and the code the applicant supplied herself, above it. They are guarded by opposite tests on
+     the same value, so no run can reach both, and a run still resumes at most once. The count is
+     asserted with the guards rather than left at one, because "one call site" stopped being the
+     thing that made this safe the moment a second, mutually exclusive one was correct to have. */
+  assert.equal((managed.match(/continueManagedBrowser\(/g) ?? []).length, 2);
+  assert.match(managed, /if \(options\.securityCode && initialChallenge\) \{/);
+  assert.match(managed, /if \(!options\.securityCode && initialChallenge && managedResultNeedsEmailVerification\(result\)\) \{/);
   assert.doesNotMatch(managed, /runManagedBrowser\(result\.url/);
-  assert.doesNotMatch(managed, /continueManagedBrowser\([^,]+,[^)]*\).*continueManagedBrowser/s);
+  assert.match(managed, /receiptResult = await continueManagedBrowser\(continuationToken, codeActions\)/);
   assert.match(managed, /receiptResult = await continueManagedBrowser\(continuationToken, prepared\.actions\)/);
   assert.match(managed, /readManagedReceipt\(receiptResult\)/);
   const terminalVerification = managed.slice(managed.indexOf("verification = {\n        status: 'completed'"));
@@ -40,7 +47,7 @@ test('managed verification resumes once by token, never by URL, then verifies th
 
 test('uncertain continuation outcome is handed off without a retry or URL reopen', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  const call = runner.indexOf('receiptResult = await continueManagedBrowser');
+  const call = runner.indexOf('receiptResult = await continueManagedBrowser(continuationToken, prepared.actions)');
   const receipt = runner.indexOf('const receipt = readManagedReceipt', call);
   const continuation = runner.slice(call, receipt);
   assert.match(continuation, /catch \(error\)/);
