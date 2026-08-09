@@ -25,6 +25,8 @@ import {
   reactSelectListboxSelector,
   GREENHOUSE_OPTION_PROBE_IDS,
   MANAGED_ACTION_LIMIT,
+  ManagedActionBudgetError,
+  PORTAL_FAMILIES,
   MANAGED_OPTION_EXTRACT_PREFIX,
   managedResultHasCoverLetterUpload,
   portalApplicationUrl,
@@ -1433,8 +1435,8 @@ test('Greenhouse trims low-priority fallbacks before exceeding the managed actio
   }
 });
 
-test('Greenhouse preserves submit when reviewed answers exceed the managed action budget', () => {
-  const actions = buildManagedPortalActions('greenhouse', {
+test('Greenhouse blocks before submit when reviewed answers exceed the managed action budget', () => {
+  const packet = {
     fullName: 'Mehek Mandal',
     email: 'mehekmandal05@gmail.com',
     phone: '+971501234567',
@@ -1444,11 +1446,12 @@ test('Greenhouse preserves submit when reviewed answers exceed the managed actio
       question: `Describe project ${index + 1}`,
       answer: `Project ${index + 1} answer`,
     })),
-  }, true);
+  };
 
-  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
-  assert.equal(actions.at(-1)?.selector, 'button[type="submit"], input[type="submit"]');
-  assert.ok(actions.some((action) => action.type === 'upload' && action.label === 'resume'));
+  assert.throws(
+    () => buildManagedPortalActions('greenhouse', packet, true),
+    (error: unknown) => error instanceof ManagedActionBudgetError && error.submitActionAppended === false,
+  );
 });
 
 test('large Greenhouse preview packets preserve core field evidence extracts inside the managed action budget', () => {
@@ -1458,7 +1461,7 @@ test('large Greenhouse preview packets preserve core field evidence extracts ins
     phone: '+971501234567',
     resume: Buffer.from('pdf'),
     resumeName: 'resume.pdf',
-    questions: Array.from({ length: 140 }, (_, index) => ({
+    questions: Array.from({ length: 8 }, (_, index) => ({
       question: `Describe project ${index + 1}`,
       answer: `Project ${index + 1} answer`,
     })),
@@ -1813,7 +1816,7 @@ test('Greenhouse replays Databricks React-select buckets without portal selector
 });
 
 test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped React-selects', () => {
-  const actions = buildManagedPortalActions('greenhouse', {
+  const packet = {
     fullName: 'Mehek Mandal',
     email: 'mehekmandal05@gmail.com',
     school: 'University of Southern California, Viterbi School of Engineering',
@@ -1864,12 +1867,22 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
         answer: '',
       },
     ],
-  });
+  };
+  // The full form is deliberately larger than Akuna's 100-action ceiling. Exercise every mapped
+  // question in safe chunks so this routing test does not require the unsafe behavior that the
+  // action-budget blocker now forbids.
+  const routedQuestions = packet.questions.filter((item) => !/prior experience working at an options market making/i.test(item.question));
+  const actionRuns = Array.from({ length: Math.ceil(routedQuestions.length / 4) }, (_, index) =>
+    buildManagedPortalActions('greenhouse', {
+      ...packet,
+      questions: routedQuestions.slice(index * 4, index * 4 + 4),
+    }));
+  const actions = actionRuns.flat();
 
   const comboFills = actions.filter((action) => action.type === 'fill' && /(?:question|greenhouse_known_question|greenhouse_fixed_question|greenhouse_akuna_attestation)_combo_label:/.test(action.label ?? ''));
-  const valuesFor = (text: string) => comboFills
+  const valuesFor = (text: string) => Array.from(new Set(comboFills
       .filter((action) => action.label?.toLowerCase().includes(text.toLowerCase()))
-      .map((action) => action.value);
+      .map((action) => action.value)));
   assert.ok(valuesFor('Which University do/did you attend?').includes('University of Southern California'));
   assert.ok(actions.some((action) =>
     action.type === 'fill'
@@ -1894,17 +1907,16 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
   assert.ok(knownComboFills.some((action) => action.selector?.includes('live in New York or California')));
   assert.equal(actions.some((action) => action.type === 'fillByLabelText' && action.label === 'gpa'), false);
   assert.equal(actions.some((action) => action.type === 'fillByLabelText' && action.label === 'gpa_question'), false);
-  const topPreferenceIndex = actions.findIndex((action) => action.type === 'fill' && action.selector?.includes('this role is my top preference'));
-  const nyCaIndex = actions.findIndex((action) => action.type === 'fill' && action.selector?.includes('live in New York or California'));
-  const sponsorshipIndex = actions.findIndex((action) => action.type === 'fill' && action.selector?.includes('require visa sponsorship'));
+  const orderedActions = buildManagedPortalActions('greenhouse', {
+    ...packet,
+    questions: [packet.questions[0]!, packet.questions[12]!],
+  });
+  const topPreferenceIndex = orderedActions.findIndex((action) => action.type === 'fill' && action.selector?.includes('this role is my top preference'));
+  const sponsorshipIndex = orderedActions.findIndex((action) => action.type === 'fill' && action.selector?.includes('require visa sponsorship'));
   assert.ok(topPreferenceIndex >= 0 && topPreferenceIndex < sponsorshipIndex);
-  assert.ok(nyCaIndex >= 0 && nyCaIndex < 80);
-  const disclaimerIndex = actions.findIndex((action) => action.type === 'fill' && action.selector?.includes('Disclaimer: Akuna Capital'));
-  assert.ok(disclaimerIndex >= 0 && disclaimerIndex < 80);
-  assert.ok(sponsorshipIndex >= 0 && sponsorshipIndex < 80);
   assert.equal(actions.some((action) => action.label?.startsWith('education_school_combo:')), false);
   assert.equal(actions.some((action) => action.label === 'education_graduation_year'), false);
-  assert.ok(actions.length <= 100, `expected at most 100 actions, got ${actions.length}`);
+  for (const run of actionRuns) assert.ok(run.length <= 100, `expected at most 100 actions, got ${run.length}`);
 
   for (const action of comboFills.filter((item) => item.label?.startsWith('question_combo_label:'))) {
     const index = actions.indexOf(action);
@@ -2355,7 +2367,7 @@ function overBudgetGreenhousePacket(extraQuestions: Array<{ question: string; an
   // Worded so each one is recognised as a React Select, because that is what makes a real screener
   // expensive: a plain text question is one action, a combobox is five. DRW's live packet reached
   // 231 raw actions this way, and 231 is the number that made the trim reach the education row.
-  const screeners = Array.from({ length: 24 }, (_, index) => ({
+  const screeners = Array.from({ length: 8 }, (_, index) => ({
     question: `Which team opening are you most interested in for area ${index + 1}?`,
     answer: 'Core platform',
   }));
@@ -3729,10 +3741,11 @@ function andurilPacket(overrides: Record<string, unknown> = {}) {
  * Software Developer Intern packet was measured at 27 required fields and 0 questions.
  *
  * The failure was silent, so a count is the only thing that can catch its return. */
-const EVERY_MANAGED_PORTAL = [
-  'greenhouse', 'lever', 'ashby', 'smartrecruiters', 'workable', 'jazzhr',
-  'paylocity', 'rippling', 'breezy', 'bamboohr', 'jobvite', 'icims', 'oraclecloud', 'ultipro',
-] as const;
+/* Read off HOSTS, not written out. The hardcoded version of this list covered fourteen families and
+ * stayed green while eleven more landed, so both ceiling tests below would have walked a stale set
+ * and reported full coverage of a set they no longer covered. PORTAL_FAMILIES cannot drift: HOSTS is
+ * a Record<PortalFamily, RegExp>, so a family with no key there does not compile. */
+const EVERY_MANAGED_PORTAL = PORTAL_FAMILIES;
 
 test('the discovery run never exceeds the runner action ceiling, on any portal', () => {
   for (const portal of EVERY_MANAGED_PORTAL) {
@@ -3742,6 +3755,206 @@ test('the discovery run never exceeds the runner action ceiling, on any portal',
       `${portal} discovery run is ${actions.length} actions, and the runner rejects anything over ${MANAGED_ACTION_LIMIT}`,
     );
   }
+});
+
+/* R-1xx. The FILL run fits inside the runner's ceiling too, on every portal and at any number of
+ * reviewed questions.
+ *
+ * The test above covers the discovery run, which is a fixed list. This one covers the list that
+ * grows per QUESTION, and only Greenhouse was ever trimmed against it. Measured on origin/main
+ * (02648ba), Ashby costs 14 actions per reviewed question - one scoped fill plus thirteen
+ * speculative selector guesses - so an eight-question posting built a 123-action list and every such
+ * run was answered with HTTP 400 TOO_MANY_ACTIONS before a browser opened:
+ *
+ *     questions     |  0    4    6    8   10   30
+ *     ashby submit  | 11   67   95  123  151  431
+ *     ashby prepare | 15   71   99  127  155  435
+ *
+ * stratus-browser-cloud PR #22 is what made that reachable: `discover` began reporting choice
+ * questions (radio, checkbox, select, Ashby pill groups) where it had reported only text-shaped
+ * inputs, so the reviewed-question count on a live Ashby packet went up sharply. Paylocity is worse
+ * still at 20 per question, because the wizard traversal repeats the fills once per step.
+ *
+ * The failure is silent on the discovery path - submissionRunner takes that run with
+ * `.catch(() => null)` - so a count is again the only thing that can catch its return. And the fix
+ * is a trim, never a higher MAX_ACTIONS: the last time a list was allowed to grow past the runner's
+ * ceiling it rejected every managed run for weeks with nobody seeing it. */
+test('the fill run never exceeds the runner action ceiling, on any portal at any question count', () => {
+  for (const questionCount of [0, 8, 30, 120]) {
+    const packet = andurilPacket({
+      city: 'Los Angeles',
+      country: 'United States',
+      linkedinUrl: 'https://linkedin.com/in/mehekmandal',
+      githubUrl: 'https://github.com/mehek',
+      portfolioUrl: 'https://mehek.dev',
+      questions: Array.from({ length: questionCount }, (_, index) => ({
+        question: `Screener question number ${index + 1}: do you have experience with distributed systems?`,
+        answer: index % 2 === 0 ? 'Yes' : 'No',
+      })),
+    });
+    for (const portal of EVERY_MANAGED_PORTAL) {
+      for (const submit of [false, true]) {
+        try {
+          const actions = buildManagedPortalActions(portal, packet, submit);
+          assert.ok(
+            actions.length <= MANAGED_ACTION_LIMIT,
+            `${portal} ${submit ? 'submit' : 'prepare'} run with ${questionCount} questions is ${actions.length} actions, and the runner rejects anything over ${MANAGED_ACTION_LIMIT}`,
+          );
+        } catch (error) {
+          assert.ok(error instanceof ManagedActionBudgetError, `${portal} returned an unexpected budget failure`);
+          assert.equal(error.submitActionAppended, false);
+          assert.match(error.blocker, /did not press submit/i);
+        }
+      }
+    }
+  }
+});
+
+function selectHeavyGreenhousePacket(questionCount: number) {
+  return andurilPacket({
+    questions: Array.from({ length: questionCount }, (_, index) => ({
+      question: `Preferred location for placement choice ${String.fromCharCode(65 + index)}`,
+      answer: index % 2 === 0 ? 'New York' : 'Chicago',
+    })),
+  });
+}
+
+function viableReviewedQuestionAttempt(
+  actions: ReturnType<typeof buildManagedPortalActions>,
+  question: string,
+): boolean {
+  const suffix = question.slice(0, 80);
+  const groups = new Map<string, typeof actions>();
+  for (const action of actions) {
+    const base = action.label?.replace(/_(?:open|option_value|option|select)$/, '');
+    if (!base || (!base.endsWith(`:${suffix}`) && base !== `question:${suffix}`)) continue;
+    groups.set(base, [...(groups.get(base) ?? []), action]);
+  }
+  return Array.from(groups.entries()).some(([base, group]) => {
+    if (base === `question:${suffix}`) return group.some((action) => action.type === 'fillByLabelText');
+    if (/^question_checkbox:/.test(base)) return group.some((action) => action.type === 'click');
+    return /^question_(?:combo(?:_label)?|select(?:_live)?):/.test(base)
+      && group.some((action) => action.type === 'fill')
+      && group.some((action) => action.type === 'press' || action.type === 'select');
+  });
+}
+
+function assertGreenhouseCoreApplicationActions(actions: ReturnType<typeof buildManagedPortalActions>) {
+  for (const label of ['first_name', 'last_name', 'email', 'phone'] as const) {
+    assert.ok(
+      actions.some((action) => action.type === 'fill' && action.label === label),
+      `the action budget removed the ${label} fill`,
+    );
+  }
+  assert.ok(
+    actions.some((action) => action.type === 'upload' && action.label === 'resume'),
+    'the action budget removed every resume upload',
+  );
+  const phoneCountry = actions.filter((action) => action.label?.replace(/_select$/, '') === 'phone_country');
+  assert.ok(phoneCountry.some((action) => action.type === 'fill'), 'the phone country fill is missing');
+  assert.ok(phoneCountry.some((action) => action.type === 'press'), 'the phone country confirmation is missing');
+
+  for (const selector of ['#school--0', '#degree--0', '#discipline--0', '#end-month--0']) {
+    const group = actions.filter((action) => action.selector === selector);
+    assert.ok(group.some((action) => action.type === 'click'), `${selector} is missing its open action`);
+    assert.ok(group.some((action) => action.type === 'fill'), `${selector} is missing its fill action`);
+    assert.ok(group.some((action) => action.type === 'press'), `${selector} is missing its confirmation action`);
+  }
+  assert.ok(
+    actions.some((action) => action.type === 'fill' && action.selector === '#end-year--0'),
+    'the required education end year fill is missing',
+  );
+}
+
+test('Greenhouse select-heavy prepare and submit keep one complete fill chain per question', () => {
+  const packet = selectHeavyGreenhousePacket(4);
+  for (const submit of [false, true]) {
+    const actions = buildManagedPortalActions('greenhouse', packet, submit);
+    assert.ok(actions.length <= MANAGED_ACTION_LIMIT);
+    for (const item of packet.questions) {
+      assert.ok(
+        viableReviewedQuestionAttempt(actions, item.question),
+        `${submit ? 'submit' : 'prepare'} lost every viable action chain for ${item.question}`,
+      );
+    }
+    if (submit) assert.equal(actions.at(-1)?.type, 'click');
+  }
+});
+
+test('Greenhouse select-heavy prepare and submit block before submit when safe chains cannot fit', () => {
+  const packet = selectHeavyGreenhousePacket(20);
+  for (const submit of [false, true]) {
+    assert.throws(
+      () => buildManagedPortalActions('greenhouse', packet, submit),
+      (error: unknown) => {
+        assert.ok(error instanceof ManagedActionBudgetError);
+        assert.equal(error.code, 'MANAGED_ACTION_BUDGET');
+        assert.equal(error.submitActionAppended, false);
+        assert.equal(error.blocker, error.message);
+        assert.match(error.message, /20 reviewed questions/);
+        return true;
+      },
+    );
+  }
+});
+
+test('Greenhouse 16 to 18 question boundaries preserve core fields or block before submit', () => {
+  for (const questionCount of [16, 17, 18]) {
+    const packet = selectHeavyGreenhousePacket(questionCount);
+    for (const submit of [false, true]) {
+      try {
+        const actions = buildManagedPortalActions('greenhouse', packet, submit);
+        assert.ok(actions.length <= MANAGED_ACTION_LIMIT);
+        assertGreenhouseCoreApplicationActions(actions);
+        for (const item of packet.questions) {
+          assert.ok(
+            viableReviewedQuestionAttempt(actions, item.question),
+            `${questionCount}-question ${submit ? 'submit' : 'prepare'} lost ${item.question}`,
+          );
+        }
+        if (submit) assert.equal(actions.at(-1)?.type, 'click');
+      } catch (error) {
+        assert.ok(error instanceof ManagedActionBudgetError);
+        assert.equal(error.submitActionAppended, false);
+        assert.match(error.blocker, /did not press submit/i);
+      }
+    }
+  }
+});
+
+test('the budget is spent on repeat guesses, and the submit click is reserved out of it', () => {
+  /* WHAT the trim gives up, not just how much. A budget that keeps a question's ninth speculative
+     selector and drops another question's only attempt is under the ceiling and still wrong. */
+  const packet = andurilPacket({
+    questions: Array.from({ length: 30 }, (_, index) => ({
+      question: `Screener question number ${index + 1}: do you have experience with distributed systems?`,
+      answer: index % 2 === 0 ? 'Yes' : 'No',
+    })),
+  });
+  const actions = buildManagedPortalActions('ashby', packet, true);
+
+  // Every question keeps the attempt that actually works on Ashby: the scoped fillByLabelText the
+  // runner answers a pill group with. The thirteen guesses behind it are what paid for the trim.
+  for (let index = 0; index < 30; index += 1) {
+    const question = `Screener question number ${index + 1}:`;
+    assert.ok(
+      actions.some((action) => action.type === 'fillByLabelText' && action.label?.startsWith(`question:${question}`) === true),
+      `question ${index + 1} lost its only real attempt`,
+    );
+  }
+
+  // Degraded evenly rather than back to front. Attempt 1 of a chain comes off every question before
+  // attempt 0 comes off any of them, so no question is stripped bare while another keeps all nine.
+  const keptAttempts = (kind: string, attempt: number) =>
+    actions.filter((action) => action.label?.startsWith(`question_${kind}:${attempt}:`) === true).length;
+  for (const kind of ['text', 'select']) {
+    assert.equal(keptAttempts(kind, 0), 30, `every question keeps its first ${kind} guess`);
+    assert.ok(keptAttempts(kind, 1) < 30, `the trim is expected to have reached the second ${kind} guess`);
+  }
+
+  // And the submit click is inside the budget, not appended past it.
+  assert.equal(actions.at(-1)?.type, 'click');
+  assert.match(actions.at(-1)?.selector ?? '', /\[type="submit"\]/);
 });
 
 test('the trim takes fills, never the discover action or the reads it exists for', () => {

@@ -2637,13 +2637,17 @@ const GREENHOUSE_LOW_PRIORITY_ACTION_GROUPS = [
   /^education_degree_combo:1$/,
 ] as const;
 
-function trimGreenhouseManagedActionsToBudget(actions: ManagedBrowserAction[], limit: number) {
+function trimGreenhouseManagedActionsToBudget(
+  actions: ManagedBrowserAction[],
+  limit: number,
+  protectedActionBases: ReadonlySet<string> = new Set(),
+) {
   for (const pattern of GREENHOUSE_LOW_PRIORITY_ACTION_GROUPS) {
     while (actions.length > limit) {
       let removableBase: string | undefined;
       for (let index = actions.length - 1; index >= 0; index -= 1) {
         const action = actions[index]!;
-        if (isProtectedManagedAction(action)) continue;
+        if (isProtectedManagedAction(action, protectedActionBases)) continue;
         const base = managedActionLabelBase(action);
         if (!base || !pattern.test(base)) continue;
         removableBase = base;
@@ -2684,23 +2688,32 @@ function trimGreenhouseManagedActionsToBudget(actions: ManagedBrowserAction[], l
 const GREENHOUSE_FIXED_EDUCATION_ACTION_RE =
   /^education_(?:school|degree|discipline|end_month)_combo(?:$|[:_])|^education_end_year_field$/;
 
-function isProtectedManagedAction(action: ManagedBrowserAction | undefined): boolean {
+function isProtectedManagedAction(
+  action: ManagedBrowserAction | undefined,
+  protectedActionBases: ReadonlySet<string> = new Set(),
+): boolean {
   if (!action) return false;
   if (action.type === 'discover') return true;
   const label = action.label ?? '';
+  const base = managedActionLabelBase(action);
+  if (base && protectedActionBases.has(base)) return true;
   if (GREENHOUSE_FIXED_EDUCATION_ACTION_RE.test(label)) return true;
   return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight)/
     .test(label);
 }
 
-function truncateManagedActionsToBudget(actions: ManagedBrowserAction[], limit: number) {
+function truncateManagedActionsToBudget(
+  actions: ManagedBrowserAction[],
+  limit: number,
+  protectedActionBases: ReadonlySet<string> = new Set(),
+) {
   while (actions.length > limit) {
     let tailIndex = actions.length - 1;
     // The evidence reads are protected alongside the filled_field extracts, and for the same reason:
     // they are what the run is JUDGED by afterwards, not part of what it fills. Truncating them off
     // the tail of a large Akuna packet would silently remove the corroboration that decides whether
     // a CAPTCHA blocker is believed, on exactly the packets most likely to hit the budget.
-    while (tailIndex >= 0 && isProtectedManagedAction(actions[tailIndex])) {
+    while (tailIndex >= 0 && isProtectedManagedAction(actions[tailIndex], protectedActionBases)) {
       tailIndex -= 1;
     }
     if (tailIndex < 0) break;
@@ -2714,6 +2727,181 @@ function truncateManagedActionsToBudget(actions: ManagedBrowserAction[], limit: 
       if (managedActionLabelBase(actions[index]!) === base) actions.splice(index, 1);
     }
   }
+}
+
+/**
+ * THE FAMILY-AGNOSTIC BUDGET TRIM, and the reason it had to stop being a Greenhouse-only concern.
+ *
+ * Only Greenhouse was ever trimmed, because only Greenhouse was ever close to the ceiling: its
+ * fixed alias fills cost ~116 actions before a single screener question is answered, so it hit
+ * MANAGED_ACTION_LIMIT on a packet with no questions at all. Every other family started small and
+ * grew per QUESTION instead, which looked safe for as long as nothing reported many questions.
+ *
+ * Measured on origin/main (02648ba) with a synthetic packet, Ashby submit list:
+ *
+ *     questions |  0    4    6    8   10   30
+ *     actions   | 11   67   95  123  151  431
+ *
+ * 14 actions per reviewed question - one scoped fill, four native-select guesses, nine text-input
+ * guesses - so eight questions is over the ceiling and the run is answered with HTTP 400
+ * TOO_MANY_ACTIONS before a browser opens. Lever, SmartRecruiters, Workable, JazzHR, Rippling,
+ * Breezy, BambooHR, Jobvite, iCIMS, Oracle Cloud and UltiPro all cost 5 per question and cross the
+ * same line further out; Paylocity costs 20, because its wizard traversal repeats the fills once per
+ * step, and crosses it at six.
+ *
+ * stratus-browser-cloud PR #22 is what turned that from a theoretical limit into a live one: the
+ * `discover` action now reports choice questions (radio, checkbox, select, and Ashby's pill groups)
+ * where it previously reported only text-shaped inputs, so the reviewed-question count on a real
+ * Ashby packet went up sharply. The Deepgram posting is exactly this shape.
+ *
+ * Raising MAX_ACTIONS is not the fix and must not become one. The runner's ceiling is a real
+ * protection, and the last time a list grew past it (discovery, 120 to 145) every managed run was
+ * rejected for weeks without anyone seeing it - submissionRunner takes the discovery run with
+ * `.catch(() => null)`, so an over-budget list is indistinguishable from a form with no questions.
+ *
+ * WHAT COMES OFF: repeat attempts at one control, highest attempt index first, across every
+ * question before any question loses its next-to-last attempt. A label of the form
+ * `<something>_select|_text|_checkbox|_combo...:<n>:<question>` is guess number <n> at a control
+ * this builder cannot see; at most one guess in a chain can ever match, so dropping the tail of the
+ * chain costs the question nothing. The primary attempt is labelled `question:<question>` with no
+ * index and is not matched here - on Ashby it is the fillByLabelText the runner's scoped choice
+ * handling actually presses the pill with, and it is the last thing that should be given up.
+ *
+ * Degrading by index rather than by question is the point. Removing from the tail one question at a
+ * time would strip the last questions of every fallback while the first kept all nine; every
+ * question losing its ninth guess first is the same saving spread evenly.
+ */
+const SPECULATIVE_ATTEMPT_LABEL_RE = /^[a-z0-9_]*_(?:select|text|checkbox|combo)[a-z0-9_]*:(\d+)(?::|$)/i;
+
+function speculativeAttemptIndex(
+  action: ManagedBrowserAction,
+  protectedActionBases: ReadonlySet<string> = new Set(),
+): number | undefined {
+  if (isProtectedManagedAction(action, protectedActionBases)) return undefined;
+  const base = managedActionLabelBase(action);
+  const attempt = base ? SPECULATIVE_ATTEMPT_LABEL_RE.exec(base)?.[1] : undefined;
+  return attempt === undefined ? undefined : Number(attempt);
+}
+
+function trimSpeculativeManagedActionsToBudget(
+  actions: ManagedBrowserAction[],
+  limit: number,
+  protectedActionBases: ReadonlySet<string> = new Set(),
+) {
+  if (actions.length <= limit) return;
+  let highestAttempt = -1;
+  for (const action of actions) {
+    const attempt = speculativeAttemptIndex(action, protectedActionBases);
+    if (attempt !== undefined && attempt > highestAttempt) highestAttempt = attempt;
+  }
+  for (let attempt = highestAttempt; attempt >= 0 && actions.length > limit; attempt -= 1) {
+    while (actions.length > limit) {
+      let removableBase: string | undefined;
+      for (let index = actions.length - 1; index >= 0; index -= 1) {
+        if (speculativeAttemptIndex(actions[index]!, protectedActionBases) !== attempt) continue;
+        removableBase = managedActionLabelBase(actions[index]!);
+        break;
+      }
+      if (!removableBase) break;
+      // One label group at a time, everywhere it appears. Paylocity's traversal pushes the same
+      // labels once per wizard step, and a guess that is worth giving up on step one is worth
+      // giving up on all four.
+      const before = actions.length;
+      for (let index = actions.length - 1; index >= 0; index -= 1) {
+        if (managedActionLabelBase(actions[index]!) === removableBase) actions.splice(index, 1);
+      }
+      if (actions.length === before) break;
+    }
+  }
+}
+
+/**
+ * The builder cannot safely trade away a reviewed answer to make the provider's action ceiling.
+ * Throwing before the submit action is appended makes that limit an explicit stop instead of a
+ * partially filled application that Litos sends anyway.
+ */
+export class ManagedActionBudgetError extends Error {
+  readonly code = 'MANAGED_ACTION_BUDGET';
+  readonly blocker: string;
+  readonly submitActionAppended = false;
+
+  constructor(portal: SupportedPortal, limit: number, protectedQuestionCount: number) {
+    const blocker = `Litos did not press submit: the ${portalFamily(portal)} application needs more than ${limit} safe browser actions to preserve a fill attempt for each of its ${protectedQuestionCount} reviewed questions.`;
+    super(blocker);
+    this.name = 'ManagedActionBudgetError';
+    this.blocker = blocker;
+  }
+}
+
+type ReviewedQuestionActionProtection = {
+  readonly actionBases: ReadonlySet<string>;
+  readonly questionCount: number;
+};
+
+/**
+ * The minimum fixed-field groups that make a Greenhouse application an application at all.
+ *
+ * A reviewed screener answer is not more important than the applicant's name, email, phone, resume,
+ * or required education row. The final tail trim previously protected only the evidence READS for
+ * these fields, so it could preserve proof labels while deleting the fills those labels were meant
+ * to verify. Keep either the single full-name action or both split-name actions, plus each remaining
+ * core group. A phone country combobox is part of the phone group because Greenhouse rejects the
+ * national number when its adjacent dial-code control is left on the wrong country.
+ */
+function coreActionProtection(actions: readonly ManagedBrowserAction[], portal: SupportedPortal): ReadonlySet<string> {
+  if (portalFamily(portal) !== 'greenhouse') return new Set();
+  const available = new Set(actions.map(managedActionLabelBase).filter((base): base is string => Boolean(base)));
+  const protectedBases = new Set<string>();
+  if (available.has('name')) {
+    protectedBases.add('name');
+  } else {
+    for (const base of ['first_name', 'last_name']) if (available.has(base)) protectedBases.add(base);
+  }
+  for (const base of ['email', 'phone_country', 'phone', 'resume']) {
+    if (available.has(base)) protectedBases.add(base);
+  }
+  return protectedBases;
+}
+
+/**
+ * Pick one COMPLETE action group for every reviewed question that emitted a browser action.
+ *
+ * React-select fills are multi-action chains: open, fill, choose an option, then press Enter. The
+ * shared base label identifies that chain after managedActionLabelBase removes the action suffix.
+ * Protecting one action is not enough because a surviving fill without its open or select is not a
+ * viable attempt. Ordinary choice questions prefer their scoped fillByLabelText action. Greenhouse
+ * React-select questions prefer their first combobox or live-select chain, which is the only path
+ * that can drive those controls.
+ */
+function reviewedQuestionActionProtection(
+  actions: readonly ManagedBrowserAction[],
+  packet: SubmissionPacket,
+): ReviewedQuestionActionProtection {
+  const protectedBases = new Set<string>();
+  let questionCount = 0;
+
+  for (const item of packet.questions) {
+    if (!greenhouseReviewedQuestionAnswer(item, packet).trim()) continue;
+    const questionText = normalizeReviewQuestionLabel(item.question);
+    if (!questionText || shouldSkipReviewedConsentQuestion(questionText)) continue;
+    const suffix = questionText.slice(0, 80);
+    const bases = Array.from(new Set(actions.flatMap((action) => {
+      const base = managedActionLabelBase(action);
+      if (!base || !base.startsWith('question')) return [];
+      return base === `question:${suffix}` || base.endsWith(`:${suffix}`) ? [base] : [];
+    })));
+    if (bases.length === 0) continue;
+
+    const prefersReactSelect = isGreenhouseReactSelectQuestion(questionText);
+    const chosen = bases.find((base) => prefersReactSelect && /^question_(?:combo(?:_label)?|select(?:_live)?):/.test(base))
+      ?? bases.find((base) => base === `question:${suffix}`)
+      ?? bases.find((base) => /^question_(?:combo(?:_label)?|select(?:_live)?|checkbox):/.test(base));
+    if (!chosen || protectedBases.has(chosen)) continue;
+    protectedBases.add(chosen);
+    questionCount += 1;
+  }
+
+  return { actionBases: protectedBases, questionCount };
 }
 
 // ─── Workable (apply.workable.com) ────────────────────────────────────────────
@@ -3459,6 +3647,7 @@ export function buildManagedDiscoveryActions(portal: SupportedPortal, packet: Su
    * losing them costs this pass nothing; isProtectedManagedAction keeps `discover`, the option
    * reads, the core-field extracts and the form preflight out of both trims' reach. */
   trimGreenhouseManagedActionsToBudget(actions, MANAGED_ACTION_LIMIT);
+  trimSpeculativeManagedActionsToBudget(actions, MANAGED_ACTION_LIMIT);
   if (actions.length > MANAGED_ACTION_LIMIT) truncateManagedActionsToBudget(actions, MANAGED_ACTION_LIMIT);
   return actions;
 }
@@ -3643,14 +3832,45 @@ export function buildManagedPortalActions(
   // was shown an empty attestation page as the evidence of what she was approving.
   if (submit && portalFamily(portal) === 'paylocity') pushPaylocityTraversal(actions, packet);
 
+  /* THE BUDGET. Applied to every family, not just Greenhouse - see
+   * trimSpeculativeManagedActionsToBudget for the measurement that made that necessary, and for why
+   * the answer is to trim here rather than to raise the runner's MAX_ACTIONS.
+   *
+   * Three passes, most discriminating first, each a no-op once the list is inside the budget:
+   *   1. the Greenhouse-specific group order, which knows which of that family's alias fills are
+   *      disposable and which are a required field's only attempt;
+   *   2. the generic one, which gives up repeat guesses at a control before the last guess at any
+   *      other, and is the whole of the trim on the other thirteen families;
+   *   3. the tail truncation, which is the blunt last resort but cannot take core application fills
+   *      or the last viable chain for a reviewed question. If the protected minimum still does not
+   *      fit, the builder stops with ManagedActionBudgetError before it creates the submit action.
+   *
+   * What pass 2 means for Greenhouse, stated precisely because the loose version of it is wrong.
+   * Pass 2 can affect Greenhouse when pass 1 cannot get under budget. That is intentional: give up
+   * a redundant guess before the blunt pass takes a whole unprotected group from the tail. Core
+   * fields and the selected question chains are protected through every pass.
+   */
   const canAppendSubmit = submit && portalCanAutoSubmit(portal);
+  const familyActionLimit = portalFamily(portal) === 'greenhouse' && packetLooksAkuna(packet)
+    ? 100
+    : MANAGED_ACTION_LIMIT;
+  // One action held back for the submit click, which is appended below and is otherwise the action
+  // that puts an exactly-full list one over the ceiling.
+  const actionLimit = canAppendSubmit ? familyActionLimit - 1 : familyActionLimit;
+  const questionProtection = reviewedQuestionActionProtection(actions, packet);
+  const protectedActionBases = new Set([
+    ...coreActionProtection(actions, portal),
+    ...questionProtection.actionBases,
+  ]);
   if (portalFamily(portal) === 'greenhouse') {
-    const greenhouseActionLimit = packetLooksAkuna(packet) ? 100 : MANAGED_ACTION_LIMIT;
-    const actionLimit = canAppendSubmit ? greenhouseActionLimit - 1 : greenhouseActionLimit;
-    trimGreenhouseManagedActionsToBudget(actions, actionLimit);
-    if (actions.length > actionLimit) {
-      truncateManagedActionsToBudget(actions, actionLimit);
-    }
+    trimGreenhouseManagedActionsToBudget(actions, actionLimit, protectedActionBases);
+  }
+  trimSpeculativeManagedActionsToBudget(actions, actionLimit, protectedActionBases);
+  if (actions.length > actionLimit) {
+    truncateManagedActionsToBudget(actions, actionLimit, protectedActionBases);
+  }
+  if (actions.length > actionLimit) {
+    throw new ManagedActionBudgetError(portal, familyActionLimit, questionProtection.questionCount);
   }
 
   if (canAppendSubmit) {
@@ -3791,6 +4011,18 @@ const HOSTS: Record<PortalFamily, RegExp> = {
   adp_recruiting: /^myjobs\.adp\.com$/i,
   avature: /^(?:(?:maximus|sandboxxerox)\.avature\.net|jobs\.ea\.com)$/i,
 };
+
+/**
+ * Every supported family, as a value rather than a type.
+ *
+ * Derived from HOSTS rather than written out, because HOSTS is a `Record<PortalFamily, RegExp>` and
+ * the compiler will not let a family exist without a key here. A hand-maintained copy of this list
+ * drifts the moment somebody adds a portal, and it drifts SILENTLY: the budget test that walks every
+ * family would keep passing while quietly not covering the new one, which is the exact shape of the
+ * blind spot the budget trim exists to close. Eleven families landed between this branch being cut
+ * and it being merged; the hardcoded list in the test had covered fourteen.
+ */
+export const PORTAL_FAMILIES = Object.keys(HOSTS) as readonly PortalFamily[];
 
 // Host alone is not enough for a portal whose host space also serves a login page, a marketing site
 // or an unrelated product. Started as one Paylocity special case; it is a map now because five of

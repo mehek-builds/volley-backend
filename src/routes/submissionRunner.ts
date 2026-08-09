@@ -1272,6 +1272,20 @@ export function unansweredRequiredBlockerLabels(
 }
 
 /**
+ * A thrown value turned into a sentence that is never empty.
+ *
+ * `new Error()` carries `message === ''`, and both prepare paths feed this string to
+ * discoveryHonestyReasons, which tests it for truthiness. An empty message therefore renders NO
+ * admission at all: the run is correctly held back from sending, and the applicant is shown a
+ * packet that stops without saying why. The fallback is deliberately plain rather than a stack
+ * trace, since this text is read by her, not by us; the log line carries the rest.
+ */
+export function describeDiscoveryFailure(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  return raw.trim() || 'the scan failed without reporting a reason';
+}
+
+/**
  * What the run owes the applicant about its own blind spots, in her words.
  *
  * Two separate admissions, and they are not the same failure. The first is "the scan did not run";
@@ -1337,7 +1351,10 @@ async function prepareManaged(
   const discoveryFailures: string[] = [];
   const discoveryResult = await runManagedBrowser(applicationUrl, buildManagedDiscoveryActions(portal, packet))
     .catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : String(error);
+      // Normalized rather than taken raw, because `new Error()` carries `message === ''` and an
+      // empty string reaches discoveryHonestyReasons as falsy: the run would be correctly held back
+      // and the applicant would be shown no reason for it.
+      const message = describeDiscoveryFailure(error);
       discoveryFailures.push(message);
       fastify.log.error(
         { applicationId: row.id, portal, error: message },
@@ -1795,7 +1812,31 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
 
     // R-055: discover and resolve the posting's own custom questions before filling, so a
     // dashboard-only submission does not depend on the extension having run first.
-    const discovered = await discoverPageQuestions(page).catch(() => []);
+    /* `.catch(() => [])` was the whole error handling here, and it is the direct-Playwright twin of
+     * the bug prepareManaged carries a long comment about: an empty array is what this path gets
+     * from a form with no custom questions AND from a scan that threw, so the two are
+     * indistinguishable downstream. The run then fills the fixed fields, writes zero question
+     * records, and reports no error - and on this path the consequence is worse than on the managed
+     * one, because standing consent turns a `safe` preparation into a click inside the same call.
+     *
+     * A scan that did not run cannot be the evidence that a form is complete. Same three
+     * consequences as the managed path: it is logged as an error because it is a product defect
+     * first, it is said to the applicant in her own attention list, and it gates `safe`. */
+    // An array rather than a nullable local, for the same reason prepareManaged uses one: TypeScript
+    // does not narrow across a closure it cannot prove ran.
+    const discoveryFailures: string[] = [];
+    const discovered = await discoverPageQuestions(page).catch((error: unknown) => {
+      // Normalized rather than taken raw, because `new Error()` carries `message === ''` and an
+      // empty string reaches discoveryHonestyReasons as falsy: the run would be correctly held back
+      // and the applicant would be shown no reason for it.
+      const message = describeDiscoveryFailure(error);
+      discoveryFailures.push(message);
+      fastify.log.error(
+        { applicationId: row.id, portal, error: message },
+        'Question discovery pass failed, so this run cannot see the questions this form asks',
+      );
+      return [];
+    });
     const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
     const resolutionCurrent = { ...current, questions: storedQuestions };
     const {
@@ -1852,8 +1893,20 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       blockers: result.blockers,
       discovered,
     }, packet);
-    // Same reasoning as the managed path above: the required-answer check moved off the run and on
-    // to the send, and this is the direct-Playwright path's send decision.
+    // What the scan owes her when it did not run. The second argument is empty because this path
+    // does not measure required-and-empty blockers against the question list the way prepareManaged
+    // does; the admission that matters here is the first one, and it is the one this run can make.
+    const honestyReasons = discoveryHonestyReasons(discoveryFailures[0], []);
+    /* Same reasoning as the managed path above: the required-answer check moved off the run and on
+     * to the send, and this is the direct-Playwright path's send decision.
+     *
+     * Counted as `discoveryFailures.length`, NOT `honestyReasons.length`. The two are equal today
+     * and it would be tempting to use the array that is already built, but discoveryHonestyReasons
+     * renders PROSE and drops a falsy message: `new Error()` carries `message === ''`, so a scan
+     * that threw one would produce no sentence, contribute nothing to this count, and leave `safe`
+     * true. That is the bug this whole change exists to remove, reintroduced through the back door
+     * of the presentation layer. The send decision reads the failure itself; the applicant-facing
+     * text is downstream of it and cannot weaken it. */
     const safe = directPreparationIsSafe({
       blockerCount: sanitizedBlockers.length + evidenceBlockers.length,
       // coverLetterAttention counts here for the same reason it gates `safe` on the managed path:
@@ -1861,7 +1914,12 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       // /submission/approve will refuse with 422, so calling it ready is a promise the send cannot
       // keep. Folded into attentionCount rather than blockerCount because it is our failure to
       // report, not a field the employer's page left empty.
-      attentionCount: discoveryAttention.length + coverLetterAttention.length,
+      //
+      // discoveryFailures is a separate and independent reason to hold the same send: the first
+      // says the packet is missing something we owed it, the second says we never read the form
+      // well enough to know what it owed. Either alone is enough; they are summed, not chosen
+      // between, so a run carrying both is not counted as carrying one.
+      attentionCount: discoveryAttention.length + coverLetterAttention.length + discoveryFailures.length,
       unansweredRequiredCount: blankRequiredQuestionLabels(mergedQuestions).length,
       verificationStatus: verification.status,
     });
@@ -1894,7 +1952,8 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       // model text. Sending them through it would not have caught the cover-letter leak either,
       // since that message was prose and prose passes straight through.
       attention_reason:
-        [...sanitizedBlockers, ...discoveryAttention, ...evidenceBlockers, ...coverLetterAttention].join('\n') || undefined,
+        [...sanitizedBlockers, ...discoveryAttention, ...evidenceBlockers, ...coverLetterAttention, ...honestyReasons]
+          .join('\n') || undefined,
       // The only path that OBSERVES a challenge on a board nobody had typed as gated, which makes it
       // the one that matters most. Without it the stall is written only for JazzHR and BambooHR,
       // families already known to gate, so the instrumentation could confirm what was already
