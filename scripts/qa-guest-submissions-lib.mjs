@@ -70,9 +70,9 @@ function loopback(hostname) {
   return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
 }
 
-const KNOWN_PRODUCTION_PORTAL_ORIGINS = new Set([
-  'https://trylitos.com',
-  'https://www.trylitos.com',
+const KNOWN_PRODUCTION_PORTAL_HOSTNAMES = new Set([
+  'trylitos.com',
+  'www.trylitos.com',
 ]);
 
 export function controlledEmailCaptureTarget(rawUrl, token) {
@@ -219,7 +219,7 @@ export function assertControlledSecurityCodeTarget({
   }
   if (!local(portalPublicBase)) {
     const target = new URL(portalPublicBase);
-    if (KNOWN_PRODUCTION_PORTAL_ORIGINS.has(target.origin)) {
+    if (KNOWN_PRODUCTION_PORTAL_HOSTNAMES.has(target.hostname.toLowerCase())) {
       throw new Error('Known production Litos origins cannot be used as controlled QA portals');
     }
     if (target.protocol !== 'https:' || !publicPortalConfirmed || !portalBindingSecret

@@ -50,8 +50,8 @@ export function isControlledTestPortalUrl(rawUrl: string): boolean {
   if (!url.pathname.startsWith('/qa/portal-submission')) return false;
 
   const host = url.hostname.toLowerCase();
-  const builtIn = (url.protocol === 'https:' && (host === 'trylitos.com' || host === 'www.trylitos.com'))
-    || (url.protocol === 'http:' && (host === 'localhost' || host === '127.0.0.1' || host === '::1'));
+  if (host === 'trylitos.com' || host === 'www.trylitos.com') return false;
+  const builtIn = url.protocol === 'http:' && (host === 'localhost' || host === '127.0.0.1' || host === '::1');
   if (builtIn) return true;
 
   const origin = configuredPublicOrigin();

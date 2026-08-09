@@ -47,7 +47,12 @@ test('security-code E2E refuses production targets and unconfirmed databases', (
     ...controlledTarget,
     configuredPortalOrigin: 'https://different.example.test',
   }), /must match LITOS_TEST_PORTAL_PUBLIC_ORIGIN/);
-  for (const productionOrigin of ['https://trylitos.com', 'https://www.trylitos.com']) {
+  for (const productionOrigin of [
+    'https://trylitos.com',
+    'https://www.trylitos.com',
+    'https://trylitos.com:444',
+    'https://www.trylitos.com:444',
+  ]) {
     assert.throws(() => assertControlledSecurityCodeTarget({
       ...controlledTarget,
       portalPublicBase: productionOrigin,

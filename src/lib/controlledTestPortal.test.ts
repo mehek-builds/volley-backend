@@ -38,17 +38,28 @@ test('a public controlled portal is exact-origin, path, signature, and environme
   assert.equal(isControlledTestPortalUrl(unsigned), false);
   assert.equal(isControlledTestPortalUrl(signed.toString().replace('run-1', 'run-2')), false);
   assert.equal(isControlledTestPortalUrl(signed.toString().replace('qa-tunnel', 'employer')), false);
+  process.env.LITOS_TEST_PORTAL_PUBLIC_ORIGIN = 'https://trylitos.com:444';
+  const productionHost = 'https://trylitos.com:444/qa/portal-submission?shape=security-code&case=run-1';
+  const productionHostSigned = new URL(productionHost);
+  productionHostSigned.searchParams.set(
+    CONTROLLED_PORTAL_BINDING_PARAM,
+    controlledPortalBinding(productionHost, process.env.LITOS_TEST_PORTAL_BINDING_SECRET),
+  );
+  assert.equal(isControlledTestPortalUrl(productionHostSigned.toString()), false);
   process.env.NODE_ENV = 'production';
   assert.equal(isControlledTestPortalUrl(signed.toString()), false);
 });
 
-test('built-in test portal origins retain their explicit flag gate', () => {
+test('local test portals retain their explicit flag gate while production hosts are always rejected', () => {
   process.env.NODE_ENV = 'test';
   delete process.env.LITOS_ENABLE_TEST_PORTAL;
   assert.equal(isControlledTestPortalUrl('http://localhost:3300/qa/portal-submission'), false);
   process.env.LITOS_ENABLE_TEST_PORTAL = 'true';
   assert.equal(isControlledTestPortalUrl('http://localhost:3300/qa/portal-submission'), true);
-  assert.equal(isControlledTestPortalUrl('https://trylitos.com/qa/portal-submission'), true);
+  assert.equal(isControlledTestPortalUrl('https://trylitos.com/qa/portal-submission'), false);
+  assert.equal(isControlledTestPortalUrl('https://www.trylitos.com/qa/portal-submission'), false);
+  assert.equal(isControlledTestPortalUrl('https://trylitos.com:444/qa/portal-submission'), false);
+  assert.equal(isControlledTestPortalUrl('https://www.trylitos.com:444/qa/portal-submission'), false);
   process.env.NODE_ENV = 'production';
   assert.equal(isControlledTestPortalUrl('http://localhost:3300/qa/portal-submission'), false);
   assert.equal(isControlledTestPortalUrl('https://trylitos.com/qa/portal-submission'), false);
