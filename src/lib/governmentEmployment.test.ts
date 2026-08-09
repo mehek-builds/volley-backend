@@ -12,27 +12,21 @@ import {
  *
  * The last empty required field on the first packet that could reach a completed submission. It is
  * answerable, and the applicant's own canon says how: questions about her history are answered from
- * her record, and absence on that record is itself the answer.
- *
- * What these tests are actually for is the difference between that and a constant. "No" is the
- * right answer for this applicant today and would also be the output of `return { value: 'No' }`,
- * so a test that only asserts "No" proves nothing about which of the two shipped. Every case below
- * is therefore about the OTHER inputs: a bank with a government employer in it, a bank that is
- * empty, a bank that could not be read, and the neighbouring question families that must stay
- * refused. A hardcoded negative fails all of them.
+ * her typed job record. A positive exact job match is evidence. A project with the same name and a
+ * non-match in a resume-derived bank are not evidence, so both stay with the applicant.
  *
  * LABELS ARE VERBATIM where they exist. "prior us government employment?" is copied out of
  * spec._review on the production packet, lowercased the way discovery lowercases them.
  */
 
 const BANK: ApplicationProfileLike['experience_bank'] = [
-  { org: 'Cinematica Labs', title: 'Program Management Intern' },
-  { org: 'Einstein Bros. Bagels (Mobile Ordering) – USC Assoc. of Innovative Marketing', title: 'Product Lead' },
-  { org: 'SoFi', title: 'Product Management Intern' },
-  { org: 'Spark SC', title: 'VP of Finance & Sponsorships' },
-  { org: 'Tonee - AI Texting Tone Detector', title: 'Founder' },
-  { org: 'Traeco - AI Agent Cost Infrastructure', title: 'AI Engineer' },
-  { org: 'Venture Capital Academy', title: 'President' },
+  { type: 'job', org: 'Cinematica Labs', title: 'Program Management Intern' },
+  { type: 'leadership', org: 'Einstein Bros. Bagels (Mobile Ordering) – USC Assoc. of Innovative Marketing', title: 'Product Lead' },
+  { type: 'job', org: 'SoFi', title: 'Product Management Intern' },
+  { type: 'leadership', org: 'Spark SC', title: 'VP of Finance & Sponsorships' },
+  { type: 'project', org: 'Tonee - AI Texting Tone Detector', title: 'Founder' },
+  { type: 'job', org: 'Traeco - AI Agent Cost Infrastructure', title: 'AI Engineer' },
+  { type: 'leadership', org: 'Venture Capital Academy', title: 'President' },
 ];
 
 /** The Skydio label, exactly as Litos stored it. */
@@ -49,15 +43,15 @@ function answer(label: string, ap: ApplicationProfileLike): string {
 }
 
 describe('prior government employment, answered from the experience bank', () => {
-  test('the Skydio blocker is answered No from a bank with no government employer in it', () => {
-    assert.equal(answer(SKYDIO, { experience_bank: BANK }), 'VALUE No');
+  test('a nonempty resume-derived bank does not prove the negative', () => {
+    assert.equal(answer(SKYDIO, { experience_bank: BANK }), 'SKIP');
   });
 
   test('the SAME bank plus one government employer answers Yes', () => {
     /* The property that separates a derivation from a constant, and the reason this file exists.
      * Nothing changes but one row. */
     const withGovernment = {
-      experience_bank: [...(BANK ?? []), { org: 'U.S. Department of Energy', title: 'Policy Intern' }],
+      experience_bank: [...(BANK ?? []), { type: 'job' as const, org: 'U.S. Department of Energy', title: 'Policy Intern' }],
     };
     assert.equal(answer(SKYDIO, withGovernment), 'VALUE Yes');
   });
@@ -68,26 +62,53 @@ describe('prior government employment, answered from the experience bank', () =>
       'Government Accountability Office',
       'City of Los Angeles',
       'Office of Congressman Ted Lieu',
-      'NASA Jet Propulsion Laboratory',
       'United States Senate',
       'Department of Justice',
     ]) {
-      assert.equal(answer(SKYDIO, { experience_bank: [...(BANK ?? []), { org }] }), 'VALUE Yes', org);
+      assert.equal(answer(SKYDIO, { experience_bank: [...(BANK ?? []), { type: 'job', org }] }), 'VALUE Yes', org);
     }
   });
 
-  test('a government TITLE at a differently-named employer also flips it', () => {
-    // "Congressional staffer" is one of the examples Skydio's own gloss lists, and the org it sits
-    // under need not say "government" anywhere.
-    const withTitle = { experience_bank: [...(BANK ?? []), { org: 'Ted Lieu for Congress', title: 'Congressional Staffer' }] };
-    assert.equal(answer(SKYDIO, withTitle), 'VALUE Yes');
+  test('titles and government-adjacent organisation names never become employer evidence', () => {
+    for (const entry of [
+      { type: 'job' as const, org: 'Acme', title: 'NASA Contractor' },
+      { type: 'job' as const, org: 'NASA Space Apps Hackathon', title: 'Project Lead' },
+      { type: 'job' as const, org: 'Booz Allen Hamilton', title: 'Federal Government Consultant' },
+      { type: 'job' as const, org: 'Ted Lieu for Congress', title: 'Congressional Staffer' },
+      { type: 'job' as const, org: 'NASA Jet Propulsion Laboratory', title: 'Research Intern' },
+    ]) {
+      assert.equal(answer(SKYDIO, { experience_bank: [...(BANK ?? []), entry] }), 'SKIP', entry.org);
+    }
+  });
+
+  test('an exact Department of Energy employment row is decisive', () => {
+    const profile = {
+      experience_bank: [{ type: 'job', org: 'Department of Energy', title: 'Policy Analyst' }],
+    } satisfies ApplicationProfileLike;
+    assert.equal(answer(SKYDIO, profile), 'VALUE Yes');
+  });
+
+  test('only vetted canonical government identities are decisive', () => {
+    for (const org of ['NASA', 'National Aeronautics and Space Administration']) {
+      assert.equal(answer(SKYDIO, { experience_bank: [{ type: 'job', org }] }), 'VALUE Yes', org);
+    }
+    for (const org of [
+      'Federal Marketing Agency',
+      'United States Talent Agency',
+      'State of Play',
+      'City of Angels',
+      'NASA Space Apps Hackathon',
+      'Department of Energy Contractor',
+    ]) {
+      assert.equal(answer(SKYDIO, { experience_bank: [{ type: 'job', org }] }), 'SKIP', org);
+    }
   });
 
   test('an organisation that MIGHT be public holds the question instead of answering it', () => {
     // Both measured in production banks on 2026-08-09. Neither is settleable from the name, and a
     // wrong "No" here is a false statement about federal service, so neither gets one.
     for (const org of ['World Bank', 'XYZ Public Charter Schools', 'National Institutes of Health']) {
-      assert.equal(answer(SKYDIO, { experience_bank: [...(BANK ?? []), { org }] }), 'SKIP', org);
+      assert.equal(answer(SKYDIO, { experience_bank: [...(BANK ?? []), { type: 'job', org }] }), 'SKIP', org);
     }
   });
 
@@ -102,7 +123,17 @@ describe('prior government employment, answered from the experience bank', () =>
   });
 
   test('a bank of blank organisations is an empty bank', () => {
-    assert.equal(answer(SKYDIO, { experience_bank: [{ org: '   ' }, { org: '' }] }), 'SKIP');
+    assert.equal(answer(SKYDIO, { experience_bank: [{ type: 'job', org: '   ' }, { type: 'job', org: '' }] }), 'SKIP');
+  });
+
+  test('a NASA project is not evidence of government employment', () => {
+    const profile = {
+      experience_bank: [{ type: 'project', org: 'NASA Space Apps Hackathon', title: 'Project Lead' }],
+    } satisfies ApplicationProfileLike;
+    assert.equal(answer(SKYDIO, profile), 'SKIP');
+    const resolved = resolveKnownAnswer(SKYDIO, 'checkbox', profile, undefined);
+    assert.ok(resolved && 'skipReason' in resolved);
+    assert.match(resolved.skipReason, /no typed employment entries/);
   });
 
   test('a stored military record holds the answer, in the one direction it can', () => {
@@ -111,9 +142,9 @@ describe('prior government employment, answered from the experience bank', () =>
     const served = { experience_bank: BANK, military_service: 'Yes, I served in the US Army' };
     assert.equal(answer(SKYDIO, served), 'SKIP');
     const declined = { experience_bank: BANK, military_service: 'No' };
-    assert.equal(answer(SKYDIO, declined), 'VALUE No');
+    assert.equal(answer(SKYDIO, declined), 'SKIP');
     const notAVeteran = { experience_bank: BANK, military_service: 'I am not a protected veteran' };
-    assert.equal(answer(SKYDIO, notAVeteran), 'VALUE No');
+    assert.equal(answer(SKYDIO, notAVeteran), 'SKIP');
   });
 
   test('Skydio\'s gloss is answered from the bank, not from the EEO block', () => {
@@ -121,9 +152,9 @@ describe('prior government employment, answered from the experience bank', () =>
      * through EEO_QUESTION, and an employment-history question came back
      * "Decline to self-identify". Verified against the real resolver on 2026-08-09. */
     assert.ok(isGovernmentEmploymentQuestion(SKYDIO_GLOSS));
-    assert.equal(answer(SKYDIO_GLOSS, { experience_bank: BANK }), 'VALUE No');
+    assert.equal(answer(SKYDIO_GLOSS, { experience_bank: BANK }), 'SKIP');
     assert.equal(
-      answer(SKYDIO_GLOSS, { experience_bank: [...(BANK ?? []), { org: 'Federal Aviation Administration' }] }),
+      answer(SKYDIO_GLOSS, { experience_bank: [...(BANK ?? []), { type: 'job', org: 'Federal Aviation Administration' }] }),
       'VALUE Yes',
     );
   });
@@ -136,7 +167,7 @@ describe('prior government employment, answered from the experience bank', () =>
       'have you previously worked for the u.s. federal government?',
     ]) {
       assert.ok(isGovernmentEmploymentQuestion(label), label);
-      assert.equal(answer(label, { experience_bank: BANK }), 'VALUE No', label);
+      assert.equal(answer(label, { experience_bank: BANK }), 'SKIP', label);
     }
   });
 });
@@ -184,11 +215,11 @@ describe('the sibling family: prior employment with the hiring company', () => {
    * owner's 9 organisations on 2026-08-09. Three of her real employers were invisible to it, so
    * the arm returned a confident "No" about a company she works at today. */
   const REAL_BANK: ApplicationProfileLike['experience_bank'] = [
-    { org: 'SoFi' },
-    { org: 'Cinematica Labs' },
-    { org: 'Tonee - AI Texting Tone Detector' },
-    { org: 'Traeco - AI Agent Cost Infrastructure' },
-    { org: 'Spark SC' },
+    { type: 'job', org: 'SoFi' },
+    { type: 'job', org: 'Cinematica Labs' },
+    { type: 'project', org: 'Tonee - AI Texting Tone Detector' },
+    { type: 'job', org: 'Traeco - AI Agent Cost Infrastructure' },
+    { type: 'leadership', org: 'Spark SC' },
   ];
   // Exactly what the parse yielded in production. Traeco and Spark SC are missing from it.
   const PARSED_ONLY = ['Tonee - AI Texting Tone Detector', 'Cinematica Labs', 'SoFi'];
@@ -196,13 +227,12 @@ describe('the sibling family: prior employment with the hiring company', () => {
   test('an employer that is only in the bank answers Yes, not No', () => {
     const ap: ApplicationProfileLike = { employer_history: PARSED_ONLY, experience_bank: REAL_BANK };
     assert.equal(answer('have you ever worked for traeco?', ap), 'VALUE Yes');
-    assert.equal(answer('have you ever worked for spark sc?', ap), 'VALUE Yes');
+    assert.equal(answer('have you ever worked for spark sc?', ap), 'SKIP');
   });
 
-  test('an employer in neither record still answers No', () => {
-    // The negative is still available and still derived; this is the corpus label it is for.
+  test('an employer in neither record is held because the records are not exhaustive', () => {
     const ap: ApplicationProfileLike = { employer_history: PARSED_ONLY, experience_bank: REAL_BANK };
-    assert.equal(answer('have you ever worked for redwood materials?', ap), 'VALUE No');
+    assert.equal(answer('have you ever worked for redwood materials?', ap), 'SKIP');
   });
 
   test('the widened match is a prefix, not a substring', () => {
@@ -210,8 +240,8 @@ describe('the sibling family: prior employment with the hiring company', () => {
      * form omits ("Traeco - AI Agent Cost Infrastructure" answering "Traeco"), but a name that
      * merely starts the same way is a different company and still answers No. */
     const ap: ApplicationProfileLike = { employer_history: PARSED_ONLY, experience_bank: REAL_BANK };
-    assert.equal(answer('have you ever worked for sofia?', ap), 'VALUE No');
-    assert.equal(answer('have you ever worked for traeco labs?', ap), 'VALUE No');
+    assert.equal(answer('have you ever worked for sofia?', ap), 'SKIP');
+    assert.equal(answer('have you ever worked for traeco labs?', ap), 'SKIP');
   });
 
   test('nothing declared at all leaves the question alone', () => {
@@ -239,5 +269,6 @@ describe('the bank actually reaches the resolver', () => {
 
   test('the loaded profile carries experience_bank', () => {
     assert.match(source, /experience_bank:\s*bankRows/);
+    assert.match(source, /experienceBankType\(entry\.type\)/);
   });
 });

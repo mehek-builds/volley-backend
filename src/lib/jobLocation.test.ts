@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { countryFromPortal, employerEvidenceApplies, jobCountry, resolveJobCountry } from './jobLocation';
+import {
+  countryFromPortal,
+  employerEvidenceApplies,
+  jobCountry,
+  resolveJobCountry,
+} from './jobLocation';
 
 /**
  * An H-1B is a US work visa, so an employer's H-1B record is evidence about US roles and nothing

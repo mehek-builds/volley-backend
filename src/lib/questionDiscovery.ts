@@ -57,12 +57,11 @@ export type ApplicationProfileLike = StoredSalaryProfile & AvailabilityWindowFac
    * `parsed_json.experience` and is a strict subset - measured on the owner account on 2026-08-09,
    * the parse held 4 organisations and the bank held 9.
    *
-   * It is here so that a question about her employment history can be answered by CHECKING it. The
-   * only claim this shape can support is one that survives reading every entry, which is why the
-   * arm that uses it refuses on an absent or empty bank: `undefined` is "she never told us" and
-   * `[]` is a bank with nothing in it, and neither of those is "she never worked for anyone".
+   * The entry type is provenance. A government-named project or leadership role is not employment.
+   * The bank can prove a positive job match, but it has no completeness attestation and therefore
+   * cannot prove a negative from absence.
    */
-  experience_bank?: { org: string; title?: string }[];
+  experience_bank?: { type?: 'job' | 'project' | 'leadership'; org: string; title?: string }[];
   school?: string;
   degree?: string;
   /**
@@ -692,6 +691,122 @@ function isRemoteWorkQuestion(label: string): boolean {
   return REMOTE_WORK_QUESTION.test(label) && !ONSITE_PRESENCE_WORD.test(label);
 }
 
+function uniqueLocationCaptures(label: string, patterns: readonly RegExp[]): string[] {
+  const captures: string[] = [];
+  for (const pattern of patterns) {
+    for (const match of label.matchAll(pattern)) {
+      const value = match[1]
+        ?.trim()
+        .replace(/^(?:our|the|an?)\s+/i, '')
+        .replace(/\s+(?:for|five|four|three|two|one|\d+)\s+(?:days?|weeks?|months?|years?)\b.*$/i, '')
+        .trim();
+      if (!value || /^(?:our|the|an?|office|site|workplace|headquarters|hq|(?:one|any|either|all|some)\s+of(?:\s+(?:our|the))?)$/i.test(value)) continue;
+      if (!captures.some((entry) => entry.toLowerCase() === value.toLowerCase())) captures.push(value);
+    }
+  }
+  return captures;
+}
+
+const LOCATION_NOUN = /\b(?:offices?|sites?|workplaces?|headquarters|hq)\b/i;
+
+type VettedWorkplaceCountry = 'US' | 'other';
+
+function normalizeIdentity(value: string): string {
+  return value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const VETTED_WORKPLACE_LOCATIONS = new Map<string, VettedWorkplaceCountry>();
+
+function registerWorkplace(country: VettedWorkplaceCountry, aliases: readonly string[]): void {
+  for (const alias of aliases) VETTED_WORKPLACE_LOCATIONS.set(normalizeIdentity(alias), country);
+}
+
+registerWorkplace('US', ['United States', 'United States of America', 'US', 'U.S.', 'USA', 'U.S.A.']);
+registerWorkplace('US', ['San Francisco', 'San Francisco, CA', 'SF', 'San Fran']);
+registerWorkplace('US', ['New York', 'New York, NY', 'New York City', 'NYC', 'Manhattan']);
+registerWorkplace('US', ['Chicago', 'Chicago, IL']);
+registerWorkplace('US', ['Los Angeles', 'Los Angeles, CA', 'Culver City', 'Santa Monica']);
+registerWorkplace('US', ['Austin', 'Austin, TX']);
+registerWorkplace('US', ['Seattle', 'Seattle, WA', 'Bellevue', 'Bellevue, WA']);
+registerWorkplace('US', ['Boston', 'Boston, MA', 'Cambridge, MA']);
+registerWorkplace('US', ['Mountain View', 'Mountain View, CA']);
+registerWorkplace('US', ['Palo Alto', 'Palo Alto, CA']);
+registerWorkplace('US', ['San Mateo', 'San Mateo, CA']);
+registerWorkplace('US', ['Greenwich', 'Greenwich, CT']);
+registerWorkplace('US', ['Houston', 'Houston, TX']);
+registerWorkplace('US', ['Denver', 'Denver, CO']);
+registerWorkplace('US', ['Atlanta', 'Atlanta, GA']);
+registerWorkplace('US', ['Costa Mesa', 'Costa Mesa, CA', 'Irvine', 'Irvine, CA']);
+registerWorkplace('US', ['Washington DC', 'Washington, DC', 'Arlington, VA']);
+registerWorkplace('other', ['Paris', 'Paris, France']);
+registerWorkplace('other', ['London', 'London, UK', 'London, United Kingdom']);
+registerWorkplace('other', ['Amsterdam', 'Amsterdam, Netherlands']);
+registerWorkplace('other', ['Hong Kong']);
+registerWorkplace('other', ['Sydney', 'Sydney, Australia']);
+registerWorkplace('other', ['Toronto', 'Toronto, Canada']);
+registerWorkplace('other', ['Dubai', 'Dubai, UAE', 'Dubai, United Arab Emirates']);
+registerWorkplace('other', ['Singapore']);
+registerWorkplace('other', ['Bengaluru', 'Bangalore', 'Bengaluru, India']);
+registerWorkplace('other', ['Mumbai', 'Mumbai, India']);
+registerWorkplace('other', ['Zug', 'Zurich', 'Zurich, Switzerland']);
+
+type WorkplaceLocationParse = {
+  sawExplicitSyntax: boolean;
+  countries: VettedWorkplaceCountry[];
+  invalid: boolean;
+};
+
+function parseCapturedWorkplaceLocations(captures: readonly string[]): WorkplaceLocationParse {
+  const countries: VettedWorkplaceCountry[] = [];
+  let invalid = false;
+  for (const capture of captures) {
+    const parts = capture.split(/\s*(?:\bor\b|\band\b|&|\/|\|)\s*/i).filter(Boolean);
+    for (const part of parts) {
+      const cleaned = part
+        .replace(/^(?:either\s+)?(?:our|the|an?)\s+/i, '')
+        .replace(/\s+(?:offices?|sites?|workplaces?|headquarters|hq)$/i, '')
+        .trim();
+      if (!cleaned || /^(?:(?:one|any|either|all|some)\s+of(?:\s+(?:our|the))?)$/i.test(cleaned)) continue;
+      const country = VETTED_WORKPLACE_LOCATIONS.get(normalizeIdentity(cleaned));
+      if (country) countries.push(country);
+      else invalid = true;
+    }
+  }
+  return { sawExplicitSyntax: captures.length > 0, countries, invalid };
+}
+
+/** A location must be attached to the work or office syntax in the question. A country word in
+ * customer, travel, or compliance prose is not a work location. Office-specific syntax wins over
+ * the broader fallback so "from our office in Chicago" is one place, not two captures. */
+function explicitWorkLocations(label: string): WorkplaceLocationParse {
+  const officeLocations = uniqueLocationCaptures(label, [
+    /\b(?:offices?|sites?|workplaces?|headquarters|hq)\s+(?:is\s+|are\s+)?(?:located\s+|based\s+)?(?:in|at|near)\s+([^?;.]{1,80})/gi,
+    /(?:[,:&/|]|\b(?:from|in|at|near|or|and|between)\b)\s*(?:(?:our|the|an?)\s+)?([^?;.]{1,80}?)\s+(?:offices?|sites?|workplaces?|headquarters|hq)\b/gi,
+  ]);
+  const fallbackCaptures = uniqueLocationCaptures(label, [
+    /\b(?:onsite|on[\s-]?site|in[\s-]?person)\s+(?:in|at|from|near)\s+([^?;.]{1,80})/gi,
+    /\b(?:work|working|based|located)\s+(?:onsite\s+|on[\s-]?site\s+)?(?:in|at|from|near)\s+([^?;.]{1,80})/gi,
+  ]);
+  const fallbackLocations = fallbackCaptures.filter((value) => !LOCATION_NOUN.test(value));
+  return parseCapturedWorkplaceLocations([...officeLocations, ...fallbackLocations]);
+}
+
+function isSingleVettedUsLocation(parsed: WorkplaceLocationParse): boolean {
+  return parsed.sawExplicitSyntax && !parsed.invalid
+    && parsed.countries.length === 1 && parsed.countries[0] === 'US';
+}
+
+function frozenWorkplaceLocationParse(locations: readonly string[]): WorkplaceLocationParse {
+  return parseCapturedWorkplaceLocations(locations);
+}
+
 /* A location question that wants a NUMBER, A DATE OR A LIST rather than a yes or a no.
  *
  * isLocationCommitmentQuestion only asks whether the label has a "can you ... office" shape, and
@@ -714,6 +829,7 @@ const LOCATION_QUESTION_WANTS_A_VALUE =
 function onsiteCommitmentAnswer(
   label: string,
   ap: ApplicationProfileLike,
+  jdText?: string,
 ): { value: string } | { skipReason: string } {
   const held = { skipReason: onsiteCommitmentSkipReason(label) };
 
@@ -734,10 +850,22 @@ function onsiteCommitmentAnswer(
 
   const named = officeMetrosNamed(label);
   if (commitment === 'anywhere') {
-    // Scoped to the US. A label naming a foreign office, or naming a foreign country in place of an
-    // office, is outside what she declared.
-    if (named.some((entry) => entry.country !== 'US')) return held;
-    return { value: 'Yes' };
+    /* `anywhere` records the US-scoped standing declaration. It is not permission to treat an
+     * unknown place as American. The old rule returned Yes whenever the finite metro table found
+     * no foreign city, so Paris and every city absent from that table became US-safe by omission.
+     *
+     * Evidence can come from the question itself, or from the structured job locations frozen
+     * into the resolution context by applicationContextForQuestionResolution. Arbitrary prose in
+     * the JD does not count: a description can mention customers, offices, or travel worldwide. */
+    const labelLocations = explicitWorkLocations(label);
+    if (labelLocations.sawExplicitSyntax) {
+      return isSingleVettedUsLocation(labelLocations) ? { value: 'Yes' } : held;
+    }
+    const frozenLocations = frozenJobLocationsFromContext(jdText);
+    if (isSingleVettedUsLocation(frozenWorkplaceLocationParse(frozenLocations))) {
+      return { value: 'Yes' };
+    }
+    return held;
   }
 
   // 'listed_locations': only a label that names a place can be checked against the list.
@@ -751,8 +879,30 @@ function onsiteCommitmentAnswer(
 function routineLocationCommitmentAnswer(
   label: string,
   ap: ApplicationProfileLike,
+  jdText?: string,
 ): { value: string } | { skipReason: string } | null {
-  return isLocationCommitmentQuestion(label) ? onsiteCommitmentAnswer(label, ap) : null;
+  return isLocationCommitmentQuestion(label) ? onsiteCommitmentAnswer(label, ap, jdText) : null;
+}
+
+const FROZEN_JOB_LOCATION_PREFIX = '[LITOS FROZEN JOB LOCATION] ';
+
+/** Encode structured job locations for question resolution without making arbitrary JD prose
+ * location evidence. Kept here so the producer and consumer share the exact marker. */
+export function frozenJobLocationContext(locations: readonly string[]): string {
+  return locations
+    .map((location) => location.trim())
+    .filter(Boolean)
+    .map((location) => `${FROZEN_JOB_LOCATION_PREFIX}${location}`)
+    .join('\n');
+}
+
+function frozenJobLocationsFromContext(context: string | undefined): string[] {
+  if (!context) return [];
+  return context
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith(FROZEN_JOB_LOCATION_PREFIX))
+    .map((line) => line.slice(FROZEN_JOB_LOCATION_PREFIX.length).trim())
+    .filter(Boolean);
 }
 
 /* AGE_ATTESTATION_QUESTION is no longer in this list, and that is the whole of the second half of
@@ -987,7 +1137,7 @@ const LOCATION_COMMITMENT_STEM = /\b(?:are|can|could|do|did|will|would|should|ma
 // that same packet came from. Four distinct postings ask this in the owner's history (Anduril,
 // Postman, Fluency, Brex), all of them asking the same routine question the office wording already
 // answers Yes to.
-const LOCATION_COMMITMENT_VOCAB = /\boffice\b|in[\s-]?office|on[\s-]?site|\bonsite\b|in[\s-]?person|\bhybrid\b|\bremote(?:ly|[\s-]?only)?\b|work\s+from\s+home|relocat|commut/i;
+const LOCATION_COMMITMENT_VOCAB = /\boffices?\b|in[\s-]?office|on[\s-]?site|\bonsite\b|in[\s-]?person|\bhybrid\b|\bremote(?:ly|[\s-]?only)?\b|work\s+from\s+home|relocat|commut/i;
 /* Moving house, which is a different promise from sitting in an office and has its own column.
  * Kept in step with answerReuse.ts's RELOCATION_QUESTION, which decides the same split for replay. */
 const RELOCATION_COMMITMENT_QUESTION = /\brelocat\w*\b|\bwilling\s+to\s+move\b|\bplan\s+to\s+move\b/i;
@@ -1244,33 +1394,29 @@ export function isGovernmentEmploymentQuestion(label: string): boolean {
   return !NOT_HER_GOVERNMENT_EMPLOYMENT.test(value);
 }
 
-/* An organisation whose NAME says it is a government employer. A hit here is decisive and flips
- * the answer to Yes, so nothing ambiguous belongs in it: two- and three-letter initialisms that
- * double as ordinary words ("VA", "DOE", "SEC", "DOT") are deliberately absent, because a company
- * called Doe Labs must not be read as the Department of Energy. */
-const GOVERNMENT_EMPLOYER_NAME = new RegExp([
-  /\bgovernment\b|\bcivil\s+service\b/,
-  /* Up to two words may sit between the qualifier and the institution word: "Federal Aviation
-   * Administration", "United States Patent and Trademark Office". A bare "federal" is NOT enough
-   * on its own, because Federal Express is a courier. */
-  /\b(?:u\.?s\.?|united\s+states|federal)\s+(?:\w+\s+){0,2}(?:department|dept\.?|agency|bureau|commission|administration|government)\b/,
-  /\b(?:department|dept\.?|ministry)\s+of\s+(?:the\s+)?(?:state|defen[cs]e|justice|energy|education|labor|labour|transportation|treasury|commerce|agriculture|health|homeland|veterans?\s+affairs|interior|housing)\b/,
-  /\b(?:city|county|state|commonwealth|town|village|borough)\s+of\s+\w/,
-  /\b(?:mayor|governor|senator|congressman|congresswoman|representative)'?s?\s+office\b/,
-  /\boffice\s+of\s+(?:the\s+)?(?:congress\w+|senator|representative|mayor|governor|attorney\s+general)\b/,
-  /\bu\.?s\.?\s+(?:senate|house\s+of\s+representatives|congress|army|navy|air\s+force|marine\s+corps|coast\s+guard|space\s+force|embassy|mint|postal\s+service)\b/,
-  /\bcongressional\s+(?:office|staff\w*|committee)\b|\bhouse\s+of\s+representatives\b|\bunited\s+states\s+senate\b/,
-  /\bnational\s+aeronautics\s+and\s+space\b|\bnasa\b|\bdarpa\b|\busaid\b|\buspto\b|\bnational\s+laborator(?:y|ies)\b/,
-  /\bnational\s+guard\b|\bpeace\s+corps\b|\barmed\s+forces\b/,
-].map((part) => part.source).join('|'), 'i');
+/* Closed registry of identities whose employer status has been vetted. This is intentionally not a
+ * pattern language. A plausible-looking new organisation stays held until it is added here or a
+ * future experience-bank row carries structured government-employer provenance. */
+const VETTED_GOVERNMENT_EMPLOYER_IDENTITIES = new Set([
+  'department of energy',
+  'u s department of energy',
+  'united states department of energy',
+  'department of justice',
+  'u s department of justice',
+  'united states department of justice',
+  'government accountability office',
+  'city of los angeles',
+  'office of congressman ted lieu',
+  'united states senate',
+  'u s senate',
+  'federal aviation administration',
+  'national aeronautics and space administration',
+  'nasa',
+]);
 
-/* The second tier, and the reason this arm is a check rather than a lookup: an organisation whose
- * name COULD be public and cannot be settled from the name alone. A hit holds the question for the
- * applicant instead of answering it either way. Measured against the four other production banks
- * on 2026-08-09, this is what catches "WORLD BANK" and "XYZ PUBLIC CHARTER SCHOOLS" - two orgs a
- * bare name match would have shrugged past on its way to printing "No". */
-const MAYBE_GOVERNMENT_EMPLOYER_NAME =
-  /\bpublic\b|\bstate\b|\bfederal\b|\bnational\b|\bmunicipal\w*\b|\bauthority\b|\bcouncil\b|\bbureau\b|\bagency\b|\bcommission\b|\badministration\b|\bministr\w*\b|\bdepartment\b|\bcongress\w*\b|\bsenate\b|\bembassy\b|\bconsulate\b|\bworld\s+bank\b|\bunited\s+nations\b|\b(?:unicef|unesco|imf|nato)\b|\bpolice\b|\bdefen[cs]e\b|\bmilitary\b|\barmy\b|\bnavy\b|\bair\s+force\b|\bcoast\s+guard\b|\bnational\s+guard\b|\bpeace\s+corps\b|\bcourt\b|\bschool\s+district\b|\bveterans?\b|\bnasa\b|\bnoaa\b|\busaid\b|\busda\b|\bdarpa\b|\bnist\b|\bnih\b|\bcdc\b|\bfda\b|\bepa\b|\bfaa\b|\bfbi\b|\bcia\b|\bnsa\b|\birs\b|\bdhs\b|\btsa\b|\bfema\b|\buspto\b|\busps\b/i;
+function isExactGovernmentEmployerOrg(org: string): boolean {
+  return VETTED_GOVERNMENT_EMPLOYER_IDENTITIES.has(normalizeIdentity(org));
+}
 
 /**
  * Whether a stored military-service answer says she served.
@@ -1293,16 +1439,9 @@ export function governmentEmploymentSkipReason(label: string, because: string): 
 /**
  * "Prior US Government Employment?" answered by READING the experience bank.
  *
- * The negative this returns is derived, and the distinction is the whole point of the arm. The
- * canon rule it implements is the applicant's own: application questions about her history are
- * answered from her record, and absence on that record is itself the answer. What makes that rule
- * safe rather than a laundered constant is that the record is actually consulted - every entry is
- * read, tested against what the question asks about, and "No" is what is left when nothing
- * matched. Put a government employer in the bank and this returns Yes without another line of
- * code, which is the property the test pins.
- *
- * A hardcoded "No" would pass the same production packet today and would be a lie the first time a
- * student with a summer at a federal agency installed Litos.
+ * A typed job entry naming a government employer proves Yes. Project and leadership entries prove
+ * nothing about employment, and absence proves nothing because the bank is resume-derived rather
+ * than an attested complete employment history. Every other case is held for review.
  */
 function governmentEmploymentAnswer(
   label: string,
@@ -1310,12 +1449,16 @@ function governmentEmploymentAnswer(
 ): { value: string } | { skipReason: string } | null {
   if (!isGovernmentEmploymentQuestion(label)) return null;
 
-  const bank = ap.experience_bank?.filter((entry) => entry?.org?.trim());
+  const recorded = ap.experience_bank?.filter((entry) => entry?.org?.trim());
   /* An empty bank is "she never told us", not "she never worked anywhere". Nothing is derivable
    * from a record that does not exist, so this refuses rather than reporting the negative - which
    * is also what keeps the empty-profile sweep at the number it was. */
-  if (!bank?.length) {
+  if (!recorded?.length) {
     return { skipReason: governmentEmploymentSkipReason(label, 'your experience is not on file') };
+  }
+  const bank = recorded.filter((entry) => entry.type === 'job');
+  if (!bank.length) {
+    return { skipReason: governmentEmploymentSkipReason(label, 'your record has no typed employment entries') };
   }
 
   /* A stored military record outranks the bank in one direction only. The armed forces are
@@ -1326,12 +1469,9 @@ function governmentEmploymentAnswer(
     return { skipReason: governmentEmploymentSkipReason(label, 'your military service is on file and this question does not fit it') };
   }
 
-  const named = bank.flatMap((entry) => [entry.org, entry.title ?? ''].map((part) => part.trim()).filter(Boolean));
-  if (named.some((name) => GOVERNMENT_EMPLOYER_NAME.test(name))) return { value: 'Yes' };
-  if (named.some((name) => MAYBE_GOVERNMENT_EMPLOYER_NAME.test(name))) {
-    return { skipReason: governmentEmploymentSkipReason(label, 'one of your organisations may be a public body') };
-  }
-  return { value: 'No' };
+  const namedOrganisations = bank.map((entry) => entry.org.trim()).filter(Boolean);
+  if (namedOrganisations.some(isExactGovernmentEmployerOrg)) return { value: 'Yes' };
+  return { skipReason: governmentEmploymentSkipReason(label, 'your employment record does not prove a complete history') };
 }
 
 // "Do you have a preferred name, other than the name indicated above?"
@@ -1901,19 +2041,20 @@ function isSinglePlainEmployerTarget(value: string): boolean {
 }
 
 /**
- * Every organisation the applicant has declared, from both records that hold one.
+ * Every employer the applicant has positively declared, from both records that hold one.
  *
  * `employer_history` alone was the sibling of the bug this branch is about. It is scraped out of
  * `parsed_json.experience`, and on the owner's production profile on 2026-08-09 it held 4 of her 9
  * organisations - Traeco, Spark SC and Venture Capital Academy were in the experience bank and not
  * in the parse. "Have you ever worked for Traeco?" therefore answered "No" from a record that was
  * missing the entry that made it Yes, which is the same failure as a hardcoded negative wearing a
- * lookup as a disguise. The bank is the record she authored, so it is unioned in here.
+ * lookup as a disguise. Typed job rows are unioned in for positive matches. Projects and
+ * leadership are excluded, and a non-match is held because neither record is proven exhaustive.
  */
 function declaredEmployers(ap: ApplicationProfileLike): string[] {
   const declared = [
     ...(ap.employer_history ?? []),
-    ...(ap.experience_bank ?? []).map((entry) => entry.org),
+    ...(ap.experience_bank ?? []).filter((entry) => entry.type === 'job').map((entry) => entry.org),
   ];
   return declared.map(normalizeEmployerName).filter(Boolean);
 }
@@ -1937,7 +2078,7 @@ function priorEmployerAnswer(label: string, ap: ApplicationProfileLike): { value
    * employer she is currently at. employerMatchesTarget is anchored at the first token precisely
    * so that "Tone" still cannot match "Tonee". */
   const knownMatch = history.some((employer) => employerMatchesTarget(employer, target));
-  return { value: knownMatch ? 'Yes' : 'No' };
+  return knownMatch ? { value: 'Yes' } : null;
 }
 
 /* Where she LIVES, which is a stored fact, kept strictly apart from where she will WORK, which is
@@ -2646,7 +2787,7 @@ export function resolveKnownAnswer(
    * and that argument does not apply to a question whose subject is where she sits. A label that is
    * genuinely about hours and names no office still reaches the branch below untouched, because
    * isLocationCommitmentQuestion requires an office/onsite/commute word. */
-  const routineLocationCommitment = routineLocationCommitmentAnswer(label, ap);
+  const routineLocationCommitment = routineLocationCommitmentAnswer(label, ap, jdText);
   if (routineLocationCommitment) return routineLocationCommitment;
 
   /* THE DATE QUESTIONS, AND ONLY THEM, AND ONLY FROM A WINDOW THAT COVERS THIS POSTING.
@@ -2769,7 +2910,7 @@ export function resolveKnownAnswer(
     case 'most_recent_employer':
       return ap.most_recent_employer ? { value: ap.most_recent_employer } : null;
     case 'onsite_commitment':
-      return onsiteCommitmentAnswer(label, ap);
+      return onsiteCommitmentAnswer(label, ap, jdText);
     case 'current_enrollment':
       return currentEnrollmentAnswer(ap);
     case 'study_year': {
