@@ -17,6 +17,26 @@ const CONTEXTUAL_ALPHA_CODE_PATTERNS = [
   /\b(?:verification|security|authentication|confirmation|one[ -]?time)\s+code\s*(?:is|[:=-])\s*([A-Za-z]{8})\b/gi,
   /\b(?:passcode|otp)\s*(?:is|[:=-])\s*([A-Za-z]{8})\b/gi,
   /\b(?:enter|type|use|provide)\s+(?:this\s+|the\s+|your\s+)?(?:verification|security|authentication|confirmation|one[ -]?time)\s+code\s+([A-Za-z]{8})\b/gi,
+  /* THE SENTENCE GREENHOUSE ACTUALLY WRITES, which none of the three above matches.
+   *
+   * Measured against the real emails, not against a paraphrase. Greenhouse's body is:
+   *
+   *     "Copy and paste this code into the security code field on your application: TPHJrFMJ.
+   *      After you enter the code, resubmit your application."
+   *
+   * Every pattern above wants the token to follow the word "code" either immediately or after an
+   * "is"/":"; here twenty-eight characters of instruction sit in between, so all three miss, and the
+   * three codes on record from this applicant's mailbox on 2026-08-09 - LSlOXjvZ, yFxeFpSl, and the
+   * TPHJrFMJ in Greenhouse's own support copy - were unreadable. Automatic retrieval cannot work on
+   * a Greenhouse board without this, and the held-session design that reads a code in the seconds
+   * after a submit has nothing to read.
+   *
+   * The colon is what makes it a hand-over rather than prose: a clause that names a code and then
+   * ends in a colon is introducing one. Bounded to a single line and 80 characters so it cannot
+   * reach across a paragraph, and the token still has to survive isGreenhouseLetterCode's
+   * lower-to-upper test, which is what keeps 'Thursday' and 'Required' out.
+   */
+  /\bcode\b[^:\n]{0,80}:\s*([A-Za-z]{8})\b/gi,
 ];
 const MAX_CODE_AGE_MS = 10 * 60_000;
 const CLOCK_SKEW_MS = 30_000;

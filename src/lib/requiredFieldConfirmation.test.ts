@@ -530,21 +530,29 @@ test('submission runner requires confirmation proof before any receipt can be re
   assert.ok(receipt > barrier);
 });
 
-test('a supplied security code is entered by a continuation that proves its own submit', () => {
+/* THE SUPPLIED-CODE CONTINUATION IS GONE, AND THAT IS THE FIX RATHER THAN A REGRESSION.
+ *
+ * It typed a code the applicant had pasted in, on a page reached by sending the application again.
+ * Greenhouse issues a new code on every send and invalidates the last - three codes to one mailbox
+ * on a live Cresta application on 2026-08-09, at 20:24:03, 21:13:07 and 21:13:53 - so the code being
+ * typed was always one generation stale and the branch could never have succeeded. There is now one
+ * continuation, and the code it carries was read inside the same run that raised the challenge.
+ */
+test('no continuation may carry a code that came from outside the run', () => {
   const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  assert.equal((source.match(/continueManagedBrowser\(/g) ?? []).length, 1,
+    'one held session, one answer: a second call site would mean a second submit');
+  // The supplied code survives in exactly one place, and it is not an action list.
   const branch = source.indexOf('if (options.securityCode && initialChallenge) {');
-  assert.ok(branch >= 0, 'the supplied-code continuation must be its own branch');
-  const continuation = source.indexOf('receiptResult = await continueManagedBrowser(continuationToken, codeActions)', branch);
-  const barrier = source.indexOf("assertManagedRequiredFieldsConfirmed(receiptResult, 'verification')", continuation);
-  const receipt = source.indexOf("const receipt = verdict.kind === 'confirmed'", continuation);
-  assert.ok(continuation > branch);
-  assert.ok(barrier > continuation, 'the code submit owes the same per-field proof as any other');
-  assert.ok(receipt > barrier);
+  assert.ok(branch > 0, 'the supplied code is still fingerprinted, so the same dead code cannot resend');
+  const body = source.slice(branch, source.indexOf('let enteredCode', branch));
+  assert.match(body, /outcome: 'superseded'/);
+  assert.doesNotMatch(body, /continueManagedBrowser|securityCodeContinuationActions|withSecurityCode\(/);
 });
 
 test('automatic security-code continuation validates its own atomic confirmation receipt', () => {
   const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
-  const continuation = source.indexOf('receiptResult = await continueManagedBrowser(continuationToken, prepared.actions)');
+  const continuation = source.indexOf('receiptResult = await continueManagedBrowser(continuationToken, codeActions)');
   const continuationBarrier = source.indexOf("assertManagedRequiredFieldsConfirmed(receiptResult, 'verification')", continuation);
   const receipt = source.indexOf("const receipt = verdict.kind === 'confirmed'", continuation);
   assert.ok(continuation >= 0);

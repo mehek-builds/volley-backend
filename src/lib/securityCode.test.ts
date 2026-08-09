@@ -104,12 +104,49 @@ test('the sentence names no address and no length when the page gave neither', (
   assert.doesNotMatch(reason, /undefined|null|0-character/);
 });
 
-test('a rejected attempt changes the sentence, because the code in her hand is now the wrong one', () => {
+/* THE SENTENCE STOPPED ASKING HER TO WIN A RACE.
+ *
+ * It used to end "use the newest email", which was a true statement about the code and a false
+ * statement about what would happen to it. Greenhouse issues a new code on every send, and Litos
+ * has to send the form to reach a code field at all, so whatever she pastes is replaced before it
+ * can be typed. Three codes to one mailbox on a live Cresta application on 2026-08-09 is the
+ * measurement.
+ *
+ * A rejection now means something narrower and worse: Litos read the code itself, in the same run,
+ * on the page that asked for it, and the employer still said no. There is no newer email that
+ * helps, so the sentence stops asking for one and hands the application back.
+ */
+test('a rejected attempt hands the application back rather than asking for a newer code', () => {
   const state = withSecurityCodeAttempt(
     beginSecurityCodeState({ challenge: { digits: 8 }, attemptedAt: 'x', authorized: true }),
     { at: 'y', fingerprint: 'f', outcome: 'rejected' },
   );
-  assert.match(securityCodeAttentionReason(state), /use the newest email/);
+  const reason = securityCodeAttentionReason(state);
+  assert.doesNotMatch(reason, /use the newest email/);
+  assert.match(reason, /did not accept it/);
+  assert.match(reason, /open the portal and finish it there/);
+});
+
+test('a superseded attempt explains why the code she gave could not be used', () => {
+  const state = withSecurityCodeAttempt(
+    beginSecurityCodeState({ challenge: { digits: 8 }, attemptedAt: 'x', authorized: true }),
+    { at: 'y', fingerprint: 'f', outcome: 'superseded' },
+  );
+  const reason = securityCodeAttentionReason(state);
+  // The mechanism, in her words, because without it "your code was not used" reads as a Litos bug.
+  assert.match(reason, /issues a new code every time the form is sent/);
+  assert.match(reason, /reads the new code itself/);
+  // And it is never reported as a wrong code, because it was never wrong.
+  assert.doesNotMatch(reason, /not accepted|wrong|incorrect/i);
+});
+
+test('with nothing tried yet, the sentence says who reads the code', () => {
+  const state = beginSecurityCodeState({ challenge: { digits: 8 }, attemptedAt: 'x', authorized: true });
+  const reason = securityCodeAttentionReason(state);
+  assert.match(reason, /reads the code from your connected mailbox/);
+  // The old sentence ended by asking her to enter one. Nothing types a code she supplies any more,
+  // so nothing may ask her for one as though it would be used.
+  assert.doesNotMatch(reason, /Enter the code from that email/);
 });
 
 test('the sentence is categorized as a security code and not as a captcha', () => {
@@ -324,12 +361,41 @@ test('the first managed run of a code finish is an application submit with no co
   // And the continuation is requested on every managed submit now, not only on the ones that expect
   // to scrape a mailbox: without a live token there is no second half to enter a code into.
   assert.match(firstRun, /requestContinuation: true/);
-  assert.match(firstRun, /continuationTtlSeconds: 120/);
+  assert.match(firstRun, /continuationTtlSeconds: SECURITY_CODE_CONTINUATION_TTL_SECONDS/);
+});
+
+/* THE CODE THAT GETS TYPED IS READ INSIDE THE RUN, AND THERE IS NO OTHER SOURCE.
+ *
+ * This is the whole defect, stated as a test. Greenhouse rotates its code on every send and a code
+ * control only exists on a page that has just been sent, so a run that has to submit to reach a
+ * field is holding a dead code by the time it gets there. Three codes to one mailbox on a live
+ * Cresta application on 2026-08-09 - 20:24:03, 21:13:07, 21:13:53 - each send killing the last.
+ *
+ * So `options.securityCode` may never reach a continuation action list. It may only be fingerprinted
+ * and recorded as superseded. A future edit that pipes it back into securityCodeContinuationActions
+ * fails here.
+ */
+test('a code supplied out of band is never typed, only fingerprinted as superseded', async () => {
+  const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const start = source.indexOf('const initialChallenge = readManagedSecurityCodeChallenge(result);');
+  const end = source.indexOf('if (!receiptResult.screenshot)', start);
+  assert.ok(start > 0 && end > start);
+  const half = source.slice(start, end);
+  // The only thing done with the supplied code in the whole second half.
+  assert.match(half, /outcome: 'superseded'/);
+  assert.match(half, /securityCodeFingerprint\(row\.id, options\.securityCode\)/);
+  assert.doesNotMatch(half, /securityCodeContinuationActions\([^)]*options\.securityCode/);
+  assert.doesNotMatch(half, /withSecurityCode\(\s*initialActions,\s*options\.securityCode/);
+  // And what IS typed comes from the mailbox read this run made, on the page this run submitted.
+  assert.match(half, /securityCodeContinuationActions\(initialActions, prepared\.code\)/);
+  assert.match(half, /enteredCode = prepared\.code/);
 });
 
 test('a code finish is only recorded as submitted when the code was accepted AND the page confirmed', async () => {
   const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  const gate = source.indexOf('if (options.securityCode) {\n      const codeOutcome');
+  // Keyed on the code this run actually entered, not on the one the applicant handed over: the
+  // second is never typed, so gating on it would gate the proof on the wrong event.
+  const gate = source.indexOf('if (enteredCode) {\n      const codeOutcome');
   assert.ok(gate > 0, 'the code run must have its own proof gate');
   const submitted = source.indexOf("status: 'submitted'", gate);
   assert.ok(submitted > gate, 'and it must sit above the submitted write');
@@ -436,7 +502,12 @@ test('automatic verification records one remote managed continuation without exp
   const continuation = source.slice(start, end);
   assert.match(continuation, /runner: 'stratus-managed'/);
   assert.match(continuation, /managedContinuationFingerprint\(continuationToken\)/);
-  assert.match(continuation, /receiptResult = await continueManagedBrowser\(continuationToken, prepared.actions\)/);
+  // The packet's own atomic submit, carrying the code, rather than the generic ten-action list.
+  // MANAGED_ACTION_LIMIT is 120 and the runner types the eight boxes itself, so this is one action
+  // where buildManagedVerificationActions was ten - and it is the shape whose selector, chooser
+  // policy and contract version the runner validates field by field.
+  assert.match(continuation, /const codeActions = securityCodeContinuationActions\(initialActions, prepared\.code\) \?\? prepared\.actions/);
+  assert.match(continuation, /receiptResult = await continueManagedBrowser\(continuationToken, codeActions\)/);
   assert.match(continuation, /continuation_resumed: true/);
   assert.doesNotMatch(continuation, /continuation_token:/i);
   const receipt = source.slice(end, source.indexOf("fastify.log.info({ applicationId: row.id }", end));

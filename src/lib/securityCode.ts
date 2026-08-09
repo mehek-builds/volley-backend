@@ -70,11 +70,35 @@ export function readManagedSecurityCodeChallenge(
 export function securityCodeAttentionReason(state: SecurityCodeState): string {
   const length = state.digits > 0 ? `${state.digits}-character ` : '';
   const address = state.sent_to ? ` to ${state.sent_to}` : '';
-  const lastRejected = state.attempts?.some((attempt) => attempt.outcome === 'rejected') === true;
-  const tail = lastRejected
-    ? ' The last code Litos tried was not accepted, so use the newest email.'
-    : '';
-  return `Litos submitted this application and the employer asked for a human check: a ${length}security code was emailed${address}, and the application is not filed until that code is entered and the form is sent again.${tail} Enter the code from that email and Litos will finish it.`;
+  const attempts = state.attempts ?? [];
+  const lastRejected = attempts.some((attempt) => attempt.outcome === 'rejected');
+  const superseded = attempts.some((attempt) => attempt.outcome === 'superseded');
+  /* WHAT SHE IS ACTUALLY BEING ASKED FOR, which is no longer a code.
+   *
+   * The old sentence ended "Enter the code from that email and Litos will finish it", and on a
+   * rejection it added "use the newest email". Both were wrong in the same way, and the way is
+   * structural rather than a wording problem: the employer issues a new code on every send and
+   * invalidates the last, and a code control only exists on a page that has just been sent. So by
+   * the time any code she pastes reaches a form, the send that got Litos back to a code field has
+   * already replaced it. "Use the newest email" asked her to win a race that cannot be won.
+   *
+   * What finishes this application is Litos reading the code itself, in the same run and on the
+   * same page, in the seconds between the send and the email landing. So the sentence says what
+   * Litos will do, what it needs to be able to do it, and - when it has already tried - what
+   * actually happened. The three tails are mutually exclusive and ordered by what she needs first.
+   */
+  const tail = superseded
+    ? ' The code you gave Litos could not be used: this employer issues a new code every time the'
+      + ' form is sent, and Litos has to send the form to reach the code field at all, so the code'
+      + ' in your hand is replaced before it can be typed. Litos now reads the new code itself from'
+      + ' your connected mailbox on the same page it was asked for.'
+    : lastRejected
+      ? ' Litos read a code from your mailbox and the employer did not accept it, so this one needs'
+        + ' you: open the portal and finish it there.'
+      : ' Litos reads the code from your connected mailbox and enters it on the same page that asked'
+        + ' for it. If your mailbox is not connected, or automatic verification is off, that is what'
+        + ' is missing here.';
+  return `Litos submitted this application and the employer asked for a human check: a ${length}security code was emailed${address}, and the application is not filed until that code is entered and the form is sent again.${tail}`;
 }
 
 /**
@@ -213,7 +237,26 @@ export function withSecurityCodeAttempt(
   state: SecurityCodeState,
   attempt: SecurityCodeAttempt,
 ): SecurityCodeState {
-  return { ...state, attempts: [...(state.attempts ?? []), attempt].slice(-10) };
+  return withSecurityCodeAttempts(state, [attempt]);
+}
+
+/**
+ * One run can now produce two attempts, and both have to survive.
+ *
+ * A finishing run carries the applicant's code, which it records as 'superseded' because it cannot
+ * be typed, and then reads the code its own submit caused and records what happened to that one.
+ * Appending them one at a time through separate state objects lost whichever was written first, and
+ * losing the superseded record is the one that matters: its fingerprint is the only thing standing
+ * between a dead code and an endless sequence of resends, each of which emails her another code.
+ *
+ * Still capped at the last ten, and still nothing but fingerprints.
+ */
+export function withSecurityCodeAttempts(
+  state: SecurityCodeState,
+  attempts: readonly SecurityCodeAttempt[],
+): SecurityCodeState {
+  if (attempts.length === 0) return state;
+  return { ...state, attempts: [...(state.attempts ?? []), ...attempts].slice(-10) };
 }
 
 /**

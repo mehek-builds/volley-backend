@@ -126,6 +126,37 @@ test('extracts case-sensitive letter-only Greenhouse codes only from explicit co
   );
 });
 
+/* THE SENTENCE GREENHOUSE REALLY SENDS, as opposed to a paraphrase of it.
+ *
+ * Every case in the test above is a synthetic wording, and the letter-code grammar was written to
+ * match those rather than the live email. Against the real body it matched nothing:
+ *
+ *   "Copy and paste this code into the security code field on your application: LSlOXjvZ.
+ *    After you enter the code, resubmit your application."
+ *
+ * Twenty-eight characters of instruction sit between "code" and the token, so all three original
+ * patterns miss. LSlOXjvZ and yFxeFpSl were read out of this applicant's mailbox on 2026-08-09
+ * during a live Cresta application and neither was readable; TPHJrFMJ is Greenhouse's own support
+ * copy and it was not readable either. Nothing downstream can work without this: the held-session
+ * design finishes an application by reading the code its own submit caused, and there was no
+ * Greenhouse code it could read.
+ */
+test('reads the codes out of the sentence Greenhouse actually writes', () => {
+  const body = (code: string) => 'Hi Mehek,\n\nCopy and paste this code into the security code field '
+    + `on your application: ${code}. After you enter the code, resubmit your application.`;
+  for (const code of ['LSlOXjvZ', 'yFxeFpSl', 'TPHJrFMJ']) {
+    assert.equal(extractCodeFromVerificationText(body(code), true), code, code);
+  }
+  // The digit-bearing shape was already readable, and stays readable through the same sentence.
+  assert.equal(extractCodeFromVerificationText(body('LH0Yjubx'), true), 'LH0Yjubx');
+  // Still gated on the portal: an unflagged board gets no letter-only code out of the same words.
+  assert.equal(extractCodeFromVerificationText(body('LSlOXjvZ')), null);
+  // And still gated on the casing test, so an ordinary capitalised word after a colon is not a code.
+  assert.equal(extractCodeFromVerificationText(
+    'Your security code is on its way for application: Thursday morning.', true,
+  ), null);
+});
+
 test('matches a mixed-case Greenhouse code only inside its authenticated application alias', () => {
   const requestedAt = new Date('2026-08-09T20:43:18.000Z');
   const row = {
