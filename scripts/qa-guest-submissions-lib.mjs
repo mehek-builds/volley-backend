@@ -101,6 +101,39 @@ export function assertDisposableDatabaseMarker(row, expectedMarker, now = new Da
   }
 }
 
+export function controlledManagedReceivingProof({
+  routeMode,
+  domain,
+  aliasSecret,
+  canaryToken,
+  webhookEndpoint,
+  webhookSecret,
+  databaseMarker,
+}) {
+  if (routeMode !== 'managed_resend') throw new Error('The controlled receiving proof requires managed_resend mode');
+  if (!domain || !/^[a-z0-9-]+\.resend\.app$/i.test(domain)) throw new Error('A valid managed Resend domain is required');
+  if (!aliasSecret?.trim() || !webhookSecret?.trim()) throw new Error('Alias and Resend webhook secrets are required');
+  if (!canaryToken || !/^[A-Za-z0-9_-]{32,128}$/.test(canaryToken)) throw new Error('A valid managed receiving canary token is required');
+  if (!databaseMarker || !/^[A-Za-z0-9_-]{24,128}$/.test(databaseMarker)) throw new Error('A valid database marker is required');
+  const endpoint = new URL(webhookEndpoint);
+  if (endpoint.protocol !== 'https:' || endpoint.pathname !== '/webhooks/application-email/inbound'
+    || endpoint.search || endpoint.hash || endpoint.username || endpoint.password) {
+    throw new Error('The managed receiving webhook endpoint is invalid');
+  }
+  const routeFingerprint = createHash('sha256').update(
+    `managed-receiving-proof-v2:${routeMode}:${domain.toLowerCase()}:${aliasSecret.trim()}:${canaryToken.toLowerCase()}:${endpoint.origin}${endpoint.pathname}:${webhookSecret.trim()}`,
+  ).digest('hex');
+  const providerMessageHash = createHash('sha256')
+    .update(`controlled-qa-receiving-proof-v1:${databaseMarker}:${routeFingerprint}`)
+    .digest('hex');
+  return {
+    provider_message_hash: providerMessageHash,
+    route_fingerprint: routeFingerprint,
+    proof_version: 2,
+    domain: domain.toLowerCase(),
+  };
+}
+
 export function assertRemoteManagedRunner({ provider, baseUrl, apiKey, oidcToken, vercelEnv, expectedOrigin }) {
   if (provider !== 'stratus-managed') {
     throw new Error('BROWSER_PROVIDER=stratus-managed is required for the security-code harness');

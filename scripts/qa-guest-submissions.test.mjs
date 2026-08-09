@@ -6,6 +6,7 @@ import {
   assertRemoteManagedRunner,
   assertControlledSecurityCodeTarget,
   controlledDatabaseTarget,
+  controlledManagedReceivingProof,
   controlledPortalBinding,
   managedApplicationAlias,
   securityCodeCase,
@@ -74,6 +75,35 @@ test('database safety rejects remote, shared, and unmarked targets', () => {
     marker,
     expires_at: new Date('2026-08-10T13:00:00.000Z'),
   }, marker, now), /within the next 24 hours/);
+});
+
+test('controlled managed receiving proof is fully bound to the disposable QA configuration', () => {
+  const input = {
+    routeMode: 'managed_resend',
+    domain: 'litos-qa.resend.app',
+    aliasSecret: 'controlled-alias-secret',
+    canaryToken: '0123456789abcdef0123456789abcdef',
+    webhookEndpoint: 'https://backend.example.test/webhooks/application-email/inbound',
+    webhookSecret: 'whsec_controlled_test',
+    databaseMarker: marker,
+  };
+  const proof = controlledManagedReceivingProof(input);
+  assert.match(proof.route_fingerprint, /^[a-f0-9]{64}$/);
+  assert.match(proof.provider_message_hash, /^[a-f0-9]{64}$/);
+  assert.equal(proof.proof_version, 2);
+  assert.equal(proof.domain, input.domain);
+  assert.notEqual(
+    proof.route_fingerprint,
+    controlledManagedReceivingProof({ ...input, aliasSecret: 'rotated-controlled-alias-secret' }).route_fingerprint,
+  );
+  assert.notEqual(
+    proof.provider_message_hash,
+    controlledManagedReceivingProof({ ...input, databaseMarker: 'rotated_database_marker_1234' }).provider_message_hash,
+  );
+  assert.throws(() => controlledManagedReceivingProof({
+    ...input,
+    webhookEndpoint: 'http://localhost:3301/webhooks/application-email/inbound',
+  }), /endpoint is invalid/);
 });
 
 test('security-code mode requires the remote managed runner and records its auth mode', () => {

@@ -9,6 +9,7 @@ import {
   assertDisposableDatabaseMarker,
   assertRemoteManagedRunner,
   assertControlledSecurityCodeTarget,
+  controlledManagedReceivingProof,
   managedApplicationAlias,
   securityCodeCase,
   securityCodeMailboxUrl,
@@ -202,6 +203,32 @@ try {
       throw new Error(`disposable QA database marker lookup failed: ${errorDetail(error)}`);
     }
     assertDisposableDatabaseMarker(markerResult.rows[0], databaseMarker);
+    activeRun = { run: null, stage: 'seed_controlled_managed_receiving_proof' };
+    const receivingProof = controlledManagedReceivingProof({
+      routeMode: process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE,
+      domain: managedDomain,
+      aliasSecret,
+      canaryToken: process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN,
+      webhookEndpoint: process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_URL,
+      webhookSecret: process.env.RESEND_WEBHOOK_SECRET,
+      databaseMarker,
+    });
+    await client.query(
+      `insert into application_email_receiving_proofs
+         (provider_message_hash, route_fingerprint, proof_version, domain, verified_at)
+       values ($1, $2, $3, $4, now())
+       on conflict (route_fingerprint) do update
+         set provider_message_hash = excluded.provider_message_hash,
+             proof_version = excluded.proof_version,
+             domain = excluded.domain,
+             verified_at = now()`,
+      [
+        receivingProof.provider_message_hash,
+        receivingProof.route_fingerprint,
+        receivingProof.proof_version,
+        receivingProof.domain,
+      ],
+    );
     activeRun = { run: null, stage: 'verify_managed_application_email_route' };
     const health = await api('/health');
     assert.equal(health.application_email?.deliverable, true, 'managed application email route is not deliverable');
@@ -436,6 +463,7 @@ try {
       receipt_source: finalState.review.receipt?.source ?? null,
       email_message_received: Boolean(inboundEvidence),
       email_message_forwarded: Boolean(inboundEvidence?.response?.forwarded),
+      controlled_managed_receiving_proof_seeded: securityCodeMode,
       first_run_guest_entry_visible: true,
       guest_history_marker_written: true,
       submission_screenshot: submissionScreenshot,
