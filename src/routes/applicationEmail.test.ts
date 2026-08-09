@@ -7,6 +7,7 @@ import {
   inboundSecretMatches,
   resendProofSignatureMatches,
   signedResendCanaryEvent,
+  signedWebhookRequestMatchesConfiguredEndpoint,
   svixSignatureMatches,
 } from './applicationEmail';
 
@@ -84,6 +85,39 @@ test('signed Resend canary parsing uses only the signed envelope and rejects oth
   assert.deepEqual(event, { emailId: 'received-id', recipients: ['Exact@Managed.Resend.App'] });
   assert.equal(signedResendCanaryEvent({ type: 'email.sent', data: { email_id: 'x', to: ['a@b.com'] } }), null);
   assert.equal(signedResendCanaryEvent(Buffer.from('not-json')), null);
+});
+
+test('signed canary route proof requires the exact configured public host protocol and path', () => {
+  const name = 'LITOS_APPLICATION_EMAIL_WEBHOOK_URL';
+  const saved = process.env[name];
+  process.env[name] = 'https://student-outreach-backend.vercel.app/webhooks/application-email/inbound/';
+  const request = (overrides: Partial<FastifyRequest> = {}) => ({
+    headers: {
+      host: 'internal.vercel.invalid',
+      'x-forwarded-host': 'student-outreach-backend.vercel.app',
+      'x-forwarded-proto': 'https',
+    },
+    protocol: 'http',
+    url: '/webhooks/application-email/inbound',
+    ...overrides,
+  } as unknown as FastifyRequest);
+  try {
+    assert.equal(signedWebhookRequestMatchesConfiguredEndpoint(request()), true);
+    assert.equal(signedWebhookRequestMatchesConfiguredEndpoint(request({
+      headers: { 'x-forwarded-host': 'attacker.example', 'x-forwarded-proto': 'https' },
+    })), false);
+    assert.equal(signedWebhookRequestMatchesConfiguredEndpoint(request({
+      headers: { 'x-forwarded-host': 'student-outreach-backend.vercel.app', 'x-forwarded-proto': 'http' },
+    })), false);
+    assert.equal(signedWebhookRequestMatchesConfiguredEndpoint(request({
+      url: '/application-email/inbound',
+    })), false);
+    process.env[name] = 'https://student-outreach-backend.vercel.app/other';
+    assert.equal(signedWebhookRequestMatchesConfiguredEndpoint(request()), false);
+  } finally {
+    if (saved === undefined) delete process.env[name];
+    else process.env[name] = saved;
+  }
 });
 
 test('managed proof trusts only RESEND_WEBHOOK_SECRET while compatibility auth remains unchanged', () => {

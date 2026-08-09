@@ -1,5 +1,7 @@
 import { promises as dnsPromises } from 'dns';
 import {
+  DEFAULT_INBOUND_WEBHOOK_URL,
+  applicationEmailWebhookEndpoint,
   applicationEmailRouteSelection,
   configuredResendManagedReceivingDomain,
 } from './applicationEmailRoute';
@@ -82,6 +84,13 @@ export type DeliverabilityProbes = {
   now?: () => number;
 };
 
+export class ResendApiHttpError extends Error {
+  constructor(readonly path: string, readonly status: number) {
+    super(`Resend ${path} answered ${status}`);
+    this.name = 'ResendApiHttpError';
+  }
+}
+
 // One hour on a good result, five minutes on a bad one. The asymmetry is the point: a working
 // inbox does not stop working every few minutes, but a broken one is expected to be repaired, and
 // the repair is a DNS record published by hand at a registrar nobody here has credentials for.
@@ -91,7 +100,7 @@ const UNDELIVERABLE_TTL_MS = 5 * 60 * 1000;
 const DNS_TIMEOUT_MS = 3_000;
 const RESEND_TIMEOUT_MS = 5_000;
 
-export const DEFAULT_INBOUND_WEBHOOK_URL = 'https://student-outreach-backend.vercel.app/webhooks/application-email/inbound';
+export { DEFAULT_INBOUND_WEBHOOK_URL } from './applicationEmailRoute';
 
 type CacheEntry = { domain: string | null; configSignature: string; expiresAt: number; value: AliasDeliverability };
 
@@ -130,7 +139,7 @@ export function applicationEmailForwardingConfigured(): boolean {
 }
 
 export function inboundWebhookEndpoint(): string {
-  return process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_URL?.trim() || DEFAULT_INBOUND_WEBHOOK_URL;
+  return applicationEmailWebhookEndpoint();
 }
 
 function withTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
@@ -159,7 +168,7 @@ async function resendGet<T>(path: string): Promise<T[]> {
     headers: { Authorization: `Bearer ${key}` },
     signal: AbortSignal.timeout(RESEND_TIMEOUT_MS),
   });
-  if (!response.ok) throw new Error(`Resend ${path} answered ${response.status}`);
+  if (!response.ok) throw new ResendApiHttpError(path, response.status);
   const body = await response.json() as { data?: T[] } | T[];
   if (Array.isArray(body)) return body;
   return Array.isArray(body?.data) ? body.data : [];
@@ -273,6 +282,20 @@ async function probe(probes: DeliverabilityProbes): Promise<AliasDeliverability>
       if (!routed) return { ...base, reason: 'inbound_route_missing' };
       return { ...base, deliverable: true, reason: 'deliverable', inbound_route_configured: true };
     } catch (error) {
+      // A 401/403 says only that this sending key cannot inspect webhook administration. The fresh
+      // durable proof already establishes that Resend delivered `email.received` to the exact URL
+      // using the exact signing secret. Other failures remain unknown and therefore fail closed.
+      if (error instanceof ResendApiHttpError
+        && error.path === '/webhooks'
+        && (error.status === 401 || error.status === 403)) {
+        return {
+          ...base,
+          deliverable: true,
+          reason: 'deliverable',
+          inbound_route_configured: true,
+          detail: 'Webhook listing is unauthorized; using fresh signed route evidence',
+        };
+      }
       return { ...base, reason: 'check_unavailable', detail: describeManagedProofError(error) };
     }
   }
