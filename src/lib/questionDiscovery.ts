@@ -1465,11 +1465,6 @@ const GOVERNMENT_EMPLOYMENT_RELATIONSHIP =
 const GOVERNMENT_WORK_SUBJECT =
   /\bprojects?\b|\bcontracts?\b|\bcontractors?\b|\bfunctions?\b|\bdisciplines?\b|\bgovernment\s+relations\b/i;
 
-/* A private entity may contain "Government" in its legal name. That is a named-employer question,
- * not the broad government-employment family, so it must reach the exact employer resolver. */
-const NAMED_PRIVATE_ENTITY_DESIGNATOR =
-  /\b(?:company|co\.?|llc|ltd\.?|limited|inc\.?|incorporated|corp\.?|corporation|plc|insurance\s+company)\b/i;
-
 /* Labels that name a government and are still not "were you employed by one". Everything here is
  * either a real corpus label (relatives, PEP, export control) or a shape whose answer is a legal
  * status rather than a history (authorization, eligibility, sponsorship, clearance, citizenship).
@@ -1481,35 +1476,98 @@ const NOT_HER_GOVERNMENT_EMPLOYMENT =
 /** Whether this label asks whether the applicant has been employed by a government. */
 export function isGovernmentEmploymentQuestion(label: string): boolean {
   const value = label ?? '';
-  if (!GOVERNMENT_EMPLOYER_SCOPE.test(value)) return false;
   if (!GOVERNMENT_EMPLOYMENT_RELATIONSHIP.test(value)) return false;
   if (GOVERNMENT_WORK_SUBJECT.test(value)) return false;
-  if (NAMED_PRIVATE_ENTITY_DESIGNATOR.test(value)) return false;
-  return !NOT_HER_GOVERNMENT_EMPLOYMENT.test(value);
+  if (NOT_HER_GOVERNMENT_EMPLOYMENT.test(value)) return false;
+  const target = governmentEmploymentTarget(value);
+  if (!target) return false;
+  if (GOVERNMENT_EMPLOYER_SCOPE.test(value)) return true;
+  return target.kind === 'named' && VETTED_GOVERNMENT_EMPLOYERS.has(target.identity);
 }
 
-/* Closed registry of identities whose employer status has been vetted. This is intentionally not a
- * pattern language. A plausible-looking new organisation stays held until it is added here or a
- * future experience-bank row carries structured government-employer provenance. */
-const VETTED_GOVERNMENT_EMPLOYER_IDENTITIES = new Set([
-  'department of energy',
-  'u s department of energy',
-  'united states department of energy',
-  'department of justice',
-  'u s department of justice',
-  'united states department of justice',
-  'government accountability office',
-  'city of los angeles',
-  'office of congressman ted lieu',
-  'united states senate',
-  'u s senate',
-  'federal aviation administration',
-  'national aeronautics and space administration',
-  'nasa',
-]);
+type GovernmentLevel = 'federal' | 'state' | 'local';
+type VettedGovernmentEmployer = { canonical: string; level: GovernmentLevel };
 
-function isExactGovernmentEmployerOrg(org: string): boolean {
-  return VETTED_GOVERNMENT_EMPLOYER_IDENTITIES.has(normalizeIdentity(org));
+/* Closed registry of identities whose employer status and level have been vetted. Aliases share a
+ * canonical identity so a named question must match the same employer, not merely another entry at
+ * the same level. A plausible-looking organisation stays held until it is registered here. */
+const VETTED_GOVERNMENT_EMPLOYERS = new Map<string, VettedGovernmentEmployer>();
+
+function registerGovernmentEmployer(
+  canonical: string,
+  level: GovernmentLevel,
+  aliases: readonly string[],
+): void {
+  const employer = { canonical: normalizeIdentity(canonical), level };
+  for (const alias of [canonical, ...aliases]) {
+    VETTED_GOVERNMENT_EMPLOYERS.set(normalizeIdentity(alias), employer);
+  }
+}
+
+registerGovernmentEmployer('Department of Energy', 'federal', [
+  'U.S. Department of Energy',
+  'United States Department of Energy',
+]);
+registerGovernmentEmployer('Department of Justice', 'federal', [
+  'U.S. Department of Justice',
+  'United States Department of Justice',
+]);
+registerGovernmentEmployer('Government Accountability Office', 'federal', []);
+registerGovernmentEmployer('City of Los Angeles', 'local', []);
+registerGovernmentEmployer('Office of Congressman Ted Lieu', 'federal', []);
+registerGovernmentEmployer('United States Senate', 'federal', ['U.S. Senate']);
+registerGovernmentEmployer('Federal Aviation Administration', 'federal', []);
+registerGovernmentEmployer('National Aeronautics and Space Administration', 'federal', ['NASA']);
+
+type GovernmentEmploymentTarget =
+  | { kind: 'any' }
+  | { kind: 'level'; level: GovernmentLevel }
+  | { kind: 'named'; identity: string };
+
+function targetFromGovernmentPhrase(raw: string): GovernmentEmploymentTarget {
+  const identity = normalizeIdentity(raw.replace(/^(?:a|an|any|the)\s+/i, ''));
+  if (/^(?:(?:u s|us|united states) )?(?:federal )?government$/.test(identity)
+    || /^(?:(?:u s|us|united states) )?federal (?:agency|agencies)$/.test(identity)) {
+    return { kind: 'level', level: 'federal' };
+  }
+  if (/^state (?:government|agency|agencies)$/.test(identity)) return { kind: 'level', level: 'state' };
+  if (/^(?:local|municipal|city|county) government$/.test(identity)) return { kind: 'level', level: 'local' };
+  if (/^(?:government(?:al)?|government (?:agency|agencies)|public sector|civil service)$/.test(identity)) {
+    return { kind: 'any' };
+  }
+  return { kind: 'named', identity };
+}
+
+/** What employer or government level the question itself names. */
+function governmentEmploymentTarget(label: string): GovernmentEmploymentTarget | null {
+  const relation = label.match(/\bwork(?:ed|ing|s)?\b[^?]{0,60}\bfor\s+(?:the\s+)?([^?(\n]{1,120})/i)
+    ?? label.match(/\bemploy(?:ed|ment)\b[^?]{0,60}\b(?:by|with)\s+(?:the\s+)?([^?(\n]{1,120})/i);
+  if (relation?.[1]) return targetFromGovernmentPhrase(relation[1].trim());
+  if (/\bwork(?:ed|ing|s)?\b[^?]{0,40}\bin\b[^?]{0,30}\b(?:public[-\s]sector|civil\s+service)\b/i.test(label)) {
+    return { kind: 'any' };
+  }
+  if (/\b(?:prior|previous|past|current)\b[^?]{0,40}\bgovernment(?:al)?\s+employment\b/i.test(label)) {
+    return /\b(?:u\.?\s*s\.?|united\s+states|federal)\b/i.test(label)
+      ? { kind: 'level', level: 'federal' }
+      : { kind: 'any' };
+  }
+  if (/\bgovernment(?:al)?\s+employee\b/i.test(label)) {
+    if (/\bfederal\b/i.test(label)) return { kind: 'level', level: 'federal' };
+    if (/\bstate\b/i.test(label)) return { kind: 'level', level: 'state' };
+    if (/\b(?:local|municipal|city|county)\b/i.test(label)) return { kind: 'level', level: 'local' };
+    return { kind: 'any' };
+  }
+  return null;
+}
+
+function governmentEmployerMatchesTarget(
+  employer: VettedGovernmentEmployer,
+  target: GovernmentEmploymentTarget,
+): boolean {
+  if (target.kind === 'any') return true;
+  if (target.kind === 'level') return employer.level === target.level;
+  const named = VETTED_GOVERNMENT_EMPLOYERS.get(target.identity);
+  return Boolean(named && named.canonical === employer.canonical);
 }
 
 /**
@@ -1542,11 +1600,11 @@ function governmentEmploymentAnswer(
   ap: ApplicationProfileLike,
 ): { value: string } | { skipReason: string } | null {
   if (!isGovernmentEmploymentQuestion(label)) {
-    if (GOVERNMENT_EMPLOYER_SCOPE.test(label) && GOVERNMENT_WORK_SUBJECT.test(label)) {
+    if (GOVERNMENT_EMPLOYER_SCOPE.test(label) && !NOT_HER_GOVERNMENT_EMPLOYMENT.test(label)) {
       return {
         skipReason: governmentEmploymentSkipReason(
           label,
-          'the question is about government-related work, not employment by a government employer',
+          'the question does not explicitly ask whether you were employed by or worked for a government employer',
         ),
       };
     }
@@ -1573,8 +1631,14 @@ function governmentEmploymentAnswer(
     return { skipReason: governmentEmploymentSkipReason(label, 'your military service is on file and this question does not fit it') };
   }
 
-  const namedOrganisations = bank.map((entry) => entry.org.trim()).filter(Boolean);
-  if (namedOrganisations.some(isExactGovernmentEmployerOrg)) return { value: 'Yes' };
+  const target = governmentEmploymentTarget(label);
+  if (!target) {
+    return { skipReason: governmentEmploymentSkipReason(label, 'the employer named by the question is unclear') };
+  }
+  const employers = bank
+    .map((entry) => VETTED_GOVERNMENT_EMPLOYERS.get(normalizeIdentity(entry.org)))
+    .filter((entry): entry is VettedGovernmentEmployer => Boolean(entry));
+  if (employers.some((employer) => governmentEmployerMatchesTarget(employer, target))) return { value: 'Yes' };
   return { skipReason: governmentEmploymentSkipReason(label, 'your employment record does not prove a complete history') };
 }
 

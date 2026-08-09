@@ -66,7 +66,7 @@ describe('prior government employment, answered from the experience bank', () =>
       'United States Senate',
       'Department of Justice',
     ]) {
-      assert.equal(answer(SKYDIO, { experience_bank: [...(BANK ?? []), { type: 'job', org }] }), 'VALUE Yes', org);
+      assert.equal(answer('prior government employment', { experience_bank: [...(BANK ?? []), { type: 'job', org }] }), 'VALUE Yes', org);
     }
   });
 
@@ -179,6 +179,11 @@ describe('prior government employment, answered from the experience bank', () =>
     for (const label of [
       'Have you ever worked for Government Employees Insurance Company (GEICO)?',
       'Have you worked for Government Brands LLC?',
+    ]) {
+      assert.ok(isGovernmentEmploymentQuestion(label), label);
+      assert.equal(answer(label, nasa), 'SKIP', label);
+    }
+    for (const label of [
       'Have you worked on government projects?',
       'Have you supported a government contractor?',
       'Have you worked on federal government contracts?',
@@ -188,6 +193,60 @@ describe('prior government employment, answered from the experience bank', () =>
     ]) {
       assert.equal(isGovernmentEmploymentQuestion(label), false, label);
       assert.equal(answer(label, nasa), 'SKIP', label);
+    }
+  });
+
+  test('a named employer or government level must match the applicant evidence', () => {
+    const nasa: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
+    };
+    for (const label of [
+      'Have you worked for the Government Accountability Office?',
+      'Have you been employed by a state agency?',
+      'Have you worked for local government?',
+    ]) {
+      assert.equal(answer(label, nasa), 'SKIP', label);
+    }
+
+    assert.equal(
+      answer('Have you worked for the Government Accountability Office?', {
+        experience_bank: [{ type: 'job', org: 'Government Accountability Office' }],
+      }),
+      'VALUE Yes',
+    );
+    assert.equal(
+      answer('Have you worked for local government?', {
+        experience_bank: [{ type: 'job', org: 'City of Los Angeles' }],
+      }),
+      'VALUE Yes',
+    );
+    assert.equal(answer('Have you worked for the federal government?', nasa), 'VALUE Yes');
+    assert.equal(
+      answer('Have you been employed by a government agency?', {
+        experience_bank: [{ type: 'job', org: 'Department of Energy' }],
+      }),
+      'VALUE Yes',
+    );
+    assert.equal(
+      answer('Have you worked for the U.S. Department of Energy?', {
+        experience_bank: [{ type: 'job', org: 'United States Department of Energy' }],
+      }),
+      'VALUE Yes',
+    );
+  });
+
+  test('nonqualifying government-adjacent employment wording returns an explicit refusal', () => {
+    const nasa: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
+    };
+    for (const label of [
+      'Have you previously served in the US government?',
+      'Have you previously served as a congressional staffer?',
+    ]) {
+      assert.equal(isGovernmentEmploymentQuestion(label), false, label);
+      const resolved = resolveKnownAnswer(label, 'checkbox', nasa, undefined);
+      assert.ok(resolved && 'skipReason' in resolved, label);
+      assert.match(resolved.skipReason, /does not explicitly ask/, label);
     }
   });
 
@@ -204,6 +263,11 @@ describe('prior government employment, answered from the experience bank', () =>
       'Describe your government relations experience.',
       'Which government function have you worked in?',
       'Is government your professional discipline?',
+      'Have you worked for the Government Accountability Office?',
+      'Have you been employed by a state agency?',
+      'Have you worked for local government?',
+      'Have you previously served in the US government?',
+      'Have you previously served as a congressional staffer?',
     ].map((question) => ({ question, answer: 'Yes' }));
 
     assert.deepEqual(
