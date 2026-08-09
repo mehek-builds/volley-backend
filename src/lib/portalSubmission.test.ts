@@ -25,12 +25,15 @@ import {
   managedResultFieldOptions,
   attachManagedFieldOptions,
   buildManagedDiscoveredOptionProbeActions,
+  buildManagedDiscoveredOptionProbeBatches,
   escapeHatchOptionFor,
   managedOptionProbeControlId,
   managedOptionProbeTargets,
+  managedOptionProbeAnalysis,
   managedUnreportedFillLabels,
   mergeManagedFieldOptions,
   MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL,
+  MANAGED_OPTION_PROBE_MAX_CONTROLS,
   reactSelectListboxSelector,
   GREENHOUSE_OPTION_PROBE_IDS,
   MANAGED_ACTION_LIMIT,
@@ -4765,9 +4768,9 @@ test('the probe reads the controls discovery found, and never the four it alread
     { label: 'How would you describe your gender identity? 4001608008', selector: '[data-litos-discovered-21]' },
     { label: 'Are you interested in our Women\'s Winternship program?*', selector: '#question_37228970002', required: true },
   ];
-  const targets = managedOptionProbeTargets('greenhouse', discovered);
-  // The education controls are the discovery pass's job, because their taxonomies load over the
-  // network and need the warming round that lives there.
+  const alreadyRead = { 'school--0': ['USC'], 'discipline--0': ['Computer Science'] };
+  const targets = managedOptionProbeTargets('greenhouse', discovered, alreadyRead);
+  // The education controls are skipped only when the earlier pass produced a usable list.
   assert.equal(targets.includes('school--0'), false);
   assert.equal(targets.includes('discipline--0'), false);
   // Structural controls the fixed-field pass owns. Country renders 244 rows (discarded at the render
@@ -4778,9 +4781,11 @@ test('the probe reads the controls discovery found, and never the four it alread
   assert.deepEqual(targets, ['question_37228964002', 'question_37228970002', '4001608008']);
   // And a list already read is not read again.
   assert.deepEqual(
-    managedOptionProbeTargets('greenhouse', discovered, { question_37228964002: VIRTU_GPA_OPTIONS }),
+    managedOptionProbeTargets('greenhouse', discovered, { ...alreadyRead, question_37228964002: VIRTU_GPA_OPTIONS }),
     ['question_37228970002', '4001608008'],
   );
+  assert.equal(managedOptionProbeTargets('greenhouse', discovered, {}).includes('school--0'), true,
+    'a windowed hardcoded read must be retried and then fail closed');
   // Not a Greenhouse form, no react-select listbox convention to read.
   assert.deepEqual(managedOptionProbeTargets('lever', discovered), []);
 });
@@ -4794,14 +4799,15 @@ test('the probe pass opens, reads and closes each control, and cannot exceed the
   const actions = buildManagedDiscoveredOptionProbeActions('greenhouse', discovered);
   assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `${actions.length} actions is over the runner's ceiling`);
   assert.equal(actions.length % MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL, 0);
-  // Nothing is typed, uploaded or sent. The whole pass is open / read / Escape.
-  assert.deepEqual([...new Set(actions.map((a) => a.type))], ['click', 'extract', 'press']);
+  // Nothing is typed, uploaded or sent. The identity read precedes two open / read / Escape rounds.
+  assert.deepEqual([...new Set(actions.map((a) => a.type))], ['extract', 'click', 'press']);
   assert.equal(actions.every((a) => a.optional === true), true);
   const first = 'question_9000000';
-  const open = actions.findIndex((a) => a.label === `option_probe_open:${first}:3`);
+  const identity = actions.findIndex((a) => a.label === `closed_control:${first}`);
+  const open = actions.findIndex((a) => a.label === `option_probe_open:${first}:1`);
   const read = actions.findIndex((a) => a.label === `${MANAGED_OPTION_EXTRACT_PREFIX}${first}`);
-  const close = actions.findIndex((a) => a.label === `option_probe_close:${first}:3`);
-  assert.ok(open >= 0 && read === open + 1 && close === open + 2);
+  const close = actions.findIndex((a) => a.label === `option_probe_close:${first}:1`);
+  assert.ok(identity >= 0 && open === identity + 1 && read === open + 1 && close === open + 2);
   assert.equal(actions[read]!.selector, reactSelectListboxSelector(first));
   assert.equal(actions[read]!.attribute, undefined);
   assert.equal(actions[close]!.value, 'Escape');
@@ -4820,9 +4826,109 @@ test('a real Greenhouse form fits the probe pass with room to spare', () => {
       .map((id) => ({ label: `${id}*`, selector: `#${id}`, required: true })),
     ...Array.from({ length: 24 }, (_, i) => ({ label: `Q${i}*`, selector: `#question_679988${String(i + 20).padStart(2, '0')}`, required: true })),
   ];
-  const actions = buildManagedDiscoveredOptionProbeActions('greenhouse', drw);
-  assert.equal(actions.length, 25 * MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL);
-  assert.ok(actions.length < MANAGED_ACTION_LIMIT);
+  const batches = buildManagedDiscoveredOptionProbeBatches('greenhouse', drw, {
+    'school--0': ['USC'],
+    'degree--0': ['Bachelors'],
+    'discipline--0': ['Computer Science'],
+    'end-month--0': ['May'],
+  });
+  assert.equal(batches.flat().length, 25 * MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL);
+  assert.ok(batches.length > 1, 'the async retry must batch rather than truncate a real select-heavy form');
+  assert.equal(batches.every((batch) => batch.length <= MANAGED_ACTION_LIMIT), true);
+});
+
+test('a native select is read without clicking and resolves from its exact options', () => {
+  const discovered = [{
+    label: 'When did you graduate from High School?*',
+    selector: '#question_12345678',
+    inputType: 'select-one',
+    required: true,
+  }];
+  const [batch] = buildManagedDiscoveredOptionProbeBatches('greenhouse', discovered);
+  assert.deepEqual(batch?.map((action) => action.type), ['extract']);
+  assert.equal(batch?.[0]?.selector, '[id="question_12345678"]:is(select)');
+  const analysis = managedOptionProbeAnalysis('greenhouse', discovered, {}, [{
+    title: '', url: '', text: '',
+    extracted: [{ selector: '[id="question_12345678"]:is(select)', value: IMC_HIGH_SCHOOL_OPTIONS.join('\n') }],
+  }]);
+  assert.deepEqual(analysis.options.question_12345678, IMC_HIGH_SCHOOL_OPTIONS);
+  assert.deepEqual(analysis.failures, []);
+});
+
+test('custom closed controls warm once, read twice, and fail closed when still loading', () => {
+  const discovered = [{
+    label: 'Overall GPA*',
+    selector: '#question_37228964002',
+    inputType: 'text',
+    required: true,
+  }];
+  const [batch] = buildManagedDiscoveredOptionProbeBatches('greenhouse', discovered);
+  assert.equal(batch?.filter((action) => action.label?.startsWith('option_probe_open:')).length, 2);
+  const analysis = managedOptionProbeAnalysis('greenhouse', discovered, {}, [{
+    title: '', url: '', text: '',
+    extracted: [
+      { selector: '[id="question_37228964002"]:is([role="combobox"],[aria-haspopup="listbox"])', value: 'question_37228964002' },
+      { selector: reactSelectListboxSelector('question_37228964002'), value: 'Loading...' },
+      { selector: reactSelectListboxSelector('question_37228964002'), value: 'Loading...' },
+    ],
+  }]);
+  assert.equal(analysis.failedIds.has('question_37228964002'), true);
+  assert.match(analysis.failures[0]?.reason ?? '', /still loading/);
+  assert.equal(analysis.options.question_37228964002, undefined);
+});
+
+test('a successful async second read yields one evidence-backed option list', () => {
+  const discovered = [{ label: 'Overall GPA*', selector: '#question_37228964002', inputType: 'text' }];
+  const analysis = managedOptionProbeAnalysis('greenhouse', discovered, {}, [{
+    title: '', url: '', text: '',
+    extracted: [
+      { selector: '[id="question_37228964002"]:is([role="combobox"],[aria-haspopup="listbox"])', value: 'question_37228964002' },
+      { selector: reactSelectListboxSelector('question_37228964002'), value: 'Loading...' },
+      { selector: reactSelectListboxSelector('question_37228964002'), value: VIRTU_GPA_OPTIONS.join('\n') },
+    ],
+  }]);
+  assert.deepEqual(analysis.options.question_37228964002, VIRTU_GPA_OPTIONS);
+  assert.deepEqual(analysis.failures, []);
+});
+
+test('windowed, conflicting, duplicate, and failed referral probes cannot fall back to aliases', () => {
+  const fields = [
+    { label: 'Which university are you currently attending?*', selector: '#question_11111111', inputType: 'select-one', options: undefined as string[] | undefined },
+    { label: 'What degree are you currently pursuing?*', selector: '#question_22222222', inputType: 'select-one', options: undefined as string[] | undefined },
+    { label: 'Duplicate degree*', selector: '#question_22222222', inputType: 'select-one', options: undefined as string[] | undefined },
+    { label: 'How did you hear about this job?*', selector: '#question_33333333', inputType: 'select-one', options: undefined as string[] | undefined },
+  ];
+  const hundred = Array.from({ length: 100 }, (_, index) => `School ${index}`).join('\n');
+  const analysis = managedOptionProbeAnalysis('greenhouse', fields, {}, [
+    { title: '', url: '', text: '', extracted: [
+      { selector: '[id="question_11111111"]:is(select)', value: hundred },
+      { selector: '[id="question_22222222"]:is(select)', value: 'Bachelors\nMasters' },
+      { selector: '[id="question_22222222"]:is(select)', value: 'Bachelor\nMaster' },
+    ] },
+  ], [{ controlIds: ['question_33333333'], reason: 'provider timeout' }]);
+  assert.equal(analysis.failedIds.has('question_11111111'), true);
+  assert.equal(analysis.failedIds.has('question_22222222'), true);
+  assert.equal(analysis.failedIds.has('question_33333333'), true);
+  assert.equal(analysis.options.question_33333333, undefined, 'referral must not fall back to a channel alias');
+  assert.match(analysis.failures.map((failure) => failure.reason).join(' '), /windowed|durable selector|provider timeout/);
+  const attached = attachManagedFieldOptions(fields, { question_22222222: POINT72_DEGREE_OPTIONS });
+  assert.equal(attached[1]?.options, undefined);
+  assert.equal(attached[2]?.options, undefined);
+});
+
+test('option probing batches whole controls and explicitly fails beyond its global bound', () => {
+  const discovered = Array.from({ length: MANAGED_OPTION_PROBE_MAX_CONTROLS + 1 }, (_, index) => ({
+    label: `Question ${index}`,
+    selector: `#question_8${String(index).padStart(7, '0')}`,
+    inputType: 'text',
+  }));
+  const batches = buildManagedDiscoveredOptionProbeBatches('greenhouse', discovered);
+  assert.equal(batches.every((batch) => batch.length <= MANAGED_ACTION_LIMIT), true);
+  assert.equal(batches.flat().length % MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL, 0);
+  const analysis = managedOptionProbeAnalysis('greenhouse', discovered, {}, []);
+  const overflowId = `question_8${String(MANAGED_OPTION_PROBE_MAX_CONTROLS).padStart(7, '0')}`;
+  assert.equal(analysis.failedIds.has(overflowId), true);
+  assert.match(analysis.failures.find((failure) => failure.controlId === overflowId)?.reason ?? '', /exceeded the bounded/);
 });
 
 test('two passes of reads become one map, and an empty read never overwrites a real list', () => {

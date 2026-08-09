@@ -857,7 +857,8 @@ function optionProbeIdForSelector(selector: string | undefined): string | undefi
   // Matched on the SELECTOR as well as the label because the provider echoes `{selector, value}`
   // and drops `label` entirely (managed-browser.js), so the selector is the only key that is
   // guaranteed to come back.
-  return selector?.match(/^\[id="react-select-(.+)-listbox"\]$/)?.[1];
+  return selector?.match(/^\[id="react-select-(.+)-listbox"\]$/)?.[1]
+    ?? selector?.match(/^\[id="([A-Za-z0-9][A-Za-z0-9_-]*)"\]:is\(select\)$/)?.[1];
 }
 
 /**
@@ -924,7 +925,7 @@ export function pushManagedReactSelectOptionProbeActions(
  * thing to a stored answer on that list is the placeholder itself.
  */
 const NON_OPTION_LISTBOX_LINE =
-  /^(?:loading(?:\.{3}|…)?|no options?|no results?(?: found)?|type to search|start typing|searching(?:\.{3}|…)?)$/i;
+  /^(?:loading(?:\.{3}|…)?|no options?|no results?(?: found)?|type to search|start typing|searching(?:\.{3}|…)?|(?:please\s+)?select(?:\s+(?:an?|one|option|value))?(?:\.{3}|…)?|choose(?:\s+(?:an?|one|option|value))?(?:\.{3}|…)?|--\s*select\s*--)$/i;
 
 /**
  * How many rows Greenhouse's select renders into an unfiltered menu. A read this long is a WINDOW
@@ -943,6 +944,16 @@ const NON_OPTION_LISTBOX_LINE =
  */
 const MANAGED_OPTION_LISTBOX_RENDER_CAP = 100;
 
+function parsedManagedOptionLines(value: unknown): { options?: string[]; invalid?: 'loading' | 'windowed' | 'empty' } {
+  const text = managedExtractedValue(value);
+  if (!text) return { invalid: 'empty' };
+  const raw = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const options = raw.filter((line) => !NON_OPTION_LISTBOX_LINE.test(line));
+  if (options.length === 0) return { invalid: raw.length > 0 ? 'loading' : 'empty' };
+  if (options.length >= MANAGED_OPTION_LISTBOX_RENDER_CAP) return { invalid: 'windowed' };
+  return { options: [...new Set(options)] };
+}
+
 /** The option lists the probe brought back, keyed by the control's own id. */
 export function managedResultFieldOptions(result: ManagedBrowserResult | null | undefined): Record<string, string[]> {
   const out: Record<string, string[]> = {};
@@ -952,13 +963,8 @@ export function managedResultFieldOptions(result: ManagedBrowserResult | null | 
       : undefined;
     const inputId = labelled || optionProbeIdForSelector(item?.selector);
     if (!inputId) continue;
-    const text = managedExtractedValue(item?.value);
-    if (!text) continue;
-    const options = text
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0 && !NON_OPTION_LISTBOX_LINE.test(line));
-    if (options.length === 0 || options.length >= MANAGED_OPTION_LISTBOX_RENDER_CAP) continue;
+    const { options } = parsedManagedOptionLines(item?.value);
+    if (!options) continue;
     const seen = new Set(out[inputId] ?? []);
     for (const option of options) {
       if (seen.has(option)) continue;
@@ -980,23 +986,19 @@ export function attachManagedFieldOptions<T extends { label: string; selector?: 
   discovered: readonly T[],
   optionsByInputId: Record<string, string[]>,
 ): T[] {
-  const entries = Object.entries(optionsByInputId).filter(([, options]) => options.length > 0);
-  if (entries.length === 0) return [...discovered];
+  const controlCounts = new Map<string, number>();
+  for (const field of discovered) {
+    const controlId = managedOptionProbeControlId(field);
+    if (controlId) controlCounts.set(controlId, (controlCounts.get(controlId) ?? 0) + 1);
+  }
   return discovered.map((field) => {
     if (field.options && field.options.length > 0) return field;
-    // The control's own id, from its selector when the provider gave an id selector and from the
-    // raw label otherwise. Matching on the label alone was enough while only the four education
-    // controls were probed, because their handles land inside the label ("discipline* discipline--0").
-    // A custom Greenhouse question arrives as `#question_37228964002` with the handle in the
-    // SELECTOR, so a label-only match would drop every list this pass now reads.
     const controlId = managedOptionProbeControlId(field);
-    if (controlId) {
-      const exact = entries.find(([inputId]) => inputId === controlId);
-      if (exact) return { ...field, options: exact[1] };
-    }
-    const label = (field.label ?? '').toLowerCase();
-    const match = entries.find(([inputId]) => label.includes(inputId.toLowerCase()));
-    return match ? { ...field, options: match[1] } : field;
+    // The same durable id on two discovered fields is ambiguous. Never attach one list to both,
+    // and never fall back to a label substring that can match a neighbouring question.
+    if (!controlId || controlCounts.get(controlId) !== 1) return field;
+    const options = optionsByInputId[controlId];
+    return options?.length ? { ...field, options } : field;
   });
 }
 
@@ -1031,8 +1033,9 @@ export function attachManagedFieldOptions<T extends { label: string; selector?: 
  * it safe to run against an employer's form on an application the applicant has not yet approved.
  */
 
-/** Open, read, close. Three actions is the whole cost of one control's option list. */
-export const MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL = 3;
+/** A custom control needs one identity read plus two bounded open/read/close rounds. */
+export const MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL = 7;
+export const MANAGED_OPTION_PROBE_MAX_CONTROLS = 80;
 
 /**
  * Greenhouse's structural controls, which this pass deliberately does not spend actions on.
@@ -1115,6 +1118,29 @@ export function managedOptionProbeControlId(
     ?? label.match(LABEL_TRAILING_DEMOGRAPHIC_HANDLE_RE)?.[1]?.toLowerCase();
 }
 
+export type ManagedOptionProbeTarget = {
+  controlId: string;
+  kind: 'native' | 'custom';
+  required: boolean;
+  expectsClosed: boolean;
+};
+
+function managedOptionProbeTarget(
+  field: { label: string; selector?: string; inputType?: string; required?: boolean },
+): ManagedOptionProbeTarget | undefined {
+  const controlId = managedOptionProbeControlId(field);
+  if (!controlId || MANAGED_OPTION_PROBE_SKIP_IDS.has(controlId)) return undefined;
+  const inputType = (field.inputType ?? '').trim().toLowerCase();
+  const kind = /^select(?:-one|-multiple)?$/.test(inputType) ? 'native' : 'custom';
+  return {
+    controlId,
+    kind,
+    required: discoveredFieldIsRequired(field),
+    expectsClosed: kind === 'native' || /^(?:combobox|listbox)$/.test(inputType)
+      || /--\d+$/.test(controlId),
+  };
+}
+
 /**
  * Which controls this pass should read, in the order a budget cut should keep.
  *
@@ -1127,24 +1153,98 @@ export function managedOptionProbeControlId(
  */
 export function managedOptionProbeTargets(
   portal: SupportedPortal,
-  discovered: readonly { label: string; selector?: string; options?: string[] | null; required?: boolean }[],
+  discovered: readonly { label: string; selector?: string; inputType?: string; options?: string[] | null; required?: boolean }[],
   alreadyRead: Record<string, string[]> = {},
 ): string[] {
   if (portalFamily(portal) !== 'greenhouse') return [];
-  const seen = new Set<string>(GREENHOUSE_OPTION_PROBE_IDS);
+  // A hardcoded education probe is only "already read" when it returned a usable list. Loading,
+  // empty and windowed reads are absent from alreadyRead and must enter this fail-closed stage.
+  const seen = new Set<string>();
   for (const [inputId, options] of Object.entries(alreadyRead)) {
     if (options.length > 0) seen.add(inputId);
   }
-  const required: string[] = [];
-  const optional: string[] = [];
+  const required: ManagedOptionProbeTarget[] = [];
+  const optional: ManagedOptionProbeTarget[] = [];
   for (const field of discovered) {
     if (field.options && field.options.length > 0) continue;
-    const controlId = managedOptionProbeControlId(field);
-    if (!controlId || seen.has(controlId) || MANAGED_OPTION_PROBE_SKIP_IDS.has(controlId)) continue;
-    seen.add(controlId);
-    (discoveredFieldIsRequired(field) ? required : optional).push(controlId);
+    const target = managedOptionProbeTarget(field);
+    if (!target || seen.has(target.controlId)) continue;
+    seen.add(target.controlId);
+    (target.required ? required : optional).push(target);
   }
-  return [...required, ...optional].slice(0, Math.floor(MANAGED_ACTION_LIMIT / MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL));
+  return [...required, ...optional].map(({ controlId }) => controlId);
+}
+
+function detailedManagedOptionProbeTargets(
+  portal: SupportedPortal,
+  discovered: readonly { label: string; selector?: string; inputType?: string; options?: string[] | null; required?: boolean }[],
+  alreadyRead: Record<string, string[]> = {},
+): ManagedOptionProbeTarget[] {
+  const ids = managedOptionProbeTargets(portal, discovered, alreadyRead);
+  const byId = new Map<string, ManagedOptionProbeTarget>();
+  for (const field of discovered) {
+    const target = managedOptionProbeTarget(field);
+    if (target && !byId.has(target.controlId)) byId.set(target.controlId, target);
+  }
+  return ids.flatMap((id) => byId.get(id) ?? []);
+}
+
+function closedControlSelector(controlId: string): string {
+  return `[id="${quoteAttr(controlId)}"]:is([role="combobox"],[aria-haspopup="listbox"])`;
+}
+
+function nativeSelectSelector(controlId: string): string {
+  return `[id="${quoteAttr(controlId)}"]:is(select)`;
+}
+
+function pushDiscoveredOptionProbe(actions: ManagedBrowserAction[], target: ManagedOptionProbeTarget) {
+  if (target.kind === 'native') {
+    actions.push({
+      type: 'extract',
+      selector: nativeSelectSelector(target.controlId),
+      label: `${MANAGED_OPTION_EXTRACT_PREFIX}${target.controlId}`,
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
+    return;
+  }
+  const selector = closedControlSelector(target.controlId);
+  actions.push({
+    type: 'extract',
+    selector,
+    attribute: 'id',
+    label: `closed_control:${target.controlId}`,
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
+  for (const round of [1, 2] as const) {
+    actions.push({ type: 'click', selector, label: `option_probe_open:${target.controlId}:${round}`, optional: true, timeout: MANAGED_FILL_TIMEOUT_MS });
+    actions.push({ type: 'extract', selector: reactSelectListboxSelector(target.controlId), label: `${MANAGED_OPTION_EXTRACT_PREFIX}${target.controlId}`, optional: true, timeout: MANAGED_FILL_TIMEOUT_MS });
+    actions.push({ type: 'press', selector, value: 'Escape', label: `option_probe_close:${target.controlId}:${round}`, optional: true, timeout: MANAGED_FILL_TIMEOUT_MS });
+  }
+}
+
+/** Pack whole controls into bounded requests. No control is partially probed at a budget edge. */
+export function buildManagedDiscoveredOptionProbeBatches(
+  portal: SupportedPortal,
+  discovered: readonly { label: string; selector?: string; inputType?: string; options?: string[] | null; required?: boolean }[],
+  alreadyRead: Record<string, string[]> = {},
+): ManagedBrowserAction[][] {
+  const targets = detailedManagedOptionProbeTargets(portal, discovered, alreadyRead)
+    .slice(0, MANAGED_OPTION_PROBE_MAX_CONTROLS);
+  const batches: ManagedBrowserAction[][] = [];
+  let actions: ManagedBrowserAction[] = [];
+  for (const target of targets) {
+    const next: ManagedBrowserAction[] = [];
+    pushDiscoveredOptionProbe(next, target);
+    if (actions.length > 0 && actions.length + next.length > MANAGED_ACTION_LIMIT) {
+      batches.push(actions);
+      actions = [];
+    }
+    actions.push(...next);
+  }
+  if (actions.length > 0) batches.push(actions);
+  return batches;
 }
 
 /**
@@ -1164,15 +1264,10 @@ export function managedOptionProbeTargets(
  */
 export function buildManagedDiscoveredOptionProbeActions(
   portal: SupportedPortal,
-  discovered: readonly { label: string; selector?: string; options?: string[] | null; required?: boolean }[],
+  discovered: readonly { label: string; selector?: string; inputType?: string; options?: string[] | null; required?: boolean }[],
   alreadyRead: Record<string, string[]> = {},
 ): ManagedBrowserAction[] {
-  const targets = managedOptionProbeTargets(portal, discovered, alreadyRead);
-  if (targets.length === 0) return [];
-  const actions: ManagedBrowserAction[] = [];
-  pushManagedReactSelectOptionProbeActions(actions, portal, 3, targets);
-  if (actions.length > MANAGED_ACTION_LIMIT) truncateManagedActionsToBudget(actions, MANAGED_ACTION_LIMIT);
-  return actions;
+  return buildManagedDiscoveredOptionProbeBatches(portal, discovered, alreadyRead)[0] ?? [];
 }
 
 /**
@@ -1191,6 +1286,108 @@ export function mergeManagedFieldOptions(
     }
   }
   return out;
+}
+
+export type ManagedOptionProbeFailure = { controlId: string; reason: string };
+export type ManagedOptionProbeBatchFailure = { controlIds: string[]; reason: string };
+
+export function managedOptionProbeAnalysis(
+  portal: SupportedPortal,
+  discovered: readonly { label: string; selector?: string; inputType?: string; options?: string[] | null; required?: boolean }[],
+  alreadyRead: Record<string, string[]>,
+  results: readonly (ManagedBrowserResult | null | undefined)[],
+  batchFailures: readonly ManagedOptionProbeBatchFailure[] = [],
+): { options: Record<string, string[]>; failures: ManagedOptionProbeFailure[]; failedIds: Set<string> } {
+  const targets = detailedManagedOptionProbeTargets(portal, discovered, alreadyRead);
+  const options = { ...alreadyRead };
+  const failures: ManagedOptionProbeFailure[] = [];
+  const failedIds = new Set<string>();
+  const counts = new Map<string, number>();
+  for (const field of discovered) {
+    const id = managedOptionProbeControlId(field);
+    if (id) counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+
+  const closedIds = new Set<string>();
+  const validReads = new Map<string, string[][]>();
+  const invalidReads = new Map<string, Set<string>>();
+  for (const result of results) {
+    for (const item of result?.extracted ?? []) {
+      const closedId = item.selector?.match(/^\[id="([A-Za-z0-9][A-Za-z0-9_-]*)"\]:is\(\[role="combobox"\],\[aria-haspopup="listbox"\]\)$/)?.[1];
+      if (closedId && managedExtractedValue(item.value)) closedIds.add(closedId);
+      const id = typeof item.label === 'string' && item.label.startsWith(MANAGED_OPTION_EXTRACT_PREFIX)
+        ? item.label.slice(MANAGED_OPTION_EXTRACT_PREFIX.length)
+        : optionProbeIdForSelector(item.selector);
+      if (!id) continue;
+      const parsed = parsedManagedOptionLines(item.value);
+      if (parsed.options) validReads.set(id, [...(validReads.get(id) ?? []), parsed.options]);
+      if (parsed.invalid) {
+        const reasons = invalidReads.get(id) ?? new Set<string>();
+        reasons.add(parsed.invalid);
+        invalidReads.set(id, reasons);
+      }
+    }
+  }
+
+  const batchFailureById = new Map<string, string>();
+  for (const failure of batchFailures) {
+    for (const id of failure.controlIds) batchFailureById.set(id, failure.reason);
+  }
+  const fail = (controlId: string, reason: string) => {
+    if (failedIds.has(controlId)) return;
+    failedIds.add(controlId);
+    failures.push({ controlId, reason });
+    delete options[controlId];
+  };
+
+  // Validate lists the earlier discovery pass supplied too. A merged union of two different live
+  // lists is not an exact option list, even if each individual read was otherwise usable.
+  for (const [controlId, reads] of validReads) {
+    if (new Set(reads.map((read) => JSON.stringify(read))).size > 1) {
+      fail(controlId, 'the live control returned conflicting option lists across bounded reads');
+    }
+  }
+
+  for (const target of targets) {
+    if (failedIds.has(target.controlId)) continue;
+    if ((counts.get(target.controlId) ?? 0) > 1) {
+      fail(target.controlId, 'the same durable selector identified more than one discovered field');
+      continue;
+    }
+    if (batchFailureById.has(target.controlId)) {
+      fail(target.controlId, `the option probe request failed: ${batchFailureById.get(target.controlId)}`);
+      continue;
+    }
+    if (targets.indexOf(target) >= MANAGED_OPTION_PROBE_MAX_CONTROLS) {
+      fail(target.controlId, `the form exceeded the bounded ${MANAGED_OPTION_PROBE_MAX_CONTROLS}-control option probe`);
+      continue;
+    }
+    const isClosed = target.kind === 'native' || closedIds.has(target.controlId);
+    if (!isClosed && !target.expectsClosed) continue;
+    if (!isClosed) {
+      fail(target.controlId, 'the field is expected to be a closed control but its live selector did not confirm that identity');
+      continue;
+    }
+    const reads = validReads.get(target.controlId) ?? [];
+    const distinct = new Map(reads.map((read) => [JSON.stringify(read), read]));
+    if (distinct.size > 1) {
+      fail(target.controlId, 'the live control returned conflicting option lists across bounded reads');
+      continue;
+    }
+    const read = [...distinct.values()][0];
+    if (!read) {
+      const invalid = [...(invalidReads.get(target.controlId) ?? [])];
+      const detail = invalid.includes('windowed')
+        ? 'the option list was windowed at the render cap'
+        : invalid.includes('loading')
+          ? 'the option list was still loading after the bounded warm/read'
+          : 'the option list returned no readable choices';
+      fail(target.controlId, detail);
+      continue;
+    }
+    options[target.controlId] = read;
+  }
+  return { options, failures, failedIds };
 }
 
 function managedGreenhouseScopedReactSelectFill(
