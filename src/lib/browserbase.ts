@@ -227,7 +227,9 @@ export function isBrowserbaseConfigured(): boolean {
   if (provider === 'stratus-managed') {
     return Boolean(
       process.env.STRATUS_BASE_URL?.trim()
-      && (process.env.STRATUS_API_KEY?.trim() || process.env.VERCEL_ENV === 'production'),
+      && (process.env.STRATUS_API_KEY?.trim()
+        || process.env.VERCEL_OIDC_TOKEN?.trim()
+        || process.env.VERCEL_ENV === 'production'),
     );
   }
   return Boolean(process.env.BROWSER_API_KEY
@@ -260,7 +262,7 @@ export async function runManagedBrowser(
   const baseUrl = process.env.STRATUS_BASE_URL?.replace(/\/$/, '');
   const apiKey = process.env.STRATUS_API_KEY?.trim();
   if (!baseUrl) throw new Error('Stratus managed browser is not configured');
-  const authorization = !apiKey && process.env.VERCEL_ENV === 'production'
+  const authorization = !apiKey && (process.env.VERCEL_OIDC_TOKEN?.trim() || process.env.VERCEL_ENV === 'production')
     ? `Bearer ${await getVercelOidcToken()}`
     : undefined;
   if (!apiKey && !authorization) throw new Error('Stratus managed browser is not configured');
@@ -301,7 +303,7 @@ export async function continueManagedBrowser(
   const baseUrl = process.env.STRATUS_BASE_URL?.replace(/\/$/, '');
   const apiKey = process.env.STRATUS_API_KEY?.trim();
   if (!baseUrl) throw new Error('Stratus managed browser is not configured');
-  const authorization = !apiKey && process.env.VERCEL_ENV === 'production'
+  const authorization = !apiKey && (process.env.VERCEL_OIDC_TOKEN?.trim() || process.env.VERCEL_ENV === 'production')
     ? `Bearer ${await getVercelOidcToken()}`
     : undefined;
   if (!apiKey && !authorization) throw new Error('Stratus managed browser is not configured');

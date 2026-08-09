@@ -43,9 +43,14 @@ test('a public controlled portal is exact-origin, path, signature, and environme
 });
 
 test('built-in test portal origins retain their explicit flag gate', () => {
+  process.env.NODE_ENV = 'test';
   delete process.env.LITOS_ENABLE_TEST_PORTAL;
   assert.equal(isControlledTestPortalUrl('http://localhost:3300/qa/portal-submission'), false);
   process.env.LITOS_ENABLE_TEST_PORTAL = 'true';
   assert.equal(isControlledTestPortalUrl('http://localhost:3300/qa/portal-submission'), true);
   assert.equal(isControlledTestPortalUrl('https://trylitos.com/qa/portal-submission'), true);
+  process.env.NODE_ENV = 'production';
+  assert.equal(isControlledTestPortalUrl('http://localhost:3300/qa/portal-submission'), false);
+  assert.equal(isControlledTestPortalUrl('https://trylitos.com/qa/portal-submission'), false);
+  assert.equal(isControlledTestPortalUrl('https://www.trylitos.com/qa/portal-submission'), false);
 });

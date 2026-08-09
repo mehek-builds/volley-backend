@@ -32,6 +32,23 @@ function withEnv(vars: Record<string, string | undefined>, fn: () => void) {
   }
 }
 
+async function withEnvAsync(vars: Record<string, string | undefined>, fn: () => Promise<void>) {
+  const saved: Record<string, string | undefined> = {};
+  for (const [key, value] of Object.entries(vars)) {
+    saved[key] = process.env[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    await fn();
+  } finally {
+    for (const key of Object.keys(saved)) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key]!;
+    }
+  }
+}
+
 describe('contact submissions', () => {
   test('accepts a complete message and trims it', () => {
     const r = contactSchema.safeParse({ ...valid, name: '  Alex Rivera  ' });
@@ -103,6 +120,35 @@ describe('outbound mail', () => {
        than the sending domain, which nobody reads. */
     assert.equal(seen!.body.reply_to, 'alex@example.com');
     assert.equal(seen!.body.subject, 'S');
+  });
+
+  test('controlled QA capture is loopback-only and disabled in production', async () => {
+    const vars = {
+      NODE_ENV: 'test',
+      LITOS_QA_EMAIL_CAPTURE_ENABLED: 'true',
+      LITOS_QA_EMAIL_CAPTURE_URL: 'http://127.0.0.1:4317/emails',
+      LITOS_QA_EMAIL_CAPTURE_TOKEN: '0123456789abcdef0123456789abcdef',
+    };
+    let seen: { url: string; token: string | null } | null = null;
+    const stub = (async (url: unknown, init: RequestInit | undefined) => {
+      seen = {
+        url: String(url),
+        token: new Headers(init?.headers).get('X-Litos-QA-Capture-Token'),
+      };
+      return new Response(JSON.stringify({ id: 'qa-capture-1' }), { status: 200 });
+    }) as typeof fetch;
+    await withEnvAsync(vars, async () => {
+      await sendEmail({ from: 'a', to: ['b@c.co'], subject: 's', text: 't' }, stub);
+    });
+    assert.deepEqual(seen, {
+      url: 'http://127.0.0.1:4317/emails',
+      token: vars.LITOS_QA_EMAIL_CAPTURE_TOKEN,
+    });
+
+    await withEnvAsync({ ...vars, NODE_ENV: 'production' }, async () => {
+      await sendEmail({ from: 'a', to: ['b@c.co'], subject: 's', text: 't' }, stub);
+      assert.equal(seen?.url, 'https://api.resend.com/emails');
+    });
   });
 
   test('a non-ok response throws rather than reporting success', async () => {

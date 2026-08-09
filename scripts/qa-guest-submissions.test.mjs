@@ -5,6 +5,7 @@ import {
   assertDisposableDatabaseMarker,
   assertRemoteManagedRunner,
   assertControlledSecurityCodeTarget,
+  controlledEmailCaptureTarget,
   controlledDatabaseTarget,
   controlledManagedReceivingProof,
   controlledPortalBinding,
@@ -46,6 +47,28 @@ test('security-code E2E refuses production targets and unconfirmed databases', (
     ...controlledTarget,
     configuredPortalOrigin: 'https://different.example.test',
   }), /must match LITOS_TEST_PORTAL_PUBLIC_ORIGIN/);
+  for (const productionOrigin of ['https://trylitos.com', 'https://www.trylitos.com']) {
+    assert.throws(() => assertControlledSecurityCodeTarget({
+      ...controlledTarget,
+      portalPublicBase: productionOrigin,
+      configuredPortalOrigin: productionOrigin,
+    }), /Known production Litos origins/);
+  }
+});
+
+test('controlled email forwarding uses only an authenticated loopback capture adapter', () => {
+  assert.equal(
+    controlledEmailCaptureTarget('http://127.0.0.1:4317/emails', '0123456789abcdef0123456789abcdef').origin,
+    'http://127.0.0.1:4317',
+  );
+  assert.throws(
+    () => controlledEmailCaptureTarget('https://capture.example.test/emails', '0123456789abcdef0123456789abcdef'),
+    /must be http:\/\/127\.0\.0\.1/,
+  );
+  assert.throws(
+    () => controlledEmailCaptureTarget('http://127.0.0.1:4317/emails', ''),
+    /Provisioning blocker/,
+  );
 });
 
 test('database safety rejects remote, shared, and unmarked targets', () => {
@@ -111,6 +134,7 @@ test('security-code mode requires the remote managed runner and records its auth
     provider: 'stratus-managed',
     baseUrl: 'https://stratus-browser-cloud.vercel.app',
     expectedOrigin: 'https://stratus-browser-cloud.vercel.app',
+    credentialScope: 'dedicated-nonproduction',
   };
   assert.deepEqual(assertRemoteManagedRunner({ ...base, apiKey: 'qa-key' }), {
     origin: 'https://stratus-browser-cloud.vercel.app',
@@ -119,7 +143,6 @@ test('security-code mode requires the remote managed runner and records its auth
   assert.deepEqual(assertRemoteManagedRunner({
     ...base,
     oidcToken: 'header.payload.signature',
-    vercelEnv: 'production',
   }), {
     origin: 'https://stratus-browser-cloud.vercel.app',
     authMode: 'vercel_oidc',
@@ -127,9 +150,9 @@ test('security-code mode requires the remote managed runner and records its auth
   assert.throws(() => assertRemoteManagedRunner({ ...base, provider: 'stratus', apiKey: 'qa-key' }), /stratus-managed/);
   assert.throws(() => assertRemoteManagedRunner({
     ...base,
+    credentialScope: undefined,
     oidcToken: 'header.payload.signature',
-    vercelEnv: 'development',
-  }), /Vercel OIDC token/);
+  }), /Provisioning blocker/);
   assert.throws(() => assertRemoteManagedRunner({
     ...base,
     baseUrl: 'http://localhost:3302',
@@ -138,6 +161,11 @@ test('security-code mode requires the remote managed runner and records its auth
   assert.throws(() => assertRemoteManagedRunner({
     ...base,
     expectedOrigin: 'https://different-runner.example',
+    apiKey: 'qa-key',
+  }), /match QA_EXPECTED_STRATUS_ORIGIN/);
+  assert.throws(() => assertRemoteManagedRunner({
+    ...base,
+    baseUrl: 'https://stratus-browser-cloud.vercel.app/unscoped',
     apiKey: 'qa-key',
   }), /match QA_EXPECTED_STRATUS_ORIGIN/);
 });

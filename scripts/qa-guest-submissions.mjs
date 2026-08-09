@@ -3,12 +3,14 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import pg from 'pg';
 import { chromium } from 'playwright-core';
 import {
   assertDisposableDatabaseMarker,
   assertRemoteManagedRunner,
   assertControlledSecurityCodeTarget,
+  controlledEmailCaptureTarget,
   controlledManagedReceivingProof,
   managedApplicationAlias,
   securityCodeCase,
@@ -37,13 +39,17 @@ const inboundSecret = process.env.RESEND_WEBHOOK_SECRET
 const qaForwardTo = process.env.QA_APPLICATION_EMAIL_FORWARD_TO;
 const databaseMarker = process.env.QA_CONTROLLED_DATABASE_MARKER;
 const portalBindingSecret = process.env.LITOS_TEST_PORTAL_BINDING_SECRET;
+const emailCaptureTarget = securityCodeMode ? controlledEmailCaptureTarget(
+  process.env.LITOS_QA_EMAIL_CAPTURE_URL,
+  process.env.LITOS_QA_EMAIL_CAPTURE_TOKEN,
+) : null;
 const runnerOrigin = securityCodeMode ? assertRemoteManagedRunner({
   provider: process.env.BROWSER_PROVIDER,
   baseUrl: process.env.STRATUS_BASE_URL,
   apiKey: process.env.STRATUS_API_KEY,
   oidcToken: process.env.VERCEL_OIDC_TOKEN,
-  vercelEnv: process.env.VERCEL_ENV,
   expectedOrigin: process.env.QA_EXPECTED_STRATUS_ORIGIN,
+  credentialScope: process.env.QA_STRATUS_CREDENTIAL_SCOPE,
 }) : null;
 if (!databaseUrl) throw new Error('DATABASE_URL is required');
 if (!Number.isInteger(runCount) || runCount < 1) throw new Error('QA_RUNS must be a positive integer');
@@ -52,6 +58,9 @@ if (securityCodeMode && !qaForwardTo) throw new Error('QA_APPLICATION_EMAIL_FORW
 if (securityCodeMode && !aliasSecret) throw new Error('The managed application-email alias secret is required');
 if (securityCodeMode && !managedDomain) throw new Error('LITOS_RESEND_MANAGED_RECEIVING_DOMAIN is required');
 if (securityCodeMode && !inboundSecret) throw new Error('The inbound application-email webhook secret is required');
+if (securityCodeMode && process.env.LITOS_QA_EMAIL_CAPTURE_ENABLED !== 'true') {
+  throw new Error('Provisioning blocker: LITOS_QA_EMAIL_CAPTURE_ENABLED=true is required');
+}
 if (securityCodeMode) {
   assertControlledSecurityCodeTarget({
     apiBase,
@@ -63,6 +72,37 @@ if (securityCodeMode) {
     databaseMarker,
     portalBindingSecret,
     configuredPortalOrigin: process.env.LITOS_TEST_PORTAL_PUBLIC_ORIGIN,
+  });
+}
+
+const capturedEmails = [];
+const captureServer = securityCodeMode ? createServer((request, response) => {
+  if (request.method !== 'POST' || request.url !== emailCaptureTarget.pathname
+    || request.headers['x-litos-qa-capture-token'] !== process.env.LITOS_QA_EMAIL_CAPTURE_TOKEN) {
+    response.writeHead(403).end();
+    return;
+  }
+  let raw = '';
+  request.setEncoding('utf8');
+  request.on('data', (chunk) => {
+    raw += chunk;
+    if (raw.length > 1_000_000) request.destroy();
+  });
+  request.on('end', () => {
+    try {
+      const payload = JSON.parse(raw);
+      capturedEmails.push(payload);
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ id: `qa-capture-${randomUUID()}` }));
+    } catch {
+      response.writeHead(400).end();
+    }
+  });
+}) : null;
+if (captureServer) {
+  await new Promise((resolve, reject) => {
+    captureServer.once('error', reject);
+    captureServer.listen(Number(emailCaptureTarget.port), '127.0.0.1', resolve);
   });
 }
 
@@ -402,6 +442,11 @@ try {
       assert.equal(seenSecurityCodes.has(inboundEvidence.code), false, 'controlled portal reused a security code');
       seenSecurityCodes.add(inboundEvidence.code);
       await forwardedVerificationMessage(applicationId, alias);
+      const capturedForward = capturedEmails.find((message) => message.subject === '[Litos] Your Greenhouse application security code'
+        && Array.isArray(message.to) && message.to.includes(qaForwardTo));
+      assert.ok(capturedForward, 'controlled local email adapter did not capture the forwarded verification message');
+      assert.match(capturedForward.html ?? '', new RegExp(alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+      assert.match(capturedForward.html ?? '', /security code/i);
     }
 
     stage = 'verify_dashboard_receipt';
@@ -463,6 +508,8 @@ try {
       receipt_source: finalState.review.receipt?.source ?? null,
       email_message_received: Boolean(inboundEvidence),
       email_message_forwarded: Boolean(inboundEvidence?.response?.forwarded),
+      email_capture_adapter: securityCodeMode ? emailCaptureTarget.origin : null,
+      email_capture_forward_proved: securityCodeMode,
       controlled_managed_receiving_proof_seeded: securityCodeMode,
       first_run_guest_entry_visible: true,
       guest_history_marker_written: true,
@@ -482,7 +529,11 @@ try {
   }
   throw error;
 } finally {
-  await Promise.all([browser.close(), client.end()]);
+  await Promise.all([
+    browser.close(),
+    client.end(),
+    captureServer ? new Promise((resolve, reject) => captureServer.close((error) => error ? reject(error) : resolve())) : undefined,
+  ]);
 }
 
 const result = { passed: true, runs: evidence };

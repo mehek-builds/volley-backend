@@ -70,6 +70,28 @@ function loopback(hostname) {
   return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
 }
 
+const KNOWN_PRODUCTION_PORTAL_ORIGINS = new Set([
+  'https://trylitos.com',
+  'https://www.trylitos.com',
+]);
+
+export function controlledEmailCaptureTarget(rawUrl, token) {
+  let target;
+  try {
+    target = new URL(rawUrl);
+  } catch {
+    throw new Error('Provisioning blocker: LITOS_QA_EMAIL_CAPTURE_URL must be a valid URL');
+  }
+  if (target.protocol !== 'http:' || target.hostname !== '127.0.0.1' || !target.port
+    || target.pathname !== '/emails' || target.search || target.hash || target.username || target.password) {
+    throw new Error('Provisioning blocker: the QA email capture adapter must be http://127.0.0.1:<port>/emails');
+  }
+  if (!token || !/^[A-Za-z0-9_-]{32,128}$/.test(token)) {
+    throw new Error('Provisioning blocker: LITOS_QA_EMAIL_CAPTURE_TOKEN must contain 32 to 128 safe characters');
+  }
+  return target;
+}
+
 export function controlledDatabaseTarget(databaseUrl) {
   let target;
   try {
@@ -134,14 +156,24 @@ export function controlledManagedReceivingProof({
   };
 }
 
-export function assertRemoteManagedRunner({ provider, baseUrl, apiKey, oidcToken, vercelEnv, expectedOrigin }) {
+export function assertRemoteManagedRunner({
+  provider,
+  baseUrl,
+  apiKey,
+  oidcToken,
+  expectedOrigin,
+  credentialScope,
+}) {
   if (provider !== 'stratus-managed') {
     throw new Error('BROWSER_PROVIDER=stratus-managed is required for the security-code harness');
   }
+  if (credentialScope !== 'dedicated-nonproduction') {
+    throw new Error('Provisioning blocker: QA_STRATUS_CREDENTIAL_SCOPE=dedicated-nonproduction is required');
+  }
   const hasApiKey = Boolean(apiKey?.trim());
-  const hasOidc = Boolean(oidcToken?.trim() && oidcToken.trim().split('.').length === 3 && vercelEnv === 'production');
+  const hasOidc = Boolean(oidcToken?.trim() && oidcToken.trim().split('.').length === 3);
   if (!hasApiKey && !hasOidc) {
-    throw new Error('The remote managed runner requires STRATUS_API_KEY or a Vercel OIDC token with VERCEL_ENV=production');
+    throw new Error('Provisioning blocker: the dedicated nonproduction Stratus service requires STRATUS_API_KEY or VERCEL_OIDC_TOKEN');
   }
   let target;
   let expected;
@@ -151,7 +183,10 @@ export function assertRemoteManagedRunner({ provider, baseUrl, apiKey, oidcToken
   } catch {
     throw new Error('STRATUS_BASE_URL and QA_EXPECTED_STRATUS_ORIGIN must be valid URLs');
   }
-  if (target.protocol !== 'https:' || loopback(target.hostname) || target.origin !== expected.origin) {
+  const rootOnly = (url) => !url.username && !url.password && !url.search && !url.hash
+    && (url.pathname === '/' || url.pathname === '');
+  if (target.protocol !== 'https:' || loopback(target.hostname) || target.origin !== expected.origin
+    || !rootOnly(target) || !rootOnly(expected)) {
     throw new Error('The remote managed runner must be HTTPS, non-loopback, and match QA_EXPECTED_STRATUS_ORIGIN');
   }
   return { origin: target.origin, authMode: hasApiKey ? 'api_key' : 'vercel_oidc' };
@@ -184,6 +219,9 @@ export function assertControlledSecurityCodeTarget({
   }
   if (!local(portalPublicBase)) {
     const target = new URL(portalPublicBase);
+    if (KNOWN_PRODUCTION_PORTAL_ORIGINS.has(target.origin)) {
+      throw new Error('Known production Litos origins cannot be used as controlled QA portals');
+    }
     if (target.protocol !== 'https:' || !publicPortalConfirmed || !portalBindingSecret
       || !/^[A-Za-z0-9_-]{32,128}$/.test(portalBindingSecret)) {
       throw new Error('A public controlled portal requires HTTPS, confirmation, and a binding secret');

@@ -40,6 +40,7 @@ export function controlledPortalBinding(rawUrl: string, secret: string): string 
 
 export function isControlledTestPortalUrl(rawUrl: string): boolean {
   if (process.env.LITOS_ENABLE_TEST_PORTAL !== 'true') return false;
+  if (process.env.NODE_ENV === 'production') return false;
   let url: URL;
   try {
     url = new URL(rawUrl);
@@ -53,7 +54,6 @@ export function isControlledTestPortalUrl(rawUrl: string): boolean {
     || (url.protocol === 'http:' && (host === 'localhost' || host === '127.0.0.1' || host === '::1'));
   if (builtIn) return true;
 
-  if (process.env.NODE_ENV === 'production') return false;
   const origin = configuredPublicOrigin();
   const secret = bindingSecret();
   const supplied = url.searchParams.get(CONTROLLED_PORTAL_BINDING_PARAM);
