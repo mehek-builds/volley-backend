@@ -321,6 +321,9 @@ test('a security-code challenge is persisted before any receipt is parsed', asyn
   assert.ok(challengeBranch > managedStart);
   assert.ok(awaitingWrite > challengeBranch);
   assert.ok(receiptRead > awaitingWrite, 'receipt parsing must happen only after the challenge branch returns');
+  const challengeWrite = source.slice(challengeBranch, receiptRead);
+  assert.match(challengeWrite, /verification: verification\.status === 'not_needed'/);
+  assert.match(challengeWrite, /claimedReview\.verification \?\? verification/);
 });
 
 test('automatic verification records one remote managed continuation without exposing its token', async () => {

@@ -107,6 +107,56 @@ test('extracts a contextual Greenhouse alphanumeric code but rejects ordinary ne
   assert.equal(extractCodeFromVerificationText('Your application for ENGINEER was received.'), null);
 });
 
+test('extracts case-sensitive letter-only Greenhouse codes only from explicit code grammar', () => {
+  assert.equal(
+    extractCodeFromVerificationText('Your security code is XXUYBKOD. It expires soon.'),
+    'XXUYBKOD',
+  );
+  assert.equal(
+    extractCodeFromVerificationText('Enter this security code TPHJrFMJ to continue.'),
+    'TPHJrFMJ',
+  );
+  assert.equal(extractCodeFromVerificationText('Security code REQUIRED before continuing.'), null);
+  assert.equal(extractCodeFromVerificationText('Your SECURITY settings were updated.'), null);
+  assert.equal(
+    extractCodeFromVerificationText('Your old security code is XXUYBKOD. Your new security code is TPHJrFMJ.'),
+    null,
+  );
+});
+
+test('matches the D-024 letter-only code only inside its authenticated application alias', () => {
+  const requestedAt = new Date('2026-08-09T20:43:18.000Z');
+  const row = {
+    from_email: 'no-reply@greenhouse.io',
+    to_email: 'app-405b84f7ae-target@litos-qa.resend.app',
+    subject: 'Your Greenhouse application security code',
+    text: 'Your security code is XXUYBKOD. It expires soon.',
+    html: '<p>Your security code is <strong>XXUYBKOD</strong>. It expires soon.</p>',
+    received_at: new Date('2026-08-09T20:43:27.471Z'),
+    raw_json: { authentication: { spf: 'pass', dkim: 'pass', dmarc: 'pass' } },
+  };
+  const portal = 'http://localhost:3300/qa/portal-submission?board=greenhouse&shape=security-code&case=email-2';
+  const previous = process.env.LITOS_ENABLE_TEST_PORTAL;
+  process.env.LITOS_ENABLE_TEST_PORTAL = 'true';
+  try {
+    assert.equal(extractLitosVerificationCode(
+      [row],
+      portal,
+      requestedAt,
+      'app-405b84f7ae-target@litos-qa.resend.app',
+    )?.code, 'XXUYBKOD');
+    assert.equal(extractLitosVerificationCode(
+      [{ ...row, raw_json: {} }],
+      portal,
+      requestedAt,
+      'app-405b84f7ae-target@litos-qa.resend.app',
+    ), null);
+  } finally {
+    if (previous === undefined) delete process.env.LITOS_ENABLE_TEST_PORTAL;
+    else process.env.LITOS_ENABLE_TEST_PORTAL = previous;
+  }
+});
+
 test('accepts recent Gmail messages only from the portal sender allowlist', () => {
   const requestedAt = new Date('2026-07-25T10:00:00.000Z');
   const match = extractVerificationCode([{
