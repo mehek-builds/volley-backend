@@ -6,6 +6,7 @@ import { validateResumeSpec } from '../engine/resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { monitoredDescriptionHash } from '../lib/monitoredPortalRepair';
 import { allowedSparseEntriesForApplicationEdit, applicationLeadAlignmentIssues } from './applications';
+import { runnerLeadAlignmentIssues } from './submissionRunner';
 
 const source: ExperienceBankEntry = {
   id: 'recent-role',
@@ -147,4 +148,24 @@ test('pre-send lead verification rejects a citation bound to another JD', () => 
     },
   });
   assert.ok(applicationLeadAlignmentIssues(stale).some((issue) => /jd_hash does not match/.test(issue)));
+});
+
+function runnerRow(spec: Record<string, unknown>) {
+  return {
+    spec,
+    job_context: { company: 'Northwind Labs', role: 'Software Engineer' },
+  } as Parameters<typeof runnerLeadAlignmentIssues>[0];
+}
+
+test('centralized runner gate rejects a hashless legacy lead citation', () => {
+  const legacy = storedWithCitation();
+  delete (legacy.lead_alignment as Record<string, unknown>).jd_hash;
+  assert.ok(runnerLeadAlignmentIssues(runnerRow(legacy)).some((issue) => /jd_hash is missing/.test(issue)));
+});
+
+test('centralized runner gate rejects stale evidence before any submission channel', () => {
+  const stale = storedWithCitation({
+    experience: [{ ...resume.experience[0], bullets: [sourceBullets[1]] }],
+  });
+  assert.ok(runnerLeadAlignmentIssues(runnerRow(stale)).some((issue) => /evidence is not one of the bullets/.test(issue)));
 });

@@ -245,6 +245,55 @@ test('dashboard edits and every pre-send route enforce current lead citations', 
     applicationsRoute.indexOf("'/applications/:id/submission/extension-outcome'"),
   );
   assert.match(extension, /preSendResumeVerificationIssues\(/);
+  assert.match(extension, /isDeepStrictEqual\(row\.spec, precheckRow\.spec\)/);
+  assert.match(extension, /generated_resumes\.spec\} = \$\{JSON\.stringify\(precheckRow\.spec\)\}::jsonb/);
+});
+
+test('the centralized runner refuses stale lead evidence before every claim and send channel', () => {
+  const runner = routeSource('submissionRunner.ts');
+  const submit = runner.slice(
+    runner.indexOf('async function submit(row:'),
+    runner.indexOf('export type SecurityCodeSubmissionOutcome'),
+  );
+  const submitGate = submit.indexOf('runnerLeadAlignmentIssues(row)');
+  const claim = submit.indexOf('claimSubmission(row');
+  assert.ok(submitGate > 0 && claim > submitGate, 'the runner must validate the exact packet before its submission claim');
+  const ordinaryClaim = runner.slice(
+    runner.indexOf('async function claimSubmission('),
+    runner.indexOf('export function submissionClaimIsHeld'),
+  );
+  assert.match(ordinaryClaim, /generated_resumes\.spec\} = \$\{JSON\.stringify\(row\.spec\)\}::jsonb/);
+  for (const channel of [
+    'submitControlled(row',
+    'submitViaAtsSubmissionChannel(row',
+    'runManagedBrowser(',
+    'clickFinalSubmit(',
+  ]) {
+    assert.ok(submit.indexOf(channel) > submitGate, `${channel} must remain behind the lead citation gate`);
+  }
+
+  const process = runner.slice(
+    runner.indexOf('export async function processSubmissionApplication'),
+    runner.indexOf('export async function submissionRunnerRoutes'),
+  );
+  assert.ok(
+    process.indexOf('runnerLeadAlignmentIssues(activeRow)') < process.indexOf('claimPreparation(activeRow)'),
+    'direct cron entry must validate before preparing or submitting a stored row',
+  );
+
+  const security = runner.slice(
+    runner.indexOf('export async function finishSecurityCodeSubmission'),
+    runner.indexOf('export async function processSubmissionApplication'),
+  );
+  assert.ok(
+    security.indexOf('runnerLeadAlignmentIssues(row)') < security.indexOf('claimSecurityCodeSubmission(row, current)'),
+    'security-code continuation must validate before reserving or refilling the employer form',
+  );
+  const securityClaim = runner.slice(
+    runner.indexOf('async function claimSecurityCodeSubmission('),
+    runner.indexOf('async function claimPreparation('),
+  );
+  assert.match(securityClaim, /generated_resumes\.spec\} = \$\{JSON\.stringify\(row\.spec\)\}::jsonb/);
 });
 
 /**

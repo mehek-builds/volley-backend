@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { put } from '@vercel/blob';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, eq, sql } from 'drizzle-orm';
@@ -390,8 +391,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
        * applicant's own browser, and this route is the moment Litos authorizes it to. Refusing at
        * extension-outcome would be refusing to record a send that already happened.
        *
-       * Ahead of the transaction, not inside it, so the read is not competing with the advisory
-       * lock the claim takes. Nothing is claimed yet at this point, so there is nothing to undo. */
+       * The expensive PDF verification runs ahead of the transaction. The transaction below then
+       * requires the row to be the same JSON value before it authorizes the extension,
+       * and the conditional update repeats that predicate. This binds the verification to the exact
+       * packet version that receives the claim. */
       const [precheckRow] = await db.select().from(generated_resumes).where(and(
         eq(generated_resumes.id, params.data.id),
         eq(generated_resumes.user_id, userId),
@@ -421,6 +424,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         )).limit(1);
         const row = rows[0];
         if (!row) return { kind: 'not_found' as const };
+        if (!precheckRow || !isDeepStrictEqual(row.spec, precheckRow.spec)) {
+          return { kind: 'changed' as const };
+        }
         const current = readApplicationReview(row.spec);
         if (!current) return { kind: 'no_review' as const };
         const startOfDay = new Date();
@@ -491,6 +497,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         const updated = await tx.update(generated_resumes).set({ spec: reviewSpec(next) }).where(and(
           eq(generated_resumes.id, row.id),
           eq(generated_resumes.user_id, userId),
+          sql`${generated_resumes.spec} = ${JSON.stringify(precheckRow.spec)}::jsonb`,
           sql`${generated_resumes.spec}->'_review'->>'status' = ${current.status}`,
           sql`${generated_resumes.spec}->'_review'->>'submission_claimed_at' is null`,
         )).returning({ id: generated_resumes.id });

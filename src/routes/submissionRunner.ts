@@ -135,6 +135,8 @@ import {
   readPinnedApplicantEmail,
   resolveFrozenApplicantEmail,
 } from '../lib/applicationEmail';
+import { leadAlignmentIssues } from '../engine/leadAlignment';
+import { normalizeSpec } from '../llm/resumeSpec';
 
 export type ResumeRow = typeof generated_resumes.$inferSelect;
 type StoredSpec = Record<string, unknown>;
@@ -161,6 +163,47 @@ type StandingAuthorization = {
 // unidentifiable build would be a confident wrong answer where absent is the honest one.
 function nextReview(current: ApplicationReviewState, patch: Partial<ApplicationReviewState>): ApplicationReviewState {
   return applyReviewPatch(current, { ...patch, run_revision: resolveRevision().revision ?? undefined });
+}
+
+function runnerApplicationCompany(row: Pick<ResumeRow, 'job_context'>): string {
+  const context = row.job_context && typeof row.job_context === 'object'
+    ? row.job_context as Record<string, unknown>
+    : {};
+  return typeof context.company === 'string' ? context.company.trim() : '';
+}
+
+/** The final runner gate is deliberately pure so every entry path can share and test one decision. */
+export function runnerLeadAlignmentIssues(row: Pick<ResumeRow, 'spec' | 'job_context'>): string[] {
+  const review = readApplicationReview(row.spec);
+  if (!review?.jd_text) {
+    return ['This application has no frozen job description for its lead-experience citation.'];
+  }
+  return leadAlignmentIssues(normalizeSpec(row.spec), review.jd_text, {
+    context: { company: runnerApplicationCompany(row), role: review.role },
+  });
+}
+
+async function withholdInvalidLeadAlignment(
+  row: ResumeRow,
+  current: ApplicationReviewState,
+  issues: string[],
+  preserveSecurityCodeState = false,
+): Promise<ApplicationReviewState> {
+  const reason = `This resume's lead experience is no longer supported by its frozen job description. Regenerate or edit it before sending. ${issues.join(' ')}`.slice(0, 1200);
+  const review = nextReview(current, {
+    status: preserveSecurityCodeState ? 'awaiting_security_code' : 'needs_attention',
+    attention_reason: preserveSecurityCodeState && current.security_code
+      ? `${securityCodeAttentionReason(current.security_code)}\n${reason}`
+      : reason,
+    attention_categories: preserveSecurityCodeState
+      ? ['security_code', 'required_document']
+      : ['required_document'],
+    submission_authorization: undefined,
+    submission_claimed_at: undefined,
+    submission_claim_id: undefined,
+  });
+  await writeReview(row, review);
+  return review;
 }
 
 export function atsApiSubmissionEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -242,6 +285,7 @@ async function claimSubmission(row: ResumeRow, alreadyHeld = false): Promise<Res
     })
     .where(and(
       eq(generated_resumes.id, row.id),
+      sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
       sql`${generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
       sql`${generated_resumes.spec}->'_review'->>'submission_claimed_at' is null`,
     ))
@@ -278,6 +322,7 @@ async function claimSecurityCodeSubmission(
     })
     .where(and(
       eq(generated_resumes.id, row.id),
+      sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
       sql`${generated_resumes.spec}->'_review'->>'status' = 'awaiting_security_code'`,
       sql`${generated_resumes.spec}->'_review'->>'submission_claimed_at' is null`,
     ))
@@ -2116,6 +2161,20 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
 } = {}) {
   const current = readApplicationReview(row.spec);
   if (!current?.submission_run_id || !current.portal_url) throw new Error('The prepared run is missing');
+  const leadIssues = runnerLeadAlignmentIssues(row);
+  if (leadIssues.length > 0) {
+    fastify.log.error(
+      { applicationId: row.id, issues: leadIssues },
+      'Submission withheld at the click: resume lead evidence is stale or unsupported',
+    );
+    await withholdInvalidLeadAlignment(
+      row,
+      current,
+      leadIssues,
+      Boolean(options.securityCode) && Boolean(current.security_code),
+    );
+    return;
+  }
   const authorization = await standingAuthorization(row.user_id);
   if (!mayClickFinalSubmit({
     source: current.submission_authorization?.source,
@@ -2770,6 +2829,12 @@ export async function finishSecurityCodeSubmission(
   const seen = findSecurityCodeAttempt(current.security_code, fingerprint);
   if (seen) return { kind: 'already_attempted', outcome: seen.outcome, review: current };
 
+  const leadIssues = runnerLeadAlignmentIssues(row);
+  if (leadIssues.length > 0) {
+    const withheld = await withholdInvalidLeadAlignment(row, current, leadIssues, true);
+    return { kind: 'done', review: withheld };
+  }
+
   // Onto the submit path. per_application_approval is the same source the approve route writes, and
   // it is the honest one here: the applicant produced a code out of her own mailbox for this one
   // application, which is a decision about this application and not a standing setting.
@@ -2827,6 +2892,15 @@ export async function processSubmissionApplication(
   let activeRow = row;
   try {
     let review = readApplicationReview(activeRow.spec);
+    if (review && (review.status === 'submit_requested' || review.status === 'submitting')) {
+      const leadIssues = runnerLeadAlignmentIssues(activeRow);
+      if (leadIssues.length > 0) {
+        await withholdInvalidLeadAlignment(activeRow, review, leadIssues);
+        const withheld = await db.select().from(generated_resumes)
+          .where(eq(generated_resumes.id, applicationId)).limit(1);
+        return withheld[0] ? readApplicationReview(withheld[0].spec) : null;
+      }
+    }
     if (review?.status === 'submit_requested') {
       const claimed = await claimPreparation(activeRow);
       if (!claimed) return review;
