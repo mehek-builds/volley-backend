@@ -178,7 +178,9 @@ function approvedReviewSpec(review: unknown, approvedAt: string) {
   return sql`jsonb_set(${reviewSpec(review)}, '{_cover_letter,approved_at}', ${JSON.stringify(approvedAt)}::jsonb, true)`;
 }
 
-function freshSubmitRequestReview(
+/* Exported for its own test. Which state a re-run clears and which it carries forward is the whole
+ * of the duplicate-safety story, and it was being asserted only indirectly, through routes. */
+export function freshSubmitRequestReview(
   current: ApplicationReviewState,
   questions: ApplicationReviewQuestion[],
 ): ApplicationReviewState {
@@ -202,6 +204,16 @@ function freshSubmitRequestReview(
     verification: undefined,
     receipt: undefined,
     stall: undefined,
+    /* THE ANSWER EXPIRES WITH THE RUN THAT PROMPTED IT.
+     *
+     * "I looked and it is not there" is true about ONE attempt. Leaving it on the row makes it true
+     * forever: the next uncertain run lands in claimed needs_attention still carrying the stale
+     * not_sent, submitRequestDisposition reads it and returns 'start', and the post-click duplicate
+     * lock for that posting is off permanently, after a single honest answer.
+     *
+     * The route's own comment says the packet is "re-runnable exactly once". This is the line that
+     * makes that true. */
+    unverified_submission: undefined,
   };
 }
 

@@ -2655,6 +2655,27 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       }));
       return;
     }
+    /* NOTHING WAS SENT, AND THAT IS KNOWN, so this must not become an unverified submission. The
+     * runner reached the end of its action list without pressing Send, which is what the pre-submit
+     * gate does when a required field is still empty. Writing 'unverified' here would tell her Litos
+     * pressed Send, send her hunting for a receipt that cannot exist, and leave an unresolved record
+     * that blocks every later application to this posting. The claim is released because the packet
+     * is safe to run again the moment the missing answer exists. */
+    if (verdict.kind === 'not_attempted') {
+      await writeReview(row, nextReview(claimedReview, {
+        status: 'needs_attention',
+        submission_attempted_at: capturedAt,
+        preview_screenshot_url: blob.url,
+        submission_error: undefined,
+        attention_reason: 'Litos filled this application but stopped before sending it, because the '
+          + 'form was not complete. Nothing reached the employer, so there is no confirmation to look '
+          + 'for. Fill in what is missing below and send it again.',
+        attention_categories: ['required_field'],
+        submission_claimed_at: undefined,
+        submission_claim_id: undefined,
+      }));
+      return;
+    }
     if (verdict.kind === 'unverified') {
       await writeReview(row, nextReview(claimedReview, unverifiedSubmissionPatch(claimedReview, {
         at: capturedAt,

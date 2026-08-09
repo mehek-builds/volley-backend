@@ -234,3 +234,52 @@ describe('the send path is wired to the reading, not to the scrape', () => {
     assert.match(route, /POST \/applications\/:id\/submission\/unverified/);
   });
 });
+
+/* THE TWO ARMS ADVERSARIAL REVIEW FOUND MISSING, both of which had already been described in prose.
+ *
+ * The module docstring said not_attempted was "a distinct and much better answer than unverified",
+ * and there was no branch for it. And the confirmed arm accepted an empty message through a `??`
+ * that only catches null, so a runner reporting a container with nothing in it produced a filed
+ * application. */
+describe('what the verdict refuses to call a submission', () => {
+  test('a run that never pressed Send is not an uncertain submission, it is a non-submission', () => {
+    const verdict = managedSubmitVerdict({
+      submitOutcome: {
+        pressed: false, state: 'not_attempted', source: null, evidence: null,
+        message: null, formStillPresent: true,
+      },
+    });
+    // 'unverified' here would tell her Litos pressed Send, send her looking for a receipt that
+    // cannot exist, and leave a record that blocks every later application to the same posting.
+    assert.equal(verdict.kind, 'not_attempted');
+  });
+
+  test('pressed:false outranks a state the runner failed to set', () => {
+    // Defence against a runner that reports an unrecognised state; the normalizer maps it to
+    // 'unknown', and without this the caller would treat a click that never happened as uncertain.
+    const verdict = managedSubmitVerdict({
+      submitOutcome: {
+        pressed: false, state: 'unknown', source: null, evidence: null,
+        message: null, formStillPresent: true,
+      },
+    });
+    assert.equal(verdict.kind, 'not_attempted');
+  });
+
+  test('a confirmation with nothing written in it is not a confirmation', () => {
+    for (const message of [null, '', '   ']) {
+      const verdict = managedSubmitVerdict({
+        submitOutcome: {
+          pressed: true, state: 'confirmed', source: 'ats_state',
+          evidence: '.ashby-application-form-success-container',
+          message, formStillPresent: true,
+        },
+      });
+      assert.equal(verdict.kind, 'unverified', `an empty container (${JSON.stringify(message)}) must not read as sent`);
+    }
+  });
+
+  test('the real confirmation still passes, so the guard has not swallowed the happy path', () => {
+    assert.equal(managedSubmitVerdict(ASHBY_CONFIRMED).kind, 'confirmed');
+  });
+});

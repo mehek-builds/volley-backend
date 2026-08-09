@@ -77,6 +77,8 @@ export type ManagedSubmitVerdict =
   | { kind: 'refused'; message: string }
   /** The click landed and the page never said. The applicant has to look, and she is told where. */
   | { kind: 'unverified'; cause: UnverifiedCause }
+  /** The runner never pressed Send, so nothing reached the employer and nothing is uncertain. */
+  | { kind: 'not_attempted' }
   /** The runner is older than submitOutcome. Fall back to whatever the caller did before. */
   | { kind: 'unreported' };
 
@@ -94,12 +96,25 @@ export function managedSubmitVerdict(result: MaybeOutcome | null | undefined): M
     return { kind: 'refused', message: outcome.message ?? 'The employer refused this application.' };
   }
   if (outcome.state === 'confirmed') {
+    /* An empty confirmation is not a confirmation. The runner will not emit 'confirmed' without a
+     * message any more, but this module is the half that ships on a different deploy cadence from
+     * the runner, and the cost of the two disagreeing is an application recorded as sent that no
+     * employer received. So the check is made twice on purpose. */
+    const confirmationText = outcome.message?.trim();
+    if (!confirmationText) return { kind: 'unverified', cause: 'no_confirmation_state' };
     return {
       kind: 'confirmed',
-      confirmationText: outcome.message ?? 'The employer showed its confirmation state.',
+      confirmationText,
       evidence: outcome.evidence ?? outcome.source ?? 'ats_state',
     };
   }
+  /* THE DOCSTRING ABOVE PROMISED THIS ARM AND THE CODE DID NOT HAVE IT, so a run that never pressed
+   * Send was reported as an uncertain submission. That is wrong in three directions at once: she is
+   * told Litos pressed Send when the runner knows it did not, she is sent looking for a receipt that
+   * cannot exist, and the unresolved unverified record then blocks every future application to that
+   * posting. The pre-submit gate declines to click whenever a required field is still blank, so this
+   * is an ordinary outcome, not a rare one. */
+  if (outcome.state === 'not_attempted' || outcome.pressed === false) return { kind: 'not_attempted' };
   return { kind: 'unverified', cause: 'no_confirmation_state' };
 }
 
