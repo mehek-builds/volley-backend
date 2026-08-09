@@ -1465,12 +1465,6 @@ const GOVERNMENT_EMPLOYMENT_RELATIONSHIP =
 const GOVERNMENT_WORK_SUBJECT =
   /\bprojects?\b|\bcontracts?\b|\bcontractors?\b|\bfunctions?\b|\bdisciplines?\b|\bgovernment\s+relations\b/i;
 
-const FOREIGN_GOVERNMENT_SCOPE =
-  /\bforeign\b|\bnon[-\s]?(?:u\.?\s*s\.?|us|united\s+states)\b|\boutside(?:\s+of)?\s+(?:the\s+)?(?:u\.?\s*s\.?|us|united\s+states)\b/i;
-
-const NEGATED_GOVERNMENT_LEVEL_SCOPE =
-  /\bnon[-\s]?(?:federal|state|local|municipal|city|county)\b|\bother\s+than\s+(?:the\s+)?(?:federal|state|local|municipal|city|county)\b|\boutside(?:\s+of)?\s+(?:the\s+)?(?:federal|state|local|municipal|city|county)(?:\s+government)?\b/i;
-
 /* Labels that name a government and are still not "were you employed by one". Everything here is
  * either a real corpus label (relatives, PEP, export control) or a shape whose answer is a legal
  * status rather than a history (authorization, eligibility, sponsorship, clearance, citizenship).
@@ -1484,8 +1478,6 @@ export function isGovernmentEmploymentQuestion(label: string): boolean {
   const value = label ?? '';
   if (!GOVERNMENT_EMPLOYMENT_RELATIONSHIP.test(value)) return false;
   if (GOVERNMENT_WORK_SUBJECT.test(value)) return false;
-  if (FOREIGN_GOVERNMENT_SCOPE.test(value)) return false;
-  if (NEGATED_GOVERNMENT_LEVEL_SCOPE.test(value)) return false;
   if (NOT_HER_GOVERNMENT_EMPLOYMENT.test(value)) return false;
   const target = governmentEmploymentTarget(value);
   if (!target) return false;
@@ -1542,6 +1534,38 @@ type GovernmentEmploymentTarget =
   | { kind: 'level'; level: GovernmentLevel }
   | { kind: 'named'; identity: string };
 
+/* The complete grammar of government scopes that an employer record may answer. This is a parser
+ * table, not a keyword ranking: the whole normalized scope must match one row. Consequently broad
+ * "government" is answerable only when it is unqualified, while an exclusion, a jurisdiction we
+ * do not model, or any other extra word makes the parse fail closed. */
+const GOVERNMENT_SCOPE_PARSERS: readonly {
+  pattern: RegExp;
+  target: GovernmentEmploymentTarget;
+}[] = [
+  {
+    pattern: /^(?:(?:u s|us|united states)(?: federal)?|federal) government$/,
+    target: { kind: 'level', level: 'federal' },
+  },
+  {
+    pattern: /^(?:(?:u s|us|united states) )?federal (?:agency|agencies)$/,
+    target: { kind: 'level', level: 'federal' },
+  },
+  { pattern: /^state (?:government|agency|agencies)$/, target: { kind: 'level', level: 'state' } },
+  { pattern: /^(?:local|municipal|city|county) government$/, target: { kind: 'level', level: 'local' } },
+  {
+    pattern: /^(?:government(?:al)?|government (?:agency|agencies)|public sector|civil service)$/,
+    target: { kind: 'any' },
+  },
+];
+
+function parsedGovernmentScope(identity: string): GovernmentEmploymentTarget | null {
+  for (const parser of GOVERNMENT_SCOPE_PARSERS) {
+    if (parser.pattern.test(identity)) return parser.target;
+  }
+  const named = VETTED_GOVERNMENT_EMPLOYERS.get(identity);
+  return named ? { kind: 'named', identity } : null;
+}
+
 function targetFromGovernmentPhrase(raw: string): GovernmentEmploymentTarget | null {
   let phrase = raw.trim().replace(/[.,;:]+$/g, '');
   const parenthetical = phrase.match(/^(.+?)\s*\(([^()]*)\)\s*$/);
@@ -1558,22 +1582,17 @@ function targetFromGovernmentPhrase(raw: string): GovernmentEmploymentTarget | n
     }
   }
   const identity = normalizeIdentity(phrase.replace(/^(?:a|an|any|the)\s+/i, ''));
-  if (/^(?:(?:u s|us|united states) )?(?:federal )?government$/.test(identity)
-    || /^(?:(?:u s|us|united states) )?federal (?:agency|agencies)$/.test(identity)) {
-    return { kind: 'level', level: 'federal' };
-  }
-  if (/^state (?:government|agency|agencies)$/.test(identity)) return { kind: 'level', level: 'state' };
-  if (/^(?:local|municipal|city|county) government$/.test(identity)) return { kind: 'level', level: 'local' };
-  if (/^(?:government(?:al)?|government (?:agency|agencies)|public sector|civil service)$/.test(identity)) {
-    return { kind: 'any' };
-  }
-  return { kind: 'named', identity };
+  return parsedGovernmentScope(identity);
 }
 
 function governmentRelationPhrase(label: string): string | null {
   const relation = label.match(/\bwork(?:ed|ing|s)?\b[^?]{0,60}\bfor\s+(?:the\s+)?([^?\n]{1,160})/i)
     ?? label.match(/\bemploy(?:ed|ment)\b[^?]{0,60}\b(?:by|with)\s+(?:the\s+)?([^?\n]{1,160})/i);
   return relation?.[1]?.trim() ?? null;
+}
+
+function isScopeTerminator(value: string): boolean {
+  return /^[\s.,;:!]*$/.test(value);
 }
 
 /** What employer or government level the question itself names. */
@@ -1583,17 +1602,20 @@ function governmentEmploymentTarget(label: string): GovernmentEmploymentTarget |
   if (/\bwork(?:ed|ing|s)?\b[^?]{0,40}\bin\b[^?]{0,30}\b(?:public[-\s]sector|civil\s+service)\b/i.test(label)) {
     return { kind: 'any' };
   }
-  if (/\b(?:prior|previous|past|current)\b[^?]{0,40}\bgovernment(?:al)?\s+employment\b/i.test(label)) {
-    if (/\b(?:u\.?\s*s\.?|united\s+states|federal)\b/i.test(label)) return { kind: 'level', level: 'federal' };
-    if (/\bstate\b/i.test(label)) return { kind: 'level', level: 'state' };
-    if (/\b(?:local|municipal|city|county)\b/i.test(label)) return { kind: 'level', level: 'local' };
-    return { kind: 'any' };
+  const employment = label.match(
+    /\b(?:prior|previous|past|current)\b\s+([^?\n]{1,80}?)\s+employment\b([^?\n]*)/i,
+  );
+  if (employment) {
+    if (!isScopeTerminator(employment[2])) return null;
+    return targetFromGovernmentPhrase(employment[1]);
   }
-  if (/\bgovernment(?:al)?\s+employee\b/i.test(label)) {
-    if (/\bfederal\b/i.test(label)) return { kind: 'level', level: 'federal' };
-    if (/\bstate\b/i.test(label)) return { kind: 'level', level: 'state' };
-    if (/\b(?:local|municipal|city|county)\b/i.test(label)) return { kind: 'level', level: 'local' };
-    return { kind: 'any' };
+  const employee = label.match(
+    /\b(?:are|were|been)\s+you\b\s+([^?\n]{1,80}?)\s+employee\b([^?\n]*)/i,
+  );
+  if (employee) {
+    if (!isScopeTerminator(employee[2])) return null;
+    const scope = employee[1].replace(/^(?:(?:ever|previously|currently|formerly|a|an)\s+)+/i, '');
+    return targetFromGovernmentPhrase(scope);
   }
   return null;
 }

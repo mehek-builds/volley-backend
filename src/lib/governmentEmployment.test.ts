@@ -349,6 +349,67 @@ describe('prior government employment, answered from the experience bank', () =>
     }
   });
 
+  test('the scope parser accepts only complete recognized government scopes', () => {
+    const federal: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
+    };
+    const local: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'City of Los Angeles', title: 'Analyst' }],
+    };
+    const cases: [string, ApplicationProfileLike, string][] = [
+      ['Prior government employment?', local, 'VALUE Yes'],
+      ['Prior U.S. government employment?', federal, 'VALUE Yes'],
+      ['Prior federal government employment?', federal, 'VALUE Yes'],
+      ['Prior state government employment?', federal, 'SKIP'],
+      ['Prior local government employment?', local, 'VALUE Yes'],
+      ['Have you worked for NASA?', federal, 'VALUE Yes'],
+      ['Have you worked for the federal government?', federal, 'VALUE Yes'],
+      ['Have you worked for local government?', local, 'VALUE Yes'],
+    ];
+    for (const [label, profile, expected] of cases) {
+      assert.ok(isGovernmentEmploymentQuestion(label), label);
+      assert.equal(answer(label, profile), expected, label);
+    }
+  });
+
+  test('unparsed qualifiers and exclusions fail closed and clear stale answers', () => {
+    const nasa: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
+    };
+    const labels = [
+      'Prior government employment except federal?',
+      'Prior government employment excluding federal?',
+      'Prior government employment apart from federal?',
+      'Prior government employment that was not federal?',
+      'Prior government employment but not federal?',
+      'Have you worked for government except federal?',
+      'Have you worked for a government excluding local government?',
+      'Have you worked for government apart from state government?',
+      'Have you worked for government that was not federal?',
+      'Have you worked for government but not local government?',
+      'Prior non-American government employment?',
+      'Prior government employment outside America?',
+      'Prior Canadian government employment?',
+      'Prior provincial government employment?',
+      'Prior tribal government employment?',
+      'Prior territorial government employment?',
+    ];
+    for (const label of labels) {
+      assert.equal(isGovernmentEmploymentQuestion(label), false, label);
+      const resolved = resolveKnownAnswer(label, 'checkbox', nasa, undefined);
+      assert.ok(resolved && 'skipReason' in resolved, label);
+      assert.equal(answer(label, nasa), 'SKIP', label);
+    }
+    assert.deepEqual(
+      refreshKnownQuestionAnswers(
+        labels.map((question) => ({ question, answer: 'Yes' })),
+        nasa,
+        undefined,
+      ),
+      labels.map((question) => ({ question, answer: '' })),
+    );
+  });
+
   test('send-time refresh removes a stale Yes from every government adjacency', () => {
     const nasa: ApplicationProfileLike = {
       experience_bank: [{ type: 'job', org: 'National Aeronautics and Space Administration', title: 'Research Intern' }],
