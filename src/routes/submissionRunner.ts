@@ -81,6 +81,7 @@ import {
   type SubmissionPacket,
   type SupportedPortal,
   ManagedActionBudgetError,
+  assertManagedRequiredFieldsConfirmed,
   NoSubmitControlError,
 } from '../lib/portalSubmission';
 import {
@@ -120,6 +121,7 @@ import {
   refreshKnownQuestionAnswers,
   resolveKnownAnswer,
   fitToBudget,
+  frozenJobLocationContext,
   WORK_ELIGIBILITY_QUESTION,
   workEligibilitySkipReason,
   type ApplicationProfileLike,
@@ -135,7 +137,7 @@ import { profileBackedBlockerLabels, resolveProfileField, usableOptions } from '
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { loadSavedAnswers } from '../lib/savedAnswerStore';
 import type { ApplicationReviewQuestion } from '../lib/applicationReview';
-import { jobCountry } from '../lib/jobLocation';
+import { jobCountry, postingCountryFromJobContext } from '../lib/jobLocation';
 import { generateStoredCoverLetter, storedCoverLetter } from '../lib/coverLetterService';
 import { repairReviewPortalFromMonitoredJob } from '../lib/applicationPortalRepair';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
@@ -622,6 +624,7 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     applicationProfile,
     review.jd_text,
     review.questions_reviewed_at,
+    postingCountryFromJobContext(row.job_context),
   );
   return {
     fullName,
@@ -1029,7 +1032,7 @@ export function applicationContextForQuestionResolution(row: ResumeRow, current:
   ].map((value) => value.trim()).filter(Boolean);
   const classifiedLocations = [...new Set(locationValues)].map((value) => ({ value, country: jobCountry(value) }));
   const safeLocations = classifiedLocations.length > 0 && classifiedLocations.every((item) => item.country === 'us')
-    ? classifiedLocations.map((item) => item.value).join('\n')
+    ? frozenJobLocationContext(classifiedLocations.map((item) => item.value))
     : '';
   return [current.role, current.jd_text, safeLocations]
     .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
@@ -1080,6 +1083,13 @@ export async function discoverAndResolveQuestions(
     // keep the fallback
   }
   const questionContext = applicationContextForQuestionResolution(row, current);
+  /* WHERE THE POSTING IS, for the one rule that is allowed to ask.
+   *
+   * Read off `job_context` - the structured location the portal published, copied onto the packet
+   * when it was created - and NOT off `questionContext`, which is role + jd_text + locations glued
+   * into one blob for the drafting-shaped rules. A country read out of prose is the inference
+   * be1bccf removed; this is the field the employer filled in to say where the job is. */
+  const postingCountry = postingCountryFromJobContext(row.job_context);
   const reuseContext: AnswerReuseContext = { company: jobContextCompany(row) };
   // Tested against the RAW label on purpose: normalizeDiscoveredLabel now strips the `--0`
   // section handle, because leaving it in the stored question text is what made every
@@ -1155,7 +1165,7 @@ export async function discoverAndResolveQuestions(
     // making them "required answer missing" would block every application on data Litos supplied.
     const fieldIsRequired = discoveredFieldIsRequired(field) && !isCoreIdentityField(label);
     const existing = existingByLabel.get(reviewLabel.toLowerCase());
-    const profileKnown = resolveKnownAnswer(label, field.inputType, ap, questionContext);
+    const profileKnown = resolveKnownAnswer(label, field.inputType, ap, questionContext, postingCountry);
     /* A REMEMBERED ANSWER, and where it sits in the order.
      *
      * It stands in only where Litos has nothing of its own. The structured profile wins over a copy
@@ -1185,6 +1195,7 @@ export async function discoverAndResolveQuestions(
         { label, inputType: field.inputType, options: field.options },
         ap,
         questionContext,
+        postingCountry,
       )
       : null;
     const knownValue = resolvedField?.value ?? (known && 'value' in known ? known.value : '');
@@ -2600,6 +2611,10 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         ...(!options.securityCode ? { requestContinuation: true, continuationTtlSeconds: 120 } : {}),
       },
     );
+    // Required-field confirmation is a barrier inside the same remote action list, immediately
+    // before submit. Require its per-field proof as well: an older runner that ignores or does not
+    // understand the protocol must not be allowed to turn a silent fill into a submitted state.
+    assertManagedRequiredFieldsConfirmed(result, options.securityCode ? 'verification' : 'application');
     let receiptResult = result;
     let verification: ApplicationReviewState['verification'] = { status: 'not_needed' };
     const initialChallenge = readManagedSecurityCodeChallenge(result);
@@ -2647,6 +2662,10 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           try {
             // Exactly one continuation call. An uncertain click is never retried.
             receiptResult = await continueManagedBrowser(continuationToken, prepared.actions);
+            // A continuation has its own physical submit. Its v2 action must confirm the active
+            // verification form and own that click atomically, just like the initial application
+            // send. The first receipt cannot authorize a later DOM or a replaced submit node.
+            assertManagedRequiredFieldsConfirmed(receiptResult, 'verification');
           } catch (error) {
             await writeReview(row, nextReview(claimedReview, {
               status: 'needs_attention',

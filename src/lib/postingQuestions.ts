@@ -39,6 +39,7 @@
  * ---------------------------------------------------------------------------------------------
  */
 
+import type { JobCountry } from './jobLocation';
 import {
   discoveredFieldIsRequired,
   isCoreIdentityField,
@@ -216,7 +217,11 @@ export function resolvePrescript(
   questions: readonly PostingQuestion[],
   profile: ApplicationProfileLike,
   savedAnswers: ReadonlyMap<string, string>,
-  context: { company?: string | null; jdText?: string } = {},
+  /* `postingCountry` is where the PORTAL says this posting is, built by
+     `postingCountryFromJobContext`. It exists so that a question deferring to "the country where
+     this role is located" can be resolved when the posting names one country and it is the United
+     States. Omitting it refuses that family, which is what every caller did before it existed. */
+  context: { company?: string | null; jdText?: string; postingCountry?: JobCountry } = {},
 ): PrescriptResolution {
   const reuseContext: AnswerReuseContext = { company: context.company };
   const out: PrescriptQuestion[] = [];
@@ -250,7 +255,7 @@ export function resolvePrescript(
       continue;
     }
 
-    const known = resolveKnownAnswer(label, question.input_type, profile, context.jdText);
+    const known = resolveKnownAnswer(label, question.input_type, profile, context.jdText, context.postingCountry);
     if (known && 'value' in known) {
       out.push({ ...base, ask: false, answer: known.value, remembered: false });
       continue;

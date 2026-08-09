@@ -119,18 +119,18 @@ export function findSecurityCodeAttempt(
 }
 
 /**
- * Hand a code to the submit click the action list already ends with.
+ * Hand a code to the atomic confirmation and submit action the list already ends with.
  *
  * ZERO EXTRA ACTIONS, and that is not tidiness. MANAGED_ACTION_LIMIT is 120; a reconstruction of a
  * real Greenhouse packet's action list came to exactly 120 with trimGreenhouseManagedActionsToBudget
  * having already shaved preferred_first_name and preferred_last_name off the end. Every action added
  * to a submit run displaces a field the applicant expects filled. The code cannot be queued as its
- * own action anyway: the control it types into does not exist until the submit click has happened,
- * so the runner performs click, type, click on the caller's behalf, and the list stays the length it
- * already was.
+ * own top-level action anyway. The runner enters the supplied code first, then performs exactly one
+ * fresh verification confirmation pass and one physical click. This action is never permitted to
+ * click an application form first, and the list stays the length it already was.
  *
- * Returns the list unchanged when it does not end in a submit click, rather than appending one. A
- * caller that has no submit click has been gated somewhere upstream (portalCanAutoSubmit, the
+ * Returns the list unchanged when it does not end in an atomic submit, rather than appending one. A
+ * caller that has no atomic submit has been gated somewhere upstream (portalCanAutoSubmit, the
  * multi-step wizards), and adding one here would walk straight through that gate.
  */
 export function withSecurityCode(
@@ -139,10 +139,11 @@ export function withSecurityCode(
 ): ManagedBrowserAction[] {
   const next = actions.map((action) => ({ ...action }));
   const last = next[next.length - 1];
-  if (!last || last.type !== 'click' || !/\[\s*type\s*[~^$*|]?=\s*["']?submit/i.test(last.selector ?? '')) {
+  if (!last || last.type !== 'confirmAndSubmit' || last.contractVersion !== 2 || last.submitKind !== 'application') {
     return next;
   }
   last.securityCode = code;
+  last.submitKind = 'verification';
   return next;
 }
 

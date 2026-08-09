@@ -57,6 +57,10 @@ function row(over: Partial<ApplicationProfile> = {}): ApplicationProfile {
     onsite_commitment: null,
     onsite_locations: null,
     relocation_willingness: null,
+    availability_window_start: null,
+    availability_window_end: null,
+    availability_cycle: null,
+    availability_valid_through: null,
     updated_at: null,
     ...over,
   };

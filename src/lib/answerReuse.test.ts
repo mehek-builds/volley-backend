@@ -8,7 +8,7 @@ import {
   savedAnswerFor,
   savedAnswerKey,
 } from './answerReuse';
-import { resolveKnownAnswer } from './questionDiscovery';
+import { frozenJobLocationContext, resolveKnownAnswer } from './questionDiscovery';
 
 /* Every label in this file is verbatim from the production run of 2026-08-08 unless it is marked
  * as a constructed sibling. The point of the file is the LINE between the two directions, so each
@@ -196,7 +196,12 @@ test('a placeless onsite label is still not replayed, and is still answered from
   assert.equal(answerReuseScope(ANDURIL_ONSITE, { company: 'Anduril' }), 'posting_specific');
   assert.equal(savedAnswerFor(ANDURIL_ONSITE, new Map([[savedAnswerKey(ANDURIL_ONSITE), 'Yes']]), { company: 'Postman' }), undefined);
   assert.deepEqual(
-    resolveKnownAnswer(ANDURIL_ONSITE, 'select', { onsite_commitment: 'anywhere' }, undefined),
+    resolveKnownAnswer(
+      ANDURIL_ONSITE,
+      'select',
+      { onsite_commitment: 'anywhere' },
+      frozenJobLocationContext(['Costa Mesa, CA']),
+    ),
     { value: 'Yes' },
   );
 });

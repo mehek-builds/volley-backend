@@ -227,11 +227,18 @@ test('carrying the code costs no actions at all', () => {
   // added here displaces a field the applicant expects filled.
   const actions: ManagedBrowserAction[] = [
     { type: 'fill', selector: '#email', value: 'a@b.com' },
-    { type: 'click', selector: 'button[type="submit"], input[type="submit"]' },
+    {
+      type: 'confirmAndSubmit',
+      selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
+      contractVersion: 2,
+      submitKind: 'application',
+      maxRetries: 1,
+    },
   ];
   const withCode = withSecurityCode(actions, 'TPHJrFMJ');
   assert.equal(withCode.length, actions.length, 'the list must be exactly as long as it was');
   assert.equal(withCode[1].securityCode, 'TPHJrFMJ');
+  assert.equal(withCode[1].submitKind, 'verification');
   assert.equal(actions[1].securityCode, undefined, 'and the caller\'s own list is not mutated');
 });
 

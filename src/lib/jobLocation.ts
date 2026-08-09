@@ -22,6 +22,7 @@
  */
 
 export type JobCountry = 'us' | 'non_us' | 'unknown';
+type JobCountrySignalDetails = { strongUs: boolean; weakUs: boolean; nonUs: boolean };
 
 const US_STATE_CODES = new Set([
   'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'FL', 'GA', 'HI', 'ID', 'IL', 'IN', 'IA', 'KS',
@@ -122,7 +123,15 @@ function normalise(location: string): string {
  * first.
  */
 export function jobCountry(location: string | null | undefined): JobCountry {
-  if (!location || !location.trim()) return 'unknown';
+  const signals = jobCountrySignalDetails(location);
+  if (signals.strongUs) return 'us';
+  if (signals.nonUs) return 'non_us';
+  if (signals.weakUs) return 'us';
+  return 'unknown';
+}
+
+function jobCountrySignalDetails(location: string | null | undefined): JobCountrySignalDetails {
+  if (!location || !location.trim()) return { strongUs: false, weakUs: false, nonUs: false };
   const text = normalise(location);
 
   // 1. Unambiguous US: the country, a full state name, or a city that is only ever American.
@@ -131,26 +140,21 @@ export function jobCountry(location: string | null | undefined): JobCountry {
     || / US /.test(text)
     || US_STATE_NAMES.some((name) => text.includes(` ${name} `))
     || US_CITIES.some((city) => text.includes(` ${city.replace(/[^A-Z0-9]+/g, ' ')} `));
-  if (strongUs) return 'us';
-
-  // 2. A named foreign country or city. Beats a two-letter code, which is what "Amsterdam, NH" and
-  //    "IN - Bengaluru" need.
-  if (NON_US.some((name) => text.includes(` ${name.replace(/[^A-Z0-9]+/g, ' ')} `))) return 'non_us';
+  const namedNonUs = NON_US.some((name) => text.includes(` ${name.replace(/[^A-Z0-9]+/g, ' ')} `));
 
   /* 3. "City, ST" and nothing else. The comma is what makes it a state rather than a country code
         or an English word: "Austin, TX" qualifies, "IN - Bengaluru" does not. */
   const upper = location.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
   const afterComma = upper.match(/,\s*([A-Z]{2})\b/g) ?? [];
-  if (afterComma.some((match) => US_STATE_CODES.has(match.replace(/[^A-Z]/g, '')))) return 'us';
+  const stateCodeUs = afterComma.some((match) => US_STATE_CODES.has(match.replace(/[^A-Z]/g, '')));
 
   /* A code at the very END, which is how "Remote - FL" and "Remote - TX" are written.
      IT HAS TO BE ITS OWN TOKEN. Without the separator this matched the last two letters of any
      word: "GEORGIA" ends in IA and became Iowa, and so would "Austria", "Slovakia" and "Somalia"
      the moment one of them was missing from the foreign list. */
   const trailing = upper.trim().match(/(?:^|[\s,\-/;])([A-Z]{2})$/);
-  if (trailing && US_STATE_CODES.has(trailing[1])) return 'us';
-
-  return 'unknown';
+  const trailingCodeUs = !!trailing && US_STATE_CODES.has(trailing[1]);
+  return { strongUs, weakUs: stateCodeUs || trailingCodeUs, nonUs: namedNonUs };
 }
 
 /**
@@ -207,4 +211,71 @@ export function resolveJobCountry(
   location: string | null | undefined,
 ): JobCountry {
   return countryFromPortal(portalCountry) ?? jobCountry(location);
+}
+
+/* Where one location FIELD stops being one place.
+ *
+ * Boards put more than one place in a single string, and they do it with these characters:
+ * "USA | Remote", "San Francisco, CA; New York, NY", "New York / Dublin", "Dublin OR London".
+ * Deliberately NOT the comma, which is the inside of "Austin, TX", and NOT the hyphen, which is the
+ * inside of "Remote - US" and "London-United Kingdom".
+ */
+const LOCATION_SEGMENT_SEPARATOR = /\s*[;|\/\n]\s*|\s+\bor\b\s+|\s+\band\b\s+/i;
+
+/**
+ * WHICH COUNTRY DOES "THE COUNTRY WHERE THIS ROLE IS LOCATED" MEAN?
+ *
+ * A different question from `jobCountry`, and it has to be, because the two are used for opposite
+ * things and one of them is a legal declaration.
+ *
+ * `jobCountry` answers "may an American hire take this job?", so it lets the US WIN A TIE on
+ * purpose: "New York / Dublin" and "Remote - US or London" both return 'us' there, and that is
+ * right for a board filter, because a role offered in New York is a role she could hold. It is
+ * wrong here. An employer asking whether she may work "in the country where this role is located"
+ * is asking about ONE country, and a posting that names two has not said which, so a stored
+ * US-scoped fact does not answer it. Reusing `jobCountry` would have put "Yes, I am authorized"
+ * on a Dublin application because the same field also said New York.
+ *
+ * So the string is split into the places it actually names and each one is classified on its own:
+ *
+ *   any segment abroad   -> 'non_us'  the posting may be there, and nothing on file covers it
+ *   otherwise any US     -> 'us'      every place named is American; "Remote" beside "USA" is not
+ *                                     a second country, it is the same one from a sofa
+ *   otherwise            -> 'unknown' a bare "Remote", an empty field, somewhere unrecognised
+ *
+ * 'unknown' is the answer whenever the classifier is not sure, and every caller of this function
+ * must treat 'unknown' exactly like 'non_us': say nothing. A gap in the lists below can therefore
+ * only ever cost a handoff, never a false statement about where somebody may work.
+ */
+export function postingCountryForLegalScope(
+  locations: readonly (string | null | undefined)[],
+): JobCountry {
+  const segments = locations
+    .flatMap((value) => (typeof value === 'string' ? value.split(LOCATION_SEGMENT_SEPARATOR) : []))
+    .map((segment) => (segment ?? '').trim())
+    .filter((segment) => segment.length > 0);
+  if (segments.length === 0) return 'unknown';
+  const classified = segments.map((segment) => jobCountry(segment));
+  if (classified.some((country) => country === 'non_us')) return 'non_us';
+  if (classified.some((country) => country === 'us')) return 'us';
+  return 'unknown';
+}
+
+/**
+ * The same answer, read off the packet's own `job_context`.
+ *
+ * `job_context.location` and `job_context.locations` are what the PORTAL published for this
+ * posting, copied onto the packet when it was created. That is the only location evidence this
+ * path will accept: the job description's prose is not consulted here and must not be. Reading
+ * "our San Francisco headquarters" out of a JD for a London role, and answering a work-eligibility
+ * question from it, is the inference be1bccf removed, and it stays removed.
+ */
+export function postingCountryFromJobContext(jobContext: unknown): JobCountry {
+  const context = (jobContext && typeof jobContext === 'object' ? jobContext : {}) as Record<string, unknown>;
+  return postingCountryForLegalScope([
+    typeof context.location === 'string' ? context.location : null,
+    ...(Array.isArray(context.locations) ? (context.locations as unknown[]).map(
+      (value) => (typeof value === 'string' ? value : null),
+    ) : []),
+  ]);
 }

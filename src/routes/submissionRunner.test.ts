@@ -565,7 +565,7 @@ test('select and radio discoveries relay a stored onsite commitment alongside st
         maxLength: null,
       },
     ],
-    { user_id: 'user-1' } as ResumeRow,
+    { user_id: 'user-1', job_context: { location: 'San Francisco, CA' } } as ResumeRow,
     current,
     // "Willing to work in person anywhere in the US" covers four days a week in any US office, so
     // the cadence in the label needs no column of its own.

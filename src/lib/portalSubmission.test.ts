@@ -4,6 +4,7 @@ import test from 'node:test';
 import { DOMParser } from '@xmldom/xmldom';
 import type { Page } from 'playwright-core';
 import { CONTROLLED_PORTAL_BINDING_PARAM, controlledPortalBinding } from './controlledTestPortal';
+import { resolveKnownAnswer } from './questionDiscovery';
 import {
   AUTONOMOUS_PORTAL_FAMILIES,
   blockersRequireCoverLetter,
@@ -158,7 +159,7 @@ test('Databricks wrapper URLs use the Greenhouse managed flow without submitting
 
   const submitting = buildManagedPortalActions('greenhouse', packet, true);
   assert.equal(
-    submitting.filter((action) => action.type === 'click' && action.selector === 'button[type="submit"], input[type="submit"]').length,
+    submitting.filter((action) => action.type === 'confirmAndSubmit').length,
     1,
   );
   assert.ok(submitting.every((action) => action.type !== 'fill' || (action.timeout ?? Infinity) < 30_000));
@@ -440,7 +441,7 @@ test('controlled portal variants exercise every real adapter selector family', (
     // deriving what to SHOW from portalCanAutoSubmit, a predicate that lied about SmartRecruiters
     // would have surfaced postings the student could never complete.
     assert.equal(
-      actions.at(-1)?.type === 'click',
+      actions.at(-1)?.type === 'confirmAndSubmit',
       portalCanAutoSubmit(portal),
       `${portal}: a submit click must appear if and only if the portal can finish alone`,
     );
@@ -492,7 +493,7 @@ test('managed controlled-portal actions include reviewed fields, resume upload, 
       'upload',
       'upload',
       'fillByLabelText',
-      'click',
+      'confirmAndSubmit',
     ],
   );
   assert.ok(actions.some((action) => action.type === 'select' && action.label?.startsWith('question_select:')));
@@ -1557,8 +1558,7 @@ test('Greenhouse trims low-priority fallbacks before exceeding the managed actio
   }, true);
 
   assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
-  assert.equal(actions.at(-1)?.type, 'click');
-  assert.equal(actions.at(-1)?.selector, 'button[type="submit"], input[type="submit"]');
+  assert.equal(actions.at(-1)?.type, 'confirmAndSubmit');
   assert.ok(actions.some((action) => action.label === 'phone_country'));
   assert.ok(actions.some((action) => action.label === 'location'));
   assert.ok(actions.some((action) => action.label?.startsWith('question_combo_label:') && action.label.includes('team opening')));
@@ -1869,6 +1869,68 @@ test('Greenhouse replays Samsara required selects with exact live options', () =
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('majoring in stem') && label.endsWith('Yes')));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('ai policy for interviewers') && label.endsWith('Yes')));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('gender identity') && label.endsWith('Woman')));
+});
+
+/* THE MOST-REPEATED UNSUBMITTABLE PACKET IN THE CORPUS, pinned at the action list.
+ *
+ * Twenty prod packets across eight employers reported, for the control discovered as
+ * "are you hispanic/latino? hispanic_ethnicity":
+ *
+ *   no option matched "Decline to self-identify", left for you to choose
+ *
+ * Its list reads ["Yes", "No", "Decline To Self Identify"], so the answer and the option are the
+ * same refusal one hyphen apart. This question gets ONE attempt - comboboxValueLimit is 1 and every
+ * alias after the first is never sent - so the assertion that matters is not that the right spelling
+ * is somewhere in the ladder, it is that it is the value that actually goes out. */
+test('the one attempt at a self-identification opt-out uses the list\'s own spelling', () => {
+  // The answer as the resolver now produces it. The measured packet stored "#hispanic_ethnicity"
+  // with input type text, so the action that reaches the page is a single fill of this string and
+  // there is no second attempt behind it.
+  assert.deepEqual(
+    resolveKnownAnswer('are you hispanic/latino? hispanic_ethnicity', 'text', { eeo_prefs: {} }, undefined),
+    { value: 'Decline To Self Identify' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('veteran status veteran_status', 'text', { eeo_prefs: {} }, undefined),
+    { value: "I don't wish to answer" },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('disability status disability_status', 'text', { eeo_prefs: {} }, undefined),
+    { value: 'I do not want to answer' },
+  );
+  // A stated answer is untouched: the substitution only ever swaps one refusal for the same refusal.
+  assert.deepEqual(
+    resolveKnownAnswer('gender', 'text', { eeo_prefs: { gender: 'Female' } }, undefined),
+    { value: 'Female' },
+  );
+
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehek@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    jdText: 'Together AI is hiring a Systems Research Engineer Intern.',
+    questions: [
+      {
+        question: 'are you hispanic/latino? hispanic_ethnicity',
+        answer: 'Decline To Self Identify',
+        portal_selector: '#hispanic_ethnicity',
+        portal_input_type: 'text',
+      },
+      { question: 'gender', answer: 'Decline to self-identify' },
+    ],
+  });
+  const valuesFor = (question: string) => actions
+    .filter((action) => typeof action.label === 'string' && action.label.toLowerCase().includes(question))
+    .map((action) => action.value)
+    .filter((value): value is string => typeof value === 'string' && value.length > 0);
+
+  const hispanic = valuesFor('hispanic_ethnicity');
+  assert.ok(hispanic.length > 0, 'nothing was attempted at the hispanic/latino question');
+  assert.deepEqual([...new Set(hispanic)], ['Decline To Self Identify']);
+  // The combobox ladder gets the same treatment, and it matters there for the same reason: the
+  // value limit is one, so the first candidate is the only candidate.
+  assert.ok(valuesFor(':gender').includes('Decline To Self Identify'));
 });
 
 test('Greenhouse replays Databricks choice questions through React-select buckets', () => {
@@ -2587,6 +2649,68 @@ test('the budget may never delete the fixed education row, however large the for
   assert.ok(actions.some((action) => action.selector === '#end-year--0'));
 });
 
+/* R-118. The fill run warms Greenhouse's education taxonomies before it types into them.
+ *
+ * School, Degree and Discipline fetch their option lists over the network when their menu is first
+ * opened. The discovery pass gets a warming round for free, because buildManagedDiscoveryActions
+ * asks for `probeOptions` and those probes are pushed AHEAD of the education fills. The fill run
+ * asks for no probe, so its education fill was the first thing on a fresh page to touch those
+ * controls and was racing that fetch with the runner's 1200ms allowance and nothing in front of it.
+ *
+ * Measured on the live Flow Traders form, 2026-08-09: cold, Degree's menu answered a typed search
+ * after 965ms; warmed, after 603ms. Production lost that race on Point72, Flow Traders and Together
+ * AI on 2026-08-09 and reported `no option matched "Bachelor's Degree"` on a control whose list
+ * holds exactly that string.
+ */
+test('the fill run opens the education taxonomies once before it fills them', () => {
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket());
+  const labels = actions.map((action) => action.label ?? '');
+  for (const inputId of ['school--0', 'degree--0', 'discipline--0']) {
+    const warm = labels.indexOf(`education_taxonomy_warm:${inputId}`);
+    const close = labels.indexOf(`education_taxonomy_warm_close:${inputId}`);
+    assert.ok(warm >= 0, `${inputId} is never warmed`);
+    assert.equal(close, warm + 1, `${inputId} must be closed by the action after it opens it`);
+    assert.equal(actions[close]!.value, 'Escape', 'Escape, so the control is left exactly as it was found');
+    assert.equal(actions[warm]!.optional, true);
+  }
+  // Before the fills it exists for, and before the name/email/phone/resume actions whose round trips
+  // are what turn two actions of warming into a second of real elapsed time.
+  assert.ok(
+    labels.indexOf('education_taxonomy_warm:school--0') < labels.indexOf('first_name'),
+    'the warm-up must precede the fixed fields, not sit next to the fills it is warming',
+  );
+  assert.ok(labels.indexOf('education_taxonomy_warm:discipline--0') < labels.indexOf('education_school_combo:0'));
+  // End date month renders its twelve rows from the document, so it is not warmed.
+  assert.ok(!labels.some((label) => label.startsWith('education_taxonomy_warm:end-month')));
+});
+
+test('a control the packet cannot answer is not warmed, and the discovery pass is not warmed twice', () => {
+  // No stored degree means no degree fill, so two actions of warming would buy nothing.
+  const labels = buildManagedPortalActions('greenhouse', andurilPacket({ degree: undefined }))
+    .map((action) => action.label ?? '');
+  assert.ok(!labels.includes('education_taxonomy_warm:degree--0'));
+  assert.ok(labels.includes('education_taxonomy_warm:school--0'));
+  // The discovery pass already opens all four controls twice, to READ them. Warming them a third
+  // time would spend six actions of a list that has measured at exactly the 120 ceiling.
+  const discovery = buildManagedDiscoveryActions('greenhouse', andurilPacket()).map((action) => action.label ?? '');
+  assert.ok(!discovery.some((label) => label.startsWith('education_taxonomy_warm')));
+  assert.ok(discovery.some((label) => label.startsWith('option_probe_open:school--0')));
+});
+
+test('the budget trim may not take the education warm-up', () => {
+  // Same claim as the fixed education row above, and for a sharper reason: a trimmed FILL leaves the
+  // control visibly empty, while a trimmed WARM-UP leaves the fill running against a menu that has
+  // not loaded, so the run reports "no option matched" about an answer that was correct.
+  const actions = buildManagedPortalActions('greenhouse', overBudgetGreenhousePacket() as never);
+  assert.ok(actions.length <= 120, `the budget must still be respected, got ${actions.length}`);
+  for (const inputId of ['school--0', 'degree--0', 'discipline--0']) {
+    assert.ok(
+      actions.some((action) => action.label === `education_taxonomy_warm:${inputId}`),
+      `${inputId} lost its warm-up to the trim`,
+    );
+  }
+});
+
 test('a control whose label offers "Other if not listed" gets that option, last and only last', () => {
   // Measured read-only on the live Virtu Software Engineer Internship form, 2026-08-09. Its question
   // "Which university are you currently attending? Select "Other" if not listed" is not the
@@ -3101,7 +3225,7 @@ test('every autonomous family actually fills something before it is allowed to p
       actions.some((a) => a.type === 'upload' && a.label === 'resume'),
       `${family}: no resume upload`,
     );
-    assert.equal(actions.at(-1)?.type, 'click', `${family}: an autonomous portal must end in the submit click`);
+    assert.equal(actions.at(-1)?.type, 'confirmAndSubmit', `${family}: an autonomous portal must end in atomic confirmation and submit`);
   }
 });
 
@@ -4220,7 +4344,7 @@ test('Greenhouse select-heavy prepare and submit keep one complete fill chain pe
         `${submit ? 'submit' : 'prepare'} lost every viable action chain for ${item.question}`,
       );
     }
-    if (submit) assert.equal(actions.at(-1)?.type, 'click');
+    if (submit) assert.equal(actions.at(-1)?.type, 'confirmAndSubmit');
   }
 });
 
@@ -4296,7 +4420,7 @@ test('Greenhouse 16 to 18 question boundaries preserve core fields on both paths
           `${questionCount}-question submit lost ${item.question}`,
         );
       }
-      assert.equal(actions.at(-1)?.type, 'click');
+      assert.equal(actions.at(-1)?.type, 'confirmAndSubmit');
     } catch (error) {
       assert.ok(error instanceof ManagedActionBudgetError);
       assert.equal(error.submitActionAppended, false);
@@ -4336,8 +4460,7 @@ test('the budget is spent on repeat guesses, and the submit click is reserved ou
   }
 
   // And the submit click is inside the budget, not appended past it.
-  assert.equal(actions.at(-1)?.type, 'click');
-  assert.match(actions.at(-1)?.selector ?? '', /\[type="submit"\]/);
+  assert.equal(actions.at(-1)?.type, 'confirmAndSubmit');
 });
 
 test('the trim takes fills, never the discover action or the reads it exists for', () => {
@@ -4590,6 +4713,46 @@ test('the control id comes off the selector first and the label second', () => {
   // employment in 2028?".
   assert.equal(managedOptionProbeControlId({ label: 'Will you be ready for full-time employment in 2028?', selector: '[data-litos-discovered-4]' }), undefined);
   assert.equal(managedOptionProbeControlId({ label: '', selector: '' }), undefined);
+});
+
+/* R-118. Greenhouse's own four self-identification controls carry a NAMED id, not a numeric one.
+ *
+ * They reach discovery as `[data-litos-discovered-14]` with the id concatenated onto the visible
+ * question, so neither the `question_<digits>` handle nor the six-digit one names them and the probe
+ * pass skipped all four. Measured on the live Flow Traders form, 2026-08-09: hispanic_ethnicity
+ * offers "Decline To Self Identify" and disability_status offers "I do not want to answer", and both
+ * production runs that day reported `no option matched "Decline to self-identify"` on them.
+ */
+test('the probe can name Greenhouse\'s own self-identification controls', () => {
+  const cases: Array<[string, string]> = [
+    ['are you hispanic/latino? hispanic_ethnicity', 'hispanic_ethnicity'],
+    ['gender gender', 'gender'],
+    ['veteran status veteran_status', 'veteran_status'],
+    ['disability status disability_status', 'disability_status'],
+    ['Race Race', 'race'],
+  ];
+  for (const [label, expected] of cases) {
+    assert.equal(managedOptionProbeControlId({ label, selector: '[data-litos-discovered-14]' }), expected, label);
+  }
+  // Not a general "last underscored word is an id" rule: that would read a control id off any
+  // question whose text happens to end in one.
+  assert.equal(
+    managedOptionProbeControlId({ label: 'Which of these best describes your work_style?', selector: '[data-litos-discovered-9]' }),
+    undefined,
+  );
+  // The id still has to be at the END of the label, where discovery concatenates it.
+  assert.equal(
+    managedOptionProbeControlId({ label: 'gender identity is asked about below', selector: '[data-litos-discovered-9]' }),
+    undefined,
+  );
+  // And the probe pass therefore reads them.
+  assert.deepEqual(
+    managedOptionProbeTargets('greenhouse', [
+      { label: 'are you hispanic/latino? hispanic_ethnicity', selector: '[data-litos-discovered-14]' },
+      { label: 'disability status disability_status', selector: '[data-litos-discovered-16]' },
+    ]),
+    ['hispanic_ethnicity', 'disability_status'],
+  );
 });
 
 test('the probe reads the controls discovery found, and never the four it already read', () => {

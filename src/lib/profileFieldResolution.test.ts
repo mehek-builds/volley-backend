@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { describeRequiredBlocker } from './fieldLabel';
 import {
   chooseClosestOption,
+  candidateTermInterval,
   chooseEeoOption,
   disciplineLadder,
   educationLevelLadder,
@@ -11,13 +12,16 @@ import {
   isDeclineToState,
   optionCoversMonthYear,
   parseNumericRange,
+  profileAnswerAliases,
   profileBackedBlockerLabels,
   referralSourceLadder,
   resolveProfileField,
   schoolAliasLadder,
+  selfIdentificationDeclineWording,
   usableOptions,
 } from './profileFieldResolution';
 import type { ApplicationProfileLike } from './questionDiscovery';
+import { employerOwnSiteOption } from './referralSource';
 
 // The account's REAL stored values, read from prod on 2026-08-08 (user
 // a18f774b-a306-4804-93f3-cd6020c27fb3): application_profile holds major, gpa, gpa_scale and
@@ -818,4 +822,196 @@ test('the opt-out stands in on self-identification questions and nowhere else', 
   );
   assert.equal(discipline?.matchedOption, false);
   assert.equal(discipline?.value, 'Computer Science');
+});
+
+/* THE MEASURED HISPANIC/LATINO FAILURE, and it was the largest single one in the corpus.
+ *
+ * Across the prod packets for the owner account on 2026-08-09, twenty packets over eight employers
+ * (Together AI, Anduril, Flow Traders, DRW, Scale AI, DV Trading, Astranis, Cloudflare) came back
+ * with `no option matched "Decline to self-identify", left for you to choose` on the question
+ * discovered as "are you hispanic/latino? hispanic_ethnicity".
+ *
+ * Its option list is the board's own, read on 2026-08-09 from the published English strings behind
+ * eeoc.questions.hispanic_ethnicity, and is identical for every customer. The stored answer and the
+ * option it belongs to are the same refusal separated by one hyphen. */
+const BOARD_HISPANIC_OPTIONS = ['Yes', 'No', 'Decline To Self Identify'];
+const BOARD_VETERAN_OPTIONS = [
+  'I am not a protected veteran',
+  'I identify as one or more of the classifications of a protected veteran',
+  "I don't wish to answer",
+];
+const BOARD_DISABILITY_OPTIONS = [
+  'Yes, I have a disability, or have had one in the past',
+  'No, I do not have a disability and have not had one in the past',
+  'I do not want to answer',
+];
+
+/** What the managed runner does with a value: case and spacing forgiven, nothing else. */
+function runnerWouldMatch(value: string, options: readonly string[]): boolean {
+  const want = value.trim().toLowerCase().replace(/\s+/g, ' ');
+  return options.some((option) => option.trim().toLowerCase().replace(/\s+/g, ' ') === want);
+}
+
+test('a refusal is offered in the spelling the control itself uses, first', () => {
+  const label = 'are you hispanic/latino? hispanic_ethnicity';
+  const ladder = eeoAnswerLadder(label, 'Decline to self-identify');
+  assert.equal(ladder[0], 'Decline To Self Identify');
+  // The managed path gets ONE attempt per control, so the head of the ladder is the whole fix.
+  assert.equal(runnerWouldMatch(ladder[0], BOARD_HISPANIC_OPTIONS), true);
+  assert.equal(chooseEeoOption(label, 'Decline to self-identify', BOARD_HISPANIC_OPTIONS), 'Decline To Self Identify');
+  assert.equal(profileAnswerAliases(label, 'Decline to self-identify')[0], 'Decline To Self Identify');
+});
+
+test('each self-identification control gets its own vocabulary, not one house spelling', () => {
+  assert.equal(selfIdentificationDeclineWording('are you hispanic/latino? hispanic_ethnicity'), 'Decline To Self Identify');
+  assert.equal(selfIdentificationDeclineWording('gender'), 'Decline To Self Identify');
+  assert.equal(selfIdentificationDeclineWording('race'), 'Decline To Self Identify');
+  assert.equal(selfIdentificationDeclineWording('veteran status veteran_status'), "I don't wish to answer");
+  assert.equal(selfIdentificationDeclineWording('disability status disability_status'), 'I do not want to answer');
+  assert.equal(
+    runnerWouldMatch(eeoAnswerLadder('veteran status veteran_status', 'Decline to self-identify')[0], BOARD_VETERAN_OPTIONS),
+    true,
+  );
+  assert.equal(
+    runnerWouldMatch(eeoAnswerLadder('disability status disability_status', 'Decline to self-identify')[0], BOARD_DISABILITY_OPTIONS),
+    true,
+  );
+});
+
+test('the employer-authored demographic block keeps her own wording', () => {
+  // Those questions are written by the employer, their labels end in a numeric question id rather
+  // than a field handle, and their opt-out is worded differently again. Guessing a spelling there
+  // would replace a wording that currently lands with one that does not.
+  const label = 'how would you describe your racial/ethnic background? (mark all that apply) 4012866007';
+  assert.equal(selfIdentificationDeclineWording(label), undefined);
+  assert.equal(eeoAnswerLadder(label, "I don't wish to answer")[0], "I don't wish to answer");
+});
+
+test('the vocabulary spelling is only ever substituted for another refusal', () => {
+  // A stated answer is never displaced by an opt-out, whatever the control's handle is.
+  assert.equal(eeoAnswerLadder('race', 'South Asian')[0], 'South Asian');
+  assert.equal(eeoAnswerLadder('gender', 'Female')[0], 'Female');
+  assert.equal(chooseEeoOption('gender', 'Female', ['Male', 'Female', 'Decline To Self Identify']), 'Female');
+});
+
+test('a refusal with nowhere to go is still left for her', () => {
+  // Point72, measured: "Have you served in the military?" is a required Yes/No with no opt-out at
+  // all, and three packets reported it unmatched. That is the correct outcome. Litos must not
+  // answer Yes or No to a question she declined, and there is no third choice to reach for.
+  assert.equal(chooseEeoOption('have you served in the military?', 'Decline to self-identify', ['Yes', 'No']), null);
+  assert.equal(chooseClosestOption(eeoAnswerLadder('gender', 'Decline to self-identify'), ['Male', 'Female']), null);
+});
+
+/* THE TERM THAT COULD NOT REACH ITS OWN BUCKET.
+ *
+ * Six prod packets across IMC Trading and DV Trading reported
+ * `no option matched "Spring 2028", left for you to choose`. Both lists are the same shape and both
+ * are read off the live forms on 2026-08-09. Spring 2028 is March, April and May 2028; every one of
+ * them is inside "January 2028 - July 2028" and none is inside any other entry, so the answer is
+ * arithmetic rather than a guess. */
+const DV_GRADUATION_OPTIONS = [
+  "I've already graduated",
+  'August 2026 - December 2026',
+  'January 2027 - July 2027',
+  'August 2027 - December 2027',
+  'January 2028 - July 2028',
+  'August 2028 - December 2028',
+  'After January 2029',
+];
+
+test('a term reaches the bucket that wholly contains it', () => {
+  assert.equal(chooseClosestOption(['Spring 2028'], DV_GRADUATION_OPTIONS), 'January 2028 - July 2028');
+  assert.equal(chooseClosestOption(['Fall 2027'], DV_GRADUATION_OPTIONS), 'August 2027 - December 2027');
+  // A month still goes through the more precise point stage, unchanged.
+  assert.equal(chooseClosestOption(['May 2028'], DV_GRADUATION_OPTIONS), 'January 2028 - July 2028');
+});
+
+test('a term that only half fits a bucket is left for her', () => {
+  // Summer is June, July and August, and this list splits at the end of July. Two of her three
+  // months are in one bucket and the third is in the next, so neither bucket is a true statement
+  // about when she finishes and the question goes back to her.
+  assert.equal(chooseClosestOption(['Summer 2028'], DV_GRADUATION_OPTIONS), null);
+  // Winter straddles the year, so there is no single span that is honestly the term.
+  assert.equal(chooseClosestOption(['Winter 2028'], DV_GRADUATION_OPTIONS), null);
+  assert.equal(candidateTermInterval('Winter 2028'), null);
+  // An option NARROWER than the term invents a month she never stated.
+  assert.equal(chooseClosestOption(['Spring 2028'], ['May 2028', 'June 2028', 'December 2028']), null);
+  // And a term with no bucket around it at all stays unanswered.
+  assert.equal(chooseClosestOption(['Spring 2028'], ['August 2027 - December 2027', 'August 2029 - December 2029']), null);
+  // A candidate that names an explicit month is not re-read as a term.
+  assert.equal(candidateTermInterval('May 2028'), null);
+  assert.equal(candidateTermInterval('Spring semester, May 2028'), null);
+});
+
+test('among the buckets that contain a term, the narrowest one wins', () => {
+  assert.equal(
+    chooseClosestOption(['Spring 2028'], ['2028 or earlier', '2028', 'January 2028 - July 2028']),
+    'January 2028 - July 2028',
+  );
+});
+
+/* THE EMPLOYER'S OWN SITE, UNDER THE EMPLOYER'S OWN NAME FOR IT.
+ *
+ * "Company website" came back as `no option matched` on fourteen prod packets across six employers,
+ * the second most repeated failure in the corpus, and on most of those lists the option stating
+ * exactly that fact was sitting there under a name the ladder cannot spell. Every list below was
+ * read off the live form on 2026-08-09. */
+const ANDURIL_REFERRAL_OPTIONS = [
+  'Google job search', 'News coverage of Anduril', 'Friend/know someone at the company',
+  'Outreach from an Anduril recruiter', 'BuiltIn', 'Indeed', 'Anduril social media',
+  'Anduril YouTube videos', 'Podcast featuring an Anduril leader', 'LinkedIn', 'GitHub',
+  'Handshake', 'Glassdoor', 'Simplify', 'Anduril Website', 'University Career Fair',
+  'Networking Event', 'Other',
+];
+const CLOUDFLARE_REFERRAL_OPTIONS = [
+  'Grace Hopper Celebration', 'College/University Career Fair or Career Website',
+  'Word of mouth from peers, friends, others', 'Cloudflare social media: Twitter, Blog, etc.',
+  'Linkedin', 'Google', 'Referral', 'Other conferences or events', 'Other (none of the above)',
+];
+const FIVE_RINGS_REFERRAL_OPTIONS = [
+  'Coffee Chat', 'Conference', 'GitHub', 'Handshake', 'LinkedIn',
+  'Student Organization Newsletter or Event', 'University Career Fair / Networking Event',
+  'Word of Mouth', 'Information Session', 'Other',
+];
+
+test('the employer\'s own site is found under whatever the employer calls it', () => {
+  const evidenced = { ...STORED_PROFILE, referral_source_evidence: EMPLOYER_SITE_EVIDENCE };
+  assert.equal(answer('How did you hear about Anduril?', ANDURIL_REFERRAL_OPTIONS, evidenced), 'Anduril Website');
+  assert.equal(
+    answer('How did you hear about this internship?', ['Virtu Careers Site', 'Social Media - LinkedIn', 'Job Posting', 'Career Fair', 'Other'], evidenced),
+    'Virtu Careers Site',
+  );
+  assert.equal(
+    answer('How did you hear about DV Trading?', ['LinkedIn', 'DV Recruitment', 'DV Employee', 'DV Website', 'Campus Event', 'Other'], evidenced),
+    'DV Website',
+  );
+  assert.equal(
+    answer('How did you hear about this job?', ['DRW Careers Page', 'Employee Referral', 'LinkedIn', 'Newspaper', 'Other'], evidenced),
+    'DRW Careers Page',
+  );
+});
+
+test('somebody else\'s website is never read as the employer\'s own', () => {
+  const evidenced = { ...STORED_PROFILE, referral_source_evidence: EMPLOYER_SITE_EVIDENCE };
+  // Cloudflare's only entry with the word website in it is a UNIVERSITY career website. Choosing it
+  // would tell an employer she came through her school, which is not what happened.
+  assert.equal(answer('How did you hear about this job?', CLOUDFLARE_REFERRAL_OPTIONS, evidenced), null);
+  assert.equal(employerOwnSiteOption(CLOUDFLARE_REFERRAL_OPTIONS), undefined);
+  // And a list with no company-site entry at all stays with her rather than reaching for Other.
+  assert.equal(answer('How did you first hear about Five Rings?', FIVE_RINGS_REFERRAL_OPTIONS, evidenced), null);
+  assert.equal(employerOwnSiteOption(FIVE_RINGS_REFERRAL_OPTIONS), undefined);
+  // Two candidates is an ambiguity, not a choice.
+  assert.equal(employerOwnSiteOption(['Acme Website', 'Acme Careers Site', 'LinkedIn']), undefined);
+});
+
+test('the site option is only reached when the evidence says she came through the site', () => {
+  // No evidence at all: the acquisition channel is unknown, so nothing is claimed about it.
+  assert.equal(answer('How did you hear about Anduril?', ANDURIL_REFERRAL_OPTIONS), null);
+  assert.equal(
+    answer('How did you hear about Anduril?', ANDURIL_REFERRAL_OPTIONS, {
+      ...STORED_PROFILE,
+      referral_source_evidence: { ...EMPLOYER_SITE_EVIDENCE, kind: 'litos_job_board', value: 'Job board' },
+    }),
+    null,
+  );
 });
