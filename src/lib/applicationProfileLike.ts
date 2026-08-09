@@ -24,6 +24,10 @@ export function workEligibilityFromSponsorshipAnswer(answer: unknown): {
   }
 }
 
+function experienceBankType(value: string): 'job' | 'project' | 'leadership' | undefined {
+  return value === 'job' || value === 'project' || value === 'leadership' ? value : undefined;
+}
+
 export async function loadApplicationProfileLike(userId: string): Promise<ApplicationProfileLike> {
   const [appRow, [profileRow], [userRow], bankRows] = await Promise.all([
     // Tolerant read, see lib/applicationFacts.ts. This is the resolver's own profile read, so a
@@ -160,7 +164,11 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
     most_recent_employer: mostRecentEmployer(),
     employer_history: employerHistory(),
     experience_bank: bankRows
-      .map((entry) => ({ org: (entry.org ?? '').trim(), title: entry.title?.trim() || undefined }))
+      .map((entry) => ({
+        type: experienceBankType(entry.type),
+        org: (entry.org ?? '').trim(),
+        title: entry.title?.trim() || undefined,
+      }))
       .filter((entry) => entry.org),
     school: academicStr('school'),
     degree: academicStr('degree'),

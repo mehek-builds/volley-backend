@@ -119,6 +119,7 @@ import {
   refreshKnownQuestionAnswers,
   resolveKnownAnswer,
   fitToBudget,
+  frozenJobLocationContext,
   WORK_ELIGIBILITY_QUESTION,
   workEligibilitySkipReason,
   type ApplicationProfileLike,
@@ -1028,7 +1029,7 @@ export function applicationContextForQuestionResolution(row: ResumeRow, current:
   ].map((value) => value.trim()).filter(Boolean);
   const classifiedLocations = [...new Set(locationValues)].map((value) => ({ value, country: jobCountry(value) }));
   const safeLocations = classifiedLocations.length > 0 && classifiedLocations.every((item) => item.country === 'us')
-    ? classifiedLocations.map((item) => item.value).join('\n')
+    ? frozenJobLocationContext(classifiedLocations.map((item) => item.value))
     : '';
   return [current.role, current.jd_text, safeLocations]
     .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)

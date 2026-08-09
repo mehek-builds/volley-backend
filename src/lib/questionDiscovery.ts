@@ -1,6 +1,7 @@
 import type { Page } from 'playwright-core';
 import { isOpaqueIdentifier, tidyLabel } from './fieldLabel';
 import { officeMetrosNamed } from './officeMetros';
+import { jobCountry } from './jobLocation';
 import type { SupportedPortal } from './portalSubmission';
 import {
   resolveSalary,
@@ -57,12 +58,11 @@ export type ApplicationProfileLike = StoredSalaryProfile & AvailabilityWindowFac
    * `parsed_json.experience` and is a strict subset - measured on the owner account on 2026-08-09,
    * the parse held 4 organisations and the bank held 9.
    *
-   * It is here so that a question about her employment history can be answered by CHECKING it. The
-   * only claim this shape can support is one that survives reading every entry, which is why the
-   * arm that uses it refuses on an absent or empty bank: `undefined` is "she never told us" and
-   * `[]` is a bank with nothing in it, and neither of those is "she never worked for anyone".
+   * The entry type is provenance. A government-named project or leadership role is not employment.
+   * The bank can prove a positive job match, but it has no completeness attestation and therefore
+   * cannot prove a negative from absence.
    */
-  experience_bank?: { org: string; title?: string }[];
+  experience_bank?: { type?: 'job' | 'project' | 'leadership'; org: string; title?: string }[];
   school?: string;
   degree?: string;
   /**
@@ -714,6 +714,7 @@ const LOCATION_QUESTION_WANTS_A_VALUE =
 function onsiteCommitmentAnswer(
   label: string,
   ap: ApplicationProfileLike,
+  jdText?: string,
 ): { value: string } | { skipReason: string } {
   const held = { skipReason: onsiteCommitmentSkipReason(label) };
 
@@ -734,10 +735,21 @@ function onsiteCommitmentAnswer(
 
   const named = officeMetrosNamed(label);
   if (commitment === 'anywhere') {
-    // Scoped to the US. A label naming a foreign office, or naming a foreign country in place of an
-    // office, is outside what she declared.
-    if (named.some((entry) => entry.country !== 'US')) return held;
-    return { value: 'Yes' };
+    /* `anywhere` records the US-scoped standing declaration. It is not permission to treat an
+     * unknown place as American. The old rule returned Yes whenever the finite metro table found
+     * no foreign city, so Paris and every city absent from that table became US-safe by omission.
+     *
+     * Evidence can come from the question itself, or from the structured job locations frozen
+     * into the resolution context by applicationContextForQuestionResolution. Arbitrary prose in
+     * the JD does not count: a description can mention customers, offices, or travel worldwide. */
+    const labelScope = jobCountry(label);
+    if (labelScope === 'us') return { value: 'Yes' };
+    if (labelScope === 'non_us') return held;
+    const frozenLocations = frozenJobLocationsFromContext(jdText);
+    if (frozenLocations.length > 0 && frozenLocations.every((location) => jobCountry(location) === 'us')) {
+      return { value: 'Yes' };
+    }
+    return held;
   }
 
   // 'listed_locations': only a label that names a place can be checked against the list.
@@ -751,8 +763,30 @@ function onsiteCommitmentAnswer(
 function routineLocationCommitmentAnswer(
   label: string,
   ap: ApplicationProfileLike,
+  jdText?: string,
 ): { value: string } | { skipReason: string } | null {
-  return isLocationCommitmentQuestion(label) ? onsiteCommitmentAnswer(label, ap) : null;
+  return isLocationCommitmentQuestion(label) ? onsiteCommitmentAnswer(label, ap, jdText) : null;
+}
+
+const FROZEN_JOB_LOCATION_PREFIX = '[LITOS FROZEN JOB LOCATION] ';
+
+/** Encode structured job locations for question resolution without making arbitrary JD prose
+ * location evidence. Kept here so the producer and consumer share the exact marker. */
+export function frozenJobLocationContext(locations: readonly string[]): string {
+  return locations
+    .map((location) => location.trim())
+    .filter(Boolean)
+    .map((location) => `${FROZEN_JOB_LOCATION_PREFIX}${location}`)
+    .join('\n');
+}
+
+function frozenJobLocationsFromContext(context: string | undefined): string[] {
+  if (!context) return [];
+  return context
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith(FROZEN_JOB_LOCATION_PREFIX))
+    .map((line) => line.slice(FROZEN_JOB_LOCATION_PREFIX.length).trim())
+    .filter(Boolean);
 }
 
 /* AGE_ATTESTATION_QUESTION is no longer in this list, and that is the whole of the second half of
@@ -1293,16 +1327,9 @@ export function governmentEmploymentSkipReason(label: string, because: string): 
 /**
  * "Prior US Government Employment?" answered by READING the experience bank.
  *
- * The negative this returns is derived, and the distinction is the whole point of the arm. The
- * canon rule it implements is the applicant's own: application questions about her history are
- * answered from her record, and absence on that record is itself the answer. What makes that rule
- * safe rather than a laundered constant is that the record is actually consulted - every entry is
- * read, tested against what the question asks about, and "No" is what is left when nothing
- * matched. Put a government employer in the bank and this returns Yes without another line of
- * code, which is the property the test pins.
- *
- * A hardcoded "No" would pass the same production packet today and would be a lie the first time a
- * student with a summer at a federal agency installed Litos.
+ * A typed job entry naming a government employer proves Yes. Project and leadership entries prove
+ * nothing about employment, and absence proves nothing because the bank is resume-derived rather
+ * than an attested complete employment history. Every other case is held for review.
  */
 function governmentEmploymentAnswer(
   label: string,
@@ -1310,12 +1337,16 @@ function governmentEmploymentAnswer(
 ): { value: string } | { skipReason: string } | null {
   if (!isGovernmentEmploymentQuestion(label)) return null;
 
-  const bank = ap.experience_bank?.filter((entry) => entry?.org?.trim());
+  const recorded = ap.experience_bank?.filter((entry) => entry?.org?.trim());
   /* An empty bank is "she never told us", not "she never worked anywhere". Nothing is derivable
    * from a record that does not exist, so this refuses rather than reporting the negative - which
    * is also what keeps the empty-profile sweep at the number it was. */
-  if (!bank?.length) {
+  if (!recorded?.length) {
     return { skipReason: governmentEmploymentSkipReason(label, 'your experience is not on file') };
+  }
+  const bank = recorded.filter((entry) => entry.type === 'job');
+  if (!bank.length) {
+    return { skipReason: governmentEmploymentSkipReason(label, 'your record has no typed employment entries') };
   }
 
   /* A stored military record outranks the bank in one direction only. The armed forces are
@@ -1331,7 +1362,7 @@ function governmentEmploymentAnswer(
   if (named.some((name) => MAYBE_GOVERNMENT_EMPLOYER_NAME.test(name))) {
     return { skipReason: governmentEmploymentSkipReason(label, 'one of your organisations may be a public body') };
   }
-  return { value: 'No' };
+  return { skipReason: governmentEmploymentSkipReason(label, 'your employment record does not prove a complete history') };
 }
 
 // "Do you have a preferred name, other than the name indicated above?"
@@ -1901,19 +1932,20 @@ function isSinglePlainEmployerTarget(value: string): boolean {
 }
 
 /**
- * Every organisation the applicant has declared, from both records that hold one.
+ * Every employer the applicant has positively declared, from both records that hold one.
  *
  * `employer_history` alone was the sibling of the bug this branch is about. It is scraped out of
  * `parsed_json.experience`, and on the owner's production profile on 2026-08-09 it held 4 of her 9
  * organisations - Traeco, Spark SC and Venture Capital Academy were in the experience bank and not
  * in the parse. "Have you ever worked for Traeco?" therefore answered "No" from a record that was
  * missing the entry that made it Yes, which is the same failure as a hardcoded negative wearing a
- * lookup as a disguise. The bank is the record she authored, so it is unioned in here.
+ * lookup as a disguise. Typed job rows are unioned in for positive matches. Projects and
+ * leadership are excluded, and a non-match is held because neither record is proven exhaustive.
  */
 function declaredEmployers(ap: ApplicationProfileLike): string[] {
   const declared = [
     ...(ap.employer_history ?? []),
-    ...(ap.experience_bank ?? []).map((entry) => entry.org),
+    ...(ap.experience_bank ?? []).filter((entry) => entry.type === 'job').map((entry) => entry.org),
   ];
   return declared.map(normalizeEmployerName).filter(Boolean);
 }
@@ -1937,7 +1969,7 @@ function priorEmployerAnswer(label: string, ap: ApplicationProfileLike): { value
    * employer she is currently at. employerMatchesTarget is anchored at the first token precisely
    * so that "Tone" still cannot match "Tonee". */
   const knownMatch = history.some((employer) => employerMatchesTarget(employer, target));
-  return { value: knownMatch ? 'Yes' : 'No' };
+  return knownMatch ? { value: 'Yes' } : null;
 }
 
 /* Where she LIVES, which is a stored fact, kept strictly apart from where she will WORK, which is
@@ -2646,7 +2678,7 @@ export function resolveKnownAnswer(
    * and that argument does not apply to a question whose subject is where she sits. A label that is
    * genuinely about hours and names no office still reaches the branch below untouched, because
    * isLocationCommitmentQuestion requires an office/onsite/commute word. */
-  const routineLocationCommitment = routineLocationCommitmentAnswer(label, ap);
+  const routineLocationCommitment = routineLocationCommitmentAnswer(label, ap, jdText);
   if (routineLocationCommitment) return routineLocationCommitment;
 
   /* THE DATE QUESTIONS, AND ONLY THEM, AND ONLY FROM A WINDOW THAT COVERS THIS POSTING.
@@ -2769,7 +2801,7 @@ export function resolveKnownAnswer(
     case 'most_recent_employer':
       return ap.most_recent_employer ? { value: ap.most_recent_employer } : null;
     case 'onsite_commitment':
-      return onsiteCommitmentAnswer(label, ap);
+      return onsiteCommitmentAnswer(label, ap, jdText);
     case 'current_enrollment':
       return currentEnrollmentAnswer(ap);
     case 'study_year': {
