@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '../db/index';
 import { application_profile, profiles, users } from '../db/schema';
 import { decryptRow } from '../routes/applicationProfile';
+import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
 import type { ApplicationProfileLike } from './questionDiscovery';
 import { selectApplicationProfileRow, factBoolean, factString, factStringList } from './applicationFacts';
 
@@ -24,7 +25,7 @@ export function workEligibilityFromSponsorshipAnswer(answer: unknown): {
 }
 
 export async function loadApplicationProfileLike(userId: string): Promise<ApplicationProfileLike> {
-  const [appRow, [profileRow], [userRow]] = await Promise.all([
+  const [appRow, [profileRow], [userRow], bankRows] = await Promise.all([
     // Tolerant read, see lib/applicationFacts.ts. This is the resolver's own profile read, so a
     // 42703 here would stall every in-flight submission, not just the new questions.
     selectApplicationProfileRow(userId),
@@ -32,6 +33,17 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
     db.select({
       sponsorship_answer: users.sponsorship_answer,
     }).from(users).where(eq(users.id, userId)).limit(1),
+    /* The experience bank, read the one way it is allowed to be read (db/experienceBank.ts), the
+     * same call coverLetterService and the submission runner already make. The resolver needs it
+     * because a question about her employment history has to be answered by checking her
+     * employment history, and `employer_history` is not that: it is scraped out of
+     * parsed_json.experience and held 4 of the owner's 9 organisations on 2026-08-09.
+     *
+     * The catch is not defensive noise. An unreadable bank must reach the resolver as an EMPTY
+     * one, because empty is the case the resolver already refuses on: "we could not read your
+     * experience" and "you never worked anywhere" must not become the same input. Throwing here
+     * would instead stall every submission over a question that is allowed to be left blank. */
+    readExperienceBankOrSeedFromBaseResume(userId).catch(() => []),
   ]);
   const app = appRow ? (decryptRow(appRow) as Record<string, unknown>) : {};
   const parsed = (profileRow?.parsed_json && typeof profileRow.parsed_json === 'object'
@@ -147,6 +159,9 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
     current_employer: currentEmployer(),
     most_recent_employer: mostRecentEmployer(),
     employer_history: employerHistory(),
+    experience_bank: bankRows
+      .map((entry) => ({ org: (entry.org ?? '').trim(), title: entry.title?.trim() || undefined }))
+      .filter((entry) => entry.org),
     school: academicStr('school'),
     degree: academicStr('degree'),
     education_start_date: educationStartDate(),
