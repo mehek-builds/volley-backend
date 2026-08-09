@@ -14,18 +14,31 @@ test('security-code E2E refuses production targets and unconfirmed databases', (
   assert.throws(() => assertControlledSecurityCodeTarget({
     apiBase: 'https://student-outreach-backend.vercel.app',
     websiteBase: 'http://localhost:3300',
+    portalPublicBase: 'http://localhost:3300',
     databaseConfirmed: true,
-  }), /only runs against local controlled services/);
+    publicPortalConfirmed: false,
+  }), /only runs against a local API and website/);
   assert.throws(() => assertControlledSecurityCodeTarget({
     apiBase: 'http://localhost:3301',
     websiteBase: 'http://localhost:3300',
+    portalPublicBase: 'http://localhost:3300',
     databaseConfirmed: false,
+    publicPortalConfirmed: false,
   }), /QA_CONTROLLED_DATABASE=1/);
   assert.doesNotThrow(() => assertControlledSecurityCodeTarget({
     apiBase: 'http://127.0.0.1:3301',
     websiteBase: 'http://localhost:3300',
+    portalPublicBase: 'https://controlled-portal.example.test',
     databaseConfirmed: true,
+    publicPortalConfirmed: true,
   }));
+  assert.throws(() => assertControlledSecurityCodeTarget({
+    apiBase: 'http://127.0.0.1:3301',
+    websiteBase: 'http://localhost:3300',
+    portalPublicBase: 'https://controlled-portal.example.test',
+    databaseConfirmed: true,
+    publicPortalConfirmed: false,
+  }), /QA_CONTROLLED_PORTAL_PUBLIC=1/);
 });
 
 test('managed alias matches the production deterministic packet shape', () => {

@@ -45,15 +45,27 @@ export function securityCodeMailboxUrl(base, caseId) {
   return target.toString();
 }
 
-export function assertControlledSecurityCodeTarget({ apiBase, websiteBase, databaseConfirmed }) {
+export function assertControlledSecurityCodeTarget({
+  apiBase,
+  websiteBase,
+  portalPublicBase,
+  databaseConfirmed,
+  publicPortalConfirmed,
+}) {
   const local = (value) => {
     const hostname = new URL(value).hostname.toLowerCase();
     return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
   };
   if (!local(apiBase) || !local(websiteBase)) {
-    throw new Error('The security-code QA path only runs against local controlled services');
+    throw new Error('The security-code QA path only runs against a local API and website');
   }
   if (!databaseConfirmed) {
     throw new Error('QA_CONTROLLED_DATABASE=1 is required before the security-code harness mutates the QA database');
+  }
+  if (!local(portalPublicBase)) {
+    const target = new URL(portalPublicBase);
+    if (target.protocol !== 'https:' || !publicPortalConfirmed) {
+      throw new Error('A public controlled portal requires HTTPS and QA_CONTROLLED_PORTAL_PUBLIC=1');
+    }
   }
 }

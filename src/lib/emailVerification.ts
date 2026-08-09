@@ -192,9 +192,9 @@ function expectedSenderDomains(portalUrl: string): string[] {
     return [];
   }
   const host = parsed.hostname.toLowerCase();
-  const localControlledPortal = (host === 'localhost' || host === '127.0.0.1' || host === '::1')
+  const controlledQaPortal = process.env.NODE_ENV !== 'production'
     && parsed.pathname.startsWith('/qa/portal-submission');
-  if (localControlledPortal && parsed.searchParams.get('board')?.toLowerCase() === 'greenhouse') {
+  if (controlledQaPortal && parsed.searchParams.get('board')?.toLowerCase() === 'greenhouse') {
     return PORTAL_SENDER_DOMAINS[0].senders;
   }
   const configured = PORTAL_SENDER_DOMAINS.find(({ portal }) => portal.test(host));

@@ -18,6 +18,7 @@ const apiBase = process.env.QA_API_BASE ?? 'http://localhost:3301';
 const portalUrl = process.env.QA_PORTAL_URL ?? 'http://localhost:3300/qa/portal-submission';
 const databaseUrl = process.env.DATABASE_URL;
 const websiteBase = process.env.QA_WEBSITE_BASE ?? 'http://localhost:3300';
+const portalPublicBase = process.env.QA_PORTAL_PUBLIC_BASE ?? websiteBase;
 const screenshotDir = process.env.QA_SCREENSHOT_DIR;
 const runCount = Number(process.env.QA_RUNS ?? '3');
 const autoApply = process.env.QA_AUTO_APPLY === '1';
@@ -42,7 +43,9 @@ if (securityCodeMode) {
   assertControlledSecurityCodeTarget({
     apiBase,
     websiteBase,
+    portalPublicBase,
     databaseConfirmed: process.env.QA_CONTROLLED_DATABASE === '1',
+    publicPortalConfirmed: process.env.QA_CONTROLLED_PORTAL_PUBLIC === '1',
   });
 }
 
@@ -107,7 +110,7 @@ async function waitForSubmitted(applicationId, token) {
 }
 
 async function readSecurityCode(caseId) {
-  const response = await fetch(securityCodeMailboxUrl(websiteBase, caseId), {
+  const response = await fetch(securityCodeMailboxUrl(portalPublicBase, caseId), {
     headers: { 'Cache-Control': 'no-store' },
   });
   const body = await response.json().catch(() => null);
@@ -232,7 +235,7 @@ try {
     const applicationId = randomUUID();
     const now = new Date().toISOString();
     const caseId = securityCodeMode ? securityCodeCase(applicationId, run) : null;
-    const runPortalUrl = securityCodeMode ? securityCodePortalUrl(websiteBase, caseId) : portalUrl;
+    const runPortalUrl = securityCodeMode ? securityCodePortalUrl(portalPublicBase, caseId) : portalUrl;
     const alias = securityCodeMode
       ? managedApplicationAlias({ aliasSecret, domain: managedDomain, userId, applicationId })
       : null;
