@@ -52,10 +52,12 @@ test('application inbox schema and webhook route are registered', () => {
 
 test('signed managed canary proof is accepted before provider content retrieval and alias routing', () => {
   const webhook = route.slice(route.indexOf("fastify.post('/webhooks/application-email/inbound'"));
+  const endpointMatch = webhook.indexOf('signedWebhookRequestMatchesConfiguredEndpoint(request)');
   const proof = webhook.indexOf('acceptSignedManagedReceivingCanary(event)');
   const retrieveAndNormalize = webhook.indexOf('inboundEmailFromWebhookBody(request.body)');
   const aliasRoute = webhook.indexOf('processInboundApplicationEmail(inbound)');
   assert.ok(proof >= 0);
+  assert.ok(endpointMatch >= 0 && endpointMatch < proof);
   assert.ok(retrieveAndNormalize > proof);
   assert.ok(aliasRoute > retrieveAndNormalize);
   assert.match(webhook, /signedByResend = resendProofSignatureMatches\(request\)/);

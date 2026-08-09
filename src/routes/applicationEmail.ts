@@ -26,6 +26,7 @@ import {
   acceptSignedManagedReceivingCanary,
   type SignedResendCanaryEvent,
 } from '../lib/applicationEmailReceivingProof';
+import { normalizedApplicationEmailWebhookEndpoint } from '../lib/applicationEmailRoute';
 
 const WEBHOOK_MAX_SKEW_MS = 5 * 60 * 1000;
 
@@ -118,6 +119,26 @@ export function inboundSecretMatches(request: FastifyRequest): boolean {
 export function resendProofSignatureMatches(request: FastifyRequest): boolean {
   const secret = process.env.RESEND_WEBHOOK_SECRET?.trim();
   return Boolean(secret && svixSignatureMatches(request, secret));
+}
+
+function firstHeader(value: string | string[] | undefined): string | null {
+  const first = Array.isArray(value) ? value[0] : value;
+  return first?.split(',')[0]?.trim().toLowerCase() || null;
+}
+
+/** The signed body is necessary but not enough for route proof. A captured valid delivery replayed
+ * to another host must not vouch for the configured production endpoint. Vercel supplies and
+ * overwrites the forwarded host and protocol at its trusted edge. */
+export function signedWebhookRequestMatchesConfiguredEndpoint(request: FastifyRequest): boolean {
+  const configured = normalizedApplicationEmailWebhookEndpoint();
+  if (!configured) return false;
+  const expected = new URL(configured);
+  const host = firstHeader(request.headers['x-forwarded-host']) ?? firstHeader(request.headers.host);
+  const protocol = firstHeader(request.headers['x-forwarded-proto']) ?? request.protocol?.toLowerCase();
+  const path = request.url.split('?')[0]?.replace(/\/+$/, '') || '/';
+  return host === expected.host.toLowerCase()
+    && protocol === expected.protocol.slice(0, -1)
+    && path === expected.pathname;
 }
 
 const directInboundBodySchema = z.object({
@@ -340,6 +361,9 @@ export async function applicationEmailRoutes(fastify: FastifyInstance) {
     if (signedByResend) {
       const event = signedResendCanaryEvent(request.body);
       if (event) {
+        if (!signedWebhookRequestMatchesConfiguredEndpoint(request)) {
+          return reply.status(400).send({ error: 'Invalid receiving proof' });
+        }
         try {
           const canary = await acceptSignedManagedReceivingCanary(event);
           if (canary.kind === 'accepted') {

@@ -2,9 +2,12 @@ import { createHash } from 'crypto';
 import { and, eq, gte } from 'drizzle-orm';
 import { db } from '../db';
 import { application_email_receiving_proofs } from '../db/schema';
-import { applicationEmailRouteSelection } from './applicationEmailRoute';
+import {
+  applicationEmailRouteSelection,
+  normalizedApplicationEmailWebhookEndpoint,
+} from './applicationEmailRoute';
 
-export const MANAGED_RECEIVING_PROOF_VERSION = 1;
+export const MANAGED_RECEIVING_PROOF_VERSION = 2;
 export const MANAGED_RECEIVING_PROOF_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 export type ManagedReceivingProof = {
@@ -17,7 +20,7 @@ export type ManagedReceivingProof = {
 
 export type ManagedReceivingProofStore = {
   findByMessageHash(hash: string): Promise<ManagedReceivingProof | null>;
-  findCurrent(routeFingerprint: string, domain: string, notBefore: Date): Promise<ManagedReceivingProof | null>;
+  findCurrent(routeFingerprint: string, domain: string, proofVersion: number, notBefore: Date): Promise<ManagedReceivingProof | null>;
   insert(proof: ManagedReceivingProof): Promise<boolean>;
 };
 
@@ -37,6 +40,10 @@ function canaryToken(): string | null {
   return token && /^[A-Za-z0-9_-]{32,128}$/.test(token) ? token.toLowerCase() : null;
 }
 
+function resendWebhookSigningSecret(): string | null {
+  return process.env.RESEND_WEBHOOK_SECRET?.trim() || null;
+}
+
 /** Exact one-time recipient, deliberately never returned by health or error responses. */
 export function configuredManagedReceivingCanaryRecipient(): string | null {
   const route = applicationEmailRouteSelection();
@@ -53,8 +60,20 @@ export function managedReceivingProofRouteFingerprint(): string | null {
   const route = applicationEmailRouteSelection();
   const secret = aliasSecret();
   const token = canaryToken();
+  const endpoint = normalizedApplicationEmailWebhookEndpoint();
+  const signingSecret = resendWebhookSigningSecret();
+  if (route.mode !== 'managed_resend' || !route.domain || !secret || !token || !endpoint || !signingSecret) return null;
+  return hash(`managed-receiving-proof-v${MANAGED_RECEIVING_PROOF_VERSION}:${route.mode}:${route.domain}:${secret}:${token}:${endpoint}:${signingSecret}`);
+}
+
+/** Version 1 omitted endpoint and signing-secret binding. It is never health evidence, but checking
+ * its fingerprint prevents reusing an already-consumed one-time recipient during this upgrade. */
+function legacyManagedReceivingProofRouteFingerprint(): string | null {
+  const route = applicationEmailRouteSelection();
+  const secret = aliasSecret();
+  const token = canaryToken();
   if (route.mode !== 'managed_resend' || !route.domain || !secret || !token) return null;
-  return hash(`managed-receiving-proof-v${MANAGED_RECEIVING_PROOF_VERSION}:${route.mode}:${route.domain}:${secret}:${token}`);
+  return hash(`managed-receiving-proof-v1:${route.mode}:${route.domain}:${secret}:${token}`);
 }
 
 export function managedReceivingProviderMessageHash(providerMessageId: string): string {
@@ -68,11 +87,11 @@ export const databaseManagedReceivingProofStore: ManagedReceivingProofStore = {
       .limit(1);
     return rows[0] ?? null;
   },
-  async findCurrent(routeFingerprint, domain, notBefore) {
+  async findCurrent(routeFingerprint, domain, proofVersion, notBefore) {
     const rows = await db.select().from(application_email_receiving_proofs).where(and(
       eq(application_email_receiving_proofs.route_fingerprint, routeFingerprint),
       eq(application_email_receiving_proofs.domain, domain),
-      eq(application_email_receiving_proofs.proof_version, MANAGED_RECEIVING_PROOF_VERSION),
+      eq(application_email_receiving_proofs.proof_version, proofVersion),
       gte(application_email_receiving_proofs.verified_at, notBefore),
     )).limit(1);
     return rows[0] ?? null;
@@ -121,6 +140,12 @@ export async function acceptSignedManagedReceivingCanary(
     return sameProof ? { kind: 'accepted', replay: true } : { kind: 'rejected' };
   }
 
+
+  const legacyFingerprint = legacyManagedReceivingProofRouteFingerprint();
+  if (legacyFingerprint && await store.findCurrent(legacyFingerprint, domain, 1, new Date(0))) {
+    return { kind: 'rejected' };
+  }
+
   const proof: ManagedReceivingProof = {
     provider_message_hash: providerMessageHash,
     route_fingerprint: routeFingerprint,
@@ -150,7 +175,7 @@ export async function recentManagedReceivingProof(options: {
   const now = options.now ?? new Date();
   const notBefore = new Date(now.getTime() - MANAGED_RECEIVING_PROOF_MAX_AGE_MS);
   const proof = await (options.store ?? databaseManagedReceivingProofStore)
-    .findCurrent(routeFingerprint, route.domain, notBefore);
+    .findCurrent(routeFingerprint, route.domain, MANAGED_RECEIVING_PROOF_VERSION, notBefore);
   return Boolean(proof
     && proof.route_fingerprint === routeFingerprint
     && proof.domain === route.domain

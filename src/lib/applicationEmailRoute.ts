@@ -1,5 +1,8 @@
 export type ApplicationEmailRouteMode = 'managed_resend' | 'custom_domain' | 'mailbox';
 
+export const DEFAULT_INBOUND_WEBHOOK_URL = 'https://student-outreach-backend.vercel.app/webhooks/application-email/inbound';
+const INBOUND_WEBHOOK_PATH = '/webhooks/application-email/inbound';
+
 export type ApplicationEmailMailboxRoute = {
   local: string;
   domain: string;
@@ -117,4 +120,26 @@ export function applicationEmailRouteSelection(): ApplicationEmailRouteSelection
 export function configuredResendManagedReceivingDomain(): string | null {
   const selection = applicationEmailRouteSelection();
   return selection.mode === 'managed_resend' ? selection.domain : null;
+}
+
+/**
+ * Exact public endpoint a managed Resend delivery must prove. The normalized value is safe to bind
+ * into a hash, but is never persisted directly. Query strings, credentials, non-HTTPS URLs, and
+ * alternate paths fail closed because none identifies the receiving route registered below.
+ */
+export function normalizedApplicationEmailWebhookEndpoint(): string | null {
+  const raw = process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_URL?.trim() || DEFAULT_INBOUND_WEBHOOK_URL;
+  try {
+    const url = new URL(raw);
+    const path = url.pathname.replace(/\/+$/, '') || '/';
+    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) return null;
+    if (path !== INBOUND_WEBHOOK_PATH) return null;
+    return `${url.protocol}//${url.host.toLowerCase()}${path}`;
+  } catch {
+    return null;
+  }
+}
+
+export function applicationEmailWebhookEndpoint(): string {
+  return normalizedApplicationEmailWebhookEndpoint() ?? '';
 }
