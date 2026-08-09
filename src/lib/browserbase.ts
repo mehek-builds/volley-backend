@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 export type BrowserProvider = 'browserbase' | 'stratus' | 'stratus-managed';
 
 export type ManagedBrowserAction = {
-  type: 'click' | 'fill' | 'fillByLabelText' | 'upload' | 'waitForSelector' | 'press' | 'select' | 'extract' | 'discover';
+  type: 'click' | 'fill' | 'fillByLabelText' | 'upload' | 'waitForSelector' | 'press' | 'select' | 'extract' | 'discover' | 'confirmRequired';
   selector?: string;
   value?: string;
   text?: string;
@@ -14,6 +14,15 @@ export type ManagedBrowserAction = {
   timeout?: number;
   attribute?: string;
   file?: { name: string; mimeType: string; base64: string };
+  /**
+   * Only used by confirmRequired. The managed runner rescans required controls after the ordinary
+   * fills, commits framework state on the affected controls, and may repeat that affected set this
+   * many times. It must stop the action list when any field remains unresolved, so a later submit
+   * click is unreachable. This is intentionally a single bounded action rather than one blind click
+   * per field: the runner has the live DOM and can choose the exact label/control without spending
+   * the application-wide action budget on speculative selectors.
+   */
+  maxRetries?: number;
   /* The emailed code that finishes a Greenhouse submit, carried on the submit click itself.
    *
    * On the click, and not as its own action, because the control it types into does not exist until
@@ -99,6 +108,23 @@ export type ManagedBrowserResult = {
    * from a text sweep that reads an employer's own "check your email for confirmation" as a
    * challenge. */
   continuationOffered?: boolean;
+  /**
+   * Fail-closed proof emitted by confirmRequired. One record is required for every required field
+   * the runner inspected, including fields that were already committed. A runner that predates the
+   * protocol returns no proof, which callers treat as unsupported and never as success.
+   */
+  requiredFieldConfirmation?: {
+    status: 'confirmed' | 'blocked';
+    attempts: Array<{
+      selector: string;
+      label: string | null;
+      fieldType: 'text' | 'date' | 'select' | 'react-select' | 'radio' | 'checkbox' | 'custom';
+      outcome: 'already_committed' | 'confirmed' | 'failed';
+      reason?: string;
+    }>;
+    retries: number;
+    unresolved: string[];
+  } | null;
 };
 
 type ManagedBrowserError = string | { message?: string; code?: string };
@@ -132,6 +158,13 @@ function stratusAction(action: ManagedBrowserAction): ManagedBrowserAction {
   if (action.type === 'fillByLabelText') {
     if (!action.text?.trim()) return action;
     return { ...action, selector: action.selector?.trim() || 'body' };
+  }
+  if (action.type === 'confirmRequired') {
+    return {
+      ...action,
+      selector: action.selector?.trim() || 'form',
+      maxRetries: Math.min(Math.max(action.maxRetries ?? 1, 0), 1),
+    };
   }
   return action;
 }

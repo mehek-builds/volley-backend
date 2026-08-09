@@ -490,6 +490,7 @@ test('managed controlled-portal actions include reviewed fields, resume upload, 
       'upload',
       'upload',
       'fillByLabelText',
+      'confirmRequired',
       'click',
     ],
   );

@@ -4284,9 +4284,13 @@ export function buildManagedPortalActions(
   const familyActionLimit = portalFamily(portal) === 'greenhouse' && packetLooksAkuna(packet)
     ? 100
     : MANAGED_ACTION_LIMIT;
-  // One action held back for the submit click, which is appended below and is otherwise the action
-  // that puts an exactly-full list one over the ceiling.
-  const actionLimit = canAppendSubmit ? familyActionLimit - 1 : familyActionLimit;
+  // Submission reserves two actions: a single live-DOM confirmation pass, then the click. The
+  // confirmation action is required and fail-closed. It emits input/change plus blur for text and
+  // date controls, commits an exact option for native and React selects, and focuses/clicks the
+  // exact associated control or label for radio, checkbox and custom controls. It then rescans
+  // only affected required fields once. The managed runner must stop the list if any confirmation
+  // fails, which makes the submit click physically unreachable.
+  const actionLimit = canAppendSubmit ? familyActionLimit - 2 : familyActionLimit;
   const questionProtection = reviewedQuestionActionProtection(actions, packet);
   const protectedActionBases = new Set([
     ...coreActionProtection(actions, portal),
@@ -4304,6 +4308,14 @@ export function buildManagedPortalActions(
   }
 
   if (canAppendSubmit) {
+    actions.push({
+      type: 'confirmRequired',
+      selector: 'form',
+      label: 'required_field_confirmation',
+      optional: false,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+      maxRetries: 1,
+    });
     actions.push({ type: 'click', selector: 'button[type="submit"], input[type="submit"]' });
   }
   return actions;
@@ -6337,6 +6349,45 @@ export class FormIncompleteError extends NoSubmitControlError {
     );
     this.name = 'FormIncompleteError';
     this.fields = fields;
+  }
+}
+
+export class ManagedRequiredFieldConfirmationError extends NoSubmitControlError {
+  readonly fields: string[];
+
+  constructor(fields: string[], message?: string) {
+    const unique = [...new Set(fields.filter((field) => field.trim()).map((field) => field.trim()))];
+    super(message ?? (
+      unique.length > 0
+        ? `Litos did not press submit: ${unique.length} required field confirmation${unique.length === 1 ? '' : 's'} failed (${unique.slice(0, 5).join('; ')})`
+        : 'Litos did not press submit: the browser could not prove required fields were committed'
+    ));
+    this.name = 'ManagedRequiredFieldConfirmationError';
+    this.fields = unique;
+  }
+}
+
+/**
+ * Require the remote runner's per-field proof before this service records a receipt. The action
+ * itself is the pre-click barrier. This read is the independent reporting barrier, so an older
+ * runner that silently ignores an unknown action cannot turn a silent fill into `submitted`.
+ */
+export function assertManagedRequiredFieldsConfirmed(
+  result: Pick<import('./browserbase').ManagedBrowserResult, 'requiredFieldConfirmation'>,
+): void {
+  const proof = result.requiredFieldConfirmation;
+  if (!proof) {
+    throw new ManagedRequiredFieldConfirmationError([], 'Litos did not press submit: the managed browser does not support required-field confirmation');
+  }
+  const failedAttempts = proof.attempts
+    .filter((attempt) => attempt.outcome === 'failed')
+    .map((attempt) => attempt.label || attempt.selector);
+  const unresolved = [...proof.unresolved, ...failedAttempts];
+  if (proof.status !== 'confirmed' || unresolved.length > 0) {
+    throw new ManagedRequiredFieldConfirmationError(unresolved);
+  }
+  if (proof.attempts.some((attempt) => !attempt.selector.trim())) {
+    throw new ManagedRequiredFieldConfirmationError([], 'Litos did not press submit: required-field confirmation returned an action without a durable selector');
   }
 }
 

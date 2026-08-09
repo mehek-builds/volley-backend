@@ -80,6 +80,7 @@ import {
   type SubmissionPacket,
   type SupportedPortal,
   ManagedActionBudgetError,
+  assertManagedRequiredFieldsConfirmed,
   NoSubmitControlError,
 } from '../lib/portalSubmission';
 import {
@@ -2569,6 +2570,10 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         ...(!options.securityCode ? { requestContinuation: true, continuationTtlSeconds: 120 } : {}),
       },
     );
+    // Required-field confirmation is a barrier inside the same remote action list, immediately
+    // before submit. Require its per-field proof as well: an older runner that ignores or does not
+    // understand the protocol must not be allowed to turn a silent fill into a submitted state.
+    assertManagedRequiredFieldsConfirmed(result);
     let receiptResult = result;
     let verification: ApplicationReviewState['verification'] = { status: 'not_needed' };
     const initialChallenge = readManagedSecurityCodeChallenge(result);
