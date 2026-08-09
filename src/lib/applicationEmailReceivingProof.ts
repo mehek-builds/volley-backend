@@ -6,8 +6,9 @@ import {
   applicationEmailRouteSelection,
   normalizedApplicationEmailWebhookEndpoint,
 } from './applicationEmailRoute';
+import { assertResendReceivedEmailReadable, resendReceivingApiKey } from './resendReceiving';
 
-export const MANAGED_RECEIVING_PROOF_VERSION = 2;
+export const MANAGED_RECEIVING_PROOF_VERSION = 3;
 export const MANAGED_RECEIVING_PROOF_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 export type ManagedReceivingProof = {
@@ -62,8 +63,9 @@ export function managedReceivingProofRouteFingerprint(): string | null {
   const token = canaryToken();
   const endpoint = normalizedApplicationEmailWebhookEndpoint();
   const signingSecret = resendWebhookSigningSecret();
-  if (route.mode !== 'managed_resend' || !route.domain || !secret || !token || !endpoint || !signingSecret) return null;
-  return hash(`managed-receiving-proof-v${MANAGED_RECEIVING_PROOF_VERSION}:${route.mode}:${route.domain}:${secret}:${token}:${endpoint}:${signingSecret}`);
+  const receivingKey = resendReceivingApiKey();
+  if (route.mode !== 'managed_resend' || !route.domain || !secret || !token || !endpoint || !signingSecret || !receivingKey) return null;
+  return hash(`managed-receiving-proof-v${MANAGED_RECEIVING_PROOF_VERSION}:${route.mode}:${route.domain}:${secret}:${token}:${endpoint}:${signingSecret}:${receivingKey}`);
 }
 
 /** Version 1 omitted endpoint and signing-secret binding. It is never health evidence, but checking
@@ -74,6 +76,18 @@ function legacyManagedReceivingProofRouteFingerprint(): string | null {
   const token = canaryToken();
   if (route.mode !== 'managed_resend' || !route.domain || !secret || !token) return null;
   return hash(`managed-receiving-proof-v1:${route.mode}:${route.domain}:${secret}:${token}`);
+}
+
+/** Version 2 proved signed routing but did not prove that the configured provider key could read
+ * received content. It is never health evidence and forces a canary-token rotation for version 3. */
+function routeOnlyManagedReceivingProofRouteFingerprint(): string | null {
+  const route = applicationEmailRouteSelection();
+  const secret = aliasSecret();
+  const token = canaryToken();
+  const endpoint = normalizedApplicationEmailWebhookEndpoint();
+  const signingSecret = resendWebhookSigningSecret();
+  if (route.mode !== 'managed_resend' || !route.domain || !secret || !token || !endpoint || !signingSecret) return null;
+  return hash(`managed-receiving-proof-v2:${route.mode}:${route.domain}:${secret}:${token}:${endpoint}:${signingSecret}`);
 }
 
 export function managedReceivingProviderMessageHash(providerMessageId: string): string {
@@ -117,7 +131,11 @@ export type ManagedCanaryAcceptance =
 /** Called only after the route has cryptographically verified the Resend Svix signature. */
 export async function acceptSignedManagedReceivingCanary(
   event: SignedResendCanaryEvent,
-  options: { store?: ManagedReceivingProofStore; now?: Date } = {},
+  options: {
+    store?: ManagedReceivingProofStore;
+    now?: Date;
+    assertContentReadable?: (emailId: string) => Promise<void>;
+  } = {},
 ): Promise<ManagedCanaryAcceptance> {
   const expectedRecipient = configuredManagedReceivingCanaryRecipient();
   const routeFingerprint = managedReceivingProofRouteFingerprint();
@@ -129,6 +147,12 @@ export async function acceptSignedManagedReceivingCanary(
   // The exact canary must be the only recipient. A copied or foreign-recipient delivery does not
   // prove the configured route in isolation and is rejected without ordinary alias processing.
   if (recipients.length !== 1 || !event.emailId.trim()) return { kind: 'rejected' };
+
+  // A signed delivery proves routing, but ordinary application processing also requires the
+  // provider's Receiving read scope. Persist health evidence only after the same content lookup
+  // used by real aliases succeeds. This prevents a sending-only or wrong-account key from making
+  // /health report a route as deliverable.
+  await (options.assertContentReadable ?? assertResendReceivedEmailReadable)(event.emailId.trim());
 
   const store = options.store ?? databaseManagedReceivingProofStore;
   const providerMessageHash = managedReceivingProviderMessageHash(event.emailId.trim());
@@ -143,6 +167,10 @@ export async function acceptSignedManagedReceivingCanary(
 
   const legacyFingerprint = legacyManagedReceivingProofRouteFingerprint();
   if (legacyFingerprint && await store.findCurrent(legacyFingerprint, domain, 1, new Date(0))) {
+    return { kind: 'rejected' };
+  }
+  const routeOnlyFingerprint = routeOnlyManagedReceivingProofRouteFingerprint();
+  if (routeOnlyFingerprint && await store.findCurrent(routeOnlyFingerprint, domain, 2, new Date(0))) {
     return { kind: 'rejected' };
   }
 

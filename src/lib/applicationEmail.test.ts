@@ -248,6 +248,33 @@ test('resend received email hydration fetches the full body before routing', asy
   }
 });
 
+test('resend received email hydration prefers the dedicated Receiving API key', async () => {
+  const previousReceivingKey = process.env.RESEND_RECEIVING_API_KEY;
+  const previousKey = process.env.RESEND_API_KEY;
+  const previousFetch = globalThis.fetch;
+  process.env.RESEND_RECEIVING_API_KEY = 're_receiving_scope';
+  process.env.RESEND_API_KEY = 're_sending_scope';
+  globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    assert.equal((init?.headers as Record<string, string>).Authorization, 'Bearer re_receiving_scope');
+    return new Response(JSON.stringify({ id: 'email_dedicated', to: ['alias@example.com'] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  try {
+    await retrieveResendReceivedEmail({
+      emailId: 'email_dedicated',
+      fallback: { provider: 'resend', to: ['alias@example.com'], raw: {} },
+    });
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousReceivingKey === undefined) delete process.env.RESEND_RECEIVING_API_KEY;
+    else process.env.RESEND_RECEIVING_API_KEY = previousReceivingKey;
+    if (previousKey === undefined) delete process.env.RESEND_API_KEY;
+    else process.env.RESEND_API_KEY = previousKey;
+  }
+});
+
 /* ---- the deliverability precondition on the address employers are given ---- */
 
 const USER_ID = '11111111-1111-4111-8111-111111111111';

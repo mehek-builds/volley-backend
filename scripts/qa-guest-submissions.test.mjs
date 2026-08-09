@@ -213,12 +213,13 @@ test('controlled managed receiving proof is fully bound to the disposable QA con
     canaryToken: '0123456789abcdef0123456789abcdef',
     webhookEndpoint: 'https://backend.example.test/webhooks/application-email/inbound',
     webhookSecret: 'whsec_controlled_test',
+    receivingApiKey: 're_controlled_receiving_test',
     databaseMarker: marker,
   };
   const proof = controlledManagedReceivingProof(input);
   assert.match(proof.route_fingerprint, /^[a-f0-9]{64}$/);
   assert.match(proof.provider_message_hash, /^[a-f0-9]{64}$/);
-  assert.equal(proof.proof_version, 2);
+  assert.equal(proof.proof_version, 3);
   assert.equal(proof.domain, input.domain);
   assert.notEqual(
     proof.route_fingerprint,
@@ -227,6 +228,10 @@ test('controlled managed receiving proof is fully bound to the disposable QA con
   assert.notEqual(
     proof.provider_message_hash,
     controlledManagedReceivingProof({ ...input, databaseMarker: 'rotated_database_marker_1234' }).provider_message_hash,
+  );
+  assert.notEqual(
+    proof.route_fingerprint,
+    controlledManagedReceivingProof({ ...input, receivingApiKey: 're_rotated_receiving_test' }).route_fingerprint,
   );
   assert.throws(() => controlledManagedReceivingProof({
     ...input,
@@ -238,7 +243,7 @@ test('security-code proof must exist before backend startup and match the exact 
   const expected = {
     provider_message_hash: 'a'.repeat(64),
     route_fingerprint: 'b'.repeat(64),
-    proof_version: 2,
+    proof_version: 3,
     domain: 'litos-qa.resend.app',
   };
   const now = new Date('2026-08-09T12:00:00.000Z');

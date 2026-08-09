@@ -19,6 +19,7 @@ async function withAliasEnv<T>(run: () => Promise<T>): Promise<T> {
     mailbox: process.env.LITOS_APPLICATION_EMAIL_MAILBOX,
     enabled: process.env.LITOS_APPLICATION_EMAIL_INBOUND_ENABLED,
     key: process.env.RESEND_API_KEY,
+    receivingKey: process.env.RESEND_RECEIVING_API_KEY,
     from: process.env.RESEND_FROM,
     managedDomain: process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN,
     canaryId: process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID,
@@ -41,6 +42,7 @@ async function withAliasEnv<T>(run: () => Promise<T>): Promise<T> {
   delete process.env.LITOS_QA_EMAIL_CAPTURE_ENABLED;
   delete process.env.LITOS_QA_EMAIL_CAPTURE_URL;
   delete process.env.LITOS_QA_EMAIL_CAPTURE_TOKEN;
+  delete process.env.RESEND_RECEIVING_API_KEY;
   process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'apply.trylitos.com';
   process.env.RESEND_API_KEY = 're_test';
   process.env.RESEND_FROM = 'Litos <applications@trylitos.com>';
@@ -57,6 +59,8 @@ async function withAliasEnv<T>(run: () => Promise<T>): Promise<T> {
     else process.env.LITOS_APPLICATION_EMAIL_INBOUND_ENABLED = saved.enabled;
     if (saved.key === undefined) delete process.env.RESEND_API_KEY;
     else process.env.RESEND_API_KEY = saved.key;
+    if (saved.receivingKey === undefined) delete process.env.RESEND_RECEIVING_API_KEY;
+    else process.env.RESEND_RECEIVING_API_KEY = saved.receivingKey;
     if (saved.from === undefined) delete process.env.RESEND_FROM;
     else process.env.RESEND_FROM = saved.from;
     if (saved.managedDomain === undefined) delete process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN;
@@ -142,6 +146,7 @@ test('managed receiving treats fresh exact signed-webhook proof as time-bounded 
 test('controlled QA capture proves forwarding without contacting Resend and is disabled in production', async () => {
   await withManagedAliasEnv(async () => {
     delete process.env.RESEND_API_KEY;
+    process.env.RESEND_RECEIVING_API_KEY = 're_controlled-capture-proof-binding';
     process.env.NODE_ENV = 'test';
     process.env.LITOS_QA_EMAIL_CAPTURE_ENABLED = 'true';
     process.env.LITOS_QA_EMAIL_CAPTURE_URL = 'http://127.0.0.1:4317/emails';
@@ -219,7 +224,7 @@ test('managed receiving rejects absent or stale durable proof', async () => {
   });
 });
 
-test('managed receiving uses signed-webhook proof without a received-email provider lookup', async () => {
+test('managed receiving reuses durable content-readable proof without another provider lookup on each health check', async () => {
   await withManagedAliasEnv(async () => {
     const result = await applicationAliasDeliverability(healthyManagedProbes);
     assert.equal(result.deliverable, true);

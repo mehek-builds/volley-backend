@@ -290,8 +290,10 @@ job-board reads can work without this, but application POSTs still need an allow
 their matching mode is selected. Managed receiving remains disabled until a fresh, signed
 `email.received` webhook for the exact one-time canary recipient stores a recent durable proof, and
 the exact active `email.received` webhook is verified. The proof is bound to mode, domain, alias
-secret, and canary token, so rotating any of them fails closed. It does not require Resend Receiving
-read scope. An invalid mode selects no route. With no mode, the previous
+secret, canary token, endpoint, webhook signing secret, and Receiving API key, so rotating any of
+them fails closed. The proof is stored only after the canary content can be fetched through Resend's
+Receiving API. A sending-only key or a key from the wrong Resend account therefore cannot make
+health report the route as deliverable. An invalid mode selects no route. With no mode, the previous
 compatibility behavior remains: legacy mailbox precedes legacy domain, managed receiving works only
 when neither legacy route is present, and ambiguous managed-plus-legacy configuration fails closed.
 
@@ -305,6 +307,11 @@ within a five minute freshness window. The webhook stores the inbound message ag
 application, forwards it to the user through Resend, and sets replies to go back to the original
 employer sender. This handles receipts, ordinary verification-code emails, and recruiter replies;
 it does not solve CAPTCHA, account walls, or missing employer-authorized ATS API channels.
+
+`RESEND_RECEIVING_API_KEY` may hold a dedicated key from the Resend account that owns the managed
+receiving domain. When it is absent, inbound reads fall back to `RESEND_API_KEY`. The selected key
+must be authorized for `GET /emails/receiving/:id`; `RESEND_API_KEY` remains the outbound sending
+key.
 
 To create or reuse the Resend webhook when a readable `RESEND_API_KEY` is available locally:
 
@@ -336,7 +343,8 @@ npm run setup:application-email-receiving-canary
 ```
 
 After a deployment containing that token, deliver one canary to the exact derived recipient using
-a trusted operator-only process. The signed webhook records only a message-ID hash, route
+a trusted operator-only process. Proof storage first reads the canary through the configured
+Receiving API key. The signed webhook records only a message-ID hash, route
 fingerprint, proof version, domain, and timestamp. Health, errors, logs, and the database never
 contain the canary recipient or token. A proof expires after seven days; rotate the one-time token
 and repeat the canary when renewing it.

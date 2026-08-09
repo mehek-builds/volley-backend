@@ -354,10 +354,9 @@ export async function applicationEmailRoutes(fastify: FastifyInstance) {
       return unauthorized(reply);
     }
 
-    /* Provider-key-independent receiving proof. This runs only for a fresh, cryptographically
-     * verified Resend webhook and before ordinary alias lookup or the provider content GET. The
-     * exact canary is intentionally not an application alias, so routing first would discard the
-     * only account-bound evidence the provider can deliver without Receiving read scope. */
+    /* This runs only for a fresh, cryptographically verified Resend webhook and before ordinary
+     * alias lookup. The proof helper also requires the same provider content GET used by real
+     * aliases, so a sending-only or wrong-account key cannot make health report deliverable. */
     if (signedByResend) {
       const event = signedResendCanaryEvent(request.body);
       if (event) {

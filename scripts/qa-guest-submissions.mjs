@@ -351,6 +351,7 @@ try {
       canaryToken: process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN,
       webhookEndpoint: process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_URL,
       webhookSecret: process.env.RESEND_WEBHOOK_SECRET,
+      receivingApiKey: process.env.RESEND_RECEIVING_API_KEY ?? process.env.RESEND_API_KEY,
       databaseMarker,
     });
     const proofResult = await client.query(

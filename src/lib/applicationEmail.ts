@@ -16,6 +16,7 @@ import {
 } from './applicationEmailDeliverability';
 import { emailSender, sendEmail, type OutboundEmail } from './email';
 import { applicationEmailRouteSelection, type ApplicationEmailRouteMode } from './applicationEmailRoute';
+import { resendReceivingApiKey } from './resendReceiving';
 
 export type ApplicationEmailIdentity = {
   alias: string;
@@ -607,8 +608,8 @@ export async function retrieveResendReceivedEmail(input: {
   emailId: string;
   fallback: InboundApplicationEmail;
 }): Promise<InboundApplicationEmail> {
-  const key = process.env.RESEND_API_KEY?.trim();
-  if (!key) throw new Error('RESEND_API_KEY is required to read received email content');
+  const key = resendReceivingApiKey();
+  if (!key) throw new Error('RESEND_RECEIVING_API_KEY or RESEND_API_KEY is required to read received email content');
   const response = await fetch(`https://api.resend.com/emails/receiving/${encodeURIComponent(input.emailId)}`, {
     headers: { Authorization: `Bearer ${key}`, 'User-Agent': 'Litos/1.0' },
   });
