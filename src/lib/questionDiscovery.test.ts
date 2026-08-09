@@ -2718,8 +2718,14 @@ test('a sponsorship question that will not say which country is still refused', 
   /* The line the disclosure rule does not cross, all four phrasings measured in the same run:
    * Together AI and Scale AI ("the country where the job is located"), Deepgram ("the country where
    * this role is located") and DV Trading ("in this country"). "Yes, I need sponsorship" is wrong
-   * and costly for a role in the one country where she may not, and the posting's own location is a
-   * JD inference, which is the thing that was removed for good reason. */
+   * and costly for a role in the one country where she may not.
+   *
+   * NARROWED, and the narrowing is deliberate rather than incidental: these labels are refused
+   * because NO POSTING IS SUPPLIED HERE, not because the family is unanswerable. Every call below
+   * omits the posting-country argument, and the jdText that is passed still counts for nothing - a
+   * country read out of a job description's prose is the inference be1bccf removed and it stays
+   * removed. Once the packet's STRUCTURED location says the United States, the same labels are
+   * answered; see workAuthorizationScope.test.ts, which pins both directions. */
   for (const label of [
     'will you now or in the future require company sponsorship to retain or extend your work authorization in the country where the job is located?',
     'will you now or in the future require visa sponsorship to work in the country where this role is located?',

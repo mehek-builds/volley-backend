@@ -48,6 +48,7 @@
 //   - chooseClosestOption never returns an option on weak evidence. Leaving a field empty is
 //     recoverable; selecting the wrong legal answer on a real application is not.
 
+import type { JobCountry } from './jobLocation';
 import {
   classifyField,
   EEO_QUESTION,
@@ -977,10 +978,13 @@ export function resolveProfileField(
   shape: ProfileFieldShape,
   ap: ApplicationProfileLike,
   jdText?: string,
+  /* Passed straight through to resolveKnownAnswer, which is the only thing that reads it. See the
+     parameter's own note there: it is where the POSTING is, and omitting it only ever refuses. */
+  postingCountry?: JobCountry,
 ): ResolvedProfileField | null {
   const label = normalizeDiscoveredLabel(shape.label);
   if (!label) return null;
-  const known = resolveKnownAnswer(label, shape.inputType ?? 'text', ap, jdText);
+  const known = resolveKnownAnswer(label, shape.inputType ?? 'text', ap, jdText, postingCountry);
   if (!known || !('value' in known)) return null;
   const base = known.value.trim();
   if (!base) return null;

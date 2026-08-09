@@ -19,7 +19,7 @@ test('supported submit-request discovery is not blocked by a sensitive pre-run s
     "'/applications/:id/submission/channels'",
   );
 
-  assert.match(handler, /const sensitive = sensitiveQuestionFor\(normalizedSubmittedQuestions, sensitiveProfile, current\.jd_text\)/);
+  assert.match(handler, /const sensitive = sensitiveQuestionFor\(\s*normalizedSubmittedQuestions, sensitiveProfile, current\.jd_text,/);
   assert.doesNotMatch(handler, /if \(sensitive\) \{\s*return reply\.status\(422\)/);
   assert.match(
     handler,
@@ -49,7 +49,7 @@ test('unsupported email and final approval retain sensitive-question send gates'
     "'/applications/:id/submission/approve'",
     "'/applications/:id/status'",
   );
-  assert.match(approval, /const sensitive = sensitiveQuestionFor\(approvalReview\.questions/);
+  assert.match(approval, /const sensitive = sensitiveQuestionFor\(\s*approvalReview\.questions/);
   assert.match(approval, /if \(sensitive\) \{/);
   assert.match(approval, /approvalIssues\.push\(`Sensitive question requires your attention:/);
 });

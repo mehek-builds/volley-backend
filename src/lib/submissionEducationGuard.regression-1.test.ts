@@ -247,7 +247,7 @@ test('final approval revalidates the full packet before it clicks submit', () =>
   assert.doesNotMatch(handler, /cover_letter_supported/);
   assert.match(handler, /approvalReview\.questions = normalizeApplicationReviewQuestions\(approvalReview\.questions\)/);
   assert.match(handler, /approvalReview\.questions\.some\(\(question\) => question\.required && !question\.answer\.trim\(\)\)/);
-  assert.match(handler, /sensitiveQuestionFor\(approvalReview\.questions/);
+  assert.match(handler, /sensitiveQuestionFor\(\s*approvalReview\.questions/);
   assert.match(handler, /Sensitive question requires your attention/);
   assert.match(handler, /preSendResumeVerificationIssues\([\s\S]{0,120}request\.jwtPayload!\.userId,[\s\S]{0,80}stored,[\s\S]{0,80}applicationCompany\(row\)/);
   assert.match(handler, /FINAL_APPROVAL_VERIFICATION_FAILED/);
