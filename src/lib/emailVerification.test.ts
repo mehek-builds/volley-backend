@@ -109,29 +109,31 @@ test('extracts a contextual Greenhouse alphanumeric code but rejects ordinary ne
 
 test('extracts case-sensitive letter-only Greenhouse codes only from explicit code grammar', () => {
   assert.equal(
-    extractCodeFromVerificationText('Your security code is XXUYBKOD. It expires soon.'),
-    'XXUYBKOD',
+    extractCodeFromVerificationText('Your security code is TPHJrFMJ. It expires soon.'),
+    null,
   );
   assert.equal(
-    extractCodeFromVerificationText('Enter this security code TPHJrFMJ to continue.'),
+    extractCodeFromVerificationText('Enter this security code TPHJrFMJ to continue.', true),
     'TPHJrFMJ',
   );
-  assert.equal(extractCodeFromVerificationText('Security code REQUIRED before continuing.'), null);
-  assert.equal(extractCodeFromVerificationText('Your SECURITY settings were updated.'), null);
+  assert.equal(extractCodeFromVerificationText('Your security code is REQUIRED before continuing.', true), null);
+  assert.equal(extractCodeFromVerificationText('Your security code is PASSWORD before continuing.', true), null);
+  assert.equal(extractCodeFromVerificationText('Use this security code CONTINUE to continue.', true), null);
+  assert.equal(extractCodeFromVerificationText('Your security code is XXUYBKOD.', true), null);
   assert.equal(
-    extractCodeFromVerificationText('Your old security code is XXUYBKOD. Your new security code is TPHJrFMJ.'),
+    extractCodeFromVerificationText('Your old security code is AB12CD34. Your new security code is TPHJrFMJ.', true),
     null,
   );
 });
 
-test('matches the D-024 letter-only code only inside its authenticated application alias', () => {
+test('matches a mixed-case Greenhouse code only inside its authenticated application alias', () => {
   const requestedAt = new Date('2026-08-09T20:43:18.000Z');
   const row = {
     from_email: 'no-reply@greenhouse.io',
     to_email: 'app-405b84f7ae-target@litos-qa.resend.app',
     subject: 'Your Greenhouse application security code',
-    text: 'Your security code is XXUYBKOD. It expires soon.',
-    html: '<p>Your security code is <strong>XXUYBKOD</strong>. It expires soon.</p>',
+    text: 'Your security code is TPHJrFMJ. It expires soon.',
+    html: '<p>Your security code is <strong>TPHJrFMJ</strong>. It expires soon.</p>',
     received_at: new Date('2026-08-09T20:43:27.471Z'),
     raw_json: { authentication: { spf: 'pass', dkim: 'pass', dmarc: 'pass' } },
   };
@@ -144,7 +146,7 @@ test('matches the D-024 letter-only code only inside its authenticated applicati
       portal,
       requestedAt,
       'app-405b84f7ae-target@litos-qa.resend.app',
-    )?.code, 'XXUYBKOD');
+    )?.code, 'TPHJrFMJ');
     assert.equal(extractLitosVerificationCode(
       [{ ...row, raw_json: {} }],
       portal,
@@ -155,6 +157,24 @@ test('matches the D-024 letter-only code only inside its authenticated applicati
     if (previous === undefined) delete process.env.LITOS_ENABLE_TEST_PORTAL;
     else process.env.LITOS_ENABLE_TEST_PORTAL = previous;
   }
+});
+
+test('letter-only code parsing is confined to Greenhouse portals', () => {
+  const requestedAt = new Date('2026-08-09T20:43:18.000Z');
+  const message = {
+    subject: 'Your security code',
+    from: 'no-reply@lever.co',
+    to: 'applicant@example.com',
+    receivedAt: '2026-08-09T20:43:27.471Z',
+    authenticationResults: 'spf=pass smtp.mailfrom=lever.co',
+    text: 'Your security code is TPHJrFMJ.',
+  };
+  assert.equal(extractVerificationCode(
+    [{ provider: 'gmail', data: { messages: [message] } }],
+    'https://jobs.lever.co/acme/123',
+    requestedAt,
+    'applicant@example.com',
+  ), null);
 });
 
 test('accepts recent Gmail messages only from the portal sender allowlist', () => {
