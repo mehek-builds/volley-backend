@@ -3,8 +3,12 @@ import assert from 'node:assert/strict';
 import { describeRequiredBlocker } from './fieldLabel';
 import {
   chooseClosestOption,
+  chooseEeoOption,
   disciplineLadder,
   educationLevelLadder,
+  eeoAnswerLadder,
+  eeoFederalRaceCategory,
+  isDeclineToState,
   optionCoversMonthYear,
   parseNumericRange,
   profileBackedBlockerLabels,
@@ -610,4 +614,198 @@ test('the referral answer snaps onto an employer-named referral list', () => {
   );
   assert.equal(snapped?.value, 'Company Website');
   assert.equal(snapped?.matchedOption, true);
+});
+
+/* ─── EEO self-identification ───────────────────────────────────────────────────────────────────
+ *
+ * The stored preferences are the account's REAL eeo_prefs, read from prod on 2026-08-09 (user
+ * a18f774b-a306-4804-93f3-cd6020c27fb3), and the two option lists are the ONLY option vocabularies
+ * the corpus has ever recorded. Both are read verbatim out of stored question labels, where managed
+ * discovery concatenated the select's option text into the label blob:
+ *
+ *   "veteran statusselect ...i identify as one or more of the classifications of protected veteran
+ *    listed abovei am not a protected veterani decline to self-identify for protected veteran
+ *    status eeo[veteran]"
+ *   "disability statusselect ...yes, i have a disability, or have had one in the pastno, i do not
+ *    have a disability and have not had one in the pasti do not want to answer eeo[disability]"
+ *
+ * Both came back unmatched on the measured Skydio run, and both are answered by an option that was
+ * sitting on the list the whole time.
+ */
+const STORED_EEO: ApplicationProfileLike = {
+  eeo_prefs: {
+    race: 'South Asian',
+    gender: 'Female',
+    veteran_status: 'Decline to self-identify',
+    disability_status: 'Decline to self-identify',
+    sexual_orientation: 'Heterosexual',
+    transgender_status: 'Decline to self-identify',
+  },
+};
+
+const MEASURED_VETERAN_OPTIONS = [
+  'Select ...',
+  'I identify as one or more of the classifications of protected veteran listed above',
+  'I am not a protected veteran',
+  'I decline to self-identify for protected veteran status',
+];
+
+const MEASURED_DISABILITY_OPTIONS = [
+  'Select ...',
+  'Yes, I have a disability, or have had one in the past',
+  'No, I do not have a disability and have not had one in the past',
+  'I do not want to answer',
+];
+
+// The federal self-identification enum. NOT from the corpus, which stores no race option list at
+// all, and labelled as such so nobody later mistakes it for a measurement.
+const FEDERAL_RACE_OPTIONS = [
+  'Hispanic or Latino',
+  'White',
+  'Black or African American',
+  'Native Hawaiian or Other Pacific Islander',
+  'Asian',
+  'American Indian or Alaska Native',
+  'Two or More Races',
+  'Decline to self-identify',
+];
+
+test('the opt-out is matched by what it means, not by how the employer spelled it', () => {
+  const veteran = resolveProfileField(
+    { label: 'veteran status veteran_status', inputType: 'text', options: MEASURED_VETERAN_OPTIONS },
+    STORED_EEO,
+  );
+  assert.equal(veteran?.value, 'I decline to self-identify for protected veteran status');
+  assert.equal(veteran?.matchedOption, true);
+
+  const disability = resolveProfileField(
+    { label: 'disability status disability_status', inputType: 'text', options: MEASURED_DISABILITY_OPTIONS },
+    STORED_EEO,
+  );
+  assert.equal(disability?.value, 'I do not want to answer');
+  assert.equal(disability?.matchedOption, true);
+});
+
+test('the veteran opt-out is not read as an extension that changes the claim', () => {
+  // The precise mechanism of the measured failure. CLOSED_SET_ANSWER_RE lists "decline to self
+  // identify" among the answers whose whole meaning is the phrase itself, so the generic matcher
+  // saw "... for protected veteran status" as words that alter the claim and refused the option.
+  // That refusal is correct for "Yes" against a sponsorship sentence and wrong for a decline: the
+  // remainder names the question being declined rather than asserting anything.
+  assert.equal(chooseClosestOption(['Decline to self-identify'], MEASURED_VETERAN_OPTIONS), null);
+  assert.equal(
+    chooseEeoOption('veteran status', 'Decline to self-identify', MEASURED_VETERAN_OPTIONS),
+    'I decline to self-identify for protected veteran status',
+  );
+  // And the rule it must not weaken for anyone else.
+  assert.equal(
+    chooseClosestOption(['Yes'], ['Yes - I am authorized to work in the US for any employer', 'No']),
+    null,
+  );
+});
+
+test('a stored race widens to the federal category that already contains it', () => {
+  const race = resolveProfileField(
+    { label: 'how would you describe your racial/ethnic background?', inputType: 'text', options: FEDERAL_RACE_OPTIONS },
+    STORED_EEO,
+  );
+  assert.equal(race?.value, 'Asian');
+  assert.equal(race?.matchedOption, true);
+  // Her own words stay at the head of the ladder, so a free-text control still gets what she wrote
+  // and a list carrying her own wording matches it before anything coarser.
+  assert.equal(eeoAnswerLadder('race', 'South Asian')[0], 'South Asian');
+  assert.equal(
+    chooseEeoOption('race', 'South Asian', ['South Asian', 'East Asian', 'Asian', 'Decline to self-identify']),
+    'South Asian',
+  );
+});
+
+test('only a clean containment widens, and everything else declines instead of guessing', () => {
+  // No decline option on this list, so a refusal to map shows up as no match at all rather than as
+  // the opt-out standing in for one.
+  const noOptOut = ['Hispanic or Latino', 'White', 'Black or African American', 'Asian', 'Two or More Races'];
+  assert.equal(eeoFederalRaceCategory('South Asian'), 'Asian');
+  // Central Asia is not named by the federal definition of Asian.
+  assert.equal(eeoFederalRaceCategory('Central Asian'), undefined);
+  assert.equal(chooseEeoOption('race', 'Central Asian', noOptOut), null);
+  // Spans two categories, so either choice narrows her answer.
+  assert.equal(eeoFederalRaceCategory('Asian/Pacific Islander'), undefined);
+  // Ambiguous between Asian Indian and American Indian.
+  assert.equal(eeoFederalRaceCategory('Indian'), undefined);
+  assert.equal(chooseEeoOption('race', 'Indian', noOptOut), null);
+  // The enum files these under White. A contested reassignment is not a coarser word.
+  assert.equal(eeoFederalRaceCategory('Middle Eastern'), undefined);
+  assert.equal(eeoFederalRaceCategory('North African'), undefined);
+  // Widening only. A stored category against a finer list invents detail she never gave.
+  assert.equal(chooseEeoOption('race', 'Asian', ['South Asian', 'East Asian', 'Southeast Asian']), null);
+});
+
+test('the opt-out never displaces an answer the list can actually hold', () => {
+  const gender = resolveProfileField(
+    { label: 'gender', inputType: 'text', options: ['Male', 'Female', 'Non-binary', "I don't wish to answer"] },
+    STORED_EEO,
+  );
+  assert.equal(gender?.value, 'Female');
+  assert.equal(gender?.matchedOption, true);
+  // And where the list has no word for what she said, the opt-out answers rather than the control
+  // being left blank: it states nothing untrue about her, and it is the entry the employer put on
+  // its own list for exactly this case.
+  const orientation = resolveProfileField(
+    {
+      label: 'how would you describe your sexual orientation? (mark all that apply)',
+      inputType: 'text',
+      options: ['Gay', 'Lesbian', 'Bisexual', 'Queer', 'I prefer not to say'],
+    },
+    STORED_EEO,
+  );
+  assert.equal(orientation?.value, 'I prefer not to say');
+  assert.equal(orientation?.matchedOption, true);
+});
+
+test('two opt-outs are resolved by a fixed order of wordings, never by DOM order', () => {
+  // A list carrying two refusals is answered by whichever one the ladder names first, because that
+  // is a decision Litos made once, in source, rather than a guess about which row the employer
+  // happened to render first.
+  assert.equal(
+    chooseEeoOption('race', 'South Asian', ['I prefer not to say', 'Decline to self-identify', 'White']),
+    'Decline to self-identify',
+  );
+  assert.equal(
+    chooseEeoOption('race', 'South Asian', ['Decline to self-identify', 'I prefer not to say', 'White']),
+    'Decline to self-identify',
+  );
+  // And when two refusals are worded in ways the ladder does not name, there is nothing to rank
+  // them by, so it refuses rather than picking whichever came first out of the DOM.
+  assert.equal(
+    chooseEeoOption('race', 'South Asian', ['White', 'I would rather not disclose this', 'Choose not to say']),
+    null,
+  );
+});
+
+test('an affirmative option is never read as a refusal to state', () => {
+  for (const option of [...MEASURED_VETERAN_OPTIONS, ...MEASURED_DISABILITY_OPTIONS].slice(0, -1)) {
+    if (/^select/i.test(option)) continue;
+    if (/decline|do not want to answer/i.test(option)) continue;
+    assert.equal(isDeclineToState(option), false, `read as a decline: ${option}`);
+  }
+  assert.equal(isDeclineToState('No, I do not have a disability and have not had one in the past'), false);
+  assert.equal(isDeclineToState('I am not a protected veteran'), false);
+  assert.equal(isDeclineToState('I identify as one or more of the classifications of protected veteran listed above'), false);
+  assert.equal(isDeclineToState('I do not want to answer'), true);
+  assert.equal(isDeclineToState('I decline to self-identify for protected veteran status'), true);
+  assert.equal(isDeclineToState("I don't wish to answer"), true);
+  assert.equal(isDeclineToState('Prefer not to say'), true);
+  assert.equal(isDeclineToState('Choose not to disclose'), true);
+});
+
+test('the opt-out stands in on self-identification questions and nowhere else', () => {
+  // A discipline list that happens to carry a "prefer not to say" row must not absorb a major that
+  // is not on it: outside the self-identification block a refusal is not an available answer, and
+  // the field being left for the applicant is the correct outcome.
+  const discipline = resolveProfileField(
+    { label: 'discipline', inputType: 'text', options: ['Accounting', 'Finance', 'Prefer not to say'] },
+    { major: 'Computer Science' },
+  );
+  assert.equal(discipline?.matchedOption, false);
+  assert.equal(discipline?.value, 'Computer Science');
 });

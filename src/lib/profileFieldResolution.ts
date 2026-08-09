@@ -50,6 +50,7 @@
 
 import {
   classifyField,
+  EEO_QUESTION,
   normalizeDiscoveredLabel,
   resolveKnownAnswer,
   type ApplicationProfileLike,
@@ -723,6 +724,176 @@ export function studyYearLadder(value: string | undefined): string[] {
   return ladder(trimmed, ...(ordinals[trimmed.toLowerCase()] ?? []));
 }
 
+// ---- EEO self-identification ----
+//
+// WHY THIS SECTION EXISTS (measured on the owner's prod packets, 2026-08-09). Packet
+// 13bccb2d-d726-4c47-80bc-e8090ae1463e (Skydio, Ashby) filled name, email, phone and resume and
+// then reported, for four separate controls, "none of the options match your saved answer, so this
+// one is left for you". Every one of those answers was already stored. So this is a matching
+// failure, not an honesty one, and it is the ONE question family where that distinction is total:
+// the fact is on the profile, the employer offers a closed list, and every such list carries an
+// explicit opt-out, so a correct answer is always available and a blank is never the right outcome.
+//
+// Nothing here touches eeoAnswer. That function returning "Decline to self-identify" across the
+// corpus's 50 EEO labels is the only approved constant in the resolver, on the grounds that a
+// refusal to state is not a statement, and it is unchanged: the sweep at
+// scripts/_sweep-untraceable.mts reports the same count before and after this section existed.
+// What changes is only whether the answer it produces can be left on the control.
+
+/**
+ * A refusal to state, in the wordings employers put on the list. Tested against comparableOption()
+ * output, so apostrophes are already gone ("don't" reads "dont") and punctuation is spaces.
+ *
+ * MATCHES THE INTENT, NEVER THE STRING. Both of the two option vocabularies the corpus has ever
+ * recorded word their opt-out differently from the stored answer, and both came back unmatched:
+ *
+ *   "I decline to self-identify for protected veteran status"   (from the veteran status control)
+ *   "I do not want to answer"                                   (from the disability status control)
+ *
+ * The first is the more interesting failure. chooseClosestOption saw an option that states the
+ * answer and adds words, and refused it because CLOSED_SET_ANSWER_RE lists "decline to self
+ * identify" among the answers whose whole meaning is the phrase itself. That rule is right for
+ * "Yes" against "Yes - I am authorized to work in the US for any employer", where the remainder
+ * asserts something the answer did not. It is wrong here: "for protected veteran status" does not
+ * add a claim, it names the question being declined. So the refusal is not relaxed for anyone else;
+ * declines are recognised by what they mean instead.
+ */
+const DECLINE_TO_STATE_RE = new RegExp(
+  [
+    // "Decline to self-identify", "I decline to self-identify for protected veteran status"
+    'declines? to (?:self identify|answer|state|say|specify|disclose|respond|provide)',
+    // "I do not want to answer", "I don't wish to answer", "prefer not to say", "choose not to disclose"
+    '(?:do not|dont|does not|doesnt|would rather not|rather not|prefer not|prefers not|choose not|chooses not)'
+    + ' (?:to )?(?:want|wish|like)? ?(?:to )?(?:answer|say|state|specify|disclose|self identify|identify|respond|provide)',
+    // "I would not like to disclose this", "not wishing to answer"
+    'not (?:want|wish|choose|prefer)(?:ing)? to (?:answer|say|state|specify|disclose|self identify|identify|respond|provide)',
+    // the bare noun phrases short lists use, whole-string only so "no answer required" is not one
+    '^(?:decline[ds]?|i decline|no answer|not disclosed|not specified|undisclosed)$',
+  ].join('|'),
+);
+
+/** Is this text a refusal to state rather than a statement? */
+export function isDeclineToState(text: string): boolean {
+  return DECLINE_TO_STATE_RE.test(comparableOption(text));
+}
+
+/**
+ * The wordings to OFFER for a decline, for a fill layer that cannot see the option list. Ordered
+ * plainest first. Only ever appended after the applicant's own answer, never in front of it.
+ */
+const DECLINE_WORDINGS = [
+  'Decline to self-identify',
+  'I decline to self-identify',
+  'I do not wish to answer',
+  'I do not want to answer',
+  'I prefer not to say',
+  'Prefer not to say',
+  'I do not wish to disclose',
+];
+
+/** A race or ethnicity question, as opposed to the rest of the self-identification block. */
+const EEO_RACE_QUESTION = /\brace\b|racial|ethnicit|ethnic\b/i;
+/** Asked as its own yes/no on nearly every US form, and answered from its own stored preference. */
+const EEO_HISPANIC_QUESTION = /hispanic|latin/i;
+
+/**
+ * THE MAPPING RULE, and it is deliberately the narrowest one that works.
+ *
+ * A stored race value is rewritten to a US federal category ONLY when that category WHOLLY CONTAINS
+ * it: the stored value names a subgroup that the federal definition of the category already
+ * includes, so the rewrite loses detail and changes no membership. "South Asian" to "Asian" is that
+ * shape - the EEOC defines Asian as origins in the Far East, Southeast Asia, or the Indian
+ * subcontinent, so a person who wrote South Asian is inside Asian by the employer's own definition,
+ * and the employer's list has no finer word to offer.
+ *
+ * Race is the applicant's own self-identification, so anything that is not a clean containment
+ * declines instead of guessing, and declining is always available and always honest. The cases this
+ * table deliberately does NOT contain, each for a stated reason:
+ *
+ *   "Central Asian"          the federal definition of Asian names the Far East, Southeast Asia and
+ *                            the Indian subcontinent, and not Central Asia. Not a containment.
+ *   "Asian/Pacific Islander" spans TWO federal categories. Picking either one narrows her answer.
+ *   "Middle Eastern",        the enum has no such category and files them under White. That is a
+ *   "North African"          contested reassignment, not a coarser word for the same thing.
+ *   "Native American"        read as American Indian or Alaska Native by most, but not by all, and
+ *                            it overlaps Native Hawaiian. Ambiguous, so it declines.
+ *   "Indian"                 ambiguous between Asian Indian and American Indian. Never mapped.
+ *
+ * A category is only ever WIDENED. The reverse - a stored "Asian" against a list offering "South
+ * Asian" and "East Asian" - is a narrowing, it invents detail she did not give, and chooseClosestOption
+ * already refuses it because the extra word distinguishes the claim.
+ */
+const EEO_FEDERAL_RACE_CATEGORIES: ReadonlyArray<{ category: string; subgroup: RegExp }> = [
+  { category: 'Asian', subgroup: /^(?:south|east|southeast|south east) asian$|^asian american$/ },
+  { category: 'Black or African American', subgroup: /^(?:black|african american)$/ },
+  { category: 'Hispanic or Latino', subgroup: /^(?:hispanic|latino|latina|latinx|latino\/a|hispanic\/latino)$/ },
+  { category: 'Native Hawaiian or Other Pacific Islander', subgroup: /^(?:native hawaiian|pacific islander)$/ },
+  { category: 'American Indian or Alaska Native', subgroup: /^(?:american indian|alaskan? native)$/ },
+  { category: 'White', subgroup: /^(?:white|caucasian)$/ },
+  { category: 'Two or More Races', subgroup: /^(?:multiracial|multi racial|biracial|bi racial|mixed race|two or more races)$/ },
+];
+
+/**
+ * The single federal category that wholly contains a stored race value, or undefined.
+ *
+ * Undefined when NO category claims it and, just as deliberately, when more than one does: two
+ * claimants is the ambiguity the rule above exists to refuse, and it must fail closed if this table
+ * is ever extended carelessly.
+ */
+export function eeoFederalRaceCategory(stored: string): string | undefined {
+  const key = comparableOption(stored);
+  if (!key) return undefined;
+  const claimed = EEO_FEDERAL_RACE_CATEGORIES.filter((entry) => entry.subgroup.test(key));
+  if (claimed.length !== 1) return undefined;
+  // Already the category itself: nothing to widen, and the exact stage would have taken it anyway.
+  return comparableOption(claimed[0].category) === key ? undefined : claimed[0].category;
+}
+
+/**
+ * The ranked forms of one EEO answer, best first.
+ *
+ * Her own words stay at the head, so a free-text control still gets exactly what she wrote and a
+ * list that carries her own wording matches it before anything coarser. The federal category comes
+ * next, and the decline wordings come LAST, for the same reason "Other" is last on the referral
+ * ladder: a truthful specific answer must never be displaced by a catch-all.
+ */
+export function eeoAnswerLadder(label: string, stored: string): string[] {
+  const base = stored.trim();
+  if (!base) return [];
+  const coarser = EEO_RACE_QUESTION.test(label) && !EEO_HISPANIC_QUESTION.test(label)
+    ? eeoFederalRaceCategory(base)
+    : undefined;
+  return ladder(base, coarser, ...DECLINE_WORDINGS);
+}
+
+/**
+ * The option that carries an EEO answer, or null.
+ *
+ * Two stages. The ladder goes through the ordinary conservative matcher first, so an option that
+ * states her answer wins whenever the list has one, and a list carrying two differently worded
+ * refusals is settled there too, by DECLINE_WORDINGS order. Only if nothing on the list can hold
+ * what she said does the intent matcher answer for it, and then only when EXACTLY ONE option reads
+ * as a refusal, because at that point there is nothing left to rank two look-alikes by and picking
+ * between them by DOM order is the guess this module exists to refuse.
+ *
+ * Substituting the opt-out is not putting words in her mouth. It is the answer the employer wrote
+ * into its own list for precisely this case, it states nothing about her that is not true, and the
+ * alternative is a required field left blank on a voluntary question, which blocks the whole
+ * application over the one family where a correct answer is guaranteed to exist.
+ */
+export function chooseEeoOption(
+  label: string,
+  stored: string,
+  rawOptions: readonly string[] | null | undefined,
+): string | null {
+  const options = usableOptions(rawOptions);
+  if (options.length === 0) return null;
+  const stated = chooseClosestOption(eeoAnswerLadder(label, stored), options);
+  if (stated) return stated;
+  const declines = options.filter((option) => isDeclineToState(option));
+  return declines.length === 1 ? declines[0] : null;
+}
+
 // ---- intent and resolution ----
 
 /** The question intent for a raw discovered label, after handle stripping. */
@@ -781,6 +952,11 @@ export function profileFieldCandidates(
 export function profileAnswerAliases(label: string, answer: string): string[] {
   const base = answer.trim();
   if (!base) return [];
+  // Before the profile-backed keys, because classifyField returns null for every EEO label by
+  // design (questionDiscovery short-circuits them), so the ladder would otherwise be [base] and the
+  // second and third attempts this function exists to supply would not exist for the one family
+  // whose stored wording is least likely to be the employer's.
+  if (EEO_QUESTION.test(label)) return eeoAnswerLadder(label, base);
   const key = profileFieldIntent(label);
   if (!isProfileBackedKey(key)) return [base];
   const synthetic: ApplicationProfileLike = {};
@@ -815,8 +991,13 @@ export function resolveProfileField(
   const base = known.value.trim();
   if (!base) return null;
   const key = profileFieldIntent(label);
-  const candidates = profileFieldCandidates(key, ap, base);
-  const matched = chooseClosestOption(candidates, shape.options);
+  // Self-identification has its own ladder and its own matcher: classifyField declines every EEO
+  // label on purpose, so `key` is null here and the generic path would offer the stored wording and
+  // nothing else. See the EEO section above for why the opt-out is a legitimate second choice on
+  // this family and on no other.
+  const eeo = EEO_QUESTION.test(label);
+  const candidates = eeo ? eeoAnswerLadder(label, base) : profileFieldCandidates(key, ap, base);
+  const matched = eeo ? chooseEeoOption(label, base, shape.options) : chooseClosestOption(candidates, shape.options);
   return {
     key,
     value: matched ?? candidates[0] ?? base,
