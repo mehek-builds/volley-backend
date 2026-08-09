@@ -84,6 +84,8 @@ export const bodySchema = z.object({
   legal_first_name: z.string().nullable().optional(),
   preferred_first_name: z.string().nullable().optional(),
   high_school_grad_date: z.string().nullable().optional(),
+  // When the current programme started, as a month and year ("August 2024"). See schema.ts for why
+  // this cannot be derived from high_school_grad_date or from the graduation date.
   education_start_date: z.string().nullable().optional(),
   // A string[] of employers previously applied to. [] is a real answer ("none"), which is why the
   // array is not collapsed to a boolean here or anywhere downstream.

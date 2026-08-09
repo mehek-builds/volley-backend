@@ -53,6 +53,7 @@ import {
   fillPortal,
   hasCoverLetterUpload,
   managedResultFilledFields,
+  managedAnswerLossReasons,
   managedResultHasCoverLetterUpload,
   navigateToApplicationForm,
   portalApplicationUrl,
@@ -1376,11 +1377,22 @@ async function prepareManaged(
     }, 'Required fields with no answerable question record');
   }
   const honestyReasons = discoveryHonestyReasons(discoveryFailures[0], unansweredRequired);
+  /* The runner's own account of the answers that did not stick, from both passes.
+   *
+   * Surfaced, deliberately NOT added to the `safe` gate below. A value that failed to persist on a
+   * REQUIRED control already comes back as the employer's own "is required and is still empty"
+   * blocker, which does gate the send; on an optional control it is a field Litos did not embellish,
+   * and refusing to send a complete application over one of those is the deadlock this codebase has
+   * already had to unwind twice. */
+  const answerLossReasons = managedAnswerLossReasons({
+    skipped: [...(result.skipped ?? []), ...(discoveryResult?.skipped ?? [])],
+  });
   const attentionReasons = [
     ...blockers,
     ...discoveryAttention,
     ...evidenceBlockers,
     ...coverLetterAttention,
+    ...answerLossReasons,
     ...honestyReasons,
   ];
   const attentionCategories = attentionCategoriesForReasons(attentionReasons);
@@ -1477,6 +1489,9 @@ async function prepareManaged(
       : {}),
     submission_run_id: runId,
     filled_fields: filledFields,
+    // The other half of filled_fields, and it was always empty before: what the runner tried and
+    // could not leave on the form. See managedAnswerLossReasons.
+    skipped_reasons: answerLossReasons,
     // Which address this form was filled with, and why. See ApplicationReviewState.applicant_email.
     ...(packet.applicantEmail ? { applicant_email: packet.applicantEmail } : {}),
     preview_screenshot_url: preview.url,
