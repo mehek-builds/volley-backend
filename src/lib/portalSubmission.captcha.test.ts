@@ -261,11 +261,16 @@ function submitButtonLocator(onClick: (label: string) => void, labels = ['Submit
       title: '',
       getAttribute: () => null,
       getClientRects: () => ({ length: 1 }),
+      closest: () => ({ setAttribute: () => undefined, querySelectorAll: () => [] }),
       /* READ_CONTROL_LABEL walks ancestors for aria-hidden and asks the view for computed
          visibility, so a node shape without these throws before it ever reads the label. */
       parentElement: null,
       ownerDocument: {
-        defaultView: { getComputedStyle: () => ({ visibility: 'visible' }) },
+        defaultView: {
+          Event,
+          requestAnimationFrame: (callback: () => void) => callback(),
+          getComputedStyle: () => ({ display: 'block', visibility: 'visible' }),
+        },
         getElementById: () => null,
       },
     }),

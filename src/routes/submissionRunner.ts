@@ -2573,7 +2573,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     // Required-field confirmation is a barrier inside the same remote action list, immediately
     // before submit. Require its per-field proof as well: an older runner that ignores or does not
     // understand the protocol must not be allowed to turn a silent fill into a submitted state.
-    assertManagedRequiredFieldsConfirmed(result);
+    assertManagedRequiredFieldsConfirmed(result, options.securityCode ? 'verification' : 'application');
     let receiptResult = result;
     let verification: ApplicationReviewState['verification'] = { status: 'not_needed' };
     const initialChallenge = readManagedSecurityCodeChallenge(result);
@@ -2621,6 +2621,10 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           try {
             // Exactly one continuation call. An uncertain click is never retried.
             receiptResult = await continueManagedBrowser(continuationToken, prepared.actions);
+            // A continuation has its own physical submit. Its v2 action must confirm the active
+            // verification form and own that click atomically, just like the initial application
+            // send. The first receipt cannot authorize a later DOM or a replaced submit node.
+            assertManagedRequiredFieldsConfirmed(receiptResult, 'verification');
           } catch (error) {
             await writeReview(row, nextReview(claimedReview, {
               status: 'needs_attention',

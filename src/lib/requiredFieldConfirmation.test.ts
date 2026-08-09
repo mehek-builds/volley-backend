@@ -6,6 +6,7 @@ import {
   assertManagedRequiredFieldsConfirmed,
   AUTONOMOUS_PORTAL_FAMILIES,
   buildManagedPortalActions,
+  COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT,
   MANAGED_ACTION_LIMIT,
   MANAGED_FINAL_SUBMIT_SELECTOR,
   ManagedActionBudgetError,
@@ -25,19 +26,33 @@ const packet: SubmissionPacket = {
 };
 
 function proof(
-  inputAttempts: Array<Omit<NonNullable<ManagedBrowserResult['requiredFieldConfirmation']>['attempts'][number], 'attemptCount'> & { attemptCount?: 1 | 2 }>,
-  overrides: Partial<NonNullable<ManagedBrowserResult['requiredFieldConfirmation']>> = {},
+  inputAttempts: Array<Omit<NonNullable<ManagedBrowserResult['requiredFieldConfirmation']>['passes'][number]['attempts'][number], 'attemptCount'> & { attemptCount?: 1 | 2 }>,
+  overrides: Partial<NonNullable<ManagedBrowserResult['requiredFieldConfirmation']>['passes'][number]>
+    & { status?: 'confirmed' | 'blocked' } = {},
 ): Pick<ManagedBrowserResult, 'requiredFieldConfirmation'> {
   const attempts = inputAttempts.map((attempt) => ({ attemptCount: 1 as const, ...attempt }));
+  const { status = 'confirmed', ...passOverrides } = overrides;
   return {
     requiredFieldConfirmation: {
-      version: 1,
-      status: 'confirmed',
-      requiredControls: attempts.map(({ selector, label, fieldType }) => ({ selector, label, fieldType, matchCount: 1 })),
-      retries: 0,
-      unresolved: [],
-      attempts,
-      ...overrides,
+      version: 2,
+      status,
+      passes: [{
+        submitKind: 'application',
+        scope: {
+          formFingerprint: 'form_fingerprint_fixture_1234',
+          submitFingerprint: 'submit_fingerprint_fixture_1234',
+          formMatchCount: 1,
+          submitMatchCount: 1,
+          requiredControlCount: attempts.length,
+          sameNode: true,
+        },
+        requiredControls: attempts.map(({ selector, label, fieldType }) => ({ selector, label, fieldType, matchCount: 1 })),
+        retries: 0,
+        unresolved: [],
+        attempts,
+        submissionOutcome: 'clicked',
+        ...passOverrides,
+      }],
     },
   };
 }
@@ -46,27 +61,28 @@ test('every autonomous managed submit reserves a mandatory confirmation barrier 
   for (const family of AUTONOMOUS_PORTAL_FAMILIES) {
     const actions = buildManagedPortalActions(family as SupportedPortal, packet, true);
     assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `${family} exceeded the managed action limit`);
-    assert.deepEqual(actions.at(-2), {
-      type: 'confirmRequired',
+    assert.deepEqual(actions.at(-1), {
+      type: 'confirmAndSubmit',
       selector: MANAGED_FINAL_SUBMIT_SELECTOR,
       label: 'required_field_confirmation',
       optional: false,
       timeout: 10_000,
       maxRetries: 1,
-      contractVersion: 1,
+      contractVersion: 2,
+      submitKind: 'application',
     });
-    assert.equal(actions.at(-1)?.type, 'click');
+    assert.equal(actions.filter((action) => action.type === 'click'
+      && action.selector === MANAGED_FINAL_SUBMIT_SELECTOR).length, 0);
   }
 });
 
 test('confirmation is bound to the exact final-submit chooser instead of the first form on the page', () => {
   const actions = buildManagedPortalActions('lever', packet, true);
-  const confirmation = actions.at(-2);
-  const submit = actions.at(-1);
-  assert.equal(confirmation?.type, 'confirmRequired');
+  const confirmation = actions.at(-1);
+  assert.equal(confirmation?.type, 'confirmAndSubmit');
   assert.equal(confirmation?.selector, MANAGED_FINAL_SUBMIT_SELECTOR);
-  assert.equal(submit?.type, 'click');
-  assert.equal(submit?.selector, confirmation?.selector);
+  assert.equal(confirmation?.contractVersion, 2);
+  assert.equal(confirmation?.submitKind, 'application');
   assert.notEqual(confirmation?.selector, 'form');
 
   // Fixture shape: form[0] is an unrelated newsletter with no required controls. The application
@@ -80,14 +96,97 @@ test('confirmation is bound to the exact final-submit chooser instead of the fir
     reason: 'This requires an answer',
   }], {
     status: 'blocked',
+    submissionOutcome: 'blocked',
     retries: 1,
     unresolved: ['Application email'],
   })));
 });
 
+test('atomic submit discovery includes common ATS submit shapes without a separate generic click', () => {
+  const actions = buildManagedPortalActions('greenhouse', packet, true);
+  const atomic = actions.at(-1)!;
+  assert.equal(atomic.type, 'confirmAndSubmit');
+  for (const shape of ['button', 'input[type="submit"]', 'input[type="image"]', '[role="button"]']) {
+    assert.ok(atomic.selector?.includes(shape), shape);
+  }
+  assert.equal(actions.some((action) => action.type === 'click'
+    && action.selector === MANAGED_FINAL_SUBMIT_SELECTOR), false);
+});
+
+test('an empty confirmed scan needs a distinct zero-control form attestation', () => {
+  assert.doesNotThrow(() => assertManagedRequiredFieldsConfirmed(proof([])));
+  const omitted = proof([]);
+  omitted.requiredFieldConfirmation!.passes[0]!.scope.requiredControlCount = 1;
+  assert.throws(() => assertManagedRequiredFieldsConfirmed(omitted), /scan control count/);
+});
+
+test('each remote run attests exactly one physical click with the expected kind', () => {
+  const receipt = proof([]);
+  const application = receipt.requiredFieldConfirmation!.passes[0]!;
+  const verification = {
+    ...application,
+    submitKind: 'verification' as const,
+    scope: {
+      ...application.scope,
+      formFingerprint: 'verification_form_fixture_1234',
+      submitFingerprint: 'verification_submit_fixture_1234',
+    },
+  };
+  assert.doesNotThrow(() => assertManagedRequiredFieldsConfirmed(receipt, 'application'));
+  assert.throws(() => assertManagedRequiredFieldsConfirmed(receipt, 'verification'), /unexpected submit kind/);
+  receipt.requiredFieldConfirmation!.passes = [verification];
+  assert.doesNotThrow(() => assertManagedRequiredFieldsConfirmed(receipt, 'verification'));
+  receipt.requiredFieldConfirmation!.passes = [application, verification];
+  assert.throws(() => assertManagedRequiredFieldsConfirmed(receipt), /confirmation passes/);
+});
+
+test('a replaced submit node cannot satisfy the atomic scope proof', () => {
+  const replaced = proof([]) as { requiredFieldConfirmation: Record<string, unknown> };
+  const replacedPass = (replaced.requiredFieldConfirmation.passes as Array<Record<string, unknown>>)[0]!;
+  replacedPass.scope = { ...(replacedPass.scope as Record<string, unknown>), sameNode: false };
+  replacedPass.submissionOutcome = 'blocked';
+  replacedPass.blockerReason = 'submit_node_replaced';
+  replaced.requiredFieldConfirmation.status = 'blocked';
+  assert.throws(
+    () => assertManagedRequiredFieldsConfirmed(replaced),
+    (error: unknown) => error instanceof ManagedRequiredFieldConfirmationError
+      && error.fields.includes('submit_node_replaced'),
+  );
+});
+
+test('direct confirmation commits the visually filled custom box without changing its answer', async () => {
+  let committed = false;
+  let focused = false;
+  const control = {
+    disabled: false,
+    value: 'Yes',
+    getAttribute: (name: string) => name === 'role' ? 'radio' : name === 'aria-checked' ? 'true' : null,
+    getClientRects: () => ({ length: 1 }),
+    focus: () => { focused = true; },
+    blur: () => undefined,
+    dispatchEvent: (event: unknown) => {
+      if ((event as { type?: string }).type === 'click') committed = true;
+      return true;
+    },
+  };
+  const form = { setAttribute: () => undefined, querySelectorAll: () => [control] };
+  const result = await COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT({
+    closest: () => form,
+    ownerDocument: { defaultView: {
+      Event,
+      requestAnimationFrame: (callback: () => void) => callback(),
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible' }),
+    } },
+  });
+  assert.deepEqual(result, { formFound: true, changed: false, committed: 1 });
+  assert.equal(focused, true);
+  assert.equal(committed, true, 'the exact selected box must receive its commit click');
+  assert.equal(control.getAttribute('aria-checked'), 'true', 'confirmation must preserve the answer');
+});
+
 test('prepare runs do not commit required fields or expose a submit action', () => {
   const actions = buildManagedPortalActions('greenhouse', packet, false);
-  assert.equal(actions.some((action) => action.type === 'confirmRequired'), false);
+  assert.equal(actions.some((action) => action.type === 'confirmAndSubmit'), false);
   assert.equal(actions.some((action) => action.type === 'click' && action.selector?.includes('button[type="submit"]')), false);
 });
 
@@ -135,8 +234,7 @@ test('Lever and Workable keep every fixed core field or block before confirmatio
         const actions = buildManagedPortalActions(family, crowded, true);
         const labels = new Set(actions.map((action) => action.label));
         for (const label of expected[family]) assert.ok(labels.has(label), `${family} lost ${label} at ${count}`);
-        assert.equal(actions.at(-2)?.type, 'confirmRequired');
-        assert.equal(actions.at(-1)?.type, 'click');
+        assert.equal(actions.at(-1)?.type, 'confirmAndSubmit');
       } catch (error) {
         assert.ok(error instanceof ManagedActionBudgetError, `${family} threw the wrong error at ${count}`);
         assert.equal(error.submitActionAppended, false);
@@ -166,6 +264,7 @@ test('a visually filled field that still fails ATS validation blocks submission 
       reason: 'This requires an answer',
     }], {
       status: 'blocked',
+      submissionOutcome: 'blocked',
       retries: 1,
       unresolved: ['Are you authorized to work?'],
     })),
@@ -213,24 +312,26 @@ test('untyped hostile receipts cannot bypass the strict versioned confirmation s
   }]);
   const raw = JSON.parse(JSON.stringify(good)) as Record<string, unknown>;
   const base = (raw.requiredFieldConfirmation as Record<string, unknown>);
+  const basePass = (base.passes as Array<Record<string, unknown>>)[0]!;
+  const withPass = (patch: Record<string, unknown>) => ({ ...base, passes: [{ ...basePass, ...patch }] });
   const cases: Array<[string, unknown]> = [
-    ['wrong version', { ...base, version: 2 }],
-    ['fractional retries', { ...base, retries: 0.5 }],
-    ['excess retries', { ...base, retries: 2 }],
-    ['unknown field type', { ...base, requiredControls: [{ selector: '#start', label: 'Start', fieldType: 'slider' }] }],
-    ['unknown outcome', { ...base, attempts: [{ selector: 'input[name="start_date"]', label: 'Start date', fieldType: 'date', outcome: 'clicked', attemptCount: 1 }] }],
-    ['missing requiredControls', Object.fromEntries(Object.entries(base).filter(([key]) => key !== 'requiredControls'))],
-    ['missing uniqueness proof', { ...base, requiredControls: [{ selector: '#start', label: 'Start', fieldType: 'date' }] }],
-    ['nonunique control', { ...base, requiredControls: [{ selector: '#start', label: 'Start', fieldType: 'date', matchCount: 2 }] }],
-    ['empty attempts with a discovered control', { ...base, attempts: [] }],
-    ['duplicate attempts', { ...base, attempts: [...(base.attempts as unknown[]), ...(base.attempts as unknown[])] }],
-    ['extra attempt', { ...base, attempts: [...(base.attempts as unknown[]), { selector: '#other', label: 'Other', fieldType: 'text', outcome: 'confirmed' }] }],
-    ['coordinate control', { ...base, requiredControls: [{ selector: '20, 30', label: 'Start date', fieldType: 'date' }] }],
-    ['failed without reason', { ...base, status: 'blocked', attempts: [{ selector: 'input[name="start_date"]', label: 'Start date', fieldType: 'date', outcome: 'failed', attemptCount: 2 }], retries: 1, unresolved: ['Start date'] }],
-    ['retry count without retry evidence', { ...base, retries: 1 }],
-    ['retry evidence without retry count', { ...base, attempts: [{ selector: 'input[name="start_date"]', label: 'Start date', fieldType: 'date', outcome: 'confirmed', attemptCount: 2 }] }],
-    ['already committed was retried', { ...base, attempts: [{ selector: 'input[name="start_date"]', label: 'Start date', fieldType: 'date', outcome: 'already_committed', attemptCount: 2 }], retries: 1 }],
-    ['confirmed with unresolved', { ...base, unresolved: ['Start date'] }],
+    ['wrong version', { ...base, version: 1 }],
+    ['fractional retries', withPass({ retries: 0.5 })],
+    ['excess retries', withPass({ retries: 2 })],
+    ['unknown field type', withPass({ requiredControls: [{ selector: '#start', label: 'Start', fieldType: 'slider' }] })],
+    ['unknown outcome', withPass({ attempts: [{ selector: 'input[name="start_date"]', label: 'Start date', fieldType: 'date', outcome: 'clicked', attemptCount: 1 }] })],
+    ['missing requiredControls', { ...base, passes: [Object.fromEntries(Object.entries(basePass).filter(([key]) => key !== 'requiredControls'))] }],
+    ['missing uniqueness proof', withPass({ requiredControls: [{ selector: '#start', label: 'Start', fieldType: 'date' }] })],
+    ['nonunique control', withPass({ requiredControls: [{ selector: '#start', label: 'Start', fieldType: 'date', matchCount: 2 }] })],
+    ['empty attempts with a discovered control', withPass({ attempts: [] })],
+    ['duplicate attempts', withPass({ attempts: [...(basePass.attempts as unknown[]), ...(basePass.attempts as unknown[])] })],
+    ['extra attempt', withPass({ attempts: [...(basePass.attempts as unknown[]), { selector: '#other', label: 'Other', fieldType: 'text', outcome: 'confirmed' }] })],
+    ['coordinate control', withPass({ requiredControls: [{ selector: '20, 30', label: 'Start date', fieldType: 'date' }] })],
+    ['failed without reason', { ...withPass({ attempts: [{ selector: 'input[name="start_date"]', label: 'Start date', fieldType: 'date', outcome: 'failed', attemptCount: 2 }], retries: 1, unresolved: ['Start date'], submissionOutcome: 'blocked' }), status: 'blocked' }],
+    ['retry count without retry evidence', withPass({ retries: 1 })],
+    ['retry evidence without retry count', withPass({ attempts: [{ selector: 'input[name="start_date"]', label: 'Start date', fieldType: 'date', outcome: 'confirmed', attemptCount: 2 }] })],
+    ['already committed was retried', withPass({ attempts: [{ selector: 'input[name="start_date"]', label: 'Start date', fieldType: 'date', outcome: 'already_committed', attemptCount: 2 }], retries: 1 })],
+    ['confirmed with unresolved', withPass({ unresolved: ['Start date'] })],
     ['blocked without failure', { ...base, status: 'blocked' }],
     ['unknown receipt property', { ...base, clicked: true }],
   ];
@@ -254,18 +355,30 @@ test('managed wire contract sends one bounded confirmation action with its durab
         url: 'https://portal.example/complete',
         text: 'Thank you',
         requiredFieldConfirmation: {
-          version: 1,
+          version: 2,
           status: 'confirmed',
-          requiredControls: [
-            { selector: 'input[name="full_name"]', label: 'Full name', fieldType: 'text', matchCount: 1 },
-            { selector: '[data-field-path="availability"]', label: 'Availability', fieldType: 'custom', matchCount: 1 },
-          ],
-          attempts: [
-            { selector: 'input[name="full_name"]', label: 'Full name', fieldType: 'text', outcome: 'already_committed', attemptCount: 1 },
-            { selector: '[data-field-path="availability"]', label: 'Availability', fieldType: 'custom', outcome: 'confirmed', attemptCount: 2 },
-          ],
-          retries: 1,
-          unresolved: [],
+          passes: [{
+            submitKind: 'application',
+            scope: {
+              formFingerprint: 'form_fingerprint_wire_fixture',
+              submitFingerprint: 'submit_fingerprint_wire_fixture',
+              formMatchCount: 1,
+              submitMatchCount: 1,
+              requiredControlCount: 2,
+              sameNode: true,
+            },
+            requiredControls: [
+              { selector: 'input[name="full_name"]', label: 'Full name', fieldType: 'text', matchCount: 1 },
+              { selector: '[data-field-path="availability"]', label: 'Availability', fieldType: 'custom', matchCount: 1 },
+            ],
+            attempts: [
+              { selector: 'input[name="full_name"]', label: 'Full name', fieldType: 'text', outcome: 'already_committed', attemptCount: 1 },
+              { selector: '[data-field-path="availability"]', label: 'Availability', fieldType: 'custom', outcome: 'confirmed', attemptCount: 2 },
+            ],
+            retries: 1,
+            unresolved: [],
+            submissionOutcome: 'clicked',
+          }],
         },
       },
     }), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -273,20 +386,22 @@ test('managed wire contract sends one bounded confirmation action with its durab
 
   try {
     await runManagedBrowser('https://portal.example/apply', [{
-      type: 'confirmRequired',
+      type: 'confirmAndSubmit',
       selector: MANAGED_FINAL_SUBMIT_SELECTOR,
       label: 'required_field_confirmation',
       optional: false,
       maxRetries: 1,
-      contractVersion: 1,
+      contractVersion: 2,
+      submitKind: 'application',
     }], { allowSubmit: true });
     assert.deepEqual(body.actions, [{
-      type: 'confirmRequired',
+      type: 'confirmAndSubmit',
       selector: MANAGED_FINAL_SUBMIT_SELECTOR,
       label: 'required_field_confirmation',
       optional: false,
       maxRetries: 1,
-      contractVersion: 1,
+      contractVersion: 2,
+      submitKind: 'application',
     }]);
   } finally {
     globalThis.fetch = previousFetch;
@@ -310,14 +425,14 @@ test('managed wire contract rejects missing versions and unbounded retry counts 
   }) as typeof fetch;
   try {
     await assert.rejects(() => runManagedBrowser('https://portal.example/apply', [{
-      type: 'confirmRequired',
+      type: 'confirmAndSubmit',
       selector: MANAGED_FINAL_SUBMIT_SELECTOR,
       maxRetries: 1,
     }]), /contract version/);
     await assert.rejects(() => runManagedBrowser('https://portal.example/apply', [{
-      type: 'confirmRequired',
+      type: 'confirmAndSubmit',
       selector: MANAGED_FINAL_SUBMIT_SELECTOR,
-      contractVersion: 1,
+      contractVersion: 2,
       maxRetries: 2,
     }]), /maxRetries/);
     assert.equal(calls, 0);
@@ -336,4 +451,14 @@ test('submission runner requires confirmation proof before any receipt can be re
   const receipt = source.indexOf('const receipt = readManagedReceipt(receiptResult)', barrier);
   assert.ok(barrier >= 0);
   assert.ok(receipt > barrier);
+});
+
+test('automatic security-code continuation validates its own atomic confirmation receipt', () => {
+  const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const continuation = source.indexOf('receiptResult = await continueManagedBrowser(continuationToken, prepared.actions)');
+  const continuationBarrier = source.indexOf('assertManagedRequiredFieldsConfirmed(receiptResult)', continuation);
+  const receipt = source.indexOf('const receipt = readManagedReceipt(receiptResult)', continuation);
+  assert.ok(continuation >= 0);
+  assert.ok(continuationBarrier > continuation);
+  assert.ok(receipt > continuationBarrier);
 });

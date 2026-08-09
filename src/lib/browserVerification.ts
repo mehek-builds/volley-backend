@@ -121,9 +121,13 @@ export function buildManagedVerificationActions(code: string): ManagedBrowserAct
     });
   }
   actions.push({
-    type: 'click',
-    selector: 'button[type="submit"], input[type="submit"]',
+    type: 'confirmAndSubmit',
+    selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
     label: 'continue_email_verification',
+    optional: false,
+    maxRetries: 1,
+    contractVersion: 2,
+    submitKind: 'verification',
   });
   return actions;
 }

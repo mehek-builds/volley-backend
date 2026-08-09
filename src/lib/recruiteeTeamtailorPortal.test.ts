@@ -77,7 +77,7 @@ test('Recruitee actions map only captured fields and preserve safety controls', 
     assert.match(serialized, new RegExp(selector.replace('.', '\\.')));
   }
   assert.doesNotMatch(serialized, /agreement|consent|hcaptcha|captcha|honeypot|hp_/i);
-  assert.equal(actions.filter((action) => action.type === 'click' && action.selector === 'button[type="submit"], input[type="submit"]').length, 1);
+  assert.equal(actions.filter((action) => action.type === 'confirmAndSubmit').length, 1);
   assert.equal(portalCanAutoSubmit('recruitee'), true);
 });
 

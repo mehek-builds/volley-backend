@@ -106,9 +106,13 @@ test('managed verification builds one bounded continuation for single and split 
   assert.deepEqual(actions.slice(1, 9).map((action) => action.selector), [1, 2, 3, 4, 5, 6, 7, 8]
     .map((index) => `:nth-match(input[maxlength="1"], ${index})`));
   assert.deepEqual(actions.at(-1), {
-    type: 'click',
-    selector: 'button[type="submit"], input[type="submit"]',
+    type: 'confirmAndSubmit',
+    selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
     label: 'continue_email_verification',
+    optional: false,
+    maxRetries: 1,
+    contractVersion: 2,
+    submitKind: 'verification',
   });
 });
 
