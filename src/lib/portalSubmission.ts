@@ -2839,6 +2839,31 @@ type ReviewedQuestionActionProtection = {
 };
 
 /**
+ * The minimum fixed-field groups that make a Greenhouse application an application at all.
+ *
+ * A reviewed screener answer is not more important than the applicant's name, email, phone, resume,
+ * or required education row. The final tail trim previously protected only the evidence READS for
+ * these fields, so it could preserve proof labels while deleting the fills those labels were meant
+ * to verify. Keep either the single full-name action or both split-name actions, plus each remaining
+ * core group. A phone country combobox is part of the phone group because Greenhouse rejects the
+ * national number when its adjacent dial-code control is left on the wrong country.
+ */
+function coreActionProtection(actions: readonly ManagedBrowserAction[], portal: SupportedPortal): ReadonlySet<string> {
+  if (portalFamily(portal) !== 'greenhouse') return new Set();
+  const available = new Set(actions.map(managedActionLabelBase).filter((base): base is string => Boolean(base)));
+  const protectedBases = new Set<string>();
+  if (available.has('name')) {
+    protectedBases.add('name');
+  } else {
+    for (const base of ['first_name', 'last_name']) if (available.has(base)) protectedBases.add(base);
+  }
+  for (const base of ['email', 'phone_country', 'phone', 'resume']) {
+    if (available.has(base)) protectedBases.add(base);
+  }
+  return protectedBases;
+}
+
+/**
  * Pick one COMPLETE action group for every reviewed question that emitted a browser action.
  *
  * React-select fills are multi-action chains: open, fill, choose an option, then press Enter. The
@@ -3816,16 +3841,14 @@ export function buildManagedPortalActions(
    *      disposable and which are a required field's only attempt;
    *   2. the generic one, which gives up repeat guesses at a control before the last guess at any
    *      other, and is the whole of the trim on the other thirteen families;
-   *   3. the tail truncation, which is the blunt last resort and the only pass that can take a
-   *      primary fill. Reaching it means the packet has more questions than 120 actions can hold.
+   *   3. the tail truncation, which is the blunt last resort but cannot take core application fills
+   *      or the last viable chain for a reviewed question. If the protected minimum still does not
+   *      fit, the builder stops with ManagedActionBudgetError before it creates the submit action.
    *
    * What pass 2 means for Greenhouse, stated precisely because the loose version of it is wrong.
-   * On every packet measured here it changes nothing: pass 1 already lands under budget (116 at
-   * every question count up to 30), so pass 2 finds a list it has no work to do on. It is NOT
-   * true that pass 2 can never affect Greenhouse. On a packet pass 1 cannot get under budget, pass
-   * 2 now runs where truncation used to, and the list that survives is different. That is the
-   * intended order - give up a redundant guess before letting the blunt pass take a whole group off
-   * the tail - but it is a behaviour change on that path, not an identity.
+   * Pass 2 can affect Greenhouse when pass 1 cannot get under budget. That is intentional: give up
+   * a redundant guess before the blunt pass takes a whole unprotected group from the tail. Core
+   * fields and the selected question chains are protected through every pass.
    */
   const canAppendSubmit = submit && portalCanAutoSubmit(portal);
   const familyActionLimit = portalFamily(portal) === 'greenhouse' && packetLooksAkuna(packet)
@@ -3835,12 +3858,16 @@ export function buildManagedPortalActions(
   // that puts an exactly-full list one over the ceiling.
   const actionLimit = canAppendSubmit ? familyActionLimit - 1 : familyActionLimit;
   const questionProtection = reviewedQuestionActionProtection(actions, packet);
+  const protectedActionBases = new Set([
+    ...coreActionProtection(actions, portal),
+    ...questionProtection.actionBases,
+  ]);
   if (portalFamily(portal) === 'greenhouse') {
-    trimGreenhouseManagedActionsToBudget(actions, actionLimit, questionProtection.actionBases);
+    trimGreenhouseManagedActionsToBudget(actions, actionLimit, protectedActionBases);
   }
-  trimSpeculativeManagedActionsToBudget(actions, actionLimit, questionProtection.actionBases);
+  trimSpeculativeManagedActionsToBudget(actions, actionLimit, protectedActionBases);
   if (actions.length > actionLimit) {
-    truncateManagedActionsToBudget(actions, actionLimit, questionProtection.actionBases);
+    truncateManagedActionsToBudget(actions, actionLimit, protectedActionBases);
   }
   if (actions.length > actionLimit) {
     throw new ManagedActionBudgetError(portal, familyActionLimit, questionProtection.questionCount);

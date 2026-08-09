@@ -3839,6 +3839,33 @@ function viableReviewedQuestionAttempt(
   });
 }
 
+function assertGreenhouseCoreApplicationActions(actions: ReturnType<typeof buildManagedPortalActions>) {
+  for (const label of ['first_name', 'last_name', 'email', 'phone'] as const) {
+    assert.ok(
+      actions.some((action) => action.type === 'fill' && action.label === label),
+      `the action budget removed the ${label} fill`,
+    );
+  }
+  assert.ok(
+    actions.some((action) => action.type === 'upload' && action.label === 'resume'),
+    'the action budget removed every resume upload',
+  );
+  const phoneCountry = actions.filter((action) => action.label?.replace(/_select$/, '') === 'phone_country');
+  assert.ok(phoneCountry.some((action) => action.type === 'fill'), 'the phone country fill is missing');
+  assert.ok(phoneCountry.some((action) => action.type === 'press'), 'the phone country confirmation is missing');
+
+  for (const selector of ['#school--0', '#degree--0', '#discipline--0', '#end-month--0']) {
+    const group = actions.filter((action) => action.selector === selector);
+    assert.ok(group.some((action) => action.type === 'click'), `${selector} is missing its open action`);
+    assert.ok(group.some((action) => action.type === 'fill'), `${selector} is missing its fill action`);
+    assert.ok(group.some((action) => action.type === 'press'), `${selector} is missing its confirmation action`);
+  }
+  assert.ok(
+    actions.some((action) => action.type === 'fill' && action.selector === '#end-year--0'),
+    'the required education end year fill is missing',
+  );
+}
+
 test('Greenhouse select-heavy prepare and submit keep one complete fill chain per question', () => {
   const packet = selectHeavyGreenhousePacket(4);
   for (const submit of [false, true]) {
@@ -3868,6 +3895,30 @@ test('Greenhouse select-heavy prepare and submit block before submit when safe c
         return true;
       },
     );
+  }
+});
+
+test('Greenhouse 16 to 18 question boundaries preserve core fields or block before submit', () => {
+  for (const questionCount of [16, 17, 18]) {
+    const packet = selectHeavyGreenhousePacket(questionCount);
+    for (const submit of [false, true]) {
+      try {
+        const actions = buildManagedPortalActions('greenhouse', packet, submit);
+        assert.ok(actions.length <= MANAGED_ACTION_LIMIT);
+        assertGreenhouseCoreApplicationActions(actions);
+        for (const item of packet.questions) {
+          assert.ok(
+            viableReviewedQuestionAttempt(actions, item.question),
+            `${questionCount}-question ${submit ? 'submit' : 'prepare'} lost ${item.question}`,
+          );
+        }
+        if (submit) assert.equal(actions.at(-1)?.type, 'click');
+      } catch (error) {
+        assert.ok(error instanceof ManagedActionBudgetError);
+        assert.equal(error.submitActionAppended, false);
+        assert.match(error.blocker, /did not press submit/i);
+      }
+    }
   }
 });
 
