@@ -438,6 +438,77 @@ test('answers the 18+ attestation from a stored date of birth, and only from tha
   );
 });
 
+/* THE PARSE, which is the part of the attestation that turns a loose string into a legal claim.
+ *
+ * Everything above this test is about WHICH labels are age attestations. This one is about what
+ * counts as a date of birth at all, and it exists because `new Date(raw)` said yes to two things it
+ * should not have: an impossible calendar day, which it rolls forward into a real one, and prose,
+ * which it invents a January the 1st out of. Both became an age, and the age became a Yes.
+ *
+ * The rule is the extension's (storedBirthDate in adapters/generic.ts): accept only the shapes
+ * Litos stores, and refuse everything else the same way an absent date of birth is refused.
+ */
+const AGE_ATTESTATION_LABEL = 'At the time of application, are you 18+ years of age?';
+
+/* One case per malformed shape, deliberately not folded into a loop inside one test: each of these
+ * is a separate way `new Date` manufactured a birthday, and a single test would stop at the first
+ * one and hide the rest. */
+const MALFORMED_DATES_OF_BIRTH: Array<[shape: string, why: string]> = [
+  // `new Date('2008-02-30T00:00:00Z')` is 1 March 2008. 30 February is not a day, but the rollover
+  // made it one, and on 9 August 2026 that reads as an 18-year-old. The parsed date must be the
+  // date that was written.
+  ['2008-02-30', 'an impossible calendar day rolled over into a real one'],
+  // `new Date('sometime in 2005')` is 1 January 2005: a whole birthday invented out of a sentence,
+  // then handed to an employer as a sworn statement.
+  ['sometime in 2005', 'prose became a date, then an age, then a Yes'],
+  // 8 September to half the world, 9 August to the other half, and nothing in the string says
+  // which. A refusal costs one question; a guess puts a false date of birth on an application.
+  ['09/08/2005', 'an all-numeric date is ambiguous between day-first and month-first'],
+  // The same rollover in the month position: `new Date('2005-13-01')` is a valid Date in Node.
+  ['2005-13-01', 'a thirteenth month rolled over into the next year'],
+];
+
+for (const [malformed, why] of MALFORMED_DATES_OF_BIRTH) {
+  test(`a date of birth of "${malformed}" is refused, because ${why}`, () => {
+    // An unparseable value must behave EXACTLY like an absent one: the same stated refusal, never a
+    // fall-through to an answer, and never a different-sounding reason that reads like a bug.
+    const absent = resolveKnownAnswer(AGE_ATTESTATION_LABEL, 'text', {}, undefined);
+    assert.ok(absent && 'skipReason' in absent);
+
+    const answer = resolveKnownAnswer(AGE_ATTESTATION_LABEL, 'text', { date_of_birth: malformed }, undefined);
+    assert.ok(answer && 'skipReason' in answer, `${malformed} must not produce an answer`);
+    assert.equal(answer.skipReason, absent.skipReason);
+    assert.match(answer.skipReason, /date of birth is not saved/);
+
+    // The minor framing runs the same parse and must refuse too, rather than inverting a guess.
+    const minor = resolveKnownAnswer('Are you under 18 years of age?', 'text', { date_of_birth: malformed }, undefined);
+    assert.ok(minor && 'skipReason' in minor, malformed);
+  });
+}
+
+test('the shapes Litos actually stores still answer the 18+ attestation', () => {
+  // Strict ISO is what the extension's setup screen writes and what the one date of birth in
+  // production is (measured 2026-08-09: 10 plaintext bytes). The day/month-name/year text is what
+  // /profile/harvest lifts off an employer's own form.
+  for (const stored of ['2005-09-25', '25 Sep 2005', '25 September 2005', 'Sep 25, 2005']) {
+    assert.deepEqual(
+      resolveKnownAnswer(AGE_ATTESTATION_LABEL, 'text', { date_of_birth: stored }, undefined),
+      { value: 'Yes' },
+      stored,
+    );
+  }
+  // A real leap day is a real birthday and must survive the same validation that rejects 30 Feb.
+  assert.deepEqual(
+    resolveKnownAnswer(AGE_ATTESTATION_LABEL, 'text', { date_of_birth: '2004-02-29' }, undefined),
+    { value: 'Yes' },
+  );
+  // And a minor still gets a No, so the strictness did not quietly swallow the answering branch.
+  assert.deepEqual(
+    resolveKnownAnswer(AGE_ATTESTATION_LABEL, 'text', { date_of_birth: '12 Mar 2012' }, undefined),
+    { value: 'No' },
+  );
+});
+
 test('sensitive gates allow only exact stored work eligibility answers', () => {
   assert.equal(
     sensitiveQuestionRequiresAttention(
