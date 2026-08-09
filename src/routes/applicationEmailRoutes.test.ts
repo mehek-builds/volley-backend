@@ -30,6 +30,7 @@ test('dashboard resume edits preserve both immutable application email keys', ()
 test('application inbox schema and webhook route are registered', () => {
   assert.match(schema, /application_email_aliases/);
   assert.match(schema, /application_email_messages/);
+  assert.match(schema, /application_email_receiving_proofs/);
   assert.match(indexRoute, /applicationEmailRoutes/);
   assert.match(route, /\/webhooks\/application-email\/inbound/);
   assert.match(route, /inboundSecretMatches/);
@@ -47,6 +48,20 @@ test('application inbox schema and webhook route are registered', () => {
   assert.match(service, /\$\{mailbox\.local\}\+\$\{route\}@\$\{mailbox\.domain\}/);
   assert.match(route, /applicationEmailRouteLabel\(\)/);
   assert.match(route, /route_generation_fingerprint: applicationEmailRouteGenerationFingerprint\(\)/);
+});
+
+test('signed managed canary proof is accepted before provider content retrieval and alias routing', () => {
+  const webhook = route.slice(route.indexOf("fastify.post('/webhooks/application-email/inbound'"));
+  const proof = webhook.indexOf('acceptSignedManagedReceivingCanary(event)');
+  const retrieveAndNormalize = webhook.indexOf('inboundEmailFromWebhookBody(request.body)');
+  const aliasRoute = webhook.indexOf('processInboundApplicationEmail(inbound)');
+  assert.ok(proof >= 0);
+  assert.ok(retrieveAndNormalize > proof);
+  assert.ok(aliasRoute > retrieveAndNormalize);
+  assert.match(webhook, /signedByResend = resendProofSignatureMatches\(request\)/);
+  assert.match(route, /resendProofSignatureMatches[\s\S]*process\.env\.RESEND_WEBHOOK_SECRET/);
+  assert.match(webhook, /receiving_proof: 'verified'/);
+  assert.doesNotMatch(webhook, /receiving_proof:[\s\S]{0,80}(emailId|recipient|fingerprint)/);
 });
 
 test('the alias never reaches a form or a rendered resume without the deliverability precondition', () => {

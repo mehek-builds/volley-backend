@@ -85,6 +85,7 @@
     "db:description-digest": "node scripts/apply-description-digest.mjs",
     "db:posting-questions": "node scripts/apply-posting-questions-schema.mjs",
     "setup:application-email-resend": "node scripts/setup-resend-application-email.mjs",
+    "setup:application-email-receiving-canary": "node scripts/configure-resend-receiving-canary.mjs",
     "verify:classification": "tsx scripts/verify-classification.mts",
     "trial:submit-control": "tsx scripts/trial-submit-control.mts",
     "trial:portal-shapes": "tsx scripts/trial-portal-shapes.mts",
