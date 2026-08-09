@@ -175,9 +175,27 @@ export function priorityEntriesForBaseResume(
   return selected;
 }
 
+/**
+ * INCLUSION IS ALWAYS REQUIRED; POSITION IS ONLY REQUIRED WHERE THERE IS NO POSTING.
+ *
+ * `priorities` is ranked by recency (selectPriorityEntries leads with rankedByRecency[0]), so the
+ * position half of this check is a recency rule wearing the word "priority". On the BASE resume
+ * that is correct and should stay: it is built with no job description in front of it, nothing else
+ * could decide the order, and leading with current work is the right default for a page the
+ * applicant reviews as a general summary.
+ *
+ * On a TAILORED resume it was the defect. It hard-failed any packet whose lead entry was chosen
+ * against the posting rather than by date, which made "the top experience is aligned for their
+ * role" unachievable by construction no matter what the prompt asked for. The tailored path passes
+ * `requireFirst: false` and hands the ordering to leadAlignmentIssues, which asks the posting.
+ *
+ * The missing-entry half is unchanged for both, and it is what actually protects the applicant:
+ * her current role stays on the page either way.
+ */
 export function baseResumeSelectionIssues(
   spec: ResumeSpec,
   priorities: ExperienceBankEntry[],
+  options: { requireFirst?: boolean } = {},
 ): string[] {
   const selected = new Set(spec.experience.map((entry) => entryIdentity(entry)));
   const issues = priorities
@@ -185,7 +203,12 @@ export function baseResumeSelectionIssues(
     .map((entry) => `required current or role-defining entry missing: ${entry.title ? `${entry.title} at ` : ''}${entry.org}`);
   const first = spec.experience[0];
   const priority = priorities[0];
-  if (priority && first && selected.has(entryIdentity(priority)) && entryIdentity(first) !== entryIdentity(priority)) {
+  if (
+    options.requireFirst !== false
+    && priority && first
+    && selected.has(entryIdentity(priority))
+    && entryIdentity(first) !== entryIdentity(priority)
+  ) {
     issues.push(`required priority entry is not first: ${priority.title ? `${priority.title} at ` : ''}${priority.org}`);
   }
   return issues;

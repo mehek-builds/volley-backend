@@ -341,8 +341,10 @@ export type ApplicationReviewState = {
     consent_version?: string;
   };
   verification?: {
-    status: 'not_needed' | 'searching' | 'completed' | 'handoff';
-    provider?: 'gmail' | 'outlook';
+    status: 'not_needed' | 'searching' | 'verification_pending' | 'completed' | 'handoff';
+    provider?: 'gmail' | 'outlook' | 'litos';
+    requested_at?: string;
+    retry_count?: number;
     completed_at?: string;
   };
   receipt?: {

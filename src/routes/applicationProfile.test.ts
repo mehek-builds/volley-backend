@@ -1,7 +1,8 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { getTableColumns } from 'drizzle-orm';
 import { bodySchema, decryptRow, ENCRYPTED_FIELDS } from './applicationProfile';
-import type { ApplicationProfile } from '../db/schema';
+import { application_profile, type ApplicationProfile } from '../db/schema';
 
 // The trap these tests exist to pin: a column declared in schema.ts with no matching line in
 // bodySchema is stripped by zod SILENTLY. PUT returns 200, the value is discarded, and the client
@@ -53,10 +54,39 @@ function row(over: Partial<ApplicationProfile> = {}): ApplicationProfile {
     attest_truthful_information: null,
     accept_privacy_notices: null,
     application_attestations_consented_at: null,
+    onsite_commitment: null,
+    onsite_locations: null,
+    relocation_willingness: null,
     updated_at: null,
     ...over,
   };
 }
+
+describe('education start date schema and round-trip', () => {
+  test('declares the live database contract: nullable text with no default', () => {
+    const column = getTableColumns(application_profile).education_start_date;
+    assert.equal(column.name, 'education_start_date');
+    assert.equal(column.getSQLType(), 'text');
+    assert.equal(column.notNull, false);
+    assert.equal(column.hasDefault, false);
+  });
+
+  test('bodySchema keeps the month-and-year value for the write side', () => {
+    const parsed = bodySchema.parse({ education_start_date: 'August 2024' });
+    assert.equal(parsed.education_start_date, 'August 2024');
+  });
+
+  test('decryptRow returns the stored value unchanged on the read side', () => {
+    const served = decryptRow(row({ education_start_date: 'August 2024' }));
+    assert.equal(served.education_start_date, 'August 2024');
+  });
+
+  test('null clears, omission leaves alone, and the field stays plaintext', () => {
+    assert.equal(bodySchema.parse({ education_start_date: null }).education_start_date, null);
+    assert.equal('education_start_date' in bodySchema.parse({}), false);
+    assert.equal((ENCRYPTED_FIELDS as readonly string[]).includes('education_start_date'), false);
+  });
+});
 
 describe('languages round-trip (PUT accepts, GET serves)', () => {
   test('bodySchema KEEPS languages - the write side of the round-trip', () => {

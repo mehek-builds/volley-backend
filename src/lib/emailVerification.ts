@@ -1,19 +1,26 @@
 import { composioRequest } from './composioApi';
+import { and, desc, eq, gte, lte } from 'drizzle-orm';
+import { db } from '../db';
+import { application_email_messages } from '../db/schema';
 
 const CODE_CONTEXT = /\b(?:verification|security|authentication|confirmation|one[ -]?time|passcode|otp)\b/i;
-const CODE_PATTERN = /(?<!\d)(\d{4,8})(?!\d)/g;
+// Most providers send a 4 to 8 digit code. Greenhouse currently sends an 8-character
+// alphanumeric code, so support that shape without treating ordinary words as credentials. An
+// alphanumeric candidate must contain at least one letter and one digit and still has to appear
+// near verification language below.
+const CODE_PATTERN = /(?<![A-Z0-9])((?=[A-Z0-9]{8}(?![A-Z0-9]))(?=[A-Z0-9]{0,7}[A-Z])(?=[A-Z0-9]{0,7}\d)[A-Z0-9]{8}|\d{4,8})(?![A-Z0-9])/gi;
 const MAX_CODE_AGE_MS = 10 * 60_000;
 const CLOCK_SKEW_MS = 30_000;
 
 const PORTAL_SENDER_DOMAINS: Array<{ portal: RegExp; senders: string[] }> = [
-  { portal: /(?:^|\.)greenhouse\.io$/i, senders: ['greenhouse.io', 'grnh.se'] },
+  { portal: /(?:^|\.)greenhouse\.io$/i, senders: ['greenhouse.io', 'grnh.se', 'us.greenhouse-mail.io'] },
   { portal: /(?:^|\.)lever\.co$/i, senders: ['lever.co'] },
   { portal: /(?:^|\.)ashbyhq\.com$/i, senders: ['ashbyhq.com'] },
   { portal: /(?:^|\.)smartrecruiters\.com$/i, senders: ['smartrecruiters.com'] },
   { portal: /(?:^|\.)(?:myworkdayjobs|workday)\.com$/i, senders: ['workday.com', 'myworkday.com', 'myworkdayjobs.com'] },
 ];
 
-type EmailProvider = 'gmail' | 'outlook';
+type EmailProvider = 'gmail' | 'outlook' | 'litos';
 
 type EmailMessage = {
   provider: EmailProvider;
@@ -21,6 +28,8 @@ type EmailMessage = {
   sender: string;
   receivedAt: Date | null;
   text: string;
+  recipients: string[];
+  senderAuthenticated: boolean;
 };
 
 export type VerificationCodeMatch = {
@@ -81,6 +90,33 @@ function bodyText(record: Record<string, unknown>): string {
   return `${direct}\n${encoded ? decodeBase64Url(encoded) : ''}`.trim();
 }
 
+function recipientAddresses(record: Record<string, unknown>): string[] {
+  const direct = firstString(record, ['to', 'recipient', 'recipients', 'deliveredTo', 'delivered_to'])
+    || headerValue(record, 'To')
+    || headerValue(record, 'Delivered-To')
+    || headerValue(record, 'X-Original-To');
+  const structured = record.toRecipients ?? record.to_recipients;
+  return [...`${direct}\n${structured ? JSON.stringify(structured) : ''}`
+    .matchAll(/[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+/gi)]
+    .map((match) => match[0].toLowerCase());
+}
+
+function authenticatedSender(record: Record<string, unknown>, sender: string): boolean {
+  const authentication = firstString(record, ['authenticationResults', 'authentication_results'])
+    || headerValue(record, 'Authentication-Results');
+  if (/\bdmarc=pass\b/i.test(authentication) && !/\bdmarc=fail\b/i.test(authentication)) return true;
+  const fromDomain = senderDomain(sender);
+  if (!fromDomain) return false;
+  const aligned = (identity: string | undefined) => Boolean(identity)
+    && (allowedSender(fromDomain, [identity!]) || allowedSender(identity!, [fromDomain]));
+  const dkimIdentity = authentication.match(/\bheader\.d=([a-z0-9.-]+)/i)?.[1]
+    ?? authentication.match(/\bdkim=pass\b[^;\r\n]*\bd=([a-z0-9.-]+)/i)?.[1];
+  if (/\bdkim=pass\b/i.test(authentication) && aligned(dkimIdentity)) return true;
+  const spfIdentity = authentication.match(/\bsmtp\.mailfrom=([^\s;@]+@)?([a-z0-9.-]+)/i)?.[2]
+    ?? authentication.match(/\bspf=pass\b[^;\r\n]*\bmailfrom=([^\s;@]+@)?([a-z0-9.-]+)/i)?.[2];
+  return /\bspf=pass\b/i.test(authentication) && aligned(spfIdentity);
+}
+
 function receivedDate(record: Record<string, unknown>): Date | null {
   const raw = firstString(record, [
     'receivedDateTime',
@@ -126,7 +162,15 @@ function messagesFromPayload(value: unknown, provider: EmailProvider): EmailMess
         || firstString(senderRecord ?? {}, ['address', 'email'])
         || firstString(emailAddress ?? {}, ['address', 'email'])
         || headerValue(record, 'From');
-      messages.push({ provider, subject, sender, receivedAt: receivedDate(record), text: bodyText(record) });
+      messages.push({
+        provider,
+        subject,
+        sender,
+        receivedAt: receivedDate(record),
+        text: bodyText(record),
+        recipients: recipientAddresses(record),
+        senderAuthenticated: authenticatedSender(record, sender),
+      });
     }
     for (const nested of Object.values(record)) visit(nested);
   }
@@ -181,15 +225,25 @@ export function extractVerificationCode(
   payloads: Array<{ provider: EmailProvider; data: unknown }>,
   portalUrl: string,
   requestedAt: Date,
+  expectedRecipient?: string,
+  applicationId?: string,
 ): VerificationCodeMatch | null {
   const allowedDomains = expectedSenderDomains(portalUrl);
   if (allowedDomains.length === 0 || Number.isNaN(requestedAt.getTime())) return null;
   const earliest = requestedAt.getTime() - CLOCK_SKEW_MS;
   const latest = requestedAt.getTime() + MAX_CODE_AGE_MS;
+  const recipient = expectedRecipient?.trim().toLowerCase() ?? '';
+  if (expectedRecipient && !recipient) return null;
+  if (recipient && applicationId && /(?:^app-|\+app-)/i.test(recipient)) {
+    const packetPrefix = applicationId.replace(/-/g, '').slice(0, 10).toLowerCase();
+    if (!recipient.includes(packetPrefix)) return null;
+  }
 
   const matches = payloads
     .flatMap(({ provider, data }) => messagesFromPayload(data, provider))
     .flatMap((message) => {
+      if (recipient && !message.recipients.includes(recipient)) return [];
+      if (recipient && !message.senderAuthenticated) return [];
       if (!message.receivedAt) return [];
       const received = message.receivedAt.getTime();
       if (received < earliest || received > latest) return [];
@@ -200,6 +254,7 @@ export function extractVerificationCode(
     })
     .sort((left, right) => right.message.receivedAt!.getTime() - left.message.receivedAt!.getTime());
 
+  if (new Set(matches.map((match) => match.code)).size > 1) return null;
   const best = matches[0];
   if (!best) return null;
   return {
@@ -211,7 +266,79 @@ export function extractVerificationCode(
 }
 
 export function isAutomaticEmailVerificationConfigured(): boolean {
-  return Boolean(process.env.COMPOSIO_API_KEY?.trim());
+  return Boolean(process.env.COMPOSIO_API_KEY?.trim() || process.env.LITOS_APPLICATION_EMAIL_DOMAIN?.trim());
+}
+
+type LitosVerificationRow = {
+  from_email: string | null;
+  to_email: string | null;
+  subject: string | null;
+  text: string | null;
+  html: string | null;
+  received_at: Date | null;
+  raw_json: unknown;
+};
+
+export function extractLitosVerificationCode(
+  rows: LitosVerificationRow[],
+  portalUrl: string,
+  requestedAt: Date,
+  expectedRecipient: string,
+): VerificationCodeMatch | null {
+  const payload = rows.map((row) => {
+    const raw = asRecord(row.raw_json);
+    const authentication = asRecord(raw?.authentication);
+    const authenticationResults = authentication
+      ? Object.entries(authentication).map(([name, verdict]) => `${name}=${String(verdict)}`).join(' ')
+      : '';
+    return {
+      subject: row.subject ?? '',
+      from: row.from_email ?? '',
+      to: row.to_email ?? '',
+      text: `${row.text ?? ''}\n${row.html ?? ''}`,
+      received_at: row.received_at?.toISOString() ?? '',
+      authenticationResults,
+    };
+  });
+  return extractVerificationCode(
+    [{ provider: 'litos', data: payload }],
+    portalUrl,
+    requestedAt,
+    expectedRecipient,
+  );
+}
+
+async function findLitosVerificationCode(options: {
+  userId: string;
+  portalUrl: string;
+  requestedAt: Date;
+  expectedRecipient: string;
+  applicationId?: string;
+}): Promise<VerificationCodeMatch | null> {
+  const recipient = options.expectedRecipient.trim().toLowerCase();
+  if (!recipient) return null;
+  if (options.applicationId) {
+    const packetPrefix = options.applicationId.replace(/-/g, '').slice(0, 10).toLowerCase();
+    if (!recipient.includes(packetPrefix)) return null;
+  }
+  const earliest = new Date(options.requestedAt.getTime() - CLOCK_SKEW_MS);
+  const latest = new Date(options.requestedAt.getTime() + MAX_CODE_AGE_MS);
+  const rows = await db.select({
+    from_email: application_email_messages.from_email,
+    to_email: application_email_messages.to_email,
+    subject: application_email_messages.subject,
+    text: application_email_messages.text,
+    html: application_email_messages.html,
+    received_at: application_email_messages.received_at,
+    raw_json: application_email_messages.raw_json,
+  }).from(application_email_messages).where(and(
+    eq(application_email_messages.user_id, options.userId),
+    eq(application_email_messages.alias, recipient),
+    eq(application_email_messages.generated_resume_id, options.applicationId ?? ''),
+    gte(application_email_messages.received_at, earliest),
+    lte(application_email_messages.received_at, latest),
+  )).orderBy(desc(application_email_messages.received_at)).limit(10);
+  return extractLitosVerificationCode(rows, options.portalUrl, options.requestedAt, recipient);
 }
 
 function defaultExecutor(): EmailToolExecutor {
@@ -231,12 +358,24 @@ export async function findComposioVerificationCode(options: {
   userId: string;
   portalUrl: string;
   requestedAt: Date;
+  expectedRecipient?: string;
+  applicationId?: string;
   executor?: EmailToolExecutor;
 }): Promise<VerificationCodeMatch | null> {
-  if (!options.executor && !isAutomaticEmailVerificationConfigured()) return null;
+  if (!options.expectedRecipient?.trim()) return null;
+  const litosMatch = await findLitosVerificationCode({
+    userId: options.userId,
+    portalUrl: options.portalUrl,
+    requestedAt: options.requestedAt,
+    expectedRecipient: options.expectedRecipient,
+    applicationId: options.applicationId,
+  }).catch(() => null);
+  if (litosMatch) return litosMatch;
+  if (!options.executor && !process.env.COMPOSIO_API_KEY?.trim()) return null;
   const execute = options.executor ?? defaultExecutor();
   const after = new Date(options.requestedAt.getTime() - CLOCK_SKEW_MS);
-  const gmailQuery = `after:${after.toISOString().slice(0, 10).replace(/-/g, '/')} {subject:"verification code" subject:"security code" subject:passcode subject:OTP}`;
+  const recipientQuery = options.expectedRecipient?.trim() ? ` to:${options.expectedRecipient.trim()}` : '';
+  const gmailQuery = `after:${after.toISOString().slice(0, 10).replace(/-/g, '/')}${recipientQuery} {subject:"verification code" subject:"security code" subject:passcode subject:OTP}`;
 
   const calls = await Promise.allSettled([
     execute('GMAIL_FETCH_EMAILS', {
@@ -248,7 +387,7 @@ export async function findComposioVerificationCode(options: {
       userId: options.userId,
       version: process.env.COMPOSIO_TOOLKIT_VERSION_OUTLOOK ?? '20260714_00',
       arguments: {
-        query: '"verification code" OR "security code" OR passcode OR OTP',
+        query: `to:${options.expectedRecipient.trim()} AND ("verification code" OR "security code" OR passcode OR OTP)`,
         size: 5,
         enable_top_results: false,
       },
@@ -260,5 +399,11 @@ export async function findComposioVerificationCode(options: {
     if (call.status !== 'fulfilled' || !call.value.result.successful) continue;
     payloads.push({ provider: call.value.provider, data: call.value.result.data });
   }
-  return extractVerificationCode(payloads, options.portalUrl, options.requestedAt);
+  return extractVerificationCode(
+    payloads,
+    options.portalUrl,
+    options.requestedAt,
+    options.expectedRecipient,
+    options.applicationId,
+  );
 }

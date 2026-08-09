@@ -245,15 +245,26 @@ test('the guard stays honest: Class B fields the profile really does not hold ar
 
 test('an empty profile flags only what the resolver can answer without one', () => {
   const blockers = CLASS_A_LABELS.map((label) => describeRequiredBlocker(label));
-  // Every academic fact and the sponsorship boolean drop out, which proves the guard is reading
-  // the profile rather than the label list. Referral source stays, because resolveKnownAnswer
-  // answers it with "Company website" for an account that has set no default, and that is a
-  // deliberate product behaviour rather than stored data.
-  assert.deepEqual(profileBackedBlockerLabels(blockers, {}), [
-    'How did you hear about this job?',
-    'How did you first hear about Five Rings?',
-    'How did you hear about this internship?',
-  ]);
+  /* Every academic fact and the sponsorship boolean drop out, which proves the guard is reading the
+     profile rather than the label list.
+
+     CHANGED 2026-08-09: referral source used to stay on this list, with the note "resolveKnownAnswer
+     answers it with 'Company website' for an account that has set no default, and that is a
+     deliberate product behaviour rather than stored data". Both halves of that were true, and the
+     second half is why it is gone: it was a statement of fact about how she found the posting, made
+     to an employer in her name, that no person had made - and usually false, because Litos finds
+     these on a monitored board. Measured the same day, all 16 production rows carried "Company
+     website" purely from the column default, so there was no account anywhere for which it was a
+     choice. An empty profile now answers NOTHING here, which is what an empty profile means. */
+  assert.deepEqual(profileBackedBlockerLabels(blockers, {}), []);
+  // With a real stored answer it is relayed again, and the blocker is correctly profile-backed.
+  assert.deepEqual(
+    profileBackedBlockerLabels(
+      [describeRequiredBlocker('How did you hear about this job?')],
+      { referral_source_default: 'LinkedIn' },
+    ),
+    ['How did you hear about this job?'],
+  );
 });
 
 // ---------------------------------------------------------------------------

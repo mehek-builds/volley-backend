@@ -9,6 +9,7 @@ import { isUndefinedColumnError } from '../lib/applicationFacts';
 import {
   type InboundApplicationEmail,
   applicationEmailRouteLabel,
+  applicationEmailRouteGenerationFingerprint,
   applicationForwardingAddress,
   forwardingAddressWouldLoop,
   inboundWebhookSecret,
@@ -118,6 +119,11 @@ const directInboundBodySchema = z.object({
   text: z.string().max(200_000).optional(),
   html: z.string().max(500_000).optional(),
   received_at: z.string().datetime().optional(),
+  authentication: z.object({
+    spf: z.string().max(40).optional(),
+    dkim: z.string().max(40).optional(),
+    dmarc: z.string().max(40).optional(),
+  }).optional(),
 }).passthrough().refine((value) => allRecipients(value).length > 0, 'At least one recipient is required');
 
 const resendReceivedBodySchema = z.object({
@@ -186,6 +192,7 @@ async function inboundEmailFromWebhookBody(body: unknown): Promise<InboundApplic
     text: direct.data.text,
     html: direct.data.html,
     receivedAt: direct.data.received_at ? new Date(direct.data.received_at) : undefined,
+    authentication: direct.data.authentication,
     raw: sanitized.rawJson,
   };
 }
@@ -219,6 +226,7 @@ export async function applicationEmailRoutes(fastify: FastifyInstance) {
       tracking_active: deliverability.deliverable,
       tracking_blocked_reason: deliverability.deliverable ? null : deliverability.reason,
       domain: applicationEmailRouteLabel(),
+      route_generation_fingerprint: applicationEmailRouteGenerationFingerprint(),
       forward_to: await applicationForwardingAddress(userId),
       aliases,
     });

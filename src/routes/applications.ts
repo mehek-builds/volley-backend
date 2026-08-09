@@ -38,7 +38,7 @@ import { buildPacket, finishSecurityCodeSubmission, processSubmissionApplication
 import { refreshKnownQuestionAnswers, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { rememberReusableAnswers } from '../lib/savedAnswerStore';
-import { blankRequiredQuestionLabels, preparedRunCanRestart, resumeEditDisposition, submitRequestDisposition } from '../lib/submissionSafety';
+import { blankRequiredQuestionLabels, preparedRunCanRestart, preparedRunHandoffExpired, resumeEditDisposition, submitRequestDisposition } from '../lib/submissionSafety';
 import {
   detectPortal,
   isPortalSupported,
@@ -644,6 +644,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const updatedSpec = {
         ...rendered.spec,
         _contact: contact,
+        ...('_applicant_email' in stored ? { _applicant_email: stored._applicant_email } : {}),
+        ...('_application_email' in stored ? { _application_email: stored._application_email } : {}),
         // Through settleStall like every other writer: this route can run on an application that is
       // waiting on a challenge, and abandoning that wait has to close it rather than carry an open
       // stall into a status the queue no longer looks at.
@@ -844,7 +846,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         });
       }
       const sensitive = sensitiveQuestionFor(normalizedSubmittedQuestions, sensitiveProfile, current.jd_text);
-      if (sensitive) {
+      // A supported portal needs the browser run to discover and surface the live form's
+      // declarations. Blocking that run on the pre-run snapshot creates a deadlock: the question
+      // cannot be answered until the form has been inspected, but inspection never starts. The
+      // unsupported path below has no intervening fill and emails the employer immediately, so it
+      // remains a send gate here. Final approval and direct browser submission retain their own
+      // post-discovery gates.
+      if (current.portal_url && !isPortalSupported(current.portal_url) && sensitive) {
         return reply.status(422).send({ error: `Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}` });
       }
       /* REMEMBER THE ANSWERS THAT TRAVEL, so she is asked for each of them exactly once.
@@ -1070,7 +1078,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         return reply.status(409).send({ error: 'This application is not waiting on you' });
       }
       const now = new Date().toISOString();
-      if (current.handoff_expires_at && Date.parse(current.handoff_expires_at) < Date.now()) {
+      /* Unchanged in meaning, narrowed to the case it was always describing. This route's
+       * 'submitted' branch below refuses outright without a browser_session_id, so on the path that
+       * genuinely needs a live session the two checks now agree instead of one of them answering
+       * for packets the other would decline. A managed stop, which has no session, keeps its
+       * "I cleared the check" for as long as it sits there. */
+      if (preparedRunHandoffExpired(current)) {
         return reply.status(409).send({ error: 'That took too long and timed out. Start the application again.' });
       }
       if (parsed.data.outcome === 'submitted') {
@@ -1143,8 +1156,23 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (!current || current.status !== 'ready_for_final_approval') {
         return reply.status(409).send({ error: 'Look over the filled form before you send it' });
       }
-      if (current.handoff_expires_at && Date.parse(current.handoff_expires_at) < Date.now()) {
-        return reply.status(409).send({ error: 'That took too long and timed out. Start the application again.' });
+      /* THE 55 MINUTE REFUSAL, now asked whether there is anything to refuse for.
+       *
+       * This line used to read the stamp alone. Cresta packet 8142004c-3358-4538-8778-16df5e31c5bb
+       * was refused by it at 03:06 on 2026-08-09: a complete Greenhouse application, no screener
+       * questions, filled 56 minutes earlier, and nothing in the submit path below would have
+       * touched the fill run's leftovers because there were none. See preparedRunHandoffExpired for
+       * what the stamp actually measures and what it was standing in for. The sentence is kept
+       * verbatim, because when it fires now it is true.
+       *
+       * The restart door is POST /applications/:id/submit-request with restart:true, which has no
+       * such check, so the sentence's advice is reachable rather than rhetorical. */
+      if (preparedRunHandoffExpired(current)) {
+        return reply.status(409).send({
+          error: 'That took too long and timed out. Start the application again.',
+          code: 'PREPARED_RUN_HANDOFF_EXPIRED',
+          restartable: preparedRunCanRestart(current.status, Boolean(current.submission_claimed_at)),
+        });
       }
       /* THE DUPLICATE GATE at the moment she presses send.
        *

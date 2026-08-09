@@ -25,9 +25,11 @@ import {
 } from '../lib/securityCode';
 import {
   connectToSession,
+  continueManagedBrowser,
   createBrowserContext,
   createBrowserSession,
   getBrowserSession,
+  HANDOFF_WINDOW_MS,
   isBrowserbaseConfigured,
   isManagedStratusProvider,
   runManagedBrowser,
@@ -80,7 +82,12 @@ import { readExperienceBank } from '../db/experienceBank';
 import { declaredSkillsList } from './profile';
 import { applicantGroundingFacts, draftApplicationAnswer, type ApplicantGroundingFacts } from '../llm/applicationAnswer';
 import { isBillingOrAuthFailure } from './resume';
-import { completeEmailVerificationIfPresent, type BrowserVerificationResult } from '../lib/browserVerification';
+import {
+  completeEmailVerificationIfPresent,
+  managedResultNeedsEmailVerification,
+  prepareManagedEmailVerification,
+  type BrowserVerificationResult,
+} from '../lib/browserVerification';
 import {
   discoverPageQuestions,
   discoveredFieldIsRequired,
@@ -121,7 +128,11 @@ import {
 import { coverLetterFileNameForRole, resumeFileNameForRole } from '../lib/resumeFileName';
 import { assessAtsSubmissionChannel, tryAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
 import { duplicateApplicationVerdict } from '../lib/duplicateApplication';
-import { resolveApplicantEmail } from '../lib/applicationEmail';
+import {
+  ApplicantEmailRegenerationRequiredError,
+  readPinnedApplicantEmail,
+  resolveFrozenApplicantEmail,
+} from '../lib/applicationEmail';
 
 export type ResumeRow = typeof generated_resumes.$inferSelect;
 type StoredSpec = Record<string, unknown>;
@@ -215,8 +226,9 @@ async function countSubmissionsClaimedToday(userId: string): Promise<number> {
   return counted?.total ?? 0;
 }
 
-async function claimSubmission(row: ResumeRow): Promise<ResumeRow | null> {
+async function claimSubmission(row: ResumeRow, alreadyHeld = false): Promise<ResumeRow | null> {
   const current = readApplicationReview(row.spec);
+  if (alreadyHeld) return submissionClaimIsHeld(current) ? row : null;
   if (!current || current.status !== 'submitting' || current.submission_claimed_at) return null;
   const claimed = nextReview(current, {
     submission_claimed_at: new Date().toISOString(),
@@ -229,6 +241,42 @@ async function claimSubmission(row: ResumeRow): Promise<ResumeRow | null> {
     .where(and(
       eq(generated_resumes.id, row.id),
       sql`${generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
+      sql`${generated_resumes.spec}->'_review'->>'submission_claimed_at' is null`,
+    ))
+    .returning();
+  return rows[0] ?? null;
+}
+
+export function submissionClaimIsHeld(review: ApplicationReviewState | null | undefined): boolean {
+  return review?.status === 'submitting'
+    && typeof review.submission_claimed_at === 'string'
+    && review.submission_claimed_at.trim().length > 0
+    && typeof review.submission_claim_id === 'string'
+    && review.submission_claim_id.trim().length > 0;
+}
+
+async function claimSecurityCodeSubmission(
+  row: ResumeRow,
+  current: ApplicationReviewState,
+): Promise<ResumeRow | null> {
+  if (current.status !== 'awaiting_security_code' || !current.security_code) return null;
+  const requested = nextReview(current, {
+    status: 'submitting',
+    submission_authorization: {
+      source: 'per_application_approval',
+      authorized_at: new Date().toISOString(),
+    },
+    submission_claimed_at: new Date().toISOString(),
+    submission_claim_id: randomUUID(),
+    submission_error: undefined,
+  });
+  const rows = await db.update(generated_resumes)
+    .set({
+      spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(requested)}::jsonb, true)`,
+    })
+    .where(and(
+      eq(generated_resumes.id, row.id),
+      sql`${generated_resumes.spec}->'_review'->>'status' = 'awaiting_security_code'`,
       sql`${generated_resumes.spec}->'_review'->>'submission_claimed_at' is null`,
     ))
     .returning();
@@ -373,15 +421,14 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
    * mail: every confirmation and every recruiter reply bounced, and the applicant was unreachable
    * on an application she cannot send twice.
    *
-   * resolveApplicantEmail will not hand back an alias unless the alias domain has been MEASURED
-   * able to receive mail, and falls back to her real address otherwise. The decision, including
-   * why, is recorded on the review state by the callers of buildPacket, so nothing can tell her
-   * her replies are being tracked when they are not. */
-  const applicantEmail = await resolveApplicantEmail({
+   * resolveFrozenApplicantEmail keeps the address written into this packet fixed. It refuses a
+   * pinned alias that is no longer receivable instead of silently typing a different address into
+   * the employer form than the one printed in the PDF. */
+  const applicantEmail = await resolveFrozenApplicantEmail({
     userId: row.user_id,
     applicationId: row.id,
+    spec: stored,
     accountEmail,
-    contactEmail: typeof contact.email === 'string' ? contact.email : null,
   });
   const email = applicantEmail.address.trim();
   if (!fullName || !email) throw new Error('Full name and email are required before submission');
@@ -1462,7 +1509,7 @@ async function prepareManaged(
     attention_categories: securityCode
       ? ['security_code' as const, ...attentionCategories.filter((category) => category !== 'security_code')]
       : attentionCategories.length > 0 ? attentionCategories : undefined,
-    handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
+    handoff_expires_at: new Date(Date.now() + HANDOFF_WINDOW_MS).toISOString(),
     submission_error: undefined,
   });
   await writeReview(row, review);
@@ -1478,6 +1525,7 @@ async function prepareManaged(
 
 async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = false) {
   const stored = row.spec as StoredSpec;
+  const verificationRecipient = readPinnedApplicantEmail(stored)?.address;
   let current = readApplicationReview(stored);
   if (!current) throw new Error('We do not have a link to the company application page');
   current = await repairReviewPortalFromMonitoredJob(row, current);
@@ -1628,6 +1676,8 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       portalUrl,
       requestedAt: verificationRequestedAt,
       permissionGranted: verificationSettings?.enabled === true,
+      expectedRecipient: verificationRecipient,
+      applicationId: row.id,
     });
     const coverLetterSupported = await hasCoverLetterUpload(page, portal);
     const { packet, coverLetterIssue } = await packetForCoverLetterCapability(row, coverLetterSupported, fastify);
@@ -1663,6 +1713,8 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       portalUrl,
       requestedAt: verificationRequestedAt,
       permissionGranted: verificationSettings?.enabled === true,
+      expectedRecipient: verificationRecipient,
+      applicationId: row.id,
     });
     if (postFillVerification.status !== 'not_needed') verification = postFillVerification;
     // Re-scan only after a successful verification so an empty OTP field reported during the
@@ -1731,7 +1783,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
           source: 'observed',
         })
         : {}),
-      handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
+      handoff_expires_at: new Date(Date.now() + HANDOFF_WINDOW_MS).toISOString(),
       submission_error: undefined,
     });
     await writeReview(row, review);
@@ -1783,7 +1835,7 @@ async function prepareControlled(
       preview_screenshot_url: `data:image/png;base64,${screenshot.toString('base64')}`,
       verification: { status: 'not_needed' },
       attention_reason: [...result.blockers, ...evidenceBlockers].join('\n') || undefined,
-      handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
+      handoff_expires_at: new Date(Date.now() + HANDOFF_WINDOW_MS).toISOString(),
       submission_error: undefined,
     });
     await writeReview(row, review);
@@ -1873,7 +1925,10 @@ async function submitViaAtsSubmissionChannel(
 // Threaded through submit() rather than given its own run, so the finishing path inherits every
 // guard this one already has: the authorization check, the claim, the daily cap, the portal gates,
 // the ATS channel and the CAPTCHA probe. A parallel path would inherit none of them.
-async function submit(row: ResumeRow, fastify: FastifyInstance, options: { securityCode?: string } = {}) {
+async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
+  securityCode?: string;
+  claimAlreadyHeld?: boolean;
+} = {}) {
   const current = readApplicationReview(row.spec);
   if (!current?.submission_run_id || !current.portal_url) throw new Error('The prepared run is missing');
   const authorization = await standingAuthorization(row.user_id);
@@ -1946,7 +2001,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: { secur
     }));
     return;
   }
-  const claimedRow = await claimSubmission(row);
+  const claimedRow = await claimSubmission(row, options.claimAlreadyHeld);
   if (!claimedRow) return;
   row = claimedRow;
   let claimedReview = readApplicationReview(row.spec);
@@ -2101,25 +2156,89 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: { secur
     }
     const builtPacket = await buildPacket(row);
     const packet = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
-    // The one run in this function that is allowed to send a form. Everything else - the probe, the
-    // discovery pass, the fill pass - runs under the runner's default-deny submit guard.
+    const verificationRequestedAt = new Date();
+    const initialActions = options.securityCode
+      ? withSecurityCode(buildManagedPortalActions(portal, packet, true), options.securityCode)
+      : buildManagedPortalActions(portal, packet, true);
     const result = await runManagedBrowser(
       applicationUrl,
-      // The code, when there is one, rides on the submit click the builder already ends with, so a
-      // finishing run is the same 120 actions as an ordinary one. It is never read from the stored
-      // review: it lives in the request and in this call frame, and only its salted digest is ever
-      // written down.
-      options.securityCode
-        ? withSecurityCode(buildManagedPortalActions(portal, packet, true), options.securityCode)
-        : buildManagedPortalActions(portal, packet, true),
-      { allowSubmit: true },
+      initialActions,
+      {
+        allowSubmit: true,
+        ...(!options.securityCode ? { requestContinuation: true, continuationTtlSeconds: 120 } : {}),
+      },
     );
-    const receipt = readManagedReceipt(result);
-    if (!result.screenshot) throw new Error('Stratus managed browser did not return a receipt screenshot');
+    let receiptResult = result;
+    let verification: ApplicationReviewState['verification'] = { status: 'not_needed' };
+    const initialChallenge = readManagedSecurityCodeChallenge(result);
+    if (!options.securityCode && initialChallenge && managedResultNeedsEmailVerification(result)) {
+      const requestedAt = verificationRequestedAt.toISOString();
+      const continuationExpiresAt = result.continuationExpiresAt;
+      const continuationToken = result.continuationToken;
+      const [verificationSettings] = await db.select({ enabled: users.automatic_verification_enabled })
+        .from(users).where(eq(users.id, row.user_id)).limit(1);
+      const continuationIsLive = typeof continuationToken === 'string'
+        && typeof continuationExpiresAt === 'string'
+        && Date.parse(continuationExpiresAt) > Date.now();
+      if (continuationIsLive && verificationSettings?.enabled === true) {
+        // The continuation capability stays call-local. Persisting it would turn the review JSON,
+        // which is returned to dashboard and extension clients, into a browser-session credential.
+        await writeReview(row, nextReview(claimedReview, {
+          verification: {
+            status: 'searching',
+            requested_at: requestedAt,
+            retry_count: 0,
+          },
+          attention_reason: undefined,
+          submission_error: undefined,
+        }));
+        const prepared = await prepareManagedEmailVerification({
+          result,
+          userId: row.user_id,
+          portalUrl: applicationUrl,
+          requestedAt: verificationRequestedAt,
+          permissionGranted: true,
+          expectedRecipient: packet.email,
+          applicationId: row.id,
+          attempts: 10,
+          delayMs: 3_000,
+        });
+        if (prepared.status === 'ready' && Date.parse(continuationExpiresAt) > Date.now()) {
+          try {
+            // Exactly one continuation call. An uncertain click is never retried.
+            receiptResult = await continueManagedBrowser(continuationToken, prepared.actions);
+          } catch (error) {
+            await writeReview(row, nextReview(claimedReview, {
+              status: 'needs_attention',
+              verification: { status: 'verification_pending', requested_at: requestedAt, retry_count: 1 },
+              attention_reason: 'Litos entered the employer verification step, but could not prove the final result. Check the employer portal before trying anything again.',
+              submission_error: error instanceof Error ? error.message.slice(0, 500) : 'Managed verification continuation failed',
+            }));
+            return;
+          }
+          if (!readManagedSecurityCodeChallenge(receiptResult)) {
+            verification = {
+              status: 'completed',
+              provider: prepared.provider,
+              requested_at: requestedAt,
+              retry_count: 1,
+              completed_at: new Date().toISOString(),
+            };
+          } else {
+            verification = { status: 'verification_pending', requested_at: requestedAt, retry_count: 1 };
+          }
+        } else {
+          verification = { status: 'verification_pending', requested_at: requestedAt, retry_count: 0 };
+        }
+      } else {
+        verification = { status: 'verification_pending', requested_at: requestedAt, retry_count: 0 };
+      }
+    }
+    if (!receiptResult.screenshot) throw new Error('Stratus managed browser did not return a receipt screenshot');
     const capturedAt = new Date().toISOString();
     const blob = await put(
       `users/${row.user_id}/submission-runs/${claimedReview.submission_run_id}/receipt.png`,
-      Buffer.from(result.screenshot, 'base64'),
+      Buffer.from(receiptResult.screenshot, 'base64'),
       // A receipt is the proof an application was actually submitted, so a collision here would
       // fail the run at the worst possible moment: after the employer already has it.
       { access: 'public', contentType: 'image/png', addRandomSuffix: true },
@@ -2134,7 +2253,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: { secur
      *
      * The screenshot is kept either way. It is the evidence of what was actually on screen, and it
      * is what makes the next state debuggable rather than a claim. */
-    const challenge = readManagedSecurityCodeChallenge(result);
+    const challenge = readManagedSecurityCodeChallenge(receiptResult);
     if (challenge) {
       const securityCode = beginSecurityCodeState({
         challenge,
@@ -2150,8 +2269,8 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: { secur
           // control after the resubmit. 'rejected' when it typed the code and the challenge was
           // still there; the other two mean Litos could not get the code into the page at all, which
           // is a defect of ours and must never be reported to her as a wrong code.
-          outcome: result.securityCodeAttempt?.outcome === 'rejected' ? 'rejected'
-            : result.securityCodeAttempt?.outcome === 'no_control' ? 'no_control'
+          outcome: receiptResult.securityCodeAttempt?.outcome === 'rejected' ? 'rejected'
+            : receiptResult.securityCodeAttempt?.outcome === 'no_control' ? 'no_control'
               : 'not_entered',
         })
         : securityCode;
@@ -2174,14 +2293,16 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: { secur
         sentTo: attempted.sent_to,
         digits: attempted.digits,
         codeSupplied: Boolean(options.securityCode),
-        codeOutcome: result.securityCodeAttempt?.outcome ?? null,
+        codeOutcome: receiptResult.securityCodeAttempt?.outcome ?? null,
       }, 'Employer is holding this application behind an emailed security code');
       return;
     }
+    const receipt = readManagedReceipt(receiptResult);
     await writeReview(row, nextReview(claimedReview, {
       status: 'submitted',
       submitted_at: capturedAt,
       submission_error: undefined,
+      verification,
       // Present only when a code finished this one, and it is the fact that makes the receipt
       // legible: this application was sent, refused, and completed with a code the applicant read
       // out of her own mailbox.
@@ -2273,19 +2394,22 @@ export type SubmissionFailureOutcome =
 export function submissionFailureOutcome(input: {
   captchaStop: 'before_fill' | 'at_submit' | null;
   noSubmitControl: boolean;
+  regenerationRequired?: boolean;
   uncertainAfterClaim: boolean;
   externalGate: boolean;
   providerSessionFailure: boolean;
   currentAttentionReason: string | undefined;
 }): SubmissionFailureOutcome {
-  const { captchaStop, noSubmitControl, uncertainAfterClaim, externalGate, providerSessionFailure } = input;
-  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || uncertainAfterClaim || providerSessionFailure
+  const { captchaStop, noSubmitControl, regenerationRequired, uncertainAfterClaim, externalGate, providerSessionFailure } = input;
+  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || regenerationRequired || uncertainAfterClaim || providerSessionFailure
     ? 'needs_attention'
     : externalGate ? 'submit_requested' : 'failed';
   const attentionReason = captchaStop === 'at_submit'
     ? 'This company\u2019s application page asks you to prove you are human, and that check is still waiting. Litos filled everything in and stopped there, so nothing has been sent. Open it when you have a minute and finish the last step.'
     : captchaStop === 'before_fill'
       ? 'This company asks you to prove you are human before it will take an application, so Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.'
+      : regenerationRequired
+        ? 'This application must be regenerated before submission because its stored Litos email no longer matches the active inbound email route. Nothing was sent to the employer.'
       : noSubmitControl
         /* CAUSE-NEUTRAL. NoSubmitControlError is thrown for a multi-step first page, a page that
            renders nothing in a headless browser, a control relabelled mid-run, and a click that
@@ -2349,9 +2473,10 @@ async function fail(row: ResumeRow, error: unknown) {
      or your email" is the one thing that must not be said: there is no receipt to find. This is
      the routine outcome on a multi-step first page, not an edge case. */
   const noSubmitControl = error instanceof NoSubmitControlError;
+  const regenerationRequired = error instanceof ApplicantEmailRegenerationRequiredError;
 
   const outcome = submissionFailureOutcome({
-    captchaStop, noSubmitControl, uncertainAfterClaim, externalGate, providerSessionFailure,
+    captchaStop, noSubmitControl, regenerationRequired, uncertainAfterClaim, externalGate, providerSessionFailure,
     currentAttentionReason: current.attention_reason,
   });
 
@@ -2365,6 +2490,21 @@ async function fail(row: ResumeRow, error: unknown) {
       })
       : {}),
     status: outcome.status,
+    ...(regenerationRequired
+      ? {
+        submission_claimed_at: undefined,
+        submission_claim_id: undefined,
+        submission_authorization: undefined,
+      }
+      : {}),
+    ...(current.verification?.status === 'searching'
+      ? {
+        verification: {
+          ...current.verification,
+          status: 'verification_pending' as const,
+        },
+      }
+      : {}),
     submission_error: message,
     attention_reason: outcome.attentionReason,
     // The typed half. attention_reason is prose written for the applicant and cannot be counted;
@@ -2430,25 +2570,19 @@ export async function finishSecurityCodeSubmission(
   // it is the honest one here: the applicant produced a code out of her own mailbox for this one
   // application, which is a decision about this application and not a standing setting.
   //
-  // The claim is cleared so claimSubmission can take a fresh one. That is safe precisely because
-  // this endpoint is the only door into this state - submitRequestDisposition rejects
-  // 'awaiting_security_code' outright - and the fingerprint check above has already refused a repeat
-  // of this exact code.
-  const requested = nextReview(current, {
-    status: 'submitting',
-    submission_authorization: {
-      source: 'per_application_approval',
-      authorized_at: new Date().toISOString(),
-    },
-    submission_claimed_at: undefined,
-    submission_claim_id: undefined,
-    submission_error: undefined,
-  });
-  await writeReview(row, requested);
-  const claimedRows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, applicationId)).limit(1);
-  const activeRow = claimedRows[0] ?? row;
+  // Take the claim in the same conditional update that leaves the waiting state. Two requests can
+  // read the same code state, but only one can change that state and receive the claimed row. The
+  // loser never starts a browser and never clears the winner's claim.
+  const activeRow = await claimSecurityCodeSubmission(row, current);
+  if (!activeRow) {
+    const latestRows = await db.select().from(generated_resumes)
+      .where(eq(generated_resumes.id, applicationId)).limit(1);
+    const latest = latestRows[0] ? readApplicationReview(latestRows[0].spec) : null;
+    if (!latest) return { kind: 'not_found' };
+    return { kind: 'not_awaiting', status: latest.status };
+  }
   try {
-    await submit(activeRow, fastify, { securityCode: code });
+    await submit(activeRow, fastify, { securityCode: code, claimAlreadyHeld: true });
   } catch (error) {
     fastify.log.error({ error, applicationId }, 'Security-code submission failed');
     await fail(activeRow, error);

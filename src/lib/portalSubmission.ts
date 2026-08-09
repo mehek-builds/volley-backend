@@ -6,6 +6,7 @@ import {
   isLegalConsentQuestion,
   normalizeReviewQuestionLabel,
   resolveKnownAnswer,
+  ROUTINE_APPLICANT_CONSENT_QUESTION,
   type ApplicationProfileLike,
 } from './questionDiscovery';
 import {
@@ -39,7 +40,9 @@ type PortalFamily =
   | 'jobvite'
   | 'icims'
   | 'oraclecloud'
-  | 'ultipro';
+  | 'ultipro'
+  | 'recruitee'
+  | 'teamtailor';
 type ControlledPortal =
   | 'controlled_test'
   | 'controlled_lever'
@@ -89,6 +92,7 @@ function portalFamily(portal: SupportedPortal): PortalFamily {
 // against this one by the type checker instead of by a test that someone can forget to run.
 type MultiStepFamily = 'paylocity' | 'smartrecruiters';
 type CaptchaGatedFamily = 'jazzhr' | 'bamboohr';
+type ConsentGatedFamily = 'teamtailor';
 
 const MULTI_STEP_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
   ['paylocity', 'smartrecruiters'] satisfies MultiStepFamily[],
@@ -103,6 +107,13 @@ const MULTI_STEP_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
 // has to be written down - the form LOOKS like a one-run submit and is not.
 const CAPTCHA_GATED_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
   ['jazzhr', 'bamboohr'] satisfies CaptchaGatedFamily[],
+);
+
+// Teamtailor puts an applicant privacy acknowledgement beside the send control on every live
+// tenant inspected. The checkbox is not consistently marked required in HTML, so the generic
+// readiness scan cannot prove that an unchecked control is safe. Fill the factual fields and stop.
+const CONSENT_GATED_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
+  ['teamtailor'] satisfies ConsentGatedFamily[],
 );
 
 // Portals where there is no application form to fill AT ALL until a human passes a gate that only
@@ -157,6 +168,7 @@ export function portalCanAutoSubmit(portal: SupportedPortal): boolean {
   const family = portalFamily(portal);
   return !MULTI_STEP_FAMILIES.has(family)
     && !CAPTCHA_GATED_FAMILIES.has(family)
+    && !CONSENT_GATED_FAMILIES.has(family)
     && !ACCOUNT_WALLED_FAMILIES.has(family);
 }
 
@@ -171,7 +183,7 @@ export function portalCanAutoSubmit(portal: SupportedPortal): boolean {
 // discovers the last step needs her anyway. Fewer jobs that all work beats more jobs that mostly do.
 export type AutonomousPortalFamily = Exclude<
   PortalFamily,
-  MultiStepFamily | CaptchaGatedFamily | AccountWalledFamily
+  MultiStepFamily | CaptchaGatedFamily | ConsentGatedFamily | AccountWalledFamily
 >;
 
 export const AUTONOMOUS_PORTAL_FAMILIES = [
@@ -185,6 +197,9 @@ export const AUTONOMOUS_PORTAL_FAMILIES = [
   // choice, or an account wall.
   'rippling',
   'breezy',
+  // Recruitee is a single-page form. Its optional invisible hCaptcha is handled by the shared
+  // pre-submit challenge probe, and any tenant agreement remains an empty required-field blocker.
+  'recruitee',
 ] as const satisfies readonly AutonomousPortalFamily[];
 
 export function isAutonomousPortalFamily(value: string): value is AutonomousPortalFamily {
@@ -218,6 +233,9 @@ export function portalHandoffReason(portal: SupportedPortal): string | null {
   if (CAPTCHA_GATED_FAMILIES.has(family)) {
     return 'This company’s application page asks you to prove you are human. Litos filled everything in, so all that is left is that check and the send button.';
   }
+  if (CONSENT_GATED_FAMILIES.has(family)) {
+    return 'This company asks you to confirm its applicant privacy terms before sending. Litos filled the form but left that choice and the send button to you.';
+  }
   if (MULTI_STEP_FAMILIES.has(family)) {
     return 'Litos filled in this application and stopped on the last page. That page asks you to confirm the details are true, and it can ask about your background and your right to work, so those answers need to be yours.';
   }
@@ -238,6 +256,9 @@ export function unattendedHandoffReason(portal: SupportedPortal): string | null 
   }
   if (CAPTCHA_GATED_FAMILIES.has(family)) {
     return 'This company asks you to prove you are human before it will take an application, so Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.';
+  }
+  if (CONSENT_GATED_FAMILIES.has(family)) {
+    return 'This company asks you to confirm its applicant privacy terms before it will take the application, so Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.';
   }
   if (MULTI_STEP_FAMILIES.has(family)) {
     return 'This company asks its questions over several pages, and the last one needs answers only you can give. Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.';
@@ -440,6 +461,8 @@ function receiptReference(body: string): string | undefined {
   return body.match(/(?:confirmation|reference)(?:\s*(?:id|number))?\s*[:#]\s*([A-Z0-9-]{5,})/i)?.[1]
     ?? body.match(/application\s*(?:id|number|#)\s*[:#]?\s*([A-Z0-9-]{5,})/i)?.[1];
 }
+
+const RECEIPT_PROOF_RE = /thank you|thanks for your application|application (?:has been )?(?:submitted|received)|we received your application|your application has been successfully submitted|all done![\s\S]{0,160}application|success/i;
 
 // Bounded auto-wait for every managed action. Playwright defaults to 30s, so a single selector
 // that never matches (e.g. a Greenhouse posting proxied through a branded domain whose form does
@@ -1038,6 +1061,13 @@ export function isChoiceQuestion(question: string): boolean {
 
 function shouldSkipReviewedConsentQuestion(questionText: string): boolean {
   return isLegalConsentQuestion(questionText) && /demographic data survey/i.test(questionText);
+}
+
+function shouldSkipPortalConsentQuestion(family: PortalFamily, questionText: string): boolean {
+  if (family !== 'recruitee' && family !== 'teamtailor') return false;
+  return isLegalConsentQuestion(questionText)
+    || ROUTINE_APPLICANT_CONSENT_QUESTION.test(questionText)
+    || /\b(?:keep|retain|store|use)\b[\s\S]{0,120}\b(?:my|your)\s+(?:information|data)\b[\s\S]{0,120}\b(?:future|other)\s+(?:jobs?|positions?|vacancies|opportunities)\b/i.test(questionText);
 }
 
 // Whether reviewed questions may be sent to a given provider's runner.
@@ -2611,6 +2641,16 @@ const BAMBOOHR_RESUME_SELECTOR = 'input[type="file"][aria-label="file-input"]';
 // present, so the same never-matching declaration as Breezy/JazzHR applies rather than a guess.
 const BAMBOOHR_COVER_LETTER_SELECTOR = 'input[type="file"][name="bambooCoverLetterThatDoesNotExist"]';
 
+// Captured from rebuy and Optiweb Recruitee forms on 2026-08-09.
+const RECRUITEE_RESUME_SELECTOR = 'input[type="file"][name="candidate.cv"]';
+const RECRUITEE_COVER_LETTER_SELECTOR = 'input[type="file"][name="candidate.coverLetterFile"]';
+
+// Captured from Teamtailor and AICOM tenant forms on 2026-08-09.
+const TEAMTAILOR_RESUME_SELECTOR = '#upload_resume_field input[type="file"]';
+// Neither captured Teamtailor form exposed a dedicated cover-letter file input. Never let a broad
+// file selector replace the resume with the cover letter.
+const TEAMTAILOR_COVER_LETTER_SELECTOR = 'input[type="file"][name="teamtailorCoverLetterThatDoesNotExist"]';
+
 // NOT filled: input[name^="nickname_"], BambooHR's honeypot, labelled "Please leave this field
 // blank" and concealed the same zero-height-ancestor way Breezy's is.
 //
@@ -2645,6 +2685,8 @@ const COVER_LETTER_UPLOAD_SELECTORS: Record<SupportedPortal, string> = {
   controlled_breezy: BREEZY_COVER_LETTER_SELECTOR,
   bamboohr: BAMBOOHR_COVER_LETTER_SELECTOR,
   controlled_bamboohr: BAMBOOHR_COVER_LETTER_SELECTOR,
+  recruitee: RECRUITEE_COVER_LETTER_SELECTOR,
+  teamtailor: TEAMTAILOR_COVER_LETTER_SELECTOR,
   // The account-walled four never reach a form, so there is no file input of any kind to find. A
   // never-matching selector is the honest answer to "can this portal accept a cover-letter file"
   // here, and it keeps hasCoverLetterUpload() from having to special-case them.
@@ -3020,6 +3062,22 @@ function pushFixedFieldActions(
     // streetAddress.value and zip.value (the packet carries only city, so inventing them is out),
     // desiredPay (R-031 governs salary and is currency-gated, handled by the reviewed-question path),
     // and educationLevelId. All surface as required-field blockers for the human.
+  } else if (family === 'recruitee') {
+    managedFill(actions, 'input[name="candidate.name"]', packet.fullName, 'name');
+    managedFill(actions, 'input[name="candidate.email"]', packet.email, 'email');
+    managedFill(actions, 'input[name="candidate.phone"]', packet.phone, 'phone');
+    managedUpload(actions, RECRUITEE_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    managedUpload(actions, RECRUITEE_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
+    // Tenant agreements, SMS consent, and CAPTCHA controls are never mapped.
+  } else if (family === 'teamtailor') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    managedFill(actions, 'input[name="candidate[first_name]"]', parts[0], 'first_name');
+    managedFill(actions, 'input[name="candidate[last_name]"]', parts.slice(1).join(' '), 'last_name');
+    managedFill(actions, 'input[name="candidate[email]"]', packet.email, 'email');
+    managedFill(actions, 'input[name="candidate[phone]"]', packet.phone, 'phone');
+    managedUpload(actions, TEAMTAILOR_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    managedUpload(actions, TEAMTAILOR_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
+    // candidate[consent_given] and candidate[consent_given_future_jobs] stay with the applicant.
   } else {
     const parts = packet.fullName.trim().split(/\s+/);
     const firstName = parts[0] ?? '';
@@ -3145,6 +3203,7 @@ export function buildManagedPortalActions(
     const questionText = normalizeReviewQuestionLabel(item.question);
     if (!questionText) continue;
     if (shouldSkipReviewedConsentQuestion(questionText)) continue;
+    if (shouldSkipPortalConsentQuestion(portalFamily(portal), questionText)) continue;
     const rawPortalSelector = reviewQuestionPortalSelector(item);
     const portalInputType = reviewQuestionPortalInputType(item);
     const portalSelector = durablePortalSelector(rawPortalSelector);
@@ -3339,7 +3398,7 @@ export function readManagedReceipt(result: ManagedBrowserResult): {
   referenceId?: string;
 } {
   const body = result.text.replace(/\s+/g, ' ').trim();
-  if (!/thank you|application (?:has been )?(?:submitted|received)|we received your application|success/i.test(body)) {
+  if (!RECEIPT_PROOF_RE.test(body)) {
     throw new Error('The company never showed a confirmation we could check');
   }
   return { confirmationText: body.slice(0, 1000), finalUrl: result.url, referenceId: receiptReference(body) };
@@ -3385,6 +3444,10 @@ const HOSTS: Record<PortalFamily, RegExp> = {
   oraclecloud: /(^|\.)oraclecloud\.com$/i,
   // Pinned exactly. The bare ultipro.com is the employee login for UKG's HR product.
   ultipro: /^recruiting\.ultipro\.com$/i,
+  // One tenant label only. Excludes www.recruitee.com and the vendor's own non-careers services.
+  recruitee: /^(?!www\.)[^.]+\.recruitee\.com$/i,
+  // career.teamtailor.com is Teamtailor's own public tenant. Product, API, and docs hosts are out.
+  teamtailor: /^(?!(?:www|app|api|partner|docs|support)\.)[^.]+\.teamtailor\.com$/i,
 };
 
 // Host alone is not enough for a portal whose host space also serves a login page, a marketing site
@@ -3409,6 +3472,8 @@ const APPLY_PATHS: Partial<Record<PortalFamily, RegExp>> = {
   // under the sun, including ones that are somebody's payroll or ERP login.
   oraclecloud: /^\/hcmUI\/CandidateExperience\//i,
   ultipro: /^\/[^/]+\/JobBoard\//i,
+  recruitee: /^\/o\/[^/]+(?:\/c\/new)?\/?$/i,
+  teamtailor: /^\/jobs\/[^/]+(?:\/applications\/new)?\/?$/i,
 };
 
 function databricksGreenhouseJobId(url: URL): string | undefined {
@@ -3481,7 +3546,7 @@ export function detectPortal(rawUrl: string): SupportedPortal {
   // Names the platforms it can actually DO something useful on. The account-walled four are
   // recognised by the loop above and explained by portalHandoffReason, but listing them here would
   // read as a promise to fill them, which is the opposite of what recognising them is for.
-  throw new Error('Litos cannot fill in this company\u2019s application page yet. It works on Greenhouse, Lever, Ashby, SmartRecruiters, Workable, JazzHR, Paylocity, Rippling, BreezyHR and BambooHR.');
+  throw new Error('Litos cannot fill in this company\u2019s application page yet. It works on Greenhouse, Lever, Ashby, SmartRecruiters, Workable, JazzHR, Paylocity, Rippling, BreezyHR, BambooHR, Recruitee and Teamtailor.');
 }
 
 /**
@@ -3572,9 +3637,21 @@ export function greenhousePortalUrlNeedsBoardToken(rawUrl: string | undefined): 
 
 export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): string {
   if (portal === 'greenhouse') return greenhouseEmbedApplicationUrl(rawUrl) ?? rawUrl;
-  if (portal !== 'ashby') return rawUrl;
   const url = new URL(rawUrl);
-  if (!url.pathname.endsWith('/application')) url.pathname = `${url.pathname.replace(/\/$/, '')}/application`;
+  // Treat the platform's optional trailing slash as formatting, not another path segment. Without
+  // this normalization, an already-canonical form URL received the same suffix a second time.
+  if (portal === 'ashby' || portal === 'recruitee' || portal === 'teamtailor') {
+    url.pathname = url.pathname.replace(/\/$/, '');
+  }
+  if (portal === 'ashby' && !url.pathname.endsWith('/application')) {
+    url.pathname = `${url.pathname.replace(/\/$/, '')}/application`;
+  }
+  if (portal === 'recruitee' && !url.pathname.endsWith('/c/new')) {
+    url.pathname = `${url.pathname.replace(/\/$/, '')}/c/new`;
+  }
+  if (portal === 'teamtailor' && !url.pathname.endsWith('/applications/new')) {
+    url.pathname = `${url.pathname.replace(/\/$/, '')}/applications/new`;
+  }
   return url.toString();
 }
 
@@ -3684,6 +3761,7 @@ async function fillReviewedQuestions(page: Page, portal: SupportedPortal, packet
     const questionText = normalizeReviewQuestionLabel(item.question);
     if (!questionText) continue;
     if (shouldSkipReviewedConsentQuestion(questionText)) continue;
+    if (shouldSkipPortalConsentQuestion(portalFamily(portal), questionText)) continue;
     const portalSelector = durablePortalSelector(reviewQuestionPortalSelector(item));
     if (/^(?:checkbox|radio)$/i.test(reviewQuestionPortalInputType(item) ?? '')) {
       if (portalFamily(portal) === 'greenhouse') {
@@ -3900,6 +3978,20 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="linkedinUrl"]'], packet.linkedinUrl, 'linkedin', filledFields);
     await fillFirst(page, ['input[name="websiteUrl"]'], packet.portfolioUrl ?? packet.githubUrl, 'portfolio', filledFields);
     await uploadFirst(page, [BAMBOOHR_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+  } else if (family === 'recruitee') {
+    await fillFirst(page, ['input[name="candidate.name"]'], packet.fullName, 'name', filledFields);
+    await fillFirst(page, ['input[name="candidate.email"]'], packet.email, 'email', filledFields);
+    await fillFirst(page, ['input[name="candidate.phone"]'], packet.phone, 'phone', filledFields);
+    await uploadFirst(page, [RECRUITEE_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, [RECRUITEE_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+  } else if (family === 'teamtailor') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    await fillFirst(page, ['input[name="candidate[first_name]"]'], parts[0], 'first_name', filledFields);
+    await fillFirst(page, ['input[name="candidate[last_name]"]'], parts.slice(1).join(' '), 'last_name', filledFields);
+    await fillFirst(page, ['input[name="candidate[email]"]'], packet.email, 'email', filledFields);
+    await fillFirst(page, ['input[name="candidate[phone]"]'], packet.phone, 'phone', filledFields);
+    await uploadFirst(page, [TEAMTAILOR_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, [TEAMTAILOR_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
   } else {
     await fillFirst(page, ['input[name="_systemfield_name"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="_systemfield_email"]'], packet.email, 'email', filledFields);
@@ -3916,6 +4008,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
   await fillReviewedQuestions(page, portal, packet, filledFields);
 
   const blockers: string[] = [];
+  if (CONSENT_GATED_FAMILIES.has(family)) blockers.push(portalHandoffReason(portal)!);
   // String kept verbatim: it is already surfaced to applicants and matched downstream.
   if (await hasUnresolvedCaptcha(page)) {
     blockers.push(CAPTCHA_BLOCKER);
@@ -4933,6 +5026,49 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
   const widgetOf = (element) => element.closest(
     '[class*="select__container"], .field, .field-wrapper, .file-upload, fieldset, [role="group"]'
   ) || element.parentElement || element;
+  /* THE LABEL THAT WRAPS ITS CONTROL AND NEVER NAMES IT.
+   *
+   * '<label>First name<input required></label>' is a legal HTML label association and carries no
+   * "for" attribute, so the byFor lookup below finds nothing and widgetOf falls back to the label
+   * itself, whose querySelector('label') then finds no label INSIDE it. Greenhouse's first-name,
+   * last-name and resume fields are all built this way, and the gate reported all three as
+   * "A required field on the form has no label Litos can read, and is still empty" - a refusal the
+   * applicant cannot act on, on the three most obvious fields on the form.
+   *
+   * Disqualified when the label wraps MORE than one control, because a label that speaks for
+   * several controls speaks for none of them in particular and would name a whole radio row after
+   * its question. That case is already served by the legend and aria-labelledby candidates.
+   */
+  const wrappingLabelTextOf = (element) => {
+    const wrapper = element && element.closest && element.closest('label');
+    if (!wrapper) return '';
+    if (wrapper.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"]').length > 1) return '';
+    return wrapper.textContent;
+  };
+  /* The question a control sits under, when the control itself is labelled with nothing useful.
+   * Last resort, and deliberately below the wrapping label. It is the only thing that names an
+   * Ashby datepicker, whose own label text is "Pick date...". Kept in step with the managed
+   * runner's gate in stratus-browser-cloud.
+   *
+   * A BLOCK HOLDING MORE THAN ONE CONTROL IS REJECTED, because its first label is then somebody
+   * else's. Measured against the SmartRecruiters fixture, whose resume input sits bare inside an
+   * <spl-dropzone> with no label of any kind: without this test the walk reached the form's field
+   * grid and reported the missing resume as "First name is required and is still empty", twice
+   * over, and the applicant was never told which document was missing. A wrong name is worse than
+   * no name, so an ambiguous block yields nothing and the honest "no label Litos can read" stands.
+   */
+  const genericControlText = (value) => /^(pick|select|choose)\s+(date|option)|^(type|enter|write)\s+(your\s+)?(answer\s+)?here/i.test(clean(value));
+  const nearestQuestionText = (start) => {
+    let block = start && start.parentElement;
+    for (let depth = 0; block && depth < 6; depth += 1, block = block.parentElement) {
+      if (!block.matches || !block.matches('div, section, li, fieldset')) continue;
+      if (block.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"]').length > 1) return '';
+      const candidate = block.querySelector('label, legend, .question, h3, h4');
+      const text = clean((candidate && candidate.textContent) || '');
+      if (text && !genericControlText(text)) return text;
+    }
+    return '';
+  };
   const labelOf = (widget, element) => {
     const labelledBy = (widget && widget.getAttribute('aria-labelledby'))
       || (element && element.getAttribute('aria-labelledby'));
@@ -4945,11 +5081,14 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
       byFor && byFor.textContent,
       legend && legend.textContent,
       own && own.textContent,
+      wrappingLabelTextOf(element),
       element && element.getAttribute('aria-label'),
-      widget && widget.getAttribute('aria-label')
+      widget && widget.getAttribute('aria-label'),
+      nearestQuestionText(element)
     ]) {
       const text = clean(candidate);
       if (!text) continue;
+      if (genericControlText(text)) continue;
       // A machine identifier is not a label. Greenhouse names custom questions with UUIDs and
       // numeric tokens, and "question_19302464004 is required" tells the applicant nothing.
       if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(text)) continue;
@@ -4966,11 +5105,53 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
   //   - Greenhouse's uploader REMOVES the file input once the upload finishes and replaces it with
   //     a filename chip, so "no input[type=file] holding a file" is true of a widget that has
   //     already been given one.
+  /* AN ANSWER THAT IS A PRESSED BUTTON, WHICH IS HOW ASHBY RENDERS EVERY YES/NO QUESTION.
+   *
+   * Ashby draws work authorization and sponsorship as a segmented control: a row of buttons plus
+   * one 'display:none' mirror input that carries the value. Measured on the live form: pressing
+   * "Yes" checks the mirror, pressing "No" leaves it UNCHECKED. So the mirror cannot tell "No"
+   * apart from unanswered, and the loop below skips it anyway for being hidden. The pressed state
+   * of the button is the ONLY place the answer is legible.
+   *
+   * Until this was read, every Ashby packet carrying a work-eligibility question stayed in
+   * needs_attention forever: the applicant answered it, the gate still called it empty, and the
+   * submit was refused on a field that was already correct.
+   *
+   * Read three ways because three families spell the same state differently: the ARIA states
+   * (role="radio" aria-checked, aria-pressed, aria-selected), a data-state attribute, and Ashby's
+   * own CSS-module class - verified in its stylesheet on 2026-08-09, '._active_1svni_57' sits in
+   * the same module as the pill class '._option_1svni_32' and is the rule that paints the chosen
+   * pill. The hash changes between bundles, so the match is on the module-name fragment.
+   *
+   * ONLY EVER MAKES THE GATE QUIETER. The caller acts on a true and on nothing else, so a block
+   * that holds pill-shaped buttons and no chosen one still falls through to its real controls. That
+   * asymmetry is deliberate: a filled text input sitting beside a button this recogniser guessed
+   * wrong about must not be reported empty, because a gate that refuses a complete application is
+   * how 79 prepared resumes produced 0 sent applications.
+   */
+  const PILL_SELECTED = /_active_|_selected_|_checked_/;
+  const chosenPillOf = (scope) => {
+    if (!scope || !scope.querySelectorAll) return null;
+    const pills = [...scope.querySelectorAll('button, [role="radio"], [role="option"], [role="tab"]')].filter((pill) => {
+      const text = clean(pill.textContent);
+      // The same exclusion list the extension's Ashby adapter uses: a block can also hold upload,
+      // remove and submit controls, and "Submit application" is not an answer to anything.
+      return text.length > 0 && text.length <= 40
+        && !/upload|replace|drag|drop|submit|browse|remove|delete|\bsave\b|cancel|\+\s*add/i.test(text);
+    });
+    if (pills.length === 0) return null;
+    return pills.some((pill) => PILL_SELECTED.test(String(pill.className || ''))
+      || pill.getAttribute('aria-pressed') === 'true'
+      || pill.getAttribute('aria-checked') === 'true'
+      || pill.getAttribute('aria-selected') === 'true'
+      || /^(?:on|true|active|selected|checked)$/i.test(pill.getAttribute('data-state') || ''));
+  };
   const widgetHasAnswer = (widget) => {
     if (!widget) return false;
     if (widget.querySelector('[class*="select__single-value"], [class*="select__multi-value__label"]')) return true;
     if (widget.querySelector('[class*="select__placeholder"]')) return false;
     if (widget.querySelector('.file-upload__filename, [class*="file-upload__filename"], [aria-label="Remove file" i]')) return true;
+    if (chosenPillOf(widget) === true) return true;
     for (const control of widget.querySelectorAll('input, textarea, select')) {
       if (control.type === 'hidden') continue;
       if (control.type === 'file') {
@@ -5008,6 +5189,71 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
     if (!isVisible(element) && !isVisible(widgetOf(element))) continue;
     note(widgetOf(element), element);
   }
+  /* THE REQUIRED MARKER THAT IS NEITHER AN ATTRIBUTE NOR AN ARIA STATE.
+   *
+   * Two more spellings of "this field, in particular", one per ATS family, both read off ONE
+   * control's own label and neither off page text. Kept in step, loop for loop, with the managed
+   * runner's gate in stratus-browser-cloud, where the class arm shipped as PR #22.
+   *
+   *   ASHBY marks the question's <label> with a CSS-module class and paints the asterisk from it:
+   *   '._required_f7cvd_91:after{content:"*"}', read out of Ashby's stylesheet on 2026-08-09. The
+   *   mark is therefore a pseudo-element that appears in no attribute and in no text anywhere.
+   *   Measured on the live Deepgram form behind packet 245c827a, which shipped as "Done - 5 checked"
+   *   with three required fields empty: SIX controls carry 'required', ZERO carry aria-required, and
+   *   the three empty ones - Current Location and both work-eligibility questions - carry neither.
+   *
+   *   GREENHOUSE prints the character itself into the label text. Measured read-only on the live
+   *   zscaler posting, 19 of its 30 labels carry a standalone "*", and on yugabyte 3 of 23.
+   *
+   * WHY THIS IS NOT THE 2026-08-08 MISTAKE. An earlier gate matched the form's own legend text,
+   * "* indicates a required field", and would have refused EVERY Greenhouse submission there is
+   * (LEGEND_TEXT below is what remains of it). Neither loop reads page text. Each reads ONE element
+   * - a <label> or <legend> that speaks for ONE control - and a page-level notice is a <p>, not a
+   * label, so it cannot reach either. ASTERISK_LEGEND excludes that same sentence a second time for
+   * the boards that do print it inside a label block.
+   *
+   * The asterisk test is labelMarksRequired's, character for character (questionDiscovery.ts), so
+   * discovery and this gate cannot disagree about which fields the employer marked required.
+   *
+   * MEASURED CONTRIBUTION, read-only against live forms on 2026-08-09. On the zscaler and yugabyte
+   * Greenhouse postings the asterisk loop adds ZERO blockers, because every field it finds already
+   * carries 'required' or aria-required. On the Deepgram, Ramp and Linear Ashby forms it matches
+   * ZERO labels, because Ashby prints no asterisk anywhere. It earns its place on the one shape
+   * neither attribute loop can see: a Greenhouse screener question marked with a red asterisk and
+   * nothing else.
+   *
+   * note() dedupes on the widget, so a field caught by an attribute loop and by one of these is
+   * still reported once.
+   */
+  // The control a marked label speaks for. "for=" first, because it is the employer's own statement
+  // of which control the mark belongs to, and Ashby sets it even where the input it names has no id
+  // (the location combobox), in which case the block's first real control is the right answer. A
+  // file input is excluded from the fallback for the same reason widgetHasAnswer treats uploads
+  // specially: the block, not the input, holds the evidence of an upload.
+  const noteMarkedLabel = (marker, widgetFallback) => {
+    const widget = widgetOf(marker);
+    if (!widget || !isVisible(widget)) return;
+    const named = marker.getAttribute('for');
+    const target = (named && widget.querySelector('#' + CSS.escape(named)))
+      || widget.querySelector('input:not([type="hidden"]):not([type="file"]), textarea, select, [role="combobox"]')
+      || (widgetFallback ? widget : null);
+    if (!target || target.disabled) return;
+    note(widget, target);
+  };
+  for (const marker of document.querySelectorAll('label[class*="_required_"], legend[class*="_required_"]')) {
+    // An Ashby question block with no readable control still has to block, which is where PR #22
+    // measured this arm.
+    noteMarkedLabel(marker, true);
+  }
+  const ASTERISK_MARK = /\*(?:\s|$)|(?:^|\s)\*/;
+  const ASTERISK_LEGEND = /\*\s*(?:indicates|denotes|means|marks|=)/i;
+  for (const marker of document.querySelectorAll('label, legend')) {
+    const markerText = (marker.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!ASTERISK_MARK.test(markerText) || ASTERISK_LEGEND.test(markerText)) continue;
+    // No widget fallback: "a label somewhere carries a star and I could not find its control" is
+    // not evidence that an application is incomplete.
+    noteMarkedLabel(marker, false);
+  }
   const stale = [];
   const ERROR_TEXT = /\bis required\b|\brequired field\b|\bplease (?:select|enter|complete|choose|provide)\b|\bcannot be blank\b/i;
   // A form's own legend says "* indicates a required field", and it matches the line above. On the
@@ -5031,7 +5277,15 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
     // twice for also carrying the matching error line.
     note(widget, control);
   }
-  return { blocking, stale: Array.from(new Set(stale)) };
+  /* Deduped by MESSAGE as well as by widget, which the managed runner's copy of this gate already
+     does. Keying only on the widget reports one question twice whenever it wears two blocks: an
+     unanswered React Select carries aria-required on both its combobox input and the hidden input
+     react-select keeps beside it, and the two resolve to the same question and the same label.
+     Measured on the live Deepgram Ashby form, empty: 18 entries covering 15 distinct questions,
+     against the managed runner's 15 for the same page. Two providers handing the applicant
+     different-length lists for one form is the drift these two copies exist to avoid, and removing
+     a duplicate can only ever make this gate quieter. */
+  return { blocking: Array.from(new Set(blocking)), stale: Array.from(new Set(stale)) };
 })()`;
 
 export type SubmitReadiness = { blocking: string[]; stale: string[] };
@@ -5246,7 +5500,7 @@ export async function readReceipt(page: Page): Promise<{ confirmationText: strin
    * be scraped instead of the confirmation, and a submitted application would be reported as
    * unverified. Measured before the barrier existed: 10 stale reads in 15 runs. */
   const body = (await page.locator('body').innerText()).replace(/\s+/g, ' ').trim();
-  if (!/thank you|application (?:has been )?(?:submitted|received)|we received your application|success/i.test(body)) {
+  if (!RECEIPT_PROOF_RE.test(body)) {
     throw new Error('The company never showed a confirmation we could check');
   }
   return { confirmationText: body.slice(0, 1000), finalUrl: page.url(), referenceId: receiptReference(body) };

@@ -29,8 +29,14 @@ test('attended handoff can record a user-confirmed submission without an ATS key
   assert.match(source, /pipeline_stage: 'applied'/);
   assert.match(source, /Submitted by the applicant in the live company page/);
   const handler = source.slice(source.indexOf("'/applications/:id/submission/handoff-complete'"));
+  /* The check moved into preparedRunHandoffExpired, so this used to look for a field name the
+     handler no longer spells. indexOf then returned -1, which is less than everything, and the
+     ordering assertion passed while measuring nothing. Anchored on the call and on its presence, so
+     renaming it again fails here rather than going quiet. */
+  const expiryGate = handler.indexOf('preparedRunHandoffExpired(current)');
+  assert.ok(expiryGate >= 0, 'the handoff completion must still consult the expiry gate');
   assert.ok(
-    handler.indexOf('handoff_expires_at') < handler.indexOf("parsed.data.outcome === 'submitted'"),
+    expiryGate < handler.indexOf("parsed.data.outcome === 'submitted'"),
     'expired handoffs must be rejected before either completion outcome mutates state',
   );
 });

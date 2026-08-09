@@ -437,9 +437,17 @@ export function applyResumePolicy(
   const context = deriveCandidateContext(education, options.now ?? new Date());
   const sourceCoursework = (education.coursework ?? []).map((course) => course.trim()).filter(Boolean);
 
-  // The model receives the JD in its original order and selects evidence in that same priority
-  // order. Preserve that ordering here. Re-sorting against the whole JD can let a later,
-  // keyword-dense requirement displace evidence for the first stated responsibility.
+  /* The model receives the JD in its original order and selects evidence in that same priority
+     order. Preserve that ordering here. Re-sorting against the whole JD can let a later,
+     keyword-dense requirement displace evidence for the first stated responsibility.
+
+     STILL TRUE, AND MEASURED RATHER THAN ASSUMED. Ranking the entries by token overlap against the
+     posting was tried over 85 production packets before the leadAlignment work and it is worse than
+     what the model does unaided: it led a Test Automation Engineer posting with a Program
+     Management internship on the shared words "intern", "through" and "system". The fix for a lead
+     entry chosen by habit is not arithmetic applied after the fact, it is making the model state
+     and defend the choice - see engine/leadAlignment.ts. This function stays deferential on
+     purpose. */
   const experience = rawSpec.experience
     .map((entry) => {
       const source = matchingBankEntry(entry, bank);
@@ -491,6 +499,17 @@ export function applyResumePolicy(
          education block is student-owned facts throughout: nothing in it is the LLM's to write. */
       gpa: educationGpaLine(education),
       school_location: education.school_location?.trim() ?? '',
+      /* EVERY course on record, in the order the student recorded them. Whatever the model wrote
+         for "coursework" is discarded here, exactly like school, degree and GPA above.
+         DELIBERATELY NOT TAILORED, recorded because it looks like a bug when measured: across 85
+         production packets for one applicant this line held exactly ONE value, while the skills
+         line held 77. The difference is not an oversight in the coursework path, it is the
+         education block being student-owned facts and the skills line being a selection.
+         Note that the grounding rule would ALLOW a JD-relevant subset - courseworkIsUngrounded
+         accepts any subset of the recorded courses and only rejects a course never recorded, and
+         coursework.test.ts pins that. So selecting here would be safe if the product ever wants
+         it. It is a product decision about whether the education block is a record or an argument,
+         not a defect to be fixed in passing, and today it is a record. */
       coursework: sourceCoursework.join(', '),
       education_position: context.education_position,
       experience,
