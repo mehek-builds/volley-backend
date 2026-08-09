@@ -227,8 +227,9 @@ export function normalizeSpec(raw: unknown): ResumeSpec {
     const entry_org = str(a.entry_org).trim();
     const requirement = str(a.requirement).trim();
     const evidence = str(a.evidence).trim();
+    const jd_hash = str(a.jd_hash).trim();
     if (!entry_org || !requirement || !evidence) return null;
-    return { entry_org, requirement, evidence };
+    return { entry_org, requirement, evidence, ...(jd_hash ? { jd_hash } : {}) };
   };
   return {
     target_role: str(o.target_role),

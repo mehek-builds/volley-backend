@@ -219,6 +219,102 @@ test('dashboard resume edits prune generated off-list skills before validation',
   assert.ok(pruneIndex > 0 && validateIndex > pruneIndex, 'dashboard save must sanitize uneditable skills before validation');
 });
 
+test('dashboard edits and every pre-send route enforce current lead citations', () => {
+  const applicationsRoute = routeSource('applications.ts');
+  const editStart = applicationsRoute.indexOf("'/applications/:id/resume'");
+  const editEnd = applicationsRoute.indexOf("'/applications/:id/review'", editStart);
+  const edit = applicationsRoute.slice(editStart, editEnd);
+  const select = edit.indexOf('selectJdAlignedLead(edited, review.jd_text');
+  const validate = edit.indexOf('validateResumeSpec(', select);
+  const render = edit.indexOf('renderResumePdf(edited', validate);
+  const renderedCitation = edit.indexOf('leadAlignmentIssues(rendered.spec', render);
+  const persist = edit.indexOf('.update(generated_resumes)', renderedCitation);
+  assert.ok(select > 0 && validate > select, 'dashboard edits must reselect the lead before validation');
+  assert.ok(render > validate && renderedCitation > render, 'the fitted edit must retain its exact citation');
+  assert.ok(persist > renderedCitation, 'a stale fitted citation must be refused before persistence');
+
+  const preSend = applicationsRoute.slice(
+    applicationsRoute.indexOf('export async function preSendResumeVerificationIssues'),
+    applicationsRoute.indexOf('async function loadSensitiveQuestionProfile'),
+  );
+  assert.match(preSend, /applicationLeadAlignmentIssues\(stored, company\)/);
+  assert.match(preSend, /leadAlignmentIssues\(rendered\.spec, review\.jd_text/);
+
+  const extension = applicationsRoute.slice(
+    applicationsRoute.indexOf("'/applications/:id/submission/extension-start'"),
+    applicationsRoute.indexOf("'/applications/:id/submission/extension-outcome'"),
+  );
+  assert.match(extension, /preSendResumeVerificationIssues\(/);
+  assert.match(extension, /sameApplicationPacketSpec\(row\.spec, precheckRow\.spec\)/);
+  assert.match(extension, /generated_resumes\.spec\} = \$\{JSON\.stringify\(precheckRow\.spec\)\}::jsonb/);
+});
+
+test('the centralized runner refuses stale lead evidence before every claim and send channel', () => {
+  const runner = routeSource('submissionRunner.ts');
+  const submit = runner.slice(
+    runner.indexOf('async function submit(row:'),
+    runner.indexOf('export type SecurityCodeSubmissionOutcome'),
+  );
+  const submitGate = submit.indexOf('runnerLeadAlignmentIssues(row)');
+  const claim = submit.indexOf('claimSubmission(row');
+  assert.ok(submitGate > 0 && claim > submitGate, 'the runner must validate the exact packet before its submission claim');
+  const ordinaryClaim = runner.slice(
+    runner.indexOf('async function claimSubmission('),
+    runner.indexOf('export function submissionClaimIsHeld'),
+  );
+  assert.match(ordinaryClaim, /generated_resumes\.spec\} = \$\{JSON\.stringify\(row\.spec\)\}::jsonb/);
+  const preparationClaim = runner.slice(
+    runner.indexOf('async function claimPreparation('),
+    runner.indexOf('async function authorizationValidAtClick('),
+  );
+  assert.match(preparationClaim, /generated_resumes\.spec\} = \$\{JSON\.stringify\(row\.spec\)\}::jsonb/);
+  for (const channel of [
+    'submitControlled(row',
+    'submitViaAtsSubmissionChannel(row',
+    'runManagedBrowser(',
+    'clickFinalSubmit(',
+  ]) {
+    assert.ok(submit.indexOf(channel) > submitGate, `${channel} must remain behind the lead citation gate`);
+  }
+
+  const process = runner.slice(
+    runner.indexOf('export async function processSubmissionApplication'),
+    runner.indexOf('export async function submissionRunnerRoutes'),
+  );
+  assert.ok(
+    process.indexOf('runnerLeadAlignmentIssues(activeRow)') < process.indexOf('claimPreparation(activeRow)'),
+    'direct cron entry must validate before preparing or submitting a stored row',
+  );
+
+  const security = runner.slice(
+    runner.indexOf('export async function finishSecurityCodeSubmission'),
+    runner.indexOf('export async function processSubmissionApplication'),
+  );
+  assert.ok(
+    security.indexOf('runnerLeadAlignmentIssues(row)') < security.indexOf('claimSecurityCodeSubmission(row, current)'),
+    'security-code continuation must validate before reserving or refilling the employer form',
+  );
+  const securityClaim = runner.slice(
+    runner.indexOf('async function claimSecurityCodeSubmission('),
+    runner.indexOf('async function claimPreparation('),
+  );
+  assert.match(securityClaim, /generated_resumes\.spec\} = \$\{JSON\.stringify\(row\.spec\)\}::jsonb/);
+});
+
+test('unsupported-portal email claims the exact verified packet before building or sending it', () => {
+  const applications = routeSource('applications.ts');
+  const handler = applications.slice(
+    applications.indexOf("'/applications/:id/submit-request'"),
+    applications.indexOf("'/applications/:id/submission/channels'"),
+  );
+  const verify = handler.indexOf('preSendResumeVerificationIssues(');
+  const exactClaim = handler.indexOf('sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`', verify);
+  const packet = handler.indexOf('buildPacket(claimedRow)', exactClaim);
+  const send = handler.indexOf('sendUnsupportedPortalApplicationEmail', exactClaim);
+  assert.ok(verify > 0 && exactClaim > verify, 'the email claim must compare against the packet that passed verification');
+  assert.ok(packet > exactClaim && send > exactClaim, 'a changed packet must be refused before packet build or employer email');
+});
+
 /**
  * Wiring, asserted separately from behaviour.
  *
