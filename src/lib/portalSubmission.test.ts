@@ -490,6 +490,7 @@ test('managed controlled-portal actions include reviewed fields, resume upload, 
       .map((action) => action.type),
     [
       'waitForSelector',
+      'waitForSelector',
       'fill',
       'fill',
       'fillByLabelText',
@@ -504,6 +505,45 @@ test('managed controlled-portal actions include reviewed fields, resume upload, 
   );
   assert.ok(actions.some((action) => action.type === 'select' && action.label?.startsWith('question_select:')));
   assert.equal(actions.find((action) => action.type === 'upload')?.file?.base64, 'cGRm');
+  const hydration = actions.find((action) => action.label === 'controlled_portal_hydrated');
+  assert.deepEqual(hydration, {
+    type: 'waitForSelector',
+    selector: 'form[data-litos-controlled-portal][data-litos-qa-ready="1"]',
+    label: 'controlled_portal_hydrated',
+    optional: false,
+    timeout: 10_000,
+  });
+  assert.ok(actions.indexOf(hydration!) < actions.findIndex((action) => action.label === 'first_name'));
+  assert.ok(actions.indexOf(hydration!) < actions.findIndex((action) => action.type === 'confirmAndSubmit'));
+});
+
+test('controlled hydration survives every budget trim before preview, submit, and discovery mutations', () => {
+  const packet = {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: Array.from({ length: 100 }, (_, index) => ({
+      question: `Why are you interested in area ${index + 1}?`,
+      answer: `Grounded answer ${index + 1}`,
+    })),
+  };
+  const lists = {
+    preview: buildManagedPortalActions('controlled_test', packet, false),
+    submit: buildManagedPortalActions('controlled_test', packet, true),
+    discovery: buildManagedDiscoveryActions('controlled_test', packet),
+  };
+  const mutationTypes = new Set(['click', 'fill', 'fillByLabelText', 'upload', 'select', 'press', 'confirmAndSubmit']);
+  for (const [name, actions] of Object.entries(lists)) {
+    assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `${name} exceeded the managed action budget`);
+    const hydrationIndex = actions.findIndex((action) => action.label === 'controlled_portal_hydrated');
+    const firstMutationIndex = actions.findIndex((action) => mutationTypes.has(action.type));
+    assert.equal(hydrationIndex, 0, `${name} lost or moved the hydration barrier`);
+    assert.ok(firstMutationIndex > hydrationIndex, `${name} can mutate the SSR form before hydration`);
+    assert.equal(actions[hydrationIndex]?.optional, false, `${name} hydration barrier must fail closed`);
+  }
+  const submitActions = lists.submit;
+  assert.ok(submitActions.findIndex((action) => action.type === 'confirmAndSubmit') > 0);
 });
 
 test('managed portals upload a tailored cover letter without replacing the resume', () => {

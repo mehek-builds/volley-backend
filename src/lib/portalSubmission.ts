@@ -3417,7 +3417,7 @@ function isProtectedManagedAction(
   const base = managedActionLabelBase(action);
   if (base && protectedActionBases.has(base)) return true;
   if (GREENHOUSE_FIXED_EDUCATION_ACTION_RE.test(label)) return true;
-  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight)/
+  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight)/
     .test(label);
 }
 
@@ -3570,6 +3570,12 @@ type ReviewedQuestionActionProtection = {
 function coreActionProtection(actions: readonly ManagedBrowserAction[], portal: SupportedPortal): ReadonlySet<string> {
   const available = new Set(actions.map(managedActionLabelBase).filter((base): base is string => Boolean(base)));
   const protectedBases = new Set<string>();
+  // The controlled fixture's SSR form is unsafe to mutate until React has attached its handlers.
+  // Class-level protection keeps this barrier in discovery trims too; naming it in the core set
+  // makes the submit and preview minimum explicit alongside identity and resume.
+  if (portal === 'controlled_test' && available.has('controlled_portal_hydrated')) {
+    protectedBases.add('controlled_portal_hydrated');
+  }
   if (available.has('name')) {
     protectedBases.add('name');
   } else {
@@ -4212,6 +4218,28 @@ function pushFixedFieldActions(
   // a run that fires ten optional fills at a consent page produces a blocker card implying the form
   // was found and merely refused. It was never reached.
   if (ACCOUNT_WALLED_FAMILIES.has(family)) return;
+  /* THE CONTROLLED PORTAL IS REACT, AND SSR IS NOT READINESS.
+   *
+   * Its contact fields and submit button exist in the server HTML before React attaches onSubmit.
+   * A cold remote browser could therefore fill every input and pass atomic required-field
+   * confirmation, then click an unhydrated native form. The browser performed a GET back to the
+   * same fixture instead of entering the security-code phase, so the runner honestly observed the
+   * old form, no challenge, and no receipt. Waiting longer after that click cannot repair it: the
+   * event that changes phase was already missed.
+   *
+   * The fixture publishes this exact marker only after its effect has run and the handlers are
+   * live. Required, not optional, because continuing without it would recreate the uncertain submit
+   * D-020 exists to prevent. It is scoped to controlled_test, so no employer page learns a QA-only
+   * contract and no production ATS action budget changes. */
+  if (portal === 'controlled_test') {
+    actions.push({
+      type: 'waitForSelector',
+      selector: 'form[data-litos-controlled-portal][data-litos-qa-ready="1"]',
+      label: 'controlled_portal_hydrated',
+      optional: false,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
+  }
   if (family === 'greenhouse') {
     pushGreenhouseManagedPreflightActions(actions);
     // After the preflight, because on a JD page the application form (and every combobox on it)
