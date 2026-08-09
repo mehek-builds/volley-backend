@@ -115,6 +115,15 @@ test('both filled preview writes use the controlled screenshot adapter and carry
   assert.match(harnessSource, /receipt_capture_sha256: capturedReceipt\.sha256/);
 });
 
+test('the controlled code email is injected only after the backend opens its request window', async () => {
+  const harnessSource = await readFile(new URL('./qa-guest-submissions.mjs', import.meta.url), 'utf8');
+  assert.match(harnessSource, /waitForVerificationRequestWindow\(applicationId\)\.then\(\(\) => injectSecurityCodeEmail/);
+  assert.match(harnessSource, /row\?\.status === 'searching'/);
+  assert.match(harnessSource, /Date\.parse\(row\.requested_at\)/);
+  assert.doesNotMatch(harnessSource, /new Promise\(\(resolve\) => setTimeout\(resolve, 1_000\)\)\.then\(\(\) => injectSecurityCodeEmail/,
+    'a wall-clock delay can put the email before verificationRequestedAt and make it unsearchable');
+});
+
 test('identical screenshot content is attributed only to the exact current submission run key', () => {
   const userId = 'user-1';
   const digest = 'a'.repeat(64);
