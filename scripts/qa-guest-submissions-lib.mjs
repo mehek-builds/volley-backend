@@ -157,6 +157,23 @@ export function controlledEmailCaptureTarget(rawUrl, token) {
   return target;
 }
 
+export function controlledReceiptCaptureTarget(rawUrl, token) {
+  let target;
+  try {
+    target = new URL(rawUrl);
+  } catch {
+    throw new Error('Provisioning blocker: LITOS_QA_RECEIPT_CAPTURE_URL must be a valid URL');
+  }
+  if (target.protocol !== 'http:' || target.hostname !== '127.0.0.1' || !target.port
+    || target.pathname !== '/receipts' || target.search || target.hash || target.username || target.password) {
+    throw new Error('Provisioning blocker: the QA receipt capture adapter must be http://127.0.0.1:<port>/receipts');
+  }
+  if (!token || !/^[A-Za-z0-9_-]{32,128}$/.test(token)) {
+    throw new Error('Provisioning blocker: LITOS_QA_RECEIPT_CAPTURE_TOKEN must contain 32 to 128 safe characters');
+  }
+  return target;
+}
+
 export function controlledDatabaseTarget(databaseUrl) {
   let target;
   try {

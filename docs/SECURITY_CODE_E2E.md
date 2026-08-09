@@ -5,7 +5,8 @@ remote managed Stratus runner pauses for a fresh security code, a signed inbound
 exact generated alias, the message is forwarded through a loopback capture adapter, the same remote
 continuation resumes, and the application reaches submitted with a receipt.
 
-It never submits to an employer. The API, website, database, and email capture service must be local.
+It never submits to an employer. The API, website, database, email capture service, and receipt
+capture service must be local.
 Only the controlled portal tunnel and dedicated nonproduction Stratus runner are remote.
 
 ## Safety contract
@@ -16,6 +17,9 @@ Only the controlled portal tunnel and dedicated nonproduction Stratus runner are
 - `trylitos.com` and `www.trylitos.com` are always rejected as harness tunnel origins.
 - Controlled portal recognition is disabled when `NODE_ENV=production`.
 - Email forwarding goes only to `http://127.0.0.1:<port>/emails`, protected by a per-run token.
+- Receipt PNGs go only to `http://127.0.0.1:<port>/receipts`, protected by a separate per-run token.
+  The harness retains only byte count and SHA-256 evidence, exposes no screenshot read endpoint, and
+  the adapter is forbidden when `NODE_ENV=production`.
 - The Stratus origin must exactly match `QA_EXPECTED_STRATUS_ORIGIN`, use HTTPS, and be declared as
   `QA_STRATUS_CREDENTIAL_SCOPE=dedicated-nonproduction`.
 - No production environment pull, production API key, production database, or real mailbox is
@@ -71,6 +75,9 @@ export LITOS_APPLICATION_EMAIL_INBOUND_ENABLED=true
 export LITOS_QA_EMAIL_CAPTURE_ENABLED=true
 export LITOS_QA_EMAIL_CAPTURE_URL=http://127.0.0.1:4317/emails
 export LITOS_QA_EMAIL_CAPTURE_TOKEN="$(openssl rand -hex 32)"
+export LITOS_QA_RECEIPT_CAPTURE_ENABLED=true
+export LITOS_QA_RECEIPT_CAPTURE_URL=http://127.0.0.1:4318/receipts
+export LITOS_QA_RECEIPT_CAPTURE_TOKEN="$(openssl rand -hex 32)"
 export BROWSER_PROVIDER=stratus-managed
 export QA_STRATUS_CREDENTIAL_SCOPE=dedicated-nonproduction
 export STRATUS_BASE_URL='https://DEDICATED-NONPRODUCTION-STRATUS.example'
@@ -129,8 +136,9 @@ node scripts/qa-guest-submissions.mjs
 
 The harness itself owns the loopback capture port while it runs. A successful evidence file records
 `runner_auth_mode`, the exact runner origin, continuation fingerprint, continuation completion,
-email receipt, local forwarding capture, submitted status, and receipt source. It never records a
-credential or security code.
+email receipt, local forwarding capture, submitted status, receipt source, receipt byte count, and
+receipt SHA-256. The screenshot bytes stay in memory only long enough to hash the request and are
+never written or exposed by a read route. The evidence never records a credential or security code.
 
 Only after this one-run evidence says `passed: true` may the same command be repeated with
 `QA_RUNS=25` and a new evidence path.

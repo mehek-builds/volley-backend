@@ -30,6 +30,7 @@ import {
   withSecurityCode,
   withSecurityCodeAttempt,
 } from '../lib/securityCode';
+import { storeReceiptScreenshot } from '../lib/receiptScreenshot';
 import {
   connectToSession,
   continueManagedBrowser,
@@ -2751,12 +2752,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     }
     if (!receiptResult.screenshot) throw new Error('Stratus managed browser did not return a receipt screenshot');
     const capturedAt = new Date().toISOString();
-    const blob = await put(
+    const blob = await storeReceiptScreenshot(
       `users/${row.user_id}/submission-runs/${claimedReview.submission_run_id}/receipt.png`,
       Buffer.from(receiptResult.screenshot, 'base64'),
-      // A receipt is the proof an application was actually submitted, so a collision here would
-      // fail the run at the worst possible moment: after the employer already has it.
-      { access: 'public', contentType: 'image/png', addRandomSuffix: true },
     );
     /* THE SUBMIT LANDED AND THE EMPLOYER ASKED FOR A CODE, so this is not 'submitted'.
      *
@@ -2927,10 +2925,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     const receipt = await readReceipt(page);
     const capturedAt = new Date().toISOString();
     const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
-    const blob = await put(
+    const blob = await storeReceiptScreenshot(
       `users/${row.user_id}/submission-runs/${claimedReview.submission_run_id}/receipt.png`,
       screenshot,
-      { access: 'public', contentType: 'image/png', addRandomSuffix: true },
     );
     await writeReview(row, nextReview(claimedReview, {
       status: 'submitted',
