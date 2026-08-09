@@ -23,6 +23,8 @@ export type ManagedBrowserAction = {
    * the application-wide action budget on speculative selectors.
    */
   maxRetries?: number;
+  /** Versioned runner capability required by confirmRequired. */
+  contractVersion?: 1;
   /* The emailed code that finishes a Greenhouse submit, carried on the submit click itself.
    *
    * On the click, and not as its own action, because the control it types into does not exist until
@@ -114,12 +116,20 @@ export type ManagedBrowserResult = {
    * protocol returns no proof, which callers treat as unsupported and never as success.
    */
   requiredFieldConfirmation?: {
+    version: 1;
     status: 'confirmed' | 'blocked';
+    requiredControls: Array<{
+      selector: string;
+      label: string | null;
+      fieldType: 'text' | 'date' | 'select' | 'react-select' | 'radio' | 'checkbox' | 'custom';
+      matchCount: 1;
+    }>;
     attempts: Array<{
       selector: string;
       label: string | null;
       fieldType: 'text' | 'date' | 'select' | 'react-select' | 'radio' | 'checkbox' | 'custom';
       outcome: 'already_committed' | 'confirmed' | 'failed';
+      attemptCount: 1 | 2;
       reason?: string;
     }>;
     retries: number;
@@ -160,10 +170,13 @@ function stratusAction(action: ManagedBrowserAction): ManagedBrowserAction {
     return { ...action, selector: action.selector?.trim() || 'body' };
   }
   if (action.type === 'confirmRequired') {
+    if (action.contractVersion !== 1) throw new Error('Managed required-field confirmation contract version is invalid');
+    if (action.maxRetries !== 0 && action.maxRetries !== 1) {
+      throw new Error('Managed required-field confirmation maxRetries must be 0 or 1');
+    }
     return {
       ...action,
       selector: action.selector?.trim() || 'form',
-      maxRetries: Math.min(Math.max(action.maxRetries ?? 1, 0), 1),
     };
   }
   return action;

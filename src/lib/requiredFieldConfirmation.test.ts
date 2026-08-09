@@ -7,6 +7,7 @@ import {
   AUTONOMOUS_PORTAL_FAMILIES,
   buildManagedPortalActions,
   MANAGED_ACTION_LIMIT,
+  ManagedActionBudgetError,
   ManagedRequiredFieldConfirmationError,
   type SubmissionPacket,
   type SupportedPortal,
@@ -23,12 +24,15 @@ const packet: SubmissionPacket = {
 };
 
 function proof(
-  attempts: NonNullable<ManagedBrowserResult['requiredFieldConfirmation']>['attempts'],
+  inputAttempts: Array<Omit<NonNullable<ManagedBrowserResult['requiredFieldConfirmation']>['attempts'][number], 'attemptCount'> & { attemptCount?: 1 | 2 }>,
   overrides: Partial<NonNullable<ManagedBrowserResult['requiredFieldConfirmation']>> = {},
 ): Pick<ManagedBrowserResult, 'requiredFieldConfirmation'> {
+  const attempts = inputAttempts.map((attempt) => ({ attemptCount: 1 as const, ...attempt }));
   return {
     requiredFieldConfirmation: {
+      version: 1,
       status: 'confirmed',
+      requiredControls: attempts.map(({ selector, label, fieldType }) => ({ selector, label, fieldType, matchCount: 1 })),
       retries: 0,
       unresolved: [],
       attempts,
@@ -48,6 +52,7 @@ test('every autonomous managed submit reserves a mandatory confirmation barrier 
       optional: false,
       timeout: 10_000,
       maxRetries: 1,
+      contractVersion: 1,
     });
     assert.equal(actions.at(-1)?.type, 'click');
   }
@@ -61,12 +66,48 @@ test('prepare runs do not commit required fields or expose a submit action', () 
 
 test('confirmation proof covers text, date, native select, React select, radio, checkbox and custom controls', () => {
   const fieldTypes = ['text', 'date', 'select', 'react-select', 'radio', 'checkbox', 'custom'] as const;
-  assert.doesNotThrow(() => assertManagedRequiredFieldsConfirmed(proof(fieldTypes.map((fieldType, index) => ({
-    selector: `[data-litos-field="${index}"]`,
-    label: `Required ${fieldType}`,
-    fieldType,
-    outcome: index === 0 ? 'already_committed' : 'confirmed',
-  })))));
+  const attempts = fieldTypes.map((fieldType, index) => {
+    const outcome: 'already_committed' | 'confirmed' = index === 0 ? 'already_committed' : 'confirmed';
+    return {
+      selector: `[data-litos-stable-id-v1="fixture-${index}"]`,
+      label: `Required ${fieldType}`,
+      fieldType,
+      outcome,
+      ...(fieldType === 'react-select' ? { attemptCount: 2 as const } : {}),
+    };
+  });
+  assert.doesNotThrow(() => assertManagedRequiredFieldsConfirmed(proof(attempts, { retries: 1 })));
+});
+
+test('Lever and Workable keep every fixed core field or block before confirmation and submit', () => {
+  const expected: Record<'lever' | 'workable', string[]> = {
+    lever: ['name', 'email', 'phone', 'resume'],
+    workable: ['first_name', 'last_name', 'email', 'phone', 'resume'],
+  };
+  for (const family of ['lever', 'workable'] as const) {
+    let blocked = 0;
+    for (let count = 1; count <= 140; count += 7) {
+      const crowded: SubmissionPacket = {
+        ...packet,
+        questions: Array.from({ length: count }, (_, index) => ({
+          question: `Required screener ${index}`,
+          answer: `Reviewed answer ${index}`,
+        })),
+      };
+      try {
+        const actions = buildManagedPortalActions(family, crowded, true);
+        const labels = new Set(actions.map((action) => action.label));
+        for (const label of expected[family]) assert.ok(labels.has(label), `${family} lost ${label} at ${count}`);
+        assert.equal(actions.at(-2)?.type, 'confirmRequired');
+        assert.equal(actions.at(-1)?.type, 'click');
+      } catch (error) {
+        assert.ok(error instanceof ManagedActionBudgetError, `${family} threw the wrong error at ${count}`);
+        assert.equal(error.submitActionAppended, false);
+        blocked += 1;
+      }
+    }
+    assert.ok(blocked > 0, `${family} never exercised its fail-closed budget path`);
+  }
 });
 
 test('missing protocol proof fails closed for an older managed runner', () => {
@@ -84,6 +125,7 @@ test('a visually filled field that still fails ATS validation blocks submission 
       label: 'Are you authorized to work?',
       fieldType: 'radio',
       outcome: 'failed',
+      attemptCount: 2,
       reason: 'This requires an answer',
     }], {
       status: 'blocked',
@@ -96,12 +138,53 @@ test('a visually filled field that still fails ATS validation blocks submission 
 });
 
 test('confirmation rejects coordinate-like or selectorless evidence', () => {
-  assert.throws(() => assertManagedRequiredFieldsConfirmed(proof([{
-    selector: '   ',
+  for (const selector of [
+    '   ', '412, 980', 'x=412,y=980', '/html/body/form/input[1]', 'form input:nth-child(2)',
+    'input[type="text"]', '[role="radio"]', '[aria-required="true"]', 'input[autocomplete="email"]',
+    'label[for="start"]', '[data-testid="start"]', '.required-field', 'input[name="first"], input[name="last"]',
+  ]) {
+    assert.throws(() => assertManagedRequiredFieldsConfirmed(proof([{
+      selector,
+      label: 'Start date',
+      fieldType: 'date',
+      outcome: 'confirmed',
+    }])), selector);
+  }
+});
+
+test('untyped hostile receipts cannot bypass the strict versioned confirmation schema', () => {
+  const good = proof([{
+    selector: 'input[name="start_date"]',
     label: 'Start date',
     fieldType: 'date',
     outcome: 'confirmed',
-  }])));
+  }]);
+  const raw = JSON.parse(JSON.stringify(good)) as Record<string, unknown>;
+  const base = (raw.requiredFieldConfirmation as Record<string, unknown>);
+  const cases: Array<[string, unknown]> = [
+    ['wrong version', { ...base, version: 2 }],
+    ['fractional retries', { ...base, retries: 0.5 }],
+    ['excess retries', { ...base, retries: 2 }],
+    ['unknown field type', { ...base, requiredControls: [{ selector: '#start', label: 'Start', fieldType: 'slider' }] }],
+    ['unknown outcome', { ...base, attempts: [{ selector: 'input[name="start_date"]', label: 'Start date', fieldType: 'date', outcome: 'clicked', attemptCount: 1 }] }],
+    ['missing requiredControls', Object.fromEntries(Object.entries(base).filter(([key]) => key !== 'requiredControls'))],
+    ['missing uniqueness proof', { ...base, requiredControls: [{ selector: '#start', label: 'Start', fieldType: 'date' }] }],
+    ['nonunique control', { ...base, requiredControls: [{ selector: '#start', label: 'Start', fieldType: 'date', matchCount: 2 }] }],
+    ['empty attempts with a discovered control', { ...base, attempts: [] }],
+    ['duplicate attempts', { ...base, attempts: [...(base.attempts as unknown[]), ...(base.attempts as unknown[])] }],
+    ['extra attempt', { ...base, attempts: [...(base.attempts as unknown[]), { selector: '#other', label: 'Other', fieldType: 'text', outcome: 'confirmed' }] }],
+    ['coordinate control', { ...base, requiredControls: [{ selector: '20, 30', label: 'Start date', fieldType: 'date' }] }],
+    ['failed without reason', { ...base, status: 'blocked', attempts: [{ selector: 'input[name="start_date"]', label: 'Start date', fieldType: 'date', outcome: 'failed', attemptCount: 2 }], retries: 1, unresolved: ['Start date'] }],
+    ['retry count without retry evidence', { ...base, retries: 1 }],
+    ['retry evidence without retry count', { ...base, attempts: [{ selector: 'input[name="start_date"]', label: 'Start date', fieldType: 'date', outcome: 'confirmed', attemptCount: 2 }] }],
+    ['already committed was retried', { ...base, attempts: [{ selector: 'input[name="start_date"]', label: 'Start date', fieldType: 'date', outcome: 'already_committed', attemptCount: 2 }], retries: 1 }],
+    ['confirmed with unresolved', { ...base, unresolved: ['Start date'] }],
+    ['blocked without failure', { ...base, status: 'blocked' }],
+    ['unknown receipt property', { ...base, clicked: true }],
+  ];
+  for (const [name, requiredFieldConfirmation] of cases) {
+    assert.throws(() => assertManagedRequiredFieldsConfirmed({ requiredFieldConfirmation }), name);
+  }
 });
 
 test('managed wire contract sends one bounded confirmation action with its durable form scope', async () => {
@@ -118,7 +201,20 @@ test('managed wire contract sends one bounded confirmation action with its durab
         title: 'Complete',
         url: 'https://portal.example/complete',
         text: 'Thank you',
-        requiredFieldConfirmation: { status: 'confirmed', attempts: [], retries: 0, unresolved: [] },
+        requiredFieldConfirmation: {
+          version: 1,
+          status: 'confirmed',
+          requiredControls: [
+            { selector: 'input[name="full_name"]', label: 'Full name', fieldType: 'text', matchCount: 1 },
+            { selector: '[data-field-path="availability"]', label: 'Availability', fieldType: 'custom', matchCount: 1 },
+          ],
+          attempts: [
+            { selector: 'input[name="full_name"]', label: 'Full name', fieldType: 'text', outcome: 'already_committed', attemptCount: 1 },
+            { selector: '[data-field-path="availability"]', label: 'Availability', fieldType: 'custom', outcome: 'confirmed', attemptCount: 2 },
+          ],
+          retries: 1,
+          unresolved: [],
+        },
       },
     }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   }) as typeof fetch;
@@ -129,7 +225,8 @@ test('managed wire contract sends one bounded confirmation action with its durab
       selector: 'form[data-application-form]',
       label: 'required_field_confirmation',
       optional: false,
-      maxRetries: 99,
+      maxRetries: 1,
+      contractVersion: 1,
     }], { allowSubmit: true });
     assert.deepEqual(body.actions, [{
       type: 'confirmRequired',
@@ -137,7 +234,41 @@ test('managed wire contract sends one bounded confirmation action with its durab
       label: 'required_field_confirmation',
       optional: false,
       maxRetries: 1,
+      contractVersion: 1,
     }]);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
+test('managed wire contract rejects missing versions and unbounded retry counts before network use', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example';
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    throw new Error('network should be unreachable');
+  }) as typeof fetch;
+  try {
+    await assert.rejects(() => runManagedBrowser('https://portal.example/apply', [{
+      type: 'confirmRequired',
+      selector: 'form[data-application-form]',
+      maxRetries: 1,
+    }]), /contract version/);
+    await assert.rejects(() => runManagedBrowser('https://portal.example/apply', [{
+      type: 'confirmRequired',
+      selector: 'form[data-application-form]',
+      contractVersion: 1,
+      maxRetries: 2,
+    }]), /maxRetries/);
+    assert.equal(calls, 0);
   } finally {
     globalThis.fetch = previousFetch;
     if (previousKey === undefined) delete process.env.STRATUS_API_KEY;

@@ -3191,7 +3191,6 @@ type ReviewedQuestionActionProtection = {
  * national number when its adjacent dial-code control is left on the wrong country.
  */
 function coreActionProtection(actions: readonly ManagedBrowserAction[], portal: SupportedPortal): ReadonlySet<string> {
-  if (portalFamily(portal) !== 'greenhouse') return new Set();
   const available = new Set(actions.map(managedActionLabelBase).filter((base): base is string => Boolean(base)));
   const protectedBases = new Set<string>();
   if (available.has('name')) {
@@ -3201,6 +3200,14 @@ function coreActionProtection(actions: readonly ManagedBrowserAction[], portal: 
   }
   for (const base of ['email', 'phone_country', 'phone', 'resume']) {
     if (available.has(base)) protectedBases.add(base);
+  }
+  // Greenhouse is the autonomous family with a fixed education row. Protect every complete chain
+  // that carries it. The class-level protection in isProtectedManagedAction remains as defence in
+  // depth, while keeping the bases here makes the minimum explicit to the budget calculation.
+  if (portalFamily(portal) === 'greenhouse') {
+    for (const base of available) {
+      if (GREENHOUSE_FIXED_EDUCATION_ACTION_RE.test(base)) protectedBases.add(base);
+    }
   }
   return protectedBases;
 }
@@ -4315,6 +4322,7 @@ export function buildManagedPortalActions(
       optional: false,
       timeout: MANAGED_FILL_TIMEOUT_MS,
       maxRetries: 1,
+      contractVersion: 1,
     });
     actions.push({ type: 'click', selector: 'button[type="submit"], input[type="submit"]' });
   }
@@ -6367,27 +6375,164 @@ export class ManagedRequiredFieldConfirmationError extends NoSubmitControlError 
   }
 }
 
+const REQUIRED_CONFIRMATION_FIELD_TYPES = new Set([
+  'text', 'date', 'select', 'react-select', 'radio', 'checkbox', 'custom',
+]);
+const REQUIRED_CONFIRMATION_OUTCOMES = new Set(['already_committed', 'confirmed', 'failed']);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, required: readonly string[], optional: readonly string[] = []): boolean {
+  const keys = Object.keys(value);
+  return required.every((key) => keys.includes(key))
+    && keys.every((key) => required.includes(key) || optional.includes(key));
+}
+
+/**
+ * Confirmation proof may identify controls only through selectors that survive layout changes.
+ * Coordinates, absolute DOM paths and positional selectors are deliberately rejected. They can
+ * point at a different answer after a responsive reflow, which is worse than failing closed.
+ */
+export function isDurableRequiredControlSelector(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const selector = value.trim();
+  if (!selector || selector.length > 500) return false;
+  if (/^(?:x\s*[:=]|coordinates?\b|point\s*\()/i.test(selector)) return false;
+  if (/^\(?\s*\d+\s*[,;]\s*\d+\s*\)?$/.test(selector)) return false;
+  if (/^(?:\/\/|\/html\b)/i.test(selector)) return false;
+  if (/:(?:nth-child|nth-of-type)\s*\(/i.test(selector)) return false;
+  // Exact identities only. matchCount:1 independently proves the identity was unique on the live
+  // page. Generic type, role, aria, autocomplete and label selectors are excluded.
+  const tag = '(?:[a-z][a-z0-9-]*)?';
+  const quoted = '(?:"[^"\\r\\n]+"|\'[^\'\\r\\n]+\')';
+  return new RegExp(
+    `^(?:${tag}#[A-Za-z_][\\w:-]*|${tag}\\[name=${quoted}\\]|\\[data-field-path=${quoted}\\]|\\[data-litos-stable-id-v1=${quoted}\\])$`,
+    'i',
+  ).test(selector);
+}
+
+type RequiredControlProof = {
+  selector: string;
+  label: string | null;
+  fieldType: 'text' | 'date' | 'select' | 'react-select' | 'radio' | 'checkbox' | 'custom';
+  matchCount?: 1;
+};
+
+function parseRequiredControl(value: unknown, requireMatchCount = false): RequiredControlProof | null {
+  const keys = requireMatchCount
+    ? ['selector', 'label', 'fieldType', 'matchCount']
+    : ['selector', 'label', 'fieldType'];
+  if (!isRecord(value) || !hasOnlyKeys(value, keys)) return null;
+  if (!isDurableRequiredControlSelector(value.selector)) return null;
+  if (value.label !== null && (typeof value.label !== 'string' || !value.label.trim() || value.label.length > 200)) return null;
+  if (typeof value.fieldType !== 'string' || !REQUIRED_CONFIRMATION_FIELD_TYPES.has(value.fieldType)) return null;
+  if (requireMatchCount && value.matchCount !== 1) return null;
+  return {
+    selector: value.selector.trim(),
+    label: typeof value.label === 'string' ? value.label.trim() : null,
+    fieldType: value.fieldType as RequiredControlProof['fieldType'],
+    ...(requireMatchCount ? { matchCount: 1 as const } : {}),
+  };
+}
+
+function confirmationContractError(message: string): never {
+  throw new ManagedRequiredFieldConfirmationError([], `Litos did not press submit: required-field confirmation proof is malformed (${message})`);
+}
+
 /**
  * Require the remote runner's per-field proof before this service records a receipt. The action
  * itself is the pre-click barrier. This read is the independent reporting barrier, so an older
  * runner that silently ignores an unknown action cannot turn a silent fill into `submitted`.
  */
 export function assertManagedRequiredFieldsConfirmed(
-  result: Pick<import('./browserbase').ManagedBrowserResult, 'requiredFieldConfirmation'>,
+  result: unknown,
 ): void {
+  if (!isRecord(result)) confirmationContractError('result is not an object');
   const proof = result.requiredFieldConfirmation;
-  if (!proof) {
+  if (proof === undefined || proof === null) {
     throw new ManagedRequiredFieldConfirmationError([], 'Litos did not press submit: the managed browser does not support required-field confirmation');
   }
-  const failedAttempts = proof.attempts
+  if (!isRecord(proof) || !hasOnlyKeys(proof, [
+    'version', 'status', 'requiredControls', 'attempts', 'retries', 'unresolved',
+  ])) confirmationContractError('receipt shape');
+  if (proof.version !== 1) confirmationContractError('unsupported version');
+  if (proof.status !== 'confirmed' && proof.status !== 'blocked') confirmationContractError('status');
+  if (!Number.isInteger(proof.retries) || (proof.retries !== 0 && proof.retries !== 1)) {
+    confirmationContractError('retries');
+  }
+  if (!Array.isArray(proof.requiredControls) || !Array.isArray(proof.attempts) || !Array.isArray(proof.unresolved)) {
+    confirmationContractError('arrays');
+  }
+
+  const controls = proof.requiredControls.map((control) => parseRequiredControl(control, true));
+  if (controls.some((control) => control === null)) confirmationContractError('required control');
+  const requiredControls = controls as RequiredControlProof[];
+  const requiredBySelector = new Map<string, RequiredControlProof>();
+  for (const control of requiredControls) {
+    if (requiredBySelector.has(control.selector)) confirmationContractError('duplicate required control');
+    requiredBySelector.set(control.selector, control);
+  }
+
+  const attempts = proof.attempts.map((value) => {
+    if (!isRecord(value) || !hasOnlyKeys(value, ['selector', 'label', 'fieldType', 'outcome', 'attemptCount'], ['reason'])) {
+      confirmationContractError('attempt shape');
+    }
+    const control = parseRequiredControl({ selector: value.selector, label: value.label, fieldType: value.fieldType });
+    if (!control) confirmationContractError('attempt control');
+    if (typeof value.outcome !== 'string' || !REQUIRED_CONFIRMATION_OUTCOMES.has(value.outcome)) {
+      confirmationContractError('attempt outcome');
+    }
+    if (value.attemptCount !== 1 && value.attemptCount !== 2) confirmationContractError('attempt count');
+    if (value.outcome === 'already_committed' && value.attemptCount !== 1) {
+      confirmationContractError('already committed retry');
+    }
+    const reason = value.reason;
+    if (value.outcome === 'failed') {
+      if (typeof reason !== 'string' || !reason.trim() || reason.length > 300) confirmationContractError('failed attempt reason');
+    } else if (reason !== undefined) {
+      confirmationContractError('successful attempt reason');
+    }
+    return {
+      ...control,
+      outcome: value.outcome,
+      attemptCount: value.attemptCount,
+      reason: typeof reason === 'string' ? reason.trim() : undefined,
+    };
+  });
+
+  if (attempts.length !== requiredControls.length) confirmationContractError('attempt coverage count');
+  const attempted = new Set<string>();
+  for (const attempt of attempts) {
+    const required = requiredBySelector.get(attempt.selector);
+    if (!required || attempted.has(attempt.selector)) confirmationContractError('attempt coverage');
+    if (attempt.fieldType !== required.fieldType || attempt.label !== required.label) confirmationContractError('attempt identity');
+    attempted.add(attempt.selector);
+  }
+  const observedRetries = attempts.some((attempt) => attempt.attemptCount === 2) ? 1 : 0;
+  if (proof.retries !== observedRetries) confirmationContractError('retry evidence');
+  if (requiredControls.length > 0 && attempts.length === 0) confirmationContractError('empty attempts');
+
+  const knownUnresolved = new Set(requiredControls.flatMap((control) => [control.selector, control.label].filter(Boolean) as string[]));
+  const unresolved: string[] = [];
+  for (const value of proof.unresolved) {
+    if (typeof value !== 'string' || !value.trim() || value.length > 200 || !knownUnresolved.has(value.trim())) {
+      confirmationContractError('unresolved field');
+    }
+    unresolved.push(value.trim());
+  }
+  const failedAttempts = attempts
     .filter((attempt) => attempt.outcome === 'failed')
     .map((attempt) => attempt.label || attempt.selector);
-  const unresolved = [...proof.unresolved, ...failedAttempts];
-  if (proof.status !== 'confirmed' || unresolved.length > 0) {
-    throw new ManagedRequiredFieldConfirmationError(unresolved);
+  if (proof.status === 'confirmed' && (unresolved.length > 0 || failedAttempts.length > 0)) {
+    confirmationContractError('confirmed with failures');
   }
-  if (proof.attempts.some((attempt) => !attempt.selector.trim())) {
-    throw new ManagedRequiredFieldConfirmationError([], 'Litos did not press submit: required-field confirmation returned an action without a durable selector');
+  if (proof.status === 'blocked' && unresolved.length === 0 && failedAttempts.length === 0) {
+    confirmationContractError('blocked without failure');
+  }
+  if (proof.status !== 'confirmed') {
+    throw new ManagedRequiredFieldConfirmationError([...unresolved, ...failedAttempts]);
   }
 }
 
