@@ -3047,11 +3047,11 @@ test('the 2026-07-29 host rules reject every login, marketing and unrelated-prod
   assert.equal(detectPortal('https://jobs.jobvite.com/ness/job/o3mfAfwY/apply'), 'jobvite');
   assert.equal(detectPortal('https://jobs-express.icims.com/jobs/48173/sales-associate/job'), 'icims');
   assert.equal(
-    detectPortal('https://eeho.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/jobsearch/job/333913'),
+    detectPortal('https://fa-etxx-saasfaprod1.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/2850/'),
     'oraclecloud',
   );
   assert.equal(
-    detectPortal('https://recruiting.ultipro.com/she1011sphs/JobBoard/62d52737-46c1-4699-83e3-3a1747e3b981'),
+    detectPortal('https://recruiting.ultipro.com/WIN1014WINDQ/JobBoard/08eb8299-5b26-4208-adb7-897aa42c6959/OpportunityDetail?opportunityId=f6cd56f9-5b2f-4b53-9e86-2553b54524f9'),
     'ultipro',
   );
 });

@@ -51,7 +51,8 @@ type PortalFamily =
   | 'bullhorn'
   | 'sap_successfactors'
   | 'oracle_taleo'
-  | 'adp_recruiting';
+  | 'adp_recruiting'
+  | 'avature';
 type ControlledPortal =
   | 'controlled_test'
   | 'controlled_lever'
@@ -160,10 +161,10 @@ const CONSENT_GATED_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
 // Being in this set is NOT a claim the platform is unsupportable forever. It is a claim that today
 // Litos can recognise the page and explain it, which is worth more to a job seeker than a fill that
 // silently does nothing.
-type AccountWalledFamily = 'jobvite' | 'icims' | 'oraclecloud' | 'ultipro' | 'sap_successfactors' | 'oracle_taleo' | 'adp_recruiting';
+type AccountWalledFamily = 'jobvite' | 'icims' | 'oraclecloud' | 'ultipro' | 'sap_successfactors' | 'oracle_taleo' | 'adp_recruiting' | 'avature';
 
 const ACCOUNT_WALLED_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
-  ['jobvite', 'icims', 'oraclecloud', 'ultipro', 'sap_successfactors', 'oracle_taleo', 'adp_recruiting'] satisfies AccountWalledFamily[],
+  ['jobvite', 'icims', 'oraclecloud', 'ultipro', 'sap_successfactors', 'oracle_taleo', 'adp_recruiting', 'avature'] satisfies AccountWalledFamily[],
 );
 
 export function isAccountWalledFamily(portal: SupportedPortal): boolean {
@@ -257,13 +258,15 @@ const ACCOUNT_WALLED_REASONS: Record<AccountWalledFamily, string> = {
   oraclecloud:
     'This company emails you a code and asks you to agree to their terms before the application form opens. Both of those need you, so Litos stops here.',
   ultipro:
-    'Litos can find this job but cannot read this company’s application form yet. Everything you need is ready to paste in, so open the page and apply there.',
+    'This company requires an applicant account or asks you to make an AI-scoring consent choice before the application form opens. Litos leaves both to you.',
   sap_successfactors:
     'This company asks you to sign in or create a SuccessFactors account before the application form opens. Litos leaves that account and every later legal choice to you.',
   oracle_taleo:
     'This Taleo application asks you to accept the employer legal notice before any application fields open. Litos leaves that decision and the later account flow to you.',
   adp_recruiting:
     'This ADP Recruiting application requires an account before any application fields open. Litos leaves the account and every later legal choice to you.',
+  avature:
+    'This company routes the application through an Avature login or tenant-specific resume intake. Litos leaves that account and every later choice to you.',
 };
 
 export function portalHandoffReason(portal: SupportedPortal): string | null {
@@ -2802,7 +2805,8 @@ const COVER_LETTER_UPLOAD_SELECTORS: Record<SupportedPortal, string> = {
   sap_successfactors: 'input[type="file"][name="noFormReachableWithoutSuccessFactorsAccount"]',
   oracle_taleo: 'input[type="file"][name="noFormReachableWithoutTaleoLegalAcceptance"]',
   adp_recruiting: 'input[type="file"][name="noFormReachableWithoutAdpAccount"]',
-  // The account-walled four never reach a form, so there is no file input of any kind to find. A
+  avature: 'input[type="file"][name="noFormReachableWithoutAvatureAccount"]',
+  // These account-walled families never reach a safe form, so there is no file input to claim. A
   // never-matching selector is the honest answer to "can this portal accept a cover-letter file"
   // here, and it keeps hasCoverLetterUpload() from having to special-case them.
   jobvite: 'input[type="file"][name="noFormReachableWithoutConsent"]',
@@ -3369,7 +3373,7 @@ export function buildManagedPortalActions(
   // SmartRecruiters capability also ends after the exact captured first-page controls. Returning
   // here is stronger than filtering legal-looking questions: no packet selector or input type can
   // widen the adapter into later tenant-specific steps.
-  if (family === 'smartrecruiters' || family === 'jazzhr') return actions;
+  if (family === 'smartrecruiters' || family === 'jazzhr' || family === 'bamboohr') return actions;
   const mayReplayReviewedQuestions = family !== 'zoho_recruit' && family !== 'bullhorn';
   if (family === 'greenhouse') {
     pushGreenhouseAkunaSafeTextActions(actions, packet);
@@ -3617,7 +3621,7 @@ const HOSTS: Record<PortalFamily, RegExp> = {
   // Same shape: tenant subdomains, and www.bamboohr.com is the marketing site. Note BambooHR's OWN
   // careers page runs on Greenhouse and lives at www.bamboohr.com/careers/application, which the
   // numeric-id path check below excludes without needing to special-case the host.
-  bamboohr: /(^|\.)bamboohr\.com$/i,
+  bamboohr: /^(?:mpathic2|prentkeromich)\.bamboohr\.com$/i,
   // jobs.* only. The bare jobvite.com is the vendor's marketing site.
   jobvite: /^jobs\.jobvite\.com$/i,
   // One tenant label only. Excludes vendor marketing, community, login, and API hosts before the
@@ -3626,7 +3630,7 @@ const HOSTS: Record<PortalFamily, RegExp> = {
   // The widest host space of any portal here BY FAR - oraclecloud.com hosts every Oracle Cloud
   // application there is, not just recruiting. The path check is doing the real work, and this entry
   // would be actively dangerous without it.
-  oraclecloud: /(^|\.)oraclecloud\.com$/i,
+  oraclecloud: /^(?:iawmqy\.fa\.ocs\.oraclecloud\.com|fa-etxx-saasfaprod1\.fa\.ocs\.oraclecloud\.com|enterpriseplatform\.dell\.com)$/i,
   // Pinned exactly. The bare ultipro.com is the employee login for UKG's HR product.
   ultipro: /^recruiting\.ultipro\.com$/i,
   // One tenant label only. Excludes www.recruitee.com and the vendor's own non-careers services.
@@ -3648,6 +3652,7 @@ const HOSTS: Record<PortalFamily, RegExp> = {
   sap_successfactors: /^career\d+\.successfactors\.(?:com|eu)$/i,
   oracle_taleo: /^(?:fa007|aa270)\.taleo\.net$/i,
   adp_recruiting: /^myjobs\.adp\.com$/i,
+  avature: /^(?:maximus|sandboxxerox)\.avature\.net$/i,
 };
 
 // Host alone is not enough for a portal whose host space also serves a login page, a marketing site
@@ -3669,13 +3674,13 @@ const APPLY_PATHS: Partial<Record<PortalFamily, RegExp>> = {
   breezy: /^\/p\//i,
   // Numeric job id. Excludes www.bamboohr.com/careers/application (their own Greenhouse-backed
   // careers page) and the /careers/{department}-team marketing routes, without an ad-hoc host rule.
-  bamboohr: /^\/careers\/\d+/i,
+  bamboohr: /^\/careers\/\d+\/?$/i,
   jobvite: /^\/[a-z0-9._-]+\/job\/[a-z0-9]+(?:\/apply)?\/?$/i,
   icims: /^\/jobs\/\d+\/[a-z0-9%._~-]+\/(?:job|login)\/?$/i,
   // The one that matters most. Without it this family would claim every Oracle Cloud application
   // under the sun, including ones that are somebody's payroll or ERP login.
-  oraclecloud: /^\/hcmUI\/CandidateExperience\//i,
-  ultipro: /^\/[^/]+\/JobBoard\//i,
+  oraclecloud: /^\/hcmUI\/CandidateExperience\/(?:[a-z]{2}\/)?sites\/[a-z0-9_-]+\/(?:job|opportunity)\/\d+\/?$/i,
+  ultipro: /^\/[a-z0-9._-]+\/JobBoard\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/OpportunityDetail\/?$/i,
   recruitee: /^\/o\/[^/]+(?:\/c\/new)?\/?$/i,
   teamtailor: /^\/jobs\/[^/]+(?:\/applications\/new)?\/?$/i,
   personio: /^\/job\/\d+(?:\/apply)?\/?$/i,
@@ -3686,6 +3691,7 @@ const APPLY_PATHS: Partial<Record<PortalFamily, RegExp>> = {
   sap_successfactors: /^\/(?:sfcareer\/jobreqcareer|career|portalcareer)\/?$/i,
   oracle_taleo: /^\/careersection\/ex\/jobdetail\.ftl$/i,
   adp_recruiting: /^\/(?:guitarcenterexternal|kaisercareers)\/cx\/job-details\/?$/i,
+  avature: /^\/(?:[a-z]{2}_[a-z]{2}\/)?careers\/(?:JobDetail(?:\/[^/]+\/\d+)?|Job-Application|Login)\/?$/i,
 };
 
 function isSmartRecruitersOneClickUrl(url: URL): boolean {
@@ -3698,6 +3704,32 @@ function isSmartRecruitersOneClickUrl(url: URL): boolean {
 // never decodes, trims, re-encodes, or otherwise changes token bytes.
 function hasComeetApplicationToken(url: URL): boolean {
   return /(?:^\?|&)token=[^&]+(?:&|$)/.test(url.search);
+}
+
+function isExactResearchedBatchIdentity(portal: PortalFamily, url: URL): boolean {
+  const host = url.hostname.toLowerCase();
+  if (portal === 'bamboohr') {
+    return (host === 'mpathic2.bamboohr.com' && /^\/careers\/99\/?$/.test(url.pathname))
+      || (host === 'prentkeromich.bamboohr.com' && /^\/careers\/480\/?$/.test(url.pathname));
+  }
+  if (portal === 'oraclecloud') {
+    return ((host === 'enterpriseplatform.dell.com' || host === 'iawmqy.fa.ocs.oraclecloud.com')
+        && /^\/hcmUI\/CandidateExperience\/en\/sites\/careers\/job\/295586\/?$/i.test(url.pathname))
+      || (host === 'fa-etxx-saasfaprod1.fa.ocs.oraclecloud.com'
+        && /^\/hcmUI\/CandidateExperience\/en\/sites\/CX_1\/job\/2850\/?$/i.test(url.pathname));
+  }
+  if (portal === 'ultipro') {
+    const identity = `${url.pathname}?opportunityId=${url.searchParams.get('opportunityId') ?? ''}`;
+    return identity === '/WIN1014WINDQ/JobBoard/08eb8299-5b26-4208-adb7-897aa42c6959/OpportunityDetail?opportunityId=f6cd56f9-5b2f-4b53-9e86-2553b54524f9'
+      || identity === '/LIT1004LDAC/JobBoard/30702fd2-636e-4886-b1ce-4fc3b07e37ec/OpportunityDetail?opportunityId=4fc30c2a-e2b3-42e0-bcaf-7805f741c04a';
+  }
+  if (portal === 'avature') {
+    if (host === 'maximus.avature.net') return /^\/careers\/Job-Application\/?$/i.test(url.pathname);
+    if (host !== 'sandboxxerox.avature.net') return false;
+    if (/^\/en_US\/careers\/JobDetail\/2nd-Line-Technical-Analyst\/44460\/?$/i.test(url.pathname)) return true;
+    return /^\/en_US\/careers\/Login\/?$/i.test(url.pathname) && url.searchParams.get('jobId') === '44460';
+  }
+  return true;
 }
 
 function databricksGreenhouseJobId(url: URL): string | undefined {
@@ -3777,6 +3809,16 @@ export function detectPortal(rawUrl: string): SupportedPortal {
     }
     if (portal === 'oracle_taleo' && !/^\d+$/.test(url.searchParams.get('job') ?? '')) continue;
     if (portal === 'adp_recruiting' && !/^\d+$/.test(url.searchParams.get('reqId') ?? '')) continue;
+    if (portal === 'ultipro') {
+      const opportunityId = url.searchParams.get('opportunityId');
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(opportunityId ?? '')) continue;
+    }
+    if (portal === 'avature') {
+      const hasPathJobId = /\/JobDetail\/[^/]+\/\d+\/?$/i.test(url.pathname);
+      const queryJobId = url.searchParams.get('jobId');
+      if (/\/(?:JobDetail|Login)\/?$/i.test(url.pathname) && !hasPathJobId && !/^\d+$/.test(queryJobId ?? '')) continue;
+    }
+    if (!isExactResearchedBatchIdentity(portal as PortalFamily, url)) continue;
     return portal as SupportedPortal;
   }
   // Names the platforms it can actually DO something useful on. The account-walled four are
@@ -3855,6 +3897,24 @@ export function canonicalSupportedPortalUrl(rawUrl: string | undefined, atsName?
       url.search = '';
       url.hash = '';
       url.pathname = url.pathname.replace(/\/$/, '');
+      return url.toString();
+    }
+    if (portal === 'bamboohr' || portal === 'oraclecloud' || portal === 'avature') {
+      const jobId = portal === 'avature' ? url.searchParams.get('jobId') : null;
+      url.search = '';
+      url.hash = '';
+      url.pathname = url.pathname.replace(/\/$/, '');
+      if (portal === 'avature' && jobId && /^\d+$/.test(jobId) && !/\/JobDetail\/[^/]+\/\d+$/i.test(url.pathname)) {
+        url.searchParams.set('jobId', jobId);
+      }
+      return url.toString();
+    }
+    if (portal === 'ultipro') {
+      const opportunityId = url.searchParams.get('opportunityId');
+      url.search = '';
+      url.hash = '';
+      url.pathname = url.pathname.replace(/\/$/, '');
+      if (opportunityId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(opportunityId)) url.searchParams.set('opportunityId', opportunityId);
       return url.toString();
     }
   } catch {
@@ -4203,7 +4263,7 @@ async function fillResolvedRequiredField(
 export function portalMayResolveUnknownRequired(portal: SupportedPortal): boolean {
   const family = portalFamily(portal);
   return family !== 'zoho_recruit' && family !== 'bullhorn' && family !== 'jazzhr'
-    && family !== 'oracle_taleo' && family !== 'adp_recruiting';
+    && family !== 'oracle_taleo' && family !== 'adp_recruiting' && family !== 'bamboohr';
 }
 
 export function portalUnknownRequiredBlocker(
@@ -4400,7 +4460,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await uploadFirst(page, ASHBY_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields);
     await uploadFirst(page, ASHBY_COVER_LETTER_SELECTOR.split(', '), packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
   }
-  if (family !== 'zoho_recruit' && family !== 'bullhorn') {
+  if (family !== 'zoho_recruit' && family !== 'bullhorn' && family !== 'bamboohr') {
     await fillReviewedQuestions(page, portal, packet, filledFields);
   }
 
