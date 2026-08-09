@@ -900,8 +900,34 @@ test('the standing onsite preference is scoped to the US and says nothing about 
     'Can you work from our Paris or US office?',
     'Can you work onsite supporting United States customers?',
     'Can you work onsite supporting United States customers from our Paris office?',
+    'Can you work onsite in support of United States customers?',
+    'Can you work onsite in compliance with US law?',
+    'Can you work from our San Francisco office or Paris office?',
+    'Can you work from our San Francisco office and Paris office?',
+    'Can you work from our San Francisco / Paris office?',
+    'Can you work from our San Francisco or Paris offices?',
+    'Can you work from either our San Francisco office or our New York office?',
   ]) {
     const held = resolveKnownAnswer(label, 'select', committed, undefined);
+    assert.ok(held && 'skipReason' in held, label);
+  }
+  const mixedLabelWithUsPosting = resolveKnownAnswer(
+    'Can you work from our San Francisco office or Paris office?',
+    'select',
+    committed,
+    frozenJobLocationContext(['San Francisco, CA']),
+  );
+  assert.ok(mixedLabelWithUsPosting && 'skipReason' in mixedLabelWithUsPosting);
+  for (const label of [
+    'Can you work onsite in support of United States customers?',
+    'Can you work onsite in compliance with US law?',
+  ]) {
+    const held = resolveKnownAnswer(
+      label,
+      'select',
+      committed,
+      frozenJobLocationContext(['San Francisco, CA']),
+    );
     assert.ok(held && 'skipReason' in held, label);
   }
   for (const locations of [
@@ -930,6 +956,7 @@ test('the standing onsite preference is scoped to the US and says nothing about 
   for (const label of [
     'Are you available to work from our office in Chicago?',
     'Are you willing to work in our New York office three days a week?',
+    'Can you work onsite in San Francisco?',
   ]) {
     assert.deepEqual(resolveKnownAnswer(label, 'select', committed, undefined), { value: 'Yes' }, label);
   }

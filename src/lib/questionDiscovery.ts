@@ -701,11 +701,31 @@ function uniqueLocationCaptures(label: string, patterns: readonly RegExp[]): str
         .replace(/^(?:our|the|an?)\s+/i, '')
         .replace(/\s+(?:for|five|four|three|two|one|\d+)\s+(?:days?|weeks?|months?|years?)\b.*$/i, '')
         .trim();
-      if (!value || /^(?:our|the|an?|office|site|workplace|headquarters|hq)$/i.test(value)) continue;
+      if (!value || /^(?:our|the|an?|office|site|workplace|headquarters|hq|(?:one|any|either|all|some)\s+of(?:\s+(?:our|the))?)$/i.test(value)) continue;
       if (!captures.some((entry) => entry.toLowerCase() === value.toLowerCase())) captures.push(value);
     }
   }
   return captures;
+}
+
+const LOCATION_NOUN = /\b(?:offices?|sites?|workplaces?|headquarters|hq)\b/i;
+
+function isSemanticNonLocationPhrase(value: string): boolean {
+  /* "onsite in support of US customers" and "onsite in compliance with US law" have the same
+   * preposition as a location but name a purpose or rule. They must not become country evidence. */
+  if (/^(?:support|service|aid|furtherance|pursuit|compliance|accordance|connection|relation|response|respect|reference|line|keeping|partnership|collaboration|coordination)\b/i.test(value)) {
+    return true;
+  }
+  if (/\b(?:customers?|clients?|laws?|regulations?|compliance|support|services?)\b/i.test(value)) {
+    return true;
+  }
+  return false;
+}
+
+function validFallbackLocationPhrase(value: string): boolean {
+  if (isSemanticNonLocationPhrase(value)) return false;
+  if (LOCATION_NOUN.test(value)) return false;
+  return value.split(/\s+/).length <= 10;
 }
 
 /** A location must be attached to the work or office syntax in the question. A country word in
@@ -713,14 +733,21 @@ function uniqueLocationCaptures(label: string, patterns: readonly RegExp[]): str
  * the broader fallback so "from our office in Chicago" is one place, not two captures. */
 function explicitWorkLocations(label: string): string[] {
   const officeLocations = uniqueLocationCaptures(label, [
-    /\b(?:office|site|workplace|headquarters|hq)\s+(?:is\s+)?(?:located\s+|based\s+)?(?:in|at|near)\s+([^?;.]{1,80})/gi,
-    /\b(?:from|in|at|near)\s+(?:(?:our|the|an?)\s+)?([^?;.]{1,80}?)\s+(?:office|site|workplace|headquarters|hq)\b/gi,
+    /\b(?:offices?|sites?|workplaces?|headquarters|hq)\s+(?:is\s+|are\s+)?(?:located\s+|based\s+)?(?:in|at|near)\s+([^?;.]{1,80})/gi,
+    /(?:[,:]|\b(?:from|in|at|near|or|and|between)\b)\s*(?:(?:our|the|an?)\s+)?([^?;.]{1,80}?)\s+(?:offices?|sites?|workplaces?|headquarters|hq)\b/gi,
   ]);
-  if (officeLocations.length > 0) return officeLocations;
-  return uniqueLocationCaptures(label, [
+  const fallbackCaptures = uniqueLocationCaptures(label, [
     /\b(?:onsite|on[\s-]?site|in[\s-]?person)\s+(?:in|at|from|near)\s+([^?;.]{1,80})/gi,
     /\b(?:work|working|based|located)\s+(?:onsite\s+|on[\s-]?site\s+)?(?:in|at|from|near)\s+([^?;.]{1,80})/gi,
   ]);
+  const fallbackLocations = fallbackCaptures.filter(validFallbackLocationPhrase);
+  if (officeLocations.length === 0 && fallbackLocations.length === 0
+      && fallbackCaptures.some(isSemanticNonLocationPhrase)) {
+    return ['[semantic prose, not a work location]'];
+  }
+  const locations = [...officeLocations, ...fallbackLocations];
+  return locations.filter((value, index) => locations
+    .findIndex((entry) => entry.toLowerCase() === value.toLowerCase()) === index);
 }
 
 function isSingleUnambiguousUsLocation(locations: readonly string[]): boolean {
@@ -784,7 +811,10 @@ function onsiteCommitmentAnswer(
      * Evidence can come from the question itself, or from the structured job locations frozen
      * into the resolution context by applicationContextForQuestionResolution. Arbitrary prose in
      * the JD does not count: a description can mention customers, offices, or travel worldwide. */
-    if (isSingleUnambiguousUsLocation(explicitWorkLocations(label))) return { value: 'Yes' };
+    const labelLocations = explicitWorkLocations(label);
+    if (labelLocations.length > 0) {
+      return isSingleUnambiguousUsLocation(labelLocations) ? { value: 'Yes' } : held;
+    }
     const frozenLocations = frozenJobLocationsFromContext(jdText);
     if (isSingleUnambiguousUsLocation(frozenLocations)) {
       return { value: 'Yes' };
@@ -1061,7 +1091,7 @@ const LOCATION_COMMITMENT_STEM = /\b(?:are|can|could|do|did|will|would|should|ma
 // that same packet came from. Four distinct postings ask this in the owner's history (Anduril,
 // Postman, Fluency, Brex), all of them asking the same routine question the office wording already
 // answers Yes to.
-const LOCATION_COMMITMENT_VOCAB = /\boffice\b|in[\s-]?office|on[\s-]?site|\bonsite\b|in[\s-]?person|\bhybrid\b|\bremote(?:ly|[\s-]?only)?\b|work\s+from\s+home|relocat|commut/i;
+const LOCATION_COMMITMENT_VOCAB = /\boffices?\b|in[\s-]?office|on[\s-]?site|\bonsite\b|in[\s-]?person|\bhybrid\b|\bremote(?:ly|[\s-]?only)?\b|work\s+from\s+home|relocat|commut/i;
 /* Moving house, which is a different promise from sitting in an office and has its own column.
  * Kept in step with answerReuse.ts's RELOCATION_QUESTION, which decides the same split for replay. */
 const RELOCATION_COMMITMENT_QUESTION = /\brelocat\w*\b|\bwilling\s+to\s+move\b|\bplan\s+to\s+move\b/i;
