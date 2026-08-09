@@ -133,19 +133,41 @@ describe('packet audit: amber on words the posting never asked for', () => {
 });
 
 describe('packet audit: generic company prose does not displace real posting requirements', () => {
-  test('Cloudflare mission prose does not make "Internet" a resume requirement', () => {
+  test('Cloudflare company history after Bonus Points does not make "Internet" a requirement', () => {
+    // Exact production section shape from packet e515deb8. Before the fix, the question-mark
+    // heading did not close Bonus Points, so everything below it inherited preferred weight.
     const jd = `About Us
 At Cloudflare, we are on a mission to help build a better Internet.
-Fundamental to our mission is protecting the free and open Internet.
+
+Responsibilities
+Ship and deliver projects over 12-14 weeks with autonomy and support.
 
 Desirable Skills, Knowledge and Experience
-Technologies include: Typescript/Javascript, Go, Rust, C/C++ and Python.
+Currently pursuing a degree or program in Computer Science, Engineering, Mathematics, Statistics or relevant field to the role.
+Demonstrated critical thinking skills and drive to learn and adapt new technologies.
+
+Bonus Points
+Demonstrated passion for software development, such as personal projects, open-source contributions, or experience with our developer platform using Cloudflare for Students.
+
+What Makes Cloudflare Special?
+Fundamental to our mission to help build a better Internet is protecting the free and open Internet.
+Project Galileo supports journalism and civil society organizations.
+We released 1.1.1.1 to help fix the foundation of the Internet with a public DNS resolver.
 `;
     const extracted = terms(jd, { company: 'Cloudflare', role: 'Software Engineer Intern' });
     assert.ok(!extracted.includes('internet'), 'company mission prose reached the colored requirements');
-    for (const technology of ['typescript', 'javascript', 'rust', 'c++', 'python']) {
-      assert.ok(extracted.includes(technology), `the concrete requirement "${technology}" was lost`);
-    }
+    assert.ok(extracted.includes('open source'), 'the actual Bonus Points requirement was lost');
+    assert.ok(extracted.includes('computer science'), 'the stated candidate-fit section was lost');
+  });
+
+  test('an explicit Internet networking requirement remains colorable', () => {
+    const jd = `Requirements
+Deep knowledge of Internet protocols and TCP/IP
+Experience with DNS, Linux, Python, and network security
+`;
+    const extracted = terms(jd, { company: 'Acme Networks', role: 'Network Engineer' });
+    assert.ok(extracted.includes('internet'), 'Internet was globally denied instead of scoped to the footer');
+    assert.ok(extracted.includes('dns') && extracted.includes('linux') && extracted.includes('python'));
   });
 
   test('Flow Traders keeps Excel when the employer explicitly requires proficiency in it', () => {

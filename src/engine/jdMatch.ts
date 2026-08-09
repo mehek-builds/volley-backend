@@ -807,12 +807,35 @@ export interface JdSection {
  * Split a JD into weighted sections. Text before any recognised heading is 'body': short postings
  * often have no headings at all, and dropping their content would leave nothing to score.
  */
-export function segmentJd(jdText: string): JdSection[] {
+/**
+ * Employer-branded footer headings can end a scored section without looking like ordinary
+ * headings. Cloudflare's production posting writes `What Makes Cloudflare Special?` directly
+ * after its one-item Bonus Points section. The question mark makes isHeadingLine reject the line,
+ * so the entire company-history footer inherited `preferred` weight and `Internet` became a
+ * colored candidate requirement.
+ *
+ * This is exact posting context, not a vocabulary ban: the heading must name the company supplied
+ * by the caller. `What Makes You Special?` is therefore untouched, and a real requirement that
+ * names Internet protocols remains in its stated section.
+ */
+function isCompanySpecialFooterHeading(line: string, company: string | null | undefined): boolean {
+  const companyName = normalizeTerm(company ?? '');
+  if (!companyName) return false;
+  const heading = normalizeTerm(headingCore(line).replace(/\?+$/, ''));
+  return heading === `what makes ${companyName} special`;
+}
+
+export function segmentJd(jdText: string, context?: JdContext): JdSection[] {
   const lines = jdText.split(/\r?\n/);
   const sections: JdSection[] = [];
   let current: JdSection = { kind: 'body', weight: SECTION_WEIGHT.body, text: '' };
 
   for (const line of lines) {
+    if (isCompanySpecialFooterHeading(line, context?.company)) {
+      if (current.text.trim()) sections.push(current);
+      current = { kind: 'noise', weight: SECTION_WEIGHT.noise, text: '', heading: headingCore(line) };
+      continue;
+    }
     if (isHeadingLine(line)) {
       const kind = classifyHeading(line);
       if (kind) {
@@ -1354,14 +1377,7 @@ open source`
  * THE COST IS THE JOB-TITLE SENSE, and it is real but not ours to keep: "Associate Product
  * Manager" and "Sales Associate" are titles, and `position`, `role`, `roles`, `job` and `jobs` are
  * already in this list for exactly that reason. Measured over 500 live postings, `associate`
- * reaches the final capped denominator on 9 of them and not one is a skill.
- *
- * `internet` is company and product context, not a resume capability. Cloudflare's Software
- * Engineer Intern posting repeats the capitalized word throughout its mission, network overview,
- * and product history. Because it never writes the word in lowercase, the casing heuristic treated
- * it as a proper name and painted it as a requirement even though the actual technology list is
- * TypeScript, JavaScript, Go, Rust, C/C++, and Python. Refusing the generic medium here preserves
- * those concrete skills and keeps "Internet" out of both the score and the gap-to-bullet input. */
+ * reaches the final capped denominator on 9 of them and not one is a skill. */
 const BOILERPLATE = new Set(
   `passionate passion obsess obsessed driven motivated enthusiastic energetic dynamic exciting
 opportunity opportunities candidate candidates applicant applicants position role roles job jobs
@@ -1397,7 +1413,6 @@ federal municipal county province
 department departments
 learn transparency hourly
 act acts statute ordinance pay total package cpt
-internet
 `
     .split(/\s+/)
     .filter(Boolean),
@@ -2624,7 +2639,7 @@ export function extractJdTerms(jdText: string, context?: JdContext): JdTerm[] {
     );
 
   const casing = documentCasing(jdText);
-  const sections = segmentJd(jdText);
+  const sections = segmentJd(jdText, context);
   const hasPrimaryFitSection =
     sections.some((s) => PRIMARY_STATED_KINDS.has(s.kind)) || hasPrimaryFitHeading(jdText);
   const rawTerms = strip(extractFrom(sections, casing, context?.company));
