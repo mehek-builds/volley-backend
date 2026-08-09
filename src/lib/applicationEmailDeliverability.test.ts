@@ -20,10 +20,12 @@ async function withAliasEnv<T>(run: () => Promise<T>): Promise<T> {
     from: process.env.RESEND_FROM,
     managedDomain: process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN,
     canaryId: process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID,
+    routeMode: process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE,
   };
   delete process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN;
   delete process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID;
   delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+  delete process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE;
   delete process.env.LITOS_APPLICATION_EMAIL_INBOUND_ENABLED;
   process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'apply.trylitos.com';
   process.env.RESEND_API_KEY = 're_test';
@@ -47,6 +49,8 @@ async function withAliasEnv<T>(run: () => Promise<T>): Promise<T> {
     else process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN = saved.managedDomain;
     if (saved.canaryId === undefined) delete process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID;
     else process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID = saved.canaryId;
+    if (saved.routeMode === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE;
+    else process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE = saved.routeMode;
   }
 }
 
@@ -101,6 +105,37 @@ test('managed receiving succeeds only from account-scoped canary proof and the e
     assert.equal(result.inbound_route_configured, true);
     assert.deepEqual(result.mx_hosts, []);
     assert.equal(result.resend_domain_status, null);
+  });
+});
+
+test('explicit managed receiving proves deliverability while legacy rollback values coexist', async () => {
+  await withManagedAliasEnv(async () => {
+    process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE = 'managed_resend';
+    process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'legacy.example';
+    process.env.LITOS_APPLICATION_EMAIL_MAILBOX = 'legacy@mailbox.example';
+    resetApplicationAliasDeliverabilityCache();
+    const result = await applicationAliasDeliverability({
+      ...healthyManagedProbes,
+      resolveMx: async () => { throw new Error('managed mode must not consult legacy MX'); },
+      resendDomains: async () => { throw new Error('managed mode must not consult legacy domains'); },
+    });
+    assert.equal(result.deliverable, true);
+    assert.equal(result.domain, 'litos-inbound.resend.app');
+    assert.equal(result.reason, 'deliverable');
+  });
+});
+
+test('invalid route mode remains unconfigured and performs no provider checks', async () => {
+  await withManagedAliasEnv(async () => {
+    process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE = 'managed';
+    resetApplicationAliasDeliverabilityCache();
+    const result = await applicationAliasDeliverability({
+      resendReceivedEmail: async () => { throw new Error('invalid mode must not retrieve a canary'); },
+      resendWebhooks: async () => { throw new Error('invalid mode must not list webhooks'); },
+    });
+    assert.equal(result.deliverable, false);
+    assert.equal(result.domain, null);
+    assert.equal(result.reason, 'alias_not_configured');
   });
 });
 

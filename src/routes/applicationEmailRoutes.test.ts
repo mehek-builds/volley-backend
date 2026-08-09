@@ -7,6 +7,7 @@ const indexRoute = readFileSync('src/index.ts', 'utf8');
 const schema = readFileSync('src/db/schema.ts', 'utf8');
 const route = readFileSync('src/routes/applicationEmail.ts', 'utf8');
 const service = readFileSync('src/lib/applicationEmail.ts', 'utf8');
+const routeSelector = readFileSync('src/lib/applicationEmailRoute.ts', 'utf8');
 const applicationsRoute = readFileSync('src/routes/applications.ts', 'utf8');
 
 test('application packet generation uses the Litos alias as the employer-facing email', () => {
@@ -41,7 +42,8 @@ test('application inbox schema and webhook route are registered', () => {
   // publishes the address the alias exists to keep out of the thread. See relayApplicantReply.
   assert.match(service, /to: \[input\.forwardTo\],[\s\S]*\{ reply_to: input\.alias \}/);
   assert.doesNotMatch(service, /reply_to: input\.inbound\.from/);
-  assert.match(service, /LITOS_APPLICATION_EMAIL_MAILBOX/);
+  assert.match(routeSelector, /LITOS_APPLICATION_EMAIL_MAILBOX/);
+  assert.match(routeSelector, /LITOS_APPLICATION_EMAIL_ROUTE_MODE/);
   assert.match(service, /\$\{mailbox\.local\}\+\$\{route\}@\$\{mailbox\.domain\}/);
   assert.match(route, /applicationEmailRouteLabel\(\)/);
   assert.match(route, /route_generation_fingerprint: applicationEmailRouteGenerationFingerprint\(\)/);

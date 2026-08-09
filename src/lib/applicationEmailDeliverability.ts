@@ -1,4 +1,8 @@
 import { promises as dnsPromises } from 'dns';
+import {
+  applicationEmailRouteSelection,
+  configuredResendManagedReceivingDomain,
+} from './applicationEmailRoute';
 
 /* CAN THE ALIAS DOMAIN ACTUALLY RECEIVE MAIL, measured rather than assumed.
  *
@@ -95,42 +99,9 @@ export function resetApplicationAliasDeliverabilityCache(): void {
   inFlight = null;
 }
 
-function configuredMailboxDomain(): string | null {
-  const mailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX?.trim().toLowerCase();
-  const match = mailbox?.match(/^[^@\s]+@([a-z0-9.-]+\.[a-z]{2,})$/i);
-  return match ? match[1] : null;
-}
-
-function configuredAliasDomain(): string | null {
-  const domain = process.env.LITOS_APPLICATION_EMAIL_DOMAIN?.trim().toLowerCase();
-  return domain && /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(domain) ? domain : null;
-}
-
-const RESEND_MANAGED_RECEIVING_DOMAIN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.resend\.app$/i;
-
-export function configuredResendManagedReceivingDomain(): string | null {
-  const domain = process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN?.trim().toLowerCase();
-  return domain && RESEND_MANAGED_RECEIVING_DOMAIN.test(domain) ? domain : null;
-}
-
-function managedReceivingModeRequested(): boolean {
-  return Boolean(process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN?.trim());
-}
-
-function customAliasRouteRequested(): boolean {
-  return Boolean(
-    process.env.LITOS_APPLICATION_EMAIL_MAILBOX?.trim()
-      || process.env.LITOS_APPLICATION_EMAIL_DOMAIN?.trim(),
-  );
-}
-
 /** The domain employers would actually send to, whichever alias shape is configured. */
 export function aliasDomain(): string | null {
-  if (managedReceivingModeRequested()) {
-    if (customAliasRouteRequested()) return null;
-    return configuredResendManagedReceivingDomain();
-  }
-  return configuredMailboxDomain() ?? configuredAliasDomain();
+  return applicationEmailRouteSelection().domain;
 }
 
 /* The explicit configuration signal, and it can only ever say NO.
@@ -456,6 +427,7 @@ export async function applicationAliasDeliverability(
   const domain = aliasDomain();
   const managedCanaryId = process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID?.trim();
   const configSignature = `${domain ?? ''}|${inboundAliasDisabled()}|${applicationEmailForwardingConfigured()}`
+    + `|${process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE?.trim().toLowerCase() ?? ''}`
     + `|${process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN?.trim().toLowerCase() ?? ''}`
     + `|${process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID?.trim() ?? ''}`;
   if (cached && cached.domain === domain && cached.configSignature === configSignature && cached.expiresAt > now) return cached.value;
