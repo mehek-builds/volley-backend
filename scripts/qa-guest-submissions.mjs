@@ -8,10 +8,12 @@ import pg from 'pg';
 import { chromium } from 'playwright-core';
 import {
   assertDisposableDatabaseMarker,
+  assertControlledManagedReceivingProofRow,
   assertRemoteManagedRunner,
   assertControlledSecurityCodeTarget,
   controlledEmailCaptureTarget,
   controlledManagedReceivingProof,
+  controlledQaPacketSpec,
   managedApplicationAlias,
   securityCodeCase,
   securityCodeMailboxUrl,
@@ -243,7 +245,7 @@ try {
       throw new Error(`disposable QA database marker lookup failed: ${errorDetail(error)}`);
     }
     assertDisposableDatabaseMarker(markerResult.rows[0], databaseMarker);
-    activeRun = { run: null, stage: 'seed_controlled_managed_receiving_proof' };
+    activeRun = { run: null, stage: 'verify_preseeded_controlled_managed_receiving_proof' };
     const receivingProof = controlledManagedReceivingProof({
       routeMode: process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE,
       domain: managedDomain,
@@ -253,22 +255,14 @@ try {
       webhookSecret: process.env.RESEND_WEBHOOK_SECRET,
       databaseMarker,
     });
-    await client.query(
-      `insert into application_email_receiving_proofs
-         (provider_message_hash, route_fingerprint, proof_version, domain, verified_at)
-       values ($1, $2, $3, $4, now())
-       on conflict (route_fingerprint) do update
-         set provider_message_hash = excluded.provider_message_hash,
-             proof_version = excluded.proof_version,
-             domain = excluded.domain,
-             verified_at = now()`,
-      [
-        receivingProof.provider_message_hash,
-        receivingProof.route_fingerprint,
-        receivingProof.proof_version,
-        receivingProof.domain,
-      ],
+    const proofResult = await client.query(
+      `select provider_message_hash, route_fingerprint, proof_version, domain, verified_at
+         from application_email_receiving_proofs
+        where route_fingerprint = $1 and domain = $2 and proof_version = $3
+        limit 1`,
+      [receivingProof.route_fingerprint, receivingProof.domain, receivingProof.proof_version],
     );
+    assertControlledManagedReceivingProofRow(proofResult.rows[0], receivingProof);
     activeRun = { run: null, stage: 'verify_managed_application_email_route' };
     const health = await api('/health');
     assert.equal(health.application_email?.deliverable, true, 'managed application email route is not deliverable');
@@ -344,50 +338,14 @@ try {
       currently_enrolled: true,
       coursework: [],
     };
-    const spec = {
-      school: education.school,
-      degree: education.degree,
-      grad_date: education.grad_date,
-      coursework: '',
-      experience: [{
-        type: 'job',
-        org: 'Northwind Labs',
-        title: 'Software Engineering Intern',
-        date_range: 'Summer 2026',
-        bullets: [
-          'Built TypeScript workflows that automated internal application review steps.',
-          'Added dashboard states that surfaced missing applicant inputs before submit.',
-          'Tested controlled portal submissions across browser and API checkpoints.',
-        ],
-      }],
-      skills: ['TypeScript'],
-      _contact: { full_name: `Guest Tester ${run}`, email },
-      _review: {
-        jd_text: 'Controlled software engineering internship used only for Litos submission QA.',
-        role: 'Software Engineering Intern',
-        portal_url: runPortalUrl,
-        ats_name: 'controlled_test',
-        status: 'ready_to_submit',
-        edited_terms: [],
-        questions: [],
-        skipped_reasons: [],
-        updated_at: now,
-      },
-      ...(alias ? {
-        _applicant_email: {
-          address: alias,
-          source: 'litos_alias',
-          reason: 'deliverable',
-          tracked: true,
-          decided_at: now,
-        },
-        _application_email: {
-          alias,
-          forwards_to: qaForwardTo,
-          mode: 'litos_application_alias',
-        },
-      } : {}),
-    };
+    const spec = controlledQaPacketSpec({
+      run,
+      email,
+      portalUrl: runPortalUrl,
+      alias,
+      forwardTo: qaForwardTo,
+      now,
+    });
     stage = 'seed_packet_and_alias';
     activeRun.stage = stage;
     await client.query(

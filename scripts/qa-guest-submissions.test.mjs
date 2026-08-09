@@ -3,11 +3,13 @@ import test from 'node:test';
 import { createHmac } from 'node:crypto';
 import {
   assertDisposableDatabaseMarker,
+  assertControlledManagedReceivingProofRow,
   assertRemoteManagedRunner,
   assertControlledSecurityCodeTarget,
   controlledEmailCaptureTarget,
   controlledDatabaseTarget,
   controlledManagedReceivingProof,
+  controlledQaPacketSpec,
   controlledPortalBinding,
   managedApplicationAlias,
   securityCodeCase,
@@ -15,6 +17,7 @@ import {
   securityCodePortalUrl,
   signedInboundRequest,
 } from './qa-guest-submissions-lib.mjs';
+import { applicationLeadAlignmentIssues } from '../src/routes/applications.ts';
 
 const marker = 'controlled_database_marker_123456';
 const controlledTarget = {
@@ -132,6 +135,57 @@ test('controlled managed receiving proof is fully bound to the disposable QA con
     ...input,
     webhookEndpoint: 'http://localhost:3301/webhooks/application-email/inbound',
   }), /endpoint is invalid/);
+});
+
+test('security-code proof must exist before backend startup and match the exact fixture binding', () => {
+  const expected = {
+    provider_message_hash: 'a'.repeat(64),
+    route_fingerprint: 'b'.repeat(64),
+    proof_version: 2,
+    domain: 'litos-qa.resend.app',
+  };
+  const now = new Date('2026-08-09T12:00:00.000Z');
+  const valid = { ...expected, verified_at: now };
+  assert.doesNotThrow(() => assertControlledManagedReceivingProofRow(valid, expected, now));
+  assert.throws(
+    () => assertControlledManagedReceivingProofRow(undefined, expected, now),
+    /seeded before backend startup/,
+  );
+  assert.throws(
+    () => assertControlledManagedReceivingProofRow({ ...valid, provider_message_hash: 'c'.repeat(64) }, expected, now),
+    /seeded before backend startup/,
+  );
+  assert.throws(
+    () => assertControlledManagedReceivingProofRow({
+      ...valid,
+      verified_at: new Date('2026-08-01T11:59:59.000Z'),
+    }, expected, now),
+    /not current/,
+  );
+});
+
+test('the seeded QA packet carries exact evidence-bound lead alignment', () => {
+  const spec = controlledQaPacketSpec({
+    run: 1,
+    email: 'guest@litos-qa.resend.app',
+    portalUrl: 'http://localhost:3300/qa/portal-submission',
+    alias: null,
+    forwardTo: null,
+    now: '2026-08-09T12:00:00.000Z',
+  });
+  assert.deepEqual(applicationLeadAlignmentIssues(spec), []);
+
+  const missing = structuredClone(spec);
+  delete missing.lead_alignment;
+  assert.match(applicationLeadAlignmentIssues(missing)[0], /lead_alignment is missing/);
+
+  const wrongHash = structuredClone(spec);
+  wrongHash.lead_alignment.jd_hash = '0000000000000000';
+  assert.match(applicationLeadAlignmentIssues(wrongHash)[0], /jd_hash does not match/);
+
+  const wrongEvidence = structuredClone(spec);
+  wrongEvidence.lead_alignment.evidence = 'Built a different workflow not present in the packet.';
+  assert.match(applicationLeadAlignmentIssues(wrongEvidence)[0], /evidence is not one of the bullets/);
 });
 
 test('security-code mode requires the remote managed runner and records its auth mode', () => {
