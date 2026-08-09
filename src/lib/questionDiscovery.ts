@@ -607,6 +607,73 @@ export function ageAttestationSkipReason(label: string): string {
   return `sensitive question left for you, because your date of birth is not saved: "${label.slice(0, 60)}"`;
 }
 
+/* THE DATE OF BIRTH IS PARSED BY HAND, and that is deliberate rather than fussy.
+ *
+ * `new Date(raw)` was here, and it is lenient in exactly the two directions that end in a false
+ * legal declaration:
+ *   - it ROLLS OVER an impossible calendar day. `new Date('2008-02-30T00:00:00Z')` is 1 March 2008,
+ *     not an error, so a corrupt day silently becomes a real date and then an age.
+ *   - it INVENTS a date out of prose. `new Date('sometime in 2005')` is 1 January 2005, which
+ *     becomes an age, which becomes a Yes on an attestation the applicant never made.
+ *
+ * So only the two shapes Litos actually STORES are matched, and everything else is refused:
+ *   - strict ISO `YYYY-MM-DD`, which is what the extension's setup screen writes and what the one
+ *     stored date of birth in production is (measured 2026-08-09: 10 plaintext bytes).
+ *   - the day / month-name / year text /profile/harvest can lift off an employer's form
+ *     ("25 Sep 2005"), and its month-first mirror ("Sep 25, 2005").
+ *
+ * ALL-NUMERIC AMBIGUOUS FORMS ARE REFUSED ON PURPOSE. "09/08/2005" is 8 September to half the
+ * world and 9 August to the other half, and there is nothing in the string that says which. A
+ * refusal costs one question; a guess puts a false date of birth on an application.
+ *
+ * Kept in step with the extension's copy, storedBirthDate in
+ * student-outreach-extension/src/lib/adapters/generic.ts. Two readers of one rule that disagree is
+ * the defect this pair keeps re-learning.
+ */
+const MONTH_NAMES = [
+  'january', 'february', 'march', 'april', 'may', 'june',
+  'july', 'august', 'september', 'october', 'november', 'december',
+];
+
+function monthNumberFromName(name: string): number | undefined {
+  const n = name.toLowerCase();
+  const index = MONTH_NAMES.findIndex((month) => month === n || (n.length >= 3 && month.startsWith(n)));
+  return index === -1 ? undefined : index + 1;
+}
+
+/** The date that was WRITTEN, or undefined when the calendar has no such day (30 February). */
+function validCalendarDate(
+  year: number,
+  month: number,
+  day: number,
+): { year: number; month: number; day: number } | undefined {
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return undefined;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+    ? { year, month, day }
+    : undefined;
+}
+
+function storedBirthDate(value: string | undefined): { year: number; month: number; day: number } | undefined {
+  const raw = value?.trim();
+  if (!raw) return undefined;
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (iso) return validCalendarDate(Number(iso[1]), Number(iso[2]), Number(iso[3]));
+  // "25 Sep 2005", "25 September, 2005"
+  const dayFirst = /^(\d{1,2})(?:st|nd|rd|th)?[\s.,-]+([a-z]{3,9})\.?[\s.,-]+(\d{4})$/i.exec(raw);
+  if (dayFirst) {
+    const month = monthNumberFromName(dayFirst[2]);
+    return month === undefined ? undefined : validCalendarDate(Number(dayFirst[3]), month, Number(dayFirst[1]));
+  }
+  // "Sep 25, 2005", "September 25 2005"
+  const monthFirst = /^([a-z]{3,9})\.?[\s.,-]+(\d{1,2})(?:st|nd|rd|th)?[\s.,-]+(\d{4})$/i.exec(raw);
+  if (monthFirst) {
+    const month = monthNumberFromName(monthFirst[1]);
+    return month === undefined ? undefined : validCalendarDate(Number(monthFirst[3]), month, Number(monthFirst[2]));
+  }
+  return undefined;
+}
+
 /**
  * Completed years between a stored date of birth and `now`, or undefined when the stored text is
  * not a date this can read.
@@ -614,21 +681,17 @@ export function ageAttestationSkipReason(label: string): string {
  * Only ever called with application_profile.date_of_birth. Nothing else in the profile is an
  * acceptable input: a graduation year, a resume, or a document in the vault would all give a
  * number, and every one of them would be a guess presented to an employer as an attestation.
- * An unparseable string is treated exactly like an absent one.
+ * An unparseable string is treated exactly like an absent one, and the caller turns both into the
+ * same stated refusal.
  */
 function ageInCompletedYears(dateOfBirth: string | undefined, now: Date): number | undefined {
-  const raw = dateOfBirth?.trim();
-  if (!raw) return undefined;
-  const parsed = new Date(/^\d{4}-\d{2}-\d{2}$/.test(raw) ? `${raw}T00:00:00Z` : raw);
-  const time = parsed.getTime();
-  if (!Number.isFinite(time)) return undefined;
+  const dob = storedBirthDate(dateOfBirth);
+  if (!dob || Number.isNaN(now.getTime())) return undefined;
+  let age = now.getUTCFullYear() - dob.year;
+  const monthDelta = now.getUTCMonth() + 1 - dob.month;
+  if (monthDelta < 0 || (monthDelta === 0 && now.getUTCDate() < dob.day)) age -= 1;
   // A birth date in the future, or before anyone alive, is corrupt rather than informative.
-  const years = (now.getTime() - time) / (365.2425 * 24 * 60 * 60 * 1000);
-  if (years < 0 || years > 130) return undefined;
-  let age = now.getUTCFullYear() - parsed.getUTCFullYear();
-  const monthDelta = now.getUTCMonth() - parsed.getUTCMonth();
-  if (monthDelta < 0 || (monthDelta === 0 && now.getUTCDate() < parsed.getUTCDate())) age -= 1;
-  return age;
+  return age < 0 || age > 130 ? undefined : age;
 }
 
 /**
