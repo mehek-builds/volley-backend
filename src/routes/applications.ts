@@ -95,6 +95,11 @@ const submitBodySchema = z.object({
 
 type StoredResumeRow = typeof generated_resumes.$inferSelect;
 
+/** Semantic equality for the packet version that passed an out-of-transaction verification. */
+export function sameApplicationPacketSpec(validated: unknown, current: unknown): boolean {
+  return isDeepStrictEqual(validated, current);
+}
+
 /** The employer a packet is for, so answerReuse can hold back anything that names them. */
 function applicationCompany(row: StoredResumeRow): string {
   const context = (row.job_context && typeof row.job_context === 'object' ? row.job_context : {}) as Record<string, unknown>;
@@ -424,7 +429,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         )).limit(1);
         const row = rows[0];
         if (!row) return { kind: 'not_found' as const };
-        if (!precheckRow || !isDeepStrictEqual(row.spec, precheckRow.spec)) {
+        if (!precheckRow || !sameApplicationPacketSpec(row.spec, precheckRow.spec)) {
           return { kind: 'changed' as const };
         }
         const current = readApplicationReview(row.spec);
@@ -942,6 +947,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           .set({ spec: reviewSpec(pending) })
           .where(and(
             eq(generated_resumes.id, row.id),
+            eq(generated_resumes.user_id, request.jwtPayload!.userId),
+            sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
             sql`${generated_resumes.spec}->'_review'->>'status' = ${current.status}`,
           ))
           .returning();

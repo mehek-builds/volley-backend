@@ -345,6 +345,7 @@ async function claimPreparation(row: ResumeRow): Promise<ResumeRow | null> {
     })
     .where(and(
       eq(generated_resumes.id, row.id),
+      sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
       sql`${generated_resumes.spec}->'_review'->>'status' = 'submit_requested'`,
     ))
     .returning();

@@ -5,7 +5,11 @@ import { checkResumeHealth } from '../engine/resumeHealth';
 import { validateResumeSpec } from '../engine/resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { monitoredDescriptionHash } from '../lib/monitoredPortalRepair';
-import { allowedSparseEntriesForApplicationEdit, applicationLeadAlignmentIssues } from './applications';
+import {
+  allowedSparseEntriesForApplicationEdit,
+  applicationLeadAlignmentIssues,
+  sameApplicationPacketSpec,
+} from './applications';
 import { runnerLeadAlignmentIssues } from './submissionRunner';
 
 const source: ExperienceBankEntry = {
@@ -168,4 +172,17 @@ test('centralized runner gate rejects stale evidence before any submission chann
     experience: [{ ...resume.experience[0], bullets: [sourceBullets[1]] }],
   });
   assert.ok(runnerLeadAlignmentIssues(runnerRow(stale)).some((issue) => /evidence is not one of the bullets/.test(issue)));
+});
+
+test('packet version equality rejects either preclaim race window after validation', () => {
+  const validated = storedWithCitation();
+  assert.equal(sameApplicationPacketSpec(validated, structuredClone(validated)), true);
+
+  const editedResume = structuredClone(validated);
+  (editedResume.experience as Array<{ bullets: string[] }>)[0].bullets = [sourceBullets[1]];
+  assert.equal(sameApplicationPacketSpec(validated, editedResume), false);
+
+  const editedReview = structuredClone(validated);
+  (editedReview._review as Record<string, unknown>).updated_at = '2026-08-09T00:01:00.000Z';
+  assert.equal(sameApplicationPacketSpec(validated, editedReview), false);
 });

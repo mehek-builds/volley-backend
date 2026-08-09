@@ -245,7 +245,7 @@ test('dashboard edits and every pre-send route enforce current lead citations', 
     applicationsRoute.indexOf("'/applications/:id/submission/extension-outcome'"),
   );
   assert.match(extension, /preSendResumeVerificationIssues\(/);
-  assert.match(extension, /isDeepStrictEqual\(row\.spec, precheckRow\.spec\)/);
+  assert.match(extension, /sameApplicationPacketSpec\(row\.spec, precheckRow\.spec\)/);
   assert.match(extension, /generated_resumes\.spec\} = \$\{JSON\.stringify\(precheckRow\.spec\)\}::jsonb/);
 });
 
@@ -263,6 +263,11 @@ test('the centralized runner refuses stale lead evidence before every claim and 
     runner.indexOf('export function submissionClaimIsHeld'),
   );
   assert.match(ordinaryClaim, /generated_resumes\.spec\} = \$\{JSON\.stringify\(row\.spec\)\}::jsonb/);
+  const preparationClaim = runner.slice(
+    runner.indexOf('async function claimPreparation('),
+    runner.indexOf('async function authorizationValidAtClick('),
+  );
+  assert.match(preparationClaim, /generated_resumes\.spec\} = \$\{JSON\.stringify\(row\.spec\)\}::jsonb/);
   for (const channel of [
     'submitControlled(row',
     'submitViaAtsSubmissionChannel(row',
@@ -294,6 +299,20 @@ test('the centralized runner refuses stale lead evidence before every claim and 
     runner.indexOf('async function claimPreparation('),
   );
   assert.match(securityClaim, /generated_resumes\.spec\} = \$\{JSON\.stringify\(row\.spec\)\}::jsonb/);
+});
+
+test('unsupported-portal email claims the exact verified packet before building or sending it', () => {
+  const applications = routeSource('applications.ts');
+  const handler = applications.slice(
+    applications.indexOf("'/applications/:id/submit-request'"),
+    applications.indexOf("'/applications/:id/submission/channels'"),
+  );
+  const verify = handler.indexOf('preSendResumeVerificationIssues(');
+  const exactClaim = handler.indexOf('sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`', verify);
+  const packet = handler.indexOf('buildPacket(claimedRow)', exactClaim);
+  const send = handler.indexOf('sendUnsupportedPortalApplicationEmail', exactClaim);
+  assert.ok(verify > 0 && exactClaim > verify, 'the email claim must compare against the packet that passed verification');
+  assert.ok(packet > exactClaim && send > exactClaim, 'a changed packet must be refused before packet build or employer email');
 });
 
 /**
