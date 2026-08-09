@@ -148,8 +148,28 @@ test('Class A: education level and Discipline (Akuna, Point72, Five Rings, IMC, 
 
 test('Class A: graduation month, year, and anticipated date (Akuna x6, Virtu, IMC, Five Rings)', () => {
   assert.equal(answer('Graduation Month'), 'May');
-  assert.equal(answer('Graduation Year'), '2028');
-  assert.equal(answer('What is your expected graduation year?'), '2028');
+  /* A YEAR QUESTION WITH NO OPTION LIST NOW ANSWERS "May 2028", and that is deliberate.
+   *
+   * Prod packet 59fb48ae (Deepgram on Ashby, 2026-08-09): "Expected Graduation Year" is a
+   * react-datepicker at day precision. A bare "2028" fills nothing, because tabbing off a typed
+   * year commits 01/01/2028 - four months before a May graduation - so the runner refuses it. The
+   * same control takes "May 2028" and commits 05/01/2028. Nothing here can tell a datepicker from a
+   * text box: the managed provider reports inputType "text" for every discovered control.
+   *
+   * The month is never invented. It comes from grad_date, and a profile holding only a year still
+   * answers with only that year (asserted below). */
+  assert.equal(answer('Graduation Year'), 'May 2028');
+  assert.equal(answer('What is your expected graduation year?'), 'May 2028');
+
+  // ONLY A YEAR ON FILE MEANS ONLY A YEAR IN THE ANSWER. graduationDateAnswer defaults an absent
+  // month to '05' so a native date input gets a complete day; that default must never reach an
+  // answer, and this is the assertion that keeps it out.
+  const yearOnly = { ...STORED_PROFILE, grad_date: '2028' };
+  assert.equal(answer('Graduation Year', undefined, yearOnly), '2028');
+  assert.equal(answer('Graduation Year', undefined, { ...STORED_PROFILE, grad_date: undefined }), '2028');
+  // grad_date and grad_year disagreeing is two facts, not one with extra precision. The year they
+  // agree on is the whole answer.
+  assert.equal(answer('Graduation Year', undefined, { ...STORED_PROFILE, grad_date: 'May 2027' }), '2028');
 
   // Month and year are separate selects on the Greenhouse education section, and each spells its
   // options differently. "May 2028" satisfies neither of them on its own.
@@ -176,6 +196,58 @@ test('Class A: graduation month, year, and anticipated date (Akuna x6, Virtu, IM
     answer('Expected Graduation Date', ['Fall 2027', 'Spring 2028', 'Fall 2028']),
     'Spring 2028',
   );
+});
+
+/* R-118. The last blocker standing between this account and its first real submission.
+ *
+ * Prod packet 59fb48ae-382c-4157-9b3d-d4c12883cc62 (Deepgram, Ashby) had every other field filled
+ * and passed every acceptance check on one sentence:
+ *
+ *   "Expected Graduation Year" is required and is still empty
+ *
+ * The control is a react-datepicker at DAY precision. Measured live against the posting: "2028"
+ * fills nothing (the runner refuses it, because tabbing off a typed year commits 01/01/2028, four
+ * months adrift of a May graduation), "May 2028" commits 05/01/2028 and the gate clears. The stored
+ * question row carried "2028" and was re-resolved from the profile on every run, so no dashboard
+ * edit could survive; the fix has to be in the resolver.
+ *
+ * The whole of the risk is in the second half of this test: a year select must keep getting a year.
+ */
+test('R-118: a graduation year answers with the month the profile states, and a year list still gets the year', () => {
+  const label = 'Expected Graduation Year';
+
+  // What packet 59fb48ae will now carry. `question` and `portal_selector` unchanged; only `answer`.
+  assert.equal(answer(label), 'May 2028');
+  assert.equal(answer('expected graduation year'), 'May 2028');
+
+  // ...and the ladder that keeps it free. The bare year is on it, so an option list still reaches it.
+  const resolved = resolveProfileField({ label }, STORED_PROFILE);
+  assert.ok(resolved);
+  assert.equal(resolved.candidates[0], 'May 2028');
+  assert.ok(resolved.candidates.includes('2028'), `bare year missing from ${JSON.stringify(resolved.candidates)}`);
+  assert.equal(resolved.matchedOption, false);
+
+  // A YEAR SELECT IS UNTOUCHED. chooseClosestOption runs its exact pass over every candidate before
+  // any inexact stage, so "2028" is found however far down the ladder it sits.
+  assert.equal(answer(label, ['2026', '2027', '2028', '2029']), '2028');
+  assert.equal(answer(label, ['Select...', '2028', '2029']), '2028');
+  assert.equal(answer('Graduation Year', ['2026', '2027', '2028', '2029']), '2028');
+  // A term list is a real graduation-year control too, and the month is what makes it answerable.
+  assert.equal(answer(label, ['Spring 2028', 'Fall 2028']), 'Spring 2028');
+
+  // A control that cannot physically hold a month name gets the year. This only fires where the
+  // input type is REAL: the managed provider reports "text" for everything, so nothing on that path
+  // depends on it.
+  assert.equal(
+    resolveProfileField({ label, inputType: 'number' }, STORED_PROFILE)?.value,
+    '2028',
+  );
+
+  // And the collapse: no month on file, no month in the answer, on every shape.
+  const yearOnly: ApplicationProfileLike = { ...STORED_PROFILE, grad_date: '2028' };
+  assert.equal(answer(label, undefined, yearOnly), '2028');
+  assert.equal(answer(label, ['2026', '2027', '2028'], yearOnly), '2028');
+  assert.deepEqual(resolveProfileField({ label }, yearOnly)?.candidates, ['2028']);
 });
 
 test('Class A: how did you hear about this job requires packet-specific evidence', () => {
