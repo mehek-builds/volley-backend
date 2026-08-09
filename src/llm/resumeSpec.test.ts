@@ -45,6 +45,19 @@ test('normalizeSpec preserves the per-application target role headline', () => {
   assert.equal(s.target_role, 'Analytics Engineer');
 });
 
+test('normalizeSpec preserves the frozen-JD binding on lead citations', () => {
+  const s = normalizeSpec({
+    experience: [{ org: 'Acme', title: 'Engineer', date_range: '2025', bullets: ['Built React interfaces'] }],
+    lead_alignment: {
+      entry_org: 'Acme',
+      requirement: 'Build React interfaces',
+      evidence: 'Built React interfaces',
+      jd_hash: '0123456789abcdef',
+    },
+  });
+  assert.equal(s.lead_alignment?.jd_hash, '0123456789abcdef');
+});
+
 test('resume prompt pins every application-specific tailoring rule', () => {
   assert.match(RESUME_SYSTEM_PROMPT, /proof document for THIS application/);
   assert.match(RESUME_SYSTEM_PROMPT, /exact role named in the Job line/);

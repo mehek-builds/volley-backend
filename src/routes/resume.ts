@@ -804,11 +804,11 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     if (priorityEntry) {
       finalSpecValidation.issues.push(...baseResumeSelectionIssues(spec, [priorityEntry], { requireFirst: false }));
     }
-    /* The citation is re-checked after fitting. The evidence bullet may have been trimmed for the
-     * one-page layout, so afterRender checks identity and frozen-JD binding rather than requiring
-     * the removed sentence to remain on the page. A missing or stale citation still blocks. */
+    /* The complete citation is re-checked after fitting. If the one-page pass removed the exact
+     * supporting bullet, the packet is blocked rather than storing an explanation the PDF no
+     * longer contains. */
     finalSpecValidation.issues.push(
-      ...leadAlignmentIssues(spec, jdText, { afterRender: true, context: { company: body.company, role: body.role } }),
+      ...leadAlignmentIssues(spec, jdText, { context: { company: body.company, role: body.role } }),
     );
     specWarnings = finalSpecValidation.warnings;
     atsCoverage = finalSpecValidation.ats_keyword_coverage_pct;

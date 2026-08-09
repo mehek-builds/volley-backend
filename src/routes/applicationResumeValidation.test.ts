@@ -4,7 +4,8 @@ import type { ExperienceBankEntry } from '../db/schema';
 import { checkResumeHealth } from '../engine/resumeHealth';
 import { validateResumeSpec } from '../engine/resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
-import { allowedSparseEntriesForApplicationEdit } from './applications';
+import { monitoredDescriptionHash } from '../lib/monitoredPortalRepair';
+import { allowedSparseEntriesForApplicationEdit, applicationLeadAlignmentIssues } from './applications';
 
 const source: ExperienceBankEntry = {
   id: 'recent-role',
@@ -80,4 +81,70 @@ test('real content errors remain blocking even when sparse source content is all
   fabricated.experience[0].bullets[1] =
     'Added automated tests, improved deployment checks, and reduced production errors by 40 percent';
   assert.ok(validate(fabricated).issues.some((issue) => issue.includes('grounding: metric "40"')));
+});
+
+const JD = `Software Engineer
+
+Responsibilities:
+- Build TypeScript services and React interfaces for operations teams
+
+Requirements:
+- Experience shipping tested production software`;
+const sourceBullets = source.bullet_variants as string[];
+
+function storedWithCitation(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    ...structuredClone(resume),
+    lead_alignment: {
+      entry_org: source.org,
+      requirement: 'Build TypeScript services and React interfaces for operations teams',
+      evidence: sourceBullets[0],
+      jd_hash: monitoredDescriptionHash(JD),
+    },
+    _review: {
+      jd_text: JD,
+      role: 'Software Engineer',
+      status: 'ready_to_submit',
+      edited_terms: [],
+      questions: [],
+      skipped_reasons: [],
+      updated_at: '2026-08-09T00:00:00.000Z',
+    },
+    ...overrides,
+  };
+}
+
+test('pre-send lead verification rejects a dashboard reorder with a stale citation', () => {
+  const stale = storedWithCitation({
+    experience: [
+      {
+        type: 'job',
+        org: 'Unrelated Lab',
+        title: 'Research Intern',
+        date_range: '2025',
+        bullets: ['Presented qualitative research findings to an internal team'],
+      },
+      ...resume.experience,
+    ],
+  });
+  assert.match(applicationLeadAlignmentIssues(stale)[0], /but the first entry is/);
+});
+
+test('pre-send lead verification rejects removal of the exact cited bullet', () => {
+  const stale = storedWithCitation({
+    experience: [{ ...resume.experience[0], bullets: [sourceBullets[1]] }],
+  });
+  assert.ok(applicationLeadAlignmentIssues(stale).some((issue) => /evidence is not one of the bullets/.test(issue)));
+});
+
+test('pre-send lead verification rejects a citation bound to another JD', () => {
+  const stale = storedWithCitation({
+    lead_alignment: {
+      entry_org: source.org,
+      requirement: 'Build TypeScript services and React interfaces for operations teams',
+      evidence: sourceBullets[0],
+      jd_hash: monitoredDescriptionHash(`${JD}\nChanged`),
+    },
+  });
+  assert.ok(applicationLeadAlignmentIssues(stale).some((issue) => /jd_hash does not match/.test(issue)));
 });

@@ -16,20 +16,17 @@ import { monitoredDescriptionHash } from '../lib/monitoredPortalRepair';
  * A resume is reverse-chronological in almost every document the model has ever seen, so absent a
  * forcing function it writes one.
  *
- * A SCORE WAS TRIED FIRST AND REJECTED. Ranking her entries by weighted overlap against the
- * posting's own extracted terms was measured over the same 85 packets and it is not defensible:
- * the ATS term extractor yields 5-12 terms per posting and matched almost nothing, and a broader
- * bag-of-words over the priority clauses ranked a Program Management internship top for a Test
- * Automation Engineer posting on the strength of the shared words "intern", "through" and
- * "system". Committing an ordering to arithmetic that coincidental would be vibes with a decimal
- * point on it. Semantics is what the model is for.
+ * A GENERIC OVERLAP SCORE WAS TRIED FIRST AND REJECTED. A broad bag of words ranked a Program
+ * Management internship top for a Test Automation Engineer posting on coincidental words such as
+ * "intern", "through" and "system". The deterministic selector below instead permits a candidate
+ * only when a domain-bearing term occurs in both a primary JD requirement and an existing bullet.
+ * Generic language cannot create a candidate or affect the ordering.
  *
- * SO THE MODEL STILL CHOOSES, AND THIS FILE CHECKS ITS WORK. The spec must carry a `lead_alignment`
- * naming (a) a requirement quoted from the posting and (b) the bullet from the first entry that
- * proves it. Both are verified as VERBATIM copies of text that already exists - the requirement
- * against the job description, the evidence against that entry's own selected bullets - and the two
- * must share real content words, so the pairing cannot be arbitrary. The check therefore has three
- * properties that matter here:
+ * THIS FILE CHOOSES AND CHECKS THE LEAD. The selector ranks only supported JD and bullet pairs,
+ * moves the winning existing entry to the front, and records `lead_alignment` metadata naming the
+ * exact requirement and evidence bullet. Both citations are verified against the frozen JD and
+ * selected bullet, and the JD hash binds the decision to the posting used to make it. The check
+ * therefore has three properties that matter here:
  *
  *   1. It is not satisfiable by recency. "It is her current job" is not a requirement quoted from
  *      the posting, so a model that leads with the most recent entry has to go and find a
@@ -346,10 +343,8 @@ export function leadRequirementCandidates(jdText: string, context?: JdContext): 
 
 export interface LeadAlignmentOptions {
   /**
-   * Post-render, one-page fitting may already have trimmed the very bullet the citation named, and
-   * a resume must not be blocked because the sentence that justified its ordering was the one that
-   * did not fit. After rendering, only the claim that survives the trim is checked: that the entry
-   * the alignment is about is still the entry leading the page.
+   * Retained for source compatibility with older callers. Post-render validation is now as strict
+   * as pre-render validation: fitting may not delete the evidence the lead decision cites.
    */
   afterRender?: boolean;
   /** Company and role, so the primary asks are extracted exactly as the tailoring prompt built
@@ -380,7 +375,9 @@ export function leadAlignmentIssues(
   }
 
   const issues: string[] = [];
-  if (alignment.jd_hash && alignment.jd_hash !== monitoredDescriptionHash(jdText)) {
+  if (!alignment.jd_hash) {
+    issues.push('lead_alignment.jd_hash is missing: regenerate the packet against its frozen job description');
+  } else if (alignment.jd_hash !== monitoredDescriptionHash(jdText)) {
     issues.push('lead_alignment.jd_hash does not match the frozen job description used by this packet');
   }
   if (foldForCitation(alignment.entry_org) !== foldForCitation(first.org)) {
@@ -392,8 +389,6 @@ export function leadAlignmentIssues(
     // the one defect that matters under noise the model then tries to fix separately.
     return issues;
   }
-  if (options.afterRender) return issues;
-
   const asks = leadRequirementCandidates(jdText, options.context);
   const requirement = foldForCitation(alignment.requirement);
   /* A posting this pipeline could not read into asks at all - a two-line listing, a page that is

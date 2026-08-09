@@ -219,6 +219,34 @@ test('dashboard resume edits prune generated off-list skills before validation',
   assert.ok(pruneIndex > 0 && validateIndex > pruneIndex, 'dashboard save must sanitize uneditable skills before validation');
 });
 
+test('dashboard edits and every pre-send route enforce current lead citations', () => {
+  const applicationsRoute = routeSource('applications.ts');
+  const editStart = applicationsRoute.indexOf("'/applications/:id/resume'");
+  const editEnd = applicationsRoute.indexOf("'/applications/:id/review'", editStart);
+  const edit = applicationsRoute.slice(editStart, editEnd);
+  const select = edit.indexOf('selectJdAlignedLead(edited, review.jd_text');
+  const validate = edit.indexOf('validateResumeSpec(', select);
+  const render = edit.indexOf('renderResumePdf(edited', validate);
+  const renderedCitation = edit.indexOf('leadAlignmentIssues(rendered.spec', render);
+  const persist = edit.indexOf('.update(generated_resumes)', renderedCitation);
+  assert.ok(select > 0 && validate > select, 'dashboard edits must reselect the lead before validation');
+  assert.ok(render > validate && renderedCitation > render, 'the fitted edit must retain its exact citation');
+  assert.ok(persist > renderedCitation, 'a stale fitted citation must be refused before persistence');
+
+  const preSend = applicationsRoute.slice(
+    applicationsRoute.indexOf('export async function preSendResumeVerificationIssues'),
+    applicationsRoute.indexOf('async function loadSensitiveQuestionProfile'),
+  );
+  assert.match(preSend, /applicationLeadAlignmentIssues\(stored, company\)/);
+  assert.match(preSend, /leadAlignmentIssues\(rendered\.spec, review\.jd_text/);
+
+  const extension = applicationsRoute.slice(
+    applicationsRoute.indexOf("'/applications/:id/submission/extension-start'"),
+    applicationsRoute.indexOf("'/applications/:id/submission/extension-outcome'"),
+  );
+  assert.match(extension, /preSendResumeVerificationIssues\(/);
+});
+
 /**
  * Wiring, asserted separately from behaviour.
  *

@@ -44,7 +44,10 @@ const TRAECO = {
   ],
 };
 
-function spec(partial: Partial<ResumeSpec>): ResumeSpec {
+function spec(partial: Partial<ResumeSpec>, jdText = JD): ResumeSpec {
+  const alignment = partial.lead_alignment
+    ? { ...partial.lead_alignment, jd_hash: partial.lead_alignment.jd_hash ?? monitoredDescriptionHash(jdText) }
+    : partial.lead_alignment;
   return normalizeSpec({
     target_role: 'Product Management Intern',
     school: 'USC',
@@ -54,6 +57,7 @@ function spec(partial: Partial<ResumeSpec>): ResumeSpec {
     experience: [TONEE, TRAECO],
     skills: ['Figma'],
     ...partial,
+    lead_alignment: alignment,
   });
 }
 
@@ -176,6 +180,14 @@ test('a citation bound to a different frozen JD is rejected', () => {
   assert.ok(issues.some((issue) => /jd_hash does not match/.test(issue)));
 });
 
+test('a citation with no frozen-JD binding is rejected', () => {
+  const selected = selectJdAlignedLead(spec({ experience: [TRAECO, TONEE] }), JD, {
+    company: 'Acme', role: 'Product Management Intern',
+  }).spec;
+  const withoutHash = { ...selected, lead_alignment: { ...selected.lead_alignment!, jd_hash: undefined } };
+  assert.ok(leadAlignmentIssues(withoutHash, JD).some((issue) => /jd_hash is missing/.test(issue)));
+});
+
 /* THE NO-FABRICATION PINS.
  *
  * This gate exists to change which true entry leads a resume. It must never become a route by
@@ -248,7 +260,7 @@ test('a posting that yields no asks falls back to quoting the job description', 
       requirement: 'Engineer wanted',
       evidence: TONEE.bullets[0],
     },
-  });
+  }, thin);
   assert.match(leadAlignmentIssues(s, thin)[0], /does not address/);
   assert.ok(!leadAlignmentIssues(s, thin).some((i) => /not in the job description/.test(i)));
 });
@@ -305,8 +317,7 @@ test('justifying a different entry than the one that leads is reported alone, no
   assert.match(issues[0], /but the first entry is "Traeco/);
 });
 
-test('after rendering, only the entry the alignment argues for is re-checked', () => {
-  // One-page fitting may have dropped the cited bullet. That must not withhold the resume.
+test('after rendering, trimming the sole cited evidence remains a blocking defect', () => {
   const trimmed = spec({
     experience: [{ ...TONEE, bullets: TONEE.bullets.slice(1) }, TRAECO],
     lead_alignment: {
@@ -316,7 +327,7 @@ test('after rendering, only the entry the alignment argues for is re-checked', (
     },
   });
   assert.equal(leadAlignmentIssues(trimmed, JD).length, 1);
-  assert.deepEqual(leadAlignmentIssues(trimmed, JD, { afterRender: true }), []);
+  assert.match(leadAlignmentIssues(trimmed, JD, { afterRender: true })[0], /evidence is not one of the bullets/);
 });
 
 /* applyResumePolicy runs normalizeDashesForPrint over every field of the spec, so a requirement
@@ -332,7 +343,7 @@ test('a requirement quoted from a posting written with em dashes survives the po
         requirement: 'Experience shipping a consumer product — end to end — to real users',
         evidence: TONEE.bullets[0],
       },
-    }),
+    }, dashJd),
     { school: 'USC', degree: 'BS', grad_date: 'May 2027', currently_enrolled: true },
     [],
     dashJd,

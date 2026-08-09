@@ -225,7 +225,7 @@ test('submit-request carries the same guard and does not merely warn', () => {
 
 test('submit-request revalidates resume content and PDF layout before the browser runner', () => {
   const handler = slice(routes, "'/applications/:id/submit-request'", "'/applications/:id/submission'");
-  assert.match(handler, /preSendResumeVerificationIssues\(request\.jwtPayload!\.userId, stored\)/);
+  assert.match(handler, /preSendResumeVerificationIssues\([\s\S]{0,120}request\.jwtPayload!\.userId,[\s\S]{0,80}stored,[\s\S]{0,80}applicationCompany\(row\)/);
   assert.match(handler, /PRE_SEND_VERIFICATION_FAILED/);
   assert.ok(
     handler.indexOf('preSendResumeVerificationIssues') < handler.indexOf('processSubmissionApplication'),
@@ -249,7 +249,7 @@ test('final approval revalidates the full packet before it clicks submit', () =>
   assert.match(handler, /approvalReview\.questions\.some\(\(question\) => question\.required && !question\.answer\.trim\(\)\)/);
   assert.match(handler, /sensitiveQuestionFor\(approvalReview\.questions/);
   assert.match(handler, /Sensitive question requires your attention/);
-  assert.match(handler, /preSendResumeVerificationIssues\(request\.jwtPayload!\.userId, stored\)/);
+  assert.match(handler, /preSendResumeVerificationIssues\([\s\S]{0,120}request\.jwtPayload!\.userId,[\s\S]{0,80}stored,[\s\S]{0,80}applicationCompany\(row\)/);
   assert.match(handler, /FINAL_APPROVAL_VERIFICATION_FAILED/);
   assert.ok(
     handler.indexOf('preSendResumeVerificationIssues') < handler.indexOf('processSubmissionApplication'),
