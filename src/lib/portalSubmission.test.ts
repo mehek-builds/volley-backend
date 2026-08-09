@@ -4760,13 +4760,13 @@ test('the probe can name Greenhouse\'s own self-identification controls', () => 
 
 test('the probe reads the controls discovery found, and never the four it already read', () => {
   const discovered = [
-    { label: 'Overall GPA*', selector: '#question_37228964002', inputType: 'combobox', required: true },
+    { label: 'Overall GPA*', selector: '#question_37228964002', inputType: 'text', role: 'combobox', required: true },
     { label: 'Discipline*', selector: '#discipline--0', required: true },
     { label: 'School*', selector: '#school--0', required: true },
     { label: 'Country*', selector: '#country', required: true },
     { label: 'Location (City)*', selector: '#candidate-location', required: true },
     { label: 'How would you describe your gender identity? 4001608008', selector: '[data-litos-discovered-21]', role: 'combobox' },
-    { label: 'Are you interested in our Women\'s Winternship program?*', selector: '#question_37228970002', inputType: 'combobox', required: true },
+    { label: 'Are you interested in our Women\'s Winternship program?*', selector: '#question_37228970002', inputType: 'text', role: 'combobox', required: true },
   ];
   const alreadyRead = { 'school--0': ['USC'], 'discipline--0': ['Computer Science'] };
   const targets = managedOptionProbeTargets('greenhouse', discovered, alreadyRead);
@@ -4790,6 +4790,21 @@ test('the probe reads the controls discovery found, and never the four it alread
   assert.deepEqual(managedOptionProbeTargets('lever', discovered), []);
 });
 
+test('the backend consumes the real Stratus text-plus-combobox-role wire shape', () => {
+  const fromStratus: ManagedDiscoveredQuestion = {
+    label: 'Overall GPA* question_37228964002',
+    selector: '#question_37228964002',
+    inputType: 'text',
+    role: 'combobox',
+    maxLength: null,
+    options: null,
+    required: true,
+  };
+  assert.deepEqual(managedOptionProbeTargets('greenhouse', [fromStratus]), ['question_37228964002']);
+  assert.deepEqual(managedOptionProbeTargets('greenhouse', [{ ...fromStratus, role: null }]), [],
+    'a dynamic text input is not closed unless the deployed runner reports its DOM role');
+});
+
 test('the probe keeps plain end-year text open while retaining its normal final fill', () => {
   const discovered = [
     { label: 'End date year* end-year--0', selector: '#end-year--0', inputType: 'text', required: true },
@@ -4807,7 +4822,8 @@ test('the probe pass opens, reads and closes each control, and cannot exceed the
   const discovered = Array.from({ length: 60 }, (_, i) => ({
     label: `Question ${i}*`,
     selector: `#question_9${String(i).padStart(6, '0')}`,
-    inputType: 'combobox',
+    inputType: 'text',
+    role: 'combobox',
     required: true,
   }));
   const actions = buildManagedDiscoveredOptionProbeActions('greenhouse', discovered);
@@ -4840,10 +4856,11 @@ test('a real Greenhouse form fits the probe pass with room to spare', () => {
       .map((id) => ({
         label: `${id}*`,
         selector: `#${id}`,
-        inputType: id === 'start-month--0' ? 'combobox' : undefined,
+        inputType: id === 'start-month--0' ? 'text' : undefined,
+        role: id === 'start-month--0' ? 'combobox' : undefined,
         required: true,
       })),
-    ...Array.from({ length: 24 }, (_, i) => ({ label: `Q${i}*`, selector: `#question_679988${String(i + 20).padStart(2, '0')}`, inputType: 'combobox', required: true })),
+    ...Array.from({ length: 24 }, (_, i) => ({ label: `Q${i}*`, selector: `#question_679988${String(i + 20).padStart(2, '0')}`, inputType: 'text', role: 'combobox', required: true })),
   ];
   const batches = buildManagedDiscoveredOptionProbeBatches('greenhouse', drw, {
     'school--0': ['USC'],
@@ -4878,7 +4895,8 @@ test('custom closed controls warm once, read twice, and fail closed when still l
   const discovered = [{
     label: 'Overall GPA*',
     selector: '#question_37228964002',
-    inputType: 'combobox',
+    inputType: 'text',
+    role: 'combobox',
     required: true,
   }];
   const [batch] = buildManagedDiscoveredOptionProbeBatches('greenhouse', discovered);
@@ -4897,7 +4915,7 @@ test('custom closed controls warm once, read twice, and fail closed when still l
 });
 
 test('a successful async second read yields one evidence-backed option list', () => {
-  const discovered = [{ label: 'Overall GPA*', selector: '#question_37228964002', inputType: 'combobox' }];
+  const discovered = [{ label: 'Overall GPA*', selector: '#question_37228964002', inputType: 'text', role: 'combobox' }];
   const analysis = managedOptionProbeAnalysis('greenhouse', discovered, {}, [{
     title: '', url: '', text: '',
     extracted: [
@@ -4939,7 +4957,8 @@ test('option probing batches whole controls and explicitly fails beyond its glob
   const discovered = Array.from({ length: MANAGED_OPTION_PROBE_MAX_CONTROLS + 1 }, (_, index) => ({
     label: `Question ${index}`,
     selector: `#question_8${String(index).padStart(7, '0')}`,
-    inputType: 'combobox',
+    inputType: 'text',
+    role: 'combobox',
   }));
   const batches = buildManagedDiscoveredOptionProbeBatches('greenhouse', discovered);
   assert.equal(batches.every((batch) => batch.length <= MANAGED_ACTION_LIMIT), true);
@@ -5086,6 +5105,47 @@ test('a failed demographic control suppresses its aliases while unrelated demogr
     && /gender identity/i.test(`${action.text ?? ''} ${action.label ?? ''}`)), false);
   assert.ok(actions.some((action) => /greenhouse_demographic/.test(action.label ?? '')
     && /veteran|military/i.test(`${action.text ?? ''} ${action.label ?? ''}`)));
+});
+
+test('academic keywords in unrelated employer questions do not suppress applicant academic fields', () => {
+  const cases = [
+    { label: 'GPA requirement for scholarship', action: /^gpa(?:_|$)/ },
+    { label: 'Degree comfortable onsite', action: /^education_degree/ },
+    { label: 'University recruiting event', action: /^education_school/ },
+  ];
+  for (const [index, item] of cases.entries()) {
+    const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+      failedFields: [{
+        controlId: `question_8100000${index}`,
+        label: item.label,
+        selector: `#question_8100000${index}`,
+        inputType: 'select-one',
+      }],
+    }));
+    assert.ok(actions.some((action) => item.action.test(action.label ?? '')), item.label);
+  }
+});
+
+test('failed exact applicant GPA, degree, and university controls still suppress their fallback families', () => {
+  const cases = [
+    { label: 'Overall GPA', forbidden: /^gpa(?:_|$)/ },
+    { label: 'What degree are you currently pursuing?', forbidden: /^education_degree/ },
+    { label: 'Which University do/did you attend?', forbidden: /^education_school/ },
+  ];
+  for (const [index, item] of cases.entries()) {
+    const failedId = `question_8200000${index}`;
+    const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+      failedFields: [{
+        controlId: failedId,
+        label: item.label,
+        selector: `#${failedId}`,
+        inputType: 'select-one',
+      }],
+    }));
+    assert.equal(actions.some((action) => item.forbidden.test(action.label ?? '')), false, item.label);
+    assert.equal(actions.some((action) => action.selector?.includes(failedId)), false, item.label);
+    assert.ok(actions.some((action) => action.label === 'first_name'), 'unrelated core fill must remain');
+  }
 });
 
 test('two passes of reads become one map, and an empty read never overwrites a real list', () => {

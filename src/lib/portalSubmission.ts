@@ -1134,7 +1134,7 @@ export type ManagedOptionProbeTarget = {
 };
 
 function managedOptionProbeTarget(
-  field: { label: string; selector?: string; inputType?: string; role?: string; required?: boolean },
+  field: { label: string; selector?: string; inputType?: string; role?: string | null; required?: boolean },
 ): ManagedOptionProbeTarget | undefined {
   const controlId = managedOptionProbeControlId(field);
   if (!controlId || MANAGED_OPTION_PROBE_SKIP_IDS.has(controlId)) return undefined;
@@ -1169,7 +1169,7 @@ function managedOptionProbeTarget(
  */
 export function managedOptionProbeTargets(
   portal: SupportedPortal,
-  discovered: readonly { label: string; selector?: string; inputType?: string; role?: string; options?: string[] | null; required?: boolean }[],
+  discovered: readonly { label: string; selector?: string; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
   alreadyRead: Record<string, string[]> = {},
 ): string[] {
   if (portalFamily(portal) !== 'greenhouse') return [];
@@ -1193,7 +1193,7 @@ export function managedOptionProbeTargets(
 
 function detailedManagedOptionProbeTargets(
   portal: SupportedPortal,
-  discovered: readonly { label: string; selector?: string; inputType?: string; role?: string; options?: string[] | null; required?: boolean }[],
+  discovered: readonly { label: string; selector?: string; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
   alreadyRead: Record<string, string[]> = {},
 ): ManagedOptionProbeTarget[] {
   const ids = managedOptionProbeTargets(portal, discovered, alreadyRead);
@@ -1243,7 +1243,7 @@ function pushDiscoveredOptionProbe(actions: ManagedBrowserAction[], target: Mana
 /** Pack whole controls into bounded requests. No control is partially probed at a budget edge. */
 export function buildManagedDiscoveredOptionProbeBatches(
   portal: SupportedPortal,
-  discovered: readonly { label: string; selector?: string; inputType?: string; options?: string[] | null; required?: boolean }[],
+  discovered: readonly { label: string; selector?: string; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
   alreadyRead: Record<string, string[]> = {},
 ): ManagedBrowserAction[][] {
   const targets = detailedManagedOptionProbeTargets(portal, discovered, alreadyRead)
@@ -1280,7 +1280,7 @@ export function buildManagedDiscoveredOptionProbeBatches(
  */
 export function buildManagedDiscoveredOptionProbeActions(
   portal: SupportedPortal,
-  discovered: readonly { label: string; selector?: string; inputType?: string; options?: string[] | null; required?: boolean }[],
+  discovered: readonly { label: string; selector?: string; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
   alreadyRead: Record<string, string[]> = {},
 ): ManagedBrowserAction[] {
   return buildManagedDiscoveredOptionProbeBatches(portal, discovered, alreadyRead)[0] ?? [];
@@ -1309,7 +1309,7 @@ export type ManagedOptionProbeBatchFailure = { controlIds: string[]; reason: str
 
 export function managedOptionProbeAnalysis(
   portal: SupportedPortal,
-  discovered: readonly { label: string; selector?: string; inputType?: string; options?: string[] | null; required?: boolean }[],
+  discovered: readonly { label: string; selector?: string; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
   alreadyRead: Record<string, string[]>,
   results: readonly (ManagedBrowserResult | null | undefined)[],
   batchFailures: readonly ManagedOptionProbeBatchFailure[] = [],
@@ -1579,11 +1579,21 @@ function managedClosedFieldFamily(label: string): string | undefined {
   if (/\bdisab/.test(normalized)) return 'demographic-disability';
   if (/\bveteran\b|\bserved in the military\b/.test(normalized)) return 'demographic-veteran';
   if (/\brace\b|\bethnicit/.test(normalized)) return 'demographic-race';
-  if (/\bgpa\b|grade point|grade average/.test(normalized)) return 'education-gpa';
-  if (/\bdegree\b|education level/.test(normalized)) return 'education-degree';
-  if (/\bschool\b|\buniversity\b/.test(normalized)) return 'education-school';
-  if (/graduat(?:e|ion).*\byear\b|\byear\b.*graduat/.test(normalized)) return 'education-graduation-year';
-  if (/graduat(?:e|ion).*\bmonth\b|\bmonth\b.*graduat/.test(normalized)) return 'education-graduation-month';
+  // Academic families are deliberately applicant-field shapes, not keyword buckets. Employer
+  // questions such as "GPA requirement for scholarship", "degree comfortable onsite", and
+  // "university recruiting event" contain the same nouns but are not asking for the applicant's
+  // stored academic fact. Exact failed labels are still caught before this family mapping.
+  if (/^(?:(?:what is|please provide) )?(?:your )?(?:(?:overall|cumulative|current|undergraduate) )?(?:gpa|grade point average|grade average)(?: on a \d+(?: \d+)? scale)?$/.test(normalized)) return 'education-gpa';
+  if (/^(?:degree|education level|degree type|type of degree|highest level of education)$/.test(normalized)
+    || /^(?:what|which) (?:is )?(?:your )?(?:current )?(?:degree|education level)(?: are you currently pursuing)?$/.test(normalized)
+    || /^what (?:degree|education level) are you currently pursuing$/.test(normalized)) return 'education-degree';
+  if (/^(?:school|university|college|academic institution)$/.test(normalized)
+    || /^(?:which|what) (?:school|university|college|academic institution)(?: do did you attend| are you currently attending| did you attend)?$/.test(normalized)
+    || /^(?:school|university|college|academic institution) (?:name|attended)$/.test(normalized)) return 'education-school';
+  if (/^(?:(?:what is|please provide) )?(?:your )?(?:expected )?graduation year$/.test(normalized)
+    || /^year of graduation$/.test(normalized)) return 'education-graduation-year';
+  if (/^(?:(?:what is|please provide) )?(?:your )?(?:expected )?graduation month$/.test(normalized)
+    || /^month of graduation$/.test(normalized)) return 'education-graduation-month';
   return undefined;
 }
 
@@ -1597,9 +1607,7 @@ function packetTargetFailed(packet: SubmissionPacket, target: ManagedFieldTarget
     if (!targetLabel || !failedLabel) return false;
     if (targetLabel === failedLabel) return true;
     const failedFamily = managedClosedFieldFamily(field.label);
-    if (targetFamily && failedFamily && targetFamily === failedFamily) return true;
-    return (targetLabel.length >= 3 && failedLabel.includes(targetLabel))
-      || (failedLabel.length >= 3 && targetLabel.includes(failedLabel));
+    return Boolean(targetFamily && failedFamily && targetFamily === failedFamily);
   }) === true;
 }
 
@@ -1660,15 +1668,16 @@ function managedFillByLabelUnlessFailed(
 /** The four fixed education controls, the value each will be given, and the label it reports under. */
 function greenhouseEducationComboboxFields(
   packet: SubmissionPacket,
-): Array<{ inputId: string; value: string | undefined; label: string }> {
-  const fields: Array<{ inputId: string; ladder: string[]; label: string }> = [
-    { inputId: 'school--0', ladder: greenhouseSchoolAliases(packet.school), label: 'education_school_combo:0' },
-    { inputId: 'degree--0', ladder: greenhouseDegreeAliases(packet.degree), label: 'education_degree_combo:0' },
-    { inputId: 'discipline--0', ladder: greenhouseDisciplineAliases(packet), label: 'education_discipline_combo:0' },
-    { inputId: 'end-month--0', ladder: packet.graduationMonth ? [packet.graduationMonth] : [], label: 'education_end_month_combo' },
+): Array<{ inputId: string; questionLabel: string; value: string | undefined; label: string }> {
+  const fields: Array<{ inputId: string; questionLabel: string; ladder: string[]; label: string }> = [
+    { inputId: 'school--0', questionLabel: 'School', ladder: greenhouseSchoolAliases(packet.school), label: 'education_school_combo:0' },
+    { inputId: 'degree--0', questionLabel: 'Degree', ladder: greenhouseDegreeAliases(packet.degree), label: 'education_degree_combo:0' },
+    { inputId: 'discipline--0', questionLabel: 'Discipline', ladder: greenhouseDisciplineAliases(packet), label: 'education_discipline_combo:0' },
+    { inputId: 'end-month--0', questionLabel: 'Graduation Month', ladder: packet.graduationMonth ? [packet.graduationMonth] : [], label: 'education_end_month_combo' },
   ];
   return fields.map((field) => ({
     inputId: field.inputId,
+    questionLabel: field.questionLabel,
     value: greenhouseReactSelectValue(packet, field.inputId, field.ladder),
     label: field.label,
   }));
@@ -1751,10 +1760,10 @@ function pushGreenhouseEducationTaxonomyWarmActions(
 function pushGreenhouseEducationComboboxActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
   const fields = greenhouseEducationComboboxFields(packet);
   for (const field of fields) {
-    if (packetControlFailed(packet, field.inputId)) continue;
+    if (packetControlFailed(packet, field.inputId) || packetLabelFailed(packet, field.questionLabel)) continue;
     managedGreenhouseReactSelectFill(actions, field.inputId, field.value, field.label);
   }
-  if (!packetControlFailed(packet, 'end-year--0')) {
+  if (!packetControlFailed(packet, 'end-year--0') && !packetLabelFailed(packet, 'Graduation Year')) {
     managedFill(actions, '#end-year--0', packet.graduationYear, 'education_end_year_field');
   }
 }

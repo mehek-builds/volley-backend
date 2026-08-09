@@ -50,6 +50,11 @@ export type ManagedDiscoveredQuestion = {
   label: string;
   selector: string;
   inputType: string;
+  // The DOM role is distinct from inputType. Greenhouse React-selects are text inputs whose role
+  // is combobox, while end-year--0 is a genuine text input. This optional wire field lets the
+  // backend distinguish those controls without treating every text input or every --0 id as closed.
+  // It remains optional during the runner rollout, and its absence never closes a dynamic control.
+  role?: string | null;
   maxLength: number | null;
   // The managed provider's `discover` action does not report option lists and, as of 2026-08-08,
   // shows no sign of learning to: it enumerates text-shaped inputs and returns four fields per
