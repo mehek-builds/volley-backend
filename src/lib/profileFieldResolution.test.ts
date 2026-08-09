@@ -189,15 +189,30 @@ test('Class A: visa sponsorship comes from the stored boolean (Akuna x7, Virtu)'
   const label = 'Do you now, or will you in the future, require visa sponsorship to continue working in the United States (e.g. H-1B, TN,';
   assert.equal(answer(label), 'Yes');
   assert.equal(answer(label, ['Yes', 'No']), 'Yes');
+  /* Virtu's real label, cut at the 120-character review limit, which is where the country it names
+   * gets cut off. It answers again: "yes, I need sponsorship" discloses a need rather than claiming
+   * a permission, so it does not depend on the employer having spelled out the country. Expecting
+   * null here for one day was the regression, not the rule; a truncation must not be able to delete
+   * a stored answer. */
   assert.equal(
     answer('Do you now, or will you in the future, need sponsorship from an employer in order to obtain, extend or renew your author', ['Yes', 'No']),
-    null,
+    'Yes',
   );
   assert.equal(
     answer('Do you now, or will you in the future, need sponsorship from an employer to work in the United States?', ['Yes', 'No']),
     'Yes',
   );
   assert.equal(answer(label, ['Yes', 'No'], { ...STORED_PROFILE, needs_sponsorship: false }), 'No');
+  // The claim direction still needs the country. "No, I need no sponsorship" asserts eligibility,
+  // and the truncated label no longer says where.
+  assert.equal(
+    answer(
+      'Do you now, or will you in the future, need sponsorship from an employer in order to obtain, extend or renew your author',
+      ['Yes', 'No'],
+      { ...STORED_PROFILE, needs_sponsorship: false },
+    ),
+    null,
+  );
 });
 
 // ---------------------------------------------------------------------------
