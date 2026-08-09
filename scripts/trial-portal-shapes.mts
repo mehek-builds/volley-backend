@@ -487,7 +487,34 @@ function runManagedLocally(url: string, actions: ManagedBrowserAction[]): Sandbo
   if (run.status !== 0) {
     throw new Error(`managed runner exited ${run.status}: ${(run.stderr || '').split('\n')[0]}`);
   }
-  return JSON.parse(readFileSync(join(dir, 'stratus-result.json'), 'utf8')) as SandboxResult;
+  return readSandboxResult(dir);
+}
+
+/**
+ * THE RUNNER WRITES ONE FILE PER PHASE, AND THIS READ HAD NOT NOTICED.
+ *
+ * `managed-browser.js` used to write a single `stratus-result.json`. The emailed-security-code work
+ * made a run two-phased and it now writes `stratus-result-<phase>.json`: phase 0 is the ordinary
+ * run, phase 1 is the continuation that types the code and resubmits. Production already reads it
+ * that way (`managed-browser.js:1821` and `:1875`).
+ *
+ * The trial did not, so against the runner's real `origin/main` every managed case threw ENOENT and
+ * the score collapsed from 9 of 12 to 4 of 12 while looking like a product regression. It only kept
+ * working at all because the shared checkout it defaults to was several merges behind, which is the
+ * second time that stale checkout has produced a wrong measurement in one day.
+ *
+ * Phase 1 wins when it exists, because a continuation is the later and truer account of the run.
+ * The unsuffixed name is still accepted so the trial can be pointed at an older runner without
+ * silently reporting every case as broken, which is the failure this comment exists to prevent.
+ */
+function readSandboxResult(dir: string): SandboxResult {
+  for (const name of ['stratus-result-1.json', 'stratus-result-0.json', 'stratus-result.json']) {
+    const path = join(dir, name);
+    if (existsSync(path)) return JSON.parse(readFileSync(path, 'utf8')) as SandboxResult;
+  }
+  throw new Error(
+    'the managed runner wrote no result file; expected stratus-result-1.json, stratus-result-0.json or stratus-result.json',
+  );
 }
 
 /* ─── driver ────────────────────────────────────────────────────────────────────────────────── */
