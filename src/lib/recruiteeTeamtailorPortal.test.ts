@@ -38,6 +38,30 @@ test('detects two unrelated live Recruitee tenants and canonicalizes their form 
   assert.throws(() => detectPortal('https://www.recruitee.com/o/not-a-tenant'));
 });
 
+test('pins the verified inline Recruitee route as a manual-submit exception', () => {
+  const live = 'https://whitecoatglobal1.recruitee.com/o/software-engineer-intern';
+  assert.equal(detectPortal(live), 'manual_recruitee');
+  assert.equal(portalApplicationUrl('manual_recruitee', live), `${live}/c/new`);
+  assert.equal(portalCanAutoSubmit('recruitee'), true);
+  assert.equal(portalCanAutoSubmit('manual_recruitee'), false);
+  assert.match(portalHandoffReason('manual_recruitee') ?? '', /review the form and send it yourself/i);
+  assert.equal(
+    buildManagedPortalActions('manual_recruitee', packet, true)
+      .some((action) => action.type === 'click' && action.selector === 'button[type="submit"], input[type="submit"]'),
+    false,
+  );
+  for (const url of [
+    'https://other.recruitee.com/o/software-engineer-intern',
+    'https://whitecoatglobal1.recruitee.com/o/other-role',
+    'https://whitecoatglobal1.recruitee.com/o/software-engineer-intern/apply',
+    'https://whitecoatglobal1.recruitee.com/o/software-engineer-intern%2Fc%2Fnew',
+    'https://whitecoatglobal1.recruitee.com/o/software-engineer-intern?source=test',
+    'https://whitecoatglobal1.recruitee.com/o/software_engineer_intern',
+    'https://api.eu.recruitee.com/o/software-engineer-intern',
+    'https://www.recruitee.com/o/software-engineer-intern',
+  ]) assert.throws(() => detectPortal(url), url);
+});
+
 test('Recruitee actions map only captured fields and preserve safety controls', () => {
   const actions = buildManagedPortalActions('recruitee', {
     ...packet,
@@ -93,6 +117,25 @@ test('detects two unrelated live Teamtailor tenants but stops before privacy con
   assert.equal(actions.some((action) => action.type === 'click' && action.selector === 'button[type="submit"], input[type="submit"]'), false);
   assert.equal(portalCanAutoSubmit('teamtailor'), false);
   assert.match(portalHandoffReason('teamtailor') ?? '', /privacy terms/i);
+});
+
+test('canonicalizes the verified Teamtailor detail route and rejects broad jobs pages', () => {
+  const live = 'https://flanks.teamtailor.com/jobs/7847431-software-engineering-intern-web-scraping-data-acquisition';
+  assert.equal(detectPortal(live), 'teamtailor');
+  assert.equal(
+    portalApplicationUrl('teamtailor', live),
+    `${live}/applications/new`,
+  );
+  for (const url of [
+    'https://other.teamtailor.com/jobs/7847431-software-engineering-intern-web-scraping-data-acquisition',
+    'https://flanks.teamtailor.com/jobs/7847432-software-engineering-intern-web-scraping-data-acquisition',
+    'https://flanks.teamtailor.com/jobs/7847431-other-role',
+    'https://flanks.teamtailor.com/jobs',
+    'https://flanks.teamtailor.com/jobs/software-engineering-intern',
+    'https://flanks.teamtailor.com/jobs/7847431-software-engineering-intern/apply',
+    'https://flanks.teamtailor.com/jobs/7847431-software-engineering-intern-web-scraping-data-acquisition%2Fapplications%2Fnew',
+    'https://app.teamtailor.com/jobs/7847431-software-engineering-intern',
+  ]) assert.throws(() => detectPortal(url), url);
 });
 
 test('receipt fixtures accept platform confirmations and reject an unchanged application form', () => {
