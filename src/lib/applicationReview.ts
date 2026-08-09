@@ -206,8 +206,16 @@ export type SecurityCodeAttempt = {
    * 'rejected' - the code was typed, the form was sent again, and the challenge was still there.
    * 'not_entered' / 'no_control' - the run could not put the code into the page at all, which is a
    *   Litos defect and not the applicant's mistake, and must not be reported to her as a bad code.
+   * 'superseded' - the code was never typed BECAUSE IT COULD NOT BE. Greenhouse issues a new code
+   *   on every send and invalidates the last one, measured on a live Cresta application on
+   *   2026-08-09 (20:24:03, 21:13:07, 21:13:53, three codes, each one killing its predecessor), and
+   *   a code control only exists on a page that has just been sent. So a code handed to Litos out
+   *   of band is dead the moment the run that could use it has to send the form to reach a field to
+   *   type it into. This is recorded rather than silently dropped for one reason: the fingerprint is
+   *   what stops the same dead code triggering a second send, and every send costs her another
+   *   email. It is never her mistake and must never be reported as a wrong code.
    * 'error' - the run threw. */
-  outcome: 'accepted' | 'rejected' | 'not_entered' | 'no_control' | 'error';
+  outcome: 'accepted' | 'rejected' | 'not_entered' | 'no_control' | 'superseded' | 'error';
 };
 
 export type SecurityCodeState = {
@@ -262,6 +270,20 @@ export type ApplicationReviewState = {
   questions: ApplicationReviewQuestion[];
   questions_reviewed_at?: string;
   skipped_reasons: string[];
+  /* THE RAW PROVIDER TEXT FOR THE ANSWERS NOBODY ACCOUNTED FOR, and nothing else raw.
+   *
+   * skipped_reasons is the sanitized, human-facing set. It was the ONLY thing this row kept, and
+   * that is why three separate rounds of investigation each had to re-derive what the managed
+   * provider had actually said about a lost value: the sanitizer had already thrown the evidence
+   * away by the time anything was written down. Storing the whole of `result.skipped` was never the
+   * answer either, since a large Greenhouse packet emits well over a hundred lines of "this
+   * optional selector matched nothing".
+   *
+   * So this keeps the provider's own words for exactly the labels where Litos typed a value, the
+   * form did not keep it, and the run offered no explanation. That is a set of size zero or one on
+   * a healthy run. Diagnostic, never displayed: managedUnexplainedAnswerReasons writes the sentence
+   * she reads. See R-122. */
+  unexplained_fills?: { label: string; question: string; raw: string[] }[];
   updated_at: string;
   /* WHICH BUILD WROTE THIS REVIEW, so a reader can tell "this stopped for a reason" apart from
    * "this has not been tried since the fix".

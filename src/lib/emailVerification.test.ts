@@ -5,8 +5,126 @@ import {
   extractLitosVerificationCode,
   extractVerificationCode,
   findComposioVerificationCode,
+  resolveVerificationEmailRoute,
   type EmailToolExecutor,
 } from './emailVerification';
+
+const EXACT_APPLICATION_ID = '22222222-2222-4222-8222-222222222222';
+const EXACT_USER_ID = 'user-123';
+const EXACT_ALIAS = 'app-2222222222-abcdef123456@litos-qa.resend.app';
+
+test('grants alias-only verification only for the healthy exact active application and user route', async () => {
+  const calls: Array<{ userId: string; applicationId: string; alias: string }> = [];
+  const route = await resolveVerificationEmailRoute({
+    userId: EXACT_USER_ID,
+    applicationId: EXACT_APPLICATION_ID,
+    expectedRecipient: EXACT_ALIAS,
+  }, {
+    currentAlias: (userId, applicationId) => {
+      assert.equal(userId, EXACT_USER_ID);
+      assert.equal(applicationId, EXACT_APPLICATION_ID);
+      return EXACT_ALIAS;
+    },
+    deliverability: async () => ({ deliverable: true }) as never,
+    activeAlias: async (input) => { calls.push(input); return true; },
+  });
+  assert.equal(route, 'application_alias');
+  assert.deepEqual(calls, [{ userId: EXACT_USER_ID, applicationId: EXACT_APPLICATION_ID, alias: EXACT_ALIAS }]);
+});
+
+test('fails closed for a stale route, unhealthy route, inactive alias, or missing application binding', async () => {
+  const input = {
+    userId: EXACT_USER_ID,
+    applicationId: EXACT_APPLICATION_ID,
+    expectedRecipient: EXACT_ALIAS,
+  };
+  const healthy = async () => ({ deliverable: true }) as never;
+  assert.equal(await resolveVerificationEmailRoute(input, {
+    currentAlias: () => 'app-2222222222-fedcba654321@litos-qa.resend.app',
+    deliverability: healthy,
+    activeAlias: async () => true,
+  }), 'invalid_alias');
+  assert.equal(await resolveVerificationEmailRoute(input, {
+    currentAlias: () => EXACT_ALIAS,
+    deliverability: async () => ({ deliverable: false }) as never,
+    activeAlias: async () => true,
+  }), 'invalid_alias');
+  assert.equal(await resolveVerificationEmailRoute(input, {
+    currentAlias: () => EXACT_ALIAS,
+    deliverability: healthy,
+    activeAlias: async () => false,
+  }), 'invalid_alias');
+  assert.equal(await resolveVerificationEmailRoute({
+    userId: EXACT_USER_ID,
+    expectedRecipient: EXACT_ALIAS,
+  }, {
+    currentAlias: () => EXACT_ALIAS,
+    deliverability: healthy,
+    activeAlias: async () => true,
+  }), 'invalid_alias');
+});
+
+test('rejects an exact active custom-domain alias even when generic deliverability is green', async () => {
+  const customAlias = 'app-2222222222-abcdef123456@apply.trylitos.com';
+  let healthChecks = 0;
+  let activeChecks = 0;
+  const route = await resolveVerificationEmailRoute({
+    userId: EXACT_USER_ID,
+    applicationId: EXACT_APPLICATION_ID,
+    expectedRecipient: customAlias,
+  }, {
+    currentAlias: () => customAlias,
+    deliverability: async () => {
+      healthChecks += 1;
+      return { deliverable: true } as never;
+    },
+    activeAlias: async () => {
+      activeChecks += 1;
+      return true;
+    },
+  });
+  assert.equal(route, 'invalid_alias');
+  assert.equal(healthChecks, 0);
+  assert.equal(activeChecks, 0);
+});
+
+test('an exact active alias miss never calls the connected-inbox executor', async () => {
+  let executorCalls = 0;
+  const executor: EmailToolExecutor = async () => {
+    executorCalls += 1;
+    throw new Error('poison executor must never run for an alias');
+  };
+  const match = await findComposioVerificationCode({
+    userId: EXACT_USER_ID,
+    portalUrl: 'https://job-boards.greenhouse.io/acme/jobs/123',
+    requestedAt: new Date('2026-07-25T10:00:00.000Z'),
+    expectedRecipient: EXACT_ALIAS,
+    applicationId: EXACT_APPLICATION_ID,
+    executor,
+    resolveRoute: async () => 'application_alias',
+    findAliasCode: async () => null,
+  });
+  assert.equal(match, null);
+  assert.equal(executorCalls, 0);
+});
+
+test('an invalid Litos alias never falls through to the connected-inbox executor', async () => {
+  let executorCalls = 0;
+  const match = await findComposioVerificationCode({
+    userId: EXACT_USER_ID,
+    portalUrl: 'https://job-boards.greenhouse.io/acme/jobs/123',
+    requestedAt: new Date('2026-07-25T10:00:00.000Z'),
+    expectedRecipient: EXACT_ALIAS,
+    applicationId: EXACT_APPLICATION_ID,
+    executor: async () => {
+      executorCalls += 1;
+      throw new Error('poison executor must never run for an alias');
+    },
+    resolveRoute: async () => 'invalid_alias',
+  });
+  assert.equal(match, null);
+  assert.equal(executorCalls, 0);
+});
 
 test('extracts only an authenticated code from the exact Litos application alias', () => {
   const requestedAt = new Date('2026-07-25T10:00:00.000Z');
@@ -105,6 +223,107 @@ test('extracts a contextual Greenhouse alphanumeric code but rejects ordinary ne
     'HJJ53KPD',
   );
   assert.equal(extractCodeFromVerificationText('Your application for ENGINEER was received.'), null);
+});
+
+test('extracts case-sensitive letter-only Greenhouse codes only from explicit code grammar', () => {
+  assert.equal(
+    extractCodeFromVerificationText('Your security code is TPHJrFMJ. It expires soon.'),
+    null,
+  );
+  assert.equal(
+    extractCodeFromVerificationText('Enter this security code TPHJrFMJ to continue.', true),
+    'TPHJrFMJ',
+  );
+  assert.equal(extractCodeFromVerificationText('Your security code is REQUIRED before continuing.', true), null);
+  assert.equal(extractCodeFromVerificationText('Your security code is PASSWORD before continuing.', true), null);
+  assert.equal(extractCodeFromVerificationText('Use this security code CONTINUE to continue.', true), null);
+  assert.equal(extractCodeFromVerificationText('Your security code is XXUYBKOD.', true), null);
+  assert.equal(
+    extractCodeFromVerificationText('Your old security code is AB12CD34. Your new security code is TPHJrFMJ.', true),
+    null,
+  );
+});
+
+/* THE SENTENCE GREENHOUSE REALLY SENDS, as opposed to a paraphrase of it.
+ *
+ * Every case in the test above is a synthetic wording, and the letter-code grammar was written to
+ * match those rather than the live email. Against the real body it matched nothing:
+ *
+ *   "Copy and paste this code into the security code field on your application: LSlOXjvZ.
+ *    After you enter the code, resubmit your application."
+ *
+ * Twenty-eight characters of instruction sit between "code" and the token, so all three original
+ * patterns miss. LSlOXjvZ and yFxeFpSl were read out of this applicant's mailbox on 2026-08-09
+ * during a live Cresta application and neither was readable; TPHJrFMJ is Greenhouse's own support
+ * copy and it was not readable either. Nothing downstream can work without this: the held-session
+ * design finishes an application by reading the code its own submit caused, and there was no
+ * Greenhouse code it could read.
+ */
+test('reads the codes out of the sentence Greenhouse actually writes', () => {
+  const body = (code: string) => 'Hi Mehek,\n\nCopy and paste this code into the security code field '
+    + `on your application: ${code}. After you enter the code, resubmit your application.`;
+  for (const code of ['LSlOXjvZ', 'yFxeFpSl', 'TPHJrFMJ']) {
+    assert.equal(extractCodeFromVerificationText(body(code), true), code, code);
+  }
+  // The digit-bearing shape was already readable, and stays readable through the same sentence.
+  assert.equal(extractCodeFromVerificationText(body('LH0Yjubx'), true), 'LH0Yjubx');
+  // Still gated on the portal: an unflagged board gets no letter-only code out of the same words.
+  assert.equal(extractCodeFromVerificationText(body('LSlOXjvZ')), null);
+  // And still gated on the casing test, so an ordinary capitalised word after a colon is not a code.
+  assert.equal(extractCodeFromVerificationText(
+    'Your security code is on its way for application: Thursday morning.', true,
+  ), null);
+});
+
+test('matches a mixed-case Greenhouse code only inside its authenticated application alias', () => {
+  const requestedAt = new Date('2026-08-09T20:43:18.000Z');
+  const row = {
+    from_email: 'no-reply@greenhouse.io',
+    to_email: 'app-405b84f7ae-target@litos-qa.resend.app',
+    subject: 'Your Greenhouse application security code',
+    text: 'Your security code is TPHJrFMJ. It expires soon.',
+    html: '<p>Your security code is <strong>TPHJrFMJ</strong>. It expires soon.</p>',
+    received_at: new Date('2026-08-09T20:43:27.471Z'),
+    raw_json: { authentication: { spf: 'pass', dkim: 'pass', dmarc: 'pass' } },
+  };
+  const portal = 'http://localhost:3300/qa/portal-submission?board=greenhouse&shape=security-code&case=email-2';
+  const previous = process.env.LITOS_ENABLE_TEST_PORTAL;
+  process.env.LITOS_ENABLE_TEST_PORTAL = 'true';
+  try {
+    assert.equal(extractLitosVerificationCode(
+      [row],
+      portal,
+      requestedAt,
+      'app-405b84f7ae-target@litos-qa.resend.app',
+    )?.code, 'TPHJrFMJ');
+    assert.equal(extractLitosVerificationCode(
+      [{ ...row, raw_json: {} }],
+      portal,
+      requestedAt,
+      'app-405b84f7ae-target@litos-qa.resend.app',
+    ), null);
+  } finally {
+    if (previous === undefined) delete process.env.LITOS_ENABLE_TEST_PORTAL;
+    else process.env.LITOS_ENABLE_TEST_PORTAL = previous;
+  }
+});
+
+test('letter-only code parsing is confined to Greenhouse portals', () => {
+  const requestedAt = new Date('2026-08-09T20:43:18.000Z');
+  const message = {
+    subject: 'Your security code',
+    from: 'no-reply@lever.co',
+    to: 'applicant@example.com',
+    receivedAt: '2026-08-09T20:43:27.471Z',
+    authenticationResults: 'spf=pass smtp.mailfrom=lever.co',
+    text: 'Your security code is TPHJrFMJ.',
+  };
+  assert.equal(extractVerificationCode(
+    [{ provider: 'gmail', data: { messages: [message] } }],
+    'https://jobs.lever.co/acme/123',
+    requestedAt,
+    'applicant@example.com',
+  ), null);
 });
 
 test('accepts recent Gmail messages only from the portal sender allowlist', () => {
@@ -226,7 +445,7 @@ test('queries only read tools and tolerates an unconnected provider', async () =
         messages: [{
           subject: 'Your Ashby verification code',
           from: 'verify@ashbyhq.com',
-          to: 'app-2222222222-test@apply.trylitos.com',
+          to: 'applicant@example.com',
           authenticationResults: 'spf=pass dkim=pass dmarc=pass',
           internalDate: '1784973620000',
           text: 'Your one-time code is 482913.',
@@ -238,14 +457,15 @@ test('queries only read tools and tolerates an unconnected provider', async () =
     userId: 'user-123',
     portalUrl: 'https://jobs.ashbyhq.com/acme/123',
     requestedAt: new Date('2026-07-25T10:00:00.000Z'),
-    expectedRecipient: 'app-2222222222-test@apply.trylitos.com',
+    expectedRecipient: 'applicant@example.com',
     applicationId: '22222222-2222-4222-8222-222222222222',
     executor,
+    resolveRoute: async () => 'personal_address',
   });
   assert.equal(match?.code, '482913');
   assert.deepEqual(calls.map(({ tool }) => tool).sort(), ['GMAIL_FETCH_EMAILS', 'OUTLOOK_SEARCH_MESSAGES']);
   assert.deepEqual(calls.find(({ tool }) => tool === 'OUTLOOK_SEARCH_MESSAGES')?.arguments, {
-    query: 'to:app-2222222222-test@apply.trylitos.com AND ("verification code" OR "security code" OR passcode OR OTP)',
+    query: 'to:applicant@example.com AND ("verification code" OR "security code" OR passcode OR OTP)',
     size: 5,
     enable_top_results: false,
   });

@@ -23,24 +23,46 @@ test('managed verification resumes once by token, never by URL, then verifies th
   const end = runner.indexOf("if (!claimedReview.browser_session_id)", firstSubmit);
   const managed = runner.slice(firstSubmit, end);
   assert.match(managed, /requestContinuation: true/);
-  assert.match(managed, /continuationTtlSeconds: 120/);
+  assert.match(managed, /continuationTtlSeconds: SECURITY_CODE_CONTINUATION_TTL_SECONDS/);
   assert.match(managed, /allowSubmit: true/);
   assert.match(managed, /readManagedSecurityCodeChallenge\(receiptResult\)/);
   assert.doesNotMatch(managed, /continuation_token:/);
   assert.doesNotMatch(managed, /continuation_expires_at:/);
   assert.match(managed, /expectedRecipient: packet\.email/);
+  /* ONE RESUME SITE. There used to be two, mutually exclusive: one for a code scraped from the
+     mailbox and one for a code the applicant supplied. The second is gone, because a code that
+     arrives from outside a run cannot be typed by that run - Greenhouse issues a new code on every
+     send and Litos has to send the form to reach a code field at all, measured as three codes to
+     one mailbox on a live Cresta application on 2026-08-09. Back to one call site, and the count is
+     the assertion again: a second one would mean a second submit had crept back in. */
   assert.equal((managed.match(/continueManagedBrowser\(/g) ?? []).length, 1);
+  // The supplied code is fingerprinted as superseded and never handed to an action list.
+  assert.match(managed, /outcome: 'superseded'/);
+  assert.doesNotMatch(managed, /securityCodeContinuationActions\([^)]*options\.securityCode/);
+  assert.match(managed, /if \(initialChallenge && managedResultNeedsEmailVerification\(result\)\) \{/);
   assert.doesNotMatch(managed, /runManagedBrowser\(result\.url/);
-  assert.doesNotMatch(managed, /continueManagedBrowser\([^,]+,[^)]*\).*continueManagedBrowser/s);
-  assert.match(managed, /receiptResult = await continueManagedBrowser\(continuationToken, prepared\.actions\)/);
+  assert.match(managed, /receiptResult = await continueManagedBrowser\(continuationToken, codeActions\)/);
   assert.match(managed, /readManagedReceipt\(receiptResult\)/);
   const terminalVerification = managed.slice(managed.indexOf("verification = {\n        status: 'completed'"));
   assert.doesNotMatch(terminalVerification, /continuation_token:/);
 });
 
+test('managed alias permission is independent from connected-inbox consent and personal email is not', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const firstSubmit = runner.indexOf('buildManagedPortalActions(portal, packet, true)');
+  const end = runner.indexOf("if (!claimedReview.browser_session_id)", firstSubmit);
+  const managed = runner.slice(firstSubmit, end);
+  assert.match(managed, /resolveVerificationEmailRoute\(\{[\s\S]*userId: row\.user_id,[\s\S]*applicationId: row\.id,[\s\S]*expectedRecipient: packet\.email/);
+  assert.match(
+    managed,
+    /verificationRoute === 'application_alias'\s*\|\| \(verificationRoute === 'personal_address' && verificationSettings\?\.enabled === true\)/,
+  );
+  assert.match(managed, /if \(continuationIsLive && verificationAllowed\)/);
+});
+
 test('uncertain continuation outcome is handed off without a retry or URL reopen', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  const call = runner.indexOf('receiptResult = await continueManagedBrowser');
+  const call = runner.indexOf('receiptResult = await continueManagedBrowser(continuationToken, codeActions)');
   const receipt = runner.indexOf('const receipt = readManagedReceipt', call);
   const continuation = runner.slice(call, receipt);
   assert.match(continuation, /catch \(error\)/);

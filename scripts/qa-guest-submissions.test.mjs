@@ -1,13 +1,20 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHmac } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import {
   assertDisposableDatabaseMarker,
+  assertControlledManagedReceivingProofRow,
   assertRemoteManagedRunner,
   assertControlledSecurityCodeTarget,
   controlledEmailCaptureTarget,
+  controlledReceiptCaptureTarget,
+  controlledScreenshotForRun,
+  controlledScreenshotObjectKey,
   controlledDatabaseTarget,
   controlledManagedReceivingProof,
+  controlledForwardedEmailForRun,
+  controlledQaPacketSpec,
   controlledPortalBinding,
   managedApplicationAlias,
   securityCodeCase,
@@ -15,6 +22,26 @@ import {
   securityCodePortalUrl,
   signedInboundRequest,
 } from './qa-guest-submissions-lib.mjs';
+
+test('sequential forwarding evidence is bound to the current application alias', () => {
+  const subject = '[Litos] Your Greenhouse application security code';
+  const to = 'qa-recipient@example.test';
+  const messages = [
+    { subject, to: [to], html: '<p>Received at app-first@litos-qa.resend.app.</p>' },
+    { subject, to: [to], html: '<p>Received at app-second@litos-qa.resend.app.</p>' },
+  ];
+  assert.equal(controlledForwardedEmailForRun(messages, {
+    subject,
+    to,
+    alias: 'app-second@litos-qa.resend.app',
+  }), messages[1]);
+  assert.equal(controlledForwardedEmailForRun(messages, {
+    subject,
+    to,
+    alias: 'app-missing@litos-qa.resend.app',
+  }), undefined);
+});
+import { applicationLeadAlignmentIssues } from '../src/routes/applications.ts';
 
 const marker = 'controlled_database_marker_123456';
 const controlledTarget = {
@@ -76,6 +103,79 @@ test('controlled email forwarding uses only an authenticated loopback capture ad
   );
 });
 
+test('receipt screenshots use only an authenticated write-only loopback capture adapter', () => {
+  assert.equal(
+    controlledReceiptCaptureTarget('http://127.0.0.1:4318/receipts', '0123456789abcdef0123456789abcdef').origin,
+    'http://127.0.0.1:4318',
+  );
+  assert.throws(
+    () => controlledReceiptCaptureTarget('https://capture.example.test/receipts', '0123456789abcdef0123456789abcdef'),
+    /must be http:\/\/127\.0\.0\.1/,
+  );
+  assert.throws(
+    () => controlledReceiptCaptureTarget('http://127.0.0.1:4318/receipts', ''),
+    /Provisioning blocker/,
+  );
+});
+
+test('both filled preview writes use the controlled screenshot adapter and carry distinct harness evidence', async () => {
+  const runnerSource = await readFile(new URL('../src/routes/submissionRunner.ts', import.meta.url), 'utf8');
+  const rawFilledWrites = runnerSource.match(/await put\([\s\S]{0,200}filled\.png/g) ?? [];
+  const previewAdapterWrites = runnerSource.match(/await storeFilledPreviewScreenshot\(/g) ?? [];
+  assert.equal(rawFilledWrites.length, 0, 'submission runner still writes a filled preview directly to Blob');
+  assert.equal(previewAdapterWrites.length, 2, 'managed and direct preparation paths must both use the adapter');
+
+  const harnessSource = await readFile(new URL('./qa-guest-submissions.mjs', import.meta.url), 'utf8');
+  assert.match(harnessSource, /controlledScreenshotForRun\(capturedScreenshots/);
+  assert.match(harnessSource, /kind: 'filled_preview'/);
+  assert.match(harnessSource, /kind: 'submission_receipt'/);
+  assert.match(harnessSource, /preview_capture_object_key: capturedPreview\.object_key/);
+  assert.match(harnessSource, /receipt_capture_object_key: capturedReceipt\.object_key/);
+  assert.match(harnessSource, /preview_capture_sha256: capturedPreview\.sha256/);
+  assert.match(harnessSource, /receipt_capture_sha256: capturedReceipt\.sha256/);
+});
+
+test('the controlled code email is injected only after the backend opens its request window', async () => {
+  const harnessSource = await readFile(new URL('./qa-guest-submissions.mjs', import.meta.url), 'utf8');
+  assert.match(harnessSource, /waitForVerificationRequestWindow\(applicationId\)\.then\(\(\) => injectSecurityCodeEmail/);
+  assert.match(harnessSource, /row\?\.status === 'searching'/);
+  assert.match(harnessSource, /Date\.parse\(row\.requested_at\)/);
+  assert.doesNotMatch(harnessSource, /new Promise\(\(resolve\) => setTimeout\(resolve, 1_000\)\)\.then\(\(\) => injectSecurityCodeEmail/,
+    'a wall-clock delay can put the email before verificationRequestedAt and make it unsearchable');
+});
+
+test('identical screenshot content is attributed only to the exact current submission run key', () => {
+  const userId = 'user-1';
+  const digest = 'a'.repeat(64);
+  for (const kind of ['filled_preview', 'submission_receipt']) {
+    const url = `urn:litos:qa-screenshot:${kind}:${digest}`;
+    const stale = {
+      kind,
+      url,
+      sha256: digest,
+      object_key: controlledScreenshotObjectKey(kind, userId, 'stale-run'),
+    };
+    const current = {
+      kind,
+      url,
+      sha256: digest,
+      object_key: controlledScreenshotObjectKey(kind, userId, 'current-run'),
+    };
+    assert.equal(controlledScreenshotForRun([stale, current], {
+      kind,
+      userId,
+      submissionRunId: 'current-run',
+      url,
+    }), current);
+    assert.equal(controlledScreenshotForRun([stale], {
+      kind,
+      userId,
+      submissionRunId: 'current-run',
+      url,
+    }), undefined);
+  }
+});
+
 test('database safety rejects remote, shared, and unmarked targets', () => {
   assert.deepEqual(controlledDatabaseTarget(controlledTarget.databaseUrl), {
     host: '127.0.0.1',
@@ -132,6 +232,57 @@ test('controlled managed receiving proof is fully bound to the disposable QA con
     ...input,
     webhookEndpoint: 'http://localhost:3301/webhooks/application-email/inbound',
   }), /endpoint is invalid/);
+});
+
+test('security-code proof must exist before backend startup and match the exact fixture binding', () => {
+  const expected = {
+    provider_message_hash: 'a'.repeat(64),
+    route_fingerprint: 'b'.repeat(64),
+    proof_version: 2,
+    domain: 'litos-qa.resend.app',
+  };
+  const now = new Date('2026-08-09T12:00:00.000Z');
+  const valid = { ...expected, verified_at: now };
+  assert.doesNotThrow(() => assertControlledManagedReceivingProofRow(valid, expected, now));
+  assert.throws(
+    () => assertControlledManagedReceivingProofRow(undefined, expected, now),
+    /seeded before backend startup/,
+  );
+  assert.throws(
+    () => assertControlledManagedReceivingProofRow({ ...valid, provider_message_hash: 'c'.repeat(64) }, expected, now),
+    /seeded before backend startup/,
+  );
+  assert.throws(
+    () => assertControlledManagedReceivingProofRow({
+      ...valid,
+      verified_at: new Date('2026-08-01T11:59:59.000Z'),
+    }, expected, now),
+    /not current/,
+  );
+});
+
+test('the seeded QA packet carries exact evidence-bound lead alignment', () => {
+  const spec = controlledQaPacketSpec({
+    run: 1,
+    email: 'guest@litos-qa.resend.app',
+    portalUrl: 'http://localhost:3300/qa/portal-submission',
+    alias: null,
+    forwardTo: null,
+    now: '2026-08-09T12:00:00.000Z',
+  });
+  assert.deepEqual(applicationLeadAlignmentIssues(spec), []);
+
+  const missing = structuredClone(spec);
+  delete missing.lead_alignment;
+  assert.match(applicationLeadAlignmentIssues(missing)[0], /lead_alignment is missing/);
+
+  const wrongHash = structuredClone(spec);
+  wrongHash.lead_alignment.jd_hash = '0000000000000000';
+  assert.match(applicationLeadAlignmentIssues(wrongHash)[0], /jd_hash does not match/);
+
+  const wrongEvidence = structuredClone(spec);
+  wrongEvidence.lead_alignment.evidence = 'Built a different workflow not present in the packet.';
+  assert.match(applicationLeadAlignmentIssues(wrongEvidence)[0], /evidence is not one of the bullets/);
 });
 
 test('security-code mode requires the remote managed runner and records its auth mode', () => {

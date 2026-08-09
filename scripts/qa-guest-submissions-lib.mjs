@@ -2,6 +2,71 @@ import { createHash, createHmac } from 'node:crypto';
 
 export const CONTROLLED_PORTAL_BINDING_PARAM = 'litos_qa_binding';
 
+export const CONTROLLED_QA_JD = `Software Engineering Intern
+
+Responsibilities:
+- Build TypeScript workflows that automate internal application review steps
+- Test controlled portal submissions across browser and API checkpoints`;
+
+export const CONTROLLED_QA_LEAD_EVIDENCE =
+  'Built TypeScript workflows that automated internal application review steps.';
+
+export function controlledQaPacketSpec({ run, email, portalUrl, alias, forwardTo, now }) {
+  const experience = [{
+    type: 'job',
+    org: 'Northwind Labs',
+    title: 'Software Engineering Intern',
+    date_range: 'Summer 2026',
+    bullets: [
+      CONTROLLED_QA_LEAD_EVIDENCE,
+      'Added dashboard states that surfaced missing applicant inputs before submit.',
+      'Tested controlled portal submissions across browser and API checkpoints.',
+    ],
+  }];
+  const spec = {
+    school: 'Litos Test University',
+    degree: 'Computer Science',
+    grad_date: '2027',
+    coursework: '',
+    experience,
+    skills: ['TypeScript'],
+    lead_alignment: {
+      entry_org: experience[0].org,
+      requirement: 'Build TypeScript workflows that automate internal application review steps',
+      evidence: CONTROLLED_QA_LEAD_EVIDENCE,
+      jd_hash: createHash('sha256').update(CONTROLLED_QA_JD).digest('hex').slice(0, 16),
+    },
+    _contact: { full_name: `Guest Tester ${run}`, email },
+    _review: {
+      jd_text: CONTROLLED_QA_JD,
+      role: 'Software Engineering Intern',
+      portal_url: portalUrl,
+      ats_name: 'controlled_test',
+      status: 'ready_to_submit',
+      edited_terms: [],
+      questions: [],
+      skipped_reasons: [],
+      updated_at: now,
+    },
+  };
+  if (!alias) return spec;
+  return {
+    ...spec,
+    _applicant_email: {
+      address: alias,
+      source: 'litos_alias',
+      reason: 'deliverable',
+      tracked: true,
+      decided_at: now,
+    },
+    _application_email: {
+      alias,
+      forwards_to: forwardTo,
+      mode: 'litos_application_alias',
+    },
+  };
+}
+
 export function managedApplicationAlias({ aliasSecret, domain, userId, applicationId }) {
   if (!aliasSecret?.trim()) throw new Error('LITOS_APPLICATION_EMAIL_ALIAS_SECRET is required');
   if (!domain?.trim()) throw new Error('LITOS_RESEND_MANAGED_RECEIVING_DOMAIN is required');
@@ -11,6 +76,14 @@ export function managedApplicationAlias({ aliasSecret, domain, userId, applicati
     .slice(0, 12);
   const packet = applicationId.replace(/-/g, '').slice(0, 10).toLowerCase();
   return `app-${packet}-${token}@${domain.trim().toLowerCase()}`;
+}
+
+export function controlledForwardedEmailForRun(messages, { subject, to, alias }) {
+  return messages.find((message) => message.subject === subject
+    && Array.isArray(message.to)
+    && message.to.includes(to)
+    && typeof message.html === 'string'
+    && message.html.includes(alias));
 }
 
 export function signedInboundRequest(payload, secret, timestamp = Date.now()) {
@@ -92,6 +165,36 @@ export function controlledEmailCaptureTarget(rawUrl, token) {
   return target;
 }
 
+export function controlledReceiptCaptureTarget(rawUrl, token) {
+  let target;
+  try {
+    target = new URL(rawUrl);
+  } catch {
+    throw new Error('Provisioning blocker: LITOS_QA_RECEIPT_CAPTURE_URL must be a valid URL');
+  }
+  if (target.protocol !== 'http:' || target.hostname !== '127.0.0.1' || !target.port
+    || target.pathname !== '/receipts' || target.search || target.hash || target.username || target.password) {
+    throw new Error('Provisioning blocker: the QA receipt capture adapter must be http://127.0.0.1:<port>/receipts');
+  }
+  if (!token || !/^[A-Za-z0-9_-]{32,128}$/.test(token)) {
+    throw new Error('Provisioning blocker: LITOS_QA_RECEIPT_CAPTURE_TOKEN must contain 32 to 128 safe characters');
+  }
+  return target;
+}
+
+export function controlledScreenshotObjectKey(kind, userId, submissionRunId) {
+  const filename = kind === 'filled_preview' ? 'filled' : kind === 'submission_receipt' ? 'receipt' : null;
+  if (!filename || !/^[A-Za-z0-9_-]+$/.test(userId ?? '') || !/^[A-Za-z0-9_-]+$/.test(submissionRunId ?? '')) {
+    throw new Error('Controlled screenshot evidence requires a valid kind, user, and submission run');
+  }
+  return `users/${userId}/submission-runs/${submissionRunId}/${filename}.png`;
+}
+
+export function controlledScreenshotForRun(captures, { kind, userId, submissionRunId, url }) {
+  const objectKey = controlledScreenshotObjectKey(kind, userId, submissionRunId);
+  return captures.find((entry) => entry.kind === kind && entry.object_key === objectKey && entry.url === url);
+}
+
 export function controlledDatabaseTarget(databaseUrl) {
   let target;
   try {
@@ -154,6 +257,21 @@ export function controlledManagedReceivingProof({
     proof_version: 2,
     domain: domain.toLowerCase(),
   };
+}
+
+export function assertControlledManagedReceivingProofRow(row, expected, now = new Date()) {
+  if (!row
+    || row.provider_message_hash !== expected.provider_message_hash
+    || row.route_fingerprint !== expected.route_fingerprint
+    || row.proof_version !== expected.proof_version
+    || row.domain !== expected.domain) {
+    throw new Error('The controlled managed receiving proof was not seeded before backend startup');
+  }
+  const verifiedAt = new Date(row.verified_at);
+  const age = now.getTime() - verifiedAt.getTime();
+  if (!Number.isFinite(age) || age < 0 || age > 7 * 24 * 60 * 60 * 1000) {
+    throw new Error('The controlled managed receiving proof is not current');
+  }
 }
 
 export function assertRemoteManagedRunner({

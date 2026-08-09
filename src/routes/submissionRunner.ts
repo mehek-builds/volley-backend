@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { decide, isBlocked } from '../engine/eligibility';
-import { put } from '@vercel/blob';
 import { chromium, type Page } from 'playwright-core';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, eq, sql } from 'drizzle-orm';
@@ -26,10 +25,12 @@ import {
   normalizeSecurityCode,
   readManagedSecurityCodeChallenge,
   securityCodeAttentionReason,
+  securityCodeContinuationActions,
   securityCodeFingerprint,
-  withSecurityCode,
   withSecurityCodeAttempt,
+  withSecurityCodeAttempts,
 } from '../lib/securityCode';
+import { storeFilledPreviewScreenshot, storeReceiptScreenshot } from '../lib/receiptScreenshot';
 import {
   connectToSession,
   continueManagedBrowser,
@@ -56,7 +57,8 @@ import {
   buildManagedDiscoveredOptionProbeBatches,
   managedOptionProbeAnalysis,
   managedOptionProbeControlId,
-  managedUnreportedFillLabels,
+  managedUnexplainedAnswers,
+  managedUnexplainedAnswerReasons,
   managedResultFieldOptions,
   managedResultSupportsDiscoveryRole,
   CaptchaUnresolvedError,
@@ -160,6 +162,7 @@ import {
   readPinnedApplicantEmail,
   resolveFrozenApplicantEmail,
 } from '../lib/applicationEmail';
+import { resolveVerificationEmailRoute } from '../lib/emailVerification';
 import { leadAlignmentIssues } from '../engine/leadAlignment';
 import { normalizeSpec } from '../llm/resumeSpec';
 
@@ -522,6 +525,41 @@ export async function referralSourceEvidenceForRow(row: ResumeRow): Promise<Refe
   };
 }
 
+type ResumePacketDependencies = {
+  resolveObjectUrl: (objectKey: string) => Promise<string | null>;
+  fetchObject: (url: string) => Promise<{ ok: boolean; arrayBuffer: () => Promise<ArrayBuffer> }>;
+};
+
+/**
+ * The controlled fixture is selected from the already-detected portal family, never from a URL or
+ * object-key prefix. detectPortal only returns controlled_test for the signed QA route, and
+ * assertControlledPortalEnabled separately refuses that family unless its test-only environment
+ * gate is enabled. Keeping this predicate exact prevents an employer URL or a qa-looking Blob key
+ * from opting itself into fixture documents.
+ */
+export function packetUsesControlledResumeFixture(portal: SupportedPortal): boolean {
+  return portal === 'controlled_test';
+}
+
+/** Load the resume bytes independently from the rest of packet assembly so fixture isolation is testable. */
+export async function resumeBytesForPacket(
+  objectKey: string,
+  controlledTest: boolean,
+  dependencies: ResumePacketDependencies = {
+    resolveObjectUrl: resolveBlobUrl,
+    fetchObject: (url) => fetch(url),
+  },
+): Promise<Buffer> {
+  if (controlledTest && process.env.LITOS_ENABLE_TEST_PORTAL === 'true') {
+    return Buffer.from('%PDF-1.4\n% Litos controlled submission fixture\n%%EOF\n');
+  }
+  const blobUrl = await dependencies.resolveObjectUrl(objectKey);
+  if (!blobUrl) throw new Error('Generated resume file is unavailable');
+  const response = await dependencies.fetchObject(blobUrl);
+  if (!response.ok) throw new Error('Generated resume file could not be downloaded');
+  return Buffer.from(await response.arrayBuffer());
+}
+
 export async function buildPacket(row: ResumeRow, controlledTest = false): Promise<SubmissionPacket> {
   const stored = row.spec as StoredSpec;
   const contact = (stored._contact ?? {}) as Record<string, unknown>;
@@ -536,16 +574,7 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
   const parsed = (profileRow[0]?.parsed_json ?? {}) as Record<string, unknown>;
   const review = readApplicationReview(stored);
   if (!review) throw new Error('We could not find this application');
-  let resume: Buffer;
-  if (controlledTest && process.env.LITOS_ENABLE_TEST_PORTAL === 'true') {
-    resume = Buffer.from('%PDF-1.4\n% Litos controlled submission fixture\n%%EOF\n');
-  } else {
-    const blobUrl = await resolveBlobUrl(row.resume_object_key);
-    if (!blobUrl) throw new Error('Generated resume file is unavailable');
-    const response = await fetch(blobUrl);
-    if (!response.ok) throw new Error('Generated resume file could not be downloaded');
-    resume = Buffer.from(await response.arrayBuffer());
-  }
+  const resume = await resumeBytesForPacket(row.resume_object_key, controlledTest);
   let coverLetter: Buffer | undefined;
   const coverLetterKey = coverLetterObjectKeyToAttach(stored);
   if (coverLetterKey) {
@@ -620,10 +649,21 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
   const roleLocations = Array.isArray(context.locations)
     ? context.locations.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
     : undefined;
+  /* THE SAME RESOLUTION CONTEXT THE DISCOVERY PASS USES, and it was not before.
+   *
+   * There are two places a stored question's answer is resolved: discoverAndResolveQuestions, which
+   * passes applicationContextForQuestionResolution(row, review), and this one, which passed a bare
+   * review.jd_text. Any resolver that reads the posting's structured locations could therefore
+   * answer in one and refuse in the other, on the same question, in the same run.
+   *
+   * Measured on Anduril b64168b8: with the location gate fixed, "Are you willing to work in-person
+   * for 12 weeks during the internship?" resolves to Yes from the frozen job locations under the
+   * discovery context and stayed blank here, so the packet the fill run was built from still
+   * carried no answer for it. */
   const refreshedQuestions = refreshKnownQuestionAnswers(
     review.questions,
     applicationProfile,
-    review.jd_text,
+    applicationContextForQuestionResolution(row, review),
     review.questions_reviewed_at,
     postingCountryFromJobContext(row.job_context),
   );
@@ -975,8 +1015,9 @@ async function packetForCoverLetterCapability(
   row: ResumeRow,
   supported: boolean,
   fastify: FastifyInstance,
+  controlledTest: boolean,
 ): Promise<{ packet: SubmissionPacket; coverLetterIssue?: string }> {
-  if (!supported) return { packet: omitCoverLetter(await buildPacket(row)) };
+  if (!supported) return { packet: omitCoverLetter(await buildPacket(row, controlledTest)) };
   if (!storedCoverLetter(row)) {
     try {
       await generateStoredCoverLetter(row, false, true);
@@ -984,7 +1025,7 @@ async function packetForCoverLetterCapability(
       // Raw message to the log, fixed sentence to the applicant. See the note above the function.
       fastify.log.warn({ error, applicationId: row.id }, 'Cover letter generation failed, continuing without it');
       return {
-        packet: omitCoverLetter(await buildPacket(row)),
+        packet: omitCoverLetter(await buildPacket(row, controlledTest)),
         coverLetterIssue: 'We could not write your cover letter for this one, so it is not attached. Everything else is filled in, and you can write or retry a cover letter from your dashboard.',
       };
     }
@@ -1001,11 +1042,14 @@ async function packetForCoverLetterCapability(
      sentence, because "we could not write it" and "we wrote it and could not attach it" are
      different facts and the second one is ours to fix rather than hers to retry. */
   try {
-    return { packet: await buildPacket(rows[0]) };
+    return { packet: await buildPacket(rows[0], controlledTest) };
   } catch (error) {
     fastify.log.warn({ error, applicationId: row.id }, 'Cover letter file could not be attached, continuing without it');
     return {
-      packet: omitCoverLetter(await buildPacket({ ...rows[0], spec: strippedCoverLetterSpec(rows[0].spec) })),
+      packet: omitCoverLetter(await buildPacket(
+        { ...rows[0], spec: strippedCoverLetterSpec(rows[0].spec) },
+        controlledTest,
+      )),
       coverLetterIssue: 'Your cover letter is written but we could not attach the file to this form. Everything else is filled in. Open the application and send it again, and if it keeps happening the cover letter is the part to retry.',
     };
   }
@@ -1027,10 +1071,19 @@ export function jobContextCompany(row: ResumeRow): string {
 
 export function applicationContextForQuestionResolution(row: ResumeRow, current: ApplicationReviewState): string {
   const context = (row.job_context && typeof row.job_context === 'object' ? row.job_context : {}) as Record<string, unknown>;
+  /* SPLIT ON THE SEMICOLON BEFORE CLASSIFYING, because a multi-office posting writes its offices
+   * into ONE string: Anduril's 2027 intern posting stores `job_context.location` as
+   * "Atlanta, Georgia, United States; Boston, Massachusetts, United States; ..." and five more.
+   *
+   * Classifying the composite is wrong in both directions. It reached jobCountry as a single value
+   * and passed the every-one-is-US test on the strength of the American cities in it, so a posting
+   * mixing Chicago with London would have frozen as safe; and it was then frozen as ONE location,
+   * which is the shape the resolver could not read at all. One city per entry makes the every-one
+   * test mean what it says and gives the resolver something it can check. */
   const locationValues = [
     typeof context.location === 'string' ? context.location : '',
     ...(Array.isArray(context.locations) ? context.locations.filter((value): value is string => typeof value === 'string') : []),
-  ].map((value) => value.trim()).filter(Boolean);
+  ].flatMap((value) => value.split(';')).map((value) => value.trim()).filter(Boolean);
   const classifiedLocations = [...new Set(locationValues)].map((value) => ({ value, country: jobCountry(value) }));
   const safeLocations = classifiedLocations.length > 0 && classifiedLocations.every((item) => item.country === 'us')
     ? frozenJobLocationContext(classifiedLocations.map((item) => item.value))
@@ -1244,6 +1297,30 @@ export async function discoverAndResolveQuestions(
         continue;
       }
     }
+    /* THE DRAFTER NEVER WRITES PROSE INTO A CONTROL THAT OFFERS A LIST.
+     *
+     * The belt to isOpenEndedQuestion's braces, and it is separate from it because it is a fact
+     * about the CONTROL, which that function cannot see. A select, radio or checkbox accepts one of
+     * its own options and nothing else, so a paragraph aimed at one cannot land however well it
+     * reads: Virtu and Faire each came back "no option matched" with a drafted answer quoted back
+     * at them. A required field the applicant can see and pick from is strictly better than a
+     * wrong-shaped value nobody can use. */
+    const closedControl = /^(?:select|radio|checkbox|combobox)$/i.test(field.inputType)
+      || usableOptions(field.options).length > 0;
+    const wouldNotDraftNow = !isOpenEndedQuestion(label) || closedControl;
+    /* A PARAGRAPH AN EARLIER BUILD DRAFTED, on a question this build would not draft at all.
+     *
+     * Without this the guard above changes nothing on a packet that already carries one: the
+     * `existing.answer.trim()` arm below replays a stored answer verbatim, so Virtu's 186 characters
+     * of prose would be typed at the same closed control on every future run of that packet.
+     *
+     * Only a DRAFTED answer, and only one this build has just declined to produce.
+     * `answer_source: 'applicant_review'` is her own, and she is allowed to write a sentence into a
+     * field Litos would not have. */
+    const staleDraftedAnswer = existing?.kind === 'essay'
+      && Boolean(existing.answer.trim())
+      && existing.answer_source !== 'applicant_review'
+      && wouldNotDraftNow;
     if (existing) {
       if (known && 'value' in known) {
         questions.push({
@@ -1255,6 +1332,9 @@ export async function discoverAndResolveQuestions(
           portal_selector: portalSelectorForField(field),
           portal_input_type: field.inputType,
         });
+      } else if (staleDraftedAnswer) {
+        invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
+        if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false));
       } else if (existing.answer.trim()) {
         questions.push({
           ...existing,
@@ -1292,7 +1372,7 @@ export async function discoverAndResolveQuestions(
      * form: a question whose answer is a statement she makes about herself is never drafted, however
      * open-ended it reads, whether or not any rule above recognised it. She is asked instead, which
      * is what the pre-script now does before the run ever starts. */
-    if (!isOpenEndedQuestion(label)) {
+    if (wouldNotDraftNow) {
       // The single biggest source of unanswerable blockers. "Discipline", "Graduation Month",
       // "EXPORT CONTROLS - ...": not a field Litos knows, not an essay it can draft, and until now
       // dropped without even an attention reason. Required means the employer will not accept the
@@ -1477,7 +1557,7 @@ async function prepareManaged(
     submission_run_id: runId,
     submission_error: undefined,
   }));
-  let packet = omitCoverLetter(await buildPacket(row));
+  let packet = omitCoverLetter(await buildPacket(row, packetUsesControlledResumeFixture(portal)));
 
   // R-055 on the managed path: a cheap first call fills only the fixed fields and asks
   // stratus-browser-cloud's 'discover' action (PR #7) to scan the resulting page for custom
@@ -1596,7 +1676,12 @@ async function prepareManaged(
       return !controlId || !optionProbe.failedIds.has(controlId);
     });
   const coverLetterSupported = managedResultHasCoverLetterUpload(discoveryResult, portal);
-  const coverLetterOutcome = await packetForCoverLetterCapability(row, coverLetterSupported, fastify);
+  const coverLetterOutcome = await packetForCoverLetterCapability(
+    row,
+    coverLetterSupported,
+    fastify,
+    packetUsesControlledResumeFixture(portal),
+  );
   packet = coverLetterOutcome.packet;
   const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
   const resolutionCurrent = { ...current, questions: storedQuestions };
@@ -1657,31 +1742,36 @@ async function prepareManaged(
   }
   const result = await runManagedBrowser(applicationUrl, fillActions);
   if (!result.screenshot) throw new Error('Stratus managed browser did not return a preview screenshot');
-  /* A value Litos typed that the run then said nothing whatsoever about.
+  /* A value Litos typed that the run then never accounted for.
    *
-   * Not a blocker and not shown to the applicant: the required-field check below already tells her
-   * the control is empty. This is the line that says the emptiness is Litos's fault rather than
-   * hers, and it exists because without it the case is unobservable. Measured on DRW, 2026-08-08:
-   * `question:legal first name` was a single fill of "Mehek" into a plain visible textarea, sat at
-   * index 55 of an accepted 120-action list, the run reported fills as late as index 100, and the
-   * result named it in neither filledFields nor skipped. */
-  const unreportedFills = managedUnreportedFillLabels(fillActions, result);
-  if (unreportedFills.length > 0) {
+   * Measured on DRW, 2026-08-08: `question:legal first name` was a single fill of "Mehek" into a
+   * plain visible textarea, sat at index 55 of an accepted 120-action list, the run reported fills
+   * as late as index 100, and the result named it in neither filledFields nor skipped.
+   *
+   * WHAT CHANGED ON 2026-08-09, and it is the reason this is now three things rather than one log
+   * line. The 25-application run was the run this diagnostic was shipped to observe, and it stayed
+   * silent while Deepgram's `question:expected graduation year` went missing exactly as predicted.
+   * Silence was the answer: the only way the old test could pass was a `result.skipped` line that
+   * STARTED with the label and explained nothing, which the sanitizer then dropped as alias-ladder
+   * noise. One predicate was answering both "did anyone mention this" and "is this worth showing
+   * her", and a line that satisfied the first while failing the second fell through both. So: the
+   * suppression test is now an EXPLANATION test, she gets a sentence saying the blank field is
+   * ours, and the provider's own words are kept on the row for the labels that lost a value. */
+  const unexplainedAnswers = managedUnexplainedAnswers(fillActions, result);
+  if (unexplainedAnswers.length > 0) {
     fastify.log.error(
-      { applicationId: row.id, portal, fields: unreportedFills },
-      'Answers were typed into the form and the run reported neither a fill nor a reason for them',
+      {
+        applicationId: row.id,
+        portal,
+        fields: unexplainedAnswers.map((entry) => entry.label),
+        rawMentions: unexplainedAnswers.map((entry) => entry.rawMentions),
+      },
+      'Answers were typed into the form and the run accounted for them in neither a fill nor a reason',
     );
   }
-  const preview = await put(
+  const preview = await storeFilledPreviewScreenshot(
     `users/${row.user_id}/submission-runs/${runId}/filled.png`,
     Buffer.from(result.screenshot, 'base64'),
-    // addRandomSuffix because a RETRY reuses the run id (runId falls back to
-    // current.submission_run_id), so a second attempt writes the same key and Vercel Blob rejects
-    // it: "This blob already exists". That turned an otherwise SUCCESSFUL run, five fields filled
-    // and a preview captured, into status `failed`. Suffixing also keeps each attempt's evidence
-    // instead of overwriting the previous one, which matters when comparing a retry to what it
-    // replaced.
-    { access: 'public', contentType: 'image/png', addRandomSuffix: true },
   );
   // Sanitized at the boundary, not upstream: the managed provider scans the form in its own
   // service and returns finished sentences, so it never passes through this repo's label
@@ -1770,6 +1860,27 @@ async function prepareManaged(
   const answerLossReasons = managedAnswerLossReasons({
     skipped: [...(result.skipped ?? []), ...(discoveryResult?.skipped ?? [])],
   });
+  /* A value that WAS typed and whose outcome the run never accounted for.
+   *
+   * Third of three, and the three are not the same fact, which is why all three are here. Read in
+   * order of how much the run knows:
+   *
+   *   answerLossReasons        Litos typed it, the page rejected it, the run SAID SO. Known bad,
+   *                            not a gate: a required control that lost its value already comes
+   *                            back as the employer's own "is required and is still empty".
+   *   unexplainedAnswerReasons Litos typed it and the run accounted for it in NEITHER a fill nor
+   *                            an explanation. Outcome unknown, and not a gate for the same reason
+   *                            as the line above: whatever happened, if the control was required
+   *                            the employer's blocker gates it, and if it was optional this is not
+   *                            worth refusing a complete application over.
+   *   budgetShortfallReasons   Litos never typed it at all. THIS ONE GATES, below.
+   *
+   * The uncertainty runs the other way for the third: the first two ran the action and the form
+   * had its say, so the employer's own required-field blocker is a reliable backstop. A question
+   * with no action never reached the form, so nothing downstream can notice it - no filled_fields
+   * entry, no provider blocker unless the employer happens to mark it required, and a preview
+   * screenshot showing a blank that looks like every other optional blank. */
+  const unexplainedAnswerReasons = managedUnexplainedAnswerReasons(unexplainedAnswers);
   /* The questions the action budget could not hold, in her words.
    *
    * Unlike answerLossReasons directly above, this DOES gate the send, and the difference is which
@@ -1794,6 +1905,7 @@ async function prepareManaged(
     ...evidenceBlockers,
     ...coverLetterAttention,
     ...answerLossReasons,
+    ...unexplainedAnswerReasons,
     ...budgetShortfallReasons,
     ...honestyReasons,
   ];
@@ -1899,6 +2011,15 @@ async function prepareManaged(
     // The other half of filled_fields, and it was always empty before: what the runner tried and
     // could not leave on the form. See managedAnswerLossReasons.
     skipped_reasons: answerLossReasons,
+    /* The provider's own words about the answers nobody accounted for, kept so the NEXT
+     * investigation reads a row instead of re-deriving the run. Bounded to the labels that lost a
+     * value, and written as an empty array rather than omitted so a run that has been re-tried on
+     * this build can be told from one that predates the field. See ApplicationReviewState. */
+    unexplained_fills: unexplainedAnswers.map((entry) => ({
+      label: entry.label,
+      question: entry.question,
+      raw: entry.rawMentions,
+    })),
     // Which address this form was filled with, and why. See ApplicationReviewState.applicant_email.
     ...(packet.applicantEmail ? { applicant_email: packet.applicantEmail } : {}),
     preview_screenshot_url: preview.url,
@@ -2090,17 +2211,29 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     await navigateToApplicationForm(page, portal); // no-op except SmartRecruiters's JD-page/form-page split
     const [verificationSettings] = await db.select({ enabled: users.automatic_verification_enabled })
       .from(users).where(eq(users.id, row.user_id)).limit(1);
+    const verificationRoute = await resolveVerificationEmailRoute({
+      userId: row.user_id,
+      applicationId: row.id,
+      expectedRecipient: verificationRecipient,
+    });
+    const verificationAllowed = verificationRoute === 'application_alias'
+      || (verificationRoute === 'personal_address' && verificationSettings?.enabled === true);
     let verification: BrowserVerificationResult = await completeEmailVerificationIfPresent({
       page,
       userId: row.user_id,
       portalUrl,
       requestedAt: verificationRequestedAt,
-      permissionGranted: verificationSettings?.enabled === true,
+      permissionGranted: verificationAllowed,
       expectedRecipient: verificationRecipient,
       applicationId: row.id,
     });
     const coverLetterSupported = await hasCoverLetterUpload(page, portal);
-    const { packet, coverLetterIssue } = await packetForCoverLetterCapability(row, coverLetterSupported, fastify);
+    const { packet, coverLetterIssue } = await packetForCoverLetterCapability(
+      row,
+      coverLetterSupported,
+      fastify,
+      packetUsesControlledResumeFixture(portal),
+    );
     const coverLetterAttention = coverLetterIssue ? [coverLetterIssue] : [];
 
     // R-055: discover and resolve the posting's own custom questions before filling, so a
@@ -2160,7 +2293,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       userId: row.user_id,
       portalUrl,
       requestedAt: verificationRequestedAt,
-      permissionGranted: verificationSettings?.enabled === true,
+      permissionGranted: verificationAllowed,
       expectedRecipient: verificationRecipient,
       applicationId: row.id,
     });
@@ -2169,12 +2302,10 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     // first pass cannot remain as a stale blocker. This does not click the final submit control.
     if (postFillVerification.status === 'completed') result = await fillPortal(page, portal, packet);
     const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
-    const preview = await put(`users/${row.user_id}/submission-runs/${runId}/filled.png`, screenshot, {
-      access: 'public',
-      contentType: 'image/png',
-      // See the managed path above: a retry reuses the run id and would collide.
-      addRandomSuffix: true,
-    });
+    const preview = await storeFilledPreviewScreenshot(
+      `users/${row.user_id}/submission-runs/${runId}/filled.png`,
+      screenshot,
+    );
     const sanitizedBlockers = sanitizeProviderBlockers(result.blockers);
     const pageText = await page.locator('body').innerText({ timeout: 1_000 }).catch(() => '');
     // Same reach evidence as the managed path: the live-page question scan and the portal's own
@@ -2394,10 +2525,36 @@ async function submitViaAtsSubmissionChannel(
   return false;
 }
 
-// `securityCode` is the emailed code that finishes a Greenhouse submit, and it is a PARAMETER rather
-// than a stored field on purpose: it is a live credential to a real employer's form, and the review
-// object it would have to live in is unvalidated JSON that is serialized to the dashboard and the
-// extension. Only its salted digest is ever written down, and only to make the endpoint idempotent.
+/**
+ * HOW LONG THE CHALLENGED PAGE IS HELD OPEN, and how long the mailbox is read for inside it.
+ *
+ * The window is the runner's continuation TTL, and since the runner started counting it from the
+ * moment the challenge appears rather than from the fork, it is a budget for THIS - reading a code
+ * and coming back - rather than whatever a hundred-action form fill happened to leave over. 180
+ * seconds against a mailbox read that finishes in a few is deliberately generous: the cost of it
+ * being too short is a resend, and a resend costs the applicant another email and invalidates the
+ * code Litos is holding.
+ *
+ * The read itself is bounded so the whole submit still fits inside one 300 second invocation, which
+ * also has to pay for the CAPTCHA probe, the packet build, the fill run and the continuation. 15
+ * passes three seconds apart is about 45 seconds of waiting plus the searches themselves. The
+ * measured gap between a Greenhouse send and its code is seconds, not minutes; this is sized for a
+ * slow mailbox rather than for a slow reader.
+ */
+const SECURITY_CODE_CONTINUATION_TTL_SECONDS = 180;
+const SECURITY_CODE_MAILBOX_ATTEMPTS = 15;
+const SECURITY_CODE_MAILBOX_DELAY_MS = 3_000;
+
+// `securityCode` is the code the applicant pasted in, and it is a PARAMETER rather than a stored
+// field on purpose: it is a live credential to a real employer's form, and the review object it
+// would have to live in is unvalidated JSON that is serialized to the dashboard and the extension.
+// Only its salted digest is ever written down, and only to make the endpoint idempotent.
+//
+// IT IS NO LONGER THE CODE THAT GETS TYPED. Greenhouse issues a new code on every send and a code
+// control only exists on a page that has just been sent, so a code that arrives from outside a run
+// is dead before that run can reach a field to put it in. What it still does is authorize one more
+// attempt and, through its fingerprint, stop the same dead code authorizing a second. The code that
+// is actually entered is read from the mailbox inside the run, on the page that asked for it.
 //
 // Threaded through submit() rather than given its own run, so the finishing path inherits every
 // guard this one already has: the authorization check, the claim, the daily cap, the portal gates,
@@ -2645,33 +2802,84 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       // codebase that declined to.
       throw new CaptchaUnresolvedError('before_fill', managedCaptchaProvider(captchaProbe, portal));
     }
-    const builtPacket = await buildPacket(row);
+    const builtPacket = await buildPacket(row, packetUsesControlledResumeFixture(portal));
     const packet = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
     const verificationRequestedAt = new Date();
-    const initialActions = options.securityCode
-      ? withSecurityCode(buildManagedPortalActions(portal, packet, true), options.securityCode)
-      : buildManagedPortalActions(portal, packet, true);
+    /* THE FIRST HALF IS THE SAME RUN WHETHER OR NOT A CODE IS IN HAND, and that is the fix.
+     *
+     * The managed runner is stateless and one-shot: every run loads the form fresh, and on first
+     * paint a Greenhouse application form carries no security-code control, because Greenhouse only
+     * renders one after a submit has been refused. So a code cannot be attached to this list. It is
+     * attached to the CONTINUATION below, which runs on the very DOM this submit produced. */
+    const initialActions = buildManagedPortalActions(portal, packet, true);
     const result = await runManagedBrowser(
       applicationUrl,
       initialActions,
-      {
-        allowSubmit: true,
-        ...(!options.securityCode ? { requestContinuation: true, continuationTtlSeconds: 120 } : {}),
-      },
+      { allowSubmit: true, requestContinuation: true, continuationTtlSeconds: SECURITY_CODE_CONTINUATION_TTL_SECONDS },
     );
     // Required-field confirmation is a barrier inside the same remote action list, immediately
     // before submit. Require its per-field proof as well: an older runner that ignores or does not
     // understand the protocol must not be allowed to turn a silent fill into a submitted state.
-    assertManagedRequiredFieldsConfirmed(result, options.securityCode ? 'verification' : 'application');
+    assertManagedRequiredFieldsConfirmed(result, 'application');
     let receiptResult = result;
     let verification: ApplicationReviewState['verification'] = { status: 'not_needed' };
     const initialChallenge = readManagedSecurityCodeChallenge(result);
-    if (!options.securityCode && initialChallenge && managedResultNeedsEmailVerification(result)) {
+    /* THE SECOND HALF HAPPENS ON THE PAGE THE FIRST HALF PRODUCED, and there is now only one way in.
+     *
+     * WHAT WAS MEASURED, on a live Cresta application on 2026-08-09. Greenhouse emailed this
+     * applicant three security codes:
+     *
+     *     20:24:03  LSlOXjvZ   issued by the first submit
+     *     21:13:07  LH0Yjubx   issued by approve/submit
+     *     21:13:53  yFxeFpSl   issued by the code attempt itself, 46 seconds later
+     *
+     * Each one invalidates its predecessor. And a code control only exists on a page that has just
+     * been sent: on first paint a Greenhouse application form has no code field at all. Put those
+     * two facts together and a code that arrives from outside the run is unusable BY CONSTRUCTION -
+     * the run has to send the form to reach a field to type it into, and that send replaces it. The
+     * old shape did exactly that and then typed the dead code, so every attempt was one generation
+     * stale, and the packet's own attention_reason told her, honestly and uselessly, to "use the
+     * newest email".
+     *
+     * So there is one branch, not two. The run that raises the challenge is the run that answers it:
+     * it holds its page open, reads the code its own submit caused out of the connected mailbox, and
+     * types it into the control that is still standing in front of it. No second send, and therefore
+     * nothing to go stale.
+     *
+     * THE WAIT IS BOUNDED AND SHORT BECAUSE THE READER IS NOT A PERSON. A held browser session is a
+     * bad place to wait for a human to open an email; it is a fine place to wait a minute for a
+     * mailbox fetch. The window it waits inside is the runner's continuation TTL, which now starts
+     * when the challenge appears rather than when the sandbox was forked, so this budget is real
+     * rather than whatever the form fill happened to leave behind.
+     *
+     * A CODE SHE SUPPLIED IS STILL WORTH SOMETHING, just not what it used to be. It is her
+     * instruction to try this application again, and its fingerprint is what stops the same dead
+     * code triggering send after send - each of which costs her another email. It is recorded as
+     * 'superseded' and it is never typed. */
+    const codeAttempts: SecurityCodeAttempt[] = [];
+    if (options.securityCode && initialChallenge) {
+      codeAttempts.push({
+        at: new Date().toISOString(),
+        fingerprint: securityCodeFingerprint(row.id, options.securityCode),
+        outcome: 'superseded',
+      });
+    }
+    // The code this run actually typed, and the only kind there is: one read in-session, from the
+    // window opened by this run's own submit. Null until a mailbox read produces one.
+    let enteredCode: string | null = null;
+    if (initialChallenge && managedResultNeedsEmailVerification(result)) {
       const requestedAt = verificationRequestedAt.toISOString();
       const continuationExpiresAt = result.continuationExpiresAt;
       const continuationToken = result.continuationToken;
       const [verificationSettings] = await db.select({ enabled: users.automatic_verification_enabled })
         .from(users).where(eq(users.id, row.user_id)).limit(1);
+      const verificationRoute = await resolveVerificationEmailRoute({
+        userId: row.user_id,
+        applicationId: row.id,
+        expectedRecipient: packet.email,
+      });
+      const verificationAllowed = verificationRoute === 'application_alias'
+        || (verificationRoute === 'personal_address' && verificationSettings?.enabled === true);
       const continuationIsLive = typeof continuationToken === 'string'
         && typeof continuationExpiresAt === 'string'
         && Date.parse(continuationExpiresAt) > Date.now();
@@ -2682,7 +2890,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           continuation_resumed: false,
         }
         : {};
-      if (continuationIsLive && verificationSettings?.enabled === true) {
+      if (continuationIsLive && verificationAllowed) {
         // The continuation capability stays call-local. Persisting it would turn the review JSON,
         // which is returned to dashboard and extension clients, into a browser-session credential.
         await writeReview(row, nextReview(claimedReview, {
@@ -2703,20 +2911,53 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           permissionGranted: true,
           expectedRecipient: packet.email,
           applicationId: row.id,
-          attempts: 10,
-          delayMs: 3_000,
+          attempts: SECURITY_CODE_MAILBOX_ATTEMPTS,
+          delayMs: SECURITY_CODE_MAILBOX_DELAY_MS,
         });
         if (prepared.status === 'ready' && Date.parse(continuationExpiresAt) > Date.now()) {
+          /* THE PACKET'S OWN SUBMIT ACTION, CARRYING THE CODE, and it is one action rather than ten.
+           *
+           * securityCodeContinuationActions derives the terminal atomic submit from the list this
+           * run already sent, so the selector, chooser policy, contract version and retry budget are
+           * the ones the runner validates field by field - and the runner types the code into the
+           * eight-box widget itself, at zero extra action cost. The generic ten-action list stays as
+           * the fallback for a packet with no atomic submit to derive from, which is the same
+           * upstream gate portalCanAutoSubmit already applies. */
+          enteredCode = prepared.code;
+          const codeActions = securityCodeContinuationActions(initialActions, prepared.code) ?? prepared.actions;
           try {
             // Exactly one continuation call. An uncertain click is never retried.
-            receiptResult = await continueManagedBrowser(continuationToken, prepared.actions);
+            receiptResult = await continueManagedBrowser(continuationToken, codeActions);
             // A continuation has its own physical submit. Its v2 action must confirm the active
             // verification form and own that click atomically, just like the initial application
             // send. The first receipt cannot authorize a later DOM or a replaced submit node.
             assertManagedRequiredFieldsConfirmed(receiptResult, 'verification');
           } catch (error) {
+            /* AN UNCERTAIN CLICK IS NEVER RETRIED, and that outranks landing somewhere friendlier.
+             *
+             * A throw here can come from either side of the physical submit: the call itself can
+             * fail before anything is clicked, and the confirmation assertion above runs after the
+             * continuation has already returned, which means after a click may have landed. Nothing
+             * available here separates those two, so the packet must not go back to a state that
+             * invites another send. Some boards cap re-applications outright - Deepgram's form says
+             * candidates may not apply more than twice in 60 days - and a duplicate filed because
+             * Litos could not read its own outcome is worse than a packet that asks for a person.
+             *
+             * The attempt is still recorded, because the fingerprint is what stops the same code
+             * being spent again, and 'error' is the honest outcome for a code whose fate is unknown.
+             * needs_attention is not a dead end: it carries the portal and the receipt screenshot,
+             * which is exactly what someone finishing this by hand needs. */
+            const failedAt = new Date().toISOString();
             await writeReview(row, nextReview(claimedReview, {
               status: 'needs_attention',
+              ...(claimedReview.security_code
+                ? {
+                  security_code: withSecurityCodeAttempts(claimedReview.security_code, [
+                    ...codeAttempts,
+                    { at: failedAt, fingerprint: securityCodeFingerprint(row.id, prepared.code), outcome: 'error' },
+                  ]),
+                }
+                : {}),
               verification: { status: 'verification_pending', requested_at: requestedAt, retry_count: 1 },
               attention_reason: 'Litos entered the employer verification step, but could not prove the final result. Check the employer portal before trying anything again.',
               submission_error: error instanceof Error ? error.message.slice(0, 500) : 'Managed verification continuation failed',
@@ -2729,7 +2970,6 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
               provider: prepared.provider,
               requested_at: requestedAt,
               retry_count: 1,
-              completed_at: new Date().toISOString(),
               ...continuationEvidence,
               continuation_resumed: true,
             };
@@ -2751,12 +2991,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     }
     if (!receiptResult.screenshot) throw new Error('Stratus managed browser did not return a receipt screenshot');
     const capturedAt = new Date().toISOString();
-    const blob = await put(
+    const blob = await storeReceiptScreenshot(
       `users/${row.user_id}/submission-runs/${claimedReview.submission_run_id}/receipt.png`,
       Buffer.from(receiptResult.screenshot, 'base64'),
-      // A receipt is the proof an application was actually submitted, so a collision here would
-      // fail the run at the worst possible moment: after the employer already has it.
-      { access: 'public', contentType: 'image/png', addRandomSuffix: true },
     );
     /* THE SUBMIT LANDED AND THE EMPLOYER ASKED FOR A CODE, so this is not 'submitted'.
      *
@@ -2776,21 +3013,29 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         authorized: true,
         existing: claimedReview.security_code,
       });
-      const attempted = options.securityCode
-        ? withSecurityCodeAttempt(securityCode, {
+      const attempted = withSecurityCodeAttempts(securityCode, [
+        ...codeAttempts,
+        // The runner says what happened to the code IT typed, and it says it by re-reading the
+        // control after the resubmit. 'rejected' when it typed the code and the challenge was still
+        // there; the other two mean Litos could not get the code into the page at all, which is a
+        // defect of ours and must never be reported to her as a wrong code. Recorded only when a
+        // code was actually typed, which now means only when this run read one in-session.
+        ...(enteredCode ? [{
           at: capturedAt,
-          fingerprint: securityCodeFingerprint(row.id, options.securityCode),
-          // The runner says what happened to the code it was given, and it says it by re-reading the
-          // control after the resubmit. 'rejected' when it typed the code and the challenge was
-          // still there; the other two mean Litos could not get the code into the page at all, which
-          // is a defect of ours and must never be reported to her as a wrong code.
-          outcome: receiptResult.securityCodeAttempt?.outcome === 'rejected' ? 'rejected'
+          fingerprint: securityCodeFingerprint(row.id, enteredCode),
+          outcome: (receiptResult.securityCodeAttempt?.outcome === 'rejected' ? 'rejected'
             : receiptResult.securityCodeAttempt?.outcome === 'no_control' ? 'no_control'
-              : 'not_entered',
-        })
-        : securityCode;
+              : 'not_entered') as SecurityCodeAttempt['outcome'],
+        }] : []),
+      ]);
       await writeReview(row, nextReview(claimedReview, {
         status: 'awaiting_security_code',
+        // Preserve the polling result computed above. Rebuilding from claimedReview here used to
+        // erase verification_pending back to not_needed after a code email arrived but could not
+        // be matched, hiding the exact reason the continuation stopped.
+        verification: verification.status === 'not_needed'
+          ? claimedReview.verification ?? verification
+          : verification,
         security_code: attempted,
         submission_attempted_at: capturedAt,
         preview_screenshot_url: blob.url,
@@ -2808,6 +3053,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         sentTo: attempted.sent_to,
         digits: attempted.digits,
         codeSupplied: Boolean(options.securityCode),
+        codeReadInSession: Boolean(enteredCode),
         codeOutcome: receiptResult.securityCodeAttempt?.outcome ?? null,
       }, 'Employer is holding this application behind an emailed security code');
       return;
@@ -2868,6 +3114,50 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       })));
       return;
     }
+    /* A CODE RUN OWES TWO PROOFS, AND "NO ERROR VISIBLE" IS NEITHER OF THEM.
+     *
+     * The challenge branch above has already returned, so by here the code control is gone from the
+     * page. Gone is not filed. Greenhouse unmounts the whole application form and navigates to its
+     * confirmation route on success, and it also unmounts the code control when it re-renders the
+     * form for any other reason, so the disappearance on its own distinguishes nothing. The two
+     * facts that do are the runner's own reading of what it did with the code, and the page's own
+     * confirmation state - and this used to demand neither, writing outcome 'accepted' onto the
+     * attempt as a literal regardless of what the runner reported.
+     *
+     * Anything short of both is 'unverified', which is a state with a next step, rather than
+     * 'submitted', which is a claim. */
+    if (enteredCode) {
+      const codeOutcome = receiptResult.securityCodeAttempt?.outcome ?? null;
+      if (codeOutcome !== 'accepted' || verdict.kind !== 'confirmed') {
+        fastify.log.warn(
+          { applicationId: row.id, codeOutcome, verdict: verdict.kind },
+          'Security-code submission could not be proved, recording it as unverified',
+        );
+        await writeReview(row, nextReview(claimedReview, {
+          ...unverifiedSubmissionPatch(claimedReview, {
+            at: capturedAt,
+            cause: 'no_confirmation_state',
+            previewUrl: blob.url,
+          }),
+          ...(claimedReview.security_code
+            ? {
+              security_code: withSecurityCodeAttempts(claimedReview.security_code, [
+                ...codeAttempts,
+                {
+                  at: capturedAt,
+                  fingerprint: securityCodeFingerprint(row.id, enteredCode),
+                  outcome: codeOutcome === 'rejected' ? 'rejected'
+                    : codeOutcome === 'no_control' ? 'no_control'
+                      : codeOutcome === 'accepted' ? 'error'
+                        : 'not_entered',
+                },
+              ]),
+            }
+            : {}),
+        }));
+        return;
+      }
+    }
     /* 'unreported' means a runner older than submitOutcome, and it keeps the previous behaviour
        exactly: scrape the body, and throw if there is nothing to scrape. Only 'confirmed' skips the
        scrape, because on that arm the page said so itself. */
@@ -2885,15 +3175,18 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       submission_error: undefined,
       verification,
       // Present only when a code finished this one, and it is the fact that makes the receipt
-      // legible: this application was sent, refused, and completed with a code the applicant read
-      // out of her own mailbox.
-      ...(options.securityCode && claimedReview.security_code
+      // legible: this application was sent, refused, and completed with the code the same run read
+      // out of the mailbox while holding the challenged page open.
+      ...(claimedReview.security_code && (enteredCode || codeAttempts.length > 0)
         ? {
-          security_code: withSecurityCodeAttempt(claimedReview.security_code, {
-            at: capturedAt,
-            fingerprint: securityCodeFingerprint(row.id, options.securityCode),
-            outcome: 'accepted',
-          }),
+          security_code: withSecurityCodeAttempts(claimedReview.security_code, [
+            ...codeAttempts,
+            ...(enteredCode ? [{
+              at: capturedAt,
+              fingerprint: securityCodeFingerprint(row.id, enteredCode),
+              outcome: 'accepted' as const,
+            }] : []),
+          ]),
         }
         : {}),
       receipt: {
@@ -2927,10 +3220,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     const receipt = await readReceipt(page);
     const capturedAt = new Date().toISOString();
     const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
-    const blob = await put(
+    const blob = await storeReceiptScreenshot(
       `users/${row.user_id}/submission-runs/${claimedReview.submission_run_id}/receipt.png`,
       screenshot,
-      { access: 'public', contentType: 'image/png', addRandomSuffix: true },
     );
     await writeReview(row, nextReview(claimedReview, {
       status: 'submitted',
@@ -3194,21 +3486,28 @@ export type SecurityCodeSubmissionOutcome =
  *
  * It moves the packet back onto the ordinary submit path with a per-application authorization - the
  * applicant supplying a code IS the approval, and it is the same shape of authorization the approve
- * route writes - and then runs submit() with the code in hand. Everything downstream is the plumbing
- * that already exists.
+ * route writes - and then runs submit(). Everything downstream is the plumbing that already exists.
  *
- * WHAT THIS CANNOT PROMISE, and it is written here rather than discovered later. The managed runner
- * is stateless and one-shot: a finishing run loads the form fresh, fills it, and submits, and only
- * then does the code control exist to type into. That first submit is what re-presents the
- * challenge, and whether Greenhouse re-issues a code at that point or keeps the outstanding one
- * valid decides whether the code she supplied is still the right one. Both are plausible and the
- * question has not been answered against a live posting. So every attempt is recorded with its
- * outcome, 'rejected' is reported as rejected rather than dressed up, and the sentence she gets then
- * tells her to use the newest email. The first real use of this endpoint is the measurement.
+ * THE QUESTION THIS USED TO LEAVE OPEN IS ANSWERED, AND THE ANSWER BREAKS THE OLD DESIGN. The note
+ * here previously said that whether Greenhouse re-issues a code on the finishing run's own submit
+ * "has not been answered against a live posting", and that the first real use would be the
+ * measurement. It was measured, on a live Cresta application on 2026-08-09: three codes to one
+ * mailbox at 20:24:03, 21:13:07 and 21:13:53, each send issuing a new one and invalidating the
+ * last. Since a code control only exists on a page that has just been sent, and this endpoint must
+ * send to reach one, the code she pasted is dead before it can be typed - every time, not
+ * sometimes. No amount of care in the typing can win that; the loop is structural.
  *
- * A stateful browser session - Browserbase contexts, which this repo already has plumbing for -
- * would remove the question entirely by keeping the pending submit alive between the two halves.
- * That is the fix if the measurement comes back badly, and it is a bigger change than this one.
+ * SO THE CODE SHE SUPPLIES IS NOT THE CODE THAT IS TYPED. It authorizes one more attempt, and its
+ * fingerprint stops the same dead code authorizing a second - which matters, because every attempt
+ * sends the form again and every send emails her another code. What gets typed is read from her
+ * connected mailbox inside the run, on the page that asked for it, while that page is still open.
+ * The attempt is recorded as 'superseded' rather than as a wrong code, because it was never wrong.
+ *
+ * WHICH MEANS THE HAPPY PATH DOES NOT COME THROUGH HERE AT ALL. When automatic verification is on
+ * and the mailbox is connected, the run that raises the challenge finishes it in the same breath and
+ * this endpoint is never reached. It exists for the case where that read failed, and the honest
+ * thing it can offer is another attempt with a fresh in-session read - not a promise to use the
+ * string she typed.
  */
 export async function finishSecurityCodeSubmission(
   applicationId: string,

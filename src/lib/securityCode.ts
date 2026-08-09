@@ -70,11 +70,35 @@ export function readManagedSecurityCodeChallenge(
 export function securityCodeAttentionReason(state: SecurityCodeState): string {
   const length = state.digits > 0 ? `${state.digits}-character ` : '';
   const address = state.sent_to ? ` to ${state.sent_to}` : '';
-  const lastRejected = state.attempts?.some((attempt) => attempt.outcome === 'rejected') === true;
-  const tail = lastRejected
-    ? ' The last code Litos tried was not accepted, so use the newest email.'
-    : '';
-  return `Litos submitted this application and the employer asked for a human check: a ${length}security code was emailed${address}, and the application is not filed until that code is entered and the form is sent again.${tail} Enter the code from that email and Litos will finish it.`;
+  const attempts = state.attempts ?? [];
+  const lastRejected = attempts.some((attempt) => attempt.outcome === 'rejected');
+  const superseded = attempts.some((attempt) => attempt.outcome === 'superseded');
+  /* WHAT SHE IS ACTUALLY BEING ASKED FOR, which is no longer a code.
+   *
+   * The old sentence ended "Enter the code from that email and Litos will finish it", and on a
+   * rejection it added "use the newest email". Both were wrong in the same way, and the way is
+   * structural rather than a wording problem: the employer issues a new code on every send and
+   * invalidates the last, and a code control only exists on a page that has just been sent. So by
+   * the time any code she pastes reaches a form, the send that got Litos back to a code field has
+   * already replaced it. "Use the newest email" asked her to win a race that cannot be won.
+   *
+   * What finishes this application is Litos reading the code itself, in the same run and on the
+   * same page, in the seconds between the send and the email landing. So the sentence says what
+   * Litos will do, what it needs to be able to do it, and - when it has already tried - what
+   * actually happened. The three tails are mutually exclusive and ordered by what she needs first.
+   */
+  const tail = superseded
+    ? ' The code you gave Litos could not be used: this employer issues a new code every time the'
+      + ' form is sent, and Litos has to send the form to reach the code field at all, so the code'
+      + ' in your hand is replaced before it can be typed. Litos now reads the new code itself from'
+      + ' your connected mailbox on the same page it was asked for.'
+    : lastRejected
+      ? ' Litos read a code from your mailbox and the employer did not accept it, so this one needs'
+        + ' you: open the portal and finish it there.'
+      : ' Litos reads the code from your connected mailbox and enters it on the same page that asked'
+        + ' for it. If your mailbox is not connected, or automatic verification is off, that is what'
+        + ' is missing here.';
+  return `Litos submitted this application and the employer asked for a human check: a ${length}security code was emailed${address}, and the application is not filed until that code is entered and the form is sent again.${tail}`;
 }
 
 /**
@@ -121,13 +145,21 @@ export function findSecurityCodeAttempt(
 /**
  * Hand a code to the atomic confirmation and submit action the list already ends with.
  *
+ * THE CODE CONTROL HAS TO ALREADY BE ON THE PAGE WHEN THIS LIST RUNS. The runner's atomic action
+ * types the code FIRST and clicks once, in that order, because clicking a verification form before
+ * the code is in it resubmits empty and rotates the code. So this is the action list for a run that
+ * is already standing on the challenge DOM, which in practice means a continuation of the run that
+ * raised it. Handing it to a list that begins with a fresh page load is what packet
+ * 9810bdcf-fc3d-44bb-a8cb-b09c51aaf131 did on 2026-08-09: on first paint a Greenhouse application
+ * form has no code control at all, the runner reported 'no_control' and threw 'Security code was not
+ * entered before atomic verification', and nothing was typed and nothing was sent.
+ * securityCodeContinuationActions below is the shape that gets used against a live employer.
+ *
  * ZERO EXTRA ACTIONS, and that is not tidiness. MANAGED_ACTION_LIMIT is 120; a reconstruction of a
  * real Greenhouse packet's action list came to exactly 120 with trimGreenhouseManagedActionsToBudget
  * having already shaved preferred_first_name and preferred_last_name off the end. Every action added
  * to a submit run displaces a field the applicant expects filled. The code cannot be queued as its
- * own top-level action anyway. The runner enters the supplied code first, then performs exactly one
- * fresh verification confirmation pass and one physical click. This action is never permitted to
- * click an application form first, and the list stays the length it already was.
+ * own top-level action anyway.
  *
  * Returns the list unchanged when it does not end in an atomic submit, rather than appending one. A
  * caller that has no atomic submit has been gated somewhere upstream (portalCanAutoSubmit, the
@@ -145,6 +177,31 @@ export function withSecurityCode(
   last.securityCode = code;
   last.submitKind = 'verification';
   return next;
+}
+
+/**
+ * The whole action list for the second half of a security-code submission: one atomic action,
+ * carrying the code, run as a continuation of the browser that is already looking at the challenge.
+ *
+ * IT IS THE PACKET'S OWN SUBMIT ACTION, not a second copy of one. buildManagedPortalActions ends in
+ * an atomic submit whose selector, chooser policy, contract version and retry budget the runner
+ * validates field by field and rejects outright on any mismatch. Writing those out again here would
+ * be a fifth place they have to agree, and the runner's answer to a disagreement is to refuse the
+ * whole run - so the list is derived from the one production already built.
+ *
+ * Returns null when the packet's list does not end in an atomic submit. That is the same upstream
+ * gate withSecurityCode respects: a packet Litos may not auto-submit does not become submittable by
+ * arriving here with a code in hand.
+ */
+export function securityCodeContinuationActions(
+  actions: readonly ManagedBrowserAction[],
+  code: string,
+): ManagedBrowserAction[] | null {
+  const last = actions[actions.length - 1];
+  if (!last || last.type !== 'confirmAndSubmit' || last.contractVersion !== 2 || last.submitKind !== 'application') {
+    return null;
+  }
+  return withSecurityCode([last], code);
 }
 
 /**
@@ -180,7 +237,26 @@ export function withSecurityCodeAttempt(
   state: SecurityCodeState,
   attempt: SecurityCodeAttempt,
 ): SecurityCodeState {
-  return { ...state, attempts: [...(state.attempts ?? []), attempt].slice(-10) };
+  return withSecurityCodeAttempts(state, [attempt]);
+}
+
+/**
+ * One run can now produce two attempts, and both have to survive.
+ *
+ * A finishing run carries the applicant's code, which it records as 'superseded' because it cannot
+ * be typed, and then reads the code its own submit caused and records what happened to that one.
+ * Appending them one at a time through separate state objects lost whichever was written first, and
+ * losing the superseded record is the one that matters: its fingerprint is the only thing standing
+ * between a dead code and an endless sequence of resends, each of which emails her another code.
+ *
+ * Still capped at the last ten, and still nothing but fingerprints.
+ */
+export function withSecurityCodeAttempts(
+  state: SecurityCodeState,
+  attempts: readonly SecurityCodeAttempt[],
+): SecurityCodeState {
+  if (attempts.length === 0) return state;
+  return { ...state, attempts: [...(state.attempts ?? []), ...attempts].slice(-10) };
 }
 
 /**

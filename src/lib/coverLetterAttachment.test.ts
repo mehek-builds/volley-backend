@@ -251,7 +251,7 @@ test('a cover letter that cannot be fetched degrades the run instead of aborting
     runner.indexOf('function strippedCoverLetterSpec'),
   );
   assert.ok(fn.length > 0, 'packetForCoverLetterCapability must still exist');
-  assert.match(fn, /try \{\s*return \{ packet: await buildPacket\(rows\[0\]\) \};\s*\} catch \(error\) \{/);
+  assert.match(fn, /try \{\s*return \{ packet: await buildPacket\(rows\[0\], controlledTest\) \};\s*\} catch \(error\) \{/);
   const issue = fn.match(/coverLetterIssue: '([^']*)'/g) ?? [];
   assert.equal(issue.length, 2, 'both failures owe the applicant a sentence');
   for (const sentence of issue) {
@@ -260,4 +260,70 @@ test('a cover letter that cannot be fetched degrades the run instead of aborting
   }
   // The detail is not thrown away either.
   assert.match(fn, /fastify\.log\.warn\(\{ error, applicationId: row\.id \}[\s\S]{0,140}could not be attached/);
+});
+
+/* THE POST-DISCOVERY REBUILD MUST KEEP THE CONTROLLED RESUME DECISION.
+ *
+ * prepareManaged builds once before discovery, then packetForCoverLetterCapability rebuilds after
+ * discovery. The first build correctly used the QA fixture while this second one silently dropped
+ * the flag and tried to read qa/<id>.pdf from Vercel Blob. Pin every exit from this helper, because
+ * unsupported forms, generation failure, attachment success and attachment failure all return a
+ * separately rebuilt packet. */
+test('every cover-letter capability rebuild preserves the caller controlled-resume decision', () => {
+  const runner = routeSource('submissionRunner.ts');
+  const fn = runner.slice(
+    runner.indexOf('async function packetForCoverLetterCapability'),
+    runner.indexOf('function strippedCoverLetterSpec'),
+  );
+  assert.ok(fn.length > 0, 'packetForCoverLetterCapability must still exist');
+  assert.match(fn, /fastify: FastifyInstance,\s*controlledTest: boolean,/);
+
+  assert.match(
+    fn,
+    /if \(!supported\) return \{ packet: omitCoverLetter\(await buildPacket\(row, controlledTest\)\) \};/,
+    'a controlled form with no cover-letter input must keep fixture resume bytes after discovery',
+  );
+  assert.match(
+    fn,
+    /Cover letter generation failed[\s\S]{0,240}omitCoverLetter\(await buildPacket\(row, controlledTest\)\)/,
+    'the generation-error degrade must keep the same resume source',
+  );
+  assert.match(
+    fn,
+    /return \{ packet: await buildPacket\(rows\[0\], controlledTest\) \}/,
+    'the supported cover-letter success branch must keep the same resume source',
+  );
+  assert.match(
+    fn,
+    /strippedCoverLetterSpec\(rows\[0\]\.spec\)[\s\S]{0,100}controlledTest/,
+    'the attachment-error degrade must remove only the cover letter, not the controlled resume decision',
+  );
+  assert.equal(fn.match(/buildPacket\(/g)?.length, 4, 'the helper has exactly four packet rebuild exits');
+  assert.equal(
+    fn.match(/\bcontrolledTest\b/g)?.length,
+    5,
+    'the explicit parameter must be used by all four packet rebuilds',
+  );
+
+  const managedCall = runner.slice(
+    runner.indexOf('async function prepareManaged('),
+    runner.indexOf('\nasync function prepare(', runner.indexOf('async function prepareManaged(')),
+  );
+  assert.match(
+    managedCall,
+    /packetForCoverLetterCapability\([\s\S]{0,180}packetUsesControlledResumeFixture\(portal\)/,
+  );
+  const directCall = runner.slice(
+    runner.indexOf('async function prepare('),
+    runner.indexOf('\nasync function submitControlled(', runner.indexOf('async function prepare(')),
+  );
+  assert.match(
+    directCall,
+    /packetForCoverLetterCapability\([\s\S]{0,180}packetUsesControlledResumeFixture\(portal\)/,
+  );
+  assert.doesNotMatch(
+    `${managedCall}\n${directCall}`,
+    /packetForCoverLetterCapability\([^;]*,\s*(?:true|false)\s*\)/,
+    'callers must derive fixture use from the detected portal, not choose it ad hoc',
+  );
 });

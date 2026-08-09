@@ -490,6 +490,32 @@ test('send-time refresh replaces stale EEO prose with stored profile answers', (
   assert.equal(questionRequiresHumanAttention(questions[0]), false);
 });
 
+/* R-118. The refresh is why a hand-edited packet could never fix the Deepgram blocker: the stored
+ * answer is thrown away and re-resolved from the profile on every run, so a "May 2028" typed into
+ * the dashboard was overwritten with "2028" before the next send. That makes this function, and not
+ * the packet row, the thing the fix has to land in.
+ *
+ * Both rows below are the real prod shape of packet 59fb48ae-382c-4157-9b3d-d4c12883cc62. */
+test('R-118: send-time refresh gives a graduation year the month the profile states', () => {
+  const profile = { grad_date: 'May 2028', grad_year: 2028 };
+  const refreshed = refreshKnownQuestionAnswers([
+    { question: 'expected graduation year', answer: '2028' },
+    { question: 'expected graduation year', answer: 'May 2028' },
+  ], profile, undefined);
+  assert.equal(refreshed[0].answer, 'May 2028');
+  assert.equal(refreshed[1].answer, 'May 2028');
+
+  // A profile with only a year is left with only a year, through the same call.
+  assert.equal(
+    refreshKnownQuestionAnswers(
+      [{ question: 'expected graduation year', answer: '2028' }],
+      { grad_date: '2028', grad_year: 2028 },
+      undefined,
+    )[0].answer,
+    '2028',
+  );
+});
+
 test('send-time refresh clears stale refused answers across the reviewer examples', () => {
   const stale = refreshKnownQuestionAnswers([
     { question: 'Can you work onsite in our Chicago office five days per week?', answer: 'Yes' },
@@ -934,11 +960,23 @@ test('the standing onsite preference is scoped to the US and says nothing about 
     );
     assert.ok(held && 'skipReason' in held, label);
   }
+  /* Held because the posting is foreign, MIXED, or names nothing that is a place at all. Two cases
+     that used to sit on this list have moved to the answered list below, and the move is the point
+     of 2026-08-09's Anduril fix rather than a relaxation of it:
+
+     ['San Francisco, CA', 'New York, NY'] - two US offices. 'anywhere' is a MAXIMAL commitment
+       scoped to the United States, so it covers both, and which of the two she ends up in does not
+       have to be decided to answer "will you work in person". Anduril's 2027 intern posting lists
+       SIX US offices in one semicolon-joined string and was refused on this rule alone.
+     ['Boise, ID'] - one US office, absent from the finite metro table. The table's rule is that an
+       unrecognised place must not become US-safe BY OMISSION, and that still holds: this is
+       recognised POSITIVELY, from a structured `City, ST` posting field carrying a US state code.
+
+     ['US market'] stays held and is the reason vettedWorkplaceCountry requires a comma: it reads as
+     American to a country classifier and is not an office. */
   for (const locations of [
     ['Paris, France'],
     ['Paris, France', 'San Francisco, CA'],
-    ['San Francisco, CA', 'New York, NY'],
-    ['Boise, ID'],
     ['US market'],
   ]) {
     const held = resolveKnownAnswer(
@@ -949,15 +987,31 @@ test('the standing onsite preference is scoped to the US and says nothing about 
     );
     assert.ok(held && 'skipReason' in held, locations.join(' | '));
   }
-  assert.deepEqual(
-    resolveKnownAnswer(
-      'Can you commit to working in-person five days per week?',
-      'select',
-      committed,
-      frozenJobLocationContext(['San Francisco, CA']),
-    ),
-    { value: 'Yes' },
-  );
+  for (const locations of [
+    ['San Francisco, CA'],
+    ['San Francisco, CA', 'New York, NY'],
+    ['Boise, ID'],
+    // Anduril's 2027 Software Engineer Intern posting, verbatim, after the semicolon split.
+    [
+      'Atlanta, Georgia, United States',
+      'Boston, Massachusetts, United States',
+      'Costa Mesa, California, United States',
+      'Irvine, California, United States',
+      'Reston, Virginia, United States',
+      'Seattle, Washington, United States',
+    ],
+  ]) {
+    assert.deepEqual(
+      resolveKnownAnswer(
+        'Can you commit to working in-person five days per week?',
+        'select',
+        committed,
+        frozenJobLocationContext(locations),
+      ),
+      { value: 'Yes' },
+      locations.join(' | '),
+    );
+  }
   // The US metros on the same list are answered.
   for (const label of [
     'Are you available to work from our office in Chicago?',
@@ -1392,7 +1446,11 @@ test('stored academic and onsite facts answer repeated select-shaped live questi
   assert.deepEqual(resolveKnownAnswer('Are you currently enrolled in a degree program?', 'radio', profile, undefined), { value: 'Yes' });
   assert.deepEqual(resolveKnownAnswer('Will you be returning to a degree program after this internship?', 'select', profile, undefined), { value: 'Yes' });
   assert.deepEqual(resolveKnownAnswer('Graduation Month', 'select', profile, undefined), { value: 'May' });
-  assert.deepEqual(resolveKnownAnswer('Graduation Year', 'select', profile, undefined), { value: '2028' });
+  // CHANGED, and the change is the point: a graduation-year answer now carries the month the
+  // profile really states. The managed provider reports every control as text, so a bare "2028" was
+  // the only thing a react-datepicker ever got and it filled nothing. See graduationYearFieldAnswer.
+  // The bare year is still what a year SELECT receives, via profileFieldCandidates' ladder.
+  assert.deepEqual(resolveKnownAnswer('Graduation Year', 'select', profile, undefined), { value: 'May 2028' });
   assert.deepEqual(
     resolveKnownAnswer('If you are enrolled in university, what degree are you currently pursuing?', 'select', profile, undefined),
     { value: 'Bachelor\'s Degree' },
@@ -2736,5 +2794,58 @@ test('a sponsorship question that will not say which country is still refused', 
   ]) {
     const resolved = resolveKnownAnswer(label, 'text', PROD_OWNER_PROFILE, 'This role is based in San Francisco, California.');
     assert.ok(resolved && 'skipReason' in resolved, `must not be answered: ${label.slice(0, 70)}`);
+  }
+});
+
+test('the surname half of a legal-name pair is answered from the stored full name', () => {
+  /* DRW `7c2db6ff`, 2026-08-09. "Legal First Name" filled and "Legal Last Name" beside it did not,
+     because classifyField returned null for the second and resolveKnownAnswer produced nothing, so
+     no action was ever built for it. Splitting a stored full name is not an inference: composedLegalName
+     has relied on exactly this reading since it shipped, keeping everything after the first token as
+     the surname, and the two arms now cannot disagree about which part of "Mehek Mandal" is which. */
+  const ap = { full_name: 'Mehek Mandal', legal_first_name: 'Mehek' };
+  assert.deepEqual(resolveKnownAnswer('Legal Last Name', 'text', ap, undefined), { value: 'Mandal' });
+  assert.deepEqual(resolveKnownAnswer('legal last name', 'textarea', ap, undefined), { value: 'Mandal' });
+  assert.deepEqual(resolveKnownAnswer('Family name (legal)', 'text', ap, undefined), { value: 'Mandal' });
+  // The stored legal first name still wins its own question, and the whole-name question is unmoved.
+  assert.deepEqual(resolveKnownAnswer('Legal First Name', 'text', ap, undefined), { value: 'Mehek' });
+  assert.deepEqual(resolveKnownAnswer('Full Legal Name', 'text', ap, undefined), { value: 'Mehek Mandal' });
+  // A bare "Last Name" is the fixed identity control every adapter already types into, not a question.
+  assert.equal(resolveKnownAnswer('Last Name', 'text', ap, undefined), null);
+  // One recorded name is no surname. Repeating the given name would be a claim nothing on file supports.
+  assert.equal(resolveKnownAnswer('Legal Last Name', 'text', { full_name: 'Mehek' }, undefined), null);
+  assert.equal(resolveKnownAnswer('Legal Last Name', 'text', {}, undefined), null);
+});
+
+test('a yes/no question is never handed to the essay drafter, however long it runs', () => {
+  /* Virtu `e6a09e7f` and `04204e04`, 2026-08-09. "Will you be ready for full-time employment in
+     2028?" is 49 characters and carries a question mark, so isOpenEndedQuestion's length catch-all
+     claimed it and the drafter answered a yes/no question with 186 and 374 characters of prose.
+     Both were typed at a closed control and came back `no option matched "Yes. I'll graduate from
+     USC Viterbi..."`. A wrong-shaped answer on a real employer's form is worse than a blank one:
+     a blank is visibly unfinished and this is not. */
+  for (const label of [
+    'Will you be ready for full-time employment in 2028?',
+    'Do you have relevant internship experience at a proprietary trading firm?',
+    'Are you willing to work in-person for 12 weeks during the internship?',
+  ]) {
+    assert.equal(isPolarQuestion(label), true, label);
+    assert.equal(isOpenEndedQuestion(label), false, label);
+  }
+  // An explicit invitation to write still makes it an essay, which is what the cue list is for.
+  for (const label of [
+    'Can you commit to a 12 week internship? Please explain any constraints.',
+    'Do you have experience with distributed systems? Tell us about it.',
+    'Are you interested in this role? Why?',
+  ]) {
+    assert.equal(isOpenEndedQuestion(label), true, label);
+  }
+  // And nothing that was an essay prompt before has stopped being one.
+  for (const label of [
+    'What excites you about Deepgram?',
+    'Why are you interested in this internship? What projects have you worked on?',
+    'You enjoy working closely with researchers on developing new and improved models.',
+  ]) {
+    assert.equal(isOpenEndedQuestion(label), true, label);
   }
 });

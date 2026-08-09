@@ -3417,7 +3417,7 @@ function isProtectedManagedAction(
   const base = managedActionLabelBase(action);
   if (base && protectedActionBases.has(base)) return true;
   if (GREENHOUSE_FIXED_EDUCATION_ACTION_RE.test(label)) return true;
-  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight)/
+  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight)/
     .test(label);
 }
 
@@ -3570,6 +3570,12 @@ type ReviewedQuestionActionProtection = {
 function coreActionProtection(actions: readonly ManagedBrowserAction[], portal: SupportedPortal): ReadonlySet<string> {
   const available = new Set(actions.map(managedActionLabelBase).filter((base): base is string => Boolean(base)));
   const protectedBases = new Set<string>();
+  // The controlled fixture's SSR form is unsafe to mutate until React has attached its handlers.
+  // Class-level protection keeps this barrier in discovery trims too; naming it in the core set
+  // makes the submit and preview minimum explicit alongside identity and resume.
+  if (portal === 'controlled_test' && available.has('controlled_portal_hydrated')) {
+    protectedBases.add('controlled_portal_hydrated');
+  }
   if (available.has('name')) {
     protectedBases.add('name');
   } else {
@@ -4074,6 +4080,20 @@ function managedActionLabelQuestion(label: string): string {
     .trim();
 }
 
+/**
+ * Does this skipped line EXPLAIN the loss of an answer, as opposed to merely mentioning a label?
+ *
+ * The distinction is the whole of R-122. `managedAnswerLossReasons` asks "is this worth showing
+ * her", and `managedUnexplainedAnswerLabels` asks "did anyone account for this label at all". Those
+ * are two different questions, and for three rounds one predicate answered both: a line reading
+ * `question:expected graduation year: nothing matched <selector>` satisfied the second while
+ * failing the first, so the diagnostic treated the label as accounted for, the sanitizer dropped
+ * the line as alias-ladder noise, and the applicant was told the field was empty with no reason.
+ */
+function managedSkipExplainsLoss(entry: string): boolean {
+  return MANAGED_ANSWER_LOSS_SUFFIX.test(entry);
+}
+
 export function managedAnswerLossReasons(result: Pick<ManagedBrowserResult, 'skipped'>): string[] {
   const out = new Set<string>();
   for (const entry of result.skipped ?? []) {
@@ -4111,13 +4131,30 @@ export function managedAnswerLossReasons(result: Pick<ManagedBrowserResult, 'ski
  * because silence there is the normal case - the ladder tries several selectors expecting most to
  * match nothing - so only labels the caller names as single-attempt are considered.
  */
-export function managedUnreportedFillLabels(
+export type ManagedUnexplainedAnswer = {
+  /** The action label, e.g. `question:expected graduation year`. */
+  label: string;
+  /** The employer's own question, with the action scaffolding stripped. */
+  question: string;
+  /**
+   * The provider's own lines about this label that carried no explanation, kept verbatim.
+   *
+   * This is the RAW signal, and it is kept for exactly the labels that lost a value and for no
+   * others. That bound is the point: `result.skipped` runs to well over a hundred lines on a large
+   * Greenhouse packet, almost all of them one optional selector that matched nothing, and storing
+   * the lot would bury the two lines that matter. Empty means the run said nothing at all about a
+   * value Litos typed, which is the other half of the diagnosis and is worth distinguishing.
+   */
+  rawMentions: string[];
+};
+
+export function managedUnexplainedAnswers(
   actions: readonly ManagedBrowserAction[],
   result: Pick<ManagedBrowserResult, 'filledFields' | 'skipped'>,
-): string[] {
+): ManagedUnexplainedAnswer[] {
   const filled = new Set(result.filledFields ?? []);
   const skipped = (result.skipped ?? []).map((entry) => (entry ?? '').trim()).filter(Boolean);
-  const out: string[] = [];
+  const out: ManagedUnexplainedAnswer[] = [];
   const seen = new Set<string>();
   for (const action of actions) {
     if (action.type !== 'fill' && action.type !== 'select') continue;
@@ -4126,11 +4163,42 @@ export function managedUnreportedFillLabels(
     // Everything else with a value is an alias ladder, where a miss is expected and reported.
     if (!label || !label.startsWith('question:') || !action.value?.trim()) continue;
     if (filled.has(label) || seen.has(label)) continue;
-    if (skipped.some((entry) => entry.startsWith(label))) continue;
+    const mentions = skipped.filter((entry) => entry.startsWith(label));
+    // Only an EXPLANATION discharges the label. A mention that explains nothing leaves the applicant
+    // exactly where an absent mention would: a required field she is told is empty, with no account
+    // of why. See managedSkipExplainsLoss.
+    if (mentions.some(managedSkipExplainsLoss)) continue;
     seen.add(label);
-    out.push(label);
+    out.push({
+      label,
+      question: managedActionLabelQuestion(label),
+      rawMentions: mentions.slice(0, 4).map((entry) => entry.slice(0, 300)),
+    });
   }
   return out;
+}
+
+/** Names only, for the log line and for the tests that pin the old contract. */
+export function managedUnreportedFillLabels(
+  actions: readonly ManagedBrowserAction[],
+  result: Pick<ManagedBrowserResult, 'filledFields' | 'skipped'>,
+): string[] {
+  return managedUnexplainedAnswers(actions, result).map((entry) => entry.label);
+}
+
+/**
+ * What she is told about a value Litos typed that the form did not keep and the run did not explain.
+ *
+ * She already gets the employer's own '"X" is required and is still empty'. That sentence is true
+ * and it is also the reason this defect survived three rounds: read on its own it says she left a
+ * field blank. This says the opposite, which is what actually happened.
+ */
+export function managedUnexplainedAnswerReasons(
+  unexplained: readonly ManagedUnexplainedAnswer[],
+): string[] {
+  return unexplained.map((entry) => (entry.question
+    ? `Litos put an answer in this field and the form did not keep it, and the run gave no reason: "${entry.question.slice(0, 60)}". This is a Litos defect, not something you left blank.`
+    : 'Litos put an answer in a field on this form and it did not keep it, and the run gave no reason. This is a Litos defect, not something you left blank.'));
 }
 
 // Fixed-field fills only (name/email/phone/location/links/resume) - shared by
@@ -4150,6 +4218,28 @@ function pushFixedFieldActions(
   // a run that fires ten optional fills at a consent page produces a blocker card implying the form
   // was found and merely refused. It was never reached.
   if (ACCOUNT_WALLED_FAMILIES.has(family)) return;
+  /* THE CONTROLLED PORTAL IS REACT, AND SSR IS NOT READINESS.
+   *
+   * Its contact fields and submit button exist in the server HTML before React attaches onSubmit.
+   * A cold remote browser could therefore fill every input and pass atomic required-field
+   * confirmation, then click an unhydrated native form. The browser performed a GET back to the
+   * same fixture instead of entering the security-code phase, so the runner honestly observed the
+   * old form, no challenge, and no receipt. Waiting longer after that click cannot repair it: the
+   * event that changes phase was already missed.
+   *
+   * The fixture publishes this exact marker only after its effect has run and the handlers are
+   * live. Required, not optional, because continuing without it would recreate the uncertain submit
+   * D-020 exists to prevent. It is scoped to controlled_test, so no employer page learns a QA-only
+   * contract and no production ATS action budget changes. */
+  if (portal === 'controlled_test') {
+    actions.push({
+      type: 'waitForSelector',
+      selector: 'form[data-litos-controlled-portal][data-litos-qa-ready="1"]',
+      label: 'controlled_portal_hydrated',
+      optional: false,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
+  }
   if (family === 'greenhouse') {
     pushGreenhouseManagedPreflightActions(actions);
     // After the preflight, because on a JD page the application form (and every combobox on it)

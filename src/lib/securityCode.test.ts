@@ -17,6 +17,7 @@ import {
   normalizeSecurityCode,
   readManagedSecurityCodeChallenge,
   securityCodeAttentionReason,
+  securityCodeContinuationActions,
   securityCodeFingerprint,
   withSecurityCode,
   withSecurityCodeAttempt,
@@ -103,12 +104,49 @@ test('the sentence names no address and no length when the page gave neither', (
   assert.doesNotMatch(reason, /undefined|null|0-character/);
 });
 
-test('a rejected attempt changes the sentence, because the code in her hand is now the wrong one', () => {
+/* THE SENTENCE STOPPED ASKING HER TO WIN A RACE.
+ *
+ * It used to end "use the newest email", which was a true statement about the code and a false
+ * statement about what would happen to it. Greenhouse issues a new code on every send, and Litos
+ * has to send the form to reach a code field at all, so whatever she pastes is replaced before it
+ * can be typed. Three codes to one mailbox on a live Cresta application on 2026-08-09 is the
+ * measurement.
+ *
+ * A rejection now means something narrower and worse: Litos read the code itself, in the same run,
+ * on the page that asked for it, and the employer still said no. There is no newer email that
+ * helps, so the sentence stops asking for one and hands the application back.
+ */
+test('a rejected attempt hands the application back rather than asking for a newer code', () => {
   const state = withSecurityCodeAttempt(
     beginSecurityCodeState({ challenge: { digits: 8 }, attemptedAt: 'x', authorized: true }),
     { at: 'y', fingerprint: 'f', outcome: 'rejected' },
   );
-  assert.match(securityCodeAttentionReason(state), /use the newest email/);
+  const reason = securityCodeAttentionReason(state);
+  assert.doesNotMatch(reason, /use the newest email/);
+  assert.match(reason, /did not accept it/);
+  assert.match(reason, /open the portal and finish it there/);
+});
+
+test('a superseded attempt explains why the code she gave could not be used', () => {
+  const state = withSecurityCodeAttempt(
+    beginSecurityCodeState({ challenge: { digits: 8 }, attemptedAt: 'x', authorized: true }),
+    { at: 'y', fingerprint: 'f', outcome: 'superseded' },
+  );
+  const reason = securityCodeAttentionReason(state);
+  // The mechanism, in her words, because without it "your code was not used" reads as a Litos bug.
+  assert.match(reason, /issues a new code every time the form is sent/);
+  assert.match(reason, /reads the new code itself/);
+  // And it is never reported as a wrong code, because it was never wrong.
+  assert.doesNotMatch(reason, /not accepted|wrong|incorrect/i);
+});
+
+test('with nothing tried yet, the sentence says who reads the code', () => {
+  const state = beginSecurityCodeState({ challenge: { digits: 8 }, attemptedAt: 'x', authorized: true });
+  const reason = securityCodeAttentionReason(state);
+  assert.match(reason, /reads the code from your connected mailbox/);
+  // The old sentence ended by asking her to enter one. Nothing types a code she supplies any more,
+  // so nothing may ask her for one as though it would be used.
+  assert.doesNotMatch(reason, /Enter the code from that email/);
 });
 
 test('the sentence is categorized as a security code and not as a captcha', () => {
@@ -242,6 +280,136 @@ test('carrying the code costs no actions at all', () => {
   assert.equal(actions[1].securityCode, undefined, 'and the caller\'s own list is not mutated');
 });
 
+/* ---- the run that actually types the code ----
+ *
+ * PACKET 9810bdcf-fc3d-44bb-a8cb-b09c51aaf131, Cresta, Greenhouse, 2026-08-09. The first run went
+ * the whole way: eight fields filled, resume and cover letter attached, approved, submitted, and
+ * Greenhouse answered by emailing an 8-character code and rendering eight single-character boxes.
+ * The packet correctly moved to awaiting_security_code. POST /applications/:id/security-code with
+ * the real code returned 200 and the packet then went to needs_attention, and the receipt shows
+ * exactly why: eight EMPTY boxes. submission_error was "Security code was not entered before atomic
+ * verification".
+ *
+ * The cause is an ordering one and it is total, not intermittent. withSecurityCode hangs the code
+ * on the action list's terminal atomic submit, and the runner's atomic submit types the code BEFORE
+ * it clicks - correctly, because clicking a verification form before the code is in it resubmits
+ * empty and rotates the code. But the managed runner is stateless: that action list begins with a
+ * fresh page load, and a Greenhouse application form on first paint has no code control at all,
+ * because Greenhouse only renders one in answer to a submit it has refused. So the runner found no
+ * control, reported 'no_control' and threw, and nothing was typed and nothing was sent.
+ *
+ * The code therefore belongs to a CONTINUATION of the run that raised the challenge, which is the
+ * one moment the control exists, and that is what these two cover. */
+
+test('the code rides a continuation carrying the packet\'s own submit action, and nothing else', () => {
+  const submitAction: ManagedBrowserAction = {
+    type: 'confirmAndSubmit',
+    selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
+    contractVersion: 2,
+    submitKind: 'application',
+    maxRetries: 1,
+    label: 'final_submit',
+    optional: false,
+  };
+  const packetActions: ManagedBrowserAction[] = [
+    { type: 'fill', selector: '#email', value: 'a@b.com' },
+    { type: 'upload', selector: '#resume', label: 'resume' },
+    submitAction,
+  ];
+  const actions = securityCodeContinuationActions(packetActions, 'TPHJrFMJ');
+  assert.ok(actions, 'a packet that ends in an atomic submit can be continued with a code');
+  // ONE action. The continuation runs on a browser that is already looking at the challenge, so
+  // re-filling the form would re-fill fields the employer already has, and re-uploading the resume
+  // would attach it twice.
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].type, 'confirmAndSubmit');
+  assert.equal(actions[0].securityCode, 'TPHJrFMJ');
+  assert.equal(actions[0].submitKind, 'verification');
+  // Derived from the packet's own submit action rather than written out again. The runner validates
+  // selector, contract version, retry budget and chooser policy field by field and refuses the whole
+  // run on any mismatch, so a second hand-written copy is a fifth place they all have to agree.
+  assert.equal(actions[0].selector, submitAction.selector);
+  assert.equal(actions[0].maxRetries, submitAction.maxRetries);
+  assert.equal(actions[0].contractVersion, 2);
+  assert.equal(submitAction.securityCode, undefined, 'and the packet\'s own action is not mutated');
+  assert.equal(submitAction.submitKind, 'application');
+});
+
+test('a packet Litos may not auto-submit does not become submittable by holding a code', () => {
+  // Same upstream gate withSecurityCode respects: no atomic submit means portalCanAutoSubmit, a
+  // multi-step wizard or an account wall said no somewhere above here. Returning null rather than
+  // synthesising a submit is what keeps that decision from being reversed by a code arriving.
+  assert.equal(securityCodeContinuationActions([{ type: 'fill', selector: '#email', value: 'a@b.com' }], 'TPHJrFMJ'), null);
+  assert.equal(securityCodeContinuationActions([], 'TPHJrFMJ'), null);
+  assert.equal(securityCodeContinuationActions([{
+    type: 'confirmAndSubmit',
+    selector: 'button',
+    contractVersion: 2,
+    submitKind: 'verification',
+    maxRetries: 1,
+  }], 'TPHJrFMJ'), null, 'a list that is already a verification submit is not a packet');
+});
+
+test('the first managed run of a code finish is an application submit with no code on it', async () => {
+  const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const start = source.indexOf('const initialActions = buildManagedPortalActions(portal, packet, true);');
+  assert.ok(start > 0, 'the first run must build the ordinary packet actions');
+  const firstRun = source.slice(start, source.indexOf('const initialChallenge = readManagedSecurityCodeChallenge(result);', start));
+  // THE REGRESSION GUARD. The code must not be attached to a list that begins with a page load.
+  assert.doesNotMatch(firstRun, /withSecurityCode\(/);
+  assert.doesNotMatch(firstRun, /options\.securityCode/);
+  // And the continuation is requested on every managed submit now, not only on the ones that expect
+  // to scrape a mailbox: without a live token there is no second half to enter a code into.
+  assert.match(firstRun, /requestContinuation: true/);
+  assert.match(firstRun, /continuationTtlSeconds: SECURITY_CODE_CONTINUATION_TTL_SECONDS/);
+});
+
+/* THE CODE THAT GETS TYPED IS READ INSIDE THE RUN, AND THERE IS NO OTHER SOURCE.
+ *
+ * This is the whole defect, stated as a test. Greenhouse rotates its code on every send and a code
+ * control only exists on a page that has just been sent, so a run that has to submit to reach a
+ * field is holding a dead code by the time it gets there. Three codes to one mailbox on a live
+ * Cresta application on 2026-08-09 - 20:24:03, 21:13:07, 21:13:53 - each send killing the last.
+ *
+ * So `options.securityCode` may never reach a continuation action list. It may only be fingerprinted
+ * and recorded as superseded. A future edit that pipes it back into securityCodeContinuationActions
+ * fails here.
+ */
+test('a code supplied out of band is never typed, only fingerprinted as superseded', async () => {
+  const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const start = source.indexOf('const initialChallenge = readManagedSecurityCodeChallenge(result);');
+  const end = source.indexOf('if (!receiptResult.screenshot)', start);
+  assert.ok(start > 0 && end > start);
+  const half = source.slice(start, end);
+  // The only thing done with the supplied code in the whole second half.
+  assert.match(half, /outcome: 'superseded'/);
+  assert.match(half, /securityCodeFingerprint\(row\.id, options\.securityCode\)/);
+  assert.doesNotMatch(half, /securityCodeContinuationActions\([^)]*options\.securityCode/);
+  assert.doesNotMatch(half, /withSecurityCode\(\s*initialActions,\s*options\.securityCode/);
+  // And what IS typed comes from the mailbox read this run made, on the page this run submitted.
+  assert.match(half, /securityCodeContinuationActions\(initialActions, prepared\.code\)/);
+  assert.match(half, /enteredCode = prepared\.code/);
+});
+
+test('a code finish is only recorded as submitted when the code was accepted AND the page confirmed', async () => {
+  const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  // Keyed on the code this run actually entered, not on the one the applicant handed over: the
+  // second is never typed, so gating on it would gate the proof on the wrong event.
+  const gate = source.indexOf('if (enteredCode) {\n      const codeOutcome');
+  assert.ok(gate > 0, 'the code run must have its own proof gate');
+  const submitted = source.indexOf("status: 'submitted'", gate);
+  assert.ok(submitted > gate, 'and it must sit above the submitted write');
+  const body = source.slice(gate, submitted);
+  // Both, not either. The challenge control being gone is not a receipt: Greenhouse unmounts it on
+  // any re-render of the form, and it unmounts the whole form on success.
+  assert.match(body, /codeOutcome !== 'accepted' \|\| verdict\.kind !== 'confirmed'/);
+  assert.match(body, /unverifiedSubmissionPatch/);
+  // The attempt records what the runner actually said. 'accepted' used to be written here as a
+  // literal, on every code run that got this far, whatever the runner reported.
+  assert.match(body, /receiptResult\.securityCodeAttempt\?\.outcome/);
+  assert.match(body, /outcome: codeOutcome === 'rejected' \? 'rejected'/);
+});
+
 test('a list with no submit click is left alone rather than given one', () => {
   // A caller with no submit click has been gated upstream: portalCanAutoSubmit, the multi-step
   // wizards, the account-walled families. Appending a click here would walk straight through that.
@@ -321,6 +489,9 @@ test('a security-code challenge is persisted before any receipt is parsed', asyn
   assert.ok(challengeBranch > managedStart);
   assert.ok(awaitingWrite > challengeBranch);
   assert.ok(receiptRead > awaitingWrite, 'receipt parsing must happen only after the challenge branch returns');
+  const challengeWrite = source.slice(challengeBranch, receiptRead);
+  assert.match(challengeWrite, /verification: verification\.status === 'not_needed'/);
+  assert.match(challengeWrite, /claimedReview\.verification \?\? verification/);
 });
 
 test('automatic verification records one remote managed continuation without exposing its token', async () => {
@@ -331,7 +502,12 @@ test('automatic verification records one remote managed continuation without exp
   const continuation = source.slice(start, end);
   assert.match(continuation, /runner: 'stratus-managed'/);
   assert.match(continuation, /managedContinuationFingerprint\(continuationToken\)/);
-  assert.match(continuation, /receiptResult = await continueManagedBrowser\(continuationToken, prepared.actions\)/);
+  // The packet's own atomic submit, carrying the code, rather than the generic ten-action list.
+  // MANAGED_ACTION_LIMIT is 120 and the runner types the eight boxes itself, so this is one action
+  // where buildManagedVerificationActions was ten - and it is the shape whose selector, chooser
+  // policy and contract version the runner validates field by field.
+  assert.match(continuation, /const codeActions = securityCodeContinuationActions\(initialActions, prepared\.code\) \?\? prepared\.actions/);
+  assert.match(continuation, /receiptResult = await continueManagedBrowser\(continuationToken, codeActions\)/);
   assert.match(continuation, /continuation_resumed: true/);
   assert.doesNotMatch(continuation, /continuation_token:/i);
   const receipt = source.slice(end, source.indexOf("fastify.log.info({ applicationId: row.id }", end));

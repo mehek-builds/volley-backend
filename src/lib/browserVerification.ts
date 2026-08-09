@@ -146,7 +146,7 @@ export async function prepareManagedEmailVerification(options: {
   findCode?: typeof findComposioVerificationCode;
 }): Promise<
   | { status: 'not_needed' | 'handoff' }
-  | { status: 'ready'; provider: VerificationCodeMatch['provider']; actions: ManagedBrowserAction[] }
+  | { status: 'ready'; provider: VerificationCodeMatch['provider']; code: string; actions: ManagedBrowserAction[] }
 > {
   if (!managedResultNeedsEmailVerification(options.result)) return { status: 'not_needed' };
   if (!options.permissionGranted) return { status: 'handoff' };
@@ -161,7 +161,14 @@ export async function prepareManagedEmailVerification(options: {
     findCode: options.findCode ?? findComposioVerificationCode,
   });
   if (!match) return { status: 'handoff' };
-  return { status: 'ready', provider: match.provider, actions: buildManagedVerificationActions(match.code) };
+  /* THE CODE TRAVELS ALONGSIDE THE ACTIONS, because the caller has a better action list than this
+   * one. A packet's own terminal atomic submit already carries the selector, chooser policy,
+   * contract version and retry budget the runner validates field by field, and the runner types the
+   * code into the eight-box widget itself at zero extra action cost. buildManagedVerificationActions
+   * below is the generic ten-action fallback for a caller that has no packet to derive from; see
+   * securityCodeContinuationActions. Neither one may be built from a code that came from anywhere
+   * other than a mailbox read inside the run that raised the challenge. */
+  return { status: 'ready', provider: match.provider, code: match.code, actions: buildManagedVerificationActions(match.code) };
 }
 
 export async function completeEmailVerificationIfPresent(options: {

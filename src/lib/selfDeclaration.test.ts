@@ -66,11 +66,18 @@ test('the refusal names what is being refused rather than reporting a failure', 
 test('the drafter is gated on this predicate, before the open-ended branch it used to reach', () => {
   const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
   const declarationGate = source.indexOf('if (isSelfDeclarationQuestion(label)) {');
-  const openEndedGate = source.indexOf('if (!isOpenEndedQuestion(label)) {');
+  const openEndedGate = source.indexOf('const wouldNotDraftNow = !isOpenEndedQuestion(label)');
   const drafter = source.indexOf('await draftApplicationAnswer(');
   assert.ok(declarationGate > 0, 'discoverAndResolveQuestions must consult isSelfDeclarationQuestion');
   assert.ok(openEndedGate > 0);
   assert.ok(drafter > 0);
+  /* The second half of the same gate, added 2026-08-09. isOpenEndedQuestion reads the LABEL and
+     cannot see the control, so a paragraph could be aimed at a select whose options it had never
+     read: Virtu and Faire each came back "no option matched" with the drafted answer quoted back at
+     them. A closed control is a fact about the form and is checked beside the predicate, not after
+     it, so the drafter is unreachable for either reason. */
+  assert.ok(source.indexOf('const closedControl =') > declarationGate);
+  assert.ok(source.indexOf('|| closedControl;') > 0, 'the closed-control belt must be part of the same gate');
   // Order is the whole guarantee: a declaration is refused before anything can decide it reads as
   // an essay, and long before the model is asked for one.
   assert.ok(declarationGate < openEndedGate, 'the declaration gate must run before the open-ended test');
