@@ -16,6 +16,18 @@
  * changes about as often as the source list does, is reviewable in a diff, and needs no migration,
  * so it does not have to wait for that to be cleaned up.
  *
+ * A SECOND CONSUMER NOW RAISES THE COST OF A WRONG ENTRY. lib/greenhouseEmbeddedBoards.ts joins
+ * this map against the board-token registry to decide that a `gh_jid` page on an employer's own
+ * domain is really that employer's Greenhouse board, and to build the application URL from it. So a
+ * wrong entry here no longer costs only a misleading logo; it can point a real application at the
+ * wrong board. Greenhouse itself is the backstop, since it validates board membership and redirects
+ * a mismatched for/token pair to an error page rather than serving another company's form, so the
+ * realistic cost is a run that lands on a page with no form. That is still worse than the old cost,
+ * and it is the reason the proof standards below are not optional.
+ *
+ * Four entries are currently believed wrong and are worth fixing under those standards rather than
+ * here: suki, imply, Nuro and stone all map to a domain owned by an unrelated company.
+ *
  * HOW THESE WERE ESTABLISHED, because a wrong logo is worse than no logo: it tells a job seeker
  * this row is a different company than it is. Nothing here was typed from memory and left at that.
  * Every entry is proven before it lands, never guessed. The first set was hand-checked on

@@ -74,8 +74,11 @@ test('natively hosted Greenhouse postings keep working exactly as before', () =>
  */
 test('a gh_jid alone never makes a page supported', () => {
   for (const url of [
-    // Not a verified employer domain. Nuro's proven domain is nuro.com, so nuro.ai cannot be
-    // resolved to the `nuro` board and must not be guessed into it.
+    // Refused because nuro.ai is not in the verified domain map, which is the right behaviour for
+    // the wrong reason: nuro.ai is in fact where all 104 of the `nuro` board's jobs publish, and the
+    // nuro.com currently recorded as proven is a parked placeholder. So this pins the refusal, not
+    // the belief behind it. Correcting the entry belongs in companyDomains.ts under its own proof
+    // standard, and when it lands this case is expected to flip to resolving.
     'https://nuro.ai/careers?gh_jid=4512345',
     // No employer domain at all.
     'https://example.com/careers?gh_jid=8052351',

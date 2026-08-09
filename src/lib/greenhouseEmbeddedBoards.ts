@@ -32,14 +32,23 @@ import { JOB_SOURCES } from './jobSources';
  *
  * A domain therefore only resolves to a token when the SAME company appears in both lists, and a
  * domain claimed by two different Greenhouse tokens resolves to nothing at all. Both lists refuse
- * to guess, so this map inherits that refusal: 222 employer domains resolve, and every other
+ * to guess, so this map inherits that refusal: 221 employer domains resolve, and every other
  * company page with a `gh_jid` on it stays unsupported and keeps the email fallback.
+ *
+ * 221 is how many domains RESOLVE, which is not how many are reachable. Asking each of those 221
+ * boards where its own jobs publish, via Greenhouse's per-job absolute_url, gives 62 boards that
+ * genuinely serve postings from the mapped domain. The other 145 publish only on greenhouse.io and
+ * so never serve a `gh_jid` page for this rule to find. 62 is the honest reach of this change.
  */
 
 /**
- * Greenhouse job ids are a single global counter and have been seven digits for years. Every one
- * observed anywhere in this repo or in production sits in this range: 4512345, 6883068002,
- * 7351061, 7796180003, 7875125, 8018893, 8052338, 8052351, 4829785101.
+ * Greenhouse job ids are a single global counter and have been seven digits for most of its life.
+ *
+ * MEASURED, not assumed: of 26,702 live job ids pulled from all 221 mapped boards, 18 (0.07%) fall
+ * below this floor, including 10 of Squarepoint Capital's 87 postings and 1 of Hudson River
+ * Trading's 70. Both of those boards do serve from their own domain, so those are exactly the
+ * postings this rule exists for, and they keep the email fallback instead. None of the 26,702 had a
+ * leading zero and none exceeded 12 digits.
  *
  * The floor is what separates a real board embed from a page that merely carries a `gh_jid`
  * shaped query parameter, and it is deliberately the conservative half of the trade: refusing a
@@ -87,10 +96,20 @@ export function greenhouseBoardTokenForHost(hostname: string | undefined): strin
   // www. and careers. style labels under the employer's own verified domain, and nothing else. A
   // suffix match is safe here only because the right-hand side is a full registrable domain that
   // was proven to belong to this employer.
+  //
+  // Longest suffix wins, and a tie resolves to nothing. Returning the first match would have made
+  // the answer depend on insertion order the day the map ever holds both foo.com and bar.foo.com
+  // under different tokens, which contradicts this file's own rule that a domain claimed twice
+  // resolves to nothing. No such pair exists among the 221 today, so this costs one pass over a
+  // small map to keep a silent future wrong answer impossible.
+  let best: { domain: string; token: string } | undefined;
+  let tied = false;
   for (const [domain, token] of BOARD_TOKEN_BY_DOMAIN) {
-    if (host.endsWith(`.${domain}`)) return token;
+    if (!host.endsWith(`.${domain}`)) continue;
+    if (!best || domain.length > best.domain.length) { best = { domain, token }; tied = false; continue; }
+    if (domain.length === best.domain.length && token !== best.token) tied = true;
   }
-  return undefined;
+  return tied ? undefined : best?.token;
 }
 
 /**
