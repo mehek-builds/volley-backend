@@ -7,6 +7,7 @@ import {
   isCoreIdentityField,
   labelMarksRequired,
   fitToBudget,
+  frozenJobLocationContext,
   graduationDateAnswer,
   isOpenEndedQuestion,
   isPolarQuestion,
@@ -822,9 +823,14 @@ test('an office commitment is answered from the stored standing preference, and 
   assert.ok(unasked && 'skipReason' in unasked);
   assert.match(unasked.skipReason, /where you will work from is yours to answer/);
 
-  // Stored, so answered - and the cadence in the label does not need a column of its own.
+  // Stored and tied to an exact frozen US job location, so the cadence needs no column of its own.
   assert.deepEqual(
-    resolveKnownAnswer(label, 'select', { address_city: 'Dubai', onsite_commitment: 'anywhere' }, undefined),
+    resolveKnownAnswer(
+      label,
+      'select',
+      { address_city: 'Dubai', onsite_commitment: 'anywhere' },
+      frozenJobLocationContext(['San Francisco, CA']),
+    ),
     { value: 'Yes' },
   );
   assert.deepEqual(
@@ -876,10 +882,87 @@ test('the standing onsite preference is scoped to the US and says nothing about 
     assert.ok(held && 'skipReason' in held, label);
     assert.match(held.skipReason, /where you will work from is yours to answer/);
   }
+  for (const [label, context] of [
+    ['Can you work from our Paris office?', undefined],
+    ['Can you commit to working in-person five days per week?', frozenJobLocationContext(['Paris, France'])],
+  ] as const) {
+    const held = resolveKnownAnswer(label, 'select', committed, context);
+    assert.ok(held && 'skipReason' in held, label);
+  }
+  const arbitraryJdMention = resolveKnownAnswer(
+    'Can you commit to working in-person five days per week?',
+    'select',
+    committed,
+    'Work with customers in the United States and Europe. The role is based in Paris, France.',
+  );
+  assert.ok(arbitraryJdMention && 'skipReason' in arbitraryJdMention);
+  for (const label of [
+    'Can you work from our Paris or US office?',
+    'Can you work onsite supporting United States customers?',
+    'Can you work onsite supporting United States customers from our Paris office?',
+    'Can you work onsite in support of United States customers?',
+    'Can you work onsite in compliance with US law?',
+    'Can you work onsite in alignment with US policy?',
+    'Can you work onsite in the US market?',
+    'Can you work from our San Francisco office or Paris office?',
+    'Can you work from our San Francisco office and Paris office?',
+    'Can you work from our San Francisco office & Paris office?',
+    'Can you work from our San Francisco / Paris office?',
+    'Can you work from our San Francisco or Paris offices?',
+    'Can you work from either our San Francisco office or our New York office?',
+    'Can you work onsite in Boise?',
+  ]) {
+    const held = resolveKnownAnswer(label, 'select', committed, undefined);
+    assert.ok(held && 'skipReason' in held, label);
+  }
+  const mixedLabelWithUsPosting = resolveKnownAnswer(
+    'Can you work from our San Francisco office or Paris office?',
+    'select',
+    committed,
+    frozenJobLocationContext(['San Francisco, CA']),
+  );
+  assert.ok(mixedLabelWithUsPosting && 'skipReason' in mixedLabelWithUsPosting);
+  for (const label of [
+    'Can you work onsite in support of United States customers?',
+    'Can you work onsite in compliance with US law?',
+  ]) {
+    const held = resolveKnownAnswer(
+      label,
+      'select',
+      committed,
+      frozenJobLocationContext(['San Francisco, CA']),
+    );
+    assert.ok(held && 'skipReason' in held, label);
+  }
+  for (const locations of [
+    ['Paris, France'],
+    ['Paris, France', 'San Francisco, CA'],
+    ['San Francisco, CA', 'New York, NY'],
+    ['Boise, ID'],
+    ['US market'],
+  ]) {
+    const held = resolveKnownAnswer(
+      'Can you commit to working in-person five days per week?',
+      'select',
+      committed,
+      frozenJobLocationContext(locations),
+    );
+    assert.ok(held && 'skipReason' in held, locations.join(' | '));
+  }
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Can you commit to working in-person five days per week?',
+      'select',
+      committed,
+      frozenJobLocationContext(['San Francisco, CA']),
+    ),
+    { value: 'Yes' },
+  );
   // The US metros on the same list are answered.
   for (const label of [
     'Are you available to work from our office in Chicago?',
     'Are you willing to work in our New York office three days a week?',
+    'Can you work onsite in San Francisco?',
   ]) {
     assert.deepEqual(resolveKnownAnswer(label, 'select', committed, undefined), { value: 'Yes' }, label);
   }
@@ -972,7 +1055,12 @@ test('an in-office commitment worded as a schedule question is not read as avail
   const faire = 'This role will be in-office on a hybrid schedule, can you commit to being in-office three days per week at the location listed?';
   assert.equal(classifyField(faire), 'onsite_commitment');
   assert.deepEqual(
-    resolveKnownAnswer(faire, 'select', { onsite_commitment: 'anywhere' }, undefined),
+    resolveKnownAnswer(
+      faire,
+      'select',
+      { onsite_commitment: 'anywhere' },
+      frozenJobLocationContext(['San Francisco, CA']),
+    ),
     { value: 'Yes' },
   );
   // A genuine availability question, naming no office, still reaches the availability branch.
@@ -997,7 +1085,11 @@ test('the four production onsite blockers of 2026-08-08 are answered from the st
     'Are you willing to work in-person for 12 weeks during the internship?',
     'This role will be in-office on a hybrid schedule, can you commit to being in-office three days per week at the location listed?',
   ]) {
-    assert.deepEqual(resolveKnownAnswer(label, 'select', stored, undefined), { value: 'Yes' }, label);
+    assert.deepEqual(
+      resolveKnownAnswer(label, 'select', stored, frozenJobLocationContext(['Costa Mesa, CA'])),
+      { value: 'Yes' },
+      label,
+    );
   }
 });
 
@@ -1152,9 +1244,8 @@ test('live-audit profile labels beat generic wording and stay out of drafts', ()
   assert.deepEqual(resolveKnownAnswer('Have you previously worked at Tonee - AI Texting Tone Detector?', 'select', profile, undefined), {
     value: 'Yes',
   });
-  assert.deepEqual(resolveKnownAnswer('Have you previously worked at Samsara?', 'select', profile, undefined), {
-    value: 'No',
-  });
+  const samsara = resolveKnownAnswer('Have you previously worked at Samsara?', 'select', profile, undefined);
+  assert.ok(samsara && 'skipReason' in samsara);
   const nearMissPriorEmployer = resolveKnownAnswer('Have you previously worked at Tone?', 'select', profile, undefined);
   assert.ok(nearMissPriorEmployer && 'skipReason' in nearMissPriorEmployer && nearMissPriorEmployer.skipReason.startsWith('prior employer'));
   const genericPriorEmployer = resolveKnownAnswer('Have you previously worked at any employer in this industry?', 'select', profile, undefined);
@@ -1291,7 +1382,7 @@ test('stored academic and onsite facts answer repeated select-shaped live questi
       'Are you able to work onsite 3 days a week?',
       'select',
       { ...profile, onsite_commitment: 'anywhere' as const },
-      undefined,
+      frozenJobLocationContext(['San Francisco, CA']),
     ),
     { value: 'Yes' },
   );
@@ -1541,16 +1632,14 @@ test('Databricks export-control checkbox questions are not inferred from profile
   );
 });
 
-test('Databricks prior employer questions answer no from known employer history', () => {
-  assert.deepEqual(
-    resolveKnownAnswer(
+test('Databricks prior employer questions answer only a proven positive', () => {
+  const absent = resolveKnownAnswer(
       'Do you currently or have you previously worked for Databricks in the past?',
       'combobox',
       { employer_history: ['SoFi', 'Traeco', 'Tonee'] },
       undefined,
-    ),
-    { value: 'No' },
   );
+  assert.ok(absent && 'skipReason' in absent);
   assert.deepEqual(
     resolveKnownAnswer(
       'Do you currently or have you previously worked for Databricks in the past?',
@@ -2309,9 +2398,10 @@ test('an in-person commitment is recognised, and is hers to make', () => {
      whether she will be there, not how many days or from when, so it stays hers. Answering it Yes
      would leave a non-answer in a required field, which is the empty-field defect wearing a hat. */
   const committed = { ...MEHEK, onsite_commitment: 'anywhere' as const, relocation_willingness: 'yes' as const };
-  assert.deepEqual(resolveKnownAnswer(label, 'text', committed, undefined), { value: 'Yes' });
+  const costaMesaContext = frozenJobLocationContext(['Costa Mesa, CA']);
+  assert.deepEqual(resolveKnownAnswer(label, 'text', committed, costaMesaContext), { value: 'Yes' });
   assert.deepEqual(
-    resolveKnownAnswer('are you able to work onsite in one of our offices, five days a week?', 'text', committed, undefined),
+    resolveKnownAnswer('are you able to work onsite in one of our offices, five days a week?', 'text', committed, costaMesaContext),
     { value: 'Yes' },
   );
   const valueShaped = resolveKnownAnswer(
