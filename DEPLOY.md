@@ -314,6 +314,17 @@ That script registers `email.received` for
 `https://student-outreach-backend.vercel.app/webhooks/application-email/inbound` and stores the
 returned signing secret in Vercel as `RESEND_WEBHOOK_SECRET`.
 
+The managed receiving proof table has a separate additive migration:
+
+```bash
+npm run db:application-email-receiving-proof
+```
+
+After its workflow is present on `main`, an operator may run
+`Application email receiving proof migration` from GitHub Actions. The workflow refuses non-main
+refs, reads the database connection only from `SCHEMA_CHECK_DATABASE_URL`, and applies only the
+idempotent `application_email_receiving_proofs` table and its two indexes.
+
 **Why a hand deploy used to report `null`.** Measured 2026-08-04 across the last 12 production
 deployments: Vercel fills the `VERCEL_GIT_*` variables from the **GitHub integration's** metadata,
 whose keys carry a `github` prefix. A `vercel --prod` from a laptop attaches its own git metadata
