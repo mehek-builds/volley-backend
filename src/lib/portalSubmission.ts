@@ -3417,7 +3417,7 @@ function isProtectedManagedAction(
   const base = managedActionLabelBase(action);
   if (base && protectedActionBases.has(base)) return true;
   if (GREENHOUSE_FIXED_EDUCATION_ACTION_RE.test(label)) return true;
-  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight)/
+  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight)/
     .test(label);
 }
 
@@ -3570,6 +3570,12 @@ type ReviewedQuestionActionProtection = {
 function coreActionProtection(actions: readonly ManagedBrowserAction[], portal: SupportedPortal): ReadonlySet<string> {
   const available = new Set(actions.map(managedActionLabelBase).filter((base): base is string => Boolean(base)));
   const protectedBases = new Set<string>();
+  // The controlled fixture's SSR form is unsafe to mutate until React has attached its handlers.
+  // Class-level protection keeps this barrier in discovery trims too; naming it in the core set
+  // makes the submit and preview minimum explicit alongside identity and resume.
+  if (portal === 'controlled_test' && available.has('controlled_portal_hydrated')) {
+    protectedBases.add('controlled_portal_hydrated');
+  }
   if (available.has('name')) {
     protectedBases.add('name');
   } else {
