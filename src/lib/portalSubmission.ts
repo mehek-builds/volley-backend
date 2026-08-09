@@ -638,6 +638,18 @@ const READ_FIELD_GROUP_DIAL_CODES_SCRIPT = String.raw`(element) => {
   return [];
 }`;
 
+/* Playwright types its evaluate target as `SVGElement | HTMLElement`, which are DOM globals.
+ * `tsconfig.json` sets `"lib": ["ES2022"]` with no DOM, so those names resolve only because a
+ * `.test.ts` file drags them in. `tsconfig.build.json` excludes tests, so the PRODUCTION build has
+ * been failing on `origin/main` with TS2304 while `npm run typecheck` passed: the emitting build
+ * and the checking build disagreed, and only the one nobody reads was right.
+ *
+ * Declared locally rather than adding "dom" to lib, because this is a Node service and exposing
+ * `document` and `window` as globals to server code invites the opposite class of bug. `object` is
+ * deliberately the widest useful shape: an element satisfies it, nothing on this side can
+ * dereference it, and the real element type only exists inside the browser where the body runs. */
+type PlaywrightEvaluationTarget = object;
+
 /* Locator.evaluate hands a STRING to the page as an expression and returns whatever it evaluates
  * to, which for a function-shaped string is the function object itself: it is never called, and the
  * result is undefined. page.evaluate(string, elementHandle) does the same. So the text above is
@@ -646,7 +658,7 @@ const READ_FIELD_GROUP_DIAL_CODES_SCRIPT = String.raw`(element) => {
 const readFieldGroupDialCodes = new Function(
   'element',
   'return (' + READ_FIELD_GROUP_DIAL_CODES_SCRIPT + ')(element);',
-) as (element: SVGElement | HTMLElement) => string[];
+) as (element: PlaywrightEvaluationTarget) => string[];
 
 function greenhouseLocationSearch(packet: SubmissionPacket): string | undefined {
   if (!packet.city) return undefined;

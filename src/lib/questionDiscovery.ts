@@ -109,8 +109,20 @@ const WORK_AUTHORIZATION_QUESTION =
   /(?:eligible|eligibility)\s+(?:to\s+)?(?:legally\s+)?work|authori[sz](?:ed|ation)\s+to\s+work|legally\s+authori[sz]ed|right\s+to\s+work|work\s+authori[sz]/i;
 const SPONSORSHIP_QUESTION =
   /(?:requir\w*|need\w*|visa|immigration|without|employment)\s+(?:\w+\s+){0,3}sponsor|sponsor\w*\s+(?:\w+\s+){0,3}(?:requir\w*|need\w*)/i;
+/* One question that mentions both halves, asked in the order that fixes its polarity: the applicant
+ * is asked whether she REQUIRES something, so "Yes" is a disclosure and never a claim of
+ * eligibility. That ordering is why this family escapes the blanket refusal that other mixed labels
+ * get.
+ *
+ * Widened on 2026-08-09 to "authorization to work" and to a longer gap before it, both measured on
+ * Virtu's live label: "do you now, or will you in the future, need sponsorship from an employer in
+ * order to obtain, extend or renew your authorization to work in the United States?" is this exact
+ * shape, spells the country out, and was refused three times in one run for saying "authorization
+ * to work" where the pattern only read "work authorization". The employer clause between the two
+ * halves is 55 characters there, past the old 50-character gap.
+ */
 const SPONSORSHIP_WORK_AUTHORIZATION_SUPPORT_QUESTION =
-  /\b(?:do|will|would|can|could)?\s*(?:you\s+)?(?:now\s+or\s+in\s+the\s+future\s+)?(?:requir\w*|need\w*)\b[^?]{0,80}\b(?:sponsor\w*|visa)\b[^?]{0,50}\bwork\s+authori[sz]ation\b/i;
+  /\b(?:do|will|would|can|could)?\s*(?:you\s+)?(?:now\s+or\s+in\s+the\s+future\s+)?(?:requir\w*|need\w*)\b[^?]{0,80}\b(?:sponsor\w*|visa)\b[^?]{0,80}\b(?:work\s+authori[sz]ation|authori[sz]ation\s+to\s+work)\b/i;
 const NON_US_WORK_SCOPE =
   /\b(canada|canadian|united kingdom|uk|britain|british|england|european union|eu|australia|australian|india|indian|united arab emirates|uae|dubai|singapore|germany|france|ireland|netherlands|hungary|hungarian|japan|korea|china)\b/i;
 const US_WORK_SCOPE = /\b(?:united states|usa|america(?:n)?)\b|\bu\.s\.(?=\s|$|[?,;:)])/i;
@@ -149,7 +161,18 @@ const US_ABBREVIATION_SCOPE =
   /\b(?:in|within|throughout|across)\s+(?:the\s+)?US\b|\bUS\s+(?:work|employment|visa|immigration|authori[sz]ation)\b/;
 const US_ABBREVIATION_SCOPE_CASE_FOLDED =
   /\b(?:in|within|throughout|across)\s+the\s+us\b|\bus\s+(?:work|employment|visa|immigration|authori[sz]ation)\b/i;
-const JOB_LOCATION_SCOPE = /country\s+(?:where|in which)\s+the\s+job\s+is\s+located|country\s+where\s+the\s+role\s+is\s+located|where\s+the\s+job\s+is\s+located/i;
+/* The employer defers the country to the posting instead of naming it.
+ *
+ * Broadened on 2026-08-09, measured: the three fixed phrasings it held missed Deepgram's "the
+ * country where THIS ROLE is located", DV Trading's "work authorization in THIS COUNTRY" and Scale
+ * AI's "the country where the job is located" variants. That went unnoticed while an unscoped label
+ * was refused anyway; once a stored "yes I need sponsorship" may answer an unscoped label, this is
+ * the rule that has to hold the line, so it now recognises the family rather than three sentences.
+ * The posting's own location deliberately does not count as scope evidence: reading a legal
+ * declaration off the JD is the inference be1bccf removed.
+ */
+const JOB_LOCATION_SCOPE =
+  /\bcountry\s+(?:where|which|in\s+which|to\s+which|for\s+which)\b|\bwhere\s+(?:the|this)\s+(?:job|role|position)\s+is\s+(?:located|based|situated)\b|\bin\s+this\s+country\b|\bcountry\s+of\s+(?:the\s+)?(?:job|role|position|employment)\b/i;
 export const ROUTINE_APPLICANT_CONSENT_QUESTION =
   /\b(?:consent|agree|acknowledg\w*|approve|confirm)\b[\s\S]{0,180}\b(?:process(?:ing)?|use|using|collect(?:ion)?|retain|store|privacy\s+policy|privacy\s+notice|notice\s+at\s+collection)\b[\s\S]{0,180}\b(?:personal\s+information|personal\s+data|application|applicant|candidacy|candidate|privacy\s+policy|privacy\s+notice|notice\s+at\s+collection|infrastructure|platform|data)\b|\bplease\s+review\s+and\s+acknowledg\w*\b[\s\S]{0,120}\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b|\byes,\s*i\s+consent\b/i;
 
@@ -206,6 +229,18 @@ export function legalConsentSkipReason(label: string): string {
   return `consent question left for you: "${label.slice(0, 60)}"`;
 }
 
+/* A sponsorship question phrased so that "Yes" would CLAIM eligibility instead of disclosing a
+ * need, which inverts the whole rule below.
+ *
+ * UNRESTRICTED_WORK_AUTHORIZATION_QUESTION already carries the four framings the corpus contains
+ * ("all employers", "any employer", "without sponsorship", "without restriction"). "Exempt from
+ * sponsorship" is not in the corpus and is named here anyway, precautionary: it is the one other
+ * common way to ask this question backwards, and reading it forwards would answer "Yes, I am
+ * exempt" for an applicant who needs sponsorship. That is R-004's false legal declaration again,
+ * so the cheap guard is worth more than the label it may never meet.
+ */
+const SPONSORSHIP_EXEMPTION_QUESTION = /\bexempt\b[^?]{0,40}\bsponsor/i;
+
 /* A COMPOUND QUESTION WHOSE OTHER HALF IS NOT ON FILE.
  *
  * "Are you currently located in the US, or do you have US work authorization?" is one form field
@@ -259,10 +294,43 @@ function workEligibilityAnswer(
   ) {
     return { skipReason: workEligibilitySkipReason(label) };
   }
+  const namesAnotherCountry = NON_US_WORK_SCOPE.test(label) || JOB_LOCATION_SCOPE.test(label);
+  /* THE COUNTRY GATE IS NOT SYMMETRIC, AND THE ASYMMETRY IS THE ENTIRE RULE.
+   *
+   * The positive US-scope requirement below exists because the legacy booleans were collected
+   * without a country, so an unscoped question cannot be answered from them. That is true of the
+   * answers that CLAIM something - "yes I am authorized", "no I need no sponsorship" - because a
+   * claim of eligibility in a country nobody named is a false legal declaration waiting to happen,
+   * and it is the defect R-004 was opened for.
+   *
+   * It is not true of "yes, I need sponsorship". That answer discloses a limitation rather than
+   * asserting a permission: it can only ever narrow what an employer will offer, never obtain
+   * something under false pretenses, and it is what needs_sponsorship literally records. Getting it
+   * wrong in that direction costs a handoff; getting it wrong in the other direction is a false
+   * statement about work eligibility on a real application, and only one of those is worth a gate.
+   *
+   * Measured on 2026-08-09 against the production corpus, replaying all 297 distinct stored labels
+   * with the real profile: requiring the employer to spell the country out before Litos will repeat
+   * a stored "yes" refused 13 sponsorship labels it is the answer to, including Cloudflare ("...to
+   * work at Cloudflare?"), Reddit, Redwood Materials (whose list is nothing but US visa categories),
+   * IMC, Five Rings, Point72, Anduril, DRW and Virtu. Not one of those employers named a country,
+   * and every one of them was told nothing instead of being told the truth.
+   *
+   * The exceptions stay exceptions, and there are now four. A label that NAMES another country, or
+   * that defers to the posting's own country, is refused even in this direction: "yes I need
+   * sponsorship" is wrong AND costly for a role in the one country where she may not, and the
+   * posting's location is a JD inference, which is what be1bccf was right to remove. A label phrased
+   * backwards is refused, because "yes" there is a claim again. And the two guards above this line,
+   * from 97207e2, run first and are untouched by any of it: a compound label whose other half has no
+   * column, and the stored pair that describes nobody, are held whichever direction the answer runs.
+   */
+  const disclosesSponsorshipNeed = ap.needs_sponsorship === true
+    && !UNRESTRICTED_WORK_AUTHORIZATION_QUESTION.test(label)
+    && !SPONSORSHIP_EXEMPTION_QUESTION.test(label);
   if (asksAuthorization && asksSponsorship && SPONSORSHIP_WORK_AUTHORIZATION_SUPPORT_QUESTION.test(label)) {
-    if (!explicitlyUsScoped || NON_US_WORK_SCOPE.test(label) || JOB_LOCATION_SCOPE.test(label)) {
-      return { skipReason: workEligibilitySkipReason(label) };
-    }
+    if (namesAnotherCountry) return { skipReason: workEligibilitySkipReason(label) };
+    if (disclosesSponsorshipNeed) return { value: 'Yes' };
+    if (!explicitlyUsScoped) return { skipReason: workEligibilitySkipReason(label) };
     if (typeof ap.needs_sponsorship === 'boolean') {
       return { value: ap.needs_sponsorship ? 'Yes' : 'No' };
     }
@@ -270,10 +338,13 @@ function workEligibilityAnswer(
   }
   if (!asksAuthorization && !asksSponsorship) return null;
   if (asksAuthorization && asksSponsorship) return { skipReason: workEligibilitySkipReason(label) };
-  // The legacy booleans were collected without a country. They are usable only when the employer's
-  // own question explicitly says United States. A JD mentioning a US office, benefit, customer or
-  // legal notice is not scope evidence, and an unscoped question is not implicitly American.
-  if ((asksAuthorization || asksSponsorship) && (!explicitlyUsScoped || NON_US_WORK_SCOPE.test(label) || JOB_LOCATION_SCOPE.test(label))) {
+  if (namesAnotherCountry) return { skipReason: workEligibilitySkipReason(label) };
+  if (asksSponsorship && disclosesSponsorshipNeed) return { value: 'Yes' };
+  // The legacy booleans were collected without a country. Every answer left below this line asserts
+  // eligibility, so it is usable only when the employer's own question explicitly says United
+  // States. A JD mentioning a US office, benefit, customer or legal notice is not scope evidence,
+  // and an unscoped question is not implicitly American.
+  if (!explicitlyUsScoped) {
     return { skipReason: workEligibilitySkipReason(label) };
   }
   if (asksAuthorization && UNRESTRICTED_WORK_AUTHORIZATION_QUESTION.test(label) && ap.needs_sponsorship === true) {
