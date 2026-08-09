@@ -157,6 +157,147 @@ test('answers work authorization and sponsorship only from explicit stored conse
   assert.ok(expiryDetail && 'skipReason' in expiryDetail);
 });
 
+/* THE SPELLING THE PIPELINE ACTUALLY PRODUCES.
+ *
+ * Every assertion above that exercises the US abbreviation writes it the way the employer printed
+ * it - "work in the US?" - and every one of them passes on the unfixed code. The extension
+ * lowercases each label before it is sent, so the resolver is only ever handed "work in the us?",
+ * and the case-sensitive guard could not match it. Measured across all 504 distinct labels Litos
+ * has stored on 2026-08-09: the guard matched none of them.
+ *
+ * That is why this test restates cases already covered above in lowercase rather than adding new
+ * wordings. The lowercase forms are the real inputs; the uppercase ones are the fiction the suite
+ * has been checking. Both are asserted from here on, because the day a capture path stops
+ * lowercasing is the day only the uppercase assertions notice.
+ */
+test('recognises the lowercased US abbreviation the extension actually sends', () => {
+  // Roblox, 2026-08-09, packet b1c2ad7f: one of the two questions that stopped the run. The same
+  // question spelled "the united states" is answered from work_authorized twelve times over in the
+  // stored corpus, so refusing this one was a spelling accident and not a scope decision.
+  assert.deepEqual(
+    resolveKnownAnswer('are you legally authorized to work in the us?', 'text', { work_authorized: true }, undefined),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('Are you legally authorized to work in the US?', 'text', { work_authorized: true }, undefined),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('are you legally authorized to work in the us?', 'text', { work_authorized: false }, undefined),
+    { value: 'No' },
+  );
+  // The sponsorship half, from the sponsorship column only. Corpus label, one employer.
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'do you now or in the future require visa sponsorship to continue working in the us? we are unable to sponsor work visas or permits (e.g. f-1 opt, h1-b) at this time.',
+      'text',
+      { work_authorized: true, needs_sponsorship: true },
+      undefined,
+    ),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('do you require visa sponsorship to work in the us?', 'text', { needs_sponsorship: false }, undefined),
+    { value: 'No' },
+  );
+  // Nothing stored still stops, in the lowercase spelling too.
+  const nothingStored = resolveKnownAnswer('are you legally authorized to work in the us?', 'text', {}, undefined);
+  assert.ok(nothingStored && 'skipReason' in nothingStored);
+
+  /* THE PRONOUN, which is the whole reason the guard was case-sensitive to begin with.
+   *
+   * Lowercase "us" is the commonest pronoun on a job form. The case-folded arm requires the
+   * article after the preposition ("in the us", never "in us") and an immigration noun after the
+   * bare token ("us work authorization", never "tell us whether"), so none of these becomes a
+   * country scope. Each is a real corpus label or its immediate sibling. */
+  for (const label of [
+    'tell us whether you will require visa sponsorship for employment.',
+    'why are you interested in us? do you require visa sponsorship?',
+    'how did you hear about us? will you require sponsorship?',
+    'if you were to join us for a technical interview, will you require visa sponsorship?',
+  ]) {
+    const pronoun = resolveKnownAnswer(label, 'text', { work_authorized: true, needs_sponsorship: false }, undefined);
+    assert.ok(pronoun && 'skipReason' in pronoun, label);
+  }
+
+  // Recognising the abbreviation does not weaken any other guard. Non-US wording, the job-location
+  // scope and the unscoped question all still stop, and "without sponsorship" still stops on a
+  // profile that needs it.
+  for (const label of [
+    'are you legally authorized to work in the uk?',
+    'are you legally authorized to work in the country where this role is located?',
+    // Roblox's SECOND stop, and it stays a stop: the question names no country at all, and no
+    // stored column says which country the booleans are about.
+    'will you now or in the future require sponsorship for work authorization?',
+    'are you authorized to work in the us without sponsorship?',
+  ]) {
+    const held = resolveKnownAnswer(label, 'text', { work_authorized: true, needs_sponsorship: true }, undefined);
+    assert.ok(held && 'skipReason' in held, label);
+  }
+});
+
+/* THE TWO WAYS THE PAIR CAN STATE SOMETHING NOBODY SAID.
+ *
+ * Both are reachable only now that the abbreviation is recognised, so they ship with it.
+ */
+test('holds the work-eligibility pair when one boolean cannot answer the whole question', () => {
+  /* A DISJUNCTION. Corpus label, one employer. work_authorized settles the second half and says
+   * nothing about the first, so "Yes" is accidentally true and "No" is a false statement about
+   * where she lives. Held in BOTH directions, because a rule that is only sound when the stored
+   * value happens to be true is not a rule. */
+  for (const ap of [
+    { work_authorized: true },
+    { work_authorized: false },
+    { work_authorized: true, needs_sponsorship: true },
+  ]) {
+    const compound = resolveKnownAnswer(
+      'are you currently located in the us, or do you have us work authorization?',
+      'text',
+      ap,
+      undefined,
+    );
+    assert.ok(compound && 'skipReason' in compound, JSON.stringify(ap));
+  }
+  // A parenthetical gloss is one question, not two, and keeps answering.
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'are you legally authorized to work in the us (e.g. you are a citizen, a permanent resident, or hold a valid visa)?',
+      'text',
+      { work_authorized: true },
+      undefined,
+    ),
+    { value: 'Yes' },
+  );
+
+  /* AN INCOHERENT STORED PAIR. Two independent selects in Settings, so a half-filled profile can
+   * hold "not authorized" and "needs no sponsorship" together, which is not a person. The two
+   * halves are answered by two different branches that cannot see each other, so left alone they
+   * would put "No, I cannot work here" and "No, I need nothing from you" on one form. */
+  const contradictory = { work_authorized: false, needs_sponsorship: false };
+  for (const label of [
+    'are you legally authorized to work in the united states?',
+    'are you legally authorized to work in the us?',
+    'will you now, or in the future, require sponsorship for employment visa status to work in the united states?',
+    'do you now or in the future require visa sponsorship/work authorization to continue working in the united states?',
+  ]) {
+    const held = resolveKnownAnswer(label, 'text', contradictory, undefined);
+    assert.ok(held && 'skipReason' in held, label);
+  }
+  // The three combinations that describe real people are untouched.
+  assert.deepEqual(
+    resolveKnownAnswer('are you legally authorized to work in the us?', 'text', { work_authorized: true, needs_sponsorship: false }, undefined),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('are you legally authorized to work in the us?', 'text', { work_authorized: true, needs_sponsorship: true }, undefined),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('are you legally authorized to work in the us?', 'text', { work_authorized: false, needs_sponsorship: true }, undefined),
+    { value: 'No' },
+  );
+});
+
 test('answers EEO / demographic questions with stored preferences or decline', () => {
   const labels = [
     'what is your gender?',

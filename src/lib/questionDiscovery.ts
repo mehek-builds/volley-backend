@@ -114,8 +114,41 @@ const SPONSORSHIP_WORK_AUTHORIZATION_SUPPORT_QUESTION =
 const NON_US_WORK_SCOPE =
   /\b(canada|canadian|united kingdom|uk|britain|british|england|european union|eu|australia|australian|india|indian|united arab emirates|uae|dubai|singapore|germany|france|ireland|netherlands|hungary|hungarian|japan|korea|china)\b/i;
 const US_WORK_SCOPE = /\b(?:united states|usa|america(?:n)?)\b|\bu\.s\.(?=\s|$|[?,;:)])/i;
+/* THE COUNTRY ABBREVIATION, SPELLED THE WAY IT ACTUALLY ARRIVES.
+ *
+ * This pattern is case-SENSITIVE on purpose: "us" is also the commonest pronoun on a job form
+ * ("how did you hear about us?", "tell us about a project", "why are you interested in us?"), and
+ * reading one of those as a country would put a US work-authorization answer on a form that never
+ * mentioned the United States. The capital letters were the whole distinction.
+ *
+ * MEASURED, on 2026-08-09, against every question label Litos has ever stored: 504 distinct
+ * labels, 491 of them entirely lowercase, and this pattern matches ZERO of them. It cannot match
+ * one. The extension lowercases every label it captures before it is sent
+ * (student-outreach-extension/src/lib/adapters/generic.ts: `clean(parts.join(' ')).toLowerCase()`
+ * on every label path), so the resolver is never handed a capital letter to distinguish on. The
+ * guard exists, it is tested, and the tests pass only because they are written with the employer's
+ * original casing - which is the one input the pipeline never produces.
+ *
+ * The consequence is not theoretical. "are you legally authorized to work in the united states?"
+ * is answered from work_authorized twelve times over in the corpus; "are you legally authorized to
+ * work in the us?" - the SAME question, Roblox's wording - is refused, and it was one of the two
+ * stops on the 2026-08-09 Roblox run. Refusing one spelling of the United States while answering
+ * the other is not a safety property, it is a dead regex.
+ *
+ * So the case-folded arm below is added rather than the flag being flipped, because the pronoun
+ * problem is real and the two arms need different shapes to survive it:
+ *   - the preposition arm REQUIRES the article. "in the us" cannot be a pronoun; "in us" can
+ *     ("why are you interested in us?"), which is why the case-folded arm does not accept it.
+ *   - the noun arm requires an immigration noun immediately after. "us work authorization" is the
+ *     country; "tell us whether ..." is not, and the existing pronoun test covers it.
+ * Measured over the same 504 labels the case-folded arm matches 6, none of them a pronoun, and of
+ * those 6 only 4 are work-eligibility questions at all - the other two are a state-of-residence
+ * select and a veteran-status question, neither of which ever consults a country scope.
+ */
 const US_ABBREVIATION_SCOPE =
   /\b(?:in|within|throughout|across)\s+(?:the\s+)?US\b|\bUS\s+(?:work|employment|visa|immigration|authori[sz]ation)\b/;
+const US_ABBREVIATION_SCOPE_CASE_FOLDED =
+  /\b(?:in|within|throughout|across)\s+the\s+us\b|\bus\s+(?:work|employment|visa|immigration|authori[sz]ation)\b/i;
 const JOB_LOCATION_SCOPE = /country\s+(?:where|in which)\s+the\s+job\s+is\s+located|country\s+where\s+the\s+role\s+is\s+located|where\s+the\s+job\s+is\s+located/i;
 export const ROUTINE_APPLICANT_CONSENT_QUESTION =
   /\b(?:consent|agree|acknowledg\w*|approve|confirm)\b[\s\S]{0,180}\b(?:process(?:ing)?|use|using|collect(?:ion)?|retain|store|privacy\s+policy|privacy\s+notice|notice\s+at\s+collection)\b[\s\S]{0,180}\b(?:personal\s+information|personal\s+data|application|applicant|candidacy|candidate|privacy\s+policy|privacy\s+notice|notice\s+at\s+collection|infrastructure|platform|data)\b|\bplease\s+review\s+and\s+acknowledg\w*\b[\s\S]{0,120}\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b|\byes,\s*i\s+consent\b/i;
@@ -173,16 +206,59 @@ export function legalConsentSkipReason(label: string): string {
   return `consent question left for you: "${label.slice(0, 60)}"`;
 }
 
+/* A COMPOUND QUESTION WHOSE OTHER HALF IS NOT ON FILE.
+ *
+ * "Are you currently located in the US, or do you have US work authorization?" is one form field
+ * asking two different things joined by OR, and only the second one has a column behind it. That
+ * asymmetry is the problem: "Yes" happens to be true whenever work_authorized is true, but "No"
+ * would also deny that she lives in the country, which nothing stored records. A rule that is
+ * sound in one direction and a false statement in the other is not a rule, so the question goes
+ * back to her.
+ *
+ * Written against the ONE label in the corpus with this shape, not against "or" in general.
+ * "Are you authorized to work in the US (e.g. you are a citizen, a permanent resident, or hold a
+ * visa)?" is a parenthetical gloss on a single question, not two questions, and must keep
+ * answering; requiring a residence clause immediately before the "or" is what separates them.
+ */
+const RESIDENCE_CLAUSE_JOINED_TO_ELIGIBILITY =
+  /\b(?:currently\s+)?(?:located|residing|living)\s+in\b[^?]{0,60}\bor\b/i;
+
+/* THE ONE STORED PAIR THAT DESCRIBES NOBODY.
+ *
+ * work_authorized and needs_sponsorship are two independent selects in Settings, so nothing stops
+ * a half-finished profile holding a combination no person is in. Three of the four are real:
+ * authorized with no sponsorship needed (citizen or permanent resident), authorized WITH
+ * sponsorship needed later (a student on CPT/OPT, which is this account), and not authorized and
+ * needing sponsorship. The fourth - not authorized AND needing no sponsorship - is not a person.
+ *
+ * It matters because the pair is answered by two DIFFERENT branches below, one column each, and
+ * neither can see what the other is about to say. On that fourth combination the two branches put
+ * "No, I am not allowed to work here" and "No, I need nothing from you" on the same page, and an
+ * employer reading them together concludes something false whichever one they believe. The whole
+ * family is held until the profile says something coherent.
+ */
+function storedEligibilityIsSelfContradictory(ap: ApplicationProfileLike): boolean {
+  return ap.work_authorized === false && ap.needs_sponsorship === false;
+}
+
 function workEligibilityAnswer(
   label: string,
   ap: ApplicationProfileLike,
 ): { value: string } | { skipReason: string } | null {
-  const explicitlyUsScoped = US_WORK_SCOPE.test(label) || US_ABBREVIATION_SCOPE.test(label);
+  const explicitlyUsScoped = US_WORK_SCOPE.test(label)
+    || US_ABBREVIATION_SCOPE.test(label)
+    || US_ABBREVIATION_SCOPE_CASE_FOLDED.test(label);
   if (WORK_AUTHORIZATION_DETAIL_QUESTION.test(label)) {
     return { skipReason: workEligibilitySkipReason(label) };
   }
   const asksAuthorization = WORK_AUTHORIZATION_QUESTION.test(label);
   const asksSponsorship = SPONSORSHIP_QUESTION.test(label);
+  if (
+    (asksAuthorization || asksSponsorship)
+    && (storedEligibilityIsSelfContradictory(ap) || RESIDENCE_CLAUSE_JOINED_TO_ELIGIBILITY.test(label))
+  ) {
+    return { skipReason: workEligibilitySkipReason(label) };
+  }
   if (asksAuthorization && asksSponsorship && SPONSORSHIP_WORK_AUTHORIZATION_SUPPORT_QUESTION.test(label)) {
     if (!explicitlyUsScoped || NON_US_WORK_SCOPE.test(label) || JOB_LOCATION_SCOPE.test(label)) {
       return { skipReason: workEligibilitySkipReason(label) };
