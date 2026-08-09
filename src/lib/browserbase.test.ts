@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { browserSessionBody, continueManagedBrowser, isBrowserbaseConfigured, runManagedBrowser } from './browserbase';
+import {
+  browserSessionBody,
+  continueManagedBrowser,
+  isBrowserbaseConfigured,
+  managedContinuationFingerprint,
+  runManagedBrowser,
+} from './browserbase';
 import { buildManagedDiscoveryActions, buildManagedPortalActions } from './portalSubmission';
 
 function assertStratusSafeActions(actions: Array<Record<string, unknown>>) {
@@ -25,6 +31,14 @@ test('Browserbase configuration requires only the current API key', () => {
   else process.env.BROWSERBASE_API_KEY = previousKey;
   if (previousProject === undefined) delete process.env.BROWSERBASE_PROJECT_ID;
   else process.env.BROWSERBASE_PROJECT_ID = previousProject;
+});
+
+test('managed continuation evidence is stable, bounded, and rejects invalid tokens', () => {
+  const token = 'A'.repeat(43);
+  assert.match(managedContinuationFingerprint(token), /^[a-f0-9]{24}$/);
+  assert.equal(managedContinuationFingerprint(token), managedContinuationFingerprint(token));
+  assert.notEqual(managedContinuationFingerprint(token), managedContinuationFingerprint('B'.repeat(43)));
+  assert.throws(() => managedContinuationFingerprint('too-short'), /continuation token is invalid/);
 });
 
 test('session body disables CAPTCHA solving and restricts navigation to the portal host', () => {

@@ -32,6 +32,7 @@ import {
   HANDOFF_WINDOW_MS,
   isBrowserbaseConfigured,
   isManagedStratusProvider,
+  managedContinuationFingerprint,
   runManagedBrowser,
 } from '../lib/browserbase';
 import {
@@ -2365,6 +2366,13 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       const continuationIsLive = typeof continuationToken === 'string'
         && typeof continuationExpiresAt === 'string'
         && Date.parse(continuationExpiresAt) > Date.now();
+      const continuationEvidence = continuationIsLive
+        ? {
+          runner: 'stratus-managed' as const,
+          continuation_fingerprint: managedContinuationFingerprint(continuationToken),
+          continuation_resumed: false,
+        }
+        : {};
       if (continuationIsLive && verificationSettings?.enabled === true) {
         // The continuation capability stays call-local. Persisting it would turn the review JSON,
         // which is returned to dashboard and extension clients, into a browser-session credential.
@@ -2373,6 +2381,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
             status: 'searching',
             requested_at: requestedAt,
             retry_count: 0,
+            ...continuationEvidence,
           },
           attention_reason: undefined,
           submission_error: undefined,
@@ -2408,15 +2417,23 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
               requested_at: requestedAt,
               retry_count: 1,
               completed_at: new Date().toISOString(),
+              ...continuationEvidence,
+              continuation_resumed: true,
             };
           } else {
-            verification = { status: 'verification_pending', requested_at: requestedAt, retry_count: 1 };
+            verification = {
+              status: 'verification_pending',
+              requested_at: requestedAt,
+              retry_count: 1,
+              ...continuationEvidence,
+              continuation_resumed: true,
+            };
           }
         } else {
-          verification = { status: 'verification_pending', requested_at: requestedAt, retry_count: 0 };
+          verification = { status: 'verification_pending', requested_at: requestedAt, retry_count: 0, ...continuationEvidence };
         }
       } else {
-        verification = { status: 'verification_pending', requested_at: requestedAt, retry_count: 0 };
+        verification = { status: 'verification_pending', requested_at: requestedAt, retry_count: 0, ...continuationEvidence };
       }
     }
     if (!receiptResult.screenshot) throw new Error('Stratus managed browser did not return a receipt screenshot');
@@ -2506,6 +2523,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         screenshot_url: blob.url,
         captured_at: capturedAt,
         reference_id: receipt.referenceId,
+        source: 'managed_browser',
       },
     }));
     fastify.log.info({ applicationId: row.id }, 'Application submission receipt verified with Stratus Sandbox');

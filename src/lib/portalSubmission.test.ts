@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { DOMParser } from '@xmldom/xmldom';
 import type { Page } from 'playwright-core';
+import { CONTROLLED_PORTAL_BINDING_PARAM, controlledPortalBinding } from './controlledTestPortal';
 import {
   AUTONOMOUS_PORTAL_FAMILIES,
   blockersRequireCoverLetter,
@@ -342,6 +343,40 @@ test('controlled portal is gated by an explicit server flag', () => {
   );
   if (previous === undefined) delete process.env.LITOS_ENABLE_TEST_PORTAL;
   else process.env.LITOS_ENABLE_TEST_PORTAL = previous;
+});
+
+test('a signed non-production portal tunnel reaches the controlled adapter and nothing else does', () => {
+  const saved = {
+    enabled: process.env.LITOS_ENABLE_TEST_PORTAL,
+    origin: process.env.LITOS_TEST_PORTAL_PUBLIC_ORIGIN,
+    secret: process.env.LITOS_TEST_PORTAL_BINDING_SECRET,
+    nodeEnv: process.env.NODE_ENV,
+  };
+  try {
+    process.env.LITOS_ENABLE_TEST_PORTAL = 'true';
+    process.env.NODE_ENV = 'test';
+    process.env.LITOS_TEST_PORTAL_PUBLIC_ORIGIN = 'https://qa-tunnel.example.test';
+    process.env.LITOS_TEST_PORTAL_BINDING_SECRET = '0123456789abcdef0123456789abcdef';
+    const unsigned = 'https://qa-tunnel.example.test/qa/portal-submission?board=greenhouse&shape=security-code&case=run-1';
+    const signed = new URL(unsigned);
+    signed.searchParams.set(
+      CONTROLLED_PORTAL_BINDING_PARAM,
+      controlledPortalBinding(unsigned, process.env.LITOS_TEST_PORTAL_BINDING_SECRET),
+    );
+    assert.equal(detectPortal(signed.toString()), 'controlled_test');
+    assert.throws(() => detectPortal(unsigned), /cannot fill in/);
+    assert.throws(() => detectPortal(signed.toString().replace('run-1', 'run-2')), /cannot fill in/);
+    assert.throws(() => detectPortal(signed.toString().replace('qa-tunnel', 'employer')), /cannot fill in/);
+  } finally {
+    if (saved.enabled === undefined) delete process.env.LITOS_ENABLE_TEST_PORTAL;
+    else process.env.LITOS_ENABLE_TEST_PORTAL = saved.enabled;
+    if (saved.origin === undefined) delete process.env.LITOS_TEST_PORTAL_PUBLIC_ORIGIN;
+    else process.env.LITOS_TEST_PORTAL_PUBLIC_ORIGIN = saved.origin;
+    if (saved.secret === undefined) delete process.env.LITOS_TEST_PORTAL_BINDING_SECRET;
+    else process.env.LITOS_TEST_PORTAL_BINDING_SECRET = saved.secret;
+    if (saved.nodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = saved.nodeEnv;
+  }
 });
 
 test('controlled portal variants exercise every real adapter selector family', () => {

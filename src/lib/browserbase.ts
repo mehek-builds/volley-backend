@@ -1,5 +1,6 @@
 import { chromium, type Browser, type Page } from 'playwright-core';
 import { getVercelOidcToken } from '@vercel/oidc';
+import { createHash } from 'node:crypto';
 
 export type BrowserProvider = 'browserbase' | 'stratus' | 'stratus-managed';
 
@@ -235,6 +236,11 @@ export function isBrowserbaseConfigured(): boolean {
 
 export function isManagedStratusProvider(): boolean {
   return process.env.BROWSER_PROVIDER === 'stratus-managed';
+}
+
+export function managedContinuationFingerprint(token: string): string {
+  if (!/^[A-Za-z0-9_-]{32,200}$/.test(token)) throw new Error('Managed Stratus continuation token is invalid');
+  return createHash('sha256').update(`stratus-managed-continuation-v1:${token}`).digest('hex').slice(0, 24);
 }
 
 // `screenshot` defaults to true because every existing caller wants the receipt image. The CAPTCHA

@@ -6,6 +6,8 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import pg from 'pg';
 import { chromium } from 'playwright-core';
 import {
+  assertDisposableDatabaseMarker,
+  assertRemoteManagedRunner,
   assertControlledSecurityCodeTarget,
   managedApplicationAlias,
   securityCodeCase,
@@ -32,6 +34,16 @@ const inboundSecret = process.env.RESEND_WEBHOOK_SECRET
   ?? process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET
   ?? process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_SECRET;
 const qaForwardTo = process.env.QA_APPLICATION_EMAIL_FORWARD_TO;
+const databaseMarker = process.env.QA_CONTROLLED_DATABASE_MARKER;
+const portalBindingSecret = process.env.LITOS_TEST_PORTAL_BINDING_SECRET;
+const runnerOrigin = securityCodeMode ? assertRemoteManagedRunner({
+  provider: process.env.BROWSER_PROVIDER,
+  baseUrl: process.env.STRATUS_BASE_URL,
+  apiKey: process.env.STRATUS_API_KEY,
+  oidcToken: process.env.VERCEL_OIDC_TOKEN,
+  vercelEnv: process.env.VERCEL_ENV,
+  expectedOrigin: process.env.QA_EXPECTED_STRATUS_ORIGIN,
+}) : null;
 if (!databaseUrl) throw new Error('DATABASE_URL is required');
 if (!Number.isInteger(runCount) || runCount < 1) throw new Error('QA_RUNS must be a positive integer');
 if (securityCodeMode && !autoApply) throw new Error('QA_AUTO_APPLY=1 is required for the security-code continuation trial');
@@ -46,6 +58,10 @@ if (securityCodeMode) {
     portalPublicBase,
     databaseConfirmed: process.env.QA_CONTROLLED_DATABASE === '1',
     publicPortalConfirmed: process.env.QA_CONTROLLED_PORTAL_PUBLIC === '1',
+    databaseUrl,
+    databaseMarker,
+    portalBindingSecret,
+    configuredPortalOrigin: process.env.LITOS_TEST_PORTAL_PUBLIC_ORIGIN,
   });
 }
 
@@ -173,6 +189,19 @@ const seenSecurityCodes = new Set();
 let activeRun = null;
 try {
   if (securityCodeMode) {
+    activeRun = { run: null, stage: 'verify_disposable_database_marker' };
+    let markerResult;
+    try {
+      markerResult = await client.query(
+        `select marker, expires_at
+           from litos_qa_control
+          where scope = 'security-code-e2e'
+          limit 1`,
+      );
+    } catch (error) {
+      throw new Error(`disposable QA database marker lookup failed: ${errorDetail(error)}`);
+    }
+    assertDisposableDatabaseMarker(markerResult.rows[0], databaseMarker);
     activeRun = { run: null, stage: 'verify_managed_application_email_route' };
     const health = await api('/health');
     assert.equal(health.application_email?.deliverable, true, 'managed application email route is not deliverable');
@@ -338,6 +367,10 @@ try {
     assert.ok(prepared.review.filled_fields.includes('resume'));
     if (securityCodeMode) {
       assert.equal(prepared.review.verification?.status, 'completed');
+      assert.equal(prepared.review.verification?.runner, 'stratus-managed');
+      assert.equal(prepared.review.verification?.continuation_resumed, true);
+      assert.match(prepared.review.verification?.continuation_fingerprint ?? '', /^[a-f0-9]{24}$/);
+      assert.equal(prepared.review.receipt?.source, 'managed_browser');
       assert.ok(inboundEvidence);
       assert.equal(seenSecurityCodes.has(inboundEvidence.code), false, 'controlled portal reused a security code');
       seenSecurityCodes.add(inboundEvidence.code);
@@ -395,6 +428,12 @@ try {
         ? createHash('sha256').update(`${applicationId}:${inboundEvidence.code}`).digest('hex').slice(0, 16)
         : null,
       verification_status: finalState.review.verification?.status ?? null,
+      runner: finalState.review.verification?.runner ?? null,
+      runner_origin: runnerOrigin?.origin ?? null,
+      runner_auth_mode: runnerOrigin?.authMode ?? null,
+      continuation_fingerprint: finalState.review.verification?.continuation_fingerprint ?? null,
+      continuation_resumed: finalState.review.verification?.continuation_resumed ?? false,
+      receipt_source: finalState.review.receipt?.source ?? null,
       email_message_received: Boolean(inboundEvidence),
       email_message_forwarded: Boolean(inboundEvidence?.response?.forwarded),
       first_run_guest_entry_visible: true,
