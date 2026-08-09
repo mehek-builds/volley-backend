@@ -5,6 +5,7 @@ import {
   assertControlledSecurityCodeTarget,
   assertDisposableDatabaseMarker,
   controlledManagedReceivingProof,
+  controlledResendReceivingApiKey,
 } from './qa-guest-submissions-lib.mjs';
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -32,7 +33,7 @@ const proof = controlledManagedReceivingProof({
   canaryToken: process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN,
   webhookEndpoint: process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_URL,
   webhookSecret: process.env.RESEND_WEBHOOK_SECRET,
-  receivingApiKey: process.env.RESEND_RECEIVING_API_KEY ?? process.env.RESEND_API_KEY,
+  receivingApiKey: controlledResendReceivingApiKey(),
   databaseMarker,
 });
 

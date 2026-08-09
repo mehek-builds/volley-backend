@@ -13,6 +13,7 @@ import {
   controlledScreenshotObjectKey,
   controlledDatabaseTarget,
   controlledManagedReceivingProof,
+  controlledResendReceivingApiKey,
   controlledForwardedEmailForRun,
   controlledQaPacketSpec,
   controlledPortalBinding,
@@ -237,6 +238,17 @@ test('controlled managed receiving proof is fully bound to the disposable QA con
     ...input,
     webhookEndpoint: 'http://localhost:3301/webhooks/application-email/inbound',
   }), /endpoint is invalid/);
+});
+
+test('controlled QA Receiving key selection trims values and falls back past a blank dedicated key', () => {
+  assert.equal(controlledResendReceivingApiKey({
+    RESEND_RECEIVING_API_KEY: '  ',
+    RESEND_API_KEY: '  re_fallback_sending_key  ',
+  }), 're_fallback_sending_key');
+  assert.equal(controlledResendReceivingApiKey({
+    RESEND_RECEIVING_API_KEY: '  re_dedicated_receiving_key  ',
+    RESEND_API_KEY: 're_fallback_sending_key',
+  }), 're_dedicated_receiving_key');
 });
 
 test('security-code proof must exist before backend startup and match the exact fixture binding', () => {

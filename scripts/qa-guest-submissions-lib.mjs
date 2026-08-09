@@ -262,6 +262,10 @@ export function controlledManagedReceivingProof({
   };
 }
 
+export function controlledResendReceivingApiKey(env = process.env) {
+  return env.RESEND_RECEIVING_API_KEY?.trim() || env.RESEND_API_KEY?.trim();
+}
+
 export function assertControlledManagedReceivingProofRow(row, expected, now = new Date()) {
   if (!row
     || row.provider_message_hash !== expected.provider_message_hash
