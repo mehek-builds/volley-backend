@@ -1,5 +1,5 @@
 import type { Page } from 'playwright-core';
-import type { ManagedBrowserAction, ManagedBrowserResult } from './browserbase';
+import { MANAGED_SUBMIT_CHOOSER_POLICY, type ManagedBrowserAction, type ManagedBrowserResult } from './browserbase';
 import { describeRequiredBlocker, describeUnlabelledBlockers, humanFieldLabel } from './fieldLabel';
 import {
   classifyField,
@@ -19,6 +19,7 @@ import {
 import type { Locator } from 'playwright-core';
 import { browserApplicationCapability } from './browserApplicationCapabilities';
 import { isControlledTestPortalUrl } from './controlledTestPortal';
+import { chooseCanonicalFinalSubmit } from './finalSubmitChooserPolicy';
 import {
   referralSourceForApplication,
   referralSourceOptionCandidates,
@@ -1753,6 +1754,8 @@ const ASHBY_QUESTION_TEXT_SELECTOR_LIMIT = 9;
  * gets an error instead of a result. Keep this number equal to that one.
  */
 export const MANAGED_ACTION_LIMIT = Number(process.env.LITOS_MEASURE_ACTION_LIMIT ?? 120);
+export const MANAGED_FINAL_SUBMIT_SELECTOR =
+  'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]';
 const CONFIRM_AFTER_FILL_FIELDS = new Set(['school', 'degree']);
 
 function pushGreenhouseManagedPreflightActions(actions: ManagedBrowserAction[]) {
@@ -3191,7 +3194,6 @@ type ReviewedQuestionActionProtection = {
  * national number when its adjacent dial-code control is left on the wrong country.
  */
 function coreActionProtection(actions: readonly ManagedBrowserAction[], portal: SupportedPortal): ReadonlySet<string> {
-  if (portalFamily(portal) !== 'greenhouse') return new Set();
   const available = new Set(actions.map(managedActionLabelBase).filter((base): base is string => Boolean(base)));
   const protectedBases = new Set<string>();
   if (available.has('name')) {
@@ -3201,6 +3203,14 @@ function coreActionProtection(actions: readonly ManagedBrowserAction[], portal: 
   }
   for (const base of ['email', 'phone_country', 'phone', 'resume']) {
     if (available.has(base)) protectedBases.add(base);
+  }
+  // Greenhouse is the autonomous family with a fixed education row. Protect every complete chain
+  // that carries it. The class-level protection in isProtectedManagedAction remains as defence in
+  // depth, while keeping the bases here makes the minimum explicit to the budget calculation.
+  if (portalFamily(portal) === 'greenhouse') {
+    for (const base of available) {
+      if (GREENHOUSE_FIXED_EDUCATION_ACTION_RE.test(base)) protectedBases.add(base);
+    }
   }
   return protectedBases;
 }
@@ -4284,8 +4294,13 @@ export function buildManagedPortalActions(
   const familyActionLimit = portalFamily(portal) === 'greenhouse' && packetLooksAkuna(packet)
     ? 100
     : MANAGED_ACTION_LIMIT;
-  // One action held back for the submit click, which is appended below and is otherwise the action
-  // that puts an exactly-full list one over the ceiling.
+  // Submission reserves one atomic action. It resolves and retains the exact final control and its
+  // closest form, confirms the form, and owns the one authorized physical click. The confirmation
+  // action is required and fail-closed. It emits input/change plus blur for text and
+  // date controls, commits an exact option for native and React selects, and focuses/clicks the
+  // exact associated control or label for radio, checkbox and custom controls. It then rescans
+  // only affected required fields once. The managed runner must stop the list if any confirmation
+  // fails, which makes the submit click physically unreachable.
   const actionLimit = canAppendSubmit ? familyActionLimit - 1 : familyActionLimit;
   const questionProtection = reviewedQuestionActionProtection(actions, packet);
   const protectedActionBases = new Set([
@@ -4304,7 +4319,21 @@ export function buildManagedPortalActions(
   }
 
   if (canAppendSubmit) {
-    actions.push({ type: 'click', selector: 'button[type="submit"], input[type="submit"]' });
+    actions.push({
+      type: 'confirmAndSubmit',
+      // This is a candidate set, not an instruction to click its first match. The v2 runner applies
+      // the same semantic final-control chooser used on the direct path, binds the chosen node and
+      // closest form through opaque fingerprints, confirms that form, then clicks that exact node
+      // inside this action. It blocks on ambiguity, replacement, or a changed form identity.
+      selector: MANAGED_FINAL_SUBMIT_SELECTOR,
+      label: 'required_field_confirmation',
+      optional: false,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+      maxRetries: 1,
+      contractVersion: 2,
+      submitKind: 'application',
+      chooserPolicy: MANAGED_SUBMIT_CHOOSER_POLICY,
+    });
   }
   return actions;
 }
@@ -6266,34 +6295,7 @@ const SUBMIT_LABEL = new RegExp(
  * control wins because a form's real submit sits at its foot.
  */
 export function chooseSubmitControl(labels: string[]): number | null {
-  const eligible = labels
-    .map((label, index) => ({ label: label.replace(/\s+/g, ' ').trim(), index }))
-    .filter(({ label }) => label
-      && !THIRD_PARTY_HANDOFF.test(label)
-      && !HANDOFF_VERB_PROVIDER.test(label)
-      && SUBMIT_LABEL.test(label));
-  if (eligible.length === 0) return null;
-  /* SUPPORT WIDGETS ARE REMOVED FROM THE WHOLE POOL, not demoted within one tier.
-     Intercom and Zendesk render "Submit feedback" and "Submit a request" as [role=button] at the
-     FOOT of a careers page, so they sort after the real control and last-wins hands them the click,
-     which submits nothing and then tells the applicant to check her email. Excluding them only
-     inside the explicit tier left two holes: "Submit application feedback" reached the strongest
-     tier on its prefix, and a page whose real control says "Apply now" fell through to a pool that
-     still contained the widget. If removing them empties the pool, the honest answer is that this
-     page has no submit control - never press the help desk. */
-  const clean = eligible.filter(({ label }) => !isSupportWidget(label));
-  if (clean.length === 0) return null;
-  /* Then two tiers, because "the last thing saying submit" is still not specific enough. A label
-     that names the application outright is the strongest signal a control can give. */
-  const application = clean.filter(({ label }) => APPLICATION_SUBMIT.test(label));
-  const explicit = clean.filter(({ label }) => /\bsubmit\b/i.test(label));
-  /* And a third rung below those: "Apply now" is a primary control, a bare "Apply" is as often a
-     sticky footer or a card link. Without this, last-wins prefers whichever happens to sit lower. */
-  const applyNow = clean.filter(({ label }) => /\bapply now\b/i.test(label));
-  const pool = application.length > 0 ? application
-    : explicit.length > 0 ? explicit
-      : applyNow.length > 0 ? applyNow : clean;
-  return pool[pool.length - 1]!.index;
+  return chooseCanonicalFinalSubmit(labels);
 }
 
 /** Every control that could conceivably be a submit button. Exported so a test can match it. */
@@ -6340,6 +6342,221 @@ export class FormIncompleteError extends NoSubmitControlError {
   }
 }
 
+export class ManagedRequiredFieldConfirmationError extends NoSubmitControlError {
+  readonly fields: string[];
+
+  constructor(fields: string[], message?: string) {
+    const unique = [...new Set(fields.filter((field) => field.trim()).map((field) => field.trim()))];
+    super(message ?? (
+      unique.length > 0
+        ? `Litos did not press submit: ${unique.length} required field confirmation${unique.length === 1 ? '' : 's'} failed (${unique.slice(0, 5).join('; ')})`
+        : 'Litos did not press submit: the browser could not prove required fields were committed'
+    ));
+    this.name = 'ManagedRequiredFieldConfirmationError';
+    this.fields = unique;
+  }
+}
+
+const REQUIRED_CONFIRMATION_FIELD_TYPES = new Set([
+  'text', 'date', 'select', 'react-select', 'radio', 'checkbox', 'file', 'custom',
+]);
+const REQUIRED_CONFIRMATION_OUTCOMES = new Set(['already_committed', 'confirmed', 'failed']);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, required: readonly string[], optional: readonly string[] = []): boolean {
+  const keys = Object.keys(value);
+  return required.every((key) => keys.includes(key))
+    && keys.every((key) => required.includes(key) || optional.includes(key));
+}
+
+/**
+ * Confirmation proof may identify controls only through selectors that survive layout changes.
+ * Coordinates, absolute DOM paths and positional selectors are deliberately rejected. They can
+ * point at a different answer after a responsive reflow, which is worse than failing closed.
+ */
+export function isDurableRequiredControlSelector(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const selector = value.trim();
+  if (!selector || selector.length > 500) return false;
+  if (/^(?:x\s*[:=]|coordinates?\b|point\s*\()/i.test(selector)) return false;
+  if (/^\(?\s*\d+\s*[,;]\s*\d+\s*\)?$/.test(selector)) return false;
+  if (/^(?:\/\/|\/html\b)/i.test(selector)) return false;
+  if (/:(?:nth-child|nth-of-type)\s*\(/i.test(selector)) return false;
+  // Exact identities only. matchCount:1 independently proves the identity was unique on the live
+  // page. Generic type, role, aria, autocomplete and label selectors are excluded.
+  const tag = '(?:[a-z][a-z0-9-]*)?';
+  const quoted = '(?:"[^"\\r\\n]+"|\'[^\'\\r\\n]+\')';
+  return new RegExp(
+    `^(?:${tag}#[A-Za-z_][\\w:-]*|${tag}\\[name=${quoted}\\]|\\[data-field-path=${quoted}\\]|\\[data-litos-stable-id-v1=${quoted}\\])$`,
+    'i',
+  ).test(selector);
+}
+
+type RequiredControlProof = {
+  selector: string;
+  label: string | null;
+  fieldType: 'text' | 'date' | 'select' | 'react-select' | 'radio' | 'checkbox' | 'file' | 'custom';
+  matchCount?: 1;
+};
+
+function parseRequiredControl(value: unknown, requireMatchCount = false): RequiredControlProof | null {
+  const keys = requireMatchCount
+    ? ['selector', 'label', 'fieldType', 'matchCount']
+    : ['selector', 'label', 'fieldType'];
+  if (!isRecord(value) || !hasOnlyKeys(value, keys)) return null;
+  if (!isDurableRequiredControlSelector(value.selector)) return null;
+  if (value.label !== null && (typeof value.label !== 'string' || !value.label.trim() || value.label.length > 200)) return null;
+  if (typeof value.fieldType !== 'string' || !REQUIRED_CONFIRMATION_FIELD_TYPES.has(value.fieldType)) return null;
+  if (requireMatchCount && value.matchCount !== 1) return null;
+  return {
+    selector: value.selector.trim(),
+    label: typeof value.label === 'string' ? value.label.trim() : null,
+    fieldType: value.fieldType as RequiredControlProof['fieldType'],
+    ...(requireMatchCount ? { matchCount: 1 as const } : {}),
+  };
+}
+
+function confirmationContractError(message: string): never {
+  throw new ManagedRequiredFieldConfirmationError([], `Litos did not press submit: required-field confirmation proof is malformed (${message})`);
+}
+
+/**
+ * Require the remote runner's per-field proof before this service records a receipt. The action
+ * itself is the pre-click barrier. This read is the independent reporting barrier, so an older
+ * runner that silently ignores an unknown action cannot turn a silent fill into `submitted`.
+ */
+export function assertManagedRequiredFieldsConfirmed(
+  result: unknown,
+  expectedSubmitKind?: 'application' | 'verification',
+): void {
+  if (!isRecord(result)) confirmationContractError('result is not an object');
+  const proof = result.requiredFieldConfirmation;
+  if (proof === undefined || proof === null) {
+    throw new ManagedRequiredFieldConfirmationError([], 'Litos did not press submit: the managed browser does not support required-field confirmation');
+  }
+  if (!isRecord(proof) || !hasOnlyKeys(proof, ['version', 'status', 'passes'])) {
+    confirmationContractError('receipt shape');
+  }
+  if (proof.version !== 2) confirmationContractError('unsupported version');
+  if (proof.status !== 'confirmed' && proof.status !== 'blocked') confirmationContractError('status');
+  if (!Array.isArray(proof.passes) || proof.passes.length !== 1) {
+    confirmationContractError('confirmation passes');
+  }
+  const opaqueFingerprint = (value: unknown) => typeof value === 'string'
+    && /^[A-Za-z0-9_-]{16,200}$/.test(value);
+  const allFailures: string[] = [];
+  const blockerFailures: string[] = [];
+  for (const pass of proof.passes) {
+    if (!isRecord(pass) || !hasOnlyKeys(pass, [
+      'submitKind', 'scope', 'requiredControls', 'attempts', 'retries', 'unresolved', 'submissionOutcome',
+    ], ['blockerReason'])) confirmationContractError('pass shape');
+    if (pass.submitKind !== 'application' && pass.submitKind !== 'verification') {
+      confirmationContractError('submit kind');
+    }
+    if (expectedSubmitKind && pass.submitKind !== expectedSubmitKind) confirmationContractError('unexpected submit kind');
+    if (!isRecord(pass.scope) || !hasOnlyKeys(pass.scope, [
+      'formFingerprint', 'submitFingerprint', 'formMatchCount', 'submitMatchCount',
+      'requiredControlCount', 'sameNode',
+    ])) confirmationContractError('scope proof');
+    if (!opaqueFingerprint(pass.scope.formFingerprint)
+      || !opaqueFingerprint(pass.scope.submitFingerprint)
+      || pass.scope.formMatchCount !== 1 || pass.scope.submitMatchCount !== 1
+      || typeof pass.scope.sameNode !== 'boolean' || !Number.isInteger(pass.scope.requiredControlCount)
+      || (pass.scope.requiredControlCount as number) < 0
+      || (pass.scope.requiredControlCount as number) > 500) confirmationContractError('scope identity');
+    if (pass.submissionOutcome !== 'clicked' && pass.submissionOutcome !== 'blocked') {
+      confirmationContractError('submission outcome');
+    }
+    const blockerReasons = new Set([
+      'submit_node_replaced', 'ambiguous_submit', 'form_identity_changed', 'no_submit_control',
+    ]);
+    if (pass.blockerReason !== undefined
+      && (typeof pass.blockerReason !== 'string' || !blockerReasons.has(pass.blockerReason))) {
+      confirmationContractError('blocker reason');
+    }
+    if (typeof pass.blockerReason === 'string') blockerFailures.push(pass.blockerReason);
+    if (pass.scope.sameNode === false && pass.blockerReason !== 'submit_node_replaced') {
+      confirmationContractError('detached node reason');
+    }
+    if (!Number.isInteger(pass.retries) || (pass.retries !== 0 && pass.retries !== 1)) confirmationContractError('retries');
+    if (!Array.isArray(pass.requiredControls) || !Array.isArray(pass.attempts) || !Array.isArray(pass.unresolved)) {
+      confirmationContractError('arrays');
+    }
+    const controls = pass.requiredControls.map((control) => parseRequiredControl(control, true));
+    if (controls.some((control) => control === null)) confirmationContractError('required control');
+    const requiredControls = controls as RequiredControlProof[];
+    if (pass.scope.requiredControlCount !== requiredControls.length) confirmationContractError('scan control count');
+    const requiredBySelector = new Map<string, RequiredControlProof>();
+    for (const control of requiredControls) {
+      if (requiredBySelector.has(control.selector)) confirmationContractError('duplicate required control');
+      requiredBySelector.set(control.selector, control);
+    }
+    const attempts = pass.attempts.map((value) => {
+    if (!isRecord(value) || !hasOnlyKeys(value, ['selector', 'label', 'fieldType', 'outcome', 'attemptCount'], ['reason'])) {
+      confirmationContractError('attempt shape');
+    }
+    const control = parseRequiredControl({ selector: value.selector, label: value.label, fieldType: value.fieldType });
+    if (!control) confirmationContractError('attempt control');
+    if (typeof value.outcome !== 'string' || !REQUIRED_CONFIRMATION_OUTCOMES.has(value.outcome)) {
+      confirmationContractError('attempt outcome');
+    }
+    if (value.attemptCount !== 1 && value.attemptCount !== 2) confirmationContractError('attempt count');
+    if (value.outcome === 'already_committed' && value.attemptCount !== 1) {
+      confirmationContractError('already committed retry');
+    }
+    const reason = value.reason;
+    if (value.outcome === 'failed') {
+      if (typeof reason !== 'string' || !reason.trim() || reason.length > 300) confirmationContractError('failed attempt reason');
+    } else if (reason !== undefined) {
+      confirmationContractError('successful attempt reason');
+    }
+    return {
+      ...control,
+      outcome: value.outcome,
+      attemptCount: value.attemptCount,
+      reason: typeof reason === 'string' ? reason.trim() : undefined,
+    };
+    });
+    if (attempts.length !== requiredControls.length) confirmationContractError('attempt coverage count');
+    const attempted = new Set<string>();
+    for (const attempt of attempts) {
+      const required = requiredBySelector.get(attempt.selector);
+      if (!required || attempted.has(attempt.selector)) confirmationContractError('attempt coverage');
+      if (attempt.fieldType !== required.fieldType || attempt.label !== required.label) confirmationContractError('attempt identity');
+      attempted.add(attempt.selector);
+    }
+    const observedRetries = attempts.some((attempt) => attempt.attemptCount === 2) ? 1 : 0;
+    if (pass.retries !== observedRetries) confirmationContractError('retry evidence');
+    const knownUnresolved = new Set(requiredControls.flatMap((control) => [control.selector, control.label].filter(Boolean) as string[]));
+    const unresolved: string[] = [];
+    for (const value of pass.unresolved) {
+      if (typeof value !== 'string' || !value.trim() || value.length > 200 || !knownUnresolved.has(value.trim())) {
+        confirmationContractError('unresolved field');
+      }
+      unresolved.push(value.trim());
+    }
+    const failedAttempts = attempts.filter((attempt) => attempt.outcome === 'failed')
+      .map((attempt) => attempt.label || attempt.selector);
+    const failures = [...unresolved, ...failedAttempts];
+    allFailures.push(...failures);
+    if (pass.submissionOutcome === 'clicked'
+      && (failures.length > 0 || pass.blockerReason !== undefined || pass.scope.sameNode !== true)) {
+      confirmationContractError('invalid atomic click proof');
+    }
+    if (pass.submissionOutcome === 'blocked' && failures.length === 0 && pass.blockerReason === undefined) {
+      confirmationContractError('blocked pass without reason');
+    }
+  }
+  if (proof.status === 'confirmed' && (allFailures.length > 0 || blockerFailures.length > 0)) confirmationContractError('confirmed with failures');
+  if (proof.status === 'blocked' && allFailures.length === 0 && blockerFailures.length === 0) confirmationContractError('blocked without failure');
+  if (proof.status !== 'confirmed') {
+    throw new ManagedRequiredFieldConfirmationError([...allFailures, ...blockerFailures]);
+  }
+}
+
 /* THE PRE-SUBMIT GATE.
  *
  * Read immediately before the final click, and it separates two things that look identical in a
@@ -6369,6 +6586,8 @@ export class FormIncompleteError extends NoSubmitControlError {
  * worse failure than either being wrong on its own.
  */
 export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
+  const scanRoot = document.querySelector('[data-litos-submit-scope-v1="active"]');
+  if (!scanRoot) return { blocking: ['Litos could not bind required-field validation to the selected application form'], stale: [] };
   const clean = (value) => (value || '').replace(/\s+/g, ' ').trim().replace(/[\s*:]+$/, '');
   const isVisible = (element) => {
     if (!element) return false;
@@ -6537,7 +6756,7 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
   // Native required, PLUS aria-required. React Select's input carries aria-required="true" and no
   // required attribute at all, so a gate built only on [required] cannot see an unanswered
   // Greenhouse screener question - which is exactly the control this gate exists to catch.
-  for (const element of document.querySelectorAll(
+  for (const element of scanRoot.querySelectorAll(
     'input[required], textarea[required], select[required], [aria-required="true"]'
   )) {
     if (element.disabled) continue;
@@ -6595,14 +6814,14 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
     if (!target || target.disabled) return;
     note(widget, target);
   };
-  for (const marker of document.querySelectorAll('label[class*="_required_"], legend[class*="_required_"]')) {
+  for (const marker of scanRoot.querySelectorAll('label[class*="_required_"], legend[class*="_required_"]')) {
     // An Ashby question block with no readable control still has to block, which is where PR #22
     // measured this arm.
     noteMarkedLabel(marker, true);
   }
   const ASTERISK_MARK = /\*(?:\s|$)|(?:^|\s)\*/;
   const ASTERISK_LEGEND = /\*\s*(?:indicates|denotes|means|marks|=)/i;
-  for (const marker of document.querySelectorAll('label, legend')) {
+  for (const marker of scanRoot.querySelectorAll('label, legend')) {
     const markerText = (marker.textContent || '').replace(/\s+/g, ' ').trim();
     if (!ASTERISK_MARK.test(markerText) || ASTERISK_LEGEND.test(markerText)) continue;
     // No widget fallback: "a label somewhere carries a star and I could not find its control" is
@@ -6616,7 +6835,7 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
   // and correctly filled application, so the gate would have refused every Greenhouse submission
   // there is. A gate that blocks everything is not caution.
   const LEGEND_TEXT = /\bindicates?\b|\bdenotes?\b|\bfields?\s+marked\b|\ball fields\b/i;
-  for (const element of document.querySelectorAll('*')) {
+  for (const element of scanRoot.querySelectorAll('*')) {
     if (element.children.length > 0) continue;
     const text = clean(element.textContent);
     if (!text || text.length > 160 || !ERROR_TEXT.test(text) || LEGEND_TEXT.test(text)) continue;
@@ -6712,6 +6931,101 @@ export const READ_CONTROL_LABEL = (node: unknown) => {
 /** How long to give a submit control that is disabled until client-side validation settles. */
 const SUBMIT_ENABLE_WAIT_MS = 3_000;
 
+/**
+ * Commit the values already present in required controls on the exact form owned by the retained
+ * submit handle. This does not invent answers. It emits the framework event sequence ATS clients
+ * use to move a visually filled value into validation state, then proves the sequence did not
+ * change the selected value. The scope marker is consumed by READ_SUBMIT_READINESS_SCRIPT.
+ */
+export const COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT = async (node: unknown) => {
+  const button = node as unknown as {
+    closest(selector: string): {
+      setAttribute(name: string, value: string): void;
+      querySelectorAll(selector: string): Iterable<unknown>;
+    } | null;
+    ownerDocument: {
+      getElementById(id: string): unknown;
+      defaultView: {
+      Event: new(type: string, init: { bubbles: boolean; cancelable?: boolean }) => { preventDefault(): void };
+      requestAnimationFrame(callback: () => void): void;
+      getComputedStyle(node: unknown): { display: string; visibility: string };
+    } };
+  };
+  // Browser DOM elements always expose closest(). A handful of isolated unit doubles predate this
+  // callback and intentionally model only label reads. Keep those doubles usable without treating
+  // a real DOM node that has no owning form as confirmed.
+  if (typeof button.closest !== 'function') return { formFound: true, changed: false, committed: 0 };
+  const form = button.closest('form');
+  if (!form) return { formFound: false, changed: false, committed: 0 };
+  form.setAttribute('data-litos-submit-scope-v1', 'active');
+  const view = button.ownerDocument.defaultView;
+  const controls = Array.from(form.querySelectorAll(
+    '[required], [aria-required="true"], [role="radio"][aria-checked="true"], [role="checkbox"][aria-checked="true"]',
+  )) as Array<{
+    type?: string; value?: string; checked?: boolean; files?: { length: number } | null;
+    disabled?: boolean; focus?(): void; blur?(): void; click?(): void;
+    getAttribute(name: string): string | null;
+    getClientRects(): { length: number };
+    dispatchEvent(event: unknown): boolean;
+  }>;
+  type Control = typeof controls[number];
+  const markers = Array.from(form.querySelectorAll(
+    'label[class*="_required_"], legend[class*="_required_"], label, legend',
+  )) as Array<{
+    textContent?: string; className?: string; control?: unknown; parentElement?: { querySelector(selector: string): unknown } | null;
+    getAttribute(name: string): string | null;
+    querySelector(selector: string): unknown;
+    closest(selector: string): { querySelector(selector: string): unknown } | null;
+  }>;
+  const controlSelector = 'input:not([type="hidden"]), textarea, select, [role="combobox"], [role="radio"], [role="checkbox"]';
+  for (const marker of markers) {
+    const className = typeof marker.className === 'string' ? marker.className : '';
+    const literalStar = /\*\s*$/.test((marker.textContent ?? '').trim());
+    if (!literalStar && !className.includes('_required_')) continue;
+    const named = marker.getAttribute('for');
+    const wrapper = marker.closest('fieldset, .field, .field-wrapper, [class*="field"], [role="group"]');
+    const candidate = marker.control
+      || (named ? button.ownerDocument.getElementById(named) : null)
+      || marker.querySelector(controlSelector)
+      || wrapper?.querySelector(controlSelector)
+      || marker.parentElement?.querySelector(controlSelector);
+    if (candidate && !controls.includes(candidate as Control)) controls.push(candidate as Control);
+  }
+  const state = (control: typeof controls[number]) => JSON.stringify({
+    value: control.value ?? null,
+    checked: control.checked ?? null,
+    ariaChecked: control.getAttribute('aria-checked'),
+    files: control.files?.length ?? null,
+  });
+  let committed = 0;
+  let changed = false;
+  for (const control of controls) {
+    const style = view.getComputedStyle(control);
+    if (control.disabled || control.getClientRects().length === 0
+      || style.display === 'none' || style.visibility === 'hidden') continue;
+    const before = state(control);
+    control.focus?.();
+    const role = control.getAttribute('role');
+    const selectedCustom = (role === 'radio' || role === 'checkbox')
+      && control.getAttribute('aria-checked') === 'true';
+    if (selectedCustom) {
+      // Custom controls often commit only on their exact click handler. Prevent the browser default
+      // and verify the selected answer snapshot after the framework has processed the event.
+      const click = new view.Event('click', { bubbles: true, cancelable: true });
+      click.preventDefault();
+      control.dispatchEvent(click);
+    } else if (control.type !== 'file') {
+      control.dispatchEvent(new view.Event('input', { bubbles: true }));
+      control.dispatchEvent(new view.Event('change', { bubbles: true }));
+    }
+    control.blur?.();
+    committed += 1;
+    await new Promise<void>((resolve) => view.requestAnimationFrame(resolve));
+    if (state(control) !== before) changed = true;
+  }
+  return { formFound: true, changed, committed };
+};
+
 export async function clickFinalSubmit(page: Page): Promise<void> {
   /* ELEMENT HANDLES, NOT nth(). An index is only meaningful against the DOM that produced it, and
      the captcha probe below sits between the two: it can spend the better part of fifteen seconds
@@ -6770,6 +7084,14 @@ export async function clickFinalSubmit(page: Page): Promise<void> {
        NOTE: this guard only covers the direct-Playwright path. The managed-Stratus path in
        submissionRunner never builds a Page, so it never reaches here. */
     const button = handles[chosen]!;
+    const committed = await button.evaluate(COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT).catch(() => null);
+    if (committed === null || !committed.formFound || committed.changed) {
+      throw new NoSubmitControlError(
+        committed?.changed
+          ? 'Litos did not submit because required-field confirmation changed a selected answer'
+          : 'Litos could not bind required-field confirmation to the selected application form',
+      );
+    }
     /* THE PRE-SUBMIT GATE, and it sits here for the same reason the captcha probe sits above: after
        the control has been found, before anything is pressed. See READ_SUBMIT_READINESS_SCRIPT for
        why a visible "is required" message is NOT on its own a reason to refuse.

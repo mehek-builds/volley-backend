@@ -156,7 +156,7 @@ test('Databricks wrapper URLs use the Greenhouse managed flow without submitting
 
   const submitting = buildManagedPortalActions('greenhouse', packet, true);
   assert.equal(
-    submitting.filter((action) => action.type === 'click' && action.selector === 'button[type="submit"], input[type="submit"]').length,
+    submitting.filter((action) => action.type === 'confirmAndSubmit').length,
     1,
   );
   assert.ok(submitting.every((action) => action.type !== 'fill' || (action.timeout ?? Infinity) < 30_000));
@@ -438,7 +438,7 @@ test('controlled portal variants exercise every real adapter selector family', (
     // deriving what to SHOW from portalCanAutoSubmit, a predicate that lied about SmartRecruiters
     // would have surfaced postings the student could never complete.
     assert.equal(
-      actions.at(-1)?.type === 'click',
+      actions.at(-1)?.type === 'confirmAndSubmit',
       portalCanAutoSubmit(portal),
       `${portal}: a submit click must appear if and only if the portal can finish alone`,
     );
@@ -490,7 +490,7 @@ test('managed controlled-portal actions include reviewed fields, resume upload, 
       'upload',
       'upload',
       'fillByLabelText',
-      'click',
+      'confirmAndSubmit',
     ],
   );
   assert.ok(actions.some((action) => action.type === 'select' && action.label?.startsWith('question_select:')));
@@ -1555,8 +1555,7 @@ test('Greenhouse trims low-priority fallbacks before exceeding the managed actio
   }, true);
 
   assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
-  assert.equal(actions.at(-1)?.type, 'click');
-  assert.equal(actions.at(-1)?.selector, 'button[type="submit"], input[type="submit"]');
+  assert.equal(actions.at(-1)?.type, 'confirmAndSubmit');
   assert.ok(actions.some((action) => action.label === 'phone_country'));
   assert.ok(actions.some((action) => action.label === 'location'));
   assert.ok(actions.some((action) => action.label?.startsWith('question_combo_label:') && action.label.includes('team opening')));
@@ -3161,7 +3160,7 @@ test('every autonomous family actually fills something before it is allowed to p
       actions.some((a) => a.type === 'upload' && a.label === 'resume'),
       `${family}: no resume upload`,
     );
-    assert.equal(actions.at(-1)?.type, 'click', `${family}: an autonomous portal must end in the submit click`);
+    assert.equal(actions.at(-1)?.type, 'confirmAndSubmit', `${family}: an autonomous portal must end in atomic confirmation and submit`);
   }
 });
 
@@ -4118,7 +4117,7 @@ test('Greenhouse select-heavy prepare and submit keep one complete fill chain pe
         `${submit ? 'submit' : 'prepare'} lost every viable action chain for ${item.question}`,
       );
     }
-    if (submit) assert.equal(actions.at(-1)?.type, 'click');
+    if (submit) assert.equal(actions.at(-1)?.type, 'confirmAndSubmit');
   }
 });
 
@@ -4153,7 +4152,7 @@ test('Greenhouse 16 to 18 question boundaries preserve core fields or block befo
             `${questionCount}-question ${submit ? 'submit' : 'prepare'} lost ${item.question}`,
           );
         }
-        if (submit) assert.equal(actions.at(-1)?.type, 'click');
+        if (submit) assert.equal(actions.at(-1)?.type, 'confirmAndSubmit');
       } catch (error) {
         assert.ok(error instanceof ManagedActionBudgetError);
         assert.equal(error.submitActionAppended, false);
@@ -4194,8 +4193,7 @@ test('the budget is spent on repeat guesses, and the submit click is reserved ou
   }
 
   // And the submit click is inside the budget, not appended past it.
-  assert.equal(actions.at(-1)?.type, 'click');
-  assert.match(actions.at(-1)?.selector ?? '', /\[type="submit"\]/);
+  assert.equal(actions.at(-1)?.type, 'confirmAndSubmit');
 });
 
 test('the trim takes fills, never the discover action or the reads it exists for', () => {

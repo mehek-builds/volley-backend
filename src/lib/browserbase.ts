@@ -1,11 +1,14 @@
 import { chromium, type Browser, type Page } from 'playwright-core';
 import { getVercelOidcToken } from '@vercel/oidc';
 import { createHash } from 'node:crypto';
+import { FINAL_SUBMIT_CHOOSER_POLICY, type FinalSubmitChooserPolicy } from './finalSubmitChooserPolicy';
 
 export type BrowserProvider = 'browserbase' | 'stratus' | 'stratus-managed';
 
+export const MANAGED_SUBMIT_CHOOSER_POLICY = FINAL_SUBMIT_CHOOSER_POLICY;
+
 export type ManagedBrowserAction = {
-  type: 'click' | 'fill' | 'fillByLabelText' | 'upload' | 'waitForSelector' | 'press' | 'select' | 'extract' | 'discover';
+  type: 'click' | 'fill' | 'fillByLabelText' | 'upload' | 'waitForSelector' | 'press' | 'select' | 'extract' | 'discover' | 'confirmAndSubmit';
   selector?: string;
   value?: string;
   text?: string;
@@ -14,7 +17,24 @@ export type ManagedBrowserAction = {
   timeout?: number;
   attribute?: string;
   file?: { name: string; mimeType: string; base64: string };
-  /* The emailed code that finishes a Greenhouse submit, carried on the submit click itself.
+  /**
+   * Only used by confirmAndSubmit. In contract v2 this one action owns both confirmation and the
+   * authorized physical submit click, so no re-render can replace the proved node between actions.
+   * The runner rescans required controls after the ordinary
+   * fills, commits framework state on the affected controls, and may repeat that affected set this
+   * many times. It must stop the action list when any field remains unresolved, so a later submit
+   * click is unreachable. This is intentionally a single bounded action rather than one blind click
+   * per field: the runner has the live DOM and can choose the exact label/control without spending
+   * the application-wide action budget on speculative selectors.
+   */
+  maxRetries?: number;
+  /** Versioned runner capability required by the atomic confirmAndSubmit action. */
+  contractVersion?: 2;
+  /** Distinguishes the employer application send from an emailed-code continuation send. */
+  submitKind?: 'application' | 'verification';
+  /** Shared semantic candidate policy. Runner must reject an unknown name or version. */
+  chooserPolicy?: FinalSubmitChooserPolicy;
+  /* The emailed code that finishes a Greenhouse submit, carried on the atomic action itself.
    *
    * On the click, and not as its own action, because the control it types into does not exist until
    * that click has happened - and because MANAGED_ACTION_LIMIT is 120, a real Greenhouse packet
@@ -99,6 +119,44 @@ export type ManagedBrowserResult = {
    * from a text sweep that reads an employer's own "check your email for confirmation" as a
    * challenge. */
   continuationOffered?: boolean;
+  /**
+   * Fail-closed proof emitted by confirmAndSubmit. One record is required for every required field
+   * the runner inspected, including fields that were already committed. A runner that predates the
+   * protocol returns no proof, which callers treat as unsupported and never as success.
+   */
+  requiredFieldConfirmation?: {
+    version: 2;
+    status: 'confirmed' | 'blocked';
+    passes: Array<{
+      submitKind: 'application' | 'verification';
+      scope: {
+        formFingerprint: string;
+        submitFingerprint: string;
+        formMatchCount: 1;
+        submitMatchCount: 1;
+        requiredControlCount: number;
+        sameNode: boolean;
+      };
+      requiredControls: Array<{
+        selector: string;
+        label: string | null;
+        fieldType: 'text' | 'date' | 'select' | 'react-select' | 'radio' | 'checkbox' | 'file' | 'custom';
+        matchCount: 1;
+      }>;
+      attempts: Array<{
+        selector: string;
+        label: string | null;
+        fieldType: 'text' | 'date' | 'select' | 'react-select' | 'radio' | 'checkbox' | 'file' | 'custom';
+        outcome: 'already_committed' | 'confirmed' | 'failed';
+        attemptCount: 1 | 2;
+        reason?: string;
+      }>;
+      retries: number;
+      unresolved: string[];
+      submissionOutcome: 'clicked' | 'blocked';
+      blockerReason?: 'submit_node_replaced' | 'ambiguous_submit' | 'form_identity_changed' | 'no_submit_control';
+    }>;
+  } | null;
 };
 
 type ManagedBrowserError = string | { message?: string; code?: string };
@@ -133,10 +191,26 @@ function stratusAction(action: ManagedBrowserAction): ManagedBrowserAction {
     if (!action.text?.trim()) return action;
     return { ...action, selector: action.selector?.trim() || 'body' };
   }
+  if (action.type === 'confirmAndSubmit') {
+    if (action.contractVersion !== 2) throw new Error('Managed required-field confirmation contract version is invalid');
+    if (action.maxRetries !== 0 && action.maxRetries !== 1) {
+      throw new Error('Managed required-field confirmation maxRetries must be 0 or 1');
+    }
+    if (!action.chooserPolicy
+      || action.chooserPolicy.name !== FINAL_SUBMIT_CHOOSER_POLICY.name
+      || action.chooserPolicy.version !== FINAL_SUBMIT_CHOOSER_POLICY.version
+      || action.chooserPolicy.finalPattern !== FINAL_SUBMIT_CHOOSER_POLICY.finalPattern
+      || action.chooserPolicy.exclusionPattern !== FINAL_SUBMIT_CHOOSER_POLICY.exclusionPattern
+      || action.chooserPolicy.grammarHash !== FINAL_SUBMIT_CHOOSER_POLICY.grammarHash) {
+      throw new Error('Managed final-submit chooser policy is invalid');
+    }
+    return action;
+  }
   return action;
 }
 
 function invalidSelectorReason(action: ManagedBrowserAction): string | undefined {
+  if (action.type === 'confirmAndSubmit') return undefined;
   const selector = action.selector?.trim();
   if (!selector) return 'empty';
   if (selector.length > STRATUS_SELECTOR_MAX_LENGTH) return 'too_long';

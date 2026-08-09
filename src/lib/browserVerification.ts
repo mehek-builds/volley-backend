@@ -1,5 +1,5 @@
 import type { Locator, Page } from 'playwright-core';
-import type { ManagedBrowserAction, ManagedBrowserResult } from './browserbase';
+import { MANAGED_SUBMIT_CHOOSER_POLICY, type ManagedBrowserAction, type ManagedBrowserResult } from './browserbase';
 import { findComposioVerificationCode, type VerificationCodeMatch } from './emailVerification';
 
 const OTP_SELECTORS = [
@@ -121,9 +121,14 @@ export function buildManagedVerificationActions(code: string): ManagedBrowserAct
     });
   }
   actions.push({
-    type: 'click',
-    selector: 'button[type="submit"], input[type="submit"]',
+    type: 'confirmAndSubmit',
+    selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
     label: 'continue_email_verification',
+    optional: false,
+    maxRetries: 1,
+    contractVersion: 2,
+    submitKind: 'verification',
+    chooserPolicy: MANAGED_SUBMIT_CHOOSER_POLICY,
   });
   return actions;
 }
