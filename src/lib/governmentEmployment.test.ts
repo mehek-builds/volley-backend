@@ -300,7 +300,9 @@ describe('prior government employment, answered from the experience bank', () =>
   test('canonical federal aliases resolve directly and at send-time', () => {
     const cases = [
       ['Have you worked for US DOE?', 'U.S. Department of Energy'],
+      ['Have you worked for U.S. DOE?', 'US Department of Energy'],
       ['Have you worked for United States DOJ?', 'DOJ'],
+      ['Have you worked for US Department of Justice?', 'U.S. DOJ'],
       ['Have you worked for U.S. Senate?', 'US Senate'],
       ['Have you worked for FAA?', 'Federal Aviation Administration'],
     ] as const;
@@ -311,6 +313,38 @@ describe('prior government employment, answered from the experience bank', () =>
         refreshKnownQuestionAnswers([{ question, answer: '' }], profile, undefined),
         [{ question, answer: 'Yes' }],
         question,
+      );
+    }
+  });
+
+  test('negated government levels hold before positive level binding', () => {
+    const federal: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
+    };
+    const local: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'City of Los Angeles', title: 'Analyst' }],
+    };
+    const cases: [string, ApplicationProfileLike][] = [
+      ['Prior non-federal government employment?', federal],
+      ['Prior government employment other than federal?', federal],
+      ['Prior government employment outside the federal government?', federal],
+      ['Have you worked for a non-federal government agency?', federal],
+      ['Prior non-local government employment?', local],
+      ['Prior government employment other than local?', local],
+      ['Prior government employment outside local government?', local],
+      ['Have you worked for a non-local government agency?', local],
+    ];
+    for (const [label, profile] of cases) {
+      assert.equal(isGovernmentEmploymentQuestion(label), false, label);
+      const resolved = resolveKnownAnswer(label, 'checkbox', profile, undefined);
+      assert.ok(resolved && 'skipReason' in resolved, label);
+    }
+
+    for (const [label, profile] of cases) {
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: 'Yes' }], profile, undefined),
+        [{ question: label, answer: '' }],
+        label,
       );
     }
   });
@@ -343,6 +377,9 @@ describe('prior government employment, answered from the experience bank', () =>
       'Prior non-U.S. government employment?',
       'Prior government employment outside the US?',
       'Have you worked for NASA (National Auto Sport Association)?',
+      'Prior non-federal government employment?',
+      'Prior government employment other than federal?',
+      'Prior government employment outside the federal government?',
     ].map((question) => ({ question, answer: 'Yes' }));
 
     assert.deepEqual(

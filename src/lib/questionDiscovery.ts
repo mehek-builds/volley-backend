@@ -1468,6 +1468,9 @@ const GOVERNMENT_WORK_SUBJECT =
 const FOREIGN_GOVERNMENT_SCOPE =
   /\bforeign\b|\bnon[-\s]?(?:u\.?\s*s\.?|us|united\s+states)\b|\boutside(?:\s+of)?\s+(?:the\s+)?(?:u\.?\s*s\.?|us|united\s+states)\b/i;
 
+const NEGATED_GOVERNMENT_LEVEL_SCOPE =
+  /\bnon[-\s]?(?:federal|state|local|municipal|city|county)\b|\bother\s+than\s+(?:the\s+)?(?:federal|state|local|municipal|city|county)\b|\boutside(?:\s+of)?\s+(?:the\s+)?(?:federal|state|local|municipal|city|county)(?:\s+government)?\b/i;
+
 /* Labels that name a government and are still not "were you employed by one". Everything here is
  * either a real corpus label (relatives, PEP, export control) or a shape whose answer is a legal
  * status rather than a history (authorization, eligibility, sponsorship, clearance, citizenship).
@@ -1482,6 +1485,7 @@ export function isGovernmentEmploymentQuestion(label: string): boolean {
   if (!GOVERNMENT_EMPLOYMENT_RELATIONSHIP.test(value)) return false;
   if (GOVERNMENT_WORK_SUBJECT.test(value)) return false;
   if (FOREIGN_GOVERNMENT_SCOPE.test(value)) return false;
+  if (NEGATED_GOVERNMENT_LEVEL_SCOPE.test(value)) return false;
   if (NOT_HER_GOVERNMENT_EMPLOYMENT.test(value)) return false;
   const target = governmentEmploymentTarget(value);
   if (!target) return false;
@@ -1513,6 +1517,7 @@ registerGovernmentEmployer('Department of Energy', 'federal', [
   'US DOE',
   'U.S. DOE',
   'United States DOE',
+  'US Department of Energy',
   'U.S. Department of Energy',
   'United States Department of Energy',
 ]);
@@ -1521,6 +1526,7 @@ registerGovernmentEmployer('Department of Justice', 'federal', [
   'US DOJ',
   'U.S. DOJ',
   'United States DOJ',
+  'US Department of Justice',
   'U.S. Department of Justice',
   'United States Department of Justice',
 ]);
