@@ -10,6 +10,14 @@ const CODE_CONTEXT = /\b(?:verification|security|authentication|confirmation|one
 // alphanumeric candidate must contain at least one letter and one digit and still has to appear
 // near verification language below.
 const CODE_PATTERN = /(?<![A-Z0-9])((?=[A-Z0-9]{8}(?![A-Z0-9]))(?=[A-Z0-9]{0,7}[A-Z])(?=[A-Z0-9]{0,7}\d)[A-Z0-9]{8}|\d{4,8})(?![A-Z0-9])/gi;
+/* Greenhouse also issues letter-only, case-sensitive 8-character codes. Treating every 8-letter
+ * word as a credential would turn ordinary email prose into a submit capability, so this format is
+ * accepted only where the message grammar explicitly identifies the token as a code. */
+const CONTEXTUAL_ALPHA_CODE_PATTERNS = [
+  /\b(?:verification|security|authentication|confirmation|one[ -]?time)\s+code\s*(?:is|[:=-])\s*([A-Za-z]{8})\b/gi,
+  /\b(?:passcode|otp)\s*(?:is|[:=-])\s*([A-Za-z]{8})\b/gi,
+  /\b(?:enter|type|use|provide)\s+(?:this\s+|the\s+|your\s+)?(?:verification|security|authentication|confirmation|one[ -]?time)\s+code\s+([A-Za-z]{8})\b/gi,
+];
 const MAX_CODE_AGE_MS = 10 * 60_000;
 const CLOCK_SKEW_MS = 30_000;
 
@@ -201,6 +209,18 @@ function expectedSenderDomains(portalUrl: string): string[] {
   return configured?.senders ?? [host];
 }
 
+function isGreenhouseVerificationPortal(portalUrl: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(portalUrl);
+  } catch {
+    return false;
+  }
+  if (PORTAL_SENDER_DOMAINS[0].portal.test(parsed.hostname.toLowerCase())) return true;
+  return isControlledTestPortalUrl(portalUrl)
+    && parsed.searchParams.get('board')?.toLowerCase() === 'greenhouse';
+}
+
 function allowedSender(actual: string, allowed: string[]): boolean {
   return allowed.some((domain) => actual === domain || actual.endsWith(`.${domain}`));
 }
@@ -216,13 +236,26 @@ function stripMarkup(value: string): string {
     .trim();
 }
 
-export function extractCodeFromVerificationText(value: string): string | null {
+function isGreenhouseLetterCode(value: string): boolean {
+  // Greenhouse's observed letter-only value is mixed case in a non-word casing pattern. Requiring
+  // a lower-to-upper transition rejects ordinary sentence words such as Required and Password.
+  return /^[A-Za-z]{8}$/.test(value) && /[a-z][A-Z]/.test(value);
+}
+
+export function extractCodeFromVerificationText(value: string, allowGreenhouseLetterCode = false): string | null {
   const text = stripMarkup(value);
   const candidates = new Set<string>();
   for (const match of text.matchAll(CODE_PATTERN)) {
     const start = Math.max(0, (match.index ?? 0) - 100);
     const end = Math.min(text.length, (match.index ?? 0) + match[0].length + 100);
     if (CODE_CONTEXT.test(text.slice(start, end))) candidates.add(match[1]);
+  }
+  if (allowGreenhouseLetterCode) {
+    for (const pattern of CONTEXTUAL_ALPHA_CODE_PATTERNS) {
+      for (const match of text.matchAll(pattern)) {
+        if (isGreenhouseLetterCode(match[1])) candidates.add(match[1]);
+      }
+    }
   }
   return candidates.size === 1 ? [...candidates][0] : null;
 }
@@ -255,7 +288,10 @@ export function extractVerificationCode(
       if (received < earliest || received > latest) return [];
       const domain = senderDomain(message.sender);
       if (!domain || !allowedSender(domain, allowedDomains)) return [];
-      const code = extractCodeFromVerificationText(`${message.subject}\n${message.text}`);
+      const code = extractCodeFromVerificationText(
+        `${message.subject}\n${message.text}`,
+        isGreenhouseVerificationPortal(portalUrl),
+      );
       return code ? [{ message, code, domain }] : [];
     })
     .sort((left, right) => right.message.receivedAt!.getTime() - left.message.receivedAt!.getTime());

@@ -2965,6 +2965,12 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         : securityCode;
       await writeReview(row, nextReview(claimedReview, {
         status: 'awaiting_security_code',
+        // Preserve the polling result computed above. Rebuilding from claimedReview here used to
+        // erase verification_pending back to not_needed after a code email arrived but could not
+        // be matched, hiding the exact reason the continuation stopped.
+        verification: verification.status === 'not_needed'
+          ? claimedReview.verification ?? verification
+          : verification,
         security_code: attempted,
         submission_attempted_at: capturedAt,
         preview_screenshot_url: blob.url,

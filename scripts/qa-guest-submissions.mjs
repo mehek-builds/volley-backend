@@ -15,6 +15,7 @@ import {
   controlledReceiptCaptureTarget,
   controlledScreenshotForRun,
   controlledManagedReceivingProof,
+  controlledForwardedEmailForRun,
   controlledQaPacketSpec,
   managedApplicationAlias,
   securityCodeCase,
@@ -506,8 +507,11 @@ try {
       assert.equal(seenSecurityCodes.has(inboundEvidence.code), false, 'controlled portal reused a security code');
       seenSecurityCodes.add(inboundEvidence.code);
       await forwardedVerificationMessage(applicationId, alias);
-      const capturedForward = capturedEmails.find((message) => message.subject === '[Litos] Your Greenhouse application security code'
-        && Array.isArray(message.to) && message.to.includes(qaForwardTo));
+      const capturedForward = controlledForwardedEmailForRun(capturedEmails, {
+        subject: '[Litos] Your Greenhouse application security code',
+        to: qaForwardTo,
+        alias,
+      });
       assert.ok(capturedForward, 'controlled local email adapter did not capture the forwarded verification message');
       assert.match(capturedForward.html ?? '', new RegExp(alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
       assert.match(capturedForward.html ?? '', /security code/i);
