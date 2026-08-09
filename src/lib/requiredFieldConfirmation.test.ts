@@ -114,7 +114,7 @@ test('atomic submit discovery includes common ATS submit shapes without a separa
     && action.selector === MANAGED_FINAL_SUBMIT_SELECTOR), false);
 });
 
-test('an empty confirmed scan needs a distinct zero-control form attestation', () => {
+test('an empty confirmed scan needs a distinct zero-control form proof', () => {
   assert.doesNotThrow(() => assertManagedRequiredFieldsConfirmed(proof([])));
   const omitted = proof([]);
   omitted.requiredFieldConfirmation!.passes[0]!.scope.requiredControlCount = 1;
@@ -521,7 +521,7 @@ test('managed wire contract rejects missing versions and unbounded retry counts 
 test('submission runner requires confirmation proof before any receipt can be recorded', () => {
   const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
   const barrier = source.indexOf("assertManagedRequiredFieldsConfirmed(result, options.securityCode ? 'verification' : 'application')");
-  const receipt = source.indexOf('const receipt = readManagedReceipt(receiptResult)', barrier);
+  const receipt = source.indexOf("const receipt = verdict.kind === 'confirmed'", barrier);
   assert.ok(barrier >= 0);
   assert.ok(receipt > barrier);
 });
@@ -530,7 +530,7 @@ test('automatic security-code continuation validates its own atomic confirmation
   const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
   const continuation = source.indexOf('receiptResult = await continueManagedBrowser(continuationToken, prepared.actions)');
   const continuationBarrier = source.indexOf("assertManagedRequiredFieldsConfirmed(receiptResult, 'verification')", continuation);
-  const receipt = source.indexOf('const receipt = readManagedReceipt(receiptResult)', continuation);
+  const receipt = source.indexOf("const receipt = verdict.kind === 'confirmed'", continuation);
   assert.ok(continuation >= 0);
   assert.ok(continuationBarrier > continuation);
   assert.ok(receipt > continuationBarrier);

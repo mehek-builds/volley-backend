@@ -6460,7 +6460,7 @@ export function assertManagedRequiredFieldsConfirmed(
     if (!isRecord(pass.scope) || !hasOnlyKeys(pass.scope, [
       'formFingerprint', 'submitFingerprint', 'formMatchCount', 'submitMatchCount',
       'requiredControlCount', 'sameNode',
-    ])) confirmationContractError('scope attestation');
+    ])) confirmationContractError('scope proof');
     if (!opaqueFingerprint(pass.scope.formFingerprint)
       || !opaqueFingerprint(pass.scope.submitFingerprint)
       || pass.scope.formMatchCount !== 1 || pass.scope.submitMatchCount !== 1
