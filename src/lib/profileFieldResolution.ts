@@ -61,6 +61,11 @@ import {
   referralSourceForApplication,
   referralSourceOptionCandidates,
 } from './referralSource';
+import {
+  comparableOption,
+  isDeclineToState,
+  selfIdentificationDeclineWording,
+} from './selfIdentification';
 
 export type ProfileFieldShape = {
   label: string;
@@ -105,20 +110,9 @@ export function isProfileBackedKey(key: ProfileKey | null | undefined): boolean 
 
 // ---- option comparison ----
 
-/**
- * Comparison form for option matching. Apostrophes are DELETED rather than spaced so that
- * "Bachelor's Degree" and "Bachelors Degree" collapse to one string: portals spell that enum
- * both ways and they are the same answer.
- */
-export function comparableOption(value: string): string {
-  return value
-    .replace(/[‘’‛ʼ']/g, '')
-    .replace(/[“”]/g, '"')
-    .toLowerCase()
-    .replace(/[^a-z0-9.+/]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
+// comparableOption and isDeclineToState live in selfIdentification.ts, where questionDiscovery can
+// reach them too. Re-exported here because this module's public surface is what callers import.
+export { comparableOption, isDeclineToState, selfIdentificationDeclineWording };
 
 function optionTokens(value: string): string[] {
   return comparableOption(value).split(' ').filter(Boolean);
@@ -730,43 +724,6 @@ export function studyYearLadder(value: string | undefined): string[] {
 // What changes is only whether the answer it produces can be left on the control.
 
 /**
- * A refusal to state, in the wordings employers put on the list. Tested against comparableOption()
- * output, so apostrophes are already gone ("don't" reads "dont") and punctuation is spaces.
- *
- * MATCHES THE INTENT, NEVER THE STRING. Both of the two option vocabularies the corpus has ever
- * recorded word their opt-out differently from the stored answer, and both came back unmatched:
- *
- *   "I decline to self-identify for protected veteran status"   (from the veteran status control)
- *   "I do not want to answer"                                   (from the disability status control)
- *
- * The first is the more interesting failure. chooseClosestOption saw an option that states the
- * answer and adds words, and refused it because CLOSED_SET_ANSWER_RE lists "decline to self
- * identify" among the answers whose whole meaning is the phrase itself. That rule is right for
- * "Yes" against "Yes - I am authorized to work in the US for any employer", where the remainder
- * asserts something the answer did not. It is wrong here: "for protected veteran status" does not
- * add a claim, it names the question being declined. So the refusal is not relaxed for anyone else;
- * declines are recognised by what they mean instead.
- */
-const DECLINE_TO_STATE_RE = new RegExp(
-  [
-    // "Decline to self-identify", "I decline to self-identify for protected veteran status"
-    'declines? to (?:self identify|answer|state|say|specify|disclose|respond|provide)',
-    // "I do not want to answer", "I don't wish to answer", "prefer not to say", "choose not to disclose"
-    '(?:do not|dont|does not|doesnt|would rather not|rather not|prefer not|prefers not|choose not|chooses not)'
-    + ' (?:to )?(?:want|wish|like)? ?(?:to )?(?:answer|say|state|specify|disclose|self identify|identify|respond|provide)',
-    // "I would not like to disclose this", "not wishing to answer"
-    'not (?:want|wish|choose|prefer)(?:ing)? to (?:answer|say|state|specify|disclose|self identify|identify|respond|provide)',
-    // the bare noun phrases short lists use, whole-string only so "no answer required" is not one
-    '^(?:decline[ds]?|i decline|no answer|not disclosed|not specified|undisclosed)$',
-  ].join('|'),
-);
-
-/** Is this text a refusal to state rather than a statement? */
-export function isDeclineToState(text: string): boolean {
-  return DECLINE_TO_STATE_RE.test(comparableOption(text));
-}
-
-/**
  * The wordings to OFFER for a decline, for a fill layer that cannot see the option list. Ordered
  * plainest first. Only ever appended after the applicant's own answer, never in front of it.
  */
@@ -852,7 +809,13 @@ export function eeoAnswerLadder(label: string, stored: string): string[] {
   const coarser = EEO_RACE_QUESTION.test(label) && !EEO_HISPANIC_QUESTION.test(label)
     ? eeoFederalRaceCategory(base)
     : undefined;
-  return ladder(base, coarser, ...DECLINE_WORDINGS);
+  // When the answer is a refusal AND the control names its vocabulary, the vocabulary's own
+  // spelling goes ahead of everything: it is the same refusal she gave, written the way the list
+  // writes it, so it can only ever replace a decline with the same decline.
+  const vocabulary = isDeclineToState(base) ? selfIdentificationDeclineWording(label) : undefined;
+  return vocabulary
+    ? ladder(vocabulary, base, coarser, ...DECLINE_WORDINGS)
+    : ladder(base, coarser, ...DECLINE_WORDINGS);
 }
 
 /**

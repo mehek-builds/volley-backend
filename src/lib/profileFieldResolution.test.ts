@@ -11,10 +11,12 @@ import {
   isDeclineToState,
   optionCoversMonthYear,
   parseNumericRange,
+  profileAnswerAliases,
   profileBackedBlockerLabels,
   referralSourceLadder,
   resolveProfileField,
   schoolAliasLadder,
+  selfIdentificationDeclineWording,
   usableOptions,
 } from './profileFieldResolution';
 import type { ApplicationProfileLike } from './questionDiscovery';
@@ -818,4 +820,82 @@ test('the opt-out stands in on self-identification questions and nowhere else', 
   );
   assert.equal(discipline?.matchedOption, false);
   assert.equal(discipline?.value, 'Computer Science');
+});
+
+/* THE MEASURED HISPANIC/LATINO FAILURE, and it was the largest single one in the corpus.
+ *
+ * Across the prod packets for the owner account on 2026-08-09, twenty packets over eight employers
+ * (Together AI, Anduril, Flow Traders, DRW, Scale AI, DV Trading, Astranis, Cloudflare) came back
+ * with `no option matched "Decline to self-identify", left for you to choose` on the question
+ * discovered as "are you hispanic/latino? hispanic_ethnicity".
+ *
+ * Its option list is the board's own, read on 2026-08-09 from the published English strings behind
+ * eeoc.questions.hispanic_ethnicity, and is identical for every customer. The stored answer and the
+ * option it belongs to are the same refusal separated by one hyphen. */
+const BOARD_HISPANIC_OPTIONS = ['Yes', 'No', 'Decline To Self Identify'];
+const BOARD_VETERAN_OPTIONS = [
+  'I am not a protected veteran',
+  'I identify as one or more of the classifications of a protected veteran',
+  "I don't wish to answer",
+];
+const BOARD_DISABILITY_OPTIONS = [
+  'Yes, I have a disability, or have had one in the past',
+  'No, I do not have a disability and have not had one in the past',
+  'I do not want to answer',
+];
+
+/** What the managed runner does with a value: case and spacing forgiven, nothing else. */
+function runnerWouldMatch(value: string, options: readonly string[]): boolean {
+  const want = value.trim().toLowerCase().replace(/\s+/g, ' ');
+  return options.some((option) => option.trim().toLowerCase().replace(/\s+/g, ' ') === want);
+}
+
+test('a refusal is offered in the spelling the control itself uses, first', () => {
+  const label = 'are you hispanic/latino? hispanic_ethnicity';
+  const ladder = eeoAnswerLadder(label, 'Decline to self-identify');
+  assert.equal(ladder[0], 'Decline To Self Identify');
+  // The managed path gets ONE attempt per control, so the head of the ladder is the whole fix.
+  assert.equal(runnerWouldMatch(ladder[0], BOARD_HISPANIC_OPTIONS), true);
+  assert.equal(chooseEeoOption(label, 'Decline to self-identify', BOARD_HISPANIC_OPTIONS), 'Decline To Self Identify');
+  assert.equal(profileAnswerAliases(label, 'Decline to self-identify')[0], 'Decline To Self Identify');
+});
+
+test('each self-identification control gets its own vocabulary, not one house spelling', () => {
+  assert.equal(selfIdentificationDeclineWording('are you hispanic/latino? hispanic_ethnicity'), 'Decline To Self Identify');
+  assert.equal(selfIdentificationDeclineWording('gender'), 'Decline To Self Identify');
+  assert.equal(selfIdentificationDeclineWording('race'), 'Decline To Self Identify');
+  assert.equal(selfIdentificationDeclineWording('veteran status veteran_status'), "I don't wish to answer");
+  assert.equal(selfIdentificationDeclineWording('disability status disability_status'), 'I do not want to answer');
+  assert.equal(
+    runnerWouldMatch(eeoAnswerLadder('veteran status veteran_status', 'Decline to self-identify')[0], BOARD_VETERAN_OPTIONS),
+    true,
+  );
+  assert.equal(
+    runnerWouldMatch(eeoAnswerLadder('disability status disability_status', 'Decline to self-identify')[0], BOARD_DISABILITY_OPTIONS),
+    true,
+  );
+});
+
+test('the employer-authored demographic block keeps her own wording', () => {
+  // Those questions are written by the employer, their labels end in a numeric question id rather
+  // than a field handle, and their opt-out is worded differently again. Guessing a spelling there
+  // would replace a wording that currently lands with one that does not.
+  const label = 'how would you describe your racial/ethnic background? (mark all that apply) 4012866007';
+  assert.equal(selfIdentificationDeclineWording(label), undefined);
+  assert.equal(eeoAnswerLadder(label, "I don't wish to answer")[0], "I don't wish to answer");
+});
+
+test('the vocabulary spelling is only ever substituted for another refusal', () => {
+  // A stated answer is never displaced by an opt-out, whatever the control's handle is.
+  assert.equal(eeoAnswerLadder('race', 'South Asian')[0], 'South Asian');
+  assert.equal(eeoAnswerLadder('gender', 'Female')[0], 'Female');
+  assert.equal(chooseEeoOption('gender', 'Female', ['Male', 'Female', 'Decline To Self Identify']), 'Female');
+});
+
+test('a refusal with nowhere to go is still left for her', () => {
+  // Point72, measured: "Have you served in the military?" is a required Yes/No with no opt-out at
+  // all, and three packets reported it unmatched. That is the correct outcome. Litos must not
+  // answer Yes or No to a question she declined, and there is no third choice to reach for.
+  assert.equal(chooseEeoOption('have you served in the military?', 'Decline to self-identify', ['Yes', 'No']), null);
+  assert.equal(chooseClosestOption(eeoAnswerLadder('gender', 'Decline to self-identify'), ['Male', 'Female']), null);
 });
