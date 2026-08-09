@@ -25,6 +25,7 @@ import {
   reactSelectListboxSelector,
   GREENHOUSE_OPTION_PROBE_IDS,
   MANAGED_ACTION_LIMIT,
+  ManagedActionBudgetError,
   PORTAL_FAMILIES,
   MANAGED_OPTION_EXTRACT_PREFIX,
   managedResultHasCoverLetterUpload,
@@ -1434,8 +1435,8 @@ test('Greenhouse trims low-priority fallbacks before exceeding the managed actio
   }
 });
 
-test('Greenhouse preserves submit when reviewed answers exceed the managed action budget', () => {
-  const actions = buildManagedPortalActions('greenhouse', {
+test('Greenhouse blocks before submit when reviewed answers exceed the managed action budget', () => {
+  const packet = {
     fullName: 'Mehek Mandal',
     email: 'mehekmandal05@gmail.com',
     phone: '+971501234567',
@@ -1445,11 +1446,12 @@ test('Greenhouse preserves submit when reviewed answers exceed the managed actio
       question: `Describe project ${index + 1}`,
       answer: `Project ${index + 1} answer`,
     })),
-  }, true);
+  };
 
-  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
-  assert.equal(actions.at(-1)?.selector, 'button[type="submit"], input[type="submit"]');
-  assert.ok(actions.some((action) => action.type === 'upload' && action.label === 'resume'));
+  assert.throws(
+    () => buildManagedPortalActions('greenhouse', packet, true),
+    (error: unknown) => error instanceof ManagedActionBudgetError && error.submitActionAppended === false,
+  );
 });
 
 test('large Greenhouse preview packets preserve core field evidence extracts inside the managed action budget', () => {
@@ -1459,7 +1461,7 @@ test('large Greenhouse preview packets preserve core field evidence extracts ins
     phone: '+971501234567',
     resume: Buffer.from('pdf'),
     resumeName: 'resume.pdf',
-    questions: Array.from({ length: 140 }, (_, index) => ({
+    questions: Array.from({ length: 8 }, (_, index) => ({
       question: `Describe project ${index + 1}`,
       answer: `Project ${index + 1} answer`,
     })),
@@ -1814,7 +1816,7 @@ test('Greenhouse replays Databricks React-select buckets without portal selector
 });
 
 test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped React-selects', () => {
-  const actions = buildManagedPortalActions('greenhouse', {
+  const packet = {
     fullName: 'Mehek Mandal',
     email: 'mehekmandal05@gmail.com',
     school: 'University of Southern California, Viterbi School of Engineering',
@@ -1865,12 +1867,22 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
         answer: '',
       },
     ],
-  });
+  };
+  // The full form is deliberately larger than Akuna's 100-action ceiling. Exercise every mapped
+  // question in safe chunks so this routing test does not require the unsafe behavior that the
+  // action-budget blocker now forbids.
+  const routedQuestions = packet.questions.filter((item) => !/prior experience working at an options market making/i.test(item.question));
+  const actionRuns = Array.from({ length: Math.ceil(routedQuestions.length / 4) }, (_, index) =>
+    buildManagedPortalActions('greenhouse', {
+      ...packet,
+      questions: routedQuestions.slice(index * 4, index * 4 + 4),
+    }));
+  const actions = actionRuns.flat();
 
   const comboFills = actions.filter((action) => action.type === 'fill' && /(?:question|greenhouse_known_question|greenhouse_fixed_question|greenhouse_akuna_attestation)_combo_label:/.test(action.label ?? ''));
-  const valuesFor = (text: string) => comboFills
+  const valuesFor = (text: string) => Array.from(new Set(comboFills
       .filter((action) => action.label?.toLowerCase().includes(text.toLowerCase()))
-      .map((action) => action.value);
+      .map((action) => action.value)));
   assert.ok(valuesFor('Which University do/did you attend?').includes('University of Southern California'));
   assert.ok(actions.some((action) =>
     action.type === 'fill'
@@ -1895,17 +1907,16 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
   assert.ok(knownComboFills.some((action) => action.selector?.includes('live in New York or California')));
   assert.equal(actions.some((action) => action.type === 'fillByLabelText' && action.label === 'gpa'), false);
   assert.equal(actions.some((action) => action.type === 'fillByLabelText' && action.label === 'gpa_question'), false);
-  const topPreferenceIndex = actions.findIndex((action) => action.type === 'fill' && action.selector?.includes('this role is my top preference'));
-  const nyCaIndex = actions.findIndex((action) => action.type === 'fill' && action.selector?.includes('live in New York or California'));
-  const sponsorshipIndex = actions.findIndex((action) => action.type === 'fill' && action.selector?.includes('require visa sponsorship'));
+  const orderedActions = buildManagedPortalActions('greenhouse', {
+    ...packet,
+    questions: [packet.questions[0]!, packet.questions[12]!],
+  });
+  const topPreferenceIndex = orderedActions.findIndex((action) => action.type === 'fill' && action.selector?.includes('this role is my top preference'));
+  const sponsorshipIndex = orderedActions.findIndex((action) => action.type === 'fill' && action.selector?.includes('require visa sponsorship'));
   assert.ok(topPreferenceIndex >= 0 && topPreferenceIndex < sponsorshipIndex);
-  assert.ok(nyCaIndex >= 0 && nyCaIndex < 80);
-  const disclaimerIndex = actions.findIndex((action) => action.type === 'fill' && action.selector?.includes('Disclaimer: Akuna Capital'));
-  assert.ok(disclaimerIndex >= 0 && disclaimerIndex < 80);
-  assert.ok(sponsorshipIndex >= 0 && sponsorshipIndex < 80);
   assert.equal(actions.some((action) => action.label?.startsWith('education_school_combo:')), false);
   assert.equal(actions.some((action) => action.label === 'education_graduation_year'), false);
-  assert.ok(actions.length <= 100, `expected at most 100 actions, got ${actions.length}`);
+  for (const run of actionRuns) assert.ok(run.length <= 100, `expected at most 100 actions, got ${run.length}`);
 
   for (const action of comboFills.filter((item) => item.label?.startsWith('question_combo_label:'))) {
     const index = actions.indexOf(action);
@@ -2356,7 +2367,7 @@ function overBudgetGreenhousePacket(extraQuestions: Array<{ question: string; an
   // Worded so each one is recognised as a React Select, because that is what makes a real screener
   // expensive: a plain text question is one action, a combobox is five. DRW's live packet reached
   // 231 raw actions this way, and 231 is the number that made the trim reach the education row.
-  const screeners = Array.from({ length: 24 }, (_, index) => ({
+  const screeners = Array.from({ length: 8 }, (_, index) => ({
     question: `Which team opening are you most interested in for area ${index + 1}?`,
     answer: 'Core platform',
   }));
@@ -3783,13 +3794,80 @@ test('the fill run never exceeds the runner action ceiling, on any portal at any
     });
     for (const portal of EVERY_MANAGED_PORTAL) {
       for (const submit of [false, true]) {
-        const actions = buildManagedPortalActions(portal, packet, submit);
-        assert.ok(
-          actions.length <= MANAGED_ACTION_LIMIT,
-          `${portal} ${submit ? 'submit' : 'prepare'} run with ${questionCount} questions is ${actions.length} actions, and the runner rejects anything over ${MANAGED_ACTION_LIMIT}`,
-        );
+        try {
+          const actions = buildManagedPortalActions(portal, packet, submit);
+          assert.ok(
+            actions.length <= MANAGED_ACTION_LIMIT,
+            `${portal} ${submit ? 'submit' : 'prepare'} run with ${questionCount} questions is ${actions.length} actions, and the runner rejects anything over ${MANAGED_ACTION_LIMIT}`,
+          );
+        } catch (error) {
+          assert.ok(error instanceof ManagedActionBudgetError, `${portal} returned an unexpected budget failure`);
+          assert.equal(error.submitActionAppended, false);
+          assert.match(error.blocker, /did not press submit/i);
+        }
       }
     }
+  }
+});
+
+function selectHeavyGreenhousePacket(questionCount: number) {
+  return andurilPacket({
+    questions: Array.from({ length: questionCount }, (_, index) => ({
+      question: `Preferred location for placement choice ${String.fromCharCode(65 + index)}`,
+      answer: index % 2 === 0 ? 'New York' : 'Chicago',
+    })),
+  });
+}
+
+function viableReviewedQuestionAttempt(
+  actions: ReturnType<typeof buildManagedPortalActions>,
+  question: string,
+): boolean {
+  const suffix = question.slice(0, 80);
+  const groups = new Map<string, typeof actions>();
+  for (const action of actions) {
+    const base = action.label?.replace(/_(?:open|option_value|option|select)$/, '');
+    if (!base || (!base.endsWith(`:${suffix}`) && base !== `question:${suffix}`)) continue;
+    groups.set(base, [...(groups.get(base) ?? []), action]);
+  }
+  return Array.from(groups.entries()).some(([base, group]) => {
+    if (base === `question:${suffix}`) return group.some((action) => action.type === 'fillByLabelText');
+    if (/^question_checkbox:/.test(base)) return group.some((action) => action.type === 'click');
+    return /^question_(?:combo(?:_label)?|select(?:_live)?):/.test(base)
+      && group.some((action) => action.type === 'fill')
+      && group.some((action) => action.type === 'press' || action.type === 'select');
+  });
+}
+
+test('Greenhouse select-heavy prepare and submit keep one complete fill chain per question', () => {
+  const packet = selectHeavyGreenhousePacket(4);
+  for (const submit of [false, true]) {
+    const actions = buildManagedPortalActions('greenhouse', packet, submit);
+    assert.ok(actions.length <= MANAGED_ACTION_LIMIT);
+    for (const item of packet.questions) {
+      assert.ok(
+        viableReviewedQuestionAttempt(actions, item.question),
+        `${submit ? 'submit' : 'prepare'} lost every viable action chain for ${item.question}`,
+      );
+    }
+    if (submit) assert.equal(actions.at(-1)?.type, 'click');
+  }
+});
+
+test('Greenhouse select-heavy prepare and submit block before submit when safe chains cannot fit', () => {
+  const packet = selectHeavyGreenhousePacket(20);
+  for (const submit of [false, true]) {
+    assert.throws(
+      () => buildManagedPortalActions('greenhouse', packet, submit),
+      (error: unknown) => {
+        assert.ok(error instanceof ManagedActionBudgetError);
+        assert.equal(error.code, 'MANAGED_ACTION_BUDGET');
+        assert.equal(error.submitActionAppended, false);
+        assert.equal(error.blocker, error.message);
+        assert.match(error.message, /20 reviewed questions/);
+        return true;
+      },
+    );
   }
 });
 

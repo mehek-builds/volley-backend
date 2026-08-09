@@ -2625,13 +2625,17 @@ const GREENHOUSE_LOW_PRIORITY_ACTION_GROUPS = [
   /^education_degree_combo:1$/,
 ] as const;
 
-function trimGreenhouseManagedActionsToBudget(actions: ManagedBrowserAction[], limit: number) {
+function trimGreenhouseManagedActionsToBudget(
+  actions: ManagedBrowserAction[],
+  limit: number,
+  protectedActionBases: ReadonlySet<string> = new Set(),
+) {
   for (const pattern of GREENHOUSE_LOW_PRIORITY_ACTION_GROUPS) {
     while (actions.length > limit) {
       let removableBase: string | undefined;
       for (let index = actions.length - 1; index >= 0; index -= 1) {
         const action = actions[index]!;
-        if (isProtectedManagedAction(action)) continue;
+        if (isProtectedManagedAction(action, protectedActionBases)) continue;
         const base = managedActionLabelBase(action);
         if (!base || !pattern.test(base)) continue;
         removableBase = base;
@@ -2672,23 +2676,32 @@ function trimGreenhouseManagedActionsToBudget(actions: ManagedBrowserAction[], l
 const GREENHOUSE_FIXED_EDUCATION_ACTION_RE =
   /^education_(?:school|degree|discipline|end_month)_combo(?:$|[:_])|^education_end_year_field$/;
 
-function isProtectedManagedAction(action: ManagedBrowserAction | undefined): boolean {
+function isProtectedManagedAction(
+  action: ManagedBrowserAction | undefined,
+  protectedActionBases: ReadonlySet<string> = new Set(),
+): boolean {
   if (!action) return false;
   if (action.type === 'discover') return true;
   const label = action.label ?? '';
+  const base = managedActionLabelBase(action);
+  if (base && protectedActionBases.has(base)) return true;
   if (GREENHOUSE_FIXED_EDUCATION_ACTION_RE.test(label)) return true;
   return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight)/
     .test(label);
 }
 
-function truncateManagedActionsToBudget(actions: ManagedBrowserAction[], limit: number) {
+function truncateManagedActionsToBudget(
+  actions: ManagedBrowserAction[],
+  limit: number,
+  protectedActionBases: ReadonlySet<string> = new Set(),
+) {
   while (actions.length > limit) {
     let tailIndex = actions.length - 1;
     // The evidence reads are protected alongside the filled_field extracts, and for the same reason:
     // they are what the run is JUDGED by afterwards, not part of what it fills. Truncating them off
     // the tail of a large Akuna packet would silently remove the corroboration that decides whether
     // a CAPTCHA blocker is believed, on exactly the packets most likely to hit the budget.
-    while (tailIndex >= 0 && isProtectedManagedAction(actions[tailIndex])) {
+    while (tailIndex >= 0 && isProtectedManagedAction(actions[tailIndex], protectedActionBases)) {
       tailIndex -= 1;
     }
     if (tailIndex < 0) break;
@@ -2748,25 +2761,32 @@ function truncateManagedActionsToBudget(actions: ManagedBrowserAction[], limit: 
  */
 const SPECULATIVE_ATTEMPT_LABEL_RE = /^[a-z0-9_]*_(?:select|text|checkbox|combo)[a-z0-9_]*:(\d+)(?::|$)/i;
 
-function speculativeAttemptIndex(action: ManagedBrowserAction): number | undefined {
-  if (isProtectedManagedAction(action)) return undefined;
+function speculativeAttemptIndex(
+  action: ManagedBrowserAction,
+  protectedActionBases: ReadonlySet<string> = new Set(),
+): number | undefined {
+  if (isProtectedManagedAction(action, protectedActionBases)) return undefined;
   const base = managedActionLabelBase(action);
   const attempt = base ? SPECULATIVE_ATTEMPT_LABEL_RE.exec(base)?.[1] : undefined;
   return attempt === undefined ? undefined : Number(attempt);
 }
 
-function trimSpeculativeManagedActionsToBudget(actions: ManagedBrowserAction[], limit: number) {
+function trimSpeculativeManagedActionsToBudget(
+  actions: ManagedBrowserAction[],
+  limit: number,
+  protectedActionBases: ReadonlySet<string> = new Set(),
+) {
   if (actions.length <= limit) return;
   let highestAttempt = -1;
   for (const action of actions) {
-    const attempt = speculativeAttemptIndex(action);
+    const attempt = speculativeAttemptIndex(action, protectedActionBases);
     if (attempt !== undefined && attempt > highestAttempt) highestAttempt = attempt;
   }
   for (let attempt = highestAttempt; attempt >= 0 && actions.length > limit; attempt -= 1) {
     while (actions.length > limit) {
       let removableBase: string | undefined;
       for (let index = actions.length - 1; index >= 0; index -= 1) {
-        if (speculativeAttemptIndex(actions[index]!) !== attempt) continue;
+        if (speculativeAttemptIndex(actions[index]!, protectedActionBases) !== attempt) continue;
         removableBase = managedActionLabelBase(actions[index]!);
         break;
       }
@@ -2781,6 +2801,70 @@ function trimSpeculativeManagedActionsToBudget(actions: ManagedBrowserAction[], 
       if (actions.length === before) break;
     }
   }
+}
+
+/**
+ * The builder cannot safely trade away a reviewed answer to make the provider's action ceiling.
+ * Throwing before the submit action is appended makes that limit an explicit stop instead of a
+ * partially filled application that Litos sends anyway.
+ */
+export class ManagedActionBudgetError extends Error {
+  readonly code = 'MANAGED_ACTION_BUDGET';
+  readonly blocker: string;
+  readonly submitActionAppended = false;
+
+  constructor(portal: SupportedPortal, limit: number, protectedQuestionCount: number) {
+    const blocker = `Litos did not press submit: the ${portalFamily(portal)} application needs more than ${limit} safe browser actions to preserve a fill attempt for each of its ${protectedQuestionCount} reviewed questions.`;
+    super(blocker);
+    this.name = 'ManagedActionBudgetError';
+    this.blocker = blocker;
+  }
+}
+
+type ReviewedQuestionActionProtection = {
+  readonly actionBases: ReadonlySet<string>;
+  readonly questionCount: number;
+};
+
+/**
+ * Pick one COMPLETE action group for every reviewed question that emitted a browser action.
+ *
+ * React-select fills are multi-action chains: open, fill, choose an option, then press Enter. The
+ * shared base label identifies that chain after managedActionLabelBase removes the action suffix.
+ * Protecting one action is not enough because a surviving fill without its open or select is not a
+ * viable attempt. Ordinary choice questions prefer their scoped fillByLabelText action. Greenhouse
+ * React-select questions prefer their first combobox or live-select chain, which is the only path
+ * that can drive those controls.
+ */
+function reviewedQuestionActionProtection(
+  actions: readonly ManagedBrowserAction[],
+  packet: SubmissionPacket,
+): ReviewedQuestionActionProtection {
+  const protectedBases = new Set<string>();
+  let questionCount = 0;
+
+  for (const item of packet.questions) {
+    if (!greenhouseReviewedQuestionAnswer(item, packet).trim()) continue;
+    const questionText = normalizeReviewQuestionLabel(item.question);
+    if (!questionText || shouldSkipReviewedConsentQuestion(questionText)) continue;
+    const suffix = questionText.slice(0, 80);
+    const bases = Array.from(new Set(actions.flatMap((action) => {
+      const base = managedActionLabelBase(action);
+      if (!base || !base.startsWith('question')) return [];
+      return base === `question:${suffix}` || base.endsWith(`:${suffix}`) ? [base] : [];
+    })));
+    if (bases.length === 0) continue;
+
+    const prefersReactSelect = isGreenhouseReactSelectQuestion(questionText);
+    const chosen = bases.find((base) => prefersReactSelect && /^question_(?:combo(?:_label)?|select(?:_live)?):/.test(base))
+      ?? bases.find((base) => base === `question:${suffix}`)
+      ?? bases.find((base) => /^question_(?:combo(?:_label)?|select(?:_live)?|checkbox):/.test(base));
+    if (!chosen || protectedBases.has(chosen)) continue;
+    protectedBases.add(chosen);
+    questionCount += 1;
+  }
+
+  return { actionBases: protectedBases, questionCount };
 }
 
 // ─── Workable (apply.workable.com) ────────────────────────────────────────────
@@ -3738,12 +3822,16 @@ export function buildManagedPortalActions(
   // One action held back for the submit click, which is appended below and is otherwise the action
   // that puts an exactly-full list one over the ceiling.
   const actionLimit = canAppendSubmit ? familyActionLimit - 1 : familyActionLimit;
+  const questionProtection = reviewedQuestionActionProtection(actions, packet);
   if (portalFamily(portal) === 'greenhouse') {
-    trimGreenhouseManagedActionsToBudget(actions, actionLimit);
+    trimGreenhouseManagedActionsToBudget(actions, actionLimit, questionProtection.actionBases);
   }
-  trimSpeculativeManagedActionsToBudget(actions, actionLimit);
+  trimSpeculativeManagedActionsToBudget(actions, actionLimit, questionProtection.actionBases);
   if (actions.length > actionLimit) {
-    truncateManagedActionsToBudget(actions, actionLimit);
+    truncateManagedActionsToBudget(actions, actionLimit, questionProtection.actionBases);
+  }
+  if (actions.length > actionLimit) {
+    throw new ManagedActionBudgetError(portal, familyActionLimit, questionProtection.questionCount);
   }
 
   if (canAppendSubmit) {
