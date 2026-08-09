@@ -1250,33 +1250,76 @@ Responsibilities
    * doing. The absolute bound stays as a backstop for a regression severe enough to be slow at BOTH
    * sizes, where the ratio alone could look healthy, and it is set loose enough that only a genuine
    * blowup reaches it rather than a busy afternoon.
+   *
+   * BOTH PARAGRAPHS ABOVE ARE RIGHT ABOUT THE PRINCIPLE AND WRONG ABOUT THE MARGIN, and this one
+   * records what it took to actually stop the flake, including a failed attempt at it.
+   *
+   * "Load cancels in the ratio" holds only if both sizes meet the same load, and they do not: the
+   * two are measured in different windows, the 60k window is twice as long, so it is twice as likely
+   * to be interrupted, and best-of-five finds a clean run at 30k more easily than at 60k. The
+   * asymmetry INFLATES the ratio instead of cancelling in it. That is why the shape rewrite did not
+   * fix it; it failed CI on PR #418 at 3.2x (22ms -> 72ms) against a diff that touched none of this.
+   *
+   * The first fix here was to measure process.cpuUsage() instead of the wall clock, since a
+   * descheduled process accrues wall time while it is not running and CPU time only while it is.
+   * That is a real improvement and it is kept - 20 trials against 14 busy-loop processes on 10
+   * cores went from p90 6.54 / max 11.98 on the clock to p90 2.22 / max 2.27 on CPU. It was still
+   * not enough. It failed CI at 3.1x (26ms -> 80ms of CPU), where contention cannot be the cause
+   * because CPU time does not accrue while descheduled. GC can: a garbage collection is real CPU,
+   * it lands in the big run far more often than the small one because the big run allocates more,
+   * and best-of cannot dodge what happens on every sample.
+   *
+   * SO THE FIX IS THE SPAN, not the instrument and not the statistic. At a 2x span the two
+   * hypotheses are 2 and 4 and the threshold sits at 2.8, which is 1.2x above where a healthy run
+   * lands - and CI inflated a healthy run by 1.5x. Widening to an 8x span puts them at 8 and 64 with
+   * the threshold at 22.6, and a healthy run at ~9. Measured under the same 14-process load:
+   *
+   *     span   healthy p50   threshold   margin
+   *     2x        2.08          2.8       1.27x   <- flaky, and this is why
+   *     4x        4.18          8.0       1.79x
+   *     8x        9.01         22.6       2.29x   <- this
+   *
+   * TOTAL over five runs rather than best-of-five, which is a reversal of the paragraph above and
+   * for a reason that only applies to GC. Best-of is right when the contaminant is the scheduler,
+   * because a clean sample exists to be found. When the contaminant is collection triggered by the
+   * work itself, no sample is clean, and summing charges both sizes in proportion to what each
+   * allocates instead of letting the small size dodge what the large one cannot. Measured: max 9.87
+   * summed against 11.84 best-of, on the same runs.
+   *
+   * 7,500 and 60,000 rather than 15k and 120k, which measure equally well: 60k is the size the
+   * input cap was chosen for, so the large end stays inside the range the module actually sees.
    */
   test('scoring a long single-line posting stays linear in its length', () => {
     const source = 'Requirements: ' + 'We need Python and Docker and AWS experience. '.repeat(1400);
-    const bestOf = (chars: number): number => {
+    const SPAN = 8;
+    // Halfway between the two hypotheses in the units they are actually expressed in. Growth over an
+    // 8x span is 8x if the work is linear and 64x if it is quadratic, and sqrt(8 * 64) sits at the
+    // geometric midpoint, a full 2.4x above healthy and 2.8x below a genuine blowup.
+    const QUADRATIC_THRESHOLD = Math.sqrt(SPAN * SPAN * SPAN);
+    const cpuMsPerRun = (chars: number): number => {
       const jd = source.slice(0, chars);
-      let best = Infinity;
-      for (let run = 0; run < 5; run += 1) {
-        const started = process.hrtime.bigint();
-        scoreJdMatch('Python Docker AWS', jd);
-        best = Math.min(best, Number(process.hrtime.bigint() - started) / 1e6);
-      }
-      return best;
+      const before = process.cpuUsage();
+      for (let run = 0; run < 5; run += 1) scoreJdMatch('Python Docker AWS', jd);
+      const spent = process.cpuUsage(before);
+      return (spent.user + spent.system) / 1000 / 5;
     };
-    // Warm the JIT and the module's lazy tables first, or the first size pays costs the second
-    // does not and the ratio measures startup instead of complexity.
-    bestOf(30_000);
+    // Warm the JIT and the module's lazy tables at BOTH sizes, or whichever is measured first pays
+    // startup costs the other does not and the ratio reports that instead of complexity.
+    cpuMsPerRun(7_500);
+    cpuMsPerRun(60_000);
 
-    const half = bestOf(30_000);
-    const full = bestOf(60_000);
-    const ratio = full / half;
+    const small = cpuMsPerRun(7_500);
+    const large = cpuMsPerRun(60_000);
+    const ratio = large / small;
     assert.ok(
-      ratio < 3,
-      `doubling the posting multiplied the work by ${ratio.toFixed(1)}x (${half.toFixed(0)}ms -> ${full.toFixed(0)}ms); linear is ~2x, positional() was O(n^2) at ~4x`,
+      ratio < QUADRATIC_THRESHOLD,
+      `growing the posting ${SPAN}x multiplied the work by ${ratio.toFixed(1)}x `
+      + `(${small.toFixed(1)}ms -> ${large.toFixed(1)}ms of CPU per run); linear is ~${SPAN}x, `
+      + `positional() was O(n^2) at ~${SPAN * SPAN}x`,
     );
     assert.ok(
-      full < 2000,
-      `extraction took ${full.toFixed(0)}ms on 60k even at its fastest of five runs; positional() was O(n^2) at ~594ms`,
+      large < 2000,
+      `extraction spent ${large.toFixed(0)}ms of CPU on 60k; positional() was O(n^2) at ~594ms`,
     );
   });
 });
