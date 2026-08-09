@@ -152,6 +152,21 @@ test('confirmation rejects coordinate-like or selectorless evidence', () => {
   }
 });
 
+test('Greenhouse bracket ids use a unique versioned stable id instead of a brittle escaped selector', () => {
+  assert.throws(() => assertManagedRequiredFieldsConfirmed(proof([{
+    selector: '#question_68005616\\[\\]_73190027',
+    label: 'Work authorization',
+    fieldType: 'react-select',
+    outcome: 'confirmed',
+  }])));
+  assert.doesNotThrow(() => assertManagedRequiredFieldsConfirmed(proof([{
+    selector: '[data-litos-stable-id-v1="required-73190027"]',
+    label: 'Work authorization',
+    fieldType: 'react-select',
+    outcome: 'confirmed',
+  }])));
+});
+
 test('untyped hostile receipts cannot bypass the strict versioned confirmation schema', () => {
   const good = proof([{
     selector: 'input[name="start_date"]',
