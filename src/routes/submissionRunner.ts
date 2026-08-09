@@ -50,6 +50,7 @@ import {
   detectPortal,
   managedResultRequiresCaptchaAttention,
   isManagedCaptchaEvidenceExtract,
+  blockersRequireCoverLetter,
   fillPortal,
   hasCoverLetterUpload,
   managedResultFilledFields,
@@ -1594,6 +1595,19 @@ async function prepareManaged(
     verification: { status: verificationHandoff ? 'handoff' : 'not_needed' },
     questions: mergedQuestions,
     cover_letter_supported: coverLetterSupported,
+    /* Measured, not assumed. `blockers` here is the merge of the discovery pass's required-field
+     * scan and the fill run's, which is the same evidence every other required field on this form
+     * is judged by. Written only when the form HAS a cover-letter control: on a portal with no such
+     * control there is nothing to require and nothing was looked at, and `undefined` says so. */
+    ...(coverLetterSupported
+      ? {
+        cover_letter_required: blockersRequireCoverLetter([
+          ...blockers,
+          ...(discoveryResult?.blockers ?? []),
+        ]),
+      }
+      : {}),
+    cover_letter_attached: Boolean(packet.coverLetter),
     // The security-code sentence LEADS when there is one, and it leads because it is the only line
     // here that says an application has already reached the employer. The blockers below it are
     // still worth reading - they describe the form that was sent - but a list of empty fields shown
@@ -1867,6 +1881,12 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       },
       questions: mergedQuestions,
       cover_letter_supported: coverLetterSupported,
+      // Same measurement as the managed path, off this path's own required-field scan. See
+      // ApplicationReviewState.cover_letter_required.
+      ...(coverLetterSupported
+        ? { cover_letter_required: blockersRequireCoverLetter(sanitizedBlockers) }
+        : {}),
+      cover_letter_attached: Boolean(packet.coverLetter),
       // Already human on this path, but the BLOCKERS are sanitized anyway so both providers are
       // held to one guarantee and a future change to either cannot quietly reintroduce identifiers.
       // The other two arrays do not go through the sanitizer and do not need to: they are written

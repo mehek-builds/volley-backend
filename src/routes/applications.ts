@@ -20,6 +20,8 @@ import { resumeSafeTargetRole } from '../engine/resumePolicy';
 import {
   applyApplicationReviewEdit,
   deriveEditedTerms,
+  finalApprovalCoverLetterIssue,
+  finalApprovalFieldIssues,
   mergeSubmittedApplicationReviewQuestions,
   normalizeApplicationReviewQuestions,
   readApplicationReview,
@@ -293,25 +295,6 @@ export async function preSendResumeVerificationIssues(
     ...findPdfSafeMarginIssues(parsedPdf.pages, rendered.layout),
     ...findPdfTextFidelityIssues(parsedPdf.text, rendered.spec, { ...contact, full_name: contact.full_name }),
   ];
-}
-
-function normalizedFilledFields(fields: readonly string[] | undefined): Set<string> {
-  return new Set((fields ?? []).map((field) => field.toLowerCase().replace(/[^a-z0-9]/g, '')));
-}
-
-function finalApprovalFieldIssues(review: ApplicationReviewState, coverLetterRequired: boolean): string[] {
-  const normalized = normalizedFilledFields(review.filled_fields);
-  const has = (needle: string) => [...normalized].some((field) => field.includes(needle));
-  const issues: string[] = [];
-  if (!has('email')) issues.push('The filled form did not record an email field.');
-  if (!has('resume')) issues.push('The filled form did not record a resume upload.');
-  if (!has('name') && !(has('first') && has('last'))) {
-    issues.push('The filled form did not record the applicant name fields.');
-  }
-  if (coverLetterRequired && !has('cover')) {
-    issues.push('The filled form did not record the cover letter attachment.');
-  }
-  return issues;
 }
 
 async function loadSensitiveQuestionProfile(userId: string): Promise<ApplicationProfileLike> {
@@ -1228,12 +1211,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if ((approvalReview.filled_fields ?? []).length === 0) {
         approvalIssues.push('No filled application fields were recorded.');
       }
-      const coverLetter = storedCoverLetter(row);
-      if (approvalReview.cover_letter_supported === true && !coverLetter) {
-        approvalIssues.push('The cover letter must be reviewed before sending.');
-      }
+      // THE COVER LETTER GATE. See finalApprovalCoverLetterIssue for why it reads
+      // cover_letter_required and not cover_letter_supported, and why undefined never refuses.
+      const coverLetterIssue = finalApprovalCoverLetterIssue(approvalReview, Boolean(storedCoverLetter(row)));
+      if (coverLetterIssue) approvalIssues.push(coverLetterIssue);
       approvalReview.questions = normalizeApplicationReviewQuestions(approvalReview.questions);
-      approvalIssues.push(...finalApprovalFieldIssues(approvalReview, approvalReview.cover_letter_supported === true && Boolean(coverLetter)));
+      approvalIssues.push(...finalApprovalFieldIssues(approvalReview, approvalReview.cover_letter_attached === true));
       if (approvalReview.questions.some((question) => question.required && !question.answer.trim())) {
         approvalIssues.push('A required application answer is still blank.');
       }

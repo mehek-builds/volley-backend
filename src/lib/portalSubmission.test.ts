@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { DOMParser } from '@xmldom/xmldom';
 import type { Page } from 'playwright-core';
 import {
   AUTONOMOUS_PORTAL_FAMILIES,
+  blockersRequireCoverLetter,
   buildManagedDiscoveryActions,
   buildManagedPortalActions,
   canFillReviewedQuestions,
@@ -201,6 +203,47 @@ test('managed cover-letter detection requires an actual file input extraction', 
   assert.equal(managedResultHasCoverLetterUpload({ title: 'Apply', url: 'https://example.com', text: 'Cover letter is optional', extracted: [{ selector: '#resume', value: 'file' }] }, 'greenhouse'), false);
   assert.equal(managedResultHasCoverLetterUpload({ title: 'Apply', url: 'https://example.com', text: 'Cover letter is optional', extracted: [] }, 'greenhouse'), false);
   assert.equal(managedResultHasCoverLetterUpload(null, 'greenhouse'), false);
+});
+
+/* WHETHER THE EMPLOYER REQUIRES A COVER LETTER, read off the run's own required-field scan.
+ *
+ * cover_letter_supported answers "can Litos attach a PDF here" and nothing else, so something had
+ * to answer "does this employer want one". Rather than a new browser capability, this reuses the
+ * one list the product already trusts to say which fields an employer marked required: the same
+ * blockers that carry native `required`, aria-required, Ashby's `_required_` label class and
+ * Greenhouse's asterisk. The fill run never attaches an unapproved letter, so on a form that
+ * requires one the control is empty when the scan runs and the scan names it.
+ */
+test('a required-field blocker naming the cover letter is what makes it required', () => {
+  assert.equal(blockersRequireCoverLetter(['"Cover Letter" is required and is still empty']), true);
+  assert.equal(blockersRequireCoverLetter(['"Cover letter" is required']), true);
+  // The provider's own spelling, before sanitizeProviderBlockers has rewritten it.
+  assert.equal(blockersRequireCoverLetter(['Cover Letter is required']), true);
+  // A complete Cresta-shaped run: other fields, no cover letter line.
+  assert.equal(blockersRequireCoverLetter([]), false);
+  assert.equal(blockersRequireCoverLetter(['"Discipline" is required and is still empty']), false);
+  assert.equal(blockersRequireCoverLetter(undefined), false);
+  /* The two sentences that mention a cover letter and do not require one. The first is a live
+     Greenhouse form's own page text, which is exactly the wording that would have made a naive
+     substring match read "optional" as "required"; the second is the run's degrade notice, which
+     rides in attention_reason next to the blockers. */
+  assert.equal(blockersRequireCoverLetter(['Cover letter is optional']), false);
+  assert.equal(blockersRequireCoverLetter([
+    'We could not write your cover letter for this one, so it is not attached. Everything else is filled in, and you can write or retry a cover letter from your dashboard.',
+  ]), false);
+});
+
+test('both run paths write the cover letter requirement and what they attached', () => {
+  const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  // Measured on both providers, and only where there is a control to measure. A portal with no
+  // cover-letter control leaves the field undefined, which the send gate reads as "not measured".
+  const measured = runner.match(/cover_letter_required: blockersRequireCoverLetter\(/g) ?? [];
+  assert.equal(measured.length, 2, 'the managed and direct paths must both measure it');
+  const attached = runner.match(/cover_letter_attached: Boolean\(packet\.coverLetter\)/g) ?? [];
+  assert.equal(attached.length, 2, 'both paths must record what the run actually carried');
+  // The managed measurement reads the discovery pass too: that pass sees the form before the fill
+  // and is where a required-and-empty control is most visible.
+  assert.match(runner, /blockersRequireCoverLetter\(\[\s*\.\.\.blockers,\s*\.\.\.\(discoveryResult\?\.blockers \?\? \[\]\),/);
 });
 
 test('every portal detects a cover-letter file control, not optional wording alone', () => {

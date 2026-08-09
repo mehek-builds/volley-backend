@@ -496,6 +496,34 @@ test('legacy broad location preferences never answer an exact employer commitmen
   assert.ok(legacyRelocation && 'skipReason' in legacyRelocation);
 });
 
+/* THE TOGETHER AI LABEL, which is the day-count shape rather than the bare one.
+ *
+ * Packet 5b52aba8-124c-4688-8b9c-a7a49d20467b sat at the send gate on 2026-08-08 with "are you
+ * willing to work four days per week in our san francisco office?" answered Yes, alongside the
+ * Redwood packet covered above. It is here because it is the shape that reads LEAST like a
+ * commitment: a cadence and a city buried in a politeness. It must still be recognised, and it must
+ * still be refused, and neither may be true only for the bare wording.
+ *
+ * What it does NOT assert any more is an answer built out of onsite_commitment and onsite_locations.
+ * Those columns carry no cadence and no duration, so "four days per week" cannot be settled by
+ * them, and the resolver now holds every such commitment. That refusal is the test below.
+ */
+test('the four-days-per-week shape is recognised as the same commitment and held', () => {
+  const together = 'are you willing to work four days per week in our san francisco office?';
+  assert.equal(classifyField(together), 'onsite_commitment');
+
+  // Refused by name, and not guessed from her address, whatever the columns happen to hold.
+  for (const profile of [
+    { address_city: 'Dubai' },
+    { onsite_commitment: 'anywhere' as const },
+    { onsite_commitment: 'listed_locations' as const, onsite_locations: ['san francisco, ca'] },
+  ]) {
+    const held = resolveKnownAnswer(together, 'select', profile, undefined);
+    assert.ok(held && 'skipReason' in held);
+    assert.match(held.skipReason, /where you will work from is yours to answer/);
+  }
+});
+
 test('location without exact cadence and duration is insufficient for an office commitment', () => {
   const profile = {
     address_city: 'Dubai',
