@@ -15,6 +15,7 @@ import {
   controlledReceiptCaptureTarget,
   controlledScreenshotForRun,
   controlledManagedReceivingProof,
+  controlledResendReceivingApiKey,
   controlledForwardedEmailForRun,
   controlledQaPacketSpec,
   managedApplicationAlias,
@@ -351,6 +352,7 @@ try {
       canaryToken: process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN,
       webhookEndpoint: process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_URL,
       webhookSecret: process.env.RESEND_WEBHOOK_SECRET,
+      receivingApiKey: controlledResendReceivingApiKey(),
       databaseMarker,
     });
     const proofResult = await client.query(

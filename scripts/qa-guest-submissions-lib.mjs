@@ -233,11 +233,14 @@ export function controlledManagedReceivingProof({
   canaryToken,
   webhookEndpoint,
   webhookSecret,
+  receivingApiKey,
   databaseMarker,
 }) {
   if (routeMode !== 'managed_resend') throw new Error('The controlled receiving proof requires managed_resend mode');
   if (!domain || !/^[a-z0-9-]+\.resend\.app$/i.test(domain)) throw new Error('A valid managed Resend domain is required');
-  if (!aliasSecret?.trim() || !webhookSecret?.trim()) throw new Error('Alias and Resend webhook secrets are required');
+  if (!aliasSecret?.trim() || !webhookSecret?.trim() || !receivingApiKey?.trim()) {
+    throw new Error('Alias, Resend webhook, and Receiving API secrets are required');
+  }
   if (!canaryToken || !/^[A-Za-z0-9_-]{32,128}$/.test(canaryToken)) throw new Error('A valid managed receiving canary token is required');
   if (!databaseMarker || !/^[A-Za-z0-9_-]{24,128}$/.test(databaseMarker)) throw new Error('A valid database marker is required');
   const endpoint = new URL(webhookEndpoint);
@@ -246,7 +249,7 @@ export function controlledManagedReceivingProof({
     throw new Error('The managed receiving webhook endpoint is invalid');
   }
   const routeFingerprint = createHash('sha256').update(
-    `managed-receiving-proof-v2:${routeMode}:${domain.toLowerCase()}:${aliasSecret.trim()}:${canaryToken.toLowerCase()}:${endpoint.origin}${endpoint.pathname}:${webhookSecret.trim()}`,
+    `managed-receiving-proof-v3:${routeMode}:${domain.toLowerCase()}:${aliasSecret.trim()}:${canaryToken.toLowerCase()}:${endpoint.origin}${endpoint.pathname}:${webhookSecret.trim()}:${receivingApiKey.trim()}`,
   ).digest('hex');
   const providerMessageHash = createHash('sha256')
     .update(`controlled-qa-receiving-proof-v1:${databaseMarker}:${routeFingerprint}`)
@@ -254,9 +257,13 @@ export function controlledManagedReceivingProof({
   return {
     provider_message_hash: providerMessageHash,
     route_fingerprint: routeFingerprint,
-    proof_version: 2,
+    proof_version: 3,
     domain: domain.toLowerCase(),
   };
+}
+
+export function controlledResendReceivingApiKey(env = process.env) {
+  return env.RESEND_RECEIVING_API_KEY?.trim() || env.RESEND_API_KEY?.trim();
 }
 
 export function assertControlledManagedReceivingProofRow(row, expected, now = new Date()) {

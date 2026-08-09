@@ -13,6 +13,7 @@ import {
   controlledScreenshotObjectKey,
   controlledDatabaseTarget,
   controlledManagedReceivingProof,
+  controlledResendReceivingApiKey,
   controlledForwardedEmailForRun,
   controlledQaPacketSpec,
   controlledPortalBinding,
@@ -213,12 +214,13 @@ test('controlled managed receiving proof is fully bound to the disposable QA con
     canaryToken: '0123456789abcdef0123456789abcdef',
     webhookEndpoint: 'https://backend.example.test/webhooks/application-email/inbound',
     webhookSecret: 'whsec_controlled_test',
+    receivingApiKey: 're_controlled_receiving_test',
     databaseMarker: marker,
   };
   const proof = controlledManagedReceivingProof(input);
   assert.match(proof.route_fingerprint, /^[a-f0-9]{64}$/);
   assert.match(proof.provider_message_hash, /^[a-f0-9]{64}$/);
-  assert.equal(proof.proof_version, 2);
+  assert.equal(proof.proof_version, 3);
   assert.equal(proof.domain, input.domain);
   assert.notEqual(
     proof.route_fingerprint,
@@ -228,17 +230,32 @@ test('controlled managed receiving proof is fully bound to the disposable QA con
     proof.provider_message_hash,
     controlledManagedReceivingProof({ ...input, databaseMarker: 'rotated_database_marker_1234' }).provider_message_hash,
   );
+  assert.notEqual(
+    proof.route_fingerprint,
+    controlledManagedReceivingProof({ ...input, receivingApiKey: 're_rotated_receiving_test' }).route_fingerprint,
+  );
   assert.throws(() => controlledManagedReceivingProof({
     ...input,
     webhookEndpoint: 'http://localhost:3301/webhooks/application-email/inbound',
   }), /endpoint is invalid/);
 });
 
+test('controlled QA Receiving key selection trims values and falls back past a blank dedicated key', () => {
+  assert.equal(controlledResendReceivingApiKey({
+    RESEND_RECEIVING_API_KEY: '  ',
+    RESEND_API_KEY: '  re_fallback_sending_key  ',
+  }), 're_fallback_sending_key');
+  assert.equal(controlledResendReceivingApiKey({
+    RESEND_RECEIVING_API_KEY: '  re_dedicated_receiving_key  ',
+    RESEND_API_KEY: 're_fallback_sending_key',
+  }), 're_dedicated_receiving_key');
+});
+
 test('security-code proof must exist before backend startup and match the exact fixture binding', () => {
   const expected = {
     provider_message_hash: 'a'.repeat(64),
     route_fingerprint: 'b'.repeat(64),
-    proof_version: 2,
+    proof_version: 3,
     domain: 'litos-qa.resend.app',
   };
   const now = new Date('2026-08-09T12:00:00.000Z');

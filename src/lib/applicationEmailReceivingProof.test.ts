@@ -49,6 +49,8 @@ async function withManagedProofEnv<T>(run: () => Promise<T>): Promise<T> {
     'LITOS_APPLICATION_EMAIL_MAILBOX',
     'LITOS_APPLICATION_EMAIL_WEBHOOK_URL',
     'RESEND_WEBHOOK_SECRET',
+    'RESEND_RECEIVING_API_KEY',
+    'RESEND_API_KEY',
   ] as const;
   const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   try {
@@ -59,6 +61,7 @@ async function withManagedProofEnv<T>(run: () => Promise<T>): Promise<T> {
     process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = 'proof-alias-secret';
     process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_URL = 'https://student-outreach-backend.vercel.app/webhooks/application-email/inbound';
     process.env.RESEND_WEBHOOK_SECRET = 'whsec_current-resend-signing-secret';
+    process.env.RESEND_RECEIVING_API_KEY = 're_receiving-account-key';
     return await run();
   } finally {
     for (const name of names) {
@@ -67,6 +70,16 @@ async function withManagedProofEnv<T>(run: () => Promise<T>): Promise<T> {
       else process.env[name] = value;
     }
   }
+}
+
+function acceptReadableCanary(
+  event: Parameters<typeof acceptSignedManagedReceivingCanary>[0],
+  options: Parameters<typeof acceptSignedManagedReceivingCanary>[1] = {},
+) {
+  return acceptSignedManagedReceivingCanary(event, {
+    assertContentReadable: async () => {},
+    ...options,
+  });
 }
 
 test('derives one exact hidden canary recipient only from valid managed configuration', async () => {
@@ -86,7 +99,7 @@ test('accepts, minimally stores, and idempotently replays the exact signed canar
     const store = new MemoryProofStore();
     const now = new Date('2026-08-09T03:00:00.000Z');
     const event = { emailId: 'provider-message-one', recipients: [RECIPIENT] };
-    assert.deepEqual(await acceptSignedManagedReceivingCanary(event, { store, now }), {
+    assert.deepEqual(await acceptReadableCanary(event, { store, now }), {
       kind: 'accepted', replay: false,
     });
     assert.equal(store.rows.length, 1);
@@ -97,42 +110,65 @@ test('accepts, minimally stores, and idempotently replays the exact signed canar
     assert.ok(!serialized.includes(RECIPIENT));
     assert.ok(!serialized.includes('provider-message-one'));
     assert.ok(!serialized.includes('proof-alias-secret'));
-    assert.deepEqual(await acceptSignedManagedReceivingCanary(event, { store, now }), {
+    assert.deepEqual(await acceptReadableCanary(event, { store, now }), {
       kind: 'accepted', replay: true,
     });
     assert.equal(store.rows[0]!.verified_at.toISOString(), now.toISOString());
   });
 });
 
+test('never persists proof when the provider cannot read the signed canary content', async () => {
+  await withManagedProofEnv(async () => {
+    const store = new MemoryProofStore();
+    let readEmailId: string | null = null;
+    await assert.rejects(
+      acceptSignedManagedReceivingCanary(
+        { emailId: 'unreadable-provider-message', recipients: [RECIPIENT] },
+        {
+          store,
+          assertContentReadable: async (emailId) => {
+            readEmailId = emailId;
+            throw new Error('Resend received email lookup failed with 401');
+          },
+        },
+      ),
+      /lookup failed with 401/,
+    );
+    assert.equal(readEmailId, 'unreadable-provider-message');
+    assert.equal(store.rows.length, 0);
+    assert.equal(await recentManagedReceivingProof({ store }), false);
+  });
+});
+
 test('rejects copied, foreign, old, and second-use canary deliveries', async () => {
   await withManagedProofEnv(async () => {
     const store = new MemoryProofStore();
-    assert.deepEqual(await acceptSignedManagedReceivingCanary({
+    assert.deepEqual(await acceptReadableCanary({
       emailId: 'foreign', recipients: ['other@foreign.resend.app'],
     }, { store }), { kind: 'not_canary' });
-    assert.deepEqual(await acceptSignedManagedReceivingCanary({
+    assert.deepEqual(await acceptReadableCanary({
       emailId: 'old', recipients: [`litos-proof-${'z'.repeat(43)}@${DOMAIN}`],
     }, { store }), { kind: 'not_canary' });
-    assert.deepEqual(await acceptSignedManagedReceivingCanary({
+    assert.deepEqual(await acceptReadableCanary({
       emailId: 'copied', recipients: [RECIPIENT, 'copy@example.com'],
     }, { store }), { kind: 'rejected' });
-    assert.equal((await acceptSignedManagedReceivingCanary({
+    assert.equal((await acceptReadableCanary({
       emailId: 'first', recipients: [RECIPIENT],
     }, { store })).kind, 'accepted');
-    assert.deepEqual(await acceptSignedManagedReceivingCanary({
+    assert.deepEqual(await acceptReadableCanary({
       emailId: 'second', recipients: [RECIPIENT],
     }, { store }), { kind: 'rejected' });
   });
 });
 
-test('mode, domain, alias-secret, endpoint, signing-secret, and canary rotation invalidate old proof', async () => {
+test('mode, domain, alias-secret, endpoint, signing-secret, receiving-key, and canary rotation invalidate old proof', async () => {
   await withManagedProofEnv(async () => {
     const store = new MemoryProofStore();
     const event = { emailId: 'bound-message', recipients: [RECIPIENT] };
-    assert.equal((await acceptSignedManagedReceivingCanary(event, { store })).kind, 'accepted');
+    assert.equal((await acceptReadableCanary(event, { store })).kind, 'accepted');
 
     process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = 'rotated-alias-secret';
-    assert.deepEqual(await acceptSignedManagedReceivingCanary(event, { store }), { kind: 'rejected' });
+    assert.deepEqual(await acceptReadableCanary(event, { store }), { kind: 'rejected' });
     assert.equal(await recentManagedReceivingProof({ store }), false);
 
     process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = 'proof-alias-secret';
@@ -146,6 +182,10 @@ test('mode, domain, alias-secret, endpoint, signing-secret, and canary rotation 
     assert.equal(await recentManagedReceivingProof({ store }), false);
 
     process.env.RESEND_WEBHOOK_SECRET = 'whsec_current-resend-signing-secret';
+    process.env.RESEND_RECEIVING_API_KEY = 're_rotated-receiving-account-key';
+    assert.equal(await recentManagedReceivingProof({ store }), false);
+
+    process.env.RESEND_RECEIVING_API_KEY = 're_receiving-account-key';
     process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN = 'other-inbound.resend.app';
     assert.equal(await recentManagedReceivingProof({ store }), false);
 
@@ -173,9 +213,30 @@ test('version-one proof is never health evidence and cannot reuse its one-time r
       store,
       now: new Date('2026-08-09T03:01:00.000Z'),
     }), false);
-    assert.deepEqual(await acceptSignedManagedReceivingCanary({
+    assert.deepEqual(await acceptReadableCanary({
       emailId: 'new-message-same-recipient', recipients: [RECIPIENT],
     }, { store, now: new Date('2026-08-09T03:01:00.000Z') }), { kind: 'rejected' });
+    assert.equal(store.rows.length, 1);
+  });
+});
+
+test('route-only version-two proof is never health evidence and forces a new canary token', async () => {
+  await withManagedProofEnv(async () => {
+    const store = new MemoryProofStore();
+    const routeOnlyFingerprint = createHash('sha256')
+      .update(`managed-receiving-proof-v2:managed_resend:${DOMAIN}:proof-alias-secret:${TOKEN}:https://student-outreach-backend.vercel.app/webhooks/application-email/inbound:whsec_current-resend-signing-secret`)
+      .digest('hex');
+    store.rows.push({
+      provider_message_hash: 'route-only-message-hash',
+      route_fingerprint: routeOnlyFingerprint,
+      proof_version: 2,
+      domain: DOMAIN,
+      verified_at: new Date('2026-08-09T03:00:00.000Z'),
+    });
+    assert.equal(await recentManagedReceivingProof({ store }), false);
+    assert.deepEqual(await acceptReadableCanary({
+      emailId: 'new-message-same-version-two-recipient', recipients: [RECIPIENT],
+    }, { store }), { kind: 'rejected' });
     assert.equal(store.rows.length, 1);
   });
 });
@@ -184,13 +245,13 @@ test('health proof requires a current, nonfuture proof inside the freshness wind
   await withManagedProofEnv(async () => {
     const store = new MemoryProofStore();
     const now = new Date('2026-08-09T03:00:00.000Z');
-    await acceptSignedManagedReceivingCanary({ emailId: 'fresh', recipients: [RECIPIENT] }, { store, now });
+    await acceptReadableCanary({ emailId: 'fresh', recipients: [RECIPIENT] }, { store, now });
     assert.equal(await recentManagedReceivingProof({ store, now }), true);
     assert.equal(await recentManagedReceivingProof({
       store,
       now: new Date('2026-08-17T03:00:00.000Z'),
     }), false);
-    assert.deepEqual(await acceptSignedManagedReceivingCanary({
+    assert.deepEqual(await acceptReadableCanary({
       emailId: 'fresh', recipients: [RECIPIENT],
     }, { store, now: new Date('2026-08-17T03:00:00.000Z') }), { kind: 'accepted', replay: true });
     assert.equal(await recentManagedReceivingProof({
