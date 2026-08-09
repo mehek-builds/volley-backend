@@ -4,6 +4,7 @@ import test from 'node:test';
 import { DOMParser } from '@xmldom/xmldom';
 import type { Page } from 'playwright-core';
 import { CONTROLLED_PORTAL_BINDING_PARAM, controlledPortalBinding } from './controlledTestPortal';
+import { resolveKnownAnswer } from './questionDiscovery';
 import {
   AUTONOMOUS_PORTAL_FAMILIES,
   blockersRequireCoverLetter,
@@ -1866,6 +1867,68 @@ test('Greenhouse replays Samsara required selects with exact live options', () =
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('majoring in stem') && label.endsWith('Yes')));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('ai policy for interviewers') && label.endsWith('Yes')));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('gender identity') && label.endsWith('Woman')));
+});
+
+/* THE MOST-REPEATED UNSUBMITTABLE PACKET IN THE CORPUS, pinned at the action list.
+ *
+ * Twenty prod packets across eight employers reported, for the control discovered as
+ * "are you hispanic/latino? hispanic_ethnicity":
+ *
+ *   no option matched "Decline to self-identify", left for you to choose
+ *
+ * Its list reads ["Yes", "No", "Decline To Self Identify"], so the answer and the option are the
+ * same refusal one hyphen apart. This question gets ONE attempt - comboboxValueLimit is 1 and every
+ * alias after the first is never sent - so the assertion that matters is not that the right spelling
+ * is somewhere in the ladder, it is that it is the value that actually goes out. */
+test('the one attempt at a self-identification opt-out uses the list\'s own spelling', () => {
+  // The answer as the resolver now produces it. The measured packet stored "#hispanic_ethnicity"
+  // with input type text, so the action that reaches the page is a single fill of this string and
+  // there is no second attempt behind it.
+  assert.deepEqual(
+    resolveKnownAnswer('are you hispanic/latino? hispanic_ethnicity', 'text', { eeo_prefs: {} }, undefined),
+    { value: 'Decline To Self Identify' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('veteran status veteran_status', 'text', { eeo_prefs: {} }, undefined),
+    { value: "I don't wish to answer" },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('disability status disability_status', 'text', { eeo_prefs: {} }, undefined),
+    { value: 'I do not want to answer' },
+  );
+  // A stated answer is untouched: the substitution only ever swaps one refusal for the same refusal.
+  assert.deepEqual(
+    resolveKnownAnswer('gender', 'text', { eeo_prefs: { gender: 'Female' } }, undefined),
+    { value: 'Female' },
+  );
+
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehek@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    jdText: 'Together AI is hiring a Systems Research Engineer Intern.',
+    questions: [
+      {
+        question: 'are you hispanic/latino? hispanic_ethnicity',
+        answer: 'Decline To Self Identify',
+        portal_selector: '#hispanic_ethnicity',
+        portal_input_type: 'text',
+      },
+      { question: 'gender', answer: 'Decline to self-identify' },
+    ],
+  });
+  const valuesFor = (question: string) => actions
+    .filter((action) => typeof action.label === 'string' && action.label.toLowerCase().includes(question))
+    .map((action) => action.value)
+    .filter((value): value is string => typeof value === 'string' && value.length > 0);
+
+  const hispanic = valuesFor('hispanic_ethnicity');
+  assert.ok(hispanic.length > 0, 'nothing was attempted at the hispanic/latino question');
+  assert.deepEqual([...new Set(hispanic)], ['Decline To Self Identify']);
+  // The combobox ladder gets the same treatment, and it matters there for the same reason: the
+  // value limit is one, so the first candidate is the only candidate.
+  assert.ok(valuesFor(':gender').includes('Decline To Self Identify'));
 });
 
 test('Greenhouse replays Databricks choice questions through React-select buckets', () => {

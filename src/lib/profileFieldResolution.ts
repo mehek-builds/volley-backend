@@ -60,7 +60,14 @@ import {
 import {
   referralSourceForApplication,
   referralSourceOptionCandidates,
+  employerOwnSiteOption,
+  isCompanySiteReferralClaim,
 } from './referralSource';
+import {
+  comparableOption,
+  isDeclineToState,
+  selfIdentificationDeclineWording,
+} from './selfIdentification';
 
 export type ProfileFieldShape = {
   label: string;
@@ -105,20 +112,9 @@ export function isProfileBackedKey(key: ProfileKey | null | undefined): boolean 
 
 // ---- option comparison ----
 
-/**
- * Comparison form for option matching. Apostrophes are DELETED rather than spaced so that
- * "Bachelor's Degree" and "Bachelors Degree" collapse to one string: portals spell that enum
- * both ways and they are the same answer.
- */
-export function comparableOption(value: string): string {
-  return value
-    .replace(/[‘’‛ʼ']/g, '')
-    .replace(/[“”]/g, '"')
-    .toLowerCase()
-    .replace(/[^a-z0-9.+/]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
+// comparableOption and isDeclineToState live in selfIdentification.ts, where questionDiscovery can
+// reach them too. Re-exported here because this module's public surface is what callers import.
+export { comparableOption, isDeclineToState, selfIdentificationDeclineWording };
 
 function optionTokens(value: string): string[] {
   return comparableOption(value).split(' ').filter(Boolean);
@@ -337,6 +333,53 @@ export function optionCoversMonthYear(option: string, month: number, year: numbe
   return optionCalendarSpan(option, month, year) !== null;
 }
 
+/**
+ * The span of months an ANSWER covers when the answer is a term rather than a month.
+ *
+ * MEASURED. Six packets across IMC Trading and DV Trading reported
+ * `no option matched "Spring 2028", left for you to choose` against lists whose entries read
+ * "January 2028 - July 2028" and "August 2028 - December 2028". Spring 2028 is March, April and
+ * May of 2028, all three of which are inside the first bucket and none of which is inside the
+ * second, so which one is meant is a fact rather than a guess. The matcher simply had no way to
+ * ask the question: monthYearOf wants an explicit month name and a term does not carry one, so
+ * the calendar stage was skipped and the answer fell through to a string comparison it could
+ * never win.
+ *
+ * Returns null for anything that is not exactly ONE contiguous run. Winter is the reason: its
+ * months straddle a year boundary, so "Winter 2028" is two separate runs and there is no single
+ * span that is honestly "the term she graduates in". A candidate that also names an explicit
+ * month is left to the point stage, which is more precise than this and runs first.
+ */
+export function candidateTermInterval(candidate: string): CalendarInterval | null {
+  if (optionDatePoints(candidate).points.length > 0) return null;
+  const runs = optionSeasonIntervals(candidate);
+  return runs.length === 1 ? runs[0] : null;
+}
+
+/**
+ * The narrowest option that WHOLLY CONTAINS a term, or null.
+ *
+ * Containment, not overlap, and that is the whole safety of it. A term that only half fits an
+ * option is a different claim about when she finishes, so it declines; a term entirely inside one
+ * is the same claim written coarsely, which is exactly what these buckets are for. Ranked by width
+ * for the same reason the point stage is: a list that opens with a catch-all must not win over the
+ * precise bucket further down.
+ */
+function chooseTermBucket(
+  entries: readonly ComparableEntry[],
+  target: CalendarInterval,
+): string | null {
+  let best: { option: string; span: number } | null = null;
+  for (const entry of entries) {
+    for (const interval of optionCalendarIntervals(entry.option)) {
+      if (target.min < interval.min || target.max > interval.max) continue;
+      const span = interval.max - interval.min;
+      if (!best || span < best.span) best = { option: entry.option, span };
+    }
+  }
+  return best?.option ?? null;
+}
+
 function numericValueOf(candidate: string): number | null {
   const match = candidate.match(/^\s*(\d+(?:\.\d+)?)\s*(?:\/\s*\d+(?:\.\d+)?)?\s*$/);
   if (!match) return null;
@@ -481,6 +524,16 @@ export function chooseClosestOption(
       if (!best || span < best.span) best = { option: entry.option, span };
     }
     if (best) return best.option;
+  }
+
+  // Then the same arithmetic for an answer that names a TERM instead of a month. Kept as its own
+  // pass after the point stage rather than folded into it, so an answer that does state a month
+  // is always settled by the more precise rule first. See candidateTermInterval.
+  for (const candidate of candidates) {
+    const term = candidateTermInterval(candidate);
+    if (!term) continue;
+    const bucket = chooseTermBucket(comparableOptions, term);
+    if (bucket) return bucket;
   }
 
   for (const candidate of candidates) {
@@ -730,43 +783,6 @@ export function studyYearLadder(value: string | undefined): string[] {
 // What changes is only whether the answer it produces can be left on the control.
 
 /**
- * A refusal to state, in the wordings employers put on the list. Tested against comparableOption()
- * output, so apostrophes are already gone ("don't" reads "dont") and punctuation is spaces.
- *
- * MATCHES THE INTENT, NEVER THE STRING. Both of the two option vocabularies the corpus has ever
- * recorded word their opt-out differently from the stored answer, and both came back unmatched:
- *
- *   "I decline to self-identify for protected veteran status"   (from the veteran status control)
- *   "I do not want to answer"                                   (from the disability status control)
- *
- * The first is the more interesting failure. chooseClosestOption saw an option that states the
- * answer and adds words, and refused it because CLOSED_SET_ANSWER_RE lists "decline to self
- * identify" among the answers whose whole meaning is the phrase itself. That rule is right for
- * "Yes" against "Yes - I am authorized to work in the US for any employer", where the remainder
- * asserts something the answer did not. It is wrong here: "for protected veteran status" does not
- * add a claim, it names the question being declined. So the refusal is not relaxed for anyone else;
- * declines are recognised by what they mean instead.
- */
-const DECLINE_TO_STATE_RE = new RegExp(
-  [
-    // "Decline to self-identify", "I decline to self-identify for protected veteran status"
-    'declines? to (?:self identify|answer|state|say|specify|disclose|respond|provide)',
-    // "I do not want to answer", "I don't wish to answer", "prefer not to say", "choose not to disclose"
-    '(?:do not|dont|does not|doesnt|would rather not|rather not|prefer not|prefers not|choose not|chooses not)'
-    + ' (?:to )?(?:want|wish|like)? ?(?:to )?(?:answer|say|state|specify|disclose|self identify|identify|respond|provide)',
-    // "I would not like to disclose this", "not wishing to answer"
-    'not (?:want|wish|choose|prefer)(?:ing)? to (?:answer|say|state|specify|disclose|self identify|identify|respond|provide)',
-    // the bare noun phrases short lists use, whole-string only so "no answer required" is not one
-    '^(?:decline[ds]?|i decline|no answer|not disclosed|not specified|undisclosed)$',
-  ].join('|'),
-);
-
-/** Is this text a refusal to state rather than a statement? */
-export function isDeclineToState(text: string): boolean {
-  return DECLINE_TO_STATE_RE.test(comparableOption(text));
-}
-
-/**
  * The wordings to OFFER for a decline, for a fill layer that cannot see the option list. Ordered
  * plainest first. Only ever appended after the applicant's own answer, never in front of it.
  */
@@ -852,7 +868,13 @@ export function eeoAnswerLadder(label: string, stored: string): string[] {
   const coarser = EEO_RACE_QUESTION.test(label) && !EEO_HISPANIC_QUESTION.test(label)
     ? eeoFederalRaceCategory(base)
     : undefined;
-  return ladder(base, coarser, ...DECLINE_WORDINGS);
+  // When the answer is a refusal AND the control names its vocabulary, the vocabulary's own
+  // spelling goes ahead of everything: it is the same refusal she gave, written the way the list
+  // writes it, so it can only ever replace a decline with the same decline.
+  const vocabulary = isDeclineToState(base) ? selfIdentificationDeclineWording(label) : undefined;
+  return vocabulary
+    ? ladder(vocabulary, base, coarser, ...DECLINE_WORDINGS)
+    : ladder(base, coarser, ...DECLINE_WORDINGS);
 }
 
 /**
@@ -995,7 +1017,16 @@ export function resolveProfileField(
   // this family and on no other.
   const eeo = EEO_QUESTION.test(label);
   const candidates = eeo ? eeoAnswerLadder(label, base) : profileFieldCandidates(key, ap, base);
-  const matched = eeo ? chooseEeoOption(label, base, shape.options) : chooseClosestOption(candidates, shape.options);
+  let matched = eeo ? chooseEeoOption(label, base, shape.options) : chooseClosestOption(candidates, shape.options);
+  if (key === 'referral_source_default' && matched === null) {
+    // The employer's own site, under the employer's own name for it. Only reached once the standard
+    // wordings have all missed, and only when the evidenced source really is the career site; the
+    // list has to say which entry that is, and say it unambiguously. See employerOwnSiteOption.
+    const evidenced = referralSourceForApplication(ap.referral_source_default, ap.referral_source_evidence);
+    if (isCompanySiteReferralClaim(evidenced)) {
+      matched = employerOwnSiteOption(usableOptions(shape.options)) ?? null;
+    }
+  }
   if (key === 'referral_source_default' && usableOptions(shape.options).length > 0 && matched === null) {
     return null;
   }

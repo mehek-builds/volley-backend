@@ -9,6 +9,8 @@ import {
   type StoredSalaryProfile,
 } from './salary';
 import { referralSourceForApplication, type ReferralSourceEvidence } from './referralSource';
+import { usStateScopeSkipReason } from './residenceScope';
+import { declineWordingForControl } from './selfIdentification';
 import {
   availabilityWindowForPosting,
   formatWindowDate,
@@ -2875,7 +2877,20 @@ export function resolveKnownAnswer(
   if (militaryService) return militaryService;
 
   if (EEO_QUESTION.test(label)) {
-    return { value: eeoAnswer(eeoPreferenceForLabel(label, ap.eeo_prefs)) };
+    /* The refusal is written in the CONTROL'S spelling when the control names its vocabulary.
+     *
+     * Measured: twenty prod packets across eight employers reported
+     * `no option matched "Decline to self-identify"` on the control discovered as
+     * "are you hispanic/latino? hispanic_ethnicity", whose list reads
+     * ["Yes", "No", "Decline To Self Identify"]. Same refusal, one hyphen apart, and nothing
+     * downstream could recover it: that control takes a single fill of this exact string.
+     *
+     * Done here rather than in a fill builder because this is where the answer is made, so every
+     * path - the managed fill, the combobox ladder, the direct-Playwright option snap and the
+     * card Mehek reads - all say the same thing. declineWordingForControl never touches a stated
+     * answer and never invents a refusal; it only respells one she already gave. */
+    const answer = eeoAnswer(eeoPreferenceForLabel(label, ap.eeo_prefs));
+    return { value: declineWordingForControl(label, answer) };
   }
 
   if (isLegalConsentQuestion(label)) {
@@ -2900,8 +2915,14 @@ export function resolveKnownAnswer(
     }
     case 'address_country':
       return ap.address_country ? { value: ap.address_country } : null;
-    case 'address_state':
-      return ap.address_state ? { value: ap.address_state } : null;
+    case 'address_state': {
+      if (!ap.address_state) return null;
+      // A question scoped to the United States is a closed set she may simply not be in. See
+      // residenceScope.ts: "Dubai" reached a fifty-state dropdown on a real application and only
+      // the strictness of the matcher kept a false residence off it.
+      const outOfScope = usStateScopeSkipReason(label, ap.address_state);
+      return outOfScope ? { skipReason: outOfScope } : { value: ap.address_state };
+    }
     case 'address_city':
       return ap.address_city ? { value: ap.address_city } : null;
     case 'phone':

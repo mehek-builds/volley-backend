@@ -13,8 +13,10 @@ import {
 import {
   chooseClosestOption,
   disciplineLadder,
+  isDeclineToState,
   profileAnswerAliases,
   resolveProfileField,
+  selfIdentificationDeclineWording,
 } from './profileFieldResolution';
 import type { Locator } from 'playwright-core';
 import { browserApplicationCapability } from './browserApplicationCapabilities';
@@ -2073,6 +2075,20 @@ function greenhouseComboboxValuesForQuestion(
   if (/\brace\/ethnicity\b|\brace\b|\bethnicit/.test(normalizedQuestion) && /decline|self-ident/i.test(answer.trim())) {
     values.unshift('Decline To Self Identify', 'Decline to self-identify', 'I don\'t wish to answer');
   }
+  /* THE ONE ATTEMPT HAS TO BE THE RIGHT ONE.
+   *
+   * comboboxValueLimit below is 1 for the ordinary question, so exactly one of these values ever
+   * reaches the page and every alias after it is decoration. That is why the twenty measured
+   * "are you hispanic/latino? hispanic_ethnicity" failures could not recover: the stored
+   * "Decline to self-identify" went out alone against a list reading "Decline To Self Identify",
+   * and the unhyphenated spelling further down the ladder was never tried.
+   *
+   * The unshift is last so it takes index 0 when it applies, and it applies only when the label
+   * names the control's vocabulary and the answer is already a refusal, so the value it puts in
+   * front of her own words is the same refusal in the list's own spelling. See
+   * selfIdentificationDeclineWording. */
+  const selfIdDecline = isDeclineToState(answer) ? selfIdentificationDeclineWording(question) : undefined;
+  if (selfIdDecline) values.unshift(selfIdDecline);
   if (/\bveteran\b/.test(normalizedQuestion) && /^no$/i.test(answer.trim())) {
     values.unshift('I am not a protected veteran');
   }
