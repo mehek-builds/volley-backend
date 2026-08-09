@@ -1,5 +1,5 @@
 import type { Locator, Page } from 'playwright-core';
-import type { ManagedBrowserAction, ManagedBrowserResult } from './browserbase';
+import { MANAGED_SUBMIT_CHOOSER_POLICY, type ManagedBrowserAction, type ManagedBrowserResult } from './browserbase';
 import { findComposioVerificationCode, type VerificationCodeMatch } from './emailVerification';
 
 const OTP_SELECTORS = [
@@ -128,6 +128,7 @@ export function buildManagedVerificationActions(code: string): ManagedBrowserAct
     maxRetries: 1,
     contractVersion: 2,
     submitKind: 'verification',
+    chooserPolicy: MANAGED_SUBMIT_CHOOSER_POLICY,
   });
   return actions;
 }

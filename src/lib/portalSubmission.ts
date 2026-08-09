@@ -1,5 +1,5 @@
 import type { Page } from 'playwright-core';
-import type { ManagedBrowserAction, ManagedBrowserResult } from './browserbase';
+import { MANAGED_SUBMIT_CHOOSER_POLICY, type ManagedBrowserAction, type ManagedBrowserResult } from './browserbase';
 import { describeRequiredBlocker, describeUnlabelledBlockers, humanFieldLabel } from './fieldLabel';
 import {
   classifyField,
@@ -4331,6 +4331,7 @@ export function buildManagedPortalActions(
       maxRetries: 1,
       contractVersion: 2,
       submitKind: 'application',
+      chooserPolicy: MANAGED_SUBMIT_CHOOSER_POLICY,
     });
   }
   return actions;
@@ -6968,7 +6969,9 @@ export const COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT = async (node: unknown) => {
       setAttribute(name: string, value: string): void;
       querySelectorAll(selector: string): Iterable<unknown>;
     } | null;
-    ownerDocument: { defaultView: {
+    ownerDocument: {
+      getElementById(id: string): unknown;
+      defaultView: {
       Event: new(type: string, init: { bubbles: boolean; cancelable?: boolean }) => { preventDefault(): void };
       requestAnimationFrame(callback: () => void): void;
       getComputedStyle(node: unknown): { display: string; visibility: string };
@@ -6991,6 +6994,29 @@ export const COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT = async (node: unknown) => {
     getClientRects(): { length: number };
     dispatchEvent(event: unknown): boolean;
   }>;
+  type Control = typeof controls[number];
+  const markers = Array.from(form.querySelectorAll(
+    'label[class*="_required_"], legend[class*="_required_"], label, legend',
+  )) as Array<{
+    textContent?: string; className?: string; control?: unknown; parentElement?: { querySelector(selector: string): unknown } | null;
+    getAttribute(name: string): string | null;
+    querySelector(selector: string): unknown;
+    closest(selector: string): { querySelector(selector: string): unknown } | null;
+  }>;
+  const controlSelector = 'input:not([type="hidden"]), textarea, select, [role="combobox"], [role="radio"], [role="checkbox"]';
+  for (const marker of markers) {
+    const className = typeof marker.className === 'string' ? marker.className : '';
+    const literalStar = /\*\s*$/.test((marker.textContent ?? '').trim());
+    if (!literalStar && !className.includes('_required_')) continue;
+    const named = marker.getAttribute('for');
+    const wrapper = marker.closest('fieldset, .field, .field-wrapper, [class*="field"], [role="group"]');
+    const candidate = marker.control
+      || (named ? button.ownerDocument.getElementById(named) : null)
+      || marker.querySelector(controlSelector)
+      || wrapper?.querySelector(controlSelector)
+      || marker.parentElement?.querySelector(controlSelector);
+    if (candidate && !controls.includes(candidate as Control)) controls.push(candidate as Control);
+  }
   const state = (control: typeof controls[number]) => JSON.stringify({
     value: control.value ?? null,
     checked: control.checked ?? null,

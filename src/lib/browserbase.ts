@@ -4,6 +4,8 @@ import { createHash } from 'node:crypto';
 
 export type BrowserProvider = 'browserbase' | 'stratus' | 'stratus-managed';
 
+export const MANAGED_SUBMIT_CHOOSER_POLICY = { name: 'litos-final-submit', version: 1 } as const;
+
 export type ManagedBrowserAction = {
   type: 'click' | 'fill' | 'fillByLabelText' | 'upload' | 'waitForSelector' | 'press' | 'select' | 'extract' | 'discover' | 'confirmAndSubmit';
   selector?: string;
@@ -29,6 +31,8 @@ export type ManagedBrowserAction = {
   contractVersion?: 2;
   /** Distinguishes the employer application send from an emailed-code continuation send. */
   submitKind?: 'application' | 'verification';
+  /** Shared semantic candidate policy. Runner must reject an unknown name or version. */
+  chooserPolicy?: { name: 'litos-final-submit'; version: 1 };
   /* The emailed code that finishes a Greenhouse submit, carried on the atomic action itself.
    *
    * On the click, and not as its own action, because the control it types into does not exist until
@@ -190,6 +194,9 @@ function stratusAction(action: ManagedBrowserAction): ManagedBrowserAction {
     if (action.contractVersion !== 2) throw new Error('Managed required-field confirmation contract version is invalid');
     if (action.maxRetries !== 0 && action.maxRetries !== 1) {
       throw new Error('Managed required-field confirmation maxRetries must be 0 or 1');
+    }
+    if (action.chooserPolicy?.name !== 'litos-final-submit' || action.chooserPolicy.version !== 1) {
+      throw new Error('Managed final-submit chooser policy is invalid');
     }
     return action;
   }

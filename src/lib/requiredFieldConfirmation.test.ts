@@ -70,6 +70,7 @@ test('every autonomous managed submit reserves a mandatory confirmation barrier 
       maxRetries: 1,
       contractVersion: 2,
       submitKind: 'application',
+      chooserPolicy: { name: 'litos-final-submit', version: 1 },
     });
     assert.equal(actions.filter((action) => action.type === 'click'
       && action.selector === MANAGED_FINAL_SUBMIT_SELECTOR).length, 0);
@@ -182,6 +183,61 @@ test('direct confirmation commits the visually filled custom box without changin
   assert.equal(focused, true);
   assert.equal(committed, true, 'the exact selected box must receive its commit click');
   assert.equal(control.getAttribute('aria-checked'), 'true', 'confirmation must preserve the answer');
+});
+
+async function commitMarkerOnlyRequiredControl(marker: { textContent: string; className: string }) {
+  let events = 0;
+  const control = {
+    disabled: false,
+    value: 'Yes',
+    getAttribute: (name: string) => name === 'role' ? 'radio' : name === 'aria-checked' ? 'true' : null,
+    getClientRects: () => ({ length: 1 }),
+    focus: () => undefined,
+    blur: () => undefined,
+    dispatchEvent: () => { events += 1; return true; },
+  };
+  const markerNode = {
+    ...marker,
+    control: null,
+    parentElement: { querySelector: () => control },
+    getAttribute: () => null,
+    querySelector: () => null,
+    closest: () => ({ querySelector: () => control }),
+  };
+  const form = {
+    setAttribute: () => undefined,
+    querySelectorAll: (selector: string) => selector.startsWith('[required]') ? [] : [markerNode],
+  };
+  const result = await COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT({
+    closest: () => form,
+    ownerDocument: {
+      getElementById: () => null,
+      defaultView: {
+        Event,
+        requestAnimationFrame: (callback: () => void) => callback(),
+        getComputedStyle: () => ({ display: 'block', visibility: 'visible' }),
+      },
+    },
+  });
+  return { result, events };
+}
+
+test('direct confirmation commits a Greenhouse literal-star custom question scoped to its form', async () => {
+  const { result, events } = await commitMarkerOnlyRequiredControl({
+    textContent: 'Are you authorized to work? *',
+    className: 'question-label',
+  });
+  assert.deepEqual(result, { formFound: true, changed: false, committed: 1 });
+  assert.equal(events, 1, 'the literal-star required control must receive its exact commit event');
+});
+
+test('direct confirmation commits an Ashby _required_ custom question scoped to its form', async () => {
+  const { result, events } = await commitMarkerOnlyRequiredControl({
+    textContent: 'Will you need sponsorship?',
+    className: '_label_8x3 _required_8x3',
+  });
+  assert.deepEqual(result, { formFound: true, changed: false, committed: 1 });
+  assert.equal(events, 1, 'the Ashby class-marked required control must receive its exact commit event');
 });
 
 test('prepare runs do not commit required fields or expose a submit action', () => {
@@ -393,6 +449,7 @@ test('managed wire contract sends one bounded confirmation action with its durab
       maxRetries: 1,
       contractVersion: 2,
       submitKind: 'application',
+      chooserPolicy: { name: 'litos-final-submit', version: 1 },
     }], { allowSubmit: true });
     assert.deepEqual(body.actions, [{
       type: 'confirmAndSubmit',
@@ -402,6 +459,7 @@ test('managed wire contract sends one bounded confirmation action with its durab
       maxRetries: 1,
       contractVersion: 2,
       submitKind: 'application',
+      chooserPolicy: { name: 'litos-final-submit', version: 1 },
     }]);
   } finally {
     globalThis.fetch = previousFetch;
@@ -435,6 +493,21 @@ test('managed wire contract rejects missing versions and unbounded retry counts 
       contractVersion: 2,
       maxRetries: 2,
     }]), /maxRetries/);
+    await assert.rejects(() => runManagedBrowser('https://portal.example/apply', [{
+      type: 'confirmAndSubmit',
+      selector: MANAGED_FINAL_SUBMIT_SELECTOR,
+      contractVersion: 2,
+      maxRetries: 1,
+      submitKind: 'application',
+    }]), /chooser policy/);
+    await assert.rejects(() => runManagedBrowser('https://portal.example/apply', [{
+      type: 'confirmAndSubmit',
+      selector: MANAGED_FINAL_SUBMIT_SELECTOR,
+      contractVersion: 2,
+      maxRetries: 1,
+      submitKind: 'application',
+      chooserPolicy: { name: 'litos-final-submit', version: 2 } as never,
+    }]), /chooser policy/);
     assert.equal(calls, 0);
   } finally {
     globalThis.fetch = previousFetch;
@@ -447,7 +520,7 @@ test('managed wire contract rejects missing versions and unbounded retry counts 
 
 test('submission runner requires confirmation proof before any receipt can be recorded', () => {
   const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
-  const barrier = source.indexOf('assertManagedRequiredFieldsConfirmed(result)');
+  const barrier = source.indexOf("assertManagedRequiredFieldsConfirmed(result, options.securityCode ? 'verification' : 'application')");
   const receipt = source.indexOf('const receipt = readManagedReceipt(receiptResult)', barrier);
   assert.ok(barrier >= 0);
   assert.ok(receipt > barrier);
@@ -456,7 +529,7 @@ test('submission runner requires confirmation proof before any receipt can be re
 test('automatic security-code continuation validates its own atomic confirmation receipt', () => {
   const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
   const continuation = source.indexOf('receiptResult = await continueManagedBrowser(continuationToken, prepared.actions)');
-  const continuationBarrier = source.indexOf('assertManagedRequiredFieldsConfirmed(receiptResult)', continuation);
+  const continuationBarrier = source.indexOf("assertManagedRequiredFieldsConfirmed(receiptResult, 'verification')", continuation);
   const receipt = source.indexOf('const receipt = readManagedReceipt(receiptResult)', continuation);
   assert.ok(continuation >= 0);
   assert.ok(continuationBarrier > continuation);

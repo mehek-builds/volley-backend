@@ -113,6 +113,7 @@ test('managed verification builds one bounded continuation for single and split 
     maxRetries: 1,
     contractVersion: 2,
     submitKind: 'verification',
+    chooserPolicy: { name: 'litos-final-submit', version: 1 },
   });
 });
 
