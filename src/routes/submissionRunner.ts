@@ -497,7 +497,12 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
   const roleLocations = Array.isArray(context.locations)
     ? context.locations.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
     : undefined;
-  const refreshedQuestions = refreshKnownQuestionAnswers(review.questions, applicationProfile, review.jd_text);
+  const refreshedQuestions = refreshKnownQuestionAnswers(
+    review.questions,
+    applicationProfile,
+    review.jd_text,
+    review.questions_reviewed_at,
+  );
   return {
     fullName,
     email,
@@ -936,12 +941,13 @@ export async function discoverAndResolveQuestions(
    * re-checks the reuse scope against THIS posting's employer before handing one over - see
    * savedAnswerFor for why the read side has to check again rather than trust the write side. */
   savedAnswers: ReadonlyMap<string, string> = new Map(),
-): Promise<{ questions: ApplicationReviewQuestion[]; attentionReasons: string[] }> {
+): Promise<{ questions: ApplicationReviewQuestion[]; attentionReasons: string[]; invalidatedQuestionKeys: string[] }> {
   const existingByLabel = new Map(
     current.questions.map((q) => [normalizeReviewQuestionLabel(q.question).toLowerCase(), q] as const),
   );
   const questions: ApplicationReviewQuestion[] = [];
   const attentionReasons: string[] = [];
+  const invalidatedQuestionKeys = new Set<string>();
 
   let bank: Awaited<ReturnType<typeof readExperienceBank>> | null = null;
   let declaredSkills: string[] = [];
@@ -1005,12 +1011,13 @@ export async function discoverAndResolveQuestions(
     field: DiscoveredQuestion,
     reviewLabel: string,
     existing: ApplicationReviewQuestion | undefined,
+    preserveExistingAnswer = false,
   ): ApplicationReviewQuestion => ({
     id: existing?.id ?? randomUUID(),
     question: reviewLabel,
-    // Whatever the applicant has already typed survives; Litos never overwrites her answer with a
-    // blank just because it has since decided it cannot answer the question itself.
-    answer: existing?.answer ?? '',
+    // Ordinary unresolved fields preserve an applicant answer. Refusal branches pass false because
+    // an old value may have been created by a superseded unsafe resolver and must be re-confirmed.
+    answer: preserveExistingAnswer ? (existing?.answer ?? '') : '',
     kind: 'required',
     required: true,
     portal_selector: portalSelectorForField(field),
@@ -1038,7 +1045,8 @@ export async function discoverAndResolveQuestions(
      *
      * Which questions may be remembered at all is answerReuse's decision, not this loop's: nothing
      * tied to one posting ever reaches here. */
-    const remembered = savedAnswerFor(label, savedAnswers, reuseContext);
+    const rememberedWithoutOptionConstraint = savedAnswerFor(label, savedAnswers, reuseContext);
+    const remembered = savedAnswerFor(label, savedAnswers, reuseContext, field.options);
     const known = (profileKnown && 'value' in profileKnown)
       ? profileKnown
       : (remembered !== undefined ? ({ value: remembered } as const) : profileKnown);
@@ -1073,14 +1081,38 @@ export async function discoverAndResolveQuestions(
     if (resolvedField && !resolvedField.matchedOption && usableOptions(field.options).length > 0) {
       attentionReasons.push(`none of the options match your saved answer, so this one is left for you: "${label.slice(0, 60)}"`);
     }
-    if (existing) {
-      if (known && 'skipReason' in known) {
-        attentionReasons.push(known.skipReason);
-        // Litos declined, so the question belongs to the applicant. Keeping the record (with her own
-        // answer if she has already given one) is what lets her give it; dropping it here is how a
-        // stored answer used to be thrown away by a later run that had decided to refuse.
+    if (rememberedWithoutOptionConstraint !== undefined
+      && remembered === undefined
+      && usableOptions(field.options).length > 0) {
+      invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
+      attentionReasons.push(`none of the options exactly match your remembered answer, so this one is left for you: "${label.slice(0, 60)}"`);
+      if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false));
+      continue;
+    }
+    if (known && 'skipReason' in known) {
+      invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
+      attentionReasons.push(known.skipReason);
+      if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false));
+      continue;
+    }
+    if (!known && isRefusedQuestion(label)) {
+      invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
+      attentionReasons.push(WORK_ELIGIBILITY_QUESTION.test(label)
+        ? workEligibilitySkipReason(label)
+        : `sensitive question left for you: "${label.slice(0, 60)}"`);
+      if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false));
+      continue;
+    }
+    if (isSelfDeclarationQuestion(label)) {
+      if (!known) {
+        invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
+        attentionReasons.push(selfDeclarationSkipReason(label));
         if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
-      } else if (known && 'value' in known) {
+        continue;
+      }
+    }
+    if (existing) {
+      if (known && 'value' in known) {
         questions.push({
           ...existing,
           question: reviewLabel,
@@ -1099,7 +1131,7 @@ export async function discoverAndResolveQuestions(
           portal_input_type: field.inputType,
         });
       } else if (fieldIsRequired) {
-        questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
+        questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, true));
       }
       continue; // already answered by the client or a prior run
     }
@@ -1116,21 +1148,6 @@ export async function discoverAndResolveQuestions(
       });
       continue;
     }
-    if (known && 'skipReason' in known) {
-      attentionReasons.push(known.skipReason);
-      if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
-      continue;
-    }
-    if (isRefusedQuestion(label)) {
-      attentionReasons.push(WORK_ELIGIBILITY_QUESTION.test(label)
-        ? workEligibilitySkipReason(label)
-        : `sensitive question left for you: "${label.slice(0, 60)}"`);
-      // Still never answered. Surfaced now, with an empty answer, when the employer requires it -
-      // otherwise a required attestation is a wall: Litos will not answer it and the applicant has
-      // nowhere to. An optional sensitive field is left alone exactly as before.
-      if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
-      continue;
-    }
     /* THE DRAFTER MAY NOT WRITE A DECLARATION ABOUT HER. This is the last door, and it is the one
      * the 600-word essay walked through: "Have you previously applied to Akuna?" is open-ended by
      * every measure isOpenEndedQuestion applies, so it went to the model, and the model wrote a
@@ -1142,11 +1159,6 @@ export async function discoverAndResolveQuestions(
      * form: a question whose answer is a statement she makes about herself is never drafted, however
      * open-ended it reads, whether or not any rule above recognised it. She is asked instead, which
      * is what the pre-script now does before the run ever starts. */
-    if (isSelfDeclarationQuestion(label)) {
-      attentionReasons.push(selfDeclarationSkipReason(label));
-      if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
-      continue;
-    }
     if (!isOpenEndedQuestion(label)) {
       // The single biggest source of unanswerable blockers. "Discipline", "Graduation Month",
       // "EXPORT CONTROLS - ...": not a field Litos knows, not an essay it can draft, and until now
@@ -1199,7 +1211,19 @@ export async function discoverAndResolveQuestions(
     }
   }
 
-  return { questions, attentionReasons };
+  return { questions, attentionReasons, invalidatedQuestionKeys: [...invalidatedQuestionKeys] };
+}
+
+export function mergeDiscoveredPortalQuestions(
+  discovered: readonly ApplicationReviewQuestion[],
+  stored: readonly ApplicationReviewQuestion[],
+  invalidatedQuestionKeys: readonly string[],
+): ApplicationReviewQuestion[] {
+  const invalidated = new Set(invalidatedQuestionKeys);
+  return normalizeApplicationReviewQuestions([
+    ...discovered,
+    ...stored.filter((question) => !invalidated.has(normalizeReviewQuestionLabel(question.question).toLowerCase())),
+  ]);
 }
 
 /**
@@ -1333,7 +1357,11 @@ async function prepareManaged(
   const resolutionCurrent = { ...current, questions: storedQuestions };
   const applicationProfile = await loadApplicationProfileLike(row.user_id);
   const savedAnswers = await loadSavedAnswers(row.user_id);
-  const { questions: discoveredQuestions, attentionReasons: discoveryAttention } = await discoverAndResolveQuestions(
+  const {
+    questions: discoveredQuestions,
+    attentionReasons: discoveryAttention,
+    invalidatedQuestionKeys,
+  } = await discoverAndResolveQuestions(
     discoveredFields,
     row,
     resolutionCurrent,
@@ -1342,7 +1370,7 @@ async function prepareManaged(
     portal,
     savedAnswers,
   );
-  const mergedQuestions = normalizeApplicationReviewQuestions([...discoveredQuestions, ...storedQuestions]);
+  const mergedQuestions = mergeDiscoveredPortalQuestions(discoveredQuestions, storedQuestions, invalidatedQuestionKeys);
   packet.questions = mergedQuestions.map((q) => ({
     question: q.question,
     answer: q.answer,
@@ -1756,7 +1784,11 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     const discovered = await discoverPageQuestions(page).catch(() => []);
     const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
     const resolutionCurrent = { ...current, questions: storedQuestions };
-    const { questions: discoveredQuestions, attentionReasons: discoveryAttention } =
+    const {
+      questions: discoveredQuestions,
+      attentionReasons: discoveryAttention,
+      invalidatedQuestionKeys,
+    } =
       await discoverAndResolveQuestions(
         discovered,
         row,
@@ -1766,7 +1798,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
         portal,
         await loadSavedAnswers(row.user_id),
       );
-    const mergedQuestions = normalizeApplicationReviewQuestions([...discoveredQuestions, ...storedQuestions]);
+    const mergedQuestions = mergeDiscoveredPortalQuestions(discoveredQuestions, storedQuestions, invalidatedQuestionKeys);
     packet.questions = mergedQuestions.map((q) => ({
       question: q.question,
       answer: q.answer,

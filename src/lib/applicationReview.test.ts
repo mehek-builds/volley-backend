@@ -3,10 +3,12 @@ import { describe, test } from 'node:test';
 import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import {
+  applyApplicationReviewEdit,
   deriveEditedTerms,
   mergeSubmittedApplicationReviewQuestions,
   normalizeApplicationReviewQuestions,
   readApplicationReview,
+  type ApplicationReviewState,
 } from './applicationReview';
 
 const bank: ExperienceBankEntry[] = [
@@ -335,4 +337,97 @@ describe('application review metadata', () => {
       ],
     );
   });
+});
+
+test('review edits stamp server-owned current-answer provenance', () => {
+  const current = {
+    jd_text: 'Role',
+    status: 'questions_ready',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: '2026-08-09T00:00:00.000Z',
+  } as ApplicationReviewState;
+  const edited = applyApplicationReviewEdit(current, {
+    questions: [{ id: 'q', question: 'Can you work onsite?', answer: 'Yes', kind: 'required', required: true }],
+    skipped_reasons: [],
+  });
+  assert.equal(edited.questions[0].answer_source, 'applicant_review');
+  assert.equal(edited.questions[0].answer_reviewed_at, edited.questions_reviewed_at);
+  assert.equal(edited.updated_at, edited.questions_reviewed_at);
+});
+
+test('submit merge preserves provenance only for an exact current reviewed identity', () => {
+  const reviewedAt = '2026-08-09T12:00:00.000Z';
+  const stored = [{
+    id: 'q',
+    question: 'Can you work onsite?',
+    answer: 'Yes',
+    kind: 'required' as const,
+    required: true,
+    answer_source: 'applicant_review' as const,
+    answer_reviewed_at: reviewedAt,
+  }];
+  const unchanged = mergeSubmittedApplicationReviewQuestions(stored, [{ ...stored[0] }], reviewedAt);
+  assert.equal(unchanged[0].answer_source, 'applicant_review');
+  assert.equal(unchanged[0].answer_reviewed_at, reviewedAt);
+
+  const changed = mergeSubmittedApplicationReviewQuestions(
+    stored,
+    [{ ...stored[0], answer: 'No' }],
+    reviewedAt,
+  );
+  assert.equal(changed[0].answer, 'No');
+  assert.equal(changed[0].answer_source, undefined);
+  assert.equal(changed[0].answer_reviewed_at, undefined);
+
+  for (const publicQuestion of [
+    '  Can you work onsite?  ',
+    'Can  you work onsite?',
+    'can you work onsite?',
+    'Can you work on-site?',
+  ]) {
+    const textMutated = mergeSubmittedApplicationReviewQuestions(
+      stored,
+      [{ ...stored[0], question: publicQuestion }],
+      reviewedAt,
+    );
+    assert.equal(textMutated.length, 1, `mutated public label must not append: ${publicQuestion}`);
+    assert.equal(textMutated[0].question, stored[0].question, 'stored canonical label must win');
+    assert.equal(textMutated[0].answer, stored[0].answer);
+    assert.equal(textMutated[0].answer_source, undefined, `mutation must invalidate: ${publicQuestion}`);
+    assert.equal(textMutated[0].answer_reviewed_at, undefined);
+  }
+
+  const staleReview = mergeSubmittedApplicationReviewQuestions(
+    stored,
+    [{ ...stored[0] }],
+    '2026-08-09T12:00:01.000Z',
+  );
+  assert.equal(staleReview[0].answer_source, undefined);
+  assert.equal(staleReview[0].answer_reviewed_at, undefined);
+
+  const changedId = mergeSubmittedApplicationReviewQuestions(
+    stored,
+    [{ ...stored[0], id: 'public-replacement' }],
+    reviewedAt,
+  );
+  assert.equal(changedId[0].answer_source, undefined);
+  assert.equal(changedId[0].answer_reviewed_at, undefined);
+
+  const replacedIdentity = mergeSubmittedApplicationReviewQuestions(
+    stored,
+    [{ ...stored[0], id: 'public-replacement', question: 'Can you work on site?' }],
+    reviewedAt,
+  );
+  assert.equal(replacedIdentity[0].question, stored[0].question);
+  assert.equal(replacedIdentity[0].answer_source, undefined);
+  assert.equal(replacedIdentity[0].answer_reviewed_at, undefined);
+  assert.equal(replacedIdentity[1].question, 'Can you work on site?');
+  assert.equal(replacedIdentity[1].answer_source, undefined);
+  assert.equal(replacedIdentity[1].answer_reviewed_at, undefined);
+
+  const omitted = mergeSubmittedApplicationReviewQuestions(stored, [], reviewedAt);
+  assert.equal(omitted[0].answer_source, undefined);
+  assert.equal(omitted[0].answer_reviewed_at, undefined);
 });

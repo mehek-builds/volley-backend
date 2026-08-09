@@ -11,6 +11,8 @@ export type ApplicationReviewQuestion = {
   portal_selector?: string;
   portal_input_type?: string;
   ats_api_field?: string;
+  answer_source?: 'applicant_review';
+  answer_reviewed_at?: string;
 };
 
 export type ApplicationAttentionCategory =
@@ -97,34 +99,76 @@ export function normalizeApplicationReviewQuestions(
 export function mergeSubmittedApplicationReviewQuestions(
   stored: readonly ApplicationReviewQuestion[],
   submitted: readonly ApplicationReviewQuestion[],
+  questionsReviewedAt?: string,
 ): ApplicationReviewQuestion[] {
-  const submittedByQuestion = new Map<string, ApplicationReviewQuestion>();
-  for (const question of submitted) {
+  const submittedByQuestion = new Map<string, { question: ApplicationReviewQuestion; index: number }>();
+  const submittedByUniqueId = new Map<string, { question: ApplicationReviewQuestion; index: number } | undefined>();
+  for (const [index, question] of submitted.entries()) {
     const key = questionKey(question.question);
-    if (key) submittedByQuestion.set(key, question);
+    if (key) submittedByQuestion.set(key, { question, index });
+    submittedByUniqueId.set(
+      question.id,
+      submittedByUniqueId.has(question.id) ? undefined : { question, index },
+    );
   }
+  const consumedSubmittedIndexes = new Set<number>();
   const merged = stored.map((question) => {
-    const submittedQuestion = submittedByQuestion.get(questionKey(question.question));
-    if (!submittedQuestion) return question;
+    // The normalized text is the ordinary semantic identity. The id fallback exists only so a
+    // public caller cannot evade invalidation by renaming a reviewed question while retaining its
+    // server-issued id. Ambiguous duplicate ids are intentionally not matched.
+    const submittedMatch = submittedByQuestion.get(questionKey(question.question))
+      ?? submittedByUniqueId.get(question.id);
+    if (!submittedMatch) {
+      const {
+        answer_source: _answerSource,
+        answer_reviewed_at: _answerReviewedAt,
+        ...questionWithoutProvenance
+      } = question;
+      return questionWithoutProvenance;
+    }
+    const { question: submittedQuestion, index: submittedIndex } = submittedMatch;
+    consumedSubmittedIndexes.add(submittedIndex);
     const portalSelector = preferredPortalSelector(question.portal_selector, submittedQuestion.portal_selector);
     const portalInputType = submittedQuestion.portal_input_type ?? question.portal_input_type;
     const atsApiField = question.ats_api_field;
+    const provenanceMatchesCurrentReview = question.answer_source === 'applicant_review'
+      && typeof question.answer_reviewed_at === 'string'
+      && question.answer_reviewed_at === questionsReviewedAt;
+    const exactReviewedIdentityUnchanged = provenanceMatchesCurrentReview
+      && submittedQuestion.id === question.id
+      && submittedQuestion.question === question.question
+      && questionKey(submittedQuestion.question) === questionKey(question.question)
+      && submittedQuestion.answer === question.answer;
+    const {
+      answer_source: _answerSource,
+      answer_reviewed_at: _answerReviewedAt,
+      ...questionWithoutProvenance
+    } = question;
     return {
-      ...question,
+      ...(exactReviewedIdentityUnchanged ? question : questionWithoutProvenance),
       answer: submittedQuestion.answer,
       kind: submittedQuestion.kind,
       required: question.required || submittedQuestion.required,
-      question: submittedQuestion.question.trim() ? submittedQuestion.question : question.question,
+      // The stored label is the form identity. A public submit body may update an answer but cannot
+      // rename that control, including by changing only case or whitespace, then inherit the proof
+      // attached to the exact text the applicant reviewed.
+      question: question.question,
       ...(portalSelector ? { portal_selector: portalSelector } : {}),
       ...(portalInputType ? { portal_input_type: portalInputType } : {}),
       ...(atsApiField ? { ats_api_field: atsApiField } : {}),
     };
   });
   const storedKeys = new Set(stored.map((question) => questionKey(question.question)).filter(Boolean));
-  for (const question of submitted) {
+  for (const [index, question] of submitted.entries()) {
+    if (consumedSubmittedIndexes.has(index)) continue;
     const key = questionKey(question.question);
     if (!key || storedKeys.has(key)) continue;
-    merged.push(question);
+    const {
+      answer_source: _answerSource,
+      answer_reviewed_at: _answerReviewedAt,
+      ...submittedWithoutProvenance
+    } = question;
+    merged.push(submittedWithoutProvenance);
   }
   return normalizeApplicationReviewQuestions(merged);
 }
@@ -211,6 +255,7 @@ export type ApplicationReviewState = {
     | 'failed';
   edited_terms: string[];
   questions: ApplicationReviewQuestion[];
+  questions_reviewed_at?: string;
   skipped_reasons: string[];
   updated_at: string;
   /* WHICH BUILD WROTE THIS REVIEW, so a reader can tell "this stopped for a reason" apart from
@@ -506,9 +551,14 @@ export function applyApplicationReviewEdit(
   const canonicalPortalUrl = edit.portal_url === undefined
     ? undefined
     : canonicalSupportedPortalUrl(edit.portal_url, edit.ats_name ?? current.ats_name) ?? edit.portal_url;
+  const reviewedAt = new Date().toISOString();
   return {
     ...current,
     ...edit,
+    questions: edit.questions.map((question) => question.answer.trim()
+      ? { ...question, answer_source: 'applicant_review' as const, answer_reviewed_at: reviewedAt }
+      : question),
+    questions_reviewed_at: reviewedAt,
     ...(canonicalPortalUrl === undefined ? {} : {
       portal_url: canonicalPortalUrl,
       ats_name: isPortalSupported(canonicalPortalUrl) ? detectPortal(canonicalPortalUrl) : edit.ats_name ?? current.ats_name,
@@ -517,6 +567,6 @@ export function applyApplicationReviewEdit(
     // perfectly good stored true, which is the same lockout arriving by a different door.
     ...(canonicalPortalUrl === undefined ? {} : { portal_supported: isPortalSupported(canonicalPortalUrl) }),
     status: edit.questions.length > 0 ? 'questions_ready' : 'ready_to_submit',
-    updated_at: new Date().toISOString(),
+    updated_at: reviewedAt,
   };
 }

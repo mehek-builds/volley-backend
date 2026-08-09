@@ -54,9 +54,9 @@ test('submit-request starts a fresh run instead of carrying stale run artifacts'
     assert.match(helper, new RegExp(`${field}:\\s*undefined`), `${field} must be cleared`);
   }
   assert.match(helper, /updated_at:\s*new Date\(\)\.toISOString\(\)/);
-  assert.match(route, /const submittedQuestions = refreshKnownQuestionAnswers\(/);
-  assert.match(route, /current\.jd_text/);
-  assert.match(route, /const normalizedSubmittedQuestions = mergeSubmittedApplicationReviewQuestions\(current\.questions, submittedQuestions\)/);
+  assert.match(route, /const submittedQuestions = parsed\.data\.questions/);
+  assert.match(route, /const mergedSubmittedQuestions = mergeSubmittedApplicationReviewQuestions\([\s\S]{0,180}current\.questions_reviewed_at/);
+  assert.match(route, /const normalizedSubmittedQuestions = refreshKnownQuestionAnswers\([\s\S]{0,180}current\.questions_reviewed_at/);
   assert.match(route, /const next = freshSubmitRequestReview\(current, normalizedSubmittedQuestions\)/);
 });
 
@@ -200,7 +200,7 @@ test('application routes refresh answers through the decrypted profile loader', 
   assert.match(route, /return loadApplicationProfileLike\(userId\)/);
   assert.doesNotMatch(route, /application_profile\.work_authorized/);
   assert.doesNotMatch(route, /application_profile\.needs_sponsorship/);
-  assert.match(route, /questions: refreshKnownQuestionAnswers\(review\.questions, profile, review\.jd_text\)/);
+  assert.match(route, /questions: refreshKnownQuestionAnswers\([\s\S]{0,160}review\.questions_reviewed_at/);
 });
 
 test('final approval validates and submits refreshed known question answers', async () => {
@@ -213,7 +213,7 @@ test('final approval validates and submits refreshed known question answers', as
 
   assert.match(approve, /const sensitiveProfile = await loadSensitiveQuestionProfile/);
   assert.match(approve, /const approvalReview: ApplicationReviewState = \{/);
-  assert.match(approve, /questions: refreshKnownQuestionAnswers\(current\.questions, sensitiveProfile, current\.jd_text\)/);
+  assert.match(approve, /questions: refreshKnownQuestionAnswers\([\s\S]{0,180}current\.questions_reviewed_at/);
   assert.match(approve, /approvalReview\.questions\.some/);
   assert.match(approve, /sensitiveQuestionFor\(approvalReview\.questions, sensitiveProfile, approvalReview\.jd_text\)/);
   assert.match(approve, /\.\.\.approvalReview,[\s\S]{0,120}status:\s*'submitting'/);
@@ -225,12 +225,13 @@ test('resume history refreshes known question answers without changing review st
   const route = await readFile('src/routes/resume.ts', 'utf8');
   assert.match(route, /function refreshedHistorySpec/);
   assert.match(route, /loadApplicationProfileLike\(userId\)/);
-  assert.match(route, /questions: refreshKnownQuestionAnswers\(review\.questions, profile, review\.jd_text\)/);
+  assert.match(route, /questions: refreshKnownQuestionAnswers\([^\n]*review\.questions_reviewed_at\)/);
   assert.doesNotMatch(route, /status:\s*'ready_to_submit'[\s\S]{0,300}refreshKnownQuestionAnswers/);
 });
 
 test('submission packet attaches the role-specific resume filename', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  assert.match(runner, /const refreshedQuestions = refreshKnownQuestionAnswers\([\s\S]{0,180}review\.questions_reviewed_at/);
   assert.match(runner, /const roleTitle = \(row\.job_context as \{ role\?: unknown \} \| null\)\?\.role/);
   assert.match(runner, /resumeName:\s*resumeFileNameForRole\(fullName,\s*roleTitle\)/);
   assert.doesNotMatch(runner, /resumeName:\s*`litos-\$\{row\.id\}\.pdf`/);

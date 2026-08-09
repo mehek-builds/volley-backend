@@ -82,23 +82,11 @@ export type ApplicationProfileLike = StoredSalaryProfile & {
   attest_truthful_information?: boolean;
   accept_privacy_notices?: boolean;
 
-  /* ---- where she will actually be ----
-   *
-   * "Are you available to work from our office in San Francisco?" was answered YES by a constant,
-   * for an applicant who lives in Dubai and studies in Los Angeles. It is the most-asked question
-   * in this whole class - 15 distinct labels across 12 employers in the stored corpus - and it is
-   * the one with a LOCATION DIMENSION: the honest answer is yes to Los Angeles and no to New York,
-   * so a single boolean could not carry it and a constant was never going to.
-   *
-   *   onsite_commitment      'anywhere'          -> she will work from an office wherever it is
-   *                          'listed_locations'  -> only the places in onsite_locations
-   *                          'no'                -> she needs remote
-   *   onsite_locations       the metros she will work onsite in, her own words
-   *   relocation_willingness whether she will MOVE for a role, which is a different commitment
-   *                          from commuting to an office she already lives near
-   *
-   * undefined means NEVER ASKED on all three, and a question with nothing stored is refused.
-   */
+  /* Legacy location preferences. These are deliberately not sufficient authority for answering an
+   * employer commitment. The stored model has no cadence, duration, office, employer or posting
+   * scope, so even `anywhere` cannot truthfully answer "five days a week for twelve weeks". They
+   * remain in the read shape for compatibility, but the resolver holds every commitment until a
+   * future exact, scoped record contains both location and cadence. */
   onsite_commitment?: 'anywhere' | 'listed_locations' | 'no';
   onsite_locations?: string[];
   relocation_willingness?: 'yes' | 'no';
@@ -125,9 +113,10 @@ const SPONSORSHIP_WORK_AUTHORIZATION_SUPPORT_QUESTION =
   /\b(?:do|will|would|can|could)?\s*(?:you\s+)?(?:now\s+or\s+in\s+the\s+future\s+)?(?:requir\w*|need\w*)\b[^?]{0,80}\b(?:sponsor\w*|visa)\b[^?]{0,50}\bwork\s+authori[sz]ation\b/i;
 const NON_US_WORK_SCOPE =
   /\b(canada|canadian|united kingdom|uk|britain|british|england|european union|eu|australia|australian|india|indian|united arab emirates|uae|dubai|singapore|germany|france|ireland|netherlands|hungary|hungarian|japan|korea|china)\b/i;
+const US_WORK_SCOPE = /\b(?:united states|usa|america(?:n)?)\b|\bu\.s\.(?=\s|$|[?,;:)])/i;
+const US_ABBREVIATION_SCOPE =
+  /\b(?:in|within|throughout|across)\s+(?:the\s+)?US\b|\bUS\s+(?:work|employment|visa|immigration|authori[sz]ation)\b/;
 const JOB_LOCATION_SCOPE = /country\s+(?:where|in which)\s+the\s+job\s+is\s+located|country\s+where\s+the\s+role\s+is\s+located|where\s+the\s+job\s+is\s+located/i;
-const JD_US_SCOPE =
-  /\b(united states|u\.s\.|usa|remote\s*\(us\)|san francisco|san mateo|mountain view|california|new york|austin|texas|washington|seattle|boston|massachusetts|chicago|illinois)\b/i;
 export const ROUTINE_APPLICANT_CONSENT_QUESTION =
   /\b(?:consent|agree|acknowledg\w*|approve|confirm)\b[\s\S]{0,180}\b(?:process(?:ing)?|use|using|collect(?:ion)?|retain|store|privacy\s+policy|privacy\s+notice|notice\s+at\s+collection)\b[\s\S]{0,180}\b(?:personal\s+information|personal\s+data|application|applicant|candidacy|candidate|privacy\s+policy|privacy\s+notice|notice\s+at\s+collection|infrastructure|platform|data)\b|\bplease\s+review\s+and\s+acknowledg\w*\b[\s\S]{0,120}\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b|\byes,\s*i\s+consent\b/i;
 
@@ -153,15 +142,15 @@ export function legalConsentSkipReason(label: string): string {
 function workEligibilityAnswer(
   label: string,
   ap: ApplicationProfileLike,
-  jdText: string | undefined,
 ): { value: string } | { skipReason: string } | null {
+  const explicitlyUsScoped = US_WORK_SCOPE.test(label) || US_ABBREVIATION_SCOPE.test(label);
   if (WORK_AUTHORIZATION_DETAIL_QUESTION.test(label)) {
     return { skipReason: workEligibilitySkipReason(label) };
   }
   const asksAuthorization = WORK_AUTHORIZATION_QUESTION.test(label);
   const asksSponsorship = SPONSORSHIP_QUESTION.test(label);
   if (asksAuthorization && asksSponsorship && SPONSORSHIP_WORK_AUTHORIZATION_SUPPORT_QUESTION.test(label)) {
-    if ((NON_US_WORK_SCOPE.test(label) || (JOB_LOCATION_SCOPE.test(label) && !JD_US_SCOPE.test(jdText ?? '')))) {
+    if (!explicitlyUsScoped || NON_US_WORK_SCOPE.test(label) || JOB_LOCATION_SCOPE.test(label)) {
       return { skipReason: workEligibilitySkipReason(label) };
     }
     if (typeof ap.needs_sponsorship === 'boolean') {
@@ -171,7 +160,10 @@ function workEligibilityAnswer(
   }
   if (!asksAuthorization && !asksSponsorship) return null;
   if (asksAuthorization && asksSponsorship) return { skipReason: workEligibilitySkipReason(label) };
-  if ((asksAuthorization || asksSponsorship) && (NON_US_WORK_SCOPE.test(label) || (JOB_LOCATION_SCOPE.test(label) && !JD_US_SCOPE.test(jdText ?? '')))) {
+  // The legacy booleans were collected without a country. They are usable only when the employer's
+  // own question explicitly says United States. A JD mentioning a US office, benefit, customer or
+  // legal notice is not scope evidence, and an unscoped question is not implicitly American.
+  if ((asksAuthorization || asksSponsorship) && (!explicitlyUsScoped || NON_US_WORK_SCOPE.test(label) || JOB_LOCATION_SCOPE.test(label))) {
     return { skipReason: workEligibilitySkipReason(label) };
   }
   if (asksAuthorization && UNRESTRICTED_WORK_AUTHORIZATION_QUESTION.test(label) && ap.needs_sponsorship === true) {
@@ -190,34 +182,15 @@ export function attestationSkipReason(label: string, what: string): string {
   return `${what} left for you to agree to yourself: "${label.slice(0, 60)}"`;
 }
 
-/**
- * Every checkbox-shaped agreement on an employer form, resolved against the two consents the
- * student may grant once in onboarding - and refused by name otherwise.
+/** Every employer agreement is scoped to the exact application and exact text shown there.
  *
- * THE RULE, which the rest of this function is only an implementation of: Litos may affirm exactly
- * two things on somebody's behalf. That the information supplied is truthful, which restates what
- * she already did by approving the packet. And that a candidate privacy notice is accepted, which
- * is the routine condition of applying at all. Both require an explicit stored `true`; neither is
- * ever inferred from the fact that she pressed submit.
- *
- * Everything else is refused, INCLUDING things that sit right next to those two on the same form:
- *   - "I acknowledge that this role is my top preference and I will not be considered for other
- *     tech and/or quant roles at Akuna this season" is a binding exclusivity commitment over the
- *     rest of her recruiting season. It was being auto-answered "Yes".
- *   - "I acknowledge that my resume must be submitted in PDF format" is a process term. Harmless
- *     to agree to and still not ours to agree to; it was also being auto-answered "Yes".
- *   - "Interview Code of Conduct" is acceptance of a behavioural policy.
- * Each of those returns a skipReason naming what is being agreed to, so the student is asked for a
- * tick rather than discovering afterwards that a machine ticked it.
+ * The legacy profile has standing booleans for truthfulness and privacy notices. Neither proves
+ * that the applicant saw this employer's current notice or reviewed this exact packet, so neither
+ * is consulted here. The booleans remain readable for migration compatibility only.
  */
-function applicationConsentAnswer(
-  label: string,
-  ap: ApplicationProfileLike,
-): { value: string } | { skipReason: string } | null {
+function applicationConsentAnswer(label: string): { skipReason: string } | null {
   if (TRUE_COMPLETE_ACCURATE_CERTIFICATION.test(label)) {
-    return ap.attest_truthful_information === true
-      ? { value: 'Yes' }
-      : { skipReason: attestationSkipReason(label, 'certification that your information is true') };
+    return { skipReason: attestationSkipReason(label, 'certification that your information is true') };
   }
   if (TOP_ROLE_PREFERENCE_ACKNOWLEDGEMENT.test(label)) {
     return { skipReason: attestationSkipReason(label, 'commitment about which roles you will be considered for') };
@@ -229,42 +202,26 @@ function applicationConsentAnswer(
     return { skipReason: attestationSkipReason(label, 'agreement to a code of conduct') };
   }
   if (BARE_PRIVACY_ACKNOWLEDGEMENT.test(label)) {
-    return ap.accept_privacy_notices === true
-      ? { value: 'Yes' }
-      : { skipReason: attestationSkipReason(label, 'privacy notice') };
+    return { skipReason: attestationSkipReason(label, 'privacy notice') };
   }
   return null;
 }
 
-/** True when the student granted the standing privacy-notice consent in onboarding. */
-function privacyNoticesAccepted(ap: ApplicationProfileLike): boolean {
-  return ap.accept_privacy_notices === true;
-}
-
-function routineConsentAnswer(
-  label: string,
-  ap: ApplicationProfileLike,
-): { value: string } | { skipReason: string } | null {
-  // Every branch below is an acceptance of a data-processing or privacy term, so every branch now
-  // needs the same stored consent. They used to return "Yes" unconditionally, which is the thing
-  // the rule above forbids: Litos was agreeing on her behalf to notices she had never seen.
-  const consented = privacyNoticesAccepted(ap);
-  const gate = (value: string): { value: string } | { skipReason: string } =>
-    (consented ? { value } : { skipReason: attestationSkipReason(label, 'privacy notice') });
-
-  if (/^\s*processing\s+of\s+personal\s+data\s*$/i.test(label)) return gate('Acknowledge/Confirm');
+function routineConsentAnswer(label: string): { skipReason: string } | null {
+  const hold = (): { skipReason: string } => ({ skipReason: attestationSkipReason(label, 'privacy notice') });
+  if (/^\s*processing\s+of\s+personal\s+data\s*$/i.test(label)) return hold();
   if (/demographic data survey/i.test(label)) return null;
-  if (/^\s*yes,\s*i\s+consent\s*$/i.test(label)) return gate('Yes, I consent');
+  if (/^\s*yes,\s*i\s+consent\s*$/i.test(label)) return hold();
   if (
     /\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b/i.test(label)
     && /\b(?:agree|consent|acknowledg\w*|processed?|processing)\b/i.test(label)
   ) {
-    return gate('Yes');
+    return hold();
   }
   if (/\bjob application\b/i.test(label) && /\bprocess(?:ed|ing)?\b/i.test(label) && /\b(?:information|data)\b/i.test(label)) {
-    return gate('Yes');
+    return hold();
   }
-  return ROUTINE_APPLICANT_CONSENT_QUESTION.test(label) ? gate('Yes') : null;
+  return ROUTINE_APPLICANT_CONSENT_QUESTION.test(label) ? hold() : null;
 }
 
 /* ---- the self-declarations ----
@@ -472,136 +429,22 @@ function furtherEducationAnswer(
   return { skipReason: `further-education question left for you: "${label.slice(0, 60)}"` };
 }
 
-/* ---- the office question, which is not routine ----
- *
- * WHAT WAS HERE. `return isLocationCommitmentQuestion(label) ? { value: 'Yes' } : null`, and the
- * matching `case 'onsite_commitment': return { value: 'Yes' }` in the switch at the bottom. Two
- * constants, no column consulted, and the comment above LOCATION_COMMITMENT_VOCAB called the
- * question "routine" - which is how it survived a module whose entire purpose is to stop a machine
- * inventing a declaration.
- *
- * It is not routine. "Are you available to work from our office in San Francisco?" going out as
- * Yes for someone with a +971 phone number and a Los Angeles university is a commitment about
- * where she will physically be, authored by a machine, sent to an employer under her name. It is
- * the same class as the Akuna exclusivity Yes, and it is asked far more often: 15 distinct labels
- * across 12 employers in the stored corpus, which puts it well past the two-posting bar for an
- * onboarding question rather than an ask at Apply.
- *
- * SO IT IS ANSWERED FROM WHAT SHE STORED, AND THE LOCATION IS PART OF THE ANSWER. Yes to Los
- * Angeles and no to New York are both true, and which one an employer gets depends on which office
- * the question names. The office is identified from the LABEL first and from the job description
- * only as a fallback - the posting is the authority on where the job is, and she is the only
- * authority on whether she will go there. Nothing composes those two into a Yes she did not make.
- */
-
-/** Canonical metro -> the spellings employers and applicants actually type for it. */
-const OFFICE_METRO_ALIASES: ReadonlyArray<readonly [string, RegExp]> = [
-  ['San Francisco', /\bsan\s+franc?[si]sco\b|\bsan\s+fran\b|\bsf\s+(?:office|bay)\b|\bin\s+sf\b|\bsf\s+hq\b/i],
-  ['New York', /\bnew\s+york(?:\s+city)?\b|\bnyc\b|\bmanhattan\b/i],
-  ['Los Angeles', /\blos\s+angeles\b|\bla\s+office\b|\bculver\s+city\b|\bsanta\s+monica\b/i],
-  ['Austin', /\baustin\b/i],
-  ['Chicago', /\bchicago\b/i],
-  ['Seattle', /\bseattle\b|\bbellevue\b/i],
-  ['Boston', /\bboston\b|\bcambridge,\s*ma\b/i],
-  ['Mountain View', /\bmountain\s+view\b/i],
-  ['Palo Alto', /\bpalo\s+alto\b/i],
-  ['San Mateo', /\bsan\s+mateo\b/i],
-  ['Greenwich', /\bgreenwich\b/i],
-  ['Houston', /\bhouston\b/i],
-  ['Denver', /\bdenver\b/i],
-  ['Atlanta', /\batlanta\b/i],
-  ['Washington DC', /\bwashington,?\s*d\.?c\.?\b|\barlington,\s*va\b/i],
-  ['London', /\blondon\b/i],
-  ['Dubai', /\bdubai\b/i],
-  ['Singapore', /\bsingapore\b/i],
-  ['Amsterdam', /\bamsterdam\b/i],
-  ['Sydney', /\bsydney\b/i],
-  ['Toronto', /\btoronto\b/i],
-  ['Bengaluru', /\bbengaluru\b|\bbangalore\b/i],
-];
-
-/** Every office metro this text names, canonicalised. Order follows OFFICE_METRO_ALIASES. */
-function officeMetrosNamedIn(text: string | undefined): string[] {
-  const value = text ?? '';
-  if (!value.trim()) return [];
-  return OFFICE_METRO_ALIASES.filter(([, pattern]) => pattern.test(value)).map(([metro]) => metro);
-}
-
-/**
- * Whether a metro the question names is one she committed to.
- *
- * Her stored entries are free text she typed, so they are matched BOTH ways: through the alias
- * table (so "SF" on her list answers a question about San Francisco) and by canonical name, and
- * never by substring, which would make "York" match "New York" and "Newark" match nothing useful.
- */
-function committedMetros(ap: ApplicationProfileLike): string[] {
-  const stored = Array.isArray(ap.onsite_locations) ? ap.onsite_locations : [];
-  const out = new Set<string>();
-  for (const entry of stored) {
-    const trimmed = (entry ?? '').trim();
-    if (!trimmed) continue;
-    const canonical = officeMetrosNamedIn(trimmed);
-    if (canonical.length > 0) for (const metro of canonical) out.add(metro);
-    else out.add(trimmed.toLowerCase());
-  }
-  return [...out];
-}
-
-const RELOCATION_QUESTION = /\brelocat\w*\b|\bwilling\s+to\s+move\b|\bplan\s+to\s+move\b/i;
-
 export function onsiteCommitmentSkipReason(label: string): string {
   return `where you will work from is yours to answer: "${label.slice(0, 60)}"`;
 }
 
-/**
- * The office/onsite/relocation commitment, answered ONLY from what she stored.
- *
- * Returns a skipReason - never null - once the label is recognised, because null falls through to
- * classifyField, and classifyField's CITY_NOUN rule answers "what is your preferred work location?"
- * with her home city. A refusal that leaks into a different wrong answer is not a refusal.
- */
-function onsiteCommitmentAnswer(
-  label: string,
-  ap: ApplicationProfileLike,
-  jdText: string | undefined,
-): { value: string } | { skipReason: string } {
-  const asksRelocation = RELOCATION_QUESTION.test(label);
-  const commitment = ap.onsite_commitment;
-
-  // A pure relocation question is its own commitment and its own column. "Are you open to
-  // relocating?" is not answered by "I will work from the Los Angeles office", which is a statement
-  // about a place she is already going to be.
-  if (asksRelocation) {
-    if (ap.relocation_willingness === 'yes') return { value: 'Yes' };
-    if (ap.relocation_willingness === 'no') return { value: 'No' };
-    return { skipReason: onsiteCommitmentSkipReason(label) };
-  }
-
-  if (commitment === undefined) return { skipReason: onsiteCommitmentSkipReason(label) };
-  if (commitment === 'no') return { value: 'No' };
-  if (commitment === 'anywhere') return { value: 'Yes' };
-
-  // 'listed_locations': which office is being asked about decides the answer.
-  const asked = officeMetrosNamedIn(label);
-  // The label names no office ("are you willing to work in-person for 12 weeks during the
-  // internship?"). The posting says where the job is; use it only to IDENTIFY the office, and only
-  // when it names exactly one, because a two-city posting makes the question genuinely ambiguous.
-  const fromJd = asked.length === 0 ? officeMetrosNamedIn(jdText) : [];
-  const candidates = asked.length > 0 ? asked : fromJd;
-  if (candidates.length === 0) return { skipReason: onsiteCommitmentSkipReason(label) };
-  if (asked.length === 0 && fromJd.length > 1) return { skipReason: onsiteCommitmentSkipReason(label) };
-
-  const committed = committedMetros(ap);
-  if (committed.length === 0) return { skipReason: onsiteCommitmentSkipReason(label) };
-  return { value: candidates.some((metro) => committed.includes(metro)) ? 'Yes' : 'No' };
+/** The legacy profile records a broad location preference but no cadence or posting scope.
+ * Consequently every office, onsite, commute and relocation commitment is held. A future resolver
+ * may relay an answer only from an exact record that matches the employer, location, cadence and
+ * duration in this label. */
+function onsiteCommitmentAnswer(label: string): { skipReason: string } {
+  return { skipReason: onsiteCommitmentSkipReason(label) };
 }
 
 function routineLocationCommitmentAnswer(
   label: string,
-  ap: ApplicationProfileLike,
-  jdText: string | undefined,
 ): { value: string } | { skipReason: string } | null {
-  return isLocationCommitmentQuestion(label) ? onsiteCommitmentAnswer(label, ap, jdText) : null;
+  return isLocationCommitmentQuestion(label) ? onsiteCommitmentAnswer(label) : null;
 }
 
 export function isRefusedQuestion(label: string): boolean {
@@ -639,11 +482,36 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
   questions: readonly T[],
   ap: ApplicationProfileLike,
   jdText: string | undefined,
+  questionsReviewedAt?: string,
 ): T[] {
   return questions.map((question) => {
     const label = normalizeReviewQuestionLabel(question.question);
     const known = label ? resolveKnownAnswer(label, 'text', ap, jdText) : null;
-    return known && 'value' in known ? { ...question, answer: known.value } : question;
+    const withProvenance = question as T & {
+      answer_source?: unknown;
+      answer_reviewed_at?: unknown;
+    };
+    const applicantReviewedCurrentAnswer = Boolean(
+      question.answer.trim()
+      && withProvenance.answer_source === 'applicant_review'
+      && typeof withProvenance.answer_reviewed_at === 'string'
+      && withProvenance.answer_reviewed_at === questionsReviewedAt,
+    );
+    const withoutProvenance = (): T => {
+      const {
+        answer_source: _answerSource,
+        answer_reviewed_at: _answerReviewedAt,
+        ...rest
+      } = withProvenance;
+      return rest as T;
+    };
+    if (known && 'value' in known) return { ...withoutProvenance(), answer: known.value };
+    const currentResolverRefuses = Boolean(known && 'skipReason' in known)
+      || Boolean(label && isRefusedQuestion(label));
+    if (currentResolverRefuses && !applicantReviewedCurrentAnswer) {
+      return { ...withoutProvenance(), answer: '' };
+    }
+    return question;
   });
 }
 
@@ -658,7 +526,7 @@ const LOCATION_COMMITMENT_STEM = /\b(?:are|can|could|do|did|will|would|should|ma
 // that same packet came from. Four distinct postings ask this in the owner's history (Anduril,
 // Postman, Fluency, Brex), all of them asking the same routine question the office wording already
 // answers Yes to.
-const LOCATION_COMMITMENT_VOCAB = /\boffice\b|in[\s-]?office|on[\s-]?site|\bonsite\b|in[\s-]?person|\bhybrid\b|relocat|commut/i;
+const LOCATION_COMMITMENT_VOCAB = /\boffice\b|in[\s-]?office|on[\s-]?site|\bonsite\b|in[\s-]?person|\bhybrid\b|\bremote(?:ly|[\s-]?only)?\b|work\s+from\s+home|relocat|commut/i;
 const STORED_ONSITE_COMMITMENT_QUESTION =
   /\b(?:able|willing|available|prepared|can|could|would)\b[^?]{0,80}\b(?:office|in[\s-]?office|on[\s-]?site|onsite|in[\s-]?person|hybrid)\b|\b(?:office|in[\s-]?office|on[\s-]?site|onsite|in[\s-]?person|hybrid)\b[^?]{0,80}\b(?:able|willing|available|prepared|can|could|would)\b/i;
 const ONSITE_DAY_COUNT_QUESTION = /\b(?:three|four|five|3|4|5)\s+days?\b/i;
@@ -671,41 +539,10 @@ export function isLocationCommitmentQuestion(label: string): boolean {
   return LOCATION_COMMITMENT_STEM.test(label) && LOCATION_COMMITMENT_VOCAB.test(label);
 }
 
-/**
- * "What is your preferred work location?", answered from HER list rather than from the posting.
- *
- * WHAT WAS HERE. The last line of the job description that looked like a US city, returned as her
- * preference. Measured in production, that shipped "San Francisco, CA" as the answer to Optiver's
- * "please rank your location preference in order of most to least preferred: austin, chicago,
- * greenwich, houston, new york city" and to "what is your office location preference? (note: the
- * software engineer internship is only available in new york and austin, not chicago)" - a
- * preference she never expressed, for an office that is not on the employer's own list.
- *
- * Her stored onsite_locations are an ORDERED preference, so the first of them the employer offers
- * is the honest answer. When the employer offers none of them, that is not a near miss to be
- * papered over with the posting's header; it is a question only she can answer.
- */
-function locationPreferenceAnswer(
-  label: string,
-  ap: ApplicationProfileLike,
-  jdText: string | undefined,
-): { value: string } | { skipReason: string } | null {
+/** A list of acceptable metros is not an answer to this employer's ranking or preference question.
+ * The offered options, ordering and role context are posting-specific, so this always holds. */
+function locationPreferenceAnswer(label: string): { skipReason: string } | null {
   if (!LOCATION_PREFERENCE_QUESTION.test(label) && !isLocationChoiceQuestion(label)) return null;
-  const stored = (Array.isArray(ap.onsite_locations) ? ap.onsite_locations : [])
-    .map((entry) => (entry ?? '').trim())
-    .filter(Boolean);
-  if (ap.onsite_commitment === 'listed_locations' && stored.length > 0) {
-    // The label usually spells the choices out; the posting is the fallback for the ones that do
-    // not, and is used only to see WHICH offices are on offer.
-    const offered = officeMetrosNamedIn(label).length > 0
-      ? officeMetrosNamedIn(label)
-      : officeMetrosNamedIn(jdText);
-    for (const entry of stored) {
-      const canonical = officeMetrosNamedIn(entry);
-      const preferred = canonical.find((metro) => offered.includes(metro));
-      if (preferred) return { value: preferred };
-    }
-  }
   return { skipReason: `location choice left for you: "${label.slice(0, 60)}"` };
 }
 
@@ -759,7 +596,7 @@ const STEM_MAJOR_QUESTION =
 export const AI_INTERVIEW_POLICY_QUESTION =
   /\bAI\s+Policy\s+for\s+Interviewers\b|\bdo\s+not\s+use\s+any\s+AI\s+tools\b[^?]{0,160}\binterview\b/i;
 const INTERNSHIP_AVAILABILITY_QUESTION =
-  /\b(?:are|will)\s+you\s+available\b[^?]{0,160}\b(?:internship|full-time|40\s*hours|weeks?)\b|\b(?:internship|full-time|40\s*hours|weeks?)\b[^?]{0,160}\b(?:are|will)\s+you\s+available\b/i;
+  /\b(?:are|will)\s+you\s+available\b[^?]{0,160}\b(?:internship|full-time|40\s*hours|weeks?)\b|\b(?:internship|full-time|40\s*hours|weeks?)\b[^?]{0,160}\b(?:are|will)\s+you\s+available\b|\b(?:can|could|will|would)\s+you\s+commit\b[^?]{0,160}\b(?:hours?|weeks?|months?|schedule|season)\b/i;
 const INTERNSHIP_SEASON_QUESTION =
   /\bconfirm\b[^?]{0,100}\bseason\b[^?]{0,100}\bapplying\b|\bseason\b[^?]{0,100}\bapplying\b/i;
 const INTERNSHIP_JOIN_QUESTION =
@@ -784,7 +621,7 @@ export const TOP_ROLE_PREFERENCE_ACKNOWLEDGEMENT =
 export const RESUME_PDF_ACKNOWLEDGEMENT =
   /\bresume\b[^?]{0,120}\bPDF\s+format\b|\bPDF\s+format\b[^?]{0,120}\bresume\b/i;
 export const TRUE_COMPLETE_ACCURATE_CERTIFICATION =
-  /\bcertify\b[^?]{0,220}\btrue\b[^?]{0,120}\bcomplete\b[^?]{0,120}\baccurate\b/i;
+  /\bcertif(?:y|ication)\b[^?]{0,220}\b(?:information|application)\b[^?]{0,180}\btrue\b[^?]{0,120}\bcomplete\b(?:[^?]{0,120}\b(?:accurate|correct)\b)?|\bcertify\b[^?]{0,220}\btrue\b[^?]{0,120}\bcomplete\b[^?]{0,120}\baccurate\b/i;
 const NY_CA_RESIDENCE_QUESTION =
   /\b(?:live|reside|located)\b[^?]{0,80}\bnew\s+york\b[^?]{0,80}\bcalifornia\b|\bnew\s+york\b[^?]{0,80}\bcalifornia\b[^?]{0,80}\b(?:live|reside|located)\b/i;
 // Politically-exposed-person declarations (Tower asks two). These are regulated legal statements
@@ -1279,35 +1116,17 @@ function postingSeasonAnswer(label: string, jdText: string | undefined): { value
   return { value: `${season} ${match[2]}` };
 }
 
-function internshipJoinAnswer(label: string, ap: ApplicationProfileLike, jdText: string | undefined): { value: string } | { skipReason: string } | null {
+function internshipJoinAnswer(label: string): { skipReason: string } | null {
   if (!INTERNSHIP_JOIN_QUESTION.test(label)) return null;
-  const storedDate = ap.availability_date?.trim();
-  if (storedDate) return { value: storedDate };
-  /* The JD-season fallback is gone. "When are you able to join Astranis as an intern? (12 week
-   * minimum)" answered "Summer 2026" because that is the season the POSTING is for - which is a
-   * fact about the posting being replayed as a commitment from her about when she is free. The
-   * season question itself (postingSeasonAnswer) still reads the JD, correctly: "please confirm
-   * the season you are applying for" is asking what she applied to, and the posting is the
-   * authority on that. This one is asking about her calendar, and it is not. */
+  // availability_date has no expiry or posting scope. Even an exact stored date may have described
+  // a past recruiting cycle, so it is reference data rather than authority for a new commitment.
   return { skipReason: `internship availability question left for you: "${label.slice(0, 60)}"` };
 }
 
-function internshipAvailabilityAnswer(label: string, ap: ApplicationProfileLike): { value: string } | { skipReason: string } {
-  const stored = [ap.availability_term, ap.availability_date].filter(Boolean).join(' ').trim();
-  if (!stored) return { skipReason: `internship availability question left for you: "${label.slice(0, 60)}"` };
-  const asksFullTime = /\bfull-time\b|\b40\s*hours\b/i.test(label);
-  const asksTwelveWeeks = /\b12\s*weeks?\b|\btwelve\s+weeks?\b/i.test(label);
-  const asksDateWindow = /\b(?:between|from)\b[^?]{0,120}\b(?:20\d{2}|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i.test(label);
-  const confirmsFullTime = !asksFullTime || /\bfull-time\b|\b40\s*hours\b/i.test(stored);
-  const confirmsTwelveWeeks = !asksTwelveWeeks || /\b12\s*weeks?\b|\btwelve\s+weeks?\b|\b3\s*months?\b|\bthree\s+months?\b/i.test(stored);
-  const confirmsDateWindow = !asksDateWindow || labelDateTokens(label).every((token) => stored.toLowerCase().includes(token));
-  if (confirmsFullTime && confirmsTwelveWeeks && confirmsDateWindow) return { value: 'Yes' };
+function internshipAvailabilityAnswer(label: string): { skipReason: string } {
+  // The legacy term is free text without a verified effective window, expiry, employer, season or
+  // cadence scope. Matching words cannot prove the commitment is still current for this posting.
   return { skipReason: `internship availability question left for you: "${label.slice(0, 60)}"` };
-}
-
-function labelDateTokens(label: string): string[] {
-  const tokens = label.toLowerCase().match(/\b(?:20\d{2}|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/g) ?? [];
-  return [...new Set(tokens)];
 }
 
 function majorAnswer(ap: ApplicationProfileLike): string | null {
@@ -1396,7 +1215,6 @@ function priorEmployerAnswer(label: string, ap: ApplicationProfileLike): { value
 function locationStatusAnswer(
   label: string,
   ap: ApplicationProfileLike,
-  jdText: string | undefined,
 ): { value: string } | { skipReason: string } | null {
   if (US_STATE_RESIDENCE_SELECT_QUESTION.test(label)) {
     const country = ap.address_country?.trim();
@@ -1422,13 +1240,9 @@ function locationStatusAnswer(
   if (ap.address_city && new RegExp(`\\b${city.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(ap.address_city)) {
     return { value: 'Yes' };
   }
-  /* "Are you currently residing in the greater Austin area OR have confirmed plans to be in Austin
-   * for the duration of this internship?" ended `return { value: 'Yes' }`, unconditionally, after
-   * the residence check had already failed - so the ONLY way to reach it was for her not to live
-   * there, and the answer it gave was that she had confirmed plans to move. That is the office
-   * commitment wearing a residence question's clothes, and it is answered from the same stored
-   * fact rather than from a constant. */
-  return onsiteCommitmentAnswer(label, ap, jdText);
+  // A mismatch proves only that the residence half is false. It says nothing about future plans,
+  // so a mixed "reside OR confirmed plans" question must remain unanswered.
+  return onsiteCommitmentAnswer(label);
 }
 
 function degreeAnswer(label: string, inputType: string | undefined, degree: string | undefined): string | null {
@@ -1954,7 +1768,7 @@ export function resolveKnownAnswer(
   const outstandingOffer = outstandingOfferAnswer(label, inputType, ap);
   if (outstandingOffer) return outstandingOffer;
 
-  const applicationConsent = applicationConsentAnswer(label, ap);
+  const applicationConsent = applicationConsentAnswer(label);
   if (applicationConsent) return applicationConsent;
 
   if (LEGAL_FIRST_NAME_QUESTION.test(label)) {
@@ -1972,10 +1786,10 @@ export function resolveKnownAnswer(
     if (ap.preferred_first_name) return { value: ap.preferred_first_name };
   }
 
-  const preferredLocation = locationPreferenceAnswer(label, ap, jdText);
+  const preferredLocation = locationPreferenceAnswer(label);
   if (preferredLocation) return preferredLocation;
 
-  const locationStatus = locationStatusAnswer(label, ap, jdText);
+  const locationStatus = locationStatusAnswer(label, ap);
   if (locationStatus) return locationStatus;
 
   if (ADVANCED_DEGREE_ENROLLMENT_QUESTION.test(label)) {
@@ -2055,11 +1869,11 @@ export function resolveKnownAnswer(
   const internshipSeason = postingSeasonAnswer(label, jdText);
   if (internshipSeason) return internshipSeason;
 
-  const internshipJoin = internshipJoinAnswer(label, ap, jdText);
+  const internshipJoin = internshipJoinAnswer(label);
   if (internshipJoin) return internshipJoin;
 
   if (INTERNSHIP_AVAILABILITY_QUESTION.test(label)) {
-    return internshipAvailabilityAnswer(label, ap);
+    return internshipAvailabilityAnswer(label);
   }
 
   const softwareEngineeringArea = softwareEngineeringAreaAnswer(label);
@@ -2068,13 +1882,13 @@ export function resolveKnownAnswer(
   const programmingLanguage = programmingLanguageAnswer(label, ap);
   if (programmingLanguage) return programmingLanguage;
 
-  const routineConsent = routineConsentAnswer(label, ap);
+  const routineConsent = routineConsentAnswer(label);
   if (routineConsent) return routineConsent;
 
-  const routineLocationCommitment = routineLocationCommitmentAnswer(label, ap, jdText);
+  const routineLocationCommitment = routineLocationCommitmentAnswer(label);
   if (routineLocationCommitment) return routineLocationCommitment;
 
-  const workEligibility = workEligibilityAnswer(label, ap, jdText);
+  const workEligibility = workEligibilityAnswer(label, ap);
   if (workEligibility) return workEligibility;
 
   if (AGE_ATTESTATION_QUESTION.test(label)) return null;
@@ -2145,16 +1959,15 @@ export function resolveKnownAnswer(
     case 'date_of_birth':
       return ap.date_of_birth ? { value: ap.date_of_birth } : null;
     case 'availability_term':
-      return ap.availability_term ? { value: ap.availability_term } : null;
+      return { skipReason: `availability duration left for you: "${label.slice(0, 60)}"` };
     case 'availability_date':
-      return ap.availability_date ? { value: ap.availability_date } : null;
+      return { skipReason: `availability date left for you: "${label.slice(0, 60)}"` };
     case 'current_employer':
       return ap.current_employer ? { value: ap.current_employer } : null;
     case 'most_recent_employer':
       return ap.most_recent_employer ? { value: ap.most_recent_employer } : null;
     case 'onsite_commitment':
-      // Was `return { value: 'Yes' }`. See onsiteCommitmentAnswer for what that shipped.
-      return onsiteCommitmentAnswer(label, ap, jdText);
+      return onsiteCommitmentAnswer(label);
     case 'current_enrollment':
       return currentEnrollmentAnswer(ap);
     case 'study_year': {
