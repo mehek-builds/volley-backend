@@ -523,6 +523,41 @@ export async function referralSourceEvidenceForRow(row: ResumeRow): Promise<Refe
   };
 }
 
+type ResumePacketDependencies = {
+  resolveObjectUrl: (objectKey: string) => Promise<string | null>;
+  fetchObject: (url: string) => Promise<{ ok: boolean; arrayBuffer: () => Promise<ArrayBuffer> }>;
+};
+
+/**
+ * The controlled fixture is selected from the already-detected portal family, never from a URL or
+ * object-key prefix. detectPortal only returns controlled_test for the signed QA route, and
+ * assertControlledPortalEnabled separately refuses that family unless its test-only environment
+ * gate is enabled. Keeping this predicate exact prevents an employer URL or a qa-looking Blob key
+ * from opting itself into fixture documents.
+ */
+export function packetUsesControlledResumeFixture(portal: SupportedPortal): boolean {
+  return portal === 'controlled_test';
+}
+
+/** Load the resume bytes independently from the rest of packet assembly so fixture isolation is testable. */
+export async function resumeBytesForPacket(
+  objectKey: string,
+  controlledTest: boolean,
+  dependencies: ResumePacketDependencies = {
+    resolveObjectUrl: resolveBlobUrl,
+    fetchObject: (url) => fetch(url),
+  },
+): Promise<Buffer> {
+  if (controlledTest && process.env.LITOS_ENABLE_TEST_PORTAL === 'true') {
+    return Buffer.from('%PDF-1.4\n% Litos controlled submission fixture\n%%EOF\n');
+  }
+  const blobUrl = await dependencies.resolveObjectUrl(objectKey);
+  if (!blobUrl) throw new Error('Generated resume file is unavailable');
+  const response = await dependencies.fetchObject(blobUrl);
+  if (!response.ok) throw new Error('Generated resume file could not be downloaded');
+  return Buffer.from(await response.arrayBuffer());
+}
+
 export async function buildPacket(row: ResumeRow, controlledTest = false): Promise<SubmissionPacket> {
   const stored = row.spec as StoredSpec;
   const contact = (stored._contact ?? {}) as Record<string, unknown>;
@@ -537,16 +572,7 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
   const parsed = (profileRow[0]?.parsed_json ?? {}) as Record<string, unknown>;
   const review = readApplicationReview(stored);
   if (!review) throw new Error('We could not find this application');
-  let resume: Buffer;
-  if (controlledTest && process.env.LITOS_ENABLE_TEST_PORTAL === 'true') {
-    resume = Buffer.from('%PDF-1.4\n% Litos controlled submission fixture\n%%EOF\n');
-  } else {
-    const blobUrl = await resolveBlobUrl(row.resume_object_key);
-    if (!blobUrl) throw new Error('Generated resume file is unavailable');
-    const response = await fetch(blobUrl);
-    if (!response.ok) throw new Error('Generated resume file could not be downloaded');
-    resume = Buffer.from(await response.arrayBuffer());
-  }
+  const resume = await resumeBytesForPacket(row.resume_object_key, controlledTest);
   let coverLetter: Buffer | undefined;
   const coverLetterKey = coverLetterObjectKeyToAttach(stored);
   if (coverLetterKey) {
@@ -1525,7 +1551,7 @@ async function prepareManaged(
     submission_run_id: runId,
     submission_error: undefined,
   }));
-  let packet = omitCoverLetter(await buildPacket(row));
+  let packet = omitCoverLetter(await buildPacket(row, packetUsesControlledResumeFixture(portal)));
 
   // R-055 on the managed path: a cheap first call fills only the fixed fields and asks
   // stratus-browser-cloud's 'discover' action (PR #7) to scan the resulting page for custom
@@ -2727,7 +2753,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       // codebase that declined to.
       throw new CaptchaUnresolvedError('before_fill', managedCaptchaProvider(captchaProbe, portal));
     }
-    const builtPacket = await buildPacket(row);
+    const builtPacket = await buildPacket(row, packetUsesControlledResumeFixture(portal));
     const packet = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
     const verificationRequestedAt = new Date();
     const initialActions = options.securityCode

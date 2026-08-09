@@ -11,9 +11,11 @@ import {
   discoveryHonestyReasons,
   isProviderSessionFailureMessage,
   mergeDiscoveredPortalQuestions,
+  packetUsesControlledResumeFixture,
   preparationEvidenceBlockers,
   reconcileManagedProviderBlockers,
   readMostRecentRole,
+  resumeBytesForPacket,
   sanitizeEeoPrefs,
   shouldUseLocalControlledBrowser,
   submissionFailureOutcome,
@@ -25,6 +27,11 @@ import { savedAnswerKey } from '../lib/answerReuse';
 import { workEligibilityFromSponsorshipAnswer } from '../lib/applicationProfileLike';
 import type { ApplicationReviewState } from '../lib/applicationReview';
 import { describeRequiredBlocker } from '../lib/fieldLabel';
+import { detectPortal } from '../lib/portalSubmission';
+import {
+  CONTROLLED_PORTAL_BINDING_PARAM,
+  controlledPortalBinding,
+} from '../lib/controlledTestPortal';
 
 // readMostRecentRole runs inside buildPacket, which every prepare and every submit goes through -
 // on EVERY portal, not just the one that needs work history. So its failure mode is not "Paylocity
@@ -490,6 +497,108 @@ test('the controlled QA portal uses the managed browser in production', () => {
     if (previousProvider === undefined) delete process.env.BROWSER_PROVIDER;
     else process.env.BROWSER_PROVIDER = previousProvider;
   }
+});
+
+test('only a signed controlled portal can select fixture resume bytes; Greenhouse still reads Blob', async () => {
+  const previous = {
+    enabled: process.env.LITOS_ENABLE_TEST_PORTAL,
+    origin: process.env.LITOS_TEST_PORTAL_PUBLIC_ORIGIN,
+    secret: process.env.LITOS_TEST_PORTAL_BINDING_SECRET,
+    nodeEnv: process.env.NODE_ENV,
+  };
+  try {
+    process.env.LITOS_ENABLE_TEST_PORTAL = 'true';
+    process.env.NODE_ENV = 'test';
+    process.env.LITOS_TEST_PORTAL_PUBLIC_ORIGIN = 'https://qa-tunnel.example.test';
+    process.env.LITOS_TEST_PORTAL_BINDING_SECRET = '0123456789abcdef0123456789abcdef';
+    const unsigned = 'https://qa-tunnel.example.test/qa/portal-submission?board=greenhouse&shape=security-code&case=packet';
+    const signed = new URL(unsigned);
+    signed.searchParams.set(
+      CONTROLLED_PORTAL_BINDING_PARAM,
+      controlledPortalBinding(unsigned, process.env.LITOS_TEST_PORTAL_BINDING_SECRET),
+    );
+
+    const controlledPortal = detectPortal(signed.toString());
+    assert.equal(packetUsesControlledResumeFixture(controlledPortal), true);
+    let resolverCalls = 0;
+    let fetchCalls = 0;
+    const controlledBytes = await resumeBytesForPacket('qa/application.pdf', true, {
+      resolveObjectUrl: async () => {
+        resolverCalls += 1;
+        return 'https://blob.example.test/should-not-be-read';
+      },
+      fetchObject: async () => {
+        fetchCalls += 1;
+        return { ok: true, arrayBuffer: async () => new Uint8Array([1]).buffer };
+      },
+    });
+    assert.match(controlledBytes.toString('utf8'), /Litos controlled submission fixture/);
+    assert.equal(resolverCalls, 0);
+    assert.equal(fetchCalls, 0);
+
+    const greenhousePortal = detectPortal('https://boards.greenhouse.io/acme/jobs/123');
+    assert.equal(packetUsesControlledResumeFixture(greenhousePortal), false);
+    const blobBytes = await resumeBytesForPacket('users/user-1/resume.pdf', false, {
+      resolveObjectUrl: async (key) => {
+        resolverCalls += 1;
+        assert.equal(key, 'users/user-1/resume.pdf');
+        return 'https://blob.example.test/resume.pdf';
+      },
+      fetchObject: async (url) => {
+        fetchCalls += 1;
+        assert.equal(url, 'https://blob.example.test/resume.pdf');
+        return { ok: true, arrayBuffer: async () => new Uint8Array([37, 80, 68, 70]).buffer };
+      },
+    });
+    assert.equal(blobBytes.toString('utf8'), '%PDF');
+    assert.equal(resolverCalls, 1);
+    assert.equal(fetchCalls, 1);
+  } finally {
+    if (previous.enabled === undefined) delete process.env.LITOS_ENABLE_TEST_PORTAL;
+    else process.env.LITOS_ENABLE_TEST_PORTAL = previous.enabled;
+    if (previous.origin === undefined) delete process.env.LITOS_TEST_PORTAL_PUBLIC_ORIGIN;
+    else process.env.LITOS_TEST_PORTAL_PUBLIC_ORIGIN = previous.origin;
+    if (previous.secret === undefined) delete process.env.LITOS_TEST_PORTAL_BINDING_SECRET;
+    else process.env.LITOS_TEST_PORTAL_BINDING_SECRET = previous.secret;
+    if (previous.nodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previous.nodeEnv;
+  }
+});
+
+test('managed prepare and final or security-code submit rebuild controlled packets with the exact portal predicate', () => {
+  const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const prepareStart = source.indexOf('async function prepareManaged(');
+  const prepareEnd = source.indexOf('\nasync function ', prepareStart + 10);
+  assert.ok(prepareStart > 0 && prepareEnd > prepareStart);
+  const prepareBody = source.slice(prepareStart, prepareEnd);
+  assert.match(
+    prepareBody,
+    /omitCoverLetter\(await buildPacket\(row, packetUsesControlledResumeFixture\(portal\)\)\)/,
+  );
+
+  const submitStart = source.indexOf('async function submit(');
+  assert.ok(submitStart > 0);
+  const submitBody = source.slice(submitStart);
+  const managedStart = submitBody.indexOf('if (isManagedStratusProvider())');
+  const directStart = submitBody.indexOf("if (!claimedReview.browser_session_id)", managedStart);
+  assert.ok(managedStart > 0 && directStart > managedStart);
+  const managedBody = submitBody.slice(managedStart, directStart);
+  assert.match(
+    managedBody,
+    /const builtPacket = await buildPacket\(row, packetUsesControlledResumeFixture\(portal\)\)/,
+  );
+  assert.match(
+    managedBody,
+    /claimedReview\.cover_letter_supported === true \? builtPacket : omitCoverLetter\(builtPacket\)/,
+    'fixture selection must not change the reviewed cover-letter attachment decision',
+  );
+
+  const buildStart = source.indexOf('export async function buildPacket(');
+  const buildEnd = source.indexOf('\nexport function readMostRecentRole', buildStart);
+  const buildBody = source.slice(buildStart, buildEnd);
+  const coverLetterBlock = buildBody.slice(buildBody.indexOf('let coverLetter:'));
+  assert.doesNotMatch(coverLetterBlock, /controlledTest|packetUsesControlledResumeFixture/,
+    'controlled resume bytes must not bypass or suppress normal cover-letter resolution');
 });
 
 test('discovered US work authorization and sponsorship become reviewed Yes answers', async () => {
