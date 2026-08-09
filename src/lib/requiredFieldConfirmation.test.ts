@@ -148,7 +148,7 @@ test('managed wire contract sends one bounded confirmation action with its durab
 });
 
 test('submission runner requires confirmation proof before any receipt can be recorded', () => {
-  const source = readFileSync(new URL('../routes/submissionRunner.ts', import.meta.url), 'utf8');
+  const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
   const barrier = source.indexOf('assertManagedRequiredFieldsConfirmed(result)');
   const receipt = source.indexOf('const receipt = readManagedReceipt(receiptResult)', barrier);
   assert.ok(barrier >= 0);
