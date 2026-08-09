@@ -19,6 +19,7 @@ import {
 import type { Locator } from 'playwright-core';
 import { browserApplicationCapability } from './browserApplicationCapabilities';
 import { isControlledTestPortalUrl } from './controlledTestPortal';
+import { chooseCanonicalFinalSubmit } from './finalSubmitChooserPolicy';
 import {
   referralSourceForApplication,
   referralSourceOptionCandidates,
@@ -6294,34 +6295,7 @@ const SUBMIT_LABEL = new RegExp(
  * control wins because a form's real submit sits at its foot.
  */
 export function chooseSubmitControl(labels: string[]): number | null {
-  const eligible = labels
-    .map((label, index) => ({ label: label.replace(/\s+/g, ' ').trim(), index }))
-    .filter(({ label }) => label
-      && !THIRD_PARTY_HANDOFF.test(label)
-      && !HANDOFF_VERB_PROVIDER.test(label)
-      && SUBMIT_LABEL.test(label));
-  if (eligible.length === 0) return null;
-  /* SUPPORT WIDGETS ARE REMOVED FROM THE WHOLE POOL, not demoted within one tier.
-     Intercom and Zendesk render "Submit feedback" and "Submit a request" as [role=button] at the
-     FOOT of a careers page, so they sort after the real control and last-wins hands them the click,
-     which submits nothing and then tells the applicant to check her email. Excluding them only
-     inside the explicit tier left two holes: "Submit application feedback" reached the strongest
-     tier on its prefix, and a page whose real control says "Apply now" fell through to a pool that
-     still contained the widget. If removing them empties the pool, the honest answer is that this
-     page has no submit control - never press the help desk. */
-  const clean = eligible.filter(({ label }) => !isSupportWidget(label));
-  if (clean.length === 0) return null;
-  /* Then two tiers, because "the last thing saying submit" is still not specific enough. A label
-     that names the application outright is the strongest signal a control can give. */
-  const application = clean.filter(({ label }) => APPLICATION_SUBMIT.test(label));
-  const explicit = clean.filter(({ label }) => /\bsubmit\b/i.test(label));
-  /* And a third rung below those: "Apply now" is a primary control, a bare "Apply" is as often a
-     sticky footer or a card link. Without this, last-wins prefers whichever happens to sit lower. */
-  const applyNow = clean.filter(({ label }) => /\bapply now\b/i.test(label));
-  const pool = application.length > 0 ? application
-    : explicit.length > 0 ? explicit
-      : applyNow.length > 0 ? applyNow : clean;
-  return pool[pool.length - 1]!.index;
+  return chooseCanonicalFinalSubmit(labels);
 }
 
 /** Every control that could conceivably be a submit button. Exported so a test can match it. */

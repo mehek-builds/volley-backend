@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { runManagedBrowser, type ManagedBrowserResult } from './browserbase';
+import { MANAGED_SUBMIT_CHOOSER_POLICY, runManagedBrowser, type ManagedBrowserResult } from './browserbase';
 import {
   assertManagedRequiredFieldsConfirmed,
   AUTONOMOUS_PORTAL_FAMILIES,
@@ -70,7 +70,7 @@ test('every autonomous managed submit reserves a mandatory confirmation barrier 
       maxRetries: 1,
       contractVersion: 2,
       submitKind: 'application',
-      chooserPolicy: { name: 'litos-final-submit', version: 1 },
+      chooserPolicy: MANAGED_SUBMIT_CHOOSER_POLICY,
     });
     assert.equal(actions.filter((action) => action.type === 'click'
       && action.selector === MANAGED_FINAL_SUBMIT_SELECTOR).length, 0);
@@ -449,7 +449,7 @@ test('managed wire contract sends one bounded confirmation action with its durab
       maxRetries: 1,
       contractVersion: 2,
       submitKind: 'application',
-      chooserPolicy: { name: 'litos-final-submit', version: 1 },
+      chooserPolicy: MANAGED_SUBMIT_CHOOSER_POLICY,
     }], { allowSubmit: true });
     assert.deepEqual(body.actions, [{
       type: 'confirmAndSubmit',
@@ -459,7 +459,7 @@ test('managed wire contract sends one bounded confirmation action with its durab
       maxRetries: 1,
       contractVersion: 2,
       submitKind: 'application',
-      chooserPolicy: { name: 'litos-final-submit', version: 1 },
+      chooserPolicy: MANAGED_SUBMIT_CHOOSER_POLICY,
     }]);
   } finally {
     globalThis.fetch = previousFetch;

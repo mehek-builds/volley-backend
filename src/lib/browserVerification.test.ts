@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Page } from 'playwright-core';
+import { MANAGED_SUBMIT_CHOOSER_POLICY } from './browserbase';
 import {
   buildManagedVerificationActions,
   completeEmailVerificationIfPresent,
@@ -113,7 +114,7 @@ test('managed verification builds one bounded continuation for single and split 
     maxRetries: 1,
     contractVersion: 2,
     submitKind: 'verification',
-    chooserPolicy: { name: 'litos-final-submit', version: 1 },
+    chooserPolicy: MANAGED_SUBMIT_CHOOSER_POLICY,
   });
 });
 
