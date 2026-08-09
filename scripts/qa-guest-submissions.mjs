@@ -284,6 +284,26 @@ async function injectSecurityCodeEmail({ alias, applicationId, caseId, run }) {
   return { code, response: body };
 }
 
+async function waitForVerificationRequestWindow(applicationId) {
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    const result = await client.query(
+      `select spec->'_review'->'verification'->>'status' as status,
+              spec->'_review'->'verification'->>'requested_at' as requested_at
+         from generated_resumes
+        where id = $1
+        limit 1`,
+      [applicationId],
+    );
+    const row = result.rows[0];
+    if (row?.status === 'searching' && Number.isFinite(Date.parse(row.requested_at))) {
+      return row.requested_at;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error('controlled submission never opened an observable verification request window');
+}
+
 async function forwardedVerificationMessage(applicationId, alias) {
   const result = await client.query(
     `select alias, generated_resume_id, direction, classification, forwarded_at, forward_error
@@ -454,7 +474,7 @@ try {
       body: JSON.stringify({ questions: [] }),
     });
     const inboundPromise = securityCodeMode
-      ? new Promise((resolve) => setTimeout(resolve, 1_000)).then(() => injectSecurityCodeEmail({
+      ? waitForVerificationRequestWindow(applicationId).then(() => injectSecurityCodeEmail({
         alias,
         applicationId,
         caseId,
