@@ -807,12 +807,41 @@ export interface JdSection {
  * Split a JD into weighted sections. Text before any recognised heading is 'body': short postings
  * often have no headings at all, and dropping their content would leave nothing to score.
  */
-export function segmentJd(jdText: string): JdSection[] {
+/**
+ * Employer-branded footer headings can end a scored section without looking like ordinary
+ * headings. Cloudflare's production posting writes `What Makes Cloudflare Special?` directly
+ * after its one-item Bonus Points section. The question mark makes isHeadingLine reject the line,
+ * so the entire company-history footer inherited `preferred` weight and `Internet` became a
+ * colored candidate requirement.
+ *
+ * This is exact posting context, not a vocabulary ban: the heading must name the company supplied
+ * by the caller. `What Makes You Special?` is therefore untouched, and a real requirement that
+ * names Internet protocols remains in its stated section.
+ */
+function isCompanySpecialFooterHeading(line: string, company: string | null | undefined): boolean {
+  const companyName = normalizeTerm(company ?? '');
+  if (!companyName) return false;
+  const heading = normalizeTerm(headingCore(line).replace(/\?+$/, ''));
+  return heading === `what makes ${companyName} special`;
+}
+
+export function segmentJd(jdText: string, context?: JdContext): JdSection[] {
   const lines = jdText.split(/\r?\n/);
   const sections: JdSection[] = [];
   let current: JdSection = { kind: 'body', weight: SECTION_WEIGHT.body, text: '' };
 
   for (const line of lines) {
+    if (isCompanySpecialFooterHeading(line, context?.company)) {
+      if (current.text.trim()) sections.push(current);
+      current = {
+        kind: 'noise',
+        weight: SECTION_WEIGHT.noise,
+        text: '',
+        heading: headingCore(line),
+        footer: true,
+      };
+      continue;
+    }
     if (isHeadingLine(line)) {
       const kind = classifyHeading(line);
       if (kind) {
@@ -2616,7 +2645,7 @@ export function extractJdTerms(jdText: string, context?: JdContext): JdTerm[] {
     );
 
   const casing = documentCasing(jdText);
-  const sections = segmentJd(jdText);
+  const sections = segmentJd(jdText, context);
   const hasPrimaryFitSection =
     sections.some((s) => PRIMARY_STATED_KINDS.has(s.kind)) || hasPrimaryFitHeading(jdText);
   const rawTerms = strip(extractFrom(sections, casing, context?.company));
