@@ -2,7 +2,7 @@ import type { ApplicationReviewState } from './applicationReview';
 import { submitRequestDisposition } from './submissionSafety';
 
 export type ExtensionAuthorization = 'standing_consent' | 'user_initiated';
-export type ExtensionOutcome = 'confirmed' | 'failed' | 'unknown';
+export type ExtensionOutcome = 'confirmed' | 'failed' | 'unknown' | 'cancelled';
 
 export function isSafeExtensionReceiptUrl(value: string): boolean {
   try {
@@ -48,6 +48,16 @@ export function extensionOutcomePatch(
       attention_reason: undefined,
       submission_claimed_at: undefined,
       submission_claim_id: undefined,
+    };
+  }
+  if (outcome === 'cancelled') {
+    return {
+      status: 'ready_to_submit',
+      submission_error: undefined,
+      attention_reason: undefined,
+      submission_claimed_at: undefined,
+      submission_claim_id: undefined,
+      submission_authorization: undefined,
     };
   }
   return {
