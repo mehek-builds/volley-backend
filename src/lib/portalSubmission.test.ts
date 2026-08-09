@@ -4760,13 +4760,13 @@ test('the probe can name Greenhouse\'s own self-identification controls', () => 
 
 test('the probe reads the controls discovery found, and never the four it already read', () => {
   const discovered = [
-    { label: 'Overall GPA*', selector: '#question_37228964002', required: true },
+    { label: 'Overall GPA*', selector: '#question_37228964002', inputType: 'combobox', required: true },
     { label: 'Discipline*', selector: '#discipline--0', required: true },
     { label: 'School*', selector: '#school--0', required: true },
     { label: 'Country*', selector: '#country', required: true },
     { label: 'Location (City)*', selector: '#candidate-location', required: true },
-    { label: 'How would you describe your gender identity? 4001608008', selector: '[data-litos-discovered-21]' },
-    { label: 'Are you interested in our Women\'s Winternship program?*', selector: '#question_37228970002', required: true },
+    { label: 'How would you describe your gender identity? 4001608008', selector: '[data-litos-discovered-21]', role: 'combobox' },
+    { label: 'Are you interested in our Women\'s Winternship program?*', selector: '#question_37228970002', inputType: 'combobox', required: true },
   ];
   const alreadyRead = { 'school--0': ['USC'], 'discipline--0': ['Computer Science'] };
   const targets = managedOptionProbeTargets('greenhouse', discovered, alreadyRead);
@@ -4790,10 +4790,24 @@ test('the probe reads the controls discovery found, and never the four it alread
   assert.deepEqual(managedOptionProbeTargets('lever', discovered), []);
 });
 
+test('the probe keeps plain end-year text open while retaining its normal final fill', () => {
+  const discovered = [
+    { label: 'End date year* end-year--0', selector: '#end-year--0', inputType: 'text', required: true },
+    { label: 'End date month* end-month--0', selector: '#end-month--0', inputType: 'text', role: 'combobox', required: true },
+  ];
+  assert.deepEqual(managedOptionProbeTargets('greenhouse', discovered), ['end-month--0']);
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket());
+  assert.ok(actions.some((action) => action.type === 'fill'
+    && action.selector === '#end-year--0'
+    && action.value === '2028'
+    && action.label === 'education_end_year_field'));
+});
+
 test('the probe pass opens, reads and closes each control, and cannot exceed the runner ceiling', () => {
   const discovered = Array.from({ length: 60 }, (_, i) => ({
     label: `Question ${i}*`,
     selector: `#question_9${String(i).padStart(6, '0')}`,
+    inputType: 'combobox',
     required: true,
   }));
   const actions = buildManagedDiscoveredOptionProbeActions('greenhouse', discovered);
@@ -4823,8 +4837,13 @@ test('a real Greenhouse form fits the probe pass with room to spare', () => {
   // This is the largest form in the owner's 25-application run, so 75 is close to the worst case.
   const drw = [
     ...['school--0', 'degree--0', 'discipline--0', 'start-month--0', 'end-month--0', 'country', 'candidate-location']
-      .map((id) => ({ label: `${id}*`, selector: `#${id}`, required: true })),
-    ...Array.from({ length: 24 }, (_, i) => ({ label: `Q${i}*`, selector: `#question_679988${String(i + 20).padStart(2, '0')}`, required: true })),
+      .map((id) => ({
+        label: `${id}*`,
+        selector: `#${id}`,
+        inputType: id === 'start-month--0' ? 'combobox' : undefined,
+        required: true,
+      })),
+    ...Array.from({ length: 24 }, (_, i) => ({ label: `Q${i}*`, selector: `#question_679988${String(i + 20).padStart(2, '0')}`, inputType: 'combobox', required: true })),
   ];
   const batches = buildManagedDiscoveredOptionProbeBatches('greenhouse', drw, {
     'school--0': ['USC'],
@@ -4859,7 +4878,7 @@ test('custom closed controls warm once, read twice, and fail closed when still l
   const discovered = [{
     label: 'Overall GPA*',
     selector: '#question_37228964002',
-    inputType: 'text',
+    inputType: 'combobox',
     required: true,
   }];
   const [batch] = buildManagedDiscoveredOptionProbeBatches('greenhouse', discovered);
@@ -4878,7 +4897,7 @@ test('custom closed controls warm once, read twice, and fail closed when still l
 });
 
 test('a successful async second read yields one evidence-backed option list', () => {
-  const discovered = [{ label: 'Overall GPA*', selector: '#question_37228964002', inputType: 'text' }];
+  const discovered = [{ label: 'Overall GPA*', selector: '#question_37228964002', inputType: 'combobox' }];
   const analysis = managedOptionProbeAnalysis('greenhouse', discovered, {}, [{
     title: '', url: '', text: '',
     extracted: [
@@ -4920,7 +4939,7 @@ test('option probing batches whole controls and explicitly fails beyond its glob
   const discovered = Array.from({ length: MANAGED_OPTION_PROBE_MAX_CONTROLS + 1 }, (_, index) => ({
     label: `Question ${index}`,
     selector: `#question_8${String(index).padStart(7, '0')}`,
-    inputType: 'text',
+    inputType: 'combobox',
   }));
   const batches = buildManagedDiscoveredOptionProbeBatches('greenhouse', discovered);
   assert.equal(batches.every((batch) => batch.length <= MANAGED_ACTION_LIMIT), true);
@@ -4997,6 +5016,76 @@ test('a referral probe 503 suppresses every final referral action for that contr
   assert.deepEqual(referralActions, []);
   assert.ok(actions.some((action) => action.label?.startsWith('education_degree_combo')),
     'only the failed referral channel is suppressed; unrelated exact channels remain');
+});
+
+test('failed closed question families suppress Akuna and known aliases without suppressing unrelated success', () => {
+  const cases = [
+    {
+      failed: 'current immigration status or basis of your current work authorization',
+      question: 'Please provide your current immigration status or basis of your current work authorization.',
+      answer: 'F-1 CPT',
+      forbidden: /immigration status|work authorization/i,
+    },
+    {
+      failed: 'Are you legally authorized to work in the United States?',
+      question: 'Are you currently eligible to legally work in the United States?',
+      answer: 'Yes',
+      forbidden: /eligible to legally work|authorized to work/i,
+    },
+    {
+      failed: 'Do you now, or will you in the future, require visa sponsorship?',
+      question: 'Will you now or in the future require immigration support or sponsorship?',
+      answer: 'Yes',
+      forbidden: /visa sponsorship|immigration support or sponsorship/i,
+    },
+    {
+      failed: 'Have you applied to this role at Akuna previously?',
+      question: 'Have you applied to an Akuna position in the past?',
+      answer: 'No',
+      forbidden: /applied.*(?:past|previously)/i,
+    },
+    {
+      failed: 'Do you have any offer deadlines that we should be aware of?',
+      question: 'Do you have any offer deadlines?',
+      answer: 'No',
+      forbidden: /offer deadlines/i,
+    },
+  ];
+  for (const [index, item] of cases.entries()) {
+    const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+      jdText: 'Akuna Capital software engineer internship',
+      failedFields: [{
+        controlId: `question_9000000${index}`,
+        label: item.failed,
+        selector: `#question_9000000${index}`,
+        inputType: 'combobox',
+      }],
+      questions: [
+        { question: item.question, answer: item.answer },
+        { question: 'Are you able to work onsite three days a week?', answer: 'Yes' },
+      ],
+    }));
+    const failedAliasActions = actions.filter((action) => item.forbidden.test(`${action.text ?? ''} ${action.label ?? ''}`));
+    assert.deepEqual(failedAliasActions, [], item.failed);
+    assert.ok(actions.some((action) => /onsite three days/i.test(`${action.text ?? ''} ${action.label ?? ''}`)),
+      `unrelated onsite answer was suppressed for ${item.failed}`);
+  }
+});
+
+test('a failed demographic control suppresses its aliases while unrelated demographic fills remain', () => {
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    failedFields: [{
+      controlId: '4001608008',
+      label: 'What gender identity do you most closely identify with?',
+      selector: '[data-litos-discovered-21]',
+      inputType: 'combobox',
+    }],
+    eeoPrefs: { gender: 'Woman', veteran_status: 'I am not a protected veteran' },
+  }));
+  assert.equal(actions.some((action) => /greenhouse_demographic/.test(action.label ?? '')
+    && /gender identity/i.test(`${action.text ?? ''} ${action.label ?? ''}`)), false);
+  assert.ok(actions.some((action) => /greenhouse_demographic/.test(action.label ?? '')
+    && /veteran|military/i.test(`${action.text ?? ''} ${action.label ?? ''}`)));
 });
 
 test('two passes of reads become one map, and an empty read never overwrites a real list', () => {

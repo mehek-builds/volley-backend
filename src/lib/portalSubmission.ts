@@ -1054,6 +1054,7 @@ export const MANAGED_OPTION_PROBE_MAX_CONTROLS = 80;
  * that cannot be used.
  */
 const MANAGED_OPTION_PROBE_SKIP_IDS = new Set<string>(['country', 'candidate-location']);
+const MANAGED_FIXED_CLOSED_CONTROL_IDS = new Set<string>(GREENHOUSE_OPTION_PROBE_IDS);
 
 /** `#question_37228964002` or `[id="school--0"]`, and nothing that is not a plain id selector. */
 function controlIdFromDiscoveredSelector(selector: string | undefined | null): string | undefined {
@@ -1133,18 +1134,26 @@ export type ManagedOptionProbeTarget = {
 };
 
 function managedOptionProbeTarget(
-  field: { label: string; selector?: string; inputType?: string; required?: boolean },
+  field: { label: string; selector?: string; inputType?: string; role?: string; required?: boolean },
 ): ManagedOptionProbeTarget | undefined {
   const controlId = managedOptionProbeControlId(field);
   if (!controlId || MANAGED_OPTION_PROBE_SKIP_IDS.has(controlId)) return undefined;
   const inputType = (field.inputType ?? '').trim().toLowerCase();
+  const role = (field.role ?? '').trim().toLowerCase();
   const kind = /^select(?:-one|-multiple)?$/.test(inputType) ? 'native' : 'custom';
+  const expectsClosed = kind === 'native'
+    || /^(?:combobox|listbox)$/.test(inputType)
+    || /^(?:combobox|listbox)$/.test(role)
+    || MANAGED_FIXED_CLOSED_CONTROL_IDS.has(controlId);
+  // Greenhouse's education row mixes React-selects with a plain text graduation-year input. The
+  // shared `--0` suffix identifies a row, not a closed control. In particular, end-year--0 must be
+  // left to its normal text fill instead of being invalidated when a listbox can never appear.
+  if (!expectsClosed) return undefined;
   return {
     controlId,
     kind,
     required: discoveredFieldIsRequired(field),
-    expectsClosed: kind === 'native' || /^(?:combobox|listbox)$/.test(inputType)
-      || /--\d+$/.test(controlId),
+    expectsClosed,
   };
 }
 
@@ -1160,7 +1169,7 @@ function managedOptionProbeTarget(
  */
 export function managedOptionProbeTargets(
   portal: SupportedPortal,
-  discovered: readonly { label: string; selector?: string; inputType?: string; options?: string[] | null; required?: boolean }[],
+  discovered: readonly { label: string; selector?: string; inputType?: string; role?: string; options?: string[] | null; required?: boolean }[],
   alreadyRead: Record<string, string[]> = {},
 ): string[] {
   if (portalFamily(portal) !== 'greenhouse') return [];
@@ -1184,7 +1193,7 @@ export function managedOptionProbeTargets(
 
 function detailedManagedOptionProbeTargets(
   portal: SupportedPortal,
-  discovered: readonly { label: string; selector?: string; inputType?: string; options?: string[] | null; required?: boolean }[],
+  discovered: readonly { label: string; selector?: string; inputType?: string; role?: string; options?: string[] | null; required?: boolean }[],
   alreadyRead: Record<string, string[]> = {},
 ): ManagedOptionProbeTarget[] {
   const ids = managedOptionProbeTargets(portal, discovered, alreadyRead);
@@ -1548,36 +1557,69 @@ function normalizedFailedFieldLabel(value: string): string {
   return normalizeReviewQuestionLabel(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
+type ManagedFieldTarget = {
+  controlId?: string;
+  selector?: string;
+  label?: string;
+};
+
+function managedClosedFieldFamily(label: string): string | undefined {
+  const normalized = normalizedFailedFieldLabel(label);
+  if (!normalized) return undefined;
+  if (/\bhow did you hear\b|\bwhere did you hear\b|\bwhere have you learned\b|\breferral source\b/.test(normalized)) return 'referral';
+  if (/\bcurrent immigration status\b|\bbasis of (?:your )?current work authorization\b|\bcurrent visa status\b/.test(normalized)) return 'immigration-status';
+  if (/\bvisa sponsorship\b|\brequire sponsorship\b|\bimmigration support or sponsorship\b|\bneed sponsorship\b/.test(normalized)) return 'sponsorship';
+  if (/\b(?:eligible|authorized|authorised|legally)\b.*\bwork\b|\bwork authorization\b/.test(normalized)
+    && !/\bcurrent immigration status\b|\bbasis of (?:your )?current work authorization\b/.test(normalized)) return 'work-authorization';
+  if (/\bapplied\b.*\b(?:past|previously|before|role|position)\b|\bpreviously applied\b/.test(normalized)) return 'prior-application';
+  if (/\boffer deadlines?\b/.test(normalized)) return 'offer-deadline';
+  if (/\bgender identity\b|\bwhat gender\b/.test(normalized)) return 'demographic-gender';
+  if (/\btransgender\b/.test(normalized)) return 'demographic-transgender';
+  if (/\bsexual orientation\b/.test(normalized)) return 'demographic-sexual-orientation';
+  if (/\bdisab/.test(normalized)) return 'demographic-disability';
+  if (/\bveteran\b|\bserved in the military\b/.test(normalized)) return 'demographic-veteran';
+  if (/\brace\b|\bethnicit/.test(normalized)) return 'demographic-race';
+  if (/\bgpa\b|grade point|grade average/.test(normalized)) return 'education-gpa';
+  if (/\bdegree\b|education level/.test(normalized)) return 'education-degree';
+  if (/\bschool\b|\buniversity\b/.test(normalized)) return 'education-school';
+  if (/graduat(?:e|ion).*\byear\b|\byear\b.*graduat/.test(normalized)) return 'education-graduation-year';
+  if (/graduat(?:e|ion).*\bmonth\b|\bmonth\b.*graduat/.test(normalized)) return 'education-graduation-month';
+  return undefined;
+}
+
+function packetTargetFailed(packet: SubmissionPacket, target: ManagedFieldTarget): boolean {
+  const targetLabel = normalizedFailedFieldLabel(target.label ?? '');
+  const targetFamily = managedClosedFieldFamily(target.label ?? '');
+  return packet.failedFields?.some((field) => {
+    if (target.controlId && field.controlId === target.controlId) return true;
+    if (target.selector && field.selector && field.selector === target.selector) return true;
+    const failedLabel = normalizedFailedFieldLabel(field.label);
+    if (!targetLabel || !failedLabel) return false;
+    if (targetLabel === failedLabel) return true;
+    const failedFamily = managedClosedFieldFamily(field.label);
+    if (targetFamily && failedFamily && targetFamily === failedFamily) return true;
+    return (targetLabel.length >= 3 && failedLabel.includes(targetLabel))
+      || (failedLabel.length >= 3 && targetLabel.includes(failedLabel));
+  }) === true;
+}
+
 function packetControlFailed(packet: SubmissionPacket, controlId: string): boolean {
-  return packet.failedFields?.some((field) => field.controlId === controlId) === true;
+  return packetTargetFailed(packet, { controlId });
 }
 
 function packetLabelFailed(packet: SubmissionPacket, label: string): boolean {
-  const expected = normalizedFailedFieldLabel(label);
-  if (!expected) return false;
-  return packet.failedFields?.some((field) => {
-    const failed = normalizedFailedFieldLabel(field.label);
-    if (!failed) return false;
-    const sameClosedFamily = [
-      /\bgpa\b|grade point|grade average/,
-      /\bdegree\b|education level/,
-      /\bschool\b|\buniversity\b/,
-      /graduat(?:e|ion).*\byear\b|\byear\b.*graduat/,
-      /graduat(?:e|ion).*\bmonth\b|\bmonth\b.*graduat/,
-    ].some((pattern) => pattern.test(expected) && pattern.test(failed));
-    return failed === expected
-      || sameClosedFamily
-      || (expected.length >= 3 && new RegExp(`\\b${expected.replace(/\s+/g, '\\s+')}\\b`, 'i').test(failed))
-      || (failed.length >= 3 && new RegExp(`\\b${failed.replace(/\s+/g, '\\s+')}\\b`, 'i').test(expected));
-  }) === true;
+  return packetTargetFailed(packet, { label });
 }
 
 function packetQuestionFailed(packet: SubmissionPacket, item: SubmissionPacket['questions'][number]): boolean {
   const selector = reviewQuestionPortalSelector(item);
   const selectorId = selector?.match(/^#([A-Za-z0-9][A-Za-z0-9_-]*)$/)?.[1]
     ?? selector?.match(/^\[id=["']([A-Za-z0-9][A-Za-z0-9_-]*)["']\]$/)?.[1];
-  return Boolean(selectorId && packetControlFailed(packet, selectorId))
-    || packetLabelFailed(packet, item.question);
+  return packetTargetFailed(packet, {
+    controlId: selectorId,
+    selector,
+    label: item.question,
+  });
 }
 
 function packetHasFailedReferralField(packet: SubmissionPacket): boolean {
@@ -3110,6 +3152,11 @@ function pushGreenhouseKnownQuestionAliases(
         ? []
         : greenhouseKnownQuestionAliases(item.question, answer);
     for (const alias of aliases) {
+      // The source reviewed question is not necessarily the control this fallback targets. A stale
+      // immigration answer, for example, can generate the canonical Akuna immigration alias even
+      // when that exact live control just failed its option probe. Guard the intended alias target
+      // before producing any scoped fill, rather than trying to infer intent from action text later.
+      if (packetTargetFailed(packet, { label: alias })) continue;
       const key = `${alias}\n${answer.trim()}`;
       if (seen.has(key)) continue;
       seen.add(key);
