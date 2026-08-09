@@ -3633,6 +3633,20 @@ function managedActionLabelQuestion(label: string): string {
     .trim();
 }
 
+/**
+ * Does this skipped line EXPLAIN the loss of an answer, as opposed to merely mentioning a label?
+ *
+ * The distinction is the whole of R-122. `managedAnswerLossReasons` asks "is this worth showing
+ * her", and `managedUnexplainedAnswerLabels` asks "did anyone account for this label at all". Those
+ * are two different questions, and for three rounds one predicate answered both: a line reading
+ * `question:expected graduation year: nothing matched <selector>` satisfied the second while
+ * failing the first, so the diagnostic treated the label as accounted for, the sanitizer dropped
+ * the line as alias-ladder noise, and the applicant was told the field was empty with no reason.
+ */
+function managedSkipExplainsLoss(entry: string): boolean {
+  return MANAGED_ANSWER_LOSS_SUFFIX.test(entry);
+}
+
 export function managedAnswerLossReasons(result: Pick<ManagedBrowserResult, 'skipped'>): string[] {
   const out = new Set<string>();
   for (const entry of result.skipped ?? []) {
@@ -3670,13 +3684,30 @@ export function managedAnswerLossReasons(result: Pick<ManagedBrowserResult, 'ski
  * because silence there is the normal case - the ladder tries several selectors expecting most to
  * match nothing - so only labels the caller names as single-attempt are considered.
  */
-export function managedUnreportedFillLabels(
+export type ManagedUnexplainedAnswer = {
+  /** The action label, e.g. `question:expected graduation year`. */
+  label: string;
+  /** The employer's own question, with the action scaffolding stripped. */
+  question: string;
+  /**
+   * The provider's own lines about this label that carried no explanation, kept verbatim.
+   *
+   * This is the RAW signal, and it is kept for exactly the labels that lost a value and for no
+   * others. That bound is the point: `result.skipped` runs to well over a hundred lines on a large
+   * Greenhouse packet, almost all of them one optional selector that matched nothing, and storing
+   * the lot would bury the two lines that matter. Empty means the run said nothing at all about a
+   * value Litos typed, which is the other half of the diagnosis and is worth distinguishing.
+   */
+  rawMentions: string[];
+};
+
+export function managedUnexplainedAnswers(
   actions: readonly ManagedBrowserAction[],
   result: Pick<ManagedBrowserResult, 'filledFields' | 'skipped'>,
-): string[] {
+): ManagedUnexplainedAnswer[] {
   const filled = new Set(result.filledFields ?? []);
   const skipped = (result.skipped ?? []).map((entry) => (entry ?? '').trim()).filter(Boolean);
-  const out: string[] = [];
+  const out: ManagedUnexplainedAnswer[] = [];
   const seen = new Set<string>();
   for (const action of actions) {
     if (action.type !== 'fill' && action.type !== 'select') continue;
@@ -3685,11 +3716,42 @@ export function managedUnreportedFillLabels(
     // Everything else with a value is an alias ladder, where a miss is expected and reported.
     if (!label || !label.startsWith('question:') || !action.value?.trim()) continue;
     if (filled.has(label) || seen.has(label)) continue;
-    if (skipped.some((entry) => entry.startsWith(label))) continue;
+    const mentions = skipped.filter((entry) => entry.startsWith(label));
+    // Only an EXPLANATION discharges the label. A mention that explains nothing leaves the applicant
+    // exactly where an absent mention would: a required field she is told is empty, with no account
+    // of why. See managedSkipExplainsLoss.
+    if (mentions.some(managedSkipExplainsLoss)) continue;
     seen.add(label);
-    out.push(label);
+    out.push({
+      label,
+      question: managedActionLabelQuestion(label),
+      rawMentions: mentions.slice(0, 4).map((entry) => entry.slice(0, 300)),
+    });
   }
   return out;
+}
+
+/** Names only, for the log line and for the tests that pin the old contract. */
+export function managedUnreportedFillLabels(
+  actions: readonly ManagedBrowserAction[],
+  result: Pick<ManagedBrowserResult, 'filledFields' | 'skipped'>,
+): string[] {
+  return managedUnexplainedAnswers(actions, result).map((entry) => entry.label);
+}
+
+/**
+ * What she is told about a value Litos typed that the form did not keep and the run did not explain.
+ *
+ * She already gets the employer's own '"X" is required and is still empty'. That sentence is true
+ * and it is also the reason this defect survived three rounds: read on its own it says she left a
+ * field blank. This says the opposite, which is what actually happened.
+ */
+export function managedUnexplainedAnswerReasons(
+  unexplained: readonly ManagedUnexplainedAnswer[],
+): string[] {
+  return unexplained.map((entry) => (entry.question
+    ? `Litos put an answer in this field and the form did not keep it, and the run gave no reason: "${entry.question.slice(0, 60)}". This is a Litos defect, not something you left blank.`
+    : 'Litos put an answer in a field on this form and it did not keep it, and the run gave no reason. This is a Litos defect, not something you left blank.'));
 }
 
 // Fixed-field fills only (name/email/phone/location/links/resume) - shared by

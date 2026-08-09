@@ -54,7 +54,8 @@ import {
   attachManagedFieldOptions,
   buildManagedDiscoveredOptionProbeActions,
   managedOptionProbeTargets,
-  managedUnreportedFillLabels,
+  managedUnexplainedAnswers,
+  managedUnexplainedAnswerReasons,
   mergeManagedFieldOptions,
   managedResultFieldOptions,
   CaptchaUnresolvedError,
@@ -618,10 +619,21 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
   const roleLocations = Array.isArray(context.locations)
     ? context.locations.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
     : undefined;
+  /* THE SAME RESOLUTION CONTEXT THE DISCOVERY PASS USES, and it was not before.
+   *
+   * There are two places a stored question's answer is resolved: discoverAndResolveQuestions, which
+   * passes applicationContextForQuestionResolution(row, review), and this one, which passed a bare
+   * review.jd_text. Any resolver that reads the posting's structured locations could therefore
+   * answer in one and refuse in the other, on the same question, in the same run.
+   *
+   * Measured on Anduril b64168b8: with the location gate fixed, "Are you willing to work in-person
+   * for 12 weeks during the internship?" resolves to Yes from the frozen job locations under the
+   * discovery context and stayed blank here, so the packet the fill run was built from still
+   * carried no answer for it. */
   const refreshedQuestions = refreshKnownQuestionAnswers(
     review.questions,
     applicationProfile,
-    review.jd_text,
+    applicationContextForQuestionResolution(row, review),
     review.questions_reviewed_at,
     postingCountryFromJobContext(row.job_context),
   );
@@ -1025,10 +1037,19 @@ export function jobContextCompany(row: ResumeRow): string {
 
 export function applicationContextForQuestionResolution(row: ResumeRow, current: ApplicationReviewState): string {
   const context = (row.job_context && typeof row.job_context === 'object' ? row.job_context : {}) as Record<string, unknown>;
+  /* SPLIT ON THE SEMICOLON BEFORE CLASSIFYING, because a multi-office posting writes its offices
+   * into ONE string: Anduril's 2027 intern posting stores `job_context.location` as
+   * "Atlanta, Georgia, United States; Boston, Massachusetts, United States; ..." and five more.
+   *
+   * Classifying the composite is wrong in both directions. It reached jobCountry as a single value
+   * and passed the every-one-is-US test on the strength of the American cities in it, so a posting
+   * mixing Chicago with London would have frozen as safe; and it was then frozen as ONE location,
+   * which is the shape the resolver could not read at all. One city per entry makes the every-one
+   * test mean what it says and gives the resolver something it can check. */
   const locationValues = [
     typeof context.location === 'string' ? context.location : '',
     ...(Array.isArray(context.locations) ? context.locations.filter((value): value is string => typeof value === 'string') : []),
-  ].map((value) => value.trim()).filter(Boolean);
+  ].flatMap((value) => value.split(';')).map((value) => value.trim()).filter(Boolean);
   const classifiedLocations = [...new Set(locationValues)].map((value) => ({ value, country: jobCountry(value) }));
   const safeLocations = classifiedLocations.length > 0 && classifiedLocations.every((item) => item.country === 'us')
     ? frozenJobLocationContext(classifiedLocations.map((item) => item.value))
@@ -1242,6 +1263,30 @@ export async function discoverAndResolveQuestions(
         continue;
       }
     }
+    /* THE DRAFTER NEVER WRITES PROSE INTO A CONTROL THAT OFFERS A LIST.
+     *
+     * The belt to isOpenEndedQuestion's braces, and it is separate from it because it is a fact
+     * about the CONTROL, which that function cannot see. A select, radio or checkbox accepts one of
+     * its own options and nothing else, so a paragraph aimed at one cannot land however well it
+     * reads: Virtu and Faire each came back "no option matched" with a drafted answer quoted back
+     * at them. A required field the applicant can see and pick from is strictly better than a
+     * wrong-shaped value nobody can use. */
+    const closedControl = /^(?:select|radio|checkbox|combobox)$/i.test(field.inputType)
+      || usableOptions(field.options).length > 0;
+    const wouldNotDraftNow = !isOpenEndedQuestion(label) || closedControl;
+    /* A PARAGRAPH AN EARLIER BUILD DRAFTED, on a question this build would not draft at all.
+     *
+     * Without this the guard above changes nothing on a packet that already carries one: the
+     * `existing.answer.trim()` arm below replays a stored answer verbatim, so Virtu's 186 characters
+     * of prose would be typed at the same closed control on every future run of that packet.
+     *
+     * Only a DRAFTED answer, and only one this build has just declined to produce.
+     * `answer_source: 'applicant_review'` is her own, and she is allowed to write a sentence into a
+     * field Litos would not have. */
+    const staleDraftedAnswer = existing?.kind === 'essay'
+      && Boolean(existing.answer.trim())
+      && existing.answer_source !== 'applicant_review'
+      && wouldNotDraftNow;
     if (existing) {
       if (known && 'value' in known) {
         questions.push({
@@ -1253,6 +1298,9 @@ export async function discoverAndResolveQuestions(
           portal_selector: portalSelectorForField(field),
           portal_input_type: field.inputType,
         });
+      } else if (staleDraftedAnswer) {
+        invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
+        if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false));
       } else if (existing.answer.trim()) {
         questions.push({
           ...existing,
@@ -1290,7 +1338,7 @@ export async function discoverAndResolveQuestions(
      * form: a question whose answer is a statement she makes about herself is never drafted, however
      * open-ended it reads, whether or not any rule above recognised it. She is asked instead, which
      * is what the pre-script now does before the run ever starts. */
-    if (!isOpenEndedQuestion(label)) {
+    if (wouldNotDraftNow) {
       // The single biggest source of unanswerable blockers. "Discipline", "Graduation Month",
       // "EXPORT CONTROLS - ...": not a field Litos knows, not an essay it can draft, and until now
       // dropped without even an attention reason. Required means the employer will not accept the
@@ -1591,19 +1639,31 @@ async function prepareManaged(
   const fillActions = buildManagedPortalActions(portal, packet);
   const result = await runManagedBrowser(applicationUrl, fillActions);
   if (!result.screenshot) throw new Error('Stratus managed browser did not return a preview screenshot');
-  /* A value Litos typed that the run then said nothing whatsoever about.
+  /* A value Litos typed that the run then never accounted for.
    *
-   * Not a blocker and not shown to the applicant: the required-field check below already tells her
-   * the control is empty. This is the line that says the emptiness is Litos's fault rather than
-   * hers, and it exists because without it the case is unobservable. Measured on DRW, 2026-08-08:
-   * `question:legal first name` was a single fill of "Mehek" into a plain visible textarea, sat at
-   * index 55 of an accepted 120-action list, the run reported fills as late as index 100, and the
-   * result named it in neither filledFields nor skipped. */
-  const unreportedFills = managedUnreportedFillLabels(fillActions, result);
-  if (unreportedFills.length > 0) {
+   * Measured on DRW, 2026-08-08: `question:legal first name` was a single fill of "Mehek" into a
+   * plain visible textarea, sat at index 55 of an accepted 120-action list, the run reported fills
+   * as late as index 100, and the result named it in neither filledFields nor skipped.
+   *
+   * WHAT CHANGED ON 2026-08-09, and it is the reason this is now three things rather than one log
+   * line. The 25-application run was the run this diagnostic was shipped to observe, and it stayed
+   * silent while Deepgram's `question:expected graduation year` went missing exactly as predicted.
+   * Silence was the answer: the only way the old test could pass was a `result.skipped` line that
+   * STARTED with the label and explained nothing, which the sanitizer then dropped as alias-ladder
+   * noise. One predicate was answering both "did anyone mention this" and "is this worth showing
+   * her", and a line that satisfied the first while failing the second fell through both. So: the
+   * suppression test is now an EXPLANATION test, she gets a sentence saying the blank field is
+   * ours, and the provider's own words are kept on the row for the labels that lost a value. */
+  const unexplainedAnswers = managedUnexplainedAnswers(fillActions, result);
+  if (unexplainedAnswers.length > 0) {
     fastify.log.error(
-      { applicationId: row.id, portal, fields: unreportedFills },
-      'Answers were typed into the form and the run reported neither a fill nor a reason for them',
+      {
+        applicationId: row.id,
+        portal,
+        fields: unexplainedAnswers.map((entry) => entry.label),
+        rawMentions: unexplainedAnswers.map((entry) => entry.rawMentions),
+      },
+      'Answers were typed into the form and the run accounted for them in neither a fill nor a reason',
     );
   }
   const preview = await put(
@@ -1704,12 +1764,14 @@ async function prepareManaged(
   const answerLossReasons = managedAnswerLossReasons({
     skipped: [...(result.skipped ?? []), ...(discoveryResult?.skipped ?? [])],
   });
+  const unexplainedAnswerReasons = managedUnexplainedAnswerReasons(unexplainedAnswers);
   const attentionReasons = [
     ...blockers,
     ...discoveryAttention,
     ...evidenceBlockers,
     ...coverLetterAttention,
     ...answerLossReasons,
+    ...unexplainedAnswerReasons,
     ...honestyReasons,
   ];
   const attentionCategories = attentionCategoriesForReasons(attentionReasons);
@@ -1810,6 +1872,15 @@ async function prepareManaged(
     // The other half of filled_fields, and it was always empty before: what the runner tried and
     // could not leave on the form. See managedAnswerLossReasons.
     skipped_reasons: answerLossReasons,
+    /* The provider's own words about the answers nobody accounted for, kept so the NEXT
+     * investigation reads a row instead of re-deriving the run. Bounded to the labels that lost a
+     * value, and written as an empty array rather than omitted so a run that has been re-tried on
+     * this build can be told from one that predates the field. See ApplicationReviewState. */
+    unexplained_fills: unexplainedAnswers.map((entry) => ({
+      label: entry.label,
+      question: entry.question,
+      raw: entry.rawMentions,
+    })),
     // Which address this form was filled with, and why. See ApplicationReviewState.applicant_email.
     ...(packet.applicantEmail ? { applicant_email: packet.applicantEmail } : {}),
     preview_screenshot_url: preview.url,

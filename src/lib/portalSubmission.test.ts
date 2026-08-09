@@ -28,6 +28,8 @@ import {
   managedOptionProbeControlId,
   managedOptionProbeTargets,
   managedUnreportedFillLabels,
+  managedUnexplainedAnswers,
+  managedUnexplainedAnswerReasons,
   mergeManagedFieldOptions,
   MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL,
   reactSelectListboxSelector,
@@ -4661,6 +4663,39 @@ test('a value that was typed and never spoken of again is named as a defect', ()
     managedUnreportedFillLabels(actions, { filledFields: ['question:linkedin profile', 'question:legal first name', 'question:overall gpa'], skipped: [] }),
     [],
   );
+});
+
+test('a mention that explains nothing does not count as having reported the loss', () => {
+  /* R-122, and the reason the test above was passing while production was silent.
+   *
+   * The 25-application run of 2026-08-09 was the run this diagnostic was shipped to observe.
+   * Deepgram's `question:expected graduation year` went missing exactly as predicted - a single
+   * fill of "2028" in a 24-action list against a 120 budget, absent from filledFields - and the
+   * diagnostic logged NOTHING, on any deployment. The only way that could happen is a skipped line
+   * that starts with the label and explains nothing, because the suppression test was a bare
+   * `startsWith`. managedAnswerLossReasons then dropped the same line as alias-ladder noise, so she
+   * was told the field was empty with no reason at all.
+   *
+   * Now only a LOSS-SHAPED line discharges the label, and the two functions can no longer disagree
+   * about whether a control was accounted for. */
+  const actions = [
+    { type: 'fill', selector: '[data-field-path="407cc864"]', value: '2028', label: 'question:expected graduation year' },
+  ] as Parameters<typeof managedUnreportedFillLabels>[0];
+  const noise = { filledFields: [], skipped: ['question:expected graduation year: nothing matched [data-field-path="407cc864"] input'] };
+  assert.deepEqual(managedUnreportedFillLabels(actions, noise), ['question:expected graduation year']);
+  // The provider's own words are kept, for these labels and no others.
+  assert.deepEqual(managedUnexplainedAnswers(actions, noise)[0]?.rawMentions, [
+    'question:expected graduation year: nothing matched [data-field-path="407cc864"] input',
+  ]);
+  // She is told the blank field is ours.
+  assert.match(
+    managedUnexplainedAnswerReasons(managedUnexplainedAnswers(actions, noise))[0]!,
+    /Litos put an answer in this field and the form did not keep it.+expected graduation year/,
+  );
+  // A real explanation still discharges it, and still reaches her through managedAnswerLossReasons.
+  const explained = { filledFields: [], skipped: ['question:expected graduation year: value did not persist after fill'] };
+  assert.deepEqual(managedUnreportedFillLabels(actions, explained), []);
+  assert.equal(managedAnswerLossReasons(explained).length, 1);
 });
 
 /* ---------------------------------------------------------------------------------------------
