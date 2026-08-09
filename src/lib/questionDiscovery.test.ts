@@ -49,13 +49,42 @@ test('answers work authorization and sponsorship only from explicit stored conse
     resolveKnownAnswer('Are you currently eligible to work in the United States of America?', 'text', { work_authorized: true }, undefined),
     { value: 'Yes' },
   );
-  const unscopedSponsorship = resolveKnownAnswer(
+  /* Five Rings' and Point72's live label, which names no country. It is answered, because "yes, I
+   * need sponsorship" is a disclosure and not a claim of eligibility: it can only narrow what an
+   * employer will offer. The country gate below still holds for every answer that asserts
+   * something, including the "no" this same label takes from the opposite stored boolean. */
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'will you now or in the future require sponsorship for employment visa status?',
+      'text',
+      { needs_sponsorship: true },
+      undefined,
+    ),
+    { value: 'Yes' },
+  );
+  const unscopedNoSponsorshipNeeded = resolveKnownAnswer(
     'will you now or in the future require sponsorship for employment visa status?',
+    'text',
+    { needs_sponsorship: false },
+    undefined,
+  );
+  assert.ok(unscopedNoSponsorshipNeeded && 'skipReason' in unscopedNoSponsorshipNeeded);
+  const unscopedAuthorization = resolveKnownAnswer(
+    'are you legally authorized to work?',
+    'text',
+    { work_authorized: true, needs_sponsorship: true },
+    undefined,
+  );
+  assert.ok(unscopedAuthorization && 'skipReason' in unscopedAuthorization);
+  // Asked backwards, "yes" would claim an exemption she does not have, so the disclosure arm does
+  // not apply and the refusal stands.
+  const exemption = resolveKnownAnswer(
+    'are you exempt from visa sponsorship requirements?',
     'text',
     { needs_sponsorship: true },
     undefined,
   );
-  assert.ok(unscopedSponsorship && 'skipReason' in unscopedSponsorship);
+  assert.ok(exemption && 'skipReason' in exemption);
   assert.deepEqual(
     resolveKnownAnswer(
       'Do you now or in the future require visa sponsorship/work authorization to continue working in the United States?',
@@ -2164,5 +2193,109 @@ test('a missing fact is left blank AND raised, never filled', () => {
     assert.ok(resolved, `must be recognised, not dropped: ${label}`);
     assert.ok('skipReason' in resolved, `must not be answered: ${label}`);
     assert.ok(resolved.skipReason.trim().length > 20, `must explain itself: ${label}`);
+  }
+});
+
+/* THE FOUR LABELS FROM THE 2026-08-08 RUN, VERBATIM.
+ *
+ * Copied out of production `spec._review.questions[].question` on packets e515deb8 (Cloudflare),
+ * 8d12aea8 (Redwood Materials), d0087343 (truveta) and 6343b0c9 (Scale AI), which is why they are
+ * all-lowercase: every one of the 519 question labels stored across the owner's packets is, and
+ * refreshKnownQuestionAnswers re-resolves from that stored text on every send. Three of the four
+ * are answerable from `needs_sponsorship: true` and were being refused. The fourth is not
+ * answerable from anything on file and must stay refused.
+ */
+const CLOUDFLARE_SPONSORSHIP_LABEL =
+  'do you now or will you in the future require immigration sponsorship to work at cloudflare?';
+const REDWOOD_SPONSORSHIP_LABEL =
+  'will you now or in the future require any type of immigration/visa sponsorship or support? sponsorship or support for an '
+  + 'immigration-related employment benefit includes but is not limited to the following: h-1b, h-1b1, j-1, tn, e-3, o-1, job '
+  + 'portability benefit (i-485 supplement js), f-1 cpt, f-1 stem opt, or any employment authorization application that may '
+  + 'require immigration support from redwood materials.';
+const TRUVETA_SPONSORSHIP_LABEL =
+  'do you now or in the future require visa sponsorship to continue working in the us? we are unable to sponsor work visas or '
+  + 'permits (e.g. f-1 opt, h1-b) at this time.';
+const SCALE_AI_RESTRICTIVE_AGREEMENT_LABEL =
+  'are you currently bound by any agreements with a current or former employer that may restrict your ability to work for scale '
+  + 'ai or perform the duties of the position for which you are applying? this includes, but is not limited to, non-compete '
+  + 'agreements, non-solicitation agreements, confidentiality or non-disclosure agreements, or any other contractual obligations '
+  + 'that could limit your employment activities.';
+
+test('the stored sponsorship need answers the four 2026-08-08 labels it is the answer to', () => {
+  /* An employer's own name where a country would go ("to work at Cloudflare"), a two-hundred-word
+   * tail of visa categories (Redwood), and an explanatory refusal to sponsor (truveta) are all
+   * things a sponsorship question is allowed to say. None of them changes what is being asked, and
+   * `needs_sponsorship: true` is exactly the answer to it. */
+  for (const label of [CLOUDFLARE_SPONSORSHIP_LABEL, REDWOOD_SPONSORSHIP_LABEL, TRUVETA_SPONSORSHIP_LABEL]) {
+    assert.deepEqual(
+      resolveKnownAnswer(label, 'text', PROD_OWNER_PROFILE, undefined),
+      { value: 'Yes' },
+      `lost the stored sponsorship answer for: ${label.slice(0, 70)}`,
+    );
+  }
+  // truveta's is a checkbox on the live form. The control type does not change the answer.
+  assert.deepEqual(
+    resolveKnownAnswer(TRUVETA_SPONSORSHIP_LABEL, 'checkbox', PROD_OWNER_PROFILE, undefined),
+    { value: 'Yes' },
+  );
+  // And with nothing stored, all three refuse and say which question is waiting.
+  for (const label of [CLOUDFLARE_SPONSORSHIP_LABEL, REDWOOD_SPONSORSHIP_LABEL, TRUVETA_SPONSORSHIP_LABEL]) {
+    const empty = resolveKnownAnswer(label, 'text', {}, undefined);
+    assert.ok(empty && 'skipReason' in empty, label.slice(0, 70));
+    assert.ok(empty.skipReason.trim().length > 20, label.slice(0, 70));
+  }
+});
+
+test('Scale AI\'s restrictive-agreement declaration stays refused, R-105', () => {
+  /* NOT a lost answer, and it must not be repaired alongside them. This asks about her contractual
+   * obligations to a PAST employer, no column records them, and the hardcoded "No" it used to get
+   * was a legal statement about her made by a machine that had consulted nothing. It refuses with a
+   * full profile and with an empty one alike, and it is surfaced so she can answer it herself. */
+  for (const profile of [PROD_OWNER_PROFILE, {}]) {
+    const resolved = resolveKnownAnswer(SCALE_AI_RESTRICTIVE_AGREEMENT_LABEL, 'text', profile, undefined);
+    assert.ok(resolved, 'must be recognised, not dropped');
+    assert.ok('skipReason' in resolved, 'must not be answered from anything');
+    assert.ok(/agreements with a past employer/.test(resolved.skipReason), resolved.skipReason);
+  }
+});
+
+test('a sponsorship question that will not say which country is still refused', () => {
+  /* The line the disclosure rule does not cross, all four phrasings measured in the same run:
+   * Together AI and Scale AI ("the country where the job is located"), Deepgram ("the country where
+   * this role is located") and DV Trading ("in this country"). "Yes, I need sponsorship" is wrong
+   * and costly for a role in the one country where she may not, and the posting's own location is a
+   * JD inference, which is the thing that was removed for good reason. */
+  for (const label of [
+    'will you now or in the future require company sponsorship to retain or extend your work authorization in the country where the job is located?',
+    'will you now or in the future require visa sponsorship to work in the country where this role is located?',
+    'will you now or in the future require employer sponsorship for work authorization in this country? if you will be working under a student visa for this role, please select "yes."',
+    'do you now, or will you in the future, require sponsorship for employment in the country which you are applying?',
+    'are you legally authorized to work in the country where this role is based?',
+    'will you now or in the future require sponsorship to work in Canada?',
+  ]) {
+    const resolved = resolveKnownAnswer(label, 'text', PROD_OWNER_PROFILE, 'This role is based in San Francisco, California.');
+    assert.ok(resolved && 'skipReason' in resolved, `must not be answered: ${label.slice(0, 70)}`);
+  }
+});
+
+test('the US abbreviation is recognised in the lowercase production labels carry', () => {
+  /* Both of Roblox's live labels, and the pronoun that the old case-sensitive pattern was there to
+   * keep out. The pronoun stays out on either spelling now that shape rather than case is what
+   * distinguishes them. */
+  assert.deepEqual(
+    resolveKnownAnswer('are you legally authorized to work in the us?', 'text', PROD_OWNER_PROFILE, undefined),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('do you require visa sponsorship to work in the us?', 'text', { needs_sponsorship: false }, undefined),
+    { value: 'No' },
+  );
+  for (const pronoun of [
+    'tell us whether you are legally authorized to work.',
+    'Tell US whether you are legally authorized to work.',
+    'are you able to work with us without any restriction on your employment?',
+  ]) {
+    const resolved = resolveKnownAnswer(pronoun, 'text', { work_authorized: true, needs_sponsorship: false }, undefined);
+    assert.ok(resolved === null || 'skipReason' in resolved, `pronoun read as a country: ${pronoun}`);
   }
 });
