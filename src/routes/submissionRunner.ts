@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { decide, isBlocked } from '../engine/eligibility';
-import { put } from '@vercel/blob';
 import { chromium, type Page } from 'playwright-core';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, eq, sql } from 'drizzle-orm';
@@ -30,7 +29,7 @@ import {
   withSecurityCode,
   withSecurityCodeAttempt,
 } from '../lib/securityCode';
-import { storeReceiptScreenshot } from '../lib/receiptScreenshot';
+import { storeFilledPreviewScreenshot, storeReceiptScreenshot } from '../lib/receiptScreenshot';
 import {
   connectToSession,
   continueManagedBrowser,
@@ -1673,16 +1672,9 @@ async function prepareManaged(
       'Answers were typed into the form and the run reported neither a fill nor a reason for them',
     );
   }
-  const preview = await put(
+  const preview = await storeFilledPreviewScreenshot(
     `users/${row.user_id}/submission-runs/${runId}/filled.png`,
     Buffer.from(result.screenshot, 'base64'),
-    // addRandomSuffix because a RETRY reuses the run id (runId falls back to
-    // current.submission_run_id), so a second attempt writes the same key and Vercel Blob rejects
-    // it: "This blob already exists". That turned an otherwise SUCCESSFUL run, five fields filled
-    // and a preview captured, into status `failed`. Suffixing also keeps each attempt's evidence
-    // instead of overwriting the previous one, which matters when comparing a retry to what it
-    // replaced.
-    { access: 'public', contentType: 'image/png', addRandomSuffix: true },
   );
   // Sanitized at the boundary, not upstream: the managed provider scans the form in its own
   // service and returns finished sentences, so it never passes through this repo's label
@@ -2170,12 +2162,10 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     // first pass cannot remain as a stale blocker. This does not click the final submit control.
     if (postFillVerification.status === 'completed') result = await fillPortal(page, portal, packet);
     const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
-    const preview = await put(`users/${row.user_id}/submission-runs/${runId}/filled.png`, screenshot, {
-      access: 'public',
-      contentType: 'image/png',
-      // See the managed path above: a retry reuses the run id and would collide.
-      addRandomSuffix: true,
-    });
+    const preview = await storeFilledPreviewScreenshot(
+      `users/${row.user_id}/submission-runs/${runId}/filled.png`,
+      screenshot,
+    );
     const sanitizedBlockers = sanitizeProviderBlockers(result.blockers);
     const pageText = await page.locator('body').innerText({ timeout: 1_000 }).catch(() => '');
     // Same reach evidence as the managed path: the live-page question scan and the portal's own

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHmac } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import {
   assertDisposableDatabaseMarker,
   assertControlledManagedReceivingProofRow,
@@ -8,6 +9,8 @@ import {
   assertControlledSecurityCodeTarget,
   controlledEmailCaptureTarget,
   controlledReceiptCaptureTarget,
+  controlledScreenshotForRun,
+  controlledScreenshotObjectKey,
   controlledDatabaseTarget,
   controlledManagedReceivingProof,
   controlledQaPacketSpec,
@@ -93,6 +96,55 @@ test('receipt screenshots use only an authenticated write-only loopback capture 
     () => controlledReceiptCaptureTarget('http://127.0.0.1:4318/receipts', ''),
     /Provisioning blocker/,
   );
+});
+
+test('both filled preview writes use the controlled screenshot adapter and carry distinct harness evidence', async () => {
+  const runnerSource = await readFile(new URL('../src/routes/submissionRunner.ts', import.meta.url), 'utf8');
+  const rawFilledWrites = runnerSource.match(/await put\([\s\S]{0,200}filled\.png/g) ?? [];
+  const previewAdapterWrites = runnerSource.match(/await storeFilledPreviewScreenshot\(/g) ?? [];
+  assert.equal(rawFilledWrites.length, 0, 'submission runner still writes a filled preview directly to Blob');
+  assert.equal(previewAdapterWrites.length, 2, 'managed and direct preparation paths must both use the adapter');
+
+  const harnessSource = await readFile(new URL('./qa-guest-submissions.mjs', import.meta.url), 'utf8');
+  assert.match(harnessSource, /controlledScreenshotForRun\(capturedScreenshots/);
+  assert.match(harnessSource, /kind: 'filled_preview'/);
+  assert.match(harnessSource, /kind: 'submission_receipt'/);
+  assert.match(harnessSource, /preview_capture_object_key: capturedPreview\.object_key/);
+  assert.match(harnessSource, /receipt_capture_object_key: capturedReceipt\.object_key/);
+  assert.match(harnessSource, /preview_capture_sha256: capturedPreview\.sha256/);
+  assert.match(harnessSource, /receipt_capture_sha256: capturedReceipt\.sha256/);
+});
+
+test('identical screenshot content is attributed only to the exact current submission run key', () => {
+  const userId = 'user-1';
+  const digest = 'a'.repeat(64);
+  for (const kind of ['filled_preview', 'submission_receipt']) {
+    const url = `urn:litos:qa-screenshot:${kind}:${digest}`;
+    const stale = {
+      kind,
+      url,
+      sha256: digest,
+      object_key: controlledScreenshotObjectKey(kind, userId, 'stale-run'),
+    };
+    const current = {
+      kind,
+      url,
+      sha256: digest,
+      object_key: controlledScreenshotObjectKey(kind, userId, 'current-run'),
+    };
+    assert.equal(controlledScreenshotForRun([stale, current], {
+      kind,
+      userId,
+      submissionRunId: 'current-run',
+      url,
+    }), current);
+    assert.equal(controlledScreenshotForRun([stale], {
+      kind,
+      userId,
+      submissionRunId: 'current-run',
+      url,
+    }), undefined);
+  }
 });
 
 test('database safety rejects remote, shared, and unmarked targets', () => {
