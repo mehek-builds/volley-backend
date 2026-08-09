@@ -54,6 +54,7 @@ import {
 } from '../lib/portalSubmission';
 import { contentDispositionFileName, resumeFileNameForRole } from '../lib/resumeFileName';
 import { monitoredDescriptionHash, monitoredJdAgrees } from '../lib/monitoredPortalRepair';
+import { postingCountryFromJobContext } from '../lib/jobLocation';
 import { refreshKnownQuestionAnswers, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
@@ -167,14 +168,20 @@ function repairedHistorySpec(
   return { ...(spec as Record<string, unknown>), _review: repaired };
 }
 
-function refreshedHistorySpec(spec: unknown, profile: ApplicationProfileLike): unknown {
+function refreshedHistorySpec(spec: unknown, profile: ApplicationProfileLike, jobContext: unknown): unknown {
   const review = readApplicationReview(spec);
   if (!review || !spec || typeof spec !== 'object' || Array.isArray(spec)) return spec;
   return {
     ...(spec as Record<string, unknown>),
     _review: {
       ...review,
-      questions: refreshKnownQuestionAnswers(review.questions, profile, review.jd_text, review.questions_reviewed_at),
+      questions: refreshKnownQuestionAnswers(
+        review.questions,
+        profile,
+        review.jd_text,
+        review.questions_reviewed_at,
+        postingCountryFromJobContext(jobContext),
+      ),
     },
   };
 }
@@ -1245,7 +1252,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       const resumeFileName = resumeFileNameForRole(contact.full_name, job.role);
       return {
         ...row,
-        spec: refreshedHistorySpec(repairedHistorySpec(row, monitoredJobs), profile),
+        spec: refreshedHistorySpec(repairedHistorySpec(row, monitoredJobs), profile, row.job_context),
         download_url: `${base}/resume/download?t=${mintDownloadToken(userId, row.resume_object_key, { fileName: resumeFileName })}`,
         cover_letter_download_url: typeof coverLetter.object_key === 'string'
           ? `${base}/resume/download?t=${mintDownloadToken(userId, coverLetter.object_key)}`

@@ -1,5 +1,6 @@
 import type { Page } from 'playwright-core';
 import { isOpaqueIdentifier, tidyLabel } from './fieldLabel';
+import type { JobCountry } from './jobLocation';
 import { officeMetrosNamed } from './officeMetros';
 import type { SupportedPortal } from './portalSubmission';
 import {
@@ -192,8 +193,23 @@ const US_ABBREVIATION_SCOPE_CASE_FOLDED =
  * AI's "the country where the job is located" variants. That went unnoticed while an unscoped label
  * was refused anyway; once a stored "yes I need sponsorship" may answer an unscoped label, this is
  * the rule that has to hold the line, so it now recognises the family rather than three sentences.
- * The posting's own location deliberately does not count as scope evidence: reading a legal
- * declaration off the JD is the inference be1bccf removed.
+ *
+ * THIS FAMILY IS A POINTER, NOT A COUNTRY, and that is what makes it different from every other
+ * scope pattern in this file. "The country where this role is located" does not say which country;
+ * it says "look it up". Until 2026-08-09 that pointer was never followed and the whole family was
+ * refused, which is why the Deepgram packet could not be sent: two required questions, both
+ * answerable from two consented columns, both blank. It is followed now, and ONLY from the
+ * posting's structured location as the portal published it (`postingCountryFromJobContext`), which
+ * resolves to 'us' only when every place the posting names is American.
+ *
+ * That is not the inference be1bccf removed, and the distinction is the whole safety argument.
+ * be1bccf deleted JD_US_SCOPE, a regex that swept the job description's PROSE for "california",
+ * "new york", "remote (us)" - so a London role whose description mentioned a San Francisco
+ * headquarters, a US customer or a US legal notice read as American and got a US work-eligibility
+ * answer. That was reading a legal declaration out of marketing copy. Resolving a pointer the
+ * employer's own question created, against the one field the employer filled in to say where the
+ * job is, is a different act: the question asks which country, and the posting is the authority on
+ * that and nothing else. Prose is still not consulted, here or anywhere below.
  */
 const JOB_LOCATION_SCOPE =
   /\bcountry\s+(?:where|which|in\s+which|to\s+which|for\s+which)\b|\bwhere\s+(?:the|this)\s+(?:job|role|position)\s+is\s+(?:located|based|situated)\b|\bin\s+this\s+country\b|\bcountry\s+of\s+(?:the\s+)?(?:job|role|position|employment)\b/i;
@@ -303,10 +319,26 @@ function storedEligibilityIsSelfContradictory(ap: ApplicationProfileLike): boole
 function workEligibilityAnswer(
   label: string,
   ap: ApplicationProfileLike,
+  postingCountry: JobCountry | undefined,
 ): { value: string } | { skipReason: string } | null {
+  /* THE POINTER, FOLLOWED - ONCE, AND ONLY WHEN IT LANDS ON THE UNITED STATES.
+   *
+   * A JOB_LOCATION_SCOPE label ("the country where this role is located") names no country, so on
+   * its own it is unanswerable from two US-scoped booleans. It becomes answerable exactly when the
+   * posting's own structured location says every place this role exists is American, because then
+   * the country the employer pointed at IS the United States and the stored facts are about that
+   * country. Anything else - a foreign posting, a two-country posting, a bare "Remote", a packet
+   * with no location on it at all, or a caller that did not pass one - leaves `postingCountry`
+   * something other than 'us' and the whole family stays refused, exactly as before.
+   *
+   * The parameter is optional for a reason worth stating: every call site that has not been taught
+   * to supply a posting therefore behaves like the old code, refusing. Forgetting to thread it
+   * costs a handoff and can never cost a false answer. */
+  const deferredCountryIsUs = JOB_LOCATION_SCOPE.test(label) && postingCountry === 'us';
   const explicitlyUsScoped = US_WORK_SCOPE.test(label)
     || US_ABBREVIATION_SCOPE.test(label)
-    || US_ABBREVIATION_SCOPE_CASE_FOLDED.test(label);
+    || US_ABBREVIATION_SCOPE_CASE_FOLDED.test(label)
+    || deferredCountryIsUs;
   if (WORK_AUTHORIZATION_DETAIL_QUESTION.test(label)) {
     return { skipReason: workEligibilitySkipReason(label) };
   }
@@ -318,7 +350,8 @@ function workEligibilityAnswer(
   ) {
     return { skipReason: workEligibilitySkipReason(label) };
   }
-  const namesAnotherCountry = NON_US_WORK_SCOPE.test(label) || JOB_LOCATION_SCOPE.test(label);
+  const namesAnotherCountry = NON_US_WORK_SCOPE.test(label)
+    || (JOB_LOCATION_SCOPE.test(label) && !deferredCountryIsUs);
   /* THE COUNTRY GATE IS NOT SYMMETRIC, AND THE ASYMMETRY IS THE ENTIRE RULE.
    *
    * The positive US-scope requirement below exists because the legacy booleans were collected
@@ -340,11 +373,14 @@ function workEligibilityAnswer(
    * IMC, Five Rings, Point72, Anduril, DRW and Virtu. Not one of those employers named a country,
    * and every one of them was told nothing instead of being told the truth.
    *
-   * The exceptions stay exceptions, and there are now four. A label that NAMES another country, or
-   * that defers to the posting's own country, is refused even in this direction: "yes I need
-   * sponsorship" is wrong AND costly for a role in the one country where she may not, and the
-   * posting's location is a JD inference, which is what be1bccf was right to remove. A label phrased
-   * backwards is refused, because "yes" there is a claim again. And the two guards above this line,
+   * The exceptions stay exceptions, and there are now four. A label that NAMES another country is
+   * refused even in this direction: "yes I need sponsorship" is wrong AND costly for a role in the
+   * one country where she may not. A label that DEFERS to the posting's own country is refused in
+   * this direction too, unless the posting's structured location resolves that deferral to the
+   * United States, in which case the label is US-scoped in fact and is treated as such by
+   * `deferredCountryIsUs` above; a posting that is foreign, two-country, remote-with-no-country or
+   * simply not supplied still refuses both directions. A label phrased backwards is refused,
+   * because "yes" there is a claim again. And the two guards above this line,
    * from 97207e2, run first and are untouched by any of it: a compound label whose other half has no
    * column, and the stored pair that describes nobody, are held whichever direction the answer runs.
    */
@@ -1073,10 +1109,11 @@ export function sensitiveQuestionRequiresAttention(
   inputType: string,
   ap: ApplicationProfileLike,
   jdText: string | undefined,
+  postingCountry?: JobCountry,
 ): boolean {
   if (!isRefusedQuestion(label)) return false;
   if (NEVER_FILL_PATTERNS.some((re) => re.test(label))) return true;
-  const known = resolveKnownAnswer(label, inputType, ap, jdText);
+  const known = resolveKnownAnswer(label, inputType, ap, jdText, postingCountry);
   return !(known && 'value' in known && comparableAnswer(known.value) === comparableAnswer(answer));
 }
 
@@ -1094,10 +1131,11 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
   ap: ApplicationProfileLike,
   jdText: string | undefined,
   questionsReviewedAt?: string,
+  postingCountry?: JobCountry,
 ): T[] {
   return questions.map((question) => {
     const label = normalizeReviewQuestionLabel(question.question);
-    const known = label ? resolveKnownAnswer(label, 'text', ap, jdText) : null;
+    const known = label ? resolveKnownAnswer(label, 'text', ap, jdText, postingCountry) : null;
     const withProvenance = question as T & {
       answer_source?: unknown;
       answer_reviewed_at?: unknown;
@@ -2613,6 +2651,14 @@ export function resolveKnownAnswer(
   inputType: string,
   ap: ApplicationProfileLike,
   jdText: string | undefined,
+  /* WHERE THE POSTING IS, as the portal published it - NOT as the job description describes it.
+   *
+   * Consulted by exactly one rule in this file, workEligibilityAnswer, and only to resolve a
+   * question that points at the posting instead of naming a country ("...in the country where this
+   * role is located"). Callers build it with `postingCountryFromJobContext`, which reads the
+   * packet's structured location fields and nothing else. Omitting it is always safe: every rule
+   * that reads it refuses when it is undefined. */
+  postingCountry?: JobCountry,
 ): { value: string } | { skipReason: string } | null {
   /* THE SELF-DECLARATIONS COME FIRST, before every classifier in this file.
    *
@@ -2813,7 +2859,7 @@ export function resolveKnownAnswer(
   const routineConsent = routineConsentAnswer(label);
   if (routineConsent) return routineConsent;
 
-  const workEligibility = workEligibilityAnswer(label, ap);
+  const workEligibility = workEligibilityAnswer(label, ap, postingCountry);
   if (workEligibility) return workEligibility;
 
   /* The blanket `if (AGE_ATTESTATION_QUESTION.test(label)) return null;` that stood here is gone.

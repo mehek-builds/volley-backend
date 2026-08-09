@@ -135,7 +135,7 @@ import { profileBackedBlockerLabels, resolveProfileField, usableOptions } from '
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { loadSavedAnswers } from '../lib/savedAnswerStore';
 import type { ApplicationReviewQuestion } from '../lib/applicationReview';
-import { jobCountry } from '../lib/jobLocation';
+import { jobCountry, postingCountryFromJobContext } from '../lib/jobLocation';
 import { generateStoredCoverLetter, storedCoverLetter } from '../lib/coverLetterService';
 import { repairReviewPortalFromMonitoredJob } from '../lib/applicationPortalRepair';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
@@ -622,6 +622,7 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     applicationProfile,
     review.jd_text,
     review.questions_reviewed_at,
+    postingCountryFromJobContext(row.job_context),
   );
   return {
     fullName,
@@ -1080,6 +1081,13 @@ export async function discoverAndResolveQuestions(
     // keep the fallback
   }
   const questionContext = applicationContextForQuestionResolution(row, current);
+  /* WHERE THE POSTING IS, for the one rule that is allowed to ask.
+   *
+   * Read off `job_context` - the structured location the portal published, copied onto the packet
+   * when it was created - and NOT off `questionContext`, which is role + jd_text + locations glued
+   * into one blob for the drafting-shaped rules. A country read out of prose is the inference
+   * be1bccf removed; this is the field the employer filled in to say where the job is. */
+  const postingCountry = postingCountryFromJobContext(row.job_context);
   const reuseContext: AnswerReuseContext = { company: jobContextCompany(row) };
   // Tested against the RAW label on purpose: normalizeDiscoveredLabel now strips the `--0`
   // section handle, because leaving it in the stored question text is what made every
@@ -1155,7 +1163,7 @@ export async function discoverAndResolveQuestions(
     // making them "required answer missing" would block every application on data Litos supplied.
     const fieldIsRequired = discoveredFieldIsRequired(field) && !isCoreIdentityField(label);
     const existing = existingByLabel.get(reviewLabel.toLowerCase());
-    const profileKnown = resolveKnownAnswer(label, field.inputType, ap, questionContext);
+    const profileKnown = resolveKnownAnswer(label, field.inputType, ap, questionContext, postingCountry);
     /* A REMEMBERED ANSWER, and where it sits in the order.
      *
      * It stands in only where Litos has nothing of its own. The structured profile wins over a copy
@@ -1185,6 +1193,7 @@ export async function discoverAndResolveQuestions(
         { label, inputType: field.inputType, options: field.options },
         ap,
         questionContext,
+        postingCountry,
       )
       : null;
     const knownValue = resolvedField?.value ?? (known && 'value' in known ? known.value : '');
