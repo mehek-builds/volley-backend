@@ -21,6 +21,7 @@ import {
   usableOptions,
 } from './profileFieldResolution';
 import type { ApplicationProfileLike } from './questionDiscovery';
+import { employerOwnSiteOption } from './referralSource';
 
 // The account's REAL stored values, read from prod on 2026-08-08 (user
 // a18f774b-a306-4804-93f3-cd6020c27fb3): application_profile holds major, gpa, gpa_scale and
@@ -946,5 +947,71 @@ test('among the buckets that contain a term, the narrowest one wins', () => {
   assert.equal(
     chooseClosestOption(['Spring 2028'], ['2028 or earlier', '2028', 'January 2028 - July 2028']),
     'January 2028 - July 2028',
+  );
+});
+
+/* THE EMPLOYER'S OWN SITE, UNDER THE EMPLOYER'S OWN NAME FOR IT.
+ *
+ * "Company website" came back as `no option matched` on fourteen prod packets across six employers,
+ * the second most repeated failure in the corpus, and on most of those lists the option stating
+ * exactly that fact was sitting there under a name the ladder cannot spell. Every list below was
+ * read off the live form on 2026-08-09. */
+const ANDURIL_REFERRAL_OPTIONS = [
+  'Google job search', 'News coverage of Anduril', 'Friend/know someone at the company',
+  'Outreach from an Anduril recruiter', 'BuiltIn', 'Indeed', 'Anduril social media',
+  'Anduril YouTube videos', 'Podcast featuring an Anduril leader', 'LinkedIn', 'GitHub',
+  'Handshake', 'Glassdoor', 'Simplify', 'Anduril Website', 'University Career Fair',
+  'Networking Event', 'Other',
+];
+const CLOUDFLARE_REFERRAL_OPTIONS = [
+  'Grace Hopper Celebration', 'College/University Career Fair or Career Website',
+  'Word of mouth from peers, friends, others', 'Cloudflare social media: Twitter, Blog, etc.',
+  'Linkedin', 'Google', 'Referral', 'Other conferences or events', 'Other (none of the above)',
+];
+const FIVE_RINGS_REFERRAL_OPTIONS = [
+  'Coffee Chat', 'Conference', 'GitHub', 'Handshake', 'LinkedIn',
+  'Student Organization Newsletter or Event', 'University Career Fair / Networking Event',
+  'Word of Mouth', 'Information Session', 'Other',
+];
+
+test('the employer\'s own site is found under whatever the employer calls it', () => {
+  const evidenced = { ...STORED_PROFILE, referral_source_evidence: EMPLOYER_SITE_EVIDENCE };
+  assert.equal(answer('How did you hear about Anduril?', ANDURIL_REFERRAL_OPTIONS, evidenced), 'Anduril Website');
+  assert.equal(
+    answer('How did you hear about this internship?', ['Virtu Careers Site', 'Social Media - LinkedIn', 'Job Posting', 'Career Fair', 'Other'], evidenced),
+    'Virtu Careers Site',
+  );
+  assert.equal(
+    answer('How did you hear about DV Trading?', ['LinkedIn', 'DV Recruitment', 'DV Employee', 'DV Website', 'Campus Event', 'Other'], evidenced),
+    'DV Website',
+  );
+  assert.equal(
+    answer('How did you hear about this job?', ['DRW Careers Page', 'Employee Referral', 'LinkedIn', 'Newspaper', 'Other'], evidenced),
+    'DRW Careers Page',
+  );
+});
+
+test('somebody else\'s website is never read as the employer\'s own', () => {
+  const evidenced = { ...STORED_PROFILE, referral_source_evidence: EMPLOYER_SITE_EVIDENCE };
+  // Cloudflare's only entry with the word website in it is a UNIVERSITY career website. Choosing it
+  // would tell an employer she came through her school, which is not what happened.
+  assert.equal(answer('How did you hear about this job?', CLOUDFLARE_REFERRAL_OPTIONS, evidenced), null);
+  assert.equal(employerOwnSiteOption(CLOUDFLARE_REFERRAL_OPTIONS), undefined);
+  // And a list with no company-site entry at all stays with her rather than reaching for Other.
+  assert.equal(answer('How did you first hear about Five Rings?', FIVE_RINGS_REFERRAL_OPTIONS, evidenced), null);
+  assert.equal(employerOwnSiteOption(FIVE_RINGS_REFERRAL_OPTIONS), undefined);
+  // Two candidates is an ambiguity, not a choice.
+  assert.equal(employerOwnSiteOption(['Acme Website', 'Acme Careers Site', 'LinkedIn']), undefined);
+});
+
+test('the site option is only reached when the evidence says she came through the site', () => {
+  // No evidence at all: the acquisition channel is unknown, so nothing is claimed about it.
+  assert.equal(answer('How did you hear about Anduril?', ANDURIL_REFERRAL_OPTIONS), null);
+  assert.equal(
+    answer('How did you hear about Anduril?', ANDURIL_REFERRAL_OPTIONS, {
+      ...STORED_PROFILE,
+      referral_source_evidence: { ...EMPLOYER_SITE_EVIDENCE, kind: 'litos_job_board', value: 'Job board' },
+    }),
+    null,
   );
 });

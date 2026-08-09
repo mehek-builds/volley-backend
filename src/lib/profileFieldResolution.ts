@@ -60,6 +60,8 @@ import {
 import {
   referralSourceForApplication,
   referralSourceOptionCandidates,
+  employerOwnSiteOption,
+  isCompanySiteReferralClaim,
 } from './referralSource';
 import {
   comparableOption,
@@ -1015,7 +1017,16 @@ export function resolveProfileField(
   // this family and on no other.
   const eeo = EEO_QUESTION.test(label);
   const candidates = eeo ? eeoAnswerLadder(label, base) : profileFieldCandidates(key, ap, base);
-  const matched = eeo ? chooseEeoOption(label, base, shape.options) : chooseClosestOption(candidates, shape.options);
+  let matched = eeo ? chooseEeoOption(label, base, shape.options) : chooseClosestOption(candidates, shape.options);
+  if (key === 'referral_source_default' && matched === null) {
+    // The employer's own site, under the employer's own name for it. Only reached once the standard
+    // wordings have all missed, and only when the evidenced source really is the career site; the
+    // list has to say which entry that is, and say it unambiguously. See employerOwnSiteOption.
+    const evidenced = referralSourceForApplication(ap.referral_source_default, ap.referral_source_evidence);
+    if (isCompanySiteReferralClaim(evidenced)) {
+      matched = employerOwnSiteOption(usableOptions(shape.options)) ?? null;
+    }
+  }
   if (key === 'referral_source_default' && usableOptions(shape.options).length > 0 && matched === null) {
     return null;
   }
