@@ -331,6 +331,53 @@ export function optionCoversMonthYear(option: string, month: number, year: numbe
   return optionCalendarSpan(option, month, year) !== null;
 }
 
+/**
+ * The span of months an ANSWER covers when the answer is a term rather than a month.
+ *
+ * MEASURED. Six packets across IMC Trading and DV Trading reported
+ * `no option matched "Spring 2028", left for you to choose` against lists whose entries read
+ * "January 2028 - July 2028" and "August 2028 - December 2028". Spring 2028 is March, April and
+ * May of 2028, all three of which are inside the first bucket and none of which is inside the
+ * second, so which one is meant is a fact rather than a guess. The matcher simply had no way to
+ * ask the question: monthYearOf wants an explicit month name and a term does not carry one, so
+ * the calendar stage was skipped and the answer fell through to a string comparison it could
+ * never win.
+ *
+ * Returns null for anything that is not exactly ONE contiguous run. Winter is the reason: its
+ * months straddle a year boundary, so "Winter 2028" is two separate runs and there is no single
+ * span that is honestly "the term she graduates in". A candidate that also names an explicit
+ * month is left to the point stage, which is more precise than this and runs first.
+ */
+export function candidateTermInterval(candidate: string): CalendarInterval | null {
+  if (optionDatePoints(candidate).points.length > 0) return null;
+  const runs = optionSeasonIntervals(candidate);
+  return runs.length === 1 ? runs[0] : null;
+}
+
+/**
+ * The narrowest option that WHOLLY CONTAINS a term, or null.
+ *
+ * Containment, not overlap, and that is the whole safety of it. A term that only half fits an
+ * option is a different claim about when she finishes, so it declines; a term entirely inside one
+ * is the same claim written coarsely, which is exactly what these buckets are for. Ranked by width
+ * for the same reason the point stage is: a list that opens with a catch-all must not win over the
+ * precise bucket further down.
+ */
+function chooseTermBucket(
+  entries: readonly ComparableEntry[],
+  target: CalendarInterval,
+): string | null {
+  let best: { option: string; span: number } | null = null;
+  for (const entry of entries) {
+    for (const interval of optionCalendarIntervals(entry.option)) {
+      if (target.min < interval.min || target.max > interval.max) continue;
+      const span = interval.max - interval.min;
+      if (!best || span < best.span) best = { option: entry.option, span };
+    }
+  }
+  return best?.option ?? null;
+}
+
 function numericValueOf(candidate: string): number | null {
   const match = candidate.match(/^\s*(\d+(?:\.\d+)?)\s*(?:\/\s*\d+(?:\.\d+)?)?\s*$/);
   if (!match) return null;
@@ -475,6 +522,16 @@ export function chooseClosestOption(
       if (!best || span < best.span) best = { option: entry.option, span };
     }
     if (best) return best.option;
+  }
+
+  // Then the same arithmetic for an answer that names a TERM instead of a month. Kept as its own
+  // pass after the point stage rather than folded into it, so an answer that does state a month
+  // is always settled by the more precise rule first. See candidateTermInterval.
+  for (const candidate of candidates) {
+    const term = candidateTermInterval(candidate);
+    if (!term) continue;
+    const bucket = chooseTermBucket(comparableOptions, term);
+    if (bucket) return bucket;
   }
 
   for (const candidate of candidates) {

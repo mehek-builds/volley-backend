@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { describeRequiredBlocker } from './fieldLabel';
 import {
   chooseClosestOption,
+  candidateTermInterval,
   chooseEeoOption,
   disciplineLadder,
   educationLevelLadder,
@@ -898,4 +899,52 @@ test('a refusal with nowhere to go is still left for her', () => {
   // answer Yes or No to a question she declined, and there is no third choice to reach for.
   assert.equal(chooseEeoOption('have you served in the military?', 'Decline to self-identify', ['Yes', 'No']), null);
   assert.equal(chooseClosestOption(eeoAnswerLadder('gender', 'Decline to self-identify'), ['Male', 'Female']), null);
+});
+
+/* THE TERM THAT COULD NOT REACH ITS OWN BUCKET.
+ *
+ * Six prod packets across IMC Trading and DV Trading reported
+ * `no option matched "Spring 2028", left for you to choose`. Both lists are the same shape and both
+ * are read off the live forms on 2026-08-09. Spring 2028 is March, April and May 2028; every one of
+ * them is inside "January 2028 - July 2028" and none is inside any other entry, so the answer is
+ * arithmetic rather than a guess. */
+const DV_GRADUATION_OPTIONS = [
+  "I've already graduated",
+  'August 2026 - December 2026',
+  'January 2027 - July 2027',
+  'August 2027 - December 2027',
+  'January 2028 - July 2028',
+  'August 2028 - December 2028',
+  'After January 2029',
+];
+
+test('a term reaches the bucket that wholly contains it', () => {
+  assert.equal(chooseClosestOption(['Spring 2028'], DV_GRADUATION_OPTIONS), 'January 2028 - July 2028');
+  assert.equal(chooseClosestOption(['Fall 2027'], DV_GRADUATION_OPTIONS), 'August 2027 - December 2027');
+  // A month still goes through the more precise point stage, unchanged.
+  assert.equal(chooseClosestOption(['May 2028'], DV_GRADUATION_OPTIONS), 'January 2028 - July 2028');
+});
+
+test('a term that only half fits a bucket is left for her', () => {
+  // Summer is June, July and August, and this list splits at the end of July. Two of her three
+  // months are in one bucket and the third is in the next, so neither bucket is a true statement
+  // about when she finishes and the question goes back to her.
+  assert.equal(chooseClosestOption(['Summer 2028'], DV_GRADUATION_OPTIONS), null);
+  // Winter straddles the year, so there is no single span that is honestly the term.
+  assert.equal(chooseClosestOption(['Winter 2028'], DV_GRADUATION_OPTIONS), null);
+  assert.equal(candidateTermInterval('Winter 2028'), null);
+  // An option NARROWER than the term invents a month she never stated.
+  assert.equal(chooseClosestOption(['Spring 2028'], ['May 2028', 'June 2028', 'December 2028']), null);
+  // And a term with no bucket around it at all stays unanswered.
+  assert.equal(chooseClosestOption(['Spring 2028'], ['August 2027 - December 2027', 'August 2029 - December 2029']), null);
+  // A candidate that names an explicit month is not re-read as a term.
+  assert.equal(candidateTermInterval('May 2028'), null);
+  assert.equal(candidateTermInterval('Spring semester, May 2028'), null);
+});
+
+test('among the buckets that contain a term, the narrowest one wins', () => {
+  assert.equal(
+    chooseClosestOption(['Spring 2028'], ['2028 or earlier', '2028', 'January 2028 - July 2028']),
+    'January 2028 - July 2028',
+  );
 });
