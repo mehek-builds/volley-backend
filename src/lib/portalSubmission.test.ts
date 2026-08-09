@@ -2588,9 +2588,9 @@ const capturePacket = {
   questions: [],
 };
 
-test('the three new hostnames are detected, and their tenant subdomains are too', () => {
+test('the three captured application hosts are detected', () => {
   assert.equal(detectPortal('https://apply.workable.com/suade/j/9C43981D17/apply'), 'workable');
-  assert.equal(detectPortal('https://ticketmanager.applytojob.com/apply/jobs/details/z8b5ObES2F'), 'jazzhr');
+  assert.equal(detectPortal('https://utilidata.applytojob.com/apply/jobs/details/VSeisrJblO'), 'jazzhr');
   assert.equal(detectPortal('https://2000recruiting.paylocity.com/Recruiting/Jobs/Apply/44457'), 'paylocity');
 });
 

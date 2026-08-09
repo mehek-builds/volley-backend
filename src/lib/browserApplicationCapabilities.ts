@@ -1,4 +1,10 @@
-export type BrowserApplicationFamily = 'zoho_recruit' | 'bullhorn' | 'sap_successfactors';
+export type BrowserApplicationFamily =
+  | 'zoho_recruit'
+  | 'bullhorn'
+  | 'sap_successfactors'
+  | 'oracle_taleo'
+  | 'adp_recruiting'
+  | 'jazzhr';
 
 export type BrowserApplicationCapability = {
   family: BrowserApplicationFamily;
@@ -40,6 +46,23 @@ const CAPABILITIES: Readonly<Record<BrowserApplicationFamily, BrowserApplication
     family: 'sap_successfactors',
     reason: 'The public job route transitions to a tenant account wall before the application form.',
   },
+  oracle_taleo: {
+    ...DENIED,
+    family: 'oracle_taleo',
+    reason: 'Both researched Taleo tenants place a legal acceptance screen before any application controls.',
+  },
+  adp_recruiting: {
+    ...DENIED,
+    family: 'adp_recruiting',
+    reason: 'Both researched ADP Recruiting tenants require authentication before the application form.',
+  },
+  jazzhr: {
+    ...DENIED,
+    family: 'jazzhr',
+    fill: true,
+    uploadResume: true,
+    reason: 'Both researched JazzHR forms include reCAPTCHA and tenant-specific questions that require applicant review.',
+  },
 };
 
 /** Unknown families and unknown tenants are denied. Nothing becomes submit-capable by omission. */
@@ -55,6 +78,9 @@ export const RESEARCHED_BROWSER_TENANTS = {
   zoho_recruit: ['genovice.zohorecruit.com', 'solution25.zohorecruit.eu'],
   bullhorn: ['www.serverlogic.com', 'www.staffingsolutionsenterprises.com'],
   sap_successfactors: ['career2.successfactors.eu', 'career8.successfactors.com'],
+  oracle_taleo: ['fa007.taleo.net', 'aa270.taleo.net'],
+  adp_recruiting: ['myjobs.adp.com'],
+  jazzhr: ['utilidata.applytojob.com', 'foundationai.applytojob.com'],
 } as const satisfies Readonly<Record<BrowserApplicationFamily, readonly string[]>>;
 
 export function isResearchedBrowserTenant(family: BrowserApplicationFamily, hostname: string): boolean {

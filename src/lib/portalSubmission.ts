@@ -49,7 +49,9 @@ type PortalFamily =
   | 'comeet'
   | 'zoho_recruit'
   | 'bullhorn'
-  | 'sap_successfactors';
+  | 'sap_successfactors'
+  | 'oracle_taleo'
+  | 'adp_recruiting';
 type ControlledPortal =
   | 'controlled_test'
   | 'controlled_lever'
@@ -158,10 +160,10 @@ const CONSENT_GATED_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
 // Being in this set is NOT a claim the platform is unsupportable forever. It is a claim that today
 // Litos can recognise the page and explain it, which is worth more to a job seeker than a fill that
 // silently does nothing.
-type AccountWalledFamily = 'jobvite' | 'icims' | 'oraclecloud' | 'ultipro' | 'sap_successfactors';
+type AccountWalledFamily = 'jobvite' | 'icims' | 'oraclecloud' | 'ultipro' | 'sap_successfactors' | 'oracle_taleo' | 'adp_recruiting';
 
 const ACCOUNT_WALLED_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
-  ['jobvite', 'icims', 'oraclecloud', 'ultipro', 'sap_successfactors'] satisfies AccountWalledFamily[],
+  ['jobvite', 'icims', 'oraclecloud', 'ultipro', 'sap_successfactors', 'oracle_taleo', 'adp_recruiting'] satisfies AccountWalledFamily[],
 );
 
 export function isAccountWalledFamily(portal: SupportedPortal): boolean {
@@ -184,7 +186,7 @@ export function captchaProviderForFamily(portal: SupportedPortal): CaptchaProvid
 
 export function portalCanAutoSubmit(portal: SupportedPortal): boolean {
   const family = portalFamily(portal);
-  if (['zoho_recruit', 'bullhorn', 'sap_successfactors'].includes(family)) {
+  if (['zoho_recruit', 'bullhorn', 'sap_successfactors', 'oracle_taleo', 'adp_recruiting', 'jazzhr'].includes(family)) {
     return browserApplicationCapability(family).programmaticSubmit;
   }
   return !MULTI_STEP_FAMILIES.has(family)
@@ -258,6 +260,10 @@ const ACCOUNT_WALLED_REASONS: Record<AccountWalledFamily, string> = {
     'Litos can find this job but cannot read this company’s application form yet. Everything you need is ready to paste in, so open the page and apply there.',
   sap_successfactors:
     'This company asks you to sign in or create a SuccessFactors account before the application form opens. Litos leaves that account and every later legal choice to you.',
+  oracle_taleo:
+    'This Taleo application asks you to accept the employer legal notice before any application fields open. Litos leaves that decision and the later account flow to you.',
+  adp_recruiting:
+    'This ADP Recruiting application requires an account before any application fields open. Litos leaves the account and every later legal choice to you.',
 };
 
 export function portalHandoffReason(portal: SupportedPortal): string | null {
@@ -2794,6 +2800,8 @@ const COVER_LETTER_UPLOAD_SELECTORS: Record<SupportedPortal, string> = {
   zoho_recruit: ZOHO_RECRUIT_COVER_LETTER_SELECTOR,
   bullhorn: BULLHORN_COVER_LETTER_SELECTOR,
   sap_successfactors: 'input[type="file"][name="noFormReachableWithoutSuccessFactorsAccount"]',
+  oracle_taleo: 'input[type="file"][name="noFormReachableWithoutTaleoLegalAcceptance"]',
+  adp_recruiting: 'input[type="file"][name="noFormReachableWithoutAdpAccount"]',
   // The account-walled four never reach a form, so there is no file input of any kind to find. A
   // never-matching selector is the honest answer to "can this portal accept a cover-letter file"
   // here, and it keeps hasCoverLetterUpload() from having to special-case them.
@@ -3361,7 +3369,7 @@ export function buildManagedPortalActions(
   // SmartRecruiters capability also ends after the exact captured first-page controls. Returning
   // here is stronger than filtering legal-looking questions: no packet selector or input type can
   // widen the adapter into later tenant-specific steps.
-  if (family === 'smartrecruiters') return actions;
+  if (family === 'smartrecruiters' || family === 'jazzhr') return actions;
   const mayReplayReviewedQuestions = family !== 'zoho_recruit' && family !== 'bullhorn';
   if (family === 'greenhouse') {
     pushGreenhouseAkunaSafeTextActions(actions, packet);
@@ -3590,9 +3598,9 @@ const HOSTS: Record<PortalFamily, RegExp> = {
   // marketing site, so a mistyped portal_url became a "supported portal" and got a fill run against
   // a page with no application on it.
   workable: /^apply\.workable\.com$/i,
-  // Every JazzHR tenant is its own subdomain of applytojob.com (ticketmanager.applytojob.com, ...),
-  // so the leading (^|\.) form matches the tenant without an allowlist of employers.
-  jazzhr: /(^|\.)applytojob\.com$/i,
+  // Only the two tenants inspected live are trusted. The shared applytojob.com suffix is not proof
+  // that an arbitrary subdomain exposes the same application controls.
+  jazzhr: /^(?:utilidata|foundationai)\.applytojob\.com$/i,
   // Tenant subdomains are arbitrary (2000recruiting.paylocity.com), so the host cannot be pinned the
   // way Workable's can - but it MUST exclude access.paylocity.com, which is Paylocity's employee
   // login. Litos filling an identity into a credential form is not a thing that should be reachable
@@ -3638,6 +3646,8 @@ const HOSTS: Record<PortalFamily, RegExp> = {
   // no arbitrary marketing domain becomes a supported ATS because it happens to link to Bullhorn.
   bullhorn: /^(?:www\.serverlogic\.com|www\.staffingsolutionsenterprises\.com)$/i,
   sap_successfactors: /^career\d+\.successfactors\.(?:com|eu)$/i,
+  oracle_taleo: /^(?:fa007|aa270)\.taleo\.net$/i,
+  adp_recruiting: /^myjobs\.adp\.com$/i,
 };
 
 // Host alone is not enough for a portal whose host space also serves a login page, a marketing site
@@ -3651,6 +3661,7 @@ const APPLY_PATHS: Partial<Record<PortalFamily, RegExp>> = {
   // Either a public posting or the separate one-click form. No API, company-listing, or account
   // route on the same host is allowed through.
   smartrecruiters: /^\/(?:[a-z0-9._-]+\/\d{6,}(?:-[^/]+)?|oneclick-ui\/company\/[a-z0-9._-]+\/publication\/[0-9a-f-]{36})\/?$/i,
+  jazzhr: /^\/apply\/jobs\/details\/[A-Za-z0-9]{10}\/?$/,
   // access.paylocity.com is an employee login on the same host space. Litos filling an identity into
   // a credential form is not a thing that should be reachable from a bad URL.
   paylocity: /^\/recruiting\/jobs\/(apply|details)\//i,
@@ -3673,6 +3684,8 @@ const APPLY_PATHS: Partial<Record<PortalFamily, RegExp>> = {
   zoho_recruit: /^\/jobs\/Careers\/\d+\/[^/]+\/?$/i,
   bullhorn: /^\/wp-content\/plugins\/bullhorn-oscp\/?$/i,
   sap_successfactors: /^\/(?:sfcareer\/jobreqcareer|career|portalcareer)\/?$/i,
+  oracle_taleo: /^\/careersection\/ex\/jobdetail\.ftl$/i,
+  adp_recruiting: /^\/(?:guitarcenterexternal|kaisercareers)\/cx\/job-details\/?$/i,
 };
 
 function isSmartRecruitersOneClickUrl(url: URL): boolean {
@@ -3762,6 +3775,8 @@ export function detectPortal(rawUrl: string): SupportedPortal {
       const tenant = url.searchParams.get('company');
       if (!jobId || !/^\d+$/.test(jobId) || !tenant || !/^[A-Za-z0-9_-]+$/.test(tenant)) continue;
     }
+    if (portal === 'oracle_taleo' && !/^\d+$/.test(url.searchParams.get('job') ?? '')) continue;
+    if (portal === 'adp_recruiting' && !/^\d+$/.test(url.searchParams.get('reqId') ?? '')) continue;
     return portal as SupportedPortal;
   }
   // Names the platforms it can actually DO something useful on. The account-walled four are
@@ -3825,6 +3840,22 @@ export function canonicalSupportedPortalUrl(rawUrl: string | undefined, atsName?
       const company = url.searchParams.get('company');
       if (!jobId || !company) return undefined;
       return `https://${url.hostname}/sfcareer/jobreqcareer?jobId=${encodeURIComponent(jobId)}&company=${encodeURIComponent(company)}`;
+    }
+    if (portal === 'oracle_taleo') {
+      const job = url.searchParams.get('job');
+      if (!job) return undefined;
+      return `https://${url.hostname}${url.pathname}?job=${job}&lang=en`;
+    }
+    if (portal === 'adp_recruiting') {
+      const reqId = url.searchParams.get('reqId');
+      if (!reqId) return undefined;
+      return `https://${url.hostname}${url.pathname.replace(/\/$/, '')}?reqId=${reqId}`;
+    }
+    if (portalFamily(portal) === 'jazzhr') {
+      url.search = '';
+      url.hash = '';
+      url.pathname = url.pathname.replace(/\/$/, '');
+      return url.toString();
     }
   } catch {
     return undefined;
@@ -4171,7 +4202,8 @@ async function fillResolvedRequiredField(
 
 export function portalMayResolveUnknownRequired(portal: SupportedPortal): boolean {
   const family = portalFamily(portal);
-  return family !== 'zoho_recruit' && family !== 'bullhorn';
+  return family !== 'zoho_recruit' && family !== 'bullhorn' && family !== 'jazzhr'
+    && family !== 'oracle_taleo' && family !== 'adp_recruiting';
 }
 
 export function portalUnknownRequiredBlocker(
@@ -4247,6 +4279,9 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="resumator-city-value"]'], packet.city, 'location', filledFields);
     await fillFirst(page, ['input[name="resumator-linkedin-value"]'], packet.linkedinUrl, 'linkedin', filledFields);
     await uploadFirst(page, [JAZZHR_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    const blockers = [portalHandoffReason(portal)!];
+    if (await hasUnresolvedCaptcha(page)) blockers.push(CAPTCHA_BLOCKER);
+    return { filledFields, blockers };
   } else if (family === 'paylocity') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, [paylocityId('info.firstName')], parts[0], 'first_name', filledFields);
