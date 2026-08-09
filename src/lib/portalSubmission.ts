@@ -194,6 +194,20 @@ export function portalCanAutoSubmit(portal: SupportedPortal): boolean {
     && !ACCOUNT_WALLED_FAMILIES.has(family);
 }
 
+export type ManagedPortalReceiptCapability = 'confirmation_possible' | 'unavailable_before_handoff';
+
+/**
+ * Whether the unattended backend path can honestly attempt to read an employer confirmation.
+ *
+ * This is deliberately derived from the same deny lists as submission. SmartRecruiters stops on
+ * its multi-step flow, while Jobvite and iCIMS stop before the application form opens. None of the
+ * three can produce a backend receipt because the backend is forbidden from performing the action
+ * that could create one. A later attended browser confirmation is a different channel.
+ */
+export function managedPortalReceiptCapability(portal: SupportedPortal): ManagedPortalReceiptCapability {
+  return portalCanAutoSubmit(portal) ? 'confirmation_possible' : 'unavailable_before_handoff';
+}
+
 // The portal families Litos can carry all the way to a confirmation on its own.
 //
 // Subtracted from PortalFamily rather than hand-listed, so a portal that later turns out to be
@@ -1200,7 +1214,7 @@ const ASHBY_PHONE_SELECTOR =
 // needs_attention/blocked rather than a false "submitted" - the same safe-degradation behavior
 // as every other blocker on this path, never a silent partial success.
 const SMARTRECRUITERS_RESUME_SELECTOR = 'spl-dropzone[data-test="resume-upload"] input[type="file"]';
-const SMARTRECRUITERS_PHONE_SELECTOR = '[aria-label="Phone number"]';
+const SMARTRECRUITERS_PHONE_SELECTOR = 'spl-phone-field input[aria-label="Phone number"]';
 const SMARTRECRUITERS_FIRST_NAME_SELECTOR = 'spl-input#first-name-input input';
 const SMARTRECRUITERS_LAST_NAME_SELECTOR = 'spl-input#last-name-input input';
 const SMARTRECRUITERS_EMAIL_SELECTOR = 'spl-input#email-input input';
@@ -1211,6 +1225,9 @@ const CONTROLLED_SMARTRECRUITERS_FIRST_NAME_SELECTOR = '[id="first-name-input"]'
 const CONTROLLED_SMARTRECRUITERS_LAST_NAME_SELECTOR = '[id="last-name-input"]';
 const CONTROLLED_SMARTRECRUITERS_EMAIL_SELECTOR = '[id="email-input"]';
 const CONTROLLED_SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR = '[id="confirm-email-input"]';
+// The controlled QA fixture is ordinary light DOM. Keep its compatibility selector isolated from
+// the live adapter so it can never broaden a real SmartRecruiters page-wide phone match.
+const CONTROLLED_SMARTRECRUITERS_PHONE_SELECTOR = '[aria-label="Phone number"]';
 const CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR = '[id="linkedin-input"]';
 const CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR = '[id="website-input"]';
 /* THE ASHBY LOCATION CONTROL, and why the obvious selector matches nothing.
@@ -3047,7 +3064,7 @@ function pushFixedFieldActions(
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_LAST_NAME_SELECTOR : SMARTRECRUITERS_LAST_NAME_SELECTOR, parts.slice(1).join(' '), 'last_name');
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_EMAIL_SELECTOR : SMARTRECRUITERS_EMAIL_SELECTOR, packet.email, 'email');
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR : SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR, packet.email, 'confirm_email');
-    managedFill(actions, SMARTRECRUITERS_PHONE_SELECTOR, phoneForPortalField(portal, packet.phone), 'phone');
+    managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_PHONE_SELECTOR : SMARTRECRUITERS_PHONE_SELECTOR, phoneForPortalField(portal, packet.phone), 'phone');
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR : SMARTRECRUITERS_LINKEDIN_SELECTOR, packet.linkedinUrl, 'linkedin');
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR : SMARTRECRUITERS_WEBSITE_SELECTOR, packet.portfolioUrl ?? packet.githubUrl, 'portfolio');
     managedUpload(actions, SMARTRECRUITERS_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
@@ -3330,13 +3347,21 @@ export function buildManagedPortalActions(
   packet: SubmissionPacket,
   submit = false,
 ): ManagedBrowserAction[] {
+  const family = portalFamily(portal);
+  // A packet is untrusted input at this boundary. Account-walled portals have no application form,
+  // so even a reviewed question carrying a malicious selector must not create an action against the
+  // login, CAPTCHA, or privacy gate that happens to be on screen.
+  if (ACCOUNT_WALLED_FAMILIES.has(family)) return [];
   const actions: ManagedBrowserAction[] = [];
   pushFixedFieldActions(actions, portal, packet);
-  const family = portalFamily(portal);
   // These three integrations are structurally fixed-field-only. SuccessFactors has no reachable
   // form at all, while Zoho Recruit and Bullhorn have only the exact identity and resume controls
   // mapped above. A stale or malicious reviewed-question packet must never widen that surface.
   if (family === 'sap_successfactors') return actions;
+  // SmartRecruiters capability also ends after the exact captured first-page controls. Returning
+  // here is stronger than filtering legal-looking questions: no packet selector or input type can
+  // widen the adapter into later tenant-specific steps.
+  if (family === 'smartrecruiters') return actions;
   const mayReplayReviewedQuestions = family !== 'zoho_recruit' && family !== 'bullhorn';
   if (family === 'greenhouse') {
     pushGreenhouseAkunaSafeTextActions(actions, packet);
@@ -3558,7 +3583,9 @@ const HOSTS: Record<PortalFamily, RegExp> = {
   greenhouse: /(^|\.)greenhouse\.io$/i,
   lever: /(^|\.)lever\.co$/i,
   ashby: /(^|\.)ashbyhq\.com$/i,
-  smartrecruiters: /(^|\.)smartrecruiters\.com$/i,
+  // The public posting and one-click form both live on this exact host. API, vendor marketing,
+  // authentication, and customer product hosts must never inherit application capability.
+  smartrecruiters: /^jobs\.smartrecruiters\.com$/i,
   // apply.* only. A bare workable.com match also claimed www.workable.com, which is the vendor's
   // marketing site, so a mistyped portal_url became a "supported portal" and got a fill run against
   // a page with no application on it.
@@ -3585,9 +3612,9 @@ const HOSTS: Record<PortalFamily, RegExp> = {
   bamboohr: /(^|\.)bamboohr\.com$/i,
   // jobs.* only. The bare jobvite.com is the vendor's marketing site.
   jobvite: /^jobs\.jobvite\.com$/i,
-  // Tenant subdomains (careers-uci, jobs-express). www.icims.com and community.icims.com are the
-  // vendor's own site and its documentation; the /jobs/ path check excludes both.
-  icims: /(^|\.)icims\.com$/i,
+  // One tenant label only. Excludes vendor marketing, community, login, and API hosts before the
+  // path rule is even considered. Real tenants include jobs-express and externalhourly-omnihotels.
+  icims: /^(?!(?:www|community|login|api)\.)[a-z0-9-]+\.icims\.com$/i,
   // The widest host space of any portal here BY FAR - oraclecloud.com hosts every Oracle Cloud
   // application there is, not just recruiting. The path check is doing the real work, and this entry
   // would be actively dangerous without it.
@@ -3621,6 +3648,9 @@ const HOSTS: Record<PortalFamily, RegExp> = {
 // A family absent from this map is matched on host alone, which is the old behaviour for the
 // portals that were already here.
 const APPLY_PATHS: Partial<Record<PortalFamily, RegExp>> = {
+  // Either a public posting or the separate one-click form. No API, company-listing, or account
+  // route on the same host is allowed through.
+  smartrecruiters: /^\/(?:[a-z0-9._-]+\/\d{6,}(?:-[^/]+)?|oneclick-ui\/company\/[a-z0-9._-]+\/publication\/[0-9a-f-]{36})\/?$/i,
   // access.paylocity.com is an employee login on the same host space. Litos filling an identity into
   // a credential form is not a thing that should be reachable from a bad URL.
   paylocity: /^\/recruiting\/jobs\/(apply|details)\//i,
@@ -3629,8 +3659,8 @@ const APPLY_PATHS: Partial<Record<PortalFamily, RegExp>> = {
   // Numeric job id. Excludes www.bamboohr.com/careers/application (their own Greenhouse-backed
   // careers page) and the /careers/{department}-team marketing routes, without an ad-hoc host rule.
   bamboohr: /^\/careers\/\d+/i,
-  jobvite: /^\/[^/]+\/job\//i,
-  icims: /^\/jobs\//i,
+  jobvite: /^\/[a-z0-9._-]+\/job\/[a-z0-9]+(?:\/apply)?\/?$/i,
+  icims: /^\/jobs\/\d+\/[a-z0-9%._~-]+\/(?:job|login)\/?$/i,
   // The one that matters most. Without it this family would claim every Oracle Cloud application
   // under the sun, including ones that are somebody's payroll or ERP login.
   oraclecloud: /^\/hcmUI\/CandidateExperience\//i,
@@ -3644,6 +3674,11 @@ const APPLY_PATHS: Partial<Record<PortalFamily, RegExp>> = {
   bullhorn: /^\/wp-content\/plugins\/bullhorn-oscp\/?$/i,
   sap_successfactors: /^\/(?:sfcareer\/jobreqcareer|career|portalcareer)\/?$/i,
 };
+
+function isSmartRecruitersOneClickUrl(url: URL): boolean {
+  return url.hostname.toLowerCase() === 'jobs.smartrecruiters.com'
+    && /^\/oneclick-ui\/company\/[a-z0-9._-]+\/publication\/[0-9a-f-]{36}\/?$/i.test(url.pathname);
+}
 
 // Comeet's public .com job page is only a wrapper. The real .co application URL is usable only
 // with the opaque token issued into its iframe query string. Inspect the raw query so validation
@@ -3797,6 +3832,24 @@ export function canonicalSupportedPortalUrl(rawUrl: string | undefined, atsName?
   if (isPortalSupported(rawUrl)) {
     const portal = detectPortal(rawUrl);
     const family = portalFamily(portal);
+    if (family === 'smartrecruiters' || family === 'jobvite' || family === 'icims') {
+      const url = new URL(portalApplicationUrl(portal, rawUrl));
+      url.hash = '';
+      if (family === 'smartrecruiters' && isSmartRecruitersOneClickUrl(url)) {
+        const company = url.pathname.split('/')[3] ?? '';
+        const dcrCompany = url.searchParams.get('dcr_ci') ?? '';
+        url.search = '';
+        // dcr_ci is the only observed form query parameter and is tenant identity, not tracking.
+        // Keep it only when it agrees with the company already pinned in the path.
+        if (dcrCompany && dcrCompany.toLowerCase() === company.toLowerCase()) {
+          url.searchParams.set('dcr_ci', company);
+        }
+      } else {
+        url.search = '';
+      }
+      url.pathname = url.pathname.replace(/\/$/, '');
+      return url.toString();
+    }
     if (family === 'personio') {
       const url = new URL(portalApplicationUrl(portal, rawUrl));
       const language = url.searchParams.get('language');
@@ -3884,6 +3937,12 @@ export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): s
   if ((family === 'teamtailor' || family === 'pinpoint') && !url.pathname.endsWith('/applications/new')) {
     url.pathname = `${url.pathname.replace(/\/$/, '')}/applications/new`;
   }
+  if (family === 'jobvite' && !url.pathname.endsWith('/apply')) {
+    url.pathname = `${url.pathname.replace(/\/$/, '')}/apply`;
+  }
+  if (family === 'icims' && /\/job\/?$/i.test(url.pathname)) {
+    url.pathname = url.pathname.replace(/\/job\/?$/i, '/login');
+  }
   return url.toString();
 }
 
@@ -3894,7 +3953,8 @@ export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): s
 // Ashby's /application suffix. It has to be found on the live page. Confirmed live, 2026-07-24, on
 // a real Western Digital posting. A no-op on every other portal, and a no-op on SmartRecruiters
 // once already on the form (the selector simply won't match).
-const SMARTRECRUITERS_APPLY_LINK_SELECTOR = 'a[href*="oneclick-ui"], a[href*="/apply"]';
+const SMARTRECRUITERS_APPLY_LINK_SELECTOR =
+  'a[href^="/oneclick-ui/company/"][href*="/publication/"], a[href^="https://jobs.smartrecruiters.com/oneclick-ui/company/"][href*="/publication/"]';
 
 export async function navigateToApplicationForm(page: Page, portal: SupportedPortal): Promise<void> {
   if (portal !== 'smartrecruiters') return;
@@ -3902,7 +3962,11 @@ export async function navigateToApplicationForm(page: Page, portal: SupportedPor
   if ((await link.count()) === 0) return; // already on the form, or the link isn't there this time
   const href = await link.getAttribute('href');
   if (!href) return;
-  await page.goto(new URL(href, page.url()).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  const destination = new URL(href, page.url()).toString();
+  // The selector is narrow, and this validation is the second boundary. It prevents a tenant DOM
+  // change from turning a similarly named link into an arbitrary navigation in a managed run.
+  if (detectPortal(destination) !== 'smartrecruiters' || !isSmartRecruitersOneClickUrl(new URL(destination))) return;
+  await page.goto(destination, { waitUntil: 'domcontentloaded', timeout: 30_000 });
 }
 
 async function fillFirst(page: Page, selectors: string[], value: string | undefined, label: string, out: string[]) {
@@ -4155,10 +4219,16 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_LAST_NAME_SELECTOR : SMARTRECRUITERS_LAST_NAME_SELECTOR], parts.slice(1).join(' '), 'last_name', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_EMAIL_SELECTOR : SMARTRECRUITERS_EMAIL_SELECTOR], packet.email, 'email', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR : SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR], packet.email, 'confirm_email', filledFields);
-    await fillFirst(page, [SMARTRECRUITERS_PHONE_SELECTOR], phoneForPortalField(portal, packet.phone), 'phone', filledFields);
+    await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_PHONE_SELECTOR : SMARTRECRUITERS_PHONE_SELECTOR], phoneForPortalField(portal, packet.phone), 'phone', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR : SMARTRECRUITERS_LINKEDIN_SELECTOR], packet.linkedinUrl, 'linkedin', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR : SMARTRECRUITERS_WEBSITE_SELECTOR], packet.portfolioUrl ?? packet.githubUrl, 'portfolio', filledFields);
     await uploadFirst(page, [SMARTRECRUITERS_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    // The direct Playwright path has its own reviewed-question and required-field writers below.
+    // Stop before both. SmartRecruiters is proven only for these exact first-page selectors, and a
+    // packet selector or generic required field must never expand that trust boundary.
+    const blockers = [portalHandoffReason(portal)!];
+    if (await hasUnresolvedCaptcha(page)) blockers.push(CAPTCHA_BLOCKER);
+    return { filledFields, blockers };
   } else if (family === 'workable') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, ['input[name="firstname"]'], parts[0], 'first_name', filledFields);
