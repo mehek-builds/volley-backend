@@ -81,6 +81,15 @@ export type ApplicationProfileLike = StoredSalaryProfile & {
   advanced_study_plan?: 'no' | 'considering' | 'committed';
   attest_truthful_information?: boolean;
   accept_privacy_notices?: boolean;
+
+  /* Legacy location preferences. These are deliberately not sufficient authority for answering an
+   * employer commitment. The stored model has no cadence, duration, office, employer or posting
+   * scope, so even `anywhere` cannot truthfully answer "five days a week for twelve weeks". They
+   * remain in the read shape for compatibility, but the resolver holds every commitment until a
+   * future exact, scoped record contains both location and cadence. */
+  onsite_commitment?: 'anywhere' | 'listed_locations' | 'no';
+  onsite_locations?: string[];
+  relocation_willingness?: 'yes' | 'no';
 };
 
 const NEVER_FILL_PATTERNS = [
@@ -104,16 +113,84 @@ const SPONSORSHIP_WORK_AUTHORIZATION_SUPPORT_QUESTION =
   /\b(?:do|will|would|can|could)?\s*(?:you\s+)?(?:now\s+or\s+in\s+the\s+future\s+)?(?:requir\w*|need\w*)\b[^?]{0,80}\b(?:sponsor\w*|visa)\b[^?]{0,50}\bwork\s+authori[sz]ation\b/i;
 const NON_US_WORK_SCOPE =
   /\b(canada|canadian|united kingdom|uk|britain|british|england|european union|eu|australia|australian|india|indian|united arab emirates|uae|dubai|singapore|germany|france|ireland|netherlands|hungary|hungarian|japan|korea|china)\b/i;
+const US_WORK_SCOPE = /\b(?:united states|usa|america(?:n)?)\b|\bu\.s\.(?=\s|$|[?,;:)])/i;
+/* THE COUNTRY ABBREVIATION, SPELLED THE WAY IT ACTUALLY ARRIVES.
+ *
+ * This pattern is case-SENSITIVE on purpose: "us" is also the commonest pronoun on a job form
+ * ("how did you hear about us?", "tell us about a project", "why are you interested in us?"), and
+ * reading one of those as a country would put a US work-authorization answer on a form that never
+ * mentioned the United States. The capital letters were the whole distinction.
+ *
+ * MEASURED, on 2026-08-09, against every question label Litos has ever stored: 504 distinct
+ * labels, 491 of them entirely lowercase, and this pattern matches ZERO of them. It cannot match
+ * one. The extension lowercases every label it captures before it is sent
+ * (student-outreach-extension/src/lib/adapters/generic.ts: `clean(parts.join(' ')).toLowerCase()`
+ * on every label path), so the resolver is never handed a capital letter to distinguish on. The
+ * guard exists, it is tested, and the tests pass only because they are written with the employer's
+ * original casing - which is the one input the pipeline never produces.
+ *
+ * The consequence is not theoretical. "are you legally authorized to work in the united states?"
+ * is answered from work_authorized twelve times over in the corpus; "are you legally authorized to
+ * work in the us?" - the SAME question, Roblox's wording - is refused, and it was one of the two
+ * stops on the 2026-08-09 Roblox run. Refusing one spelling of the United States while answering
+ * the other is not a safety property, it is a dead regex.
+ *
+ * So the case-folded arm below is added rather than the flag being flipped, because the pronoun
+ * problem is real and the two arms need different shapes to survive it:
+ *   - the preposition arm REQUIRES the article. "in the us" cannot be a pronoun; "in us" can
+ *     ("why are you interested in us?"), which is why the case-folded arm does not accept it.
+ *   - the noun arm requires an immigration noun immediately after. "us work authorization" is the
+ *     country; "tell us whether ..." is not, and the existing pronoun test covers it.
+ * Measured over the same 504 labels the case-folded arm matches 6, none of them a pronoun, and of
+ * those 6 only 4 are work-eligibility questions at all - the other two are a state-of-residence
+ * select and a veteran-status question, neither of which ever consults a country scope.
+ */
+const US_ABBREVIATION_SCOPE =
+  /\b(?:in|within|throughout|across)\s+(?:the\s+)?US\b|\bUS\s+(?:work|employment|visa|immigration|authori[sz]ation)\b/;
+const US_ABBREVIATION_SCOPE_CASE_FOLDED =
+  /\b(?:in|within|throughout|across)\s+the\s+us\b|\bus\s+(?:work|employment|visa|immigration|authori[sz]ation)\b/i;
 const JOB_LOCATION_SCOPE = /country\s+(?:where|in which)\s+the\s+job\s+is\s+located|country\s+where\s+the\s+role\s+is\s+located|where\s+the\s+job\s+is\s+located/i;
-const JD_US_SCOPE =
-  /\b(united states|u\.s\.|usa|remote\s*\(us\)|san francisco|san mateo|mountain view|california|new york|austin|texas|washington|seattle|boston|massachusetts|chicago|illinois)\b/i;
 export const ROUTINE_APPLICANT_CONSENT_QUESTION =
   /\b(?:consent|agree|acknowledg\w*|approve|confirm)\b[\s\S]{0,180}\b(?:process(?:ing)?|use|using|collect(?:ion)?|retain|store|privacy\s+policy|privacy\s+notice|notice\s+at\s+collection)\b[\s\S]{0,180}\b(?:personal\s+information|personal\s+data|application|applicant|candidacy|candidate|privacy\s+policy|privacy\s+notice|notice\s+at\s+collection|infrastructure|platform|data)\b|\bplease\s+review\s+and\s+acknowledg\w*\b[\s\S]{0,120}\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b|\byes,\s*i\s+consent\b/i;
 
 export const EEO_QUESTION =
   /transgender|\bgender\b|what is your sex\b|race|racial|ethnicit|ethnic\b|hispanic|latino|veteran|military|disab|sexual orientation|lgbtq|lgbtqia|communities|which categories describe you|identify with|current age|what is your age|age range|how old are you|\bage group\b/i;
+/* THE 18+ ATTESTATION, both framings.
+ *
+ * Widened from the four shapes it was written against, measured on every distinct label Litos has
+ * stored: the corpus itself only carries "At the time of application, are you 18+ years of age?",
+ * but "18 years or older" and "18 or older" are the two common phrasings the old pattern missed
+ * entirely - they were not even recognised as age questions, so they would have fallen through to
+ * classifyField instead of stopping.
+ *
+ * Deliberately still 18-specific and still requiring an age word next to the number. The nearest
+ * miss in the corpus is IMC's "applied ... within the last 12-18 months", and none of these
+ * alternatives can reach it.
+ */
 export const AGE_ATTESTATION_QUESTION =
-  /(?:\b18\+\s*(?:years?)?|\beighteen\b|\bat\s+least\s+18\b|\b18\s+years?\s+of\s+age\b|\bage\s+of\s+18\b)/i;
+  /(?:\b18\+\s*(?:years?)?|\beighteen\b|\bat\s+least\s+18\b|\b18\s+years?\s+of\s+age\b|\bage\s+of\s+18\b|\b18\s+(?:years?\s+)?or\s+older\b|\b(?:over|older\s+than)\s+(?:the\s+age\s+of\s+)?18\b|\bunder\s+18\b|\byounger\s+than\s+18\b)/i;
+/* The MINOR framing of that same attestation, which takes the OPPOSITE answer.
+ *
+ * "Yes" to "are you 18 or older" and "Yes" to "are you under 18" are contradictory statements
+ * about the same person. A handler that could not tell them apart would declare a twenty-year-old
+ * a minor on a form she never read, so the inversion is recognised explicitly rather than assumed
+ * away. Note that the old AGE_ATTESTATION_QUESTION already matched "are you under 18 years of
+ * age?" through its `18 years of age` alternative, which is precisely why answering the family
+ * without this split would have been unsafe.
+ */
+const BELOW_AGE_18_QUESTION =
+  /\b(?:under|below|younger\s+than|less\s+than)\s+(?:the\s+age\s+of\s+)?(?:18|eighteen)\b|\bare\s+you\s+a\s+minor\b/i;
+/* THE NUMBER 18 USED FOR SOMETHING THAT IS NOT AN AGE.
+ *
+ * Carried over from the extension's own copy of this rule
+ * (student-outreach-extension/src/lib/adapters/generic.ts, desiredAnswer), where it is not
+ * hypothetical: "do you have 18+ months of experience?" and "at least 18 years of experience"
+ * both satisfy the alternatives above, and Litos answered Yes, claiming experience the student
+ * never stated. That cost nothing while the age family was blanket-refused here. It costs a false
+ * declaration the moment the family becomes answerable, which is what this change does.
+ */
+const AGE_18_USED_AS_A_DURATION =
+  /\bexperience\b|\bmonths?\b|\btenure\b|\bcredits?\b|\bunits?\b|\bhours?\b|\bemployment\b/i;
 export const LEGAL_CONSENT_QUESTION =
   /candidate privacy policy|candidate-privacy-notice|privacy notice|notice at collection|review and acknowledge|information (?:i|you) have provided.*process|by selecting ["']?i agree|demographic data survey|collecting,\s*storing,\s*and processing/i;
 
@@ -129,18 +206,61 @@ export function legalConsentSkipReason(label: string): string {
   return `consent question left for you: "${label.slice(0, 60)}"`;
 }
 
+/* A COMPOUND QUESTION WHOSE OTHER HALF IS NOT ON FILE.
+ *
+ * "Are you currently located in the US, or do you have US work authorization?" is one form field
+ * asking two different things joined by OR, and only the second one has a column behind it. That
+ * asymmetry is the problem: "Yes" happens to be true whenever work_authorized is true, but "No"
+ * would also deny that she lives in the country, which nothing stored records. A rule that is
+ * sound in one direction and a false statement in the other is not a rule, so the question goes
+ * back to her.
+ *
+ * Written against the ONE label in the corpus with this shape, not against "or" in general.
+ * "Are you authorized to work in the US (e.g. you are a citizen, a permanent resident, or hold a
+ * visa)?" is a parenthetical gloss on a single question, not two questions, and must keep
+ * answering; requiring a residence clause immediately before the "or" is what separates them.
+ */
+const RESIDENCE_CLAUSE_JOINED_TO_ELIGIBILITY =
+  /\b(?:currently\s+)?(?:located|residing|living)\s+in\b[^?]{0,60}\bor\b/i;
+
+/* THE ONE STORED PAIR THAT DESCRIBES NOBODY.
+ *
+ * work_authorized and needs_sponsorship are two independent selects in Settings, so nothing stops
+ * a half-finished profile holding a combination no person is in. Three of the four are real:
+ * authorized with no sponsorship needed (citizen or permanent resident), authorized WITH
+ * sponsorship needed later (a student on CPT/OPT, which is this account), and not authorized and
+ * needing sponsorship. The fourth - not authorized AND needing no sponsorship - is not a person.
+ *
+ * It matters because the pair is answered by two DIFFERENT branches below, one column each, and
+ * neither can see what the other is about to say. On that fourth combination the two branches put
+ * "No, I am not allowed to work here" and "No, I need nothing from you" on the same page, and an
+ * employer reading them together concludes something false whichever one they believe. The whole
+ * family is held until the profile says something coherent.
+ */
+function storedEligibilityIsSelfContradictory(ap: ApplicationProfileLike): boolean {
+  return ap.work_authorized === false && ap.needs_sponsorship === false;
+}
+
 function workEligibilityAnswer(
   label: string,
   ap: ApplicationProfileLike,
-  jdText: string | undefined,
 ): { value: string } | { skipReason: string } | null {
+  const explicitlyUsScoped = US_WORK_SCOPE.test(label)
+    || US_ABBREVIATION_SCOPE.test(label)
+    || US_ABBREVIATION_SCOPE_CASE_FOLDED.test(label);
   if (WORK_AUTHORIZATION_DETAIL_QUESTION.test(label)) {
     return { skipReason: workEligibilitySkipReason(label) };
   }
   const asksAuthorization = WORK_AUTHORIZATION_QUESTION.test(label);
   const asksSponsorship = SPONSORSHIP_QUESTION.test(label);
+  if (
+    (asksAuthorization || asksSponsorship)
+    && (storedEligibilityIsSelfContradictory(ap) || RESIDENCE_CLAUSE_JOINED_TO_ELIGIBILITY.test(label))
+  ) {
+    return { skipReason: workEligibilitySkipReason(label) };
+  }
   if (asksAuthorization && asksSponsorship && SPONSORSHIP_WORK_AUTHORIZATION_SUPPORT_QUESTION.test(label)) {
-    if ((NON_US_WORK_SCOPE.test(label) || (JOB_LOCATION_SCOPE.test(label) && !JD_US_SCOPE.test(jdText ?? '')))) {
+    if (!explicitlyUsScoped || NON_US_WORK_SCOPE.test(label) || JOB_LOCATION_SCOPE.test(label)) {
       return { skipReason: workEligibilitySkipReason(label) };
     }
     if (typeof ap.needs_sponsorship === 'boolean') {
@@ -150,7 +270,10 @@ function workEligibilityAnswer(
   }
   if (!asksAuthorization && !asksSponsorship) return null;
   if (asksAuthorization && asksSponsorship) return { skipReason: workEligibilitySkipReason(label) };
-  if ((asksAuthorization || asksSponsorship) && (NON_US_WORK_SCOPE.test(label) || (JOB_LOCATION_SCOPE.test(label) && !JD_US_SCOPE.test(jdText ?? '')))) {
+  // The legacy booleans were collected without a country. They are usable only when the employer's
+  // own question explicitly says United States. A JD mentioning a US office, benefit, customer or
+  // legal notice is not scope evidence, and an unscoped question is not implicitly American.
+  if ((asksAuthorization || asksSponsorship) && (!explicitlyUsScoped || NON_US_WORK_SCOPE.test(label) || JOB_LOCATION_SCOPE.test(label))) {
     return { skipReason: workEligibilitySkipReason(label) };
   }
   if (asksAuthorization && UNRESTRICTED_WORK_AUTHORIZATION_QUESTION.test(label) && ap.needs_sponsorship === true) {
@@ -169,34 +292,15 @@ export function attestationSkipReason(label: string, what: string): string {
   return `${what} left for you to agree to yourself: "${label.slice(0, 60)}"`;
 }
 
-/**
- * Every checkbox-shaped agreement on an employer form, resolved against the two consents the
- * student may grant once in onboarding - and refused by name otherwise.
+/** Every employer agreement is scoped to the exact application and exact text shown there.
  *
- * THE RULE, which the rest of this function is only an implementation of: Litos may affirm exactly
- * two things on somebody's behalf. That the information supplied is truthful, which restates what
- * she already did by approving the packet. And that a candidate privacy notice is accepted, which
- * is the routine condition of applying at all. Both require an explicit stored `true`; neither is
- * ever inferred from the fact that she pressed submit.
- *
- * Everything else is refused, INCLUDING things that sit right next to those two on the same form:
- *   - "I acknowledge that this role is my top preference and I will not be considered for other
- *     tech and/or quant roles at Akuna this season" is a binding exclusivity commitment over the
- *     rest of her recruiting season. It was being auto-answered "Yes".
- *   - "I acknowledge that my resume must be submitted in PDF format" is a process term. Harmless
- *     to agree to and still not ours to agree to; it was also being auto-answered "Yes".
- *   - "Interview Code of Conduct" is acceptance of a behavioural policy.
- * Each of those returns a skipReason naming what is being agreed to, so the student is asked for a
- * tick rather than discovering afterwards that a machine ticked it.
+ * The legacy profile has standing booleans for truthfulness and privacy notices. Neither proves
+ * that the applicant saw this employer's current notice or reviewed this exact packet, so neither
+ * is consulted here. The booleans remain readable for migration compatibility only.
  */
-function applicationConsentAnswer(
-  label: string,
-  ap: ApplicationProfileLike,
-): { value: string } | { skipReason: string } | null {
+function applicationConsentAnswer(label: string): { skipReason: string } | null {
   if (TRUE_COMPLETE_ACCURATE_CERTIFICATION.test(label)) {
-    return ap.attest_truthful_information === true
-      ? { value: 'Yes' }
-      : { skipReason: attestationSkipReason(label, 'certification that your information is true') };
+    return { skipReason: attestationSkipReason(label, 'certification that your information is true') };
   }
   if (TOP_ROLE_PREFERENCE_ACKNOWLEDGEMENT.test(label)) {
     return { skipReason: attestationSkipReason(label, 'commitment about which roles you will be considered for') };
@@ -208,42 +312,26 @@ function applicationConsentAnswer(
     return { skipReason: attestationSkipReason(label, 'agreement to a code of conduct') };
   }
   if (BARE_PRIVACY_ACKNOWLEDGEMENT.test(label)) {
-    return ap.accept_privacy_notices === true
-      ? { value: 'Yes' }
-      : { skipReason: attestationSkipReason(label, 'privacy notice') };
+    return { skipReason: attestationSkipReason(label, 'privacy notice') };
   }
   return null;
 }
 
-/** True when the student granted the standing privacy-notice consent in onboarding. */
-function privacyNoticesAccepted(ap: ApplicationProfileLike): boolean {
-  return ap.accept_privacy_notices === true;
-}
-
-function routineConsentAnswer(
-  label: string,
-  ap: ApplicationProfileLike,
-): { value: string } | { skipReason: string } | null {
-  // Every branch below is an acceptance of a data-processing or privacy term, so every branch now
-  // needs the same stored consent. They used to return "Yes" unconditionally, which is the thing
-  // the rule above forbids: Litos was agreeing on her behalf to notices she had never seen.
-  const consented = privacyNoticesAccepted(ap);
-  const gate = (value: string): { value: string } | { skipReason: string } =>
-    (consented ? { value } : { skipReason: attestationSkipReason(label, 'privacy notice') });
-
-  if (/^\s*processing\s+of\s+personal\s+data\s*$/i.test(label)) return gate('Acknowledge/Confirm');
+function routineConsentAnswer(label: string): { skipReason: string } | null {
+  const hold = (): { skipReason: string } => ({ skipReason: attestationSkipReason(label, 'privacy notice') });
+  if (/^\s*processing\s+of\s+personal\s+data\s*$/i.test(label)) return hold();
   if (/demographic data survey/i.test(label)) return null;
-  if (/^\s*yes,\s*i\s+consent\s*$/i.test(label)) return gate('Yes, I consent');
+  if (/^\s*yes,\s*i\s+consent\s*$/i.test(label)) return hold();
   if (
     /\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b/i.test(label)
     && /\b(?:agree|consent|acknowledg\w*|processed?|processing)\b/i.test(label)
   ) {
-    return gate('Yes');
+    return hold();
   }
   if (/\bjob application\b/i.test(label) && /\bprocess(?:ed|ing)?\b/i.test(label) && /\b(?:information|data)\b/i.test(label)) {
-    return gate('Yes');
+    return hold();
   }
-  return ROUTINE_APPLICANT_CONSENT_QUESTION.test(label) ? gate('Yes') : null;
+  return ROUTINE_APPLICANT_CONSENT_QUESTION.test(label) ? hold() : null;
 }
 
 /* ---- the self-declarations ----
@@ -451,13 +539,180 @@ function furtherEducationAnswer(
   return { skipReason: `further-education question left for you: "${label.slice(0, 60)}"` };
 }
 
-function routineLocationCommitmentAnswer(label: string): { value: string } | null {
-  return isLocationCommitmentQuestion(label) ? { value: 'Yes' } : null;
+export function onsiteCommitmentSkipReason(label: string): string {
+  return `where you will work from is yours to answer: "${label.slice(0, 60)}"`;
 }
 
+/** The legacy profile records a broad location preference but no cadence or posting scope.
+ * Consequently every office, onsite, commute and relocation commitment is held. A future resolver
+ * may relay an answer only from an exact record that matches the employer, location, cadence and
+ * duration in this label. */
+function onsiteCommitmentAnswer(label: string): { skipReason: string } {
+  return { skipReason: onsiteCommitmentSkipReason(label) };
+}
+
+function routineLocationCommitmentAnswer(
+  label: string,
+): { value: string } | { skipReason: string } | null {
+  return isLocationCommitmentQuestion(label) ? onsiteCommitmentAnswer(label) : null;
+}
+
+/* AGE_ATTESTATION_QUESTION is no longer in this list, and that is the whole of the second half of
+ * this change. It sat here beside SSN and CAPTCHA, so "are you 18+ years of age?" was refused
+ * before anything looked at whether the answer was known - and it is knowable. An age computed
+ * from a stored date of birth is a FACT, not a self-declaration: the applicant told Litos when she
+ * was born, and arithmetic on that is not Litos making a claim on her behalf.
+ *
+ * The refusal did not disappear, it moved and got a condition. ageAttestationAnswer runs at the
+ * top of resolveKnownAnswer and returns a skipReason whenever date_of_birth is absent or
+ * unreadable, so a profile with nothing stored stops exactly as it does today. It stays in
+ * selfDeclaration.ts's list too, which is the belt to this brace: no drafter may ever invent it.
+ */
 export function isRefusedQuestion(label: string): boolean {
   const l = label ?? '';
-  return NEVER_FILL_PATTERNS.some((re) => re.test(l)) || AGE_ATTESTATION_QUESTION.test(l) || WORK_ELIGIBILITY_QUESTION.test(l) || EEO_QUESTION.test(l);
+  return NEVER_FILL_PATTERNS.some((re) => re.test(l)) || WORK_ELIGIBILITY_QUESTION.test(l) || EEO_QUESTION.test(l);
+}
+
+/**
+ * The applicant's whole legal name, composed rather than looked up.
+ *
+ * There is no legal-surname column. There is a stored legal FIRST name and a parsed full name, so
+ * the honest composition is the stored legal first name followed by everything after the first
+ * token of the parsed name, and the parsed name unchanged when no legal first name was ever given.
+ *
+ * The stored legal first name WINS, always. That is the distinction the legal-first-name arm below
+ * exists to protect and it survives here: the person this question is asked of is the one whose
+ * legal first name is not the name on her resume, and composing "Legal Name" from the resume's
+ * first token would hand the employer the exact name she came here to correct. Nothing is invented
+ * either - with an empty profile this returns undefined and the question is left alone.
+ */
+function composedLegalName(ap: ApplicationProfileLike): string | undefined {
+  const fullName = ap.full_name?.trim().replace(/\s+/g, ' ');
+  const legalFirst = ap.legal_first_name?.trim().replace(/\s+/g, ' ');
+  if (!legalFirst) return fullName || undefined;
+  if (!fullName) return legalFirst;
+  const surname = fullName.split(' ').slice(1);
+  return surname.length ? [legalFirst, ...surname].join(' ') : legalFirst;
+}
+
+export function ageAttestationSkipReason(label: string): string {
+  // Worded to carry the phrase "sensitive question", which is what attentionCategoriesForReasons
+  // matches to file this under sensitive_attestation. Avoids the word "file" on purpose: that
+  // function's required_document arm matches a bare /file/, and "not on file" would have routed an
+  // age question to the missing-transcript bucket.
+  return `sensitive question left for you, because your date of birth is not saved: "${label.slice(0, 60)}"`;
+}
+
+/* THE DATE OF BIRTH IS PARSED BY HAND, and that is deliberate rather than fussy.
+ *
+ * `new Date(raw)` was here, and it is lenient in exactly the two directions that end in a false
+ * legal declaration:
+ *   - it ROLLS OVER an impossible calendar day. `new Date('2008-02-30T00:00:00Z')` is 1 March 2008,
+ *     not an error, so a corrupt day silently becomes a real date and then an age.
+ *   - it INVENTS a date out of prose. `new Date('sometime in 2005')` is 1 January 2005, which
+ *     becomes an age, which becomes a Yes on an attestation the applicant never made.
+ *
+ * So only the two shapes Litos actually STORES are matched, and everything else is refused:
+ *   - strict ISO `YYYY-MM-DD`, which is what the extension's setup screen writes and what the one
+ *     stored date of birth in production is (measured 2026-08-09: 10 plaintext bytes).
+ *   - the day / month-name / year text /profile/harvest can lift off an employer's form
+ *     ("25 Sep 2005"), and its month-first mirror ("Sep 25, 2005").
+ *
+ * ALL-NUMERIC AMBIGUOUS FORMS ARE REFUSED ON PURPOSE. "09/08/2005" is 8 September to half the
+ * world and 9 August to the other half, and there is nothing in the string that says which. A
+ * refusal costs one question; a guess puts a false date of birth on an application.
+ *
+ * Kept in step with the extension's copy, storedBirthDate in
+ * student-outreach-extension/src/lib/adapters/generic.ts. Two readers of one rule that disagree is
+ * the defect this pair keeps re-learning.
+ */
+const MONTH_NAMES = [
+  'january', 'february', 'march', 'april', 'may', 'june',
+  'july', 'august', 'september', 'october', 'november', 'december',
+];
+
+function monthNumberFromName(name: string): number | undefined {
+  const n = name.toLowerCase();
+  const index = MONTH_NAMES.findIndex((month) => month === n || (n.length >= 3 && month.startsWith(n)));
+  return index === -1 ? undefined : index + 1;
+}
+
+/** The date that was WRITTEN, or undefined when the calendar has no such day (30 February). */
+function validCalendarDate(
+  year: number,
+  month: number,
+  day: number,
+): { year: number; month: number; day: number } | undefined {
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return undefined;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+    ? { year, month, day }
+    : undefined;
+}
+
+function storedBirthDate(value: string | undefined): { year: number; month: number; day: number } | undefined {
+  const raw = value?.trim();
+  if (!raw) return undefined;
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (iso) return validCalendarDate(Number(iso[1]), Number(iso[2]), Number(iso[3]));
+  // "25 Sep 2005", "25 September, 2005"
+  const dayFirst = /^(\d{1,2})(?:st|nd|rd|th)?[\s.,-]+([a-z]{3,9})\.?[\s.,-]+(\d{4})$/i.exec(raw);
+  if (dayFirst) {
+    const month = monthNumberFromName(dayFirst[2]);
+    return month === undefined ? undefined : validCalendarDate(Number(dayFirst[3]), month, Number(dayFirst[1]));
+  }
+  // "Sep 25, 2005", "September 25 2005"
+  const monthFirst = /^([a-z]{3,9})\.?[\s.,-]+(\d{1,2})(?:st|nd|rd|th)?[\s.,-]+(\d{4})$/i.exec(raw);
+  if (monthFirst) {
+    const month = monthNumberFromName(monthFirst[1]);
+    return month === undefined ? undefined : validCalendarDate(Number(monthFirst[3]), month, Number(monthFirst[2]));
+  }
+  return undefined;
+}
+
+/**
+ * Completed years between a stored date of birth and `now`, or undefined when the stored text is
+ * not a date this can read.
+ *
+ * Only ever called with application_profile.date_of_birth. Nothing else in the profile is an
+ * acceptable input: a graduation year, a resume, or a document in the vault would all give a
+ * number, and every one of them would be a guess presented to an employer as an attestation.
+ * An unparseable string is treated exactly like an absent one, and the caller turns both into the
+ * same stated refusal.
+ */
+function ageInCompletedYears(dateOfBirth: string | undefined, now: Date): number | undefined {
+  const dob = storedBirthDate(dateOfBirth);
+  if (!dob || Number.isNaN(now.getTime())) return undefined;
+  let age = now.getUTCFullYear() - dob.year;
+  const monthDelta = now.getUTCMonth() + 1 - dob.month;
+  if (monthDelta < 0 || (monthDelta === 0 && now.getUTCDate() < dob.day)) age -= 1;
+  // A birth date in the future, or before anyone alive, is corrupt rather than informative.
+  return age < 0 || age > 130 ? undefined : age;
+}
+
+/**
+ * "At the time of application, are you 18+ years of age?" answered from the stored date of birth.
+ *
+ * Returns null for every label that is not an age attestation, a skipReason when nothing is
+ * stored, and Yes/No otherwise - with the answer inverted for the "are you under 18" framing.
+ */
+function ageAttestationAnswer(
+  label: string,
+  ap: ApplicationProfileLike,
+  now: Date = new Date(),
+): { value: string } | { skipReason: string } | null {
+  if (!AGE_ATTESTATION_QUESTION.test(label)) return null;
+  // "18 months of experience" is not an age. Falls through to the rules that were handling it
+  // before, which is nothing plus selfDeclaration's refusal, exactly as today.
+  if (AGE_18_USED_AS_A_DURATION.test(label)) return null;
+  // "What is your age?", "age range", "how old are you" are EEO self-identification, answered by
+  // the EEO branch from the applicant's own preference. A label that asks for the age ITSELF is
+  // not an attestation, even when it happens to mention 18.
+  if (EEO_QUESTION.test(label)) return null;
+  const age = ageInCompletedYears(ap.date_of_birth, now);
+  if (age === undefined) return { skipReason: ageAttestationSkipReason(label) };
+  const isAdult = age >= 18;
+  return { value: (BELOW_AGE_18_QUESTION.test(label) ? !isAdult : isAdult) ? 'Yes' : 'No' };
 }
 
 function comparableAnswer(value: string): string {
@@ -490,11 +745,36 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
   questions: readonly T[],
   ap: ApplicationProfileLike,
   jdText: string | undefined,
+  questionsReviewedAt?: string,
 ): T[] {
   return questions.map((question) => {
     const label = normalizeReviewQuestionLabel(question.question);
     const known = label ? resolveKnownAnswer(label, 'text', ap, jdText) : null;
-    return known && 'value' in known ? { ...question, answer: known.value } : question;
+    const withProvenance = question as T & {
+      answer_source?: unknown;
+      answer_reviewed_at?: unknown;
+    };
+    const applicantReviewedCurrentAnswer = Boolean(
+      question.answer.trim()
+      && withProvenance.answer_source === 'applicant_review'
+      && typeof withProvenance.answer_reviewed_at === 'string'
+      && withProvenance.answer_reviewed_at === questionsReviewedAt,
+    );
+    const withoutProvenance = (): T => {
+      const {
+        answer_source: _answerSource,
+        answer_reviewed_at: _answerReviewedAt,
+        ...rest
+      } = withProvenance;
+      return rest as T;
+    };
+    if (known && 'value' in known) return { ...withoutProvenance(), answer: known.value };
+    const currentResolverRefuses = Boolean(known && 'skipReason' in known)
+      || Boolean(label && isRefusedQuestion(label));
+    if (currentResolverRefuses && !applicantReviewedCurrentAnswer) {
+      return { ...withoutProvenance(), answer: '' };
+    }
+    return question;
   });
 }
 
@@ -509,7 +789,7 @@ const LOCATION_COMMITMENT_STEM = /\b(?:are|can|could|do|did|will|would|should|ma
 // that same packet came from. Four distinct postings ask this in the owner's history (Anduril,
 // Postman, Fluency, Brex), all of them asking the same routine question the office wording already
 // answers Yes to.
-const LOCATION_COMMITMENT_VOCAB = /\boffice\b|in[\s-]?office|on[\s-]?site|\bonsite\b|in[\s-]?person|\bhybrid\b|relocat|commut/i;
+const LOCATION_COMMITMENT_VOCAB = /\boffice\b|in[\s-]?office|on[\s-]?site|\bonsite\b|in[\s-]?person|\bhybrid\b|\bremote(?:ly|[\s-]?only)?\b|work\s+from\s+home|relocat|commut/i;
 const STORED_ONSITE_COMMITMENT_QUESTION =
   /\b(?:able|willing|available|prepared|can|could|would)\b[^?]{0,80}\b(?:office|in[\s-]?office|on[\s-]?site|onsite|in[\s-]?person|hybrid)\b|\b(?:office|in[\s-]?office|on[\s-]?site|onsite|in[\s-]?person|hybrid)\b[^?]{0,80}\b(?:able|willing|available|prepared|can|could|would)\b/i;
 const ONSITE_DAY_COUNT_QUESTION = /\b(?:three|four|five|3|4|5)\s+days?\b/i;
@@ -517,19 +797,16 @@ const LOCATION_PREFERENCE_QUESTION =
   /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\blocation\b[^?]{0,120}\b(?:single|top|preferred|preference|most interested)\b/i;
 const LOCATION_CHOICE_QUESTION =
   /\b(?:choose|select|pick)\b[^?]{0,120}\b(?:single|top|preferred|preference|most interested|location|office)\b|\b(?:single|top|most interested)\b[^?]{0,120}\blocation\b|\blocation\b[^?]{0,120}\b(?:single|top|most interested)\b/i;
-const SAFE_US_LOCATION_LINE =
-  /^(?:remote(?:,\s*)?(?:us|u\.s\.|usa|united states)?|[A-Z][A-Za-z .'-]+,\s*(?:[A-Z]{2}|Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New Hampshire|New Jersey|New Mexico|New York|North Carolina|North Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode Island|South Carolina|South Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West Virginia|Wisconsin|Wyoming)(?:,\s*(?:United States|USA|US|U\.S\.))?)$/i;
 
 export function isLocationCommitmentQuestion(label: string): boolean {
   return LOCATION_COMMITMENT_STEM.test(label) && LOCATION_COMMITMENT_VOCAB.test(label);
 }
 
-function locationPreferenceAnswer(label: string, jdText: string | undefined): { value: string } | null {
-  if (!LOCATION_PREFERENCE_QUESTION.test(label)) return null;
-  for (const line of (jdText ?? '').split(/\n+/).map((value) => value.trim()).filter(Boolean).reverse()) {
-    if (line.length <= 120 && SAFE_US_LOCATION_LINE.test(line)) return { value: line };
-  }
-  return null;
+/** A list of acceptable metros is not an answer to this employer's ranking or preference question.
+ * The offered options, ordering and role context are posting-specific, so this always holds. */
+function locationPreferenceAnswer(label: string): { skipReason: string } | null {
+  if (!LOCATION_PREFERENCE_QUESTION.test(label) && !isLocationChoiceQuestion(label)) return null;
+  return { skipReason: `location choice left for you: "${label.slice(0, 60)}"` };
 }
 
 export function isLocationChoiceQuestion(label: string): boolean {
@@ -582,7 +859,7 @@ const STEM_MAJOR_QUESTION =
 export const AI_INTERVIEW_POLICY_QUESTION =
   /\bAI\s+Policy\s+for\s+Interviewers\b|\bdo\s+not\s+use\s+any\s+AI\s+tools\b[^?]{0,160}\binterview\b/i;
 const INTERNSHIP_AVAILABILITY_QUESTION =
-  /\b(?:are|will)\s+you\s+available\b[^?]{0,160}\b(?:internship|full-time|40\s*hours|weeks?)\b|\b(?:internship|full-time|40\s*hours|weeks?)\b[^?]{0,160}\b(?:are|will)\s+you\s+available\b/i;
+  /\b(?:are|will)\s+you\s+available\b[^?]{0,160}\b(?:internship|full-time|40\s*hours|weeks?)\b|\b(?:internship|full-time|40\s*hours|weeks?)\b[^?]{0,160}\b(?:are|will)\s+you\s+available\b|\b(?:can|could|will|would)\s+you\s+commit\b[^?]{0,160}\b(?:hours?|weeks?|months?|schedule|season)\b/i;
 const INTERNSHIP_SEASON_QUESTION =
   /\bconfirm\b[^?]{0,100}\bseason\b[^?]{0,100}\bapplying\b|\bseason\b[^?]{0,100}\bapplying\b/i;
 const INTERNSHIP_JOIN_QUESTION =
@@ -602,12 +879,24 @@ const SAN_FRANCISCO_RESIDENCE_QUESTION = /\bcurrently\s+reside\b[^?]{0,80}\bsan\
 const CONFIRMED_PLANS_CITY_RE = /\b(?:currently\s+residing|confirmed\s+plans)\b[^?]{0,80}\b(?:greater\s+)?([a-z][a-z .'-]+?)\s+area\b|\bconfirmed\s+plans\b[^?]{0,80}\bin\s+([a-z][a-z .'-]+)\b/i;
 const LEGAL_FIRST_NAME_QUESTION =
   /\blegal\s+first\s+name\b|\bfirst\s+name\b[^?]{0,120}\blegal\b/i;
+/* Roblox's "Legal Name", and the Workday shape "Full Legal Name" - the WHOLE name in one control.
+ *
+ * LEGAL_FIRST_NAME_QUESTION cannot match either, correctly: "legal first name" and "legal name"
+ * are different questions and answering one with the other's answer is wrong in both directions.
+ * So the label matched nothing at all, and a live Roblox run stopped on `"Legal Name" is required
+ * and is still empty` with the name sitting in the profile the whole time.
+ *
+ * Kept deliberately narrow: it requires "legal" IMMEDIATELY followed by "name". Measured against
+ * every distinct stored label, the only two it reaches are "legal name" and "full legal name",
+ * and none of the six legal-first-name or legal-last-name labels satisfies it. */
+const LEGAL_FULL_NAME_QUESTION =
+  /\b(?:full\s+)?legal\s+name\b|\blegal\s+full\s+name\b/i;
 export const TOP_ROLE_PREFERENCE_ACKNOWLEDGEMENT =
   /\banswering\s+[“"]?yes[”"]?\s+below\b[^?]{0,220}\btop\s+preference\b|\btop\s+preference\b[^?]{0,220}\banswering\s+[“"]?yes[”"]?\s+below\b/i;
 export const RESUME_PDF_ACKNOWLEDGEMENT =
   /\bresume\b[^?]{0,120}\bPDF\s+format\b|\bPDF\s+format\b[^?]{0,120}\bresume\b/i;
 export const TRUE_COMPLETE_ACCURATE_CERTIFICATION =
-  /\bcertify\b[^?]{0,220}\btrue\b[^?]{0,120}\bcomplete\b[^?]{0,120}\baccurate\b/i;
+  /\bcertif(?:y|ication)\b[^?]{0,220}\b(?:information|application)\b[^?]{0,180}\btrue\b[^?]{0,120}\bcomplete\b(?:[^?]{0,120}\b(?:accurate|correct)\b)?|\bcertify\b[^?]{0,220}\btrue\b[^?]{0,120}\bcomplete\b[^?]{0,120}\baccurate\b/i;
 const NY_CA_RESIDENCE_QUESTION =
   /\b(?:live|reside|located)\b[^?]{0,80}\bnew\s+york\b[^?]{0,80}\bcalifornia\b|\bnew\s+york\b[^?]{0,80}\bcalifornia\b[^?]{0,80}\b(?:live|reside|located)\b/i;
 // Politically-exposed-person declarations (Tower asks two). These are regulated legal statements
@@ -842,6 +1131,12 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
   // Same shape of hazard: "personal pronouns" carries no residence, name or degree word that a
   // rule below could latch onto today, and this makes sure none added later can.
   if (PRONOUNS_QUESTION.test(l)) return null;
+  /* Same shape again, and newly load-bearing: the age attestation used to be unreachable here
+   * because isRefusedQuestion above returned early on it. It is answered now, by
+   * ageAttestationAnswer at the top of resolveKnownAnswer, so this function is the only way a
+   * broad rule could still reach the label - and "are you 18+ years of age?" must never be
+   * classified as a date of birth, an availability date or anything else. */
+  if (AGE_ATTESTATION_QUESTION.test(l)) return null;
   if (type === 'tel') return 'phone';
 
   const locationCommitment = isLocationCommitmentQuestion(l);
@@ -1102,34 +1397,17 @@ function postingSeasonAnswer(label: string, jdText: string | undefined): { value
   return { value: `${season} ${match[2]}` };
 }
 
-function internshipJoinAnswer(label: string, ap: ApplicationProfileLike, jdText: string | undefined): { value: string } | { skipReason: string } | null {
+function internshipJoinAnswer(label: string): { skipReason: string } | null {
   if (!INTERNSHIP_JOIN_QUESTION.test(label)) return null;
-  const storedDate = ap.availability_date?.trim();
-  if (storedDate) return { value: storedDate };
-  const season = (jdText ?? '').match(/\b(spring|summer|fall|winter)\s+((?:20)\d{2})\b/i);
-  if (season) {
-    const value = season[1].toLowerCase().replace(/^\w/u, (letter) => letter.toUpperCase());
-    return { value: `${value} ${season[2]}` };
-  }
+  // availability_date has no expiry or posting scope. Even an exact stored date may have described
+  // a past recruiting cycle, so it is reference data rather than authority for a new commitment.
   return { skipReason: `internship availability question left for you: "${label.slice(0, 60)}"` };
 }
 
-function internshipAvailabilityAnswer(label: string, ap: ApplicationProfileLike): { value: string } | { skipReason: string } {
-  const stored = [ap.availability_term, ap.availability_date].filter(Boolean).join(' ').trim();
-  if (!stored) return { skipReason: `internship availability question left for you: "${label.slice(0, 60)}"` };
-  const asksFullTime = /\bfull-time\b|\b40\s*hours\b/i.test(label);
-  const asksTwelveWeeks = /\b12\s*weeks?\b|\btwelve\s+weeks?\b/i.test(label);
-  const asksDateWindow = /\b(?:between|from)\b[^?]{0,120}\b(?:20\d{2}|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i.test(label);
-  const confirmsFullTime = !asksFullTime || /\bfull-time\b|\b40\s*hours\b/i.test(stored);
-  const confirmsTwelveWeeks = !asksTwelveWeeks || /\b12\s*weeks?\b|\btwelve\s+weeks?\b|\b3\s*months?\b|\bthree\s+months?\b/i.test(stored);
-  const confirmsDateWindow = !asksDateWindow || labelDateTokens(label).every((token) => stored.toLowerCase().includes(token));
-  if (confirmsFullTime && confirmsTwelveWeeks && confirmsDateWindow) return { value: 'Yes' };
+function internshipAvailabilityAnswer(label: string): { skipReason: string } {
+  // The legacy term is free text without a verified effective window, expiry, employer, season or
+  // cadence scope. Matching words cannot prove the commitment is still current for this posting.
   return { skipReason: `internship availability question left for you: "${label.slice(0, 60)}"` };
-}
-
-function labelDateTokens(label: string): string[] {
-  const tokens = label.toLowerCase().match(/\b(?:20\d{2}|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/g) ?? [];
-  return [...new Set(tokens)];
 }
 
 function majorAnswer(ap: ApplicationProfileLike): string | null {
@@ -1149,15 +1427,18 @@ function majorAnswer(ap: ApplicationProfileLike): string | null {
   return cleaned || degree;
 }
 
-function softwareEngineeringAreaAnswer(label: string, jdText: string | undefined): { value: string } | { skipReason: string } | null {
+/**
+ * "1st choice: area of interest in software engineering" - refused, not computed.
+ *
+ * WHAT WAS HERE. Three keyword counts over the EMPLOYER'S OWN job description, and whichever
+ * vocabulary the employer used most became her declared area of interest. That is not a reading of
+ * a fact about her; it is a machine telling the employer what the employer wants to hear, and it
+ * ranked "2nd choice" identically to "1st choice" because the JD is the same text both times.
+ * Her area of interest is a self-assessment, in the same family as the skill self-ratings
+ * selfDeclaration.ts refuses, and nothing on file records it.
+ */
+function softwareEngineeringAreaAnswer(label: string): { skipReason: string } | null {
   if (!SOFTWARE_ENGINEERING_AREA_QUESTION.test(label)) return null;
-  const text = jdText ?? '';
-  const backendSignals = (text.match(/\b(?:backend|back-end|systems?|infrastructure|platform|network|distributed|api|apis|service|services|security|rust|go|c\+\+|python)\b/gi) ?? []).length;
-  const frontendSignals = (text.match(/\b(?:frontend|front-end|ui|ux|react|web\s+app|interface|client-side)\b/gi) ?? []).length;
-  const fullStackSignals = (text.match(/\b(?:full-stack|fullstack|end-to-end)\b/gi) ?? []).length;
-  if (backendSignals > Math.max(frontendSignals, fullStackSignals)) return { value: 'Backend/Systems' };
-  if (fullStackSignals > Math.max(backendSignals, frontendSignals)) return { value: 'Full-stack' };
-  if (frontendSignals > Math.max(backendSignals, fullStackSignals)) return { value: 'Frontend' };
   return { skipReason: `area of interest left for you: "${label.slice(0, 60)}"` };
 }
 
@@ -1208,9 +1489,19 @@ function priorEmployerAnswer(label: string, ap: ApplicationProfileLike): { value
   return { value: knownMatch ? 'Yes' : 'No' };
 }
 
-function locationStatusAnswer(label: string, ap: ApplicationProfileLike): { value: string } | null {
-  if (US_STATE_RESIDENCE_SELECT_QUESTION.test(label) && !/\b(?:united states|usa|us|u\.s\.)\b/i.test(ap.address_country ?? '')) {
-    return { value: 'Not in the US' };
+/* Where she LIVES, which is a stored fact, kept strictly apart from where she will WORK, which is
+ * onsiteCommitmentAnswer's business. Every branch here now requires the address column it reasons
+ * from: an empty column used to produce "Not in the US" and "No", which are answers, not silence.
+ */
+function locationStatusAnswer(
+  label: string,
+  ap: ApplicationProfileLike,
+): { value: string } | { skipReason: string } | null {
+  if (US_STATE_RESIDENCE_SELECT_QUESTION.test(label)) {
+    const country = ap.address_country?.trim();
+    if (!country) return { skipReason: `state of residence left for you: "${label.slice(0, 60)}"` };
+    if (!/\b(?:united states|usa|us|u\.s\.)\b/i.test(country)) return { value: 'Not in the US' };
+    return null;
   }
   if (NY_CA_RESIDENCE_QUESTION.test(label)) {
     const state = `${ap.address_state ?? ''} ${ap.address_city ?? ''}`.trim();
@@ -1218,7 +1509,11 @@ function locationStatusAnswer(label: string, ap: ApplicationProfileLike): { valu
     return /\b(?:ny|new\s+york|ca|california)\b/i.test(state) ? { value: 'Yes' } : { value: 'No' };
   }
   if (SAN_FRANCISCO_RESIDENCE_QUESTION.test(label)) {
-    return { value: /\bsan\s+francisco\b/i.test(ap.address_city ?? '') ? 'Yes' : 'No' };
+    // Was an unconditional Yes/No off `ap.address_city ?? ''`, so a profile with no city on file
+    // declared that she does not live in San Francisco. Absence of a fact is not the fact's negation.
+    const city = ap.address_city?.trim();
+    if (!city) return { skipReason: `city of residence left for you: "${label.slice(0, 60)}"` };
+    return { value: /\bsan\s+francisco\b/i.test(city) ? 'Yes' : 'No' };
   }
   const cityMatch = label.match(CONFIRMED_PLANS_CITY_RE);
   const city = cityMatch?.[1] ?? cityMatch?.[2];
@@ -1226,7 +1521,9 @@ function locationStatusAnswer(label: string, ap: ApplicationProfileLike): { valu
   if (ap.address_city && new RegExp(`\\b${city.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(ap.address_city)) {
     return { value: 'Yes' };
   }
-  return { value: 'Yes' };
+  // A mismatch proves only that the residence half is false. It says nothing about future plans,
+  // so a mixed "reside OR confirmed plans" question must remain unanswered.
+  return onsiteCommitmentAnswer(label);
 }
 
 function degreeAnswer(label: string, inputType: string | undefined, degree: string | undefined): string | null {
@@ -1740,6 +2037,13 @@ export function resolveKnownAnswer(
   const pronouns = pronounsAnswer(label, ap);
   if (pronouns) return pronouns;
 
+  /* Up here with the self-declarations, and for the same reason they are: this label must not
+   * reach a broad rule. It is the one member of this group that is answered from ARITHMETIC on a
+   * stored fact rather than from a stored answer, and it refuses in exactly the same way when the
+   * fact is missing. */
+  const ageAttestation = ageAttestationAnswer(label, ap);
+  if (ageAttestation) return ageAttestation;
+
   const furtherEducation = furtherEducationAnswer(label, ap);
   if (furtherEducation) return furtherEducation;
 
@@ -1752,7 +2056,7 @@ export function resolveKnownAnswer(
   const outstandingOffer = outstandingOfferAnswer(label, inputType, ap);
   if (outstandingOffer) return outstandingOffer;
 
-  const applicationConsent = applicationConsentAnswer(label, ap);
+  const applicationConsent = applicationConsentAnswer(label);
   if (applicationConsent) return applicationConsent;
 
   if (LEGAL_FIRST_NAME_QUESTION.test(label)) {
@@ -1763,6 +2067,14 @@ export function resolveKnownAnswer(
     return firstName ? { value: firstName } : null;
   }
 
+  // Checked AFTER the legal-first-name arm, though neither pattern can reach the other's labels.
+  // The order is the safety statement: if a future edit ever widens this one, the narrower and
+  // more specific question still gets first refusal on its own labels.
+  if (LEGAL_FULL_NAME_QUESTION.test(label)) {
+    const legalName = composedLegalName(ap);
+    return legalName ? { value: legalName } : null;
+  }
+
   if (PREFERRED_NAME_QUESTION.test(label)) {
     // Answered only from an explicit declaration. Null falls through unchanged, because "I have no
     // preferred name" and "never asked" are not distinguishable from an empty column, and stating
@@ -1770,11 +2082,8 @@ export function resolveKnownAnswer(
     if (ap.preferred_first_name) return { value: ap.preferred_first_name };
   }
 
-  const preferredLocation = locationPreferenceAnswer(label, jdText);
+  const preferredLocation = locationPreferenceAnswer(label);
   if (preferredLocation) return preferredLocation;
-  if (isLocationChoiceQuestion(label)) {
-    return { skipReason: `location choice left for you: "${label.slice(0, 60)}"` };
-  }
 
   const locationStatus = locationStatusAnswer(label, ap);
   if (locationStatus) return locationStatus;
@@ -1785,7 +2094,14 @@ export function resolveKnownAnswer(
   }
 
   if (EMPLOYER_RESTRICTION_AGREEMENT_QUESTION.test(label)) {
-    return { value: 'No' };
+    /* CHANGED. This returned a hardcoded "No" - a legal declaration that she is under no
+     * non-compete, non-solicitation or confidentiality obligation to any past employer, made by a
+     * machine with no column consulted and nothing on file that could ever have supported it. It
+     * is a statement to an employer about her contractual obligations to a different employer, and
+     * it is already named in selfDeclaration.ts's list; the constant here simply ran first and
+     * short-circuited it. One label, one company in the corpus, which is below the two-posting bar
+     * for an onboarding question, so it becomes an ask at Apply instead. */
+    return { skipReason: attestationSkipReason(label, 'declaration about agreements with a past employer') };
   }
 
   // The politically-exposed-person refusal that landed on integrate/submission-flow now sits at the
@@ -1834,7 +2150,13 @@ export function resolveKnownAnswer(
   }
 
   if (AI_INTERVIEW_POLICY_QUESTION.test(label)) {
-    return { value: 'Yes' };
+    /* CHANGED. This returned a hardcoded "Yes" to "AI Policy for Interviewers" / "do not use any
+     * AI tools during the interview", with nothing stored. It is acceptance of a behavioural
+     * policy that binds her conduct in a live interview, which is the same thing IMC's "Interview
+     * Code of Conduct" is, and applicationConsentAnswer already refuses that one by name with the
+     * reasoning quoted in its header: "A behavioural policy is not a privacy notice and not a
+     * statement of truth." Two wordings of one policy cannot have two answers. */
+    return { skipReason: attestationSkipReason(label, 'agreement to an interview conduct policy') };
   }
 
   const stemMajor = stemMajorAnswer(label, ap);
@@ -1843,29 +2165,33 @@ export function resolveKnownAnswer(
   const internshipSeason = postingSeasonAnswer(label, jdText);
   if (internshipSeason) return internshipSeason;
 
-  const internshipJoin = internshipJoinAnswer(label, ap, jdText);
+  const internshipJoin = internshipJoinAnswer(label);
   if (internshipJoin) return internshipJoin;
 
   if (INTERNSHIP_AVAILABILITY_QUESTION.test(label)) {
-    return internshipAvailabilityAnswer(label, ap);
+    return internshipAvailabilityAnswer(label);
   }
 
-  const softwareEngineeringArea = softwareEngineeringAreaAnswer(label, jdText);
+  const softwareEngineeringArea = softwareEngineeringAreaAnswer(label);
   if (softwareEngineeringArea) return softwareEngineeringArea;
 
   const programmingLanguage = programmingLanguageAnswer(label, ap);
   if (programmingLanguage) return programmingLanguage;
 
-  const routineConsent = routineConsentAnswer(label, ap);
+  const routineConsent = routineConsentAnswer(label);
   if (routineConsent) return routineConsent;
 
   const routineLocationCommitment = routineLocationCommitmentAnswer(label);
   if (routineLocationCommitment) return routineLocationCommitment;
 
-  const workEligibility = workEligibilityAnswer(label, ap, jdText);
+  const workEligibility = workEligibilityAnswer(label, ap);
   if (workEligibility) return workEligibility;
 
-  if (AGE_ATTESTATION_QUESTION.test(label)) return null;
+  /* The blanket `if (AGE_ATTESTATION_QUESTION.test(label)) return null;` that stood here is gone.
+   * It is unreachable now: ageAttestationAnswer runs at the top of this function and returns a
+   * value or a skipReason for every label this pattern matches, never null. Removed rather than
+   * left as dead code, because a second age rule in a second place is how the two copies of these
+   * regexes drifted the last time. */
 
   // Before the EEO branch: Point72's "Have you served in the military?" is a required Yes/No with
   // no decline option, and eeoAnswer's "Decline to self-identify" fits none of its choices, so the
@@ -1912,7 +2238,17 @@ export function resolveKnownAnswer(
     case 'portfolio_url':
       return ap.portfolio_url ? { value: ap.portfolio_url } : null;
     case 'referral_source_default':
-      return ap.referral_source_default ? { value: ap.referral_source_default } : { value: 'Company website' };
+      /* CHANGED. The fallback was `{ value: 'Company website' }` for an account that had stored
+       * nothing, described in profileFieldResolution.test.ts as "a deliberate product behaviour
+       * rather than stored data". It is deliberate and it is still a statement of fact about how
+       * she found the posting, made to the employer in her name, and it is usually false: Litos
+       * finds these jobs on a monitored board, not on the company's website. It is also the single
+       * most-asked question in the whole corpus - 25 distinct labels across 20 employers - which by
+       * the two-posting rule makes it an ONBOARDING question, not a constant. The column already
+       * exists; only the invented default is gone. */
+      return ap.referral_source_default
+        ? { value: ap.referral_source_default }
+        : { skipReason: `how you heard about this role is yours to answer: "${label.slice(0, 60)}"` };
     case 'desired_salary': {
       resolveSalary(
         { label, field: inputType === 'number' ? 'numeric' : 'freetext', jdText },
@@ -1923,15 +2259,15 @@ export function resolveKnownAnswer(
     case 'date_of_birth':
       return ap.date_of_birth ? { value: ap.date_of_birth } : null;
     case 'availability_term':
-      return ap.availability_term ? { value: ap.availability_term } : null;
+      return { skipReason: `availability duration left for you: "${label.slice(0, 60)}"` };
     case 'availability_date':
-      return ap.availability_date ? { value: ap.availability_date } : null;
+      return { skipReason: `availability date left for you: "${label.slice(0, 60)}"` };
     case 'current_employer':
       return ap.current_employer ? { value: ap.current_employer } : null;
     case 'most_recent_employer':
       return ap.most_recent_employer ? { value: ap.most_recent_employer } : null;
     case 'onsite_commitment':
-      return { value: 'Yes' };
+      return onsiteCommitmentAnswer(label);
     case 'current_enrollment':
       return currentEnrollmentAnswer(ap);
     case 'study_year': {

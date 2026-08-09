@@ -20,15 +20,25 @@ const DRW_RATING = 'Please rate your skill level in C++';
 const DRW_SETTINGS = 'In which settings have you used C++? Select all that apply';
 const TRUVETA_SPONSORSHIP = 'Do you now OR in the future require visa sponsorship to continue working in the US? We are unable to sponsor work visas.';
 
-test('a declaration about the applicant carries to the next posting', () => {
+test('self-declarations and mutable answers never carry to the next posting', () => {
   for (const label of [EXPORT_CONTROL, DRW_RATING, DRW_SETTINGS, TRUVETA_SPONSORSHIP]) {
-    assert.equal(answerReuseScope(label), 'reusable', label.slice(0, 50));
+    assert.equal(answerReuseScope(label), 'posting_specific', label.slice(0, 50));
   }
-  // Constructed siblings of the same class, so a narrow regex cannot pass this file by accident.
-  assert.equal(answerReuseScope('Please rate your skill level in Python'), 'reusable');
+  assert.equal(answerReuseScope('Please rate your skill level in Python'), 'posting_specific');
   assert.equal(answerReuseScope('What are your SAT scores?'), 'reusable');
-  assert.equal(answerReuseScope('Have you served in the military?'), 'reusable');
-  assert.equal(answerReuseScope('What are your personal pronouns?'), 'reusable');
+  assert.equal(answerReuseScope('Have you served in the military?'), 'posting_specific');
+  assert.equal(answerReuseScope('What are your personal pronouns?'), 'posting_specific');
+  assert.equal(answerReuseScope('I certify that this application is true and complete'), 'posting_specific');
+  assert.equal(answerReuseScope('Please accept the AI policy for this interview'), 'posting_specific');
+  assert.equal(answerReuseScope('Do you agree to the candidate privacy notice?'), 'posting_specific');
+});
+
+test('only exact standardized scores are reusable, never an employer option taxonomy', () => {
+  assert.equal(answerReuseScope('What is your SAT score?'), 'reusable');
+  assert.equal(answerReuseScope('What are your GRE scores?'), 'reusable');
+  assert.equal(answerReuseScope('Select your SAT score range'), 'posting_specific');
+  assert.equal(answerReuseScope('Which of these ACT score bands applies?'), 'posting_specific');
+  assert.equal(answerReuseScope('Is your SAT score above 1500?'), 'posting_specific');
 });
 
 test('an answer about THIS posting never carries to another', () => {
@@ -84,13 +94,11 @@ test('only the answers that carry are written to the store', () => {
     { question: FAIRE_TEAM, answer: 'Payments' },
     { question: POINT72_LOCATION, answer: 'New York' },
     { question: DRW_SETTINGS, answer: 'Coursework, personal projects' },
+    { question: 'What are your SAT scores?', answer: '1540' },
     // A blank is not an answer and is not remembered as one.
-    { question: 'What are your SAT scores?', answer: '   ' },
+    { question: 'What are your ACT scores?', answer: '   ' },
   ], { company: 'DRW' });
-  assert.deepEqual(
-    stored.map((item) => item.answer).sort(),
-    ['Advanced', 'Coursework, personal projects', 'Yes'],
-  );
+  assert.deepEqual(stored.map((item) => item.answer), ['1540']);
 });
 
 test('the read side re-checks the scope against the employer asking now', () => {
@@ -98,17 +106,97 @@ test('the read side re-checks the scope against the employer asking now', () => 
     [savedAnswerKey(EXPORT_CONTROL), 'Yes'],
     [savedAnswerKey('Have you applied to us before?'), 'No'],
     [savedAnswerKey('Please rate your skill level in C++'), 'Advanced'],
+    [savedAnswerKey('What is your SAT score?'), '1540'],
   ]);
-  assert.equal(savedAnswerFor(EXPORT_CONTROL, saved, { company: 'Anduril' }), 'Yes');
-  assert.equal(savedAnswerFor(DRW_RATING, saved, { company: 'Jane Street' }), 'Advanced');
+  assert.equal(savedAnswerFor(EXPORT_CONTROL, saved, { company: 'Anduril' }), undefined);
+  assert.equal(savedAnswerFor(DRW_RATING, saved, { company: 'Jane Street' }), undefined);
+  assert.equal(savedAnswerFor('What is your SAT score?', saved, { company: 'Jane Street' }), '1540');
   // Stored under a per-employer question, so it is never handed back however it got in there.
   assert.equal(savedAnswerFor('Have you applied to us before?', saved, { company: 'Akuna Capital' }), undefined);
   // Nothing stored for this one.
   assert.equal(savedAnswerFor(POINT72_LOCATION, saved, { company: 'Point72' }), undefined);
 });
 
+test('a reusable score enters a closed control only when an exact current option exists', () => {
+  const label = 'What is your SAT score?';
+  const saved = new Map([[savedAnswerKey(label), '1510']]);
+  assert.equal(savedAnswerFor(label, saved, {}, ['1200-1399', '1400-1499', '1500-1600']), undefined);
+  assert.equal(savedAnswerFor(label, saved, {}, ['1500', '1510', '1520']), '1510');
+  assert.equal(savedAnswerFor(label, saved, {}, null), '1510');
+});
+
+test('a changed employer policy never inherits acceptance of an earlier version', () => {
+  const oldPolicy = 'I agree not to use AI tools during the interview.';
+  const changedPolicy = 'I agree not to use AI tools during the interview or take personal notes.';
+  const saved = new Map([[savedAnswerKey(oldPolicy), 'Yes']]);
+  assert.equal(answerReuseScope(oldPolicy), 'posting_specific');
+  assert.equal(answerReuseScope(changedPolicy), 'posting_specific');
+  assert.equal(savedAnswerFor(oldPolicy, saved, { company: 'Example Corp' }), undefined);
+  assert.equal(savedAnswerFor(changedPolicy, saved, { company: 'Example Corp' }), undefined);
+});
+
 test('the default is posting-specific, so an unrecognised question is asked again rather than replayed', () => {
   assert.equal(answerReuseScope('What is your favourite trade of the last year?'), 'posting_specific');
   assert.equal(answerReuseScope(''), 'posting_specific');
   assert.equal(reusableAnswersToStore([{ question: 'Anything at all', answer: 'something' }]).length, 0);
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * THE ONSITE COMMITMENT, in both directions.
+ *
+ * Together AI packet 5b52aba8-124c-4688-8b9c-a7a49d20467b and Redwood Materials packet
+ * 8d12aea8-8476-4f7a-860b-fa6393842df9 were both at the send gate on 2026-08-08 with these
+ * answered "Yes" from a constant in resolveKnownAnswer, for an applicant who lives in Dubai and
+ * studies in Los Angeles. The guard that stopped them is right and stays. This is the other half of
+ * the handoff: an answer she gives once must not be asked for a seventh time.
+ *
+ * The line is whether the LABEL says where. It does for these two, and it does not for Anduril's.
+ * ------------------------------------------------------------------------------------------- */
+const TOGETHER_ONSITE = 'Are you willing to work four days per week in our San Francisco office?';
+const REDWOOD_ONSITE = 'Are you available to work from our office in San Francisco?';
+const ANDURIL_ONSITE = 'Are you willing to work in-person for 12 weeks during the internship?';
+
+test('an onsite commitment that names the office is a fact about her and carries', () => {
+  assert.equal(answerReuseScope(TOGETHER_ONSITE, { company: 'Together AI' }), 'reusable');
+  assert.equal(answerReuseScope(REDWOOD_ONSITE, { company: 'Redwood Materials' }), 'reusable');
+  // The day-count variant, which is the same commitment counted differently.
+  assert.equal(answerReuseScope('Are you able to work onsite in our New York office 3 days a week?', {}), 'reusable');
+  // Relocation needs no place: application_profile.relocation_willingness is a plain yes/no because
+  // the willingness itself is the stable fact, wherever the employer happens to be.
+  assert.equal(answerReuseScope('Are you willing to relocate?', {}), 'reusable');
+  assert.equal(answerReuseScope('Are you willing to relocate to Austin?', {}), 'reusable');
+});
+
+test('an onsite commitment with no place in it is asked again at the next employer', () => {
+  /* Anduril's. "In-person for 12 weeks" means Costa Mesa on Anduril's form and somewhere else on
+   * Postman's, and the label cannot tell them apart. A "Yes" replayed here is Litos making a
+   * commitment she never made, which is the whole harm this module exists to prevent, so the tie
+   * goes to asking her. */
+  assert.equal(answerReuseScope(ANDURIL_ONSITE, { company: 'Anduril' }), 'posting_specific');
+  assert.equal(answerReuseScope('Are you able to work onsite four days a week?', {}), 'posting_specific');
+});
+
+test('choosing among an employer’s own offices is still posting-specific', () => {
+  // Committing to sit in an office and picking which of THIS employer's offices are on offer are
+  // different questions, and the posting-scoped veto has to keep winning over the onsite rule.
+  assert.equal(answerReuseScope('What is your preferred work location?', {}), 'posting_specific');
+  assert.equal(answerReuseScope('Which office location would you like to work from?', {}), 'posting_specific');
+  assert.equal(answerReuseScope('Are you willing to work from this office?', {}), 'posting_specific');
+});
+
+test('the onsite answer is written to the store and read back at the next employer', () => {
+  const stored = reusableAnswersToStore(
+    [
+      { question: REDWOOD_ONSITE, answer: 'No' },
+      { question: ANDURIL_ONSITE, answer: 'Yes' },
+    ],
+    { company: 'Redwood Materials' },
+  );
+  assert.deepEqual(stored.map((item) => item.question), [REDWOOD_ONSITE]);
+
+  const saved = new Map(stored.map((item) => [item.key, item.answer]));
+  // A different employer asking the same question about the same city gets her answer.
+  assert.equal(savedAnswerFor(REDWOOD_ONSITE, saved, { company: 'Databricks' }), 'No');
+  // And the placeless one was never stored, so there is nothing to replay.
+  assert.equal(savedAnswerFor(ANDURIL_ONSITE, saved, { company: 'Postman' }), undefined);
 });

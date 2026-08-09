@@ -139,14 +139,26 @@ test('a declaration is asked even when a stored profile column could have answer
   assert.equal(ask[0].answer, '');
 });
 
-test('an answer she gave once comes back filled, and is not asked again', () => {
-  const label = 'Please rate your skill level in C++';
-  const saved = new Map([[savedAnswerKey(label), 'Advanced']]);
+test('a narrowly factual standardized score she gave once comes back filled', () => {
+  const label = 'What was your SAT score?';
+  const saved = new Map([[savedAnswerKey(label), '1510']]);
   const { ask, questions } = resolvePrescript([question({ label })], profile, saved, { company: 'Jane Street' });
   assert.equal(ask.length, 0);
-  assert.equal(questions[0].answer, 'Advanced');
+  assert.equal(questions[0].answer, '1510');
   assert.equal(questions[0].remembered, true);
   assert.equal(questions[0].reusable, true);
+});
+
+test('a remembered standardized score is asked again when the current closed options changed', () => {
+  const label = 'What was your SAT score?';
+  const saved = new Map([[savedAnswerKey(label), '1510']]);
+  const { ask, questions } = resolvePrescript([
+    question({ label, input_type: 'select', options: ['1200-1399', '1400-1499', '1500-1600'] }),
+  ], profile, saved, { company: 'Jane Street' });
+  assert.equal(ask.length, 1);
+  assert.equal(questions[0].answer, '');
+  assert.equal(questions[0].remembered, false);
+  assert.equal(questions[0].reason, 'choice_for_you');
 });
 
 test('a posting-specific answer she gave elsewhere is never carried in', () => {
@@ -204,4 +216,45 @@ test('the pre-script is not joined into a board list query', () => {
   // that gains nothing from it. Read exactly one row, on the Apply path, and nowhere else.
   const board = readFileSync('src/routes/jobMonitor.ts', 'utf8');
   assert.doesNotMatch(board, /posting_questions/);
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * AN EXISTING USER WHO HAS NOT ANSWERED IS ASKED, NEVER DEFAULTED.
+ *
+ * The migration that adds onsite_commitment is additive and nullable, so every account already on
+ * the system reads null the moment the code deploys. The failure mode this pins is the tempting
+ * one: making the new column "default to what we did before" so nothing appears to change. That
+ * would be the constant again, with a migration in front of it.
+ *
+ * Instead the resolver refuses, and the pre-script - the ask-at-Apply machinery from PR #373 -
+ * puts the question on the screen with a sentence naming it, before the run starts.
+ * ------------------------------------------------------------------------------------------- */
+test('an account with no stored onsite commitment is asked at Apply, not answered', () => {
+  // The exact Redwood Materials label, from packet 8d12aea8-8476-4f7a-860b-fa6393842df9, which was
+  // ready to send with this answered "Yes".
+  const redwood: PostingQuestion = {
+    label: 'Are you available to work from our office in San Francisco?',
+    input_type: 'select',
+    options: ['Yes', 'No'],
+    required: true,
+    max_length: null,
+  };
+  const { ask, questions } = resolvePrescript([redwood], profile, new Map(), { company: 'Redwood Materials' });
+  assert.equal(ask.length, 1);
+  assert.equal(ask[0].label, redwood.label);
+  // Blank. Not "Yes", and not a best guess off her address.
+  assert.equal(ask[0].answer, '');
+  assert.equal(questions[0].remembered, false);
+  // And she is told which question is waiting, rather than finding an empty required field later.
+  assert.ok(prescriptAskExplanation(ask[0].reason!, redwood.label).length > 20);
+
+  // A legacy broad location preference still lacks the exact location and cadence scope.
+  const committed = resolvePrescript([redwood], {
+    ...profile,
+    onsite_commitment: 'listed_locations',
+    onsite_locations: ['Los Angeles'],
+  }, new Map(), { company: 'Redwood Materials' });
+  assert.equal(committed.ask.length, 1);
+  assert.equal(committed.questions[0].answer, '');
+  assert.equal(committed.questions[0].remembered, false);
 });

@@ -7,18 +7,30 @@ const indexRoute = readFileSync('src/index.ts', 'utf8');
 const schema = readFileSync('src/db/schema.ts', 'utf8');
 const route = readFileSync('src/routes/applicationEmail.ts', 'utf8');
 const service = readFileSync('src/lib/applicationEmail.ts', 'utf8');
+const routeSelector = readFileSync('src/lib/applicationEmailRoute.ts', 'utf8');
+const applicationsRoute = readFileSync('src/routes/applications.ts', 'utf8');
 
 test('application packet generation uses the Litos alias as the employer-facing email', () => {
   assert.match(resumeRoute, /applicationAliasFor\(userId, resumeId\)/);
   assert.match(resumeRoute, /applicationContact = applicationEmail[\s\S]*email: applicationEmail\.alias/);
   assert.match(resumeRoute, /_contact: applicationContact/);
+  assert.match(resumeRoute, /_applicant_email: pinnedApplicantEmail/);
   assert.match(resumeRoute, /_application_email: applicationEmail/);
   assert.match(resumeRoute, /ensureApplicationEmailAlias/);
+  assert.match(resumeRoute, /applicant_email: pinnedApplicantEmail/);
+  assert.match(resumeRoute, /address: applicationContact\.email/);
+  assert.match(resumeRoute, /if \(body\.application\) \{[\s\S]*application_identity_persistence_failed/);
+});
+
+test('dashboard resume edits preserve both immutable application email keys', () => {
+  assert.match(applicationsRoute, /'_applicant_email' in stored \? \{ _applicant_email: stored\._applicant_email \} : \{\}/);
+  assert.match(applicationsRoute, /'_application_email' in stored \? \{ _application_email: stored\._application_email \} : \{\}/);
 });
 
 test('application inbox schema and webhook route are registered', () => {
   assert.match(schema, /application_email_aliases/);
   assert.match(schema, /application_email_messages/);
+  assert.match(schema, /application_email_receiving_proofs/);
   assert.match(indexRoute, /applicationEmailRoutes/);
   assert.match(route, /\/webhooks\/application-email\/inbound/);
   assert.match(route, /inboundSecretMatches/);
@@ -29,11 +41,29 @@ test('application inbox schema and webhook route are registered', () => {
   assert.match(route, /\/applications\/:id\/email-messages/);
   // Reply-to is the ALIAS, never the employer: a reply that leaves the applicant's own mailbox
   // publishes the address the alias exists to keep out of the thread. See relayApplicantReply.
-  assert.match(service, /to: \[input\.forwardTo\],\s*\n\s*reply_to: input\.alias,/);
+  assert.match(service, /to: \[input\.forwardTo\],[\s\S]*\{ reply_to: input\.alias \}/);
   assert.doesNotMatch(service, /reply_to: input\.inbound\.from/);
-  assert.match(service, /LITOS_APPLICATION_EMAIL_MAILBOX/);
+  assert.match(routeSelector, /LITOS_APPLICATION_EMAIL_MAILBOX/);
+  assert.match(routeSelector, /LITOS_APPLICATION_EMAIL_ROUTE_MODE/);
   assert.match(service, /\$\{mailbox\.local\}\+\$\{route\}@\$\{mailbox\.domain\}/);
   assert.match(route, /applicationEmailRouteLabel\(\)/);
+  assert.match(route, /route_generation_fingerprint: applicationEmailRouteGenerationFingerprint\(\)/);
+});
+
+test('signed managed canary proof is accepted before provider content retrieval and alias routing', () => {
+  const webhook = route.slice(route.indexOf("fastify.post('/webhooks/application-email/inbound'"));
+  const endpointMatch = webhook.indexOf('signedWebhookRequestMatchesConfiguredEndpoint(request)');
+  const proof = webhook.indexOf('acceptSignedManagedReceivingCanary(event)');
+  const retrieveAndNormalize = webhook.indexOf('inboundEmailFromWebhookBody(request.body)');
+  const aliasRoute = webhook.indexOf('processInboundApplicationEmail(inbound)');
+  assert.ok(proof >= 0);
+  assert.ok(endpointMatch >= 0 && endpointMatch < proof);
+  assert.ok(retrieveAndNormalize > proof);
+  assert.ok(aliasRoute > retrieveAndNormalize);
+  assert.match(webhook, /signedByResend = resendProofSignatureMatches\(request\)/);
+  assert.match(route, /resendProofSignatureMatches[\s\S]*process\.env\.RESEND_WEBHOOK_SECRET/);
+  assert.match(webhook, /receiving_proof: 'verified'/);
+  assert.doesNotMatch(webhook, /receiving_proof:[\s\S]{0,80}(emailId|recipient|fingerprint)/);
 });
 
 test('the alias never reaches a form or a rendered resume without the deliverability precondition', () => {
@@ -41,7 +71,7 @@ test('the alias never reaches a form or a rendered resume without the deliverabi
   // Both call sites go through the precondition. resume.ts matters as much as the runner: the
   // contact block it builds is rendered INTO the PDF, so an undeliverable alias is frozen into the
   // document the employer keeps.
-  assert.match(runner, /resolveApplicantEmail\(\{/);
+  assert.match(runner, /resolveFrozenApplicantEmail\(\{/);
   assert.match(resumeRoute, /applicationAliasDeliverability\(\)/);
   assert.match(resumeRoute, /aliasDeliverability\?\.deliverable \? applicationAliasFor\(userId, resumeId\) : null/);
   assert.match(service, /if \(!check\.deliverable\) return \{ \.\.\.fallback, reason: check\.reason \}/);
@@ -72,14 +102,35 @@ test('the reply relay exists, is outbound, and cannot loop', () => {
   assert.match(service, /const recipient = relayRecipientFor\(thread/);
 });
 
+test('managed receiving rejects applicant replies before any relay ledger insert, claim, or send', () => {
+  const processor = service.slice(
+    service.indexOf('export async function processInboundApplicationEmail'),
+    service.indexOf('export async function applicationEmailHealth'),
+  );
+  const drop = processor.indexOf("if (route.kind === 'drop')");
+  const relay = processor.indexOf('return relayApplicantReply');
+  assert.ok(drop >= 0);
+  assert.ok(relay > drop);
+  assert.match(service, /if \(aliasUsesManagedReceiving\(alias\)\) return \{ kind: 'drop', reason: 'managed_reply_unsupported' \}/);
+  assert.match(service, /return \/\^\[a-z0-9\].*\\\.resend\\\.app\$\/i\.test\(domain\)/);
+});
+
 test('the forwarding destination is a stored preference, not the login address', () => {
   const schemaSource = readFileSync('src/db/schema.ts', 'utf8');
   assert.match(schemaSource, /application_email_forward_to: text\('application_email_forward_to'\)/);
   assert.match(service, /export async function applicationForwardingAddress/);
   assert.match(route, /\/application-email\/forwarding/);
   assert.match(route, /forwardingAddressWouldLoop\(requested\)/);
-  // Survives the migration not having run yet, because on Vercel a merge is a deploy.
-  assert.match(service, /'42703'/);
+  /* Survives the migration not having run yet, because on Vercel a merge is a deploy.
+   *
+   * Through the SHARED check, not a local `error.code === '42703'`. That literal was what this line
+   * used to pin, and it was measured on 2026-08-09 to never match: Drizzle wraps the pg error in a
+   * DrizzleQueryError whose own `code` is undefined, so the fallback could not fire and the
+   * tolerance was decorative. isUndefinedColumnError walks the cause chain. */
+  assert.match(service, /if \(isUndefinedColumnError\(error\)\) return fallback;/);
+  assert.match(route, /if \(isUndefinedColumnError\(error\)\)/);
+  assert.doesNotMatch(service, /\?\.code === '42703'/);
+  assert.doesNotMatch(route, /\?\.code === '42703'/);
   const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
   assert.doesNotMatch(runner, /forwardTo: accountEmail/);
 });

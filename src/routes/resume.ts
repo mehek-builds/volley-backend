@@ -4,7 +4,7 @@ import { eq, desc, and, inArray, sql } from 'drizzle-orm';
 import { createHash, randomUUID } from 'node:crypto';
 import { put } from '@vercel/blob';
 import { db } from '../db/index';
-import { profiles, generated_resumes, autofill_events, application_profile, monitored_jobs, career_page_sources } from '../db/schema';
+import { profiles, generated_resumes, autofill_events, application_profile, monitored_jobs, career_page_sources, users } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
 import { allowHourly, claimCounterSlot, getCount, getEntitlements, LIMITS, monthPeriod, quotaExceededPayload, rateLimitedReply, releaseCounterSlot } from '../middleware/quota';
@@ -26,6 +26,7 @@ import {
   applicationAliasFor,
   applicationForwardingAddress,
   ensureApplicationEmailAlias,
+  type ApplicantEmailChoice,
   type ApplicationEmailIdentity,
 } from '../lib/applicationEmail';
 import { applicationAliasDeliverability } from '../lib/applicationEmailDeliverability';
@@ -40,6 +41,7 @@ import { academicRecordRowFor } from './profile';
 import { warmRequirementCache } from '../engine/warmRequirements';
 import { postingRow, resolveJdText } from './jdMatch';
 import { baseResumeSelectionIssues } from '../llm/baseResume';
+import { leadAlignmentIssues } from '../engine/leadAlignment';
 import { deriveEditedTerms, readApplicationReview, type ApplicationReviewState } from '../lib/applicationReview';
 import { repairReviewPortalFromMonitoredJob } from '../lib/applicationPortalRepair';
 import {
@@ -172,7 +174,7 @@ function refreshedHistorySpec(spec: unknown, profile: ApplicationProfileLike): u
     ...(spec as Record<string, unknown>),
     _review: {
       ...review,
-      questions: refreshKnownQuestionAnswers(review.questions, profile, review.jd_text),
+      questions: refreshKnownQuestionAnswers(review.questions, profile, review.jd_text, review.questions_reviewed_at),
     },
   };
 }
@@ -495,6 +497,15 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     const applicationContact = applicationEmail
       ? { ...contactOfRecord, email: applicationEmail.alias }
       : contactOfRecord;
+    const pinnedApplicantEmail: ApplicantEmailChoice | null = body.application && applicationContact.email
+      ? {
+        address: applicationContact.email,
+        source: applicationEmail ? 'litos_alias' : body.contact.email ? 'contact_email' : 'account_email',
+        reason: applicationEmail ? 'deliverable' : aliasDeliverability?.reason ?? 'alias_unavailable',
+        tracked: Boolean(applicationEmail),
+        decided_at: new Date().toISOString(),
+      }
+      : null;
     if (bank.length === 0) {
       return reply.status(400).send({ error: 'Nothing saved about your work yet. Finish setting up first.' });
     }
@@ -555,6 +566,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     // and only genuine drift triggers a second Claude call instead of trusting the prompt alone.
     let spec: ResumeSpec | undefined;
     let specIssues: string[] = [];
+    let leadIssues: string[] = [];
     let specWarnings: ReturnType<typeof validateResumeSpec>['warnings'] = [];
     let atsCoverage = 0;
 
@@ -644,7 +656,17 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       const result = validateResumeSpec(spec, jdText, bank, declaredSkills, education, body.role);
       const typographyIssues = findResumeTypographyIssues(spec, applicationContact);
       specIssues = [...result.issues, ...typographyIssues];
-      if (priorityEntry) specIssues.push(...baseResumeSelectionIssues(spec, [priorityEntry]));
+      /* requireFirst: false. The priority entry has to be ON the resume; which entry LEADS it is
+         decided against this posting, by leadAlignmentIssues below. See baseResumeSelectionIssues
+         for why the position half of that check belongs to the base resume and not here. */
+      if (priorityEntry) {
+        specIssues.push(...baseResumeSelectionIssues(spec, [priorityEntry], { requireFirst: false }));
+      }
+      /* Kept in its own variable as well as pushed onto specIssues, because it is the only issue
+         here that can survive the loop and still ship. _quality.leadAlignmentIssues stores it so a
+         packet that went out with an unjustified lead is distinguishable from one that did not. */
+      leadIssues = leadAlignmentIssues(spec, jdText, { context: { company: body.company, role: body.role } });
+      specIssues.push(...leadIssues);
       specWarnings = result.warnings;
       atsCoverage = result.ats_keyword_coverage_pct;
 
@@ -746,7 +768,28 @@ export async function resumeRoutes(fastify: FastifyInstance) {
           : [],
       },
     );
-    if (priorityEntry) finalSpecValidation.issues.push(...baseResumeSelectionIssues(spec, [priorityEntry]));
+    if (priorityEntry) {
+      finalSpecValidation.issues.push(...baseResumeSelectionIssues(spec, [priorityEntry], { requireFirst: false }));
+    }
+    /* A LEAD-ALIGNMENT DEFECT IS NOT A REASON TO WITHHOLD A RESUME, and this is the one place that
+     * distinction has to be made deliberately. Every issue pushed onto finalSpecValidation 422s the
+     * request and the student's application does not go out.
+     *
+     * The issues in that list are all claims the resume MAKES: a fabricated metric, a degree she
+     * does not hold, an entry not in the bank. Shipping one of those is worse than shipping
+     * nothing. A weak justification for why one true entry precedes another true entry is not in
+     * that class - the page is accurate either way, and the worst case is the ordering this
+     * pipeline produced unconditionally before today. Blocking on it would trade a real
+     * application for a cosmetic one.
+     *
+     * So the strict citation check runs in the retry loop above, where the model gets a second
+     * attempt with the defect as feedback, and after rendering only the claim that can still be
+     * wrong is re-checked: that the entry the alignment argues for is the entry actually leading
+     * the page. That one is a genuine inconsistency in a stored record rather than a matter of
+     * judgement, and nothing between here and there is supposed to reorder entries. */
+    finalSpecValidation.issues.push(
+      ...leadAlignmentIssues(spec, jdText, { afterRender: true, context: { company: body.company, role: body.role } }),
+    );
     specWarnings = finalSpecValidation.warnings;
     atsCoverage = finalSpecValidation.ats_keyword_coverage_pct;
     if (finalSpecValidation.issues.length > 0) {
@@ -907,6 +950,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         portal_supported: canonicalApplicationPortalSupported,
       } : {}),
       status: body.application ? 'ready_to_submit' as const : 'resume_ready' as const,
+      ...(pinnedApplicantEmail ? { applicant_email: pinnedApplicantEmail } : {}),
       edited_terms: deriveEditedTerms(spec, bank),
       questions: [],
       skipped_reasons: [],
@@ -921,6 +965,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     const storedSpec = {
       ...spec,
       _contact: applicationContact,
+      ...(pinnedApplicantEmail ? { _applicant_email: pinnedApplicantEmail } : {}),
       ...(applicationEmail ? { _application_email: applicationEmail } : {}),
       _review: applicationReview,
       _quality: {
@@ -929,6 +974,16 @@ export async function resumeRoutes(fastify: FastifyInstance) {
            the validator rejected". This is a fact about the ACCOUNT, not about the generated
            content, and a reader auditing packets needs to be able to tell those apart. */
         contactIssues,
+        /* Whether the lead entry's justification was ACCEPTED, recorded per packet so criterion 3
+           is auditable from the corpus instead of by re-running generation.
+           This is the one place a leftover lead-alignment defect survives. It deliberately does not
+           block the resume (see the note beside the final validation), and before this key it was
+           computed, used for a retry, and then dropped - so a packet that shipped with an
+           unjustified lead looked from storage exactly like one that shipped with a good one. That
+           is precisely the measurement that was missing when this criterion was first audited: the
+           only way to tell was to read 85 resumes and notice the same org at the top of 71 of them.
+           Empty means the lead is justified against a requirement this posting actually states. */
+        leadAlignmentIssues: leadIssues,
         layoutIssues,
         visualWarnings,
         atsCoverage,
@@ -966,6 +1021,12 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       persisted = true;
     } catch (err) {
       fastify.log.error(err);
+      if (body.application) {
+        return reply.status(500).send({
+          error: 'Litos could not save one email across this application. Nothing was prepared for submission. Try again.',
+          code: 'application_identity_persistence_failed',
+        });
+      }
       // The file is already generated and returned below; failing to log it for audit
       // shouldn't block the student from getting their resume.
     }

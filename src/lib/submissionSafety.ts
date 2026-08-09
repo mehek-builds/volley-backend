@@ -56,6 +56,44 @@ export function preparedRunCanRestart(
   return status === 'ready_for_final_approval' && !submissionWasClaimed;
 }
 
+/**
+ * Whether this packet's handoff window has closed ON SOMETHING THAT WAS REALLY THERE.
+ *
+ * WHAT THE WINDOW IS. `handoff_expires_at` is written by every prepare path as now + 55 minutes,
+ * and 55 minutes is the persistent browser session's own 3600s timeout minus a five minute margin
+ * (see HANDOFF_WINDOW_MS). The original 409 said so in as many words: "The secure portal session
+ * expired." It is a statement about a Browserbase/Stratus session that is still running and can
+ * still be reconnected to, and it is CORRECT for the one path that reconnects: submit()'s
+ * non-managed branch does `getBrowserSession(review.browser_session_id)` then `connectToSession`,
+ * and that call cannot succeed against a session the provider has already reaped.
+ *
+ * WHAT IT IS NOT. The MANAGED provider keeps no session at all. prepareManaged explicitly writes
+ * `browser_session_id: undefined`, and submit()'s managed branch re-navigates, rebuilds the packet
+ * with buildPacket(row) and refills the form from scratch inside a fresh remote run. Nothing from
+ * the fill run survives into the send except the stored review, which does not expire. Yet
+ * prepareManaged writes the same 55 minute stamp, and the approve route read it with no reference
+ * to whether a session existed. Measured against prod on 2026-08-08: all 11 packets sitting at
+ * ready_for_final_approval had `browser_session_id` null, and 10 of the 11 were past their stamp.
+ * Every one of those refusals was protecting a session that was never created, and the price of
+ * each was a full re-run of a managed browser against the employer's form.
+ *
+ * So the window is asked for what it actually knows: a session id, and a deadline on it. No id, no
+ * deadline. The remaining freshness worries - a screenshot from three hours ago, an employer who
+ * edited the form since - are real but are NOT what this field measures, and a 55 minute cutoff is
+ * not a control for either: the form can change in five minutes as easily as in fifty six, and the
+ * managed submit re-reads the live page anyway. Duplicate sends are held by submission_claimed_at's
+ * conditional update and by refuseDuplicateApplication, neither of which needs a clock.
+ */
+export function preparedRunHandoffExpired(
+  review: Pick<ApplicationReviewState, 'handoff_expires_at' | 'browser_session_id'>,
+  now: number = Date.now(),
+): boolean {
+  if (!review.browser_session_id) return false;
+  if (!review.handoff_expires_at) return false;
+  const expiresAt = Date.parse(review.handoff_expires_at);
+  return Number.isFinite(expiresAt) && expiresAt < now;
+}
+
 export function submitRequestDisposition(
   status: ApplicationReviewState['status'],
   submissionWasClaimed = false,

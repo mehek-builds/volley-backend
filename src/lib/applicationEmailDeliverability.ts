@@ -1,4 +1,15 @@
 import { promises as dnsPromises } from 'dns';
+import {
+  DEFAULT_INBOUND_WEBHOOK_URL,
+  applicationEmailWebhookEndpoint,
+  applicationEmailRouteSelection,
+  configuredResendManagedReceivingDomain,
+} from './applicationEmailRoute';
+import {
+  configuredManagedReceivingCanaryRecipient,
+  managedReceivingProofRouteFingerprint,
+  recentManagedReceivingProof,
+} from './applicationEmailReceivingProof';
 
 /* CAN THE ALIAS DOMAIN ACTUALLY RECEIVE MAIL, measured rather than assumed.
  *
@@ -33,9 +44,16 @@ export type AliasDeliverabilityReason =
   | 'alias_not_configured'
   | 'inbound_disabled'
   | 'no_mx_record'
+  | 'mx_provider_mismatch'
   | 'domain_not_verified_in_resend'
+  | 'receiving_not_enabled_in_resend'
+  | 'managed_receiving_proof_missing'
+  | 'managed_receiving_proof_mismatch'
   | 'inbound_route_missing'
+  | 'forwarding_not_configured'
   | 'check_unavailable';
+
+export type AliasMxProvider = 'resend' | 'google_workspace' | 'mixed' | 'other' | 'unknown';
 
 export type AliasDeliverability = {
   deliverable: boolean;
@@ -43,20 +61,35 @@ export type AliasDeliverability = {
   reason: AliasDeliverabilityReason;
   detail?: string;
   mx_hosts: string[];
+  mx_provider: AliasMxProvider;
+  mx_provider_agrees: boolean;
   resend_domain_status: string | null;
+  resend_receiving_status: string | null;
   inbound_route_configured: boolean;
   checked_at: string;
 };
 
-export type ResendDomainRecord = { name?: string; status?: string };
+export type ResendDomainRecord = {
+  name?: string;
+  status?: string;
+  capabilities?: { receiving?: string; sending?: string };
+};
 export type ResendWebhookRecord = { endpoint?: string; events?: string[]; status?: string };
 
 export type DeliverabilityProbes = {
   resolveMx?: (domain: string) => Promise<Array<{ exchange: string; priority: number }>>;
   resendDomains?: () => Promise<ResendDomainRecord[]>;
   resendWebhooks?: () => Promise<ResendWebhookRecord[]>;
+  managedReceivingProof?: () => Promise<boolean>;
   now?: () => number;
 };
+
+export class ResendApiHttpError extends Error {
+  constructor(readonly path: string, readonly status: number) {
+    super(`Resend ${path} answered ${status}`);
+    this.name = 'ResendApiHttpError';
+  }
+}
 
 // One hour on a good result, five minutes on a bad one. The asymmetry is the point: a working
 // inbox does not stop working every few minutes, but a broken one is expected to be repaired, and
@@ -67,9 +100,9 @@ const UNDELIVERABLE_TTL_MS = 5 * 60 * 1000;
 const DNS_TIMEOUT_MS = 3_000;
 const RESEND_TIMEOUT_MS = 5_000;
 
-export const DEFAULT_INBOUND_WEBHOOK_URL = 'https://student-outreach-backend.vercel.app/webhooks/application-email/inbound';
+export { DEFAULT_INBOUND_WEBHOOK_URL } from './applicationEmailRoute';
 
-type CacheEntry = { domain: string | null; expiresAt: number; value: AliasDeliverability };
+type CacheEntry = { domain: string | null; configSignature: string; expiresAt: number; value: AliasDeliverability };
 
 let cached: CacheEntry | null = null;
 let inFlight: Promise<AliasDeliverability> | null = null;
@@ -79,20 +112,9 @@ export function resetApplicationAliasDeliverabilityCache(): void {
   inFlight = null;
 }
 
-function configuredMailboxDomain(): string | null {
-  const mailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX?.trim().toLowerCase();
-  const match = mailbox?.match(/^[^@\s]+@([a-z0-9.-]+\.[a-z]{2,})$/i);
-  return match ? match[1] : null;
-}
-
-function configuredAliasDomain(): string | null {
-  const domain = process.env.LITOS_APPLICATION_EMAIL_DOMAIN?.trim().toLowerCase();
-  return domain && /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(domain) ? domain : null;
-}
-
 /** The domain employers would actually send to, whichever alias shape is configured. */
 export function aliasDomain(): string | null {
-  return configuredMailboxDomain() ?? configuredAliasDomain();
+  return applicationEmailRouteSelection().domain;
 }
 
 /* The explicit configuration signal, and it can only ever say NO.
@@ -107,8 +129,17 @@ export function inboundAliasDisabled(): boolean {
   return raw === 'false' || raw === '0' || raw === 'off' || raw === 'no';
 }
 
+export function applicationEmailForwardingConfigured(): boolean {
+  const key = process.env.RESEND_API_KEY?.trim();
+  const sender = process.env.RESEND_FROM?.trim();
+  if (!key || !sender) return false;
+  const bracketed = sender.match(/^[^<>]*<([^<>]+)>$/)?.[1];
+  const address = bracketed ?? sender;
+  return /^[^<>@\s]+@[^<>@\s]+$/.test(address);
+}
+
 export function inboundWebhookEndpoint(): string {
-  return process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_URL?.trim() || DEFAULT_INBOUND_WEBHOOK_URL;
+  return applicationEmailWebhookEndpoint();
 }
 
 function withTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
@@ -137,7 +168,7 @@ async function resendGet<T>(path: string): Promise<T[]> {
     headers: { Authorization: `Bearer ${key}` },
     signal: AbortSignal.timeout(RESEND_TIMEOUT_MS),
   });
-  if (!response.ok) throw new Error(`Resend ${path} answered ${response.status}`);
+  if (!response.ok) throw new ResendApiHttpError(path, response.status);
   const body = await response.json() as { data?: T[] } | T[];
   if (Array.isArray(body)) return body;
   return Array.isArray(body?.data) ? body.data : [];
@@ -166,6 +197,40 @@ export function resendDomainIsVerified(domains: readonly ResendDomainRecord[], d
   return resendDomainStatus(domains, domain) === 'verified';
 }
 
+export function resendReceivingStatus(domains: readonly ResendDomainRecord[], domain: string): string | null {
+  const match = domains.find((row) => row.name?.trim().toLowerCase() === domain);
+  return match?.capabilities?.receiving?.trim().toLowerCase() || null;
+}
+
+const RESEND_INBOUND_MX = /^inbound-smtp\.[a-z0-9-]+\.amazonaws\.com\.?$/i;
+const GOOGLE_WORKSPACE_MX = /(?:^|\.)google(?:mail)?\.com\.?$/i;
+
+export function classifyAliasMxProvider(
+  records: readonly { exchange: string; priority: number }[],
+): AliasMxProvider {
+  const hosts = records.map((record) => record.exchange.trim().toLowerCase()).filter(Boolean);
+  if (hosts.length === 0) return 'unknown';
+  const hasResend = hosts.some((host) => RESEND_INBOUND_MX.test(host));
+  const hasGoogle = hosts.some((host) => GOOGLE_WORKSPACE_MX.test(host));
+  if (hasResend && hosts.some((host) => !RESEND_INBOUND_MX.test(host))) return 'mixed';
+  if (hasResend) return 'resend';
+  if (hasGoogle) return 'google_workspace';
+  return 'other';
+}
+
+/**
+ * Resend receives mail only when its inbound MX has the best, lowest numeric priority. Merely
+ * publishing the host beside Google Workspace is not enough and can make delivery nondeterministic.
+ */
+export function mxRoutesToResend(
+  records: readonly { exchange: string; priority: number }[],
+): boolean {
+  if (records.length === 0) return false;
+  const bestPriority = Math.min(...records.map((record) => record.priority));
+  const best = records.filter((record) => record.priority === bestPriority);
+  return best.length > 0 && best.every((record) => RESEND_INBOUND_MX.test(record.exchange.trim()));
+}
+
 export function inboundRouteConfigured(
   webhooks: readonly ResendWebhookRecord[],
   endpoint: string,
@@ -188,18 +253,59 @@ async function probe(probes: DeliverabilityProbes): Promise<AliasDeliverability>
     domain,
     reason: 'check_unavailable',
     mx_hosts: [],
+    mx_provider: 'unknown',
+    mx_provider_agrees: false,
     resend_domain_status: null,
+    resend_receiving_status: null,
     inbound_route_configured: false,
     checked_at: checkedAt,
   };
   if (!domain) return { ...base, reason: 'alias_not_configured' };
   if (inboundAliasDisabled()) return { ...base, reason: 'inbound_disabled' };
+  if (!applicationEmailForwardingConfigured()) return { ...base, reason: 'forwarding_not_configured' };
 
+  if (configuredResendManagedReceivingDomain() === domain) {
+    const canaryRecipient = configuredManagedReceivingCanaryRecipient();
+    const proofFingerprint = managedReceivingProofRouteFingerprint();
+    if (!canaryRecipient || !proofFingerprint) return { ...base, reason: 'managed_receiving_proof_missing' };
+    try {
+      const proved = await (probes.managedReceivingProof
+        ?? (() => recentManagedReceivingProof({ now: new Date(probes.now?.() ?? Date.now()) })))();
+      if (!proved) return { ...base, reason: 'managed_receiving_proof_mismatch' };
+    } catch (error) {
+      return { ...base, reason: 'check_unavailable', detail: describeManagedProofError(error) };
+    }
+
+    try {
+      const webhooks = await (probes.resendWebhooks ?? listResendWebhooks)();
+      const routed = inboundRouteConfigured(webhooks, inboundWebhookEndpoint());
+      if (!routed) return { ...base, reason: 'inbound_route_missing' };
+      return { ...base, deliverable: true, reason: 'deliverable', inbound_route_configured: true };
+    } catch (error) {
+      // A 401/403 says only that this sending key cannot inspect webhook administration. The fresh
+      // durable proof already establishes that Resend delivered `email.received` to the exact URL
+      // using the exact signing secret. Other failures remain unknown and therefore fail closed.
+      if (error instanceof ResendApiHttpError
+        && error.path === '/webhooks'
+        && (error.status === 401 || error.status === 403)) {
+        return {
+          ...base,
+          deliverable: true,
+          reason: 'deliverable',
+          inbound_route_configured: true,
+          detail: 'Webhook listing is unauthorized; using fresh signed route evidence',
+        };
+      }
+      return { ...base, reason: 'check_unavailable', detail: describeManagedProofError(error) };
+    }
+  }
+
+  let mxRecords: Array<{ exchange: string; priority: number }>;
   let mxHosts: string[];
   try {
     const resolver = probes.resolveMx ?? ((name: string) => dnsPromises.resolveMx(name));
-    const records = await withTimeout(resolver(domain), DNS_TIMEOUT_MS, 'MX lookup');
-    mxHosts = records
+    mxRecords = await withTimeout(resolver(domain), DNS_TIMEOUT_MS, 'MX lookup');
+    mxHosts = mxRecords
       .map((record) => record.exchange?.trim().toLowerCase())
       .filter((host): host is string => Boolean(host));
     if (mxHosts.length === 0) return { ...base, reason: 'no_mx_record' };
@@ -211,15 +317,55 @@ async function probe(probes: DeliverabilityProbes): Promise<AliasDeliverability>
     };
   }
 
+  const mxProvider = classifyAliasMxProvider(mxRecords);
+  if (!mxRoutesToResend(mxRecords)) {
+    return {
+      ...base,
+      mx_hosts: mxHosts,
+      mx_provider: mxProvider,
+      reason: 'mx_provider_mismatch',
+      detail: mxProvider === 'google_workspace'
+        ? `MX for ${domain} routes to Google Workspace, but inbound processing is configured for Resend. Configure a dedicated Resend receiving subdomain and keep the root Google MX unchanged.`
+        : `MX for ${domain} does not route exclusively to Resend at the best priority. Configure the Resend inbound MX on a dedicated receiving subdomain.`,
+    };
+  }
+
   let domainStatus: string | null;
+  let receivingStatus: string | null;
   try {
     const domains = await (probes.resendDomains ?? listResendDomains)();
     domainStatus = resendDomainStatus(domains, domain);
     if (domainStatus !== 'verified') {
-      return { ...base, mx_hosts: mxHosts, resend_domain_status: domainStatus, reason: 'domain_not_verified_in_resend' };
+      return {
+        ...base,
+        mx_hosts: mxHosts,
+        mx_provider: mxProvider,
+        mx_provider_agrees: true,
+        resend_domain_status: domainStatus,
+        reason: 'domain_not_verified_in_resend',
+      };
+    }
+    receivingStatus = resendReceivingStatus(domains, domain);
+    if (receivingStatus !== 'enabled') {
+      return {
+        ...base,
+        mx_hosts: mxHosts,
+        mx_provider: mxProvider,
+        mx_provider_agrees: true,
+        resend_domain_status: domainStatus,
+        resend_receiving_status: receivingStatus,
+        reason: 'receiving_not_enabled_in_resend',
+      };
     }
   } catch (error) {
-    return { ...base, mx_hosts: mxHosts, reason: 'check_unavailable', detail: describe(error) };
+    return {
+      ...base,
+      mx_hosts: mxHosts,
+      mx_provider: mxProvider,
+      mx_provider_agrees: true,
+      reason: 'check_unavailable',
+      detail: describe(error),
+    };
   }
 
   try {
@@ -229,7 +375,10 @@ async function probe(probes: DeliverabilityProbes): Promise<AliasDeliverability>
       return {
         ...base,
         mx_hosts: mxHosts,
+        mx_provider: mxProvider,
+        mx_provider_agrees: true,
         resend_domain_status: domainStatus,
+        resend_receiving_status: receivingStatus,
         reason: 'inbound_route_missing',
       };
     }
@@ -238,7 +387,10 @@ async function probe(probes: DeliverabilityProbes): Promise<AliasDeliverability>
       domain,
       reason: 'deliverable',
       mx_hosts: mxHosts,
+      mx_provider: mxProvider,
+      mx_provider_agrees: true,
       resend_domain_status: domainStatus,
+      resend_receiving_status: receivingStatus,
       inbound_route_configured: true,
       checked_at: checkedAt,
     };
@@ -246,7 +398,10 @@ async function probe(probes: DeliverabilityProbes): Promise<AliasDeliverability>
     return {
       ...base,
       mx_hosts: mxHosts,
+      mx_provider: mxProvider,
+      mx_provider_agrees: true,
       resend_domain_status: domainStatus,
+      resend_receiving_status: receivingStatus,
       reason: 'check_unavailable',
       detail: describe(error),
     };
@@ -255,6 +410,19 @@ async function probe(probes: DeliverabilityProbes): Promise<AliasDeliverability>
 
 function describe(error: unknown): string {
   return String(error instanceof Error ? error.message : error).slice(0, 200);
+}
+
+function describeManagedProofError(error: unknown): string {
+  const raw = String(error instanceof Error ? error.message : error);
+  const secrets = [
+    process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN?.trim(),
+    process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID?.trim(),
+    configuredManagedReceivingCanaryRecipient(),
+  ].filter((value): value is string => Boolean(value)).sort((left, right) => right.length - left.length);
+  return secrets.reduce(
+    (value, secret) => value.replaceAll(secret, '[redacted]').replaceAll(encodeURIComponent(secret), '[redacted]'),
+    raw,
+  ).slice(0, 200);
 }
 
 /**
@@ -267,22 +435,30 @@ export async function applicationAliasDeliverability(
 ): Promise<AliasDeliverability> {
   const now = probes.now?.() ?? Date.now();
   const domain = aliasDomain();
-  if (cached && cached.domain === domain && cached.expiresAt > now) return cached.value;
+  const configSignature = `${domain ?? ''}|${inboundAliasDisabled()}|${applicationEmailForwardingConfigured()}`
+    + `|${process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE?.trim().toLowerCase() ?? ''}`
+    + `|${process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN?.trim().toLowerCase() ?? ''}`
+    + `|${managedReceivingProofRouteFingerprint() ?? ''}`;
+  if (cached && cached.domain === domain && cached.configSignature === configSignature && cached.expiresAt > now) return cached.value;
   if (inFlight) return inFlight;
   inFlight = probe(probes)
     .catch((error): AliasDeliverability => ({
       deliverable: false,
       domain,
       reason: 'check_unavailable',
-      detail: describe(error),
+      detail: configuredResendManagedReceivingDomain() ? describeManagedProofError(error) : describe(error),
       mx_hosts: [],
+      mx_provider: 'unknown',
+      mx_provider_agrees: false,
       resend_domain_status: null,
+      resend_receiving_status: null,
       inbound_route_configured: false,
       checked_at: new Date(now).toISOString(),
     }))
     .then((value) => {
       cached = {
         domain,
+        configSignature,
         expiresAt: now + (value.deliverable ? DELIVERABLE_TTL_MS : UNDELIVERABLE_TTL_MS),
         value,
       };

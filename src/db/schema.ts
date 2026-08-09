@@ -508,7 +508,20 @@ export const application_profile = pgTable('application_profile', {
   // empty means "never answered", and the fill path must leave language questions alone.
   languages: jsonb('languages'),
   eeo_prefs: jsonb('eeo_prefs'), // nullable, only set if the student explicitly opts in
-  referral_source_default: text('referral_source_default').default('Company website'),
+  /* HOW SHE FOUND THE POSTING, and it is hers to say.
+   *
+   * The `.default('Company website')` that used to be here is gone. Measured on 2026-08-09: all 16
+   * production rows carry "Company website" and NOT ONE of them was typed by a person - the column
+   * default put it there, and `resolveKnownAnswer` had a second copy of the same constant as its
+   * fallback. So the most-asked question in the whole corpus (25 distinct labels, 20 employers) was
+   * answered on every application with a statement of fact nobody had made, and one that is usually
+   * false: Litos finds these postings on a monitored job board, not on the employer's own site.
+   *
+   * Null now means never asked, the resolver refuses on null, and onboarding asks for it. The
+   * migration drops the default for new rows; clearing the value on the existing 16 is a separate,
+   * explicit step in scripts/apply-onsite-commitment-schema.mjs, because it makes those accounts
+   * start being asked a question they were silently answering before. */
+  referral_source_default: text('referral_source_default'),
 
   /* ---- application facts asked once in onboarding (2026-08-08) ----
    *
@@ -552,6 +565,31 @@ export const application_profile = pgTable('application_profile', {
   // Free text month-and-year like grad_date, e.g. "June 2024", because that is what the forms ask
   // for and a full ISO date would be a precision the student does not have to hand.
   high_school_grad_date: text('high_school_grad_date'),
+  /* WHEN THE CURRENT PROGRAMME STARTED. "Start date month" / "Start date year", the education
+   * block on Greenhouse's own education row, which blocked 7 of the 22 applications that stopped on
+   * 2026-08-08: DRW x2, Flow Traders, IMC x2, Five Rings x2. The single widest gap in that run.
+   *
+   * THREE THINGS THIS IS NOT, and each was tried before this column existed:
+   *   Not availability_date. Answering it from job availability put "August 6, 2026" - the date she
+   *     could start WORK - into a field asking when she started UNIVERSITY.
+   *   Not the graduation date. That is the end of the programme, and education_end_date already is.
+   *   Not derived from high_school_grad_date. Hers reads "May 2023" against a graduation of "May
+   *     2028". A five-year run at one institution and a gap year followed by four both fit those two
+   *     facts exactly, and they give different answers (August 2023 against August 2024). Picking
+   *     one is inventing a fact about her education, which is the defect class this whole column
+   *     group exists to remove.
+   *
+   * Nothing on file can supply it, so it is asked. Asked HERE rather than at Apply because
+   * answerReuse scopes "start date month" posting_specific - it is not a self-declaration and not a
+   * test score - so an answer given on the Apply screen is used once and never carried, and she
+   * would retype it at every firm that asks. It is one fixed fact about her, identical on every
+   * form, which is exactly what this group is for. The Apply screen still asks it, unchanged,
+   * for the window before she answers it here and for anyone who skips onboarding.
+   *
+   * Free text month-and-year, like grad_date and high_school_grad_date: "August 2024". The forms
+   * ask for a month and a year, and narrowDatePart already splits one into either half.
+   */
+  education_start_date: text('education_start_date'),
   /* "Have you previously applied to work at Point72?" / "...with Akuna in the past?" / "...another
    * role @IMC within the last 12-18 months?" - 4 postings, 3 companies.
    *
@@ -630,6 +668,35 @@ export const application_profile = pgTable('application_profile', {
   // When the two booleans above were last set. Consent evidence, in the same shape users.* records
   // it for the automation permissions: a permission with no timestamp cannot be audited later.
   application_attestations_consented_at: timestamp('application_attestations_consented_at', { withTimezone: true }),
+
+  /* ---- where she will actually work from (2026-08-09) ----
+   *
+   * THE DEFECT THESE CLOSE. `resolveKnownAnswer` had `case 'onsite_commitment': return
+   * { value: 'Yes' }`, a constant with no column behind it, and a second constant beside it for
+   * the same question in prose form. A Redwood Materials packet was ready to send with "Are you
+   * available to work from our office in San Francisco?" answered YES, for an applicant with a
+   * +971 phone number who studies in Los Angeles. Same class as the Akuna exclusivity Yes, and far
+   * more frequent: 15 distinct labels across 12 employers in the stored corpus, which is six times
+   * the two-posting bar the columns above were chosen by.
+   *
+   * WHY THREE COLUMNS AND NOT A BOOLEAN. This is the one fact in the group with a LOCATION
+   * DIMENSION. "Yes to Los Angeles, no to New York" is a single coherent answer that no boolean can
+   * hold, and collapsing it either commits her to an office she will not go to or refuses one she
+   * would. And relocating is a different promise from commuting: someone who will work five days a
+   * week from an office in the city she already lives in has said nothing about moving to Seattle.
+   *
+   *   onsite_commitment      'anywhere' | 'listed_locations' | 'no'
+   *   onsite_locations       string[], her own words, ORDERED - the first entry an employer offers
+   *                          is also the answer to "what is your preferred work location?"
+   *   relocation_willingness 'yes' | 'no'
+   *
+   * null means never asked on all three, and the resolver refuses rather than defaults. An existing
+   * account that has not answered is therefore ASKED, which is the entire point: the previous
+   * behaviour and "defaulting after the migration" are the same wrong answer.
+   */
+  onsite_commitment: text('onsite_commitment'),
+  onsite_locations: jsonb('onsite_locations'),
+  relocation_willingness: text('relocation_willingness'),
 
   updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
@@ -756,6 +823,23 @@ export const application_email_messages = pgTable('application_email_messages', 
   providerMessageUnique: uniqueIndex('application_email_messages_provider_id_unique')
     .on(t.provider, t.provider_message_id)
     .where(sql`${t.provider_message_id} is not null`),
+}));
+
+// ---- application_email_receiving_proofs ----
+// A provider-key-independent proof that Resend delivered one exact, operator-configured canary to
+// the selected managed receiving route. The webhook handler writes only hashes and routing facts:
+// never the canary recipient, provider payload, message body, headers, or signing secrets.
+export const application_email_receiving_proofs = pgTable('application_email_receiving_proofs', {
+  provider_message_hash: text('provider_message_hash').primaryKey(),
+  route_fingerprint: text('route_fingerprint').notNull(),
+  proof_version: integer('proof_version').notNull(),
+  domain: text('domain').notNull(),
+  verified_at: timestamp('verified_at', { withTimezone: true }).notNull(),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  routeFingerprintUnique: uniqueIndex('application_email_receiving_proofs_route_fingerprint_unique')
+    .on(t.route_fingerprint),
+  verifiedAtIdx: index('application_email_receiving_proofs_verified_at_idx').on(t.verified_at),
 }));
 
 // ---- career_page_sources ----

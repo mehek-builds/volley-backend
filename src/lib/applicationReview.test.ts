@@ -3,10 +3,14 @@ import { describe, test } from 'node:test';
 import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import {
+  applyApplicationReviewEdit,
   deriveEditedTerms,
+  finalApprovalCoverLetterIssue,
+  finalApprovalFieldIssues,
   mergeSubmittedApplicationReviewQuestions,
   normalizeApplicationReviewQuestions,
   readApplicationReview,
+  type ApplicationReviewState,
 } from './applicationReview';
 
 const bank: ExperienceBankEntry[] = [
@@ -335,4 +339,179 @@ describe('application review metadata', () => {
       ],
     );
   });
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * THE SEND GATE AND THE COVER LETTER: an optional one may never refuse a finished application.
+ *
+ * Cresta packet 8142004c-3358-4538-8778-16df5e31c5bb, 2026-08-08. Status ready_for_final_approval,
+ * six filled fields, a resume uploaded, no blockers, no screener questions unanswered, and
+ * POST /submission/approve answering 422 FINAL_APPROVAL_VERIFICATION_FAILED with a single issue:
+ * "The filled form did not record the cover letter attachment." The live form's cover letter
+ * offered Attach / Dropbox / Enter manually and carried no required marker, while First Name, Last
+ * Name and Email all did.
+ *
+ * Two conflations, and it took both:
+ *   cover_letter_supported, which means the form HAS a cover-letter file control, was read as
+ *   meaning the employer REQUIRES one; and
+ *   a cover letter stored on the row was read as a cover letter the RUN ATTACHED, when buildPacket
+ *   attaches only an approved letter and this one was an unapproved 1,918 character draft.
+ * ------------------------------------------------------------------------------------------- */
+describe('the final approval cover letter gate', () => {
+  const cresta: ApplicationReviewState = {
+    role: 'Data Science Intern',
+    status: 'ready_for_final_approval',
+    updated_at: '2026-08-08T23:29:52.561Z',
+    jd_text: 'Data Science Intern, Customer Success. San Francisco.',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    filled_fields: ['first_name', 'last_name', 'preferred_first_name', 'email', 'phone', 'resume'],
+    cover_letter_supported: true,
+  };
+
+  test('a form that only OFFERS a cover letter does not block the send', () => {
+    // The measured Cresta shape, with the requirement measured and false.
+    assert.equal(finalApprovalCoverLetterIssue({ ...cresta, cover_letter_required: false }, false), null);
+    // And with a draft sitting on the row, which is where the second conflation lived.
+    assert.equal(finalApprovalCoverLetterIssue({ ...cresta, cover_letter_required: false }, true), null);
+  });
+
+  test('a packet filled before the requirement was measured does not block either', () => {
+    // cover_letter_required undefined is every packet already in the database. Unknown must not be
+    // read as required: that is the same refusal wearing a new field name, and it is what left
+    // three applications unsendable on 2026-08-08.
+    assert.equal(finalApprovalCoverLetterIssue(cresta, false), null);
+  });
+
+  test('a cover letter the employer requires and she has not written DOES block', () => {
+    const issue = finalApprovalCoverLetterIssue({ ...cresta, cover_letter_required: true }, false);
+    assert.ok(issue);
+    assert.match(issue, /requires a cover letter/i);
+  });
+
+  test('a required cover letter is satisfied by a draft on the row, approved or not', () => {
+    // Approving is what this endpoint does: approvedReviewSpec stamps _cover_letter.approved_at on
+    // the way through and the submit run rebuilds the packet, so a stored draft will be sent.
+    assert.equal(finalApprovalCoverLetterIssue({ ...cresta, cover_letter_required: true }, true), null);
+  });
+
+  test('the filled-form evidence check asks what the RUN attached, not what the row holds', () => {
+    // The run did not attach a letter, so a form with no cover field is correct and complete.
+    assert.deepEqual(finalApprovalFieldIssues(cresta, false), []);
+    // A run that DID attach one and recorded no cover field is a real defect and still reported.
+    assert.deepEqual(
+      finalApprovalFieldIssues(cresta, true),
+      ['The filled form did not record the cover letter attachment.'],
+    );
+    // And that report clears the moment the evidence is there.
+    assert.deepEqual(
+      finalApprovalFieldIssues({ ...cresta, filled_fields: [...cresta.filled_fields!, 'cover_letter'] }, true),
+      [],
+    );
+  });
+
+  test('the other three evidence checks are untouched by any of this', () => {
+    assert.deepEqual(
+      finalApprovalFieldIssues({ ...cresta, filled_fields: [] }, false),
+      [
+        'The filled form did not record an email field.',
+        'The filled form did not record a resume upload.',
+        'The filled form did not record the applicant name fields.',
+      ],
+    );
+  });
+});
+
+test('review edits stamp server-owned current-answer provenance', () => {
+  const current = {
+    jd_text: 'Role',
+    status: 'questions_ready',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: '2026-08-09T00:00:00.000Z',
+  } as ApplicationReviewState;
+  const edited = applyApplicationReviewEdit(current, {
+    questions: [{ id: 'q', question: 'Can you work onsite?', answer: 'Yes', kind: 'required', required: true }],
+    skipped_reasons: [],
+  });
+  assert.equal(edited.questions[0].answer_source, 'applicant_review');
+  assert.equal(edited.questions[0].answer_reviewed_at, edited.questions_reviewed_at);
+  assert.equal(edited.updated_at, edited.questions_reviewed_at);
+});
+
+test('submit merge preserves provenance only for an exact current reviewed identity', () => {
+  const reviewedAt = '2026-08-09T12:00:00.000Z';
+  const stored = [{
+    id: 'q',
+    question: 'Can you work onsite?',
+    answer: 'Yes',
+    kind: 'required' as const,
+    required: true,
+    answer_source: 'applicant_review' as const,
+    answer_reviewed_at: reviewedAt,
+  }];
+  const unchanged = mergeSubmittedApplicationReviewQuestions(stored, [{ ...stored[0] }], reviewedAt);
+  assert.equal(unchanged[0].answer_source, 'applicant_review');
+  assert.equal(unchanged[0].answer_reviewed_at, reviewedAt);
+
+  const changed = mergeSubmittedApplicationReviewQuestions(
+    stored,
+    [{ ...stored[0], answer: 'No' }],
+    reviewedAt,
+  );
+  assert.equal(changed[0].answer, 'No');
+  assert.equal(changed[0].answer_source, undefined);
+  assert.equal(changed[0].answer_reviewed_at, undefined);
+
+  for (const publicQuestion of [
+    '  Can you work onsite?  ',
+    'Can  you work onsite?',
+    'can you work onsite?',
+    'Can you work on-site?',
+  ]) {
+    const textMutated = mergeSubmittedApplicationReviewQuestions(
+      stored,
+      [{ ...stored[0], question: publicQuestion }],
+      reviewedAt,
+    );
+    assert.equal(textMutated.length, 1, `mutated public label must not append: ${publicQuestion}`);
+    assert.equal(textMutated[0].question, stored[0].question, 'stored canonical label must win');
+    assert.equal(textMutated[0].answer, stored[0].answer);
+    assert.equal(textMutated[0].answer_source, undefined, `mutation must invalidate: ${publicQuestion}`);
+    assert.equal(textMutated[0].answer_reviewed_at, undefined);
+  }
+
+  const staleReview = mergeSubmittedApplicationReviewQuestions(
+    stored,
+    [{ ...stored[0] }],
+    '2026-08-09T12:00:01.000Z',
+  );
+  assert.equal(staleReview[0].answer_source, undefined);
+  assert.equal(staleReview[0].answer_reviewed_at, undefined);
+
+  const changedId = mergeSubmittedApplicationReviewQuestions(
+    stored,
+    [{ ...stored[0], id: 'public-replacement' }],
+    reviewedAt,
+  );
+  assert.equal(changedId[0].answer_source, undefined);
+  assert.equal(changedId[0].answer_reviewed_at, undefined);
+
+  const replacedIdentity = mergeSubmittedApplicationReviewQuestions(
+    stored,
+    [{ ...stored[0], id: 'public-replacement', question: 'Can you work on site?' }],
+    reviewedAt,
+  );
+  assert.equal(replacedIdentity[0].question, stored[0].question);
+  assert.equal(replacedIdentity[0].answer_source, undefined);
+  assert.equal(replacedIdentity[0].answer_reviewed_at, undefined);
+  assert.equal(replacedIdentity[1].question, 'Can you work on site?');
+  assert.equal(replacedIdentity[1].answer_source, undefined);
+  assert.equal(replacedIdentity[1].answer_reviewed_at, undefined);
+
+  const omitted = mergeSubmittedApplicationReviewQuestions(stored, [], reviewedAt);
+  assert.equal(omitted[0].answer_source, undefined);
+  assert.equal(omitted[0].answer_reviewed_at, undefined);
 });

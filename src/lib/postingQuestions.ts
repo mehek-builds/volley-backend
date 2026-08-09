@@ -224,7 +224,7 @@ export function resolvePrescript(
   for (const question of questions) {
     const label = question.label;
     const reusable = answerReuseScope(label, reuseContext) === 'reusable';
-    const remembered = savedAnswerFor(label, savedAnswers, reuseContext);
+    const remembered = savedAnswerFor(label, savedAnswers, reuseContext, question.options);
     const base = {
       label,
       input_type: question.input_type,

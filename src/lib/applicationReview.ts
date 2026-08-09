@@ -11,6 +11,8 @@ export type ApplicationReviewQuestion = {
   portal_selector?: string;
   portal_input_type?: string;
   ats_api_field?: string;
+  answer_source?: 'applicant_review';
+  answer_reviewed_at?: string;
 };
 
 export type ApplicationAttentionCategory =
@@ -97,34 +99,76 @@ export function normalizeApplicationReviewQuestions(
 export function mergeSubmittedApplicationReviewQuestions(
   stored: readonly ApplicationReviewQuestion[],
   submitted: readonly ApplicationReviewQuestion[],
+  questionsReviewedAt?: string,
 ): ApplicationReviewQuestion[] {
-  const submittedByQuestion = new Map<string, ApplicationReviewQuestion>();
-  for (const question of submitted) {
+  const submittedByQuestion = new Map<string, { question: ApplicationReviewQuestion; index: number }>();
+  const submittedByUniqueId = new Map<string, { question: ApplicationReviewQuestion; index: number } | undefined>();
+  for (const [index, question] of submitted.entries()) {
     const key = questionKey(question.question);
-    if (key) submittedByQuestion.set(key, question);
+    if (key) submittedByQuestion.set(key, { question, index });
+    submittedByUniqueId.set(
+      question.id,
+      submittedByUniqueId.has(question.id) ? undefined : { question, index },
+    );
   }
+  const consumedSubmittedIndexes = new Set<number>();
   const merged = stored.map((question) => {
-    const submittedQuestion = submittedByQuestion.get(questionKey(question.question));
-    if (!submittedQuestion) return question;
+    // The normalized text is the ordinary semantic identity. The id fallback exists only so a
+    // public caller cannot evade invalidation by renaming a reviewed question while retaining its
+    // server-issued id. Ambiguous duplicate ids are intentionally not matched.
+    const submittedMatch = submittedByQuestion.get(questionKey(question.question))
+      ?? submittedByUniqueId.get(question.id);
+    if (!submittedMatch) {
+      const {
+        answer_source: _answerSource,
+        answer_reviewed_at: _answerReviewedAt,
+        ...questionWithoutProvenance
+      } = question;
+      return questionWithoutProvenance;
+    }
+    const { question: submittedQuestion, index: submittedIndex } = submittedMatch;
+    consumedSubmittedIndexes.add(submittedIndex);
     const portalSelector = preferredPortalSelector(question.portal_selector, submittedQuestion.portal_selector);
     const portalInputType = submittedQuestion.portal_input_type ?? question.portal_input_type;
     const atsApiField = question.ats_api_field;
+    const provenanceMatchesCurrentReview = question.answer_source === 'applicant_review'
+      && typeof question.answer_reviewed_at === 'string'
+      && question.answer_reviewed_at === questionsReviewedAt;
+    const exactReviewedIdentityUnchanged = provenanceMatchesCurrentReview
+      && submittedQuestion.id === question.id
+      && submittedQuestion.question === question.question
+      && questionKey(submittedQuestion.question) === questionKey(question.question)
+      && submittedQuestion.answer === question.answer;
+    const {
+      answer_source: _answerSource,
+      answer_reviewed_at: _answerReviewedAt,
+      ...questionWithoutProvenance
+    } = question;
     return {
-      ...question,
+      ...(exactReviewedIdentityUnchanged ? question : questionWithoutProvenance),
       answer: submittedQuestion.answer,
       kind: submittedQuestion.kind,
       required: question.required || submittedQuestion.required,
-      question: submittedQuestion.question.trim() ? submittedQuestion.question : question.question,
+      // The stored label is the form identity. A public submit body may update an answer but cannot
+      // rename that control, including by changing only case or whitespace, then inherit the proof
+      // attached to the exact text the applicant reviewed.
+      question: question.question,
       ...(portalSelector ? { portal_selector: portalSelector } : {}),
       ...(portalInputType ? { portal_input_type: portalInputType } : {}),
       ...(atsApiField ? { ats_api_field: atsApiField } : {}),
     };
   });
   const storedKeys = new Set(stored.map((question) => questionKey(question.question)).filter(Boolean));
-  for (const question of submitted) {
+  for (const [index, question] of submitted.entries()) {
+    if (consumedSubmittedIndexes.has(index)) continue;
     const key = questionKey(question.question);
     if (!key || storedKeys.has(key)) continue;
-    merged.push(question);
+    const {
+      answer_source: _answerSource,
+      answer_reviewed_at: _answerReviewedAt,
+      ...submittedWithoutProvenance
+    } = question;
+    merged.push(submittedWithoutProvenance);
   }
   return normalizeApplicationReviewQuestions(merged);
 }
@@ -211,6 +255,7 @@ export type ApplicationReviewState = {
     | 'failed';
   edited_terms: string[];
   questions: ApplicationReviewQuestion[];
+  questions_reviewed_at?: string;
   skipped_reasons: string[];
   updated_at: string;
   /* WHICH BUILD WROTE THIS REVIEW, so a reader can tell "this stopped for a reason" apart from
@@ -297,7 +342,46 @@ export type ApplicationReviewState = {
   security_code?: SecurityCodeState;
   handoff_expires_at?: string;
   final_approved_at?: string;
+  /* WHETHER THIS FORM HAS A COVER-LETTER FILE CONTROL LITOS CAN ATTACH TO. Nothing more.
+   *
+   * Written from hasCoverLetterUpload / managedResultHasCoverLetterUpload, both of which count file
+   * inputs matching COVER_LETTER_UPLOAD_SELECTORS. It is a statement about the PORTAL's capability
+   * and about Litos's ability to use it, and it is deliberately FALSE on JazzHR and Breezy, whose
+   * employers do accept a cover letter but take it as a textarea Litos cannot attach a PDF to.
+   *
+   * It has never meant "the employer requires a cover letter", and reading it that way is what made
+   * Cresta packet 8142004c-3358-4538-8778-16df5e31c5bb unsendable: a complete Greenhouse form, every
+   * required field filled, a live cover letter control that carried no required marker while First
+   * Name, Last Name and Email all did, and POST /submission/approve refusing it 422 forever. See
+   * cover_letter_required below, which is the field that answers the question the approve gate was
+   * asking this one. */
   cover_letter_supported?: boolean;
+  /* WHETHER THE EMPLOYER MARKED THE COVER LETTER REQUIRED, measured on their own form.
+   *
+   * Read off the run's blocker list rather than off a new browser capability, because the blocker
+   * list is already the product's single answer to "which fields did this employer mark required":
+   * native `required`, `aria-required`, Ashby's `_required_` label class, and Greenhouse's asterisk
+   * printed into a label. Both providers compute it, both write it into attention_reason, and the
+   * fill run never attaches an unapproved letter - so on a form that requires one, the control is
+   * empty when the scan runs and the scan names it. Absence of that line, on a form that HAS the
+   * control and had it empty, is therefore evidence the control is optional.
+   *
+   * Tri-state on purpose. `undefined` means no run has measured it (every packet stored before this
+   * field existed, and every portal with no cover-letter control at all), and undefined must never
+   * block a send: an application that is otherwise complete is not made wrong by a cover letter
+   * nobody asked for. Only `true` blocks. If the measurement is ever wrong in the quiet direction,
+   * the submit-time readiness gate still fails closed on a required-and-empty control, so the cost
+   * is a handoff rather than a half-blank application at an employer. */
+  cover_letter_required?: boolean;
+  /* WHETHER THE RUN THAT FILLED THIS FORM ACTUALLY CARRIED A COVER LETTER.
+   *
+   * buildPacket attaches a letter only once `_cover_letter.approved_at` is set, so a generated but
+   * unreviewed draft is NOT sent and the form correctly records no cover-letter field. The approve
+   * gate used to assert "the filled form recorded the cover letter attachment" whenever a letter
+   * existed on the row at approve time, which asserts something that never happened and is exactly
+   * how Cresta failed. Recorded here, at the run, so the evidence check can ask what the run did
+   * rather than infer it from state that has since moved. */
+  cover_letter_attached?: boolean;
   /* Whether Litos can fill in this posting's application page AT ALL, derived from portal_url.
    *
    * Unlike cover_letter_supported, which can only be answered by looking at a live form mid-run,
@@ -341,8 +425,10 @@ export type ApplicationReviewState = {
     consent_version?: string;
   };
   verification?: {
-    status: 'not_needed' | 'searching' | 'completed' | 'handoff';
-    provider?: 'gmail' | 'outlook';
+    status: 'not_needed' | 'searching' | 'verification_pending' | 'completed' | 'handoff';
+    provider?: 'gmail' | 'outlook' | 'litos';
+    requested_at?: string;
+    retry_count?: number;
     completed_at?: string;
   };
   receipt?: {
@@ -474,6 +560,72 @@ export function readApplicationReview(spec: unknown): ApplicationReviewState | n
   return state;
 }
 
+function normalizedFilledFields(fields: readonly string[] | undefined): Set<string> {
+  return new Set((fields ?? []).map((field) => field.toLowerCase().replace(/[^a-z0-9]/g, '')));
+}
+
+/**
+ * Did the run record filling the fields it must have filled?
+ *
+ * Lives here, beside the state it reads, so the send gate can be exercised without standing a route
+ * up. `coverLetterAttached` is what the RUN carried, read off review.cover_letter_attached, and NOT
+ * whether a letter exists on the row now. buildPacket attaches a letter only once it is approved,
+ * so a generated but unreviewed draft was never sent and the form is correct to record no
+ * cover-letter field. Asking the second question instead of the first is what refused the Cresta
+ * packet 8142004c-3358-4538-8778-16df5e31c5bb: it held a 1,918 character unapproved draft, so the
+ * gate read "a cover letter exists" as "the run attached one" and demanded evidence of something
+ * that had deliberately not happened.
+ */
+export function finalApprovalFieldIssues(
+  review: ApplicationReviewState,
+  coverLetterAttached: boolean,
+): string[] {
+  const normalized = normalizedFilledFields(review.filled_fields);
+  const has = (needle: string) => [...normalized].some((field) => field.includes(needle));
+  const issues: string[] = [];
+  if (!has('email')) issues.push('The filled form did not record an email field.');
+  if (!has('resume')) issues.push('The filled form did not record a resume upload.');
+  if (!has('name') && !(has('first') && has('last'))) {
+    issues.push('The filled form did not record the applicant name fields.');
+  }
+  if (coverLetterAttached && !has('cover')) {
+    issues.push('The filled form did not record the cover letter attachment.');
+  }
+  return issues;
+}
+
+/**
+ * The one sentence the send gate may say about a cover letter, or none.
+ *
+ * TWO DIFFERENT FACTS, and the gate used to run on the wrong one. `cover_letter_supported` means
+ * the form HAS a cover-letter file control Litos can attach to; it has never meant the employer
+ * wants one, and it is deliberately false on JazzHR and Breezy, whose employers do take a cover
+ * letter but as a textarea. Blocking on it made every complete application on a form that merely
+ * OFFERS the control unsendable. Cresta is the measured case: a Greenhouse form offering Attach /
+ * Dropbox / Enter manually with no required marker, while First Name, Last Name and Email all
+ * carried one, refused 422 with every required field filled.
+ *
+ * `cover_letter_required` is the fact the gate wanted, measured by the run off the employer's own
+ * required-field scan. It is tri-state and only `true` refuses: `undefined` is every packet filled
+ * before the field existed, and treating unknown as required is the same refusal wearing a new
+ * name. If the measurement is ever wrong in the quiet direction the submit-time readiness gate
+ * still fails closed on a required-and-empty control, so the cost is a handoff and not a half-blank
+ * application at an employer.
+ *
+ * `hasCoverLetter` is the STORED letter, approved or not, because approving is what this endpoint
+ * does: approvedReviewSpec stamps `_cover_letter.approved_at` on the way through, and the submit
+ * run rebuilds the packet afterwards and attaches it. A draft waiting on the row is a letter that
+ * will be sent.
+ */
+export function finalApprovalCoverLetterIssue(
+  review: ApplicationReviewState,
+  hasCoverLetter: boolean,
+): string | null {
+  if (review.cover_letter_required !== true) return null;
+  if (hasCoverLetter) return null;
+  return 'This employer requires a cover letter. Write one before sending.';
+}
+
 export type ApplicationReviewEdit = {
   ats_name?: string;
   portal_url?: string;
@@ -504,9 +656,14 @@ export function applyApplicationReviewEdit(
   const canonicalPortalUrl = edit.portal_url === undefined
     ? undefined
     : canonicalSupportedPortalUrl(edit.portal_url, edit.ats_name ?? current.ats_name) ?? edit.portal_url;
+  const reviewedAt = new Date().toISOString();
   return {
     ...current,
     ...edit,
+    questions: edit.questions.map((question) => question.answer.trim()
+      ? { ...question, answer_source: 'applicant_review' as const, answer_reviewed_at: reviewedAt }
+      : question),
+    questions_reviewed_at: reviewedAt,
     ...(canonicalPortalUrl === undefined ? {} : {
       portal_url: canonicalPortalUrl,
       ats_name: isPortalSupported(canonicalPortalUrl) ? detectPortal(canonicalPortalUrl) : edit.ats_name ?? current.ats_name,
@@ -515,6 +672,6 @@ export function applyApplicationReviewEdit(
     // perfectly good stored true, which is the same lockout arriving by a different door.
     ...(canonicalPortalUrl === undefined ? {} : { portal_supported: isPortalSupported(canonicalPortalUrl) }),
     status: edit.questions.length > 0 ? 'questions_ready' : 'ready_to_submit',
-    updated_at: new Date().toISOString(),
+    updated_at: reviewedAt,
   };
 }

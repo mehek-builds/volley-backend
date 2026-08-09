@@ -10,6 +10,7 @@ import {
   discoverAndResolveQuestions,
   discoveryHonestyReasons,
   isProviderSessionFailureMessage,
+  mergeDiscoveredPortalQuestions,
   preparationEvidenceBlockers,
   reconcileManagedProviderBlockers,
   readMostRecentRole,
@@ -20,6 +21,7 @@ import {
   unansweredRequiredBlockerLabels,
   type ResumeRow,
 } from './submissionRunner';
+import { savedAnswerKey } from '../lib/answerReuse';
 import { workEligibilityFromSponsorshipAnswer } from '../lib/applicationProfileLike';
 import type { ApplicationReviewState } from '../lib/applicationReview';
 import { describeRequiredBlocker } from '../lib/fieldLabel';
@@ -465,7 +467,7 @@ test('discovered US work authorization and sponsorship become reviewed Yes answe
         maxLength: null,
       },
       {
-        label: 'Will you now or in the future require sponsorship for employment visa status?',
+        label: 'Will you now or in the future require sponsorship for employment visa status in the United States?',
         selector: '[data-litos-discovered-2]',
         inputType: 'text',
         maxLength: null,
@@ -483,12 +485,12 @@ test('discovered US work authorization and sponsorship become reviewed Yes answe
     result.questions.map((question) => ({ question: question.question, answer: question.answer })),
     [
       { question: 'Are you legally authorized to work in the United States?', answer: 'Yes' },
-      { question: 'Will you now or in the future require sponsorship for employment visa status?', answer: 'Yes' },
+      { question: 'Will you now or in the future require sponsorship for employment visa status in the United States?', answer: 'Yes' },
     ],
   );
 });
 
-test('select and radio discoveries resolve from stored profile without direct textbox selectors', async () => {
+test('select and radio discoveries hold an exact onsite commitment while resolving stored academic facts', async () => {
   const current: ApplicationReviewState = {
     jd_text: 'This internship is based in San Francisco, California.',
     role: 'Software Engineering Intern',
@@ -518,12 +520,15 @@ test('select and radio discoveries resolve from stored profile without direct te
     ],
     { user_id: 'user-1' } as ResumeRow,
     current,
-    { currently_enrolled: true, grad_date: 'May 2028', grad_year: 2028 },
+    // The legacy location fields do not include cadence or posting scope.
+    { currently_enrolled: true, grad_date: 'May 2028', grad_year: 2028, onsite_commitment: 'anywhere' },
     true,
     'greenhouse',
   );
 
-  assert.deepEqual(result.attentionReasons, []);
+  assert.deepEqual(result.attentionReasons, [
+    'where you will work from is yours to answer: "Are you able to work onsite 4 days a week?"',
+  ]);
   assert.deepEqual(
     result.questions.map((question) => ({
       question: question.question,
@@ -531,7 +536,6 @@ test('select and radio discoveries resolve from stored profile without direct te
       portal_selector: question.portal_selector,
     })),
     [
-      { question: 'Are you able to work onsite 4 days a week?', answer: 'Yes', portal_selector: undefined },
       { question: 'Are you currently enrolled in a degree program?', answer: 'Yes', portal_selector: undefined },
     ],
   );
@@ -1085,7 +1089,7 @@ test('required-ness reaches the stored question, so the dashboard and the 422 st
   assert.equal(heardAbout.answer, 'Company website');
 });
 
-test('an answer the applicant already gave survives a later run that decides it must refuse', async () => {
+test('a stale answer is invalidated when the current resolver refuses the exact field', async () => {
   const answered: ApplicationReviewState = {
     ...ANDURIL_REVIEW,
     questions: [{
@@ -1106,9 +1110,62 @@ test('an answer the applicant already gave survives a later run that decides it 
   );
 
   const question = result.questions.find((item) => item.question.startsWith('What is your top location'));
-  assert.ok(question, 'the stored answer was dropped by the refusal branch');
-  assert.equal(question.answer, 'Costa Mesa, CA');
+  assert.ok(question, 'the required field must remain available for a fresh applicant answer');
+  assert.equal(question.answer, '');
   assert.equal(question.id, 'q-existing');
+  assert.ok(result.invalidatedQuestionKeys.includes('what is your top location preference?'));
+  const merged = mergeDiscoveredPortalQuestions(result.questions, answered.questions, result.invalidatedQuestionKeys);
+  assert.equal(merged[0]?.answer, '', 'the later packet merge must not restore the stale value');
+});
+
+test('refused required and optional answers cannot re-enter a packet through the stored-question merge', async () => {
+  const fields = [
+    { label: 'Are you able to work onsite in our office five days per week?* question_1', selector: '#q1', inputType: 'select', maxLength: null, options: ['Yes', 'No'] },
+    { label: 'Will you require visa sponsorship for employment?* question_2', selector: '#q2', inputType: 'select', maxLength: null, options: ['Yes', 'No'] },
+    { label: 'I certify that all information in this application is true and complete.* question_3', selector: '#q3', inputType: 'checkbox', maxLength: null },
+    { label: 'Candidate Privacy Notice question_4', selector: '#q4', inputType: 'checkbox', maxLength: null },
+    { label: 'AI Policy for Interviewers question_5', selector: '#q5', inputType: 'checkbox', maxLength: null },
+    { label: 'When can you start?* question_6', selector: '#q6', inputType: 'text', maxLength: null },
+  ];
+  const stored = fields.map((field, index) => ({
+    id: `stale-${index}`,
+    question: field.label.replace(/\*?\s+question_\d+$/, ''),
+    answer: index === 5 ? 'June 1, 2026' : 'Yes',
+    kind: 'required' as const,
+    required: field.label.includes('*'),
+  }));
+  const result = await discoverAndResolveQuestions(
+    fields,
+    { user_id: 'user-1' } as ResumeRow,
+    { ...ANDURIL_REVIEW, questions: stored },
+    { work_authorized: true, needs_sponsorship: false, availability_date: 'June 1, 2026' },
+    true,
+    'greenhouse',
+  );
+  const merged = mergeDiscoveredPortalQuestions(result.questions, stored, result.invalidatedQuestionKeys);
+  assert.equal(merged.some((question) => question.answer.trim()), false);
+  assert.equal(merged.some((question) => question.question === 'Candidate Privacy Notice'), false);
+  assert.equal(merged.some((question) => question.question === 'AI Policy for Interviewers'), false);
+});
+
+test('a remembered exact score does not survive changed closed-list options in discovery', async () => {
+  const label = 'What was your SAT score?';
+  const result = await discoverAndResolveQuestions(
+    [{ label: `${label}* question_7`, selector: '#sat', inputType: 'select', maxLength: null, options: ['1200-1399', '1400-1499', '1500-1600'] }],
+    { user_id: 'user-1' } as ResumeRow,
+    { ...ANDURIL_REVIEW, questions: [{ id: 'stale-sat', question: label, answer: '1510', kind: 'required', required: true }] },
+    {},
+    true,
+    'greenhouse',
+    new Map([[savedAnswerKey(label), '1510']]),
+  );
+  assert.equal(result.questions[0]?.answer, '');
+  assert.match(result.attentionReasons.join(' '), /none of the options exactly match your remembered answer/);
+  assert.equal(mergeDiscoveredPortalQuestions(
+    result.questions,
+    [{ id: 'stale-sat', question: label, answer: '1510', kind: 'required', required: true }],
+    result.invalidatedQuestionKeys,
+  )[0]?.answer, '');
 });
 
 /* R-101, the reporting half. The DRW Software Developer Intern run of 2026-08-08 recorded
@@ -1180,7 +1237,7 @@ test('a scan that threw with no message is still a failure, not a silent success
   assert.equal(discoveryHonestyReasons(describeDiscoveryFailure(new Error()), []).length, 1);
   // And the send decision is counted off the failure itself, not off the sentence.
   const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
-  assert.match(runner, /attentionCount: discoveryAttention\.length \+ discoveryFailures\.length/);
+  assert.match(runner, /attentionCount:[^\n]*\+ discoveryFailures\.length/);
   assert.doesNotMatch(runner, /attentionCount:[^\n]*honestyReasons\.length/);
 });
 
@@ -1222,7 +1279,10 @@ test('neither prepare path can call a form safe on the strength of a scan that f
   assert.equal(runner.match(/discoveryHonestyReasons\(discoveryFailures\[0\]/g)?.length, 2);
   assert.match(runner, /\.\.\.coverLetterAttention,\s*\.\.\.honestyReasons\b/);
   // ...and neither can be called safe while it stands. BOTH gates read the failure array itself,
-  // never the rendered prose, so a message that renders to nothing cannot restore `safe`.
+  // never the rendered prose, so a message that renders to nothing cannot restore `safe`. The
+  // direct path's count is matched loosely on purpose: it sums several independent hold-the-send
+  // reasons and more will be added, so the assertion pins that this term is present, not the
+  // arithmetic around it.
   assert.match(runner, /&& discoveryFailures\.length === 0/);
-  assert.match(runner, /attentionCount: discoveryAttention\.length \+ discoveryFailures\.length/);
+  assert.match(runner, /attentionCount:[^\n]*\+ discoveryFailures\.length/);
 });

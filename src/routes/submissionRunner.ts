@@ -25,9 +25,11 @@ import {
 } from '../lib/securityCode';
 import {
   connectToSession,
+  continueManagedBrowser,
   createBrowserContext,
   createBrowserSession,
   getBrowserSession,
+  HANDOFF_WINDOW_MS,
   isBrowserbaseConfigured,
   isManagedStratusProvider,
   runManagedBrowser,
@@ -48,9 +50,11 @@ import {
   detectPortal,
   managedResultRequiresCaptchaAttention,
   isManagedCaptchaEvidenceExtract,
+  blockersRequireCoverLetter,
   fillPortal,
   hasCoverLetterUpload,
   managedResultFilledFields,
+  managedAnswerLossReasons,
   managedResultHasCoverLetterUpload,
   navigateToApplicationForm,
   portalApplicationUrl,
@@ -79,7 +83,12 @@ import { readExperienceBank } from '../db/experienceBank';
 import { declaredSkillsList } from './profile';
 import { applicantGroundingFacts, draftApplicationAnswer, type ApplicantGroundingFacts } from '../llm/applicationAnswer';
 import { isBillingOrAuthFailure } from './resume';
-import { completeEmailVerificationIfPresent, type BrowserVerificationResult } from '../lib/browserVerification';
+import {
+  completeEmailVerificationIfPresent,
+  managedResultNeedsEmailVerification,
+  prepareManagedEmailVerification,
+  type BrowserVerificationResult,
+} from '../lib/browserVerification';
 import {
   discoverPageQuestions,
   discoveredFieldIsRequired,
@@ -120,7 +129,11 @@ import {
 import { coverLetterFileNameForRole, resumeFileNameForRole } from '../lib/resumeFileName';
 import { assessAtsSubmissionChannel, tryAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
 import { duplicateApplicationVerdict } from '../lib/duplicateApplication';
-import { resolveApplicantEmail } from '../lib/applicationEmail';
+import {
+  ApplicantEmailRegenerationRequiredError,
+  readPinnedApplicantEmail,
+  resolveFrozenApplicantEmail,
+} from '../lib/applicationEmail';
 
 export type ResumeRow = typeof generated_resumes.$inferSelect;
 type StoredSpec = Record<string, unknown>;
@@ -214,8 +227,9 @@ async function countSubmissionsClaimedToday(userId: string): Promise<number> {
   return counted?.total ?? 0;
 }
 
-async function claimSubmission(row: ResumeRow): Promise<ResumeRow | null> {
+async function claimSubmission(row: ResumeRow, alreadyHeld = false): Promise<ResumeRow | null> {
   const current = readApplicationReview(row.spec);
+  if (alreadyHeld) return submissionClaimIsHeld(current) ? row : null;
   if (!current || current.status !== 'submitting' || current.submission_claimed_at) return null;
   const claimed = nextReview(current, {
     submission_claimed_at: new Date().toISOString(),
@@ -228,6 +242,42 @@ async function claimSubmission(row: ResumeRow): Promise<ResumeRow | null> {
     .where(and(
       eq(generated_resumes.id, row.id),
       sql`${generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
+      sql`${generated_resumes.spec}->'_review'->>'submission_claimed_at' is null`,
+    ))
+    .returning();
+  return rows[0] ?? null;
+}
+
+export function submissionClaimIsHeld(review: ApplicationReviewState | null | undefined): boolean {
+  return review?.status === 'submitting'
+    && typeof review.submission_claimed_at === 'string'
+    && review.submission_claimed_at.trim().length > 0
+    && typeof review.submission_claim_id === 'string'
+    && review.submission_claim_id.trim().length > 0;
+}
+
+async function claimSecurityCodeSubmission(
+  row: ResumeRow,
+  current: ApplicationReviewState,
+): Promise<ResumeRow | null> {
+  if (current.status !== 'awaiting_security_code' || !current.security_code) return null;
+  const requested = nextReview(current, {
+    status: 'submitting',
+    submission_authorization: {
+      source: 'per_application_approval',
+      authorized_at: new Date().toISOString(),
+    },
+    submission_claimed_at: new Date().toISOString(),
+    submission_claim_id: randomUUID(),
+    submission_error: undefined,
+  });
+  const rows = await db.update(generated_resumes)
+    .set({
+      spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(requested)}::jsonb, true)`,
+    })
+    .where(and(
+      eq(generated_resumes.id, row.id),
+      sql`${generated_resumes.spec}->'_review'->>'status' = 'awaiting_security_code'`,
       sql`${generated_resumes.spec}->'_review'->>'submission_claimed_at' is null`,
     ))
     .returning();
@@ -329,10 +379,40 @@ function majorFromAcademicProfile(major: string | undefined, degree: string | un
   return cleaned || trimmed;
 }
 
+/**
+ * The blob key of the cover letter this packet should carry, or null when there is nothing to carry.
+ *
+ * THE ONE CONDITION THAT KEPT EVERY COVER LETTER OFF EVERY FORM. This used to also require
+ * `_cover_letter.approved_at` to be a string, and that single term is why no application Litos has
+ * ever filled reached an employer with a cover letter attached. Measured against prod on
+ * 2026-08-09: of the 112 packets whose form HAS a cover-letter control and which hold a written
+ * letter, 111 recorded no cover-letter upload in filled_fields, and exactly one had `approved_at`
+ * set at all.
+ *
+ * The requirement was circular, and the circle closed on the applicant. `approved_at` is written in
+ * exactly one place, approvedReviewSpec in routes/applications.ts, on the FINAL APPROVE. Final
+ * approve refuses (422, FINAL_APPROVAL_VERIFICATION_FAILED) unless filled_fields already records a
+ * cover entry. filled_fields can only record one if the fill run carried the file. The fill run
+ * could only carry the file once `approved_at` was set. So the only route to an attached cover
+ * letter ran through an approval that could not be granted until the cover letter was attached.
+ * Cresta packet 8142004c-3358-4538-8778-16df5e31c5bb sat in exactly that state: a complete
+ * 294-word letter, a live 3121-byte PDF in blob storage, and a Send button that returned 422.
+ *
+ * Attaching is now decided by the same fact the product promises on the pre-fill screen: the form
+ * has somewhere to put a cover letter and the applicant has one. WHETHER to attach is not this
+ * function's question and never was - every caller already gates on `cover_letter_supported`
+ * through omitCoverLetter, which is the honest reading of "does this form have a slot".
+ */
+export function coverLetterObjectKeyToAttach(spec: unknown): string | null {
+  const stored = (spec && typeof spec === 'object' ? spec : {}) as Record<string, unknown>;
+  const meta = (stored._cover_letter ?? {}) as Record<string, unknown>;
+  const key = typeof meta.object_key === 'string' ? meta.object_key.trim() : '';
+  return key || null;
+}
+
 export async function buildPacket(row: ResumeRow, controlledTest = false): Promise<SubmissionPacket> {
   const stored = row.spec as StoredSpec;
   const contact = (stored._contact ?? {}) as Record<string, unknown>;
-  const coverLetterMeta = (stored._cover_letter ?? {}) as Record<string, unknown>;
   const [userRow, appRow, profileRow] = await Promise.all([
     db.select().from(users).where(eq(users.id, row.user_id)).limit(1),
     // Tolerant read, see lib/applicationFacts.ts.
@@ -354,8 +434,9 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     resume = Buffer.from(await response.arrayBuffer());
   }
   let coverLetter: Buffer | undefined;
-  if (typeof coverLetterMeta.object_key === 'string' && typeof coverLetterMeta.approved_at === 'string') {
-    const coverLetterUrl = await resolveBlobUrl(coverLetterMeta.object_key);
+  const coverLetterKey = coverLetterObjectKeyToAttach(stored);
+  if (coverLetterKey) {
+    const coverLetterUrl = await resolveBlobUrl(coverLetterKey);
     if (!coverLetterUrl) throw new Error('Generated cover letter file is unavailable');
     const coverLetterResponse = await fetch(coverLetterUrl);
     if (!coverLetterResponse.ok) throw new Error('Generated cover letter file could not be downloaded');
@@ -372,15 +453,14 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
    * mail: every confirmation and every recruiter reply bounced, and the applicant was unreachable
    * on an application she cannot send twice.
    *
-   * resolveApplicantEmail will not hand back an alias unless the alias domain has been MEASURED
-   * able to receive mail, and falls back to her real address otherwise. The decision, including
-   * why, is recorded on the review state by the callers of buildPacket, so nothing can tell her
-   * her replies are being tracked when they are not. */
-  const applicantEmail = await resolveApplicantEmail({
+   * resolveFrozenApplicantEmail keeps the address written into this packet fixed. It refuses a
+   * pinned alias that is no longer receivable instead of silently typing a different address into
+   * the employer form than the one printed in the PDF. */
+  const applicantEmail = await resolveFrozenApplicantEmail({
     userId: row.user_id,
     applicationId: row.id,
+    spec: stored,
     accountEmail,
-    contactEmail: typeof contact.email === 'string' ? contact.email : null,
   });
   const email = applicantEmail.address.trim();
   if (!fullName || !email) throw new Error('Full name and email are required before submission');
@@ -418,7 +498,12 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
   const roleLocations = Array.isArray(context.locations)
     ? context.locations.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
     : undefined;
-  const refreshedQuestions = refreshKnownQuestionAnswers(review.questions, applicationProfile, review.jd_text);
+  const refreshedQuestions = refreshKnownQuestionAnswers(
+    review.questions,
+    applicationProfile,
+    review.jd_text,
+    review.questions_reviewed_at,
+  );
   return {
     fullName,
     email,
@@ -738,12 +823,18 @@ export function attentionBlockersForManagedResult(
  * no retry and no way to tell. Reproduced in prod on a Greenhouse posting on 2026-08-04, where a
  * cover letter that had merely failed to PARSE aborted a submission that was otherwise fine.
  *
- * Degrading is safe here, and not just tolerable: the generated letter is written unapproved
- * (approved=false), and buildPacket only ATTACHES a cover letter once approved_at is set. So a
- * failure at this step costs the applicant nothing they were about to send - it only means the
- * draft is not waiting for them on the approval screen. They can still write or retry one from the
- * dashboard. Losing the whole submission to protect an artifact the packet would not have carried
- * is strictly worse than continuing without it.
+ * Degrading beats aborting: losing a whole filled application to protect one attachment is the
+ * worse trade, and the applicant can still write or retry a letter from her dashboard.
+ *
+ * WHAT THIS PARAGRAPH USED TO SAY, and why it is worth keeping the correction visible: "the
+ * generated letter is written unapproved (approved=false), and buildPacket only ATTACHES a cover
+ * letter once approved_at is set. So a failure at this step costs the applicant nothing they were
+ * about to send." Both sentences were true and the conclusion was wrong. It cost her the send
+ * itself: on a form with a cover-letter control, /submission/approve refuses with 422 whenever the
+ * portal supports a letter and the packet has none recorded, so a degrade here produced a packet
+ * that read `ready_for_final_approval` and could never be sent. That is why `coverLetterIssue` now
+ * gates `safe` at both call sites rather than only being displayed. See coverLetterObjectKeyToAttach
+ * for the approved_at term itself, which is gone.
  *
  * The reason is returned rather than swallowed so the caller can put it in front of the applicant
  * as an attention reason. A silent degrade would be its own version of this bug.
@@ -776,7 +867,31 @@ async function packetForCoverLetterCapability(
   }
   const rows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, row.id)).limit(1);
   if (!rows[0]) throw new Error('This application went missing while we wrote the cover letter');
-  return { packet: await buildPacket(rows[0]) };
+  /* The SECOND way this step can fail, and it only became reachable when the approved_at term came
+     out of coverLetterObjectKeyToAttach. buildPacket now goes to blob storage for the letter on
+     every supported form, and it throws when the object key resolves to nothing or the fetch is not
+     ok. Before, that block was entered on approximately no run, so the throw was theoretical; now it
+     sits on the hot path of every Greenhouse prepare, and an unhandled throw here would abort a
+     filled application over a missing attachment - the exact failure the paragraph above this
+     function exists to prevent, reintroduced one line lower down. Same degrade, same shape, its own
+     sentence, because "we could not write it" and "we wrote it and could not attach it" are
+     different facts and the second one is ours to fix rather than hers to retry. */
+  try {
+    return { packet: await buildPacket(rows[0]) };
+  } catch (error) {
+    fastify.log.warn({ error, applicationId: row.id }, 'Cover letter file could not be attached, continuing without it');
+    return {
+      packet: omitCoverLetter(await buildPacket({ ...rows[0], spec: strippedCoverLetterSpec(rows[0].spec) })),
+      coverLetterIssue: 'Your cover letter is written but we could not attach the file to this form. Everything else is filled in. Open the application and send it again, and if it keeps happening the cover letter is the part to retry.',
+    };
+  }
+}
+
+/** The same spec with the cover letter artifact removed, so a rebuild cannot re-enter the fetch. */
+function strippedCoverLetterSpec(spec: unknown): Record<string, unknown> {
+  const stored = { ...((spec && typeof spec === 'object' ? spec : {}) as Record<string, unknown>) };
+  delete stored._cover_letter;
+  return stored;
 }
 
 /** The employer this packet is for, from job_context. Empty when the packet has no company on it. */
@@ -827,12 +942,13 @@ export async function discoverAndResolveQuestions(
    * re-checks the reuse scope against THIS posting's employer before handing one over - see
    * savedAnswerFor for why the read side has to check again rather than trust the write side. */
   savedAnswers: ReadonlyMap<string, string> = new Map(),
-): Promise<{ questions: ApplicationReviewQuestion[]; attentionReasons: string[] }> {
+): Promise<{ questions: ApplicationReviewQuestion[]; attentionReasons: string[]; invalidatedQuestionKeys: string[] }> {
   const existingByLabel = new Map(
     current.questions.map((q) => [normalizeReviewQuestionLabel(q.question).toLowerCase(), q] as const),
   );
   const questions: ApplicationReviewQuestion[] = [];
   const attentionReasons: string[] = [];
+  const invalidatedQuestionKeys = new Set<string>();
 
   let bank: Awaited<ReturnType<typeof readExperienceBank>> | null = null;
   let declaredSkills: string[] = [];
@@ -896,12 +1012,13 @@ export async function discoverAndResolveQuestions(
     field: DiscoveredQuestion,
     reviewLabel: string,
     existing: ApplicationReviewQuestion | undefined,
+    preserveExistingAnswer = false,
   ): ApplicationReviewQuestion => ({
     id: existing?.id ?? randomUUID(),
     question: reviewLabel,
-    // Whatever the applicant has already typed survives; Litos never overwrites her answer with a
-    // blank just because it has since decided it cannot answer the question itself.
-    answer: existing?.answer ?? '',
+    // Ordinary unresolved fields preserve an applicant answer. Refusal branches pass false because
+    // an old value may have been created by a superseded unsafe resolver and must be re-confirmed.
+    answer: preserveExistingAnswer ? (existing?.answer ?? '') : '',
     kind: 'required',
     required: true,
     portal_selector: portalSelectorForField(field),
@@ -929,7 +1046,8 @@ export async function discoverAndResolveQuestions(
      *
      * Which questions may be remembered at all is answerReuse's decision, not this loop's: nothing
      * tied to one posting ever reaches here. */
-    const remembered = savedAnswerFor(label, savedAnswers, reuseContext);
+    const rememberedWithoutOptionConstraint = savedAnswerFor(label, savedAnswers, reuseContext);
+    const remembered = savedAnswerFor(label, savedAnswers, reuseContext, field.options);
     const known = (profileKnown && 'value' in profileKnown)
       ? profileKnown
       : (remembered !== undefined ? ({ value: remembered } as const) : profileKnown);
@@ -964,14 +1082,38 @@ export async function discoverAndResolveQuestions(
     if (resolvedField && !resolvedField.matchedOption && usableOptions(field.options).length > 0) {
       attentionReasons.push(`none of the options match your saved answer, so this one is left for you: "${label.slice(0, 60)}"`);
     }
-    if (existing) {
-      if (known && 'skipReason' in known) {
-        attentionReasons.push(known.skipReason);
-        // Litos declined, so the question belongs to the applicant. Keeping the record (with her own
-        // answer if she has already given one) is what lets her give it; dropping it here is how a
-        // stored answer used to be thrown away by a later run that had decided to refuse.
+    if (rememberedWithoutOptionConstraint !== undefined
+      && remembered === undefined
+      && usableOptions(field.options).length > 0) {
+      invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
+      attentionReasons.push(`none of the options exactly match your remembered answer, so this one is left for you: "${label.slice(0, 60)}"`);
+      if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false));
+      continue;
+    }
+    if (known && 'skipReason' in known) {
+      invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
+      attentionReasons.push(known.skipReason);
+      if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false));
+      continue;
+    }
+    if (!known && isRefusedQuestion(label)) {
+      invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
+      attentionReasons.push(WORK_ELIGIBILITY_QUESTION.test(label)
+        ? workEligibilitySkipReason(label)
+        : `sensitive question left for you: "${label.slice(0, 60)}"`);
+      if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false));
+      continue;
+    }
+    if (isSelfDeclarationQuestion(label)) {
+      if (!known) {
+        invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
+        attentionReasons.push(selfDeclarationSkipReason(label));
         if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
-      } else if (known && 'value' in known) {
+        continue;
+      }
+    }
+    if (existing) {
+      if (known && 'value' in known) {
         questions.push({
           ...existing,
           question: reviewLabel,
@@ -990,7 +1132,7 @@ export async function discoverAndResolveQuestions(
           portal_input_type: field.inputType,
         });
       } else if (fieldIsRequired) {
-        questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
+        questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, true));
       }
       continue; // already answered by the client or a prior run
     }
@@ -1007,21 +1149,6 @@ export async function discoverAndResolveQuestions(
       });
       continue;
     }
-    if (known && 'skipReason' in known) {
-      attentionReasons.push(known.skipReason);
-      if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
-      continue;
-    }
-    if (isRefusedQuestion(label)) {
-      attentionReasons.push(WORK_ELIGIBILITY_QUESTION.test(label)
-        ? workEligibilitySkipReason(label)
-        : `sensitive question left for you: "${label.slice(0, 60)}"`);
-      // Still never answered. Surfaced now, with an empty answer, when the employer requires it -
-      // otherwise a required attestation is a wall: Litos will not answer it and the applicant has
-      // nowhere to. An optional sensitive field is left alone exactly as before.
-      if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
-      continue;
-    }
     /* THE DRAFTER MAY NOT WRITE A DECLARATION ABOUT HER. This is the last door, and it is the one
      * the 600-word essay walked through: "Have you previously applied to Akuna?" is open-ended by
      * every measure isOpenEndedQuestion applies, so it went to the model, and the model wrote a
@@ -1033,11 +1160,6 @@ export async function discoverAndResolveQuestions(
      * form: a question whose answer is a statement she makes about herself is never drafted, however
      * open-ended it reads, whether or not any rule above recognised it. She is asked instead, which
      * is what the pre-script now does before the run ever starts. */
-    if (isSelfDeclarationQuestion(label)) {
-      attentionReasons.push(selfDeclarationSkipReason(label));
-      if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
-      continue;
-    }
     if (!isOpenEndedQuestion(label)) {
       // The single biggest source of unanswerable blockers. "Discipline", "Graduation Month",
       // "EXPORT CONTROLS - ...": not a field Litos knows, not an essay it can draft, and until now
@@ -1090,7 +1212,19 @@ export async function discoverAndResolveQuestions(
     }
   }
 
-  return { questions, attentionReasons };
+  return { questions, attentionReasons, invalidatedQuestionKeys: [...invalidatedQuestionKeys] };
+}
+
+export function mergeDiscoveredPortalQuestions(
+  discovered: readonly ApplicationReviewQuestion[],
+  stored: readonly ApplicationReviewQuestion[],
+  invalidatedQuestionKeys: readonly string[],
+): ApplicationReviewQuestion[] {
+  const invalidated = new Set(invalidatedQuestionKeys);
+  return normalizeApplicationReviewQuestions([
+    ...discovered,
+    ...stored.filter((question) => !invalidated.has(normalizeReviewQuestionLabel(question.question).toLowerCase())),
+  ]);
 }
 
 /**
@@ -1241,7 +1375,11 @@ async function prepareManaged(
   const resolutionCurrent = { ...current, questions: storedQuestions };
   const applicationProfile = await loadApplicationProfileLike(row.user_id);
   const savedAnswers = await loadSavedAnswers(row.user_id);
-  const { questions: discoveredQuestions, attentionReasons: discoveryAttention } = await discoverAndResolveQuestions(
+  const {
+    questions: discoveredQuestions,
+    attentionReasons: discoveryAttention,
+    invalidatedQuestionKeys,
+  } = await discoverAndResolveQuestions(
     discoveredFields,
     row,
     resolutionCurrent,
@@ -1250,7 +1388,7 @@ async function prepareManaged(
     portal,
     savedAnswers,
   );
-  const mergedQuestions = normalizeApplicationReviewQuestions([...discoveredQuestions, ...storedQuestions]);
+  const mergedQuestions = mergeDiscoveredPortalQuestions(discoveredQuestions, storedQuestions, invalidatedQuestionKeys);
   packet.questions = mergedQuestions.map((q) => ({
     question: q.question,
     answer: q.answer,
@@ -1316,8 +1454,14 @@ async function prepareManaged(
   const verificationHandoff = blockers.some((blocker) =>
     /verification code|security code|one[ -]?time code|passcode|\botp\b/i.test(blocker),
   );
-  // A missing cover letter is worth telling the applicant about, but it is not a blocker: the form
-  // is filled and sendable without it, so it must not flip the run out of the safe path.
+  /* A MISSING COVER LETTER IS A BLOCKER ON A FORM THAT ASKS FOR ONE. This line used to read "worth
+     telling the applicant about, but it is not a blocker: the form is filled and sendable without
+     it", and it is not sendable without it. /submission/approve refuses a packet with 422 when
+     cover_letter_supported is true and no cover letter is recorded, so leaving `safe` alone here
+     produced the one outcome that is worse than either honest answer: a packet described to her as
+     ready, with a Send button that cannot work. It reaches `safe` below rather than only
+     attention_reason. This branch is only ever populated when the form HAS a cover-letter control,
+     because packetForCoverLetterCapability returns no issue when `supported` is false. */
   const coverLetterAttention = coverLetterOutcome.coverLetterIssue ? [coverLetterOutcome.coverLetterIssue] : [];
   const filledFields = managedResultFilledFields(result);
   // Both passes count as evidence the form was reached. The discovery pass enumerates the live
@@ -1346,11 +1490,22 @@ async function prepareManaged(
     }, 'Required fields with no answerable question record');
   }
   const honestyReasons = discoveryHonestyReasons(discoveryFailures[0], unansweredRequired);
+  /* The runner's own account of the answers that did not stick, from both passes.
+   *
+   * Surfaced, deliberately NOT added to the `safe` gate below. A value that failed to persist on a
+   * REQUIRED control already comes back as the employer's own "is required and is still empty"
+   * blocker, which does gate the send; on an optional control it is a field Litos did not embellish,
+   * and refusing to send a complete application over one of those is the deadlock this codebase has
+   * already had to unwind twice. */
+  const answerLossReasons = managedAnswerLossReasons({
+    skipped: [...(result.skipped ?? []), ...(discoveryResult?.skipped ?? [])],
+  });
   const attentionReasons = [
     ...blockers,
     ...discoveryAttention,
     ...evidenceBlockers,
     ...coverLetterAttention,
+    ...answerLossReasons,
     ...honestyReasons,
   ];
   const attentionCategories = attentionCategoriesForReasons(attentionReasons);
@@ -1372,6 +1527,7 @@ async function prepareManaged(
     && discoveryAttention.length === 0
     && evidenceBlockers.length === 0
     && discoveryFailures.length === 0
+    && coverLetterAttention.length === 0
     && unansweredRequiredQuestions.length === 0;
   /* A FILL RUN THAT FOUND A SECURITY-CODE SCREEN HAS SUBMITTED THIS APPLICATION.
    *
@@ -1447,12 +1603,28 @@ async function prepareManaged(
       : {}),
     submission_run_id: runId,
     filled_fields: filledFields,
+    // The other half of filled_fields, and it was always empty before: what the runner tried and
+    // could not leave on the form. See managedAnswerLossReasons.
+    skipped_reasons: answerLossReasons,
     // Which address this form was filled with, and why. See ApplicationReviewState.applicant_email.
     ...(packet.applicantEmail ? { applicant_email: packet.applicantEmail } : {}),
     preview_screenshot_url: preview.url,
     verification: { status: verificationHandoff ? 'handoff' : 'not_needed' },
     questions: mergedQuestions,
     cover_letter_supported: coverLetterSupported,
+    /* Measured, not assumed. `blockers` here is the merge of the discovery pass's required-field
+     * scan and the fill run's, which is the same evidence every other required field on this form
+     * is judged by. Written only when the form HAS a cover-letter control: on a portal with no such
+     * control there is nothing to require and nothing was looked at, and `undefined` says so. */
+    ...(coverLetterSupported
+      ? {
+        cover_letter_required: blockersRequireCoverLetter([
+          ...blockers,
+          ...(discoveryResult?.blockers ?? []),
+        ]),
+      }
+      : {}),
+    cover_letter_attached: Boolean(packet.coverLetter),
     // The security-code sentence LEADS when there is one, and it leads because it is the only line
     // here that says an application has already reached the employer. The blockers below it are
     // still worth reading - they describe the form that was sent - but a list of empty fields shown
@@ -1464,7 +1636,7 @@ async function prepareManaged(
     attention_categories: securityCode
       ? ['security_code' as const, ...attentionCategories.filter((category) => category !== 'security_code')]
       : attentionCategories.length > 0 ? attentionCategories : undefined,
-    handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
+    handoff_expires_at: new Date(Date.now() + HANDOFF_WINDOW_MS).toISOString(),
     submission_error: undefined,
   });
   await writeReview(row, review);
@@ -1480,6 +1652,7 @@ async function prepareManaged(
 
 async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = false) {
   const stored = row.spec as StoredSpec;
+  const verificationRecipient = readPinnedApplicantEmail(stored)?.address;
   let current = readApplicationReview(stored);
   if (!current) throw new Error('We do not have a link to the company application page');
   current = await repairReviewPortalFromMonitoredJob(row, current);
@@ -1630,6 +1803,8 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       portalUrl,
       requestedAt: verificationRequestedAt,
       permissionGranted: verificationSettings?.enabled === true,
+      expectedRecipient: verificationRecipient,
+      applicationId: row.id,
     });
     const coverLetterSupported = await hasCoverLetterUpload(page, portal);
     const { packet, coverLetterIssue } = await packetForCoverLetterCapability(row, coverLetterSupported, fastify);
@@ -1664,7 +1839,11 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     });
     const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
     const resolutionCurrent = { ...current, questions: storedQuestions };
-    const { questions: discoveredQuestions, attentionReasons: discoveryAttention } =
+    const {
+      questions: discoveredQuestions,
+      attentionReasons: discoveryAttention,
+      invalidatedQuestionKeys,
+    } =
       await discoverAndResolveQuestions(
         discovered,
         row,
@@ -1674,7 +1853,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
         portal,
         await loadSavedAnswers(row.user_id),
       );
-    const mergedQuestions = normalizeApplicationReviewQuestions([...discoveredQuestions, ...storedQuestions]);
+    const mergedQuestions = mergeDiscoveredPortalQuestions(discoveredQuestions, storedQuestions, invalidatedQuestionKeys);
     packet.questions = mergedQuestions.map((q) => ({
       question: q.question,
       answer: q.answer,
@@ -1689,6 +1868,8 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       portalUrl,
       requestedAt: verificationRequestedAt,
       permissionGranted: verificationSettings?.enabled === true,
+      expectedRecipient: verificationRecipient,
+      applicationId: row.id,
     });
     if (postFillVerification.status !== 'not_needed') verification = postFillVerification;
     // Re-scan only after a successful verification so an empty OTP field reported during the
@@ -1728,7 +1909,17 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
      * text is downstream of it and cannot weaken it. */
     const safe = directPreparationIsSafe({
       blockerCount: sanitizedBlockers.length + evidenceBlockers.length,
-      attentionCount: discoveryAttention.length + discoveryFailures.length,
+      // coverLetterAttention counts here for the same reason it gates `safe` on the managed path:
+      // on a form with a cover-letter control, a packet with no cover letter recorded is one that
+      // /submission/approve will refuse with 422, so calling it ready is a promise the send cannot
+      // keep. Folded into attentionCount rather than blockerCount because it is our failure to
+      // report, not a field the employer's page left empty.
+      //
+      // discoveryFailures is a separate and independent reason to hold the same send: the first
+      // says the packet is missing something we owed it, the second says we never read the form
+      // well enough to know what it owed. Either alone is enough; they are summed, not chosen
+      // between, so a run carrying both is not counted as carrying one.
+      attentionCount: discoveryAttention.length + coverLetterAttention.length + discoveryFailures.length,
       unansweredRequiredCount: blankRequiredQuestionLabels(mergedQuestions).length,
       verificationStatus: verification.status,
     });
@@ -1748,6 +1939,12 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       },
       questions: mergedQuestions,
       cover_letter_supported: coverLetterSupported,
+      // Same measurement as the managed path, off this path's own required-field scan. See
+      // ApplicationReviewState.cover_letter_required.
+      ...(coverLetterSupported
+        ? { cover_letter_required: blockersRequireCoverLetter(sanitizedBlockers) }
+        : {}),
+      cover_letter_attached: Boolean(packet.coverLetter),
       // Already human on this path, but the BLOCKERS are sanitized anyway so both providers are
       // held to one guarantee and a future change to either cannot quietly reintroduce identifiers.
       // The other two arrays do not go through the sanitizer and do not need to: they are written
@@ -1770,7 +1967,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
           source: 'observed',
         })
         : {}),
-      handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
+      handoff_expires_at: new Date(Date.now() + HANDOFF_WINDOW_MS).toISOString(),
       submission_error: undefined,
     });
     await writeReview(row, review);
@@ -1822,7 +2019,7 @@ async function prepareControlled(
       preview_screenshot_url: `data:image/png;base64,${screenshot.toString('base64')}`,
       verification: { status: 'not_needed' },
       attention_reason: [...result.blockers, ...evidenceBlockers].join('\n') || undefined,
-      handoff_expires_at: new Date(Date.now() + 55 * 60_000).toISOString(),
+      handoff_expires_at: new Date(Date.now() + HANDOFF_WINDOW_MS).toISOString(),
       submission_error: undefined,
     });
     await writeReview(row, review);
@@ -1912,7 +2109,10 @@ async function submitViaAtsSubmissionChannel(
 // Threaded through submit() rather than given its own run, so the finishing path inherits every
 // guard this one already has: the authorization check, the claim, the daily cap, the portal gates,
 // the ATS channel and the CAPTCHA probe. A parallel path would inherit none of them.
-async function submit(row: ResumeRow, fastify: FastifyInstance, options: { securityCode?: string } = {}) {
+async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
+  securityCode?: string;
+  claimAlreadyHeld?: boolean;
+} = {}) {
   const current = readApplicationReview(row.spec);
   if (!current?.submission_run_id || !current.portal_url) throw new Error('The prepared run is missing');
   const authorization = await standingAuthorization(row.user_id);
@@ -1985,7 +2185,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: { secur
     }));
     return;
   }
-  const claimedRow = await claimSubmission(row);
+  const claimedRow = await claimSubmission(row, options.claimAlreadyHeld);
   if (!claimedRow) return;
   row = claimedRow;
   let claimedReview = readApplicationReview(row.spec);
@@ -2140,25 +2340,89 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: { secur
     }
     const builtPacket = await buildPacket(row);
     const packet = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
-    // The one run in this function that is allowed to send a form. Everything else - the probe, the
-    // discovery pass, the fill pass - runs under the runner's default-deny submit guard.
+    const verificationRequestedAt = new Date();
+    const initialActions = options.securityCode
+      ? withSecurityCode(buildManagedPortalActions(portal, packet, true), options.securityCode)
+      : buildManagedPortalActions(portal, packet, true);
     const result = await runManagedBrowser(
       applicationUrl,
-      // The code, when there is one, rides on the submit click the builder already ends with, so a
-      // finishing run is the same 120 actions as an ordinary one. It is never read from the stored
-      // review: it lives in the request and in this call frame, and only its salted digest is ever
-      // written down.
-      options.securityCode
-        ? withSecurityCode(buildManagedPortalActions(portal, packet, true), options.securityCode)
-        : buildManagedPortalActions(portal, packet, true),
-      { allowSubmit: true },
+      initialActions,
+      {
+        allowSubmit: true,
+        ...(!options.securityCode ? { requestContinuation: true, continuationTtlSeconds: 120 } : {}),
+      },
     );
-    const receipt = readManagedReceipt(result);
-    if (!result.screenshot) throw new Error('Stratus managed browser did not return a receipt screenshot');
+    let receiptResult = result;
+    let verification: ApplicationReviewState['verification'] = { status: 'not_needed' };
+    const initialChallenge = readManagedSecurityCodeChallenge(result);
+    if (!options.securityCode && initialChallenge && managedResultNeedsEmailVerification(result)) {
+      const requestedAt = verificationRequestedAt.toISOString();
+      const continuationExpiresAt = result.continuationExpiresAt;
+      const continuationToken = result.continuationToken;
+      const [verificationSettings] = await db.select({ enabled: users.automatic_verification_enabled })
+        .from(users).where(eq(users.id, row.user_id)).limit(1);
+      const continuationIsLive = typeof continuationToken === 'string'
+        && typeof continuationExpiresAt === 'string'
+        && Date.parse(continuationExpiresAt) > Date.now();
+      if (continuationIsLive && verificationSettings?.enabled === true) {
+        // The continuation capability stays call-local. Persisting it would turn the review JSON,
+        // which is returned to dashboard and extension clients, into a browser-session credential.
+        await writeReview(row, nextReview(claimedReview, {
+          verification: {
+            status: 'searching',
+            requested_at: requestedAt,
+            retry_count: 0,
+          },
+          attention_reason: undefined,
+          submission_error: undefined,
+        }));
+        const prepared = await prepareManagedEmailVerification({
+          result,
+          userId: row.user_id,
+          portalUrl: applicationUrl,
+          requestedAt: verificationRequestedAt,
+          permissionGranted: true,
+          expectedRecipient: packet.email,
+          applicationId: row.id,
+          attempts: 10,
+          delayMs: 3_000,
+        });
+        if (prepared.status === 'ready' && Date.parse(continuationExpiresAt) > Date.now()) {
+          try {
+            // Exactly one continuation call. An uncertain click is never retried.
+            receiptResult = await continueManagedBrowser(continuationToken, prepared.actions);
+          } catch (error) {
+            await writeReview(row, nextReview(claimedReview, {
+              status: 'needs_attention',
+              verification: { status: 'verification_pending', requested_at: requestedAt, retry_count: 1 },
+              attention_reason: 'Litos entered the employer verification step, but could not prove the final result. Check the employer portal before trying anything again.',
+              submission_error: error instanceof Error ? error.message.slice(0, 500) : 'Managed verification continuation failed',
+            }));
+            return;
+          }
+          if (!readManagedSecurityCodeChallenge(receiptResult)) {
+            verification = {
+              status: 'completed',
+              provider: prepared.provider,
+              requested_at: requestedAt,
+              retry_count: 1,
+              completed_at: new Date().toISOString(),
+            };
+          } else {
+            verification = { status: 'verification_pending', requested_at: requestedAt, retry_count: 1 };
+          }
+        } else {
+          verification = { status: 'verification_pending', requested_at: requestedAt, retry_count: 0 };
+        }
+      } else {
+        verification = { status: 'verification_pending', requested_at: requestedAt, retry_count: 0 };
+      }
+    }
+    if (!receiptResult.screenshot) throw new Error('Stratus managed browser did not return a receipt screenshot');
     const capturedAt = new Date().toISOString();
     const blob = await put(
       `users/${row.user_id}/submission-runs/${claimedReview.submission_run_id}/receipt.png`,
-      Buffer.from(result.screenshot, 'base64'),
+      Buffer.from(receiptResult.screenshot, 'base64'),
       // A receipt is the proof an application was actually submitted, so a collision here would
       // fail the run at the worst possible moment: after the employer already has it.
       { access: 'public', contentType: 'image/png', addRandomSuffix: true },
@@ -2173,7 +2437,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: { secur
      *
      * The screenshot is kept either way. It is the evidence of what was actually on screen, and it
      * is what makes the next state debuggable rather than a claim. */
-    const challenge = readManagedSecurityCodeChallenge(result);
+    const challenge = readManagedSecurityCodeChallenge(receiptResult);
     if (challenge) {
       const securityCode = beginSecurityCodeState({
         challenge,
@@ -2189,8 +2453,8 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: { secur
           // control after the resubmit. 'rejected' when it typed the code and the challenge was
           // still there; the other two mean Litos could not get the code into the page at all, which
           // is a defect of ours and must never be reported to her as a wrong code.
-          outcome: result.securityCodeAttempt?.outcome === 'rejected' ? 'rejected'
-            : result.securityCodeAttempt?.outcome === 'no_control' ? 'no_control'
+          outcome: receiptResult.securityCodeAttempt?.outcome === 'rejected' ? 'rejected'
+            : receiptResult.securityCodeAttempt?.outcome === 'no_control' ? 'no_control'
               : 'not_entered',
         })
         : securityCode;
@@ -2213,14 +2477,16 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: { secur
         sentTo: attempted.sent_to,
         digits: attempted.digits,
         codeSupplied: Boolean(options.securityCode),
-        codeOutcome: result.securityCodeAttempt?.outcome ?? null,
+        codeOutcome: receiptResult.securityCodeAttempt?.outcome ?? null,
       }, 'Employer is holding this application behind an emailed security code');
       return;
     }
+    const receipt = readManagedReceipt(receiptResult);
     await writeReview(row, nextReview(claimedReview, {
       status: 'submitted',
       submitted_at: capturedAt,
       submission_error: undefined,
+      verification,
       // Present only when a code finished this one, and it is the fact that makes the receipt
       // legible: this application was sent, refused, and completed with a code the applicant read
       // out of her own mailbox.
@@ -2312,19 +2578,22 @@ export type SubmissionFailureOutcome =
 export function submissionFailureOutcome(input: {
   captchaStop: 'before_fill' | 'at_submit' | null;
   noSubmitControl: boolean;
+  regenerationRequired?: boolean;
   uncertainAfterClaim: boolean;
   externalGate: boolean;
   providerSessionFailure: boolean;
   currentAttentionReason: string | undefined;
 }): SubmissionFailureOutcome {
-  const { captchaStop, noSubmitControl, uncertainAfterClaim, externalGate, providerSessionFailure } = input;
-  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || uncertainAfterClaim || providerSessionFailure
+  const { captchaStop, noSubmitControl, regenerationRequired, uncertainAfterClaim, externalGate, providerSessionFailure } = input;
+  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || regenerationRequired || uncertainAfterClaim || providerSessionFailure
     ? 'needs_attention'
     : externalGate ? 'submit_requested' : 'failed';
   const attentionReason = captchaStop === 'at_submit'
     ? 'This company\u2019s application page asks you to prove you are human, and that check is still waiting. Litos filled everything in and stopped there, so nothing has been sent. Open it when you have a minute and finish the last step.'
     : captchaStop === 'before_fill'
       ? 'This company asks you to prove you are human before it will take an application, so Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.'
+      : regenerationRequired
+        ? 'This application must be regenerated before submission because its stored Litos email no longer matches the active inbound email route. Nothing was sent to the employer.'
       : noSubmitControl
         /* CAUSE-NEUTRAL. NoSubmitControlError is thrown for a multi-step first page, a page that
            renders nothing in a headless browser, a control relabelled mid-run, and a click that
@@ -2388,9 +2657,10 @@ async function fail(row: ResumeRow, error: unknown) {
      or your email" is the one thing that must not be said: there is no receipt to find. This is
      the routine outcome on a multi-step first page, not an edge case. */
   const noSubmitControl = error instanceof NoSubmitControlError;
+  const regenerationRequired = error instanceof ApplicantEmailRegenerationRequiredError;
 
   const outcome = submissionFailureOutcome({
-    captchaStop, noSubmitControl, uncertainAfterClaim, externalGate, providerSessionFailure,
+    captchaStop, noSubmitControl, regenerationRequired, uncertainAfterClaim, externalGate, providerSessionFailure,
     currentAttentionReason: current.attention_reason,
   });
 
@@ -2404,6 +2674,21 @@ async function fail(row: ResumeRow, error: unknown) {
       })
       : {}),
     status: outcome.status,
+    ...(regenerationRequired
+      ? {
+        submission_claimed_at: undefined,
+        submission_claim_id: undefined,
+        submission_authorization: undefined,
+      }
+      : {}),
+    ...(current.verification?.status === 'searching'
+      ? {
+        verification: {
+          ...current.verification,
+          status: 'verification_pending' as const,
+        },
+      }
+      : {}),
     submission_error: message,
     attention_reason: outcome.attentionReason,
     // The typed half. attention_reason is prose written for the applicant and cannot be counted;
@@ -2469,25 +2754,19 @@ export async function finishSecurityCodeSubmission(
   // it is the honest one here: the applicant produced a code out of her own mailbox for this one
   // application, which is a decision about this application and not a standing setting.
   //
-  // The claim is cleared so claimSubmission can take a fresh one. That is safe precisely because
-  // this endpoint is the only door into this state - submitRequestDisposition rejects
-  // 'awaiting_security_code' outright - and the fingerprint check above has already refused a repeat
-  // of this exact code.
-  const requested = nextReview(current, {
-    status: 'submitting',
-    submission_authorization: {
-      source: 'per_application_approval',
-      authorized_at: new Date().toISOString(),
-    },
-    submission_claimed_at: undefined,
-    submission_claim_id: undefined,
-    submission_error: undefined,
-  });
-  await writeReview(row, requested);
-  const claimedRows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, applicationId)).limit(1);
-  const activeRow = claimedRows[0] ?? row;
+  // Take the claim in the same conditional update that leaves the waiting state. Two requests can
+  // read the same code state, but only one can change that state and receive the claimed row. The
+  // loser never starts a browser and never clears the winner's claim.
+  const activeRow = await claimSecurityCodeSubmission(row, current);
+  if (!activeRow) {
+    const latestRows = await db.select().from(generated_resumes)
+      .where(eq(generated_resumes.id, applicationId)).limit(1);
+    const latest = latestRows[0] ? readApplicationReview(latestRows[0].spec) : null;
+    if (!latest) return { kind: 'not_found' };
+    return { kind: 'not_awaiting', status: latest.status };
+  }
   try {
-    await submit(activeRow, fastify, { securityCode: code });
+    await submit(activeRow, fastify, { securityCode: code, claimAlreadyHeld: true });
   } catch (error) {
     fastify.log.error({ error, applicationId }, 'Security-code submission failed');
     await fail(activeRow, error);

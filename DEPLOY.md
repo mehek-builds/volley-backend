@@ -69,7 +69,11 @@ Set these for Production (and Preview if you want):
 | `JOB_MONITOR_SOURCES_JSON` | optional JSON array of extra Greenhouse, Lever, Ashby, or Workable boards loaded by each daily monitor run |
 | `LITOS_ATS_API_SUBMISSION_ENABLED` | set to literal `true` only when employer-authorized ATS submission channels may POST applications |
 | `LITOS_EMPLOYER_API_SUBMISSION_CHANNELS_JSON` | JSON array of allowlisted Greenhouse, Ashby, or Lever submit channels; references key env names, never raw secrets |
+| `LITOS_APPLICATION_EMAIL_ROUTE_MODE` | nonsecret route selector: `managed_resend`, `custom_domain`, or `mailbox` |
+| `LITOS_RESEND_MANAGED_RECEIVING_DOMAIN` | exact one-label `*.resend.app` receiving domain selected by `managed_resend` |
+| `LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN` | hidden 32+ character random token deriving the exact one-time managed receiving canary recipient |
 | `LITOS_APPLICATION_EMAIL_DOMAIN` | domain that receives employer application mail for generated aliases, for example `apply.trylitos.com` |
+| `LITOS_APPLICATION_EMAIL_MAILBOX` | rollback mailbox route using plus-addressed per-application aliases |
 | `LITOS_APPLICATION_EMAIL_ALIAS_SECRET` | stable secret used to mint opaque per-application alias local parts |
 | `RESEND_WEBHOOK_SECRET` | Resend `email.received` webhook signing secret, returned when the webhook is created |
 | `LITOS_INBOUND_EMAIL_WEBHOOK_SECRET` | compatibility HMAC secret for signed non-Resend `POST /application-email/inbound` calls |
@@ -279,10 +283,21 @@ literal string `true`; an empty variable, `1`, or `false` leaves ATS API posting
 job-board reads can work without this, but application POSTs still need an allowlisted channel in
 `LITOS_EMPLOYER_API_SUBMISSION_CHANNELS_JSON` plus the referenced employer-authorized key env vars.
 
-**Application email routing is separate from ATS submission.** When
-`LITOS_APPLICATION_EMAIL_DOMAIN` is set, submission packets use a per-application Litos alias as
-the applicant email and keep the user's verified account email as the forwarding destination. Point
-the inbound email provider for that domain at `POST /application-email/inbound`. The caller must
+**Application email routing is separate from ATS submission.** Set
+`LITOS_APPLICATION_EMAIL_ROUTE_MODE` to select exactly one route. `managed_resend` uses only
+`LITOS_RESEND_MANAGED_RECEIVING_DOMAIN`; the legacy `LITOS_APPLICATION_EMAIL_DOMAIN` and
+`LITOS_APPLICATION_EMAIL_MAILBOX` values may remain deployed for rollback and are ignored until
+their matching mode is selected. Managed receiving remains disabled until a fresh, signed
+`email.received` webhook for the exact one-time canary recipient stores a recent durable proof, and
+the exact active `email.received` webhook is verified. The proof is bound to mode, domain, alias
+secret, and canary token, so rotating any of them fails closed. It does not require Resend Receiving
+read scope. An invalid mode selects no route. With no mode, the previous
+compatibility behavior remains: legacy mailbox precedes legacy domain, managed receiving works only
+when neither legacy route is present, and ambiguous managed-plus-legacy configuration fails closed.
+
+When the selected route is proven deliverable, submission packets use a per-application Litos alias
+as the applicant email and keep the user's verified account email as the forwarding destination.
+Point the inbound email provider for that domain at `POST /webhooks/application-email/inbound`. The caller must
 send Resend's `svix-id`, `svix-timestamp`, and `svix-signature` headers, verified against
 `RESEND_WEBHOOK_SECRET`. Non-Resend test providers can send `X-Litos-Webhook-Timestamp` as epoch milliseconds and `X-Litos-Webhook-Signature` as
 `hex(hmac_sha256(LITOS_INBOUND_EMAIL_WEBHOOK_SECRET, timestamp + "." + JSON.stringify(body)))`
@@ -300,6 +315,31 @@ npm run setup:application-email-resend
 That script registers `email.received` for
 `https://student-outreach-backend.vercel.app/webhooks/application-email/inbound` and stores the
 returned signing secret in Vercel as `RESEND_WEBHOOK_SECRET`.
+
+The managed receiving proof table has a separate additive migration:
+
+```bash
+npm run db:application-email-receiving-proof
+```
+
+After its workflow is present on `main`, an operator may run
+`Application email receiving proof migration` from GitHub Actions. The workflow refuses non-main
+refs, reads the database connection only from `SCHEMA_CHECK_DATABASE_URL`, and applies only the
+idempotent `application_email_receiving_proofs` table and its two indexes.
+
+After applying that migration, configure a fresh hidden canary token before enabling managed
+receiving. The setup command sends the random token to Vercel over stdin and never prints the token
+or derived recipient. It does not deploy or send a canary by itself:
+
+```bash
+npm run setup:application-email-receiving-canary
+```
+
+After a deployment containing that token, deliver one canary to the exact derived recipient using
+a trusted operator-only process. The signed webhook records only a message-ID hash, route
+fingerprint, proof version, domain, and timestamp. Health, errors, logs, and the database never
+contain the canary recipient or token. A proof expires after seven days; rotate the one-time token
+and repeat the canary when renewing it.
 
 **Why a hand deploy used to report `null`.** Measured 2026-08-04 across the last 12 production
 deployments: Vercel fills the `VERCEL_GIT_*` variables from the **GitHub integration's** metadata,

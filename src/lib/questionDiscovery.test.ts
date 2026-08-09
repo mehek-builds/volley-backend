@@ -37,32 +37,25 @@ test('answers work authorization and sponsorship only from explicit stored conse
     resolveKnownAnswer('Are you currently eligible to legally work in the United States?', 'text', { work_authorized: true }, undefined),
     { value: 'Yes' },
   );
-  assert.deepEqual(
-    resolveKnownAnswer(
-      'are you legally authorized to work in the country where the job is located?',
-      'text',
-      { work_authorized: true },
-      'This role is based in San Francisco, California.',
-    ),
-    { value: 'Yes' },
-  );
-  assert.deepEqual(
-    resolveKnownAnswer(
-      'Are you legally authorized to work in the country in which you are applying?',
-      'text',
-      { work_authorized: true },
-      'Mountain View, CA',
-    ),
-    { value: 'Yes' },
-  );
+  for (const [label, jd] of [
+    ['are you legally authorized to work in the country where the job is located?', 'This role is based in San Francisco, California.'],
+    ['Are you legally authorized to work in the country in which you are applying?', 'Mountain View, CA'],
+    ['are you legally authorized to work?', 'US benefits and Canadian customers are described below.'],
+  ] as const) {
+    const scoped = resolveKnownAnswer(label, 'text', { work_authorized: true }, jd);
+    assert.ok(scoped && 'skipReason' in scoped, label);
+  }
   assert.deepEqual(
     resolveKnownAnswer('Are you currently eligible to work in the United States of America?', 'text', { work_authorized: true }, undefined),
     { value: 'Yes' },
   );
-  assert.deepEqual(
-    resolveKnownAnswer('will you now or in the future require sponsorship for employment visa status?', 'text', { needs_sponsorship: true }, undefined),
-    { value: 'Yes' },
+  const unscopedSponsorship = resolveKnownAnswer(
+    'will you now or in the future require sponsorship for employment visa status?',
+    'text',
+    { needs_sponsorship: true },
+    undefined,
   );
+  assert.ok(unscopedSponsorship && 'skipReason' in unscopedSponsorship);
   assert.deepEqual(
     resolveKnownAnswer(
       'Do you now or in the future require visa sponsorship/work authorization to continue working in the United States?',
@@ -76,6 +69,20 @@ test('answers work authorization and sponsorship only from explicit stored conse
     resolveKnownAnswer('do you require visa sponsorship to work in the US?', 'text', { needs_sponsorship: false }, undefined),
     { value: 'No' },
   );
+  const pronounIsNotCountryScope = resolveKnownAnswer(
+    'Tell us whether you will require visa sponsorship for employment.',
+    'text',
+    { needs_sponsorship: false },
+    undefined,
+  );
+  assert.ok(pronounIsNotCountryScope && 'skipReason' in pronounIsNotCountryScope);
+  const uppercasePronounIsNotCountryScope = resolveKnownAnswer(
+    'Tell US whether you will require visa sponsorship for employment.',
+    'text',
+    { needs_sponsorship: false },
+    undefined,
+  );
+  assert.ok(uppercasePronounIsNotCountryScope && 'skipReason' in uppercasePronounIsNotCountryScope);
 
   const missingConsent = resolveKnownAnswer(
     'are you legally authorized to work in the United States?',
@@ -150,6 +157,147 @@ test('answers work authorization and sponsorship only from explicit stored conse
   assert.ok(expiryDetail && 'skipReason' in expiryDetail);
 });
 
+/* THE SPELLING THE PIPELINE ACTUALLY PRODUCES.
+ *
+ * Every assertion above that exercises the US abbreviation writes it the way the employer printed
+ * it - "work in the US?" - and every one of them passes on the unfixed code. The extension
+ * lowercases each label before it is sent, so the resolver is only ever handed "work in the us?",
+ * and the case-sensitive guard could not match it. Measured across all 504 distinct labels Litos
+ * has stored on 2026-08-09: the guard matched none of them.
+ *
+ * That is why this test restates cases already covered above in lowercase rather than adding new
+ * wordings. The lowercase forms are the real inputs; the uppercase ones are the fiction the suite
+ * has been checking. Both are asserted from here on, because the day a capture path stops
+ * lowercasing is the day only the uppercase assertions notice.
+ */
+test('recognises the lowercased US abbreviation the extension actually sends', () => {
+  // Roblox, 2026-08-09, packet b1c2ad7f: one of the two questions that stopped the run. The same
+  // question spelled "the united states" is answered from work_authorized twelve times over in the
+  // stored corpus, so refusing this one was a spelling accident and not a scope decision.
+  assert.deepEqual(
+    resolveKnownAnswer('are you legally authorized to work in the us?', 'text', { work_authorized: true }, undefined),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('Are you legally authorized to work in the US?', 'text', { work_authorized: true }, undefined),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('are you legally authorized to work in the us?', 'text', { work_authorized: false }, undefined),
+    { value: 'No' },
+  );
+  // The sponsorship half, from the sponsorship column only. Corpus label, one employer.
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'do you now or in the future require visa sponsorship to continue working in the us? we are unable to sponsor work visas or permits (e.g. f-1 opt, h1-b) at this time.',
+      'text',
+      { work_authorized: true, needs_sponsorship: true },
+      undefined,
+    ),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('do you require visa sponsorship to work in the us?', 'text', { needs_sponsorship: false }, undefined),
+    { value: 'No' },
+  );
+  // Nothing stored still stops, in the lowercase spelling too.
+  const nothingStored = resolveKnownAnswer('are you legally authorized to work in the us?', 'text', {}, undefined);
+  assert.ok(nothingStored && 'skipReason' in nothingStored);
+
+  /* THE PRONOUN, which is the whole reason the guard was case-sensitive to begin with.
+   *
+   * Lowercase "us" is the commonest pronoun on a job form. The case-folded arm requires the
+   * article after the preposition ("in the us", never "in us") and an immigration noun after the
+   * bare token ("us work authorization", never "tell us whether"), so none of these becomes a
+   * country scope. Each is a real corpus label or its immediate sibling. */
+  for (const label of [
+    'tell us whether you will require visa sponsorship for employment.',
+    'why are you interested in us? do you require visa sponsorship?',
+    'how did you hear about us? will you require sponsorship?',
+    'if you were to join us for a technical interview, will you require visa sponsorship?',
+  ]) {
+    const pronoun = resolveKnownAnswer(label, 'text', { work_authorized: true, needs_sponsorship: false }, undefined);
+    assert.ok(pronoun && 'skipReason' in pronoun, label);
+  }
+
+  // Recognising the abbreviation does not weaken any other guard. Non-US wording, the job-location
+  // scope and the unscoped question all still stop, and "without sponsorship" still stops on a
+  // profile that needs it.
+  for (const label of [
+    'are you legally authorized to work in the uk?',
+    'are you legally authorized to work in the country where this role is located?',
+    // Roblox's SECOND stop, and it stays a stop: the question names no country at all, and no
+    // stored column says which country the booleans are about.
+    'will you now or in the future require sponsorship for work authorization?',
+    'are you authorized to work in the us without sponsorship?',
+  ]) {
+    const held = resolveKnownAnswer(label, 'text', { work_authorized: true, needs_sponsorship: true }, undefined);
+    assert.ok(held && 'skipReason' in held, label);
+  }
+});
+
+/* THE TWO WAYS THE PAIR CAN STATE SOMETHING NOBODY SAID.
+ *
+ * Both are reachable only now that the abbreviation is recognised, so they ship with it.
+ */
+test('holds the work-eligibility pair when one boolean cannot answer the whole question', () => {
+  /* A DISJUNCTION. Corpus label, one employer. work_authorized settles the second half and says
+   * nothing about the first, so "Yes" is accidentally true and "No" is a false statement about
+   * where she lives. Held in BOTH directions, because a rule that is only sound when the stored
+   * value happens to be true is not a rule. */
+  for (const ap of [
+    { work_authorized: true },
+    { work_authorized: false },
+    { work_authorized: true, needs_sponsorship: true },
+  ]) {
+    const compound = resolveKnownAnswer(
+      'are you currently located in the us, or do you have us work authorization?',
+      'text',
+      ap,
+      undefined,
+    );
+    assert.ok(compound && 'skipReason' in compound, JSON.stringify(ap));
+  }
+  // A parenthetical gloss is one question, not two, and keeps answering.
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'are you legally authorized to work in the us (e.g. you are a citizen, a permanent resident, or hold a valid visa)?',
+      'text',
+      { work_authorized: true },
+      undefined,
+    ),
+    { value: 'Yes' },
+  );
+
+  /* AN INCOHERENT STORED PAIR. Two independent selects in Settings, so a half-filled profile can
+   * hold "not authorized" and "needs no sponsorship" together, which is not a person. The two
+   * halves are answered by two different branches that cannot see each other, so left alone they
+   * would put "No, I cannot work here" and "No, I need nothing from you" on one form. */
+  const contradictory = { work_authorized: false, needs_sponsorship: false };
+  for (const label of [
+    'are you legally authorized to work in the united states?',
+    'are you legally authorized to work in the us?',
+    'will you now, or in the future, require sponsorship for employment visa status to work in the united states?',
+    'do you now or in the future require visa sponsorship/work authorization to continue working in the united states?',
+  ]) {
+    const held = resolveKnownAnswer(label, 'text', contradictory, undefined);
+    assert.ok(held && 'skipReason' in held, label);
+  }
+  // The three combinations that describe real people are untouched.
+  assert.deepEqual(
+    resolveKnownAnswer('are you legally authorized to work in the us?', 'text', { work_authorized: true, needs_sponsorship: false }, undefined),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('are you legally authorized to work in the us?', 'text', { work_authorized: true, needs_sponsorship: true }, undefined),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('are you legally authorized to work in the us?', 'text', { work_authorized: false, needs_sponsorship: true }, undefined),
+    { value: 'No' },
+  );
+});
+
 test('answers EEO / demographic questions with stored preferences or decline', () => {
   const labels = [
     'what is your gender?',
@@ -177,18 +325,14 @@ test('answers EEO / demographic questions with stored preferences or decline', (
   );
 });
 
-test('answers candidate privacy consent only from the stored acceptance, and never the demographic survey', () => {
-  /* CHANGED 2026-08-08, and the change is the point. This used to pass `{}` and expect "Yes": Litos
-     accepted an employer's privacy notice on the student's behalf with nothing stored behind it.
-     Acceptance of a privacy notice is one of the two things an automated submission MAY affirm, but
-     only from an explicit consent, which is now collected once in onboarding. */
+test('candidate privacy consent always requires the exact application notice', () => {
   const label = 'By selecting "I agree," I understand that the information I have provided as part of this job application will be processed in accordance with the Candidate Privacy Policy.';
   const unasked = resolveKnownAnswer(label, 'text', {}, undefined);
   assert.ok(unasked && 'skipReason' in unasked);
   assert.match(unasked.skipReason, /privacy notice left for you to agree to yourself/);
 
   const privacy = resolveKnownAnswer(label, 'text', { accept_privacy_notices: true }, undefined);
-  assert.deepEqual(privacy, { value: 'Yes' });
+  assert.ok(privacy && 'skipReason' in privacy);
 
   const demographicConsent = resolveKnownAnswer(
     'By checking this box, I consent to Reddit collecting, storing, and processing my responses to the demographic data survey above.',
@@ -288,7 +432,7 @@ test('send-time refresh replaces stale EEO prose with stored profile answers', (
       answer: "I don't think that's relevant to my qualifications for this role.",
     },
     {
-      question: 'will you now or in the future require immigration sponsorship?',
+      question: 'will you now or in the future require immigration sponsorship in the United States?',
       answer: '',
     },
     {
@@ -302,6 +446,38 @@ test('send-time refresh replaces stale EEO prose with stored profile answers', (
   assert.equal(questionRequiresHumanAttention(questions[0]), false);
 });
 
+test('send-time refresh clears stale refused answers across the reviewer examples', () => {
+  const stale = refreshKnownQuestionAnswers([
+    { question: 'Can you work onsite in our Chicago office five days per week?', answer: 'Yes' },
+    { question: 'When can you start?', answer: 'June 1, 2026' },
+    { question: 'Please acknowledge the Candidate Privacy Notice.', answer: 'Yes' },
+    { question: 'I certify that all information in this application is true and complete.', answer: 'Yes' },
+    { question: 'AI Policy for Interviewers', answer: 'Yes' },
+    { question: 'Social Security Number', answer: '123-45-6789' },
+  ], {
+    onsite_commitment: 'anywhere',
+    availability_date: 'June 1, 2026',
+    accept_privacy_notices: true,
+    attest_truthful_information: true,
+  }, undefined);
+  assert.deepEqual(stale.map((question) => question.answer), ['', '', '', '', '', '']);
+});
+
+test('only provenance from the current explicit applicant review preserves a refused answer', () => {
+  const reviewedAt = '2026-08-09T12:00:00.000Z';
+  const question = {
+    question: 'Can you work onsite in our Chicago office five days per week?',
+    answer: 'Yes',
+    answer_source: 'applicant_review' as const,
+    answer_reviewed_at: reviewedAt,
+  };
+  assert.equal(refreshKnownQuestionAnswers([question], {}, undefined, reviewedAt)[0].answer, 'Yes');
+  const stale = refreshKnownQuestionAnswers([question], {}, undefined, '2026-08-09T13:00:00.000Z')[0];
+  assert.equal(stale.answer, '');
+  assert.equal('answer_source' in stale, false);
+  assert.equal('answer_reviewed_at' in stale, false);
+});
+
 test('never answers SSN or driver license fields', () => {
   assert.equal(isRefusedQuestion('social security number'), true);
   assert.equal(isRefusedQuestion("driver's license number"), true);
@@ -312,8 +488,166 @@ test('never answers CAPTCHA or recording consent fields', () => {
   assert.equal(resolveKnownAnswer('Please complete the CAPTCHA', 'checkbox', {}, undefined), null);
   assert.equal(isRefusedQuestion('Do you consent to this interview being recorded?'), true);
   assert.equal(resolveKnownAnswer('Do you consent to this interview being recorded?', 'checkbox', {}, undefined), null);
-  assert.equal(isRefusedQuestion('At the time of application, are you 18+ years of age?'), true);
-  assert.equal(resolveKnownAnswer('At the time of application, are you 18+ years of age?', 'text', {}, undefined), null);
+});
+
+/* THE 18+ ATTESTATION. It used to live in the assertion directly above, listed with CAPTCHA and
+ * recording consent as a question Litos would never answer. It is not that kind of question: the
+ * applicant tells Litos when she was born, and subtracting two dates is not Litos making a claim
+ * on her behalf. What stays absolute is the input - the stored date of birth and nothing else. */
+test('answers the 18+ attestation from a stored date of birth, and only from that', () => {
+  const label = 'At the time of application, are you 18+ years of age?';
+  const born2005: ApplicationProfileLike = { date_of_birth: '2005-09-25' };
+
+  // The Roblox packet's exact label, which stopped the run on 2026-08-09.
+  assert.deepEqual(resolveKnownAnswer(label, 'text', born2005, undefined), { value: 'Yes' });
+
+  // The other phrasings employers use for the same attestation. Three of these were not even
+  // recognised as age questions before, so they fell past every rule instead of stopping.
+  for (const variant of [
+    'Are you at least 18 years of age?',
+    'Are you 18 years or older?',
+    'Are you 18 or older?',
+    'Are you over the age of 18?',
+    'Are you eighteen years of age or older?',
+  ]) {
+    assert.deepEqual(resolveKnownAnswer(variant, 'text', born2005, undefined), { value: 'Yes' }, variant);
+  }
+
+  // The MINOR framing inverts. Answering these the same way would declare an adult a minor.
+  for (const variant of ['Are you under 18 years of age?', 'Are you younger than 18?']) {
+    assert.deepEqual(resolveKnownAnswer(variant, 'text', born2005, undefined), { value: 'No' }, variant);
+  }
+  assert.deepEqual(
+    resolveKnownAnswer('Are you under 18 years of age?', 'text', { date_of_birth: '2012-01-01' }, undefined),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer(label, 'text', { date_of_birth: '2012-01-01' }, undefined),
+    { value: 'No' },
+  );
+
+  // NULL date_of_birth is the state of the owner's own profile today. It refuses, and it says why.
+  const unanswered = resolveKnownAnswer(label, 'text', {}, undefined);
+  assert.ok(unanswered && 'skipReason' in unanswered);
+  assert.match(unanswered.skipReason, /date of birth is not saved/);
+  // The refusal sentence has to carry "sensitive question", which is the phrase
+  // attentionCategoriesForReasons matches to file this under sensitive_attestation, and must NOT
+  // contain the word "file", which that function's required_document arm matches on.
+  assert.match(unanswered.skipReason, /sensitive question/);
+  assert.doesNotMatch(unanswered.skipReason, /file/);
+
+  // NOTHING but date_of_birth may produce an age. A graduation year is the tempting one.
+  for (const profile of [
+    { grad_year: 2027 },
+    { grad_date: 'May 2027', school: 'USC', currently_enrolled: true },
+    { full_name: 'Mehek Mandal', high_school_grad_date: 'June 2023' },
+    { date_of_birth: '   ' },
+    { date_of_birth: 'sometime in the nineties' },
+  ] satisfies ApplicationProfileLike[]) {
+    const answer = resolveKnownAnswer(label, 'text', profile, undefined);
+    assert.ok(answer && 'skipReason' in answer, JSON.stringify(profile));
+  }
+
+  // No broad rule may reach the label now that isRefusedQuestion no longer short-circuits it.
+  assert.equal(classifyField(label), null);
+  assert.equal(classifyField('Are you 18 years or older?'), null);
+
+  // IMC's "within the last 12-18 months" is the nearest miss in the whole stored corpus. It is a
+  // question about prior applications and must not become an age attestation.
+  const imc = 'have you applied to this role or another role @IMC within the last 12-18 months?';
+  const imcAnswer = resolveKnownAnswer(imc, 'text', born2005, undefined);
+  assert.ok(imcAnswer && 'skipReason' in imcAnswer);
+  assert.match(imcAnswer.skipReason, /prior application/);
+
+  /* The number 18 used for TENURE, not age. The extension's copy of this rule already carries the
+   * exclusion because it already shipped the false Yes: "18+ months of experience" is not an age
+   * question, and answering it Yes claims experience the student never stated. Harmless while the
+   * age family was blanket-refused; a false declaration the moment it is answerable. */
+  for (const tenure of [
+    'Do you have 18+ months of experience with Python?',
+    'Do you have at least 18 years of experience in the industry?',
+    'Have you completed 18 credits or more?',
+  ]) {
+    const answer = resolveKnownAnswer(tenure, 'text', born2005, undefined);
+    assert.equal(answer === null || !('value' in answer && /^yes$/i.test(answer.value)), true, tenure);
+  }
+
+  // "What is your age?" is EEO self-identification, not an attestation, and keeps its own answer.
+  assert.deepEqual(
+    resolveKnownAnswer('What is your age?', 'text', born2005, undefined),
+    { value: 'Decline to self-identify' },
+  );
+});
+
+/* THE PARSE, which is the part of the attestation that turns a loose string into a legal claim.
+ *
+ * Everything above this test is about WHICH labels are age attestations. This one is about what
+ * counts as a date of birth at all, and it exists because `new Date(raw)` said yes to two things it
+ * should not have: an impossible calendar day, which it rolls forward into a real one, and prose,
+ * which it invents a January the 1st out of. Both became an age, and the age became a Yes.
+ *
+ * The rule is the extension's (storedBirthDate in adapters/generic.ts): accept only the shapes
+ * Litos stores, and refuse everything else the same way an absent date of birth is refused.
+ */
+const AGE_ATTESTATION_LABEL = 'At the time of application, are you 18+ years of age?';
+
+/* One case per malformed shape, deliberately not folded into a loop inside one test: each of these
+ * is a separate way `new Date` manufactured a birthday, and a single test would stop at the first
+ * one and hide the rest. */
+const MALFORMED_DATES_OF_BIRTH: Array<[shape: string, why: string]> = [
+  // `new Date('2008-02-30T00:00:00Z')` is 1 March 2008. 30 February is not a day, but the rollover
+  // made it one, and on 9 August 2026 that reads as an 18-year-old. The parsed date must be the
+  // date that was written.
+  ['2008-02-30', 'an impossible calendar day rolled over into a real one'],
+  // `new Date('sometime in 2005')` is 1 January 2005: a whole birthday invented out of a sentence,
+  // then handed to an employer as a sworn statement.
+  ['sometime in 2005', 'prose became a date, then an age, then a Yes'],
+  // 8 September to half the world, 9 August to the other half, and nothing in the string says
+  // which. A refusal costs one question; a guess puts a false date of birth on an application.
+  ['09/08/2005', 'an all-numeric date is ambiguous between day-first and month-first'],
+  // The same rollover in the month position: `new Date('2005-13-01')` is a valid Date in Node.
+  ['2005-13-01', 'a thirteenth month rolled over into the next year'],
+];
+
+for (const [malformed, why] of MALFORMED_DATES_OF_BIRTH) {
+  test(`a date of birth of "${malformed}" is refused, because ${why}`, () => {
+    // An unparseable value must behave EXACTLY like an absent one: the same stated refusal, never a
+    // fall-through to an answer, and never a different-sounding reason that reads like a bug.
+    const absent = resolveKnownAnswer(AGE_ATTESTATION_LABEL, 'text', {}, undefined);
+    assert.ok(absent && 'skipReason' in absent);
+
+    const answer = resolveKnownAnswer(AGE_ATTESTATION_LABEL, 'text', { date_of_birth: malformed }, undefined);
+    assert.ok(answer && 'skipReason' in answer, `${malformed} must not produce an answer`);
+    assert.equal(answer.skipReason, absent.skipReason);
+    assert.match(answer.skipReason, /date of birth is not saved/);
+
+    // The minor framing runs the same parse and must refuse too, rather than inverting a guess.
+    const minor = resolveKnownAnswer('Are you under 18 years of age?', 'text', { date_of_birth: malformed }, undefined);
+    assert.ok(minor && 'skipReason' in minor, malformed);
+  });
+}
+
+test('the shapes Litos actually stores still answer the 18+ attestation', () => {
+  // Strict ISO is what the extension's setup screen writes and what the one date of birth in
+  // production is (measured 2026-08-09: 10 plaintext bytes). The day/month-name/year text is what
+  // /profile/harvest lifts off an employer's own form.
+  for (const stored of ['2005-09-25', '25 Sep 2005', '25 September 2005', 'Sep 25, 2005']) {
+    assert.deepEqual(
+      resolveKnownAnswer(AGE_ATTESTATION_LABEL, 'text', { date_of_birth: stored }, undefined),
+      { value: 'Yes' },
+      stored,
+    );
+  }
+  // A real leap day is a real birthday and must survive the same validation that rejects 30 Feb.
+  assert.deepEqual(
+    resolveKnownAnswer(AGE_ATTESTATION_LABEL, 'text', { date_of_birth: '2004-02-29' }, undefined),
+    { value: 'Yes' },
+  );
+  // And a minor still gets a No, so the strictness did not quietly swallow the answering branch.
+  assert.deepEqual(
+    resolveKnownAnswer(AGE_ATTESTATION_LABEL, 'text', { date_of_birth: '12 Mar 2012' }, undefined),
+    { value: 'No' },
+  );
 });
 
 test('sensitive gates allow only exact stored work eligibility answers', () => {
@@ -329,7 +663,7 @@ test('sensitive gates allow only exact stored work eligibility answers', () => {
   );
   assert.equal(
     sensitiveQuestionRequiresAttention(
-      'will you now or in the future require sponsorship for employment visa status?',
+      'will you now or in the future require sponsorship for employment visa status in the United States?',
       'Yes',
       'text',
       { needs_sponsorship: true },
@@ -408,12 +742,105 @@ test('citizenship is answered but never substituted for residence', () => {
   assert.deepEqual(resolved, { value: 'India' });
 });
 
-test('a routine location-commitment question is answered as an approved logistics acknowledgement', () => {
+test('legacy broad location preferences never answer an exact employer commitment', () => {
+  /* RENAMED AND REVERSED, 2026-08-09. It used to be called "...is answered as an approved logistics
+     acknowledgement" and it asserted exactly what this file now forbids: `{ address_city: 'Dubai' }`
+     in, `{ value: 'Yes' }` out, for a question about being in a US office three days a week.
+
+     The word doing the work in the old name was "approved". Nothing approved it. There was no
+     column, no consent and no stored value anywhere behind that Yes - just
+     `return isLocationCommitmentQuestion(label) ? { value: 'Yes' } : null`, and a comment upstream
+     calling the question "routine". A commitment about where a person will physically be for the
+     next twelve weeks is not routine, and calling it logistics does not make it less of a statement
+     she never made. It was found on a Redwood Materials packet that was ready to send with "Are you
+     available to work from our office in San Francisco?" answered Yes.
+
+     What survives from the old test is its real content: these labels must be RECOGNISED, and must
+     never fall through to the essay drafter. That is still asserted, and the answer now comes from
+     application_profile.onsite_commitment / onsite_locations. */
   const label = 'this role is in-office three days a week, can you commit to that?';
   assert.equal(classifyField(label), 'onsite_commitment');
-  assert.deepEqual(resolveKnownAnswer(label, 'select', { address_city: 'Dubai' }, undefined), { value: 'Yes' });
+
+  // Nothing stored: refused by name, and it is a skipReason rather than a null, so it cannot fall
+  // through to classifyField and come back as her home city.
+  const unasked = resolveKnownAnswer(label, 'select', { address_city: 'Dubai' }, undefined);
+  assert.ok(unasked && 'skipReason' in unasked);
+  assert.match(unasked.skipReason, /where you will work from is yours to answer/);
+
+  for (const profile of [
+    { address_city: 'Dubai', onsite_commitment: 'anywhere' as const },
+    { address_city: 'Dubai', onsite_commitment: 'no' as const },
+    { address_city: 'Dubai', onsite_commitment: 'listed_locations' as const, onsite_locations: ['San Francisco'] },
+  ]) {
+    const held = resolveKnownAnswer(label, 'select', profile, undefined);
+    assert.ok(held && 'skipReason' in held);
+  }
+
+  // Relocation is its own commitment and its own column: agreeing to sit in an office is not
+  // agreeing to move house, so onsite_commitment alone must not answer it.
   assert.equal(classifyField('are you willing to relocate to San Francisco?'), null);
-  assert.deepEqual(resolveKnownAnswer('are you willing to relocate to San Francisco?', 'text', { address_city: 'Dubai' }, undefined), { value: 'Yes' });
+  const relocation = resolveKnownAnswer(
+    'are you willing to relocate to San Francisco?',
+    'text',
+    { address_city: 'Dubai', onsite_commitment: 'anywhere' },
+    undefined,
+  );
+  assert.ok(relocation && 'skipReason' in relocation);
+  const legacyRelocation = resolveKnownAnswer(
+    'are you willing to relocate to San Francisco?',
+    'text',
+    { relocation_willingness: 'no' },
+    undefined,
+  );
+  assert.ok(legacyRelocation && 'skipReason' in legacyRelocation);
+});
+
+/* THE TOGETHER AI LABEL, which is the day-count shape rather than the bare one.
+ *
+ * Packet 5b52aba8-124c-4688-8b9c-a7a49d20467b sat at the send gate on 2026-08-08 with "are you
+ * willing to work four days per week in our san francisco office?" answered Yes, alongside the
+ * Redwood packet covered above. It is here because it is the shape that reads LEAST like a
+ * commitment: a cadence and a city buried in a politeness. It must still be recognised, and it must
+ * still be refused, and neither may be true only for the bare wording.
+ *
+ * What it does NOT assert any more is an answer built out of onsite_commitment and onsite_locations.
+ * Those columns carry no cadence and no duration, so "four days per week" cannot be settled by
+ * them, and the resolver now holds every such commitment. That refusal is the test below.
+ */
+test('the four-days-per-week shape is recognised as the same commitment and held', () => {
+  const together = 'are you willing to work four days per week in our san francisco office?';
+  assert.equal(classifyField(together), 'onsite_commitment');
+
+  // Refused by name, and not guessed from her address, whatever the columns happen to hold.
+  for (const profile of [
+    { address_city: 'Dubai' },
+    { onsite_commitment: 'anywhere' as const },
+    { onsite_commitment: 'listed_locations' as const, onsite_locations: ['san francisco, ca'] },
+  ]) {
+    const held = resolveKnownAnswer(together, 'select', profile, undefined);
+    assert.ok(held && 'skipReason' in held);
+    assert.match(held.skipReason, /where you will work from is yours to answer/);
+  }
+});
+
+test('location without exact cadence and duration is insufficient for an office commitment', () => {
+  const profile = {
+    address_city: 'Dubai',
+    onsite_commitment: 'listed_locations' as const,
+    onsite_locations: ['Los Angeles', 'New York'],
+  };
+  for (const [label, jd] of [
+    ['Are you available to work from our office in Los Angeles?', undefined],
+    ['Are you available to work from our office in San Francisco?', undefined],
+    ['Are you willing to work in-person for 12 weeks during the internship?', 'Software Engineer Intern\nNew York, NY'],
+    ['Can you commute to our Chicago office five days per week?', 'Chicago, IL'],
+    ['Are you able to work remotely for the duration of this internship?', 'Remote internship'],
+    ['Can you work remotely from the United States five days per week?', 'Remote, United States'],
+    ['This is a remote-only role. Are you comfortable with that schedule?', 'Remote-only role'],
+  ] as const) {
+    const held = resolveKnownAnswer(label, 'select', profile, jd);
+    assert.ok(held && 'skipReason' in held, label);
+  }
 });
 
 test('a preferred-location choice is not drafted as prose', () => {
@@ -425,18 +852,17 @@ test('a preferred-location choice is not drafted as prose', () => {
   assert.match(resolved.skipReason, /location choice left for you/);
 });
 
-test('routine applicant data and privacy consent questions are answered yes once the consent is stored', () => {
+test('standing profile consent never accepts a posting-specific privacy notice', () => {
   const labels = [
     'Do you consent to Brex processing your personal information for the purpose of assessing your candidacy for this position?',
     "Please review and acknowledge Cloudflare's Candidate Privacy Policy.",
     'Yes, I consent',
   ];
   for (const label of labels) {
-    const expected = label === 'Yes, I consent' ? 'Yes, I consent' : 'Yes';
-    assert.deepEqual(resolveKnownAnswer(label, 'text', { accept_privacy_notices: true }, undefined), { value: expected });
-    // And the same label with nothing stored is held, rather than agreed to on her behalf.
-    const unasked = resolveKnownAnswer(label, 'text', {}, undefined);
-    assert.ok(unasked && 'skipReason' in unasked, `${label} should be held without a stored consent`);
+    for (const profile of [{}, { accept_privacy_notices: true }]) {
+      const held = resolveKnownAnswer(label, 'text', profile, undefined);
+      assert.ok(held && 'skipReason' in held, label);
+    }
   }
 });
 
@@ -445,11 +871,8 @@ test('the bare privacy labels three employers actually ship are recognised', () 
   // "Privacy". None of them is a sentence, so the prose-shaped consent rule matched none of them
   // and all three sat empty and blocked the application.
   for (const label of ['Privacy', 'Privacy Statement', 'Privacy Policy Acknowledgement', 'Candidate Privacy Notice']) {
-    assert.deepEqual(
-      resolveKnownAnswer(label, 'checkbox', { accept_privacy_notices: true }, undefined),
-      { value: 'Yes' },
-      label,
-    );
+    const stored = resolveKnownAnswer(label, 'checkbox', { accept_privacy_notices: true }, undefined);
+    assert.ok(stored && 'skipReason' in stored, label);
     const unasked = resolveKnownAnswer(label, 'checkbox', {}, undefined);
     assert.ok(unasked && 'skipReason' in unasked, label);
   }
@@ -581,10 +1004,13 @@ test('live-audit profile labels beat generic wording and stay out of drafts', ()
   assert.deepEqual(resolveKnownAnswer('When are you expecting to graduate from your degree?', 'select', profile, undefined), {
     value: 'May 2028',
   });
-  assert.deepEqual(
-    resolveKnownAnswer('Processing of Personal Data', 'select', { ...profile, accept_privacy_notices: true }, undefined),
-    { value: 'Acknowledge/Confirm' },
+  const storedProcessing = resolveKnownAnswer(
+    'Processing of Personal Data',
+    'select',
+    { ...profile, accept_privacy_notices: true },
+    undefined,
   );
+  assert.ok(storedProcessing && 'skipReason' in storedProcessing);
   // Same label, no stored acceptance: held rather than confirmed on her behalf.
   const unconsentedProcessing = resolveKnownAnswer('Processing of Personal Data', 'select', profile, undefined);
   assert.ok(unconsentedProcessing && 'skipReason' in unconsentedProcessing);
@@ -592,15 +1018,93 @@ test('live-audit profile labels beat generic wording and stay out of drafts', ()
     resolveKnownAnswer('Are you majoring in STEM (Computer Science, Electrical Engineering, Data Science, Cog Sci, Information Management/Systems, Mathematics, Machine Learning, etc.)?', 'select', profile, undefined),
     { value: 'Yes' },
   );
-  assert.deepEqual(resolveKnownAnswer('AI Policy for Interviewers', 'select', profile, undefined), {
-    value: 'Yes',
-  });
+  /* CHANGED 2026-08-09: was `{ value: 'Yes' }`, a constant with nothing stored. "AI Policy for
+     Interviewers" is acceptance of a behavioural policy binding her conduct in a live interview.
+     applicationConsentAnswer already refuses IMC's "Interview Code of Conduct" with the reasoning
+     "A behavioural policy is not a privacy notice and not a statement of truth", and two wordings
+     of one policy cannot have two answers. One company asks it, which is below the two-posting bar
+     for an onboarding column, so it becomes an ask at Apply. */
+  const aiPolicy = resolveKnownAnswer('AI Policy for Interviewers', 'select', profile, undefined);
+  assert.ok(aiPolicy && 'skipReason' in aiPolicy);
+  assert.match(aiPolicy.skipReason, /interview conduct policy/);
 });
 
-test('referral source handles first-heard wording', () => {
-  assert.deepEqual(resolveKnownAnswer('How did you first hear about Five Rings?', 'text', {}, undefined), {
-    value: 'Company website',
-  });
+test('referral source is relayed when stored and refused when it is not', () => {
+  /* CHANGED 2026-08-09. This asserted "Company website" from an EMPTY profile. That constant was
+     described elsewhere as "a deliberate product behaviour rather than stored data", and it was
+     both: deliberate, and a statement of fact about how she found the posting that she never made -
+     usually a false one, since Litos finds these on a monitored job board. Measured the same day:
+     all 16 production rows carried "Company website" purely from the column default, so there was
+     no account anywhere for which the answer was a person's choice.
+
+     It is the most-asked question in the corpus (25 distinct labels, 20 employers), which is why it
+     went to onboarding rather than to an ask at Apply. */
+  assert.deepEqual(
+    resolveKnownAnswer('How did you first hear about Five Rings?', 'text', { referral_source_default: 'LinkedIn' }, undefined),
+    { value: 'LinkedIn' },
+  );
+  const unstored = resolveKnownAnswer('How did you first hear about Five Rings?', 'text', {}, undefined);
+  assert.ok(unstored && 'skipReason' in unstored);
+  assert.match(unstored.skipReason, /how you heard about this role is yours to answer/);
+});
+
+/* "Legal Name" - the WHOLE name in one control, which Roblox asks for and Greenhouse required.
+ * LEGAL_FIRST_NAME_QUESTION does not match it, correctly, so nothing did and a live run stopped
+ * with `"Legal Name" is required and is still empty` while the name sat in the profile. */
+test('answers a full legal name, with the stored legal first name beating the resume name', () => {
+  const mehek: ApplicationProfileLike = { full_name: 'Mehek Mandal', legal_first_name: 'Mehek' };
+  assert.deepEqual(resolveKnownAnswer('Legal Name', 'text', mehek, undefined), { value: 'Mehek Mandal' });
+  // The Workday shape, taken verbatim from the stored corpus.
+  assert.deepEqual(
+    resolveKnownAnswer('full legal name type here... _systemfield_name _systemfield_name', 'text', mehek, undefined),
+    { value: 'Mehek Mandal' },
+  );
+
+  /* THE CASE THE QUESTION EXISTS FOR: a legal first name that is NOT the first token of the name
+   * on the resume. Composing "Legal Name" from full_name would hand the employer "Robert Smith",
+   * the exact name she filled in legal_first_name to correct. */
+  const differing: ApplicationProfileLike = {
+    full_name: 'Robert Smith',
+    legal_first_name: 'Roberta',
+    preferred_first_name: 'Bobbie',
+  };
+  assert.deepEqual(resolveKnownAnswer('Legal Name', 'text', differing, undefined), { value: 'Roberta Smith' });
+  assert.deepEqual(resolveKnownAnswer('What is your full legal name?', 'text', differing, undefined), { value: 'Roberta Smith' });
+
+  // Legal first, legal last and preferred name asked separately still route to three answers, and
+  // in particular the full-name arm never swallows the narrower two.
+  assert.deepEqual(resolveKnownAnswer('Legal First Name', 'text', differing, undefined), { value: 'Roberta' });
+  assert.deepEqual(
+    resolveKnownAnswer('Legal First Name (if different from preferred name)', 'text', differing, undefined),
+    { value: 'Roberta' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('Do you have a preferred name, other than the name indicated above? If yes, please indicate that name below', 'text', differing, undefined),
+    { value: 'Bobbie' },
+  );
+  // "Legal Last Name" has no column behind it and no rule claiming it. It must stay unanswered
+  // rather than pick up the composed full name or the legal FIRST name.
+  const legalLast = resolveKnownAnswer('Legal Last Name', 'text', differing, undefined);
+  assert.equal(legalLast === null || !('value' in legalLast && /Roberta/.test(legalLast.value)), true);
+
+  // PREFERRED_NAME_QUESTION must not start matching the legal labels as a side effect.
+  const preferredOnly: ApplicationProfileLike = { preferred_first_name: 'Bobbie' };
+  assert.equal(resolveKnownAnswer('Legal Name', 'text', preferredOnly, undefined), null);
+  assert.equal(resolveKnownAnswer('Legal First Name', 'text', preferredOnly, undefined), null);
+
+  // No legal first name stored: the parsed full name is the honest answer and is used unchanged.
+  assert.deepEqual(
+    resolveKnownAnswer('Legal Name', 'text', { full_name: 'Mehek Mandal' }, undefined),
+    { value: 'Mehek Mandal' },
+  );
+  // A legal first name with no parsed surname anywhere gives the first name alone, not a fragment.
+  assert.deepEqual(
+    resolveKnownAnswer('Legal Name', 'text', { legal_first_name: 'Roberta' }, undefined),
+    { value: 'Roberta' },
+  );
+  // Nothing stored, nothing answered. This is what keeps the empty-profile sweep at its count.
+  assert.equal(resolveKnownAnswer('Legal Name', 'text', {}, undefined), null);
+  assert.equal(resolveKnownAnswer('full legal name', 'text', {}, undefined), null);
 });
 
 test('stored academic and onsite facts answer repeated select-shaped live questions', () => {
@@ -624,7 +1128,13 @@ test('stored academic and onsite facts answer repeated select-shaped live questi
     ),
     { value: 'Mehek' },
   );
-  assert.deepEqual(resolveKnownAnswer('Are you able to work onsite 3 days a week?', 'select', profile, undefined), { value: 'Yes' });
+  const onsite = resolveKnownAnswer(
+    'Are you able to work onsite 3 days a week?',
+    'select',
+    { ...profile, onsite_commitment: 'anywhere' as const },
+    undefined,
+  );
+  assert.ok(onsite && 'skipReason' in onsite);
   assert.deepEqual(resolveKnownAnswer('Are you currently enrolled in a degree program?', 'radio', profile, undefined), { value: 'Yes' });
   assert.deepEqual(resolveKnownAnswer('Will you be returning to a degree program after this internship?', 'select', profile, undefined), { value: 'Yes' });
   assert.deepEqual(resolveKnownAnswer('Graduation Month', 'select', profile, undefined), { value: 'May' });
@@ -671,15 +1181,23 @@ test('required internship form fields resolve from profile-backed defaults inste
   assert.deepEqual(resolveKnownAnswer('Do you currently reside in San Francisco?', 'select', profile, undefined), { value: 'No' });
   assert.deepEqual(resolveKnownAnswer('Do you live in New York or California?', 'select', profile, undefined), { value: 'No' });
   assert.equal(resolveKnownAnswer('Do you live in New York or California?', 'select', {}, undefined), null);
-  assert.deepEqual(
-    resolveKnownAnswer(
-      'Are you currently residing in the greater Austin area or have confirmed plans to be in Austin for the duration of this internship?',
+  /* CHANGED 2026-08-09. This asserted Yes for a profile whose address_city is Dubai. The residence
+     half of that question had already been checked and failed, so the ONLY way to reach the Yes was
+     for her not to live in Austin - and the answer it then gave was that she had confirmed plans to
+     move there. It is the office commitment wearing a residence question's clothes, and it is now
+     answered from the same stored fact. */
+  const austin = 'Are you currently residing in the greater Austin area or have confirmed plans to be in Austin for the duration of this internship?';
+  const austinUnasked = resolveKnownAnswer(austin, 'select', profile, undefined);
+  assert.ok(austinUnasked && 'skipReason' in austinUnasked);
+  for (const onsite_locations of [['Austin'], ['Los Angeles']]) {
+    const held = resolveKnownAnswer(
+      austin,
       'select',
-      profile,
+      { ...profile, onsite_commitment: 'listed_locations' as const, onsite_locations },
       undefined,
-    ),
-    { value: 'Yes' },
-  );
+    );
+    assert.ok(held && 'skipReason' in held);
+  }
   assert.deepEqual(
     resolveKnownAnswer('Are you currently enrolled in a Masters or PhD program for a technical field?', 'select', profile, undefined),
     { value: 'No' },
@@ -693,26 +1211,30 @@ test('required internship form fields resolve from profile-backed defaults inste
     ),
     { value: 'Fall 2026' },
   );
-  assert.deepEqual(
-    resolveKnownAnswer(
-      'When are you able to join Astranis as an intern? (12 week minimum)',
-      'text',
-      profile,
-      'Software Engineer- Backend Intern (Fall 2026)',
-    ),
-    { value: 'Fall 2026' },
+  /* CHANGED 2026-08-09. This asserted "Fall 2026" from the JOB DESCRIPTION for "when are you able
+     to join Astranis as an intern?" - the season the POSTING is for, replayed as a statement from
+     her about when her calendar is free. The assertion directly above it stays, and is the
+     distinction: "please confirm the season you are applying for" is asking what she applied to,
+     and the posting is the authority on that. This one asks about her, and it is not. The stored
+     availability_date still answers it; nothing else does. */
+  for (const jd of ['Software Engineer- Backend Intern (Fall 2026)', undefined]) {
+    const joinDate = resolveKnownAnswer('When are you able to join Astranis as an intern? (12 week minimum)', 'text', profile, jd);
+    assert.ok(joinDate && 'skipReason' in joinDate, String(jd));
+  }
+  const storedJoinDate = resolveKnownAnswer(
+    'When are you able to join Astranis as an intern? (12 week minimum)',
+    'text',
+    { ...profile, availability_date: 'June 1, 2026' },
+    'Software Engineer- Backend Intern (Fall 2026)',
   );
-  assert.ok(
-    resolveKnownAnswer('When are you able to join Astranis as an intern? (12 week minimum)', 'text', profile, undefined)
-    && 'skipReason' in resolveKnownAnswer('When are you able to join Astranis as an intern? (12 week minimum)', 'text', profile, undefined)!,
-  );
+  assert.ok(storedJoinDate && 'skipReason' in storedJoinDate);
   const privacy = resolveKnownAnswer(
     'Please review and acknowledge Cloudflare\'s Candidate Privacy Policy (cloudflare.com/candidate-privacy-notice/).',
     'checkbox',
     { ...profile, accept_privacy_notices: true },
     undefined,
   );
-  assert.deepEqual(privacy, { value: 'Yes' });
+  assert.ok(privacy && 'skipReason' in privacy);
   assert.deepEqual(
     resolveKnownAnswer('Do you consider yourself a member of the LGBTQIA+ community?', 'select', profile, undefined),
     { value: 'Decline to self-identify' },
@@ -721,18 +1243,23 @@ test('required internship form fields resolve from profile-backed defaults inste
     resolveKnownAnswer('Which categories describe you? Select all that apply to you', 'checkbox', profile, undefined),
     { value: 'Decline to self-identify' },
   );
-  assert.deepEqual(
-    resolveKnownAnswer(
-      'Are you currently bound by any agreements with a current or former employer that may restrict your ability to work for Scale AI?',
-      'select',
-      profile,
-      undefined,
-    ),
-    { value: 'No' },
+  /* CHANGED 2026-08-09: was `{ value: 'No' }`, a hardcoded legal declaration that she is under no
+     non-compete, non-solicitation or confidentiality obligation to any past employer. No column was
+     consulted and none could have been - nothing on file records her contracts. The label is
+     already named in selfDeclaration.ts's list; this constant simply ran first and short-circuited
+     it, which is the structural gap this change closes. One label, one company, so it is an ask at
+     Apply rather than an onboarding column. */
+  const restriction = resolveKnownAnswer(
+    'Are you currently bound by any agreements with a current or former employer that may restrict your ability to work for Scale AI?',
+    'select',
+    profile,
+    undefined,
   );
+  assert.ok(restriction && 'skipReason' in restriction);
+  assert.match(restriction.skipReason, /agreements with a past employer/);
 });
 
-test('Greenhouse acknowledgements: only truthfulness and privacy may be ticked, and only from a stored consent', () => {
+test('Greenhouse acknowledgements remain posting-specific despite standing booleans', () => {
   /* CHANGED 2026-08-08. Two of these were auto-answered "Yes" with nothing stored:
      - "this role is my top preference and I will not be considered for other tech and/or quant
        roles at Akuna this season" is a binding exclusivity commitment over her whole recruiting
@@ -762,10 +1289,13 @@ test('Greenhouse acknowledgements: only truthfulness and privacy may be ticked, 
   const uncertified = resolveKnownAnswer(certification, 'combobox', {}, undefined);
   assert.ok(uncertified && 'skipReason' in uncertified);
   assert.match(uncertified.skipReason, /certification that your information is true/);
-  assert.deepEqual(
-    resolveKnownAnswer(certification, 'combobox', { attest_truthful_information: true }, undefined),
-    { value: 'Yes' },
+  const storedCertification = resolveKnownAnswer(
+    certification,
+    'combobox',
+    { attest_truthful_information: true },
+    undefined,
   );
+  assert.ok(storedCertification && 'skipReason' in storedCertification);
 
   const pdf = resolveKnownAnswer(
     'I acknowledge that my resume must be submitted in PDF format to be considered.',
@@ -777,7 +1307,18 @@ test('Greenhouse acknowledgements: only truthfulness and privacy may be ticked, 
   assert.match(pdf.skipReason, /how your resume is submitted/);
 });
 
-test('job location preference questions use the safe posting locations context', () => {
+test('a job location preference is posting-specific even with a stored metro list', () => {
+  /* CHANGED 2026-08-09. The old name was "...use the safe posting locations context" and the rule
+     it pinned was: take the last line of the JOB DESCRIPTION that looks like a US city and return
+     it as her preferred location. "Safe" meant well-formed, not true. Measured in production, that
+     shipped "San Francisco, CA" as the answer to Optiver's "please rank your location preference in
+     order of most to least preferred: austin, chicago, greenwich, houston, new york city" and to
+     "what is your office location preference? (note: the internship is only available in new york
+     and austin, not chicago)" - a preference she never expressed, naming an office the employer had
+     just said was not on offer.
+
+     Her stored onsite_locations ARE an ordered preference, so the first of them the employer offers
+     is an honest answer, and it is now the only one given. */
   const label = "Please choose the single location that you're the most interested in, and we will discuss more with you as you move through the process.";
   const context = [
     'Build data systems for customers.',
@@ -786,15 +1327,24 @@ test('job location preference questions use the safe posting locations context',
   ].join('\n');
 
   assert.equal(classifyField(label), null);
-  assert.deepEqual(
-    resolveKnownAnswer(
-      label,
-      'select',
-      {},
-      context,
-    ),
-    { value: 'San Francisco, CA' },
+  const unasked = resolveKnownAnswer(label, 'select', {}, context);
+  assert.ok(unasked && 'skipReason' in unasked);
+  assert.match(unasked.skipReason, /location choice left for you/);
+
+  const storedPreference = resolveKnownAnswer(label, 'select', {
+    onsite_commitment: 'listed_locations',
+    onsite_locations: ['San Francisco', 'Austin'],
+  }, context);
+  assert.ok(storedPreference && 'skipReason' in storedPreference);
+  // Optiver's list offers none of hers, so it stays hers to answer rather than borrowing a city
+  // from the posting header.
+  const noOverlap = resolveKnownAnswer(
+    'Please rank your location preference in order of most to least preferred: Austin, Chicago, Greenwich, Houston, New York City.',
+    'select',
+    { onsite_commitment: 'listed_locations', onsite_locations: ['Los Angeles'] },
+    context,
   );
+  assert.ok(noOverlap && 'skipReason' in noOverlap);
   assert.deepEqual(resolveKnownAnswer('What is your current location?', 'text', { address_city: 'Dubai' }, context), { value: 'Dubai' });
 });
 
@@ -980,12 +1530,13 @@ test('live-audit profile fields use question shape before generic enrollment wor
     resolveKnownAnswer('Are you available for a 12-week full-time (40 hours per week) internship between September - December 2026?', 'select', profile, undefined)
     && 'skipReason' in resolveKnownAnswer('Are you available for a 12-week full-time (40 hours per week) internship between September - December 2026?', 'select', profile, undefined)!,
   );
-  assert.deepEqual(resolveKnownAnswer('Are you available for a 12-week full-time (40 hours per week) internship between September - December 2026?', 'select', {
+  assert.ok(resolveKnownAnswer('Are you available for a 12-week full-time (40 hours per week) internship between September - December 2026?', 'select', {
     ...profile,
     availability_term: 'Available full-time for 12 weeks between September and December 2026',
-  }, undefined), {
-    value: 'Yes',
-  });
+  }, undefined) && 'skipReason' in resolveKnownAnswer('Are you available for a 12-week full-time (40 hours per week) internship between September - December 2026?', 'select', {
+    ...profile,
+    availability_term: 'Available full-time for 12 weeks between September and December 2026',
+  }, undefined)!);
   assert.ok(
     resolveKnownAnswer('Are you available for a 12-week full-time (40 hours per week) internship between September - December 2026?', 'select', {
       ...profile,
@@ -996,15 +1547,20 @@ test('live-audit profile fields use question shape before generic enrollment wor
       availability_term: undefined,
     }, undefined)!,
   );
-  assert.deepEqual(
-    resolveKnownAnswer(
-      '1st choice: Area of interest in Software Engineering',
-      'select',
-      profile,
-      'Engineering teams build software that handles traffic across our global network. Technologies include Go, Rust, C/C++ and Python services.',
-    ),
-    { value: 'Backend/Systems' },
+  /* CHANGED 2026-08-09: was `{ value: 'Backend/Systems' }`, produced by counting backend, frontend
+     and full-stack keywords in the EMPLOYER'S OWN job description and returning whichever the
+     employer used most. That is not a reading of a fact about her, it is a machine telling the
+     employer what the employer wants to hear - and it scored "2nd choice" identically to "1st
+     choice", because the JD is the same text both times. An area of interest is a self-assessment,
+     the same family as the skill self-ratings selfDeclaration.ts refuses, and nothing is on file. */
+  const area = resolveKnownAnswer(
+    '1st choice: Area of interest in Software Engineering',
+    'select',
+    profile,
+    'Engineering teams build software that handles traffic across our global network. Technologies include Go, Rust, C/C++ and Python services.',
   );
+  assert.ok(area && 'skipReason' in area);
+  assert.match(area.skipReason, /area of interest left for you/);
   assert.ok(
     resolveKnownAnswer('1st choice: Area of interest in Software Engineering', 'select', profile, 'Software engineering internship')
     && 'skipReason' in resolveKnownAnswer('1st choice: Area of interest in Software Engineering', 'select', profile, 'Software engineering internship')!,
@@ -1241,12 +1797,10 @@ test('Greenhouse education "start date month/year" is not job availability (Five
     resolveKnownAnswer('start date year* start date year start-year--0', 'number', withHistory, undefined),
     { value: '2024' },
   );
-  // Job availability itself is untouched.
+  // Job availability is reference-only until its scope and expiry are modeled.
   assert.equal(classifyField('when can you start?'), 'availability_date');
-  assert.deepEqual(
-    resolveKnownAnswer('When are you available to start?', 'text', PROD_OWNER_PROFILE, undefined),
-    { value: 'August 6, 2026' },
-  );
+  const availability = resolveKnownAnswer('When are you available to start?', 'text', PROD_OWNER_PROFILE, undefined);
+  assert.ok(availability && 'skipReason' in availability);
 });
 
 test('education end date is the graduation date, and a whole-range field needs both ends', () => {
@@ -1559,20 +2113,38 @@ const MEHEK: ApplicationProfileLike = {
   address_country: 'United Arab Emirates',
 };
 
-test('an in-person commitment is the routine location question it has always been', () => {
-  // '"Are you willing to work in-person for 12 weeks during the internship?" is required and is
-  // still empty'. With only office/onsite/hybrid in the vocabulary this fell all the way to the
-  // ESSAY drafter, so a react-select with a Yes/No list was handed a paragraph and stayed empty,
-  // and the paragraph is where the "Los Angeles" grounding warning on that packet came from.
+test('an in-person commitment is recognised, and is hers to make', () => {
+  /* RENAMED 2026-08-09: was "...is the routine location question it has always been", and asserted
+     Yes for MEHEK, whose address_city is Dubai and who was in none of these offices.
+
+     The half of this test that was always right is kept intact and is the reason the labels below
+     are still listed: '"Are you willing to work in-person for 12 weeks during the internship?" is
+     required and is still empty'. With only office/onsite/hybrid in the vocabulary this fell all
+     the way to the ESSAY drafter, so a react-select with a Yes/No list was handed a paragraph and
+     stayed empty, and the paragraph is where the "Los Angeles" grounding warning on that packet
+     came from. Every label here must still be RECOGNISED and must never reach the drafter.
+
+     What changed is what recognition produces. "Routine" was the error: these are commitments about
+     where she will physically be, and the answer is now relayed from what she stored or refused. */
   const label = normalizeDiscoveredLabel(ANDURIL_IN_PERSON_LABEL);
-  assert.deepEqual(resolveKnownAnswer(label, 'text', MEHEK, undefined), { value: 'Yes' });
-  // Three more postings ask the same thing in their own words.
-  for (const other of [
+  const labels = [
+    label,
     'are you able to work onsite in one of our offices, five days a week?',
     'how many days per week can you work on-site in sf, and from what date?',
     'do you currently live in, or plan to relocate to, the specified location to meet this in-office requirement?',
-  ]) {
-    assert.deepEqual(resolveKnownAnswer(other, 'text', MEHEK, undefined), { value: 'Yes' }, other);
+  ];
+  for (const other of labels) {
+    const unasked = resolveKnownAnswer(other, 'text', MEHEK, undefined);
+    // Recognised: never null, so it can never fall through to classifyField or to the drafter.
+    assert.ok(unasked && 'skipReason' in unasked, other);
+    assert.equal(isOpenEndedQuestion(other) && !('skipReason' in unasked), false, other);
+  }
+  // The legacy broad fields still lack exact cadence and posting scope, so they cannot unlock any
+  // of these variants, including the changed five-day and dated policy shapes.
+  const committed = { ...MEHEK, onsite_commitment: 'anywhere' as const, relocation_willingness: 'yes' as const };
+  for (const other of labels) {
+    const held = resolveKnownAnswer(other, 'text', committed, undefined);
+    assert.ok(held && 'skipReason' in held, other);
   }
 });
 
@@ -1626,5 +2198,183 @@ test('the referral question is answered even when its label names the employer',
       { value: 'Company website' },
       raw,
     );
+  }
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * THE MEASUREMENT, TURNED INTO A TEST.
+ *
+ * Every distinct question label Litos has stored - 1924 stored questions across generated_resumes
+ * spec._review.questions, posting_questions and saved_application_answers, 495 distinct label/type
+ * pairs - was replayed through resolveKnownAnswer against an EMPTY profile on 2026-08-09. An empty
+ * profile has no stored fact behind any answer, so a `{ value }` from it is by definition an answer
+ * no column supports: a constant, or something lifted out of the job description.
+ *
+ * 101 labels came back answered. Fifty of them are below, with the number of times each was stored.
+ * The other fifty-one are EEO self-identification blocks answered "Decline to self-identify", which
+ * is the one approved constant in this file and is asserted separately underneath.
+ *
+ * Reproduce with: npx tsx scripts/_sweep-untraceable.mts
+ * --------------------------------------------------------------------------------------------- */
+const UNTRACEABLY_ANSWERED_PRODUCTION_LABELS: ReadonlyArray<readonly [string, string]> = [
+  ['how did you hear about this job?', '25x'],
+  ['how did you hear about this opportunity?', '10x'],
+  ['are you able to work in our austin office 3–5 days a week?', '9x'],
+  ['how did you hear about this internship?', '9x'],
+  ['when are you able to join astranis as an intern? (12 week minimum)', '9x'],
+  ['at astranis, we value in-person collaboration and a strong work ethic. are you comfortable with working onsite at our san francisco hq 5 days a week and commit to 55 hours per week?', '9x'],
+  ['how did you hear about astranis', '9x'],
+  ['how did you hear about us?', '7x'],
+  ['ai policy for interviewers', '7x'],
+  ['are you available to work from our office in san francisco?', '6x'],
+  ['what is your office location preference? (note: the software engineer internship is only available in new york and austin, not chicago).', '5x'],
+  ['how did you first hear about this role?', '5x'],
+  ['where have you learned about samsara? select all that apply.* []', '5x'],
+  ['how did you hear about this program?', '4x'],
+  ['1st choice: area of interest in software engineering', '4x'],
+  ['2nd choice (optional): area of interest in software engineering', '4x'],
+  ['are you able to work onsite in one of our offices, five days a week?', '3x'],
+  ['are you currently bound by any agreements with a current or former employer that may restrict your ability to work for scale ai or perform the duties of the position for which you are applying? this includes, but is not limited to, non-compete agreements, non-solicitation agreements, confidentiality or non-disclosure agreements, or any other contractual obligations that could limit your employment activities.', '3x'],
+  ['this position is hybrid and requires 4 days a week in office, including thursdays in our mountain view, ca headquarters and the remaining 3 days in either mountain view or our san francisco, ca office. are you able to meet this requirement?', '3x'],
+  ['how many days per week can you work on-site in sf, and from what date?', '3x'],
+  ['we are unable to provide relocation assistance. will you be located in the seattle area and have the ability to come into our bellevue office several days a week during the time of the internship?', '3x'],
+  ['if this job post is available in multiple cities, what is your preferred work location?', '3x'],
+  ['please rank your location preference in order of most to least preferred: austin, chicago, greenwich, houston, new york city. if you are not open to a location, do not rank it. * please rank your location preference in order of most to least preferred: austin, chicago, greenwich, houston, new york city. if you are not open to a location, do not rank it.', '3x'],
+  ['please select your current state of residence. select “not in the us” if you reside outside the united states. this information helps us understand our talent pool and ensures we provide accurate resources throughout the hiring process.', '2x'],
+  ['this role will be in-office on a hybrid schedule, can you commit to being in-office three days per week at the location where this position is posted?', '2x'],
+  ['do you currently reside in san francisco?', '2x'],
+  ['how did you hear about optiver?', '2x'],
+  ['are you willing to work four days per week in our san francisco office?', '2x'],
+  ['how did you hear about anduril?', '2x'],
+  ['what is your preferred work location?', '2x'],
+  ['Location Preference', '1x'],
+  ['how did you hear about this job? how did you hear about this job? question_66274351', '1x'],
+  ['this role is required to be based near our new york city, ny office. are you open to relocating if you\'re not currently based there?* question_66274357', '1x'],
+  ['are you currently residing in the greater austin area or have confirmed plans to be in austin for the duration of this internship?', '1x'],
+  ['how did you hear about hrt?', '1x'],
+  ['are you available to work from our office in san francisco?* question_19366889004', '1x'],
+  ['how did you hear about this opportunity?* question_31572824003', '1x'],
+  ['how did you hear about old mission? * []', '1x'],
+  ['how did you hear about beacon?', '1x'],
+  ['do you currently live in, or plan to relocate to, the specified location to meet this in-office requirement?', '1x'],
+  ['this role requires in-office work three days per week (mon, wed, thurs). do you acknowledge and agree to this requirement?', '1x'],
+  ['please choose the single location that you\'re the most interested in, and we will discuss more with you as you move through the process.', '1x'],
+  ['we will only consider you for one role/location at a time. therefore, if you are interested in multiple roles, please submit an application for your first preference only.', '1x'],
+  ['are you able and willing to work out of the san fransisco office?', '1x'],
+  ['how did you first hear about five rings?* []', '1x'],
+  ['how did you hear about dv trading?', '1x'],
+  ['are you willing to work onsite at our chicago office 5 days a week?', '1x'],
+  ['are you willing to work in-person for 12 weeks during the internship?', '1x'],
+  ['what is your top location preference?', '1x'],
+  ['how did you first hear about five rings?', '1x'],
+];
+
+test('no production question is answered from a profile with nothing stored', () => {
+  /* THE GENERAL FORM OF THE FIX, and the thing that would have caught onsite_commitment.
+   *
+   * selfDeclaration.ts was already the general predicate for this class, and onsite_commitment
+   * still slipped past it, for two reasons worth naming here so the next one does not:
+   *
+   *   1. No office, onsite or location pattern was on its list at all. The list was built from the
+   *      labels measured on the 25-packet run plus the named defects, and the comment above
+   *      LOCATION_COMMITMENT_VOCAB in questionDiscovery.ts called this question "routine".
+   *   2. Structurally, isSelfDeclarationQuestion only ever guards the DRAFTER. In the submission
+   *      runner it is consulted after resolveKnownAnswer, as the last door before the model; a
+   *      `{ value }` from resolveKnownAnswer short-circuits it and is never seen. So a predicate
+   *      that is a superset of the labels resolveKnownAnswer REFUSES has no authority whatsoever
+   *      over the labels resolveKnownAnswer ANSWERS, which is where all three constants lived.
+   *
+   * This test has authority over both, because it asks the only question that matters: with nothing
+   * on file, does a machine still produce an answer? A new constant anywhere in resolveKnownAnswer
+   * fails here without anybody having to remember to add a pattern to a list.
+   */
+  const jd = 'Redwood Materials\nSan Francisco, CA\nSummer 2026 internship, full-stack engineering.';
+  const answered: string[] = [];
+  for (const [label, seen] of UNTRACEABLY_ANSWERED_PRODUCTION_LABELS) {
+    for (const jdText of [undefined, jd]) {
+      const resolved = resolveKnownAnswer(label, 'text', {}, jdText);
+      if (resolved && 'value' in resolved) {
+        answered.push(`${seen} ${label.slice(0, 70)} -> ${resolved.value}`);
+      }
+    }
+  }
+  assert.deepEqual(answered, []);
+});
+
+test('the only constant an empty profile may produce is the EEO decline', () => {
+  /* R-018, and it is not an exception to the rule so much as the rule reaching its floor.
+   * "Decline to self-identify" is a REFUSAL TO STATE, not a statement: it is the option the
+   * employer's own form offers for exactly this, and choosing it claims nothing about her race,
+   * gender, veteran status or disability. Every other constant in this file made a claim. */
+  for (const label of [
+    'How would you describe your gender identity?',
+    'Are you Hispanic/Latino?',
+    'Do you identify as transgender?',
+    'Are you a veteran or active member of the United States Armed Forces?',
+  ]) {
+    assert.deepEqual(resolveKnownAnswer(label, 'select', {}, undefined), { value: 'Decline to self-identify' });
+  }
+  // And a stored preference still wins over the decline, which is the half that makes it a relay.
+  assert.deepEqual(
+    resolveKnownAnswer('How would you describe your gender identity?', 'select', { eeo_prefs: { gender: 'Female' } }, undefined),
+    { value: 'Female' },
+  );
+});
+
+test('the season a posting is for is read from the posting, and her calendar is not', () => {
+  /* The one JD-derived answer that stays. "Please confirm the season you are applying for" asks
+   * which posting she applied to, and the posting is the authority on that - it is a fact about the
+   * job, not a claim about her. Its neighbour, "when are you able to join Astranis as an intern?",
+   * used to be answered from the same JD season, and that one IS a claim about her: it is now
+   * refused unless availability_date is stored. The pair is the whole distinction. */
+  assert.deepEqual(
+    resolveKnownAnswer('Please confirm the season you are applying for.', 'select', {}, 'Backend Intern (Fall 2026)'),
+    { value: 'Fall 2026' },
+  );
+  const join = resolveKnownAnswer('When are you able to join us as an intern?', 'text', {}, 'Backend Intern (Fall 2026)');
+  assert.ok(join && 'skipReason' in join);
+});
+
+test('legacy availability facts never authorize a new date, season, duration, or cadence commitment', () => {
+  const legacy = {
+    availability_date: 'June 1, 2026',
+    availability_term: 'Available full-time for 12 weeks between June and August 2026',
+  };
+  for (const label of [
+    'When can you start?',
+    'Earliest start date',
+    'Length or term of availability',
+    'Are you available full-time for Summer 2027?',
+    'Can you commit to 40 hours per week for 12 weeks from June through August 2027?',
+  ]) {
+    const resolved = resolveKnownAnswer(label, 'select', legacy, 'Summer 2027 internship');
+    assert.ok(resolved && 'skipReason' in resolved, label);
+  }
+  assert.deepEqual(
+    resolveKnownAnswer('Please confirm the season you are applying for.', 'select', legacy, 'Summer 2027 internship'),
+    { value: 'Summer 2027' },
+  );
+});
+
+test('a missing fact is left blank AND raised, never filled', () => {
+  /* THE ABSOLUTE RULE, pinned end to end rather than resolver-by-resolver. For each label, with
+   * nothing stored: no value comes back, and what does come back carries a sentence naming the
+   * question, so the human is told rather than left to find an empty required field after the run.
+   *
+   * The first entry is the exact Redwood Materials label from packet
+   * 8d12aea8-8476-4f7a-860b-fa6393842df9, which was ready to send answered "Yes". */
+  for (const label of [
+    'Are you available to work from our office in San Francisco?',
+    'AI Policy for Interviewers',
+    'Are you currently bound by any agreements with a current or former employer that may restrict your ability to work for Scale AI?',
+    'How did you hear about this job?',
+    '1st choice: Area of interest in Software Engineering',
+    'What is your top location preference?',
+    'Do you currently reside in San Francisco?',
+  ]) {
+    const resolved = resolveKnownAnswer(label, 'text', {}, undefined);
+    assert.ok(resolved, `must be recognised, not dropped: ${label}`);
+    assert.ok('skipReason' in resolved, `must not be answered: ${label}`);
+    assert.ok(resolved.skipReason.trim().length > 20, `must explain itself: ${label}`);
   }
 });

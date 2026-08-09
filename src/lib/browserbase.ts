@@ -56,6 +56,8 @@ export type ManagedBrowserResult = {
   skipped?: string[];
   discovered?: ManagedDiscoveredQuestion[];
   extracted?: Array<{ selector: string; label?: string; value: string | null }>;
+  continuationToken?: string;
+  continuationExpiresAt?: string;
   /* The human check the page is holding the application behind, read off the CONTROL by the runner
    * at zero action cost. Greenhouse emails an 8-character code and renders a code field, and files
    * nothing until that code is entered and the form is sent again. See lib/securityCode.ts.
@@ -241,11 +243,13 @@ export function isManagedStratusProvider(): boolean {
 export async function runManagedBrowser(
   portalUrl: string,
   actions: ManagedBrowserAction[],
-  // `allowSubmit` defaults to false at the runner, and the default is the safety property: a run
-  // that does not ask for it cannot submit a form, whatever its action list turns out to do on a
-  // live page. Only the two authorized paths pass true. See the guard in stratus-browser-cloud's
-  // SANDBOX_RUNNER, and the three packets of 2026-08-08 that a fill run submitted.
-  options: { screenshot?: boolean; allowSubmit?: boolean } = {},
+  options: {
+    screenshot?: boolean;
+    allowSubmit?: boolean;
+    requestContinuation?: boolean;
+    continuationCheckpoint?: boolean;
+    continuationTtlSeconds?: number;
+  } = {},
 ): Promise<ManagedBrowserResult> {
   const baseUrl = process.env.STRATUS_BASE_URL?.replace(/\/$/, '');
   const apiKey = process.env.STRATUS_API_KEY?.trim();
@@ -269,6 +273,46 @@ export async function runManagedBrowser(
       allowSubmit: options.allowSubmit === true,
       fullPage: true,
       waitUntil: 'domcontentloaded',
+      ...(options.requestContinuation ? {
+        requestContinuation: true,
+        continuationCheckpoint: options.continuationCheckpoint === true,
+        continuationTtlSeconds: Math.min(Math.max(options.continuationTtlSeconds ?? 120, 15), 120),
+      } : {}),
+    }),
+  });
+  const payload = await response.json().catch(() => ({})) as { run?: ManagedBrowserResult; error?: ManagedBrowserError };
+  if (!response.ok || !payload.run) {
+    throw new Error(managedBrowserErrorMessage(payload.error, response.status, outboundActions));
+  }
+  return payload.run;
+}
+
+export async function continueManagedBrowser(
+  continuationToken: string,
+  actions: ManagedBrowserAction[],
+  options: { screenshot?: boolean } = {},
+): Promise<ManagedBrowserResult> {
+  const baseUrl = process.env.STRATUS_BASE_URL?.replace(/\/$/, '');
+  const apiKey = process.env.STRATUS_API_KEY?.trim();
+  if (!baseUrl) throw new Error('Stratus managed browser is not configured');
+  const authorization = !apiKey && process.env.VERCEL_ENV === 'production'
+    ? `Bearer ${await getVercelOidcToken()}`
+    : undefined;
+  if (!apiKey && !authorization) throw new Error('Stratus managed browser is not configured');
+  if (!/^[A-Za-z0-9_-]{32,200}$/.test(continuationToken)) throw new Error('Managed Stratus continuation token is invalid');
+  const outboundActions = normalizeStratusActions(actions);
+  const response = await fetch(`${baseUrl}/api/run`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(apiKey ? { 'X-Stratus-API-Key': apiKey } : {}),
+      ...(authorization ? { Authorization: authorization } : {}),
+    },
+    body: JSON.stringify({
+      continuationToken,
+      actions: outboundActions,
+      screenshot: options.screenshot ?? true,
+      fullPage: true,
     }),
   });
   const payload = await response.json().catch(() => ({})) as { run?: ManagedBrowserResult; error?: ManagedBrowserError };
@@ -283,6 +327,29 @@ export async function createBrowserContext(): Promise<string> {
   return result.id;
 }
 
+/**
+ * How long a PERSISTENT browser session stays alive, in seconds.
+ *
+ * The provider kills the session at this mark. Anything that intends to reconnect to it later,
+ * which on this codebase is exactly one thing - submit()'s non-managed path, via
+ * getBrowserSession(review.browser_session_id) followed by connectToSession - has until then and
+ * not a second longer. HANDOFF_WINDOW_MS below is derived from it rather than written out again.
+ */
+export const BROWSER_SESSION_TIMEOUT_SECONDS = 3600;
+
+/**
+ * The handoff window: how long a run that LEFT A LIVE SESSION BEHIND may be finished by hand.
+ *
+ * 55 minutes, and until now that was a bare `55 * 60_000` repeated at three call sites with nothing
+ * saying where the 55 came from. It is the session timeout above minus a five minute margin, so the
+ * window closes slightly before the thing it is a window onto. Written as a subtraction so that
+ * raising the session timeout raises this with it, which is the whole point: these two numbers were
+ * never independent, they only looked independent.
+ *
+ * IT IS A FACT ABOUT A BROWSER SESSION, NOT ABOUT A FILLED FORM. See preparedRunHandoffExpired.
+ */
+export const HANDOFF_WINDOW_MS = (BROWSER_SESSION_TIMEOUT_SECONDS - 5 * 60) * 1_000;
+
 export function browserSessionBody(
   contextId: string,
   portalUrl: string,
@@ -293,7 +360,7 @@ export function browserSessionBody(
   if (provider === 'stratus') {
     return {
       keepAlive: true,
-      timeout: 3600,
+      timeout: BROWSER_SESSION_TIMEOUT_SECONDS,
       contextId,
       browserSettings: {
         protectionPolicy: {

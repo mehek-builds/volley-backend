@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { browserSessionBody, isBrowserbaseConfigured, runManagedBrowser } from './browserbase';
+import { browserSessionBody, continueManagedBrowser, isBrowserbaseConfigured, runManagedBrowser } from './browserbase';
 import { buildManagedDiscoveryActions, buildManagedPortalActions } from './portalSubmission';
 
 function assertStratusSafeActions(actions: Array<Record<string, unknown>>) {
@@ -143,6 +143,40 @@ test('managed Stratus posts bounded actions to the private production run endpoi
     fullPage: true,
     waitUntil: 'domcontentloaded',
   });
+  globalThis.fetch = previousFetch;
+  if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+  else process.env.STRATUS_API_KEY = previousKey;
+  if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+  else process.env.STRATUS_BASE_URL = previousUrl;
+});
+
+test('managed Stratus continuation sends an opaque token and actions without reopening a URL', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  const requests: Array<Record<string, unknown>> = [];
+  globalThis.fetch = (async (_input, init) => {
+    requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    return new Response(JSON.stringify({ run: { title: 'Complete', url: 'https://portal.example/complete', text: 'Thank you' } }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  await runManagedBrowser('https://portal.example/apply', [], {
+    requestContinuation: true,
+    continuationTtlSeconds: 500,
+  });
+  await continueManagedBrowser('a'.repeat(43), [{ type: 'click', selector: '#verify' }]);
+
+  assert.equal(requests[0].requestContinuation, true);
+  assert.equal(requests[0].continuationTtlSeconds, 120);
+  assert.equal(requests[1].continuationToken, 'a'.repeat(43));
+  assert.equal('url' in requests[1], false);
+  assert.equal('requestContinuation' in requests[1], false);
+
   globalThis.fetch = previousFetch;
   if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
   else process.env.STRATUS_API_KEY = previousKey;

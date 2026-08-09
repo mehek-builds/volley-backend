@@ -1229,12 +1229,55 @@ Responsibilities
     assert.deepEqual(result.missing, []);
   });
 
-  test('a 60k single-line posting scores without stalling the event loop', () => {
-    const jd = 'Requirements: ' + 'We need Python and Docker and AWS experience. '.repeat(1400);
-    const started = process.hrtime.bigint();
-    scoreJdMatch('Python Docker AWS', jd.slice(0, 60_000));
-    const ms = Number(process.hrtime.bigint() - started) / 1e6;
-    assert.ok(ms < 250, `extraction took ${Math.round(ms)}ms; positional() was O(n^2) at ~594ms`);
+  /* MEASURES THE SHAPE OF THE CURVE, NOT THE CLOCK, and that change is what makes it reliable.
+   *
+   * The regression this guards is real and worth a test: positional() was O(n^2) and a 60k
+   * single-line posting took ~594ms. The original test asserted a bare `ms < 250` on one run, which
+   * is a machine-speed assertion wearing a complexity assertion's clothes. Measured on this machine
+   * it passes with room to spare when quiet - 44ms at the minimum, 63ms typical - and fails at
+   * 286ms when four test suites run at once, which is exactly what happens when several agents
+   * share a laptop. That made it the suite's only load-sensitive test, red roughly one run in four
+   * under contention and green whenever anyone looked at it alone. An intermittently red gate in
+   * front of a deploy is worse than no gate, because it teaches people to re-run instead of read.
+   *
+   * Doubling the input and comparing instead removes the machine from the question. Load inflates
+   * both measurements together, so it cancels in the ratio: linear work comes back near 2.0
+   * (measured 11.1 / 21.8 / 43.7ms across 15k / 30k / 60k), quadratic near 4.0. The 3.0 threshold
+   * sits halfway between the two, which is a far wider margin than 250ms ever had over 63ms.
+   *
+   * BEST-OF, not mean, for the same reason: a scheduler that steals time from a run can only ever
+   * make it slower, so the minimum is the sample least contaminated by whatever else the machine is
+   * doing. The absolute bound stays as a backstop for a regression severe enough to be slow at BOTH
+   * sizes, where the ratio alone could look healthy, and it is set loose enough that only a genuine
+   * blowup reaches it rather than a busy afternoon.
+   */
+  test('scoring a long single-line posting stays linear in its length', () => {
+    const source = 'Requirements: ' + 'We need Python and Docker and AWS experience. '.repeat(1400);
+    const bestOf = (chars: number): number => {
+      const jd = source.slice(0, chars);
+      let best = Infinity;
+      for (let run = 0; run < 5; run += 1) {
+        const started = process.hrtime.bigint();
+        scoreJdMatch('Python Docker AWS', jd);
+        best = Math.min(best, Number(process.hrtime.bigint() - started) / 1e6);
+      }
+      return best;
+    };
+    // Warm the JIT and the module's lazy tables first, or the first size pays costs the second
+    // does not and the ratio measures startup instead of complexity.
+    bestOf(30_000);
+
+    const half = bestOf(30_000);
+    const full = bestOf(60_000);
+    const ratio = full / half;
+    assert.ok(
+      ratio < 3,
+      `doubling the posting multiplied the work by ${ratio.toFixed(1)}x (${half.toFixed(0)}ms -> ${full.toFixed(0)}ms); linear is ~2x, positional() was O(n^2) at ~4x`,
+    );
+    assert.ok(
+      full < 2000,
+      `extraction took ${full.toFixed(0)}ms on 60k even at its fastest of five runs; positional() was O(n^2) at ~594ms`,
+    );
   });
 });
 

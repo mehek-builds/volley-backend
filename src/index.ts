@@ -45,7 +45,9 @@ import { resolveBuild, resolveRevision } from './lib/buildInfo';
 import { dashboardBootstrapRoutes } from './routes/dashboardBootstrap';
 import { configuredAtsSubmissionChannels } from './lib/atsSubmissionChannels';
 import { applicationEmailHealth } from './lib/applicationEmail';
+import { applicationEmailRouteSelection } from './lib/applicationEmailRoute';
 import { warmApplicationAliasDeliverability } from './lib/applicationEmailDeliverability';
+import { aggregateServiceHealthStatus } from './lib/serviceHealth';
 
 export interface BuildAppOptions {
   rateLimit?: RateLimitConfig;
@@ -193,16 +195,33 @@ export async function buildApp(options: BuildAppOptions = {}) {
      * It used to answer with three environment-variable booleans, which on a probe failure printed
      * exactly the same reassuring output as a working inbox. If we cannot measure the inbox we do
      * not know it works, and /health has to say the thing we actually know. */
-    const applicationEmailUnavailable = (reason: string) => ({
-      status: 'degraded' as const,
-      reason,
-      deliverable: false,
-      domain: (process.env.LITOS_APPLICATION_EMAIL_DOMAIN?.trim() || null),
-      enabled_aliases: null,
-      domain_configured: Boolean(process.env.LITOS_APPLICATION_EMAIL_DOMAIN?.trim()),
-      inbound_webhook_configured: Boolean((process.env.RESEND_WEBHOOK_SECRET || process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET || process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_SECRET)?.trim()),
-      forwarding_configured: Boolean(process.env.RESEND_API_KEY?.trim() && process.env.RESEND_FROM?.trim()),
-    });
+    const applicationEmailUnavailable = (reason: string) => {
+      const route = applicationEmailRouteSelection();
+      return {
+        status: 'degraded' as const,
+        reason,
+        route_mode: route.mode,
+        route_mode_explicit: route.explicit,
+        invalid_route_mode_present: route.invalid_mode_present,
+        ignored_legacy_domain_present: route.ignored_legacy_domain_present,
+        ignored_legacy_mailbox_present: route.ignored_legacy_mailbox_present,
+        deliverable: false,
+        domain: route.domain,
+        mx_hosts: [],
+        mx_provider: 'unknown' as const,
+        mx_provider_agrees: false,
+        resend_domain_status: null,
+        resend_receiving_status: null,
+        inbound_route_configured: false,
+        last_inbound_message_at: null,
+        last_inbound_message_age_seconds: null,
+        enabled_aliases: null,
+        domain_configured: Boolean(route.route_label),
+        inbound_webhook_configured: Boolean((process.env.RESEND_WEBHOOK_SECRET || process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET || process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_SECRET)?.trim()),
+        forwarding_configured: Boolean(process.env.RESEND_API_KEY?.trim() && process.env.RESEND_FROM?.trim()),
+        checked_at: new Date().toISOString(),
+      };
+    };
     const applicationEmail = database.status === 'ok'
       ? await applicationEmailHealth().catch((error) => {
         request.log.error({ err: error }, 'health: application email status unavailable');
@@ -215,7 +234,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
          dependency it cannot work without is unavailable. Every identity field below is still
          present on a 503, because DEPLOY.md reads `revision` from this response to confirm what
          shipped, and that has to keep working during an incident. */
-      status: database.status === 'ok' ? 'ok' : 'degraded',
+      status: aggregateServiceHealthStatus({ database: database.status, applicationEmail }),
       database: database.status,
       ...(database.status === 'ok' ? {} : { database_reason: database.reason }),
       database_ms: database.ms,

@@ -199,7 +199,7 @@ test('extension-start refuses a drifted packet before it reserves the submission
 
 test('extension-start refuses sensitive questions before it reserves the submission', () => {
   const handler = slice(routes, "'/applications/:id/submission/extension-start'", "'/applications/:id/submission/extension-outcome'");
-  assert.match(handler, /const refreshedQuestions = refreshKnownQuestionAnswers\(current\.questions, sensitiveProfile, current\.jd_text\)/);
+  assert.match(handler, /const refreshedQuestions = refreshKnownQuestionAnswers\([\s\S]{0,180}current\.questions_reviewed_at/);
   assert.match(handler, /sensitiveQuestionFor\(refreshedQuestions/);
   assert.match(handler, /kind: 'sensitive_question'/);
   assert.match(handler, /result\.kind === 'sensitive_question'/);
@@ -235,12 +235,16 @@ test('submit-request revalidates resume content and PDF layout before the browse
 
 test('final approval revalidates the full packet before it clicks submit', () => {
   const handler = slice(routes, "'/applications/:id/submission/approve'", "'/applications/:id/status'");
-  assert.match(handler, /questions: refreshKnownQuestionAnswers\(current\.questions, sensitiveProfile, current\.jd_text\)/);
+  assert.match(handler, /questions: refreshKnownQuestionAnswers\([\s\S]{0,180}current\.questions_reviewed_at/);
   assert.match(handler, /approvalReview\.preview_screenshot_url/);
   assert.match(handler, /approvalReview\.filled_fields/);
-  assert.match(handler, /finalApprovalFieldIssues\(approvalReview, approvalReview\.cover_letter_supported === true && Boolean\(coverLetter\)\)/);
-  assert.match(handler, /const coverLetter = storedCoverLetter\(row\)/);
-  assert.match(handler, /approvalReview\.cover_letter_supported === true && !coverLetter/);
+  /* The cover letter terms are pinned to the two facts they are ALLOWED to read, because both were
+   * previously read off cover_letter_supported and that made a complete Cresta packet unsendable.
+   * The evidence check asks what the run attached; the requirement check asks what the employer
+   * marked required. Neither may go back to asking whether the form has the control. */
+  assert.match(handler, /finalApprovalFieldIssues\(approvalReview, approvalReview\.cover_letter_attached === true\)/);
+  assert.match(handler, /finalApprovalCoverLetterIssue\(approvalReview, Boolean\(storedCoverLetter\(row\)\)\)/);
+  assert.doesNotMatch(handler, /cover_letter_supported/);
   assert.match(handler, /approvalReview\.questions = normalizeApplicationReviewQuestions\(approvalReview\.questions\)/);
   assert.match(handler, /approvalReview\.questions\.some\(\(question\) => question\.required && !question\.answer\.trim\(\)\)/);
   assert.match(handler, /sensitiveQuestionFor\(approvalReview\.questions/);

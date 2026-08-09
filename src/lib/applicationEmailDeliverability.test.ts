@@ -1,8 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   applicationAliasDeliverability,
+  classifyAliasMxProvider,
   inboundRouteConfigured,
+  mxRoutesToResend,
+  ResendApiHttpError,
   resendDomainIsVerified,
   resetApplicationAliasDeliverabilityCache,
 } from './applicationEmailDeliverability';
@@ -15,11 +19,24 @@ async function withAliasEnv<T>(run: () => Promise<T>): Promise<T> {
     mailbox: process.env.LITOS_APPLICATION_EMAIL_MAILBOX,
     enabled: process.env.LITOS_APPLICATION_EMAIL_INBOUND_ENABLED,
     key: process.env.RESEND_API_KEY,
+    from: process.env.RESEND_FROM,
+    managedDomain: process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN,
+    canaryId: process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID,
+    canaryToken: process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN,
+    aliasSecret: process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET,
+    routeMode: process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE,
+    webhookUrl: process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_URL,
+    resendWebhookSecret: process.env.RESEND_WEBHOOK_SECRET,
   };
+  delete process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN;
+  delete process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID;
+  delete process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN;
   delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+  delete process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE;
   delete process.env.LITOS_APPLICATION_EMAIL_INBOUND_ENABLED;
   process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'apply.trylitos.com';
   process.env.RESEND_API_KEY = 're_test';
+  process.env.RESEND_FROM = 'Litos <applications@trylitos.com>';
   resetApplicationAliasDeliverabilityCache();
   try {
     return await run();
@@ -33,12 +50,51 @@ async function withAliasEnv<T>(run: () => Promise<T>): Promise<T> {
     else process.env.LITOS_APPLICATION_EMAIL_INBOUND_ENABLED = saved.enabled;
     if (saved.key === undefined) delete process.env.RESEND_API_KEY;
     else process.env.RESEND_API_KEY = saved.key;
+    if (saved.from === undefined) delete process.env.RESEND_FROM;
+    else process.env.RESEND_FROM = saved.from;
+    if (saved.managedDomain === undefined) delete process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN;
+    else process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN = saved.managedDomain;
+    if (saved.canaryId === undefined) delete process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID;
+    else process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_ID = saved.canaryId;
+    if (saved.canaryToken === undefined) delete process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN;
+    else process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN = saved.canaryToken;
+    if (saved.aliasSecret === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET;
+    else process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = saved.aliasSecret;
+    if (saved.routeMode === undefined) delete process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE;
+    else process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE = saved.routeMode;
+    if (saved.webhookUrl === undefined) delete process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_URL;
+    else process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_URL = saved.webhookUrl;
+    if (saved.resendWebhookSecret === undefined) delete process.env.RESEND_WEBHOOK_SECRET;
+    else process.env.RESEND_WEBHOOK_SECRET = saved.resendWebhookSecret;
   }
 }
 
+async function withManagedAliasEnv<T>(run: () => Promise<T>): Promise<T> {
+  return withAliasEnv(async () => {
+    delete process.env.LITOS_APPLICATION_EMAIL_DOMAIN;
+    delete process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
+    process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN = 'litos-inbound.resend.app';
+    process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN = 'abcdefghijklmnopqrstuvwxyz0123456789abcdef';
+    process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = 'managed-alias-secret';
+    process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_URL = ENDPOINT;
+    process.env.RESEND_WEBHOOK_SECRET = 'whsec_managed-test-secret';
+    resetApplicationAliasDeliverabilityCache();
+    return run();
+  });
+}
+
+const healthyManagedProbes = {
+  managedReceivingProof: async () => true,
+  resendWebhooks: async () => [{ endpoint: ENDPOINT, events: ['email.received'], status: 'enabled' }],
+};
+
 const healthyProbes = {
   resolveMx: async () => [{ exchange: 'inbound-smtp.us-east-1.amazonaws.com', priority: 10 }],
-  resendDomains: async () => [{ name: 'apply.trylitos.com', status: 'verified' }],
+  resendDomains: async () => [{
+    name: 'apply.trylitos.com',
+    status: 'verified',
+    capabilities: { receiving: 'enabled' },
+  }],
   resendWebhooks: async () => [{ endpoint: ENDPOINT, events: ['email.received'] }],
 };
 
@@ -49,6 +105,195 @@ test('a domain with MX, Resend verification and an inbound route is deliverable'
     assert.equal(result.reason, 'deliverable');
     assert.deepEqual(result.mx_hosts, ['inbound-smtp.us-east-1.amazonaws.com']);
     assert.equal(result.inbound_route_configured, true);
+  });
+});
+
+test('managed receiving treats fresh exact signed-webhook proof as time-bounded active route evidence', async () => {
+  await withManagedAliasEnv(async () => {
+    const result = await applicationAliasDeliverability({
+      ...healthyManagedProbes,
+      resolveMx: async () => { throw new Error('managed mode must not trust MX'); },
+      resendDomains: async () => { throw new Error('managed mode must not trust /domains'); },
+      resendWebhooks: async () => { throw new ResendApiHttpError('/webhooks', 401); },
+    });
+    assert.equal(result.deliverable, true);
+    assert.equal(result.domain, 'litos-inbound.resend.app');
+    assert.equal(result.inbound_route_configured, true);
+    assert.deepEqual(result.mx_hosts, []);
+    assert.equal(result.resend_domain_status, null);
+  });
+});
+
+test('explicit managed receiving proves deliverability while legacy rollback values coexist', async () => {
+  await withManagedAliasEnv(async () => {
+    process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE = 'managed_resend';
+    process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'legacy.example';
+    process.env.LITOS_APPLICATION_EMAIL_MAILBOX = 'legacy@mailbox.example';
+    resetApplicationAliasDeliverabilityCache();
+    const result = await applicationAliasDeliverability({
+      ...healthyManagedProbes,
+      resolveMx: async () => { throw new Error('managed mode must not consult legacy MX'); },
+      resendDomains: async () => { throw new Error('managed mode must not consult legacy domains'); },
+    });
+    assert.equal(result.deliverable, true);
+    assert.equal(result.domain, 'litos-inbound.resend.app');
+    assert.equal(result.reason, 'deliverable');
+  });
+});
+
+test('invalid route mode remains unconfigured and performs no provider checks', async () => {
+  await withManagedAliasEnv(async () => {
+    process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE = 'managed';
+    resetApplicationAliasDeliverabilityCache();
+    const result = await applicationAliasDeliverability({
+      managedReceivingProof: async () => { throw new Error('invalid mode must not read proof'); },
+      resendWebhooks: async () => { throw new Error('invalid mode must not list webhooks'); },
+    });
+    assert.equal(result.deliverable, false);
+    assert.equal(result.domain, null);
+    assert.equal(result.reason, 'alias_not_configured');
+  });
+});
+
+test('managed receiving fails closed when its canary configuration is missing', async () => {
+  await withManagedAliasEnv(async () => {
+    delete process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN;
+    resetApplicationAliasDeliverabilityCache();
+    const result = await applicationAliasDeliverability({
+      managedReceivingProof: async () => { throw new Error('must not read proof without a token'); },
+    });
+    assert.equal(result.deliverable, false);
+    assert.equal(result.reason, 'managed_receiving_proof_missing');
+  });
+});
+
+test('managed receiving rejects absent or stale durable proof', async () => {
+  await withManagedAliasEnv(async () => {
+    const missing = await applicationAliasDeliverability({
+      ...healthyManagedProbes,
+      managedReceivingProof: async () => false,
+    });
+    assert.equal(missing.reason, 'managed_receiving_proof_mismatch');
+  });
+});
+
+test('managed receiving uses signed-webhook proof without a received-email provider lookup', async () => {
+  await withManagedAliasEnv(async () => {
+    const result = await applicationAliasDeliverability(healthyManagedProbes);
+    assert.equal(result.deliverable, true);
+    assert.equal(result.reason, 'deliverable');
+    const source = readFileSync('src/lib/applicationEmailDeliverability.ts', 'utf8');
+    assert.doesNotMatch(source, /emails\/receiving/);
+  });
+});
+
+test('managed receiving redacts its canary token and recipient from durable-store errors', async () => {
+  await withManagedAliasEnv(async () => {
+    const token = process.env.LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN!;
+    const recipient = `litos-proof-${token}@litos-inbound.resend.app`;
+    for (const message of [`store failure ${token}`, `store failure ${recipient}`]) {
+      resetApplicationAliasDeliverabilityCache();
+      const result = await applicationAliasDeliverability({
+        ...healthyManagedProbes,
+        managedReceivingProof: async () => { throw new Error(message); },
+      });
+      assert.equal(result.reason, 'check_unavailable');
+      assert.doesNotMatch(result.detail ?? '', new RegExp(token));
+      assert.doesNotMatch(result.detail ?? '', /litos-proof-/);
+      assert.match(result.detail ?? '', /\[redacted\]/);
+    }
+  });
+});
+
+test('managed receiving never lets provider listing bypass absent durable proof', async () => {
+  await withManagedAliasEnv(async () => {
+    const result = await applicationAliasDeliverability({
+      managedReceivingProof: async () => false,
+      resendWebhooks: async () => { throw new Error('provider listing must not bypass signed proof'); },
+    });
+    assert.equal(result.deliverable, false);
+    assert.equal(result.reason, 'managed_receiving_proof_mismatch');
+  });
+});
+
+test('managed receiving fallback is only for explicit webhook-list authorization denial', async () => {
+  await withManagedAliasEnv(async () => {
+    for (const status of [401, 403]) {
+      resetApplicationAliasDeliverabilityCache();
+      const result = await applicationAliasDeliverability({
+        ...healthyManagedProbes,
+        resendWebhooks: async () => { throw new ResendApiHttpError('/webhooks', status); },
+      });
+      assert.equal(result.deliverable, true, String(status));
+      assert.equal(result.inbound_route_configured, true, String(status));
+    }
+    for (const error of [
+      new ResendApiHttpError('/webhooks', 429),
+      new ResendApiHttpError('/domains', 401),
+      new Error('network unavailable'),
+    ]) {
+      resetApplicationAliasDeliverabilityCache();
+      const result = await applicationAliasDeliverability({
+        ...healthyManagedProbes,
+        resendWebhooks: async () => { throw error; },
+      });
+      assert.equal(result.deliverable, false);
+      assert.equal(result.reason, 'check_unavailable');
+    }
+  });
+});
+
+test('successful webhook listing can revoke stale signed evidence immediately', async () => {
+  await withManagedAliasEnv(async () => {
+    for (const webhooks of [
+      [],
+      [{ endpoint: 'https://example.com/other', events: ['email.received'], status: 'enabled' }],
+      [{ endpoint: ENDPOINT, events: ['email.sent'], status: 'enabled' }],
+      [{ endpoint: ENDPOINT, events: ['email.received'], status: 'disabled' }],
+    ]) {
+      resetApplicationAliasDeliverabilityCache();
+      const result = await applicationAliasDeliverability({ ...healthyManagedProbes, resendWebhooks: async () => webhooks });
+      assert.equal(result.deliverable, false);
+      assert.equal(result.reason, 'inbound_route_missing');
+    }
+  });
+});
+
+test('managed receiving accepts only one valid label below resend.app', async () => {
+  await withManagedAliasEnv(async () => {
+    for (const malformed of [
+      'resend.app',
+      'two.labels.resend.app',
+      '*.resend.app',
+      '-leading.resend.app',
+      'trailing-.resend.app',
+    ]) {
+      process.env.LITOS_RESEND_MANAGED_RECEIVING_DOMAIN = malformed;
+      resetApplicationAliasDeliverabilityCache();
+      const result = await applicationAliasDeliverability(healthyManagedProbes);
+      assert.equal(result.deliverable, false, malformed);
+      assert.equal(result.reason, 'alias_not_configured', malformed);
+    }
+  });
+});
+
+test('managed and custom receiving routes are mutually exclusive', async () => {
+  await withManagedAliasEnv(async () => {
+    process.env.LITOS_APPLICATION_EMAIL_DOMAIN = 'custom.example.com';
+    resetApplicationAliasDeliverabilityCache();
+    const result = await applicationAliasDeliverability(healthyManagedProbes);
+    assert.equal(result.deliverable, false);
+    assert.equal(result.reason, 'alias_not_configured');
+  });
+});
+
+test('healthy inbound with forwarding disabled cannot issue a tracked alias', async () => {
+  await withAliasEnv(async () => {
+    assert.equal((await applicationAliasDeliverability(healthyProbes)).deliverable, true);
+    delete process.env.RESEND_FROM;
+    const result = await applicationAliasDeliverability(healthyProbes);
+    assert.equal(result.deliverable, false);
+    assert.equal(result.reason, 'forwarding_not_configured');
   });
 });
 
@@ -94,11 +339,65 @@ test('MX alone is not enough: the domain must be verified in Resend', async () =
   });
 });
 
+test('Google Workspace MX is reported as a provider mismatch before any Resend API outage', async () => {
+  await withAliasEnv(async () => {
+    const result = await applicationAliasDeliverability({
+      ...healthyProbes,
+      resolveMx: async () => [
+        { exchange: 'aspmx.l.google.com', priority: 1 },
+        { exchange: 'alt1.aspmx.l.google.com', priority: 5 },
+      ],
+      resendDomains: async () => { throw new Error('this provider call must not hide the topology mismatch'); },
+    });
+    assert.equal(result.deliverable, false);
+    assert.equal(result.reason, 'mx_provider_mismatch');
+    assert.equal(result.mx_provider, 'google_workspace');
+    assert.equal(result.mx_provider_agrees, false);
+    assert.match(result.detail ?? '', /dedicated Resend receiving subdomain/);
+    assert.doesNotMatch(result.detail ?? '', /this provider call/);
+  });
+});
+
+test('a Resend MX that loses priority to another provider is not a valid inbound route', async () => {
+  const records = [
+    { exchange: 'aspmx.l.google.com', priority: 1 },
+    { exchange: 'inbound-smtp.us-east-1.amazonaws.com', priority: 10 },
+  ];
+  assert.equal(classifyAliasMxProvider(records), 'mixed');
+  assert.equal(mxRoutesToResend(records), false);
+});
+
+test('a dedicated subdomain whose best MX routes to Resend satisfies the provider contract', async () => {
+  const records = [{ exchange: 'inbound-smtp.eu-west-1.amazonaws.com', priority: 10 }];
+  assert.equal(classifyAliasMxProvider(records), 'resend');
+  assert.equal(mxRoutesToResend(records), true);
+});
+
+test('verified sending without Resend receiving enabled fails closed', async () => {
+  await withAliasEnv(async () => {
+    const result = await applicationAliasDeliverability({
+      ...healthyProbes,
+      resendDomains: async () => [{
+        name: 'apply.trylitos.com',
+        status: 'verified',
+        capabilities: { sending: 'enabled', receiving: 'disabled' },
+      }],
+    });
+    assert.equal(result.deliverable, false);
+    assert.equal(result.reason, 'receiving_not_enabled_in_resend');
+    assert.equal(result.resend_receiving_status, 'disabled');
+  });
+});
+
 test('a verified parent domain never vouches for the receiving subdomain', async () => {
   await withAliasEnv(async () => {
     const result = await applicationAliasDeliverability({
       ...healthyProbes,
-      resendDomains: async () => [{ name: 'trylitos.com', status: 'verified' }],
+      resendDomains: async () => [{
+        name: 'trylitos.com',
+        status: 'verified',
+        capabilities: { receiving: 'enabled' },
+      }],
     });
     assert.equal(result.deliverable, false);
     assert.equal(result.reason, 'domain_not_verified_in_resend');

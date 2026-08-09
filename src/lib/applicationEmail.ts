@@ -3,16 +3,19 @@ import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { db } from '../db';
 import { application_email_aliases, application_email_messages, generated_resumes, users } from '../db/schema';
 import { readApplicationReview } from './applicationReview';
+import { isUndefinedColumnError } from './applicationFacts';
 import {
   type AliasDeliverability,
   type AliasDeliverabilityReason,
   applicationAliasDeliverability,
+  applicationEmailForwardingConfigured,
   aliasDomain,
   inboundRouteConfigured,
   inboundWebhookEndpoint,
   listResendWebhooks,
 } from './applicationEmailDeliverability';
 import { emailSender, sendEmail, type OutboundEmail } from './email';
+import { applicationEmailRouteSelection, type ApplicationEmailRouteMode } from './applicationEmailRoute';
 
 export type ApplicationEmailIdentity = {
   alias: string;
@@ -54,21 +57,23 @@ type ResendReceivedEmail = {
   html?: string | null;
   text?: string | null;
   message_id?: string;
+  headers?: Record<string, string>;
 };
 
+function authenticationFromHeaders(headers: Record<string, string> | undefined): InboundApplicationEmail['authentication'] {
+  const value = Object.entries(headers ?? {}).find(([name]) => name.toLowerCase() === 'authentication-results')?.[1] ?? '';
+  const verdict = (mechanism: 'spf' | 'dkim' | 'dmarc') => value.match(new RegExp(`\\b${mechanism}=([a-z]+)`, 'i'))?.[1]?.toLowerCase();
+  const authentication = { spf: verdict('spf'), dkim: verdict('dkim'), dmarc: verdict('dmarc') };
+  return Object.values(authentication).some(Boolean) ? authentication : undefined;
+}
+
 function configuredMailbox(): { local: string; domain: string; address: string } | null {
-  const mailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX?.trim().toLowerCase();
-  const match = mailbox?.match(/^([^@\s]+)@([a-z0-9.-]+\.[a-z]{2,})$/i);
-  if (!match) return null;
-  const local = match[1];
-  const domain = match[2];
-  if (!/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+$/i.test(local)) return null;
-  return { local, domain, address: `${local}@${domain}` };
+  return applicationEmailRouteSelection().mailbox;
 }
 
 function configuredDomain(): string | null {
-  const domain = process.env.LITOS_APPLICATION_EMAIL_DOMAIN?.trim().toLowerCase();
-  return domain && /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(domain) ? domain : null;
+  const selection = applicationEmailRouteSelection();
+  return selection.mailbox ? null : selection.domain;
 }
 
 export function applicationAliasSecret(): string | null {
@@ -90,11 +95,19 @@ export function isApplicationEmailConfigured(): boolean {
 }
 
 export function applicationEmailRouteLabel(): string | null {
-  return configuredMailbox()?.address || configuredDomain();
+  return applicationEmailRouteSelection().route_label;
 }
 
 function digest(value: string, length = 10): string {
   return createHash('sha256').update(value).digest('hex').slice(0, length);
+}
+
+export function applicationEmailRouteGenerationFingerprint(): string | null {
+  const secret = applicationAliasSecret();
+  const route = applicationEmailRouteLabel();
+  if (!secret || !route) return null;
+  const mode = applicationEmailRouteSelection().mode;
+  return digest(`application-email-route-v2:${mode}:${route}:${secret}`, 20);
 }
 
 export function applicationAliasFor(userId: string, applicationId: string): string | null {
@@ -161,7 +174,10 @@ export async function applicationForwardingAddress(
     if (preferred) return preferred;
     return row?.account?.trim().toLowerCase() || fallback;
   } catch (error) {
-    if ((error as { code?: string } | null)?.code === '42703') return fallback;
+    // Through the cause chain, because Drizzle wraps the pg error and the code is not on the
+    // outside. See isUndefinedColumnError, where testing the outer `code` alone was measured to
+    // never match and to defeat the whole fallback.
+    if (isUndefinedColumnError(error)) return fallback;
     throw error;
   }
 }
@@ -190,22 +206,139 @@ export type ApplicantEmailChoice = {
   decided_at: string;
 };
 
+export class ApplicantEmailRegenerationRequiredError extends Error {
+  readonly code = 'applicant_email_regeneration_required';
+
+  constructor(reason: string) {
+    super(`This application must be regenerated before submission: ${reason}`);
+    this.name = 'ApplicantEmailRegenerationRequiredError';
+  }
+}
+
+type StoredApplicantEmailSpec = {
+  _applicant_email?: unknown;
+  _application_email?: unknown;
+  _contact?: unknown;
+};
+
+function applicantEmailChoice(value: unknown): ApplicantEmailChoice | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const address = normalizedAddress(record.address);
+  const source = record.source;
+  if (!address || (source !== 'litos_alias' && source !== 'contact_email' && source !== 'account_email')) return null;
+  return {
+    address,
+    source,
+    reason: typeof record.reason === 'string' && record.reason ? record.reason as ApplicantEmailChoice['reason'] : 'alias_unavailable',
+    tracked: record.tracked === true,
+    decided_at: typeof record.decided_at === 'string' && record.decided_at ? record.decided_at : new Date(0).toISOString(),
+  };
+}
+
+/** Reads the immutable email decision written when a packet and its PDF were generated. */
+export function readPinnedApplicantEmail(spec: unknown): ApplicantEmailChoice | null {
+  if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return null;
+  return applicantEmailChoice((spec as StoredApplicantEmailSpec)._applicant_email);
+}
+
+export type FrozenApplicantEmailDeps = {
+  deliverability?: () => Promise<AliasDeliverability>;
+  aliasActive?: (input: { userId: string; applicationId: string; alias: string }) => Promise<boolean>;
+};
+
+async function activeAliasForApplication(input: { userId: string; applicationId: string; alias: string }): Promise<boolean> {
+  const [row] = await db.select({ alias: application_email_aliases.alias })
+    .from(application_email_aliases)
+    .where(and(
+      eq(application_email_aliases.alias, input.alias),
+      eq(application_email_aliases.user_id, input.userId),
+      eq(application_email_aliases.generated_resume_id, input.applicationId),
+      eq(application_email_aliases.status, 'active'),
+    ))
+    .limit(1);
+  return Boolean(row);
+}
+
+/**
+ * Resolves the form email without ever changing the address printed in the frozen PDF.
+ *
+ * New packets carry `_applicant_email`. Legacy packets are recovered from `_contact.email`,
+ * which was the exact value rendered into their PDF. A pinned alias that is no longer receivable
+ * is a regeneration hold. Falling back to a personal address at submit time would make the PDF
+ * and employer form disagree, and would also hide that employer replies cannot arrive.
+ */
+export async function resolveFrozenApplicantEmail(input: {
+  userId: string;
+  applicationId: string;
+  spec: unknown;
+  accountEmail?: string | null;
+}, deps: FrozenApplicantEmailDeps = {}): Promise<ApplicantEmailChoice> {
+  const stored = input.spec && typeof input.spec === 'object' && !Array.isArray(input.spec)
+    ? input.spec as StoredApplicantEmailSpec
+    : {};
+  let pinned = readPinnedApplicantEmail(stored);
+
+  if (!pinned) {
+    const contact = stored._contact && typeof stored._contact === 'object' && !Array.isArray(stored._contact)
+      ? normalizedAddress((stored._contact as Record<string, unknown>).email)
+      : null;
+    const legacyIdentity = stored._application_email && typeof stored._application_email === 'object' && !Array.isArray(stored._application_email)
+      ? normalizedAddress((stored._application_email as Record<string, unknown>).alias)
+      : null;
+    const address = contact ?? legacyIdentity ?? normalizedAddress(input.accountEmail);
+    if (!address) throw new ApplicantEmailRegenerationRequiredError('no applicant email is stored');
+    const alias = isAliasAddress(address);
+    pinned = {
+      address,
+      source: alias ? 'litos_alias' : contact ? 'contact_email' : 'account_email',
+      reason: alias ? 'deliverable' : 'alias_unavailable',
+      tracked: alias,
+      decided_at: new Date(0).toISOString(),
+    };
+  }
+
+  if (pinned.source !== 'litos_alias' && !isAliasAddress(pinned.address)) return pinned;
+
+  const deliverability = await (deps.deliverability ?? applicationAliasDeliverability)().catch(() => null);
+  if (!deliverability?.deliverable) {
+    throw new ApplicantEmailRegenerationRequiredError(
+      `the pinned Litos email is not receivable (${deliverability?.reason ?? 'deliverability_check_failed'})`,
+    );
+  }
+  const currentAlias = applicationAliasFor(input.userId, input.applicationId);
+  if (!currentAlias || pinned.address !== currentAlias) {
+    throw new ApplicantEmailRegenerationRequiredError(
+      'the pinned Litos email does not match the current inbound email route',
+    );
+  }
+  const active = await (deps.aliasActive ?? activeAliasForApplication)({
+    userId: input.userId,
+    applicationId: input.applicationId,
+    alias: pinned.address,
+  }).catch(() => false);
+  if (!active) throw new ApplicantEmailRegenerationRequiredError('the pinned Litos email is not active for this packet');
+  return { ...pinned, source: 'litos_alias', reason: 'deliverable', tracked: true };
+}
+
 function normalizedAddress(value: unknown): string | null {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim().toLowerCase();
   return trimmed && isValidForwardingAddress(trimmed) ? trimmed : null;
 }
 
-/** True for any address on the alias domain, including one stored on an older packet. */
+/** True for an address shaped like a Litos alias, including one stored on an older route. */
 export function isAliasAddress(value: string | null | undefined): boolean {
-  const domain = aliasDomain();
   const address = value?.trim().toLowerCase();
-  if (!domain || !address) return false;
-  if (address.endsWith(`@${domain}`)) return true;
-  const mailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX?.trim().toLowerCase();
-  if (!mailbox) return false;
-  const [local, mailboxDomain] = mailbox.split('@');
-  return address.startsWith(`${local}+`) && address.endsWith(`@${mailboxDomain}`);
+  if (!address) return false;
+  const separator = address.lastIndexOf('@');
+  const local = separator > 0 ? address.slice(0, separator) : '';
+  // Packets outlive provider and domain migrations. Recognize both supported alias shapes without
+  // naming a retired domain, otherwise a dead alias becomes a personal address after configuration
+  // changes and can silently reach an employer again.
+  if (/^app-[a-f0-9]{10}-[a-f0-9]{12}$/.test(local)) return true;
+  if (/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+\+app-[a-f0-9]{10}-[a-f0-9]{12}$/.test(local)) return true;
+  return false;
 }
 
 export type ResolveApplicantEmailDeps = {
@@ -244,7 +377,10 @@ export async function resolveApplicantEmail(input: {
     domain: null,
     reason: 'check_unavailable',
     mx_hosts: [],
+    mx_provider: 'unknown',
+    mx_provider_agrees: false,
     resend_domain_status: null,
+    resend_receiving_status: null,
     inbound_route_configured: false,
     checked_at: decidedAt,
   }));
@@ -313,7 +449,16 @@ function inboundBodyText(inbound: InboundApplicationEmail): string {
  *
  * The employer's address is still printed in the body, so she can always see who she is talking to
  * and can go around Litos on purpose if she wants to. */
-function forwardEmailPayload(input: {
+export function aliasUsesManagedReceiving(alias: string): boolean {
+  const normalized = normalizedAddress(alias);
+  const domain = normalized?.slice(normalized.lastIndexOf('@') + 1) ?? '';
+  // Resend-managed receiving aliases are permanently inbound-only. Infer that capability from the
+  // strict provider domain shape rather than today's environment, because packets and active alias
+  // rows can outlive a route migration.
+  return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.resend\.app$/i.test(domain);
+}
+
+export function forwardEmailPayload(input: {
   alias: string;
   forwardTo: string;
   inbound: InboundApplicationEmail;
@@ -322,16 +467,20 @@ function forwardEmailPayload(input: {
   const subject = input.inbound.subject?.trim() || '(no subject)';
   const from = input.inbound.from?.trim() || 'unknown sender';
   const bodyText = inboundBodyText(input.inbound);
+  const managedReceiving = aliasUsesManagedReceiving(input.alias);
+  const replyInstruction = managedReceiving
+    ? `This Litos receiving address cannot send replies. Contact ${from} directly from your own mailbox.`
+    : `Reply to this message and Litos sends your answer to ${from} from your application address.`;
   return {
     from: emailSender(),
     to: [input.forwardTo],
-    reply_to: input.alias,
+    ...(managedReceiving ? {} : { reply_to: input.alias }),
     subject: `[Litos] ${subject}`,
     text: [
       `Litos received this application email at ${input.alias}.`,
       `From: ${from}`,
       `Classification: ${input.classification}`,
-      `Reply to this message and Litos sends your answer to ${from} from your application address.`,
+      replyInstruction,
       ``,
       bodyText,
     ].join('\n'),
@@ -339,7 +488,7 @@ function forwardEmailPayload(input: {
       `<p>Litos received this application email at ${escapeHtml(input.alias)}.</p>`,
       `<p><strong>From:</strong> ${escapeHtml(from)}</p>`,
       `<p><strong>Classification:</strong> ${escapeHtml(input.classification)}</p>`,
-      `<p>Reply to this message and Litos sends your answer to ${escapeHtml(from)} from your application address.</p>`,
+      `<p>${escapeHtml(replyInstruction)}</p>`,
       `<p>${escapeHtml(bodyText || 'No plain-text body was provided.').replace(/\n/g, '<br>')}</p>`,
     ].join(''),
   };
@@ -373,7 +522,7 @@ export function relayEmailPayload(input: {
 export type InboundRoute =
   | { kind: 'employer_message' }
   | { kind: 'applicant_reply' }
-  | { kind: 'drop'; reason: 'self_addressed' | 'sender_authentication_failed' };
+  | { kind: 'drop'; reason: 'self_addressed' | 'sender_authentication_failed' | 'managed_reply_unsupported' };
 
 /* WHO SENT IT decides which direction this message is going, and it is decided here rather than
  * from the words in it.
@@ -401,6 +550,7 @@ export function routeInboundApplicationEmail(input: {
   const sender = from.match(/<([^>]+)>/)?.[1]?.trim().toLowerCase() ?? from;
   if (sender === alias) return { kind: 'drop', reason: 'self_addressed' };
   if (sender !== forwardTo) return { kind: 'employer_message' };
+  if (aliasUsesManagedReceiving(alias)) return { kind: 'drop', reason: 'managed_reply_unsupported' };
   if (senderAuthenticationFailed(input.authentication)) {
     return { kind: 'drop', reason: 'sender_authentication_failed' };
   }
@@ -460,7 +610,7 @@ export async function retrieveResendReceivedEmail(input: {
   const key = process.env.RESEND_API_KEY?.trim();
   if (!key) throw new Error('RESEND_API_KEY is required to read received email content');
   const response = await fetch(`https://api.resend.com/emails/receiving/${encodeURIComponent(input.emailId)}`, {
-    headers: { Authorization: `Bearer ${key}` },
+    headers: { Authorization: `Bearer ${key}`, 'User-Agent': 'Litos/1.0' },
   });
   if (!response.ok) {
     throw new Error(`Resend received email lookup failed with ${response.status}`);
@@ -475,12 +625,14 @@ export async function retrieveResendReceivedEmail(input: {
     text: body.text ?? input.fallback.text,
     html: body.html ?? input.fallback.html,
     receivedAt: body.created_at ? new Date(body.created_at) : input.fallback.receivedAt,
+    authentication: authenticationFromHeaders(body.headers),
     raw: {
       provider: 'resend',
       email_id: body.id || input.emailId,
       message_id: body.message_id,
       to: body.to,
       subject: body.subject,
+      authentication: authenticationFromHeaders(body.headers),
     },
   };
 }
@@ -667,7 +819,10 @@ export async function processInboundApplicationEmail(input: InboundApplicationEm
     text: input.text,
     html: input.html,
     classification,
-    raw_json: input.raw as Record<string, unknown> | undefined,
+    raw_json: {
+      payload: input.raw as Record<string, unknown> | undefined,
+      authentication: input.authentication,
+    },
     received_at: receivedAt,
   }).onConflictDoNothing({ target: application_email_messages.dedupe_key }).returning({
     id: application_email_messages.id,
@@ -729,11 +884,19 @@ export async function processInboundApplicationEmail(input: InboundApplicationEm
 export type ApplicationEmailHealth = {
   status: 'ok' | 'degraded' | 'not_configured';
   reason: AliasDeliverabilityReason;
+  route_mode: ApplicationEmailRouteMode | null;
+  route_mode_explicit: boolean;
+  invalid_route_mode_present: boolean;
+  ignored_legacy_domain_present: boolean;
+  ignored_legacy_mailbox_present: boolean;
   domain: string | null;
   // Measured against the world.
   deliverable: boolean;
   mx_hosts: string[];
+  mx_provider: AliasDeliverability['mx_provider'];
+  mx_provider_agrees: boolean;
   resend_domain_status: string | null;
+  resend_receiving_status: string | null;
   inbound_route_configured: boolean;
   last_inbound_message_at: string | null;
   last_inbound_message_age_seconds: number | null;
@@ -765,6 +928,7 @@ export type ApplicationEmailHealth = {
  * degrade to null rather than propagating. */
 export async function applicationEmailHealth(): Promise<ApplicationEmailHealth> {
   const check = await applicationAliasDeliverability();
+  const route = applicationEmailRouteSelection();
   const [aliasCount, lastInbound] = await Promise.all([
     db
       .select({ count: sql<number>`count(*)::int` })
@@ -787,12 +951,22 @@ export async function applicationEmailHealth(): Promise<ApplicationEmailHealth> 
     // to be loud and distinct from 'ok'.
     status: check.deliverable
       ? 'ok'
-      : (check.reason === 'alias_not_configured' || check.reason === 'inbound_disabled' ? 'not_configured' : 'degraded'),
+      : (check.reason === 'inbound_disabled' || (check.reason === 'alias_not_configured' && !route.explicit)
+        ? 'not_configured'
+        : 'degraded'),
     reason: check.reason,
+    route_mode: route.mode,
+    route_mode_explicit: route.explicit,
+    invalid_route_mode_present: route.invalid_mode_present,
+    ignored_legacy_domain_present: route.ignored_legacy_domain_present,
+    ignored_legacy_mailbox_present: route.ignored_legacy_mailbox_present,
     domain: check.domain,
     deliverable: check.deliverable,
     mx_hosts: check.mx_hosts,
+    mx_provider: check.mx_provider,
+    mx_provider_agrees: check.mx_provider_agrees,
     resend_domain_status: check.resend_domain_status,
+    resend_receiving_status: check.resend_receiving_status,
     inbound_route_configured: check.inbound_route_configured,
     last_inbound_message_at: lastIso,
     last_inbound_message_age_seconds: lastIso
@@ -801,7 +975,7 @@ export async function applicationEmailHealth(): Promise<ApplicationEmailHealth> 
     enabled_aliases: aliasCount,
     domain_configured: Boolean((configuredDomain() || configuredMailbox()) && applicationAliasSecret()),
     inbound_webhook_configured: Boolean(inboundWebhookSecret()),
-    forwarding_configured: Boolean(process.env.RESEND_API_KEY?.trim() && process.env.RESEND_FROM?.trim()),
+    forwarding_configured: applicationEmailForwardingConfigured(),
     checked_at: check.checked_at,
     ...(check.detail ? { detail: check.detail } : {}),
   };
