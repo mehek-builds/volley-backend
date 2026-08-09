@@ -7,6 +7,7 @@ import {
   storedSalaryOf,
   type StoredSalaryProfile,
 } from './salary';
+import { referralSourceForApplication, type ReferralSourceEvidence } from './referralSource';
 
 // R-055 fix: the dashboard-driven submission flow used to never discover a posting's custom
 // questions (GPA, sponsorship, GitHub, essays, ...) - only the Chrome extension did, client-side.
@@ -71,6 +72,7 @@ export type ApplicationProfileLike = StoredSalaryProfile & {
   skills?: string[] | null;
   eeo_prefs?: Record<string, string> | null;
   referral_source_default?: string;
+  referral_source_evidence?: ReferralSourceEvidence;
 
   /* ---- application facts asked once in onboarding ----
    *
@@ -2617,7 +2619,7 @@ export function resolveKnownAnswer(
       return ap.github_url ? { value: ap.github_url } : null;
     case 'portfolio_url':
       return ap.portfolio_url ? { value: ap.portfolio_url } : null;
-    case 'referral_source_default':
+    case 'referral_source_default': {
       /* CHANGED. The fallback was `{ value: 'Company website' }` for an account that had stored
        * nothing, described in profileFieldResolution.test.ts as "a deliberate product behaviour
        * rather than stored data". It is deliberate and it is still a statement of fact about how
@@ -2626,9 +2628,11 @@ export function resolveKnownAnswer(
        * most-asked question in the whole corpus - 25 distinct labels across 20 employers - which by
        * the two-posting rule makes it an ONBOARDING question, not a constant. The column already
        * exists; only the invented default is gone. */
-      return ap.referral_source_default
-        ? { value: ap.referral_source_default }
+      const source = referralSourceForApplication(ap.referral_source_default, ap.referral_source_evidence);
+      return source
+        ? { value: source }
         : { skipReason: `how you heard about this role is yours to answer: "${label.slice(0, 60)}"` };
+    }
     case 'desired_salary': {
       resolveSalary(
         { label, field: inputType === 'number' ? 'numeric' : 'freetext', jdText },

@@ -18,6 +18,11 @@ import {
 import type { Locator } from 'playwright-core';
 import { browserApplicationCapability } from './browserApplicationCapabilities';
 import { isControlledTestPortalUrl } from './controlledTestPortal';
+import {
+  referralSourceForApplication,
+  referralSourceOptionCandidates,
+  type ReferralSourceEvidence,
+} from './referralSource';
 
 // Portal field ids legitimately contain CSS-syntax characters (Greenhouse uses UUIDs, others use
 // dots and colons), so they are matched with the [id="..."] attribute form rather than #id. Inside
@@ -375,6 +380,7 @@ export type SubmissionPacket = {
   roleLocation?: string;
   roleLocations?: string[];
   referralSourceDefault?: string;
+  referralSourceEvidence?: ReferralSourceEvidence;
   /**
    * The REAL option texts of the closed-list controls on this posting, keyed by the control's own
    * id, as read off the live page by the discovery pass (pushManagedReactSelectOptionProbeActions).
@@ -1593,9 +1599,6 @@ function selectValuesForAnswer(answer: string): string[] {
   if (lower === 'yes') return ['Yes', 'yes', '1', 'true'];
   if (lower === 'no') return ['No', 'no', '0', 'false'];
   const values = [trimmed];
-  if (/^company website$/i.test(trimmed)) {
-    values.push('Company Website', 'Company website', 'Careers page', 'Career site', 'Other');
-  }
   if (/\b(?:have\s+not|haven't|never)\s+(?:worked|been employed)\b/.test(lower)) {
     values.push('No', 'No, I have not', 'I have not worked there before');
   }
@@ -1688,7 +1691,16 @@ function cityOnlyLocation(value: string): string | undefined {
   return match?.[1]?.trim() || undefined;
 }
 
-function greenhouseComboboxValuesForQuestion(question: string, answer: string, contextText = ''): string[] {
+function isReferralSourceQuestion(question: string): boolean {
+  return /\b(?:how\s+did\s+you\s+hear|referral\s+source|hear\s+about|where\s+have\s+you\s+learned\s+about|source)\b/i.test(question);
+}
+
+function greenhouseComboboxValuesForQuestion(
+  question: string,
+  answer: string,
+  contextText = '',
+  referralEvidence?: ReferralSourceEvidence,
+): string[] {
   const normalizedQuestion = question.toLowerCase();
   const normalizedAnswer = answer.trim().toLowerCase();
   const normalizedContext = contextText.toLowerCase();
@@ -1699,14 +1711,18 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string, c
     && !/\b(?:spring|summer|fall|winter|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|20\d{2})\b/i.test(answer)) {
     return [];
   }
-  const values = selectValuesForAnswer(answer);
+  const referralQuestion = isReferralSourceQuestion(question);
+  const values = referralQuestion
+    ? referralSourceOptionCandidates(answer, referralEvidence)
+    : selectValuesForAnswer(answer);
+  if (referralQuestion && values.length === 0) return [];
   // The general, employer-independent ladder: education level enum, discipline family, the
   // institution name without its trailing "... School of Engineering" clause, GPA to two and one
   // decimal places, month name plus its number, term and year forms of a graduation date, and the
   // standard referral-source wordings. Appended rather than unshifted so every rule below still
   // wins the head of the list; these exist so the SECOND and THIRD attempts are useful instead of
   // absent. uniqueDefined at the end of this function dedupes against whatever they add.
-  values.push(...profileAnswerAliases(question, answer));
+  if (!referralQuestion) values.push(...profileAnswerAliases(question, answer));
   const isGraduationPartQuestion = /\bgraduat(?:ion|e)\s+(?:month|year)\b|\bwhat\s+is\s+your\s+graduation\s+(?:month|year)\b/.test(normalizedQuestion);
   if (/\bwhat\s+is\s+your\s+gpa\b|\bgpa\b|academic\s+performance|grade\s+average|grade\s+point/.test(normalizedQuestion)) {
     values.unshift(greenhouseGpaBucket(answer) ?? '');
@@ -1740,20 +1756,18 @@ function greenhouseComboboxValuesForQuestion(question: string, answer: string, c
   if (/\b(?:current\s+year|year\s+of\s+(?:your\s+)?stud(?:y|ies)|academic\s+year)\b/.test(normalizedQuestion)) {
     values.unshift(answer.replace(/\s+year$/i, ''), answer);
   }
-  if (/\b(?:how\s+did\s+you\s+hear|referral\s+source|hear\s+about|where\s+have\s+you\s+learned\s+about|source)\b/.test(normalizedQuestion)) {
-    if (/\bsamsara\b/.test(normalizedQuestion + ' ' + normalizedContext) && /^company website$/i.test(answer.trim())) {
+  if (referralQuestion) {
+    const hasEmployerSiteEvidence = referralEvidence?.kind === 'employer_career_site'
+      && referralEvidence.value === 'Company website';
+    if (hasEmployerSiteEvidence && /\bsamsara\b/.test(normalizedQuestion + ' ' + normalizedContext)) {
       values.unshift('Samsara Careers Site');
     }
-    if (/\bwhere\s+have\s+you\s+learned\s+about\s+samsara\b/.test(normalizedQuestion) && /^company website$/i.test(answer.trim())) {
+    if (hasEmployerSiteEvidence && /\bwhere\s+have\s+you\s+learned\s+about\s+samsara\b/.test(normalizedQuestion)) {
       values.unshift('Samsara blog or website');
     }
-    if (isRobloxContext && /\bhow\s+did\s+you\s+first\s+hear\s+about\s+this\s+role\b/.test(normalizedQuestion) && /^company website$/i.test(answer.trim())) {
+    if (hasEmployerSiteEvidence && isRobloxContext && /\bhow\s+did\s+you\s+first\s+hear\s+about\s+this\s+role\b/.test(normalizedQuestion)) {
       values.unshift('Roblox Careers Site');
     }
-    if (/\bhow\s+did\s+you\s+hear\s+about\s+this\s+job\b/.test(normalizedQuestion) && /^company website$/i.test(answer.trim())) {
-      values.unshift(isAkunaContext ? 'Other' : 'Other (none of the above)');
-    }
-    values.push('Company Website', 'Company website', 'Careers page', 'Career site', 'Other');
   }
   if (/\bpreferred\s+coding\s+language\b|\binterview\b[^?]{0,120}\bcoding\s+language\b/.test(normalizedQuestion)) {
     if (/\bpython\b/.test(normalizedAnswer)) values.unshift('Python 3');
@@ -1884,6 +1898,7 @@ function pushGreenhouseQuestionComboboxActions(
   answer: string,
   labelPrefix: string,
   contextText = '',
+  referralEvidence?: ReferralSourceEvidence,
 ) {
   if (!isGreenhouseReactSelectQuestion(questionText)) return;
   const selectors = [selector];
@@ -1898,7 +1913,13 @@ function pushGreenhouseQuestionComboboxActions(
   // The label's own escape hatch, appended last, exactly as the label-scoped builder does it. This
   // branch is the one a question with a durable selector actually takes, so without it the hatch
   // was unreachable for precisely those questions. See greenhouseComboboxCandidateValues.
-  const candidates = greenhouseComboboxCandidateValues(questionText, answer, contextText, valueLimit);
+  const candidates = greenhouseComboboxCandidateValues(
+    questionText,
+    answer,
+    contextText,
+    valueLimit,
+    referralEvidence,
+  );
   for (const [index, value] of candidates.entries()) {
     for (const [selectorIndex, inputSelector] of selectors.entries()) {
       managedGreenhouseScopedReactSelectFill(
@@ -1935,8 +1956,14 @@ function pushGreenhouseQuestionSelectActions(
   answer: string,
   labelPrefix: string,
   contextText = '',
+  referralEvidence?: ReferralSourceEvidence,
 ) {
-  const values = greenhouseComboboxValuesForQuestion(questionText, answer, contextText).slice(0, 3);
+  const values = greenhouseComboboxValuesForQuestion(
+    questionText,
+    answer,
+    contextText,
+    referralEvidence,
+  ).slice(0, 3);
   for (const [index, value] of values.entries()) {
     managedSelect(actions, selector, value, `${labelPrefix}_select_live:${index}:${questionText.slice(0, 80)}`);
   }
@@ -1992,8 +2019,10 @@ function greenhouseComboboxCandidateValues(
   answer: string,
   contextText: string,
   valueLimit: number,
+  referralEvidence?: ReferralSourceEvidence,
 ): string[] {
-  const sliced = greenhouseComboboxValuesForQuestion(questionText, answer, contextText).slice(0, valueLimit);
+  const values = greenhouseComboboxValuesForQuestion(questionText, answer, contextText, referralEvidence);
+  const sliced = isReferralSourceQuestion(questionText) ? values : values.slice(0, valueLimit);
   const escapeHatch = escapeHatchOptionFor(questionText);
   if (!escapeHatch || sliced.some((value) => value.trim().toLowerCase() === escapeHatch.toLowerCase())) return sliced;
   return [...sliced, escapeHatch];
@@ -2005,6 +2034,7 @@ function pushGreenhouseQuestionComboboxLabelActions(
   answer: string,
   labelPrefix: string,
   contextText = '',
+  referralEvidence?: ReferralSourceEvidence,
 ) {
   if (!isGreenhouseReactSelectQuestion(questionText)) return;
   let index = 0;
@@ -2012,7 +2042,13 @@ function pushGreenhouseQuestionComboboxLabelActions(
   // The slice happens inside, before the hatch is appended. Running the pair through uniqueDefined
   // instead also dropped the empty strings the slice can contain, which promoted a value from past
   // the limit into first place and emitted a fill where the old code deliberately emitted none.
-  const values = greenhouseComboboxCandidateValues(questionText, answer, contextText, valueLimit);
+  const values = greenhouseComboboxCandidateValues(
+    questionText,
+    answer,
+    contextText,
+    valueLimit,
+    referralEvidence,
+  );
   for (const selector of greenhouseQuestionComboboxSelectors(questionText).slice(0, QUESTION_COMBOBOX_SELECTOR_LIMIT)) {
     for (const value of values) {
       const compactKnownLabel = /^(?:greenhouse_fixed_question|greenhouse_known_question|greenhouse_akuna_attestation)$/.test(labelPrefix);
@@ -2076,7 +2112,14 @@ function pushGreenhouseReferralSourceAliases(actions: ManagedBrowserAction[], pa
   const value = packet.referralSourceDefault?.trim();
   if (!value) return;
   for (const alias of GREENHOUSE_REFERRAL_LABEL_PREFIXES) {
-    pushGreenhouseQuestionComboboxLabelActions(actions, alias, value, 'greenhouse_referral');
+    pushGreenhouseQuestionComboboxLabelActions(
+      actions,
+      alias,
+      value,
+      'greenhouse_referral',
+      '',
+      packet.referralSourceEvidence,
+    );
   }
 }
 
@@ -2427,6 +2470,12 @@ function packetLooksDatabricks(packet: SubmissionPacket): boolean {
  */
 function greenhouseReviewedQuestionAnswer(item: SubmissionPacket['questions'][number], packet: SubmissionPacket): string {
   const questionText = normalizeReviewQuestionLabel(item.question);
+  if (isReferralSourceQuestion(questionText)) {
+    return referralSourceForApplication(
+      packet.referralSourceDefault ?? item.answer,
+      packet.referralSourceEvidence,
+    ) ?? '';
+  }
   if (/\bgraduat(?:ion|e)\s+month\b|\bwhat\s+is\s+your\s+graduation\s+month\b|\bmonth\s+of\s+graduation\b/i.test(questionText)) {
     return packet.graduationMonth?.trim() || item.answer;
   }
@@ -3727,12 +3776,28 @@ export function buildManagedPortalActions(
       ? rawPortalSelector.trim()
       : undefined;
     if (runtimeGreenhouseSelector) {
-      pushGreenhouseQuestionSelectActions(actions, runtimeGreenhouseSelector, questionText, answer, 'question', packet.jdText);
+      pushGreenhouseQuestionSelectActions(
+        actions,
+        runtimeGreenhouseSelector,
+        questionText,
+        answer,
+        'question',
+        packet.jdText,
+        packet.referralSourceEvidence,
+      );
       pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
     }
     if (portalSelector) {
       if (portalFamily(portal) === 'greenhouse' && /^combobox$/i.test(portalInputType ?? '')) {
-        pushGreenhouseQuestionComboboxActions(actions, portalSelector, questionText, answer, 'question', packet.jdText);
+        pushGreenhouseQuestionComboboxActions(
+          actions,
+          portalSelector,
+          questionText,
+          answer,
+          'question',
+          packet.jdText,
+          packet.referralSourceEvidence,
+        );
         pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
         continue;
       }
@@ -3772,7 +3837,15 @@ export function buildManagedPortalActions(
         });
       }
       if (portalFamily(portal) === 'greenhouse') {
-        pushGreenhouseQuestionComboboxActions(actions, portalSelector, questionText, answer, 'question', packet.jdText);
+        pushGreenhouseQuestionComboboxActions(
+          actions,
+          portalSelector,
+          questionText,
+          answer,
+          'question',
+          packet.jdText,
+          packet.referralSourceEvidence,
+        );
         pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
       }
       continue;
@@ -3781,19 +3854,40 @@ export function buildManagedPortalActions(
       if (isRoutineCandidatePrivacyAcknowledgement(questionText)) {
         pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
         if (/\bjob\s+applicant\s+privacy\s+notice\b/i.test(questionText)) {
-          pushGreenhouseQuestionComboboxLabelActions(actions, questionText, answer, 'question', packet.jdText);
+          pushGreenhouseQuestionComboboxLabelActions(
+            actions,
+            questionText,
+            answer,
+            'question',
+            packet.jdText,
+            packet.referralSourceEvidence,
+          );
         }
         continue;
       }
       if (isGreenhouseEducationComboboxQuestion(questionText)) {
-        pushGreenhouseQuestionComboboxLabelActions(actions, questionText, answer, 'question', packet.jdText);
+        pushGreenhouseQuestionComboboxLabelActions(
+          actions,
+          questionText,
+          answer,
+          'question',
+          packet.jdText,
+          packet.referralSourceEvidence,
+        );
         continue;
       }
       const isReactSelectQuestion = isGreenhouseReactSelectQuestion(questionText);
       if (!isReactSelectQuestion) {
         pushScopedQuestionChoiceActions(actions, questionText, answer, 'question');
       }
-      pushGreenhouseQuestionComboboxLabelActions(actions, questionText, answer, 'question', packet.jdText);
+      pushGreenhouseQuestionComboboxLabelActions(
+        actions,
+        questionText,
+        answer,
+        'question',
+        packet.jdText,
+        packet.referralSourceEvidence,
+      );
       pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
     } else {
       pushScopedQuestionChoiceActions(actions, questionText, answer, 'question');
@@ -4626,17 +4720,26 @@ async function fillReviewedQuestions(page: Page, portal: SupportedPortal, packet
     const container = label.locator('xpath=ancestor::*[self::div or self::fieldset][1]');
     const input = container.locator('textarea, input:not([type=file]):not([type=hidden])').first();
     if ((await input.count()) > 0 && (await input.isVisible().catch(() => false))) {
-      await input.fill(item.answer);
+      await input.fill(answer);
       out.push(`question:${questionText.slice(0, 80)}`);
       continue;
     }
     const select = container.locator('select').first();
     if ((await select.count()) > 0) {
-      await select.selectOption({ label: item.answer }).catch(() => select.selectOption(item.answer));
-      out.push(`question:${questionText.slice(0, 80)}`);
+      const candidates = isReferralSourceQuestion(questionText)
+        ? referralSourceOptionCandidates(answer, packet.referralSourceEvidence)
+        : [answer];
+      let selected = false;
+      for (const candidate of candidates) {
+        selected = await select.selectOption({ label: candidate })
+          .then(() => true)
+          .catch(() => select.selectOption(candidate).then(() => true).catch(() => false));
+        if (selected) break;
+      }
+      if (selected) out.push(`question:${questionText.slice(0, 80)}`);
       continue;
     }
-    const answerPattern = new RegExp(`^\\s*${item.answer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i');
+    const answerPattern = new RegExp(`^\\s*${answer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i');
     const choice = container.getByLabel(answerPattern).first();
     if ((await choice.count()) > 0 && (await choice.isVisible().catch(() => false))) {
       await choice.check().catch(() => choice.click());

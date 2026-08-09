@@ -82,7 +82,12 @@ describe('onboarding gaps: languages', () => {
       gpa: encryptField('3.89'),
       languages: ['English'],
     });
-    assert.deepEqual(g, ['gpa_scale', 'desired_salary', 'desired_salary_currency']);
+    assert.deepEqual(g, [
+      'gpa_scale',
+      'desired_salary',
+      'desired_salary_currency',
+      'referral_source_default',
+    ]);
   });
 });
 

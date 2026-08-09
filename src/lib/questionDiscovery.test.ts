@@ -2360,19 +2360,26 @@ test('the export-control refusal leaves the sanctions checklist alone', () => {
   );
 });
 
-test('the referral question is answered even when its label names the employer', () => {
-  // '"How did you hear about Anduril?" is required and is still empty', with
-  // application_profile.referral_source_default = "Company website" in the same row.
+test('the referral question needs packet evidence even when its label names the employer', () => {
+  const evidence: ApplicationProfileLike['referral_source_evidence'] = {
+    kind: 'employer_career_site',
+    value: 'Company website',
+    jobId: '11111111-1111-4111-8111-111111111111',
+    sourceId: '22222222-2222-4222-8222-222222222222',
+    sourceUrl: 'https://careers.example.com/jobs/123',
+    observedAt: '2026-08-09T00:00:00.000Z',
+  };
   for (const raw of [
     ANDURIL_REFERRAL_LABEL,
     'how did you hear about this internship?* question_1',
     'how did you hear about this job?* question_2',
   ]) {
     assert.deepEqual(
-      resolveKnownAnswer(normalizeDiscoveredLabel(raw), 'text', MEHEK, undefined),
+      resolveKnownAnswer(normalizeDiscoveredLabel(raw), 'text', { ...MEHEK, referral_source_evidence: evidence }, undefined),
       { value: 'Company website' },
       raw,
     );
+    assert.ok('skipReason' in resolveKnownAnswer(normalizeDiscoveredLabel(raw), 'text', MEHEK, undefined)!);
   }
 });
 
@@ -2635,4 +2642,3 @@ test('a sponsorship question that will not say which country is still refused', 
     assert.ok(resolved && 'skipReason' in resolved, `must not be answered: ${label.slice(0, 70)}`);
   }
 });
-

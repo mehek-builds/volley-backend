@@ -56,6 +56,10 @@ import {
   type ApplicationProfileLike,
   type ProfileKey,
 } from './questionDiscovery';
+import {
+  referralSourceForApplication,
+  referralSourceOptionCandidates,
+} from './referralSource';
 
 export type ProfileFieldShape = {
   label: string;
@@ -677,9 +681,6 @@ export function graduationDateLadder(gradDate: string | undefined, gradYear: num
 }
 
 /** Does the stored referral source name the employer's own site? */
-const COMPANY_SITE_SOURCE_RE =
-  /\b(?:company|corporate|employer|careers?|website|web\s*site|web\s*page|homepage|portal)\b/i;
-
 /**
  * Referral source lists are short and closed, and every entry on one is a factual claim about how
  * this applicant found this posting.
@@ -693,23 +694,11 @@ const COMPANY_SITE_SOURCE_RE =
  *
  * "Other" stays LAST, so it can never displace a truthful specific option.
  */
-export function referralSourceLadder(stored: string | undefined): string[] {
-  const trimmed = stored?.trim();
-  const namesCompanySite = !trimmed || COMPANY_SITE_SOURCE_RE.test(trimmed);
-  return ladder(
-    trimmed,
-    ...(namesCompanySite
-      ? [
-        'Company Website',
-        'Company website',
-        'Company Careers Site',
-        'Careers Page',
-        'Career Site',
-        'Careers Website',
-      ]
-      : []),
-    'Other',
-  );
+export function referralSourceLadder(
+  stored: string | undefined,
+  evidence?: ApplicationProfileLike['referral_source_evidence'],
+): string[] {
+  return referralSourceOptionCandidates(stored, evidence);
 }
 
 export function studyYearLadder(value: string | undefined): string[] {
@@ -939,7 +928,13 @@ export function profileFieldCandidates(
     case 'study_year':
       return ladder(base, ...studyYearLadder(base));
     case 'referral_source_default':
-      return ladder(base, ...referralSourceLadder(ap.referral_source_default ?? base));
+      return ladder(
+        base,
+        ...referralSourceLadder(
+          referralSourceForApplication(ap.referral_source_default, ap.referral_source_evidence),
+          ap.referral_source_evidence,
+        ),
+      );
     default:
       return ladder(base);
   }

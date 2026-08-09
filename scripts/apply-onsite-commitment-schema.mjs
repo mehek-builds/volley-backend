@@ -55,15 +55,14 @@
  *
  * This script ALWAYS drops the default, so new rows are honest.
  *
- * It clears the existing 16 values ONLY with --reset-referral-default, because doing so starts
- * asking 16 accounts a question they were previously answering without noticing, and that is a
- * product decision rather than a schema one. Until it is run with that flag, those accounts keep
- * relaying "Company website" - which is at least a value the resolver can point at a column for,
- * and is no worse than today.
+ * A legacy value can be cleared ONLY for one named account. A global value-based update cannot
+ * distinguish the historical database default from a student who later chose the same words, so
+ * this script deliberately has no global reset switch. The submission resolver independently
+ * refuses a company-site claim without packet evidence, which keeps old rows safe before cleanup.
  *
  * Usage:
  *   node scripts/apply-onsite-commitment-schema.mjs
- *   node scripts/apply-onsite-commitment-schema.mjs --reset-referral-default
+ *   node scripts/apply-onsite-commitment-schema.mjs --reset-referral-default-for=user@example.com
  */
 
 import pg from 'pg';
@@ -76,7 +75,14 @@ const COLUMNS = {
 };
 
 async function main() {
-  const resetReferral = process.argv.includes('--reset-referral-default');
+  if (process.argv.includes('--reset-referral-default')) {
+    throw new Error('Global referral reset is unsafe. Use --reset-referral-default-for=<exact account email>.');
+  }
+  const resetArg = process.argv.find((arg) => arg.startsWith('--reset-referral-default-for='));
+  const resetReferralFor = resetArg?.slice('--reset-referral-default-for='.length).trim().toLowerCase() || null;
+  if (resetReferralFor && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(resetReferralFor)) {
+    throw new Error('The referral reset requires one exact account email.');
+  }
 
   if (!process.env.DATABASE_URL) {
     console.error('DATABASE_URL is not set.');
@@ -99,11 +105,19 @@ async function main() {
     await client.query('alter table application_profile alter column referral_source_default drop default');
 
     let cleared = 0;
-    if (resetReferral) {
+    if (resetReferralFor) {
       const { rowCount } = await client.query(
-        "update application_profile set referral_source_default = null where referral_source_default = 'Company website'",
+        `update application_profile ap
+            set referral_source_default = null,
+                updated_at = now()
+           from users u
+          where ap.user_id = u.id
+            and lower(u.email) = $1
+            and ap.referral_source_default = 'Company website'`,
+        [resetReferralFor],
       );
       cleared = rowCount ?? 0;
+      if (cleared > 1) throw new Error('Referral reset matched more than one application profile.');
     }
 
     const { rows } = await client.query(
@@ -131,9 +145,9 @@ async function main() {
 
     console.log(`Ready: application_profile has all ${Object.keys(COLUMNS).length} onsite-commitment columns.`);
     console.log('Ready: referral_source_default no longer defaults to "Company website" for new rows.');
-    console.log(resetReferral
-      ? `Cleared the unchosen "Company website" value on ${cleared} existing row(s); those accounts will now be asked.`
-      : 'Existing rows keep their unchosen "Company website" value. Re-run with --reset-referral-default to clear it.');
+    console.log(resetReferralFor
+      ? `Cleared the unverified "Company website" value on ${cleared} profile(s) for the exact requested account.`
+      : 'Existing rows were not changed. Use --reset-referral-default-for=<exact account email> for a reviewed cleanup.');
   } finally {
     await client.end();
   }
