@@ -23,6 +23,7 @@ import {
   managedAnswerLossReasons,
   ashbyControlWithinFieldPath,
   managedResultFieldOptions,
+  managedResultSupportsDiscoveryRole,
   attachManagedFieldOptions,
   buildManagedDiscoveredOptionProbeActions,
   buildManagedDiscoveredOptionProbeBatches,
@@ -52,7 +53,7 @@ import {
 } from './portalSubmission';
 import { POLLABLE_JOB_BOARDS } from './jobMonitor';
 import { resolveProfileField } from './profileFieldResolution';
-import type { ManagedDiscoveredQuestion } from './browserbase';
+import { MANAGED_DISCOVERY_ROLE_CAPABILITY, type ManagedDiscoveredQuestion } from './browserbase';
 import type { ReferralSourceEvidence } from './referralSource';
 
 const JOB_BOARD_REFERRAL_EVIDENCE: ReferralSourceEvidence = {
@@ -4769,7 +4770,7 @@ test('the probe reads the controls discovery found, and never the four it alread
     { label: 'Are you interested in our Women\'s Winternship program?*', selector: '#question_37228970002', inputType: 'text', role: 'combobox', required: true },
   ];
   const alreadyRead = { 'school--0': ['USC'], 'discipline--0': ['Computer Science'] };
-  const targets = managedOptionProbeTargets('greenhouse', discovered, alreadyRead);
+  const targets = managedOptionProbeTargets('greenhouse', discovered, alreadyRead, true);
   // The education controls are skipped only when the earlier pass produced a usable list.
   assert.equal(targets.includes('school--0'), false);
   assert.equal(targets.includes('discipline--0'), false);
@@ -4781,7 +4782,7 @@ test('the probe reads the controls discovery found, and never the four it alread
   assert.deepEqual(targets, ['question_37228964002', 'question_37228970002', '4001608008']);
   // And a list already read is not read again.
   assert.deepEqual(
-    managedOptionProbeTargets('greenhouse', discovered, { ...alreadyRead, question_37228964002: VIRTU_GPA_OPTIONS }),
+    managedOptionProbeTargets('greenhouse', discovered, { ...alreadyRead, question_37228964002: VIRTU_GPA_OPTIONS }, true),
     ['question_37228970002', '4001608008'],
   );
   assert.equal(managedOptionProbeTargets('greenhouse', discovered, {}).includes('school--0'), true,
@@ -4800,8 +4801,17 @@ test('the backend consumes the real Stratus text-plus-combobox-role wire shape',
     options: null,
     required: true,
   };
-  assert.deepEqual(managedOptionProbeTargets('greenhouse', [fromStratus]), ['question_37228964002']);
-  assert.deepEqual(managedOptionProbeTargets('greenhouse', [{ ...fromStratus, role: null }]), [],
+  const advertised = {
+    title: '', url: '', text: '', discovered: [fromStratus],
+    capabilities: [MANAGED_DISCOVERY_ROLE_CAPABILITY],
+  };
+  assert.equal(managedResultSupportsDiscoveryRole(advertised), true);
+  assert.equal(managedResultSupportsDiscoveryRole({ ...advertised, capabilities: [] }), false);
+  assert.equal(managedResultSupportsDiscoveryRole({ ...advertised, capabilities: undefined }), false);
+  assert.deepEqual(managedOptionProbeTargets('greenhouse', [fromStratus], {}, true), ['question_37228964002']);
+  assert.deepEqual(managedOptionProbeTargets('greenhouse', [fromStratus]), [],
+    'role metadata without the advertised runner capability cannot activate dynamic probing');
+  assert.deepEqual(managedOptionProbeTargets('greenhouse', [{ ...fromStratus, role: null }], {}, true), [],
     'a dynamic text input is not closed unless the deployed runner reports its DOM role');
 });
 
@@ -4826,7 +4836,7 @@ test('the probe pass opens, reads and closes each control, and cannot exceed the
     role: 'combobox',
     required: true,
   }));
-  const actions = buildManagedDiscoveredOptionProbeActions('greenhouse', discovered);
+  const actions = buildManagedDiscoveredOptionProbeActions('greenhouse', discovered, {}, true);
   assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `${actions.length} actions is over the runner's ceiling`);
   assert.equal(actions.length % MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL, 0);
   // Nothing is typed, uploaded or sent. The identity read precedes two open / read / Escape rounds.
@@ -4867,7 +4877,7 @@ test('a real Greenhouse form fits the probe pass with room to spare', () => {
     'degree--0': ['Bachelors'],
     'discipline--0': ['Computer Science'],
     'end-month--0': ['May'],
-  });
+  }, true);
   assert.equal(batches.flat().length, 25 * MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL);
   assert.ok(batches.length > 1, 'the async retry must batch rather than truncate a real select-heavy form');
   assert.equal(batches.every((batch) => batch.length <= MANAGED_ACTION_LIMIT), true);
@@ -4880,13 +4890,13 @@ test('a native select is read without clicking and resolves from its exact optio
     inputType: 'select-one',
     required: true,
   }];
-  const [batch] = buildManagedDiscoveredOptionProbeBatches('greenhouse', discovered);
+  const [batch] = buildManagedDiscoveredOptionProbeBatches('greenhouse', discovered, {}, true);
   assert.deepEqual(batch?.map((action) => action.type), ['extract']);
   assert.equal(batch?.[0]?.selector, '[id="question_12345678"]:is(select)');
   const analysis = managedOptionProbeAnalysis('greenhouse', discovered, {}, [{
     title: '', url: '', text: '',
     extracted: [{ selector: '[id="question_12345678"]:is(select)', value: IMC_HIGH_SCHOOL_OPTIONS.join('\n') }],
-  }]);
+  }], [], true);
   assert.deepEqual(analysis.options.question_12345678, IMC_HIGH_SCHOOL_OPTIONS);
   assert.deepEqual(analysis.failures, []);
 });
@@ -4899,7 +4909,7 @@ test('custom closed controls warm once, read twice, and fail closed when still l
     role: 'combobox',
     required: true,
   }];
-  const [batch] = buildManagedDiscoveredOptionProbeBatches('greenhouse', discovered);
+  const [batch] = buildManagedDiscoveredOptionProbeBatches('greenhouse', discovered, {}, true);
   assert.equal(batch?.filter((action) => action.label?.startsWith('option_probe_open:')).length, 2);
   const analysis = managedOptionProbeAnalysis('greenhouse', discovered, {}, [{
     title: '', url: '', text: '',
@@ -4908,7 +4918,7 @@ test('custom closed controls warm once, read twice, and fail closed when still l
       { selector: reactSelectListboxSelector('question_37228964002'), value: 'Loading...' },
       { selector: reactSelectListboxSelector('question_37228964002'), value: 'Loading...' },
     ],
-  }]);
+  }], [], true);
   assert.equal(analysis.failedIds.has('question_37228964002'), true);
   assert.match(analysis.failures[0]?.reason ?? '', /still loading/);
   assert.equal(analysis.options.question_37228964002, undefined);
@@ -4923,7 +4933,7 @@ test('a successful async second read yields one evidence-backed option list', ()
       { selector: reactSelectListboxSelector('question_37228964002'), value: 'Loading...' },
       { selector: reactSelectListboxSelector('question_37228964002'), value: VIRTU_GPA_OPTIONS.join('\n') },
     ],
-  }]);
+  }], [], true);
   assert.deepEqual(analysis.options.question_37228964002, VIRTU_GPA_OPTIONS);
   assert.deepEqual(analysis.failures, []);
 });
@@ -4960,10 +4970,10 @@ test('option probing batches whole controls and explicitly fails beyond its glob
     inputType: 'text',
     role: 'combobox',
   }));
-  const batches = buildManagedDiscoveredOptionProbeBatches('greenhouse', discovered);
+  const batches = buildManagedDiscoveredOptionProbeBatches('greenhouse', discovered, {}, true);
   assert.equal(batches.every((batch) => batch.length <= MANAGED_ACTION_LIMIT), true);
   assert.equal(batches.flat().length % MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL, 0);
-  const analysis = managedOptionProbeAnalysis('greenhouse', discovered, {}, []);
+  const analysis = managedOptionProbeAnalysis('greenhouse', discovered, {}, [], [], true);
   const overflowId = `question_8${String(MANAGED_OPTION_PROBE_MAX_CONTROLS).padStart(7, '0')}`;
   assert.equal(analysis.failedIds.has(overflowId), true);
   assert.match(analysis.failures.find((failure) => failure.controlId === overflowId)?.reason ?? '', /exceeded the bounded/);
@@ -5123,6 +5133,35 @@ test('academic keywords in unrelated employer questions do not suppress applican
       }],
     }));
     assert.ok(actions.some((action) => item.action.test(action.label ?? '')), item.label);
+  }
+});
+
+test('failed Five Rings and measured applicant GPA variants suppress every final GPA alias', () => {
+  const variants = [
+    'Please indicate your overall GPA.',
+    'Please provide your cumulative GPA',
+    'Please select your GPA range',
+    'What is your current grade point average?',
+    'Overall GPA',
+    'Please report your college GPA on a 4.0 scale',
+  ];
+  for (const [index, label] of variants.entries()) {
+    const failedId = `question_8300000${index}`;
+    const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+      failedFields: [{
+        controlId: failedId,
+        label,
+        selector: `#${failedId}`,
+        inputType: 'select-one',
+      }],
+      // A stale semantically equivalent record must not regenerate generic GPA or
+      // "What is your GPA?" aliases after the exact live control failed.
+      questions: [{ question: 'What is your GPA?', answer: '3.89' }],
+    }));
+    assert.equal(actions.some((action) => action.value === '3.89'), false, label);
+    assert.equal(actions.some((action) => action.selector?.includes(failedId)), false, label);
+    assert.ok(actions.some((action) => action.label?.startsWith('education_degree')),
+      `unrelated degree fill was suppressed for ${label}`);
   }
 });
 

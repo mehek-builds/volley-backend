@@ -1,5 +1,10 @@
 import type { Page } from 'playwright-core';
-import { MANAGED_SUBMIT_CHOOSER_POLICY, type ManagedBrowserAction, type ManagedBrowserResult } from './browserbase';
+import {
+  MANAGED_DISCOVERY_ROLE_CAPABILITY,
+  MANAGED_SUBMIT_CHOOSER_POLICY,
+  type ManagedBrowserAction,
+  type ManagedBrowserResult,
+} from './browserbase';
 import { describeRequiredBlocker, describeUnlabelledBlockers, humanFieldLabel } from './fieldLabel';
 import {
   classifyField,
@@ -1135,6 +1140,7 @@ export type ManagedOptionProbeTarget = {
 
 function managedOptionProbeTarget(
   field: { label: string; selector?: string; inputType?: string; role?: string | null; required?: boolean },
+  discoveryRoleCapability = false,
 ): ManagedOptionProbeTarget | undefined {
   const controlId = managedOptionProbeControlId(field);
   if (!controlId || MANAGED_OPTION_PROBE_SKIP_IDS.has(controlId)) return undefined;
@@ -1143,7 +1149,7 @@ function managedOptionProbeTarget(
   const kind = /^select(?:-one|-multiple)?$/.test(inputType) ? 'native' : 'custom';
   const expectsClosed = kind === 'native'
     || /^(?:combobox|listbox)$/.test(inputType)
-    || /^(?:combobox|listbox)$/.test(role)
+    || (discoveryRoleCapability && /^(?:combobox|listbox)$/.test(role))
     || MANAGED_FIXED_CLOSED_CONTROL_IDS.has(controlId);
   // Greenhouse's education row mixes React-selects with a plain text graduation-year input. The
   // shared `--0` suffix identifies a row, not a closed control. In particular, end-year--0 must be
@@ -1171,6 +1177,7 @@ export function managedOptionProbeTargets(
   portal: SupportedPortal,
   discovered: readonly { label: string; selector?: string; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
   alreadyRead: Record<string, string[]> = {},
+  discoveryRoleCapability = false,
 ): string[] {
   if (portalFamily(portal) !== 'greenhouse') return [];
   // A hardcoded education probe is only "already read" when it returned a usable list. Loading,
@@ -1183,7 +1190,7 @@ export function managedOptionProbeTargets(
   const optional: ManagedOptionProbeTarget[] = [];
   for (const field of discovered) {
     if (field.options && field.options.length > 0) continue;
-    const target = managedOptionProbeTarget(field);
+    const target = managedOptionProbeTarget(field, discoveryRoleCapability);
     if (!target || seen.has(target.controlId)) continue;
     seen.add(target.controlId);
     (target.required ? required : optional).push(target);
@@ -1195,11 +1202,12 @@ function detailedManagedOptionProbeTargets(
   portal: SupportedPortal,
   discovered: readonly { label: string; selector?: string; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
   alreadyRead: Record<string, string[]> = {},
+  discoveryRoleCapability = false,
 ): ManagedOptionProbeTarget[] {
-  const ids = managedOptionProbeTargets(portal, discovered, alreadyRead);
+  const ids = managedOptionProbeTargets(portal, discovered, alreadyRead, discoveryRoleCapability);
   const byId = new Map<string, ManagedOptionProbeTarget>();
   for (const field of discovered) {
-    const target = managedOptionProbeTarget(field);
+    const target = managedOptionProbeTarget(field, discoveryRoleCapability);
     if (target && !byId.has(target.controlId)) byId.set(target.controlId, target);
   }
   return ids.flatMap((id) => byId.get(id) ?? []);
@@ -1245,8 +1253,9 @@ export function buildManagedDiscoveredOptionProbeBatches(
   portal: SupportedPortal,
   discovered: readonly { label: string; selector?: string; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
   alreadyRead: Record<string, string[]> = {},
+  discoveryRoleCapability = false,
 ): ManagedBrowserAction[][] {
-  const targets = detailedManagedOptionProbeTargets(portal, discovered, alreadyRead)
+  const targets = detailedManagedOptionProbeTargets(portal, discovered, alreadyRead, discoveryRoleCapability)
     .slice(0, MANAGED_OPTION_PROBE_MAX_CONTROLS);
   const batches: ManagedBrowserAction[][] = [];
   let actions: ManagedBrowserAction[] = [];
@@ -1282,8 +1291,13 @@ export function buildManagedDiscoveredOptionProbeActions(
   portal: SupportedPortal,
   discovered: readonly { label: string; selector?: string; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
   alreadyRead: Record<string, string[]> = {},
+  discoveryRoleCapability = false,
 ): ManagedBrowserAction[] {
-  return buildManagedDiscoveredOptionProbeBatches(portal, discovered, alreadyRead)[0] ?? [];
+  return buildManagedDiscoveredOptionProbeBatches(portal, discovered, alreadyRead, discoveryRoleCapability)[0] ?? [];
+}
+
+export function managedResultSupportsDiscoveryRole(result: ManagedBrowserResult | null | undefined): boolean {
+  return result?.capabilities?.includes(MANAGED_DISCOVERY_ROLE_CAPABILITY) === true;
 }
 
 /**
@@ -1313,8 +1327,9 @@ export function managedOptionProbeAnalysis(
   alreadyRead: Record<string, string[]>,
   results: readonly (ManagedBrowserResult | null | undefined)[],
   batchFailures: readonly ManagedOptionProbeBatchFailure[] = [],
+  discoveryRoleCapability = false,
 ): { options: Record<string, string[]>; failures: ManagedOptionProbeFailure[]; failedIds: Set<string> } {
-  const targets = detailedManagedOptionProbeTargets(portal, discovered, alreadyRead);
+  const targets = detailedManagedOptionProbeTargets(portal, discovered, alreadyRead, discoveryRoleCapability);
   const options = { ...alreadyRead };
   const failures: ManagedOptionProbeFailure[] = [];
   const failedIds = new Set<string>();
@@ -1583,7 +1598,9 @@ function managedClosedFieldFamily(label: string): string | undefined {
   // questions such as "GPA requirement for scholarship", "degree comfortable onsite", and
   // "university recruiting event" contain the same nouns but are not asking for the applicant's
   // stored academic fact. Exact failed labels are still caught before this family mapping.
-  if (/^(?:(?:what is|please provide) )?(?:your )?(?:(?:overall|cumulative|current|undergraduate) )?(?:gpa|grade point average|grade average)(?: on a \d+(?: \d+)? scale)?$/.test(normalized)) return 'education-gpa';
+  const unrelatedAcademicPolicy = /\b(?:scholarship|requirement|minimum|required|eligibility|qualif(?:y|ication)|policy|program)\b/.test(normalized);
+  if (!unrelatedAcademicPolicy
+    && /^(?:(?:please )?(?:indicate|provide|enter|report|select|choose) )?(?:(?:what is) )?(?:your )?(?:(?:overall|cumulative|current|undergraduate|college) )?(?:gpa|grade point average|grade average)(?: (?:range|band))?(?:(?: out of| on a) \d+(?: \d+)?(?: scale)?)?(?: if applicable)?$/.test(normalized)) return 'education-gpa';
   if (/^(?:degree|education level|degree type|type of degree|highest level of education)$/.test(normalized)
     || /^(?:what|which) (?:is )?(?:your )?(?:current )?(?:degree|education level)(?: are you currently pursuing)?$/.test(normalized)
     || /^what (?:degree|education level) are you currently pursuing$/.test(normalized)) return 'education-degree';

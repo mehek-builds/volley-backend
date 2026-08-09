@@ -6,6 +6,8 @@ import { FINAL_SUBMIT_CHOOSER_POLICY, type FinalSubmitChooserPolicy } from './fi
 export type BrowserProvider = 'browserbase' | 'stratus' | 'stratus-managed';
 
 export const MANAGED_SUBMIT_CHOOSER_POLICY = FINAL_SUBMIT_CHOOSER_POLICY;
+/** Stratus result capability that proves discovered controls include their live DOM role. */
+export const MANAGED_DISCOVERY_ROLE_CAPABILITY = 'discovery-control-role-v1';
 
 export type ManagedBrowserAction = {
   type: 'click' | 'fill' | 'fillByLabelText' | 'upload' | 'waitForSelector' | 'press' | 'select' | 'extract' | 'discover' | 'confirmAndSubmit';
@@ -81,6 +83,8 @@ export type ManagedBrowserResult = {
   blockers?: string[];
   skipped?: string[];
   discovered?: ManagedDiscoveredQuestion[];
+  /** Additive runner features this exact result contract supports. Absence means unsupported. */
+  capabilities?: string[];
   extracted?: Array<{ selector: string; label?: string; value: string | null }>;
   continuationToken?: string;
   continuationExpiresAt?: string;

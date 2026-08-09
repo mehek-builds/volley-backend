@@ -58,6 +58,7 @@ import {
   managedOptionProbeControlId,
   managedUnreportedFillLabels,
   managedResultFieldOptions,
+  managedResultSupportsDiscoveryRole,
   CaptchaUnresolvedError,
   clickFinalSubmit,
   detectPortal,
@@ -1536,10 +1537,12 @@ async function prepareManaged(
    * closed twice so an async first read can warm the second. Whole controls are batched under the
    * provider's 120-action ceiling. Any missing, windowed, conflicting or failed closed-control read
    * is removed before resolution, so a blind alias is never sent in its place. */
+  const discoveryRoleCapability = managedResultSupportsDiscoveryRole(discoveryResult);
   const optionProbeBatches = buildManagedDiscoveredOptionProbeBatches(
     portal,
     discoveryResult?.discovered ?? [],
     discoveryFieldOptions,
+    discoveryRoleCapability,
   );
   const optionProbeResults = [];
   const optionProbeBatchFailures: Array<{ controlIds: string[]; reason: string }> = [];
@@ -1574,6 +1577,7 @@ async function prepareManaged(
     discoveryFieldOptions,
     [discoveryResult, ...optionProbeResults],
     optionProbeBatchFailures,
+    discoveryRoleCapability,
   );
   if (optionProbe.failures.length > 0) {
     discoveryFailures.push(

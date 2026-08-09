@@ -1396,6 +1396,9 @@ test('neither prepare path can call a form safe on the strength of a scan that f
    * to send a guessed alias into a closed employer control. */
   assert.equal(runner.match(/describeDiscoveryFailure\(error\)/g)?.length, 3);
   assert.match(runner, /closed-control option discovery failed:/);
+  assert.match(runner, /const discoveryRoleCapability = managedResultSupportsDiscoveryRole\(discoveryResult\)/);
+  assert.match(runner, /buildManagedDiscoveredOptionProbeBatches\([\s\S]{0,300}discoveryRoleCapability/);
+  assert.match(runner, /managedOptionProbeAnalysis\([\s\S]{0,500}discoveryRoleCapability/);
   const analysisIndex = runner.indexOf('managedOptionProbeAnalysis(');
   const filterIndex = runner.indexOf('.filter((field) =>', analysisIndex);
   const resolutionIndex = runner.indexOf('discoverAndResolveQuestions(', filterIndex);
