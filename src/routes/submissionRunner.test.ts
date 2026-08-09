@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import {
   attentionCategoriesForReasons,
   applicationContextForQuestionResolution,
@@ -1156,4 +1157,45 @@ test('a run that discovered nothing and a run that could not look are different 
 
   assert.equal(discoveryHonestyReasons('boom', ['A', 'B']).length, 2);
   assert.match(discoveryHonestyReasons(undefined, ['A', 'B'])[0]!, /^2 required fields have/);
+});
+
+/* NEITHER prepare path may throw the question scan's failure away.
+ *
+ * prepareManaged learned this on 2026-08-08, from a DRW packet whose discovery call was rejected
+ * with HTTP 400 before a browser opened: the run filled the fixed fields, recorded 27 separate
+ * "is required and is still empty" blockers, wrote zero question records, and reported no error.
+ * `.catch(() => null)` is what made a total failure of the scan look exactly like a form with no
+ * custom questions.
+ *
+ * prepareDirect kept the identical bug in `.catch(() => [])` for the live-Page scan, and the
+ * consequence there is worse: standing consent turns a `safe` preparation into a click inside the
+ * same call, so a swallowed scan failure could send a form whose questions were never read.
+ *
+ * Asserted against the SOURCE because neither path is reachable from a unit test - one needs a
+ * remote runner, the other a live browser session, a database and blob storage - and the pure
+ * pieces above pass whether or not anything calls them. What is being pinned is the wiring: both
+ * scans record their failure, both feed discoveryHonestyReasons, and on both paths the result
+ * reaches the applicant's attention list and gates `safe`. */
+test('neither prepare path can call a form safe on the strength of a scan that failed', () => {
+  const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+
+  // The two swallows, by their exact original text. This is the assertion that fails if either is
+  // ever restored, and it is the whole point of the test.
+  assert.doesNotMatch(runner, /discoverPageQuestions\(page\)\s*\.catch\(\(\) => \[\]\)/);
+  assert.doesNotMatch(runner, /buildManagedDiscoveryActions\([^)]*\)\)\s*\.catch\(\(\) => null\)/);
+
+  // Both scans record what went wrong rather than returning an empty result that says nothing.
+  assert.equal(runner.match(/discoveryFailures\.push\(message\)/g)?.length, 2);
+  assert.equal(
+    runner.match(/'Question discovery pass failed, so this run cannot see the questions this form asks'/g)?.length,
+    2,
+  );
+
+  // Both turn it into something the applicant reads...
+  assert.equal(runner.match(/discoveryHonestyReasons\(discoveryFailures\[0\]/g)?.length, 2);
+  assert.match(runner, /\.\.\.coverLetterAttention,\s*\.\.\.honestyReasons\b/);
+  // ...and neither can be called safe while it stands. The managed path names the failure directly;
+  // the direct path counts the same admission in with its other attention reasons.
+  assert.match(runner, /&& discoveryFailures\.length === 0/);
+  assert.match(runner, /attentionCount: discoveryAttention\.length \+ honestyReasons\.length/);
 });

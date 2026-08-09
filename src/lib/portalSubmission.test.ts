@@ -3663,6 +3663,88 @@ test('the discovery run never exceeds the runner action ceiling, on any portal',
   }
 });
 
+/* R-1xx. The FILL run fits inside the runner's ceiling too, on every portal and at any number of
+ * reviewed questions.
+ *
+ * The test above covers the discovery run, which is a fixed list. This one covers the list that
+ * grows per QUESTION, and only Greenhouse was ever trimmed against it. Measured on origin/main
+ * (02648ba), Ashby costs 14 actions per reviewed question - one scoped fill plus thirteen
+ * speculative selector guesses - so an eight-question posting built a 123-action list and every such
+ * run was answered with HTTP 400 TOO_MANY_ACTIONS before a browser opened:
+ *
+ *     questions     |  0    4    6    8   10   30
+ *     ashby submit  | 11   67   95  123  151  431
+ *     ashby prepare | 15   71   99  127  155  435
+ *
+ * stratus-browser-cloud PR #22 is what made that reachable: `discover` began reporting choice
+ * questions (radio, checkbox, select, Ashby pill groups) where it had reported only text-shaped
+ * inputs, so the reviewed-question count on a live Ashby packet went up sharply. Paylocity is worse
+ * still at 20 per question, because the wizard traversal repeats the fills once per step.
+ *
+ * The failure is silent on the discovery path - submissionRunner takes that run with
+ * `.catch(() => null)` - so a count is again the only thing that can catch its return. And the fix
+ * is a trim, never a higher MAX_ACTIONS: the last time a list was allowed to grow past the runner's
+ * ceiling it rejected every managed run for weeks with nobody seeing it. */
+test('the fill run never exceeds the runner action ceiling, on any portal at any question count', () => {
+  for (const questionCount of [0, 8, 30, 120]) {
+    const packet = andurilPacket({
+      city: 'Los Angeles',
+      country: 'United States',
+      linkedinUrl: 'https://linkedin.com/in/mehekmandal',
+      githubUrl: 'https://github.com/mehek',
+      portfolioUrl: 'https://mehek.dev',
+      questions: Array.from({ length: questionCount }, (_, index) => ({
+        question: `Screener question number ${index + 1}: do you have experience with distributed systems?`,
+        answer: index % 2 === 0 ? 'Yes' : 'No',
+      })),
+    });
+    for (const portal of EVERY_MANAGED_PORTAL) {
+      for (const submit of [false, true]) {
+        const actions = buildManagedPortalActions(portal, packet, submit);
+        assert.ok(
+          actions.length <= MANAGED_ACTION_LIMIT,
+          `${portal} ${submit ? 'submit' : 'prepare'} run with ${questionCount} questions is ${actions.length} actions, and the runner rejects anything over ${MANAGED_ACTION_LIMIT}`,
+        );
+      }
+    }
+  }
+});
+
+test('the budget is spent on repeat guesses, and the submit click is reserved out of it', () => {
+  /* WHAT the trim gives up, not just how much. A budget that keeps a question's ninth speculative
+     selector and drops another question's only attempt is under the ceiling and still wrong. */
+  const packet = andurilPacket({
+    questions: Array.from({ length: 30 }, (_, index) => ({
+      question: `Screener question number ${index + 1}: do you have experience with distributed systems?`,
+      answer: index % 2 === 0 ? 'Yes' : 'No',
+    })),
+  });
+  const actions = buildManagedPortalActions('ashby', packet, true);
+
+  // Every question keeps the attempt that actually works on Ashby: the scoped fillByLabelText the
+  // runner answers a pill group with. The thirteen guesses behind it are what paid for the trim.
+  for (let index = 0; index < 30; index += 1) {
+    const question = `Screener question number ${index + 1}:`;
+    assert.ok(
+      actions.some((action) => action.type === 'fillByLabelText' && action.label?.startsWith(`question:${question}`) === true),
+      `question ${index + 1} lost its only real attempt`,
+    );
+  }
+
+  // Degraded evenly rather than back to front. Attempt 1 of a chain comes off every question before
+  // attempt 0 comes off any of them, so no question is stripped bare while another keeps all nine.
+  const keptAttempts = (kind: string, attempt: number) =>
+    actions.filter((action) => action.label?.startsWith(`question_${kind}:${attempt}:`) === true).length;
+  for (const kind of ['text', 'select']) {
+    assert.equal(keptAttempts(kind, 0), 30, `every question keeps its first ${kind} guess`);
+    assert.ok(keptAttempts(kind, 1) < 30, `the trim is expected to have reached the second ${kind} guess`);
+  }
+
+  // And the submit click is inside the budget, not appended past it.
+  assert.equal(actions.at(-1)?.type, 'click');
+  assert.match(actions.at(-1)?.selector ?? '', /\[type="submit"\]/);
+});
+
 test('the trim takes fills, never the discover action or the reads it exists for', () => {
   // The packet that produced the 145-action list: every education and location alias applies.
   const actions = buildManagedDiscoveryActions('greenhouse', andurilPacket({

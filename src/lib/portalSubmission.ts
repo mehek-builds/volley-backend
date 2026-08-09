@@ -2331,6 +2331,85 @@ function truncateManagedActionsToBudget(actions: ManagedBrowserAction[], limit: 
   }
 }
 
+/**
+ * THE FAMILY-AGNOSTIC BUDGET TRIM, and the reason it had to stop being a Greenhouse-only concern.
+ *
+ * Only Greenhouse was ever trimmed, because only Greenhouse was ever close to the ceiling: its
+ * fixed alias fills cost ~116 actions before a single screener question is answered, so it hit
+ * MANAGED_ACTION_LIMIT on a packet with no questions at all. Every other family started small and
+ * grew per QUESTION instead, which looked safe for as long as nothing reported many questions.
+ *
+ * Measured on origin/main (02648ba) with a synthetic packet, Ashby submit list:
+ *
+ *     questions |  0    4    6    8   10   30
+ *     actions   | 11   67   95  123  151  431
+ *
+ * 14 actions per reviewed question - one scoped fill, four native-select guesses, nine text-input
+ * guesses - so eight questions is over the ceiling and the run is answered with HTTP 400
+ * TOO_MANY_ACTIONS before a browser opens. Lever, SmartRecruiters, Workable, JazzHR, Rippling,
+ * Breezy, BambooHR, Jobvite, iCIMS, Oracle Cloud and UltiPro all cost 5 per question and cross the
+ * same line further out; Paylocity costs 20, because its wizard traversal repeats the fills once per
+ * step, and crosses it at six.
+ *
+ * stratus-browser-cloud PR #22 is what turned that from a theoretical limit into a live one: the
+ * `discover` action now reports choice questions (radio, checkbox, select, and Ashby's pill groups)
+ * where it previously reported only text-shaped inputs, so the reviewed-question count on a real
+ * Ashby packet went up sharply. The Deepgram posting is exactly this shape.
+ *
+ * Raising MAX_ACTIONS is not the fix and must not become one. The runner's ceiling is a real
+ * protection, and the last time a list grew past it (discovery, 120 to 145) every managed run was
+ * rejected for weeks without anyone seeing it - submissionRunner takes the discovery run with
+ * `.catch(() => null)`, so an over-budget list is indistinguishable from a form with no questions.
+ *
+ * WHAT COMES OFF: repeat attempts at one control, highest attempt index first, across every
+ * question before any question loses its next-to-last attempt. A label of the form
+ * `<something>_select|_text|_checkbox|_combo...:<n>:<question>` is guess number <n> at a control
+ * this builder cannot see; at most one guess in a chain can ever match, so dropping the tail of the
+ * chain costs the question nothing. The primary attempt is labelled `question:<question>` with no
+ * index and is not matched here - on Ashby it is the fillByLabelText the runner's scoped choice
+ * handling actually presses the pill with, and it is the last thing that should be given up.
+ *
+ * Degrading by index rather than by question is the point. Removing from the tail one question at a
+ * time would strip the last questions of every fallback while the first kept all nine; every
+ * question losing its ninth guess first is the same saving spread evenly.
+ */
+const SPECULATIVE_ATTEMPT_LABEL_RE = /^[a-z0-9_]*_(?:select|text|checkbox|combo)[a-z0-9_]*:(\d+)(?::|$)/i;
+
+function speculativeAttemptIndex(action: ManagedBrowserAction): number | undefined {
+  if (isProtectedManagedAction(action)) return undefined;
+  const base = managedActionLabelBase(action);
+  const attempt = base ? SPECULATIVE_ATTEMPT_LABEL_RE.exec(base)?.[1] : undefined;
+  return attempt === undefined ? undefined : Number(attempt);
+}
+
+function trimSpeculativeManagedActionsToBudget(actions: ManagedBrowserAction[], limit: number) {
+  if (actions.length <= limit) return;
+  let highestAttempt = -1;
+  for (const action of actions) {
+    const attempt = speculativeAttemptIndex(action);
+    if (attempt !== undefined && attempt > highestAttempt) highestAttempt = attempt;
+  }
+  for (let attempt = highestAttempt; attempt >= 0 && actions.length > limit; attempt -= 1) {
+    while (actions.length > limit) {
+      let removableBase: string | undefined;
+      for (let index = actions.length - 1; index >= 0; index -= 1) {
+        if (speculativeAttemptIndex(actions[index]!) !== attempt) continue;
+        removableBase = managedActionLabelBase(actions[index]!);
+        break;
+      }
+      if (!removableBase) break;
+      // One label group at a time, everywhere it appears. Paylocity's traversal pushes the same
+      // labels once per wizard step, and a guess that is worth giving up on step one is worth
+      // giving up on all four.
+      const before = actions.length;
+      for (let index = actions.length - 1; index >= 0; index -= 1) {
+        if (managedActionLabelBase(actions[index]!) === removableBase) actions.splice(index, 1);
+      }
+      if (actions.length === before) break;
+    }
+  }
+}
+
 // ─── Workable (apply.workable.com) ────────────────────────────────────────────
 // Read off a live Suade posting, 2026-07-28 (apply.workable.com/suade/j/9C43981D17/apply). Plain
 // HTML, single step, stable `name` attributes - the simplest of the three added that day.
@@ -2887,6 +2966,7 @@ export function buildManagedDiscoveryActions(portal: SupportedPortal, packet: Su
    * losing them costs this pass nothing; isProtectedManagedAction keeps `discover`, the option
    * reads, the core-field extracts and the form preflight out of both trims' reach. */
   trimGreenhouseManagedActionsToBudget(actions, MANAGED_ACTION_LIMIT);
+  trimSpeculativeManagedActionsToBudget(actions, MANAGED_ACTION_LIMIT);
   if (actions.length > MANAGED_ACTION_LIMIT) truncateManagedActionsToBudget(actions, MANAGED_ACTION_LIMIT);
   return actions;
 }
@@ -3061,14 +3141,31 @@ export function buildManagedPortalActions(
   // was shown an empty attestation page as the evidence of what she was approving.
   if (submit && portalFamily(portal) === 'paylocity') pushPaylocityTraversal(actions, packet);
 
+  /* THE BUDGET. Applied to every family, not just Greenhouse - see
+   * trimSpeculativeManagedActionsToBudget for the measurement that made that necessary, and for why
+   * the answer is to trim here rather than to raise the runner's MAX_ACTIONS.
+   *
+   * Three passes, most discriminating first, each a no-op once the list is inside the budget:
+   *   1. the Greenhouse-specific group order, which knows which of that family's alias fills are
+   *      disposable and which are a required field's only attempt;
+   *   2. the generic one, which gives up repeat guesses at a control before the last guess at any
+   *      other, and is the whole of the trim on the other thirteen families;
+   *   3. the tail truncation, which is the blunt last resort and the only pass that can take a
+   *      primary fill. Reaching it means the packet has more questions than 120 actions can hold.
+   */
   const canAppendSubmit = submit && portalCanAutoSubmit(portal);
+  const familyActionLimit = portalFamily(portal) === 'greenhouse' && packetLooksAkuna(packet)
+    ? 100
+    : MANAGED_ACTION_LIMIT;
+  // One action held back for the submit click, which is appended below and is otherwise the action
+  // that puts an exactly-full list one over the ceiling.
+  const actionLimit = canAppendSubmit ? familyActionLimit - 1 : familyActionLimit;
   if (portalFamily(portal) === 'greenhouse') {
-    const greenhouseActionLimit = packetLooksAkuna(packet) ? 100 : MANAGED_ACTION_LIMIT;
-    const actionLimit = canAppendSubmit ? greenhouseActionLimit - 1 : greenhouseActionLimit;
     trimGreenhouseManagedActionsToBudget(actions, actionLimit);
-    if (actions.length > actionLimit) {
-      truncateManagedActionsToBudget(actions, actionLimit);
-    }
+  }
+  trimSpeculativeManagedActionsToBudget(actions, actionLimit);
+  if (actions.length > actionLimit) {
+    truncateManagedActionsToBudget(actions, actionLimit);
   }
 
   if (canAppendSubmit) {

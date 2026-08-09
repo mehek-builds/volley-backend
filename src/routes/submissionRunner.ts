@@ -1620,7 +1620,28 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
 
     // R-055: discover and resolve the posting's own custom questions before filling, so a
     // dashboard-only submission does not depend on the extension having run first.
-    const discovered = await discoverPageQuestions(page).catch(() => []);
+    /* `.catch(() => [])` was the whole error handling here, and it is the direct-Playwright twin of
+     * the bug prepareManaged carries a long comment about: an empty array is what this path gets
+     * from a form with no custom questions AND from a scan that threw, so the two are
+     * indistinguishable downstream. The run then fills the fixed fields, writes zero question
+     * records, and reports no error - and on this path the consequence is worse than on the managed
+     * one, because standing consent turns a `safe` preparation into a click inside the same call.
+     *
+     * A scan that did not run cannot be the evidence that a form is complete. Same three
+     * consequences as the managed path: it is logged as an error because it is a product defect
+     * first, it is said to the applicant in her own attention list, and it gates `safe`. */
+    // An array rather than a nullable local, for the same reason prepareManaged uses one: TypeScript
+    // does not narrow across a closure it cannot prove ran.
+    const discoveryFailures: string[] = [];
+    const discovered = await discoverPageQuestions(page).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      discoveryFailures.push(message);
+      fastify.log.error(
+        { applicationId: row.id, portal, error: message },
+        'Question discovery pass failed, so this run cannot see the questions this form asks',
+      );
+      return [];
+    });
     const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
     const resolutionCurrent = { ...current, questions: storedQuestions };
     const { questions: discoveredQuestions, attentionReasons: discoveryAttention } =
@@ -1671,11 +1692,17 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       blockers: result.blockers,
       discovered,
     }, packet);
+    // What the scan owes her when it did not run. The second argument is empty because this path
+    // does not measure required-and-empty blockers against the question list the way prepareManaged
+    // does; the admission that matters here is the first one, and it is the one this run can make.
+    const honestyReasons = discoveryHonestyReasons(discoveryFailures[0], []);
     // Same reasoning as the managed path above: the required-answer check moved off the run and on
-    // to the send, and this is the direct-Playwright path's send decision.
+    // to the send, and this is the direct-Playwright path's send decision. The failed scan is
+    // counted in with the attention reasons rather than given its own parameter, because that is
+    // exactly what it is: something the applicant has to be told before this packet is sent.
     const safe = directPreparationIsSafe({
       blockerCount: sanitizedBlockers.length + evidenceBlockers.length,
-      attentionCount: discoveryAttention.length,
+      attentionCount: discoveryAttention.length + honestyReasons.length,
       unansweredRequiredCount: blankRequiredQuestionLabels(mergedQuestions).length,
       verificationStatus: verification.status,
     });
@@ -1702,7 +1729,8 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       // model text. Sending them through it would not have caught the cover-letter leak either,
       // since that message was prose and prose passes straight through.
       attention_reason:
-        [...sanitizedBlockers, ...discoveryAttention, ...evidenceBlockers, ...coverLetterAttention].join('\n') || undefined,
+        [...sanitizedBlockers, ...discoveryAttention, ...evidenceBlockers, ...coverLetterAttention, ...honestyReasons]
+          .join('\n') || undefined,
       // The only path that OBSERVES a challenge on a board nobody had typed as gated, which makes it
       // the one that matters most. Without it the stall is written only for JazzHR and BambooHR,
       // families already known to gate, so the instrumentation could confirm what was already
