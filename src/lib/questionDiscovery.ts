@@ -1834,6 +1834,13 @@ const NUMBER_TO_MONTH: Record<string, string> = {
   '12': 'December',
 };
 
+/* The two shapes in which a stored graduation date STATES a month. Module constants so the reader
+ * that needs the month on its own (statedGraduationMonth) and the one that needs a whole ISO day
+ * (graduationDateAnswer) cannot drift apart. Only ever used through matchAll, which clones the
+ * regex, so the /g flag carries no lastIndex from one call to the next. */
+const GRADUATION_ISO_MONTH_RE = /\b((?:19|20)\d{2})-(\d{2})(?:-\d{2})?\b/g;
+const GRADUATION_MONTH_YEAR_RE = /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b[^0-9]{0,20}\b((?:19|20)\d{2})\b/gi;
+
 export function graduationDateAnswer(
   gradDate: string | undefined,
   gradYear: number | undefined,
@@ -1843,10 +1850,10 @@ export function graduationDateAnswer(
   if (!text) return null;
   if (inputType !== 'date') return text;
   const preferredYear = gradYear && gradYear > 0 ? String(gradYear) : undefined;
-  const isoMatches = [...text.matchAll(/\b((?:19|20)\d{2})-(\d{2})(?:-\d{2})?\b/g)];
+  const isoMatches = [...text.matchAll(GRADUATION_ISO_MONTH_RE)];
   const iso = isoMatches.find((match) => match[1] === preferredYear) ?? isoMatches.at(-1);
   if (iso) return `${iso[1]}-${iso[2]}-01`;
-  const monthYearMatches = [...text.matchAll(/\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b[^0-9]{0,20}\b((?:19|20)\d{2})\b/gi)];
+  const monthYearMatches = [...text.matchAll(GRADUATION_MONTH_YEAR_RE)];
   const monthYear = monthYearMatches.find((match) => match[2] === preferredYear) ?? monthYearMatches.at(-1);
   if (monthYear) return `${monthYear[2]}-${MONTH_TO_NUMBER[monthYear[1].toLowerCase()]}-01`;
   const year = preferredYear ?? text.match(/\b(?:19|20)\d{2}\b/g)?.at(-1) ?? '';
@@ -1880,6 +1887,71 @@ function graduationMonthAnswer(gradDate: string | undefined, gradYear: number | 
 function graduationYearAnswer(gradDate: string | undefined, gradYear: number | undefined): string | null {
   if (gradYear && gradYear > 0) return String(gradYear);
   return graduationDateAnswer(gradDate, gradYear, 'date')?.match(/^(\d{4})-/)?.[1] ?? null;
+}
+
+/**
+ * The month the stored graduation date actually STATES, with the year it states it against, or null.
+ *
+ * Deliberately NOT read off graduationDateAnswer. That function ends with
+ * `const month = monthToken ? MONTH_TO_NUMBER[monthToken] : '05'`, so a stored "2028" comes back as
+ * 2028-05-01: a May that nobody put on file. That default is fine where it lives - a native date
+ * input has to be handed a complete day or it takes nothing - but it must never become part of an
+ * ANSWER, because an answer is a claim. When only a year is stored, the year is the whole truth and
+ * this returns null.
+ */
+function statedGraduationMonth(
+  gradDate: string | undefined,
+  gradYear: number | undefined,
+): { month: string; year: string } | null {
+  const text = gradDate?.trim();
+  if (!text) return null;
+  const preferredYear = gradYear && gradYear > 0 ? String(gradYear) : undefined;
+  const isoMatches = [...text.matchAll(GRADUATION_ISO_MONTH_RE)];
+  const iso = isoMatches.find((match) => match[1] === preferredYear) ?? isoMatches.at(-1);
+  if (iso) return NUMBER_TO_MONTH[iso[2]] ? { month: iso[2], year: iso[1] } : null;
+  const monthYearMatches = [...text.matchAll(GRADUATION_MONTH_YEAR_RE)];
+  const monthYear = monthYearMatches.find((match) => match[2] === preferredYear) ?? monthYearMatches.at(-1);
+  if (!monthYear) return null;
+  const month = MONTH_TO_NUMBER[monthYear[1].toLowerCase()];
+  return month ? { month, year: monthYear[2] } : null;
+}
+
+/**
+ * What goes into a control that asks for a graduation YEAR.
+ *
+ * WHY THIS IS NOT JUST THE YEAR (measured on prod packet 59fb48ae, Deepgram on Ashby, 2026-08-09).
+ * "Expected Graduation Year" there is a react-datepicker at DAY precision. Handed a bare "2028" the
+ * runner deliberately fills nothing, because tabbing off a typed year commits 01/01/2028 - four
+ * months before a May graduation, and a date an employer reads as fact. Handed "May 2028" the same
+ * control commits 05/01/2028 and the required-and-empty blocker clears. The answer string is the
+ * only channel the backend has to that control: the managed provider reports inputType "text" for
+ * every discovered control (see the header of profileFieldResolution.ts), so there is no shape here
+ * to branch on and no honest way to send one string to a datepicker and another to a text box.
+ *
+ * The extra precision is truthful everywhere else it lands. "May 2028" answers "what year do you
+ * graduate" correctly, with a month the profile really holds; it is never a guess, because
+ * statedGraduationMonth refuses to invent one. And a closed list is unaffected: profileFieldCandidates
+ * keeps the bare year on the graduation_year ladder, and chooseClosestOption's exact-match pass runs
+ * over every candidate before any inexact stage, so a select offering "2028" still selects "2028".
+ *
+ * The one narrowing is a control that cannot physically hold a month name. It fires only where the
+ * input type is REAL - the direct Playwright fill reads it off the element - and never on the
+ * managed path, where every type is reported as "text" and this rule would be a lie either way.
+ */
+export function graduationYearFieldAnswer(
+  gradDate: string | undefined,
+  gradYear: number | undefined,
+  inputType: string | undefined,
+): string | null {
+  const year = graduationYearAnswer(gradDate, gradYear);
+  if (!year) return null;
+  if (/^(?:number|tel)$/i.test(inputType ?? '')) return year;
+  const stated = statedGraduationMonth(gradDate, gradYear);
+  // A stored date that names a DIFFERENT year than grad_year is two facts disagreeing, and the
+  // month belongs to the one this answer is not reporting. The year alone is what both agree on.
+  if (!stated || stated.year !== year) return year;
+  const month = NUMBER_TO_MONTH[stated.month];
+  return month ? `${month} ${year}` : year;
 }
 
 /**
@@ -3020,7 +3092,7 @@ export function resolveKnownAnswer(
       return value ? { value } : null;
     }
     case 'graduation_year': {
-      const value = graduationYearAnswer(ap.grad_date, ap.grad_year);
+      const value = graduationYearFieldAnswer(ap.grad_date, ap.grad_year, inputType);
       return value ? { value } : null;
     }
     case 'gpa':
