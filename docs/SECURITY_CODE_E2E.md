@@ -91,7 +91,22 @@ export QA_PORTAL_PUBLIC_BASE='https://ASSIGNED-TUNNEL.example'
 export LITOS_TEST_PORTAL_PUBLIC_ORIGIN="$QA_PORTAL_PUBLIC_BASE"
 ```
 
-Start the backend:
+Seed the exact controlled receiving proof before the backend starts:
+
+```bash
+QA_API_BASE=http://127.0.0.1:3301 \
+QA_WEBSITE_BASE=http://127.0.0.1:3300 \
+QA_CONTROLLED_PORTAL_PUBLIC=1 \
+QA_CONTROLLED_DATABASE=1 \
+npm run qa:security-code:prepare
+```
+
+This ordering is part of the test contract. The backend warms application-email deliverability at
+startup, and a proof inserted after startup would leave its fail-closed cached answer unchanged for
+the undeliverable TTL. The trial verifies the exact preseeded row and never clears or bypasses the
+production cache.
+
+Only after preparation succeeds, start the backend:
 
 ```bash
 PORT=3301 npm run dev

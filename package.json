@@ -90,6 +90,8 @@
     "verify:classification": "tsx scripts/verify-classification.mts",
     "trial:submit-control": "tsx scripts/trial-submit-control.mts",
     "trial:portal-shapes": "tsx scripts/trial-portal-shapes.mts",
+    "qa:security-code:prepare": "node scripts/prepare-qa-security-code-proof.mjs",
+    "qa:guest-submissions:test": "node --import tsx --test scripts/qa-guest-submissions.test.mjs",
     "deploy:prod": "bash scripts/deploy-prod.sh"
   }
 }

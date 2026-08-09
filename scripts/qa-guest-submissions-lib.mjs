@@ -2,6 +2,71 @@ import { createHash, createHmac } from 'node:crypto';
 
 export const CONTROLLED_PORTAL_BINDING_PARAM = 'litos_qa_binding';
 
+export const CONTROLLED_QA_JD = `Software Engineering Intern
+
+Responsibilities:
+- Build TypeScript workflows that automate internal application review steps
+- Test controlled portal submissions across browser and API checkpoints`;
+
+export const CONTROLLED_QA_LEAD_EVIDENCE =
+  'Built TypeScript workflows that automated internal application review steps.';
+
+export function controlledQaPacketSpec({ run, email, portalUrl, alias, forwardTo, now }) {
+  const experience = [{
+    type: 'job',
+    org: 'Northwind Labs',
+    title: 'Software Engineering Intern',
+    date_range: 'Summer 2026',
+    bullets: [
+      CONTROLLED_QA_LEAD_EVIDENCE,
+      'Added dashboard states that surfaced missing applicant inputs before submit.',
+      'Tested controlled portal submissions across browser and API checkpoints.',
+    ],
+  }];
+  const spec = {
+    school: 'Litos Test University',
+    degree: 'Computer Science',
+    grad_date: '2027',
+    coursework: '',
+    experience,
+    skills: ['TypeScript'],
+    lead_alignment: {
+      entry_org: experience[0].org,
+      requirement: 'Build TypeScript workflows that automate internal application review steps',
+      evidence: CONTROLLED_QA_LEAD_EVIDENCE,
+      jd_hash: createHash('sha256').update(CONTROLLED_QA_JD).digest('hex').slice(0, 16),
+    },
+    _contact: { full_name: `Guest Tester ${run}`, email },
+    _review: {
+      jd_text: CONTROLLED_QA_JD,
+      role: 'Software Engineering Intern',
+      portal_url: portalUrl,
+      ats_name: 'controlled_test',
+      status: 'ready_to_submit',
+      edited_terms: [],
+      questions: [],
+      skipped_reasons: [],
+      updated_at: now,
+    },
+  };
+  if (!alias) return spec;
+  return {
+    ...spec,
+    _applicant_email: {
+      address: alias,
+      source: 'litos_alias',
+      reason: 'deliverable',
+      tracked: true,
+      decided_at: now,
+    },
+    _application_email: {
+      alias,
+      forwards_to: forwardTo,
+      mode: 'litos_application_alias',
+    },
+  };
+}
+
 export function managedApplicationAlias({ aliasSecret, domain, userId, applicationId }) {
   if (!aliasSecret?.trim()) throw new Error('LITOS_APPLICATION_EMAIL_ALIAS_SECRET is required');
   if (!domain?.trim()) throw new Error('LITOS_RESEND_MANAGED_RECEIVING_DOMAIN is required');
@@ -154,6 +219,21 @@ export function controlledManagedReceivingProof({
     proof_version: 2,
     domain: domain.toLowerCase(),
   };
+}
+
+export function assertControlledManagedReceivingProofRow(row, expected, now = new Date()) {
+  if (!row
+    || row.provider_message_hash !== expected.provider_message_hash
+    || row.route_fingerprint !== expected.route_fingerprint
+    || row.proof_version !== expected.proof_version
+    || row.domain !== expected.domain) {
+    throw new Error('The controlled managed receiving proof was not seeded before backend startup');
+  }
+  const verifiedAt = new Date(row.verified_at);
+  const age = now.getTime() - verifiedAt.getTime();
+  if (!Number.isFinite(age) || age < 0 || age > 7 * 24 * 60 * 60 * 1000) {
+    throw new Error('The controlled managed receiving proof is not current');
+  }
 }
 
 export function assertRemoteManagedRunner({
