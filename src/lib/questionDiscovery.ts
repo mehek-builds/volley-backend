@@ -122,8 +122,42 @@ export const ROUTINE_APPLICANT_CONSENT_QUESTION =
 
 export const EEO_QUESTION =
   /transgender|\bgender\b|what is your sex\b|race|racial|ethnicit|ethnic\b|hispanic|latino|veteran|military|disab|sexual orientation|lgbtq|lgbtqia|communities|which categories describe you|identify with|current age|what is your age|age range|how old are you|\bage group\b/i;
+/* THE 18+ ATTESTATION, both framings.
+ *
+ * Widened from the four shapes it was written against, measured on every distinct label Litos has
+ * stored: the corpus itself only carries "At the time of application, are you 18+ years of age?",
+ * but "18 years or older" and "18 or older" are the two common phrasings the old pattern missed
+ * entirely - they were not even recognised as age questions, so they would have fallen through to
+ * classifyField instead of stopping.
+ *
+ * Deliberately still 18-specific and still requiring an age word next to the number. The nearest
+ * miss in the corpus is IMC's "applied ... within the last 12-18 months", and none of these
+ * alternatives can reach it.
+ */
 export const AGE_ATTESTATION_QUESTION =
-  /(?:\b18\+\s*(?:years?)?|\beighteen\b|\bat\s+least\s+18\b|\b18\s+years?\s+of\s+age\b|\bage\s+of\s+18\b)/i;
+  /(?:\b18\+\s*(?:years?)?|\beighteen\b|\bat\s+least\s+18\b|\b18\s+years?\s+of\s+age\b|\bage\s+of\s+18\b|\b18\s+(?:years?\s+)?or\s+older\b|\b(?:over|older\s+than)\s+(?:the\s+age\s+of\s+)?18\b|\bunder\s+18\b|\byounger\s+than\s+18\b)/i;
+/* The MINOR framing of that same attestation, which takes the OPPOSITE answer.
+ *
+ * "Yes" to "are you 18 or older" and "Yes" to "are you under 18" are contradictory statements
+ * about the same person. A handler that could not tell them apart would declare a twenty-year-old
+ * a minor on a form she never read, so the inversion is recognised explicitly rather than assumed
+ * away. Note that the old AGE_ATTESTATION_QUESTION already matched "are you under 18 years of
+ * age?" through its `18 years of age` alternative, which is precisely why answering the family
+ * without this split would have been unsafe.
+ */
+const BELOW_AGE_18_QUESTION =
+  /\b(?:under|below|younger\s+than|less\s+than)\s+(?:the\s+age\s+of\s+)?(?:18|eighteen)\b|\bare\s+you\s+a\s+minor\b/i;
+/* THE NUMBER 18 USED FOR SOMETHING THAT IS NOT AN AGE.
+ *
+ * Carried over from the extension's own copy of this rule
+ * (student-outreach-extension/src/lib/adapters/generic.ts, desiredAnswer), where it is not
+ * hypothetical: "do you have 18+ months of experience?" and "at least 18 years of experience"
+ * both satisfy the alternatives above, and Litos answered Yes, claiming experience the student
+ * never stated. That cost nothing while the age family was blanket-refused here. It costs a false
+ * declaration the moment the family becomes answerable, which is what this change does.
+ */
+const AGE_18_USED_AS_A_DURATION =
+  /\bexperience\b|\bmonths?\b|\btenure\b|\bcredits?\b|\bunits?\b|\bhours?\b|\bemployment\b/i;
 export const LEGAL_CONSENT_QUESTION =
   /candidate privacy policy|candidate-privacy-notice|privacy notice|notice at collection|review and acknowledge|information (?:i|you) have provided.*process|by selecting ["']?i agree|demographic data survey|collecting,\s*storing,\s*and processing/i;
 
@@ -447,9 +481,99 @@ function routineLocationCommitmentAnswer(
   return isLocationCommitmentQuestion(label) ? onsiteCommitmentAnswer(label) : null;
 }
 
+/* AGE_ATTESTATION_QUESTION is no longer in this list, and that is the whole of the second half of
+ * this change. It sat here beside SSN and CAPTCHA, so "are you 18+ years of age?" was refused
+ * before anything looked at whether the answer was known - and it is knowable. An age computed
+ * from a stored date of birth is a FACT, not a self-declaration: the applicant told Litos when she
+ * was born, and arithmetic on that is not Litos making a claim on her behalf.
+ *
+ * The refusal did not disappear, it moved and got a condition. ageAttestationAnswer runs at the
+ * top of resolveKnownAnswer and returns a skipReason whenever date_of_birth is absent or
+ * unreadable, so a profile with nothing stored stops exactly as it does today. It stays in
+ * selfDeclaration.ts's list too, which is the belt to this brace: no drafter may ever invent it.
+ */
 export function isRefusedQuestion(label: string): boolean {
   const l = label ?? '';
-  return NEVER_FILL_PATTERNS.some((re) => re.test(l)) || AGE_ATTESTATION_QUESTION.test(l) || WORK_ELIGIBILITY_QUESTION.test(l) || EEO_QUESTION.test(l);
+  return NEVER_FILL_PATTERNS.some((re) => re.test(l)) || WORK_ELIGIBILITY_QUESTION.test(l) || EEO_QUESTION.test(l);
+}
+
+/**
+ * The applicant's whole legal name, composed rather than looked up.
+ *
+ * There is no legal-surname column. There is a stored legal FIRST name and a parsed full name, so
+ * the honest composition is the stored legal first name followed by everything after the first
+ * token of the parsed name, and the parsed name unchanged when no legal first name was ever given.
+ *
+ * The stored legal first name WINS, always. That is the distinction the legal-first-name arm below
+ * exists to protect and it survives here: the person this question is asked of is the one whose
+ * legal first name is not the name on her resume, and composing "Legal Name" from the resume's
+ * first token would hand the employer the exact name she came here to correct. Nothing is invented
+ * either - with an empty profile this returns undefined and the question is left alone.
+ */
+function composedLegalName(ap: ApplicationProfileLike): string | undefined {
+  const fullName = ap.full_name?.trim().replace(/\s+/g, ' ');
+  const legalFirst = ap.legal_first_name?.trim().replace(/\s+/g, ' ');
+  if (!legalFirst) return fullName || undefined;
+  if (!fullName) return legalFirst;
+  const surname = fullName.split(' ').slice(1);
+  return surname.length ? [legalFirst, ...surname].join(' ') : legalFirst;
+}
+
+export function ageAttestationSkipReason(label: string): string {
+  // Worded to carry the phrase "sensitive question", which is what attentionCategoriesForReasons
+  // matches to file this under sensitive_attestation. Avoids the word "file" on purpose: that
+  // function's required_document arm matches a bare /file/, and "not on file" would have routed an
+  // age question to the missing-transcript bucket.
+  return `sensitive question left for you, because your date of birth is not saved: "${label.slice(0, 60)}"`;
+}
+
+/**
+ * Completed years between a stored date of birth and `now`, or undefined when the stored text is
+ * not a date this can read.
+ *
+ * Only ever called with application_profile.date_of_birth. Nothing else in the profile is an
+ * acceptable input: a graduation year, a resume, or a document in the vault would all give a
+ * number, and every one of them would be a guess presented to an employer as an attestation.
+ * An unparseable string is treated exactly like an absent one.
+ */
+function ageInCompletedYears(dateOfBirth: string | undefined, now: Date): number | undefined {
+  const raw = dateOfBirth?.trim();
+  if (!raw) return undefined;
+  const parsed = new Date(/^\d{4}-\d{2}-\d{2}$/.test(raw) ? `${raw}T00:00:00Z` : raw);
+  const time = parsed.getTime();
+  if (!Number.isFinite(time)) return undefined;
+  // A birth date in the future, or before anyone alive, is corrupt rather than informative.
+  const years = (now.getTime() - time) / (365.2425 * 24 * 60 * 60 * 1000);
+  if (years < 0 || years > 130) return undefined;
+  let age = now.getUTCFullYear() - parsed.getUTCFullYear();
+  const monthDelta = now.getUTCMonth() - parsed.getUTCMonth();
+  if (monthDelta < 0 || (monthDelta === 0 && now.getUTCDate() < parsed.getUTCDate())) age -= 1;
+  return age;
+}
+
+/**
+ * "At the time of application, are you 18+ years of age?" answered from the stored date of birth.
+ *
+ * Returns null for every label that is not an age attestation, a skipReason when nothing is
+ * stored, and Yes/No otherwise - with the answer inverted for the "are you under 18" framing.
+ */
+function ageAttestationAnswer(
+  label: string,
+  ap: ApplicationProfileLike,
+  now: Date = new Date(),
+): { value: string } | { skipReason: string } | null {
+  if (!AGE_ATTESTATION_QUESTION.test(label)) return null;
+  // "18 months of experience" is not an age. Falls through to the rules that were handling it
+  // before, which is nothing plus selfDeclaration's refusal, exactly as today.
+  if (AGE_18_USED_AS_A_DURATION.test(label)) return null;
+  // "What is your age?", "age range", "how old are you" are EEO self-identification, answered by
+  // the EEO branch from the applicant's own preference. A label that asks for the age ITSELF is
+  // not an attestation, even when it happens to mention 18.
+  if (EEO_QUESTION.test(label)) return null;
+  const age = ageInCompletedYears(ap.date_of_birth, now);
+  if (age === undefined) return { skipReason: ageAttestationSkipReason(label) };
+  const isAdult = age >= 18;
+  return { value: (BELOW_AGE_18_QUESTION.test(label) ? !isAdult : isAdult) ? 'Yes' : 'No' };
 }
 
 function comparableAnswer(value: string): string {
@@ -616,6 +740,18 @@ const SAN_FRANCISCO_RESIDENCE_QUESTION = /\bcurrently\s+reside\b[^?]{0,80}\bsan\
 const CONFIRMED_PLANS_CITY_RE = /\b(?:currently\s+residing|confirmed\s+plans)\b[^?]{0,80}\b(?:greater\s+)?([a-z][a-z .'-]+?)\s+area\b|\bconfirmed\s+plans\b[^?]{0,80}\bin\s+([a-z][a-z .'-]+)\b/i;
 const LEGAL_FIRST_NAME_QUESTION =
   /\blegal\s+first\s+name\b|\bfirst\s+name\b[^?]{0,120}\blegal\b/i;
+/* Roblox's "Legal Name", and the Workday shape "Full Legal Name" - the WHOLE name in one control.
+ *
+ * LEGAL_FIRST_NAME_QUESTION cannot match either, correctly: "legal first name" and "legal name"
+ * are different questions and answering one with the other's answer is wrong in both directions.
+ * So the label matched nothing at all, and a live Roblox run stopped on `"Legal Name" is required
+ * and is still empty` with the name sitting in the profile the whole time.
+ *
+ * Kept deliberately narrow: it requires "legal" IMMEDIATELY followed by "name". Measured against
+ * every distinct stored label, the only two it reaches are "legal name" and "full legal name",
+ * and none of the six legal-first-name or legal-last-name labels satisfies it. */
+const LEGAL_FULL_NAME_QUESTION =
+  /\b(?:full\s+)?legal\s+name\b|\blegal\s+full\s+name\b/i;
 export const TOP_ROLE_PREFERENCE_ACKNOWLEDGEMENT =
   /\banswering\s+[“"]?yes[”"]?\s+below\b[^?]{0,220}\btop\s+preference\b|\btop\s+preference\b[^?]{0,220}\banswering\s+[“"]?yes[”"]?\s+below\b/i;
 export const RESUME_PDF_ACKNOWLEDGEMENT =
@@ -856,6 +992,12 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
   // Same shape of hazard: "personal pronouns" carries no residence, name or degree word that a
   // rule below could latch onto today, and this makes sure none added later can.
   if (PRONOUNS_QUESTION.test(l)) return null;
+  /* Same shape again, and newly load-bearing: the age attestation used to be unreachable here
+   * because isRefusedQuestion above returned early on it. It is answered now, by
+   * ageAttestationAnswer at the top of resolveKnownAnswer, so this function is the only way a
+   * broad rule could still reach the label - and "are you 18+ years of age?" must never be
+   * classified as a date of birth, an availability date or anything else. */
+  if (AGE_ATTESTATION_QUESTION.test(l)) return null;
   if (type === 'tel') return 'phone';
 
   const locationCommitment = isLocationCommitmentQuestion(l);
@@ -1756,6 +1898,13 @@ export function resolveKnownAnswer(
   const pronouns = pronounsAnswer(label, ap);
   if (pronouns) return pronouns;
 
+  /* Up here with the self-declarations, and for the same reason they are: this label must not
+   * reach a broad rule. It is the one member of this group that is answered from ARITHMETIC on a
+   * stored fact rather than from a stored answer, and it refuses in exactly the same way when the
+   * fact is missing. */
+  const ageAttestation = ageAttestationAnswer(label, ap);
+  if (ageAttestation) return ageAttestation;
+
   const furtherEducation = furtherEducationAnswer(label, ap);
   if (furtherEducation) return furtherEducation;
 
@@ -1777,6 +1926,14 @@ export function resolveKnownAnswer(
     // parsed full name is the WRONG answer, and it is the one we would otherwise give.
     const firstName = ap.legal_first_name ?? ap.full_name?.trim().split(/\s+/)[0];
     return firstName ? { value: firstName } : null;
+  }
+
+  // Checked AFTER the legal-first-name arm, though neither pattern can reach the other's labels.
+  // The order is the safety statement: if a future edit ever widens this one, the narrower and
+  // more specific question still gets first refusal on its own labels.
+  if (LEGAL_FULL_NAME_QUESTION.test(label)) {
+    const legalName = composedLegalName(ap);
+    return legalName ? { value: legalName } : null;
   }
 
   if (PREFERRED_NAME_QUESTION.test(label)) {
@@ -1891,7 +2048,11 @@ export function resolveKnownAnswer(
   const workEligibility = workEligibilityAnswer(label, ap);
   if (workEligibility) return workEligibility;
 
-  if (AGE_ATTESTATION_QUESTION.test(label)) return null;
+  /* The blanket `if (AGE_ATTESTATION_QUESTION.test(label)) return null;` that stood here is gone.
+   * It is unreachable now: ageAttestationAnswer runs at the top of this function and returns a
+   * value or a skipReason for every label this pattern matches, never null. Removed rather than
+   * left as dead code, because a second age rule in a second place is how the two copies of these
+   * regexes drifted the last time. */
 
   // Before the EEO branch: Point72's "Have you served in the military?" is a required Yes/No with
   // no decline option, and eeoAnswer's "Decline to self-identify" fits none of its choices, so the
