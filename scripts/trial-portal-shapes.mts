@@ -394,6 +394,60 @@ const CASES: Case[] = [
       };
     },
   },
+  {
+    id: 'eeo-radio-groups',
+    defect: '12. two Ashby EEO radio groups under one preamble',
+    engine: 'managed',
+    async run(ctx) {
+      /* Skydio packet 13bccb2d-d726-4c47-80bc-e8090ae1463e. Two runs, because the two failures this
+         shape carries are opposite and a case that only checked one would pass on the other.
+
+         RUN A is the production packet: an answer for each group, and the two groups share a
+         "Decline to self-identify" option. Measured against the live Skydio form on 2026-08-09 with
+         the runner at 41d3095, the race answer set the GENDER control and race was left blank, so
+         the applicant's stated gender was silently replaced by a decline she did not give. Both
+         halves are checked here: each group holds its OWN answer, and neither holds anything else.
+
+         RUN B is the qualified-option gap, kept measured rather than hidden. The stored answer is
+         "Asian" and the only option that could carry it reads "Asian (Not Hispanic or Latino)".
+         Neither the resolver's containment rule nor the runner's optionMatches accepts the extra
+         words, so nothing can be selected. That is an OPEN GAP and the assertion here is only the
+         part that is not negotiable: an unmade choice must not be claimed as filled, and must not
+         be quietly redirected onto the gender group next door. */
+      const runA = await ctx.managed(
+        'eeo-radio-groups',
+        eeoActions([['Gender', 'Female'], ['Race', 'Decline to self-identify']]),
+        [['gender', 'data-litos-qa-eeo-gender'], ['race', 'data-litos-qa-eeo-race']],
+        { board: 'ashby' },
+      );
+      const genderHeld = runA.state.gender ?? '';
+      const raceHeld = runA.state.race ?? '';
+      const claimed = (run: ManagedRun, question: string) =>
+        run.filledFields.includes(`question:${question}`);
+      const placed = genderHeld === 'Female' && raceHeld === 'Decline to self-identify';
+      const reported = claimed(runA, 'Gender') && claimed(runA, 'Race');
+
+      const runB = await ctx.managed(
+        'eeo-radio-groups',
+        eeoActions([['Race', 'Asian']]),
+        [['gender', 'data-litos-qa-eeo-gender'], ['race', 'data-litos-qa-eeo-race']],
+        { board: 'ashby' },
+      );
+      const gapHonest = !claimed(runB, 'Race') && !runB.state.race && !runB.state.gender;
+
+      return {
+        pass: placed && reported && gapHonest,
+        detail:
+          `gender group holds ${JSON.stringify(genderHeld)} (wanted "Female"); `
+          + `race group holds ${JSON.stringify(raceHeld)} (wanted "Decline to self-identify")`
+          + `${genderHeld === 'Decline to self-identify' ? ' (HER GENDER ANSWER WAS REPLACED BY THE RACE ANSWER)' : ''}; `
+          + `filled=${JSON.stringify(runA.filledFields)} skipped=${JSON.stringify(runA.skipped)}; `
+          + `open gap, stored "Asian" against "Asian (Not Hispanic or Latino)": race holds `
+          + `${JSON.stringify(runB.state.race)}, gender holds ${JSON.stringify(runB.state.gender)}, `
+          + `claimed filled: ${claimed(runB, 'Race')}, said: ${JSON.stringify(runB.skipped)}`,
+      };
+    },
+  },
 ];
 
 /* ─── action lists, taken from the real builder rather than typed here ───────────────────────── */
@@ -419,6 +473,31 @@ const schoolActions = (school: string) =>
   actionsMatching('education_school_combo', packetFor({ school }));
 const graduationYearActions = (year: string) =>
   actionsMatching('education_end_year_field', packetFor({ graduationYear: year }));
+
+/* THE EEO QUESTIONS, THROUGH THE ASHBY BUILDER.
+ *
+ * `controlled_ashby` rather than `controlled_test`, because portalFamily maps controlled_test to
+ * greenhouse and the greenhouse arm answers a demographic question through its react-select ladder -
+ * a control this shape does not have and Ashby does not render. The Ashby arm emits exactly what
+ * production emitted for packet 13bccb2d: one `fillByLabelText` per question, labelled
+ * `question:<the question>`, which is the action whose failure the packet reported.
+ *
+ * Filtered to those fills alone. The builder also fans out a `select` and nine `fill` alternatives
+ * per question at selectors this fixture deliberately does not have; they are optional no-ops that
+ * would put forty actions on a page whose defect needs two, and MANAGED_ACTION_LIMIT would then be
+ * closer to the thing under test than the radio group is.
+ */
+function eeoActions(pairs: Array<[question: string, answer: string]>): ManagedBrowserAction[] {
+  const packet = packetFor({ questions: pairs.map(([question, answer]) => ({ question, answer })) });
+  const all = buildManagedPortalActions('controlled_ashby', packet);
+  const picked = all.filter((action) =>
+    action.type === 'fillByLabelText'
+    && pairs.some(([question]) => action.label === `question:${question}`));
+  if (picked.length !== pairs.length) {
+    throw new Error(`the production Ashby builder emitted ${picked.length} question fills, not ${pairs.length}`);
+  }
+  return picked;
+}
 
 /* Both file uploads, in the order the production builder emits them. Not filtered to the cover
    letter alone: the misfiling failure - the letter landing in the resume control, or the resume in
