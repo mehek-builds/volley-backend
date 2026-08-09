@@ -24,6 +24,7 @@ import {
   referralSourceOptionCandidates,
   type ReferralSourceEvidence,
 } from './referralSource';
+import { embeddedGreenhouseApplicationUrl, embeddedGreenhouseJobId } from './greenhouseEmbeddedBoards';
 
 // Portal field ids legitimately contain CSS-syntax characters (Greenhouse uses UUIDs, others use
 // dots and colons), so they are matched with the [id="..."] attribute form rather than #id. Inside
@@ -4459,6 +4460,10 @@ function greenhouseEmbedApplicationUrl(rawUrl: string): string | undefined {
   if (url.protocol !== 'https:') return undefined;
   const databricksJobId = databricksGreenhouseJobId(url);
   if (databricksJobId) return `https://boards.greenhouse.io/embed/job_app?token=${databricksJobId}`;
+  // Greenhouse boards embedded on an employer's own domain. The board token is never read off the
+  // page; see lib/greenhouseEmbeddedBoards for how it is established.
+  const embeddedBoardUrl = embeddedGreenhouseApplicationUrl(url);
+  if (embeddedBoardUrl) return embeddedBoardUrl;
   const host = url.hostname.toLowerCase();
   if (host === 'boards.greenhouse.io' && url.pathname === '/embed/job_app') {
     const token = url.searchParams.get('token') ?? '';
@@ -4502,6 +4507,12 @@ export function detectPortal(rawUrl: string): SupportedPortal {
   // the known careers path plus numeric Greenhouse job id so unrelated company pages with `gh_jid`
   // query strings do not become supported by accident.
   if (databricksGreenhouseJobId(url)) {
+    return 'greenhouse';
+  }
+  // Every other employer that serves its Greenhouse board from its own domain. Recognised only
+  // when the host resolves to exactly one verified Greenhouse board token, so a `gh_jid` on a page
+  // that is not a board we can name stays unsupported and keeps its email fallback.
+  if (embeddedGreenhouseJobId(url)) {
     return 'greenhouse';
   }
   const bullhornHash = url.hash.match(/^#\/jobs\/(\d+)(?:\/apply)?\/?$/i);
@@ -4567,14 +4578,17 @@ export function isPortalSupported(rawUrl: string | undefined): boolean {
 export function canonicalSupportedPortalUrl(rawUrl: string | undefined, atsName?: string | null): string | undefined {
   if (!rawUrl) return undefined;
   // Some company-hosted Greenhouse wrappers keep only gh_jid in the URL and are stored with a
-  // generic ats_name on older packets. Only the Databricks wrapper shape is supported here; other
-  // company pages with a gh_jid query string stay unsupported until we verify their embedded form.
+  // generic ats_name on older packets. The Databricks wrapper keeps its own pinned shape, and every
+  // other employer domain goes through the verified board-token map in greenhouseEmbeddedBoards; a
+  // company page whose board token cannot be established stays unsupported.
   void atsName;
   try {
     const url = new URL(rawUrl);
     if (url.protocol !== 'https:') return undefined;
     const greenhouseJobId = databricksGreenhouseJobId(url);
     if (greenhouseJobId) return `https://boards.greenhouse.io/embed/job_app?token=${greenhouseJobId}`;
+    const embeddedBoardUrl = embeddedGreenhouseApplicationUrl(url);
+    if (embeddedBoardUrl) return embeddedBoardUrl;
     const portal = detectPortal(rawUrl);
     if (portal === 'zoho_recruit') {
       url.search = '';
