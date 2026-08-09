@@ -9,6 +9,7 @@ import {
   type StoredSalaryProfile,
 } from './salary';
 import { referralSourceForApplication, type ReferralSourceEvidence } from './referralSource';
+import { usStateScopeSkipReason } from './residenceScope';
 import {
   availabilityWindowForPosting,
   formatWindowDate,
@@ -2900,8 +2901,14 @@ export function resolveKnownAnswer(
     }
     case 'address_country':
       return ap.address_country ? { value: ap.address_country } : null;
-    case 'address_state':
-      return ap.address_state ? { value: ap.address_state } : null;
+    case 'address_state': {
+      if (!ap.address_state) return null;
+      // A question scoped to the United States is a closed set she may simply not be in. See
+      // residenceScope.ts: "Dubai" reached a fifty-state dropdown on a real application and only
+      // the strictness of the matcher kept a false residence off it.
+      const outOfScope = usStateScopeSkipReason(label, ap.address_state);
+      return outOfScope ? { skipReason: outOfScope } : { value: ap.address_state };
+    }
     case 'address_city':
       return ap.address_city ? { value: ap.address_city } : null;
     case 'phone':
