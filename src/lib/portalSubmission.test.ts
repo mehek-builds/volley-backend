@@ -490,6 +490,7 @@ test('managed controlled-portal actions include reviewed fields, resume upload, 
       .map((action) => action.type),
     [
       'waitForSelector',
+      'waitForSelector',
       'fill',
       'fill',
       'fillByLabelText',
@@ -504,6 +505,16 @@ test('managed controlled-portal actions include reviewed fields, resume upload, 
   );
   assert.ok(actions.some((action) => action.type === 'select' && action.label?.startsWith('question_select:')));
   assert.equal(actions.find((action) => action.type === 'upload')?.file?.base64, 'cGRm');
+  const hydration = actions.find((action) => action.label === 'controlled_portal_hydrated');
+  assert.deepEqual(hydration, {
+    type: 'waitForSelector',
+    selector: 'form[data-litos-controlled-portal][data-litos-qa-ready="1"]',
+    label: 'controlled_portal_hydrated',
+    optional: false,
+    timeout: 10_000,
+  });
+  assert.ok(actions.indexOf(hydration!) < actions.findIndex((action) => action.label === 'first_name'));
+  assert.ok(actions.indexOf(hydration!) < actions.findIndex((action) => action.type === 'confirmAndSubmit'));
 });
 
 test('managed portals upload a tailored cover letter without replacing the resume', () => {
