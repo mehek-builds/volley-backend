@@ -7,6 +7,7 @@ import {
   assertRemoteManagedRunner,
   assertControlledSecurityCodeTarget,
   controlledEmailCaptureTarget,
+  controlledReceiptCaptureTarget,
   controlledDatabaseTarget,
   controlledManagedReceivingProof,
   controlledQaPacketSpec,
@@ -75,6 +76,21 @@ test('controlled email forwarding uses only an authenticated loopback capture ad
   );
   assert.throws(
     () => controlledEmailCaptureTarget('http://127.0.0.1:4317/emails', ''),
+    /Provisioning blocker/,
+  );
+});
+
+test('receipt screenshots use only an authenticated write-only loopback capture adapter', () => {
+  assert.equal(
+    controlledReceiptCaptureTarget('http://127.0.0.1:4318/receipts', '0123456789abcdef0123456789abcdef').origin,
+    'http://127.0.0.1:4318',
+  );
+  assert.throws(
+    () => controlledReceiptCaptureTarget('https://capture.example.test/receipts', '0123456789abcdef0123456789abcdef'),
+    /must be http:\/\/127\.0\.0\.1/,
+  );
+  assert.throws(
+    () => controlledReceiptCaptureTarget('http://127.0.0.1:4318/receipts', ''),
     /Provisioning blocker/,
   );
 });
