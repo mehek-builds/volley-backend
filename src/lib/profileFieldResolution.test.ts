@@ -47,6 +47,15 @@ const PARSED_PROFILE: ApplicationProfileLike = {
   major: 'Computer Science & Business Administration, Finance Emphasis',
 };
 
+const EMPLOYER_SITE_EVIDENCE: ApplicationProfileLike['referral_source_evidence'] = {
+  kind: 'employer_career_site',
+  value: 'Company website',
+  jobId: '11111111-1111-4111-8111-111111111111',
+  sourceId: '22222222-2222-4222-8222-222222222222',
+  sourceUrl: 'https://careers.example.com/jobs/123',
+  observedAt: '2026-08-09T00:00:00.000Z',
+};
+
 function answer(label: string, options?: string[], ap: ApplicationProfileLike = STORED_PROFILE): string | null {
   return resolveProfileField({ label, options }, ap)?.value ?? null;
 }
@@ -165,23 +174,24 @@ test('Class A: graduation month, year, and anticipated date (Akuna x6, Virtu, IM
   );
 });
 
-test('Class A: how did you hear about this job (Akuna, Five Rings, Virtu, IMC)', () => {
-  assert.equal(answer('How did you hear about this job?'), 'Company website');
-  assert.equal(answer('How did you first hear about Five Rings?'), 'Company website');
-  assert.equal(answer('How did you hear about this internship?'), 'Company website');
+test('Class A: how did you hear about this job requires packet-specific evidence', () => {
+  const evidenced = { ...STORED_PROFILE, referral_source_evidence: EMPLOYER_SITE_EVIDENCE };
+  assert.equal(answer('How did you hear about this job?'), null);
+  assert.equal(answer('How did you first hear about Five Rings?'), null);
+  assert.equal(answer('How did you hear about this internship?'), null);
 
   assert.equal(
-    answer('How did you hear about this job?', ['LinkedIn', 'Company Website', 'Job Board', 'Other']),
+    answer('How did you hear about this job?', ['LinkedIn', 'Company Website', 'Job Board', 'Other'], evidenced),
     'Company Website',
   );
   assert.equal(
-    answer('How did you first hear about Five Rings?', ['University event', 'Careers Page', 'Referral']),
+    answer('How did you first hear about Five Rings?', ['University event', 'Careers Page', 'Referral'], evidenced),
     'Careers Page',
   );
-  // "Other" is truthful and is the LAST resort, never something that displaces a real option.
+  // No same-channel option means review, never a generic value that can overwrite the truth.
   assert.equal(
-    answer('How did you hear about this internship?', ['LinkedIn', 'Employee referral', 'Other']),
-    'Other',
+    answer('How did you hear about this internship?', ['LinkedIn', 'Employee referral', 'Other'], evidenced),
+    null,
   );
 });
 
@@ -234,9 +244,6 @@ const CLASS_A_LABELS = [
   'Graduation Year',
   'What is your expected graduation year?',
   'When is your anticipated graduation date - please select a Graduation Date range',
-  'How did you hear about this job?',
-  'How did you first hear about Five Rings?',
-  'How did you hear about this internship?',
   'Do you now, or will you in the future, require visa sponsorship to continue working in the United States (e.g. H-1B, TN,',
 ];
 
@@ -388,28 +395,28 @@ test('a truncated school name never picks a campus it cannot distinguish', () =>
   );
 });
 
-/* BOTH EXTRAS, because each one puts a false statement on a form.
- *
- * referralSourceLadder listed 'Job Board' ahead of 'Other', so a stored "Company website" against
- * ['LinkedIn','Job Board','Employee referral','Other'] returned Job Board: a claim about how she
- * found the role that did not happen. "Other" is true however she arrived. */
+/* Every candidate is the same acquisition fact. A generic fallback can overwrite an earlier exact
+ * managed selection, so a closed list with no same-channel option returns for review. */
 test('a referral source never claims a channel the applicant did not use', () => {
   assert.equal(
     answer('How did you hear about this job?', ['LinkedIn', 'Job Board', 'Employee referral', 'Other']),
-    'Other',
+    null,
   );
-  assert.deepEqual(referralSourceLadder('Company website').at(-1), 'Other');
+  assert.deepEqual(referralSourceLadder('Company website'), []);
   assert.equal(referralSourceLadder('Company website').includes('Job Board'), false);
-  // A stored value that is NOT the company's own site does not get the company-site synonyms
-  // offered on its behalf either. Stored value, then Other, and nothing invented in between.
-  assert.deepEqual(referralSourceLadder('LinkedIn'), ['LinkedIn', 'Other']);
+  // A user-declared source gets only its exact channel, and no invented alternative.
+  assert.deepEqual(referralSourceLadder('LinkedIn'), ['LinkedIn']);
   assert.equal(
     chooseClosestOption(referralSourceLadder('LinkedIn'), ['Company Website', 'Job Board', 'Other']),
-    'Other',
+    null,
   );
-  // The truthful specific option still beats Other whenever it is on the list.
+  // The truthful specific option is still selected whenever it is on the list.
   assert.equal(
-    answer('How did you hear about this job?', ['LinkedIn', 'Company Website', 'Job Board', 'Other']),
+    answer(
+      'How did you hear about this job?',
+      ['LinkedIn', 'Company Website', 'Job Board', 'Other'],
+      { ...STORED_PROFILE, referral_source_evidence: EMPLOYER_SITE_EVIDENCE },
+    ),
     'Company Website',
   );
 });
@@ -603,7 +610,10 @@ test('the stored major snaps onto the Greenhouse discipline taxonomy', () => {
 test('the referral answer snaps onto an employer-named referral list', () => {
   // Verbatim from the Anduril form: the question names the employer, and the option list is the
   // one the control actually offers.
-  const ap: ApplicationProfileLike = { referral_source_default: 'Company website' };
+  const ap: ApplicationProfileLike = {
+    referral_source_default: 'Company website',
+    referral_source_evidence: EMPLOYER_SITE_EVIDENCE,
+  };
   const snapped = resolveProfileField(
     {
       label: 'how did you hear about anduril?',

@@ -5,7 +5,14 @@ import { chromium, type Page } from 'playwright-core';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db/index';
-import { application_profile, generated_resumes, profiles, users } from '../db/schema';
+import {
+  application_profile,
+  career_page_sources,
+  generated_resumes,
+  monitored_jobs,
+  profiles,
+  users,
+} from '../db/schema';
 import {
   normalizeApplicationReviewQuestions,
   readApplicationReview,
@@ -113,6 +120,10 @@ import {
   type DiscoveredQuestion,
 } from '../lib/questionDiscovery';
 import { isSelfDeclarationQuestion, selfDeclarationSkipReason } from '../lib/selfDeclaration';
+import {
+  referralSourceForApplication,
+  type ReferralSourceEvidence,
+} from '../lib/referralSource';
 import { savedAnswerFor, type AnswerReuseContext } from '../lib/answerReuse';
 import { profileBackedBlockerLabels, resolveProfileField, usableOptions } from '../lib/profileFieldResolution';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
@@ -462,14 +473,55 @@ export function coverLetterObjectKeyToAttach(spec: unknown): string | null {
   return key || null;
 }
 
+function referralIdentity(value: unknown): string {
+  return typeof value === 'string' ? value.trim().replace(/\s+/g, ' ').toLowerCase() : '';
+}
+
+/**
+ * Evidence that this packet was created from Litos's monitored job board, not from a profile
+ * default or from the URL where the browser happens to be now. The company and role checks bind
+ * the UUID to this packet, so an unrelated monitored row cannot be attached merely to obtain a
+ * source answer.
+ */
+export async function referralSourceEvidenceForRow(row: ResumeRow): Promise<ReferralSourceEvidence | undefined> {
+  const context = (row.job_context && typeof row.job_context === 'object' && !Array.isArray(row.job_context)
+    ? row.job_context
+    : {}) as Record<string, unknown>;
+  const jobId = typeof context.job_id === 'string' ? context.job_id : '';
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(jobId)) return undefined;
+  const [source] = await db.select({
+    sourceId: monitored_jobs.source_id,
+    company: monitored_jobs.company_name,
+    role: monitored_jobs.title,
+    sourceUrl: monitored_jobs.posting_url,
+    observedAt: monitored_jobs.first_seen_at,
+  })
+    .from(monitored_jobs)
+    .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+    .where(eq(monitored_jobs.id, jobId))
+    .limit(1);
+  if (!source) return undefined;
+  if (referralIdentity(source.company) !== referralIdentity(context.company)) return undefined;
+  if (referralIdentity(source.role) !== referralIdentity(context.role)) return undefined;
+  return {
+    kind: 'litos_job_board',
+    value: 'Job board',
+    jobId,
+    sourceId: source.sourceId,
+    sourceUrl: source.sourceUrl,
+    observedAt: source.observedAt.toISOString(),
+  };
+}
+
 export async function buildPacket(row: ResumeRow, controlledTest = false): Promise<SubmissionPacket> {
   const stored = row.spec as StoredSpec;
   const contact = (stored._contact ?? {}) as Record<string, unknown>;
-  const [userRow, appRow, profileRow] = await Promise.all([
+  const [userRow, appRow, profileRow, referralSourceEvidence] = await Promise.all([
     db.select().from(users).where(eq(users.id, row.user_id)).limit(1),
     // Tolerant read, see lib/applicationFacts.ts.
     selectApplicationProfileRow(row.user_id),
     db.select().from(profiles).where(eq(profiles.user_id, row.user_id)).limit(1),
+    referralSourceEvidenceForRow(row),
   ]);
   const app = appRow ? decryptRow(appRow) : {};
   const parsed = (profileRow[0]?.parsed_json ?? {}) as Record<string, unknown>;
@@ -545,7 +597,16 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
   const appStr = (key: string): string | undefined => (typeof app[key] === 'string' && (app[key] as string).trim()
     ? (app[key] as string).trim()
     : undefined);
-  const applicationProfile = await loadApplicationProfileLike(row.user_id);
+  const rawApplicationProfile = await loadApplicationProfileLike(row.user_id);
+  const referralSourceDefault = referralSourceForApplication(
+    typeof app.referral_source_default === 'string' ? app.referral_source_default : undefined,
+    referralSourceEvidence,
+  );
+  const applicationProfile: ApplicationProfileLike = {
+    ...rawApplicationProfile,
+    referral_source_default: referralSourceDefault,
+    referral_source_evidence: referralSourceEvidence,
+  };
   const context = (row.job_context && typeof row.job_context === 'object' ? row.job_context : {}) as Record<string, unknown>;
   const roleLocations = Array.isArray(context.locations)
     ? context.locations.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
@@ -573,7 +634,8 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     gpa: appStr('gpa') ?? academicStr('gpa'),
     major: appStr('major') ?? majorFromAcademicProfile(academicStr('major'), degree),
     currentlyEnrolled: academicBoolean('currently_enrolled'),
-    referralSourceDefault: typeof app.referral_source_default === 'string' ? app.referral_source_default : undefined,
+    referralSourceDefault,
+    referralSourceEvidence,
     roleLocation: typeof context.location === 'string' ? context.location : undefined,
     roleLocations,
     applicationProfile,
@@ -713,7 +775,7 @@ function academicEvidenceValuesForLabel(label: string, packet: SubmissionPacket)
     values.push(...selectEvidenceValues(packet.degree));
   }
   if (/\bhow\s+did\s+you\s+hear\b|\bhear\s+about\b|\breferral\s+source\b|\bsource\b/.test(normalizedLabel)) {
-    values.push(...selectEvidenceValues(packet.referralSourceDefault ?? 'Company website'));
+    values.push(...selectEvidenceValues(packet.referralSourceDefault));
   }
   if (/\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b|\bnotice\s+at\s+collection\b|\bprocess\s+your\s+personal\s+data\b|\bprocessing\s+of\s+personal\s+data\b/.test(normalizedLabel)) {
     values.push('Yes', 'I agree', 'Acknowledge/Confirm', 'Yes, I consent');
@@ -1267,6 +1329,17 @@ export async function discoverAndResolveQuestions(
   return { questions, attentionReasons, invalidatedQuestionKeys: [...invalidatedQuestionKeys] };
 }
 
+function applicationProfileForPacket(
+  profile: ApplicationProfileLike,
+  packet: SubmissionPacket,
+): ApplicationProfileLike {
+  return {
+    ...profile,
+    referral_source_default: packet.referralSourceDefault,
+    referral_source_evidence: packet.referralSourceEvidence,
+  };
+}
+
 export function mergeDiscoveredPortalQuestions(
   discovered: readonly ApplicationReviewQuestion[],
   stored: readonly ApplicationReviewQuestion[],
@@ -1469,7 +1542,10 @@ async function prepareManaged(
   packet = coverLetterOutcome.packet;
   const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
   const resolutionCurrent = { ...current, questions: storedQuestions };
-  const applicationProfile = await loadApplicationProfileLike(row.user_id);
+  const applicationProfile = applicationProfileForPacket(
+    await loadApplicationProfileLike(row.user_id),
+    packet,
+  );
   const savedAnswers = await loadSavedAnswers(row.user_id);
   const {
     questions: discoveredQuestions,
@@ -1960,7 +2036,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
         discovered,
         row,
         resolutionCurrent,
-        await loadApplicationProfileLike(row.user_id),
+        applicationProfileForPacket(await loadApplicationProfileLike(row.user_id), packet),
         authorization.enabled,
         portal,
         await loadSavedAnswers(row.user_id),

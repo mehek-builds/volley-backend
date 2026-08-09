@@ -56,6 +56,10 @@ import {
   type ApplicationProfileLike,
   type ProfileKey,
 } from './questionDiscovery';
+import {
+  referralSourceForApplication,
+  referralSourceOptionCandidates,
+} from './referralSource';
 
 export type ProfileFieldShape = {
   label: string;
@@ -677,9 +681,6 @@ export function graduationDateLadder(gradDate: string | undefined, gradYear: num
 }
 
 /** Does the stored referral source name the employer's own site? */
-const COMPANY_SITE_SOURCE_RE =
-  /\b(?:company|corporate|employer|careers?|website|web\s*site|web\s*page|homepage|portal)\b/i;
-
 /**
  * Referral source lists are short and closed, and every entry on one is a factual claim about how
  * this applicant found this posting.
@@ -688,28 +689,15 @@ const COMPANY_SITE_SOURCE_RE =
  * ["LinkedIn", "Job Board", "Employee referral", "Other"] returned Job Board: a statement about
  * where she found the role that simply did not happen. It is gone. The synonyms that remain are
  * all sayings of the SAME fact, and they are only offered when the stored value is that fact;
- * for anything else the ladder runs stored-value then "Other", because "Other" is the one entry
- * on a referral list that is true no matter how the applicant arrived.
- *
- * "Other" stays LAST, so it can never displace a truthful specific option.
+ * for anything else the ladder uses only the student's exact source. A generic "Other" fallback
+ * is deliberately absent: managed select retries can replace an earlier exact choice, and an
+ * unsupported closed list must return for review instead of changing the acquisition channel.
  */
-export function referralSourceLadder(stored: string | undefined): string[] {
-  const trimmed = stored?.trim();
-  const namesCompanySite = !trimmed || COMPANY_SITE_SOURCE_RE.test(trimmed);
-  return ladder(
-    trimmed,
-    ...(namesCompanySite
-      ? [
-        'Company Website',
-        'Company website',
-        'Company Careers Site',
-        'Careers Page',
-        'Career Site',
-        'Careers Website',
-      ]
-      : []),
-    'Other',
-  );
+export function referralSourceLadder(
+  stored: string | undefined,
+  evidence?: ApplicationProfileLike['referral_source_evidence'],
+): string[] {
+  return referralSourceOptionCandidates(stored, evidence);
 }
 
 export function studyYearLadder(value: string | undefined): string[] {
@@ -939,7 +927,13 @@ export function profileFieldCandidates(
     case 'study_year':
       return ladder(base, ...studyYearLadder(base));
     case 'referral_source_default':
-      return ladder(base, ...referralSourceLadder(ap.referral_source_default ?? base));
+      return ladder(
+        base,
+        ...referralSourceLadder(
+          referralSourceForApplication(ap.referral_source_default, ap.referral_source_evidence),
+          ap.referral_source_evidence,
+        ),
+      );
     default:
       return ladder(base);
   }
@@ -998,6 +992,9 @@ export function resolveProfileField(
   const eeo = EEO_QUESTION.test(label);
   const candidates = eeo ? eeoAnswerLadder(label, base) : profileFieldCandidates(key, ap, base);
   const matched = eeo ? chooseEeoOption(label, base, shape.options) : chooseClosestOption(candidates, shape.options);
+  if (key === 'referral_source_default' && usableOptions(shape.options).length > 0 && matched === null) {
+    return null;
+  }
   return {
     key,
     value: matched ?? candidates[0] ?? base,

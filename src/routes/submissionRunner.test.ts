@@ -1150,7 +1150,8 @@ test('required-ness reaches the stored question, so the dashboard and the 422 st
   const heardAbout = result.questions.find((question) => question.question.startsWith('How did you hear'));
   assert.ok(heardAbout);
   assert.equal(heardAbout.required, true);
-  assert.equal(heardAbout.answer, 'Company website');
+  assert.equal(heardAbout.answer, '');
+  assert.match(result.attentionReasons.join('\n'), /how you heard about this role is yours to answer/i);
 });
 
 test('a stale answer is invalidated when the current resolver refuses the exact field', async () => {

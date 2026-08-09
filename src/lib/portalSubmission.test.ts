@@ -47,6 +47,22 @@ import {
 import { POLLABLE_JOB_BOARDS } from './jobMonitor';
 import { resolveProfileField } from './profileFieldResolution';
 import type { ManagedDiscoveredQuestion } from './browserbase';
+import type { ReferralSourceEvidence } from './referralSource';
+
+const JOB_BOARD_REFERRAL_EVIDENCE: ReferralSourceEvidence = {
+  kind: 'litos_job_board',
+  value: 'Job board',
+  jobId: '11111111-1111-4111-8111-111111111111',
+  sourceId: '22222222-2222-4222-8222-222222222222',
+  sourceUrl: 'https://job-boards.greenhouse.io/acme/jobs/123',
+  observedAt: '2026-08-09T00:00:00.000Z',
+};
+
+const EMPLOYER_SITE_REFERRAL_EVIDENCE: ReferralSourceEvidence = {
+  ...JOB_BOARD_REFERRAL_EVIDENCE,
+  kind: 'employer_career_site',
+  value: 'Company website',
+};
 
 function isGreenhousePreflightClick(action: { type: string; label?: string }) {
   return action.type === 'click'
@@ -768,6 +784,78 @@ test('direct Greenhouse reviewed graduation fill prefers packet date over stale 
   assert.equal(values.get(graduationSelector), 'May 2028');
 });
 
+test('direct Greenhouse replay replaces a stale company-site answer with evidenced Job board', async () => {
+  const referralSelector = 'input[id="question_referral"]';
+  const { page, values } = directFillPage([
+    '#first_name',
+    '#last_name',
+    '#email',
+    referralSelector,
+  ]);
+  await fillPortal(page, 'greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    referralSourceDefault: 'Job board',
+    referralSourceEvidence: JOB_BOARD_REFERRAL_EVIDENCE,
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [{
+      question: 'How did you hear about this role?',
+      answer: 'Company website',
+      portalSelector: referralSelector,
+    }],
+  });
+  assert.equal(values.get(referralSelector), 'Job board');
+});
+
+test('managed referral replay emits only the packet-evidenced Job board channel', () => {
+  const runtimeSelector = '[data-litos-discovered-4]';
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    referralSourceDefault: 'Job board',
+    referralSourceEvidence: JOB_BOARD_REFERRAL_EVIDENCE,
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [{
+      question: 'How did you hear about this role?',
+      answer: 'Company website',
+      portalSelector: runtimeSelector,
+      portalInputType: 'select',
+    }],
+  });
+  const referralActions = actions.filter((action) => (
+    action.selector === runtimeSelector
+    || action.label?.startsWith('greenhouse_referral_')
+    || /how did you hear/i.test(action.label ?? '')
+  ));
+  const values = referralActions.map((action) => action.value).filter((value): value is string => Boolean(value));
+  assert.ok(values.includes('Job board'), values.join(' | '));
+  assert.equal(values.some((value) => /company\s+website|career|other/i.test(value)), false, values.join(' | '));
+});
+
+test('managed referral replay fails closed for ambiguous Website and Careers answers', () => {
+  for (const answer of ['Website', 'Careers']) {
+    const actions = buildManagedPortalActions('greenhouse', {
+      fullName: 'Taylor Example',
+      email: 'taylor@example.com',
+      resume: Buffer.from('resume-pdf'),
+      resumeName: 'resume.pdf',
+      questions: [{
+        question: 'How did you hear about this role?',
+        answer,
+        portalSelector: '[data-litos-discovered-4]',
+        portalInputType: 'select',
+      }],
+    });
+    assert.equal(
+      actions.some((action) => /referral|how did you hear/i.test(action.label ?? '') && Boolean(action.value)),
+      false,
+      answer,
+    );
+  }
+});
+
 test('direct Greenhouse fill selects saved demographic choices', async () => {
   const genderSelector = '.field:has(label:has-text("What gender identity do you most closely identify with?")) select';
   const orientationSelector = '.field:has(label:has-text("What sexual orientation do you most closely identify with?")) select';
@@ -1335,6 +1423,7 @@ test('Greenhouse replays Faire option-style choices through React-select buckets
     coverLetter: Buffer.from('cover'),
     coverLetterName: 'cover-letter.pdf',
     referralSourceDefault: 'Company website',
+    referralSourceEvidence: EMPLOYER_SITE_REFERRAL_EVIDENCE,
     eeoPrefs: {
       gender: 'Female',
       transgender_status: 'Decline to self-identify',
@@ -1442,6 +1531,7 @@ test('Greenhouse trims low-priority fallbacks before exceeding the managed actio
     coverLetter: Buffer.from('cover'),
     coverLetterName: 'cover-letter.pdf',
     referralSourceDefault: 'Company website',
+    referralSourceEvidence: EMPLOYER_SITE_REFERRAL_EVIDENCE,
     eeoPrefs: {
       gender: 'Female',
       transgender_status: 'Decline to self-identify',
@@ -1537,6 +1627,7 @@ test('Greenhouse replays Jump academic and referral choices without consent', ()
     graduationMonth: 'May',
     graduationYear: '2028',
     referralSourceDefault: 'Company website',
+    referralSourceEvidence: EMPLOYER_SITE_REFERRAL_EVIDENCE,
     resume: Buffer.from('pdf'),
     resumeName: 'resume.pdf',
     questions: [
@@ -1575,6 +1666,8 @@ test('Greenhouse profile-backed academic questions replay through label-scoped c
     gpa: '3.89/4.0',
     resume: Buffer.from('pdf'),
     resumeName: 'resume.pdf',
+    referralSourceDefault: 'Company website',
+    referralSourceEvidence: EMPLOYER_SITE_REFERRAL_EVIDENCE,
     questions: [
       { question: 'Degree', answer: 'Bachelor of Science in Computer Science' },
       { question: 'Discipline', answer: 'Computer Science' },
@@ -1608,6 +1701,8 @@ test('Greenhouse replays Cloudflare graduation and degree choice buckets', () =>
     email: 'mehekman@usc.edu',
     resume: Buffer.from('pdf'),
     resumeName: 'resume.pdf',
+    referralSourceDefault: 'Company website',
+    referralSourceEvidence: EMPLOYER_SITE_REFERRAL_EVIDENCE,
     questions: [
       {
         question: 'How did you hear about this job?',
@@ -1639,7 +1734,10 @@ test('Greenhouse replays Cloudflare graduation and degree choice buckets', () =>
   const comboLabels = actions
     .filter((action) => action.type === 'fill' && action.label?.startsWith('question_combo_label:'))
     .map((action) => `${action.label}:${action.value}`);
-  assert.ok(comboLabels.some((label) => label.toLowerCase().includes('how did you hear about this job') && label.endsWith('Other (none of the above)')));
+  assert.ok(comboLabels.some((label) => (
+    label.toLowerCase().includes('how did you hear about this job')
+    && label.endsWith('Company website')
+  )));
   assert.ok(
     comboLabels.some((label) => label.toLowerCase().includes('when do you expect to') && label.endsWith('June 2028')),
     comboLabels.join('\n'),
@@ -1673,6 +1771,8 @@ test('Greenhouse replays Roblox required select buckets with exact live options'
     resumeName: 'resume.pdf',
     degree: 'Bachelor of Science in Computer Science',
     jdText: 'Roblox is hiring a software engineering intern.',
+    referralSourceDefault: 'Company website',
+    referralSourceEvidence: EMPLOYER_SITE_REFERRAL_EVIDENCE,
     questions: [
       { question: 'degree* degree--0', answer: 'Bachelor\'s Degree' },
       {
@@ -1701,6 +1801,8 @@ test('Greenhouse Roblox-specific select labels stay scoped to Roblox context', (
     email: 'mehekman@usc.edu',
     resume: Buffer.from('pdf'),
     resumeName: 'resume.pdf',
+    referralSourceDefault: 'Company website',
+    referralSourceEvidence: EMPLOYER_SITE_REFERRAL_EVIDENCE,
     questions: [
       { question: 'How did you first hear about this role?', answer: 'Company website' },
       { question: 'Please review and acknowledge Acme\'s Job Applicant Privacy Notice', answer: 'Yes' },
@@ -1722,6 +1824,8 @@ test('Greenhouse replays Samsara required selects with exact live options', () =
     resume: Buffer.from('pdf'),
     resumeName: 'resume.pdf',
     jdText: 'Samsara is hiring a Software Engineer I New Grad.',
+    referralSourceDefault: 'Company website',
+    referralSourceEvidence: EMPLOYER_SITE_REFERRAL_EVIDENCE,
     questions: [
       { question: 'Processing of Personal Data', answer: 'Acknowledge/Confirm' },
       { question: 'How did you hear about this opportunity?', answer: 'Company website' },
@@ -1878,6 +1982,7 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
     resume: Buffer.from('pdf'),
     resumeName: 'resume.pdf',
     referralSourceDefault: 'Company website',
+    referralSourceEvidence: EMPLOYER_SITE_REFERRAL_EVIDENCE,
     jdText: 'Akuna Capital software engineer internship',
     questions: [
       {
@@ -1949,7 +2054,11 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
   assert.ok(knownComboFills.some((action) => action.selector?.includes('this role is my top preference')));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('Have you ever applied to a full time or internship position with Akuna in the past?') && action.value === 'No'));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('Have you applied to this role at Akuna previously?') && action.value === 'No'));
-  assert.ok(knownComboFills.some((action) => action.selector?.includes('How did you hear about this job')));
+  assert.ok(actions.some((action) => (
+    action.type === 'fill'
+    && action.label?.startsWith('greenhouse_referral_combo_label:')
+    && action.value === 'Company website'
+  )));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('Do you have any offer deadlines')));
   assert.ok(knownComboFills.some((action) => action.label?.includes('Disclaimer: Akuna Capital is a global company') && action.value === 'Yes'));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('Do you now, or will you in the future, require visa sponsorship')));
@@ -2436,6 +2545,7 @@ function overBudgetGreenhousePacket(extraQuestions: Array<{ question: string; an
     major: 'Computer Science & Business Administration, Finance Emphasis',
     roleLocation: 'Chicago',
     referralSourceDefault: 'Company website',
+    referralSourceEvidence: EMPLOYER_SITE_REFERRAL_EVIDENCE,
     eeoPrefs: {
       gender: 'Female',
       race: 'Asian',
@@ -3790,7 +3900,8 @@ function andurilPacket(overrides: Record<string, unknown> = {}) {
     graduationMonth: 'May',
     graduationYear: '2028',
     gpa: '3.89',
-    referralSourceDefault: 'Company website',
+    referralSourceDefault: 'Job board',
+    referralSourceEvidence: JOB_BOARD_REFERRAL_EVIDENCE,
     resume: Buffer.from('pdf'),
     resumeName: 'resume.pdf',
     questions: [],
@@ -4157,7 +4268,7 @@ test('the referral question is scoped by a prefix, so it matches the employer th
   const referral = actions.filter((a) => a.label?.startsWith('greenhouse_referral_combo_label:'));
   assert.ok(referral.length > 0);
   const scope = referral.find((a) => a.type === 'fill')!;
-  assert.equal(scope.value, 'Company website');
+  assert.equal(scope.value, 'Job board');
   // Playwright's :has-text() is a case-insensitive substring match, so this scope is the one that
   // reaches "How did you hear about Anduril?" and "How did you hear about this internship?" alike.
   assert.ok(scope.selector?.includes('How did you hear about'), scope.selector);

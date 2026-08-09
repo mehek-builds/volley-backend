@@ -52,11 +52,12 @@ describe('the gaps a seeded profile still has', () => {
       'languages',
       'desired_salary',
       'desired_salary_currency',
+      'referral_source_default',
     ]);
   });
 
-  test('a resume that printed nothing leaves the full six', () => {
-    assert.equal(gapsFrom({}).length, 6);
+  test('a resume that printed nothing leaves the full seven', () => {
+    assert.equal(gapsFrom({}).length, 7);
   });
 });
 

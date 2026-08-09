@@ -129,7 +129,15 @@ export function hasFiveTargetRoles(parsed: { target_roles?: unknown } | null | u
 // yes/no about one language, never the student's own list - and the declared list is the
 // authority (R-015, see schema.ts). ZURU asked about Spanish and Enpal about German with nothing
 // on file (2026-07-17); only the student can close that gap, so onboarding asks once.
-const GAP_FIELDS = ['gpa', 'gpa_scale', 'major', 'languages', 'desired_salary', 'desired_salary_currency'] as const;
+const GAP_FIELDS = [
+  'gpa',
+  'gpa_scale',
+  'major',
+  'languages',
+  'desired_salary',
+  'desired_salary_currency',
+  'referral_source_default',
+] as const;
 const completeBodySchema = z.object({
   automatic_submission_enabled: z.boolean().default(false),
   automatic_verification_enabled: z.boolean().default(false),
