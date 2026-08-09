@@ -136,6 +136,53 @@ test('provider stream failures are retryable attention, not dead failed applicat
   assert.match(outcome.attentionReason ?? '', /Nothing was sent/);
 });
 
+test('an action-budget stop outranks the uncertainty the claim would otherwise imply', () => {
+  /* buildManagedPortalActions throws ManagedActionBudgetError while ASSEMBLING the list, before
+     runManagedBrowser is called, so nothing reached the employer. But the claim is taken at the top
+     of the run, so uncertainAfterClaim is true on this path exactly as it is on every other one.
+     Without a branch that outranks it, this stop inherits "the submission was attempted, check the
+     portal or your email" - a receipt that cannot exist - AND lands at needs_attention-after-claim,
+     which submitRequestDisposition refuses to re-run. The application would be permanently stuck on
+     a send that provably never happened.
+
+     Asserted behaviourally, because the file this guards says the branches here had no behavioural
+     coverage at all and a review pass found the suite still green after deleting each one. */
+  const blocker = 'Litos did not press submit: the greenhouse application needs more than 120 safe '
+    + 'browser actions to preserve a fill attempt for each of its 121 reviewed questions.';
+  const outcome = submissionFailureOutcome({
+    captchaStop: null,
+    noSubmitControl: false,
+    actionBudgetStop: blocker,
+    uncertainAfterClaim: true,
+    externalGate: false,
+    providerSessionFailure: false,
+    currentAttentionReason: undefined,
+  });
+
+  assert.equal(outcome.status, 'needs_attention');
+  // The error's own sentence survives, so the reason names the portal and the count.
+  assert.match(outcome.attentionReason, /needs more than 120 safe browser actions/);
+  assert.match(outcome.attentionReason, /Nothing was sent/);
+  // And the sentence that sends her hunting for a confirmation is NOT the one she gets.
+  assert.doesNotMatch(outcome.attentionReason, /could not verify the employer confirmation/);
+});
+
+test('without a budget stop the same inputs still report the uncertainty', () => {
+  // The other half of the precedence: this test would pass on a build where the new branch swallowed
+  // every failure, so the case it outranks has to still work.
+  const outcome = submissionFailureOutcome({
+    captchaStop: null,
+    noSubmitControl: false,
+    actionBudgetStop: null,
+    uncertainAfterClaim: true,
+    externalGate: false,
+    providerSessionFailure: false,
+    currentAttentionReason: undefined,
+  });
+  assert.equal(outcome.status, 'needs_attention');
+  assert.match(outcome.attentionReason, /could not verify the employer confirmation/);
+});
+
 test('provider stream classifier does not absorb post-click page closures', () => {
   assert.equal(isProviderSessionFailureMessage('Sandbox stream was closed and is not accepting commands.'), true);
   assert.equal(isProviderSessionFailureMessage('Target closed while reading receipt'), false);
