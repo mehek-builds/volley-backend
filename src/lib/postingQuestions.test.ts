@@ -248,13 +248,30 @@ test('an account with no stored onsite commitment is asked at Apply, not answere
   // And she is told which question is waiting, rather than finding an empty required field later.
   assert.ok(prescriptAskExplanation(ask[0].reason!, redwood.label).length > 20);
 
-  // A legacy broad location preference still lacks the exact location and cadence scope.
-  const committed = resolvePrescript([redwood], {
+  /* ONCE SHE HAS ANSWERED, the pre-script stops asking, which is the whole point of the columns.
+     A list that does not include San Francisco is a truthful No, not a shrug: she named the offices
+     she will sit in and this is not one of them. A list that does include it is a Yes. Neither is a
+     guess, and neither reads anything off her home address. */
+  const notListed = resolvePrescript([redwood], {
     ...profile,
     onsite_commitment: 'listed_locations',
     onsite_locations: ['Los Angeles'],
   }, new Map(), { company: 'Redwood Materials' });
-  assert.equal(committed.ask.length, 1);
-  assert.equal(committed.questions[0].answer, '');
-  assert.equal(committed.questions[0].remembered, false);
+  assert.equal(notListed.ask.length, 0);
+  assert.equal(notListed.questions[0].answer, 'No');
+
+  const listed = resolvePrescript([redwood], {
+    ...profile,
+    onsite_commitment: 'listed_locations',
+    onsite_locations: ['San Francisco'],
+  }, new Map(), { company: 'Redwood Materials' });
+  assert.equal(listed.ask.length, 0);
+  assert.equal(listed.questions[0].answer, 'Yes');
+
+  const anywhere = resolvePrescript([redwood], {
+    ...profile,
+    onsite_commitment: 'anywhere',
+  }, new Map(), { company: 'Redwood Materials' });
+  assert.equal(anywhere.ask.length, 0);
+  assert.equal(anywhere.questions[0].answer, 'Yes');
 });

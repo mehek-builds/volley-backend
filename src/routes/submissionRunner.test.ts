@@ -490,7 +490,7 @@ test('discovered US work authorization and sponsorship become reviewed Yes answe
   );
 });
 
-test('select and radio discoveries hold an exact onsite commitment while resolving stored academic facts', async () => {
+test('select and radio discoveries relay a stored onsite commitment alongside stored academic facts', async () => {
   const current: ApplicationReviewState = {
     jd_text: 'This internship is based in San Francisco, California.',
     role: 'Software Engineering Intern',
@@ -520,15 +520,14 @@ test('select and radio discoveries hold an exact onsite commitment while resolvi
     ],
     { user_id: 'user-1' } as ResumeRow,
     current,
-    // The legacy location fields do not include cadence or posting scope.
+    // "Willing to work in person anywhere in the US" covers four days a week in any US office, so
+    // the cadence in the label needs no column of its own.
     { currently_enrolled: true, grad_date: 'May 2028', grad_year: 2028, onsite_commitment: 'anywhere' },
     true,
     'greenhouse',
   );
 
-  assert.deepEqual(result.attentionReasons, [
-    'where you will work from is yours to answer: "Are you able to work onsite 4 days a week?"',
-  ]);
+  assert.deepEqual(result.attentionReasons, []);
   assert.deepEqual(
     result.questions.map((question) => ({
       question: question.question,
@@ -536,9 +535,27 @@ test('select and radio discoveries hold an exact onsite commitment while resolvi
       portal_selector: question.portal_selector,
     })),
     [
+      { question: 'Are you able to work onsite 4 days a week?', answer: 'Yes', portal_selector: undefined },
       { question: 'Are you currently enrolled in a degree program?', answer: 'Yes', portal_selector: undefined },
     ],
   );
+
+  // The same two controls on an account that has never answered: the onsite one comes back as work
+  // for her, by name, and the academic one is still resolved.
+  const unasked = await discoverAndResolveQuestions(
+    [
+      { label: 'Are you able to work onsite 4 days a week?', selector: 'select[name="question_1"]', inputType: 'select', maxLength: null },
+      { label: 'Are you currently enrolled in a degree program?', selector: 'input[name="question_2"][type="radio"]', inputType: 'radio', maxLength: null },
+    ],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { currently_enrolled: true, grad_date: 'May 2028', grad_year: 2028 },
+    true,
+    'greenhouse',
+  );
+  assert.deepEqual(unasked.attentionReasons, [
+    'where you will work from is yours to answer: "Are you able to work onsite 4 days a week?"',
+  ]);
 });
 
 test('combobox discoveries resolve stored academic facts without direct text selectors', async () => {

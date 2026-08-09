@@ -8,6 +8,7 @@ import {
   savedAnswerFor,
   savedAnswerKey,
 } from './answerReuse';
+import { resolveKnownAnswer } from './questionDiscovery';
 
 /* Every label in this file is verbatim from the production run of 2026-08-08 unless it is marked
  * as a constructed sibling. The point of the file is the LINE between the two directions, so each
@@ -146,9 +147,10 @@ test('the default is posting-specific, so an unrecognised question is asked agai
  *
  * Together AI packet 5b52aba8-124c-4688-8b9c-a7a49d20467b and Redwood Materials packet
  * 8d12aea8-8476-4f7a-860b-fa6393842df9 were both at the send gate on 2026-08-08 with these
- * answered "Yes" from a constant in resolveKnownAnswer, for an applicant who lives in Dubai and
- * studies in Los Angeles. The guard that stopped them is right and stays. This is the other half of
- * the handoff: an answer she gives once must not be asked for a seventh time.
+ * answered "Yes" from a constant in resolveKnownAnswer, with nothing stored behind it. That
+ * constant is gone; the answer now comes from application_profile.onsite_commitment, which is a
+ * declaration she made. What this file governs is the separate question of whether an answer she
+ * typed on ONE employer's form may be replayed on another's, and that restriction is unchanged.
  *
  * The line is whether the LABEL says where. It does for these two, and it does not for Anduril's.
  * ------------------------------------------------------------------------------------------- */
@@ -174,6 +176,29 @@ test('an onsite commitment with no place in it is asked again at the next employ
    * goes to asking her. */
   assert.equal(answerReuseScope(ANDURIL_ONSITE, { company: 'Anduril' }), 'posting_specific');
   assert.equal(answerReuseScope('Are you able to work onsite four days a week?', {}), 'posting_specific');
+});
+
+test('a placeless onsite label is still not replayed, and is still answered from the profile', () => {
+  /* THE DISTINCTION THIS MODULE AND THE RESOLVER EACH OWN HALF OF, pinned in one place because
+     conflating them is how this fix nearly went wrong.
+   *
+   * CARRYING AN ANSWER BETWEEN EMPLOYERS is what this file governs, and a placeless label stays
+   * restricted: "in-person for 12 weeks" is Costa Mesa on Anduril's form and somewhere else on
+   * Postman's, so a Yes she typed at Anduril must not be replayed at Postman.
+   *
+   * RESOLVING FROM A STORED STANDING PREFERENCE is a different act with a different source. It
+   * reads application_profile.onsite_commitment, which is a declaration she maintains about herself
+   * rather than a snapshot of one employer's form, and "anywhere in the US" is true of Postman's
+   * office as much as Anduril's. So it answers the placeless label that a replay may not.
+   *
+   * Both statements are asserted together so a later change cannot relax one by appealing to the
+   * other. */
+  assert.equal(answerReuseScope(ANDURIL_ONSITE, { company: 'Anduril' }), 'posting_specific');
+  assert.equal(savedAnswerFor(ANDURIL_ONSITE, new Map([[savedAnswerKey(ANDURIL_ONSITE), 'Yes']]), { company: 'Postman' }), undefined);
+  assert.deepEqual(
+    resolveKnownAnswer(ANDURIL_ONSITE, 'select', { onsite_commitment: 'anywhere' }, undefined),
+    { value: 'Yes' },
+  );
 });
 
 test('choosing among an employer’s own offices is still posting-specific', () => {

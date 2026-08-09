@@ -503,7 +503,19 @@ test('send-time refresh clears stale refused answers across the reviewer example
     accept_privacy_notices: true,
     attest_truthful_information: true,
   }, undefined);
-  assert.deepEqual(stale.map((question) => question.answer), ['', '', '', '', '', '']);
+  /* The onsite answer is KEPT, and it is the only one that is. The refresh clears an answer the
+     current resolver refuses; it does not clear one the resolver agrees with, and with
+     onsite_commitment = 'anywhere' on file the Chicago question resolves to Yes on its own. The
+     other five are still refusals - a start date, a privacy notice, a truthfulness certification, an
+     interview conduct policy and an SSN - and every one of them still comes back empty. */
+  assert.deepEqual(stale.map((question) => question.answer), ['Yes', '', '', '', '', '']);
+
+  // With nothing stored the onsite answer is cleared like the rest, which is the case this test was
+  // written for and the one that must not regress.
+  const unasked = refreshKnownQuestionAnswers([
+    { question: 'Can you work onsite in our Chicago office five days per week?', answer: 'Yes' },
+  ], {}, undefined);
+  assert.deepEqual(unasked.map((question) => question.answer), ['']);
 });
 
 test('only provenance from the current explicit applicant review preserves a refused answer', () => {
@@ -785,22 +797,22 @@ test('citizenship is answered but never substituted for residence', () => {
   assert.deepEqual(resolved, { value: 'India' });
 });
 
-test('legacy broad location preferences never answer an exact employer commitment', () => {
-  /* RENAMED AND REVERSED, 2026-08-09. It used to be called "...is answered as an approved logistics
-     acknowledgement" and it asserted exactly what this file now forbids: `{ address_city: 'Dubai' }`
-     in, `{ value: 'Yes' }` out, for a question about being in a US office three days a week.
+test('an office commitment is answered from the stored standing preference, and only from it', () => {
+  /* REVERSED AGAIN, 2026-08-09, and this is the second half of the change the first half set up.
+     The version before this one asserted that every office commitment is HELD whatever the columns
+     hold, on the reasoning that onsite_commitment carries no cadence and no duration. The columns
+     were added and populated hours later, and the refusal stayed, so the four packets on the
+     2026-08-08 run that named an office - Redwood Materials, Together AI, Anduril, Faire - were all
+     stopped on a question the profile could answer.
 
-     The word doing the work in the old name was "approved". Nothing approved it. There was no
-     column, no consent and no stored value anywhere behind that Yes - just
-     `return isLocationCommitmentQuestion(label) ? { value: 'Yes' } : null`, and a comment upstream
-     calling the question "routine". A commitment about where a person will physically be for the
-     next twelve weeks is not routine, and calling it logistics does not make it less of a statement
-     she never made. It was found on a Redwood Materials packet that was ready to send with "Are you
-     available to work from our office in San Francisco?" answered Yes.
+     The reasoning was wrong in one specific way: 'anywhere' is a MAXIMAL commitment. "I will work in
+     person anywhere in the US" already entails three days a week in any US city for any stretch of
+     the role, so no cadence column is needed to read it. What it does not entail is an office
+     abroad, a promise about where she will live, or a remote-only schedule, and each of those is
+     asserted below.
 
-     What survives from the old test is its real content: these labels must be RECOGNISED, and must
-     never fall through to the essay drafter. That is still asserted, and the answer now comes from
-     application_profile.onsite_commitment / onsite_locations. */
+     What survives unchanged from both previous versions: nothing is invented. A profile that has
+     never answered is refused exactly as before. */
   const label = 'this role is in-office three days a week, can you commit to that?';
   assert.equal(classifyField(label), 'onsite_commitment');
 
@@ -810,14 +822,24 @@ test('legacy broad location preferences never answer an exact employer commitmen
   assert.ok(unasked && 'skipReason' in unasked);
   assert.match(unasked.skipReason, /where you will work from is yours to answer/);
 
-  for (const profile of [
-    { address_city: 'Dubai', onsite_commitment: 'anywhere' as const },
-    { address_city: 'Dubai', onsite_commitment: 'no' as const },
+  // Stored, so answered - and the cadence in the label does not need a column of its own.
+  assert.deepEqual(
+    resolveKnownAnswer(label, 'select', { address_city: 'Dubai', onsite_commitment: 'anywhere' }, undefined),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer(label, 'select', { address_city: 'Dubai', onsite_commitment: 'no' }, undefined),
+    { value: 'No' },
+  );
+  // 'listed_locations' against a label that names no place: the office it means is this posting's,
+  // which is not an input to the resolver, so the list cannot be checked and the question is held.
+  const placeless = resolveKnownAnswer(
+    label,
+    'select',
     { address_city: 'Dubai', onsite_commitment: 'listed_locations' as const, onsite_locations: ['San Francisco'] },
-  ]) {
-    const held = resolveKnownAnswer(label, 'select', profile, undefined);
-    assert.ok(held && 'skipReason' in held);
-  }
+    undefined,
+  );
+  assert.ok(placeless && 'skipReason' in placeless);
 
   // Relocation is its own commitment and its own column: agreeing to sit in an office is not
   // agreeing to move house, so onsite_commitment alone must not answer it.
@@ -829,13 +851,77 @@ test('legacy broad location preferences never answer an exact employer commitmen
     undefined,
   );
   assert.ok(relocation && 'skipReason' in relocation);
-  const legacyRelocation = resolveKnownAnswer(
-    'are you willing to relocate to San Francisco?',
-    'text',
-    { relocation_willingness: 'no' },
-    undefined,
+  assert.deepEqual(
+    resolveKnownAnswer('are you willing to relocate to San Francisco?', 'text', { relocation_willingness: 'no' }, undefined),
+    { value: 'No' },
   );
-  assert.ok(legacyRelocation && 'skipReason' in legacyRelocation);
+  assert.deepEqual(
+    resolveKnownAnswer('are you willing to relocate?', 'text', { relocation_willingness: 'yes' }, undefined),
+    { value: 'Yes' },
+  );
+});
+
+test('the standing onsite preference is scoped to the US and says nothing about a foreign office', () => {
+  /* IMC asks about Amsterdam, Sydney and Hong Kong on the same form that asks about Chicago, and
+     Optiver and Jane Street ask the same way. The declaration behind onsite_commitment is "willing
+     to work in person anywhere in the US", so a label naming a foreign office is outside it and has
+     to be held rather than answered Yes. */
+  const committed = { onsite_commitment: 'anywhere' as const };
+  for (const label of [
+    'Are you able to work from our Amsterdam office?',
+    'Are you willing to work onsite in London five days per week?',
+    'Can you commit to being in-office in Hong Kong?',
+  ]) {
+    const held = resolveKnownAnswer(label, 'select', committed, undefined);
+    assert.ok(held && 'skipReason' in held, label);
+    assert.match(held.skipReason, /where you will work from is yours to answer/);
+  }
+  // The US metros on the same list are answered.
+  for (const label of [
+    'Are you available to work from our office in Chicago?',
+    'Are you willing to work in our New York office three days a week?',
+  ]) {
+    assert.deepEqual(resolveKnownAnswer(label, 'select', committed, undefined), { value: 'Yes' }, label);
+  }
+});
+
+test('a remote-schedule question is not answered by a willingness to be in an office', () => {
+  /* These share the location vocabulary and ask the opposite question. "I will work in person
+     anywhere" is not an answer to "are you comfortable working remotely", so they stay held however
+     complete the onsite columns are. */
+  const committed = { onsite_commitment: 'anywhere' as const, relocation_willingness: 'yes' as const };
+  for (const label of [
+    'Are you able to work remotely for the duration of this internship?',
+    'Can you work remotely from the United States five days per week?',
+    'This is a remote-only role. Are you comfortable with that schedule?',
+    'Are you able to work from home for this position?',
+  ]) {
+    const held = resolveKnownAnswer(label, 'select', committed, undefined);
+    assert.ok(held && 'skipReason' in held, label);
+  }
+});
+
+test('a listed-locations commitment answers only the offices she listed', () => {
+  const profile = {
+    onsite_commitment: 'listed_locations' as const,
+    onsite_locations: ['Los Angeles', 'New York'],
+  };
+  assert.deepEqual(
+    resolveKnownAnswer('Are you available to work from our office in Los Angeles?', 'select', profile, undefined),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('Are you available to work from our office in San Francisco?', 'select', profile, undefined),
+    { value: 'No' },
+  );
+  // Names no office, so there is nothing to check the list against.
+  const placeless = resolveKnownAnswer(
+    'Are you willing to work in-person for 12 weeks during the internship?',
+    'select',
+    profile,
+    'Software Engineer Intern\nNew York, NY',
+  );
+  assert.ok(placeless && 'skipReason' in placeless);
 });
 
 /* THE TOGETHER AI LABEL, which is the day-count shape rather than the bare one.
@@ -846,43 +932,72 @@ test('legacy broad location preferences never answer an exact employer commitmen
  * commitment: a cadence and a city buried in a politeness. It must still be recognised, and it must
  * still be refused, and neither may be true only for the bare wording.
  *
- * What it does NOT assert any more is an answer built out of onsite_commitment and onsite_locations.
- * Those columns carry no cadence and no duration, so "four days per week" cannot be settled by
- * them, and the resolver now holds every such commitment. That refusal is the test below.
+ * The cadence in it needs no column of its own: 'anywhere' is a maximal commitment and four days a
+ * week in a US office is inside it. What still has to be true is that the label is RECOGNISED as a
+ * commitment rather than read as an availability question or drafted as prose.
  */
-test('the four-days-per-week shape is recognised as the same commitment and held', () => {
+test('the four-days-per-week shape is recognised as the same commitment', () => {
   const together = 'are you willing to work four days per week in our san francisco office?';
   assert.equal(classifyField(together), 'onsite_commitment');
 
-  // Refused by name, and not guessed from her address, whatever the columns happen to hold.
-  for (const profile of [
-    { address_city: 'Dubai' },
-    { onsite_commitment: 'anywhere' as const },
-    { onsite_commitment: 'listed_locations' as const, onsite_locations: ['san francisco, ca'] },
-  ]) {
-    const held = resolveKnownAnswer(together, 'select', profile, undefined);
-    assert.ok(held && 'skipReason' in held);
-    assert.match(held.skipReason, /where you will work from is yours to answer/);
-  }
+  // Nothing stored: still refused, and never guessed from her address.
+  const unasked = resolveKnownAnswer(together, 'select', { address_city: 'Dubai' }, undefined);
+  assert.ok(unasked && 'skipReason' in unasked);
+  assert.match(unasked.skipReason, /where you will work from is yours to answer/);
+
+  assert.deepEqual(
+    resolveKnownAnswer(together, 'select', { address_city: 'Dubai', onsite_commitment: 'anywhere' }, undefined),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer(
+      together,
+      'select',
+      { onsite_commitment: 'listed_locations' as const, onsite_locations: ['san francisco, ca'] },
+      undefined,
+    ),
+    { value: 'Yes' },
+  );
 });
 
-test('location without exact cadence and duration is insufficient for an office commitment', () => {
-  const profile = {
-    address_city: 'Dubai',
-    onsite_commitment: 'listed_locations' as const,
-    onsite_locations: ['Los Angeles', 'New York'],
-  };
-  for (const [label, jd] of [
-    ['Are you available to work from our office in Los Angeles?', undefined],
-    ['Are you available to work from our office in San Francisco?', undefined],
-    ['Are you willing to work in-person for 12 weeks during the internship?', 'Software Engineer Intern\nNew York, NY'],
-    ['Can you commute to our Chicago office five days per week?', 'Chicago, IL'],
-    ['Are you able to work remotely for the duration of this internship?', 'Remote internship'],
-    ['Can you work remotely from the United States five days per week?', 'Remote, United States'],
-    ['This is a remote-only role. Are you comfortable with that schedule?', 'Remote-only role'],
-  ] as const) {
-    const held = resolveKnownAnswer(label, 'select', profile, jd);
-    assert.ok(held && 'skipReason' in held, label);
+/* THE FAIRE LABEL, which is the one of the four that was held for a DIFFERENT reason.
+ *
+ * Packet 2a914f64-9d27-4965-93aa-5116a964ebd8 reported 'internship availability question left for
+ * you', not the onsite refusal the other three reported, because INTERNSHIP_AVAILABILITY_QUESTION
+ * matches "can you commit ... schedule" and that branch ran first. Fixing the onsite resolver alone
+ * would have left this one exactly where it was, which is why the ordering is asserted here rather
+ * than left to the resolver's own comment.
+ */
+test('an in-office commitment worded as a schedule question is not read as availability', () => {
+  const faire = 'This role will be in-office on a hybrid schedule, can you commit to being in-office three days per week at the location listed?';
+  assert.equal(classifyField(faire), 'onsite_commitment');
+  assert.deepEqual(
+    resolveKnownAnswer(faire, 'select', { onsite_commitment: 'anywhere' }, undefined),
+    { value: 'Yes' },
+  );
+  // A genuine availability question, naming no office, still reaches the availability branch.
+  const hours = resolveKnownAnswer(
+    'Can you commit to a full-time schedule of 40 hours per week?',
+    'select',
+    { onsite_commitment: 'anywhere' },
+    undefined,
+  );
+  assert.ok(hours && 'skipReason' in hours);
+  assert.match(hours.skipReason, /internship availability question left for you/);
+});
+
+test('the four production onsite blockers of 2026-08-08 are answered from the stored preference', () => {
+  /* The exact labels, copied off spec._review.attention_reason on the packets they stopped. Each of
+     these read '"..." is required and is still empty' on a profile that held
+     onsite_commitment = 'anywhere' and relocation_willingness = 'yes'. */
+  const stored = { onsite_commitment: 'anywhere' as const, relocation_willingness: 'yes' as const, address_city: 'Dubai' };
+  for (const label of [
+    'Are you available to work from our office in San Francisco?',
+    'Are you willing to work four days per week in our San Francisco office?',
+    'Are you willing to work in-person for 12 weeks during the internship?',
+    'This role will be in-office on a hybrid schedule, can you commit to being in-office three days per week at the location listed?',
+  ]) {
+    assert.deepEqual(resolveKnownAnswer(label, 'select', stored, undefined), { value: 'Yes' }, label);
   }
 });
 
@@ -1171,13 +1286,18 @@ test('stored academic and onsite facts answer repeated select-shaped live questi
     ),
     { value: 'Mehek' },
   );
-  const onsite = resolveKnownAnswer(
-    'Are you able to work onsite 3 days a week?',
-    'select',
-    { ...profile, onsite_commitment: 'anywhere' as const },
-    undefined,
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Are you able to work onsite 3 days a week?',
+      'select',
+      { ...profile, onsite_commitment: 'anywhere' as const },
+      undefined,
+    ),
+    { value: 'Yes' },
   );
-  assert.ok(onsite && 'skipReason' in onsite);
+  // Same label, nothing stored: still hers to answer.
+  const unasked = resolveKnownAnswer('Are you able to work onsite 3 days a week?', 'select', profile, undefined);
+  assert.ok(unasked && 'skipReason' in unasked);
   assert.deepEqual(resolveKnownAnswer('Are you currently enrolled in a degree program?', 'radio', profile, undefined), { value: 'Yes' });
   assert.deepEqual(resolveKnownAnswer('Will you be returning to a degree program after this internship?', 'select', profile, undefined), { value: 'Yes' });
   assert.deepEqual(resolveKnownAnswer('Graduation Month', 'select', profile, undefined), { value: 'May' });
@@ -2182,13 +2302,25 @@ test('an in-person commitment is recognised, and is hers to make', () => {
     assert.ok(unasked && 'skipReason' in unasked, other);
     assert.equal(isOpenEndedQuestion(other) && !('skipReason' in unasked), false, other);
   }
-  // The legacy broad fields still lack exact cadence and posting scope, so they cannot unlock any
-  // of these variants, including the changed five-day and dated policy shapes.
+
+  /* WITH THE COLUMNS ANSWERED, the yes/no shapes are relayed and the value-shaped one is not.
+     "How many days per week can you work on-site in SF, and from what date?" has the same
+     can-you-office shape as the rest and wants a number and a date. A stored "anywhere" answers
+     whether she will be there, not how many days or from when, so it stays hers. Answering it Yes
+     would leave a non-answer in a required field, which is the empty-field defect wearing a hat. */
   const committed = { ...MEHEK, onsite_commitment: 'anywhere' as const, relocation_willingness: 'yes' as const };
-  for (const other of labels) {
-    const held = resolveKnownAnswer(other, 'text', committed, undefined);
-    assert.ok(held && 'skipReason' in held, other);
-  }
+  assert.deepEqual(resolveKnownAnswer(label, 'text', committed, undefined), { value: 'Yes' });
+  assert.deepEqual(
+    resolveKnownAnswer('are you able to work onsite in one of our offices, five days a week?', 'text', committed, undefined),
+    { value: 'Yes' },
+  );
+  const valueShaped = resolveKnownAnswer(
+    'how many days per week can you work on-site in sf, and from what date?',
+    'text',
+    committed,
+    undefined,
+  );
+  assert.ok(valueShaped && 'skipReason' in valueShaped);
 });
 
 test('an export-control eligibility declaration is refused by name, never inferred', () => {

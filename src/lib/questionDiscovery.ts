@@ -1,5 +1,6 @@
 import type { Page } from 'playwright-core';
 import { isOpaqueIdentifier, tidyLabel } from './fieldLabel';
+import { officeMetrosNamed } from './officeMetros';
 import type { SupportedPortal } from './portalSubmission';
 import {
   resolveSalary,
@@ -614,18 +615,120 @@ export function onsiteCommitmentSkipReason(label: string): string {
   return `where you will work from is yours to answer: "${label.slice(0, 60)}"`;
 }
 
-/** The legacy profile records a broad location preference but no cadence or posting scope.
- * Consequently every office, onsite, commute and relocation commitment is held. A future resolver
- * may relay an answer only from an exact record that matches the employer, location, cadence and
- * duration in this label. */
-function onsiteCommitmentAnswer(label: string): { skipReason: string } {
-  return { skipReason: onsiteCommitmentSkipReason(label) };
+/* WHERE SHE WILL WORK FROM, RELAYED FROM THE COLUMN SHE ANSWERED IT INTO.
+ *
+ * This function returned a bare refusal for every office, onsite, commute and relocation question,
+ * with a comment saying a future resolver could answer one from an exact record. The columns that
+ * record arrived in on 2026-08-09 (application_profile.onsite_commitment, onsite_locations,
+ * relocation_willingness), and the refusal stayed, so the four packets that named an office on the
+ * 2026-08-08 run - Redwood Materials, Together AI, Anduril, Faire - were all held on a question the
+ * profile could already answer. That is the R-076 shape: computed correctly, never reaches the
+ * control, except here it was never computed at all.
+ *
+ * THE RULE, and the whole of it is that 'anywhere' is a MAXIMAL commitment.
+ *
+ * "I am willing to work in person anywhere in the US" entails every lesser promise inside the US:
+ * any city, any cadence, any number of days, any stretch of weeks. So it answers Yes to a label
+ * naming San Francisco, to one naming four days a week, and to one naming twelve weeks and no place
+ * at all, without any of those dimensions having to be stored. Nothing is composed: one stored
+ * declaration is being read out, and the reading is the same one a person would give it.
+ *
+ * The refusals that stay, each because the stored value genuinely does not cover the question:
+ *
+ *   NOTHING STORED. Unchanged. null and 'never asked' are the same thing and neither is a Yes.
+ *
+ *   A NON-US OFFICE. The declaration is scoped to the United States, and IMC, Optiver and Jane
+ *     Street all ask about Amsterdam, London, Hong Kong and Sydney. "Anywhere in the US" says
+ *     nothing about Amsterdam, so a label naming one is held.
+ *
+ *   'listed_locations' WITH NO PLACE IN THE LABEL. She named the offices she will sit in; a
+ *     question that names none cannot be checked against that list, because the office it means is
+ *     whichever one this posting is at, and the posting is not this function's input.
+ *
+ *   A REMOTE QUESTION. "Are you comfortable with this remote-only schedule?" is the inverse
+ *     question and shares the vocabulary. Willingness to be in an office is not an answer to it.
+ *
+ * Relocation is answered from its own column, because agreeing to sit in an office is not agreeing
+ * to move house. That column is a plain yes/no by design, so it settles "will you relocate?" and
+ * "will you relocate to Austin?" identically.
+ *
+ * SEPARATE FROM ANSWER REUSE, and the two must not be confused. answerReuse.ts decides whether an
+ * answer SHE TYPED on one employer's form may be replayed on another's, and it deliberately holds a
+ * placeless onsite answer back so a promise about Costa Mesa is never replayed at Postman. That
+ * restriction is untouched and still right: it governs carrying an answer between employers.
+ * Resolving from a standing preference is not carrying anything between employers - it reads the
+ * profile the applicant maintains - so it is allowed to answer a placeless question that a replay
+ * may not.
+ */
+const REMOTE_WORK_QUESTION = /\bremote(?:ly|[\s-]?only|[\s-]?first)?\b|\bwork\s+from\s+home\b|\bwfh\b/i;
+const ONSITE_PRESENCE_WORD = /\boffice\b|in[\s-]?office|on[\s-]?site|\bonsite\b|in[\s-]?person|\bhybrid\b|commut/i;
+
+/** A question about working remotely, rather than about being in an office. */
+function isRemoteWorkQuestion(label: string): boolean {
+  return REMOTE_WORK_QUESTION.test(label) && !ONSITE_PRESENCE_WORD.test(label);
+}
+
+/* A location question that wants a NUMBER, A DATE OR A LIST rather than a yes or a no.
+ *
+ * isLocationCommitmentQuestion only asks whether the label has a "can you ... office" shape, and
+ * "How many days per week can you work on-site in SF, and from what date?" has exactly that shape
+ * while wanting two values. Answering it "Yes" would put a non-answer in a required field, which is
+ * the same defect as leaving it empty and harder to spot. isPolarQuestion cannot be used for this:
+ * it requires the label to OPEN with the auxiliary, and Faire's real label opens "This role will be
+ * in-office on a hybrid schedule, can you commit ...", so it would refuse the one this fix exists
+ * for. The honest test is what the question asks for, not where its verb sits.
+ *
+ * AN INTERROGATIVE ONLY COUNTS WHERE A QUESTION STARTS. A bare `\bwhere\b` was tried first and it
+ * refused Faire's real label, which ends "... at the location WHERE this position is posted?" - a
+ * relative clause naming the office, not a request for one. So the wh-words are read at the start of
+ * the label or of a sentence inside it, and the quantity and date phrases are read anywhere, because
+ * "and from what date?" is a second question tacked on after a comma.
+ */
+const LOCATION_QUESTION_WANTS_A_VALUE =
+  /^\s*(?:what|which|when|where|how)\b|[.?!]\s+(?:what|which|when|where|how)\b|\bhow\s+(?:many|much|often|long|frequently)\b|\b(?:from|by|on|starting)\s+what\s+(?:date|day|month|time)\b|\bplease\s+(?:provide|specify|describe|explain|list|rank|indicate|state|share|tell|enter)\b/i;
+
+function onsiteCommitmentAnswer(
+  label: string,
+  ap: ApplicationProfileLike,
+): { value: string } | { skipReason: string } {
+  const held = { skipReason: onsiteCommitmentSkipReason(label) };
+
+  if (LOCATION_QUESTION_WANTS_A_VALUE.test(label)) return held;
+
+  if (RELOCATION_COMMITMENT_QUESTION.test(label)) {
+    const willing = ap.relocation_willingness;
+    if (willing === 'yes') return { value: 'Yes' };
+    if (willing === 'no') return { value: 'No' };
+    return held;
+  }
+
+  if (isRemoteWorkQuestion(label)) return held;
+
+  const commitment = ap.onsite_commitment;
+  if (!commitment) return held;
+  if (commitment === 'no') return { value: 'No' };
+
+  const named = officeMetrosNamed(label);
+  if (commitment === 'anywhere') {
+    // Scoped to the US. A label naming a foreign office, or naming a foreign country in place of an
+    // office, is outside what she declared.
+    if (named.some((entry) => entry.country !== 'US')) return held;
+    return { value: 'Yes' };
+  }
+
+  // 'listed_locations': only a label that names a place can be checked against the list.
+  if (named.length === 0) return held;
+  const listed = ap.onsite_locations ?? [];
+  if (listed.length === 0) return held;
+  const covered = named.every((entry) => listed.some((location) => entry.pattern.test(location)));
+  return { value: covered ? 'Yes' : 'No' };
 }
 
 function routineLocationCommitmentAnswer(
   label: string,
+  ap: ApplicationProfileLike,
 ): { value: string } | { skipReason: string } | null {
-  return isLocationCommitmentQuestion(label) ? onsiteCommitmentAnswer(label) : null;
+  return isLocationCommitmentQuestion(label) ? onsiteCommitmentAnswer(label, ap) : null;
 }
 
 /* AGE_ATTESTATION_QUESTION is no longer in this list, and that is the whole of the second half of
@@ -861,6 +964,9 @@ const LOCATION_COMMITMENT_STEM = /\b(?:are|can|could|do|did|will|would|should|ma
 // Postman, Fluency, Brex), all of them asking the same routine question the office wording already
 // answers Yes to.
 const LOCATION_COMMITMENT_VOCAB = /\boffice\b|in[\s-]?office|on[\s-]?site|\bonsite\b|in[\s-]?person|\bhybrid\b|\bremote(?:ly|[\s-]?only)?\b|work\s+from\s+home|relocat|commut/i;
+/* Moving house, which is a different promise from sitting in an office and has its own column.
+ * Kept in step with answerReuse.ts's RELOCATION_QUESTION, which decides the same split for replay. */
+const RELOCATION_COMMITMENT_QUESTION = /\brelocat\w*\b|\bwilling\s+to\s+move\b|\bplan\s+to\s+move\b/i;
 const STORED_ONSITE_COMMITMENT_QUESTION =
   /\b(?:able|willing|available|prepared|can|could|would)\b[^?]{0,80}\b(?:office|in[\s-]?office|on[\s-]?site|onsite|in[\s-]?person|hybrid)\b|\b(?:office|in[\s-]?office|on[\s-]?site|onsite|in[\s-]?person|hybrid)\b[^?]{0,80}\b(?:able|willing|available|prepared|can|could|would)\b/i;
 const ONSITE_DAY_COUNT_QUESTION = /\b(?:three|four|five|3|4|5)\s+days?\b/i;
@@ -1593,8 +1699,10 @@ function locationStatusAnswer(
     return { value: 'Yes' };
   }
   // A mismatch proves only that the residence half is false. It says nothing about future plans,
-  // so a mixed "reside OR confirmed plans" question must remain unanswered.
-  return onsiteCommitmentAnswer(label);
+  // so a mixed "reside OR confirmed plans" question must remain unanswered. Stated here rather than
+  // delegated to onsiteCommitmentAnswer, which now answers from the stored standing preference: a
+  // promise to work in an office is not a statement about where she will be LIVING.
+  return { skipReason: `where you will be living is yours to answer: "${label.slice(0, 60)}"` };
 }
 
 function degreeAnswer(label: string, inputType: string | undefined, degree: string | undefined): string | null {
@@ -2239,6 +2347,23 @@ export function resolveKnownAnswer(
   const internshipJoin = internshipJoinAnswer(label);
   if (internshipJoin) return internshipJoin;
 
+  /* MOVED ABOVE THE INTERNSHIP-AVAILABILITY BRANCH, and the move is the whole of the Faire fix.
+   *
+   * "This role will be in-office on a hybrid schedule, can you commit to being in-office three days
+   * per week at the location listed?" is a location commitment by every test in this file -
+   * classifyField returns onsite_commitment for it - but INTERNSHIP_AVAILABILITY_QUESTION also
+   * matches it, on "can you commit ... schedule", and that branch ran first and refused. So the one
+   * of the four onsite blockers whose wording mentions a schedule was held for a different reason
+   * than the other three, and fixing the onsite resolver alone would have left it held.
+   *
+   * The ordering is right this way round rather than merely convenient: the availability branch
+   * refuses because a stored free-text term cannot be checked against a posting's season and hours,
+   * and that argument does not apply to a question whose subject is where she sits. A label that is
+   * genuinely about hours and names no office still reaches the branch below untouched, because
+   * isLocationCommitmentQuestion requires an office/onsite/commute word. */
+  const routineLocationCommitment = routineLocationCommitmentAnswer(label, ap);
+  if (routineLocationCommitment) return routineLocationCommitment;
+
   if (INTERNSHIP_AVAILABILITY_QUESTION.test(label)) {
     return internshipAvailabilityAnswer(label);
   }
@@ -2251,9 +2376,6 @@ export function resolveKnownAnswer(
 
   const routineConsent = routineConsentAnswer(label);
   if (routineConsent) return routineConsent;
-
-  const routineLocationCommitment = routineLocationCommitmentAnswer(label);
-  if (routineLocationCommitment) return routineLocationCommitment;
 
   const workEligibility = workEligibilityAnswer(label, ap);
   if (workEligibility) return workEligibility;
@@ -2338,7 +2460,7 @@ export function resolveKnownAnswer(
     case 'most_recent_employer':
       return ap.most_recent_employer ? { value: ap.most_recent_employer } : null;
     case 'onsite_commitment':
-      return onsiteCommitmentAnswer(label);
+      return onsiteCommitmentAnswer(label, ap);
     case 'current_enrollment':
       return currentEnrollmentAnswer(ap);
     case 'study_year': {
