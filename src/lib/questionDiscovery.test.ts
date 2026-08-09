@@ -347,8 +347,95 @@ test('never answers CAPTCHA or recording consent fields', () => {
   assert.equal(resolveKnownAnswer('Please complete the CAPTCHA', 'checkbox', {}, undefined), null);
   assert.equal(isRefusedQuestion('Do you consent to this interview being recorded?'), true);
   assert.equal(resolveKnownAnswer('Do you consent to this interview being recorded?', 'checkbox', {}, undefined), null);
-  assert.equal(isRefusedQuestion('At the time of application, are you 18+ years of age?'), true);
-  assert.equal(resolveKnownAnswer('At the time of application, are you 18+ years of age?', 'text', {}, undefined), null);
+});
+
+/* THE 18+ ATTESTATION. It used to live in the assertion directly above, listed with CAPTCHA and
+ * recording consent as a question Litos would never answer. It is not that kind of question: the
+ * applicant tells Litos when she was born, and subtracting two dates is not Litos making a claim
+ * on her behalf. What stays absolute is the input - the stored date of birth and nothing else. */
+test('answers the 18+ attestation from a stored date of birth, and only from that', () => {
+  const label = 'At the time of application, are you 18+ years of age?';
+  const born2005: ApplicationProfileLike = { date_of_birth: '2005-09-25' };
+
+  // The Roblox packet's exact label, which stopped the run on 2026-08-09.
+  assert.deepEqual(resolveKnownAnswer(label, 'text', born2005, undefined), { value: 'Yes' });
+
+  // The other phrasings employers use for the same attestation. Three of these were not even
+  // recognised as age questions before, so they fell past every rule instead of stopping.
+  for (const variant of [
+    'Are you at least 18 years of age?',
+    'Are you 18 years or older?',
+    'Are you 18 or older?',
+    'Are you over the age of 18?',
+    'Are you eighteen years of age or older?',
+  ]) {
+    assert.deepEqual(resolveKnownAnswer(variant, 'text', born2005, undefined), { value: 'Yes' }, variant);
+  }
+
+  // The MINOR framing inverts. Answering these the same way would declare an adult a minor.
+  for (const variant of ['Are you under 18 years of age?', 'Are you younger than 18?']) {
+    assert.deepEqual(resolveKnownAnswer(variant, 'text', born2005, undefined), { value: 'No' }, variant);
+  }
+  assert.deepEqual(
+    resolveKnownAnswer('Are you under 18 years of age?', 'text', { date_of_birth: '2012-01-01' }, undefined),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer(label, 'text', { date_of_birth: '2012-01-01' }, undefined),
+    { value: 'No' },
+  );
+
+  // NULL date_of_birth is the state of the owner's own profile today. It refuses, and it says why.
+  const unanswered = resolveKnownAnswer(label, 'text', {}, undefined);
+  assert.ok(unanswered && 'skipReason' in unanswered);
+  assert.match(unanswered.skipReason, /date of birth is not saved/);
+  // The refusal sentence has to carry "sensitive question", which is the phrase
+  // attentionCategoriesForReasons matches to file this under sensitive_attestation, and must NOT
+  // contain the word "file", which that function's required_document arm matches on.
+  assert.match(unanswered.skipReason, /sensitive question/);
+  assert.doesNotMatch(unanswered.skipReason, /file/);
+
+  // NOTHING but date_of_birth may produce an age. A graduation year is the tempting one.
+  for (const profile of [
+    { grad_year: 2027 },
+    { grad_date: 'May 2027', school: 'USC', currently_enrolled: true },
+    { full_name: 'Mehek Mandal', high_school_grad_date: 'June 2023' },
+    { date_of_birth: '   ' },
+    { date_of_birth: 'sometime in the nineties' },
+  ] satisfies ApplicationProfileLike[]) {
+    const answer = resolveKnownAnswer(label, 'text', profile, undefined);
+    assert.ok(answer && 'skipReason' in answer, JSON.stringify(profile));
+  }
+
+  // No broad rule may reach the label now that isRefusedQuestion no longer short-circuits it.
+  assert.equal(classifyField(label), null);
+  assert.equal(classifyField('Are you 18 years or older?'), null);
+
+  // IMC's "within the last 12-18 months" is the nearest miss in the whole stored corpus. It is a
+  // question about prior applications and must not become an age attestation.
+  const imc = 'have you applied to this role or another role @IMC within the last 12-18 months?';
+  const imcAnswer = resolveKnownAnswer(imc, 'text', born2005, undefined);
+  assert.ok(imcAnswer && 'skipReason' in imcAnswer);
+  assert.match(imcAnswer.skipReason, /prior application/);
+
+  /* The number 18 used for TENURE, not age. The extension's copy of this rule already carries the
+   * exclusion because it already shipped the false Yes: "18+ months of experience" is not an age
+   * question, and answering it Yes claims experience the student never stated. Harmless while the
+   * age family was blanket-refused; a false declaration the moment it is answerable. */
+  for (const tenure of [
+    'Do you have 18+ months of experience with Python?',
+    'Do you have at least 18 years of experience in the industry?',
+    'Have you completed 18 credits or more?',
+  ]) {
+    const answer = resolveKnownAnswer(tenure, 'text', born2005, undefined);
+    assert.equal(answer === null || !('value' in answer && /^yes$/i.test(answer.value)), true, tenure);
+  }
+
+  // "What is your age?" is EEO self-identification, not an attestation, and keeps its own answer.
+  assert.deepEqual(
+    resolveKnownAnswer('What is your age?', 'text', born2005, undefined),
+    { value: 'Decline to self-identify' },
+  );
 });
 
 test('sensitive gates allow only exact stored work eligibility answers', () => {
@@ -747,6 +834,65 @@ test('referral source is relayed when stored and refused when it is not', () => 
   const unstored = resolveKnownAnswer('How did you first hear about Five Rings?', 'text', {}, undefined);
   assert.ok(unstored && 'skipReason' in unstored);
   assert.match(unstored.skipReason, /how you heard about this role is yours to answer/);
+});
+
+/* "Legal Name" - the WHOLE name in one control, which Roblox asks for and Greenhouse required.
+ * LEGAL_FIRST_NAME_QUESTION does not match it, correctly, so nothing did and a live run stopped
+ * with `"Legal Name" is required and is still empty` while the name sat in the profile. */
+test('answers a full legal name, with the stored legal first name beating the resume name', () => {
+  const mehek: ApplicationProfileLike = { full_name: 'Mehek Mandal', legal_first_name: 'Mehek' };
+  assert.deepEqual(resolveKnownAnswer('Legal Name', 'text', mehek, undefined), { value: 'Mehek Mandal' });
+  // The Workday shape, taken verbatim from the stored corpus.
+  assert.deepEqual(
+    resolveKnownAnswer('full legal name type here... _systemfield_name _systemfield_name', 'text', mehek, undefined),
+    { value: 'Mehek Mandal' },
+  );
+
+  /* THE CASE THE QUESTION EXISTS FOR: a legal first name that is NOT the first token of the name
+   * on the resume. Composing "Legal Name" from full_name would hand the employer "Robert Smith",
+   * the exact name she filled in legal_first_name to correct. */
+  const differing: ApplicationProfileLike = {
+    full_name: 'Robert Smith',
+    legal_first_name: 'Roberta',
+    preferred_first_name: 'Bobbie',
+  };
+  assert.deepEqual(resolveKnownAnswer('Legal Name', 'text', differing, undefined), { value: 'Roberta Smith' });
+  assert.deepEqual(resolveKnownAnswer('What is your full legal name?', 'text', differing, undefined), { value: 'Roberta Smith' });
+
+  // Legal first, legal last and preferred name asked separately still route to three answers, and
+  // in particular the full-name arm never swallows the narrower two.
+  assert.deepEqual(resolveKnownAnswer('Legal First Name', 'text', differing, undefined), { value: 'Roberta' });
+  assert.deepEqual(
+    resolveKnownAnswer('Legal First Name (if different from preferred name)', 'text', differing, undefined),
+    { value: 'Roberta' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('Do you have a preferred name, other than the name indicated above? If yes, please indicate that name below', 'text', differing, undefined),
+    { value: 'Bobbie' },
+  );
+  // "Legal Last Name" has no column behind it and no rule claiming it. It must stay unanswered
+  // rather than pick up the composed full name or the legal FIRST name.
+  const legalLast = resolveKnownAnswer('Legal Last Name', 'text', differing, undefined);
+  assert.equal(legalLast === null || !('value' in legalLast && /Roberta/.test(legalLast.value)), true);
+
+  // PREFERRED_NAME_QUESTION must not start matching the legal labels as a side effect.
+  const preferredOnly: ApplicationProfileLike = { preferred_first_name: 'Bobbie' };
+  assert.equal(resolveKnownAnswer('Legal Name', 'text', preferredOnly, undefined), null);
+  assert.equal(resolveKnownAnswer('Legal First Name', 'text', preferredOnly, undefined), null);
+
+  // No legal first name stored: the parsed full name is the honest answer and is used unchanged.
+  assert.deepEqual(
+    resolveKnownAnswer('Legal Name', 'text', { full_name: 'Mehek Mandal' }, undefined),
+    { value: 'Mehek Mandal' },
+  );
+  // A legal first name with no parsed surname anywhere gives the first name alone, not a fragment.
+  assert.deepEqual(
+    resolveKnownAnswer('Legal Name', 'text', { legal_first_name: 'Roberta' }, undefined),
+    { value: 'Roberta' },
+  );
+  // Nothing stored, nothing answered. This is what keeps the empty-profile sweep at its count.
+  assert.equal(resolveKnownAnswer('Legal Name', 'text', {}, undefined), null);
+  assert.equal(resolveKnownAnswer('full legal name', 'text', {}, undefined), null);
 });
 
 test('stored academic and onsite facts answer repeated select-shaped live questions', () => {
