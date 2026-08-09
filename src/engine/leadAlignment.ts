@@ -1,6 +1,7 @@
 import { extractJdSignals } from './jdSignals';
 import type { JdContext } from './jdMatch';
 import type { ResumeSpec } from '../llm/resumeSpec';
+import { monitoredDescriptionHash } from '../lib/monitoredPortalRepair';
 
 /**
  * WHAT "THE TOP EXPERIENCE IS ALIGNED FOR THEIR ROLE" MEANS, STATED SO A MACHINE CAN CHECK IT.
@@ -51,6 +52,9 @@ export interface LeadAlignment {
   requirement: string;
   /** Verbatim one of the first entry's own selected bullets. */
   evidence: string;
+  /** Hash of the exact JD text used to make the choice. New packets always carry it; optional so
+   *  specs generated before this field existed can still be read and explicitly re-evaluated. */
+  jd_hash?: string;
 }
 
 /* Folded for comparison only, never for output. Curly quotes, the various dashes and non-breaking
@@ -108,6 +112,140 @@ function citationTerms(text: string): Set<string> {
     if (stem.length >= 3) terms.add(stem);
   }
   return terms;
+}
+
+/* Words that can truthfully occur in both almost any software posting and almost any technical
+ * resume bullet, but cannot decide which experience is most like the job. They may strengthen a
+ * citation after a specific match exists; they can never create a candidate by themselves. */
+const LEAD_DECISION_STOPWORDS = new Set([
+  'application', 'build', 'built', 'create', 'created', 'data', 'develop', 'developed', 'engineer',
+  'engineering', 'feature', 'implement', 'implemented', 'intern', 'internship', 'project', 'research',
+  'software', 'solution', 'system', 'technology', 'tool', 'work',
+]);
+
+const LEAD_IRREGULAR_TERMS = new Map<string, string>([
+  ['built', 'build'],
+  ['shipped', 'ship'],
+  ['shipping', 'ship'],
+  ['wrote', 'write'],
+]);
+
+/** Normalized only for the private comparison. The citation stored on the packet remains verbatim. */
+function leadDecisionTerms(text: string): Set<string> {
+  const terms = new Set<string>();
+  for (const raw of foldForCitation(text).match(/[a-z][a-z0-9+#.]{2,}/g) ?? []) {
+    if (CITATION_STOPWORDS.has(raw)) continue;
+    const irregular = LEAD_IRREGULAR_TERMS.get(raw);
+    const stem = irregular ?? raw
+      .replace(/ies$/, 'y')
+      .replace(/(?:ing|ed)$/, '')
+      .replace(/(?:es|s)$/, '')
+      .replace(/([a-z])\1$/, '$1');
+    if (stem.length >= 3) terms.add(stem);
+  }
+  return terms;
+}
+
+interface LeadCandidate {
+  entryIndex: number;
+  askIndex: number;
+  evidence: string;
+  requirement: string;
+  supportedTerms: string[];
+  specificTerms: string[];
+}
+
+export interface JdLeadSelectionResult {
+  spec: ResumeSpec;
+  issues: string[];
+  supported_terms: string[];
+}
+
+function candidateIsBetter(next: LeadCandidate, current: LeadCandidate | null): boolean {
+  if (!current) return true;
+  /* Evidence strength leads. This prevents one coincidental word in the first ask from beating an
+   * entry that repeats the posting's actual domain language. Posting order then breaks equal
+   * evidence, followed by the model's stable entry order as the final deterministic tie-break. */
+  if (next.specificTerms.length !== current.specificTerms.length) {
+    return next.specificTerms.length > current.specificTerms.length;
+  }
+  if (next.supportedTerms.length !== current.supportedTerms.length) {
+    return next.supportedTerms.length > current.supportedTerms.length;
+  }
+  const nextSpecificChars = next.specificTerms.reduce((sum, term) => sum + term.length, 0);
+  const currentSpecificChars = current.specificTerms.reduce((sum, term) => sum + term.length, 0);
+  if (nextSpecificChars !== currentSpecificChars) return nextSpecificChars > currentSpecificChars;
+  if (next.askIndex !== current.askIndex) return next.askIndex < current.askIndex;
+  return next.entryIndex < current.entryIndex;
+}
+
+/**
+ * Choose the lead entry from evidence that occurs on BOTH sides of the application packet.
+ *
+ * This is deliberately narrower than a semantic similarity score. A term can affect ordering only
+ * when the frozen JD requirement and the selected bullet both contain it. Broad words such as
+ * "software", "system" and "build" cannot create a match. The function never writes content: it
+ * only moves one already-grounded entry to position zero and records verbatim citations.
+ */
+export function selectJdAlignedLead(
+  spec: ResumeSpec,
+  jdText: string,
+  context?: JdContext,
+): JdLeadSelectionResult {
+  const asks = leadRequirementCandidates(jdText, context);
+  if (asks.length === 0) {
+    return {
+      spec: { ...spec, lead_alignment: null },
+      issues: ['lead experience cannot be chosen: the frozen job description contains no supported primary ask'],
+      supported_terms: [],
+    };
+  }
+
+  let best: LeadCandidate | null = null;
+  for (let entryIndex = 0; entryIndex < spec.experience.length; entryIndex++) {
+    const entry = spec.experience[entryIndex]!;
+    for (let askIndex = 0; askIndex < asks.length; askIndex++) {
+      const requirement = asks[askIndex]!;
+      const requirementTerms = leadDecisionTerms(requirement);
+      for (const evidence of entry.bullets) {
+        const evidenceTerms = leadDecisionTerms(evidence);
+        const supportedTerms = [...requirementTerms].filter((term) => evidenceTerms.has(term));
+        const specificTerms = supportedTerms.filter((term) => !LEAD_DECISION_STOPWORDS.has(term));
+        // No broad-word fallback. If the domain-bearing intersection is empty, this bullet does
+        // not support ordering, even if it shares "build software systems" with the posting.
+        if (specificTerms.length === 0) continue;
+        const candidate = { entryIndex, askIndex, evidence, requirement, supportedTerms, specificTerms };
+        if (candidateIsBetter(candidate, best)) best = candidate;
+      }
+    }
+  }
+
+  if (!best) {
+    return {
+      spec: { ...spec, lead_alignment: null },
+      issues: ['lead experience cannot be chosen: no selected bullet shares supported domain evidence with a primary ask in the frozen job description'],
+      supported_terms: [],
+    };
+  }
+
+  const lead = spec.experience[best.entryIndex]!;
+  const experience = best.entryIndex === 0
+    ? [...spec.experience]
+    : [lead, ...spec.experience.slice(0, best.entryIndex), ...spec.experience.slice(best.entryIndex + 1)];
+  return {
+    spec: {
+      ...spec,
+      experience,
+      lead_alignment: {
+        entry_org: lead.org,
+        requirement: best.requirement,
+        evidence: best.evidence,
+        jd_hash: monitoredDescriptionHash(jdText),
+      },
+    },
+    issues: [],
+    supported_terms: best.supportedTerms,
+  };
 }
 
 /**
@@ -231,9 +369,10 @@ export function leadAlignmentIssues(
   options: LeadAlignmentOptions = {},
 ): string[] {
   const first = spec.experience[0];
-  // Nothing to align. An empty selection is already a hard issue in validateResumeSpec, and a
-  // one-entry resume has no ordering decision to defend.
-  if (!first || spec.experience.length < 2) return [];
+  // An empty selection is already a hard issue in validateResumeSpec. A one-entry resume still
+  // needs a citation: there is no ordering tie, but there is still a claim that this is the right
+  // experience to put at the top for this job.
+  if (!first) return [];
 
   const alignment = spec.lead_alignment;
   if (!alignment) {
@@ -241,6 +380,9 @@ export function leadAlignmentIssues(
   }
 
   const issues: string[] = [];
+  if (alignment.jd_hash && alignment.jd_hash !== monitoredDescriptionHash(jdText)) {
+    issues.push('lead_alignment.jd_hash does not match the frozen job description used by this packet');
+  }
   if (foldForCitation(alignment.entry_org) !== foldForCitation(first.org)) {
     issues.push(
       `lead_alignment.entry_org is "${alignment.entry_org}" but the first entry is "${first.org}": justify the entry you actually led with`,

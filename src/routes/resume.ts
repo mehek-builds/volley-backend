@@ -41,7 +41,7 @@ import { academicRecordRowFor } from './profile';
 import { warmRequirementCache } from '../engine/warmRequirements';
 import { postingRow, resolveJdText } from './jdMatch';
 import { baseResumeSelectionIssues } from '../llm/baseResume';
-import { leadAlignmentIssues } from '../engine/leadAlignment';
+import { leadAlignmentIssues, selectJdAlignedLead } from '../engine/leadAlignment';
 import { deriveEditedTerms, readApplicationReview, type ApplicationReviewState } from '../lib/applicationReview';
 import { repairReviewPortalFromMonitoredJob } from '../lib/applicationPortalRepair';
 import {
@@ -567,6 +567,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     let spec: ResumeSpec | undefined;
     let specIssues: string[] = [];
     let leadIssues: string[] = [];
+    let leadSelectionIssues: string[] = [];
     let specWarnings: ReturnType<typeof validateResumeSpec>['warnings'] = [];
     let atsCoverage = 0;
 
@@ -606,7 +607,13 @@ export async function resumeRoutes(fastify: FastifyInstance) {
                 baseSpec,
                 priorityEntry,
               );
-              return applyResumePolicy(generated, education, bank, jdText, { targetRole: body.role }).spec;
+              const policed = applyResumePolicy(generated, education, bank, jdText, { targetRole: body.role }).spec;
+              /* Ordering is decided from supported text on both sides of this exact packet, after
+               * the model output has been grounded to the bank and before any renderer sees it.
+               * The model's proposed lead_alignment is deliberately replaced, not trusted. */
+              const selected = selectJdAlignedLead(policed, jdText, { company: body.company, role: body.role });
+              leadSelectionIssues = selected.issues;
+              return selected.spec;
             } catch (err) {
               lastErr = err;
               if (!isTransientOverload(err)) throw err;
@@ -662,10 +669,12 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       if (priorityEntry) {
         specIssues.push(...baseResumeSelectionIssues(spec, [priorityEntry], { requireFirst: false }));
       }
-      /* Kept in its own variable as well as pushed onto specIssues, because it is the only issue
-         here that can survive the loop and still ship. _quality.leadAlignmentIssues stores it so a
-         packet that went out with an unjustified lead is distinguishable from one that did not. */
-      leadIssues = leadAlignmentIssues(spec, jdText, { context: { company: body.company, role: body.role } });
+      /* The deterministic selector's inability to find supported evidence is a hard packet defect,
+         not permission to preserve model or chronological order. Otherwise verify the citation it
+         produced against the same frozen JD before rendering. */
+      leadIssues = leadSelectionIssues.length > 0
+        ? leadSelectionIssues
+        : leadAlignmentIssues(spec, jdText, { context: { company: body.company, role: body.role } });
       specIssues.push(...leadIssues);
       specWarnings = result.warnings;
       atsCoverage = result.ats_keyword_coverage_pct;
@@ -709,6 +718,30 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       priorityEntryId: priorityEntry?.id,
       allowSparsePriority: recentReview?.continue_with_found === true,
     });
+    /* Grounding and the bullet-floor repair can remove or add evidence after the first selection.
+     * Recompute from the exact pre-render document so a citation can never survive after its
+     * supporting bullet changed. */
+    const finalLeadSelection = selectJdAlignedLead(spec, jdText, { company: body.company, role: body.role });
+    spec = finalLeadSelection.spec;
+    leadIssues = finalLeadSelection.issues.length > 0
+      ? finalLeadSelection.issues
+      : leadAlignmentIssues(spec, jdText, { context: { company: body.company, role: body.role } });
+    if (leadIssues.length > 0) {
+      fastify.log.error(
+        { userId, company: body.company, issues: leadIssues },
+        'resume blocked before rendering because no JD-supported lead experience could be chosen',
+      );
+      return reply.status(422).send(resumeQualityHoldResponseSchema.parse({
+        error: 'Litos could not prove which experience should lead this resume, so it was not attached.',
+        code: 'resume_quality_hold',
+        quality: {
+          ready_to_attach: false,
+          issues: leadIssues,
+          warnings: specWarnings,
+          omissions: groundingRemoved,
+        },
+      }));
+    }
     const renderedEducationIssues = missingRenderedEducation(spec);
     if (renderedEducationIssues.length > 0) {
       fastify.log.error(
@@ -771,22 +804,9 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     if (priorityEntry) {
       finalSpecValidation.issues.push(...baseResumeSelectionIssues(spec, [priorityEntry], { requireFirst: false }));
     }
-    /* A LEAD-ALIGNMENT DEFECT IS NOT A REASON TO WITHHOLD A RESUME, and this is the one place that
-     * distinction has to be made deliberately. Every issue pushed onto finalSpecValidation 422s the
-     * request and the student's application does not go out.
-     *
-     * The issues in that list are all claims the resume MAKES: a fabricated metric, a degree she
-     * does not hold, an entry not in the bank. Shipping one of those is worse than shipping
-     * nothing. A weak justification for why one true entry precedes another true entry is not in
-     * that class - the page is accurate either way, and the worst case is the ordering this
-     * pipeline produced unconditionally before today. Blocking on it would trade a real
-     * application for a cosmetic one.
-     *
-     * So the strict citation check runs in the retry loop above, where the model gets a second
-     * attempt with the defect as feedback, and after rendering only the claim that can still be
-     * wrong is re-checked: that the entry the alignment argues for is the entry actually leading
-     * the page. That one is a genuine inconsistency in a stored record rather than a matter of
-     * judgement, and nothing between here and there is supposed to reorder entries. */
+    /* The citation is re-checked after fitting. The evidence bullet may have been trimmed for the
+     * one-page layout, so afterRender checks identity and frozen-JD binding rather than requiring
+     * the removed sentence to remain on the page. A missing or stale citation still blocks. */
     finalSpecValidation.issues.push(
       ...leadAlignmentIssues(spec, jdText, { afterRender: true, context: { company: body.company, role: body.role } }),
     );
@@ -976,13 +996,10 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         contactIssues,
         /* Whether the lead entry's justification was ACCEPTED, recorded per packet so criterion 3
            is auditable from the corpus instead of by re-running generation.
-           This is the one place a leftover lead-alignment defect survives. It deliberately does not
-           block the resume (see the note beside the final validation), and before this key it was
-           computed, used for a retry, and then dropped - so a packet that shipped with an
-           unjustified lead looked from storage exactly like one that shipped with a good one. That
-           is precisely the measurement that was missing when this criterion was first audited: the
-           only way to tell was to read 85 resumes and notice the same org at the top of 71 of them.
-           Empty means the lead is justified against a requirement this posting actually states. */
+           A nonempty value now prevents the packet from reaching storage. Keeping the verdict on a
+           clean packet still matters: it distinguishes "checked and passed" from old rows that
+           predate the selector. Empty means the lead is justified against a requirement this
+           posting actually states and is bound to the stored JD hash. */
         leadAlignmentIssues: leadIssues,
         layoutIssues,
         visualWarnings,
